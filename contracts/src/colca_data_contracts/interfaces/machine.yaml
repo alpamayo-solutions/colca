@@ -1,0 +1,29 @@
+# Platform-standard interface. Any physical machine or PLC-connected asset
+# that is observed by a Colca connector. Adapter services use this as the
+# base contract; customer-specific contracts (e.g. MBMachine) extend it.
+
+name: Machine
+version: "1.0"
+description: |
+  Baseline contract for any connector-observed machine. Both signals are
+  published directly by the connector and reflect connector-level health,
+  not machine-process state.
+
+signals:
+  - name: heartbeat
+    type: bool
+    required: true
+    description: |
+      Liveness signal published periodically by the connector. Toggles or
+      pulses at a fixed cadence (typically 1–5 s). Independent of the
+      remote PLC's reachability — its absence means the connector itself
+      is down, not the PLC.
+
+  - name: is_connected
+    type: bool
+    required: true
+    description: |
+      Connector-driven flag indicating whether the underlying PLC/source
+      is reachable. Derived from the same internal state the connector
+      already exposes as a Prometheus metric. False while the connector
+      cannot read tags from the source; true once communication recovers.

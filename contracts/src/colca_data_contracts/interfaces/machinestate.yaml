@@ -1,0 +1,72 @@
+# Platform-default machine-state contract. The required spine is a lean
+# OPC-UA-Machinery roll-up + a Colca UNKNOWN, encoded as an ORDINAL INT
+# (value_number, so Grafana time-in-state survives bucketing). Three optional
+# orthogonal axes (operating_mode, state_reason, detailed_state) carry WHY /
+# CAUSE / native-rich without ever being folded into machine_state.
+#
+# enum_values here are the SAME ordering as the IntEnums in
+# colca_data_contracts/machine_state.py — that module is the source of truth
+# and test_machine_state.py asserts they never drift.
+#
+# machine_state is the SOLE OEE / ISO-22400 input. Industry-agnostic across
+# discrete part production AND continuous/batch process production.
+
+name: MachineState
+version: "1.0"
+extends:
+  - Machine            # inherits heartbeat + is_connected (Machine v1.0, unchanged)
+
+description: |
+  Platform-default machine-state contract. Required spine = the OPC-UA
+  Machinery roll-up + a Colca UNKNOWN, as an ordinal int. Orthogonal optional
+  operating_mode + state_reason (fixed enums) + a pluggable optional native
+  detailed_state. machine_state is the sole OEE input. No transition guards —
+  it is an observation roll-up, not a behavioural state machine.
+
+signals:
+  - name: machine_state              # axis 1 — WHAT it is doing (required)
+    type: int
+    required: true
+    source: dataops
+    enum_values: ["UNKNOWN", "OFFLINE", "DOWN", "IDLE", "EXECUTING"]
+    description: >
+      0 UNKNOWN | 1 OFFLINE | 2 DOWN | 3 IDLE | 4 EXECUTING. Mutually exclusive
+      (NOT a bitfield). OPC-UA Machinery semantics + Colca UNKNOWN. EXECUTING is
+      part-counter-free (counter-delta OR rate>threshold OR recipe phase active
+      OR at-setpoint OR native ACTIVE). is_connected=false or a stale producing
+      input => UNKNOWN, never OFFLINE/DOWN. OFFLINE requires a positively
+      observed power/disconnect signal, never a stale heartbeat.
+
+  - name: operating_mode             # axis 2 — WHY / who drives (optional)
+    type: int
+    required: false
+    source: dataops
+    enum_values: ["UNKNOWN", "PRODUCTION", "SETUP", "MAINTENANCE", "MANUAL", "ENGINEERING"]
+    description: >
+      Orthogonal planned-vs-unplanned driver. Consumed by the OEE layer (which
+      owns the shift calendar); NEVER folded into machine_state. UNKNOWN when
+      unobservable -> OEE falls back to the shift calendar.
+
+  - name: state_reason               # axis 3 — CAUSE (optional, FIXED enum)
+    type: int
+    required: false
+    source: dataops
+    enum_values: ["UNCLASSIFIED", "LOCAL_FAULT", "EMERGENCY_STOP", "STARVED",
+                  "BLOCKED", "UTILITY_LOSS", "CHANGEOVER", "CLEANING",
+                  "PLANNED_MAINTENANCE", "NO_DEMAND", "NO_SHIFT", "WARMUP",
+                  "QUALITY_HOLD", "GRADE_CHANGE"]
+    description: >
+      Cause axis; routes each interval to an OEE loss family deterministically.
+      Carries local-vs-upstream (LOCAL_FAULT vs STARVED/BLOCKED) and
+      starved-vs-blocked splits. UNCLASSIFIED is the honest default, never guessed.
+
+  - name: detailed_state             # native rich state (optional)
+    type: str
+    required: false
+    source: dataops
+    description: >
+      Native rich state verbatim (e.g. PackML "Suspended", MTConnect "FEED_HOLD",
+      vendor code). Absent/empty when the native feed is gone (no fabrication).
+      NEVER an OEE input. Stored as value_text; consumed via un-bucketed Grafana
+      panels for drill-down. How it rolls up to machine_state is the adapter's
+      concern, not the contract's.

@@ -1,0 +1,42 @@
+# Platform-standard interface. An asset that produces discrete parts whose
+# throughput, quality, and downtime can be measured for OEE.
+#
+# Signal names are deliberately canonical English. Customer-specific signal
+# names (e.g. "Anzahl abgefuellter Kartuschen") will be reconciled via signal
+# aliases in Phase 2; for the spike, coverage will simply show 'missing'
+# against assets whose connector exposes localized names — and that gap is
+# the useful output: it surfaces where naming standardization is needed.
+
+name: OEEProducer
+version: "1.0"
+description: |
+  Discrete-parts producer that supplies the input signals an OEE compute
+  service needs: a part counter, optionally a reject counter, and an
+  optional active-error flag. Output signals (oee, availability, quality,
+  productivity) belong to a future OEEResult interface, not here.
+
+signals:
+  - name: part_counter
+    type: int
+    required: true
+    description: |
+      Cumulative count of parts produced since boot/reset. Strictly
+      monotonic except on counter resets; the OEE pipeline computes rates
+      from the delta over a rolling window.
+
+  - name: reject_counter
+    type: int
+    required: false
+    description: |
+      Cumulative count of rejected parts. May be a single counter or the
+      sum of multiple per-reason counters maintained by the connector. If
+      absent, every part counts as good.
+
+  - name: error_active
+    type: bool
+    required: false
+    description: |
+      True while the machine is in an unplanned error state. Drives the
+      'downtime reason' classification in the OEE pipeline. When absent,
+      the OEE service falls back to inferring downtimes from gaps in
+      part_counter.
