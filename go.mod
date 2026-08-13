@@ -2,7 +2,10 @@ module github.com/alpamayo-solutions/colca
 
 go 1.25.1
 
-require github.com/cockroachdb/pebble/v2 v2.1.6
+require (
+	github.com/cockroachdb/pebble/v2 v2.1.6
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
 	github.com/DataDog/zstd v1.5.7 // indirect
