@@ -62,3 +62,67 @@ func TestDurabilityAcrossReopen(t *testing.T) {
 		t.Fatalf("offset continuity broken: %d..%d", first, last)
 	}
 }
+
+func TestCursorMonotonicAck(t *testing.T) {
+	s := mustOpen(t)
+	if got := s.CursorGet("hub", "metrics"); got != 1 {
+		t.Fatalf("initial cursor: %d", got)
+	}
+	if !s.CursorAck("hub", "metrics", 10) {
+		t.Fatal("ack 10 should move")
+	}
+	if s.CursorAck("hub", "metrics", 5) {
+		t.Fatal("ack 5 must be no-op (monotonic)")
+	}
+	if got := s.CursorGet("hub", "metrics"); got != 10 {
+		t.Fatalf("cursor: %d", got)
+	}
+}
+
+func TestApplyReplicatedDedupe(t *testing.T) {
+	s := mustOpen(t)
+	batch := []ReplRecord{
+		{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/edge1/m1/a", Payload: []byte("1"), TS: 1, KVPath: "edge1/m1/a", KVNode: "m1"},
+		{ChildOffset: 2, Topic: "colca/v1/_Metric/m1/edge1/m1/b", Payload: []byte("2"), TS: 2, KVPath: "edge1/m1/b", KVNode: "m1"},
+	}
+	applied, hwm, err := s.ApplyReplicated("n-edge1", "metrics", batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != 2 || hwm != 2 {
+		t.Fatalf("applied %d hwm %d", applied, hwm)
+	}
+	// exact same batch again → full dedupe
+	applied, hwm, _ = s.ApplyReplicated("n-edge1", "metrics", batch)
+	if applied != 0 || hwm != 2 {
+		t.Fatalf("dedupe failed: applied %d hwm %d", applied, hwm)
+	}
+	// overlapping batch → partial
+	batch = append(batch, ReplRecord{ChildOffset: 3, Topic: "colca/v1/_Metric/m1/edge1/m1/c", Payload: []byte("3"), TS: 3, KVPath: "edge1/m1/c", KVNode: "m1"})
+	applied, hwm, _ = s.ApplyReplicated("n-edge1", "metrics", batch)
+	if applied != 1 || hwm != 3 {
+		t.Fatalf("partial dedupe: applied %d hwm %d", applied, hwm)
+	}
+	if s.NextOffset("metrics") != 4 {
+		t.Fatalf("local offsets: %d", s.NextOffset("metrics"))
+	}
+}
+
+func TestKVScan(t *testing.T) {
+	s := mustOpen(t)
+	s.Append("metrics", []Record{
+		{Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "m1/temp", KVNode: "m1"},
+		{Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":2}`), TS: 2, KVPath: "m1/temp", KVNode: "m1"}, // overwrites
+		{Topic: "colca/v1/_Metric/m2/m2/temp", Payload: []byte(`{"v":9}`), TS: 3, KVPath: "m2/temp", KVNode: "m2"},
+	})
+	entries := s.KVScan("m1/")
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	if string(entries[0].Payload) != `{"v":2}` {
+		t.Fatalf("last value wrong: %s", entries[0].Payload)
+	}
+	if len(s.KVScan("")) != 2 {
+		t.Fatal("full scan should see 2 keys")
+	}
+}

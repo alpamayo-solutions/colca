@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -172,4 +173,141 @@ func (s *Store) Read(stream string, from uint64, max int, filter func(string) bo
 		out = append(out, StoredRecord{Offset: off, Topic: e.Topic, Payload: e.Payload, TS: e.TS})
 	}
 	return out, next, nil
+}
+
+// readU64 returns the big-endian counter stored at key, or dflt when the key is
+// absent or does not hold exactly 8 bytes.
+func (s *Store) readU64(key []byte, dflt uint64) uint64 {
+	v, closer, err := s.db.Get(key)
+	if err != nil {
+		return dflt
+	}
+	defer closer.Close()
+	if len(v) != 8 {
+		return dflt
+	}
+	return binary.BigEndian.Uint64(v)
+}
+
+// CursorGet returns the next offset a named consumer should read from a stream.
+// A cursor that was never acked starts at 1, the first offset Append hands out.
+func (s *Store) CursorGet(name, stream string) uint64 {
+	return s.readU64(cursorKey(name, stream), 1)
+}
+
+// CursorAck moves the cursor forward only (monotonic); returns whether it moved.
+func (s *Store) CursorAck(name, stream string, off uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if off <= s.readU64(cursorKey(name, stream), 1) {
+		return false
+	}
+	if err := s.db.Set(cursorKey(name, stream), be64(off), pebble.Sync); err != nil {
+		return false
+	}
+	return true
+}
+
+// HWMGet returns the highest child offset already applied for (child, stream),
+// or 0 when nothing from that child has been applied yet.
+func (s *Store) HWMGet(child, stream string) uint64 {
+	return s.readU64(hwmKey(child, stream), 0)
+}
+
+// ReplRecord is a record as it travels from a child node to its parent. The
+// json tags are the wire format — do not rename them.
+type ReplRecord struct {
+	ChildOffset uint64 `json:"o"`
+	Topic       string `json:"t"`
+	Payload     []byte `json:"p"`
+	TS          int64  `json:"ts"`
+	KVPath      string `json:"kp,omitempty"`
+	KVNode      string `json:"kn,omitempty"`
+}
+
+// ApplyReplicated appends records with ChildOffset > HWM(child,stream), assigns LOCAL offsets,
+// updates KV and the HWM — all in one atomic batch. Idempotent by construction.
+func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applied int, hwm uint64, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev := s.HWMGet(child, stream)
+	hwm = prev
+	off := s.next[stream]
+	if off == 0 {
+		return 0, prev, fmt.Errorf("unknown stream %q", stream)
+	}
+	b := s.db.NewBatch()
+	defer b.Close()
+	for _, r := range recs {
+		if r.ChildOffset <= hwm {
+			continue
+		}
+		val, err := json.Marshal(recEnc{r.Topic, r.Payload, r.TS})
+		if err != nil {
+			return 0, prev, err
+		}
+		if err := b.Set(streamKey(stream, off), val, nil); err != nil {
+			return 0, prev, err
+		}
+		if r.KVPath != "" {
+			kval, err := json.Marshal(kvEnc{r.Topic, r.Payload, r.TS, off})
+			if err != nil {
+				return 0, prev, err
+			}
+			if err := b.Set(kvKey(r.KVPath, r.KVNode), kval, nil); err != nil {
+				return 0, prev, err
+			}
+		}
+		off++
+		applied++
+		hwm = r.ChildOffset
+	}
+	if applied == 0 {
+		return 0, prev, nil
+	}
+	if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
+		return 0, prev, err
+	}
+	if err := b.Set(hwmKey(child, stream), be64(hwm), nil); err != nil {
+		return 0, prev, err
+	}
+	if err := s.db.Apply(b, pebble.Sync); err != nil {
+		return 0, prev, err
+	}
+	s.next[stream] = off
+	return applied, hwm, nil
+}
+
+// KVScan returns the current KV projection for every path starting with prefix.
+// An empty prefix scans the whole projection.
+func (s *Store) KVScan(prefix string) []KVEntry {
+	lb := kvPrefix(prefix)
+	ub := append(append([]byte{}, lb...), 0xFF)
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
+	if err != nil {
+		return nil
+	}
+	defer iter.Close()
+	var out []KVEntry
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := string(iter.Key()[2:]) // strip "k\x00"
+		// key = path \x00 nodeID
+		sep := strings.IndexByte(key, 0)
+		if sep < 0 {
+			continue
+		}
+		var e kvEnc
+		if json.Unmarshal(iter.Value(), &e) != nil {
+			continue
+		}
+		out = append(out, KVEntry{
+			Path:    key[:sep],
+			NodeID:  key[sep+1:],
+			Topic:   e.Topic,
+			Payload: e.Payload,
+			TS:      e.TS,
+			Offset:  e.Offset,
+		})
+	}
+	return out
 }
