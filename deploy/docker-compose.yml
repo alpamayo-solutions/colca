@@ -1,0 +1,84 @@
+# colca/deploy/docker-compose.yml — the 4-node / 3-level demo topology.
+#
+#   global (level 1)            mounts: site1 → n-site1
+#      ▲ mTLS
+#   site1  (level 2)            mounts: edge1 → n-edge1, edge2 → n-edge2
+#      ▲          ▲ mTLS
+#   edge1        edge2          clients: m1 → machine m1, m2 → machine m2
+#      ▲ MQTT       ▲ MQTT
+#     m1           m2
+#
+# Startup is deterministic without healthchecks (distroless has no shell, so a
+# CMD-based healthcheck is impossible): depends_on gives the parent-before-child
+# order, and `restart: unless-stopped` heals a node that loses the race anyway —
+# while still honouring an explicit `docker compose stop <svc>` (which the smoke
+# test uses for the offline catch-up assertion).
+services:
+  global:
+    image: colca:dev
+    command: ["/etc/colca/global.yaml"]
+    restart: unless-stopped
+    volumes:
+      - "./config/global.yaml:/etc/colca/global.yaml:ro"
+      - "./keys:/keys:ro"
+      - "global-data:/data"
+    ports: ["127.0.0.1:18080:8080"]
+
+  site1:
+    image: colca:dev
+    command: ["/etc/colca/site1.yaml"]
+    restart: unless-stopped
+    volumes:
+      - "./config/site1.yaml:/etc/colca/site1.yaml:ro"
+      - "./keys:/keys:ro"
+      - "site1-data:/data"
+    ports: ["127.0.0.1:18081:8080"]
+    depends_on: [global]
+
+  edge1:
+    image: colca:dev
+    command: ["/etc/colca/edge1.yaml"]
+    restart: unless-stopped
+    volumes:
+      - "./config/edge1.yaml:/etc/colca/edge1.yaml:ro"
+      - "./keys:/keys:ro"
+      - "edge1-data:/data"
+    ports: ["127.0.0.1:18082:8080", "127.0.0.1:11883:1883"]
+    depends_on: [site1]
+
+  edge2:
+    image: colca:dev
+    command: ["/etc/colca/edge2.yaml"]
+    restart: unless-stopped
+    volumes:
+      - "./config/edge2.yaml:/etc/colca/edge2.yaml:ro"
+      - "./keys:/keys:ro"
+      - "edge2-data:/data"
+    ports: ["127.0.0.1:18083:8080", "127.0.0.1:11884:1883"]
+    depends_on: [site1]
+
+  m1:
+    image: colca:dev
+    entrypoint: ["/usr/local/bin/colca-machine"]
+    environment:
+      MACHINE_ULID: m1
+      MACHINE_TOKEN: m1-secret
+      BROKER_ADDR: "edge1:1883"
+      PUBLISH_INTERVAL_MS: "1000"
+    depends_on: [edge1]
+
+  m2:
+    image: colca:dev
+    entrypoint: ["/usr/local/bin/colca-machine"]
+    environment:
+      MACHINE_ULID: m2
+      MACHINE_TOKEN: m2-secret
+      BROKER_ADDR: "edge2:1883"
+      PUBLISH_INTERVAL_MS: "1000"
+    depends_on: [edge2]
+
+volumes:
+  global-data: {}
+  site1-data: {}
+  edge1-data: {}
+  edge2-data: {}

@@ -1,0 +1,8 @@
+# Keep generated demo state out of the build context: the private node keys must
+# never enter an image layer, and a regenerated key or config must not invalidate
+# the `COPY . .` build cache.
+deploy/keys/
+deploy/pubkeys.env
+deploy/config/*.yaml
+bin/
+.git/
