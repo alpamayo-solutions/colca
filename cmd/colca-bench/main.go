@@ -49,6 +49,7 @@ func main() {
 		"live":        bench.RunLive,
 		"catchup":     bench.RunCatchup,
 		"cardinality": bench.RunCardinality,
+		"footprint":   bench.RunFootprint,
 	}
 	order := []string{scenario}
 	if scenario == "all" {
