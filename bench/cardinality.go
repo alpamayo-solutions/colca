@@ -82,9 +82,12 @@ func RunCardinality(p Params) (*Report, error) {
 
 	// Retained replay on the HUB: wait until replication has carried every
 	// path across, then time a fresh subscriber receiving the full retained set.
-	deadline := time.Now().Add(5 * time.Minute)
+	// Each wait phase gets its own deadline so a slow replication phase can't
+	// silently eat the budget the replay-wait phase needs, which would surface
+	// as a misleading "retained replay delivered X of Y" error.
+	replicationDeadline := time.Now().Add(5 * time.Minute)
 	for NextOffset(pair.Hub, "metrics") < uint64(p.Paths)+1 {
-		if time.Now().After(deadline) {
+		if time.Now().After(replicationDeadline) {
 			return nil, fmt.Errorf("hub never received all %d paths (offset %d)", p.Paths, NextOffset(pair.Hub, "metrics"))
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -104,8 +107,9 @@ func RunCardinality(p Params) (*Report, error) {
 	if !tk.WaitTimeout(10*time.Second) || tk.Error() != nil {
 		return nil, fmt.Errorf("subscribe: %w", tk.Error())
 	}
+	replayDeadline := time.Now().Add(5 * time.Minute)
 	for got.Load() < int64(p.Paths) {
-		if time.Now().After(deadline) {
+		if time.Now().After(replayDeadline) {
 			return nil, fmt.Errorf("retained replay delivered %d of %d", got.Load(), p.Paths)
 		}
 		time.Sleep(10 * time.Millisecond)
