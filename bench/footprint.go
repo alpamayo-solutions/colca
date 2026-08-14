@@ -53,9 +53,12 @@ clients:
 	}()
 
 	// Wait for /healthz, then let allocations settle before the idle sample.
+	// A per-request timeout keeps a stalled connection from blocking past the
+	// overall deadline — http.DefaultClient has no timeout of its own.
+	hc := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		resp, err := http.Get("http://" + apiAddr + "/healthz")
+		resp, err := hc.Get("http://" + apiAddr + "/healthz")
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
