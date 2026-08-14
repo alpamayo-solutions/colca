@@ -126,6 +126,14 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 // runs. eng may be nil and be supplied later via SetEngine.
 func New(cfg *config.Config, eng *engine.Engine) (*Server, error) {
 	s := mqtt.New(&mqtt.Options{InlineClient: true})
+	// A fresh subscriber replaying the retained set (the bus's "current state
+	// on connect" contract) can burst thousands of QoS-1 messages to one
+	// client. mochi's default MaximumInflight (8192) silently drops anything
+	// beyond that with no retry — proven by the cardinality benchmark scenario
+	// at its default 10000 paths (colca/bench/cardinality.go). Raise it to the
+	// protocol maximum so replay at realistic path cardinalities can't be
+	// silently truncated.
+	s.Options.Capabilities.MaximumInflight = 65535
 	hook := &colcaHook{eng: eng, cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt")}
 	if err := s.AddHook(hook, nil); err != nil {
 		return nil, err

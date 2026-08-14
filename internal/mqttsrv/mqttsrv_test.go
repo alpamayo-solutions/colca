@@ -83,6 +83,19 @@ func waitRecords(t *testing.T, st *store.Store, stream string, want int, d time.
 	}
 }
 
+// TestMaximumInflightRaised guards the fix for a real data-loss bug the
+// cardinality benchmark scenario found (colca/bench/cardinality.go): a fresh
+// subscriber replaying the retained set can burst thousands of QoS-1
+// messages, and mochi's default MaximumInflight (8192) silently drops
+// anything past that with no retry. New must raise it past any realistic
+// path count instead of leaving mochi's default in place.
+func TestMaximumInflightRaised(t *testing.T) {
+	s, _ := newBroker(t)
+	if got := s.S.Options.Capabilities.MaximumInflight; got != 65535 {
+		t.Fatalf("MaximumInflight = %d, want 65535 (mochi default of 8192 drops retained replay beyond that count)", got)
+	}
+}
+
 func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 	s, st := newBroker(t)
 	addr := s.Addr()
