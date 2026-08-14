@@ -1,0 +1,6 @@
+{
+  "ingest":    { "ingest_msgs_per_sec":  { "min": null, "max": null } },
+  "live":      { "live_p95_ms":          { "min": null, "max": null } },
+  "catchup":   { "catchup_recs_per_sec": { "min": null, "max": null } },
+  "footprint": { "footprint_loaded_mb":  { "min": null, "max": null } }
+}

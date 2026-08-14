@@ -36,9 +36,21 @@ func main() {
 	colcad := fs.String("colcad", "bin/colcad", "colcad binary (footprint)")
 	storage := fs.String("storage", os.Getenv("COLCA_BENCH_STORAGE"), "storage note for the report")
 	out := fs.String("out", "", "append reports to this JSON array file")
-	_ = fs.String("results", "", "results file (check)")
-	_ = fs.String("thresholds", "bench/thresholds.json", "thresholds file (check)")
+	results := fs.String("results", "", "results file (check)")
+	thresholds := fs.String("thresholds", "bench/thresholds.json", "thresholds file (check)")
 	_ = fs.Parse(os.Args[2:])
+
+	if scenario == "check" {
+		if *results == "" {
+			fmt.Fprintln(os.Stderr, "check: --results is required")
+			os.Exit(2)
+		}
+		if err := bench.Check(*results, *thresholds, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "GATE FAILED:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	p := bench.Params{
 		Machines: *machines, RateHz: *rate, Duration: *duration,
