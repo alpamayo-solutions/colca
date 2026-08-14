@@ -1,5 +1,5 @@
 # colca/Makefile
-.PHONY: test build docker demo smoke ci
+.PHONY: test build docker demo smoke ci bench bench-scenarios bench-check
 test:
 	go test ./... -race -count=1 -v
 build:
@@ -13,3 +13,9 @@ demo: docker
 smoke: docker
 	bash demo/smoke.sh
 ci: test docker smoke
+bench:
+	go test ./internal/store/ -run '^$$' -bench . -benchtime 2s
+bench-scenarios: build
+	go run ./cmd/colca-bench all --colcad bin/colcad --out bench/results-$$(hostname -s).json
+bench-check:
+	go run ./cmd/colca-bench check --results bench/results-$$(hostname -s).json --thresholds bench/thresholds.json
