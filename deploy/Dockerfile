@@ -13,6 +13,10 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/colcad ./cmd/colcad \
  && CGO_ENABLED=0 go build -trimpath -o /out/colca-machine ./cmd/colca-machine \
  && CGO_ENABLED=0 go build -trimpath -o /out/colca-keygen ./cmd/colca-keygen
 
-FROM gcr.io/distroless/static-debian12
+# Pinned by digest, not by tag: distroless publishes no semver tags for
+# static-debian12 — only latest/nonroot/debug — and hadolint rejects both an
+# untagged base (DL3006) and :latest (DL3007). This digest is what :latest
+# resolved to on 2026-08-14, so runtime behaviour is unchanged.
+FROM gcr.io/distroless/static-debian12@sha256:6447365a6337c3732f412d1b74357b30a633831955b2bc45552b0086be907687
 COPY --from=build /out/ /usr/local/bin/
 ENTRYPOINT ["/usr/local/bin/colcad"]
