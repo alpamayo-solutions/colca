@@ -22,6 +22,10 @@ type Child struct {
 type Client struct {
 	ULID  string `yaml:"ulid"`
 	Token string `yaml:"token"` // pre-shared secret (MVP stand-in for machine keys)
+	// Mount is OPTIONAL. A client without a mount has no place in the hierarchy
+	// to write into and is therefore a read-only observer: it may CONNECT and
+	// SUBSCRIBE, but engine.IngestClient rejects everything it publishes with
+	// "no mount registered".
 	Mount string `yaml:"mount"`
 }
 
@@ -72,6 +76,9 @@ func Load(path string) (*Config, error) {
 }
 
 // Validate checks required fields and enforces the shared mount namespace.
+// A client mount is optional (mount-less clients are read-only observers) and
+// empty mounts are skipped in the collision check — two observers do not
+// "collide" on the empty mount.
 func (c *Config) Validate() error {
 	if c.ULID == "" || c.DataDir == "" || c.KeyFile == "" {
 		return fmt.Errorf("config: ulid, data_dir, key_file are required")
@@ -87,8 +94,11 @@ func (c *Config) Validate() error {
 		mounts[ch.Mount] = ch.ULID
 	}
 	for _, cl := range c.Clients {
-		if cl.ULID == "" || cl.Token == "" || cl.Mount == "" {
-			return fmt.Errorf("config: client needs ulid, token, mount: %+v", cl)
+		if cl.ULID == "" || cl.Token == "" {
+			return fmt.Errorf("config: client needs ulid and token: %+v", cl)
+		}
+		if cl.Mount == "" {
+			continue // read-only observer: no mount, so nothing to collide with
 		}
 		if prev, dup := mounts[cl.Mount]; dup {
 			return fmt.Errorf("config: mount collision %q between %s and %s", cl.Mount, prev, cl.ULID)

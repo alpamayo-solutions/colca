@@ -120,9 +120,6 @@ func TestValidateRequiredFields(t *testing.T) {
 		"client without token": func(c *Config) {
 			c.Clients = []Client{{ULID: "a", Mount: "m"}}
 		},
-		"client without mount": func(c *Config) {
-			c.Clients = []Client{{ULID: "a", Token: "t"}}
-		},
 		"client without ulid": func(c *Config) {
 			c.Clients = []Client{{Token: "t", Mount: "m"}}
 		},
@@ -130,6 +127,36 @@ func TestValidateRequiredFields(t *testing.T) {
 		c := base()
 		mutate(c)
 		if err := c.Validate(); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+}
+
+// A client without a mount is a read-only observer: it has no place in the
+// hierarchy to write into, so it may connect and subscribe but never publish
+// (engine.IngestClient rejects it — see engine.TestObserverClientMayNotPublish).
+// Several observers must not "collide" on the empty mount.
+func TestValidateAllowsMountlessObserverClients(t *testing.T) {
+	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		Children: []Child{{ULID: "n-edge1", Pubkey: "p1", Mount: "edge1"}},
+		Clients: []Client{
+			{ULID: "observer", Token: "observer-secret"},
+			{ULID: "observer2", Token: "observer2-secret"},
+			{ULID: "m1", Token: "m1-secret", Mount: "m1"},
+		}}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("mount-less observer clients must validate: %v", err)
+	}
+	if c.Clients[0].Mount != "" {
+		t.Fatalf("observer must stay mount-less: %+v", c.Clients[0])
+	}
+	// ulid and token stay mandatory for an observer.
+	for name, cl := range map[string]Client{
+		"observer without token": {ULID: "o"},
+		"observer without ulid":  {Token: "t"},
+	} {
+		bad := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Clients: []Client{cl}}
+		if err := bad.Validate(); err == nil {
 			t.Errorf("%s: want error", name)
 		}
 	}
