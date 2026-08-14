@@ -45,9 +45,10 @@ func main() {
 		Records: *records, Paths: *paths, ColcadPath: *colcad, Storage: *storage,
 	}
 	runners := map[string]func(bench.Params) (*bench.Report, error){
-		"ingest":  bench.RunIngest,
-		"live":    bench.RunLive,
-		"catchup": bench.RunCatchup,
+		"ingest":      bench.RunIngest,
+		"live":        bench.RunLive,
+		"catchup":     bench.RunCatchup,
+		"cardinality": bench.RunCardinality,
 	}
 	order := []string{scenario}
 	if scenario == "all" {
