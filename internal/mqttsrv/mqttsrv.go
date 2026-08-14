@@ -132,7 +132,10 @@ func New(cfg *config.Config, eng *engine.Engine) (*Server, error) {
 	// beyond that with no retry — proven by the cardinality benchmark scenario
 	// at its default 10000 paths (colca/bench/cardinality.go). Raise it to the
 	// protocol maximum so replay at realistic path cardinalities can't be
-	// silently truncated.
+	// silently truncated. This moves the truncation cliff, it does not remove
+	// it: silent drops now start above 65,535 retained paths in a single
+	// namespace. If that cardinality becomes realistic, the real fix is
+	// chunked/paginated retained replay, not a further bump of this field.
 	s.Options.Capabilities.MaximumInflight = 65535
 	hook := &colcaHook{eng: eng, cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt")}
 	if err := s.AddHook(hook, nil); err != nil {
