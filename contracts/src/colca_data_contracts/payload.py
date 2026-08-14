@@ -405,7 +405,7 @@ class Interface(Payload):
     """Interface definition published as retained MQTT.
 
     Topic: colca/v1/_Interface/{name}/v{version}
-    Published by edge-api at boot. Subscribers (UI, dataops, dm CLI)
+    Published by the api service at boot. Subscribers (UI, dataops, dm CLI)
     consume this to discover the available interface registry and the
     signals each interface requires. ``signals`` carries the *resolved*
     list (parents already merged), so consumers don't need to walk
@@ -429,7 +429,7 @@ class SystemElement(Payload):
     """Topology entity published as retained MQTT.
 
     Topic: colca/v1/_SystemElement/{_topic_context_section}
-    Published by edge-api on SystemElement create/update; soft-delete publishes
+    Published by the api service on SystemElement create/update; soft-delete publishes
     a retained empty payload (tombstone). Consumed by the Topology UI view and,
     in a later iteration, by hub-side mqtt-to-api for replication.
     """
@@ -461,7 +461,7 @@ class Signal(Payload):
     Topic: colca/v1/_Signal/{_topic_context_section}
     Superset of SignalData (still embedded in DataTagContext
     until the Schritt-2 migration replaces SignalData with this type).
-    Published by edge-api on Signal create/update; soft-delete publishes a
+    Published by the api service on Signal create/update; soft-delete publishes a
     retained empty payload (tombstone).
     """
 

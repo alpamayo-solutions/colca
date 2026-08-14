@@ -11,7 +11,7 @@ bucketed/gap-fill query renders a string state as empty (grafana-plugin
 ``db.go``). The IntEnum value IS the stored int.
 
 Why this lives in colca-data-contracts (not dataops): the contract YAML's
-``enum_values`` derive from these enums, and edge-api / UI / dm all consume the
+``enum_values`` derive from these enums, and the api service / UI / dm all consume the
 contract. ``dataops`` depends on ``colca-data-contracts``, never the reverse —
 so the MachineState producer base imports these from here.
 

@@ -4,7 +4,7 @@ machinestate.yaml interface.
 The point of these tests: the ordinal ints are a wire/storage contract
 (value_number in the historian, Grafana value-mappings, OEE routing). They
 must never drift silently — not between releases, and not between the Python
-IntEnums and the YAML enum_values that the UI / dm / edge-api consume.
+IntEnums and the YAML enum_values that the UI / dm / api service consume.
 """
 
 from pathlib import Path
