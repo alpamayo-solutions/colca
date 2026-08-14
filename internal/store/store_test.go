@@ -136,3 +136,26 @@ func TestKVScan(t *testing.T) {
 		t.Fatal("full scan should see 2 keys")
 	}
 }
+
+func TestDiskMetricsGrowWithWrites(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	before := s.DiskMetrics()
+	recs := make([]Record, 100)
+	for i := range recs {
+		recs[i] = Record{Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":1.5}`), TS: int64(i)}
+	}
+	if _, _, err := s.Append("metrics", recs); err != nil {
+		t.Fatal(err)
+	}
+	after := s.DiskMetrics()
+	if after.WALBytesWritten <= before.WALBytesWritten {
+		t.Fatalf("WAL bytes did not grow: before=%d after=%d", before.WALBytesWritten, after.WALBytesWritten)
+	}
+	if after.DiskUsageBytes == 0 {
+		t.Fatal("disk usage reported as 0 after writes")
+	}
+}

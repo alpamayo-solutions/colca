@@ -316,3 +316,25 @@ func (s *Store) KVScan(prefix string) []KVEntry {
 	}
 	return out
 }
+
+// DiskMetrics is a point-in-time snapshot of the bytes Pebble has pushed to
+// disk. Deltas of it are the basis for flash-endurance estimates: every
+// ingested record costs WAL bytes now and level (flush+compaction) bytes later.
+type DiskMetrics struct {
+	WALBytesWritten   uint64 // bytes written to the write-ahead log
+	LevelBytesWritten uint64 // bytes flushed + compacted across all LSM levels
+	DiskUsageBytes    uint64 // current on-disk footprint of the store
+}
+
+func (s *Store) DiskMetrics() DiskMetrics {
+	m := s.db.Metrics()
+	var level uint64
+	for i := range m.Levels {
+		level += uint64(m.Levels[i].TableBytesFlushed) + uint64(m.Levels[i].TableBytesCompacted)
+	}
+	return DiskMetrics{
+		WALBytesWritten:   uint64(m.WAL.BytesWritten),
+		LevelBytesWritten: level,
+		DiskUsageBytes:    m.DiskSpaceUsage(),
+	}
+}
