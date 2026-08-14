@@ -46,6 +46,7 @@ func main() {
 	}
 	runners := map[string]func(bench.Params) (*bench.Report, error){
 		"ingest": bench.RunIngest,
+		"live":   bench.RunLive,
 	}
 	order := []string{scenario}
 	if scenario == "all" {
