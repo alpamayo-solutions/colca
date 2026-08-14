@@ -3,7 +3,6 @@ import hashlib
 import datetime
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field, fields
-from enum import Enum
 
 from franzmq.data_contracts.base import (
     Payload,
@@ -14,11 +13,6 @@ from franzmq.data_contracts.base import (
     IndexType,
     DataType,
 )
-
-
-class StrEnum(str, Enum):
-    def __str__(self):
-        return self.value
 
 
 class ServiceType(BaseStrEnum):
