@@ -1,20 +1,35 @@
 // Command colca-bench runs the Colca benchmark scenarios and
-// writes uniform JSON reports. It is the benchmark gate:
+// writes uniform JSON run records. Recording is always on: every run appends
+// one JSONL line per scenario to bench/results/<host>.jsonl, commit-stamped
+// via bench.Stamp. It is the benchmark gate:
 //
-//	colca-bench ingest --machines 4 --duration 30s --storage emmc --out results.json
-//	colca-bench all --storage laptop-nvme --out results.json
-//	colca-bench check --results results.json --thresholds bench/thresholds.json
+//	colca-bench ingest --machines 4 --duration 30s --storage emmc
+//	colca-bench all --storage laptop-nvme
+//	colca-bench check --thresholds bench/thresholds.json
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/bench"
 )
+
+// defaultRecordPath returns bench/results/<short-hostname>.jsonl — the
+// always-on run-record location shared by scenario runs and `check`.
+func defaultRecordPath() string {
+	hn, _ := os.Hostname()
+	if i := strings.IndexByte(hn, '.'); i >= 0 {
+		hn = hn[:i]
+	}
+	if hn == "" {
+		hn = "unknown-host"
+	}
+	return "bench/results/" + hn + ".jsonl"
+}
 
 // scenarioOrder is the full scenario set colca-bench will eventually run for
 // "all", in a fixed order. "all" filters this down to whatever is currently
@@ -35,16 +50,12 @@ func main() {
 	paths := fs.Int("paths", 10000, "distinct signal paths (cardinality)")
 	colcad := fs.String("colcad", "bin/colcad", "colcad binary (footprint)")
 	storage := fs.String("storage", os.Getenv("COLCA_BENCH_STORAGE"), "storage note for the report")
-	out := fs.String("out", "", "append reports to this JSON array file")
-	results := fs.String("results", "", "results file (check)")
+	out := fs.String("out", defaultRecordPath(), "run-record JSONL file to append reports to")
+	results := fs.String("results", defaultRecordPath(), "run-record JSONL file to read (check)")
 	thresholds := fs.String("thresholds", "bench/thresholds.json", "thresholds file (check)")
 	_ = fs.Parse(os.Args[2:])
 
 	if scenario == "check" {
-		if *results == "" {
-			fmt.Fprintln(os.Stderr, "check: --results is required")
-			os.Exit(2)
-		}
 		if err := bench.Check(*results, *thresholds, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "GATE FAILED:", err)
 			os.Exit(1)
@@ -88,27 +99,11 @@ func main() {
 		fmt.Print(r.Table())
 		reports = append(reports, r)
 	}
-	if *out != "" {
-		if err := appendReports(*out, reports); err != nil {
-			fmt.Fprintln(os.Stderr, "write results:", err)
-			os.Exit(1)
-		}
+	if err := bench.AppendRecords(*out, reports); err != nil {
+		fmt.Fprintln(os.Stderr, "record results:", err)
+		os.Exit(1)
 	}
-}
-
-func appendReports(path string, add []*bench.Report) error {
-	var all []*bench.Report
-	if raw, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(raw, &all); err != nil {
-			return fmt.Errorf("existing %s is not a report array: %w", path, err)
-		}
-	}
-	all = append(all, add...)
-	raw, err := json.MarshalIndent(all, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, raw, 0o644)
+	fmt.Printf("recorded %d report(s) → %s\n", len(reports), *out)
 }
 
 func must(s string, err error) string {

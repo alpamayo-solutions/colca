@@ -16,6 +16,6 @@ ci: test docker smoke
 bench:
 	go test ./internal/store/ -run '^$$' -bench . -benchtime 2s
 bench-scenarios: build
-	go run ./cmd/colca-bench all --colcad bin/colcad --out bench/results-$$(hostname -s).json
+	go run ./cmd/colca-bench all --colcad bin/colcad
 bench-check:
-	go run ./cmd/colca-bench check --results bench/results-$$(hostname -s).json --thresholds bench/thresholds.json
+	go run ./cmd/colca-bench check --thresholds bench/thresholds.json

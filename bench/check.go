@@ -13,23 +13,20 @@ type Bound struct {
 	Max *float64 `json:"max"`
 }
 
-// Check compares the newest report of each scenario in resultsPath against
-// thresholdsPath. Metrics with null/absent bounds are printed but never gate —
-// that is how the harness ships BEFORE target-hardware numbers exist. A missing
-// file (either side) is an error: a gate that cannot read its inputs must fail,
-// not pass. A scenario with at least one non-null bound that is absent from
-// resultsPath is also a violation — an empty or stale results file must not
-// silently pass a gate that has real bounds. A scenario whose bounds are all
-// null stays skip-silent when absent, so report-only runs still work with a
+// Check compares the newest report of each scenario in resultsPath (a JSONL
+// run-record file, see ReadRecords) against thresholdsPath. Metrics with
+// null/absent bounds are printed but never gate — that is how the harness
+// ships BEFORE target-hardware numbers exist. A missing file (either side) is
+// an error: a gate that cannot read its inputs must fail, not pass. A
+// scenario with at least one non-null bound that is absent from resultsPath
+// is also a violation — an empty or stale results file must not silently
+// pass a gate that has real bounds. A scenario whose bounds are all null
+// stays skip-silent when absent, so report-only runs still work with a
 // partial results file.
 func Check(resultsPath, thresholdsPath string, w io.Writer) error {
-	rawR, err := os.ReadFile(resultsPath)
+	reports, err := ReadRecords(resultsPath)
 	if err != nil {
 		return fmt.Errorf("read results: %w", err)
-	}
-	var reports []Report
-	if err := json.Unmarshal(rawR, &reports); err != nil {
-		return fmt.Errorf("parse results: %w", err)
 	}
 	rawT, err := os.ReadFile(thresholdsPath)
 	if err != nil {

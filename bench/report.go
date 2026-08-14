@@ -25,8 +25,15 @@ type Host struct {
 }
 
 type Report struct {
-	Scenario  string             `json:"scenario"`
-	StartedAt string             `json:"started_at"`
+	Scenario  string `json:"scenario"`
+	StartedAt string `json:"started_at"`
+	// Service, GitCommit, and GitDirty identify what produced this run record
+	// (run-record convention, not colca-specific): every
+	// performance-test execution is stamped with the service that ran it and
+	// the exact commit it ran at, via Stamp.
+	Service   string             `json:"service"`
+	GitCommit string             `json:"git_commit"`
+	GitDirty  bool               `json:"git_dirty"`
 	Host      Host               `json:"host"`
 	Params    map[string]any     `json:"params"`
 	Metrics   map[string]float64 `json:"metrics"`
@@ -34,7 +41,7 @@ type Report struct {
 
 func NewReport(scenario, storage string, params map[string]any) *Report {
 	hn, _ := os.Hostname()
-	return &Report{
+	r := &Report{
 		Scenario:  scenario,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
 		Host: Host{
@@ -44,6 +51,8 @@ func NewReport(scenario, storage string, params map[string]any) *Report {
 		Params:  params,
 		Metrics: map[string]float64{},
 	}
+	Stamp(r)
+	return r
 }
 
 // Table renders the report for a human: params first, then metrics sorted by name.

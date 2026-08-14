@@ -18,11 +18,10 @@ func writeFile(t *testing.T, dir, name, content string) string {
 
 func TestCheckPassFailAndNull(t *testing.T) {
 	dir := t.TempDir()
-	results := writeFile(t, dir, "results.json", `[
-		{"scenario":"ingest","started_at":"2026-08-14T00:00:00Z",
-		 "host":{"os":"linux","arch":"arm64","num_cpu":4,"hostname":"x","go_version":"go1.25","storage":"emmc"},
-		 "params":{},"metrics":{"ingest_msgs_per_sec": 500, "write_amplification": 9}}
-	]`)
+	results := writeFile(t, dir, "results.jsonl",
+		`{"scenario":"ingest","started_at":"2026-08-14T00:00:00Z","service":"colca","git_commit":"abc1234","git_dirty":false,`+
+			`"host":{"os":"linux","arch":"arm64","num_cpu":4,"hostname":"x","go_version":"go1.25","storage":"emmc"},`+
+			`"params":{},"metrics":{"ingest_msgs_per_sec": 500, "write_amplification": 9}}`+"\n")
 
 	pass := writeFile(t, dir, "pass.json", `{"ingest":{"ingest_msgs_per_sec":{"min":100}}}`)
 	if err := Check(results, pass, os.Stderr); err != nil {
@@ -52,7 +51,7 @@ func TestCheckPassFailAndNull(t *testing.T) {
 
 func TestCheckAbsentScenario(t *testing.T) {
 	dir := t.TempDir()
-	empty := writeFile(t, dir, "empty.json", `[]`)
+	empty := writeFile(t, dir, "empty.jsonl", ``)
 
 	active := writeFile(t, dir, "active.json", `{"ingest":{"ingest_msgs_per_sec":{"min":100}}}`)
 	err := Check(empty, active, os.Stderr)
