@@ -33,7 +33,10 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/node"
 )
 
-const tok = "test-admin-token"
+const (
+	tok    = "test-admin-token"
+	obsTok = "observer-secret"
+)
 
 type topo struct {
 	global, site1, edge1, edge2 *node.Node
@@ -57,23 +60,25 @@ func startTopo(t *testing.T) *topo {
 		tp.keys[n] = id
 		tp.dirs[n] = filepath.Join(base, n+"-data")
 	}
-	mk := func(ulid string, parent *config.Parent, children []config.Child, clients []config.Client, withMQTT bool) *config.Config {
-		c := &config.Config{
+	// EVERY node runs a broker, including the two that have no machine attached:
+	// the bus mirrors the store at every level, so a subscriber at the hub sees
+	// the whole tree. Every node also gets a mount-less `observer` client, which
+	// may subscribe but never publish.
+	mk := func(ulid string, parent *config.Parent, children []config.Child, clients []config.Client) *config.Config {
+		return &config.Config{
 			ULID: ulid, DataDir: tp.dirs[ulid], LogLevel: "debug",
 			KeyFile: filepath.Join(base, ulid+".key"),
 			API:     config.API{Addr: "127.0.0.1:0", Token: tok},
-			Repl:    config.Endpoint{Addr: "127.0.0.1:0"},
-			Parent:  parent, Children: children, Clients: clients,
-		}
-		if withMQTT {
 			// The broker binds in node.Start and reports the resolved port as
 			// Node.MQTTAddr — never read cfg.MQTT.Addr, it stays "127.0.0.1:0".
-			c.MQTT = config.Endpoint{Addr: "127.0.0.1:0"}
+			MQTT:   config.Endpoint{Addr: "127.0.0.1:0"},
+			Repl:   config.Endpoint{Addr: "127.0.0.1:0"},
+			Parent: parent, Children: children,
+			Clients: append(clients, config.Client{ULID: "observer", Token: obsTok}),
 		}
-		return c
 	}
 
-	gcfg := mk("n-global", nil, []config.Child{{ULID: "n-site1", Pubkey: tp.keys["n-site1"].PublicHex(), Mount: "site1"}}, nil, false)
+	gcfg := mk("n-global", nil, []config.Child{{ULID: "n-site1", Pubkey: tp.keys["n-site1"].PublicHex(), Mount: "site1"}}, nil)
 	g, err := node.Start(gcfg)
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +90,7 @@ func startTopo(t *testing.T) *topo {
 		[]config.Child{
 			{ULID: "n-edge1", Pubkey: tp.keys["n-edge1"].PublicHex(), Mount: "edge1"},
 			{ULID: "n-edge2", Pubkey: tp.keys["n-edge2"].PublicHex(), Mount: "edge2"},
-		}, nil, false)
+		}, nil)
 	s, err := node.Start(scfg)
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +99,7 @@ func startTopo(t *testing.T) *topo {
 
 	e1cfg := mk("n-edge1",
 		&config.Parent{URL: "https://" + s.ReplAddr, Pubkey: tp.keys["n-site1"].PublicHex()},
-		nil, []config.Client{{ULID: "m1", Token: "m1-secret", Mount: "m1"}}, true)
+		nil, []config.Client{{ULID: "m1", Token: "m1-secret", Mount: "m1"}})
 	e1, err := node.Start(e1cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +108,7 @@ func startTopo(t *testing.T) *topo {
 
 	e2cfg := mk("n-edge2",
 		&config.Parent{URL: "https://" + s.ReplAddr, Pubkey: tp.keys["n-site1"].PublicHex()},
-		nil, []config.Client{{ULID: "m2", Token: "m2-secret", Mount: "m2"}}, true)
+		nil, []config.Client{{ULID: "m2", Token: "m2-secret", Mount: "m2"}})
 	e2, err := node.Start(e2cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -196,6 +201,70 @@ func machine(t *testing.T, addr, ulid, token string) pahomqtt.Client {
 	}
 	t.Cleanup(func() { c.Disconnect(100) })
 	return c
+}
+
+// observer connects a READ-ONLY client: it has no mount, so the engine rejects
+// everything it publishes ("no mount registered"), but it may subscribe. This is
+// how a backend service taps a node's bus.
+func observer(t *testing.T, addr, clientID string) pahomqtt.Client {
+	t.Helper()
+	opts := pahomqtt.NewClientOptions().AddBroker("tcp://" + addr).
+		SetClientID(clientID).SetUsername("observer").SetPassword(obsTok).
+		SetCleanSession(true).SetConnectTimeout(5 * time.Second)
+	c := pahomqtt.NewClient(opts)
+	tk := c.Connect()
+	if !tk.WaitTimeout(10*time.Second) || tk.Error() != nil {
+		t.Fatalf("observer %s connect: %v", clientID, tk.Error())
+	}
+	t.Cleanup(func() { c.Disconnect(100) })
+	return c
+}
+
+// subscribeAll subscribes to filter and returns every message that arrives on
+// it, in order, through a buffered channel.
+func subscribeAll(t *testing.T, c pahomqtt.Client, filter string) <-chan pahomqtt.Message {
+	t.Helper()
+	msgs := make(chan pahomqtt.Message, 256)
+	tk := c.Subscribe(filter, 1, func(_ pahomqtt.Client, m pahomqtt.Message) { msgs <- m })
+	if !tk.WaitTimeout(10*time.Second) || tk.Error() != nil {
+		t.Fatalf("subscribe %s: %v", filter, tk.Error())
+	}
+	return msgs
+}
+
+// awaitTopic waits for a message on the exact topic and returns it. Anything
+// else on the same filter is ignored (but see collectFor for the negative
+// assertions, which must look at everything).
+func awaitTopic(t *testing.T, msgs <-chan pahomqtt.Message, topic string, d time.Duration) pahomqtt.Message {
+	t.Helper()
+	deadline := time.After(d)
+	var seen []string
+	for {
+		select {
+		case m := <-msgs:
+			if m.Topic() == topic {
+				return m
+			}
+			seen = append(seen, m.Topic())
+		case <-deadline:
+			t.Fatalf("timeout waiting for %q on the bus; saw %v", topic, seen)
+		}
+	}
+}
+
+// collectFor drains everything that arrives within d — used for "must NOT be
+// delivered" assertions, which can only be made after giving it time to arrive.
+func collectFor(msgs <-chan pahomqtt.Message, d time.Duration) []pahomqtt.Message {
+	deadline := time.After(d)
+	var out []pahomqtt.Message
+	for {
+		select {
+		case m := <-msgs:
+			out = append(out, m)
+		case <-deadline:
+			return out
+		}
+	}
 }
 
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
@@ -463,4 +532,105 @@ func TestRestartDurabilityEdge(t *testing.T) {
 	waitFor(t, "11th after restart, no dupes", 15*time.Second, func() bool {
 		return len(fetchRecords(t, tp.global, "metrics", "dur2", "site1/edge1/m1/d", 100)) == 11
 	})
+}
+
+// TestHubMQTTMirrorsWholeTree is the point of mirroring the store onto the bus:
+// a subscriber at the GLOBAL node sees the whole plant live, under the topic the
+// global node stored — three mount insertions away from what m1 published.
+func TestHubMQTTMirrorsWholeTree(t *testing.T) {
+	tp := startTopo(t)
+	obs := observer(t, tp.global.MQTTAddr, "hub-observer")
+	msgs := subscribeAll(t, obs, "colca/#")
+
+	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 21.5}`).WaitTimeout(5 * time.Second)
+
+	msg := awaitTopic(t, msgs, "colca/v1/_Metric/m1/site1/edge1/m1/temp", 15*time.Second)
+	var p map[string]any
+	if err := json.Unmarshal(msg.Payload(), &p); err != nil {
+		t.Fatalf("hub bus payload is not JSON: %v (%s)", err, msg.Payload())
+	}
+	if p["v"].(float64) != 21.5 {
+		t.Fatalf("hub bus payload: %v", p)
+	}
+}
+
+// TestHTTPPublishVisibleOnMQTT: a record that enters through the HTTP API is on
+// the bus like any other — "even when I publish over HTTP I want to see it in
+// MQTT".
+func TestHTTPPublishVisibleOnMQTT(t *testing.T) {
+	tp := startTopo(t)
+	obs := observer(t, tp.global.MQTTAddr, "http-observer")
+	msgs := subscribeAll(t, obs, "colca/#")
+
+	topic := "colca/v1/_CmdParam/m1/site1/edge1/m1/set-speed"
+	api(t, tp.global, "POST", "/publish", map[string]any{
+		"topic":   topic,
+		"payload": map[string]any{"correlation_id": "http-1", "expires_at": float64(time.Now().Add(time.Hour).UnixMilli())},
+	})
+
+	msg := awaitTopic(t, msgs, topic, 15*time.Second)
+	var p map[string]any
+	if err := json.Unmarshal(msg.Payload(), &p); err != nil {
+		t.Fatalf("payload is not JSON: %v (%s)", err, msg.Payload())
+	}
+	if p["correlation_id"] != "http-1" {
+		t.Fatalf("payload: %v", p)
+	}
+}
+
+// TestRetainedDeliversCurrentStateOnConnect pins the two halves of the retain
+// rule at once: state contracts are retained, so a brand-new subscriber gets the
+// current value with no new publish happening; commands are NOT retained, so a
+// command delivered before it connected is never replayed to it.
+func TestRetainedDeliversCurrentStateOnConnect(t *testing.T) {
+	tp := startTopo(t)
+	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+
+	// a command travels down and is delivered on edge1's bus BEFORE the fresh
+	// subscriber exists
+	cmds := subscribeAll(t, m1, "colca/v1/_CmdParam/m1/#")
+	api(t, tp.global, "POST", "/publish", map[string]any{
+		"topic":   "colca/v1/_CmdParam/m1/site1/edge1/m1/set-speed",
+		"payload": map[string]any{"correlation_id": "retain-1", "expires_at": float64(time.Now().Add(time.Hour).UnixMilli())},
+	})
+	awaitTopic(t, cmds, "colca/v1/_CmdParam/m1/m1/set-speed", 20*time.Second)
+
+	// metrics have flowed
+	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 33.25}`).WaitTimeout(5 * time.Second)
+	waitFor(t, "metric stored at edge1", 10*time.Second, func() bool {
+		return len(kvAt(t, tp.edge1, "m1/temp")) == 1
+	})
+
+	// BRAND NEW subscriber, no publish after this point
+	fresh := observer(t, tp.edge1.MQTTAddr, "fresh-observer")
+	msgs := subscribeAll(t, fresh, "colca/#")
+
+	got := collectFor(msgs, 3*time.Second)
+	var metric pahomqtt.Message
+	for _, m := range got {
+		switch m.Topic() {
+		case "colca/v1/_Metric/m1/m1/temp":
+			metric = m
+		case "colca/v1/_CmdParam/m1/m1/set-speed":
+			t.Fatal("a command was retained and replayed to a fresh subscriber — commands are events, not state")
+		}
+	}
+	if metric == nil {
+		var topics []string
+		for _, m := range got {
+			topics = append(topics, m.Topic())
+		}
+		t.Fatalf("fresh subscriber got no retained metric; saw %v", topics)
+	}
+	if !metric.Retained() {
+		t.Fatal("the metric must arrive with the RETAINED flag — it is the current state, not a live publish")
+	}
+	var p map[string]any
+	if err := json.Unmarshal(metric.Payload(), &p); err != nil {
+		t.Fatalf("retained payload is not JSON: %v (%s)", err, metric.Payload())
+	}
+	if p["v"].(float64) != 33.25 {
+		t.Fatalf("retained value is not the current one: %v", p)
+	}
 }

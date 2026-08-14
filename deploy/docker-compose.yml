@@ -22,7 +22,9 @@ services:
       - "./config/global.yaml:/etc/colca/global.yaml:ro"
       - "./keys:/keys:ro"
       - "global-data:/data"
-    ports: ["127.0.0.1:18080:8080"]
+    # 11880 is the hub bus: every record replicated up from the whole tree is
+    # mirrored there under its stored topic (subscribe as observer/observer-secret).
+    ports: ["127.0.0.1:18080:8080", "127.0.0.1:11880:1883"]
 
   site1:
     image: colca:dev
@@ -32,7 +34,7 @@ services:
       - "./config/site1.yaml:/etc/colca/site1.yaml:ro"
       - "./keys:/keys:ro"
       - "site1-data:/data"
-    ports: ["127.0.0.1:18081:8080"]
+    ports: ["127.0.0.1:18081:8080", "127.0.0.1:11881:1883"]
     depends_on: [global]
 
   edge1:
@@ -60,6 +62,7 @@ services:
   m1:
     image: colca:dev
     entrypoint: ["/usr/local/bin/colca-machine"]
+    restart: unless-stopped
     environment:
       MACHINE_ULID: m1
       MACHINE_TOKEN: m1-secret
@@ -70,6 +73,7 @@ services:
   m2:
     image: colca:dev
     entrypoint: ["/usr/local/bin/colca-machine"]
+    restart: unless-stopped
     environment:
       MACHINE_ULID: m2
       MACHINE_TOKEN: m2-secret

@@ -123,8 +123,9 @@ echo "── 2) command roundtrip: global → site1 → edge1 → m1 → ack bac
 CORR="smoke-$(date +%s)-$$"
 EXP=$(($(date +%s) * 1000 + 3600000))
 say "   issuing $CMD_TOPIC (correlation_id=$CORR, expires in 1h)"
-say "   note: /publish does NOT deliver to local MQTT — the command only reaches"
-say "   m1 by travelling DOWN the tree, which is exactly what is asserted here."
+say "   note: /publish lands on GLOBAL's own bus (127.0.0.1:11880), not on m1's —"
+say "   the command only reaches m1 by travelling DOWN the tree, which is exactly"
+say "   what is asserted here."
 curl -sf -H "$TOK" -H "Content-Type: application/json" -X POST "$G/publish" \
   -d "{\"topic\":\"$CMD_TOPIC\",\"payload\":{\"correlation_id\":\"$CORR\",\"expires_at\":$EXP,\"params\":{\"speed\":7}}}" \
   >/dev/null || fail "publishing the command at global failed"
