@@ -102,6 +102,15 @@ func Start(cfg *config.Config) (*Node, error) {
 				log.Error("mqtt server stopped", "err", err)
 			}
 		}(n.MQTT)
+		// Re-seed the broker's retained set from the KV projection. The two are
+		// ONE contract seen from two sides (engine.retainFor retains exactly the
+		// classes that project into KV), but mochi's retained store is in-memory:
+		// without this replay a restarted node comes back with an intact KV view
+		// and an EMPTY retained set, silently breaking the "fresh subscriber gets
+		// the current state on connect" guarantee the bus makes.
+		for _, en := range st.KVScan("") {
+			n.MQTT.DeliverLocal(en.Topic, en.Payload, true)
+		}
 	}
 
 	// 3. Local HTTP control API.
