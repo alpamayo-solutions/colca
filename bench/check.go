@@ -17,7 +17,11 @@ type Bound struct {
 // thresholdsPath. Metrics with null/absent bounds are printed but never gate —
 // that is how the harness ships BEFORE target-hardware numbers exist. A missing
 // file (either side) is an error: a gate that cannot read its inputs must fail,
-// not pass.
+// not pass. A scenario with at least one non-null bound that is absent from
+// resultsPath is also a violation — an empty or stale results file must not
+// silently pass a gate that has real bounds. A scenario whose bounds are all
+// null stays skip-silent when absent, so report-only runs still work with a
+// partial results file.
 func Check(resultsPath, thresholdsPath string, w io.Writer) error {
 	rawR, err := os.ReadFile(resultsPath)
 	if err != nil {
@@ -46,7 +50,12 @@ func Check(resultsPath, thresholdsPath string, w io.Writer) error {
 	for scenario, bounds := range thresholds {
 		rep, ok := latest[scenario]
 		if !ok {
-			continue // scenario not in this run; gate only what was measured
+			if hasActiveBound(bounds) {
+				violations = append(violations, fmt.Sprintf("scenario %q with active bounds missing from results", scenario))
+			}
+			// else: every bound is null (report-only) — skip silently so
+			// partial runs still work before target-hardware numbers exist.
+			continue
 		}
 		for metric, b := range bounds {
 			v, ok := rep.Metrics[metric]
@@ -71,4 +80,16 @@ func Check(resultsPath, thresholdsPath string, w io.Writer) error {
 		return fmt.Errorf("%d threshold violation(s):\n  %s", len(violations), strings.Join(violations, "\n  "))
 	}
 	return nil
+}
+
+// hasActiveBound reports whether any metric in bounds has a non-null min or
+// max. A scenario whose thresholds are all null is report-only by design and
+// must not gate even when it's absent from the results being checked.
+func hasActiveBound(bounds map[string]Bound) bool {
+	for _, b := range bounds {
+		if b.Min != nil || b.Max != nil {
+			return true
+		}
+	}
+	return false
 }

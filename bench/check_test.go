@@ -49,3 +49,22 @@ func TestCheckPassFailAndNull(t *testing.T) {
 		t.Fatal("missing thresholds file must be an error, not a silent pass")
 	}
 }
+
+func TestCheckAbsentScenario(t *testing.T) {
+	dir := t.TempDir()
+	empty := writeFile(t, dir, "empty.json", `[]`)
+
+	active := writeFile(t, dir, "active.json", `{"ingest":{"ingest_msgs_per_sec":{"min":100}}}`)
+	err := Check(empty, active, os.Stderr)
+	if err == nil {
+		t.Fatal("expected violation: scenario with active bounds is absent from results")
+	}
+	if !strings.Contains(err.Error(), "ingest") {
+		t.Fatalf("error must name the missing scenario, got: %v", err)
+	}
+
+	allNull := writeFile(t, dir, "all-null.json", `{"ingest":{"ingest_msgs_per_sec":{"min":null}}}`)
+	if err := Check(empty, allNull, os.Stderr); err != nil {
+		t.Fatalf("all-null bounds must stay skip-silent when scenario absent, got: %v", err)
+	}
+}
