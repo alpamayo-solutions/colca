@@ -1,6 +1,8 @@
 package mqttsrv
 
 import (
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -83,16 +85,91 @@ func waitRecords(t *testing.T, st *store.Store, stream string, want int, d time.
 	}
 }
 
-// TestMaximumInflightRaised guards the fix for a real data-loss bug the
-// cardinality benchmark scenario found (colca/bench/cardinality.go): a fresh
-// subscriber replaying the retained set can burst thousands of QoS-1
-// messages, and mochi's default MaximumInflight (8192) silently drops
-// anything past that with no retry. New must raise it past any realistic
-// path count instead of leaving mochi's default in place.
-func TestMaximumInflightRaised(t *testing.T) {
-	s, _ := newBroker(t)
-	if got := s.S.Options.Capabilities.MaximumInflight; got != 65535 {
-		t.Fatalf("MaximumInflight = %d, want 65535 (mochi default of 8192 drops retained replay beyond that count)", got)
+// TestRetainedReplayDeliversAllMessages is a behavioral regression test for
+// the data-loss bug the cardinality benchmark scenario found
+// (colca/bench/cardinality.go): a fresh subscriber replaying the retained set
+// can burst more QoS-1 messages than mochi's inflight window, and anything
+// past the window used to be silently dropped with no retry
+// ("client store quota reached" / packets.ErrQuotaExceeded in
+// publishToClient). It seeds retainedCount retained messages — just past
+// mochi's 8192 default MaximumInflight — then connects ONE fresh subscriber
+// and asserts it receives every single one.
+//
+// Seeding goes straight to the store (one batched Append) and then straight
+// to the broker's inline publish (Server.DeliverLocal, the same call the
+// engine makes after every real ingest) instead of through engine.IngestAdmin
+// or awaited MQTT publishes: each of those does one fsync per record, and at
+// the store's single-record fsync rate (~230 rec/s, see
+// BenchmarkAppendBatch/size=1 in internal/store) seeding 9000 records that
+// way would take minutes. Bypassing the fsync-bound path keeps this test
+// under a second to seed; the mechanism under test — mochi's per-subscriber
+// inflight cap at SUBSCRIBE-time retained replay — is unaffected by how the
+// retained set was populated.
+//
+// Reverting the MaximumInflight fix in New (or setting it back to mochi's
+// 8192 default) makes this test fail with "retained replay delivered 8192 of
+// 9000" — verified manually; see task-11-report.md for the revert/RED and
+// fixed/GREEN command output.
+func TestRetainedReplayDeliversAllMessages(t *testing.T) {
+	const retainedCount = 9000 // just past mochi's 8192 default MaximumInflight
+
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		ULID:    "n1",
+		DataDir: t.TempDir(),
+		KeyFile: "unused.pem",
+		MQTT:    config.Endpoint{Addr: "127.0.0.1:0"},
+		Clients: []config.Client{
+			// mount-less → read-only observer: connects and subscribes, never publishes
+			{ULID: "observer", Token: "observer-secret"},
+		},
+	}
+	s, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	go func() { _ = s.Serve() }()
+	t.Cleanup(func() { s.Close() })
+
+	recs := make([]store.Record, retainedCount)
+	for i := range recs {
+		recs[i] = store.Record{
+			Topic:   fmt.Sprintf("colca/v1/_Metric/n1/m1/sig%d", i),
+			Payload: []byte(fmt.Sprintf(`{"v":%d}`, i)),
+			TS:      int64(i),
+		}
+	}
+	if _, _, err := st.Append("metrics", recs); err != nil {
+		t.Fatalf("seed store append: %v", err)
+	}
+	for _, r := range recs {
+		s.DeliverLocal(r.Topic, r.Payload, true) // retain=true, same as a real data/entity ingest
+	}
+
+	obs := connect(t, s.Addr(), "obs", "observer", "observer-secret")
+	defer obs.Disconnect(100)
+
+	var got atomic.Int64
+	tok := obs.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
+		if m.Retained() {
+			got.Add(1)
+		}
+	})
+	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		t.Fatalf("subscribe: %v", tok.Error())
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+	for got.Load() < int64(retainedCount) {
+		if time.Now().After(deadline) {
+			t.Fatalf("retained replay delivered %d of %d (mochi's MaximumInflight cap dropped the rest)", got.Load(), retainedCount)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
