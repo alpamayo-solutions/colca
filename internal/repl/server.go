@@ -167,7 +167,10 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		}
 		repl = append(repl, rr)
 	}
-	applied, hwm, err := s.eng.Store().ApplyReplicated(child.ULID, in.Stream, repl)
+	// Through the engine, never straight into the store: the engine is the single
+	// place every write converges, and it is what mirrors the newly applied
+	// records onto this node's local MQTT bus.
+	applied, hwm, err := s.eng.IngestReplicated(child.ULID, in.Stream, repl)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

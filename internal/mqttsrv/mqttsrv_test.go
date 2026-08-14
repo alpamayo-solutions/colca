@@ -25,7 +25,11 @@ func newBroker(t *testing.T) (*Server, *store.Store) {
 		DataDir: t.TempDir(),
 		KeyFile: "unused.pem",
 		MQTT:    config.Endpoint{Addr: "127.0.0.1:0"},
-		Clients: []config.Client{{ULID: "m1", Token: "m1-secret", Mount: "m1"}},
+		Clients: []config.Client{
+			{ULID: "m1", Token: "m1-secret", Mount: "m1"},
+			// mount-less → read-only observer: connects and subscribes, never publishes
+			{ULID: "observer", Token: "observer-secret"},
+		},
 	}
 	s, err := New(cfg, nil)
 	if err != nil {
@@ -167,7 +171,7 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 
 		topic := "colca/v1/_CmdParam/m1/m1/go"
 		payload := []byte(`{"correlation_id":"c1","expires_at":1}`)
-		s.DeliverLocal(topic, payload)
+		s.DeliverLocal(topic, payload, false)
 
 		select {
 		case m := <-msgs:
@@ -192,4 +196,105 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 			t.Errorf("entities next offset = %d, want 1", got)
 		}
 	})
+}
+
+// collect subscribes to filter and returns a function that drains everything
+// that arrived so far. Sub-second settling is deliberate: the assertions below
+// are about what must NOT arrive, so the test has to give it time to arrive.
+func collect(t *testing.T, c paho.Client, filter string) func(settle time.Duration) []paho.Message {
+	t.Helper()
+	msgs := make(chan paho.Message, 32)
+	tok := c.Subscribe(filter, 1, func(_ paho.Client, m paho.Message) { msgs <- m })
+	if !tok.WaitTimeout(5 * time.Second) {
+		t.Fatalf("subscribe %s: timed out", filter)
+	}
+	if err := tok.Error(); err != nil {
+		t.Fatalf("subscribe %s: %v", filter, err)
+	}
+	return func(settle time.Duration) []paho.Message {
+		deadline := time.After(settle)
+		var out []paho.Message
+		for {
+			select {
+			case m := <-msgs:
+				out = append(out, m)
+			case <-deadline:
+				return out
+			}
+		}
+	}
+}
+
+// The no-double-delivery guarantee: a client's raw publish is suppressed
+// (CodeSuccessIgnore) and only the engine's canonical, mount-rewritten form is
+// distributed. A subscriber on colca/# must see each record exactly once.
+func TestClientPublishDistributedOnlyAsCanonicalTopic(t *testing.T) {
+	s, st := newBroker(t)
+
+	sub := connect(t, s.Addr(), "observer-sub", "observer", "observer-secret")
+	defer sub.Disconnect(100)
+	drain := collect(t, sub, "colca/#")
+
+	pub := connect(t, s.Addr(), "m1-pub", "m1", "m1-secret")
+	defer pub.Disconnect(100)
+	tok := pub.Publish("colca/v1/_Metric/m1/temp", 1, false, []byte(`{"v":42}`))
+	if !tok.WaitTimeout(5 * time.Second) {
+		t.Fatal("publish: timed out waiting for PUBACK (CodeSuccessIgnore must still ack)")
+	}
+	if err := tok.Error(); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	got := drain(1500 * time.Millisecond)
+	if len(got) != 1 {
+		var topics []string
+		for _, m := range got {
+			topics = append(topics, m.Topic())
+		}
+		t.Fatalf("want exactly 1 message on colca/#, got %d: %v", len(got), topics)
+	}
+	if want := "colca/v1/_Metric/m1/m1/temp"; got[0].Topic() != want {
+		t.Fatalf("topic = %q, want the canonical %q", got[0].Topic(), want)
+	}
+	if string(got[0].Payload()) != `{"v":42}` {
+		t.Fatalf("payload = %q", got[0].Payload())
+	}
+	for _, m := range got {
+		if m.Topic() == "colca/v1/_Metric/m1/temp" {
+			t.Fatal("the raw client topic must never be distributed")
+		}
+	}
+	if st.NextOffset("metrics") != 2 {
+		t.Fatalf("metrics next offset = %d, want 2", st.NextOffset("metrics"))
+	}
+}
+
+// Outside colca/# Colca is just a broker: a non-UNS publish is not persisted and
+// must be distributed unchanged.
+func TestNonUnsTopicStillDistributed(t *testing.T) {
+	s, st := newBroker(t)
+
+	sub := connect(t, s.Addr(), "observer-other", "observer", "observer-secret")
+	defer sub.Disconnect(100)
+	drain := collect(t, sub, "other/#")
+
+	pub := connect(t, s.Addr(), "m1-other", "m1", "m1-secret")
+	defer pub.Disconnect(100)
+	tok := pub.Publish("other/thing", 1, false, []byte("hello"))
+	if !tok.WaitTimeout(5 * time.Second) {
+		t.Fatal("publish: timed out")
+	}
+
+	got := drain(1500 * time.Millisecond)
+	if len(got) != 1 {
+		t.Fatalf("want exactly 1 message on other/#, got %d", len(got))
+	}
+	if got[0].Topic() != "other/thing" || string(got[0].Payload()) != "hello" {
+		t.Fatalf("non-UNS message altered: topic=%q payload=%q", got[0].Topic(), got[0].Payload())
+	}
+	for _, stream := range []string{"metrics", "entities", "commands"} {
+		if off := st.NextOffset(stream); off != 1 {
+			t.Fatalf("%s next offset = %d, want 1 (non-UNS must not persist)", stream, off)
+		}
+	}
 }

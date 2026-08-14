@@ -14,8 +14,11 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// LocalDeliver lets the engine hand downlink commands to the local MQTT broker (nil in unit tests).
-type LocalDeliver func(topic string, payload []byte)
+// LocalDeliver hands a record to the local MQTT broker (nil when the node has
+// no broker, and in unit tests). retain is true for the state contracts, so the
+// broker's retained set and the store's KV projection are the same thing seen
+// from two sides.
+type LocalDeliver func(topic string, payload []byte, retain bool)
 
 // Result describes what an ingest did. Topic is the post-rewrite topic, i.e.
 // exactly what was persisted.
@@ -36,10 +39,16 @@ type Engine struct {
 
 // New builds an engine. The mount map covers both children and clients: they
 // share one mount namespace (config.Validate guarantees no collisions).
+//
+// A client without a mount is a read-only observer and is deliberately left OUT
+// of the map, so IngestClient rejects its publishes with "no mount registered"
+// instead of rewriting them into a topic with an empty path segment.
 func New(s *store.Store, cfg *config.Config, deliver LocalDeliver) *Engine {
 	m := map[string]string{}
 	for _, c := range cfg.Clients {
-		m[c.ULID] = c.Mount
+		if c.Mount != "" {
+			m[c.ULID] = c.Mount
+		}
 	}
 	for _, c := range cfg.Children {
 		m[c.ULID] = c.Mount
@@ -110,31 +119,63 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 }
 
 // IngestDownlink: a command received from the parent (already mount-stripped to
-// local coords). Trusted (parent authenticated), persisted to the own commands
-// stream with the ORIGINAL parent timestamp — expiry must not be refreshed by a
-// hop — and then delivered to the local MQTT broker.
+// local coords). Trusted (parent authenticated) and persisted to the own
+// commands stream with the ORIGINAL parent timestamp — expiry must not be
+// refreshed by a hop. Local MQTT delivery is not done here: persistTS mirrors
+// every appended record onto the bus, so doing it again would publish twice.
 func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result, error) {
 	p, err := uns.Parse(topic)
 	if err != nil {
 		return Result{}, err
 	}
-	res, err := e.persistTS(uns.ClassOf(p.Contract), p, topic, payload, ts)
-	if err != nil {
-		return res, err
-	}
-	if e.deliver != nil {
-		e.deliver(topic, payload)
-	}
-	return res, nil
+	return e.persistTS(uns.ClassOf(p.Contract), p, topic, payload, ts)
 }
+
+// IngestReplicated applies a batch pushed by a child: dedupe by high-water-mark,
+// then mirror every NEWLY applied record onto the local MQTT bus. Replication is
+// the fourth way a record enters a node's store and it must converge here like
+// the other three — the replication server never talks to the store directly.
+func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord) (applied int, hwm uint64, err error) {
+	got, hwm, err := e.store.ApplyReplicated(child, stream, recs)
+	if err != nil {
+		return 0, hwm, err
+	}
+	if e.deliver == nil {
+		return len(got), hwm, nil
+	}
+	for _, r := range got {
+		p, perr := uns.Parse(r.Topic)
+		if perr != nil {
+			// Durable already — only the bus mirror is skipped, never the apply.
+			e.log.Warn("replicated record not mirrored to the local bus: unparseable topic",
+				"child", child, "stream", stream, "topic", r.Topic, "err", perr)
+			continue
+		}
+		e.deliver(r.Topic, r.Payload, retainFor(uns.ClassOf(p.Contract)))
+	}
+	return len(got), hwm, nil
+}
+
+// retainFor decides how a record appears on the local MQTT bus. Data and
+// entities are STATE: they are retained, which is exactly the set that also
+// gets a KV projection. Commands and acks are EVENTS: retaining them would
+// re-deliver stale commands to every new subscriber.
+func retainFor(c uns.Class) bool { return c == uns.ClassData || c == uns.ClassEntity }
 
 func (e *Engine) persist(class uns.Class, p uns.Parsed, topic string, payload []byte) (Result, error) {
 	return e.persistTS(class, p, topic, payload, time.Now().UnixMilli())
 }
 
 // persistTS writes the record (plus, for data/entity, its KV projection) in one
-// atomic batch. p must be the parse of topic, i.e. post-rewrite, so KVPath and
-// KVNode carry the local coordinates and the originating node id.
+// atomic batch and then mirrors it onto the local MQTT bus under the STORED
+// topic. p must be the parse of topic, i.e. post-rewrite, so KVPath and KVNode
+// carry the local coordinates and the originating node id.
+//
+// The order is load-bearing: the bus must never show something that is not
+// durable, so delivery happens only after Append returned successfully. This is
+// the single place that guarantees the rule "everything appended to a node's
+// stream is also published on that node's bus" for client, admin and downlink
+// ingest alike.
 func (e *Engine) persistTS(class uns.Class, p uns.Parsed, topic string, payload []byte, ts int64) (Result, error) {
 	streamName := uns.StreamFor(class)
 	rec := store.Record{Topic: topic, Payload: payload, TS: ts}
@@ -146,5 +187,8 @@ func (e *Engine) persistTS(class uns.Class, p uns.Parsed, topic string, payload 
 		return Result{}, err
 	}
 	e.log.Debug("ingest", "stream", streamName, "offset", first, "topic", topic)
+	if e.deliver != nil {
+		e.deliver(topic, payload, retainFor(class))
+	}
 	return Result{Persisted: true, Stream: streamName, Offset: first, Topic: topic}, nil
 }

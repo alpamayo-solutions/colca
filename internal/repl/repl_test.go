@@ -338,7 +338,12 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
 	delivered := make(chan string, 4)
-	ceng := engine.New(cs, ccfg, func(topic string, payload []byte) { delivered <- topic })
+	ceng := engine.New(cs, ccfg, func(topic string, payload []byte, retain bool) {
+		if retain {
+			t.Errorf("a command must not be retained on the local bus: %s", topic)
+		}
+		delivered <- topic
+	})
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 
 	stop := make(chan struct{})

@@ -227,14 +227,19 @@ type ReplRecord struct {
 
 // ApplyReplicated appends records with ChildOffset > HWM(child,stream), assigns LOCAL offsets,
 // updates KV and the HWM — all in one atomic batch. Idempotent by construction.
-func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applied int, hwm uint64, err error) {
+//
+// It returns the records it ACTUALLY wrote, in write order. That is what makes
+// the caller able to mirror exactly the new records onto the local MQTT bus:
+// deduplicated records are not in the returned slice, and on any error the
+// slice is nil, so nothing that is not durable can ever reach the bus.
+func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applied []ReplRecord, hwm uint64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev := s.HWMGet(child, stream)
 	hwm = prev
 	off := s.next[stream]
 	if off == 0 {
-		return 0, prev, fmt.Errorf("unknown stream %q", stream)
+		return nil, prev, fmt.Errorf("unknown stream %q", stream)
 	}
 	b := s.db.NewBatch()
 	defer b.Close()
@@ -244,35 +249,35 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 		}
 		val, err := json.Marshal(recEnc{r.Topic, r.Payload, r.TS})
 		if err != nil {
-			return 0, prev, err
+			return nil, prev, err
 		}
 		if err := b.Set(streamKey(stream, off), val, nil); err != nil {
-			return 0, prev, err
+			return nil, prev, err
 		}
 		if r.KVPath != "" {
 			kval, err := json.Marshal(kvEnc{r.Topic, r.Payload, r.TS, off})
 			if err != nil {
-				return 0, prev, err
+				return nil, prev, err
 			}
 			if err := b.Set(kvKey(r.KVPath, r.KVNode), kval, nil); err != nil {
-				return 0, prev, err
+				return nil, prev, err
 			}
 		}
 		off++
-		applied++
+		applied = append(applied, r)
 		hwm = r.ChildOffset
 	}
-	if applied == 0 {
-		return 0, prev, nil
+	if len(applied) == 0 {
+		return nil, prev, nil
 	}
 	if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
-		return 0, prev, err
+		return nil, prev, err
 	}
 	if err := b.Set(hwmKey(child, stream), be64(hwm), nil); err != nil {
-		return 0, prev, err
+		return nil, prev, err
 	}
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
-		return 0, prev, err
+		return nil, prev, err
 	}
 	s.next[stream] = off
 	return applied, hwm, nil

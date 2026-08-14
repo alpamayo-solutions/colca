@@ -88,8 +88,16 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 
 // OnPublish routes every authenticated client publish through the engine. A
 // rejected packet is dropped by mochi (no PUBACK under MQTT 3.1.1) and nothing
-// is persisted. Publishes from the inline client (empty identity, e.g.
+// is persisted. Publishes from the inline client (empty identity, i.e.
 // DeliverLocal) bypass ingest and pass through untouched.
+//
+// A persisted packet is answered with packets.CodeSuccessIgnore: mochi sets
+// pk.Ignore, which makes publishToSubscribers and the retain handling return
+// early while the client still gets its PUBACK. The client's RAW topic is
+// therefore never distributed — the engine publishes the CANONICAL,
+// mount-rewritten form instead, so a subscriber on colca/# sees each record once.
+// A non-UNS topic is not persisted and must be distributed normally: outside
+// colca/# Colca is just a broker.
 func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
 	identity := string(cl.Properties.Username)
 	if identity == "" {
@@ -108,6 +116,7 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 	if res.Persisted {
 		h.log.Debug("mqtt ingest", "identity", identity, "topic_in", pk.TopicName,
 			"topic_stored", res.Topic, "stream", res.Stream, "offset", res.Offset)
+		return pk, packets.CodeSuccessIgnore
 	}
 	return pk, nil
 }
@@ -137,10 +146,13 @@ func (s *Server) Addr() string { return s.tcp.Address() }
 func (s *Server) Serve() error { return s.S.Serve() }
 func (s *Server) Close() error { return s.S.Close() }
 
-// DeliverLocal publishes into the local broker (used for downlink command
-// delivery). It matches engine.LocalDeliver.
-func (s *Server) DeliverLocal(topic string, payload []byte) {
-	if err := s.S.Publish(topic, payload, false, 1); err != nil {
-		slog.Default().Warn("local delivery failed", "topic", topic, "err", err)
+// DeliverLocal publishes into the local broker. It matches engine.LocalDeliver
+// and is how every record the engine appends reaches this node's MQTT bus,
+// under the stored (canonical) topic. retain is passed through: state contracts
+// are retained so a fresh subscriber gets the current value on connect, events
+// are not.
+func (s *Server) DeliverLocal(topic string, payload []byte, retain bool) {
+	if err := s.S.Publish(topic, payload, retain, 1); err != nil {
+		slog.Default().Warn("local delivery failed", "topic", topic, "retain", retain, "err", err)
 	}
 }

@@ -89,19 +89,29 @@ func TestApplyReplicatedDedupe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if applied != 2 || hwm != 2 {
-		t.Fatalf("applied %d hwm %d", applied, hwm)
+	if len(applied) != 2 || hwm != 2 {
+		t.Fatalf("applied %d hwm %d", len(applied), hwm)
+	}
+	// the returned slice IS the set of records written, in write order — that is
+	// what the engine mirrors onto the local MQTT bus.
+	if applied[0].ChildOffset != 1 || applied[0].Topic != batch[0].Topic ||
+		applied[1].ChildOffset != 2 || applied[1].Topic != batch[1].Topic {
+		t.Fatalf("returned records are not the applied ones, in order: %+v", applied)
 	}
 	// exact same batch again → full dedupe
 	applied, hwm, _ = s.ApplyReplicated("n-edge1", "metrics", batch)
-	if applied != 0 || hwm != 2 {
-		t.Fatalf("dedupe failed: applied %d hwm %d", applied, hwm)
+	if len(applied) != 0 || hwm != 2 {
+		t.Fatalf("dedupe failed: applied %d hwm %d", len(applied), hwm)
 	}
 	// overlapping batch → partial
 	batch = append(batch, ReplRecord{ChildOffset: 3, Topic: "colca/v1/_Metric/m1/edge1/m1/c", Payload: []byte("3"), TS: 3, KVPath: "edge1/m1/c", KVNode: "m1"})
 	applied, hwm, _ = s.ApplyReplicated("n-edge1", "metrics", batch)
-	if applied != 1 || hwm != 3 {
-		t.Fatalf("partial dedupe: applied %d hwm %d", applied, hwm)
+	if len(applied) != 1 || hwm != 3 {
+		t.Fatalf("partial dedupe: applied %d hwm %d", len(applied), hwm)
+	}
+	// exactly the new record, never one of the two already-applied ones
+	if applied[0].ChildOffset != 3 || applied[0].Topic != "colca/v1/_Metric/m1/edge1/m1/c" {
+		t.Fatalf("partial dedupe returned the wrong record: %+v", applied)
 	}
 	if s.NextOffset("metrics") != 4 {
 		t.Fatalf("local offsets: %d", s.NextOffset("metrics"))
