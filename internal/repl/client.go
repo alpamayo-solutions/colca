@@ -186,6 +186,11 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 					batch[i] = store.ReplRecord{ChildOffset: r.Offset, Topic: r.Topic, Payload: r.Payload, TS: r.TS}
 				}
 				if _, err := c.replicate(ctx, st.name, batch); err != nil {
+					select {
+					case <-stop:
+						return // the request was aborted by our own shutdown, not a real failure
+					default:
+					}
 					c.log.Warn("uplink push failed (will retry)", "stream", st.name, "err", err)
 					m.UplinkPushFailed(st.name)
 					continue // parent down → cursor stays, offline buffering in action
