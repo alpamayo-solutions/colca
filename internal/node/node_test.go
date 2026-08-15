@@ -399,6 +399,24 @@ func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 		t.Fatalf("node.Start with %d KV paths took %v — the retained re-seed is delaying readiness pathologically", paths, elapsed)
 	}
 
+	// The reseed count is exported on /metrics (tokenless), as a startup-cost
+	// witness: it must equal the number of seeded KV paths.
+	resp, err := http.Get("http://" + n.APIAddr + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("GET /metrics: read body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics without token: want 200, got %d", resp.StatusCode)
+	}
+	if want := fmt.Sprintf("colca_retained_reseed_records %d", paths); !strings.Contains(string(body), want) {
+		t.Fatalf("/metrics must report %q after the seed, got:\n%s", want, body)
+	}
+
 	// The timing is only meaningful if the seed actually happened: spot-check
 	// one retained path on a fresh subscriber.
 	obs := connectMQTT(t, n.MQTTAddr, "obs-cost", "obs", "obs-secret")

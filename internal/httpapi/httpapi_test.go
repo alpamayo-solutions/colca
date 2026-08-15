@@ -11,6 +11,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
@@ -20,7 +21,7 @@ func newAPI(t *testing.T) *httptest.Server {
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
 	e := engine.New(s, cfg, nil)
-	srv := httptest.NewServer(Handler(e, cfg))
+	srv := httptest.NewServer(Handler(e, cfg, metrics.New(s)))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -295,6 +296,44 @@ func TestAuthAndDebugState(t *testing.T) {
 	}
 }
 
+// /metrics serves the Prometheus text format WITHOUT a token (same trust
+// posture as /healthz) and reflects state written through the API — while
+// every protected route keeps requiring the token (TestAuthAndDebugState).
+func TestMetricsTokenlessAndLive(t *testing.T) {
+	srv := newAPI(t)
+	publish(t, srv, "colca/v1/_Metric/n-test/line1/temp", `{"v":1}`)
+
+	resp, body := raw(t, srv, "GET", "/metrics", "", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics without token: want 200, got %d (%s)", resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("GET /metrics Content-Type = %q, want text/plain exposition format", ct)
+	}
+	if !strings.Contains(body, `colca_stream_next_offset{stream="metrics"} 2`) {
+		t.Fatalf("metrics must reflect the published record (next_offset 2), body:\n%s", body)
+	}
+	if !strings.Contains(body, `colca_rejected_publishes_total{reason="identity"} 0`) {
+		t.Fatalf("counter families must be present zero-valued, body:\n%s", body)
+	}
+}
+
+// A node built without a metrics registry has no /metrics route at all.
+func TestNoMetricsRegistryMeansNoRoute(t *testing.T) {
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
+	srv := httptest.NewServer(Handler(engine.New(s, cfg, nil), cfg, nil))
+	t.Cleanup(srv.Close)
+	resp, _ := raw(t, srv, "GET", "/metrics", "", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("nil metrics: want 404 on /metrics, got %d", resp.StatusCode)
+	}
+}
+
 // An empty configured token is a missing secret, not an invitation: nothing
 // authenticates, and /healthz stays tokenless.
 func TestEmptyConfiguredTokenDeniesEveryone(t *testing.T) {
@@ -304,7 +343,7 @@ func TestEmptyConfiguredTokenDeniesEveryone(t *testing.T) {
 	}
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-notoken"}
-	srv := httptest.NewServer(Handler(engine.New(s, cfg, nil), cfg))
+	srv := httptest.NewServer(Handler(engine.New(s, cfg, nil), cfg, metrics.New(s)))
 	t.Cleanup(srv.Close)
 
 	for _, token := range []string{"", "tok"} {

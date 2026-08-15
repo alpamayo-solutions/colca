@@ -214,6 +214,64 @@ func (s *Store) HWMGet(child, stream string) uint64 {
 	return s.readU64(hwmKey(child, stream), 0)
 }
 
+// CursorInfo is one persisted consumer cursor: the next offset the named
+// consumer will read from a stream.
+type CursorInfo struct {
+	Name, Stream string
+	Position     uint64
+}
+
+// HWMInfo is one replication high-water mark: the highest child offset already
+// applied locally for (child, stream).
+type HWMInfo struct {
+	Child, Stream string
+	HWM           uint64
+}
+
+// scanU64Pairs iterates every key of the form {prefix}\x00{first}\x00{second}
+// holding an 8-byte big-endian counter. Malformed keys and values are skipped,
+// the same tolerance KVScan applies.
+func (s *Store) scanU64Pairs(prefix byte, fn func(first, second string, v uint64)) {
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: []byte{prefix, 0x00},
+		UpperBound: []byte{prefix, 0xFF},
+	})
+	if err != nil {
+		return
+	}
+	defer iter.Close()
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := string(iter.Key()[2:]) // strip "{prefix}\x00"
+		sep := strings.IndexByte(key, 0)
+		if sep < 0 {
+			continue
+		}
+		v := iter.Value()
+		if len(v) != 8 {
+			continue
+		}
+		fn(key[:sep], key[sep+1:], binary.BigEndian.Uint64(v))
+	}
+}
+
+// Cursors returns every persisted cursor. Read-only.
+func (s *Store) Cursors() []CursorInfo {
+	var out []CursorInfo
+	s.scanU64Pairs('c', func(name, stream string, v uint64) {
+		out = append(out, CursorInfo{Name: name, Stream: stream, Position: v})
+	})
+	return out
+}
+
+// HWMs returns every persisted replication high-water mark. Read-only.
+func (s *Store) HWMs() []HWMInfo {
+	var out []HWMInfo
+	s.scanU64Pairs('h', func(child, stream string, v uint64) {
+		out = append(out, HWMInfo{Child: child, Stream: stream, HWM: v})
+	})
+	return out
+}
+
 // ReplRecord is a record as it travels from a child node to its parent. The
 // json tags are the wire format — do not rename them.
 type ReplRecord struct {

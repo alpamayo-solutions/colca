@@ -20,6 +20,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/httpapi"
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/mqttsrv"
 	"github.com/alpamayo-solutions/colca/internal/repl"
 	"github.com/alpamayo-solutions/colca/internal/store"
@@ -34,6 +35,7 @@ type Node struct {
 	Engine  *engine.Engine
 	MQTT    *mqttsrv.Server
 	ReplSrv *repl.Server
+	Metrics *metrics.Metrics
 
 	APIAddr  string // resolved HTTP API address ("" if no api configured)
 	ReplAddr string // resolved replication address ("" if this node has no children)
@@ -68,7 +70,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		return nil, fmt.Errorf("node %s: open store %s: %w", cfg.ULID, cfg.DataDir, err)
 	}
 
-	n := &Node{Cfg: cfg, Store: st, stop: make(chan struct{})}
+	n := &Node{Cfg: cfg, Store: st, Metrics: metrics.New(st), stop: make(chan struct{})}
 	log := slog.Default().With("node", cfg.ULID, "comp", "node")
 	// From here on every error path unwinds through Stop.
 	fail := func(err error) (*Node, error) {
@@ -114,9 +116,12 @@ func Start(cfg *config.Config) (*Node, error) {
 		// 10k seeded paths measures ~70ms total, ~380ms under -race
 		// (TestRetainedSeedStartupCostTenThousandPaths) — so it does not
 		// meaningfully delay /healthz, which opens after it.
+		seeded := 0
 		for _, en := range st.KVScan("") {
 			n.MQTT.DeliverLocal(en.Topic, en.Payload, true)
+			seeded++
 		}
+		n.Metrics.SetReseedCount(seeded)
 		go func(mq *mqttsrv.Server) {
 			if err := mq.Serve(); err != nil {
 				log.Error("mqtt server stopped", "err", err)
@@ -132,7 +137,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.apiLn = ln
 		n.APIAddr = ln.Addr().String()
-		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg))}
+		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, n.Metrics))}
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server stopped", "err", err)

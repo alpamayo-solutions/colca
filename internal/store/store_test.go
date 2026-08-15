@@ -148,6 +148,71 @@ func TestKVScan(t *testing.T) {
 	}
 }
 
+// Cursors()/HWMs() report exactly the persisted read-only state the metrics
+// collector derives gauges from, and tolerate malformed keys/values the same
+// way KVScan does (skip, never fail).
+func TestCursorsAndHWMsScan(t *testing.T) {
+	s := mustOpen(t)
+	if got := s.Cursors(); len(got) != 0 {
+		t.Fatalf("fresh store must have no cursors, got %v", got)
+	}
+	if got := s.HWMs(); len(got) != 0 {
+		t.Fatalf("fresh store must have no HWMs, got %v", got)
+	}
+
+	// Seed through the public APIs only.
+	if !s.CursorAck("hub", "metrics", 7) {
+		t.Fatal("CursorAck(hub, metrics, 7) should move")
+	}
+	if !s.CursorAck("archiver", "entities", 3) {
+		t.Fatal("CursorAck(archiver, entities, 3) should move")
+	}
+	if _, _, err := s.ApplyReplicated("n-child", "metrics", []ReplRecord{
+		{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/a", Payload: []byte("1"), TS: 1},
+		{ChildOffset: 5, Topic: "colca/v1/_Metric/m1/b", Payload: []byte("2"), TS: 2},
+	}); err != nil {
+		t.Fatalf("ApplyReplicated: %v", err)
+	}
+
+	cursors := map[string]CursorInfo{}
+	for _, c := range s.Cursors() {
+		cursors[c.Name+"/"+c.Stream] = c
+	}
+	if len(cursors) != 2 {
+		t.Fatalf("want 2 cursors, got %v", cursors)
+	}
+	if c := cursors["hub/metrics"]; c.Position != 7 {
+		t.Fatalf("hub/metrics position = %d, want 7 (%+v)", c.Position, c)
+	}
+	if c := cursors["archiver/entities"]; c.Position != 3 {
+		t.Fatalf("archiver/entities position = %d, want 3 (%+v)", c.Position, c)
+	}
+
+	hwms := s.HWMs()
+	if len(hwms) != 1 {
+		t.Fatalf("want 1 HWM, got %v", hwms)
+	}
+	if h := hwms[0]; h.Child != "n-child" || h.Stream != "metrics" || h.HWM != 5 {
+		t.Fatalf("HWM = %+v, want {n-child metrics 5}", h)
+	}
+
+	// Malformed entries must be skipped, not returned and not fatal:
+	// a cursor key without the name/stream separator, and a value that is
+	// not an 8-byte counter.
+	if err := s.db.Set([]byte("c\x00no-separator"), be64(9), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Set([]byte("h\x00bad\x00metrics"), []byte("short"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Cursors(); len(got) != 2 {
+		t.Fatalf("malformed cursor key must be skipped, got %v", got)
+	}
+	if got := s.HWMs(); len(got) != 1 {
+		t.Fatalf("malformed HWM value must be skipped, got %v", got)
+	}
+}
+
 func TestDiskMetricsGrowWithWrites(t *testing.T) {
 	s, err := Open(t.TempDir())
 	if err != nil {

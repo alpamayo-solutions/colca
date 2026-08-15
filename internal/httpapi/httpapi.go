@@ -1,6 +1,7 @@
 // Package httpapi exposes the node's local control surface: publish, cursor
-// fetch/ack, the KV projection and a debug view. Every route except /healthz
-// requires the admin token from the config (header X-Colca-Token).
+// fetch/ack, the KV projection, Prometheus metrics and a debug view. Every
+// route except /healthz and /metrics requires the admin token from the config
+// (header X-Colca-Token).
 //
 // Payloads travel as json.RawMessage in both directions: they are never decoded
 // into map[string]any and re-encoded, so a number keeps the exact form the
@@ -15,6 +16,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -24,7 +26,7 @@ const (
 	maxMax     = 1000
 )
 
-func Handler(e *engine.Engine, cfg *config.Config) http.Handler {
+func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Handler {
 	mux := http.NewServeMux()
 
 	writeJSON := func(w http.ResponseWriter, code int, v any) {
@@ -47,6 +49,12 @@ func Handler(e *engine.Engine, cfg *config.Config) http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ulid": cfg.ULID})
 	})
+
+	// /metrics is tokenless like /healthz: the API listener is loopback/
+	// in-cluster, and Prometheus scrape targets do not carry admin tokens.
+	if m != nil {
+		mux.Handle("GET /metrics", m.Handler())
+	}
 
 	mux.HandleFunc("POST /publish", auth(func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
