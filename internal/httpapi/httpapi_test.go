@@ -13,6 +13,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
@@ -25,17 +26,25 @@ func newAPI(t *testing.T) *httptest.Server {
 // records with exact timestamps or prune directly (the gap-contract tests).
 func newAPIStore(t *testing.T) (*httptest.Server, *store.Store) {
 	t.Helper()
+	srv, s, _ := newAPIStoreMetrics(t)
+	return srv, s
+}
+
+// newAPIStoreMetrics additionally hands out the *metrics.Metrics registry —
+// for tests asserting the gap-served counter (design §8).
+func newAPIStoreMetrics(t *testing.T) (*httptest.Server, *store.Store, *metrics.Metrics) {
+	t.Helper()
 	s, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
-	m := metrics.New(s)
+	m := metrics.New(s, config.Retention{})
 	e := engine.New(s, cfg, nil, m)
 	srv := httptest.NewServer(Handler(e, cfg, m))
 	t.Cleanup(srv.Close)
-	return srv, s
+	return srv, s, m
 }
 
 func req(t *testing.T, srv *httptest.Server, method, path, token string, body any) (*http.Response, map[string]any) {
@@ -355,7 +364,7 @@ func TestEmptyConfiguredTokenDeniesEveryone(t *testing.T) {
 	}
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-notoken"}
-	srv := httptest.NewServer(Handler(engine.New(s, cfg, nil, nil), cfg, metrics.New(s)))
+	srv := httptest.NewServer(Handler(engine.New(s, cfg, nil, nil), cfg, metrics.New(s, config.Retention{})))
 	t.Cleanup(srv.Close)
 
 	for _, token := range []string{"", "tok"} {
@@ -457,6 +466,55 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	_, body = raw(t, srv, "GET", "/fetch?stream=entities&cursor=any", "tok", "")
 	if strings.Contains(body, `"gap"`) {
 		t.Fatalf("unpruned stream must not carry a gap: %s", body)
+	}
+}
+
+// design §8: every /fetch response carrying a gap object counts
+// colca_gap_served_total{stream="metrics",surface="fetch"} — a response
+// WITHOUT a gap must never move it.
+func TestFetchGapCountsGapServed(t *testing.T) {
+	srv, s, m := newAPIStoreMetrics(t)
+	const topic = "colca/v1/_Metric/n-test/line1/temp"
+	seedMetrics(t, s, 5, topic) // offsets 1..5
+	if n, err := s.Prune("metrics", 4, nil, nil); err != nil || n != 3 {
+		t.Fatalf("prune: %d %v", n, err)
+	}
+
+	const gapServed = `colca_gap_served_total{stream="metrics",surface="fetch"}`
+	if v := metricstest.Value(t, m, gapServed); v != 0 {
+		t.Fatalf("%s = %v before any gap-carrying fetch, want 0", gapServed, v)
+	}
+
+	// A cursor at the LWM never sees a gap: the counter must not move.
+	if !s.CursorAck("edge", "metrics", 4) {
+		t.Fatal("ack must move")
+	}
+	if _, body := raw(t, srv, "GET", "/fetch?stream=metrics&cursor=edge", "tok", ""); strings.Contains(body, `"gap"`) {
+		t.Fatalf("cursor at the LWM must not see a gap: %s", body)
+	}
+	if v := metricstest.Value(t, m, gapServed); v != 0 {
+		t.Fatalf("%s = %v after a gap-FREE fetch, want unchanged 0", gapServed, v)
+	}
+
+	// A cursor below the LWM sees a gap: exactly one increment.
+	if !s.CursorAck("lag", "metrics", 2) {
+		t.Fatal("ack must move")
+	}
+	if _, body := raw(t, srv, "GET", "/fetch?stream=metrics&cursor=lag", "tok", ""); !strings.Contains(body, `"gap"`) {
+		t.Fatalf("cursor below the LWM must see a gap: %s", body)
+	}
+	if v := metricstest.Value(t, m, gapServed); v != 1 {
+		t.Fatalf("%s = %v after one gap-carrying fetch, want 1", gapServed, v)
+	}
+
+	// The gap is side-effect free (does not move the cursor): a second fetch
+	// sees the SAME gap and counts a SECOND time — one increment per response
+	// actually served, not per distinct gap.
+	if _, body := raw(t, srv, "GET", "/fetch?stream=metrics&cursor=lag", "tok", ""); !strings.Contains(body, `"gap"`) {
+		t.Fatalf("repeat fetch must still see the gap: %s", body)
+	}
+	if v := metricstest.Value(t, m, gapServed); v != 2 {
+		t.Fatalf("%s = %v after two gap-carrying fetches, want 2", gapServed, v)
 	}
 }
 

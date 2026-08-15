@@ -9,11 +9,18 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 const nodeULID = "n-edge1"
+
+// scrapeMetric reads back one metric value through the shared test helper —
+// see metricstest's doc comment for why this goes through Handler() rather
+// than a Collector/Gatherer accessor.
+var scrapeMetric = metricstest.Value
 
 func mustParts(t *testing.T) (*store.Store, *engine.Engine) {
 	t.Helper()
@@ -29,6 +36,15 @@ func mustParts(t *testing.T) (*store.Store, *engine.Engine) {
 func newPruner(t *testing.T, st *store.Store, eng *engine.Engine, ret config.Retention) *Pruner {
 	t.Helper()
 	return NewPruner(st, eng, ret, nil, nodeULID)
+}
+
+// newPrunerWithMetrics is newPruner for tests asserting the design §8
+// counters (colca_retention_pruned_records_total, ..._prune_runs_total,
+// ..._gap_records_total, ..._state_refresh_*_total).
+func newPrunerWithMetrics(t *testing.T, st *store.Store, eng *engine.Engine, ret config.Retention) (*Pruner, *metrics.Metrics) {
+	t.Helper()
+	m := metrics.New(st, ret)
+	return NewPruner(st, eng, ret, m, nodeULID), m
 }
 
 // appendAt appends n records to a stream with explicit timestamps ts, ts+step,
@@ -68,8 +84,10 @@ func TestAgePolicyPrunesToExactBoundary(t *testing.T) {
 	st, eng := mustParts(t)
 	base := time.Now().UnixMilli()
 	appendAt(t, st, "metrics", 10, base, 1000) // offsets 1..10, TS base..base+9000
+	bytesBefore := st.StreamBytes("metrics")
 
-	p := newPruner(t, st, eng, retFor("metrics", config.StreamRetention{MaxAge: config.Duration(time.Hour)}))
+	ret := retFor("metrics", config.StreamRetention{MaxAge: config.Duration(time.Hour)})
+	p, m := newPrunerWithMetrics(t, st, eng, ret)
 	// cutoff = now − 1h = base+5000, exactly the TS of offset 6: offsets 1..5
 	// (TS < cutoff) go, offset 6 (TS == cutoff) survives.
 	p.now = func() time.Time { return time.UnixMilli(base + 5000).Add(time.Hour) }
@@ -84,6 +102,28 @@ func TestAgePolicyPrunesToExactBoundary(t *testing.T) {
 	}
 	if next := st.NextOffset("metrics"); next != 11 {
 		t.Fatalf("no marker expected on a plain policy prune: next = %d, want 11", next)
+	}
+
+	// design §8: one run removed exactly 5 records and the bytes the store
+	// itself shed (no override on this stream, so no gap-records counter).
+	if v := scrapeMetric(t, m, `colca_retention_prune_runs_total{stream="metrics"}`); v != 1 {
+		t.Fatalf("prune runs = %v, want 1", v)
+	}
+	if v := scrapeMetric(t, m, `colca_retention_pruned_records_total{stream="metrics"}`); v != 5 {
+		t.Fatalf("pruned records = %v, want 5", v)
+	}
+	wantBytes := float64(bytesBefore - st.StreamBytes("metrics"))
+	if v := scrapeMetric(t, m, `colca_retention_pruned_bytes_total{stream="metrics"}`); v != wantBytes {
+		t.Fatalf("pruned bytes = %v, want %v (bytes actually shed from the store)", v, wantBytes)
+	}
+	if v := scrapeMetric(t, m, `colca_retention_gap_records_total{stream="metrics"}`); v != 0 {
+		t.Fatalf("gap records = %v, want 0 (no cursor override on a plain policy prune)", v)
+	}
+
+	// An idle cycle (nothing left to prune) must not tick the run counter.
+	p.runOnce()
+	if v := scrapeMetric(t, m, `colca_retention_prune_runs_total{stream="metrics"}`); v != 1 {
+		t.Fatalf("prune runs after an idle cycle = %v, want unchanged 1", v)
 	}
 }
 
@@ -160,10 +200,11 @@ func TestStalenessOverrideFiresOnlyPastWindow(t *testing.T) {
 	}
 	ackTime := time.Now()
 
-	p := newPruner(t, st, eng, retFor("metrics", config.StreamRetention{
+	ret := retFor("metrics", config.StreamRetention{
 		MaxAge:             config.Duration(time.Minute),
 		IgnoreCursorsAfter: config.Duration(time.Hour),
-	}))
+	})
+	p, m := newPrunerWithMetrics(t, st, eng, ret)
 
 	// Inside the window: the cursor still protects. Offsets 1..2 are pruned
 	// (below the cursor), the rest is clamped. No override, no marker.
@@ -175,6 +216,17 @@ func TestStalenessOverrideFiresOnlyPastWindow(t *testing.T) {
 	if next := st.NextOffset("metrics"); next != 11 {
 		t.Fatalf("inside the window: no marker allowed, next = %d, want 11", next)
 	}
+	// design §8: a real (clamped) prune still counts as a run, but with no
+	// override there is no gap-records tick.
+	if v := scrapeMetric(t, m, `colca_retention_prune_runs_total{stream="metrics"}`); v != 1 {
+		t.Fatalf("prune runs after the clamped cycle = %v, want 1", v)
+	}
+	if v := scrapeMetric(t, m, `colca_retention_pruned_records_total{stream="metrics"}`); v != 2 {
+		t.Fatalf("pruned records after the clamped cycle = %v, want 2", v)
+	}
+	if v := scrapeMetric(t, m, `colca_retention_gap_records_total{stream="metrics"}`); v != 0 {
+		t.Fatalf("gap records after the clamped cycle = %v, want 0 (no override yet)", v)
+	}
 
 	// Past the window: the cursor is overridden.
 	p.now = func() time.Time { return ackTime.Add(2 * time.Hour) }
@@ -184,6 +236,18 @@ func TestStalenessOverrideFiresOnlyPastWindow(t *testing.T) {
 	}
 	if next := st.NextOffset("metrics"); next != 12 {
 		t.Fatalf("exactly one marker must be appended: next = %d, want 12", next)
+	}
+	// design §8: the second run adds 8 more pruned records (3..10) and counts
+	// its own run; the override ticks gap-records exactly once — matching the
+	// single _StreamGap marker just asserted above.
+	if v := scrapeMetric(t, m, `colca_retention_prune_runs_total{stream="metrics"}`); v != 2 {
+		t.Fatalf("prune runs after the override cycle = %v, want 2", v)
+	}
+	if v := scrapeMetric(t, m, `colca_retention_pruned_records_total{stream="metrics"}`); v != 10 {
+		t.Fatalf("pruned records after the override cycle = %v, want 10 (2 + 8)", v)
+	}
+	if v := scrapeMetric(t, m, `colca_retention_gap_records_total{stream="metrics"}`); v != 1 {
+		t.Fatalf("gap records after the override cycle = %v, want exactly 1", v)
 	}
 	recs := readAll(t, st, "metrics", 11)
 	if len(recs) != 1 {
@@ -249,12 +313,25 @@ func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 		t.Fatal("cursor ack must move")
 	}
 
-	p := newPruner(t, st, eng, retFor("entities", config.StreamRetention{
+	ret := retFor("entities", config.StreamRetention{
 		MaxAge:             config.Duration(time.Hour),
 		IgnoreCursorsAfter: config.Duration(30 * time.Minute),
-	}))
+	})
+	p, m := newPrunerWithMetrics(t, st, eng, ret)
 	p.now = func() time.Time { return time.Now().Add(2 * time.Hour) } // records old, cursor stale
 	p.runOnce()
+
+	// design §8: exactly the 2 affected paths counted as applied refreshes;
+	// nothing skipped or failed.
+	if v := scrapeMetric(t, m, `colca_retention_state_refresh_records_total`); v != 2 {
+		t.Fatalf("state refresh records = %v, want 2", v)
+	}
+	if v := scrapeMetric(t, m, `colca_retention_state_refresh_skipped_total`); v != 0 {
+		t.Fatalf("state refresh skipped = %v, want 0", v)
+	}
+	if v := scrapeMetric(t, m, `colca_retention_state_refresh_failures_total`); v != 0 {
+		t.Fatalf("state refresh failures = %v, want 0", v)
+	}
 
 	// Prune [1..4] → LWM 5, marker at 5, refresh appends after it.
 	if got := st.LWM("entities"); got != 5 {
@@ -493,7 +570,7 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 	})
 
 	// Cycle 1: override prunes [1..3]; the refresh append for line1/c fails.
-	pA := newPruner(t, st, eng, ret)
+	pA, mA := newPrunerWithMetrics(t, st, eng, ret)
 	pA.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 	realPublish := pA.publish
 	pA.publish = func(topic string, payload []byte, ifKVOffset uint64) (bool, error) {
@@ -515,10 +592,24 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 	if next := st.NextOffset("entities"); next != 6 {
 		t.Fatalf("entities next = %d, want 6 (marker + one successful refresh)", next)
 	}
+	// design §8: this is the refresh path's OWN failure counter — line1/c's
+	// injected error counts here, line1/b's success counts as applied, and
+	// nothing was skipped.
+	if v := scrapeMetric(t, mA, `colca_retention_state_refresh_failures_total`); v != 1 {
+		t.Fatalf("pA state refresh failures = %v, want 1", v)
+	}
+	if v := scrapeMetric(t, mA, `colca_retention_state_refresh_records_total`); v != 1 {
+		t.Fatalf("pA state refresh records = %v, want 1", v)
+	}
+	if v := scrapeMetric(t, mA, `colca_retention_state_refresh_skipped_total`); v != 0 {
+		t.Fatalf("pA state refresh skipped = %v, want 0", v)
+	}
 
-	// "Restart": a NEW pruner instance on the same store, healthy publish
-	// path, completes the obligation at Run startup — before any tick.
-	pB := newPruner(t, st, eng, ret)
+	// "Restart": a NEW pruner instance (own metrics registry too — a
+	// restarted process starts every Prometheus counter at zero) on the same
+	// store, healthy publish path, completes the obligation at Run startup —
+	// before any tick.
+	pB, mB := newPrunerWithMetrics(t, st, eng, ret)
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() { pB.Run(stop); close(done) }()
@@ -548,6 +639,16 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 	}
 	if next := st.NextOffset("entities"); next != 7 {
 		t.Fatalf("entities next = %d, want 7 — the retry must not double-refresh line1/b", next)
+	}
+	// design §8: on pB's own registry, the retried line1/c is exactly one
+	// applied refresh — no failures, no skips. line1/b never re-enters the
+	// scan (its KV Offset already moved past the range), so it does not
+	// double-count here.
+	if v := scrapeMetric(t, mB, `colca_retention_state_refresh_records_total`); v != 1 {
+		t.Fatalf("pB state refresh records = %v, want 1", v)
+	}
+	if v := scrapeMetric(t, mB, `colca_retention_state_refresh_failures_total`); v != 0 {
+		t.Fatalf("pB state refresh failures = %v, want 0", v)
 	}
 
 	// rp/ absent → completion is a no-op: another cycle appends nothing.
@@ -629,10 +730,11 @@ func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
 	if !st.CursorAck("uplink", "entities", 2) { // offset 2 (line1/b) unread
 		t.Fatal("ack must move")
 	}
-	p := newPruner(t, st, eng, retFor("entities", config.StreamRetention{
+	ret := retFor("entities", config.StreamRetention{
 		MaxAge:             config.Duration(time.Hour),
 		IgnoreCursorsAfter: config.Duration(30 * time.Minute),
-	}))
+	})
+	p, m := newPrunerWithMetrics(t, st, eng, ret)
 	p.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 	realPublish := p.publish
 	p.publish = func(topic string, payload []byte, ifKVOffset uint64) (bool, error) {
@@ -650,6 +752,18 @@ func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
 	// The retired path stays GONE — no resurrection.
 	if kv := st.KVScan("line1/b"); len(kv) != 0 {
 		t.Fatalf("tombstoned path resurrected by the refresh: %+v", kv)
+	}
+	// design §8: the guard skip is a completion, not a failure — it counts
+	// against the skipped family only. Nothing was applied (topicA falls
+	// outside the refresh range [2,3)).
+	if v := scrapeMetric(t, m, `colca_retention_state_refresh_skipped_total`); v != 1 {
+		t.Fatalf("state refresh skipped = %v, want 1", v)
+	}
+	if v := scrapeMetric(t, m, `colca_retention_state_refresh_records_total`); v != 0 {
+		t.Fatalf("state refresh records = %v, want 0", v)
+	}
+	if v := scrapeMetric(t, m, `colca_retention_state_refresh_failures_total`); v != 0 {
+		t.Fatalf("state refresh failures = %v, want 0", v)
 	}
 	// Stream head: marker at 3 (prune of [1..2]), injected tombstone at 4,
 	// and NO refresh record for line1/b.

@@ -16,16 +16,22 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
-// parentFixture is the standard mTLS parent + one registered child.
+// parentFixture is the standard mTLS parent + one registered child. pm is the
+// parent's own metrics registry (design §8, e.g. colca_gap_served_total —
+// wired for every fixture since it is pure observability and changes no
+// behavior the other gap_test.go tests assert on).
 type parentFixture struct {
 	ps      *store.Store
 	pcfg    *config.Config
 	peng    *engine.Engine
 	pid     *identity.Identity
 	cid     *identity.Identity
+	pm      *metrics.Metrics
 	srv     *Server
 	addr    string
 	cl      *Client
@@ -41,10 +47,11 @@ func newParentFixture(t *testing.T) *parentFixture {
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"},
 		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}}}
 	peng := engine.New(ps, pcfg, nil, nil)
-	srv, addr := startServer(t, pcfg, peng, parentID)
+	pm := metrics.New(ps, config.Retention{})
+	srv, addr := startServerWithMetrics(t, pcfg, peng, parentID, pm)
 	t.Cleanup(srv.Stop)
 	return &parentFixture{
-		ps: ps, pcfg: pcfg, peng: peng, pid: parentID, cid: childID,
+		ps: ps, pcfg: pcfg, peng: peng, pid: parentID, cid: childID, pm: pm,
 		srv: srv, addr: addr,
 		cl: mustClient(t, addr, parentID.PublicHex(), childID), childID: "n-child",
 	}
@@ -167,6 +174,7 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 	pcfg.Repl.Addr = addr
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
+	cm := metrics.New(cs, config.Retention{})
 	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, nil, nil)
 	for i := 1; i <= 5; i++ {
 		mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", fmt.Sprintf(`{"v":%d}`, i))
@@ -177,7 +185,7 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunUplink(cl, ceng, nil, stop)
+		RunUplink(cl, ceng, cm, stop)
 	}()
 	defer func() {
 		close(stop)
@@ -191,9 +199,17 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 		t.Fatalf("prune: %d %v", n, err)
 	}
 
+	// design §8: the loop's own jump over the pruned range counts
+	// colca_gap_received_total{stream="metrics"} exactly once — independent
+	// of the parent being reachable yet.
+	const gapReceived = `colca_gap_received_total{stream="metrics"}`
+	waitFor(t, "the uplink jump to count colca_gap_received_total", 5*time.Second, func() bool {
+		return metricstest.Value(t, cm, gapReceived) == 1
+	})
+
 	// Parent returns on the same address; the loop must jump 1 → 4 and push
 	// the survivors — never stall on the pruned range.
-	srv2, err := NewServer(pcfg, peng, parentID)
+	srv2, err := NewServer(pcfg, peng, parentID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +238,11 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 
 // Spec §6.3, downlink half: on receiving a gap object the child logs,
 // continues past the hole, and ingests the surviving commands — nothing
-// stalls, nothing propagates further down.
+// stalls, nothing propagates further down. Also design §8: the parent's
+// gap-carrying /downlink response counts colca_gap_served_total{stream=
+// "commands",surface="downlink"} and the child's handling of it counts
+// colca_gap_received_total{stream="commands"} — the two ends of the same
+// wire event, on two different registries.
 func TestRunDownlinkContinuesPastGap(t *testing.T) {
 	f := newParentFixture(t)
 	seedParentCommands(t, f.ps, 3)
@@ -232,13 +252,14 @@ func TestRunDownlinkContinuesPastGap(t *testing.T) {
 
 	dir := t.TempDir()
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
+	cm := metrics.New(cs, config.Retention{})
 	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, nil, nil)
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunDownlink(f.cl, ceng, nil, stop)
+		RunDownlink(f.cl, ceng, cm, stop)
 	}()
 	waitFor(t, "the downlink cursor to advance past the hole", 10*time.Second, func() bool {
 		return cs.CursorGet(downlinkCursor, downlinkStream) == 4
@@ -253,6 +274,13 @@ func TestRunDownlinkContinuesPastGap(t *testing.T) {
 	}
 	if len(recs) != 1 || recs[0].Topic != "colca/v1/_CmdParam/m1/m1/go" {
 		t.Fatalf("child commands = %+v, want exactly the one surviving command", recs)
+	}
+
+	if v := metricstest.Value(t, f.pm, `colca_gap_served_total{stream="commands",surface="downlink"}`); v != 1 {
+		t.Fatalf("parent colca_gap_served_total{stream=commands,surface=downlink} = %v, want 1", v)
+	}
+	if v := metricstest.Value(t, cm, `colca_gap_received_total{stream="commands"}`); v != 1 {
+		t.Fatalf("child colca_gap_received_total{stream=commands} = %v, want 1", v)
 	}
 }
 

@@ -34,7 +34,7 @@ func TestUplinkMetricsProgressAndFailure(t *testing.T) {
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
-	cm := metrics.New(cs)
+	cm := metrics.New(cs, config.Retention{})
 	ceng := engine.New(cs, ccfg, nil, cm)
 	mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", `{"v":1}`)
 
@@ -102,7 +102,7 @@ func TestDownlinkMetricsProgressAndFailure(t *testing.T) {
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
-	cm := metrics.New(cs)
+	cm := metrics.New(cs, config.Retention{})
 	ceng := engine.New(cs, ccfg, nil, cm)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 

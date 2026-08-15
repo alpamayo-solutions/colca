@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 
+	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
@@ -31,6 +33,57 @@ func seedRecords(t *testing.T, s *store.Store, stream string, n int) {
 	}
 }
 
+// seedRecordsAt is seedRecords with explicit timestamps base, base+step,
+// base+2*step, … — for the retention gauges, which read record age off real
+// wall-clock-relative timestamps.
+func seedRecordsAt(t *testing.T, s *store.Store, stream string, n int, base, step int64) {
+	t.Helper()
+	recs := make([]store.Record, n)
+	for i := range recs {
+		recs[i] = store.Record{Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":1}`), TS: base + int64(i)*step}
+	}
+	if _, _, err := s.Append(stream, recs); err != nil {
+		t.Fatalf("seed %s: %v", stream, err)
+	}
+}
+
+// gaugeValue scans a Gather() result for one family+label-set combination.
+// The retention gauges are Desc-based ConstMetrics emitted by storeCollector
+// (design: derived at scrape time, never a standalone Gauge object), so
+// testutil.ToFloat64 does not apply — that helper requires a Collector that
+// exposes exactly one metric, and storeCollector exposes many per Collect.
+func gaugeValue(t *testing.T, m *Metrics, family string, labels map[string]string) float64 {
+	t.Helper()
+	mfs, err := m.reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != family {
+			continue
+		}
+		for _, mm := range mf.GetMetric() {
+			if labelsMatch(mm, labels) {
+				return mm.GetGauge().GetValue()
+			}
+		}
+	}
+	t.Fatalf("family %s with labels %v not found in scrape", family, labels)
+	return 0
+}
+
+func labelsMatch(mm *dto.Metric, want map[string]string) bool {
+	if len(mm.GetLabel()) != len(want) {
+		return false
+	}
+	for _, lp := range mm.GetLabel() {
+		if want[lp.GetName()] != lp.GetValue() {
+			return false
+		}
+	}
+	return true
+}
+
 // The collector families carry the STORE's values, derived at scrape time:
 // scraping twice around a store mutation must show the new state without any
 // metrics call in between. Pinned values: 3 appends → next_offset 4; cursor
@@ -48,7 +101,7 @@ func TestCollectorDerivesGaugesFromStoreAtScrape(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := New(s)
+	m := New(s, config.Retention{})
 	expect := `
 # HELP colca_child_hwm Highest child offset already applied, per (child, stream).
 # TYPE colca_child_hwm gauge
@@ -90,6 +143,77 @@ colca_stream_next_offset{stream="metrics"} 6
 	}
 }
 
+// The retention gauges (design §8) are derived from the store AND the node's
+// retention policy at scrape time, never cached — values, not just presence.
+// Scenario: 5 records spaced 10 minutes apart, oldest 2h old, against a 1h
+// max_age. Nothing has been pruned (LWM stays 1), so every record is still
+// "live" and the oldest one is what colca_retention_pressure measures. A
+// cursor sitting at offset 3 (below the offset the unclamped age policy would
+// reach) is exactly what colca_retention_blocked_by_cursor counts.
+func TestRetentionGaugesDerivedFromStoreAndPolicy(t *testing.T) {
+	s := mustStore(t)
+	base := time.Now().Add(-2 * time.Hour).UnixMilli()
+	seedRecordsAt(t, s, "metrics", 5, base, 10*60*1000) // offsets 1..5, 2h..80min old
+
+	if !s.CursorAck("slow", "metrics", 3) { // consumed 1..2, unread from 3
+		t.Fatal("seed cursor")
+	}
+
+	cfg := config.Retention{Streams: map[string]config.StreamRetention{
+		"metrics": {MaxAge: config.Duration(time.Hour)},
+	}}
+	m := New(s, cfg)
+
+	if got, want := gaugeValue(t, m, "colca_stream_low_water_mark", map[string]string{"stream": "metrics"}), 1.0; got != want {
+		t.Fatalf("colca_stream_low_water_mark = %v, want %v (nothing pruned yet)", got, want)
+	}
+	if got, want := gaugeValue(t, m, "colca_stream_live_bytes", map[string]string{"stream": "metrics"}), float64(s.StreamBytes("metrics")); got != want {
+		t.Fatalf("colca_stream_live_bytes = %v, want %v (store.StreamBytes)", got, want)
+	}
+
+	// Oldest retained record (offset 1) is ~2h old against a 1h max_age:
+	// pressure = age_used/max_age ≈ 2. Tolerance covers test wall-clock drift.
+	if pressure := gaugeValue(t, m, "colca_retention_pressure", map[string]string{"stream": "metrics"}); pressure < 1.9 || pressure > 2.2 {
+		t.Fatalf("colca_retention_pressure = %v, want ~2 (oldest record ~2h old, max_age 1h)", pressure)
+	}
+
+	// All 5 records are older than max_age, so the unclamped policy wants the
+	// whole stream gone — the "slow" cursor at 3 is the one thing in the way.
+	if blocked := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "metrics"}); blocked != 1 {
+		t.Fatalf("colca_retention_blocked_by_cursor = %v, want 1", blocked)
+	}
+
+	// Scrape-time derivation, not a snapshot at New: advancing the cursor past
+	// the policy target must drop the block to 0 on the NEXT scrape with no
+	// metrics call in between (mutation guard for blockedByCursor's position
+	// comparison).
+	if !s.CursorAck("slow", "metrics", 6) {
+		t.Fatal("cursor advance must move")
+	}
+	if got := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "metrics"}); got != 0 {
+		t.Fatalf("colca_retention_blocked_by_cursor after the cursor catches up = %v, want 0", got)
+	}
+}
+
+// A cursor sitting below LWM's records is NOT "blocked" when the policy does
+// not want to prune that far in the first place (max_age far larger than any
+// record's age) — blockedByCursor must compare against what the policy
+// actually wants, not just "any cursor below next_offset".
+func TestBlockedByCursorZeroWhenPolicyWantsNothingPruned(t *testing.T) {
+	s := mustStore(t)
+	seedRecordsAt(t, s, "commands", 3, time.Now().Add(-100*24*time.Hour).UnixMilli(), 1000)
+	if !s.CursorAck("slow", "commands", 2) { // consumed offset 1, unread from offset 2
+		t.Fatal("seed cursor")
+	}
+	cfg := config.Retention{Streams: map[string]config.StreamRetention{
+		"commands": {MaxAge: config.Duration(1000 * 24 * time.Hour)}, // far older than any record
+	}}
+	m := New(s, cfg)
+	if got := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "commands"}); got != 0 {
+		t.Fatalf("colca_retention_blocked_by_cursor = %v, want 0 (policy wants nothing pruned)", got)
+	}
+}
+
 // A cursor acked beyond the stream's next offset must floor lag at 0, never
 // underflow into a huge uint.
 func TestCursorLagFloorsAtZero(t *testing.T) {
@@ -98,7 +222,7 @@ func TestCursorLagFloorsAtZero(t *testing.T) {
 	if !s.CursorAck("eager", "metrics", 9) {
 		t.Fatal("seed cursor")
 	}
-	m := New(s)
+	m := New(s, config.Retention{})
 	expect := `
 # HELP colca_cursor_lag_records Records the cursor has not read yet: next_offset - position, floored at 0.
 # TYPE colca_cursor_lag_records gauge
@@ -114,7 +238,7 @@ colca_cursor_lag_records{cursor="eager",stream="metrics"} 0
 // (pre-created children) — dashboards and Plan C queries never see a missing
 // family on an idle node.
 func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
-	m := New(mustStore(t))
+	m := New(mustStore(t), config.Retention{})
 	got, err := m.reg.Gather()
 	if err != nil {
 		t.Fatal(err)
@@ -132,6 +256,25 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_downlink_last_success_timestamp_seconds": 1,
 		"colca_downlink_fetch_failures_total":           1,
 		"colca_retained_reseed_records":                 1,
+		// Retention (design §8): collector-derived gauges, always one child per
+		// known stream regardless of activity.
+		"colca_stream_low_water_mark":                  3,
+		"colca_stream_live_bytes":                      3,
+		"colca_retention_pressure":                     3,
+		"colca_retention_blocked_by_cursor":            3,
+		"colca_retention_pruned_records_total":         3,
+		"colca_retention_pruned_bytes_total":           3,
+		"colca_retention_prune_runs_total":             3,
+		"colca_retention_gap_records_total":            3,
+		"colca_retention_state_refresh_records_total":  1, // unlabeled
+		"colca_retention_state_refresh_skipped_total":  1,
+		"colca_retention_state_refresh_failures_total": 1,
+		"colca_gap_served_total":                       6, // 3 streams × 2 surfaces
+		"colca_gap_received_total":                     3,
+		// colca_cursor_position/lag/last_advance_age, colca_child_hwm and
+		// colca_repl_gap_applied_total are dynamic (no series until a cursor or
+		// child exists) and deliberately excluded here, same precedent as the
+		// pre-existing cursor/child families.
 	}
 	for fam, children := range want {
 		if families[fam] != children {
@@ -143,7 +286,7 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 
 // The increment surface lands on the right child with the right value.
 func TestIncrementSurface(t *testing.T) {
-	m := New(mustStore(t))
+	m := New(mustStore(t), config.Retention{})
 
 	m.IngestRecord("metrics")
 	m.IngestRecord("metrics")
@@ -187,6 +330,56 @@ func TestIncrementSurface(t *testing.T) {
 	if got := testutil.ToFloat64(m.reseed); got != 42 {
 		t.Errorf("reseed = %v, want 42", got)
 	}
+
+	m.RetentionPruneRun("metrics")
+	m.RetentionPruneRun("metrics")
+	if got := testutil.ToFloat64(m.pruneRunsBy["metrics"]); got != 2 {
+		t.Errorf("prune runs metrics = %v, want 2", got)
+	}
+
+	m.RetentionPruned("metrics", 7, 350)
+	if got := testutil.ToFloat64(m.prunedRecordsBy["metrics"]); got != 7 {
+		t.Errorf("pruned records metrics = %v, want 7", got)
+	}
+	if got := testutil.ToFloat64(m.prunedBytesBy["metrics"]); got != 350 {
+		t.Errorf("pruned bytes metrics = %v, want 350", got)
+	}
+
+	m.RetentionGapRecorded("entities")
+	if got := testutil.ToFloat64(m.gapRecordsBy["entities"]); got != 1 {
+		t.Errorf("gap records entities = %v, want 1", got)
+	}
+
+	m.StateRefreshApplied()
+	m.StateRefreshApplied()
+	m.StateRefreshSkipped()
+	m.StateRefreshFailed()
+	if got := testutil.ToFloat64(m.refreshRecords); got != 2 {
+		t.Errorf("state refresh records = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(m.refreshSkipped); got != 1 {
+		t.Errorf("state refresh skipped = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.refreshFailures); got != 1 {
+		t.Errorf("state refresh failures = %v, want 1", got)
+	}
+
+	m.GapServed("commands", "downlink")
+	m.GapServed("commands", "downlink")
+	if got := testutil.ToFloat64(m.gapServedBy["commands"]["downlink"]); got != 2 {
+		t.Errorf("gap served commands/downlink = %v, want 2", got)
+	}
+
+	m.GapReceived("metrics")
+	if got := testutil.ToFloat64(m.gapReceivedBy["metrics"]); got != 1 {
+		t.Errorf("gap received metrics = %v, want 1", got)
+	}
+
+	m.GapApplied("n-child", "entities")
+	m.GapApplied("n-child", "entities")
+	if got := testutil.ToFloat64(m.replGapApplied.WithLabelValues("n-child", "entities")); got != 2 {
+		t.Errorf("repl gap applied n-child/entities = %v, want 2", got)
+	}
 }
 
 // Every method on a nil *Metrics is a no-op — later tasks wire the handle
@@ -200,4 +393,13 @@ func TestNilReceiverIsNoOp(t *testing.T) {
 	m.DownlinkFetched(time.Now())
 	m.DownlinkFetchFailed()
 	m.SetReseedCount(3)
+	m.RetentionPruneRun("metrics")
+	m.RetentionPruned("metrics", 1, 1)
+	m.RetentionGapRecorded("metrics")
+	m.StateRefreshApplied()
+	m.StateRefreshSkipped()
+	m.StateRefreshFailed()
+	m.GapServed("metrics", "fetch")
+	m.GapReceived("metrics")
+	m.GapApplied("n-child", "metrics")
 }

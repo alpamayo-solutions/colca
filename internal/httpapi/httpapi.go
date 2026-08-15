@@ -128,7 +128,7 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 		resp := map[string]any{"records": out, "next": next}
 		if gap, ok := e.Store().Gap(stream, from); ok {
 			resp["gap"] = gap
-			// TODO: increment colca_gap_served_total{stream,surface="fetch"}.
+			m.GapServed(stream, "fetch")
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}))

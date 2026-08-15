@@ -29,6 +29,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -48,6 +49,7 @@ type Server struct {
 	cfg *config.Config
 	eng *engine.Engine
 	id  *identity.Identity
+	m   *metrics.Metrics // nil-safe: every Metrics method is a no-op on a nil receiver
 	log *slog.Logger
 
 	mu   sync.Mutex
@@ -55,8 +57,10 @@ type Server struct {
 	ln   net.Listener
 }
 
-func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity) (*Server, error) {
-	return &Server{cfg: cfg, eng: eng, id: id, log: slog.Default().With("node", cfg.ULID, "comp", "repl-server")}, nil
+// NewServer builds a replication server. m may be nil (unit tests and any
+// caller that does not care about metrics).
+func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, m *metrics.Metrics) (*Server, error) {
+	return &Server{cfg: cfg, eng: eng, id: id, m: m, log: slog.Default().With("node", cfg.ULID, "comp", "repl-server")}, nil
 }
 
 // childFromReq resolves the authenticated child from the TLS client cert
@@ -257,7 +261,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 					resp["next"] = lwm
 				}
 				resp["gap"] = gap
-				// TODO: increment colca_gap_served_total{stream="commands",surface="downlink"}.
+				s.m.GapServed("commands", "downlink")
 			}
 			s.log.Debug("downlink", "child", child.ULID, "delivered", len(out), "next", resp["next"], "gap", hasGap)
 			writeJSON(w, resp)

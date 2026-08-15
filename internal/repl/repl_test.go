@@ -11,6 +11,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
@@ -24,7 +25,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"},
 		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}}}
 	peng := engine.New(ps, pcfg, nil, nil)
-	srv, err := NewServer(pcfg, peng, parentID)
+	srv, err := NewServer(pcfg, peng, parentID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +112,7 @@ func TestStopReleasesPortAndKillsLongPoll(t *testing.T) {
 	peng := engine.New(ps, pcfg, nil, nil)
 
 	// Stop before Start must not panic.
-	unstarted, err := NewServer(pcfg, peng, parentID)
+	unstarted, err := NewServer(pcfg, peng, parentID, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -264,7 +265,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	}
 
 	// Phase 2: parent comes back on the same address (proves the port was released).
-	srv2, err := NewServer(pcfg, peng, parentID)
+	srv2, err := NewServer(pcfg, peng, parentID, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -413,7 +414,14 @@ func mustIngestAdmin(t *testing.T, eng *engine.Engine, topic, payload string) {
 
 func startServer(t *testing.T, cfg *config.Config, eng *engine.Engine, id *identity.Identity) (*Server, string) {
 	t.Helper()
-	srv, err := NewServer(cfg, eng, id)
+	return startServerWithMetrics(t, cfg, eng, id, nil)
+}
+
+// startServerWithMetrics is startServer for tests that assert on the repl
+// server's own counters (design §8, colca_gap_served_total{surface="downlink"}).
+func startServerWithMetrics(t *testing.T, cfg *config.Config, eng *engine.Engine, id *identity.Identity, m *metrics.Metrics) (*Server, string) {
+	t.Helper()
+	srv, err := NewServer(cfg, eng, id, m)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

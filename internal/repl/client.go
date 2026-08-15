@@ -189,7 +189,7 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 			if lwm := eng.Store().LWM(st.name); from < lwm {
 				c.log.Error("uplink cursor below the stream LWM — local retention pruned past it (spec §6.3): jumping to the LWM",
 					"stream", st.name, "position", from, "lwm", lwm)
-				// TODO: increment colca_gap_received_total{stream}.
+				m.GapReceived(st.name)
 				eng.Store().CursorAck(uplinkCursor, st.name, lwm)
 				from = lwm
 			}
@@ -273,7 +273,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			c.log.Error("downlink gap: the parent pruned commands this node never received (spec §6.3) — continuing past the hole",
 				"from_offset", gap.FromOffset, "to_offset", gap.ToOffset,
 				"first_ts", gap.FirstTS, "last_ts", gap.LastTS, "approx", gap.Approx)
-			// TODO: increment colca_gap_received_total{stream="commands"}.
+			m.GapReceived("commands")
 		}
 		for _, r := range recs {
 			if _, err := eng.IngestDownlink(r.Topic, r.Payload, r.TS); err != nil {

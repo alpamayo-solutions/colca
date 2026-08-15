@@ -154,27 +154,29 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 // retained flag. Only KV-projecting classes are accepted (the guard is
 // meaningless for anything else) and an empty payload is rejected — a refresh
 // re-states current state and must never smuggle in a tombstone.
+//
+// Failures here are NOT counted against colca_rejected_publishes_total: that
+// family describes rejected client/admin publishes, and a refresh is the
+// pruner's own internal repair traffic, never a client's. The caller (the
+// pruner's refreshEntities) is what turns a returned error into
+// colca_retention_state_refresh_failures_total — this method just reports
+// success/failure honestly.
 func (e *Engine) IngestRefresh(topic string, payload []byte, ifKVOffset uint64) (Result, bool, error) {
 	if !uns.IsUns(topic) {
-		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, false, fmt.Errorf("refresh publish must be colca/#")
 	}
 	p, err := uns.Parse(topic)
 	if err != nil {
-		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, false, err
 	}
 	class := uns.ClassOf(p.Contract)
 	if class != uns.ClassData && class != uns.ClassEntity {
-		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, false, fmt.Errorf("refresh publish requires a KV-projecting contract, got %s", p.Contract)
 	}
 	if len(payload) == 0 {
-		e.metrics.RejectPublish(metrics.ReasonValidation)
 		return Result{}, false, fmt.Errorf("refresh publish must not be empty (a refresh cannot tombstone)")
 	}
 	if err := uns.Validate(p.Contract, payload); err != nil {
-		e.metrics.RejectPublish(metrics.ReasonValidation)
 		return Result{}, false, err
 	}
 	streamName := uns.StreamFor(class)
@@ -261,7 +263,7 @@ func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []sto
 		if r.ChildOffset > last+1 {
 			e.log.Error("replication offset jump: this node never received the child offsets between have and got — likely pruned at the child before replication (spec §6.4 second net)",
 				"child", child, "stream", stream, "have", last, "got", r.ChildOffset)
-			// TODO: increment colca_repl_gap_applied_total{child,stream}.
+			e.metrics.GapApplied(child, stream)
 		}
 		last = r.ChildOffset
 	}

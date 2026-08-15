@@ -31,7 +31,7 @@ type Pruner struct {
 	st  *store.Store
 	eng *engine.Engine
 	cfg config.Retention
-	m   *metrics.Metrics // nil-safe surface; a later change adds retention families
+	m   *metrics.Metrics // nil-safe surface: prune/gap/refresh counters (design §8)
 	// ulid is the node's own ULID: level 4 of the _StreamGap topic is the
 	// PRUNING node (design §6.4), so the marker needs the node identity.
 	ulid string
@@ -299,6 +299,16 @@ func (p *Pruner) pruneStream(stream string) {
 	if removed == 0 {
 		return // shrunk to a no-op by the in-batch recheck: nothing was deleted
 	}
+	// design §8: a "run" is one cycle that actually removed something —
+	// distinct from pruned records/bytes, which measure the removed span
+	// itself. shed is this run's pre-commit accounting scan (see
+	// metrics.RetentionPruned's doc comment for the rare in-batch-shrink
+	// caveat).
+	p.m.RetentionPruneRun(stream)
+	p.m.RetentionPruned(stream, removed, shed)
+	if len(applied) > 0 {
+		p.m.RetentionGapRecorded(stream) // exactly one _StreamGap marker per overriding run
+	}
 	for _, c := range applied {
 		p.log.Error("retention staleness override: pruned past a stale cursor (spec §5.2) — the consumer will see a gap",
 			"stream", stream, "cursor", c.name, "position", c.pos,
@@ -378,15 +388,18 @@ func (p *Pruner) refreshEntities(from, to uint64) bool {
 		if err != nil {
 			p.log.Error("entities state refresh append failed (range stays pending, retried next cycle)", "topic", e.Topic, "err", err)
 			failed++
+			p.m.StateRefreshFailed()
 			continue
 		}
 		if !applied {
 			p.log.Warn("entities state refresh skipped: path retired or superseded since the snapshot (guard, spec §6.5/§7.1)",
 				"topic", e.Topic, "snapshot_offset", e.Offset)
 			skipped++
+			p.m.StateRefreshSkipped()
 			continue
 		}
 		refreshed++
+		p.m.StateRefreshApplied()
 	}
 	if refreshed > 0 || skipped > 0 || failed > 0 {
 		p.log.Info("entities state refresh", "paths", refreshed, "skipped", skipped, "failed", failed,

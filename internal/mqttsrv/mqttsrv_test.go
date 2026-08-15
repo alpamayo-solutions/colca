@@ -49,7 +49,7 @@ func newBrokerWithMetrics(t *testing.T) (*Server, *store.Store, *metrics.Metrics
 			{ULID: "observer", Token: "observer-secret"},
 		},
 	}
-	m := metrics.New(st)
+	m := metrics.New(st, config.Retention{})
 	s, err := New(cfg, nil, m)
 	if err != nil {
 		st.Close()

@@ -71,7 +71,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		return nil, fmt.Errorf("node %s: open store %s: %w", cfg.ULID, cfg.DataDir, err)
 	}
 
-	n := &Node{Cfg: cfg, Store: st, Metrics: metrics.New(st), stop: make(chan struct{})}
+	n := &Node{Cfg: cfg, Store: st, Metrics: metrics.New(st, cfg.Retention), stop: make(chan struct{})}
 	log := slog.Default().With("node", cfg.ULID, "comp", "node")
 	// From here on every error path unwinds through Stop.
 	fail := func(err error) (*Node, error) {
@@ -148,7 +148,7 @@ func Start(cfg *config.Config) (*Node, error) {
 
 	// 4. Replication server — only meaningful for a node that has children.
 	if len(cfg.Children) > 0 && cfg.Repl.Addr != "" {
-		rs, err := repl.NewServer(cfg, n.Engine, id)
+		rs, err := repl.NewServer(cfg, n.Engine, id, n.Metrics)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: repl server: %w", cfg.ULID, err))
 		}

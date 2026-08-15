@@ -1,6 +1,9 @@
 package engine
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
@@ -25,7 +28,7 @@ func newMetricsEngine(t *testing.T) (*Engine, *metrics.Metrics) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	m := metrics.New(s)
+	m := metrics.New(s, config.Retention{})
 	cfg := &config.Config{ULID: "n-edge1", Clients: []config.Client{
 		{ULID: "m1", Token: "tok", Mount: "m1"},
 		{ULID: "observer", Token: "observer-secret"},
@@ -226,6 +229,100 @@ func TestIngestRecordCountsReplicatedApplies(t *testing.T) {
 	}
 	if v := scrapeMetric(t, m, line); v != 2 {
 		t.Fatalf("%s = %v after a fully-deduplicated re-push, want unchanged 2", line, v)
+	}
+}
+
+// scrapeBody returns m's full exposition text — used for colca_repl_gap_applied_total,
+// whose (child, stream) labels are dynamic (no pre-created children, unlike
+// the fixed-label counters), so ABSENCE has to be checked by substring rather
+// than metricstest.Value (which fails the test when a line is missing).
+func scrapeBody(t *testing.T, m *metrics.Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	return rec.Body.String()
+}
+
+// TestGapAppliedCountsOffsetJumpsOnly is the design §8 companion to
+// TestIngestReplicatedLogsOffsetJumps (engine_test.go): colca_repl_gap_applied_total
+// must move on exactly the same event that triggers the ERROR log — a
+// contiguous apply must never create the series, and the commands-stream
+// exemption (filtered uplink, not data loss) must hold for the counter too.
+func TestGapAppliedCountsOffsetJumpsOnly(t *testing.T) {
+	e, m := newMetricsEngine(t)
+	metric := "colca/v1/_Metric/m1/edge1/m1/t"
+	const line = `colca_repl_gap_applied_total{child="n-edge1",stream="metrics"}`
+
+	if _, _, err := e.IngestReplicated("n-edge1", "metrics", []store.ReplRecord{
+		{ChildOffset: 1, Topic: metric, Payload: []byte(`{"v":1}`), TS: 1},
+		{ChildOffset: 2, Topic: metric, Payload: []byte(`{"v":2}`), TS: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if body := scrapeBody(t, m); strings.Contains(body, line) {
+		t.Fatalf("%s present after a contiguous apply, want no series at all:\n%s", line, body)
+	}
+
+	if _, _, err := e.IngestReplicated("n-edge1", "metrics", []store.ReplRecord{
+		{ChildOffset: 5, Topic: metric, Payload: []byte(`{"v":5}`), TS: 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if v := scrapeMetric(t, m, line); v != 1 {
+		t.Fatalf("%s = %v after the 2→5 jump, want 1", line, v)
+	}
+
+	// The commands stream is exempt (filtered uplink): no series at all, no
+	// matter how large the child-offset hole.
+	const commandsLine = `colca_repl_gap_applied_total{child="n-edge1",stream="commands"}`
+	if _, _, err := e.IngestReplicated("n-edge1", "commands", []store.ReplRecord{
+		{ChildOffset: 9, Topic: "colca/v1/_Ack/m1/edge1/m1/go", Payload: []byte(`{"v":1}`), TS: 9},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if body := scrapeBody(t, m); strings.Contains(body, commandsLine) {
+		t.Fatalf("%s present, want no series (commands stream is exempt from jump detection):\n%s", commandsLine, body)
+	}
+}
+
+// TestIngestRefreshFailuresDoNotCountAsRejectedPublishes is the mutation
+// guard for the reroute: IngestRefresh used to fall through to
+// e.metrics.RejectPublish on every failure branch, conflating the pruner's
+// internal §6.5 repair traffic with a client's rejected publish. Refresh
+// failures are now the caller's (retention.Pruner.refreshEntities) concern —
+// this engine-level method must leave colca_rejected_publishes_total alone
+// entirely, on every one of its own failure branches.
+func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
+	e, m := newMetricsEngine(t)
+	topic := "colca/v1/_SystemElement/n-edge1/line1/press"
+	if _, err := e.IngestAdmin(topic, []byte(`{"ulid":"P1"}`)); err != nil { // entities offset 1
+		t.Fatal(err)
+	}
+	before := map[string]float64{}
+	for _, reason := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation, metrics.ReasonNoMount, metrics.ReasonNotCommand, metrics.ReasonAuth} {
+		before[reason] = scrapeMetric(t, m, `colca_rejected_publishes_total{reason="`+reason+`"}`)
+	}
+
+	// Non-UNS topic, unparseable topic (grammar), non-KV class (grammar),
+	// empty payload (validation), and schema-invalid payload (validation) —
+	// every failure branch IngestRefresh has.
+	if _, _, err := e.IngestRefresh("not-uns-at-all", []byte(`{}`), 1); err == nil {
+		t.Fatal("non-UNS topic must be rejected")
+	}
+	if _, _, err := e.IngestRefresh("colca/v1/_Ack/n-edge1/line1/x", []byte(`{"correlation_id":"c","result_code":0}`), 1); err == nil {
+		t.Fatal("non-KV class must be rejected")
+	}
+	if _, _, err := e.IngestRefresh(topic, nil, 1); err == nil {
+		t.Fatal("empty payload must be rejected")
+	}
+	if _, _, err := e.IngestRefresh(topic, []byte(`{"not":"a valid SystemElement"}`), 1); err == nil {
+		t.Fatal("schema-invalid payload must be rejected")
+	}
+
+	for _, reason := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation, metrics.ReasonNoMount, metrics.ReasonNotCommand, metrics.ReasonAuth} {
+		if v := scrapeMetric(t, m, `colca_rejected_publishes_total{reason="`+reason+`"}`); v != before[reason] {
+			t.Fatalf("colca_rejected_publishes_total{reason=%s} moved from %v to %v after refresh failures — must stay untouched", reason, before[reason], v)
+		}
 	}
 }
 
