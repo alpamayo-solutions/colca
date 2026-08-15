@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -304,4 +306,101 @@ func TestIngestReplicatedSkipsUnparseableTopic(t *testing.T) {
 	if len(got) != 1 || got[0].Topic != "colca/v1/_Metric/m1/edge1/m1/b" {
 		t.Fatalf("only the parseable record may be mirrored: %+v", got)
 	}
+}
+
+// captureLogs routes slog.Default through a buffer for the duration of the
+// test, returning the buffer. Engines constructed AFTER the call log into it.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+func newCapturedEngine(t *testing.T) (*Engine, *bytes.Buffer) {
+	t.Helper()
+	buf := captureLogs(t)
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return New(s, &config.Config{ULID: "n-parent"}, nil, nil), buf
+}
+
+func replBatchAt(topic string, offsets ...uint64) []store.ReplRecord {
+	out := make([]store.ReplRecord, len(offsets))
+	for i, o := range offsets {
+		out[i] = store.ReplRecord{ChildOffset: o, Topic: topic, Payload: []byte(`{"v":1}`), TS: int64(o)}
+	}
+	return out
+}
+
+// Spec §6.4 second net: child stream offsets are gapless and the uplink reads
+// them contiguously, so an applied ChildOffset above HWM+1 is a gap — the
+// parent logs it to catch a child that failed to emit its _StreamGap marker.
+// Detection only; the batch is still applied unchanged.
+func TestIngestReplicatedLogsOffsetJumps(t *testing.T) {
+	const marker = "replication offset jump"
+	metric := "colca/v1/_Metric/m1/child1/m1/t"
+
+	t.Run("contiguous offsets are silent", func(t *testing.T) {
+		e, buf := newCapturedEngine(t)
+		if _, _, err := e.IngestReplicated("n-child", "metrics", replBatchAt(metric, 1, 2, 3)); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(buf.String(), marker) {
+			t.Fatalf("contiguous batch logged a jump:\n%s", buf.String())
+		}
+	})
+
+	t.Run("jump across batches is logged and applied", func(t *testing.T) {
+		e, buf := newCapturedEngine(t)
+		if _, _, err := e.IngestReplicated("n-child", "metrics", replBatchAt(metric, 1, 2)); err != nil {
+			t.Fatal(err)
+		}
+		applied, hwm, err := e.IngestReplicated("n-child", "metrics", replBatchAt(metric, 5, 6))
+		if err != nil || applied != 2 || hwm != 6 {
+			t.Fatalf("apply after jump: %d %d %v — detection must never block the apply", applied, hwm, err)
+		}
+		if !strings.Contains(buf.String(), marker) || !strings.Contains(buf.String(), "have=2") || !strings.Contains(buf.String(), "got=5") {
+			t.Fatalf("jump 2→5 not logged:\n%s", buf.String())
+		}
+	})
+
+	t.Run("jump inside a batch is logged", func(t *testing.T) {
+		e, buf := newCapturedEngine(t)
+		if _, _, err := e.IngestReplicated("n-child", "metrics", replBatchAt(metric, 1, 2, 7)); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(buf.String(), marker) || !strings.Contains(buf.String(), "got=7") {
+			t.Fatalf("in-batch jump 2→7 not logged:\n%s", buf.String())
+		}
+	})
+
+	t.Run("first contact past offset 1 is a gap", func(t *testing.T) {
+		// The child pruned before ever replicating: the parent genuinely
+		// misses [1..3] — the fresh-cursor twin of the §6.1 [delta].
+		e, buf := newCapturedEngine(t)
+		if _, _, err := e.IngestReplicated("n-child", "entities", replBatchAt("colca/v1/_SystemElement/m1/child1/m1/a", 4, 5)); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(buf.String(), marker) || !strings.Contains(buf.String(), "have=0") || !strings.Contains(buf.String(), "got=4") {
+			t.Fatalf("first-contact jump not logged:\n%s", buf.String())
+		}
+	})
+
+	t.Run("commands stream is exempt", func(t *testing.T) {
+		// The commands uplink is filtered (_Ack + _StreamGap only), so
+		// child-offset holes there are the filter working, not data loss.
+		e, buf := newCapturedEngine(t)
+		if _, _, err := e.IngestReplicated("n-child", "commands", replBatchAt("colca/v1/_Ack/m1/child1/m1/go", 3, 9)); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(buf.String(), marker) {
+			t.Fatalf("filtered commands stream must not report offset jumps:\n%s", buf.String())
+		}
+	})
 }

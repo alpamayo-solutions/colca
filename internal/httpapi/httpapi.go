@@ -77,6 +77,14 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 
 	// GET /fetch reads from the cursor's current position and never advances it:
 	// reading is side-effect free, /ack is the only thing that moves a cursor.
+	//
+	// Gap contract (spec §6.1): when the cursor's position is below the
+	// stream's LWM the response gains a "gap" object and records begin at the
+	// LWM (the pruned prefix is gone from disk, so Read starts there by
+	// construction). The gap does NOT move the cursor — the consumer sees the
+	// same gap on every fetch until it acks a record at or past the LWM. A
+	// brand-new cursor (position 1) on a long-pruned stream gets the gap too:
+	// a new consumer genuinely cannot see history.
 	mux.HandleFunc("GET /fetch", auth(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		stream, cursor := q.Get("stream"), q.Get("cursor")
@@ -108,7 +116,12 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 				"ts":      rec.TS,
 			})
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"records": out, "next": next})
+		resp := map[string]any{"records": out, "next": next}
+		if gap, ok := e.Store().Gap(stream, from); ok {
+			resp["gap"] = gap
+			// TODO: increment colca_gap_served_total{stream,surface="fetch"}.
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}))
 
 	// POST /ack: the client acks the last PROCESSED offset, the store holds the

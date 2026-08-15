@@ -110,44 +110,50 @@ type DownRec struct {
 	TS           int64
 }
 
-func (c *Client) Downlink(after uint64, max int, timeout time.Duration) ([]DownRec, uint64, error) {
+// Downlink polls the parent once. gap is non-nil when the poll position lies
+// inside a hole the parent's retention pruned (spec §6.2) — next then already
+// points past it.
+func (c *Client) Downlink(after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, error) {
 	return c.downlink(context.Background(), after, max, timeout)
 }
 
-func (c *Client) downlink(ctx context.Context, after uint64, max int, timeout time.Duration) ([]DownRec, uint64, error) {
+func (c *Client) downlink(ctx context.Context, after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, error) {
 	hc := *c.http
 	hc.Timeout = timeout + 10*time.Second
 	url := fmt.Sprintf("%s/downlink?after=%d&max=%d", c.base, after, max)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, after, err
+		return nil, after, nil, err
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, after, err
+		return nil, after, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, after, fmt.Errorf("downlink: http %d", resp.StatusCode)
+		return nil, after, nil, fmt.Errorf("downlink: http %d", resp.StatusCode)
 	}
 	var out struct {
-		Records []wireRec `json:"records"`
-		Next    uint64    `json:"next"`
+		Records []wireRec      `json:"records"`
+		Next    uint64         `json:"next"`
+		Gap     *store.GapSpan `json:"gap"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, after, err
+		return nil, after, nil, err
 	}
 	recs := make([]DownRec, len(out.Records))
 	for i, r := range out.Records {
 		recs[i] = DownRec{ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS}
 	}
-	return recs, out.Next, nil
+	return recs, out.Next, out.Gap, nil
 }
 
-// RunUplink pushes metrics+entities fully and only _Ack from commands, forever
-// (until stop is closed). Commands flow down, acks flow up — a command is never
-// mirrored back to the node it came from. m may be nil (every Metrics method is
-// nil-safe).
+// RunUplink pushes metrics+entities fully and only _Ack and _StreamGap from
+// commands, forever (until stop is closed). Commands flow down, acks flow up —
+// a command is never mirrored back to the node it came from; _StreamGap
+// markers must pass so a pruned commands stream stays honest upstream (spec
+// §6.4: the marker replicates like any other record). m may be nil (every
+// Metrics method is nil-safe).
 func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
@@ -159,7 +165,7 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 		{"entities", nil},
 		{"commands", func(topic string) bool {
 			p, err := uns.Parse(topic)
-			return err == nil && p.Contract == "_Ack"
+			return err == nil && (p.Contract == "_Ack" || p.Contract == "_StreamGap")
 		}},
 	}
 	for {
@@ -171,6 +177,18 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 		idle := true
 		for _, st := range streams {
 			from := eng.Store().CursorGet(uplinkCursor, st.name)
+			// Spec §6.3, uplink half: a cursor below the local LWM means the
+			// local pruner overrode it (only possible after the explicit §5.2
+			// staleness opt-in — the parent was gone longer than the window).
+			// The data is gone and the durable §6.4 marker already carries the
+			// fact upstream, so never stall: jump to the LWM and keep going.
+			if lwm := eng.Store().LWM(st.name); from < lwm {
+				c.log.Error("uplink cursor below the stream LWM — local retention pruned past it (spec §6.3): jumping to the LWM",
+					"stream", st.name, "position", from, "lwm", lwm)
+				// TODO: increment colca_gap_received_total{stream}.
+				eng.Store().CursorAck(uplinkCursor, st.name, lwm)
+				from = lwm
+			}
 			recs, next, err := eng.Store().Read(st.name, from, replBatch, st.filter)
 			if err != nil {
 				c.log.Error("uplink read", "stream", st.name, "err", err)
@@ -226,7 +244,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		default:
 		}
 		after := eng.Store().CursorGet(downlinkCursor, downlinkStream)
-		recs, next, err := c.downlink(ctx, after, replBatch, downlinkWait)
+		recs, next, gap, err := c.downlink(ctx, after, replBatch, downlinkWait)
 		if err != nil {
 			select {
 			case <-stop:
@@ -243,6 +261,16 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			continue
 		}
 		m.DownlinkFetched(time.Now())
+		if gap != nil {
+			// Spec §6.3, downlink half: log, count, continue — next already
+			// points past the hole and the cursor advances through the normal
+			// ack below. Nothing propagates further down: pruned commands are,
+			// by the §3.4 config rule, commands whose TTL had already expired.
+			c.log.Error("downlink gap: the parent pruned commands this node never received (spec §6.3) — continuing past the hole",
+				"from_offset", gap.FromOffset, "to_offset", gap.ToOffset,
+				"first_ts", gap.FirstTS, "last_ts", gap.LastTS, "approx", gap.Approx)
+			// TODO: increment colca_gap_received_total{stream="commands"}.
+		}
 		for _, r := range recs {
 			if _, err := eng.IngestDownlink(r.Topic, r.Payload, r.TS); err != nil {
 				c.log.Error("downlink ingest", "topic", r.Topic, "err", err)

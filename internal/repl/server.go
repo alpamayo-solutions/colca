@@ -215,7 +215,14 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if len(recs) > 0 || time.Now().After(deadline) {
+		// Gap contract on the downlink wire (spec §6.2): same shape and same
+		// journal as /fetch, offsets in PARENT coordinates. The after param is
+		// the first offset the child has not consumed (Read starts there), so
+		// the condition is after < LWM. A gap answers the poll immediately —
+		// making the child wait out the long poll to learn its position is
+		// inside a pruned hole would stall §6.3's log-and-continue handling.
+		gap, hasGap := s.eng.Store().Gap("commands", after)
+		if len(recs) > 0 || hasGap || time.Now().After(deadline) {
 			out := make([]wireRec, 0, len(recs))
 			for _, rec := range recs {
 				stripped, ok := uns.MountStrip(rec.Topic, child.Mount)
@@ -224,8 +231,20 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 				}
 				out = append(out, wireRec{O: rec.Offset, T: stripped, P: rec.Payload, TS: rec.TS})
 			}
-			s.log.Debug("downlink", "child", child.ULID, "delivered", len(out), "next", next)
-			writeJSON(w, map[string]any{"records": out, "next": next})
+			resp := map[string]any{"records": out, "next": next}
+			if hasGap {
+				// §6.3: "next already points past the hole". With surviving
+				// records Read guarantees that; with none it would stay at
+				// `after` and the child would re-receive the gap forever, so
+				// point it at the LWM explicitly.
+				if lwm := gap.ToOffset + 1; next < lwm {
+					resp["next"] = lwm
+				}
+				resp["gap"] = gap
+				// TODO: increment colca_gap_served_total{stream="commands",surface="downlink"}.
+			}
+			s.log.Debug("downlink", "child", child.ULID, "delivered", len(out), "next", resp["next"], "gap", hasGap)
+			writeJSON(w, resp)
 			return
 		}
 		select {

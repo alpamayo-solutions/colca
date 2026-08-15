@@ -71,9 +71,12 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 
 	// parent stores a command for the child zone; child fetches → stripped
 	peng.IngestAdmin("colca/v1/_CmdParam/m1/child1/m1/go", []byte(`{"correlation_id":"c1","expires_at":99999999999}`))
-	dl, next, err := cl.Downlink(1, 10, 5*time.Second)
+	dl, next, gap, err := cl.Downlink(1, 10, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if gap != nil {
+		t.Fatalf("no gap expected on an unpruned stream: %+v", gap)
 	}
 	if len(dl) != 1 || dl[0].Topic != "colca/v1/_CmdParam/m1/m1/go" {
 		t.Fatalf("downlink: %+v", dl)
@@ -120,7 +123,7 @@ func TestStopReleasesPortAndKillsLongPoll(t *testing.T) {
 	// Nothing in the commands stream → the handler enters the ~20s long poll.
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := cl.Downlink(1, 10, 20*time.Second)
+		_, _, _, err := cl.Downlink(1, 10, 20*time.Second)
 		done <- err
 	}()
 	waitFor(t, "the long-poll handler to be running", 5*time.Second, func() bool {
@@ -184,7 +187,7 @@ func TestDownlinkOnlyOwnMountCommands(t *testing.T) {
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
 
 	cl := mustClient(t, addr, parentID.PublicHex(), child1ID)
-	dl, next, err := cl.Downlink(1, 10, 5*time.Second)
+	dl, next, _, err := cl.Downlink(1, 10, 5*time.Second)
 	if err != nil {
 		t.Fatalf("downlink: %v", err)
 	}

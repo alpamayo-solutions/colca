@@ -159,10 +159,12 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 // the fourth way a record enters a node's store and it must converge here like
 // the other three — the replication server never talks to the store directly.
 func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord) (applied int, hwm uint64, err error) {
+	prev := e.store.HWMGet(child, stream)
 	got, hwm, err := e.store.ApplyReplicated(child, stream, recs)
 	if err != nil {
 		return 0, hwm, err
 	}
+	e.logOffsetJumps(child, stream, prev, got)
 	// Replication is a fourth entry path into this node's store, so it counts
 	// against colca_ingest_records_total exactly like the other three — the
 	// family measures records entering the store, not records entering
@@ -184,6 +186,31 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 		e.deliver(r.Topic, r.Payload, retainFor(uns.ClassOf(p.Contract)))
 	}
 	return len(got), hwm, nil
+}
+
+// logOffsetJumps is the second net of spec §6.4: a child's stream offsets are
+// gapless and the uplink reads them contiguously, so an applied ChildOffset
+// above HWM+1 means records the parent never received are gone at the child —
+// a gap — and a child that failed to emit its _StreamGap marker would
+// otherwise pass unnoticed. Detection only, from values IngestReplicated
+// already has (prev HWM + the applied batch); the store is not involved.
+//
+// The commands stream is exempt: its uplink is filtered (only _Ack and
+// _StreamGap travel up), so child-offset holes there are the filter working,
+// not data loss — the premise "gapless offsets" does not hold on that wire.
+func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []store.ReplRecord) {
+	if stream == "commands" {
+		return
+	}
+	last := prev
+	for _, r := range applied {
+		if r.ChildOffset > last+1 {
+			e.log.Error("replication offset jump: the child skipped offsets — records pruned at the child before this node received them (spec §6.4 second net)",
+				"child", child, "stream", stream, "have", last, "got", r.ChildOffset)
+			// TODO: increment colca_repl_gap_applied_total{child,stream}.
+		}
+		last = r.ChildOffset
+	}
 }
 
 // retainFor decides how a record appears on the local MQTT bus. Data and

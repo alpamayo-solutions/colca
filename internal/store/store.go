@@ -480,6 +480,48 @@ type PruneSpan struct {
 	Coalesced       bool
 }
 
+// GapSpan is the wire gap object of spec §6.1/§6.2: the contiguous pruned
+// hole [FromOffset..ToOffset] below a consumer's position, with the time span
+// of the removed records answered from the prune journal. The json tags are
+// the wire contract (/fetch and GET /downlink responses) — do not rename
+// them. Approx is true when a coalesced journal entry answered FirstTS.
+type GapSpan struct {
+	Stream     string `json:"stream"`
+	FromOffset uint64 `json:"from_offset"`
+	ToOffset   uint64 `json:"to_offset"`
+	FirstTS    int64  `json:"first_ts"`
+	LastTS     int64  `json:"last_ts"`
+	Approx     bool   `json:"approx"`
+}
+
+// Gap reports the pruned hole a consumer positioned at position (the next
+// offset it would read) faces on a stream: ok is false when position >= LWM
+// (nothing it wants is gone — including the whole untouched-stream case,
+// LWM 1). Because pruning removes only the contiguous prefix [1..LWM), the
+// hole is exactly [position..LWM-1]; FirstTS/LastTS come from the journal
+// entries containing the two boundary offsets (the journal is a complete
+// ordered partition of [1..LWM), so both lookups always hit).
+func (s *Store) Gap(stream string, position uint64) (GapSpan, bool) {
+	lwm := s.LWM(stream)
+	if position >= lwm {
+		return GapSpan{}, false
+	}
+	if position < 1 {
+		position = 1 // cursor positions start at 1; the journal starts there too
+	}
+	g := GapSpan{Stream: stream, FromOffset: position, ToOffset: lwm - 1}
+	for _, sp := range s.PruneJournal(stream) {
+		if g.FromOffset >= sp.From && g.FromOffset <= sp.To {
+			g.FirstTS = sp.FirstTS
+			g.Approx = sp.Coalesced // spec §6.2: approx marks a blurred first_ts
+		}
+		if g.ToOffset >= sp.From && g.ToOffset <= sp.To {
+			g.LastTS = sp.LastTS
+		}
+	}
+	return g, true
+}
+
 // journalCap bounds the prune journal per stream (spec §6.2). When a new
 // entry would exceed it, the two oldest are coalesced (union range, min/max
 // ts) in the same batch — coverage of [1..LWM) stays complete forever,
