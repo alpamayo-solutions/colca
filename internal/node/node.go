@@ -23,6 +23,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/mqttsrv"
 	"github.com/alpamayo-solutions/colca/internal/repl"
+	"github.com/alpamayo-solutions/colca/internal/retention"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
@@ -175,6 +176,17 @@ func Start(cfg *config.Config) (*Node, error) {
 			repl.RunDownlink(cl, n.Engine, n.Metrics, n.stop)
 		}()
 	}
+
+	// 6. Retention pruner. Joins the same WaitGroup as the repl loops: a prune
+	//    batch or refresh append in flight must finish before Stop closes the
+	//    store. With retention.interval: 0 (explicit disable) Run returns
+	//    immediately; the default (absent) config prunes on the §3.1 defaults.
+	pruner := retention.NewPruner(st, n.Engine, cfg.Retention, n.Metrics, cfg.ULID)
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		pruner.Run(n.stop)
+	}()
 
 	log.Info("colca node started", "ulid", cfg.ULID, "api", n.APIAddr, "repl", n.ReplAddr, "mqtt", n.MQTTAddr)
 	return n, nil

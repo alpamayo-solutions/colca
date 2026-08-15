@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/pebble/v2"
 )
@@ -238,16 +239,42 @@ func (s *Store) CursorGet(name, stream string) uint64 {
 }
 
 // CursorAck moves the cursor forward only (monotonic); returns whether it moved.
+// The cursor and its last-advance timestamp (ct/, the staleness input of spec
+// §5.2) are ONE synced batch: a crash can never persist an advance without its
+// timestamp or vice versa.
 func (s *Store) CursorAck(name, stream string, off uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if off <= s.readU64(cursorKey(name, stream), 1) {
 		return false
 	}
-	if err := s.db.Set(cursorKey(name, stream), be64(off), pebble.Sync); err != nil {
+	b := s.db.NewBatch()
+	defer b.Close()
+	if err := b.Set(cursorKey(name, stream), be64(off), nil); err != nil {
+		return false
+	}
+	if err := b.Set(ctKey(name, stream), be64(uint64(time.Now().UnixMilli())), nil); err != nil {
+		return false
+	}
+	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return false
 	}
 	return true
+}
+
+// CursorMarkSeen records ts (unix ms) as the last-advance time of a cursor
+// that has no recorded timestamp yet; a no-op when one exists. This is the
+// spec §5.2 upgrade case: a cursor key that predates the ct/ timestamps is
+// treated as advancing NOW at first sighting, so it gets a full staleness
+// window before it can ever be overridden. Synced: the sighting must survive
+// restart, otherwise every restart would rewind the staleness clock.
+func (s *Store) CursorMarkSeen(name, stream string, ts int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readU64(ctKey(name, stream), 0) != 0 {
+		return
+	}
+	_ = s.db.Set(ctKey(name, stream), be64(uint64(ts)), pebble.Sync)
 }
 
 // HWMGet returns the highest child offset already applied for (child, stream),
@@ -257,10 +284,15 @@ func (s *Store) HWMGet(child, stream string) uint64 {
 }
 
 // CursorInfo is one persisted consumer cursor: the next offset the named
-// consumer will read from a stream.
+// consumer will read from a stream. LastAdvanceMS is the unix-ms timestamp of
+// the cursor's last advance (the ct/ key, spec §5.2's staleness input); 0
+// means no timestamp was ever recorded — a cursor key predating the ct/
+// mechanism, which the pruner treats as advancing now at first sighting
+// (CursorMarkSeen).
 type CursorInfo struct {
-	Name, Stream string
-	Position     uint64
+	Name, Stream  string
+	Position      uint64
+	LastAdvanceMS int64
 }
 
 // HWMInfo is one replication high-water mark: the highest child offset already
@@ -272,11 +304,14 @@ type HWMInfo struct {
 
 // scanU64Pairs iterates every key of the form {prefix}\x00{first}\x00{second}
 // holding an 8-byte big-endian counter. Malformed keys and values are skipped,
-// the same tolerance KVScan applies.
+// the same tolerance KVScan applies. The upper bound is {prefix, 0x01}, not
+// {prefix, 0xFF}: only keys whose SECOND byte is the \x00 separator belong to
+// the family — a wider bound would sweep up multi-byte prefixes sharing the
+// first byte (concretely: ct/ cursor timestamps inside the c/ cursor scan).
 func (s *Store) scanU64Pairs(prefix byte, fn func(first, second string, v uint64)) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: []byte{prefix, 0x00},
-		UpperBound: []byte{prefix, 0xFF},
+		UpperBound: []byte{prefix, 0x01},
 	})
 	if err != nil {
 		return
@@ -300,7 +335,10 @@ func (s *Store) scanU64Pairs(prefix byte, fn func(first, second string, v uint64
 func (s *Store) Cursors() []CursorInfo {
 	var out []CursorInfo
 	s.scanU64Pairs('c', func(name, stream string, v uint64) {
-		out = append(out, CursorInfo{Name: name, Stream: stream, Position: v})
+		out = append(out, CursorInfo{
+			Name: name, Stream: stream, Position: v,
+			LastAdvanceMS: int64(s.readU64(ctKey(name, stream), 0)),
+		})
 	})
 	return out
 }
@@ -617,6 +655,40 @@ func (s *Store) Prune(stream string, upTo uint64, gapRecords []Record) (uint64, 
 	s.lwm[stream] = upTo
 	s.bytes[stream] = liveBytes
 	return pruned, nil
+}
+
+// ScanRecords iterates the records of a stream in [from, upTo) in offset
+// order, calling fn with each record's offset, timestamp and logical byte
+// cost — len(stream key) + len(encoded value), the exact unit the b/{stream}
+// accounting and Prune's shed computation use. Iteration stops early when fn
+// returns false. Mutex-free by design: Pebble iterators are
+// snapshot-consistent, and spec §4.1 places the pruner's policy scan outside
+// the store mutex. A record that fails to decode is a fail-loud error, same
+// discipline as Prune's accounting scan.
+func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64, ts int64, size uint64) bool) error {
+	if upTo <= from {
+		return nil
+	}
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: streamKey(stream, from),
+		UpperBound: streamKey(stream, upTo),
+	})
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := iter.Key()
+		off := binary.BigEndian.Uint64(key[len(key)-8:])
+		var e recEnc
+		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+			return fmt.Errorf("decode record %q during scan: %w", key, err)
+		}
+		if !fn(off, e.TS, uint64(len(key)+len(iter.Value()))) {
+			break
+		}
+	}
+	return nil
 }
 
 // KVScan returns the current KV projection for every path starting with prefix.

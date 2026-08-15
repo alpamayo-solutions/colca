@@ -549,3 +549,59 @@ func TestParentChildUplinkThroughNodes(t *testing.T) {
 		t.Errorf("parent KV payload = %v, want the published {\"v\":42}", entry["payload"])
 	}
 }
+
+// The retention pruner runs inside the node lifecycle: it prunes on its
+// cadence, Stop never closes the store under a running cycle (Pebble would
+// panic on use-after-Close), and a restart on the same data dir picks the
+// persisted LWM back up. Stop fires while the 5ms-cadence pruner is mid-flight
+// by construction — this is the restart-style shutdown-safety test.
+func TestRetentionPrunerRunsInNodeLifecycleAndRestartsSafely(t *testing.T) {
+	base := t.TempDir()
+	keyFile := filepath.Join(base, "n-ret.key")
+	genKey(t, keyFile)
+	dataDir := filepath.Join(base, "data")
+
+	// Seed history old enough for a 1h max_age BEFORE the node starts.
+	st, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour).UnixMilli()
+	var recs []store.Record
+	for i := 0; i < 10; i++ {
+		recs = append(recs, store.Record{Topic: fmt.Sprintf("colca/v1/_Metric/n-ret/plant/s%d", i), Payload: []byte(`{"v":1}`), TS: old + int64(i)})
+	}
+	if _, _, err := st.Append("metrics", recs); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	interval := config.Duration(5 * time.Millisecond)
+	cfg := &config.Config{
+		ULID:    "n-ret",
+		DataDir: dataDir,
+		KeyFile: keyFile,
+		API:     config.API{Addr: "127.0.0.1:0", Token: tok},
+		Retention: config.Retention{
+			Interval: &interval,
+			Streams:  map[string]config.StreamRetention{"metrics": {MaxAge: config.Duration(time.Hour)}},
+		},
+	}
+	n := mustStart(t, cfg)
+	deadline := time.Now().Add(10 * time.Second)
+	for n.Store.LWM("metrics") != 11 {
+		if time.Now().After(deadline) {
+			t.Fatalf("pruner never pruned inside the node: LWM = %d, want 11", n.Store.LWM("metrics"))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	n.Stop() // while the 5ms pruner is ticking — must not panic the store
+
+	// Restart on the same dir: the LWM is persisted state, and the pruner
+	// starts again without tripping over it.
+	n2 := mustStart(t, cfg)
+	if got := n2.Store.LWM("metrics"); got != 11 {
+		t.Fatalf("LWM after restart = %d, want 11", got)
+	}
+	n2.Stop()
+}

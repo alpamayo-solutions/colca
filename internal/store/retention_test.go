@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cockroachdb/pebble/v2"
 )
 
 // recCost is the logical byte cost the b/{stream} accounting must charge for
@@ -452,5 +455,130 @@ drained:
 		if j[i].From != j[i-1].To+1 {
 			t.Fatalf("journal not contiguous: %+v -> %+v", j[i-1], j[i])
 		}
+	}
+}
+
+// Spec §2/§5.2: every CursorAck writes the ct/ last-advance timestamp in the
+// same synced write as the cursor, and both survive restart — the staleness
+// clock must not rewind when the process restarts.
+func TestCursorLastAdvanceStampedAndSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendMetrics(t, s, 5, 100)
+	before := time.Now().UnixMilli()
+	if !s.CursorAck("uplink", "metrics", 4) {
+		t.Fatal("ack must move")
+	}
+	after := time.Now().UnixMilli()
+
+	cs := s.Cursors()
+	if len(cs) != 1 || cs[0].Name != "uplink" || cs[0].Stream != "metrics" {
+		// Exactly one clean cursor also pins the scan bounds: ct/ keys share
+		// the first byte with c/ keys and must never surface as a bogus
+		// cursor with an empty name.
+		t.Fatalf("Cursors() = %+v, want exactly [uplink/metrics]", cs)
+	}
+	stamped := cs[0].LastAdvanceMS
+	if stamped < before || stamped > after {
+		t.Fatalf("LastAdvanceMS = %d, want within [%d..%d]", stamped, before, after)
+	}
+	// A non-advancing ack (same offset) must NOT refresh the timestamp: the
+	// clock tracks advances, not polls.
+	if s.CursorAck("uplink", "metrics", 4) {
+		t.Fatal("non-advancing ack must report false")
+	}
+	if got := s.Cursors()[0].LastAdvanceMS; got != stamped {
+		t.Fatalf("non-advancing ack refreshed LastAdvanceMS: %d, want %d", got, stamped)
+	}
+	s.Close()
+
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if got := s2.Cursors()[0].LastAdvanceMS; got != stamped {
+		t.Fatalf("LastAdvanceMS after reopen = %d, want %d", got, stamped)
+	}
+}
+
+// Spec §5.2 upgrade case: a cursor key that predates the ct/ timestamps reads
+// LastAdvanceMS 0, and CursorMarkSeen stamps it exactly once (first sighting
+// counts as an advance; later sightings must not keep resetting the clock).
+func TestCursorMarkSeenStampsLegacyCursorOnce(t *testing.T) {
+	s := mustOpen(t)
+	appendMetrics(t, s, 5, 100)
+	// A pre-ct cursor: the raw c/ key without its ct/ companion — exactly
+	// what a store written by an older build contains.
+	if err := s.db.Set(cursorKey("legacy", "metrics"), be64(3), pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	cs := s.Cursors()
+	if len(cs) != 1 || cs[0].LastAdvanceMS != 0 {
+		t.Fatalf("legacy cursor = %+v, want LastAdvanceMS 0", cs)
+	}
+
+	s.CursorMarkSeen("legacy", "metrics", 42_000)
+	if got := s.Cursors()[0].LastAdvanceMS; got != 42_000 {
+		t.Fatalf("LastAdvanceMS after first sighting = %d, want 42000", got)
+	}
+	// Second sighting: no-op — the staleness clock keeps running.
+	s.CursorMarkSeen("legacy", "metrics", 99_000)
+	if got := s.Cursors()[0].LastAdvanceMS; got != 42_000 {
+		t.Fatalf("second CursorMarkSeen moved the clock: %d, want 42000", got)
+	}
+	// A real advance DOES refresh it.
+	if !s.CursorAck("legacy", "metrics", 5) {
+		t.Fatal("ack must move")
+	}
+	if got := s.Cursors()[0].LastAdvanceMS; got <= 42_000 {
+		t.Fatalf("advance did not refresh LastAdvanceMS: %d", got)
+	}
+}
+
+// ScanRecords reports each record's offset, timestamp and the exact logical
+// byte cost the b/ accounting charges, honors [from, upTo) and the early-exit
+// return.
+func TestScanRecordsBoundsAndSizes(t *testing.T) {
+	s := mustOpen(t)
+	appendMetrics(t, s, 6, 100)
+
+	type seen struct {
+		off  uint64
+		ts   int64
+		size uint64
+	}
+	var got []seen
+	if err := s.ScanRecords("metrics", 2, 5, func(off uint64, ts int64, size uint64) bool {
+		got = append(got, seen{off, ts, size})
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].off != 2 || got[2].off != 4 {
+		t.Fatalf("scan [2,5) = %+v, want offsets 2..4", got)
+	}
+	recs, _, err := s.Read("metrics", 2, 3, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range recs {
+		if want := recCost(t, "metrics", r.Offset, r.Topic, r.Payload, r.TS); got[i].size != want || got[i].ts != r.TS {
+			t.Fatalf("record %d: size/ts = %d/%d, want %d/%d", r.Offset, got[i].size, got[i].ts, want, r.TS)
+		}
+	}
+	// Early exit: fn returning false stops the scan.
+	calls := 0
+	if err := s.ScanRecords("metrics", 1, 7, func(uint64, int64, uint64) bool {
+		calls++
+		return false
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("early exit ignored: fn called %d times, want 1", calls)
 	}
 }
