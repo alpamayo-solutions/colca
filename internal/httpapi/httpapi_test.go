@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -569,6 +570,163 @@ func TestFetchUnknownStreamRejected(t *testing.T) {
 		if strings.Contains(body, `"gap"`) {
 			t.Fatalf("stream %q: fabricated a gap: %s", stream, body)
 		}
+	}
+}
+
+// The payload must survive as raw JSON in both directions: never decoded into
+// map[string]any and re-encoded, so an integer too large for a float64 keeps
+// its exact digits, and never emitted as a base64 or quoted string. Asserted
+// on the RAW body bytes — req()'s map decode would round the digits away and
+// could never see this regression.
+func TestPayloadStaysRawJSON(t *testing.T) {
+	a := newAPI(t)
+	admin := client(nil)
+	if resp, out := req(t, admin, "POST", a.url+"/publish", "tok", map[string]any{
+		"topic":   "colca/v1/_Metric/n-test/line1/temp",
+		"payload": json.RawMessage(`{"v":1,"seq":9007199254740993}`),
+	}); resp.StatusCode != 200 {
+		t.Fatalf("publish: %d %v", resp.StatusCode, out)
+	}
+
+	_, body := raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=rawc", "tok", "")
+	if !strings.Contains(body, `"payload":{`) {
+		t.Fatalf("fetch payload must be a JSON object, got %s", body)
+	}
+	if !strings.Contains(body, `"seq":9007199254740993`) {
+		t.Fatalf("fetch payload lost exact number form: %s", body)
+	}
+
+	_, body = raw(t, admin, "GET", a.url+"/kv?prefix=line1", "tok", "")
+	if !strings.Contains(body, `"payload":{`) {
+		t.Fatalf("kv payload must be a JSON object, got %s", body)
+	}
+	if !strings.Contains(body, `"seq":9007199254740993`) {
+		t.Fatalf("kv payload lost exact number form: %s", body)
+	}
+	if !strings.Contains(body, `"path":"line1/temp"`) || !strings.Contains(body, `"node_id":"n-test"`) {
+		t.Fatalf("kv entry must carry path and node_id: %s", body)
+	}
+}
+
+// prefix filters on the uns hierarchy path, not on the raw topic, and max is
+// bounded (<=0 or >1000 falls back to 100). Run as the admin (unscoped) so
+// the prefix logic is isolated from the grant filter it composes with.
+func TestFetchPrefixAndMax(t *testing.T) {
+	a := newAPI(t)
+	admin := client(nil)
+	for i, tp := range []string{"colca/v1/_Metric/n-test/line1/temp", "colca/v1/_Metric/n-test/line2/temp"} {
+		if resp, out := req(t, admin, "POST", a.url+"/publish", "tok",
+			map[string]any{"topic": tp, "payload": map[string]any{"v": float64(i)}}); resp.StatusCode != 200 {
+			t.Fatalf("seed %s: %d %v", tp, resp.StatusCode, out)
+		}
+	}
+
+	_, out := req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=p1&prefix=line1", "tok", nil)
+	recs := out["records"].([]any)
+	if len(recs) != 1 {
+		t.Fatalf("prefix must filter on the hierarchy path: %v", out)
+	}
+	if topic := recs[0].(map[string]any)["topic"]; topic != "colca/v1/_Metric/n-test/line1/temp" {
+		t.Fatalf("wrong record survived the prefix filter: %v", topic)
+	}
+	// "n-test" is in the topic but not at the head of the path → no match.
+	_, out = req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=p2&prefix=n-test", "tok", nil)
+	if len(out["records"].([]any)) != 0 {
+		t.Fatalf("prefix must not match the raw topic: %v", out)
+	}
+	for _, q := range []string{"&max=0", "&max=-5", "&max=99999", "&max=nonsense", ""} {
+		_, out = req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=m1"+q, "tok", nil)
+		if len(out["records"].([]any)) != 2 {
+			t.Fatalf("max=%q must fall back to the default: %v", q, out)
+		}
+	}
+}
+
+// /debug/state reports the node's ulid and correct per-stream next offsets —
+// field correctness, not just a 200. Offsets are relative to the fixture's
+// own baseline (enrollment appends an _EdgeNode record to entities), so the
+// assertion pins the DELTA a publish causes plus the exact ulid.
+func TestDebugStateFieldCorrectness(t *testing.T) {
+	a := newAPI(t)
+	admin := client(nil)
+
+	before := map[string]float64{}
+	_, out := req(t, admin, "GET", a.url+"/debug/state", "tok", nil)
+	if out["ulid"] != "n-test" {
+		t.Fatalf("debug state must report the node ulid: %v", out)
+	}
+	for stream, v := range out["streams"].(map[string]any) {
+		before[stream] = v.(map[string]any)["next_offset"].(float64)
+	}
+	// The fixture baseline itself is deterministic: one enrolled machine.
+	if before["metrics"] != 1 || before["entities"] != 2 || before["commands"] != 1 {
+		t.Fatalf("fixture baseline offsets = %v, want metrics=1 entities=2 commands=1", before)
+	}
+
+	if resp, pub := req(t, admin, "POST", a.url+"/publish", "tok", map[string]any{
+		"topic": "colca/v1/_Metric/n-test/line1/temp", "payload": map[string]any{"v": 1.0},
+	}); resp.StatusCode != 200 {
+		t.Fatalf("publish: %d %v", resp.StatusCode, pub)
+	}
+
+	_, out = req(t, admin, "GET", a.url+"/debug/state", "tok", nil)
+	streams := out["streams"].(map[string]any)
+	for stream, delta := range map[string]float64{"metrics": 1, "entities": 0, "commands": 0} {
+		got := streams[stream].(map[string]any)["next_offset"].(float64)
+		if want := before[stream] + delta; got != want {
+			t.Fatalf("debug state %s.next_offset = %v, want %v", stream, got, want)
+		}
+	}
+}
+
+// plainHandler builds a Handler over a plain httptest server (no TLS): the
+// two defensive-construction tests below pin Handler-level contracts that do
+// not depend on the listener's TLS wrapping.
+func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptest.Server {
+	t.Helper()
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	reg, err := registry.New(s, cfg.ULID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(Handler(engine.New(s, cfg, reg, nil, m), cfg, reg, m))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// A node built without a metrics registry has no /metrics route at all.
+func TestNoMetricsRegistryMeansNoRoute(t *testing.T) {
+	srv := plainHandler(t, &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}, nil)
+	resp, _ := raw(t, srv.Client(), "GET", srv.URL+"/metrics", "", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("nil metrics: want 404 on /metrics, got %d", resp.StatusCode)
+	}
+}
+
+// An empty configured token is a missing secret, not an invitation: nothing
+// authenticates, and /healthz stays tokenless.
+func TestEmptyConfiguredTokenDeniesEveryone(t *testing.T) {
+	cfg := &config.Config{ULID: "n-notoken"}
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	srv := plainHandler(t, cfg, metrics.New(st, config.Retention{}))
+
+	for _, token := range []string{"", "tok"} {
+		resp, _ := req(t, srv.Client(), "GET", srv.URL+"/kv", token, nil)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("empty configured token with %q: want 401, got %d", token, resp.StatusCode)
+		}
+	}
+	resp, _ := req(t, srv.Client(), "GET", srv.URL+"/healthz", "", nil)
+	if resp.StatusCode != 200 {
+		t.Fatal("healthz must stay tokenless")
 	}
 }
 
