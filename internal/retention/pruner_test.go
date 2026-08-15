@@ -497,10 +497,23 @@ func TestConcurrentFirstAckNeverPrunedPast(t *testing.T) {
 	if !st.CursorAck("lag", "metrics", 3) { // stale, will be overridden
 		t.Fatal("ack must move")
 	}
-	p := newPruner(t, st, eng, retFor("metrics", config.StreamRetention{
+	// The EFFECTIVE span [1..4] this run actually removes, computed before
+	// the prune so it can still be scanned — the bytes design §8's
+	// colca_retention_pruned_bytes_total must report, NOT the bytes of the
+	// policy's originally intended (and larger) [1..10] span.
+	var wantShedBytes uint64
+	if err := st.ScanRecords("metrics", 1, 5, func(_ uint64, _ int64, size uint64) bool {
+		wantShedBytes += size
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ret := retFor("metrics", config.StreamRetention{
 		MaxAge:             config.Duration(time.Minute),
 		IgnoreCursorsAfter: config.Duration(time.Hour),
-	}))
+	})
+	p, m := newPrunerWithMetrics(t, st, eng, ret)
 	p.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 	p.beforePrune = func(stream string) {
 		// A consumer's first ack, racing the cycle: policy already decided to
@@ -510,6 +523,17 @@ func TestConcurrentFirstAckNeverPrunedPast(t *testing.T) {
 		}
 	}
 	p.runOnce()
+
+	// design §8: pruned_bytes must be the EFFECTIVE
+	// post-shrink figure (4 records), never the pre-commit scan's larger
+	// intended figure (10 records) — the store's own store.PruneSpan.Shed,
+	// captured by the plan closure, is the only correct source.
+	if v := scrapeMetric(t, m, `colca_retention_pruned_records_total{stream="metrics"}`); v != 4 {
+		t.Fatalf("pruned records = %v, want 4 (the shrunk [1..4] span, not the intended 10)", v)
+	}
+	if v, want := scrapeMetric(t, m, `colca_retention_pruned_bytes_total{stream="metrics"}`), float64(wantShedBytes); v != want {
+		t.Fatalf("pruned bytes = %v, want %v (bytes of the EFFECTIVE [1..4] span, not the larger intended span)", v, want)
+	}
 
 	if got := st.LWM("metrics"); got != 5 {
 		t.Fatalf("LWM = %d, want 5: the concurrently acked cursor must clamp the prune", got)

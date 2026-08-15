@@ -304,11 +304,12 @@ func (m *Metrics) RetentionPruneRun(stream string) {
 
 // RetentionPruned adds one run's removed records and shed logical bytes to
 // stream's running totals (design §8, colca_retention_pruned_records_total /
-// colca_retention_pruned_bytes_total). records is the store's authoritative
-// removed count; bytes is the pruner's own pre-commit accounting scan and can
-// overstate the true figure by the rare in-batch shrink race (spec §5.2
-// [delta], the store's own recheck) — an acceptable approximation for an
-// observability counter, never used for correctness.
+// colca_retention_pruned_bytes_total). Both records and bytes must be the
+// store's own authoritative post-commit figures (store.Prune's return value
+// and store.PruneSpan.Shed respectively) — the store's in-batch cursor
+// recheck (spec §5.2 [delta]) can shrink the pruned range after the caller's
+// own pre-commit scan, and only the store's own accounting reflects what was
+// actually removed.
 func (m *Metrics) RetentionPruned(stream string, records, bytes uint64) {
 	if m == nil {
 		return
@@ -541,12 +542,13 @@ func (c *storeCollector) oldestTS(stream string) (ts int64, ok bool) {
 
 // blockedByCursor derives design §8's colca_retention_blocked_by_cursor for
 // stream: the count of protected cursors sitting below the offset the
-// age/size policy would prune to if no cursor existed. This intentionally
-// duplicates the shape of retention.Pruner.pruneStream's unclamped scan and
-// protected-set logic (import of internal/retention would cycle back into
-// this package, and the "no self-reported state" rule means this gauge must
-// be re-derived from the store, not read off the pruner's last decision) —
-// read-only: no CursorMarkSeen, no batch, no mutation.
+// age/size policy would prune to if no cursor existed. Built entirely from
+// store.ProtectedCursors and store.PolicyPruneTarget — the exact same
+// classification and scan retention.Pruner.pruneStream uses for the real
+// clamp/override decision (drift between the two is structurally
+// impossible; there is only one implementation) — called here read-only
+// (no CursorMarkSeen, no batch, no mutation) and unclamped (clamp=next: how
+// far the policy would go with no cursor floor at all).
 func (c *storeCollector) blockedByCursor(stream string, now time.Time) int {
 	pol := c.cfg.EffectiveStream(stream)
 	maxAge := time.Duration(pol.MaxAge)
@@ -558,37 +560,15 @@ func (c *storeCollector) blockedByCursor(stream string, now time.Time) int {
 	lwm := c.st.LWM(stream)
 	next := c.st.NextOffset(stream)
 	liveBytes := c.st.StreamBytes(stream)
-	nowMS := now.UnixMilli()
-	cutoff := nowMS - maxAge.Milliseconds()
 
-	target := lwm
-	var shed uint64
-	_ = c.st.ScanRecords(stream, lwm, next, func(off uint64, ts int64, size uint64) bool {
-		ageWants := maxAge > 0 && ts < cutoff
-		sizeWants := maxBytes > 0 && liveBytes > shed+maxBytes
-		if !ageWants && !sizeWants {
-			return false
-		}
-		shed += size
-		target = off + 1
-		return true
-	})
+	target, _, _ := c.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, next)
 	if target <= lwm {
 		return 0 // policy wants nothing further: no cursor can be "blocking"
 	}
 
+	protecting, _ := c.st.ProtectedCursors(stream, now, window)
 	blocked := 0
-	for _, cur := range c.st.Cursors() {
-		if cur.Stream != stream {
-			continue
-		}
-		last := cur.LastAdvanceMS
-		if last == 0 {
-			last = nowMS // upgrade case: treated as advancing now, same as the pruner
-		}
-		if window > 0 && now.Sub(time.UnixMilli(last)) > window {
-			continue // stale past the opt-in window: no longer protecting
-		}
+	for _, cur := range protecting {
 		if cur.Position < target {
 			blocked++
 		}

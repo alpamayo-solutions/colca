@@ -303,11 +303,16 @@ func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 		before[reason] = scrapeMetric(t, m, `colca_rejected_publishes_total{reason="`+reason+`"}`)
 	}
 
-	// Non-UNS topic, unparseable topic (grammar), non-KV class (grammar),
-	// empty payload (validation), and schema-invalid payload (validation) —
-	// every failure branch IngestRefresh has.
+	// Non-UNS topic, root-prefixed but unparseable (too few segments —
+	// uns.Parse's own grammar error, distinct from IsUns's prefix check),
+	// non-KV class (grammar), empty payload (validation), and
+	// schema-invalid payload (validation) — every failure branch
+	// IngestRefresh has.
 	if _, _, err := e.IngestRefresh("not-uns-at-all", []byte(`{}`), 1); err == nil {
 		t.Fatal("non-UNS topic must be rejected")
+	}
+	if _, _, err := e.IngestRefresh("colca/v1/x", []byte(`{}`), 1); err == nil {
+		t.Fatal("root-prefixed but unparseable topic (too few segments) must be rejected")
 	}
 	if _, _, err := e.IngestRefresh("colca/v1/_Ack/n-edge1/line1/x", []byte(`{"correlation_id":"c","result_code":0}`), 1); err == nil {
 		t.Fatal("non-KV class must be rejected")

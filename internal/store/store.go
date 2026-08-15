@@ -442,6 +442,44 @@ func (s *Store) Cursors() []CursorInfo {
 	return out
 }
 
+// ProtectedCursors classifies stream's persisted cursors against the §5.2
+// staleness window at now: cursors still protecting the stream (silence
+// window not passed, or window<=0 meaning "never override") and cursors the
+// staleness override has stopped protecting ("stale"). Shared by
+// retention.Pruner (the actual clamp/override decision) and the metrics
+// collector (colca_retention_pressure/_blocked_by_cursor, design §8) so both
+// always see the identical classification — one scan, not two hand-kept
+// copies.
+//
+// A cursor with no persisted last-advance timestamp (LastAdvanceMS==0, the
+// upgrade case) is treated as advancing NOW for this classification only —
+// conservatively giving it a full staleness window before it can ever be
+// overridden — which always resolves it into `protecting` (staleFor≈0 can
+// never exceed a positive window). Its CursorInfo is returned UNCHANGED
+// (LastAdvanceMS still 0): a caller that is actually about to prune this
+// cycle (only the pruner) detects that and persists the stamp itself via
+// CursorMarkSeen, so the staleness clock does not restart on every process
+// restart. A read-only caller (the collector) does no such thing and simply
+// re-derives the same classification on every scrape — this method itself
+// never mutates the store.
+func (s *Store) ProtectedCursors(stream string, now time.Time, window time.Duration) (protecting, stale []CursorInfo) {
+	for _, c := range s.Cursors() {
+		if c.Stream != stream {
+			continue
+		}
+		last := c.LastAdvanceMS
+		if last == 0 {
+			last = now.UnixMilli()
+		}
+		if window > 0 && now.Sub(time.UnixMilli(last)) > window {
+			stale = append(stale, c)
+			continue
+		}
+		protecting = append(protecting, c)
+	}
+	return protecting, stale
+}
+
 // HWMs returns every persisted replication high-water mark. Read-only.
 func (s *Store) HWMs() []HWMInfo {
 	var out []HWMInfo
@@ -551,6 +589,13 @@ type PruneSpan struct {
 	From, To        uint64
 	FirstTS, LastTS int64
 	Coalesced       bool
+	// Shed is the logical bytes actually removed by THIS commit — the
+	// post-in-batch-recheck accounting (design §8,
+	// colca_retention_pruned_bytes_total). Only ever populated on the
+	// ephemeral span Prune hands to its plan callback; PruneJournal's
+	// reconstructed spans (read back from the on-disk journal, which never
+	// stored bytes) always carry the zero value.
+	Shed uint64
 }
 
 // GapSpan is the wire gap object of spec §6.1/§6.2: the contiguous pruned
@@ -834,7 +879,7 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 			return 0, err
 		}
 	}
-	span := PruneSpan{From: lwm, To: upTo - 1, FirstTS: stats.firstTS, LastTS: stats.lastTS}
+	span := PruneSpan{From: lwm, To: upTo - 1, FirstTS: stats.firstTS, LastTS: stats.lastTS, Shed: stats.shed}
 	var out PruneOutcome
 	if plan != nil {
 		out = plan(span)
@@ -970,6 +1015,43 @@ func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64
 		}
 	}
 	return nil
+}
+
+// PolicyPruneTarget scans stream's records forward from lwm (via ScanRecords)
+// applying the age (record TS < now−maxAge) and size (running shed total
+// keeps live_bytes−shed > maxBytes) criteria of design §4.1 step 2, and
+// returns the offset the policy alone wants to prune up to — capped at
+// clamp, which it never advances past. Either limit may be disabled
+// (maxAge<=0 skips the age check, maxBytes==0 skips the size check).
+//
+// Shared by retention.Pruner (called with clamp = the protected-cursor
+// floor, the real prune bound) and the metrics collector (called with
+// clamp = next, i.e. uncapped — colca_retention_pressure/_blocked_by_cursor,
+// design §8, want to know how far the policy would go with NO cursor floor
+// at all). Passing next as clamp is always a no-op cap: ScanRecords never
+// yields an offset >= next in the first place.
+//
+// clampedAtCap is true when the scan stopped only because it hit clamp with
+// the policy still wanting more (the §5.2 WARN log / pressure signal).
+func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time, maxAge time.Duration, maxBytes, liveBytes, clamp uint64) (target uint64, clampedAtCap bool, err error) {
+	cutoff := now.UnixMilli() - maxAge.Milliseconds()
+	target = lwm
+	var shed uint64
+	err = s.ScanRecords(stream, lwm, next, func(off uint64, ts int64, size uint64) bool {
+		ageWants := maxAge > 0 && ts < cutoff
+		sizeWants := maxBytes > 0 && liveBytes > shed+maxBytes // liveBytes−shed > maxBytes, underflow-safe
+		if !ageWants && !sizeWants {
+			return false // first record the policy keeps — early exit (§4.1)
+		}
+		if off >= clamp {
+			clampedAtCap = true // policy wants more, the cap forbids it
+			return false
+		}
+		shed += size
+		target = off + 1
+		return true
+	})
+	return target, clampedAtCap, err
 }
 
 // KVScan returns the current KV projection for every path starting with prefix.

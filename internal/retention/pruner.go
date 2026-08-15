@@ -149,56 +149,45 @@ func (p *Pruner) pruneStream(stream string) {
 	// last advance. Cursors on other streams — including the child-side
 	// "commands-parent" pseudo-stream, which tracks PARENT offsets — never
 	// protect this stream (the existing "never mix the two" rule holds by
-	// the Stream field match).
+	// store.ProtectedCursors' own Stream match). Shared with the metrics
+	// collector (design §8) so both always classify identically — one scan,
+	// not two hand-kept copies.
+	protecting, staleCursors := p.st.ProtectedCursors(stream, now, window)
 	clamp := next
 	blocking := ""
 	var stale []overriddenCursor
-	for _, c := range p.st.Cursors() {
-		if c.Stream != stream {
-			continue
-		}
-		last := c.LastAdvanceMS
-		if last == 0 {
+	for _, c := range protecting {
+		if c.LastAdvanceMS == 0 {
 			// §5.2 upgrade case: a cursor predating the ct/ timestamps is
 			// treated as advancing NOW at first sighting (persisted, so the
 			// staleness clock does not restart on every process restart).
-			p.st.CursorMarkSeen(c.Name, c.Stream, nowMS)
-			last = nowMS
-		}
-		staleFor := now.Sub(time.UnixMilli(last))
-		if window > 0 && staleFor > window {
-			stale = append(stale, overriddenCursor{name: c.Name, pos: c.Position, staleFor: staleFor})
-			continue // past the window: this cursor stops protecting the stream
+			// ProtectedCursors is read-only and never does this itself —
+			// only the pruner, which is actually about to prune this cycle,
+			// persists the stamp.
+			p.st.CursorMarkSeen(c.Name, stream, nowMS)
 		}
 		if c.Position < clamp {
 			clamp = c.Position
 			blocking = c.Name
 		}
 	}
+	for _, c := range staleCursors {
+		// staleCursors never contains a first-sighting (LastAdvanceMS==0)
+		// cursor — ProtectedCursors' own staleFor-vs-window classification
+		// always resolves that case into protecting — so recomputing
+		// staleFor from the raw timestamp here reproduces the exact value
+		// ProtectedCursors used internally.
+		staleFor := now.Sub(time.UnixMilli(c.LastAdvanceMS))
+		stale = append(stale, overriddenCursor{name: c.Name, pos: c.Position, staleFor: staleFor})
+	}
 
 	// §4.1 step 2 — policy scan from the LWM, capped at the protected floor.
 	// The cap makes over-pruning structurally impossible, not a checked
 	// condition. The scan runs one record PAST the cap only to learn whether
 	// the policy is cursor-clamped (the §5.2 WARN + pressure signal); it
-	// never advances newLWM past it.
-	cutoff := nowMS - maxAge.Milliseconds()
-	newLWM := lwm
-	var shed uint64
-	clamped := false
-	scanErr := p.st.ScanRecords(stream, lwm, next, func(off uint64, ts int64, size uint64) bool {
-		ageWants := maxAge > 0 && ts < cutoff
-		sizeWants := maxBytes > 0 && liveBytes > shed+maxBytes // liveBytes−shed > maxBytes, underflow-safe
-		if !ageWants && !sizeWants {
-			return false // first record the policy keeps — early exit (§4.1)
-		}
-		if off >= clamp {
-			clamped = true // policy wants more, a live cursor forbids it
-			return false
-		}
-		shed += size
-		newLWM = off + 1
-		return true
-	})
+	// never advances newLWM past it. Shared with the metrics collector
+	// (design §8, called there with an uncapped clamp).
+	newLWM, clamped, scanErr := p.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp)
 	if scanErr != nil {
 		p.log.Error("retention policy scan failed", "stream", stream, "err", scanErr)
 		return
@@ -235,7 +224,9 @@ func (p *Pruner) pruneStream(stream string) {
 		names[i] = c.name
 	}
 	var applied []overriddenCursor // set by plan; valid only when Prune committed
+	var effectiveShed uint64       // set by plan from the EFFECTIVE (post-recheck) span; valid only when Prune committed
 	plan := func(span store.PruneSpan) store.PruneOutcome {
+		effectiveShed = span.Shed
 		var eff []overriddenCursor
 		minPos := uint64(0)
 		for _, c := range candidates {
@@ -301,11 +292,13 @@ func (p *Pruner) pruneStream(stream string) {
 	}
 	// design §8: a "run" is one cycle that actually removed something —
 	// distinct from pruned records/bytes, which measure the removed span
-	// itself. shed is this run's pre-commit accounting scan (see
-	// metrics.RetentionPruned's doc comment for the rare in-batch-shrink
-	// caveat).
+	// itself. effectiveShed comes from the store's own post-in-batch-recheck
+	// accounting (store.PruneSpan.Shed, set inside plan above), not the
+	// pre-commit scan's `shed` local — that value describes the INTENDED
+	// span and can overstate the true figure whenever the in-batch recheck
+	// shrinks upTo (spec §5.2 [delta]).
 	p.m.RetentionPruneRun(stream)
-	p.m.RetentionPruned(stream, removed, shed)
+	p.m.RetentionPruned(stream, removed, effectiveShed)
 	if len(applied) > 0 {
 		p.m.RetentionGapRecorded(stream) // exactly one _StreamGap marker per overriding run
 	}

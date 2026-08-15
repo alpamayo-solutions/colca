@@ -195,6 +195,44 @@ func TestRetentionGaugesDerivedFromStoreAndPolicy(t *testing.T) {
 	}
 }
 
+// colca_retention_blocked_by_cursor counts EVERY protecting cursor below the
+// policy target, not just whether any exist — two independently blocking
+// cursors must read 2, not be capped at 1 (mutation guard against an
+// accidental early-return/boolean-collapse in blockedByCursor's loop).
+func TestBlockedByCursorCountsEveryProtectingCursorBelowTarget(t *testing.T) {
+	s := mustStore(t)
+	base := time.Now().Add(-2 * time.Hour).UnixMilli()
+	seedRecordsAt(t, s, "metrics", 5, base, 10*60*1000) // offsets 1..5, all older than max_age below
+
+	// Two independent cursors, both below where the unclamped policy wants
+	// to go (offset 6): "slower" at 2, "slow" at 3.
+	if !s.CursorAck("slower", "metrics", 2) {
+		t.Fatal("seed cursor")
+	}
+	if !s.CursorAck("slow", "metrics", 3) {
+		t.Fatal("seed cursor")
+	}
+
+	cfg := config.Retention{Streams: map[string]config.StreamRetention{
+		"metrics": {MaxAge: config.Duration(time.Hour)},
+	}}
+	m := New(s, cfg)
+
+	if blocked := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "metrics"}); blocked != 2 {
+		t.Fatalf("colca_retention_blocked_by_cursor = %v, want 2 (both cursors independently block)", blocked)
+	}
+
+	// Advancing only the FURTHER-BEHIND cursor past the target must drop the
+	// count by exactly one, not to zero — pins that the count is a true sum,
+	// not a boolean collapsed to 0/1.
+	if !s.CursorAck("slower", "metrics", 6) {
+		t.Fatal("cursor advance must move")
+	}
+	if blocked := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "metrics"}); blocked != 1 {
+		t.Fatalf("colca_retention_blocked_by_cursor after one cursor catches up = %v, want 1 (the other still blocks)", blocked)
+	}
+}
+
 // A cursor sitting below LWM's records is NOT "blocked" when the policy does
 // not want to prune that far in the first place (max_age far larger than any
 // record's age) — blockedByCursor must compare against what the policy
