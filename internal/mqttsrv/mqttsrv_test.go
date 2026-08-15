@@ -453,3 +453,116 @@ func TestNonUnsTopicStillDistributed(t *testing.T) {
 		}
 	}
 }
+
+// Retention design §7.1 step 3, against the real broker: the engine's
+// empty-payload delivery with retain=true makes mochi clear the retained
+// message per the MQTT spec. Asserted from both sides of the contract — a
+// subscriber online at tombstone time receives the empty-payload clear, and a
+// FRESH subscriber connecting afterwards gets no retained message for the
+// retired path while an untouched sibling path still replays.
+func TestTombstoneClearsRetainedOnBroker(t *testing.T) {
+	s, st := newBroker(t)
+	const (
+		tombTopic = "colca/v1/_Metric/m1/m1/temp" // canonical (post-mount) form
+		keepTopic = "colca/v1/_Metric/m1/m1/keep"
+	)
+
+	m1 := connect(t, s.Addr(), "m1-tomb", "m1", "m1-secret")
+	defer m1.Disconnect(100)
+	pub := func(topic, payload string) {
+		t.Helper()
+		tok := m1.Publish(topic, 1, false, []byte(payload))
+		if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+			t.Fatalf("publish %s: %v", topic, tok.Error())
+		}
+	}
+	pub("colca/v1/_Metric/m1/temp", `{"v":7}`)
+	pub("colca/v1/_Metric/m1/keep", `{"v":1}`)
+
+	// A subscriber online BEFORE the tombstone: it must see the live clear.
+	type msg struct {
+		topic, payload string
+		retained       bool
+	}
+	liveMsgs := make(chan msg, 16)
+	live := connect(t, s.Addr(), "obs-live", "observer", "observer-secret")
+	defer live.Disconnect(100)
+	tok := live.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
+		liveMsgs <- msg{m.Topic(), string(m.Payload()), m.Retained()}
+	})
+	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		t.Fatalf("subscribe: %v", tok.Error())
+	}
+	// Drain the retained replay of both set values first.
+	for seen := 0; seen < 2; {
+		select {
+		case m := <-liveMsgs:
+			if m.topic == tombTopic || m.topic == keepTopic {
+				seen++
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("retained replay of the two set values never arrived")
+		}
+	}
+
+	// The tombstone: empty payload through the normal client publish path.
+	pub("colca/v1/_Metric/m1/temp", "")
+
+	// PUBACK means the engine persisted it — the KV key must be gone.
+	if got := st.KVScan("m1/temp"); len(got) != 0 {
+		t.Fatalf("KV key survived the tombstone: %+v", got)
+	}
+	if got := st.KVScan("m1/keep"); len(got) != 1 {
+		t.Fatalf("sibling KV key must survive, got %d", len(got))
+	}
+
+	// The online subscriber receives the empty-payload clear on the canonical topic.
+	for {
+		select {
+		case m := <-liveMsgs:
+			if m.topic == tombTopic && m.payload == "" {
+				goto cleared
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("online subscriber never received the empty-payload clear")
+		}
+	}
+cleared:
+
+	// A FRESH subscriber gets the sibling's retained value but nothing —
+	// retained or otherwise — for the retired path.
+	freshMsgs := make(chan msg, 16)
+	fresh := connect(t, s.Addr(), "obs-fresh", "observer", "observer-secret")
+	defer fresh.Disconnect(100)
+	tok = fresh.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
+		freshMsgs <- msg{m.Topic(), string(m.Payload()), m.Retained()}
+	})
+	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		t.Fatalf("fresh subscribe: %v", tok.Error())
+	}
+	keepSeen := false
+	deadline := time.After(10 * time.Second)
+	grace := time.NewTimer(0)
+	<-grace.C
+	for {
+		select {
+		case m := <-freshMsgs:
+			if m.topic == tombTopic {
+				t.Fatalf("fresh subscriber received the tombstoned path: %+v — mochi did not clear the retained message", m)
+			}
+			if m.topic == keepTopic && m.retained {
+				keepSeen = true
+				// The sibling arrived: the retained replay is demonstrably
+				// working, so give the retired path a short grace window to
+				// prove its absence, then finish.
+				grace.Reset(500 * time.Millisecond)
+			}
+		case <-grace.C:
+			if keepSeen {
+				return
+			}
+		case <-deadline:
+			t.Fatal("fresh subscriber never received the sibling's retained value")
+		}
+	}
+}

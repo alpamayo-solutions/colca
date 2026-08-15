@@ -125,6 +125,17 @@ func MountStrip(topic, mount string) (string, bool) {
 // the generated schema bundle — same enforcement point, swappable later).
 // Unknown contracts are rejected: that is the point of a validated namespace.
 func Validate(contract string, payload []byte) error {
+	// Empty payload is the tombstone (retention design §7.1): valid exactly for
+	// the KV-projecting state classes (data/entity), where it retires the path —
+	// KV key deleted, retained message cleared. For every other contract an
+	// empty payload was never a valid value and deletion is not meaningful
+	// (§7.3): commands/acks/gaps are events, there is nothing to retire.
+	if len(payload) == 0 {
+		if c := ClassOf(contract); c == ClassData || c == ClassEntity {
+			return nil
+		}
+		return fmt.Errorf("%s: empty payload (tombstone) is only valid for KV-projecting state contracts", contract)
+	}
 	var m map[string]any
 	if err := json.Unmarshal(payload, &m); err != nil {
 		return fmt.Errorf("%s: payload is not valid JSON: %w", contract, err)

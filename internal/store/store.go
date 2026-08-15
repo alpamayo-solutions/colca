@@ -26,6 +26,11 @@ type Record struct {
 	// optional KV projection written in the same atomic batch:
 	KVPath string `json:"-"` // hierarchy path (segments after contract, post-mount)
 	KVNode string `json:"-"` // node-id (level 4)
+	// Delete marks the record as a tombstone (retention design §7.1): the KV
+	// key k/{KVPath}\x00{KVNode} is DELETED in the same atomic batch instead of
+	// set. The stream record itself is appended as usual — the retirement is
+	// history. Set by the engine on an empty payload for a KV-projecting class.
+	Delete bool `json:"-"`
 }
 
 type StoredRecord struct {
@@ -152,7 +157,11 @@ type kvEnc struct {
 // addRecord writes one stream record (and its optional KV projection) into the
 // batch and returns the record's logical byte cost — len(stream key) +
 // len(encoded value), the unit the b/{stream} accounting tracks (spec §4).
-func addRecord(b *pebble.Batch, stream string, off uint64, topic string, payload []byte, ts int64, kvPath, kvNode string) (uint64, error) {
+//
+// del is the tombstone flag (retention design §7.1): the KV key is deleted in
+// the batch instead of set. Deleting an absent key is a no-op in Pebble, so a
+// replayed tombstone is idempotent by construction.
+func addRecord(b *pebble.Batch, stream string, off uint64, topic string, payload []byte, ts int64, kvPath, kvNode string, del bool) (uint64, error) {
 	val, err := json.Marshal(recEnc{topic, payload, ts})
 	if err != nil {
 		return 0, err
@@ -162,12 +171,18 @@ func addRecord(b *pebble.Batch, stream string, off uint64, topic string, payload
 		return 0, err
 	}
 	if kvPath != "" {
-		kval, err := json.Marshal(kvEnc{topic, payload, ts, off})
-		if err != nil {
-			return 0, err
-		}
-		if err := b.Set(kvKey(kvPath, kvNode), kval, nil); err != nil {
-			return 0, err
+		if del {
+			if err := b.Delete(kvKey(kvPath, kvNode), nil); err != nil {
+				return 0, err
+			}
+		} else {
+			kval, err := json.Marshal(kvEnc{topic, payload, ts, off})
+			if err != nil {
+				return 0, err
+			}
+			if err := b.Set(kvKey(kvPath, kvNode), kval, nil); err != nil {
+				return 0, err
+			}
 		}
 	}
 	return uint64(len(key) + len(val)), nil
@@ -190,7 +205,7 @@ func (s *Store) Append(stream string, recs []Record) (first, last uint64, err er
 	defer b.Close()
 	liveBytes := s.bytes[stream]
 	for _, r := range recs {
-		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode)
+		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode, r.Delete)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -395,6 +410,12 @@ type ReplRecord struct {
 	TS          int64  `json:"ts"`
 	KVPath      string `json:"kp,omitempty"`
 	KVNode      string `json:"kn,omitempty"`
+	// Delete mirrors Record.Delete (retention design §7.1): ApplyReplicated
+	// deletes the KV key in its batch instead of setting it. The parent's
+	// replication server derives it the same way the engine does — empty
+	// payload on a KV-projecting class — because the empty payload IS the wire
+	// truth of the tombstone (§7.1 rejected-alternative argument).
+	Delete bool `json:"d,omitempty"`
 }
 
 // ApplyReplicated appends records with ChildOffset > HWM(child,stream), assigns LOCAL offsets,
@@ -420,7 +441,7 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 		if r.ChildOffset <= hwm {
 			continue
 		}
-		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode)
+		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode, r.Delete)
 		if err != nil {
 			return nil, prev, err
 		}
@@ -789,7 +810,7 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	}
 	off := s.next[stream]
 	for _, r := range out.GapRecords {
-		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode)
+		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode, r.Delete)
 		if err != nil {
 			return 0, err
 		}

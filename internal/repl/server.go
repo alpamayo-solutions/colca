@@ -163,6 +163,11 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 			cl := uns.ClassOf(p.Contract)
 			if cl == uns.ClassData || cl == uns.ClassEntity {
 				rr.KVPath, rr.KVNode = p.Path, p.NodeID
+				// A replicated tombstone retires the path here too (retention
+				// design §7.1): the empty payload is the wire truth, derived
+				// exactly like the engine derives it on first ingest, so every
+				// ancestor's KV + retained set converge on the same fact.
+				rr.Delete = len(rec.P) == 0
 			}
 		}
 		repl = append(repl, rr)

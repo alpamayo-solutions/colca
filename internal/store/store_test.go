@@ -235,3 +235,144 @@ func TestDiskMetricsGrowWithWrites(t *testing.T) {
 		t.Fatal("disk usage reported as 0 after writes")
 	}
 }
+
+// sumRecordBytes recomputes a stream's live logical bytes from the records
+// themselves (ScanRecords reports the exact per-record cost the b/ accounting
+// uses), so a drifted counter cannot hide behind its own bookkeeping.
+func sumRecordBytes(t *testing.T, s *Store, stream string) uint64 {
+	t.Helper()
+	var sum uint64
+	if err := s.ScanRecords(stream, 1, s.NextOffset(stream), func(_ uint64, _ int64, size uint64) bool {
+		sum += size
+		return true
+	}); err != nil {
+		t.Fatalf("ScanRecords(%s): %v", stream, err)
+	}
+	return sum
+}
+
+// Retention design §7.1: a Record with the Delete flag appends the tombstone to
+// the stream as history AND deletes the KV key — one atomic batch, byte
+// accounting intact, and the deletion durable across a reopen (which is what
+// makes the reseed correct with zero reseed changes).
+func TestAppendTombstoneDeletesKVInBatch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Append("metrics", []Record{
+		{Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":7}`), TS: 1, KVPath: "m1/temp", KVNode: "m1"},
+		{Topic: "colca/v1/_Metric/m1/m1/keep", Payload: []byte(`{"v":1}`), TS: 2, KVPath: "m1/keep", KVNode: "m1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(s.KVScan("")); got != 2 {
+		t.Fatalf("pre-tombstone KV entries = %d, want 2", got)
+	}
+
+	if _, _, err := s.Append("metrics", []Record{
+		{Topic: "colca/v1/_Metric/m1/m1/temp", TS: 3, KVPath: "m1/temp", KVNode: "m1", Delete: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := s.KVScan("m1/temp"); len(got) != 0 {
+		t.Fatalf("tombstoned KV key survived the batch: %+v", got)
+	}
+	if got := s.KVScan("m1/keep"); len(got) != 1 {
+		t.Fatalf("untouched sibling key must survive, got %d entries", len(got))
+	}
+	// The tombstone IS history: the stream keeps all three records.
+	recs, _, err := s.Read("metrics", 1, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 3 {
+		t.Fatalf("stream records = %d, want 3 (tombstone appended as history)", len(recs))
+	}
+	if recs[2].Offset != 3 || len(recs[2].Payload) != 0 || recs[2].Topic != "colca/v1/_Metric/m1/m1/temp" {
+		t.Fatalf("tombstone record = %+v, want offset 3, empty payload, original topic", recs[2])
+	}
+	// Byte accounting counts the tombstone record like any other.
+	if got, want := s.StreamBytes("metrics"), sumRecordBytes(t, s, "metrics"); got != want {
+		t.Fatalf("StreamBytes = %d, want %d (sum of per-record costs incl. the tombstone)", got, want)
+	}
+
+	// Durability: the deletion is part of the synced batch, so a reopen shows
+	// the same picture — the KV key stays gone, nothing to reseed from.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if got := s2.KVScan("m1/temp"); len(got) != 0 {
+		t.Fatalf("tombstoned KV key resurrected across reopen: %+v", got)
+	}
+	if got := len(s2.KVScan("")); got != 1 {
+		t.Fatalf("KV entries after reopen = %d, want 1 (only m1/keep)", got)
+	}
+	if s2.NextOffset("metrics") != 4 {
+		t.Fatalf("next offset after reopen = %d, want 4", s2.NextOffset("metrics"))
+	}
+}
+
+// Retention design §7.1: ApplyReplicated applies a replicated tombstone
+// identically — KV key deleted in the same batch as the appended record and the
+// HWM advance. A REPLAYED tombstone is dropped by the HWM dedupe, and a
+// tombstone for an already-absent key applies cleanly (batch delete is
+// idempotent), so replication can never wedge on a delete.
+func TestApplyReplicatedTombstone(t *testing.T) {
+	s := mustOpen(t)
+	set := ReplRecord{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/edge1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "edge1/m1/a", KVNode: "m1"}
+	if _, _, err := s.ApplyReplicated("n-edge1", "metrics", []ReplRecord{set}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.KVScan("edge1/m1/a")) != 1 {
+		t.Fatal("setup: replicated KV entry missing")
+	}
+
+	tomb := ReplRecord{ChildOffset: 2, Topic: "colca/v1/_Metric/m1/edge1/m1/a", TS: 2, KVPath: "edge1/m1/a", KVNode: "m1", Delete: true}
+	applied, hwm, err := s.ApplyReplicated("n-edge1", "metrics", []ReplRecord{tomb})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 1 || hwm != 2 {
+		t.Fatalf("tombstone apply: applied %d hwm %d, want 1/2", len(applied), hwm)
+	}
+	if got := s.KVScan("edge1/m1/a"); len(got) != 0 {
+		t.Fatalf("replicated tombstone did not retire the KV key: %+v", got)
+	}
+
+	// Replay of the same tombstone: HWM dedupe drops it, no error, no state change.
+	applied, hwm, err = s.ApplyReplicated("n-edge1", "metrics", []ReplRecord{set, tomb})
+	if err != nil {
+		t.Fatalf("replayed tombstone must not error: %v", err)
+	}
+	if len(applied) != 0 || hwm != 2 {
+		t.Fatalf("replayed tombstone: applied %d hwm %d, want 0/2", len(applied), hwm)
+	}
+	if got := s.KVScan("edge1/m1/a"); len(got) != 0 {
+		t.Fatalf("replay resurrected the KV key: %+v", got)
+	}
+
+	// A tombstone for a path this node never had: delete of an absent key is a
+	// no-op inside the batch — the record still lands, the HWM still advances.
+	ghost := ReplRecord{ChildOffset: 3, Topic: "colca/v1/_Metric/m1/edge1/m1/never", TS: 3, KVPath: "edge1/m1/never", KVNode: "m1", Delete: true}
+	applied, hwm, err = s.ApplyReplicated("n-edge1", "metrics", []ReplRecord{ghost})
+	if err != nil {
+		t.Fatalf("tombstone for an absent KV key must apply cleanly: %v", err)
+	}
+	if len(applied) != 1 || hwm != 3 {
+		t.Fatalf("ghost tombstone: applied %d hwm %d, want 1/3", len(applied), hwm)
+	}
+	if s.NextOffset("metrics") != 4 {
+		t.Fatalf("next offset = %d, want 4", s.NextOffset("metrics"))
+	}
+	if got, want := s.StreamBytes("metrics"), sumRecordBytes(t, s, "metrics"); got != want {
+		t.Fatalf("StreamBytes = %d, want %d after tombstone applies", got, want)
+	}
+}

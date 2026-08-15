@@ -404,3 +404,137 @@ func TestIngestReplicatedLogsOffsetJumps(t *testing.T) {
 		}
 	})
 }
+
+// Retention design §7.1: an empty payload on a KV-projecting class is the
+// tombstone. The engine appends the record as history (correct class/stream,
+// validation's field checks bypassed by the §7 rule), deletes the KV key in the
+// same batch, and mirrors the empty payload retained — the retained-clear —
+// onto the bus. Exercised for both KV classes: data (client path, mount
+// rewrite) and entity (admin path, no rewrite).
+func TestEmptyPayloadTombstonesKVAndDeliversRetainedClear(t *testing.T) {
+	e, rec := newRecordingEngine(t)
+
+	// Data class through the client path.
+	if _, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", []byte(`{"v":7}`)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", nil)
+	if err != nil {
+		t.Fatalf("empty payload on _Metric must be accepted as a tombstone: %v", err)
+	}
+	if !res.Persisted || res.Stream != "metrics" || res.Offset != 2 {
+		t.Fatalf("tombstone result = %+v, want persisted metrics offset 2", res)
+	}
+	if got := e.Store().KVScan("m1/temp"); len(got) != 0 {
+		t.Fatalf("tombstone did not retire the KV key: %+v", got)
+	}
+	recs, _, _ := e.Store().Read("metrics", 1, 10, nil)
+	if len(recs) != 2 || len(recs[1].Payload) != 0 || recs[1].Topic != "colca/v1/_Metric/m1/m1/temp" {
+		t.Fatalf("tombstone record = %+v, want empty payload under the canonical topic", recs)
+	}
+
+	// Entity class through the admin path.
+	if _, err := e.IngestAdmin("colca/v1/_Signal/m1/m1/sig-a", []byte(`{"ulid":"sig-a"}`)); err != nil {
+		t.Fatal(err)
+	}
+	res, err = e.IngestAdmin("colca/v1/_Signal/m1/m1/sig-a", nil)
+	if err != nil {
+		t.Fatalf("empty payload on _Signal must be accepted as a tombstone: %v", err)
+	}
+	if res.Stream != "entities" {
+		t.Fatalf("entity tombstone stream = %q, want entities", res.Stream)
+	}
+	if got := e.Store().KVScan("m1/sig-a"); len(got) != 0 {
+		t.Fatalf("entity tombstone did not retire the KV key: %+v", got)
+	}
+
+	// Delivery: each tombstone is mirrored as an empty payload with retain=true
+	// — the MQTT retained-clear — under the stored topic.
+	got := rec.got()
+	if len(got) != 4 {
+		t.Fatalf("want 4 deliveries (2 sets + 2 clears), got %d: %+v", len(got), got)
+	}
+	if want := (delivery{Topic: "colca/v1/_Metric/m1/m1/temp", Payload: "", Retain: true}); got[1] != want {
+		t.Fatalf("metric clear delivery = %+v, want %+v", got[1], want)
+	}
+	if want := (delivery{Topic: "colca/v1/_Signal/m1/m1/sig-a", Payload: "", Retain: true}); got[3] != want {
+		t.Fatalf("entity clear delivery = %+v, want %+v", got[3], want)
+	}
+}
+
+// Retention design §7.3: for non-KV classes an empty payload was never a valid
+// value and deletion is not meaningful — commands and acks with empty payloads
+// are rejected, nothing is persisted, nothing reaches the bus.
+func TestEmptyPayloadRejectedForNonKVClasses(t *testing.T) {
+	e, rec := newRecordingEngine(t)
+	if _, err := e.IngestAdmin("colca/v1/_CmdParam/m1/m1/set-speed", nil); err == nil {
+		t.Fatal("empty _CmdParam payload must be rejected — commands cannot be tombstoned")
+	}
+	if _, err := e.IngestClient("m1", "colca/v1/_Ack/m1/set-speed", nil); err == nil {
+		t.Fatal("empty _Ack payload must be rejected — acks cannot be tombstoned")
+	}
+	if e.Store().NextOffset("commands") != 1 {
+		t.Fatal("rejected empty payloads must not be persisted")
+	}
+	if got := rec.got(); len(got) != 0 {
+		t.Fatalf("rejected empty payloads must deliver nothing, got %+v", got)
+	}
+}
+
+// The level-4 identity rule already gates tombstones: an empty payload is a
+// publish like any other, so a client cannot retire another node's path.
+func TestClientCannotTombstoneForeignPath(t *testing.T) {
+	e, rec := newRecordingEngine(t)
+	// A path owned by node OTHER, seeded as replicated state would be.
+	if _, _, err := e.Store().Append("metrics", []store.Record{
+		{Topic: "colca/v1/_Metric/OTHER/x/temp", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "x/temp", KVNode: "OTHER"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.IngestClient("m1", "colca/v1/_Metric/OTHER/x/temp", nil)
+	if err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("foreign tombstone must fail the identity rule, got: %v", err)
+	}
+	if got := e.Store().KVScan("x/temp"); len(got) != 1 {
+		t.Fatalf("foreign KV entry must survive the rejected tombstone: %+v", got)
+	}
+	if e.Store().NextOffset("metrics") != 2 {
+		t.Fatal("rejected tombstone must not be persisted")
+	}
+	if got := rec.got(); len(got) != 0 {
+		t.Fatalf("rejected tombstone must deliver nothing, got %+v", got)
+	}
+}
+
+// Retention design §7.1: the tombstone replicates upward like any record and
+// retires the path at the ancestor the same way — KV key deleted by
+// ApplyReplicated, retained message cleared by the empty-payload mirror.
+func TestIngestReplicatedTombstoneRetiresKVAndClearsRetained(t *testing.T) {
+	e, rec := newRecordingEngine(t)
+	set := []store.ReplRecord{{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/edge1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "edge1/m1/a", KVNode: "m1"}}
+	if _, _, err := e.IngestReplicated("n-edge1", "metrics", set); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.Store().KVScan("edge1/m1/a")) != 1 {
+		t.Fatal("setup: replicated KV entry missing")
+	}
+
+	tomb := []store.ReplRecord{{ChildOffset: 2, Topic: "colca/v1/_Metric/m1/edge1/m1/a", TS: 2, KVPath: "edge1/m1/a", KVNode: "m1", Delete: true}}
+	applied, hwm, err := e.IngestReplicated("n-edge1", "metrics", tomb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != 1 || hwm != 2 {
+		t.Fatalf("tombstone apply: %d/%d, want 1/2", applied, hwm)
+	}
+	if got := e.Store().KVScan("edge1/m1/a"); len(got) != 0 {
+		t.Fatalf("replicated tombstone did not retire the parent KV: %+v", got)
+	}
+	got := rec.got()
+	if len(got) != 2 {
+		t.Fatalf("want 2 deliveries, got %d: %+v", len(got), got)
+	}
+	if want := (delivery{Topic: "colca/v1/_Metric/m1/edge1/m1/a", Payload: "", Retain: true}); got[1] != want {
+		t.Fatalf("parent clear delivery = %+v, want %+v (empty payload, retained)", got[1], want)
+	}
+}

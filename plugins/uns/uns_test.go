@@ -156,3 +156,23 @@ func TestValidate(t *testing.T) {
 		}
 	}
 }
+
+// Retention design §7.1/§7.3: the empty payload is the tombstone and it is
+// valid EXACTLY for the KV-projecting state classes (data/entity) — there it
+// retires the path. For events (commands, acks, gap markers) and unknown
+// contracts deletion is not meaningful and the empty payload stays rejected.
+func TestValidateEmptyPayloadTombstoneRule(t *testing.T) {
+	for _, contract := range []string{"_Metric", "_EdgeNode", "_SystemElement", "_Signal"} {
+		if err := Validate(contract, nil); err != nil {
+			t.Errorf("empty payload on KV-projecting %s must validate (tombstone): %v", contract, err)
+		}
+		if err := Validate(contract, []byte{}); err != nil {
+			t.Errorf("zero-length payload on KV-projecting %s must validate (tombstone): %v", contract, err)
+		}
+	}
+	for _, contract := range []string{"_CmdParam", "_Ack", "_StreamGap", "_Unknown"} {
+		if err := Validate(contract, nil); err == nil {
+			t.Errorf("empty payload on %s must be rejected — deletion is not meaningful for events", contract)
+		}
+	}
+}

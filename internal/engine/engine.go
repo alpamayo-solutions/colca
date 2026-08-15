@@ -238,6 +238,12 @@ func (e *Engine) persistTS(class uns.Class, p uns.Parsed, topic string, payload 
 	rec := store.Record{Topic: topic, Payload: payload, TS: ts}
 	if class == uns.ClassData || class == uns.ClassEntity {
 		rec.KVPath, rec.KVNode = p.Path, p.NodeID
+		// Empty payload on a KV-projecting class is the tombstone (retention
+		// design §7.1): the record is appended as history, the KV key is
+		// DELETED in the same batch, and the delivery below — retain=true with
+		// the empty payload — makes mochi clear the retained message per the
+		// MQTT spec. Retained set ≡ KV stays one contract.
+		rec.Delete = len(payload) == 0
 	}
 	first, _, err := e.store.Append(streamName, []store.Record{rec})
 	if err != nil {

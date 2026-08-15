@@ -605,3 +605,250 @@ func TestRetentionPrunerRunsInNodeLifecycleAndRestartsSafely(t *testing.T) {
 	}
 	n2.Stop()
 }
+
+// Retention design §7.1 "symmetry with the reseed": a tombstoned path has no KV
+// key, so the restart reseed replays nothing for it — with ZERO reseed changes.
+// The inverse of TestRestartRepopulatesRetainedFromKV: after tombstone +
+// restart, a fresh subscriber gets the surviving path's retained value but the
+// retired path stays gone, and the KV view agrees.
+func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
+	base := t.TempDir()
+	keyFile := filepath.Join(base, "n1.key")
+	genKey(t, keyFile)
+
+	cfg := &config.Config{
+		ULID:     "n1",
+		DataDir:  filepath.Join(base, "data"),
+		LogLevel: "debug",
+		KeyFile:  keyFile,
+		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
+		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
+		Clients: []config.Client{
+			{ULID: "m1", Token: "m1-secret", Mount: "m1"},
+			{ULID: "obs", Token: "obs-secret"}, // no mount → read-only observer
+		},
+	}
+
+	first := mustStart(t, cfg)
+	m1 := connectMQTT(t, first.MQTTAddr, "m1-tomb", "m1", "m1-secret")
+	publishMQTT(t, m1, "colca/v1/_Metric/m1/pressure", `{"v":7}`)
+	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", `{"v":1}`)
+	// The tombstone: empty payload on the pressure path. PUBACK ⇒ persisted.
+	publishMQTT(t, m1, "colca/v1/_Metric/m1/pressure", "")
+	if got := first.Store.KVScan("m1/pressure"); len(got) != 0 {
+		t.Fatalf("KV key survived the tombstone before restart: %+v", got)
+	}
+	m1.Disconnect(100)
+	first.Stop()
+
+	second, err := Start(cfg)
+	if err != nil {
+		t.Fatalf("restart on the same data dir: %v", err)
+	}
+	t.Cleanup(second.Stop)
+
+	// The stream still carries the full history (2 sets + 1 tombstone)…
+	if got := nextOffset(t, second, "metrics"); got != 4 {
+		t.Errorf("metrics next_offset after restart = %v, want 4 (tombstone is history)", got)
+	}
+	// …but the KV view has retired the path, and so must the retained set.
+	if got := second.Store.KVScan("m1/pressure"); len(got) != 0 {
+		t.Fatalf("tombstoned KV key resurrected across restart: %+v", got)
+	}
+
+	type received struct {
+		topic, payload string
+		retained       bool
+	}
+	msgs := make(chan received, 64)
+	obs := connectMQTT(t, second.MQTTAddr, "obs-tomb", "obs", "obs-secret")
+	stok := obs.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
+		msgs <- received{topic: m.Topic(), payload: string(m.Payload()), retained: m.Retained()}
+	})
+	if !stok.WaitTimeout(5 * time.Second) {
+		t.Fatal("mqtt subscribe colca/#: timed out")
+	}
+	if err := stok.Error(); err != nil {
+		t.Fatalf("mqtt subscribe colca/#: %v", err)
+	}
+
+	// The surviving path must replay retained; the retired path must never
+	// arrive. The temp arrival proves the reseed ran, so the 500ms grace after
+	// it is a real absence check, not a vacuous timeout.
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case m := <-msgs:
+			if m.topic == "colca/v1/_Metric/m1/m1/pressure" {
+				t.Fatalf("tombstoned path resurrected via reseed: %+v", m)
+			}
+			if m.topic == "colca/v1/_Metric/m1/m1/temp" {
+				if !m.retained || !strings.Contains(m.payload, `"v":1`) {
+					t.Fatalf("surviving path = %+v, want retained {\"v\":1}", m)
+				}
+				goto graceDrain
+			}
+		case <-deadline:
+			t.Fatal("surviving path never replayed retained — the reseed did not run")
+		}
+	}
+graceDrain:
+	grace := time.NewTimer(500 * time.Millisecond)
+	for {
+		select {
+		case m := <-msgs:
+			if m.topic == "colca/v1/_Metric/m1/m1/pressure" {
+				t.Fatalf("tombstoned path resurrected via reseed: %+v", m)
+			}
+		case <-grace.C:
+			return
+		}
+	}
+}
+
+// Retention design §7.1 step 1: the tombstone record replicates upward like any
+// record, and the parent's ApplyReplicated retires the path the same way — KV
+// key deleted, retained message cleared. Full black-box fixture: child broker →
+// child store → uplink → parent mount-insert → parent KV + parent bus.
+func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
+	base := t.TempDir()
+	parentKey := filepath.Join(base, "parent.key")
+	childKey := filepath.Join(base, "child.key")
+	parentID := genKey(t, parentKey)
+	childID := genKey(t, childKey)
+
+	parentCfg := &config.Config{
+		ULID:     "n-parent",
+		DataDir:  filepath.Join(base, "parent-data"),
+		LogLevel: "debug",
+		KeyFile:  parentKey,
+		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
+		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
+		Repl:     config.Endpoint{Addr: "127.0.0.1:0"},
+		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}},
+		Clients:  []config.Client{{ULID: "obs", Token: "obs-secret"}}, // observer on the parent bus
+	}
+	parent := mustStart(t, parentCfg)
+
+	childCfg := &config.Config{
+		ULID:     "n-child",
+		DataDir:  filepath.Join(base, "child-data"),
+		LogLevel: "debug",
+		KeyFile:  childKey,
+		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
+		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
+		Parent:   &config.Parent{URL: "https://" + parent.ReplAddr, Pubkey: parentID.PublicHex()},
+		Clients:  []config.Client{{ULID: "m1", Token: "m1-secret", Mount: "m1"}},
+	}
+	child := mustStart(t, childCfg)
+
+	m1 := connectMQTT(t, child.MQTTAddr, "m1-up", "m1", "m1-secret")
+	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", `{"v":42}`)
+	publishMQTT(t, m1, "colca/v1/_Metric/m1/keep", `{"v":1}`)
+
+	// waitParentKV polls the parent KV until prefix holds want entries.
+	waitParentKV := func(prefix string, want int, why string) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			code, out := apiCall(t, parent, http.MethodGet, "/kv?prefix="+prefix, nil)
+			if code != http.StatusOK {
+				t.Fatalf("parent GET /kv: status %d: %v", code, out)
+			}
+			entries, _ := out["entries"].([]any)
+			if len(entries) == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: parent KV %q has %d entries, want %d", why, prefix, len(entries), want)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	waitParentKV("child1/m1/temp", 1, "setup: metric never replicated up")
+	waitParentKV("child1/m1/keep", 1, "setup: sibling never replicated up")
+
+	// A live observer on the PARENT bus, subscribed before the tombstone: its
+	// receipt of the empty-payload clear is the synchronization point — mochi
+	// updates its retained store before delivering to subscribers, so once the
+	// clear arrives the fresh-subscriber absence check below cannot race the
+	// parent's KV-apply → bus-mirror window.
+	type received struct {
+		topic    string
+		payload  string
+		retained bool
+	}
+	liveMsgs := make(chan received, 64)
+	live := connectMQTT(t, parent.MQTTAddr, "obs-parent-live", "obs", "obs-secret")
+	ltok := live.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
+		liveMsgs <- received{topic: m.Topic(), payload: string(m.Payload()), retained: m.Retained()}
+	})
+	if !ltok.WaitTimeout(5 * time.Second) {
+		t.Fatal("parent live subscribe: timed out")
+	}
+	if err := ltok.Error(); err != nil {
+		t.Fatalf("parent live subscribe: %v", err)
+	}
+
+	// The tombstone at the child: empty payload through the normal publish path.
+	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", "")
+
+	// It replicates upward and retires the parent's KV copy…
+	waitParentKV("child1/m1/temp", 0, "tombstone did not retire the parent KV")
+	// …while the sibling path survives untouched.
+	waitParentKV("child1/m1/keep", 1, "sibling was wrongly retired")
+
+	// …and the live observer sees the empty-payload clear on the parent bus.
+	clearDeadline := time.After(15 * time.Second)
+	for {
+		var m received
+		select {
+		case m = <-liveMsgs:
+		case <-clearDeadline:
+			t.Fatal("empty-payload clear never arrived on the parent bus")
+		}
+		if m.topic == "colca/v1/_Metric/m1/child1/m1/temp" && m.payload == "" {
+			break
+		}
+	}
+
+	// The parent's retained set agrees: a fresh subscriber on the parent bus
+	// gets the sibling's retained value but nothing for the retired path.
+	msgs := make(chan received, 64)
+	obs := connectMQTT(t, parent.MQTTAddr, "obs-parent", "obs", "obs-secret")
+	stok := obs.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
+		msgs <- received{topic: m.Topic(), retained: m.Retained()}
+	})
+	if !stok.WaitTimeout(5 * time.Second) {
+		t.Fatal("parent mqtt subscribe: timed out")
+	}
+	if err := stok.Error(); err != nil {
+		t.Fatalf("parent mqtt subscribe: %v", err)
+	}
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case m := <-msgs:
+			if m.topic == "colca/v1/_Metric/m1/child1/m1/temp" && m.retained {
+				t.Fatalf("retired path still retained on the parent bus: %+v", m)
+			}
+			if m.topic == "colca/v1/_Metric/m1/child1/m1/keep" && m.retained {
+				goto graceDrain
+			}
+		case <-deadline:
+			t.Fatal("sibling's retained value never arrived on the parent bus")
+		}
+	}
+graceDrain:
+	grace := time.NewTimer(500 * time.Millisecond)
+	for {
+		select {
+		case m := <-msgs:
+			if m.topic == "colca/v1/_Metric/m1/child1/m1/temp" && m.retained {
+				t.Fatalf("retired path still retained on the parent bus: %+v", m)
+			}
+		case <-grace.C:
+			return
+		}
+	}
+}
