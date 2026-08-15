@@ -23,6 +23,14 @@ func hwmKey(child, stream string) []byte { return []byte("h\x00" + child + "\x00
 func lwmKey(stream string) []byte        { return []byte("l\x00" + stream) }
 func bytesKey(stream string) []byte      { return []byte("b\x00" + stream) }
 
+// rpKey holds a stream's pending state-refresh range (spec §6.5 [delta]): two
+// big-endian uint64s [From, To) over KV-projection Offsets, written in the
+// prune batch when a run overrides cursors on an entities stream, cleared
+// only after every refresh append succeeded. Its survival across a crash is
+// what keeps the §6.4 marker from claiming a completeness the lost refresh
+// never delivered.
+func rpKey(stream string) []byte { return []byte("rp\x00" + stream) }
+
 func journalKey(stream string, first uint64) []byte {
 	return append([]byte("j\x00"+stream+"\x00"), be64(first)...)
 }

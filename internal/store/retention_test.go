@@ -61,7 +61,11 @@ func TestPruneDeletesExactlyThePrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pruned, err := s.Prune("metrics", 4, nil)
+	// "hub" sits at 2, inside the doomed range: the in-batch cursor recheck
+	// (spec §5.2 [delta]) would clamp the prune there, so this test — whose
+	// subject is the prefix-deletion mechanics, not the floor — explicitly
+	// overrides it.
+	pruned, err := s.Prune("metrics", 4, []string{"hub"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,19 +134,19 @@ func TestPruneNoopAndErrorEdges(t *testing.T) {
 	s := mustOpen(t)
 	appendMetrics(t, s, 5, 100)
 
-	if _, err := s.Prune("nope", 2, nil); err == nil {
+	if _, err := s.Prune("nope", 2, nil, nil); err == nil {
 		t.Fatal("unknown stream must error")
 	}
-	if _, err := s.Prune("metrics", 7, nil); err == nil {
+	if _, err := s.Prune("metrics", 7, nil, nil); err == nil {
 		t.Fatal("pruning beyond NextOffset must error")
 	}
-	if pruned, err := s.Prune("metrics", 1, nil); pruned != 0 || err != nil {
+	if pruned, err := s.Prune("metrics", 1, nil, nil); pruned != 0 || err != nil {
 		t.Fatalf("upTo == LWM must be a no-op, got %d %v", pruned, err)
 	}
-	if pruned, err := s.Prune("metrics", 3, nil); pruned != 2 || err != nil {
+	if pruned, err := s.Prune("metrics", 3, nil, nil); pruned != 2 || err != nil {
 		t.Fatalf("prune to 3: %d %v", pruned, err)
 	}
-	if pruned, err := s.Prune("metrics", 2, nil); pruned != 0 || err != nil {
+	if pruned, err := s.Prune("metrics", 2, nil, nil); pruned != 0 || err != nil {
 		t.Fatalf("upTo below LWM must be a no-op, got %d %v", pruned, err)
 	}
 	// no-op runs write no journal entries
@@ -152,7 +156,7 @@ func TestPruneNoopAndErrorEdges(t *testing.T) {
 
 	// Pruning everything (upTo == NextOffset) empties the stream but keeps
 	// the offset sequence: the next append continues where it left off.
-	if pruned, err := s.Prune("metrics", 6, nil); pruned != 3 || err != nil {
+	if pruned, err := s.Prune("metrics", 6, nil, nil); pruned != 3 || err != nil {
 		t.Fatalf("prune all: %d %v", pruned, err)
 	}
 	if got, _, err := s.Read("metrics", 1, 100, nil); err != nil || len(got) != 0 {
@@ -172,7 +176,7 @@ func TestRetentionStateSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	appendMetrics(t, s, 8, 100)
-	if _, err := s.Prune("metrics", 5, nil); err != nil {
+	if _, err := s.Prune("metrics", 5, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	wantLWM, wantBytes, wantJournal := s.LWM("metrics"), s.StreamBytes("metrics"), s.PruneJournal("metrics")
@@ -275,7 +279,7 @@ func TestStreamBytesAccounting(t *testing.T) {
 	}
 
 	// Prune decrements by exactly the pruned records' cost.
-	if _, err := s.Prune("metrics", 3, nil); err != nil {
+	if _, err := s.Prune("metrics", 3, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	want -= recCost(t, "metrics", 1, recs[0].Topic, recs[0].Payload, recs[0].TS)
@@ -302,9 +306,18 @@ func TestPruneAppendsGapRecords(t *testing.T) {
 		KVPath:  "gap/metrics", KVNode: "n1",
 	}
 	bytesBefore := s.StreamBytes("metrics")
-	pruned, err := s.Prune("metrics", 4, []Record{gap})
+	var gotSpan PruneSpan
+	pruned, err := s.Prune("metrics", 4, nil, func(span PruneSpan) PruneOutcome {
+		gotSpan = span
+		return PruneOutcome{GapRecords: []Record{gap}}
+	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The plan callback receives the effective span — the same values the
+	// journal entry records (single source of truth for marker spans).
+	if gotSpan.From != 1 || gotSpan.To != 3 || gotSpan.FirstTS != 100 || gotSpan.LastTS != 102 {
+		t.Fatalf("plan span = %+v, want [1..3] ts [100..102]", gotSpan)
 	}
 	if pruned != 3 {
 		t.Fatalf("pruned = %d, want 3 (gap records are appended, not pruned)", pruned)
@@ -356,7 +369,7 @@ func TestPruneJournalCoalescesAtCap(t *testing.T) {
 	const runs = journalCap + 6
 	appendMetrics(t, s, runs, 100) // ts of offset o = 100 + (o-1)
 	for i := 1; i <= runs; i++ {
-		if pruned, err := s.Prune("metrics", uint64(i+1), nil); pruned != 1 || err != nil {
+		if pruned, err := s.Prune("metrics", uint64(i+1), nil, nil); pruned != 1 || err != nil {
 			t.Fatalf("run %d: pruned=%d err=%v", i, pruned, err)
 		}
 	}
@@ -415,13 +428,13 @@ func TestPruneConcurrentWithAppendStaysConsistent(t *testing.T) {
 		case <-done:
 			goto drained
 		default:
-			if _, err := s.Prune("metrics", s.NextOffset("metrics"), nil); err != nil {
+			if _, err := s.Prune("metrics", s.NextOffset("metrics"), nil, nil); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
 drained:
-	if _, err := s.Prune("metrics", s.NextOffset("metrics")-1, nil); err != nil {
+	if _, err := s.Prune("metrics", s.NextOffset("metrics")-1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -580,5 +593,115 @@ func TestScanRecordsBoundsAndSizes(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("early exit ignored: fn called %d times, want 1", calls)
+	}
+}
+
+// Spec §5.2 [delta]: Prune recomputes the protected-cursor floor UNDER the
+// mutex, inside the commit path. A caller working from a stale snapshot (the
+// TOCTOU window between policy evaluation and commit) can therefore never
+// prune past a cursor it did not explicitly override — and the journal and
+// plan span shrink with it, one source of truth.
+func TestPruneRechecksCursorFloorInBatch(t *testing.T) {
+	s := mustOpen(t)
+	appendMetrics(t, s, 10, 100)
+	if !s.CursorAck("late", "metrics", 4) {
+		t.Fatal("ack must move")
+	}
+
+	// The caller asks for 8 (its stale snapshot knew no cursor); the floor
+	// shrinks it to 4.
+	var gotSpan PruneSpan
+	pruned, err := s.Prune("metrics", 8, nil, func(span PruneSpan) PruneOutcome {
+		gotSpan = span
+		return PruneOutcome{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != 3 || s.LWM("metrics") != 4 {
+		t.Fatalf("pruned/LWM = %d/%d, want 3/4: the in-batch recheck must clamp at the cursor", pruned, s.LWM("metrics"))
+	}
+	if gotSpan.To != 3 || gotSpan.FirstTS != 100 || gotSpan.LastTS != 102 {
+		t.Fatalf("plan span = %+v, want the SHRUNK range [1..3] ts [100..102]", gotSpan)
+	}
+	if j := s.PruneJournal("metrics"); j[len(j)-1].To != 3 {
+		t.Fatalf("journal records the requested, not the effective, range: %+v", j)
+	}
+
+	// Explicitly overridden, the same cursor no longer clamps.
+	if pruned, err := s.Prune("metrics", 8, []string{"late"}, nil); err != nil || pruned != 4 {
+		t.Fatalf("overridden prune = %d, %v, want 4 records", pruned, err)
+	}
+
+	// A floor at (or below) the LWM makes the prune a no-op: no batch, no
+	// journal entry, no records removed.
+	if !s.CursorAck("late", "metrics", 8) {
+		t.Fatal("ack must move")
+	}
+	before := len(s.PruneJournal("metrics"))
+	if pruned, err := s.Prune("metrics", 10, nil, nil); err != nil || pruned != 0 {
+		t.Fatalf("shrunk-to-noop prune = %d, %v, want 0, nil", pruned, err)
+	}
+	if got := s.LWM("metrics"); got != 8 {
+		t.Fatalf("LWM = %d, want unchanged 8", got)
+	}
+	if got := len(s.PruneJournal("metrics")); got != before {
+		t.Fatalf("no-op prune wrote a journal entry: %d -> %d", before, got)
+	}
+}
+
+// Spec §6.5 [delta]: the pending-refresh range rides the prune batch, unions
+// with an existing obligation, survives restart, clears explicitly, and a
+// corrupt value fails Open loudly.
+func TestRefreshPendingRidesBatchUnionsAndClears(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendMetrics(t, s, 10, 100)
+	if _, ok := s.RefreshPending("metrics"); ok {
+		t.Fatal("fresh store must have no pending refresh")
+	}
+	if _, err := s.Prune("metrics", 3, nil, func(span PruneSpan) PruneOutcome {
+		return PruneOutcome{Refresh: &RefreshRange{From: 3, To: 5}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r, ok := s.RefreshPending("metrics"); !ok || r != (RefreshRange{From: 3, To: 5}) {
+		t.Fatalf("pending = %+v/%v, want [3,5)", r, ok)
+	}
+	// A second overriding prune before completion unions the obligation.
+	if _, err := s.Prune("metrics", 6, nil, func(span PruneSpan) PruneOutcome {
+		return PruneOutcome{Refresh: &RefreshRange{From: 4, To: 9}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r, ok := s.RefreshPending("metrics"); !ok || r != (RefreshRange{From: 3, To: 9}) {
+		t.Fatalf("pending after union = %+v/%v, want [3,9)", r, ok)
+	}
+	// Survives restart — that is the whole point of persisting it.
+	s.Close()
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, ok := s.RefreshPending("metrics"); !ok || r != (RefreshRange{From: 3, To: 9}) {
+		t.Fatalf("pending after reopen = %+v/%v, want [3,9)", r, ok)
+	}
+	if err := s.ClearRefreshPending("metrics"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.RefreshPending("metrics"); ok {
+		t.Fatal("pending survived ClearRefreshPending")
+	}
+	// Corrupt rp/ fails Open loudly — silently reading "nothing pending"
+	// would drop a crash-persisted obligation.
+	if err := s.db.Set(rpKey("metrics"), []byte("bogus"), pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if _, err := Open(dir); err == nil || !strings.Contains(err.Error(), "corrupt pending refresh") {
+		t.Fatalf("corrupt rp/ must fail Open, got %v", err)
 	}
 }

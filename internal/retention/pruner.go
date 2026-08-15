@@ -37,6 +37,14 @@ type Pruner struct {
 	ulid string
 	log  *slog.Logger
 	now  func() time.Time // injectable clock for tests; defaults to time.Now
+	// publish is the §6.5 refresh append path, defaulting to
+	// engine.IngestAdmin — a seam so tests can fail individual appends
+	// deterministically.
+	publish func(topic string, payload []byte) error
+	// beforePrune, when set (tests only), runs between the policy evaluation
+	// and the Prune call — the exact window the store's in-batch cursor
+	// recheck (spec §5.2 [delta]) exists to close.
+	beforePrune func(stream string)
 }
 
 // NewPruner builds a pruner. ulid is the node's own ULID — it becomes level 4
@@ -47,6 +55,10 @@ func NewPruner(st *store.Store, eng *engine.Engine, cfg config.Retention, m *met
 		st: st, eng: eng, cfg: cfg, m: m, ulid: ulid,
 		log: slog.Default().With("node", ulid, "comp", "retention"),
 		now: time.Now,
+		publish: func(topic string, payload []byte) error {
+			_, err := eng.IngestAdmin(topic, payload)
+			return err
+		},
 	}
 }
 
@@ -57,12 +69,17 @@ func NewPruner(st *store.Store, eng *engine.Engine, cfg config.Retention, m *met
 // A cycle in progress always completes before Run returns; the caller's
 // WaitGroup discipline (node.Stop waits before closing the store) is what
 // makes that sufficient.
+//
+// Before the first cycle, Run completes any state-refresh obligation a
+// previous process persisted but did not finish (spec §6.5 [delta] — the
+// rp/ key survives a crash between the prune batch and the refresh).
 func (p *Pruner) Run(stop <-chan struct{}) {
 	interval := p.cfg.EffectiveInterval()
 	if interval <= 0 {
 		p.log.Info("retention pruner disabled (interval 0)")
 		return
 	}
+	p.completePendingRefresh()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -75,9 +92,12 @@ func (p *Pruner) Run(stop <-chan struct{}) {
 	}
 }
 
-// runOnce is one full cycle: one policy evaluation and at most one Prune per
-// stream. Per-stream failures are logged and never abort the other streams.
+// runOnce is one full cycle: any pending refresh first (crash recovery and
+// retry of previously failed appends), then one policy evaluation and at
+// most one Prune per stream. Per-stream failures are logged and never abort
+// the other streams.
 func (p *Pruner) runOnce() {
+	p.completePendingRefresh()
 	for _, stream := range streams {
 		p.pruneStream(stream)
 	}
@@ -161,8 +181,6 @@ func (p *Pruner) pruneStream(stream string) {
 	cutoff := nowMS - maxAge.Milliseconds()
 	newLWM := lwm
 	var shed uint64
-	var firstTS, lastTS int64
-	var pruned uint64
 	clamped := false
 	scanErr := p.st.ScanRecords(stream, lwm, next, func(off uint64, ts int64, size uint64) bool {
 		ageWants := maxAge > 0 && ts < cutoff
@@ -174,14 +192,7 @@ func (p *Pruner) pruneStream(stream string) {
 			clamped = true // policy wants more, a live cursor forbids it
 			return false
 		}
-		if pruned == 0 || ts < firstTS {
-			firstTS = ts
-		}
-		if pruned == 0 || ts > lastTS {
-			lastTS = ts
-		}
 		shed += size
-		pruned++
 		newLWM = off + 1
 		return true
 	})
@@ -198,103 +209,170 @@ func (p *Pruner) pruneStream(stream string) {
 	}
 
 	// §6.4 — one durable _StreamGap marker per overridden prune run.
-	// "Overridden" = a stale cursor the range [lwm, newLWM) is being pruned
-	// past: its position is below the new LWM, so records it had not read
-	// are now gone. The marker describes THIS run's pruned span [lwm,
-	// newLWM-1] and its time span — the same numbers as the run's journal
-	// entry; spans destroyed by earlier runs were covered by earlier markers.
-	var overridden []overriddenCursor
+	// "Overridden" = a stale cursor the pruned range is being pruned past:
+	// its position is below the new LWM, so records it had not read are now
+	// gone. The marker describes THIS run's pruned span and its time span —
+	// the same numbers as the run's journal entry; spans destroyed by
+	// earlier runs were covered by earlier markers.
+	//
+	// The store's in-batch cursor recheck (spec §5.2 [delta]) may SHRINK the
+	// range below newLWM if a live cursor was acked concurrently, so the
+	// marker and the refresh range are built inside the plan callback from
+	// the EFFECTIVE span the store hands it — one source of truth for the
+	// span, shared with the journal entry. Candidates whose position falls
+	// outside the effective span are no longer overridden and drop out.
+	var candidates []overriddenCursor
 	for _, c := range stale {
 		if c.pos < newLWM {
-			overridden = append(overridden, c)
+			candidates = append(candidates, c)
 		}
 	}
-	var gapRecords []store.Record
-	if len(overridden) > 0 {
-		names := make([]string, len(overridden))
-		for i, c := range overridden {
-			names[i] = c.name
-			p.log.Error("retention staleness override: pruning past a stale cursor (spec §5.2) — the consumer will see a gap",
-				"stream", stream, "cursor", c.name, "position", c.pos,
-				"stale_for", c.staleFor, "window", window, "new_lwm", newLWM)
+	names := make([]string, len(candidates))
+	for i, c := range candidates {
+		names[i] = c.name
+	}
+	var applied []overriddenCursor // set by plan; valid only when Prune committed
+	plan := func(span store.PruneSpan) store.PruneOutcome {
+		var eff []overriddenCursor
+		minPos := uint64(0)
+		for _, c := range candidates {
+			if c.pos <= span.To {
+				eff = append(eff, c)
+				if minPos == 0 || c.pos < minPos {
+					minPos = c.pos
+				}
+			}
+		}
+		applied = eff
+		if len(eff) == 0 {
+			return store.PruneOutcome{}
+		}
+		effNames := make([]string, len(eff))
+		for i, c := range eff {
+			effNames[i] = c.name
 		}
 		payload, err := json.Marshal(gapPayload{
 			Stream:            stream,
-			FromOffset:        lwm,
-			ToOffset:          newLWM - 1,
-			FirstTS:           firstTS,
-			LastTS:            lastTS,
-			OverriddenCursors: names,
+			FromOffset:        span.From,
+			ToOffset:          span.To,
+			FirstTS:           span.FirstTS,
+			LastTS:            span.LastTS,
+			OverriddenCursors: effNames,
 		})
 		if err != nil {
-			p.log.Error("retention gap marker encode failed — skipping prune to stay honest", "stream", stream, "err", err)
-			return
+			// Unreachable for this struct; if it ever fires, prune without a
+			// marker rather than deadlock the policy, and say so loudly.
+			p.log.Error("retention gap marker encode failed — pruning WITHOUT a marker", "stream", stream, "err", err)
+			applied = nil
+			return store.PruneOutcome{}
 		}
 		// ClassGap: an event, no KV projection (KVPath empty), not retained.
 		// Appended in the prune batch itself, post-LWM, so it survives its
 		// own prune run (§6.4).
-		gapRecords = append(gapRecords, store.Record{
+		out := store.PruneOutcome{GapRecords: []store.Record{{
 			Topic:   "colca/v1/_StreamGap/" + p.ulid + "/" + stream,
 			Payload: payload,
 			TS:      nowMS,
-		})
+		}}}
+		if stream == "entities" {
+			// §6.5 [delta]: the refresh obligation rides the prune batch as
+			// rp/{stream} — a crash between batch and refresh leaves it owed,
+			// not lost.
+			out.Refresh = &store.RefreshRange{From: minPos, To: span.To + 1}
+		}
+		return out
 	}
 
-	// §4.1 step 3 — one atomic synced batch inside the store.
-	removed, err := p.st.Prune(stream, newLWM, gapRecords)
+	if p.beforePrune != nil {
+		p.beforePrune(stream)
+	}
+	// §4.1 step 3 — one atomic synced batch inside the store (which also
+	// runs the §5.2 in-batch cursor recheck against `names`).
+	removed, err := p.st.Prune(stream, newLWM, names, plan)
 	if err != nil {
 		p.log.Error("prune failed", "stream", stream, "up_to", newLWM, "err", err)
 		return
 	}
-	p.log.Info("pruned", "stream", stream, "records", removed, "bytes", shed,
-		"lwm", newLWM, "overridden_cursors", len(overridden))
+	if removed == 0 {
+		return // shrunk to a no-op by the in-batch recheck: nothing was deleted
+	}
+	for _, c := range applied {
+		p.log.Error("retention staleness override: pruned past a stale cursor (spec §5.2) — the consumer will see a gap",
+			"stream", stream, "cursor", c.name, "position", c.pos,
+			"stale_for", c.staleFor, "window", window)
+	}
+	p.log.Info("pruned", "stream", stream, "records", removed,
+		"lwm", lwm+removed, "overridden_cursors", len(applied))
 
 	// §6.5 — entities state refresh, AFTER the prune batch (and therefore
-	// after the marker) committed: gap-then-state, in offsets. Only for
-	// entities — metrics self-heal at their own cadence (re-presenting a
-	// dead signal's pre-outage reading as fresh state is the wrong move) and
-	// commands have no current state at all.
-	if stream == "entities" && len(overridden) > 0 {
-		minPos := overridden[0].pos
-		for _, c := range overridden[1:] {
-			if c.pos < minPos {
-				minPos = c.pos
-			}
-		}
-		p.refreshEntities(minPos, newLWM)
+	// after the marker) committed: gap-then-state, in offsets. Executed via
+	// the persisted obligation so the crash window between batch and refresh
+	// is closed. Only entities carry one — metrics self-heal at their own
+	// cadence (re-presenting a dead signal's pre-outage reading as fresh
+	// state is the wrong move) and commands have no current state at all.
+	if stream == "entities" && len(applied) > 0 {
+		p.completePendingRefresh()
+	}
+}
+
+// completePendingRefresh executes the persisted entities refresh obligation,
+// if any (spec §6.5 [delta]). Runs at pruner startup (crash recovery), at
+// every cycle start (retry of previously failed appends) and immediately
+// after an overriding entities prune (the normal same-run path). The rp/ key
+// is cleared — its own synced write — only once EVERY affected append
+// succeeded; partial failure keeps the range pending and is retried next
+// cycle, with already-refreshed paths naturally dropping out because their KV
+// Offset now points past the range.
+func (p *Pruner) completePendingRefresh() {
+	r, ok := p.st.RefreshPending("entities")
+	if !ok {
+		return
+	}
+	if !p.refreshEntities(r.From, r.To) {
+		return // failures logged per path; the obligation stays pending
+	}
+	if err := p.st.ClearRefreshPending("entities"); err != nil {
+		p.log.Error("clearing completed refresh obligation failed (will re-run, refresh is idempotent)", "err", err)
 	}
 }
 
 // refreshEntities re-appends the current KV entry of every affected entity
 // path to the entities stream (design §6.5). Affected = entity-class KV
-// entries whose Offset ∈ [minPos, newLWM): produced by a record some
-// overridden consumer had not yet read and that is now gone. Entries below
-// minPos were already consumed; entries at or above newLWM still exist in the
-// stream and flow normally.
+// entries whose Offset ∈ [from, to): produced by a record some overridden
+// consumer had not yet read and that is now gone. Entries below the range
+// were already consumed; entries at or above it still exist in the stream and
+// flow normally. Returns whether every affected append succeeded.
 //
-// Each refresh goes through engine.IngestAdmin — the on-node service path
-// into the single delivery point (persistTS): original topic and payload in
-// local coordinates (no rewrite), contract validation, atomic append with a
-// new offset and new KV Offset, local bus mirror and retained republish for
-// free, and the uplink picks it up like any other entities record. The
-// record's timestamp is the refresh time, which is what keeps a refresh from
-// being age-pruned again immediately (a preserved original timestamp would
-// recreate the hole on the next cycle).
-func (p *Pruner) refreshEntities(minPos, newLWM uint64) {
-	refreshed := 0
+// Each refresh goes through the publish seam — engine.IngestAdmin, the
+// on-node service path into the single delivery point (persistTS): original
+// topic and payload in local coordinates (no rewrite), contract validation,
+// atomic append with a new offset and new KV Offset, local bus mirror and
+// retained republish for free, and the uplink picks it up like any other
+// entities record. The record's timestamp is the refresh time, which is what
+// keeps a refresh from being age-pruned again immediately (a preserved
+// original timestamp would recreate the hole on the next cycle). A payload
+// that fails re-validation (contract drift) logs ERROR each cycle and keeps
+// the range pending: bounded noise, honest, never silent.
+func (p *Pruner) refreshEntities(from, to uint64) bool {
+	refreshed, failed := 0, 0
 	for _, e := range p.st.KVScan("") {
-		if e.Offset < minPos || e.Offset >= newLWM {
+		if e.Offset < from || e.Offset >= to {
 			continue
 		}
 		parsed, err := uns.Parse(e.Topic)
 		if err != nil || uns.ClassOf(parsed.Contract) != uns.ClassEntity {
 			continue // metrics-class KV entries share the projection; only entities refresh (§6.5)
 		}
-		if _, err := p.eng.IngestAdmin(e.Topic, e.Payload); err != nil {
-			p.log.Error("entities state refresh append failed", "topic", e.Topic, "err", err)
+		if err := p.publish(e.Topic, e.Payload); err != nil {
+			p.log.Error("entities state refresh append failed (range stays pending, retried next cycle)", "topic", e.Topic, "err", err)
+			failed++
 			continue
 		}
 		refreshed++
 	}
-	p.log.Info("entities state refresh", "paths", refreshed, "offset_range_from", minPos, "offset_range_to", newLWM-1)
+	if refreshed > 0 || failed > 0 {
+		p.log.Info("entities state refresh", "paths", refreshed, "failed", failed,
+			"offset_range_from", from, "offset_range_to", to-1)
+	}
+	return failed == 0
 }

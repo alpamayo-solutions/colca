@@ -3,6 +3,7 @@ package retention
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -305,6 +306,10 @@ func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 	if next := st.NextOffset("metrics"); next != 4 {
 		t.Fatalf("metrics next = %d, want 4: an entities refresh must never re-append metric-class KV entries", next)
 	}
+	// The completed refresh cleared its persisted obligation.
+	if r, ok := st.RefreshPending("entities"); ok {
+		t.Fatalf("refresh obligation %+v not cleared after full success", r)
+	}
 }
 
 // Spec §6.5 exclusion: metrics are KV-projected too, but an overridden prune
@@ -340,6 +345,10 @@ func TestMetricsOverrideRefreshesNothing(t *testing.T) {
 		if e.Offset > 2 {
 			t.Fatalf("metric KV %s was re-appended (Offset %d) — §6.5 refreshes entities only", e.Path, e.Offset)
 		}
+	}
+	// A metrics override persists no refresh obligation at all.
+	if r, ok := st.RefreshPending("metrics"); ok {
+		t.Fatalf("metrics override persisted a refresh obligation %+v — §6.5 is entities-only", r)
 	}
 }
 
@@ -395,5 +404,156 @@ func TestRunPrunesOnCadenceAndStopsCleanly(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after stop")
+	}
+}
+
+// Spec §5.2 [delta]: a cursor whose FIRST ack lands in the TOCTOU window
+// between the pruner's policy evaluation and the Prune commit is never pruned
+// past — the store's in-batch recheck clamps the range, and the §6.4 marker is
+// rewritten to the effective span (one source of truth, shared with the
+// journal). Deterministic: the beforePrune hook injects the ack exactly into
+// the window.
+func TestConcurrentFirstAckNeverPrunedPast(t *testing.T) {
+	st, eng := mustParts(t)
+	old := time.Now().Add(-2 * time.Hour).UnixMilli()
+	appendAt(t, st, "metrics", 10, old, 1000)
+	if !st.CursorAck("lag", "metrics", 3) { // stale, will be overridden
+		t.Fatal("ack must move")
+	}
+	p := newPruner(t, st, eng, retFor("metrics", config.StreamRetention{
+		MaxAge:             config.Duration(time.Minute),
+		IgnoreCursorsAfter: config.Duration(time.Hour),
+	}))
+	p.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	p.beforePrune = func(stream string) {
+		// A consumer's first ack, racing the cycle: policy already decided to
+		// prune to 11.
+		if !st.CursorAck("sniper", "metrics", 5) {
+			t.Error("concurrent ack must move")
+		}
+	}
+	p.runOnce()
+
+	if got := st.LWM("metrics"); got != 5 {
+		t.Fatalf("LWM = %d, want 5: the concurrently acked cursor must clamp the prune", got)
+	}
+	recs := readAll(t, st, "metrics", 1)
+	// Offsets 5..10 survive, one marker at 11.
+	if len(recs) != 7 || recs[0].Offset != 5 {
+		t.Fatalf("survivors = %d records from %d, want 7 from 5", len(recs), recs[0].Offset)
+	}
+	marker := recs[6]
+	if marker.Topic != "colca/v1/_StreamGap/"+nodeULID+"/metrics" {
+		t.Fatalf("head record = %q, want the gap marker", marker.Topic)
+	}
+	var gp gapPayload
+	if err := json.Unmarshal(marker.Payload, &gp); err != nil {
+		t.Fatal(err)
+	}
+	// The marker describes the EFFECTIVE pruned span [1..4], not the
+	// requested [1..10] — same numbers as the journal entry.
+	if gp.FromOffset != 1 || gp.ToOffset != 4 {
+		t.Fatalf("marker span = [%d..%d], want the shrunk [1..4]", gp.FromOffset, gp.ToOffset)
+	}
+	if gp.FirstTS != old || gp.LastTS != old+3*1000 {
+		t.Fatalf("marker time span = [%d..%d], want [%d..%d]", gp.FirstTS, gp.LastTS, old, old+3000)
+	}
+	if len(gp.OverriddenCursors) != 1 || gp.OverriddenCursors[0] != "lag" {
+		t.Fatalf("overridden_cursors = %v, want [lag]", gp.OverriddenCursors)
+	}
+	j := st.PruneJournal("metrics")
+	if j[len(j)-1].To != 4 {
+		t.Fatalf("journal span %+v disagrees with the marker", j[len(j)-1])
+	}
+}
+
+// Spec §6.5 [delta]: the refresh obligation is persisted in the prune batch
+// (rp/), so a partial refresh failure — or a crash before the refresh — never
+// loses it: the range stays pending, is retried each cycle, and a NEW pruner
+// instance (process restart) completes it at startup. Already-refreshed paths
+// drop out naturally (their KV Offset moved past the range), so retries never
+// double-refresh.
+func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
+	st, eng := mustParts(t)
+	seed := func(topic, payload string) {
+		t.Helper()
+		if _, err := eng.IngestAdmin(topic, []byte(payload)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/a", `{"ulid":"A1"}`) // offset 1
+	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/b", `{"ulid":"B1"}`) // offset 2
+	seed("colca/v1/_Signal/"+nodeULID+"/line1/c", `{"ulid":"C1"}`)        // offset 3
+	if !st.CursorAck("uplink", "entities", 2) {                         // offsets 2..3 unread
+		t.Fatal("ack must move")
+	}
+	ret := retFor("entities", config.StreamRetention{
+		MaxAge:             config.Duration(time.Hour),
+		IgnoreCursorsAfter: config.Duration(30 * time.Minute),
+	})
+
+	// Cycle 1: override prunes [1..3]; the refresh append for line1/c fails.
+	pA := newPruner(t, st, eng, ret)
+	pA.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	realPublish := pA.publish
+	pA.publish = func(topic string, payload []byte) error {
+		if strings.HasSuffix(topic, "/line1/c") {
+			return fmt.Errorf("injected refresh failure")
+		}
+		return realPublish(topic, payload)
+	}
+	pA.runOnce()
+
+	if got := st.LWM("entities"); got != 4 {
+		t.Fatalf("LWM = %d, want 4", got)
+	}
+	r, ok := st.RefreshPending("entities")
+	if !ok || r != (store.RefreshRange{From: 2, To: 4}) {
+		t.Fatalf("pending after partial failure = %+v/%v, want [2,4) kept", r, ok)
+	}
+	// Marker at 4, successful refresh of line1/b at 5; line1/c still owed.
+	if next := st.NextOffset("entities"); next != 6 {
+		t.Fatalf("entities next = %d, want 6 (marker + one successful refresh)", next)
+	}
+
+	// "Restart": a NEW pruner instance on the same store, healthy publish
+	// path, completes the obligation at Run startup — before any tick.
+	pB := newPruner(t, st, eng, ret)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { pB.Run(stop); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := st.RefreshPending("entities"); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("restarted pruner never completed the pending refresh")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(stop)
+	<-done
+
+	// line1/c refreshed exactly once (offset 6); line1/b NOT re-refreshed.
+	recs := readAll(t, st, "entities", 4)
+	if len(recs) != 3 { // marker, b-refresh, c-refresh
+		t.Fatalf("head records = %d, want 3: %+v", len(recs), recs)
+	}
+	if got := recs[2].Topic; got != "colca/v1/_Signal/"+nodeULID+"/line1/c" {
+		t.Fatalf("retried refresh = %q, want line1/c", got)
+	}
+	if string(recs[2].Payload) != `{"ulid":"C1"}` {
+		t.Fatalf("retried refresh payload = %q", recs[2].Payload)
+	}
+	if next := st.NextOffset("entities"); next != 7 {
+		t.Fatalf("entities next = %d, want 7 — the retry must not double-refresh line1/b", next)
+	}
+
+	// rp/ absent → completion is a no-op: another cycle appends nothing.
+	pC := newPruner(t, st, eng, ret)
+	pC.runOnce()
+	if next := st.NextOffset("entities"); next != 7 {
+		t.Fatalf("no-op completion appended records: next = %d, want 7", next)
 	}
 }

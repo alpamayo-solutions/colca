@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -83,8 +84,35 @@ func Open(dir string) (*Store, error) {
 			db.Close()
 			return nil, err
 		}
+		// Same for the pending-refresh range: a corrupt rp/ silently read as
+		// "nothing pending" would drop a crash-persisted refresh obligation —
+		// exactly the loss the key exists to prevent.
+		if err := validateRefreshPending(db, stream); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return s, nil
+}
+
+// validateRefreshPending checks that rp/{stream}, if present, holds a sane
+// [From, To) range. Absent is fine (no refresh pending).
+func validateRefreshPending(db *pebble.DB, stream string) error {
+	v, closer, err := db.Get(rpKey(stream))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read pending refresh for stream %q: %w", stream, err)
+	}
+	defer closer.Close()
+	if len(v) != 16 {
+		return fmt.Errorf("corrupt pending refresh for stream %q: %d bytes", stream, len(v))
+	}
+	if from, to := binary.BigEndian.Uint64(v[:8]), binary.BigEndian.Uint64(v[8:]); from >= to {
+		return fmt.Errorf("corrupt pending refresh for stream %q: empty range [%d, %d)", stream, from, to)
+	}
+	return nil
 }
 
 // readCounter returns the 8-byte big-endian counter at key, or dflt when the
@@ -274,7 +302,13 @@ func (s *Store) CursorMarkSeen(name, stream string, ts int64) {
 	if s.readU64(ctKey(name, stream), 0) != 0 {
 		return
 	}
-	_ = s.db.Set(ctKey(name, stream), be64(uint64(ts)), pebble.Sync)
+	if err := s.db.Set(ctKey(name, stream), be64(uint64(ts)), pebble.Sync); err != nil {
+		// Non-fatal by design (the caller treats the cursor as fresh either
+		// way), but never silent: an unpersisted sighting rewinds the
+		// staleness clock on the next restart.
+		slog.Warn("store: persisting cursor first-sighting timestamp failed",
+			"cursor", name, "stream", stream, "err", err)
+	}
 }
 
 // HWMGet returns the highest child offset already applied for (child, stream),
@@ -545,18 +579,87 @@ func (s *Store) writeJournal(b *pebble.Batch, stream string, span PruneSpan) err
 	return setJournal(b, stream, span)
 }
 
+// pruneStats is the accounting of a doomed prefix: record count, shed logical
+// bytes and the time span, gathered by scanDoomed.
+type pruneStats struct {
+	pruned, shed    uint64
+	firstTS, lastTS int64
+}
+
+// scanDoomed accumulates the accounting stats of the prefix [from, upTo).
+func (s *Store) scanDoomed(stream string, from, upTo uint64) (pruneStats, error) {
+	var st pruneStats
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: streamKey(stream, from),
+		UpperBound: streamKey(stream, upTo),
+	})
+	if err != nil {
+		return st, err
+	}
+	for iter.First(); iter.Valid(); iter.Next() {
+		var e recEnc
+		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+			iter.Close()
+			return st, fmt.Errorf("decode record %q during prune: %w", iter.Key(), err)
+		}
+		if st.pruned == 0 || e.TS < st.firstTS {
+			st.firstTS = e.TS
+		}
+		if st.pruned == 0 || e.TS > st.lastTS {
+			st.lastTS = e.TS
+		}
+		st.shed += uint64(len(iter.Key()) + len(iter.Value()))
+		st.pruned++
+	}
+	if err := iter.Close(); err != nil {
+		return st, err
+	}
+	return st, nil
+}
+
+// RefreshRange is a pending entities state-refresh obligation (spec §6.5
+// [delta]): the KV-projection Offsets [From, To) whose current entries must be
+// re-appended. Persisted as rp/{stream} inside the prune batch and cleared
+// only after every refresh append succeeded, so a crash between the batch and
+// the refresh leaves the obligation on disk instead of losing it.
+type RefreshRange struct {
+	From, To uint64
+}
+
+// PruneOutcome is what a Prune plan callback contributes to the prune batch:
+// gap-marker records appended at the head (spec §6.4) and an optional pending
+// refresh range persisted as rp/{stream} (spec §6.5 [delta]).
+type PruneOutcome struct {
+	GapRecords []Record
+	Refresh    *RefreshRange
+}
+
 // Prune removes the contiguous prefix [LWM..upTo) of a stream in ONE atomic,
 // synced batch: a single range tombstone, the advanced l/{stream}, the
-// decremented b/{stream}, the journal entry, and any gapRecords appended at
-// the head (ordinary records with KV semantics — the durable gap markers of
-// spec §6.4 ride here so they survive their own prune run). Because it is one
-// batch there is no "crash between delete and LWM" state: after a crash the
-// stream is either fully pre-prune or fully post-prune (spec §4.2).
+// decremented b/{stream}, the journal entry, plus whatever the plan callback
+// contributes — gap markers appended at the head (spec §6.4, so they survive
+// their own prune run) and the pending refresh range (spec §6.5). Because it
+// is one batch there is no "crash between delete and LWM" state: after a
+// crash the stream is either fully pre-prune or fully post-prune (spec §4.2).
+//
+// In-batch cursor recheck (spec §5.2 [delta]): under the mutex — which
+// CursorAck also takes, so no ack can interleave before the commit — the
+// protected-cursor floor is recomputed and upTo shrinks to the position of
+// any cursor on the stream NOT named in overridden. This closes the
+// caller-snapshot race: a consumer whose first ack lands between the caller's
+// policy evaluation and this commit is structurally impossible to prune past.
+// If the shrink makes upTo <= LWM the prune is a no-op — no batch, no
+// journal, no marker.
+//
+// plan, if non-nil, is invoked exactly once per committing prune with the
+// EFFECTIVE span (post-shrink offsets and time span — the same values the
+// journal entry records), making it the single source of truth for marker
+// spans. It runs under the store mutex and must not call back into the store.
 //
 // upTo <= LWM is a no-op (0, nil). Unknown streams and upTo beyond the next
 // offset (pruning the future) are errors. KV projections, cursors and HWMs
 // are never touched. Returns the number of records removed.
-func (s *Store) Prune(stream string, upTo uint64, gapRecords []Record) (uint64, error) {
+func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func(span PruneSpan) PruneOutcome) (uint64, error) {
 	s.mu.Lock()
 	next, lwm := s.next[stream], s.lwm[stream]
 	s.mu.Unlock()
@@ -574,31 +677,8 @@ func (s *Store) Prune(stream string, upTo uint64, gapRecords []Record) (uint64, 
 	// (spec §4.1: the mutex is for the commit, never the scan): Append writes
 	// only at offsets >= next >= upTo, and the prefix can only shrink through
 	// Prune itself, which the LWM recheck below serializes.
-	var pruned, shed uint64
-	var firstTS, lastTS int64
-	iter, err := s.db.NewIter(&pebble.IterOptions{
-		LowerBound: streamKey(stream, lwm),
-		UpperBound: streamKey(stream, upTo),
-	})
+	stats, err := s.scanDoomed(stream, lwm, upTo)
 	if err != nil {
-		return 0, err
-	}
-	for iter.First(); iter.Valid(); iter.Next() {
-		var e recEnc
-		if err := json.Unmarshal(iter.Value(), &e); err != nil {
-			iter.Close()
-			return 0, fmt.Errorf("decode record %q during prune: %w", iter.Key(), err)
-		}
-		if pruned == 0 || e.TS < firstTS {
-			firstTS = e.TS
-		}
-		if pruned == 0 || e.TS > lastTS {
-			lastTS = e.TS
-		}
-		shed += uint64(len(iter.Key()) + len(iter.Value()))
-		pruned++
-	}
-	if err := iter.Close(); err != nil {
 		return 0, err
 	}
 
@@ -606,6 +686,38 @@ func (s *Store) Prune(stream string, upTo uint64, gapRecords []Record) (uint64, 
 	defer s.mu.Unlock()
 	if s.lwm[stream] != lwm {
 		return 0, fmt.Errorf("concurrent prune on stream %q", stream)
+	}
+	// The §5.2 in-batch recheck: shrink upTo to the floor of every cursor on
+	// this stream the caller did not explicitly override.
+	ov := make(map[string]bool, len(overridden))
+	for _, name := range overridden {
+		ov[name] = true
+	}
+	s.scanU64Pairs('c', func(name, cstream string, pos uint64) {
+		if cstream != stream || ov[name] {
+			return
+		}
+		if pos < upTo {
+			upTo = pos
+		}
+	})
+	if upTo <= lwm {
+		return 0, nil // a live cursor moved into the doomed range: nothing may go
+	}
+	if stats.pruned != upTo-lwm {
+		// The floor shrank after the mutex-free scan — rescan the smaller
+		// range under the mutex so the journal and the plan see the stats of
+		// exactly what is being deleted. Rare (only when a cursor advanced
+		// into the doomed range mid-cycle) and bounded by the original scan.
+		stats, err = s.scanDoomed(stream, lwm, upTo)
+		if err != nil {
+			return 0, err
+		}
+	}
+	span := PruneSpan{From: lwm, To: upTo - 1, FirstTS: stats.firstTS, LastTS: stats.lastTS}
+	var out PruneOutcome
+	if plan != nil {
+		out = plan(span)
 	}
 	b := s.db.NewBatch()
 	defer b.Close()
@@ -623,13 +735,13 @@ func (s *Store) Prune(stream string, upTo uint64, gapRecords []Record) (uint64, 
 	// greenfield branch no pre-counter store exists, so that state is
 	// unreachable in practice.
 	liveBytes := s.bytes[stream]
-	if shed > liveBytes {
+	if stats.shed > liveBytes {
 		liveBytes = 0
 	} else {
-		liveBytes -= shed
+		liveBytes -= stats.shed
 	}
 	off := s.next[stream]
-	for _, r := range gapRecords {
+	for _, r := range out.GapRecords {
 		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode)
 		if err != nil {
 			return 0, err
@@ -642,10 +754,25 @@ func (s *Store) Prune(stream string, upTo uint64, gapRecords []Record) (uint64, 
 			return 0, err
 		}
 	}
+	if out.Refresh != nil {
+		// Persist the refresh obligation IN the prune batch (spec §6.5
+		// [delta]): if the process dies before the refresh runs, the range is
+		// still owed after restart. An already-pending range is unioned — the
+		// obligation only ever grows until a completed refresh clears it.
+		r := *out.Refresh
+		if cur, ok := s.refreshPending(stream); ok {
+			r.From = min(r.From, cur.From)
+			r.To = max(r.To, cur.To)
+		}
+		val := append(be64(r.From), be64(r.To)...)
+		if err := b.Set(rpKey(stream), val, nil); err != nil {
+			return 0, err
+		}
+	}
 	if err := b.Set(bytesKey(stream), be64(liveBytes), nil); err != nil {
 		return 0, err
 	}
-	if err := s.writeJournal(b, stream, PruneSpan{From: lwm, To: upTo - 1, FirstTS: firstTS, LastTS: lastTS}); err != nil {
+	if err := s.writeJournal(b, stream, span); err != nil {
 		return 0, err
 	}
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
@@ -654,7 +781,41 @@ func (s *Store) Prune(stream string, upTo uint64, gapRecords []Record) (uint64, 
 	s.next[stream] = off
 	s.lwm[stream] = upTo
 	s.bytes[stream] = liveBytes
-	return pruned, nil
+	return stats.pruned, nil
+}
+
+// refreshPending reads rp/{stream} without locking (callers hold s.mu or are
+// the single pruner goroutine). ok=false when no refresh is pending.
+func (s *Store) refreshPending(stream string) (RefreshRange, bool) {
+	v, closer, err := s.db.Get(rpKey(stream))
+	if err != nil {
+		return RefreshRange{}, false
+	}
+	defer closer.Close()
+	if len(v) != 16 {
+		return RefreshRange{}, false
+	}
+	return RefreshRange{
+		From: binary.BigEndian.Uint64(v[:8]),
+		To:   binary.BigEndian.Uint64(v[8:]),
+	}, true
+}
+
+// RefreshPending returns the stream's persisted pending state-refresh range,
+// if any (spec §6.5 [delta]).
+func (s *Store) RefreshPending(stream string) (RefreshRange, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refreshPending(stream)
+}
+
+// ClearRefreshPending removes the stream's pending refresh obligation. Called
+// only after EVERY refresh append of the range succeeded; its own small
+// synced write, deliberately separate from (and after) the refresh appends.
+func (s *Store) ClearRefreshPending(stream string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.db.Delete(rpKey(stream), pebble.Sync)
 }
 
 // ScanRecords iterates the records of a stream in [from, upTo) in offset
