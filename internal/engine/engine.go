@@ -140,6 +140,60 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 	return e.persist(class, p, topic, payload)
 }
 
+// IngestRefresh is the retention pruner's §6.5 state-refresh entry (spec §6.5
+// [delta]) — an admin-grade publish that applies ONLY IF the KV entry for the
+// topic's (path, node) still sits at ifKVOffset, evaluated as a true CAS under
+// the store mutex (AppendIfKVUnchanged). A tombstone (§7) or newer write
+// landing between the pruner's KVScan snapshot and this call makes the
+// re-statement stale: applying it would resurrect a retired path or clobber
+// the newer value, so the WHOLE record is skipped — no stream append, no
+// metrics, and crucially no bus delivery (applied=false, nil error).
+//
+// Records that DO apply keep the full IngestAdmin semantics: uns grammar,
+// contract validation, atomic append with KV projection, bus mirror with the
+// retained flag. Only KV-projecting classes are accepted (the guard is
+// meaningless for anything else) and an empty payload is rejected — a refresh
+// re-states current state and must never smuggle in a tombstone.
+func (e *Engine) IngestRefresh(topic string, payload []byte, ifKVOffset uint64) (Result, bool, error) {
+	if !uns.IsUns(topic) {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
+		return Result{}, false, fmt.Errorf("refresh publish must be colca/#")
+	}
+	p, err := uns.Parse(topic)
+	if err != nil {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
+		return Result{}, false, err
+	}
+	class := uns.ClassOf(p.Contract)
+	if class != uns.ClassData && class != uns.ClassEntity {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
+		return Result{}, false, fmt.Errorf("refresh publish requires a KV-projecting contract, got %s", p.Contract)
+	}
+	if len(payload) == 0 {
+		e.metrics.RejectPublish(metrics.ReasonValidation)
+		return Result{}, false, fmt.Errorf("refresh publish must not be empty (a refresh cannot tombstone)")
+	}
+	if err := uns.Validate(p.Contract, payload); err != nil {
+		e.metrics.RejectPublish(metrics.ReasonValidation)
+		return Result{}, false, err
+	}
+	streamName := uns.StreamFor(class)
+	rec := store.Record{Topic: topic, Payload: payload, TS: time.Now().UnixMilli(), KVPath: p.Path, KVNode: p.NodeID}
+	off, applied, err := e.store.AppendIfKVUnchanged(streamName, rec, ifKVOffset)
+	if err != nil {
+		return Result{}, false, err
+	}
+	if !applied {
+		return Result{}, false, nil // superseded snapshot: skipped, nothing delivered
+	}
+	e.metrics.IngestRecord(streamName)
+	e.log.Debug("refresh ingest", "stream", streamName, "offset", off, "topic", topic)
+	if e.deliver != nil {
+		e.deliver(topic, payload, retainFor(class))
+	}
+	return Result{Persisted: true, Stream: streamName, Offset: off, Topic: topic}, true, nil
+}
+
 // IngestDownlink: a command received from the parent (already mount-stripped to
 // local coords). Trusted (parent authenticated) and persisted to the own
 // commands stream with the ORIGINAL parent timestamp — expiry must not be

@@ -496,11 +496,11 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 	pA := newPruner(t, st, eng, ret)
 	pA.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
 	realPublish := pA.publish
-	pA.publish = func(topic string, payload []byte) error {
+	pA.publish = func(topic string, payload []byte, ifKVOffset uint64) (bool, error) {
 		if strings.HasSuffix(topic, "/line1/c") {
-			return fmt.Errorf("injected refresh failure")
+			return false, fmt.Errorf("injected refresh failure")
 		}
-		return realPublish(topic, payload)
+		return realPublish(topic, payload, ifKVOffset)
 	}
 	pA.runOnce()
 
@@ -604,5 +604,71 @@ func TestStaleDownlinkChildCursorBlocksThenOverridden(t *testing.T) {
 	}
 	if len(gp.OverriddenCursors) != 1 || gp.OverriddenCursors[0] != "downlink:n-child-offline" {
 		t.Fatalf("overridden_cursors = %v, want the child's downlink cursor", gp.OverriddenCursors)
+	}
+}
+
+// Spec §6.5 [delta] × §7.1: a tombstone landing between the refresh's KVScan
+// snapshot and that entry's publish must NOT be resurrected by the refresh.
+// Deterministic: the publish seam injects the tombstone exactly into the
+// window, then delegates to the real guarded publish — which must skip. The
+// skip voids the obligation for that path (nothing current to refresh), so
+// rp/ still clears. This test is the mutation guard for the CAS: dropping the
+// offset check in AppendIfKVUnchanged turns it red.
+func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
+	st, eng := mustParts(t)
+	topicA := "colca/v1/_SystemElement/" + nodeULID + "/line1/a"
+	topicB := "colca/v1/_SystemElement/" + nodeULID + "/line1/b"
+	for _, s := range []struct{ topic, payload string }{
+		{topicA, `{"ulid":"A1"}`}, // entities offset 1
+		{topicB, `{"ulid":"B1"}`}, // entities offset 2
+	} {
+		if _, err := eng.IngestAdmin(s.topic, []byte(s.payload)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !st.CursorAck("uplink", "entities", 2) { // offset 2 (line1/b) unread
+		t.Fatal("ack must move")
+	}
+	p := newPruner(t, st, eng, retFor("entities", config.StreamRetention{
+		MaxAge:             config.Duration(time.Hour),
+		IgnoreCursorsAfter: config.Duration(30 * time.Minute),
+	}))
+	p.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	realPublish := p.publish
+	p.publish = func(topic string, payload []byte, ifKVOffset uint64) (bool, error) {
+		if topic == topicB {
+			// The race, made deterministic: the path is retired AFTER the
+			// KVScan snapshot, BEFORE its refresh publish.
+			if _, err := eng.IngestAdmin(topicB, nil); err != nil {
+				t.Errorf("tombstone injection failed: %v", err)
+			}
+		}
+		return realPublish(topic, payload, ifKVOffset)
+	}
+	p.runOnce()
+
+	// The retired path stays GONE — no resurrection.
+	if kv := st.KVScan("line1/b"); len(kv) != 0 {
+		t.Fatalf("tombstoned path resurrected by the refresh: %+v", kv)
+	}
+	// Stream head: marker at 3 (prune of [1..2]), injected tombstone at 4,
+	// and NO refresh record for line1/b.
+	recs := readAll(t, st, "entities", 3)
+	if len(recs) != 2 {
+		t.Fatalf("head records = %d, want 2 (marker + tombstone): %+v", len(recs), recs)
+	}
+	if recs[0].Topic != "colca/v1/_StreamGap/"+nodeULID+"/entities" {
+		t.Fatalf("offset 3 = %q, want the gap marker", recs[0].Topic)
+	}
+	if recs[1].Topic != topicB || len(recs[1].Payload) != 0 {
+		t.Fatalf("offset 4 = %q (%d bytes), want the empty tombstone for line1/b", recs[1].Topic, len(recs[1].Payload))
+	}
+	// The skip voids the obligation: rp/ cleared, nothing left pending.
+	if r, ok := st.RefreshPending("entities"); ok {
+		t.Fatalf("obligation %+v not cleared — a guard skip must count as completion", r)
+	}
+	// The untouched sibling keeps its state.
+	if kv := st.KVScan("line1/a"); len(kv) != 1 || string(kv[0].Payload) != `{"ulid":"A1"}` {
+		t.Fatalf("sibling path damaged: %+v", kv)
 	}
 }

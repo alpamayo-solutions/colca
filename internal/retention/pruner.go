@@ -38,9 +38,12 @@ type Pruner struct {
 	log  *slog.Logger
 	now  func() time.Time // injectable clock for tests; defaults to time.Now
 	// publish is the §6.5 refresh append path, defaulting to
-	// engine.IngestAdmin — a seam so tests can fail individual appends
-	// deterministically.
-	publish func(topic string, payload []byte) error
+	// engine.IngestRefresh: guarded on the KVScan snapshot's Offset so a
+	// tombstone or newer write racing the refresh is skipped, never
+	// resurrected (spec §6.5 [delta]/§7.1). applied=false with nil error is
+	// the guard skip. A seam so tests can fail or interleave individual
+	// appends deterministically.
+	publish func(topic string, payload []byte, ifKVOffset uint64) (applied bool, err error)
 	// beforePrune, when set (tests only), runs between the policy evaluation
 	// and the Prune call — the exact window the store's in-batch cursor
 	// recheck (spec §5.2 [delta]) exists to close.
@@ -55,9 +58,9 @@ func NewPruner(st *store.Store, eng *engine.Engine, cfg config.Retention, m *met
 		st: st, eng: eng, cfg: cfg, m: m, ulid: ulid,
 		log: slog.Default().With("node", ulid, "comp", "retention"),
 		now: time.Now,
-		publish: func(topic string, payload []byte) error {
-			_, err := eng.IngestAdmin(topic, payload)
-			return err
+		publish: func(topic string, payload []byte, ifKVOffset uint64) (bool, error) {
+			_, applied, err := eng.IngestRefresh(topic, payload, ifKVOffset)
+			return applied, err
 		},
 	}
 }
@@ -343,18 +346,26 @@ func (p *Pruner) completePendingRefresh() {
 // were already consumed; entries at or above it still exist in the stream and
 // flow normally. Returns whether every affected append succeeded.
 //
-// Each refresh goes through the publish seam — engine.IngestAdmin, the
-// on-node service path into the single delivery point (persistTS): original
-// topic and payload in local coordinates (no rewrite), contract validation,
-// atomic append with a new offset and new KV Offset, local bus mirror and
-// retained republish for free, and the uplink picks it up like any other
-// entities record. The record's timestamp is the refresh time, which is what
-// keeps a refresh from being age-pruned again immediately (a preserved
-// original timestamp would recreate the hole on the next cycle). A payload
-// that fails re-validation (contract drift) logs ERROR each cycle and keeps
-// the range pending: bounded noise, honest, never silent.
+// Each refresh goes through the publish seam — engine.IngestRefresh, the
+// guarded variant of the on-node admin path: original topic and payload in
+// local coordinates (no rewrite), contract validation, atomic append with a
+// new offset and new KV Offset, local bus mirror and retained republish for
+// free, and the uplink picks it up like any other entities record. The
+// record's timestamp is the refresh time, which is what keeps a refresh from
+// being age-pruned again immediately (a preserved original timestamp would
+// recreate the hole on the next cycle).
+//
+// The append is a CAS on the snapshot's KV Offset (spec §6.5 [delta]): a
+// tombstone (§7) or newer write landing between this function's KVScan and an
+// entry's publish makes the guard fail and the entry is SKIPPED — re-stating
+// it would resurrect a retired path or clobber the newer value, and in either
+// case the obligation for that path is void (nothing current to refresh, or
+// the newer record flows through the stream normally). Skips therefore count
+// toward completion. A payload that fails re-validation (contract drift) logs
+// ERROR each cycle and keeps the range pending: bounded noise, honest, never
+// silent.
 func (p *Pruner) refreshEntities(from, to uint64) bool {
-	refreshed, failed := 0, 0
+	refreshed, skipped, failed := 0, 0, 0
 	for _, e := range p.st.KVScan("") {
 		if e.Offset < from || e.Offset >= to {
 			continue
@@ -363,15 +374,22 @@ func (p *Pruner) refreshEntities(from, to uint64) bool {
 		if err != nil || uns.ClassOf(parsed.Contract) != uns.ClassEntity {
 			continue // metrics-class KV entries share the projection; only entities refresh (§6.5)
 		}
-		if err := p.publish(e.Topic, e.Payload); err != nil {
+		applied, err := p.publish(e.Topic, e.Payload, e.Offset)
+		if err != nil {
 			p.log.Error("entities state refresh append failed (range stays pending, retried next cycle)", "topic", e.Topic, "err", err)
 			failed++
 			continue
 		}
+		if !applied {
+			p.log.Warn("entities state refresh skipped: path retired or superseded since the snapshot (guard, spec §6.5/§7.1)",
+				"topic", e.Topic, "snapshot_offset", e.Offset)
+			skipped++
+			continue
+		}
 		refreshed++
 	}
-	if refreshed > 0 || failed > 0 {
-		p.log.Info("entities state refresh", "paths", refreshed, "failed", failed,
+	if refreshed > 0 || skipped > 0 || failed > 0 {
+		p.log.Info("entities state refresh", "paths", refreshed, "skipped", skipped, "failed", failed,
 			"offset_range_from", from, "offset_range_to", to-1)
 	}
 	return failed == 0

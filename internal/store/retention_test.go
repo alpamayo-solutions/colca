@@ -737,3 +737,55 @@ func TestGapDegenerateInputs(t *testing.T) {
 		t.Fatalf("Gap(metrics, 0) after prune = %+v/%v, want [1..2]", g, ok)
 	}
 }
+
+// Spec §6.5 [delta]: AppendIfKVUnchanged is a true CAS under s.mu — the record
+// (stream append AND KV set) applies only while the KV entry still sits at the
+// snapshot offset. Superseded or retired entries skip the whole record.
+func TestAppendIfKVUnchangedGuards(t *testing.T) {
+	s := mustOpen(t)
+	rec := func(v string) Record {
+		return Record{Topic: "colca/v1/_Metric/m1/m1/a", Payload: []byte(v), TS: 100, KVPath: "m1/a", KVNode: "m1"}
+	}
+	if _, _, err := s.Append("metrics", []Record{rec(`{"v":1}`)}); err != nil { // offset 1
+		t.Fatal(err)
+	}
+
+	// Guard passes: entry at snapshot offset 1.
+	off, applied, err := s.AppendIfKVUnchanged("metrics", rec(`{"v":2}`), 1)
+	if err != nil || !applied || off != 2 {
+		t.Fatalf("guarded append = (%d, %v, %v), want (2, true, nil)", off, applied, err)
+	}
+	if kv := s.KVScan("m1/a"); len(kv) != 1 || kv[0].Offset != 2 {
+		t.Fatalf("KV after guarded append = %+v, want Offset 2", kv)
+	}
+
+	// Guard fails — superseded: the entry moved to offset 2, snapshot says 1.
+	bytesBefore, nextBefore := s.StreamBytes("metrics"), s.NextOffset("metrics")
+	if _, applied, err := s.AppendIfKVUnchanged("metrics", rec(`{"v":stale}`), 1); err != nil || applied {
+		t.Fatalf("superseded guard = (%v, %v), want (false, nil)", applied, err)
+	}
+	if s.NextOffset("metrics") != nextBefore || s.StreamBytes("metrics") != bytesBefore {
+		t.Fatal("a skipped record must append NOTHING — no stream record, no byte accounting")
+	}
+	if kv := s.KVScan("m1/a"); string(kv[0].Payload) != `{"v":2}` {
+		t.Fatalf("skipped record clobbered KV: %s", kv[0].Payload)
+	}
+
+	// Guard fails — retired: tombstone the path, then try to refresh it.
+	tomb := rec("")
+	tomb.Delete = true
+	if _, _, err := s.Append("metrics", []Record{tomb}); err != nil { // offset 3
+		t.Fatal(err)
+	}
+	if _, applied, err := s.AppendIfKVUnchanged("metrics", rec(`{"v":2}`), 2); err != nil || applied {
+		t.Fatalf("retired guard = (%v, %v), want (false, nil): a refresh must not resurrect a tombstoned path", applied, err)
+	}
+	if kv := s.KVScan("m1/a"); len(kv) != 0 {
+		t.Fatalf("tombstoned path resurrected: %+v", kv)
+	}
+
+	// A record without KV projection is a misuse.
+	if _, _, err := s.AppendIfKVUnchanged("metrics", Record{Topic: "t", Payload: []byte("x")}, 1); err == nil {
+		t.Fatal("guarded append without a KV projection must error")
+	}
+}

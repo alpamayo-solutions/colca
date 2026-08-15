@@ -196,6 +196,11 @@ func (s *Store) Append(stream string, recs []Record) (first, last uint64, err er
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.appendLocked(stream, recs)
+}
+
+// appendLocked is Append's body; the caller holds s.mu.
+func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, err error) {
 	off := s.next[stream]
 	if off == 0 {
 		return 0, 0, fmt.Errorf("unknown stream %q", stream)
@@ -225,6 +230,51 @@ func (s *Store) Append(stream string, recs []Record) (first, last uint64, err er
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
 	return first, last, nil
+}
+
+// kvOffset returns the Offset field of the current KV entry for (path, node),
+// ok=false when the key is absent or undecodable. Callers hold s.mu.
+func (s *Store) kvOffset(path, node string) (uint64, bool) {
+	v, closer, err := s.db.Get(kvKey(path, node))
+	if err != nil {
+		return 0, false
+	}
+	defer closer.Close()
+	var e kvEnc
+	if json.Unmarshal(v, &e) != nil {
+		return 0, false
+	}
+	return e.Offset, true
+}
+
+// AppendIfKVUnchanged appends rec — stream record AND KV projection — only if
+// the current KV entry for (rec.KVPath, rec.KVNode) still exists with Offset
+// == ifKVOffset. The guard is evaluated under s.mu, the same mutex every KV
+// write serializes on, so it is a true compare-and-swap: nothing can retire or
+// supersede the entry between the check and the batch application.
+//
+// This is the §6.5 state refresh's append path (spec §6.5 [delta]) and its
+// only intended caller: a refresh re-states a KV snapshot, and a tombstone
+// (§7) or newer write landing after that snapshot makes the re-statement
+// stale — applying it would resurrect a retired path or clobber the newer
+// value. When the guard fails the WHOLE record is skipped (applied=false, no
+// stream append either): a refresh of a superseded snapshot is not history
+// worth writing. rec must carry a KV projection.
+func (s *Store) AppendIfKVUnchanged(stream string, rec Record, ifKVOffset uint64) (off uint64, applied bool, err error) {
+	if rec.KVPath == "" {
+		return 0, false, fmt.Errorf("guarded append requires a KV projection")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.kvOffset(rec.KVPath, rec.KVNode)
+	if !ok || cur != ifKVOffset {
+		return 0, false, nil // retired or superseded since the snapshot — skip entirely
+	}
+	first, _, err := s.appendLocked(stream, []Record{rec})
+	if err != nil {
+		return 0, false, err
+	}
+	return first, true, nil
 }
 
 func (s *Store) NextOffset(stream string) uint64 {
@@ -414,8 +464,10 @@ type ReplRecord struct {
 	// deletes the KV key in its batch instead of setting it. The parent's
 	// replication server derives it the same way the engine does — empty
 	// payload on a KV-projecting class — because the empty payload IS the wire
-	// truth of the tombstone (§7.1 rejected-alternative argument).
-	Delete bool `json:"d,omitempty"`
+	// truth of the tombstone (§7.1 rejected-alternative argument). NOT a wire
+	// field (the repl wire type is wireRec; this flag is derived server-side
+	// after decoding), hence excluded from marshaling.
+	Delete bool `json:"-"`
 }
 
 // ApplyReplicated appends records with ChildOffset > HWM(child,stream), assigns LOCAL offsets,

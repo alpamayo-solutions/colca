@@ -538,3 +538,54 @@ func TestIngestReplicatedTombstoneRetiresKVAndClearsRetained(t *testing.T) {
 		t.Fatalf("parent clear delivery = %+v, want %+v (empty payload, retained)", got[1], want)
 	}
 }
+
+// IngestRefresh (retention spec §6.5 [delta]) is the pruner's guarded refresh
+// entry: full admin semantics when the KV guard holds — append, KV upsert, bus
+// mirror with retain — and a TOTAL skip when it does not: no record, no
+// delivery, nil error. Non-KV classes and empty payloads (a refresh must never
+// smuggle a tombstone) are rejected outright.
+func TestIngestRefreshGuardAndSkipSemantics(t *testing.T) {
+	e, rec := newRecordingEngine(t)
+	topic := "colca/v1/_SystemElement/n-edge1/line1/press"
+	if _, err := e.IngestAdmin(topic, []byte(`{"ulid":"P1"}`)); err != nil { // entities offset 1
+		t.Fatal(err)
+	}
+
+	// Guard holds: applied with full delivery semantics.
+	res, applied, err := e.IngestRefresh(topic, []byte(`{"ulid":"P1"}`), 1)
+	if err != nil || !applied || !res.Persisted || res.Offset != 2 {
+		t.Fatalf("refresh = (%+v, %v, %v), want applied at offset 2", res, applied, err)
+	}
+	got := rec.got()
+	if len(got) != 2 || got[1].Topic != topic || !got[1].Retain {
+		t.Fatalf("applied refresh must mirror retained onto the bus: %+v", got)
+	}
+
+	// Tombstone the path, then refresh against the stale snapshot: total skip.
+	if _, err := e.IngestAdmin(topic, nil); err != nil { // tombstone, offset 3
+		t.Fatal(err)
+	}
+	before := e.Store().NextOffset("entities")
+	deliveries := len(rec.got())
+	res, applied, err = e.IngestRefresh(topic, []byte(`{"ulid":"P1"}`), 2)
+	if err != nil || applied || res.Persisted {
+		t.Fatalf("stale refresh = (%+v, %v, %v), want a clean skip", res, applied, err)
+	}
+	if e.Store().NextOffset("entities") != before {
+		t.Fatal("skipped refresh appended a record")
+	}
+	if len(rec.got()) != deliveries {
+		t.Fatal("skipped refresh delivered to the bus")
+	}
+	if kv := e.Store().KVScan("line1/press"); len(kv) != 0 {
+		t.Fatalf("skipped refresh resurrected the tombstoned path: %+v", kv)
+	}
+
+	// Guard is meaningless outside KV classes; empty payloads are not refreshes.
+	if _, _, err := e.IngestRefresh("colca/v1/_Ack/n-edge1/line1/x", []byte(`{"correlation_id":"c","result_code":0}`), 1); err == nil {
+		t.Fatal("refresh of a non-KV class must be rejected")
+	}
+	if _, _, err := e.IngestRefresh(topic, nil, 2); err == nil {
+		t.Fatal("empty refresh payload must be rejected — a refresh cannot tombstone")
+	}
+}
