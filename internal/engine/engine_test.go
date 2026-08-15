@@ -7,6 +7,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 func newEngine(t *testing.T) *Engine {
@@ -166,6 +167,22 @@ func TestIngestAdminDeliversCommandUnretained(t *testing.T) {
 	}
 	if got[0].Retain {
 		t.Fatal("_CmdParam must NOT be retained — commands are events, not state")
+	}
+}
+
+// A _StreamGap marker is an event (design §6.4: "no KV projection, not
+// retained"), exactly like a command/ack — it must never hit the local
+// broker's retained set. Pins the real retainFor function directly (not just
+// the class enum in plugins/uns): mutating retainFor to also cover ClassGap
+// turns this red.
+func TestRetainForExcludesStreamGap(t *testing.T) {
+	if retainFor(uns.ClassGap) {
+		t.Fatal("retainFor(ClassGap) must be false — _StreamGap is an event, not state")
+	}
+	// Sanity: the two classes that ARE retained still are, so the assertion
+	// above is actually exercising the gate, not a vacuously-false function.
+	if !retainFor(uns.ClassData) || !retainFor(uns.ClassEntity) {
+		t.Fatal("retainFor must still retain data/entity classes")
 	}
 }
 

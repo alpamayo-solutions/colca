@@ -23,6 +23,11 @@ func TestParseAndClass(t *testing.T) {
 		// demo topology: every _Cmd* contract is a command, never ClassNone
 		"_CmdOperate": {ClassCmd, "commands"}, "_CmdMaintain": {ClassCmd, "commands"},
 		"_Signal": {ClassEntity, "entities"},
+		// _StreamGap (design §6.4) is its own class. StreamFor deliberately
+		// answers "" for it — unlike every other class it has no single fixed
+		// stream, it targets whichever stream it describes (Parsed.Path, see
+		// TestStreamGapTargetsDescribedStream).
+		"_StreamGap": {ClassGap, ""},
 	}
 	for c, want := range cases {
 		if ClassOf(c) != want.class || StreamFor(ClassOf(c)) != want.stream {
@@ -43,6 +48,36 @@ func TestParseAndClass(t *testing.T) {
 	}
 	if !IsUns("colca/v1/_Metric/m1/m1/temp") {
 		t.Fatal("UNS topic must be true")
+	}
+}
+
+// Design §6.4: "topic colca/v1/_StreamGap/{node-ulid}/{stream} — level 4 is the
+// pruning node, ordinary uns grammar" — no Parse special case needed, and the
+// stream the marker describes is exactly Parsed.Path.
+func TestStreamGapTargetsDescribedStream(t *testing.T) {
+	for _, stream := range []string{"metrics", "entities", "commands"} {
+		topic := "colca/v1/_StreamGap/n-edge1/" + stream
+		p, err := Parse(topic)
+		if err != nil {
+			t.Fatalf("%s: %v", topic, err)
+		}
+		if p.Contract != "_StreamGap" || p.NodeID != "n-edge1" || p.Path != stream {
+			t.Fatalf("%s: got %+v", topic, p)
+		}
+		if ClassOf(p.Contract) != ClassGap {
+			t.Fatalf("%s: class = %v, want ClassGap", topic, ClassOf(p.Contract))
+		}
+	}
+}
+
+// engine.retainFor(c) == (c == ClassData || c == ClassEntity), and
+// persistTS's KV-projection gate uses the identical condition — so pinning
+// that ClassGap is neither ClassData nor ClassEntity here pins BOTH "never
+// retained" and "never KV-projected" at the source: the class enum itself.
+// (engine_test.go additionally exercises the real retainFor function.)
+func TestStreamGapNeverRetainedOrKVProjected(t *testing.T) {
+	if ClassGap == ClassData || ClassGap == ClassEntity {
+		t.Fatal("ClassGap must not be ClassData or ClassEntity — it is an event, not state (design §6.4)")
 	}
 }
 
@@ -88,6 +123,8 @@ func TestValidate(t *testing.T) {
 		{"_CmdParam", `{"correlation_id":"abc","expires_at": 99999999999, "params":{"speed":5}}`},
 		{"_Ack", `{"correlation_id":"abc","result_code":200,"message":"ok"}`},
 		{"_EdgeNode", `{"ulid":"n-edge1","mount":"edge1","typ":"node"}`},
+		{"_StreamGap", `{"stream":"metrics","from_offset":57,"to_offset":49999,"first_ts":1755100000000,"last_ts":1755700000000,"overridden_cursors":["uplink"]}`},
+		{"_StreamGap", `{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":["downlink:child-01","uplink"]}`},
 	}
 	for _, c := range ok {
 		if err := Validate(c[0], []byte(c[1])); err != nil {
@@ -101,6 +138,17 @@ func TestValidate(t *testing.T) {
 		{"_Ack", `{"result_code":200}`},           // missing correlation_id
 		{"_Unknown", `{}`},                        // unknown contract
 		{"_Metric", `not json`},
+		// _StreamGap: each case is missing exactly one required field (§6.4:
+		// {stream, from_offset, to_offset, first_ts, last_ts, overridden_cursors}).
+		{"_StreamGap", `{"from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":["uplink"]}`},              // missing stream
+		{"_StreamGap", `{"stream":"metrics","to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":["uplink"]}`},           // missing from_offset
+		{"_StreamGap", `{"stream":"metrics","from_offset":1,"first_ts":1,"last_ts":2,"overridden_cursors":["uplink"]}`},         // missing to_offset
+		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"last_ts":2,"overridden_cursors":["uplink"]}`},        // missing first_ts
+		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"overridden_cursors":["uplink"]}`},       // missing last_ts
+		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2}`},                           // missing overridden_cursors
+		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":[]}`},   // empty overridden_cursors
+		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":[""]}`}, // empty cursor name
+		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":[1]}`},  // non-string cursor name
 	}
 	for _, c := range bad {
 		if err := Validate(c[0], []byte(c[1])); err == nil {

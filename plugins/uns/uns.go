@@ -23,6 +23,7 @@ const (
 	ClassEntity       // _EdgeNode, _SystemElement, _Signal
 	ClassCmd          // _Cmd*        write: ancestors/admin, flows down
 	ClassAck          // _Ack         write: owner, flows up
+	ClassGap          // _StreamGap   write: pruner only. Event, no KV, not retained (design §6.4).
 )
 
 // Parsed is a decomposed UNS topic: colca/v1/_Contract/{node-id}/{path…}
@@ -64,6 +65,8 @@ func ClassOf(contract string) Class {
 		return ClassEntity
 	case contract == "_Ack":
 		return ClassAck
+	case contract == "_StreamGap":
+		return ClassGap
 	case strings.HasPrefix(contract, "_Cmd"):
 		return ClassCmd
 	}
@@ -71,6 +74,13 @@ func ClassOf(contract string) Class {
 }
 
 // StreamFor maps a class to the persistent stream that stores it.
+//
+// ClassGap is deliberately NOT mapped to a fixed stream here: a _StreamGap
+// marker is appended into whichever stream it describes (design §6.4), which
+// varies per record and is carried in the topic itself — Parsed.Path is the
+// stream name for a _StreamGap topic (colca/v1/_StreamGap/{node-ulid}/{stream},
+// ordinary uns grammar, so Parse needs no special case). Callers writing or
+// routing a _StreamGap record must use Parsed.Path, not StreamFor.
 func StreamFor(c Class) string {
 	switch c {
 	case ClassData:
@@ -79,6 +89,8 @@ func StreamFor(c Class) string {
 		return "entities"
 	case ClassCmd, ClassAck:
 		return "commands"
+	case ClassGap:
+		return ""
 	}
 	return ""
 }
@@ -139,6 +151,25 @@ func Validate(contract string, payload []byte) error {
 		return reqNum("result_code")
 	case contract == "_EdgeNode" || contract == "_SystemElement" || contract == "_Signal":
 		return reqStr("ulid")
+	case contract == "_StreamGap":
+		if err := reqStr("stream"); err != nil {
+			return err
+		}
+		for _, k := range []string{"from_offset", "to_offset", "first_ts", "last_ts"} {
+			if err := reqNum(k); err != nil {
+				return err
+			}
+		}
+		cursors, ok := m["overridden_cursors"].([]any)
+		if !ok || len(cursors) == 0 {
+			return fmt.Errorf("%s: field %q must be a non-empty array", contract, "overridden_cursors")
+		}
+		for _, oc := range cursors {
+			if s, ok := oc.(string); !ok || s == "" {
+				return fmt.Errorf("%s: field %q must contain only non-empty strings", contract, "overridden_cursors")
+			}
+		}
+		return nil
 	case strings.HasPrefix(contract, "_Cmd"):
 		if err := reqStr("correlation_id"); err != nil {
 			return err
