@@ -1,9 +1,10 @@
 // Package uns is the Colca-specific plugin layer: topic grammar, contract
 // classes, mount insert/strip and payload validation for the `colca/#` namespace.
 //
-// It has no dependencies beyond the Go standard library and must never be
-// imported *by* the core — the core stays generic, the domain knowledge lives
-// here. Keep it that way.
+// It has no dependencies beyond the Go standard library and must never import
+// the core — the core stays generic, the domain knowledge lives here. The core
+// calls into this package (engine, httpapi, repl); never the other way around.
+// Enforced by arch_test.go.
 package uns
 
 import (
