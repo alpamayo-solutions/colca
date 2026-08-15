@@ -205,6 +205,7 @@ func TestCorruptRetentionCountersFailOpen(t *testing.T) {
 	}{
 		{"lwm", lwmKey("metrics")},
 		{"bytes", bytesKey("metrics")},
+		{"journal", journalKey("metrics", 1)}, // "bad" is not valid journal JSON
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -360,10 +361,15 @@ func TestPruneJournalCoalescesAtCap(t *testing.T) {
 	if len(j) != journalCap {
 		t.Fatalf("journal length = %d, want %d", len(j), journalCap)
 	}
-	// Head absorbed the 6 overflow runs: [1..7] with the union time span.
-	head := PruneSpan{From: 1, To: 7, FirstTS: 100, LastTS: 106}
+	// Head absorbed the 6 overflow runs: [1..7] with the union time span,
+	// marked Coalesced (merging an already-coalesced head stays true) so the
+	// API layer can report the gap's first_ts as approximate.
+	head := PruneSpan{From: 1, To: 7, FirstTS: 100, LastTS: 106, Coalesced: true}
 	if j[0] != head {
 		t.Fatalf("coalesced head = %+v, want %+v", j[0], head)
+	}
+	if j[1].Coalesced || j[len(j)-1].Coalesced {
+		t.Fatalf("never-merged entries must not be marked coalesced: %+v, %+v", j[1], j[len(j)-1])
 	}
 	// Contiguous partition of [1..LWM).
 	if j[0].From != 1 {

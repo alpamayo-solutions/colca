@@ -76,6 +76,12 @@ func Open(dir string) (*Store, error) {
 		s.next[stream] = next
 		s.lwm[stream] = lwm
 		s.bytes[stream] = liveBytes
+		// Validate the prune journal with the same fail-loud discipline: a
+		// corrupt entry would misreport gap spans for as long as it lived.
+		if _, err := s.readJournal(stream); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -392,10 +398,14 @@ func (s *Store) StreamBytes(stream string) uint64 {
 // PruneSpan is one prune-journal entry: the inclusive offset range [From..To]
 // a prune run removed and the time span of the removed records. The journal
 // is a contiguous ordered partition of [1..LWM) — it answers "what span is
-// missing", never "what were the values".
+// missing", never "what were the values". Coalesced marks an entry merged
+// from older entries: its time span is a union, so a gap answered from it is
+// approximate (the API layer maps this to the gap object's approx field,
+// spec §6.1/§6.2).
 type PruneSpan struct {
 	From, To        uint64
 	FirstTS, LastTS int64
+	Coalesced       bool
 }
 
 // journalCap bounds the prune journal per stream (spec §6.2). When a new
@@ -405,48 +415,59 @@ type PruneSpan struct {
 const journalCap = 64
 
 type journalEnc struct {
-	To      uint64 `json:"to"`
-	FirstTS int64  `json:"ft"`
-	LastTS  int64  `json:"lt"`
+	To        uint64 `json:"to"`
+	FirstTS   int64  `json:"ft"`
+	LastTS    int64  `json:"lt"`
+	Coalesced bool   `json:"c,omitempty"`
 }
 
 // PruneJournal returns the prune journal of a stream, oldest first.
 func (s *Store) PruneJournal(stream string) []PruneSpan {
-	return s.readJournal(stream)
+	spans, err := s.readJournal(stream)
+	if err != nil {
+		// Journals are validated at Open and every write goes through
+		// writeJournal; corruption here means the disk changed under a
+		// running process. Nothing sane to return — the next Open fails
+		// loudly on it.
+		return nil
+	}
+	return spans
 }
 
 // readJournal scans the journal entries of a stream in key order (ascending
-// From). Malformed keys and values are skipped, the same tolerance KVScan
-// applies.
-func (s *Store) readJournal(stream string) []PruneSpan {
+// From). A malformed key or value is an error, the same fail-loud discipline
+// as the l/ and b/ counters: a silently dropped entry would punch a hole in
+// the [1..LWM) partition and misreport a gap's time span.
+func (s *Store) readJournal(stream string) ([]PruneSpan, error) {
 	lb, ub := journalBounds(stream)
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer iter.Close()
 	var out []PruneSpan
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := iter.Key()
 		if len(key) < 8 {
-			continue
+			return nil, fmt.Errorf("corrupt prune-journal key %q for stream %q", key, stream)
 		}
 		var e journalEnc
-		if json.Unmarshal(iter.Value(), &e) != nil {
-			continue
+		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+			return nil, fmt.Errorf("corrupt prune-journal entry %q for stream %q: %w", key, stream, err)
 		}
 		out = append(out, PruneSpan{
-			From:    binary.BigEndian.Uint64(key[len(key)-8:]),
-			To:      e.To,
-			FirstTS: e.FirstTS,
-			LastTS:  e.LastTS,
+			From:      binary.BigEndian.Uint64(key[len(key)-8:]),
+			To:        e.To,
+			FirstTS:   e.FirstTS,
+			LastTS:    e.LastTS,
+			Coalesced: e.Coalesced,
 		})
 	}
-	return out
+	return out, nil
 }
 
 func setJournal(b *pebble.Batch, stream string, span PruneSpan) error {
-	val, err := json.Marshal(journalEnc{To: span.To, FirstTS: span.FirstTS, LastTS: span.LastTS})
+	val, err := json.Marshal(journalEnc{To: span.To, FirstTS: span.FirstTS, LastTS: span.LastTS, Coalesced: span.Coalesced})
 	if err != nil {
 		return err
 	}
@@ -454,10 +475,14 @@ func setJournal(b *pebble.Batch, stream string, span PruneSpan) error {
 }
 
 // writeJournal adds one entry to the prune batch, coalescing the two oldest
-// entries (union range, min/max ts) while the journal would exceed journalCap.
-// Called under s.mu.
+// entries (union range, min/max ts, marked Coalesced) while the journal would
+// exceed journalCap. Called under s.mu.
 func (s *Store) writeJournal(b *pebble.Batch, stream string, span PruneSpan) error {
-	entries := append(s.readJournal(stream), span)
+	existing, err := s.readJournal(stream)
+	if err != nil {
+		return err
+	}
+	entries := append(existing, span)
 	merged := false
 	for len(entries) > journalCap {
 		next := entries[1]
@@ -465,10 +490,11 @@ func (s *Store) writeJournal(b *pebble.Batch, stream string, span PruneSpan) err
 			return err
 		}
 		entries[1] = PruneSpan{
-			From:    entries[0].From,
-			To:      next.To,
-			FirstTS: min(entries[0].FirstTS, next.FirstTS),
-			LastTS:  max(entries[0].LastTS, next.LastTS),
+			From:      entries[0].From,
+			To:        next.To,
+			FirstTS:   min(entries[0].FirstTS, next.FirstTS),
+			LastTS:    max(entries[0].LastTS, next.LastTS),
+			Coalesced: true,
 		}
 		entries = entries[1:]
 		merged = true
@@ -553,7 +579,11 @@ func (s *Store) Prune(stream string, upTo uint64, gapRecords []Record) (uint64, 
 	}
 	// A store upgraded from a pre-accounting version has records b/ never
 	// counted; clamp at zero instead of underflowing — sizes are honest for
-	// everything written since the counter existed.
+	// everything written since the counter existed. Note the clamp can also
+	// absorb legitimately-counted bytes while pre-counter records are being
+	// pruned out (counted and uncounted records share one counter); on this
+	// greenfield branch no pre-counter store exists, so that state is
+	// unreachable in practice.
 	liveBytes := s.bytes[stream]
 	if shed > liveBytes {
 		liveBytes = 0
