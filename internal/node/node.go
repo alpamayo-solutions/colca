@@ -97,20 +97,31 @@ func Start(cfg *config.Config) (*Node, error) {
 
 	if n.MQTT != nil {
 		n.MQTT.SetEngine(n.Engine)
-		go func(mq *mqttsrv.Server) {
-			if err := mq.Serve(); err != nil {
-				log.Error("mqtt server stopped", "err", err)
-			}
-		}(n.MQTT)
 		// Re-seed the broker's retained set from the KV projection. The two are
 		// ONE contract seen from two sides (engine.retainFor retains exactly the
 		// classes that project into KV), but mochi's retained store is in-memory:
 		// without this replay a restarted node comes back with an intact KV view
 		// and an EMPTY retained set, silently breaking the "fresh subscriber gets
 		// the current state on connect" guarantee the bus makes.
+		//
+		// The seed MUST run before Serve: mochi's Publish/InjectPacket works
+		// entirely on in-memory state, while Serve is what starts the listener
+		// accept loops — so no client CONNECT (and therefore no client publish)
+		// can interleave with the replay, and a fresh live value can never be
+		// overwritten by this stale snapshot. Connections attempted meanwhile
+		// just wait in the kernel accept backlog (the listener is already
+		// bound). Cost is one in-memory publish per KV path — node.Start with
+		// 10k seeded paths measures ~70ms total, ~380ms under -race
+		// (TestRetainedSeedStartupCostTenThousandPaths) — so it does not
+		// meaningfully delay /healthz, which opens after it.
 		for _, en := range st.KVScan("") {
 			n.MQTT.DeliverLocal(en.Topic, en.Payload, true)
 		}
+		go func(mq *mqttsrv.Server) {
+			if err := mq.Serve(); err != nil {
+				log.Error("mqtt server stopped", "err", err)
+			}
+		}(n.MQTT)
 	}
 
 	// 3. Local HTTP control API.
