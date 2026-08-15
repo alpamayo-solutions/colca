@@ -510,3 +510,22 @@ func TestFetchGapApproxFromCoalescedJournal(t *testing.T) {
 		t.Fatalf("gap %+v: a non-coalesced entry answering first_ts must keep approx=false", out.Gap)
 	}
 }
+
+// An unknown stream is a malformed request: 400 with an error body, never a
+// fabricated gap (an unknown stream has no LWM, and the gap arithmetic must
+// not run on it) and never a silently empty 200.
+func TestFetchUnknownStreamRejected(t *testing.T) {
+	srv := newAPI(t)
+	for _, stream := range []string{"bogus", ""} {
+		resp, body := raw(t, srv, "GET", "/fetch?stream="+stream+"&cursor=c1", "tok", "")
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("stream %q: want 400, got %d (%s)", stream, resp.StatusCode, body)
+		}
+		if !strings.Contains(body, `"error"`) {
+			t.Fatalf("stream %q: 400 must carry an error body: %s", stream, body)
+		}
+		if strings.Contains(body, `"gap"`) {
+			t.Fatalf("stream %q: fabricated a gap: %s", stream, body)
+		}
+	}
+}

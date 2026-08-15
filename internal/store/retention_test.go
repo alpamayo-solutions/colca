@@ -705,3 +705,35 @@ func TestRefreshPendingRidesBatchUnionsAndClears(t *testing.T) {
 		t.Fatalf("corrupt rp/ must fail Open, got %v", err)
 	}
 }
+
+// Gap's degenerate inputs must never fabricate a span on the wire: an unknown
+// stream has no LWM (0) and the LWM-1 arithmetic would underflow into a
+// [1..max-uint64] gap; a raw position 0 compared before clamping would invert
+// the span. Both return ok=false / the clamped result instead.
+func TestGapDegenerateInputs(t *testing.T) {
+	s := mustOpen(t)
+
+	// Unknown stream: no gap at any position, including 0.
+	for _, pos := range []uint64{0, 1, 5} {
+		if g, ok := s.Gap("bogus", pos); ok {
+			t.Fatalf("Gap(bogus, %d) fabricated %+v — unknown streams have no gap", pos, g)
+		}
+	}
+
+	// Untouched stream (LWM 1): position 0 clamps to 1 → no gap, not an
+	// inverted [0..0] span.
+	if g, ok := s.Gap("metrics", 0); ok {
+		t.Fatalf("Gap(metrics, 0) on an untouched stream = %+v, want none", g)
+	}
+
+	// Pruned stream: position 0 still clamps to 1 and yields the full,
+	// correctly oriented hole.
+	appendMetrics(t, s, 3, 1000)
+	if n, err := s.Prune("metrics", 3, nil, nil); err != nil || n != 2 {
+		t.Fatalf("prune: %d %v", n, err)
+	}
+	g, ok := s.Gap("metrics", 0)
+	if !ok || g.FromOffset != 1 || g.ToOffset != 2 {
+		t.Fatalf("Gap(metrics, 0) after prune = %+v/%v, want [1..2]", g, ok)
+	}
+}

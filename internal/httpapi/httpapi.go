@@ -84,10 +84,19 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 	// construction). The gap does NOT move the cursor — the consumer sees the
 	// same gap on every fetch until it acks a record at or past the LWM. A
 	// brand-new cursor (position 1) on a long-pruned stream gets the gap too:
-	// a new consumer genuinely cannot see history.
+	// a new consumer genuinely cannot see history. Unlike GET /downlink, next
+	// is never bumped past the hole here — /fetch is side-effect free and
+	// ack-driven, so a consumer with nothing readable past the LWM clears the
+	// gap by acking gap.to_offset (which puts its cursor exactly at the LWM).
 	mux.HandleFunc("GET /fetch", auth(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		stream, cursor := q.Get("stream"), q.Get("cursor")
+		// An unknown stream is a malformed request, not an empty result — and
+		// it has no LWM, so the gap machinery must never see it.
+		if e.Store().NextOffset(stream) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown stream " + strconv.Quote(stream)})
+			return
+		}
 		limit, _ := strconv.Atoi(q.Get("max"))
 		if limit <= 0 || limit > maxMax {
 			limit = defaultMax

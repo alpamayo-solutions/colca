@@ -205,7 +205,7 @@ func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []sto
 	last := prev
 	for _, r := range applied {
 		if r.ChildOffset > last+1 {
-			e.log.Error("replication offset jump: the child skipped offsets — records pruned at the child before this node received them (spec §6.4 second net)",
+			e.log.Error("replication offset jump: this node never received the child offsets between have and got — likely pruned at the child before replication (spec §6.4 second net)",
 				"child", child, "stream", stream, "have", last, "got", r.ChildOffset)
 			// TODO: increment colca_repl_gap_applied_total{child,stream}.
 		}

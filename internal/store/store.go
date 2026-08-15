@@ -497,17 +497,22 @@ type GapSpan struct {
 // Gap reports the pruned hole a consumer positioned at position (the next
 // offset it would read) faces on a stream: ok is false when position >= LWM
 // (nothing it wants is gone — including the whole untouched-stream case,
-// LWM 1). Because pruning removes only the contiguous prefix [1..LWM), the
-// hole is exactly [position..LWM-1]; FirstTS/LastTS come from the journal
-// entries containing the two boundary offsets (the journal is a complete
-// ordered partition of [1..LWM), so both lookups always hit).
+// LWM 1). Because pruning removes only the contiguous prefix [1..LWM),
+// the hole is exactly [position..LWM-1]; FirstTS/LastTS come from the
+// journal entries containing the two boundary offsets (the journal is a
+// complete ordered partition of [1..LWM), so both lookups always hit).
+//
+// An unknown stream has no LWM (0) and therefore no gap — without the guard
+// the LWM-1 arithmetic would underflow into a fabricated max-uint64 span on
+// the wire. Position 0 is clamped to 1 BEFORE the comparison: cursor
+// positions start at 1, and comparing the raw 0 would invert the span.
 func (s *Store) Gap(stream string, position uint64) (GapSpan, bool) {
 	lwm := s.LWM(stream)
-	if position >= lwm {
-		return GapSpan{}, false
-	}
 	if position < 1 {
 		position = 1 // cursor positions start at 1; the journal starts there too
+	}
+	if lwm == 0 || position >= lwm {
+		return GapSpan{}, false // lwm == 0: unknown stream (a real stream's LWM is >= 1)
 	}
 	g := GapSpan{Stream: stream, FromOffset: position, ToOffset: lwm - 1}
 	for _, sp := range s.PruneJournal(stream) {
