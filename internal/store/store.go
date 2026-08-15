@@ -1017,12 +1017,29 @@ func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64
 	return nil
 }
 
+// DefaultPolicyScanCap bounds how many records a single PolicyPruneTarget
+// call will examine (JSON-decode) before giving up and reporting a floor
+// instead of the true target. Without a cap, the walk from lwm is bounded
+// only by clamp — and clamp is uncapped (=next) whenever no live cursor is
+// protecting the stream, which is exactly the alert state
+// colca_retention_blocked_by_cursor exists to surface (dead consumer,
+// default ignore_cursors_after=0 never overriding, backlog growing without
+// bound). At the measured store throughput (bench/RESULTS.md:
+// BenchmarkReadSequential 924,235 rec/s decoding+paging, BenchmarkKVScan
+// 100,000 paths in ~124ms) 100k records costs on the order of 100ms on
+// development hardware — generous enough that no real backlog ever needs a
+// second pass to answer one scrape, bounded enough to stay well inside any
+// Prometheus scrape timeout even on slower edge storage.
+const DefaultPolicyScanCap = 100_000
+
 // PolicyPruneTarget scans stream's records forward from lwm (via ScanRecords)
 // applying the age (record TS < now−maxAge) and size (running shed total
 // keeps live_bytes−shed > maxBytes) criteria of design §4.1 step 2, and
 // returns the offset the policy alone wants to prune up to — capped at
-// clamp, which it never advances past. Either limit may be disabled
-// (maxAge<=0 skips the age check, maxBytes==0 skips the size check).
+// clamp, which it never advances past, AND capped at maxScan records
+// examined (0 disables the scan cap; callers in this codebase always pass
+// DefaultPolicyScanCap). Either policy limit may be disabled (maxAge<=0
+// skips the age check, maxBytes==0 skips the size check).
 //
 // Shared by retention.Pruner (called with clamp = the protected-cursor
 // floor, the real prune bound) and the metrics collector (called with
@@ -1033,25 +1050,40 @@ func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64
 //
 // clampedAtCap is true when the scan stopped only because it hit clamp with
 // the policy still wanting more (the §5.2 WARN log / pressure signal).
-func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time, maxAge time.Duration, maxBytes, liveBytes, clamp uint64) (target uint64, clampedAtCap bool, err error) {
+// hitScanCap is true when the scan stopped only because it examined maxScan
+// records with the policy still wanting more — independent of clampedAtCap,
+// since the two have different causes and different callers care about them
+// differently (the pruner's WARN log names a blocking cursor; a scan-cap
+// stop has no cursor to name). Either flag means target is a FLOOR: safe to
+// prune up to (never advances past a record the policy did not examine and
+// accept), but possibly short of where the policy would truly stop — never
+// past it, so a caller building an undercount-safe signal from target (like
+// blocked-cursor counting) stays correct; one that needs the exact target
+// does not get it in one call.
+func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time, maxAge time.Duration, maxBytes, liveBytes, clamp, maxScan uint64) (target uint64, clampedAtCap, hitScanCap bool, err error) {
 	cutoff := now.UnixMilli() - maxAge.Milliseconds()
 	target = lwm
-	var shed uint64
+	var shed, scanned uint64
 	err = s.ScanRecords(stream, lwm, next, func(off uint64, ts int64, size uint64) bool {
+		if maxScan > 0 && scanned >= maxScan {
+			hitScanCap = true // policy wants more, the scan budget forbids it
+			return false
+		}
+		scanned++
 		ageWants := maxAge > 0 && ts < cutoff
 		sizeWants := maxBytes > 0 && liveBytes > shed+maxBytes // liveBytes−shed > maxBytes, underflow-safe
 		if !ageWants && !sizeWants {
 			return false // first record the policy keeps — early exit (§4.1)
 		}
 		if off >= clamp {
-			clampedAtCap = true // policy wants more, the cap forbids it
+			clampedAtCap = true // policy wants more, the cursor cap forbids it
 			return false
 		}
 		shed += size
 		target = off + 1
 		return true
 	})
-	return target, clampedAtCap, err
+	return target, clampedAtCap, hitScanCap, err
 }
 
 // KVScan returns the current KV projection for every path starting with prefix.

@@ -195,7 +195,7 @@ func New(st *store.Store, cfg config.Retention) *Metrics {
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied,
-		&storeCollector{st: st, cfg: cfg})
+		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
 	return m
 }
 
@@ -417,6 +417,18 @@ func (m *Metrics) GapApplied(child, stream string) {
 type storeCollector struct {
 	st  *store.Store
 	cfg config.Retention
+	// scanCap bounds blockedByCursor's PolicyPruneTarget scan (see
+	// store.DefaultPolicyScanCap). Always the production default via New;
+	// tests construct a collector directly with a small value to prove the
+	// walk is bounded without seeding hundreds of thousands of records.
+	scanCap uint64
+}
+
+// newStoreCollector builds the collector with an explicit scan cap — New
+// (the production constructor) always passes store.DefaultPolicyScanCap;
+// this seam exists so tests can pass a small cap instead.
+func newStoreCollector(st *store.Store, cfg config.Retention, scanCap uint64) *storeCollector {
+	return &storeCollector{st: st, cfg: cfg, scanCap: scanCap}
 }
 
 var (
@@ -442,7 +454,12 @@ var (
 		"max(age_used/max_age, live_bytes/max_bytes) for the stream's currently retained window; >1 means policy wants to prune further but is cursor-clamped (design §5.2).",
 		[]string{"stream"}, nil)
 	descBlockedByCursor = prometheus.NewDesc("colca_retention_blocked_by_cursor",
-		"Count of cursors currently clamping the stream below where the age/size policy would otherwise prune to.",
+		"Count of cursors currently clamping the stream below where the age/size policy would otherwise prune to. "+
+			"The policy target itself is scanned under a bounded record cap (store.DefaultPolicyScanCap): in an "+
+			"extreme backlog (e.g. a long-dead consumer) the scan may stop before reaching the policy's true target, "+
+			"in which case this gauge counts cursors below that capped FLOOR instead — every counted cursor is still "+
+			"exactly blocked, so the value can only undercount, never overcount. colca_stream_live_bytes is the "+
+			"O(1), never-capped signal for unbounded backlog pressure.",
 		[]string{"stream"}, nil)
 	descChildHWM = prometheus.NewDesc("colca_child_hwm",
 		"Highest child offset already applied, per (child, stream).",
@@ -549,6 +566,15 @@ func (c *storeCollector) oldestTS(stream string) (ts int64, ok bool) {
 // impossible; there is only one implementation) — called here read-only
 // (no CursorMarkSeen, no batch, no mutation) and unclamped (clamp=next: how
 // far the policy would go with no cursor floor at all).
+//
+// The scan is bounded by c.scanCap (store.DefaultPolicyScanCap in
+// production): in the exact alert state this gauge exists to catch — a dead
+// consumer, default ignore_cursors_after=0 never overriding, backlog
+// growing unbounded — an uncapped scan here would JSON-decode the entire
+// clamped backlog on every single scrape. When the cap is hit, target is a
+// FLOOR (see PolicyPruneTarget's doc): every cursor counted below it is
+// still exactly blocked, so this can only undercount cursors sitting
+// between the floor and the true (unscanned) target, never overcount.
 func (c *storeCollector) blockedByCursor(stream string, now time.Time) int {
 	pol := c.cfg.EffectiveStream(stream)
 	maxAge := time.Duration(pol.MaxAge)
@@ -561,7 +587,7 @@ func (c *storeCollector) blockedByCursor(stream string, now time.Time) int {
 	next := c.st.NextOffset(stream)
 	liveBytes := c.st.StreamBytes(stream)
 
-	target, _, _ := c.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, next)
+	target, _, _, _ := c.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, next, c.scanCap)
 	if target <= lwm {
 		return 0 // policy wants nothing further: no cursor can be "blocking"
 	}

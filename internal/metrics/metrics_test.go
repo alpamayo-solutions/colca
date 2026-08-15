@@ -252,6 +252,78 @@ func TestBlockedByCursorZeroWhenPolicyWantsNothingPruned(t *testing.T) {
 	}
 }
 
+// colca_retention_blocked_by_cursor's scrape-time scan must never walk the
+// full backlog: in the state the gauge exists to alert on (a dead consumer,
+// backlog growing without bound — spec §14 follow-up) an uncapped scan
+// would JSON-decode the entire clamped backlog on every single scrape.
+// Seed a backlog far larger than a small test cap, all old enough that the
+// age policy wants every one of them pruned (so nothing early-exits the
+// scan before the cap is reached), and prove:
+//  1. the underlying PolicyPruneTarget scan stops at EXACTLY the cap — the
+//     returned target is a FLOOR (lwm + cap), not the full backlog's end;
+//  2. the gauge reports floor semantics — a cursor sitting between the
+//     floor and the true (unscanned) backlog end is NOT counted as
+//     blocking, only the cursor below the floor is.
+//
+// The uncapped comparison at the end is the mutation guard: it proves the
+// same backlog, scanned without a cap (scanCap=0 — the pre-fix behavior),
+// finds BOTH cursors blocking. If the cap is ever removed or bypassed, the
+// capped assertion above (blocked==1) fails and reads 2 instead — this is
+// the "assertion goes red" the cap's mutation check is built on.
+func TestBlockedByCursorScanIsBoundedByCap(t *testing.T) {
+	s := mustStore(t)
+	const backlog = 1000
+	const testCap = 50
+	base := time.Now().Add(-2 * time.Hour).UnixMilli()
+	seedRecordsAt(t, s, "metrics", backlog, base, 1000) // all well older than the 1h cutoff below
+
+	// One cursor below the capped floor (must count), one well above it but
+	// still below the true uncapped target (must NOT count while capped).
+	if !s.CursorAck("below-floor", "metrics", 30) {
+		t.Fatal("seed cursor")
+	}
+	if !s.CursorAck("above-floor", "metrics", 200) {
+		t.Fatal("seed cursor")
+	}
+
+	cfg := config.Retention{Streams: map[string]config.StreamRetention{
+		"metrics": {MaxAge: config.Duration(time.Hour)},
+	}}
+
+	// Direct PolicyPruneTarget check: with the cap, the scan examines
+	// exactly `testCap` records (lwm starts at 1, every one of the first
+	// testCap records is old enough to be shed) and reports hitScanCap.
+	lwm := s.LWM("metrics")
+	next := s.NextOffset("metrics")
+	liveBytes := s.StreamBytes("metrics")
+	target, clampedAtCap, hitScanCap, err := s.PolicyPruneTarget("metrics", lwm, next, time.Now(), time.Hour, 0, liveBytes, next, testCap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clampedAtCap {
+		t.Fatal("no cursor clamp in play here (blockedByCursor always calls with clamp=next); clampedAtCap must stay false")
+	}
+	if !hitScanCap {
+		t.Fatal("scan must report hitting the record cap — backlog (1000) far exceeds the cap (50)")
+	}
+	if want := lwm + testCap; target != want {
+		t.Fatalf("target = %d, want %d (lwm + cap: the scan must examine EXACTLY the cap's worth of records, not the full backlog)", target, want)
+	}
+
+	// Collector-level check: capped, only the below-floor cursor blocks.
+	c := newStoreCollector(s, cfg, testCap)
+	if blocked := c.blockedByCursor("metrics", time.Now()); blocked != 1 {
+		t.Fatalf("colca_retention_blocked_by_cursor (capped) = %d, want 1 (only the below-floor cursor; the above-floor cursor sits beyond the scan cap and must not be reported as blocking)", blocked)
+	}
+
+	// Mutation guard: an uncapped scan (scanCap=0, the pre-fix behavior)
+	// walks the entire 1000-record backlog and finds BOTH cursors blocking.
+	uncapped := newStoreCollector(s, cfg, 0)
+	if blocked := uncapped.blockedByCursor("metrics", time.Now()); blocked != 2 {
+		t.Fatalf("colca_retention_blocked_by_cursor (uncapped, scanCap=0) = %d, want 2 (sanity check that the capped case above is actually exercising the cap, not returning 1 for some unrelated reason)", blocked)
+	}
+}
+
 // A cursor acked beyond the stream's next offset must floor lag at 0, never
 // underflow into a huge uint.
 func TestCursorLagFloorsAtZero(t *testing.T) {

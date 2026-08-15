@@ -181,13 +181,24 @@ func (p *Pruner) pruneStream(stream string) {
 		stale = append(stale, overriddenCursor{name: c.Name, pos: c.Position, staleFor: staleFor})
 	}
 
-	// §4.1 step 2 — policy scan from the LWM, capped at the protected floor.
-	// The cap makes over-pruning structurally impossible, not a checked
-	// condition. The scan runs one record PAST the cap only to learn whether
-	// the policy is cursor-clamped (the §5.2 WARN + pressure signal); it
-	// never advances newLWM past it. Shared with the metrics collector
-	// (design §8, called there with an uncapped clamp).
-	newLWM, clamped, scanErr := p.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp)
+	// §4.1 step 2 — policy scan from the LWM, capped at the protected floor
+	// AND at store.DefaultPolicyScanCap records examined. The cursor cap
+	// makes over-pruning structurally impossible, not a checked condition.
+	// The scan runs one record PAST the cursor cap only to learn whether the
+	// policy is cursor-clamped (the §5.2 WARN + pressure signal); it never
+	// advances newLWM past it. Shared with the metrics collector (design §8,
+	// called there with an uncapped clamp).
+	//
+	// The scan cap matters here too: when the staleness override is active
+	// and a cursor has just crossed into "stale" (spec §5.2), it drops out of
+	// the clamp entirely — clamp reverts to next, uncapped — so a long-dead
+	// consumer plus a large backlog can make this a very long walk. Hitting
+	// the scan cap in that state is not an error: newLWM is still a safe
+	// floor (never past what the policy actually examined and accepted), so
+	// the pruner simply advances as far as it scanned and picks up the rest
+	// on the next cycle(s) — chunked pruning across cycles, not a single
+	// unbounded pass.
+	newLWM, clamped, capped, scanErr := p.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, store.DefaultPolicyScanCap)
 	if scanErr != nil {
 		p.log.Error("retention policy scan failed", "stream", stream, "err", scanErr)
 		return
@@ -195,6 +206,10 @@ func (p *Pruner) pruneStream(stream string) {
 	if clamped {
 		p.log.Warn("retention policy cursor-clamped: policy wants to prune further but a live cursor forbids it (spec §5.2)",
 			"stream", stream, "cursor", blocking, "clamp", clamp, "lwm", lwm)
+	}
+	if capped {
+		p.log.Info("retention policy scan hit the per-cycle record cap: pruning this cycle's floor now, continuing next cycle",
+			"stream", stream, "scan_cap", store.DefaultPolicyScanCap, "lwm", lwm, "target", newLWM)
 	}
 	if newLWM <= lwm {
 		return // nothing to prune this cycle
