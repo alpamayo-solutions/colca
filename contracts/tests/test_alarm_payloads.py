@@ -79,7 +79,7 @@ def test_alarm_config_snapshot_decodes_serialized_revision_id():
     assert decoded.revision_id == snapshot.revision_id
 
 
-def test_alarm_events_have_idempotency_keys():
+def test_alarm_event_idempotency_keys_survive_wire_round_trip():
     state_change = AlarmStateChange(
         event_id="evt-1",
         alarm_id="alarm-1",
@@ -103,8 +103,13 @@ def test_alarm_events_have_idempotency_keys():
         metadata_json={},
     )
 
-    assert state_change.__dict__["event_id"] == "evt-1"
-    assert dispatch.__dict__["idempotency_key"] == "dispatch-1"
+    decoded_change = AlarmStateChange.decode(state_change.encode(), timestamp=0)
+    assert decoded_change.event_id == "evt-1"
+    assert decoded_change.alarm_id == "alarm-1"
+
+    decoded_dispatch = NotificationDispatched.decode(dispatch.encode(), timestamp=0)
+    assert decoded_dispatch.idempotency_key == "dispatch-1"
+    assert decoded_dispatch.alarm_event_id == "evt-1"
 
 
 def test_service_types_include_notifications():

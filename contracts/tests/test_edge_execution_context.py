@@ -9,16 +9,13 @@ from colca_data_contracts.semantic.edge_execution_context import (
     EdgeExecutionContext,
     ExecutionEventSource,
     ExecutionEventType,
+    ExecutionSegmentKind,
+    ExecutionSubjectType,
 )
 
 
 AWARE_TIMESTAMP = datetime(2026, 7, 15, 10, 30, tzinfo=timezone.utc)
 SESSION_ID = "9e2c2c0c-0000-4000-8000-000000000001"
-
-
-def _enum_member(enum_name: str, member: str, fallback: str):
-    enum_type = getattr(execution_contract, enum_name, None)
-    return getattr(enum_type, member) if enum_type is not None else fallback
 
 
 def _valid_event(event_type: ExecutionEventType, **overrides) -> EdgeExecutionContext:
@@ -38,9 +35,9 @@ def _valid_event(event_type: ExecutionEventType, **overrides) -> EdgeExecutionCo
         ExecutionEventType.EXECUTION_END,
     ):
         values.update(
-            segment_kind=_enum_member("ExecutionSegmentKind", "MACHINE", "machine"),
+            segment_kind=ExecutionSegmentKind.MACHINE,
             session_id=SESSION_ID,
-            subject_type=_enum_member("ExecutionSubjectType", "EQUIPMENT", "equipment"),
+            subject_type=ExecutionSubjectType.EQUIPMENT,
             subject_id="tcdb-aus:17",
             subject_label="Autoclave A2",
         )
@@ -93,9 +90,9 @@ def test_operator_id_round_trip():
         order_nr=42,
         step_id=7,
         operator_id="employee:abc-123",
-        segment_kind=_enum_member("ExecutionSegmentKind", "OPERATOR", "operator"),
+        segment_kind=ExecutionSegmentKind.OPERATOR,
         session_id=SESSION_ID,
-        subject_type=_enum_member("ExecutionSubjectType", "OPERATOR", "operator"),
+        subject_type=ExecutionSubjectType.OPERATOR,
         subject_id="employee:abc-123",
     )
     json_data = ctx.to_json()

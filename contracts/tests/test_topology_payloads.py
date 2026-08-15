@@ -68,6 +68,7 @@ def test_system_element_roundtrip_full():
     assert decoded.external_asset_id_type == original.external_asset_id_type
     assert decoded.metadata == original.metadata
     assert decoded.edge_node_id == original.edge_node_id
+    assert decoded.hub_node_id is None
     assert decoded.created_at == original.created_at
     assert decoded.updated_at == original.updated_at
 
