@@ -366,3 +366,69 @@ func unreachableAddr(t *testing.T) string {
 	ln.Close()
 	return addr
 }
+
+// Spec §5.1 [delta]: the parent persists each child's downlink progress as an
+// ordinary named cursor downlink:{child-ulid} on its commands stream — from
+// the AUTHENTICATED identity plus the after parameter, forward-only, stamped
+// like every CursorAck — and the store's prune clamp honors it like any other
+// cursor.
+func TestDownlinkPollPersistsChildCursorAndClampsPrune(t *testing.T) {
+	f := newParentFixture(t)
+	seedParentCommands(t, f.ps, 2)
+	cursorName := downlinkCursorPrefix + f.childID
+
+	find := func() (store.CursorInfo, bool) {
+		for _, c := range f.ps.Cursors() {
+			if c.Name == cursorName && c.Stream == "commands" {
+				return c, true
+			}
+		}
+		return store.CursorInfo{}, false
+	}
+
+	// A poll at the start position (after=1) is no advance: no cursor key is
+	// created — same "acking is what buys protection" semantics as /fetch.
+	if _, _, _, err := f.cl.Downlink(1, 10, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if c, ok := find(); ok {
+		t.Fatalf("poll at position 1 must not create a cursor, got %+v", c)
+	}
+
+	// A poll reporting progress persists it immediately — before the long poll
+	// parks (the request itself stays parked; only the cursor write matters).
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		f.cl.Downlink(3, 10, 25*time.Second) //nolint:errcheck // killed by srv.Stop below
+	}()
+	waitFor(t, "the downlink cursor to be persisted", 5*time.Second, func() bool {
+		c, ok := find()
+		return ok && c.Position == 3
+	})
+	c, _ := find()
+	if c.LastAdvanceMS == 0 {
+		t.Fatal("the downlink cursor must carry the ct/ last-advance stamp (spec §5.2 staleness input)")
+	}
+
+	// A later poll with a LOWER after must not move it backwards.
+	if _, _, _, err := f.cl.Downlink(2, 10, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := find(); c.Position != 3 {
+		t.Fatalf("cursor regressed to %d after a lower poll, want 3", c.Position)
+	}
+
+	// The pruner's clamp honors it: pruning the whole stream stops at the
+	// slowest child's persisted position (store in-batch recheck, spec §5.2).
+	seedParentCommands(t, f.ps, 2) // offsets 3..4, so there is something past the cursor
+	if n, err := f.ps.Prune("commands", 5, nil, nil); err != nil || n != 2 {
+		t.Fatalf("prune removed %d (%v), want 2 — clamped at the downlink cursor", n, err)
+	}
+	if lwm := f.ps.LWM("commands"); lwm != 3 {
+		t.Fatalf("LWM = %d, want 3: the child's downlink cursor must clamp the prune", lwm)
+	}
+
+	f.srv.Stop()
+	waitForClosed(t, "the parked poll to die with the server", pollDone, 5*time.Second)
+}

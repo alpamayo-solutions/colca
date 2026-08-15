@@ -21,6 +21,10 @@ import (
 const (
 	uplinkCursor   = "uplink"
 	downlinkCursor = "downlink"
+	// downlinkCursorPrefix names the PARENT-side cursor the /downlink handler
+	// persists per child (spec §5.1 [delta]): downlink:{child-ulid} on the
+	// parent's commands stream.
+	downlinkCursorPrefix = "downlink:"
 	// downlinkStream is a pseudo-stream name: the cursor tracks PARENT offsets,
 	// which are unrelated to the local commands stream — never mix the two.
 	downlinkStream = "commands-parent"

@@ -557,3 +557,52 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 		t.Fatalf("no-op completion appended records: next = %d, want 7", next)
 	}
 }
+
+// Spec §5.1 [delta] + §5.2: a child's persisted downlink cursor
+// (downlink:{child-ulid} on the parent's commands stream, written by the
+// /downlink handler) is an ordinary named cursor — an offline child blocks
+// the parent's commands prune until the staleness window passes, then is
+// overridden with the marker naming it.
+func TestStaleDownlinkChildCursorBlocksThenOverridden(t *testing.T) {
+	st, eng := mustParts(t)
+	old := time.Now().Add(-2 * time.Hour).UnixMilli()
+	appendAt(t, st, "commands", 6, old, 1000)
+	// What the /downlink handler persists when the child last polled at 3.
+	if !st.CursorAck("downlink:n-child-offline", "commands", 3) {
+		t.Fatal("ack must move")
+	}
+	pollTime := time.Now()
+
+	p := newPruner(t, st, eng, retFor("commands", config.StreamRetention{
+		MaxAge:             config.Duration(time.Minute),
+		IgnoreCursorsAfter: config.Duration(time.Hour),
+	}))
+
+	// Child offline, but inside the window: its cursor clamps the prune.
+	p.now = func() time.Time { return pollTime }
+	p.runOnce()
+	if got := st.LWM("commands"); got != 3 {
+		t.Fatalf("LWM = %d, want 3: the offline child's downlink cursor must block the prune", got)
+	}
+	if next := st.NextOffset("commands"); next != 7 {
+		t.Fatalf("clamped prune must not emit a marker: next = %d, want 7", next)
+	}
+
+	// Past the window the child stops protecting: override + marker naming it.
+	p.now = func() time.Time { return pollTime.Add(2 * time.Hour) }
+	p.runOnce()
+	if got := st.LWM("commands"); got != 7 {
+		t.Fatalf("LWM = %d, want 7 (policy bound after the override)", got)
+	}
+	recs := readAll(t, st, "commands", 7)
+	if len(recs) != 1 || recs[0].Topic != "colca/v1/_StreamGap/"+nodeULID+"/commands" {
+		t.Fatalf("head records = %+v, want exactly the commands gap marker", recs)
+	}
+	var gp gapPayload
+	if err := json.Unmarshal(recs[0].Payload, &gp); err != nil {
+		t.Fatal(err)
+	}
+	if len(gp.OverriddenCursors) != 1 || gp.OverriddenCursors[0] != "downlink:n-child-offline" {
+		t.Fatalf("overridden_cursors = %v, want the child's downlink cursor", gp.OverriddenCursors)
+	}
+}

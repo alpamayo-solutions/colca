@@ -194,6 +194,17 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		limit = defaultDownlinkMax
 	}
 
+	// Spec §5.1 [delta]: persist the child's downlink progress as an ordinary
+	// named cursor, c/downlink:{child-ulid}/commands ← max(existing, after),
+	// keyed by the AUTHENTICATED identity (the after parameter only carries the
+	// position, never who it belongs to). Without it, a parent pruning its
+	// commands stream is blind to its slowest child. CursorAck gives exactly
+	// the required semantics: forward-only, one synced write per actual
+	// advance (an idle re-poll with the same after writes nothing), and the
+	// ct/ last-advance stamp that puts these cursors under the §5.2 staleness
+	// window like every other cursor.
+	s.eng.Store().CursorAck(downlinkCursorPrefix+child.ULID, "commands", after)
+
 	// A child only ever sees commands for its own subtree.
 	filter := func(topic string) bool {
 		p, err := uns.Parse(topic)
