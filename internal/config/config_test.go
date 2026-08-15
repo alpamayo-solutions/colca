@@ -192,7 +192,10 @@ func TestRetentionRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := time.Duration(c.Retention.Interval), 5*time.Minute; got != want {
+	if c.Retention.Interval == nil {
+		t.Fatal("interval: explicitly set in YAML, must not be nil")
+	}
+	if got, want := time.Duration(*c.Retention.Interval), 5*time.Minute; got != want {
 		t.Fatalf("interval: got %s want %s", got, want)
 	}
 
@@ -283,9 +286,16 @@ func TestRetentionDefaultsApplyPerFieldNotOnlyWhenStreamEntryAbsent(t *testing.T
 	}
 }
 
+// durPtr builds a *Duration for struct-literal test setup, mirroring the
+// pointer YAML unmarshals into for retention.interval (nil = absent).
+func durPtr(d time.Duration) *Duration {
+	v := Duration(d)
+	return &v
+}
+
 func TestRetentionValidationRejectsNegativeDurations(t *testing.T) {
 	for name, r := range map[string]Retention{
-		"negative interval": {Interval: Duration(-time.Minute)},
+		"negative interval": {Interval: durPtr(-time.Minute)},
 		"negative max_age": {Streams: map[string]StreamRetention{
 			"metrics": {MaxAge: Duration(-time.Hour)},
 		}},
@@ -299,6 +309,92 @@ func TestRetentionValidationRejectsNegativeDurations(t *testing.T) {
 		} else if !strings.Contains(err.Error(), "config:") {
 			t.Errorf("%s: error must use the config: prefix, got %q", name, err)
 		}
+	}
+}
+
+// loadRetention writes a minimal config with the given retention: body (or no
+// retention: key at all when body == "") and loads it — the Load path is
+// what actually exercises Duration.UnmarshalYAML's presence tracking via the
+// *Duration field, which a struct literal cannot: a struct literal can only
+// ever set the pointer to nil or non-nil explicitly, it cannot reproduce "the
+// YAML decoder never touched this field because the key was absent".
+func loadRetention(t *testing.T, body string) (*Config, error) {
+	t.Helper()
+	doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nkey_file: /keys/edge1.key\n"
+	if body != "" {
+		doc += "retention:\n" + body
+	}
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return Load(p)
+}
+
+// Pins all three states of retention.interval through the real YAML Load
+// path (design §3.1): absent → 5m default (pruning ON); explicit 0 →
+// disabled (the operator's explicit opt-out, EffectiveInterval returns 0);
+// explicit non-zero → that value. A bare (non-pointer) Duration field cannot
+// distinguish the first two, which was the bug this fix addresses.
+func TestRetentionIntervalThreeStatesThroughLoad(t *testing.T) {
+	t.Run("absent defaults to 5m", func(t *testing.T) {
+		c, err := loadRetention(t, "  streams:\n    metrics:\n      max_age: 336h\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Retention.Interval != nil {
+			t.Fatalf("interval must be nil (absent), got %v", *c.Retention.Interval)
+		}
+		if got, want := c.Retention.EffectiveInterval(), 5*time.Minute; got != want {
+			t.Fatalf("got %s want %s", got, want)
+		}
+	})
+
+	t.Run("no retention block at all defaults to 5m", func(t *testing.T) {
+		c, err := loadRetention(t, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := c.Retention.EffectiveInterval(), 5*time.Minute; got != want {
+			t.Fatalf("got %s want %s", got, want)
+		}
+	})
+
+	t.Run("explicit 0 disables the pruner", func(t *testing.T) {
+		c, err := loadRetention(t, "  interval: 0\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Retention.Interval == nil {
+			t.Fatal("interval must be non-nil — the key was explicitly written")
+		}
+		if got := c.Retention.EffectiveInterval(); got != 0 {
+			t.Fatalf("explicit interval:0 must disable the pruner (EffectiveInterval()==0), got %s", got)
+		}
+	})
+
+	t.Run("explicit 2m", func(t *testing.T) {
+		c, err := loadRetention(t, "  interval: 2m\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := c.Retention.EffectiveInterval(), 2*time.Minute; got != want {
+			t.Fatalf("got %s want %s", got, want)
+		}
+	})
+}
+
+// A negative duration string reaching validate() through the
+// actual Load path (not a struct literal), pinning that UnmarshalYAML's
+// success (a negative duration parses fine syntactically) does not bypass
+// the separate non-negative check in validate().
+func TestRetentionIntervalNegativeThroughLoad(t *testing.T) {
+	_, err := loadRetention(t, "  interval: -5m\n")
+	if err == nil {
+		t.Fatal("negative interval must be rejected by Load")
+	}
+	if !strings.Contains(err.Error(), "retention.interval") {
+		t.Fatalf("error must name retention.interval: %q", err)
 	}
 }
 

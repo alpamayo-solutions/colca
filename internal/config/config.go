@@ -169,13 +169,22 @@ type StreamRetention struct {
 // Retention is the retention: block (design §3.1). Streams is keyed by
 // stream name (metrics/entities/commands — the only names uns.StreamFor ever
 // produces); a missing entry gets the full default row.
+//
+// Interval is a pointer because absent and explicit-0 are NOT the same
+// state, despite the §3.1 YAML example's inline comment reading "0 or absent
+// = pruner disabled": the prose two paragraphs below it is authoritative —
+// "`interval` default: 5 minutes. Absent `retention:` block entirely →
+// defaults above apply (pruning ON by default...)" — so absent must default
+// to 5m (pruning ON), while an operator who writes `interval: 0` explicitly
+// is turning the pruner off. A bare Duration cannot distinguish "the key was
+// never written" from "the key was written as 0"; the pointer can.
 type Retention struct {
-	Interval Duration                   `yaml:"interval"`
+	Interval *Duration                  `yaml:"interval"`
 	Streams  map[string]StreamRetention `yaml:"streams"`
 }
 
 // defaultRetentionInterval is the pruner cadence when retention.interval is
-// absent or 0 (design §3.1).
+// absent (design §3.1).
 const defaultRetentionInterval = 5 * time.Minute
 
 // minCommandsMaxAge is the build-time floor from design §3.4: "Config
@@ -202,13 +211,16 @@ var defaultStreamMaxAge = map[string]time.Duration{
 // retention over a closed set of streams).
 var knownStreams = map[string]bool{"metrics": true, "entities": true, "commands": true}
 
-// EffectiveInterval returns the pruner cadence, applying the §3.1 default
-// when Interval is unset.
+// EffectiveInterval returns the pruner cadence: the §3.1 default (5m) when
+// Interval is absent (nil), or the configured value — including an explicit
+// 0, which is the operator's "pruner disabled" (§3.1). Callers (the
+// pruner goroutine) MUST treat a returned 0 as "never run", not as "use the
+// default" — that translation already happened here.
 func (r Retention) EffectiveInterval() time.Duration {
-	if time.Duration(r.Interval) <= 0 {
+	if r.Interval == nil {
 		return defaultRetentionInterval
 	}
-	return time.Duration(r.Interval)
+	return time.Duration(*r.Interval)
 }
 
 // EffectiveStream returns stream's effective retention policy, applying the
@@ -279,8 +291,8 @@ func (c *Config) Validate() error {
 // validate checks the retention: block (design §3.1/§3.4): non-negative
 // durations, known stream names, and the commands.max_age floor.
 func (r Retention) validate() error {
-	if time.Duration(r.Interval) < 0 {
-		return fmt.Errorf("config: retention.interval must not be negative, got %s", time.Duration(r.Interval))
+	if r.Interval != nil && time.Duration(*r.Interval) < 0 {
+		return fmt.Errorf("config: retention.interval must not be negative, got %s", time.Duration(*r.Interval))
 	}
 	for name, s := range r.Streams {
 		if !knownStreams[name] {
