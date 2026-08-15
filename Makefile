@@ -8,10 +8,14 @@ build:
 	CGO_ENABLED=0 go build -o bin/colca-machine ./cmd/colca-machine
 docker:
 	docker build -f deploy/Dockerfile -t colca:dev .
+# demo runs demo/demo.sh, which executes demo/smoke.sh with narration. That
+# script is the human walkthrough only — the AUTHORITATIVE CI gate for these
+# assertions is the pytest system suite (tests/system, smoke marker), which
+# `smoke` below delegates to. Do not let smoke.sh's assertions drift from it.
 demo: docker
 	bash demo/demo.sh
 smoke: docker
-	bash demo/smoke.sh
+	cd .. && COLCA_IMAGE=colca:dev uv run scripts/dev.py test system -m smoke
 ci: test docker smoke
 bench:
 	go test ./internal/store/ -run '^$$' -bench . -benchtime 2s

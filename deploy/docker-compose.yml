@@ -13,9 +13,13 @@
 # order, and `restart: unless-stopped` heals a node that loses the race anyway —
 # while still honouring an explicit `docker compose stop <svc>` (which the smoke
 # test uses for the offline catch-up assertion).
+#
+# COLCA_IMAGE selects the image for every container (default colca:dev, the tag
+# `make docker` builds): the level-4 system suite (tests/system) drives this
+# same file against whatever image dev.py resolved (bake tag or CI run tag).
 services:
   global:
-    image: colca:dev
+    image: ${COLCA_IMAGE:-colca:dev}
     command: ["/etc/colca/global.yaml"]
     restart: unless-stopped
     volumes:
@@ -27,7 +31,7 @@ services:
     ports: ["127.0.0.1:18080:8080", "127.0.0.1:11880:1883"]
 
   site1:
-    image: colca:dev
+    image: ${COLCA_IMAGE:-colca:dev}
     command: ["/etc/colca/site1.yaml"]
     restart: unless-stopped
     volumes:
@@ -38,7 +42,7 @@ services:
     depends_on: [global]
 
   edge1:
-    image: colca:dev
+    image: ${COLCA_IMAGE:-colca:dev}
     command: ["/etc/colca/edge1.yaml"]
     restart: unless-stopped
     volumes:
@@ -49,7 +53,7 @@ services:
     depends_on: [site1]
 
   edge2:
-    image: colca:dev
+    image: ${COLCA_IMAGE:-colca:dev}
     command: ["/etc/colca/edge2.yaml"]
     restart: unless-stopped
     volumes:
@@ -60,7 +64,7 @@ services:
     depends_on: [site1]
 
   m1:
-    image: colca:dev
+    image: ${COLCA_IMAGE:-colca:dev}
     entrypoint: ["/usr/local/bin/colca-machine"]
     restart: unless-stopped
     environment:
@@ -71,7 +75,7 @@ services:
     depends_on: [edge1]
 
   m2:
-    image: colca:dev
+    image: ${COLCA_IMAGE:-colca:dev}
     entrypoint: ["/usr/local/bin/colca-machine"]
     restart: unless-stopped
     environment:
