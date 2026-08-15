@@ -41,44 +41,61 @@ type KVEntry struct {
 }
 
 type Store struct {
-	db   *pebble.DB
-	mu   sync.Mutex
-	next map[string]uint64 // next offset per stream
+	db    *pebble.DB
+	mu    sync.Mutex
+	next  map[string]uint64 // next offset per stream
+	lwm   map[string]uint64 // low-water mark per stream: lowest retained offset
+	bytes map[string]uint64 // live logical bytes per stream (stream key + encoded value)
 }
 
-// Open opens (or creates) the store at dir and restores the next offset of
-// every stream from persisted meta, so offsets stay gapless across restarts.
+// Open opens (or creates) the store at dir and restores the next offset,
+// low-water mark and byte counter of every stream from persisted meta, so
+// offsets stay gapless and the pruned-prefix contract holds across restarts.
 func Open(dir string) (*Store, error) {
 	db, err := pebble.Open(dir, &pebble.Options{})
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, next: map[string]uint64{}}
+	s := &Store{db: db, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{}}
 	for _, stream := range streams {
-		next, err := readMeta(db, stream)
+		next, err := readCounter(db, metaKey(stream), 1, "meta", stream)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		lwm, err := readCounter(db, lwmKey(stream), 1, "low-water mark", stream)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		liveBytes, err := readCounter(db, bytesKey(stream), 0, "byte counter", stream)
 		if err != nil {
 			db.Close()
 			return nil, err
 		}
 		s.next[stream] = next
+		s.lwm[stream] = lwm
+		s.bytes[stream] = liveBytes
 	}
 	return s, nil
 }
 
-// readMeta returns the persisted next offset of a stream, or 1 if the stream
-// has never been written. Any other error is fatal: silently restarting at 1
-// would overwrite existing records and break offset continuity.
-func readMeta(db *pebble.DB, stream string) (uint64, error) {
-	v, closer, err := db.Get(metaKey(stream))
+// readCounter returns the 8-byte big-endian counter at key, or dflt when the
+// key was never written. Any other outcome is fatal: silently substituting the
+// default would break the invariant the counter protects — offset continuity
+// for m/, the pruned-prefix contract for l/ (a corrupt LWM read as 1 would
+// resurrect the pruned range as a phantom gap), honest size accounting for b/.
+func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (uint64, error) {
+	v, closer, err := db.Get(key)
 	if errors.Is(err, pebble.ErrNotFound) {
-		return 1, nil
+		return dflt, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("read meta for stream %q: %w", stream, err)
+		return 0, fmt.Errorf("read %s for stream %q: %w", what, stream, err)
 	}
 	defer closer.Close()
 	if len(v) != 8 {
-		return 0, fmt.Errorf("corrupt meta for stream %q: %d bytes", stream, len(v))
+		return 0, fmt.Errorf("corrupt %s for stream %q: %d bytes", what, stream, len(v))
 	}
 	return binary.BigEndian.Uint64(v), nil
 }
@@ -97,7 +114,32 @@ type kvEnc struct {
 	Offset  uint64 `json:"o"`
 }
 
-// Append writes records + meta + KV projections in ONE atomic, synced batch.
+// addRecord writes one stream record (and its optional KV projection) into the
+// batch and returns the record's logical byte cost — len(stream key) +
+// len(encoded value), the unit the b/{stream} accounting tracks (spec §4).
+func addRecord(b *pebble.Batch, stream string, off uint64, topic string, payload []byte, ts int64, kvPath, kvNode string) (uint64, error) {
+	val, err := json.Marshal(recEnc{topic, payload, ts})
+	if err != nil {
+		return 0, err
+	}
+	key := streamKey(stream, off)
+	if err := b.Set(key, val, nil); err != nil {
+		return 0, err
+	}
+	if kvPath != "" {
+		kval, err := json.Marshal(kvEnc{topic, payload, ts, off})
+		if err != nil {
+			return 0, err
+		}
+		if err := b.Set(kvKey(kvPath, kvNode), kval, nil); err != nil {
+			return 0, err
+		}
+	}
+	return uint64(len(key) + len(val)), nil
+}
+
+// Append writes records + meta + byte counter + KV projections in ONE atomic,
+// synced batch.
 func (s *Store) Append(stream string, recs []Record) (first, last uint64, err error) {
 	if len(recs) == 0 {
 		return 0, 0, nil
@@ -111,33 +153,27 @@ func (s *Store) Append(stream string, recs []Record) (first, last uint64, err er
 	first = off
 	b := s.db.NewBatch()
 	defer b.Close()
+	liveBytes := s.bytes[stream]
 	for _, r := range recs {
-		val, err := json.Marshal(recEnc{r.Topic, r.Payload, r.TS})
+		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode)
 		if err != nil {
 			return 0, 0, err
 		}
-		if err := b.Set(streamKey(stream, off), val, nil); err != nil {
-			return 0, 0, err
-		}
-		if r.KVPath != "" {
-			kval, err := json.Marshal(kvEnc{r.Topic, r.Payload, r.TS, off})
-			if err != nil {
-				return 0, 0, err
-			}
-			if err := b.Set(kvKey(r.KVPath, r.KVNode), kval, nil); err != nil {
-				return 0, 0, err
-			}
-		}
+		liveBytes += n
 		off++
 	}
 	last = off - 1
 	if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
 		return 0, 0, err
 	}
+	if err := b.Set(bytesKey(stream), be64(liveBytes), nil); err != nil {
+		return 0, 0, err
+	}
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return 0, 0, err
 	}
 	s.next[stream] = off
+	s.bytes[stream] = liveBytes
 	return first, last, nil
 }
 
@@ -301,26 +337,16 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 	}
 	b := s.db.NewBatch()
 	defer b.Close()
+	liveBytes := s.bytes[stream]
 	for _, r := range recs {
 		if r.ChildOffset <= hwm {
 			continue
 		}
-		val, err := json.Marshal(recEnc{r.Topic, r.Payload, r.TS})
+		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode)
 		if err != nil {
 			return nil, prev, err
 		}
-		if err := b.Set(streamKey(stream, off), val, nil); err != nil {
-			return nil, prev, err
-		}
-		if r.KVPath != "" {
-			kval, err := json.Marshal(kvEnc{r.Topic, r.Payload, r.TS, off})
-			if err != nil {
-				return nil, prev, err
-			}
-			if err := b.Set(kvKey(r.KVPath, r.KVNode), kval, nil); err != nil {
-				return nil, prev, err
-			}
-		}
+		liveBytes += n
 		off++
 		applied = append(applied, r)
 		hwm = r.ChildOffset
@@ -331,6 +357,9 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 	if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
 		return nil, prev, err
 	}
+	if err := b.Set(bytesKey(stream), be64(liveBytes), nil); err != nil {
+		return nil, prev, err
+	}
 	if err := b.Set(hwmKey(child, stream), be64(hwm), nil); err != nil {
 		return nil, prev, err
 	}
@@ -338,7 +367,226 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 		return nil, prev, err
 	}
 	s.next[stream] = off
+	s.bytes[stream] = liveBytes
 	return applied, hwm, nil
+}
+
+// LWM returns the low-water mark of a stream: the lowest offset still
+// retained. Streams start at 1; pruning advances it — the pruned region is
+// exactly the contiguous prefix [1..LWM).
+func (s *Store) LWM(stream string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lwm[stream]
+}
+
+// StreamBytes returns the live logical bytes of a stream: the sum of
+// len(stream key)+len(encoded value) over every retained record, maintained
+// by Append/ApplyReplicated (+) and Prune (−) inside their atomic batches.
+func (s *Store) StreamBytes(stream string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bytes[stream]
+}
+
+// PruneSpan is one prune-journal entry: the inclusive offset range [From..To]
+// a prune run removed and the time span of the removed records. The journal
+// is a contiguous ordered partition of [1..LWM) — it answers "what span is
+// missing", never "what were the values".
+type PruneSpan struct {
+	From, To        uint64
+	FirstTS, LastTS int64
+}
+
+// journalCap bounds the prune journal per stream (spec §6.2). When a new
+// entry would exceed it, the two oldest are coalesced (union range, min/max
+// ts) in the same batch — coverage of [1..LWM) stays complete forever,
+// granularity degrades only for the oldest history.
+const journalCap = 64
+
+type journalEnc struct {
+	To      uint64 `json:"to"`
+	FirstTS int64  `json:"ft"`
+	LastTS  int64  `json:"lt"`
+}
+
+// PruneJournal returns the prune journal of a stream, oldest first.
+func (s *Store) PruneJournal(stream string) []PruneSpan {
+	return s.readJournal(stream)
+}
+
+// readJournal scans the journal entries of a stream in key order (ascending
+// From). Malformed keys and values are skipped, the same tolerance KVScan
+// applies.
+func (s *Store) readJournal(stream string) []PruneSpan {
+	lb, ub := journalBounds(stream)
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
+	if err != nil {
+		return nil
+	}
+	defer iter.Close()
+	var out []PruneSpan
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := iter.Key()
+		if len(key) < 8 {
+			continue
+		}
+		var e journalEnc
+		if json.Unmarshal(iter.Value(), &e) != nil {
+			continue
+		}
+		out = append(out, PruneSpan{
+			From:    binary.BigEndian.Uint64(key[len(key)-8:]),
+			To:      e.To,
+			FirstTS: e.FirstTS,
+			LastTS:  e.LastTS,
+		})
+	}
+	return out
+}
+
+func setJournal(b *pebble.Batch, stream string, span PruneSpan) error {
+	val, err := json.Marshal(journalEnc{To: span.To, FirstTS: span.FirstTS, LastTS: span.LastTS})
+	if err != nil {
+		return err
+	}
+	return b.Set(journalKey(stream, span.From), val, nil)
+}
+
+// writeJournal adds one entry to the prune batch, coalescing the two oldest
+// entries (union range, min/max ts) while the journal would exceed journalCap.
+// Called under s.mu.
+func (s *Store) writeJournal(b *pebble.Batch, stream string, span PruneSpan) error {
+	entries := append(s.readJournal(stream), span)
+	merged := false
+	for len(entries) > journalCap {
+		next := entries[1]
+		if err := b.Delete(journalKey(stream, next.From), nil); err != nil {
+			return err
+		}
+		entries[1] = PruneSpan{
+			From:    entries[0].From,
+			To:      next.To,
+			FirstTS: min(entries[0].FirstTS, next.FirstTS),
+			LastTS:  max(entries[0].LastTS, next.LastTS),
+		}
+		entries = entries[1:]
+		merged = true
+	}
+	if merged {
+		if err := setJournal(b, stream, entries[0]); err != nil {
+			return err
+		}
+	}
+	return setJournal(b, stream, span)
+}
+
+// Prune removes the contiguous prefix [LWM..upTo) of a stream in ONE atomic,
+// synced batch: a single range tombstone, the advanced l/{stream}, the
+// decremented b/{stream}, the journal entry, and any gapRecords appended at
+// the head (ordinary records with KV semantics — the durable gap markers of
+// spec §6.4 ride here so they survive their own prune run). Because it is one
+// batch there is no "crash between delete and LWM" state: after a crash the
+// stream is either fully pre-prune or fully post-prune (spec §4.2).
+//
+// upTo <= LWM is a no-op (0, nil). Unknown streams and upTo beyond the next
+// offset (pruning the future) are errors. KV projections, cursors and HWMs
+// are never touched. Returns the number of records removed.
+func (s *Store) Prune(stream string, upTo uint64, gapRecords []Record) (uint64, error) {
+	s.mu.Lock()
+	next, lwm := s.next[stream], s.lwm[stream]
+	s.mu.Unlock()
+	if next == 0 {
+		return 0, fmt.Errorf("unknown stream %q", stream)
+	}
+	if upTo <= lwm {
+		return 0, nil
+	}
+	if upTo > next {
+		return 0, fmt.Errorf("prune %q up to %d: beyond next offset %d", stream, upTo, next)
+	}
+
+	// Accounting scan over the doomed prefix [lwm..upTo), without the mutex
+	// (spec §4.1: the mutex is for the commit, never the scan): Append writes
+	// only at offsets >= next >= upTo, and the prefix can only shrink through
+	// Prune itself, which the LWM recheck below serializes.
+	var pruned, shed uint64
+	var firstTS, lastTS int64
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: streamKey(stream, lwm),
+		UpperBound: streamKey(stream, upTo),
+	})
+	if err != nil {
+		return 0, err
+	}
+	for iter.First(); iter.Valid(); iter.Next() {
+		var e recEnc
+		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+			iter.Close()
+			return 0, fmt.Errorf("decode record %q during prune: %w", iter.Key(), err)
+		}
+		if pruned == 0 || e.TS < firstTS {
+			firstTS = e.TS
+		}
+		if pruned == 0 || e.TS > lastTS {
+			lastTS = e.TS
+		}
+		shed += uint64(len(iter.Key()) + len(iter.Value()))
+		pruned++
+	}
+	if err := iter.Close(); err != nil {
+		return 0, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lwm[stream] != lwm {
+		return 0, fmt.Errorf("concurrent prune on stream %q", stream)
+	}
+	b := s.db.NewBatch()
+	defer b.Close()
+	if err := b.DeleteRange(streamKey(stream, lwm), streamKey(stream, upTo), nil); err != nil {
+		return 0, err
+	}
+	if err := b.Set(lwmKey(stream), be64(upTo), nil); err != nil {
+		return 0, err
+	}
+	// A store upgraded from a pre-accounting version has records b/ never
+	// counted; clamp at zero instead of underflowing — sizes are honest for
+	// everything written since the counter existed.
+	liveBytes := s.bytes[stream]
+	if shed > liveBytes {
+		liveBytes = 0
+	} else {
+		liveBytes -= shed
+	}
+	off := s.next[stream]
+	for _, r := range gapRecords {
+		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode)
+		if err != nil {
+			return 0, err
+		}
+		liveBytes += n
+		off++
+	}
+	if off != s.next[stream] {
+		if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
+			return 0, err
+		}
+	}
+	if err := b.Set(bytesKey(stream), be64(liveBytes), nil); err != nil {
+		return 0, err
+	}
+	if err := s.writeJournal(b, stream, PruneSpan{From: lwm, To: upTo - 1, FirstTS: firstTS, LastTS: lastTS}); err != nil {
+		return 0, err
+	}
+	if err := s.db.Apply(b, pebble.Sync); err != nil {
+		return 0, err
+	}
+	s.next[stream] = off
+	s.lwm[stream] = upTo
+	s.bytes[stream] = liveBytes
+	return pruned, nil
 }
 
 // KVScan returns the current KV projection for every path starting with prefix.
