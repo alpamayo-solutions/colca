@@ -15,6 +15,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
 const tok = "test-admin-token"
@@ -196,6 +197,231 @@ func TestRestartSameDataDirKeepsOffsets(t *testing.T) {
 
 	if got := nextOffset(t, second, "metrics"); got != 2 {
 		t.Errorf("metrics next_offset after restart = %v, want 2 (offsets must survive a restart)", got)
+	}
+}
+
+// connectMQTT connects a paho client to a node's broker and fails the test on error.
+func connectMQTT(t *testing.T, addr, clientID, user, pass string) paho.Client {
+	t.Helper()
+	opts := paho.NewClientOptions().
+		AddBroker("tcp://" + addr).
+		SetClientID(clientID).
+		SetUsername(user).
+		SetPassword(pass).
+		SetConnectTimeout(5 * time.Second)
+	cl := paho.NewClient(opts)
+	ctok := cl.Connect()
+	if !ctok.WaitTimeout(5 * time.Second) {
+		t.Fatalf("mqtt connect %s as %s: timed out", addr, user)
+	}
+	if err := ctok.Error(); err != nil {
+		t.Fatalf("mqtt connect %s as %s: %v", addr, user, err)
+	}
+	t.Cleanup(func() { cl.Disconnect(100) })
+	return cl
+}
+
+// publishMQTT publishes at QoS 1 and requires the PUBACK (i.e. the node persisted it).
+func publishMQTT(t *testing.T, cl paho.Client, topic, payload string) {
+	t.Helper()
+	ptok := cl.Publish(topic, 1, false, []byte(payload))
+	if !ptok.WaitTimeout(5 * time.Second) {
+		t.Fatalf("mqtt publish %s: timed out waiting for PUBACK", topic)
+	}
+	if err := ptok.Error(); err != nil {
+		t.Fatalf("mqtt publish %s: %v", topic, err)
+	}
+}
+
+// TestRestartRepopulatesRetainedFromKV pins the restart half of the "retained
+// set ≡ KV view" contract: mochi's retained store is in-memory, so a restarted
+// node must re-seed it from the KV projection — a fresh subscriber connecting
+// after a restart gets the current value of every state path with no new
+// publish, commands are NOT replayed, and (the seed-before-Serve ordering) a
+// value published right after the restart wins over the stale snapshot.
+func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
+	base := t.TempDir()
+	keyFile := filepath.Join(base, "n1.key")
+	genKey(t, keyFile)
+
+	cfg := &config.Config{
+		ULID:     "n1",
+		DataDir:  filepath.Join(base, "data"),
+		LogLevel: "debug",
+		KeyFile:  keyFile,
+		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
+		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
+		Clients: []config.Client{
+			{ULID: "m1", Token: "m1-secret", Mount: "m1"},
+			{ULID: "obs", Token: "obs-secret"}, // no mount → read-only observer
+		},
+	}
+
+	first := mustStart(t, cfg)
+	m1 := connectMQTT(t, first.MQTTAddr, "m1-pre", "m1", "m1-secret")
+	// Two state topics: "pressure" is never touched again — only the KV
+	// re-seed can bring it back, so it is the assertion the mutation check
+	// bites on. "temp" gets a FRESH value right after the restart — it pins
+	// the seed-before-Serve ordering instead.
+	publishMQTT(t, m1, "colca/v1/_Metric/m1/pressure", `{"v":7}`)
+	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", `{"v":1}`)
+	// A command in the commands stream: it must NOT come back retained.
+	code, out := apiCall(t, first, http.MethodPost, "/publish", map[string]any{
+		"topic":   "colca/v1/_CmdParam/m1/m1/set-speed",
+		"payload": json.RawMessage(`{"correlation_id":"c1","expires_at":1}`),
+	})
+	if code != http.StatusOK {
+		t.Fatalf("POST /publish command: status %d: %v", code, out)
+	}
+	m1.Disconnect(100)
+	first.Stop()
+
+	second, err := Start(cfg)
+	if err != nil {
+		t.Fatalf("restart on the same data dir: %v", err)
+	}
+	t.Cleanup(second.Stop)
+
+	// Seed-ordering assertion (the race a post-Serve replay would open): a
+	// FRESH value published immediately after the restart must win over the
+	// pre-restart snapshot value in the retained set.
+	m1b := connectMQTT(t, second.MQTTAddr, "m1-post", "m1", "m1-secret")
+	publishMQTT(t, m1b, "colca/v1/_Metric/m1/temp", `{"v":2}`)
+
+	type received struct {
+		topic    string
+		payload  string
+		retained bool
+	}
+	msgs := make(chan received, 64)
+	obs := connectMQTT(t, second.MQTTAddr, "obs-post", "obs", "obs-secret")
+	stok := obs.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
+		msgs <- received{topic: m.Topic(), payload: string(m.Payload()), retained: m.Retained()}
+	})
+	if !stok.WaitTimeout(5 * time.Second) {
+		t.Fatal("mqtt subscribe colca/#: timed out")
+	}
+	if err := stok.Error(); err != nil {
+		t.Fatalf("mqtt subscribe colca/#: %v", err)
+	}
+
+	// Drain until BOTH canonical metric topics arrived (deadline-bounded),
+	// then keep draining briefly: if a command had been wrongly retained it
+	// would be replayed in the same on-subscribe burst.
+	seen := map[string]received{}
+	deadline := time.After(10 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case m := <-msgs:
+			if strings.HasPrefix(m.topic, "colca/v1/_Cmd") {
+				t.Fatalf("a command was replayed to a fresh post-restart subscriber: %s (retained=%v)", m.topic, m.retained)
+			}
+			if m.topic == "colca/v1/_Metric/m1/m1/temp" || m.topic == "colca/v1/_Metric/m1/m1/pressure" {
+				seen[m.topic] = m
+			}
+		case <-deadline:
+			t.Fatalf("fresh post-restart subscriber got %d of the 2 retained metric topics within 10s (saw: %v) — the retained set was not re-seeded from KV", len(seen), seen)
+		}
+	}
+	// The untouched topic can only come from the KV re-seed.
+	pressure := seen["colca/v1/_Metric/m1/m1/pressure"]
+	if !pressure.retained || !strings.Contains(pressure.payload, `"v":7`) {
+		t.Errorf("pressure after restart = %+v, want retained {\"v\":7} restored from KV", pressure)
+	}
+	// The re-published topic must show the FRESH value, not the stale snapshot.
+	temp := seen["colca/v1/_Metric/m1/m1/temp"]
+	if !temp.retained {
+		t.Errorf("post-restart temp arrived unretained — retained flag lost across restart")
+	}
+	if !strings.Contains(temp.payload, `"v":2`) {
+		t.Errorf("retained temp after restart = %s, want the FRESH {\"v\":2} — the stale KV snapshot overwrote a live publish", temp.payload)
+	}
+	grace := time.NewTimer(500 * time.Millisecond)
+	for {
+		select {
+		case m := <-msgs:
+			if strings.HasPrefix(m.topic, "colca/v1/_Cmd") {
+				t.Fatalf("a command was replayed to a fresh post-restart subscriber: %s (retained=%v)", m.topic, m.retained)
+			}
+		case <-grace.C:
+			return
+		}
+	}
+}
+
+// TestRetainedSeedStartupCostTenThousandPaths bounds the availability cost of
+// the retained re-seed: Start replays one in-memory mochi publish per KV path
+// before the API listener opens, so /healthz is gated on it. At the 10k-path
+// cardinality the benchmarks anticipate this must stay far below a second;
+// the generous bound only catches pathological regressions (per-entry fsyncs,
+// accidental O(n²)). The measured number is logged.
+func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
+	const paths = 10_000
+	base := t.TempDir()
+	keyFile := filepath.Join(base, "n1.key")
+	genKey(t, keyFile)
+	dataDir := filepath.Join(base, "data")
+
+	st, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	recs := make([]store.Record, 0, paths)
+	for i := 0; i < paths; i++ {
+		recs = append(recs, store.Record{
+			Topic:   fmt.Sprintf("colca/v1/_Metric/m1/m1/temp%d", i),
+			Payload: []byte(`{"v":1}`),
+			TS:      1,
+			KVPath:  fmt.Sprintf("m1/temp%d", i),
+			KVNode:  "m1",
+		})
+	}
+	if _, _, err := st.Append("metrics", recs); err != nil {
+		t.Fatalf("seed append: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("store.Close: %v", err)
+	}
+
+	cfg := &config.Config{
+		ULID:    "n1",
+		DataDir: dataDir,
+		KeyFile: keyFile,
+		API:     config.API{Addr: "127.0.0.1:0", Token: tok},
+		MQTT:    config.Endpoint{Addr: "127.0.0.1:0"},
+		Clients: []config.Client{{ULID: "obs", Token: "obs-secret"}},
+	}
+	started := time.Now()
+	n := mustStart(t, cfg)
+	elapsed := time.Since(started)
+	t.Logf("node.Start with %d KV paths (retained re-seed included): %v", paths, elapsed)
+	if elapsed > 10*time.Second {
+		t.Fatalf("node.Start with %d KV paths took %v — the retained re-seed is delaying readiness pathologically", paths, elapsed)
+	}
+
+	// The timing is only meaningful if the seed actually happened: spot-check
+	// one retained path on a fresh subscriber.
+	obs := connectMQTT(t, n.MQTTAddr, "obs-cost", "obs", "obs-secret")
+	got := make(chan paho.Message, 1)
+	stok := obs.Subscribe("colca/v1/_Metric/m1/m1/temp9999", 1, func(_ paho.Client, m paho.Message) {
+		select {
+		case got <- m:
+		default:
+		}
+	})
+	if !stok.WaitTimeout(5 * time.Second) {
+		t.Fatal("mqtt subscribe: timed out")
+	}
+	if err := stok.Error(); err != nil {
+		t.Fatalf("mqtt subscribe: %v", err)
+	}
+	select {
+	case m := <-got:
+		if !m.Retained() {
+			t.Error("seeded path arrived unretained")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("seeded path colca/v1/_Metric/m1/m1/temp9999 never arrived retained — the 10k seed did not reach the broker")
 	}
 }
 
