@@ -13,6 +13,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -145,8 +146,9 @@ func (c *Client) downlink(ctx context.Context, after uint64, max int, timeout ti
 
 // RunUplink pushes metrics+entities fully and only _Ack from commands, forever
 // (until stop is closed). Commands flow down, acks flow up — a command is never
-// mirrored back to the node it came from.
-func RunUplink(c *Client, eng *engine.Engine, stop <-chan struct{}) {
+// mirrored back to the node it came from. m may be nil (every Metrics method is
+// nil-safe).
+func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
 	streams := []struct {
@@ -177,6 +179,7 @@ func RunUplink(c *Client, eng *engine.Engine, stop <-chan struct{}) {
 			if next == from {
 				continue // nothing scanned
 			}
+			pushed := false
 			if len(recs) > 0 {
 				batch := make([]store.ReplRecord, len(recs))
 				for i, r := range recs {
@@ -184,10 +187,15 @@ func RunUplink(c *Client, eng *engine.Engine, stop <-chan struct{}) {
 				}
 				if _, err := c.replicate(ctx, st.name, batch); err != nil {
 					c.log.Warn("uplink push failed (will retry)", "stream", st.name, "err", err)
+					m.UplinkPushFailed(st.name)
 					continue // parent down → cursor stays, offline buffering in action
 				}
+				pushed = true
 			}
 			eng.Store().CursorAck(uplinkCursor, st.name, next)
+			if pushed {
+				m.UplinkPushed(st.name, time.Now())
+			}
 			idle = false
 		}
 		if idle {
@@ -201,8 +209,9 @@ func RunUplink(c *Client, eng *engine.Engine, stop <-chan struct{}) {
 }
 
 // RunDownlink fetches commands from the parent and hands them to the engine
-// (persist with the parent's original timestamp + local delivery).
-func RunDownlink(c *Client, eng *engine.Engine, stop <-chan struct{}) {
+// (persist with the parent's original timestamp + local delivery). m may be
+// nil (every Metrics method is nil-safe).
+func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
 	for {
@@ -220,6 +229,7 @@ func RunDownlink(c *Client, eng *engine.Engine, stop <-chan struct{}) {
 			default:
 			}
 			c.log.Warn("downlink fetch failed (will retry)", "err", err)
+			m.DownlinkFetchFailed()
 			select {
 			case <-stop:
 				return
@@ -227,6 +237,7 @@ func RunDownlink(c *Client, eng *engine.Engine, stop <-chan struct{}) {
 			}
 			continue
 		}
+		m.DownlinkFetched(time.Now())
 		for _, r := range recs {
 			if _, err := eng.IngestDownlink(r.Topic, r.Payload, r.TS); err != nil {
 				c.log.Error("downlink ingest", "topic", r.Topic, "err", err)

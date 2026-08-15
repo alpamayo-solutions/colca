@@ -81,7 +81,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	// 1. Broker first: New binds the socket, so MQTTAddr is known before Serve
 	//    and before the engine exists. The engine is late-bound below.
 	if cfg.MQTT.Addr != "" {
-		mq, err := mqttsrv.New(cfg, nil)
+		mq, err := mqttsrv.New(cfg, nil, n.Metrics)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: mqtt listen %s: %w", cfg.ULID, cfg.MQTT.Addr, err))
 		}
@@ -95,7 +95,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	if n.MQTT != nil {
 		deliver = n.MQTT.DeliverLocal
 	}
-	n.Engine = engine.New(st, cfg, deliver)
+	n.Engine = engine.New(st, cfg, deliver, n.Metrics)
 
 	if n.MQTT != nil {
 		n.MQTT.SetEngine(n.Engine)
@@ -168,11 +168,11 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.wg.Add(2)
 		go func() {
 			defer n.wg.Done()
-			repl.RunUplink(cl, n.Engine, n.stop)
+			repl.RunUplink(cl, n.Engine, n.Metrics, n.stop)
 		}()
 		go func() {
 			defer n.wg.Done()
-			repl.RunDownlink(cl, n.Engine, n.stop)
+			repl.RunDownlink(cl, n.Engine, n.Metrics, n.stop)
 		}()
 	}
 

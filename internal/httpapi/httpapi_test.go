@@ -20,8 +20,9 @@ func newAPI(t *testing.T) *httptest.Server {
 	s, _ := store.Open(t.TempDir())
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
-	e := engine.New(s, cfg, nil)
-	srv := httptest.NewServer(Handler(e, cfg, metrics.New(s)))
+	m := metrics.New(s)
+	e := engine.New(s, cfg, nil, m)
+	srv := httptest.NewServer(Handler(e, cfg, m))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -326,7 +327,7 @@ func TestNoMetricsRegistryMeansNoRoute(t *testing.T) {
 	}
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
-	srv := httptest.NewServer(Handler(engine.New(s, cfg, nil), cfg, nil))
+	srv := httptest.NewServer(Handler(engine.New(s, cfg, nil, nil), cfg, nil))
 	t.Cleanup(srv.Close)
 	resp, _ := raw(t, srv, "GET", "/metrics", "", "")
 	if resp.StatusCode != http.StatusNotFound {
@@ -343,7 +344,7 @@ func TestEmptyConfiguredTokenDeniesEveryone(t *testing.T) {
 	}
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-notoken"}
-	srv := httptest.NewServer(Handler(engine.New(s, cfg, nil), cfg, metrics.New(s)))
+	srv := httptest.NewServer(Handler(engine.New(s, cfg, nil, nil), cfg, metrics.New(s)))
 	t.Cleanup(srv.Close)
 
 	for _, token := range []string{"", "tok"} {

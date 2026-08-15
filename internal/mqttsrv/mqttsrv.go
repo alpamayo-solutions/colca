@@ -16,6 +16,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
 )
 
 // Server is the embedded broker plus its Colca hook.
@@ -35,10 +36,11 @@ type Server struct {
 // against the broker's connection goroutines.
 type colcaHook struct {
 	mqtt.HookBase
-	mu  sync.RWMutex
-	eng *engine.Engine
-	cfg *config.Config
-	log *slog.Logger
+	mu      sync.RWMutex
+	eng     *engine.Engine
+	cfg     *config.Config
+	log     *slog.Logger
+	metrics *metrics.Metrics // nil-safe: every Metrics method is a no-op on nil
 }
 
 func (h *colcaHook) engine() *engine.Engine {
@@ -76,6 +78,7 @@ func (h *colcaHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bo
 		}
 	}
 	h.log.Warn("mqtt auth rejected", "user", user)
+	h.metrics.RejectPublish(metrics.ReasonAuth)
 	return false
 }
 
@@ -123,8 +126,9 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 
 // New builds the broker and binds its TCP listener immediately (AddListener
 // calls Init → net.Listen), so Addr reports the resolved address before Serve
-// runs. eng may be nil and be supplied later via SetEngine.
-func New(cfg *config.Config, eng *engine.Engine) (*Server, error) {
+// runs. eng may be nil and be supplied later via SetEngine. m may be nil
+// (every Metrics method is nil-safe).
+func New(cfg *config.Config, eng *engine.Engine, m *metrics.Metrics) (*Server, error) {
 	s := mqtt.New(&mqtt.Options{InlineClient: true})
 	// A fresh subscriber replaying the retained set (the bus's "current state
 	// on connect" contract) can burst thousands of QoS-1 messages to one
@@ -137,7 +141,7 @@ func New(cfg *config.Config, eng *engine.Engine) (*Server, error) {
 	// namespace. If that cardinality becomes realistic, the real fix is
 	// chunked/paginated retained replay, not a further bump of this field.
 	s.Options.Capabilities.MaximumInflight = 65535
-	hook := &colcaHook{eng: eng, cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt")}
+	hook := &colcaHook{eng: eng, cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m}
 	if err := s.AddHook(hook, nil); err != nil {
 		return nil, err
 	}

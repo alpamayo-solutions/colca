@@ -2,6 +2,10 @@ package mqttsrv
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,13 +14,45 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
+
+// scrapeMetric parses the Prometheus text exposition from m.Handler() and
+// returns the value of one exact family+labels line (see the identical helper
+// in internal/engine/metrics_test.go for the rationale: the increment surface
+// has no exported Collector accessor, so the HTTP-exposed contract is the test
+// seam).
+func scrapeMetric(t *testing.T, m *metrics.Metrics, line string) float64 {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, l := range strings.Split(rec.Body.String(), "\n") {
+		if rest, ok := strings.CutPrefix(l, line+" "); ok {
+			v, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)
+			if err != nil {
+				t.Fatalf("parse metric line %q: %v", l, err)
+			}
+			return v
+		}
+	}
+	t.Fatalf("metric line %q not found in scrape:\n%s", line, rec.Body.String())
+	return 0
+}
 
 // newBroker starts a broker on a random loopback port with one configured
 // client (m1/m1-secret mounted at "m1") and a real store. The engine is bound
 // after construction, exercising the late-binding path node assembly uses.
 func newBroker(t *testing.T) (*Server, *store.Store) {
+	t.Helper()
+	s, st, _ := newBrokerWithMetrics(t)
+	return s, st
+}
+
+// newBrokerWithMetrics is newBroker plus the *metrics.Metrics wired into both
+// the broker (for auth-reject counting) and the engine (for the same registry
+// a real node would share).
+func newBrokerWithMetrics(t *testing.T) (*Server, *store.Store, *metrics.Metrics) {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
 	if err != nil {
@@ -33,18 +69,19 @@ func newBroker(t *testing.T) (*Server, *store.Store) {
 			{ULID: "observer", Token: "observer-secret"},
 		},
 	}
-	s, err := New(cfg, nil)
+	m := metrics.New(st)
+	s, err := New(cfg, nil, m)
 	if err != nil {
 		st.Close()
 		t.Fatalf("New: %v", err)
 	}
-	s.SetEngine(engine.New(st, cfg, s.DeliverLocal))
+	s.SetEngine(engine.New(st, cfg, s.DeliverLocal, m))
 	go func() { _ = s.Serve() }()
 	t.Cleanup(func() {
 		s.Close()
 		st.Close()
 	})
-	return s, st
+	return s, st, m
 }
 
 func connect(t *testing.T, addr, clientID, user, pass string) paho.Client {
@@ -129,7 +166,7 @@ func TestRetainedReplayDeliversAllMessages(t *testing.T) {
 			{ULID: "observer", Token: "observer-secret"},
 		},
 	}
-	s, err := New(cfg, nil)
+	s, err := New(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -312,6 +349,52 @@ func collect(t *testing.T, c paho.Client, filter string) func(settle time.Durati
 				return out
 			}
 		}
+	}
+}
+
+// A failed CONNECT (unknown user or wrong token) must count against
+// colca_rejected_publishes_total{reason="auth"} — the broker's own reject
+// path, distinct from every engine reject path.
+func TestBrokerAuthFailureIncrementsRejectedReasonAuth(t *testing.T) {
+	s, _, m := newBrokerWithMetrics(t)
+	addr := s.Addr()
+
+	const line = `colca_rejected_publishes_total{reason="auth"}`
+	if v := scrapeMetric(t, m, line); v != 0 {
+		t.Fatalf("%s = %v before any failed connect, want 0", line, v)
+	}
+
+	opts := paho.NewClientOptions().
+		AddBroker("tcp://" + addr).
+		SetClientID("bad-pass").
+		SetUsername("m1").
+		SetPassword("wrong").
+		SetConnectTimeout(5 * time.Second)
+	c := paho.NewClient(opts)
+	defer c.Disconnect(100)
+	tok := c.Connect()
+	if !tok.WaitTimeout(5 * time.Second) {
+		t.Fatal("connect with wrong password: timed out instead of being refused")
+	}
+	if tok.Error() == nil {
+		t.Fatal("connect with wrong password succeeded, want error")
+	}
+
+	// mochi's connect handling may invoke OnConnectAuthenticate more than once
+	// for a single rejected CONNECT (observed: 2, from the underlying MQTT
+	// negotiation, not from anything this hook controls) — the contract this
+	// test pins is "a failed CONNECT counts as auth rejections", not an exact
+	// multiplicity mochi does not document.
+	afterFail := scrapeMetric(t, m, line)
+	if afterFail < 1 {
+		t.Fatalf("%s = %v after a failed CONNECT, want >= 1", line, afterFail)
+	}
+
+	// A successful connect right after must not move the auth counter.
+	good := connect(t, addr, "m1-ok", "m1", "m1-secret")
+	defer good.Disconnect(100)
+	if v := scrapeMetric(t, m, line); v != afterFail {
+		t.Fatalf("%s = %v after a successful connect, want unchanged %v", line, v, afterFail)
 	}
 }
 

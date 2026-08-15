@@ -23,7 +23,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	defer ps.Close()
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"},
 		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}}}
-	peng := engine.New(ps, pcfg, nil)
+	peng := engine.New(ps, pcfg, nil, nil)
 	srv, err := NewServer(pcfg, peng, parentID)
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +105,7 @@ func TestStopReleasesPortAndKillsLongPoll(t *testing.T) {
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"},
 		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}}}
-	peng := engine.New(ps, pcfg, nil)
+	peng := engine.New(ps, pcfg, nil, nil)
 
 	// Stop before Start must not panic.
 	unstarted, err := NewServer(pcfg, peng, parentID)
@@ -174,7 +174,7 @@ func TestDownlinkOnlyOwnMountCommands(t *testing.T) {
 			{ULID: "n-child1", Pubkey: child1ID.PublicHex(), Mount: "child1"},
 			{ULID: "n-child2", Pubkey: child2ID.PublicHex(), Mount: "child2"},
 		}}
-	peng := engine.New(ps, pcfg, nil)
+	peng := engine.New(ps, pcfg, nil, nil)
 	srv, addr := startServer(t, pcfg, peng, parentID)
 	defer srv.Stop()
 
@@ -221,7 +221,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"},
 		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}}}
-	peng := engine.New(ps, pcfg, nil)
+	peng := engine.New(ps, pcfg, nil, nil)
 
 	// Start once only to obtain a real address, then stop: the parent is down.
 	srv1, addr := startServer(t, pcfg, peng, parentID)
@@ -230,7 +230,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
-	ceng := engine.New(cs, ccfg, nil)
+	ceng := engine.New(cs, ccfg, nil, nil)
 	mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", `{"v":1}`)
 	mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", `{"v":2}`)
 	// commands stream: 1 = a command (must never be mirrored back up), 2 = an ack.
@@ -244,7 +244,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunUplink(cl, ceng, stop)
+		RunUplink(cl, ceng, nil, stop)
 	}()
 	time.Sleep(400 * time.Millisecond)
 	close(stop)
@@ -278,7 +278,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	done2 := make(chan struct{})
 	go func() {
 		defer close(done2)
-		RunUplink(cl, ceng, stop2)
+		RunUplink(cl, ceng, nil, stop2)
 	}()
 	waitFor(t, "the buffered records to reach the parent", 10*time.Second, func() bool {
 		return ps.NextOffset("metrics") == 3 && ps.NextOffset("commands") == 2
@@ -330,7 +330,7 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"},
 		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}}}
-	peng := engine.New(ps, pcfg, nil)
+	peng := engine.New(ps, pcfg, nil, nil)
 	srv, addr := startServer(t, pcfg, peng, parentID)
 	defer srv.Stop()
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
@@ -343,14 +343,14 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 			t.Errorf("a command must not be retained on the local bus: %s", topic)
 		}
 		delivered <- topic
-	})
+	}, nil)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunDownlink(cl, ceng, stop)
+		RunDownlink(cl, ceng, nil, stop)
 	}()
 
 	select {

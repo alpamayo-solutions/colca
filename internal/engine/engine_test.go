@@ -17,7 +17,7 @@ func newEngine(t *testing.T) *Engine {
 	}
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-edge1", Clients: []config.Client{{ULID: "m1", Token: "tok", Mount: "m1"}}}
-	return New(s, cfg, nil) // nil = no local MQTT delivery in unit tests
+	return New(s, cfg, nil, nil) // nil, nil = no local MQTT delivery, no metrics in unit tests
 }
 
 // delivery is one call of engine.LocalDeliver, recorded verbatim.
@@ -60,7 +60,7 @@ func newRecordingEngine(t *testing.T) (*Engine, *recorder) {
 		{ULID: "observer", Token: "observer-secret"},
 	}}
 	rec := &recorder{}
-	return New(s, cfg, rec.deliver), rec
+	return New(s, cfg, rec.deliver, nil), rec
 }
 
 func TestClientPublishMountAndKV(t *testing.T) {

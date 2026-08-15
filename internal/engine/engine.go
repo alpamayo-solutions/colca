@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -35,6 +36,7 @@ type Engine struct {
 	deliver LocalDeliver
 	mounts  map[string]string // identity ulid → mount (clients + children)
 	log     *slog.Logger
+	metrics *metrics.Metrics // nil-safe: every method on a nil receiver is a no-op
 }
 
 // New builds an engine. The mount map covers both children and clients: they
@@ -43,17 +45,20 @@ type Engine struct {
 // A client without a mount is a read-only observer and is deliberately left OUT
 // of the map, so IngestClient rejects its publishes with "no mount registered"
 // instead of rewriting them into a topic with an empty path segment.
-func New(s *store.Store, cfg *config.Config, deliver LocalDeliver) *Engine {
-	m := map[string]string{}
+//
+// m may be nil (unit tests and any caller that does not care about metrics) —
+// every Metrics method is nil-safe.
+func New(s *store.Store, cfg *config.Config, deliver LocalDeliver, m *metrics.Metrics) *Engine {
+	mounts := map[string]string{}
 	for _, c := range cfg.Clients {
 		if c.Mount != "" {
-			m[c.ULID] = c.Mount
+			mounts[c.ULID] = c.Mount
 		}
 	}
 	for _, c := range cfg.Children {
-		m[c.ULID] = c.Mount
+		mounts[c.ULID] = c.Mount
 	}
-	return &Engine{store: s, cfg: cfg, deliver: deliver, mounts: m, log: slog.Default().With("node", cfg.ULID)}
+	return &Engine{store: s, cfg: cfg, deliver: deliver, mounts: mounts, log: slog.Default().With("node", cfg.ULID), metrics: m}
 }
 
 func (e *Engine) Store() *store.Store { return e.store }
@@ -74,25 +79,38 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 	}
 	p, err := uns.Parse(topic)
 	if err != nil {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, err
 	}
 	class := uns.ClassOf(p.Contract)
-	if class == uns.ClassCmd || class == uns.ClassNone {
+	if class == uns.ClassCmd {
+		e.metrics.RejectPublish(metrics.ReasonNotCommand)
+		return Result{}, fmt.Errorf("client %s may not publish %s", identity, p.Contract)
+	}
+	if class == uns.ClassNone {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, fmt.Errorf("client %s may not publish %s", identity, p.Contract)
 	}
 	if p.NodeID != identity {
+		e.metrics.RejectPublish(metrics.ReasonIdentity)
 		return Result{}, fmt.Errorf("identity rule: level-4 %q != authenticated identity %q", p.NodeID, identity)
 	}
 	if err := uns.Validate(p.Contract, payload); err != nil {
+		e.metrics.RejectPublish(metrics.ReasonValidation)
 		return Result{}, err
 	}
 	mount, ok := e.mounts[identity]
 	if !ok {
+		e.metrics.RejectPublish(metrics.ReasonNoMount)
 		return Result{}, fmt.Errorf("no mount registered for %s", identity)
 	}
 	rewritten := uns.MountInsert(topic, mount)
 	rp, err := uns.Parse(rewritten)
 	if err != nil {
+		// Defensive: MountInsert only adds a path segment to an already-parsed
+		// topic, so this can't fail in practice — but a rejection is a
+		// rejection, and it is still a grammar failure if it ever does.
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, err
 	}
 	return e.persist(class, rp, rewritten, payload)
@@ -102,17 +120,21 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 // coordinates, no rewrite, commands allowed, still validated.
 func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 	if !uns.IsUns(topic) {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, fmt.Errorf("admin publish must be colca/#")
 	}
 	p, err := uns.Parse(topic)
 	if err != nil {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, err
 	}
 	class := uns.ClassOf(p.Contract)
 	if class == uns.ClassNone {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, fmt.Errorf("unknown contract %s", p.Contract)
 	}
 	if err := uns.Validate(p.Contract, payload); err != nil {
+		e.metrics.RejectPublish(metrics.ReasonValidation)
 		return Result{}, err
 	}
 	return e.persist(class, p, topic, payload)
@@ -126,6 +148,7 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result, error) {
 	p, err := uns.Parse(topic)
 	if err != nil {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, err
 	}
 	return e.persistTS(uns.ClassOf(p.Contract), p, topic, payload, ts)
@@ -139,6 +162,13 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 	got, hwm, err := e.store.ApplyReplicated(child, stream, recs)
 	if err != nil {
 		return 0, hwm, err
+	}
+	// Replication is a fourth entry path into this node's store, so it counts
+	// against colca_ingest_records_total exactly like the other three — the
+	// family measures records entering the store, not records entering
+	// through any one specific path.
+	for range got {
+		e.metrics.IngestRecord(stream)
 	}
 	if e.deliver == nil {
 		return len(got), hwm, nil
@@ -186,6 +216,7 @@ func (e *Engine) persistTS(class uns.Class, p uns.Parsed, topic string, payload 
 	if err != nil {
 		return Result{}, err
 	}
+	e.metrics.IngestRecord(streamName)
 	e.log.Debug("ingest", "stream", streamName, "offset", first, "topic", topic)
 	if e.deliver != nil {
 		e.deliver(topic, payload, retainFor(class))
