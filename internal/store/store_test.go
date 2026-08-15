@@ -41,7 +41,10 @@ func TestAppendReadOffsets(t *testing.T) {
 	}
 
 	// filter
-	got, _, _ = s.Read("metrics", 1, 100, func(topic string) bool { return topic == "colca/v1/_Metric/m1/t4" })
+	got, _, err = s.Read("metrics", 1, 100, func(topic string) bool { return topic == "colca/v1/_Metric/m1/t4" })
+	if err != nil {
+		t.Fatalf("filtered read: %v", err)
+	}
 	if len(got) != 1 || got[0].Offset != 5 {
 		t.Fatalf("filtered: %+v", got)
 	}
@@ -49,15 +52,23 @@ func TestAppendReadOffsets(t *testing.T) {
 
 func TestDurabilityAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
-	s, _ := Open(dir)
-	s.Append("metrics", []Record{{Topic: "a", Payload: []byte("1"), TS: 1}})
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if _, _, err := s.Append("metrics", []Record{{Topic: "a", Payload: []byte("1"), TS: 1}}); err != nil {
+		t.Fatalf("append before reopen: %v", err)
+	}
 	s.Close()
 	s2, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	first, last, _ := s2.Append("metrics", []Record{{Topic: "b", Payload: []byte("2"), TS: 2}})
+	first, last, err := s2.Append("metrics", []Record{{Topic: "b", Payload: []byte("2"), TS: 2}})
+	if err != nil {
+		t.Fatalf("append after reopen: %v", err)
+	}
 	if first != 2 || last != 2 {
 		t.Fatalf("offset continuity broken: %d..%d", first, last)
 	}

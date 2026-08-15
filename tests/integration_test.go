@@ -579,6 +579,88 @@ func TestHTTPPublishVisibleOnMQTT(t *testing.T) {
 	}
 }
 
+// TestRetainedSetEqualsKVView pins "the bus mirrors the store" as a single set
+// equality instead of spot checks: after a mix of data/entity publishes (one
+// path overwritten) and a command/ack round-trip, the retained set a fresh
+// subscriber receives and the node's KV view must be equal as sets — same
+// topics AND same payloads — and no command/ack topic may ever be retained.
+func TestRetainedSetEqualsKVView(t *testing.T) {
+	tp := startTopo(t)
+	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+
+	// state traffic: three metric paths (temp published twice — only the last
+	// value is state) and one entity.
+	cmds := subscribeAll(t, m1, "colca/v1/_CmdParam/m1/#")
+	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 1}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 2}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Metric/m1/rpm", 1, false, `{"v": 900}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Signal/m1/cfg", 1, false, `{"ulid":"sig-1"}`).WaitTimeout(5 * time.Second)
+
+	// command/ack traffic through the same node's streams
+	api(t, tp.global, "POST", "/publish", map[string]any{
+		"topic":   "colca/v1/_CmdParam/m1/site1/edge1/m1/set-speed",
+		"payload": map[string]any{"correlation_id": "kv-eq-1", "expires_at": float64(time.Now().Add(time.Hour).UnixMilli())},
+	})
+	awaitTopic(t, cmds, "colca/v1/_CmdParam/m1/m1/set-speed", 20*time.Second)
+	m1.Publish("colca/v1/_Ack/m1/set-speed", 1, false, `{"correlation_id":"kv-eq-1","result_code":200}`).WaitTimeout(5 * time.Second)
+
+	// settle: all three state paths in KV, the ack in the commands stream
+	waitFor(t, "state and ack persisted at edge1", 10*time.Second, func() bool {
+		if len(kvAt(t, tp.edge1, "")) != 3 {
+			return false
+		}
+		for _, r := range fetchRecords(t, tp.edge1, "commands", "kv-eq-settle", "", 100) {
+			if r.(map[string]any)["topic"] == "colca/v1/_Ack/m1/m1/set-speed" {
+				return true
+			}
+		}
+		return false
+	})
+
+	// the KV view: topic → payload (payload normalized through JSON)
+	kvView := map[string]string{}
+	for _, e := range kvAt(t, tp.edge1, "") {
+		entry := e.(map[string]any)
+		kvView[entry["topic"].(string)] = mustJSON(entry["payload"])
+	}
+
+	// the retained set: everything a brand-new subscriber receives with no new
+	// publish happening. collectFor is the honest form — the set is complete
+	// only after nothing more arrives.
+	fresh := observer(t, tp.edge1.MQTTAddr, "kv-eq-observer")
+	retained := map[string]string{}
+	for _, m := range collectFor(subscribeAll(t, fresh, "colca/#"), 3*time.Second) {
+		if strings.HasPrefix(m.Topic(), "colca/v1/_Cmd") || strings.HasPrefix(m.Topic(), "colca/v1/_Ack/") {
+			t.Fatalf("command/ack topic %q was retained — commands are events, not state", m.Topic())
+		}
+		if !m.Retained() {
+			t.Fatalf("fresh subscriber got a non-retained message on %q — nothing was published after it connected", m.Topic())
+		}
+		var p any
+		if err := json.Unmarshal(m.Payload(), &p); err != nil {
+			t.Fatalf("retained payload on %q is not JSON: %v (%s)", m.Topic(), err, m.Payload())
+		}
+		retained[m.Topic()] = mustJSON(p)
+	}
+
+	if len(retained) != len(kvView) {
+		t.Fatalf("retained set and KV view differ in size: retained %v vs kv %v", retained, kvView)
+	}
+	for topic, kvPayload := range kvView {
+		got, ok := retained[topic]
+		if !ok {
+			t.Fatalf("KV topic %q missing from the retained set %v", topic, retained)
+		}
+		if got != kvPayload {
+			t.Fatalf("payload mismatch on %q: retained %s vs kv %s", topic, got, kvPayload)
+		}
+	}
+	// the overwritten path must carry the LAST value in both views
+	if got := retained["colca/v1/_Metric/m1/m1/temp"]; got != `{"v":2}` {
+		t.Fatalf("overwritten path retained stale state: %s (want {\"v\":2})", got)
+	}
+}
+
 // TestRetainedDeliversCurrentStateOnConnect pins the two halves of the retain
 // rule at once: state contracts are retained, so a brand-new subscriber gets the
 // current value with no new publish happening; commands are NOT retained, so a
