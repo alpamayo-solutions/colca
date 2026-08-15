@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -32,11 +33,7 @@ api:
   token: %s
 mqtt:
   addr: %s
-clients:
-  - ulid: m1
-    token: %s
-    mount: m1
-`, filepath.Join(dir, "fp-data"), keyPath, apiAddr, BenchToken, mqttAddr, machineSecret)
+`, filepath.Join(dir, "fp-data"), keyPath, apiAddr, BenchToken, mqttAddr)
 	cfgPath := filepath.Join(dir, "fp.yaml")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		return nil, err
@@ -55,10 +52,10 @@ clients:
 	// Wait for /healthz, then let allocations settle before the idle sample.
 	// A per-request timeout keeps a stalled connection from blocking past the
 	// overall deadline — http.DefaultClient has no timeout of its own.
-	hc := &http.Client{Timeout: 2 * time.Second}
+	hc := &http.Client{Timeout: 2 * time.Second, Transport: apiTransport()}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		resp, err := hc.Get("http://" + apiAddr + "/healthz")
+		resp, err := hc.Get("https://" + apiAddr + "/healthz")
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
@@ -70,6 +67,31 @@ clients:
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+
+	// Enroll m1 through the REAL enrollment door (the binary has no other way
+	// to learn an identity), then let allocations settle for the idle sample.
+	m1id, err := identity.Generate(filepath.Join(dir, "m1.key"))
+	if err != nil {
+		return nil, err
+	}
+	entry, _ := json.Marshal(map[string]any{"ulid": "m1", "pubkey": m1id.PublicHex(), "kind": "machine", "mount": "m1"})
+	req, err := http.NewRequest("POST", "https://"+apiAddr+"/enroll", bytes.NewReader(entry))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Colca-Token", BenchToken)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("enroll m1: %w", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("enroll m1: HTTP %d", resp.StatusCode)
+	}
+	m1cert, err := m1id.SelfSignedCert("m1")
+	if err != nil {
+		return nil, err
+	}
 	time.Sleep(2 * time.Second)
 
 	r := NewReport("footprint", p.Storage, map[string]any{"duration": p.Duration.String()})
@@ -79,7 +101,7 @@ clients:
 	}
 	r.Metrics["footprint_idle_mb"] = float64(idle) / (1 << 20)
 
-	m, err := connect(mqttAddr, "m1", "m1", machineSecret)
+	m, err := connect(mqttAddr, "m1", "m1", &benchIdentity{id: m1id, cert: m1cert})
 	if err != nil {
 		return nil, err
 	}

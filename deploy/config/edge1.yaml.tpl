@@ -9,5 +9,3 @@ repl: { addr: ":9443" }
 parent:
   url: https://site1:9443
   pubkey: ${PUB_SITE1}
-clients:
-  - { ulid: m1, token: m1-secret, mount: m1 }

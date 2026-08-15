@@ -10,6 +10,7 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 NODES="global site1 edge1 edge2"
+MACHINES="m1 m2"
 
 mkdir -p keys
 for n in $NODES; do
@@ -22,6 +23,26 @@ for n in $NODES; do
   fi
   chmod 600 "keys/$n.key"
 done
+
+# Machine keys: a machine's key IS its credential — generated once here,
+# enrolled at its node by smoke.sh through the enrollment door.
+for m in $MACHINES; do
+  if [ ! -f "keys/$m-machine.key" ] || [ ! -s "keys/$m-machine.pub" ]; then
+    rm -f "keys/$m-machine.key" "keys/$m-machine.pub"
+    go run ../cmd/colca-keygen "keys/$m-machine.key" > "keys/$m-machine.pub"
+    echo "gen-keys: generated keys/$m-machine.key"
+  fi
+  chmod 644 "keys/$m-machine.key"
+done
+
+# Observer key for bus-tapping clients (system suite, humans): -cert writes
+# the PEM client certificate non-Go MQTT clients present at the TLS door.
+if [ ! -f "keys/observer.key" ] || [ ! -s "keys/observer.pub" ]; then
+  rm -f "keys/observer.key" "keys/observer.pub" "keys/observer.key.crt"
+  go run ../cmd/colca-keygen -cert "keys/observer.key" > "keys/observer.pub"
+  echo "gen-keys: generated keys/observer.key (+cert)"
+fi
+chmod 644 "keys/observer.key"
 
 {
   echo "PUB_GLOBAL=$(cat keys/global.pub)"

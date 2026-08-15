@@ -16,22 +16,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type Child struct {
-	ULID   string `yaml:"ulid"`
-	Pubkey string `yaml:"pubkey"` // hex ed25519, pinned on connect
-	Mount  string `yaml:"mount"`
-}
-
-type Client struct {
-	ULID  string `yaml:"ulid"`
-	Token string `yaml:"token"` // pre-shared secret (MVP stand-in for machine keys)
-	// Mount is OPTIONAL. A client without a mount has no place in the hierarchy
-	// to write into and is therefore a read-only observer: it may CONNECT and
-	// SUBSCRIBE, but engine.IngestClient rejects everything it publishes with
-	// "no mount registered".
-	Mount string `yaml:"mount"`
-}
-
 type Endpoint struct {
 	Addr string `yaml:"addr"`
 }
@@ -47,8 +31,9 @@ type API struct {
 }
 
 // Config is a node's full configuration. Only ULID, DataDir and KeyFile are
-// required: a global node has no Parent and no MQTT listener, and a leaf edge
-// node has clients but no children.
+// required: a global node has no Parent and no MQTT listener. Machines and
+// child nodes are NOT config: they are runtime registry state, enrolled
+// through the admin API (auth design §2, §4).
 type Config struct {
 	ULID     string   `yaml:"ulid"`
 	DataDir  string   `yaml:"data_dir"`
@@ -58,8 +43,6 @@ type Config struct {
 	MQTT     Endpoint `yaml:"mqtt"`
 	Repl     Endpoint `yaml:"repl"`
 	Parent   *Parent  `yaml:"parent"`
-	Children []Child  `yaml:"children"`
-	Clients  []Client `yaml:"clients"`
 
 	// Retention configures the background pruner (design §3). Absent entirely
 	// = every default in the §3.1 table applies (pruning ON by default).
@@ -255,35 +238,12 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
-// Validate checks required fields and enforces the shared mount namespace.
-// A client mount is optional (mount-less clients are read-only observers) and
-// empty mounts are skipped in the collision check — two observers do not
-// "collide" on the empty mount.
+// Validate checks required fields. Identity and mount rules moved to
+// enrollment validation (registry manager + uns.Entry.Validate) — machines
+// and children are runtime registry state, not config.
 func (c *Config) Validate() error {
 	if c.ULID == "" || c.DataDir == "" || c.KeyFile == "" {
 		return fmt.Errorf("config: ulid, data_dir, key_file are required")
-	}
-	mounts := map[string]string{}
-	for _, ch := range c.Children {
-		if ch.ULID == "" || ch.Pubkey == "" || ch.Mount == "" {
-			return fmt.Errorf("config: child needs ulid, pubkey, mount: %+v", ch)
-		}
-		if prev, dup := mounts[ch.Mount]; dup {
-			return fmt.Errorf("config: mount collision %q between %s and %s", ch.Mount, prev, ch.ULID)
-		}
-		mounts[ch.Mount] = ch.ULID
-	}
-	for _, cl := range c.Clients {
-		if cl.ULID == "" || cl.Token == "" {
-			return fmt.Errorf("config: client needs ulid and token: %+v", cl)
-		}
-		if cl.Mount == "" {
-			continue // read-only observer: no mount, so nothing to collide with
-		}
-		if prev, dup := mounts[cl.Mount]; dup {
-			return fmt.Errorf("config: mount collision %q between %s and %s", cl.Mount, prev, cl.ULID)
-		}
-		mounts[cl.Mount] = cl.ULID
 	}
 	return c.Retention.validate()
 }

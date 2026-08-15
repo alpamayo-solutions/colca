@@ -1,21 +1,50 @@
+// Command colca-keygen generates an ed25519 identity key and prints its
+// public key (hex) — the value an admin enrolls at a node (POST /enroll).
+//
+// With -cert it additionally writes <out.key>.crt, a PEM self-signed
+// certificate wrapping the key (cert = key container, trust = registry
+// pinning — no CA anywhere): exactly what a non-Go MQTT/HTTPS client needs to
+// present the key as a TLS client certificate.
 package main
 
 import (
+	"encoding/pem"
+	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/alpamayo-solutions/colca/internal/identity"
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: colca-keygen <out.key>  (prints pubkey hex to stdout)")
+	writeCert := flag.Bool("cert", false, "also write <out.key>.crt (PEM self-signed cert wrapping the key)")
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: colca-keygen [-cert] <out.key>  (prints pubkey hex to stdout)")
+	}
+	flag.Parse()
+	if flag.NArg() != 1 {
+		flag.Usage()
 		os.Exit(2)
 	}
-	id, err := identity.Generate(os.Args[1])
+	keyPath := flag.Arg(0)
+	id, err := identity.Generate(keyPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	if *writeCert {
+		cn := filepath.Base(keyPath)
+		cert, err := id.SelfSignedCert(cn)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})
+		if err := os.WriteFile(keyPath+".crt", pemBytes, 0o644); err != nil { // #nosec G306 -- a certificate is public
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 	fmt.Println(id.PublicHex())
 }

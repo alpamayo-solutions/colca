@@ -12,7 +12,3 @@ key_file: /keys/global.key
 api: { addr: ":8080", token: "demo-admin-token" }
 mqtt: { addr: ":1883" }
 repl: { addr: ":9443" }
-children:
-  - { ulid: n-site1, pubkey: ${PUB_SITE1}, mount: site1 }
-clients:
-  - { ulid: observer, token: observer-secret }

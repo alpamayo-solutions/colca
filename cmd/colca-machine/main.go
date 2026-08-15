@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -28,6 +29,8 @@ import (
 	"time"
 
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
+
+	"github.com/alpamayo-solutions/colca/internal/identity"
 )
 
 const (
@@ -54,14 +57,28 @@ func main() { os.Exit(run()) }
 
 func run() int {
 	ulid := env("MACHINE_ULID", "m1")
-	token := env("MACHINE_TOKEN", "m1-secret")
+	keyPath := env("MACHINE_KEY", "/keys/"+ulid+"-machine.key")
 	broker := env("BROKER_ADDR", "127.0.0.1:1883")
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("machine", ulid)
 	interval := publishInterval(log)
 
+	// The machine's key IS its credential (auth design §6.1): pre-provisioned
+	// at keyPath (gen-keys.sh) and enrolled at the node before first connect.
+	id, err := identity.Load(keyPath)
+	if err != nil {
+		log.Error("cannot load machine key — generate it with colca-keygen and enroll the pubkey", "key", keyPath, "err", err)
+		return 1
+	}
+	cert, err := id.SelfSignedCert(ulid)
+	if err != nil {
+		log.Error("cannot build client certificate", "err", err)
+		return 1
+	}
+
 	metricTopic := "colca/v1/_Metric/" + ulid + "/temp"
-	cmdPrefix := "colca/v1/_CmdParam/" + ulid + "/"
-	cmdFilter := cmdPrefix + "#"
+	// Path-anchored (node-id level is a wildcard for readers): the machine's
+	// default read grant covers its own zone, which is where its commands land.
+	cmdFilter := "colca/v1/_CmdParam/+/" + ulid + "/#"
 
 	// SIGINT/SIGTERM cancel the context; every wait below selects on it, so the
 	// process always leaves through the single clean shutdown path.
@@ -73,8 +90,13 @@ func run() int {
 	}
 
 	opts := pahomqtt.NewClientOptions().
-		AddBroker("tcp://" + broker).
-		SetClientID(ulid).SetUsername(ulid).SetPassword(token).
+		AddBroker("ssl://" + broker).
+		SetTLSConfig(&tls.Config{
+			Certificates:       []tls.Certificate{cert},
+			InsecureSkipVerify: true, // #nosec G402 -- pinning model: the node's registry pins THIS key; no CA exists
+			MinVersion:         tls.VersionTLS13,
+		}).
+		SetClientID(ulid).SetUsername(ulid).
 		// The broker keeps the session, so QoS-1 commands issued while this
 		// machine was away are delivered after a reconnect.
 		SetCleanSession(false).
@@ -112,7 +134,7 @@ func run() int {
 	// SUBSCRIBE of a fresh connection has been registered as a route; such a
 	// message would otherwise be dropped, so route it by hand.
 	opts.SetDefaultPublishHandler(func(c pahomqtt.Client, msg pahomqtt.Message) {
-		if strings.HasPrefix(msg.Topic(), cmdPrefix) {
+		if isOwnCommand(msg.Topic(), ulid) {
 			log.Debug("command arrived before the subscription route", "topic", msg.Topic())
 			onCommand(c, msg)
 			return
@@ -250,6 +272,14 @@ func expiresAt(cmd map[string]any) (int64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// isOwnCommand reports whether topic is a _CmdParam addressed into this
+// machine's zone (local coordinates: colca/v1/_CmdParam/{target}/{mount}/...,
+// where the mount equals the machine's ulid in the demo topology).
+func isOwnCommand(topic, ulid string) bool {
+	parts := strings.Split(topic, "/")
+	return len(parts) >= 5 && parts[2] == "_CmdParam" && parts[4] == ulid
 }
 
 // lastSegment returns the command name, i.e. the last segment of the topic.

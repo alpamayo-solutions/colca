@@ -12,6 +12,26 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
+// fakeIDs is a test Mounts: ulid → entry.
+type fakeIDs map[string]*uns.Entry
+
+func (f fakeIDs) MountOf(ulid string) (string, bool) {
+	e, ok := f[ulid]
+	if !ok || e.Mount == "" {
+		return "", false
+	}
+	return e.Mount, true
+}
+func (f fakeIDs) Get(ulid string) (*uns.Entry, bool) { e, ok := f[ulid]; return e, ok }
+
+func testIDs() fakeIDs {
+	return fakeIDs{
+		"m1":       {ULID: "m1", Kind: uns.KindMachine, Mount: "m1"},
+		"observer": {ULID: "observer", Kind: uns.KindMachine},
+		"hmi":      {ULID: "hmi", Kind: uns.KindMachine, Mount: "hmi", Grants: []string{"cmd:m1/#:param"}},
+	}
+}
+
 func newEngine(t *testing.T) *Engine {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -19,8 +39,8 @@ func newEngine(t *testing.T) *Engine {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	cfg := &config.Config{ULID: "n-edge1", Clients: []config.Client{{ULID: "m1", Token: "tok", Mount: "m1"}}}
-	return New(s, cfg, nil, nil) // nil, nil = no local MQTT delivery, no metrics in unit tests
+	cfg := &config.Config{ULID: "n-edge1"}
+	return New(s, cfg, testIDs(), nil, nil) // nils = no local MQTT delivery, no metrics in unit tests
 }
 
 // delivery is one call of engine.LocalDeliver, recorded verbatim.
@@ -58,12 +78,9 @@ func newRecordingEngine(t *testing.T) (*Engine, *recorder) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	cfg := &config.Config{ULID: "n-edge1", Clients: []config.Client{
-		{ULID: "m1", Token: "tok", Mount: "m1"},
-		{ULID: "observer", Token: "observer-secret"},
-	}}
+	cfg := &config.Config{ULID: "n-edge1"}
 	rec := &recorder{}
-	return New(s, cfg, rec.deliver, nil), rec
+	return New(s, cfg, testIDs(), rec.deliver, nil), rec
 }
 
 func TestClientPublishMountAndKV(t *testing.T) {
@@ -94,6 +111,62 @@ func TestClientIdentityRule(t *testing.T) {
 	_, err = e.IngestClient("m1", "colca/v1/_CmdParam/m1/x", []byte(`{"correlation_id":"c","expires_at":1}`))
 	if err == nil {
 		t.Fatal("clients must not publish commands")
+	}
+}
+
+// Registry entries enter through the enrollment door ONLY (auth §3): _EdgeNode
+// is rejected at both ordinary ingest doors, no matter who sends it.
+func TestEdgeNodeRejectedAtOrdinaryDoors(t *testing.T) {
+	e := newEngine(t)
+	if _, err := e.IngestClient("m1", "colca/v1/_EdgeNode/m1/somewhere", []byte(`{"ulid":"m1"}`)); err == nil {
+		t.Fatal("client _EdgeNode publish must be rejected")
+	}
+	if _, err := e.IngestAdmin("colca/v1/_EdgeNode/x/somewhere", []byte(`{"ulid":"x"}`)); err == nil {
+		t.Fatal("admin _EdgeNode publish must be rejected")
+	}
+	if e.Store().NextOffset("entities") != 1 {
+		t.Fatal("rejected _EdgeNode must not be persisted")
+	}
+	// Replication is NOT an ordinary door: a child's already-enrolled fact
+	// rides upward like any entity (rejecting it would hole the stream).
+	recs := []store.ReplRecord{{ChildOffset: 1, Topic: "colca/v1/_EdgeNode/m9/edge1/z/m9",
+		Payload: []byte(`{"ulid":"m9"}`), TS: 1, KVPath: "edge1/z/m9", KVNode: "m9"}}
+	if _, _, err := e.IngestReplicated("child1", "entities", recs); err != nil {
+		t.Fatalf("replicated _EdgeNode must be accepted: %v", err)
+	}
+	if kv := e.Store().KVScan("edge1/z/m9"); len(kv) != 1 {
+		t.Fatalf("replicated _EdgeNode must project into KV: %v", kv)
+	}
+}
+
+// A client with a covering cmd grant may publish commands of the granted
+// class into the granted zone — absolute node-local paths, no mount rewrite,
+// no level-4 identity rule (auth §5.3 ActCmd).
+func TestClientCmdGrants(t *testing.T) {
+	e := newEngine(t)
+	payload := []byte(`{"correlation_id":"c","expires_at":99999999999}`)
+	res, err := e.IngestClient("hmi", "colca/v1/_CmdParam/m1/m1/set-speed", payload)
+	if err != nil {
+		t.Fatalf("granted cmd rejected: %v", err)
+	}
+	if res.Stream != "commands" {
+		t.Fatalf("%+v", res)
+	}
+	recs, _, _ := e.Store().Read("commands", res.Offset, 1, nil)
+	if recs[0].Topic != "colca/v1/_CmdParam/m1/m1/set-speed" {
+		t.Fatalf("cmd publish must not be rewritten: %s", recs[0].Topic)
+	}
+	// Class outside the grant.
+	if _, err := e.IngestClient("hmi", "colca/v1/_CmdMaintain/m1/m1/calibrate", payload); err == nil {
+		t.Fatal("ungranted cmd class must be rejected")
+	}
+	// Zone outside the grant.
+	if _, err := e.IngestClient("hmi", "colca/v1/_CmdParam/x/other/set", payload); err == nil {
+		t.Fatal("cmd outside the granted zone must be rejected")
+	}
+	// Invalid payload still rejected even with a grant.
+	if _, err := e.IngestClient("hmi", "colca/v1/_CmdParam/m1/m1/set", []byte(`{}`)); err == nil {
+		t.Fatal("cmd payload validation must still apply")
 	}
 }
 
@@ -327,7 +400,7 @@ func newCapturedEngine(t *testing.T) (*Engine, *bytes.Buffer) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return New(s, &config.Config{ULID: "n-parent"}, nil, nil), buf
+	return New(s, &config.Config{ULID: "n-parent"}, testIDs(), nil, nil), buf
 }
 
 func replBatchAt(topic string, offsets ...uint64) []store.ReplRecord {

@@ -26,15 +26,46 @@ import (
 
 // Reject reasons — the allowed label values of colca_rejected_publishes_total.
 const (
-	ReasonIdentity   = "identity"    // topic level 4 does not match the sender's identity
-	ReasonGrammar    = "grammar"     // topic does not parse as uns grammar
-	ReasonValidation = "validation"  // payload fails the contract's schema
-	ReasonNoMount    = "no_mount"    // no mount configured for the sender
-	ReasonNotCommand = "not_command" // a client published a _Cmd* topic
-	ReasonAuth       = "auth"        // broker CONNECT authentication failed
+	ReasonIdentity   = "identity"   // topic level 4 does not match the sender's identity
+	ReasonGrammar    = "grammar"    // topic does not parse as uns grammar
+	ReasonValidation = "validation" // payload fails the contract's schema
+	ReasonNoMount    = "no_mount"   // no mount configured for the sender
+	ReasonCmdDenied  = "cmd_denied" // a client's _Cmd* publish had no covering cmd grant
+	// ReasonRegistryContract: _EdgeNode arrived at an ordinary ingest door —
+	// registry entries enter only through the enrollment endpoint (auth §3).
+	ReasonRegistryContract = "registry_contract"
 )
 
-var reasons = []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonNotCommand, ReasonAuth}
+var reasons = []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonCmdDenied, ReasonRegistryContract}
+
+// Auth doors and rejection reasons — the label values of
+// colca_auth_rejections_total{door,reason} (auth design §9). CONNECT/request
+// authentication failures live here, NOT in colca_rejected_publishes_total:
+// that family counts publishes, this one counts identities turned away at a
+// door.
+const (
+	DoorMQTT = "mqtt"
+	DoorHTTP = "http"
+	DoorRepl = "repl"
+
+	AuthUnknownKey       = "unknown_key"       // TLS peer key not in the local registry (incl. revoked)
+	AuthKind             = "kind"              // entry exists but its kind may not use this door
+	AuthUsernameMismatch = "username_mismatch" // MQTT username != the key's enrolled ULID
+	AuthToken            = "token"             // admin token missing or wrong
+)
+
+var authDoors = []string{DoorMQTT, DoorHTTP, DoorRepl}
+var authReasons = []string{AuthUnknownKey, AuthKind, AuthUsernameMismatch, AuthToken}
+
+// ACL denial actions — label values of colca_acl_denials_total{action}:
+// read-side denials only (sub = MQTT subscribe filter, read = HTTP record
+// scope). Write-side rejections stay in colca_rejected_publishes_total.
+const (
+	ACLSub  = "sub"
+	ACLRead = "read"
+)
+
+var aclActions = []string{ACLSub, ACLRead}
 
 // streams mirrors the store's fixed stream set (store.streams; the same list
 // the /debug/state route enumerates).
@@ -59,6 +90,9 @@ type Metrics struct {
 	downlinkOK   prometheus.Gauge
 	downlinkFail prometheus.Counter
 	reseed       prometheus.Gauge
+	authReject   *prometheus.CounterVec
+	aclDeny      *prometheus.CounterVec
+	kicks        prometheus.Counter
 
 	// Retention (design §8): pruner-side counters.
 	prunedRecords *prometheus.CounterVec // colca_retention_pruned_records_total{stream}
@@ -83,6 +117,7 @@ type Metrics struct {
 	rejectedBy      map[string]prometheus.Counter
 	uplinkOKBy      map[string]prometheus.Gauge
 	uplinkFailBy    map[string]prometheus.Counter
+	aclDenyBy       map[string]prometheus.Counter
 	prunedRecordsBy map[string]prometheus.Counter
 	prunedBytesBy   map[string]prometheus.Counter
 	pruneRunsBy     map[string]prometheus.Counter
@@ -128,6 +163,18 @@ func New(st *store.Store, cfg config.Retention) *Metrics {
 			Name: "colca_retained_reseed_records",
 			Help: "KV entries replayed into the broker's retained set at startup.",
 		}),
+		authReject: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_auth_rejections_total",
+			Help: "Identities turned away at a door, by door and reason. Resets on restart.",
+		}, []string{"door", "reason"}),
+		aclDeny: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_acl_denials_total",
+			Help: "Read-side authorization denials (sub = MQTT subscribe, read = HTTP scope). Resets on restart.",
+		}, []string{"action"}),
+		kicks: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_session_kicks_total",
+			Help: "Live MQTT sessions disconnected by a registry change (revoke or re-enroll). Resets on restart.",
+		}),
 		prunedRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_retention_pruned_records_total",
 			Help: "Records removed by the retention pruner, by stream. Resets on restart.",
@@ -172,6 +219,7 @@ func New(st *store.Store, cfg config.Retention) *Metrics {
 	m.ingestBy = counterChildren(m.ingest, streams)
 	m.rejectedBy = counterChildren(m.rejected, reasons)
 	m.uplinkFailBy = counterChildren(m.uplinkFail, streams)
+	m.aclDenyBy = counterChildren(m.aclDeny, aclActions)
 	m.uplinkOKBy = make(map[string]prometheus.Gauge, len(streams))
 	for _, s := range streams {
 		m.uplinkOKBy[s] = m.uplinkOK.WithLabelValues(s)
@@ -189,14 +237,49 @@ func New(st *store.Store, cfg config.Retention) *Metrics {
 		}
 		m.gapServedBy[s] = byName
 	}
+	// Pre-create every door×reason child so all label combinations scrape as 0.
+	for _, d := range authDoors {
+		for _, r := range authReasons {
+			m.authReject.WithLabelValues(d, r)
+		}
+	}
 
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
 		m.downlinkOK, m.downlinkFail, m.reseed,
+		m.authReject, m.aclDeny, m.kicks,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
 	return m
+}
+
+// AuthReject counts one identity turned away at a door.
+func (m *Metrics) AuthReject(door, reason string) {
+	if m == nil {
+		return
+	}
+	m.authReject.WithLabelValues(door, reason).Inc()
+}
+
+// ACLDeny counts one read-side authorization denial.
+func (m *Metrics) ACLDeny(action string) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.aclDenyBy[action]; ok {
+		c.Inc()
+		return
+	}
+	m.aclDeny.WithLabelValues(action).Inc()
+}
+
+// SessionKick counts one live session disconnected by a registry change.
+func (m *Metrics) SessionKick() {
+	if m == nil {
+		return
+	}
+	m.kicks.Inc()
 }
 
 // counterChildren pre-resolves one child per known label value, so incrementing

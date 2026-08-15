@@ -11,6 +11,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
+	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -30,7 +31,11 @@ func mustParts(t *testing.T) (*store.Store, *engine.Engine) {
 	}
 	t.Cleanup(func() { st.Close() })
 	cfg := &config.Config{ULID: nodeULID}
-	return st, engine.New(st, cfg, nil, nil)
+	reg, err := registry.New(st, nodeULID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, engine.New(st, cfg, reg, nil, nil)
 }
 
 func newPruner(t *testing.T, st *store.Store, eng *engine.Engine, ret config.Retention) *Pruner {

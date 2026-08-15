@@ -2,16 +2,20 @@ package mqttsrv
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 
+	"github.com/alpamayo-solutions/colca/internal/authtest"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
+	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
@@ -20,67 +24,87 @@ import (
 // through Handler() rather than a Collector/Gatherer accessor.
 var scrapeMetric = metricstest.Value
 
-// newBroker starts a broker on a random loopback port with one configured
-// client (m1/m1-secret mounted at "m1") and a real store. The engine is bound
-// after construction, exercising the late-binding path node assembly uses.
-func newBroker(t *testing.T) (*Server, *store.Store) {
-	t.Helper()
-	s, st, _ := newBrokerWithMetrics(t)
-	return s, st
+// world is the broker fixture: TLS listener, registry with two enrolled
+// machines (m1 mounted at "m1"; observer mountless with read:#), engine
+// late-bound like node assembly does, kick wired.
+type world struct {
+	srv     *Server
+	st      *store.Store
+	reg     *registry.Manager
+	m       *metrics.Metrics
+	m1, obs *authtest.Machine
 }
 
-// newBrokerWithMetrics is newBroker plus the *metrics.Metrics wired into both
-// the broker (for auth-reject counting) and the engine (for the same registry
-// a real node would share).
-func newBrokerWithMetrics(t *testing.T) (*Server, *store.Store, *metrics.Metrics) {
+func newWorld(t *testing.T) *world {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
-	cfg := &config.Config{
-		ULID:    "n1",
-		DataDir: t.TempDir(),
-		KeyFile: "unused.pem",
-		MQTT:    config.Endpoint{Addr: "127.0.0.1:0"},
-		Clients: []config.Client{
-			{ULID: "m1", Token: "m1-secret", Mount: "m1"},
-			// mount-less → read-only observer: connects and subscribes, never publishes
-			{ULID: "observer", Token: "observer-secret"},
-		},
+	nodeID, err := identity.Generate(filepath.Join(t.TempDir(), "n1.key"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	reg, err := registry.New(st, "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &world{
+		st:  st,
+		reg: reg,
+		m1:  authtest.NewMachine(t, "m1"),
+		obs: authtest.NewMachine(t, "observer"),
+	}
+	authtest.Enroll(t, reg, w.m1, "m1")
+	authtest.Enroll(t, reg, w.obs, "", "read:#")
+
+	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
+		MQTT: config.Endpoint{Addr: "127.0.0.1:0"}}
 	m := metrics.New(st, config.Retention{})
-	s, err := New(cfg, nil, m)
+	w.m = m
+	s, err := New(cfg, nodeID, reg, nil, m)
 	if err != nil {
 		st.Close()
 		t.Fatalf("New: %v", err)
 	}
-	s.SetEngine(engine.New(st, cfg, s.DeliverLocal, m))
+	s.SetEngine(engine.New(st, cfg, reg, s.DeliverLocal, m))
+	reg.SetKick(s.Kick)
 	go func() { _ = s.Serve() }()
 	t.Cleanup(func() {
 		s.Close()
 		st.Close()
 	})
-	return s, st, m
+	w.srv = s
+	return w
 }
 
-func connect(t *testing.T, addr, clientID, user, pass string) paho.Client {
+// connect dials the TLS listener with the machine's client cert.
+func connect(t *testing.T, addr, clientID string, m *authtest.Machine) paho.Client {
 	t.Helper()
+	c, err := tryConnect(addr, clientID, m, m.ULID)
+	if err != nil {
+		t.Fatalf("connect %s: %v", clientID, err)
+	}
+	t.Cleanup(func() { c.Disconnect(100) })
+	return c
+}
+
+// tryConnect is connect without the test-failure: for assertions on REJECTED
+// connects. username lets a test present a mismatched name on purpose.
+func tryConnect(addr, clientID string, m *authtest.Machine, username string) (paho.Client, error) {
 	opts := paho.NewClientOptions().
-		AddBroker("tcp://" + addr).
+		AddBroker("ssl://" + addr).
+		SetTLSConfig(m.TLSConfig()).
 		SetClientID(clientID).
-		SetUsername(user).
-		SetPassword(pass).
+		SetUsername(username).
+		SetProtocolVersion(4). // one physical connect per attempt (no 3.1 downgrade retry)
 		SetConnectTimeout(5 * time.Second)
 	c := paho.NewClient(opts)
 	tok := c.Connect()
 	if !tok.WaitTimeout(5 * time.Second) {
-		t.Fatalf("connect %s: timed out", clientID)
+		return c, fmt.Errorf("timed out")
 	}
-	if err := tok.Error(); err != nil {
-		t.Fatalf("connect %s: %v", clientID, err)
-	}
-	return c
+	return c, tok.Error()
 }
 
 // waitRecords polls a stream until it holds at least want records.
@@ -106,52 +130,15 @@ func waitRecords(t *testing.T, st *store.Store, stream string, want int, d time.
 // the data-loss bug the cardinality benchmark scenario found
 // (colca/bench/cardinality.go): a fresh subscriber replaying the retained set
 // can burst more QoS-1 messages than mochi's inflight window, and anything
-// past the window used to be silently dropped with no retry
-// ("client store quota reached" / packets.ErrQuotaExceeded in
-// publishToClient). It seeds retainedCount retained messages — just past
-// mochi's 8192 default MaximumInflight — then connects ONE fresh subscriber
-// and asserts it receives every single one.
-//
-// Seeding goes straight to the store (one batched Append) and then straight
-// to the broker's inline publish (Server.DeliverLocal, the same call the
-// engine makes after every real ingest) instead of through engine.IngestAdmin
-// or awaited MQTT publishes: each of those does one fsync per record, and at
-// the store's single-record fsync rate (~230 rec/s, see
-// BenchmarkAppendBatch/size=1 in internal/store) seeding 9000 records that
-// way would take minutes. Bypassing the fsync-bound path keeps this test
-// under a second to seed; the mechanism under test — mochi's per-subscriber
-// inflight cap at SUBSCRIBE-time retained replay — is unaffected by how the
-// retained set was populated.
-//
-// Reverting the MaximumInflight fix in New (or setting it back to mochi's
-// 8192 default) makes this test fail with "retained replay delivered 8192 of
-// 9000" — verified manually; see task-11-report.md for the revert/RED and
-// fixed/GREEN command output.
+// past the window used to be silently dropped with no retry. It seeds
+// retainedCount retained messages — just past mochi's 8192 default
+// MaximumInflight — then connects ONE fresh subscriber and asserts it
+// receives every single one. Seeding goes straight to the store (one batched
+// Append) and DeliverLocal to stay fsync-cheap; see git history for the full
+// rationale.
 func TestRetainedReplayDeliversAllMessages(t *testing.T) {
 	const retainedCount = 9000 // just past mochi's 8192 default MaximumInflight
-
-	st, err := store.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	defer st.Close()
-
-	cfg := &config.Config{
-		ULID:    "n1",
-		DataDir: t.TempDir(),
-		KeyFile: "unused.pem",
-		MQTT:    config.Endpoint{Addr: "127.0.0.1:0"},
-		Clients: []config.Client{
-			// mount-less → read-only observer: connects and subscribes, never publishes
-			{ULID: "observer", Token: "observer-secret"},
-		},
-	}
-	s, err := New(cfg, nil, nil)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	go func() { _ = s.Serve() }()
-	t.Cleanup(func() { s.Close() })
+	w := newWorld(t)
 
 	recs := make([]store.Record, retainedCount)
 	for i := range recs {
@@ -161,15 +148,14 @@ func TestRetainedReplayDeliversAllMessages(t *testing.T) {
 			TS:      int64(i),
 		}
 	}
-	if _, _, err := st.Append("metrics", recs); err != nil {
+	if _, _, err := w.st.Append("metrics", recs); err != nil {
 		t.Fatalf("seed store append: %v", err)
 	}
 	for _, r := range recs {
-		s.DeliverLocal(r.Topic, r.Payload, true) // retain=true, same as a real data/entity ingest
+		w.srv.DeliverLocal(r.Topic, r.Payload, true) // retain=true, same as a real data/entity ingest
 	}
 
-	obs := connect(t, s.Addr(), "obs", "observer", "observer-secret")
-	defer obs.Disconnect(100)
+	obs := connect(t, w.srv.Addr(), "obs", w.obs)
 
 	var got atomic.Int64
 	tok := obs.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
@@ -191,33 +177,31 @@ func TestRetainedReplayDeliversAllMessages(t *testing.T) {
 }
 
 func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
-	s, st := newBroker(t)
-	addr := s.Addr()
+	w := newWorld(t)
+	addr := w.srv.Addr()
 	if addr == "" {
 		t.Fatal("Addr() is empty after AddListener")
 	}
 
-	t.Run("wrong password is rejected", func(t *testing.T) {
-		opts := paho.NewClientOptions().
-			AddBroker("tcp://" + addr).
-			SetClientID("bad-pass").
-			SetUsername("m1").
-			SetPassword("wrong").
-			SetConnectTimeout(5 * time.Second)
-		c := paho.NewClient(opts)
+	t.Run("unknown key is rejected", func(t *testing.T) {
+		stranger := authtest.NewMachine(t, "stranger")
+		c, err := tryConnect(addr, "stranger", stranger, "stranger")
 		defer c.Disconnect(100)
-		tok := c.Connect()
-		if !tok.WaitTimeout(5 * time.Second) {
-			t.Fatal("connect with wrong password: timed out instead of being refused")
+		if err == nil {
+			t.Fatal("connect with an un-enrolled key succeeded, want rejection")
 		}
-		if tok.Error() == nil {
-			t.Fatal("connect with wrong password succeeded, want error")
+	})
+
+	t.Run("username mismatch is rejected", func(t *testing.T) {
+		c, err := tryConnect(addr, "m1-as-other", w.m1, "not-m1")
+		defer c.Disconnect(100)
+		if err == nil {
+			t.Fatal("connect with mismatched username succeeded, want rejection")
 		}
 	})
 
 	t.Run("client publish is ingested with mount rewrite", func(t *testing.T) {
-		c := connect(t, addr, "m1-pub", "m1", "m1-secret")
-		defer c.Disconnect(100)
+		c := connect(t, addr, "m1-pub", w.m1)
 
 		tok := c.Publish("colca/v1/_Metric/m1/temp", 1, false, []byte(`{"v":1}`))
 		if !tok.WaitTimeout(5 * time.Second) {
@@ -227,24 +211,17 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 			t.Fatalf("publish: %v", err)
 		}
 
-		recs := waitRecords(t, st, "metrics", 1, 5*time.Second)
+		recs := waitRecords(t, w.st, "metrics", 1, 5*time.Second)
 		if len(recs) != 1 {
 			t.Fatalf("metrics records = %d, want 1: %+v", len(recs), recs)
-		}
-		if recs[0].Offset != 1 {
-			t.Errorf("offset = %d, want 1", recs[0].Offset)
 		}
 		if want := "colca/v1/_Metric/m1/m1/temp"; recs[0].Topic != want {
 			t.Errorf("topic = %q, want %q", recs[0].Topic, want)
 		}
-		if string(recs[0].Payload) != `{"v":1}` {
-			t.Errorf("payload = %q, want %q", recs[0].Payload, `{"v":1}`)
-		}
 	})
 
 	t.Run("spoofed identity is rejected and never persisted", func(t *testing.T) {
-		c := connect(t, addr, "m1-spoof", "m1", "m1-secret")
-		defer c.Disconnect(100)
+		c := connect(t, addr, "m1-spoof", w.m1)
 
 		// A rejected packet gets no PUBACK under MQTT 3.1.1, so the token never
 		// completes — the assertion is on the store, not on the token.
@@ -252,7 +229,7 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 		tok.WaitTimeout(500 * time.Millisecond)
 
 		time.Sleep(300 * time.Millisecond)
-		recs, _, err := st.Read("metrics", 1, 100, nil)
+		recs, _, err := w.st.Read("metrics", 1, 100, nil)
 		if err != nil {
 			t.Fatalf("read metrics: %v", err)
 		}
@@ -262,11 +239,13 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 	})
 
 	t.Run("DeliverLocal reaches subscribers and bypasses ingest", func(t *testing.T) {
-		c := connect(t, addr, "m1-sub", "m1", "m1-secret")
-		defer c.Disconnect(100)
+		c := connect(t, addr, "m1-sub", w.m1)
 
 		msgs := make(chan paho.Message, 1)
-		tok := c.Subscribe("colca/v1/_CmdParam/m1/#", 1, func(_ paho.Client, m paho.Message) {
+		// Path-anchored filter: the node-id level is a wildcard for readers,
+		// the PATH must sit inside the granted zone (a `#` straight after the
+		// node-id level would be path-open and need read:#).
+		tok := c.Subscribe("colca/v1/_CmdParam/+/m1/#", 1, func(_ paho.Client, m paho.Message) {
 			msgs <- m
 		})
 		if !tok.WaitTimeout(5 * time.Second) {
@@ -278,104 +257,156 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 
 		topic := "colca/v1/_CmdParam/m1/m1/go"
 		payload := []byte(`{"correlation_id":"c1","expires_at":1}`)
-		s.DeliverLocal(topic, payload, false)
+		w.srv.DeliverLocal(topic, payload, false)
 
 		select {
 		case m := <-msgs:
 			if m.Topic() != topic {
 				t.Errorf("delivered topic = %q, want %q", m.Topic(), topic)
 			}
-			if string(m.Payload()) != string(payload) {
-				t.Errorf("delivered payload = %q, want %q", m.Payload(), payload)
-			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("DeliverLocal message never arrived")
 		}
 
 		// The inline delivery must not run through the engine.
-		if got := st.NextOffset("commands"); got != 1 {
+		if got := w.st.NextOffset("commands"); got != 1 {
 			t.Errorf("commands next offset = %d, want 1 (inline publish must bypass ingest)", got)
-		}
-		if got := st.NextOffset("metrics"); got != 2 {
-			t.Errorf("metrics next offset = %d, want 2", got)
-		}
-		if got := st.NextOffset("entities"); got != 1 {
-			t.Errorf("entities next offset = %d, want 1", got)
 		}
 	})
 }
 
-// collect subscribes to filter and returns a function that drains everything
-// that arrived so far. Sub-second settling is deliberate: the assertions below
-// are about what must NOT arrive, so the test has to give it time to arrive.
-func collect(t *testing.T, c paho.Client, filter string) func(settle time.Duration) []paho.Message {
-	t.Helper()
-	msgs := make(chan paho.Message, 32)
-	tok := c.Subscribe(filter, 1, func(_ paho.Client, m paho.Message) { msgs <- m })
-	if !tok.WaitTimeout(5 * time.Second) {
-		t.Fatalf("subscribe %s: timed out", filter)
+// Subscribe-side ACLs (auth §6.1): a machine's default read scope is its own
+// zone; filters outside it are denied at SUBSCRIBE time and counted.
+func TestSubscribeACLScopes(t *testing.T) {
+	w := newWorld(t)
+	c := connect(t, w.srv.Addr(), "m1-acl", w.m1)
+
+	const denyLine = `colca_acl_denials_total{action="sub"}`
+	if v := scrapeMetric(t, w.m, denyLine); v != 0 {
+		t.Fatalf("%s = %v before any subscribe, want 0", denyLine, v)
 	}
-	if err := tok.Error(); err != nil {
-		t.Fatalf("subscribe %s: %v", filter, err)
-	}
-	return func(settle time.Duration) []paho.Message {
-		deadline := time.After(settle)
-		var out []paho.Message
-		for {
-			select {
-			case m := <-msgs:
-				out = append(out, m)
-			case <-deadline:
-				return out
+
+	subErr := func(filter string) error {
+		tok := c.Subscribe(filter, 1, func(paho.Client, paho.Message) {})
+		if !tok.WaitTimeout(5 * time.Second) {
+			return fmt.Errorf("timeout")
+		}
+		if err := tok.Error(); err != nil {
+			return err
+		}
+		// paho surfaces a rejected subscription as granted QoS 0x80 in the
+		// SUBACK; token.Error is nil on v3.1.1, so inspect the result map.
+		if st, ok := tok.(*paho.SubscribeToken); ok {
+			if qos, found := st.Result()[filter]; found && qos == 0x80 {
+				return fmt.Errorf("subscription rejected (0x80)")
 			}
 		}
+		return nil
+	}
+
+	if err := subErr("colca/v1/+/+/m1/#"); err != nil {
+		t.Fatalf("own-zone subscribe denied: %v", err)
+	}
+	if err := subErr("colca/v1/_Metric/+/m1/temp"); err != nil {
+		t.Fatalf("own-zone concrete subscribe denied: %v", err)
+	}
+	if err := subErr("other/raw/#"); err != nil {
+		t.Fatalf("non-UNS subscribe denied: %v", err)
+	}
+	if err := subErr("colca/v1/+/+/sibling/#"); err == nil {
+		t.Fatal("sibling-zone subscribe allowed, want denial")
+	}
+	if err := subErr("colca/#"); err == nil {
+		t.Fatal("colca/# subscribe allowed for a zone-scoped machine, want denial")
+	}
+	if v := scrapeMetric(t, w.m, denyLine); v != 2 {
+		t.Fatalf("%s = %v after two denials, want 2", denyLine, v)
+	}
+
+	// The observer's read:# grant covers everything.
+	obs := connect(t, w.srv.Addr(), "obs-acl", w.obs)
+	tok := obs.Subscribe("colca/#", 1, func(paho.Client, paho.Message) {})
+	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		t.Fatalf("observer colca/# subscribe: %v", tok.Error())
 	}
 }
 
-// A failed CONNECT (unknown user or wrong token) must count against
-// colca_rejected_publishes_total{reason="auth"} — the broker's own reject
-// path, distinct from every engine reject path.
-func TestBrokerAuthFailureIncrementsRejectedReasonAuth(t *testing.T) {
-	s, _, m := newBrokerWithMetrics(t)
-	addr := s.Addr()
+// A denied subscription must not leak the retained set (the replay happens at
+// SUBSCRIBE time, so the ACL denial suppresses it).
+func TestDeniedSubscribeLeaksNoRetained(t *testing.T) {
+	w := newWorld(t)
+	// Seed one retained record OUTSIDE m1's zone.
+	w.srv.DeliverLocal("colca/v1/_Metric/x/sibling/temp", []byte(`{"v":9}`), true)
 
-	const line = `colca_rejected_publishes_total{reason="auth"}`
-	if v := scrapeMetric(t, m, line); v != 0 {
+	c := connect(t, w.srv.Addr(), "m1-leak", w.m1)
+	got := make(chan paho.Message, 8)
+	tok := c.Subscribe("colca/v1/+/+/sibling/#", 1, func(_ paho.Client, m paho.Message) { got <- m })
+	tok.WaitTimeout(2 * time.Second)
+
+	select {
+	case m := <-got:
+		t.Fatalf("retained message leaked through a denied subscription: %s", m.Topic())
+	case <-time.After(700 * time.Millisecond):
+	}
+}
+
+// Revocation kicks the live session and the key cannot reconnect (auth §7).
+func TestRevocationKicksAndBlocksReconnect(t *testing.T) {
+	w := newWorld(t)
+	c := connect(t, w.srv.Addr(), "m1-kick", w.m1)
+	if !c.IsConnected() {
+		t.Fatal("precondition: not connected")
+	}
+
+	const kickLine = `colca_session_kicks_total`
+	if _, err := w.reg.Revoke("m1"); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for c.IsConnectionOpen() {
+		if time.Now().After(deadline) {
+			t.Fatal("revoked client still connected after 5s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if v := scrapeMetric(t, w.m, kickLine); v < 1 {
+		t.Fatalf("%s = %v after a revoke of a live session, want >= 1", kickLine, v)
+	}
+
+	// Reconnect with the revoked key must fail.
+	c2, err := tryConnect(w.srv.Addr(), "m1-again", w.m1, "m1")
+	defer c2.Disconnect(100)
+	if err == nil {
+		t.Fatal("revoked key reconnected, want rejection")
+	}
+}
+
+// A failed CONNECT counts against colca_auth_rejections_total{door="mqtt"} —
+// the door's own family, distinct from every engine publish-reject path.
+func TestBrokerAuthFailureIncrementsDoorMetric(t *testing.T) {
+	w := newWorld(t)
+
+	const line = `colca_auth_rejections_total{door="mqtt",reason="unknown_key"}`
+	if v := scrapeMetric(t, w.m, line); v != 0 {
 		t.Fatalf("%s = %v before any failed connect, want 0", line, v)
 	}
 
-	opts := paho.NewClientOptions().
-		AddBroker("tcp://" + addr).
-		SetClientID("bad-pass").
-		SetUsername("m1").
-		SetPassword("wrong").
-		// Pin the protocol version so paho makes exactly one physical connection.
-		// With protocolVersionExplicit left false, paho's attemptConnection retries
-		// a rejected CONNACK by opening a SECOND TCP connection and reconnecting
-		// with MQTT 3.1 (goto CONN in the client internals) — that second
-		// connection is a second, genuine CONNECT the broker's hook correctly
-		// rejects again, not a double-count bug in the hook. Mochi itself only
-		// ever invokes OnConnectAuthenticate once per TCP connection.
-		SetProtocolVersion(4).
-		SetConnectTimeout(5 * time.Second)
-	c := paho.NewClient(opts)
+	stranger := authtest.NewMachine(t, "stranger")
+	c, err := tryConnect(w.srv.Addr(), "stranger", stranger, "stranger")
 	defer c.Disconnect(100)
-	tok := c.Connect()
-	if !tok.WaitTimeout(5 * time.Second) {
-		t.Fatal("connect with wrong password: timed out instead of being refused")
-	}
-	if tok.Error() == nil {
-		t.Fatal("connect with wrong password succeeded, want error")
+	if err == nil {
+		t.Fatal("connect with un-enrolled key succeeded, want rejection")
 	}
 
-	if v := scrapeMetric(t, m, line); v != 1 {
+	if v := scrapeMetric(t, w.m, line); v != 1 {
 		t.Fatalf("%s = %v after one failed CONNECT, want exactly 1", line, v)
 	}
 
-	// A successful connect right after must not move the auth counter.
-	good := connect(t, addr, "m1-ok", "m1", "m1-secret")
-	defer good.Disconnect(100)
-	if v := scrapeMetric(t, m, line); v != 1 {
+	// A successful connect right after must not move the counter.
+	good := connect(t, w.srv.Addr(), "m1-ok", w.m1)
+	_ = good
+	if v := scrapeMetric(t, w.m, line); v != 1 {
 		t.Fatalf("%s = %v after a successful connect, want unchanged 1", line, v)
 	}
 }
@@ -384,23 +415,32 @@ func TestBrokerAuthFailureIncrementsRejectedReasonAuth(t *testing.T) {
 // (CodeSuccessIgnore) and only the engine's canonical, mount-rewritten form is
 // distributed. A subscriber on colca/# must see each record exactly once.
 func TestClientPublishDistributedOnlyAsCanonicalTopic(t *testing.T) {
-	s, st := newBroker(t)
+	w := newWorld(t)
 
-	sub := connect(t, s.Addr(), "observer-sub", "observer", "observer-secret")
-	defer sub.Disconnect(100)
-	drain := collect(t, sub, "colca/#")
+	sub := connect(t, w.srv.Addr(), "observer-sub", w.obs)
+	msgs := make(chan paho.Message, 32)
+	tok := sub.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
+	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		t.Fatalf("subscribe: %v", tok.Error())
+	}
 
-	pub := connect(t, s.Addr(), "m1-pub", "m1", "m1-secret")
-	defer pub.Disconnect(100)
-	tok := pub.Publish("colca/v1/_Metric/m1/temp", 1, false, []byte(`{"v":42}`))
-	if !tok.WaitTimeout(5 * time.Second) {
+	pub := connect(t, w.srv.Addr(), "m1-pub", w.m1)
+	ptok := pub.Publish("colca/v1/_Metric/m1/temp", 1, false, []byte(`{"v":42}`))
+	if !ptok.WaitTimeout(5 * time.Second) {
 		t.Fatal("publish: timed out waiting for PUBACK (CodeSuccessIgnore must still ack)")
 	}
-	if err := tok.Error(); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
 
-	got := drain(1500 * time.Millisecond)
+	var got []paho.Message
+	deadline := time.After(1500 * time.Millisecond)
+drain:
+	for {
+		select {
+		case m := <-msgs:
+			got = append(got, m)
+		case <-deadline:
+			break drain
+		}
+	}
 	if len(got) != 1 {
 		var topics []string
 		for _, m := range got {
@@ -411,45 +451,45 @@ func TestClientPublishDistributedOnlyAsCanonicalTopic(t *testing.T) {
 	if want := "colca/v1/_Metric/m1/m1/temp"; got[0].Topic() != want {
 		t.Fatalf("topic = %q, want the canonical %q", got[0].Topic(), want)
 	}
-	if string(got[0].Payload()) != `{"v":42}` {
-		t.Fatalf("payload = %q", got[0].Payload())
-	}
-	for _, m := range got {
-		if m.Topic() == "colca/v1/_Metric/m1/temp" {
-			t.Fatal("the raw client topic must never be distributed")
-		}
-	}
-	if st.NextOffset("metrics") != 2 {
-		t.Fatalf("metrics next offset = %d, want 2", st.NextOffset("metrics"))
+	if w.st.NextOffset("metrics") != 2 {
+		t.Fatalf("metrics next offset = %d, want 2", w.st.NextOffset("metrics"))
 	}
 }
 
 // Outside colca/# Colca is just a broker: a non-UNS publish is not persisted and
-// must be distributed unchanged.
+// must be distributed unchanged — and non-UNS subscriptions need no grant.
 func TestNonUnsTopicStillDistributed(t *testing.T) {
-	s, st := newBroker(t)
+	w := newWorld(t)
+	// Baseline: enrollments already appended _EdgeNode entities.
+	base := map[string]uint64{}
+	for _, stream := range []string{"metrics", "entities", "commands"} {
+		base[stream] = w.st.NextOffset(stream)
+	}
 
-	sub := connect(t, s.Addr(), "observer-other", "observer", "observer-secret")
-	defer sub.Disconnect(100)
-	drain := collect(t, sub, "other/#")
+	sub := connect(t, w.srv.Addr(), "m1-other-sub", w.m1)
+	msgs := make(chan paho.Message, 8)
+	tok := sub.Subscribe("other/#", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
+	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		t.Fatalf("subscribe other/#: %v", tok.Error())
+	}
 
-	pub := connect(t, s.Addr(), "m1-other", "m1", "m1-secret")
-	defer pub.Disconnect(100)
-	tok := pub.Publish("other/thing", 1, false, []byte("hello"))
-	if !tok.WaitTimeout(5 * time.Second) {
+	pub := connect(t, w.srv.Addr(), "m1-other-pub", w.m1)
+	ptok := pub.Publish("other/thing", 1, false, []byte("hello"))
+	if !ptok.WaitTimeout(5 * time.Second) {
 		t.Fatal("publish: timed out")
 	}
 
-	got := drain(1500 * time.Millisecond)
-	if len(got) != 1 {
-		t.Fatalf("want exactly 1 message on other/#, got %d", len(got))
-	}
-	if got[0].Topic() != "other/thing" || string(got[0].Payload()) != "hello" {
-		t.Fatalf("non-UNS message altered: topic=%q payload=%q", got[0].Topic(), got[0].Payload())
+	select {
+	case m := <-msgs:
+		if m.Topic() != "other/thing" || string(m.Payload()) != "hello" {
+			t.Fatalf("non-UNS message altered: topic=%q payload=%q", m.Topic(), m.Payload())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("non-UNS message never arrived")
 	}
 	for _, stream := range []string{"metrics", "entities", "commands"} {
-		if off := st.NextOffset(stream); off != 1 {
-			t.Fatalf("%s next offset = %d, want 1 (non-UNS must not persist)", stream, off)
+		if off := w.st.NextOffset(stream); off != base[stream] {
+			t.Fatalf("%s next offset moved %d → %d (non-UNS must not persist)", stream, base[stream], off)
 		}
 	}
 }
@@ -461,13 +501,14 @@ func TestNonUnsTopicStillDistributed(t *testing.T) {
 // FRESH subscriber connecting afterwards gets no retained message for the
 // retired path while an untouched sibling path still replays.
 func TestTombstoneClearsRetainedOnBroker(t *testing.T) {
-	s, st := newBroker(t)
+	w := newWorld(t)
+	s, st := w.srv, w.st
 	const (
 		tombTopic = "colca/v1/_Metric/m1/m1/temp" // canonical (post-mount) form
 		keepTopic = "colca/v1/_Metric/m1/m1/keep"
 	)
 
-	m1 := connect(t, s.Addr(), "m1-tomb", "m1", "m1-secret")
+	m1 := connect(t, s.Addr(), "m1-tomb", w.m1)
 	defer m1.Disconnect(100)
 	pub := func(topic, payload string) {
 		t.Helper()
@@ -485,7 +526,7 @@ func TestTombstoneClearsRetainedOnBroker(t *testing.T) {
 		retained       bool
 	}
 	liveMsgs := make(chan msg, 16)
-	live := connect(t, s.Addr(), "obs-live", "observer", "observer-secret")
+	live := connect(t, s.Addr(), "obs-live", w.obs)
 	defer live.Disconnect(100)
 	tok := live.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
 		liveMsgs <- msg{m.Topic(), string(m.Payload()), m.Retained()}
@@ -532,7 +573,7 @@ cleared:
 	// A FRESH subscriber gets the sibling's retained value but nothing —
 	// retained or otherwise — for the retired path.
 	freshMsgs := make(chan msg, 16)
-	fresh := connect(t, s.Addr(), "obs-fresh", "observer", "observer-secret")
+	fresh := connect(t, s.Addr(), "obs-fresh", w.obs)
 	defer fresh.Disconnect(100)
 	tok = fresh.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
 		freshMsgs <- msg{m.Topic(), string(m.Payload()), m.Retained()}

@@ -31,14 +31,14 @@ func RunCardinality(p Params) (*Report, error) {
 		return nil, err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second, Transport: apiTransport()}
 	seedStart := time.Now()
 	for i := 0; i < p.Paths; i++ {
 		body, _ := json.Marshal(map[string]any{
 			"topic":   fmt.Sprintf("colca/v1/_Metric/n-edge/line%d/sig%d", i/100, i%100),
 			"payload": map[string]any{"v": float64(i)},
 		})
-		req, _ := http.NewRequest("POST", "http://"+pair.Edge.APIAddr+"/publish", bytes.NewReader(body))
+		req, _ := http.NewRequest("POST", "https://"+pair.Edge.APIAddr+"/publish", bytes.NewReader(body))
 		req.Header.Set("X-Colca-Token", BenchToken)
 		resp, err := client.Do(req)
 		if err != nil {
@@ -56,7 +56,7 @@ func RunCardinality(p Params) (*Report, error) {
 	var bestScan time.Duration
 	for run := 0; run < 5; run++ {
 		t0 := time.Now()
-		req, _ := http.NewRequest("GET", "http://"+pair.Edge.APIAddr+"/kv?prefix=", nil)
+		req, _ := http.NewRequest("GET", "https://"+pair.Edge.APIAddr+"/kv?prefix=", nil)
 		req.Header.Set("X-Colca-Token", BenchToken)
 		resp, err := client.Do(req)
 		if err != nil {

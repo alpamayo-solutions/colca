@@ -4,7 +4,7 @@
 #      ▲ mTLS
 #   site1  (level 2)            mounts: edge1 → n-edge1, edge2 → n-edge2
 #      ▲          ▲ mTLS
-#   edge1        edge2          clients: m1 → machine m1, m2 → machine m2
+#   edge1        edge2          machines m1/m2 enrolled at their edges (smoke.sh)
 #      ▲ MQTT       ▲ MQTT
 #     m1           m2
 #
@@ -27,7 +27,7 @@ services:
       - "./keys:/keys:ro"
       - "global-data:/data"
     # 11880 is the hub bus: every record replicated up from the whole tree is
-    # mirrored there under its stored topic (subscribe as observer/observer-secret).
+    # mirrored there under its stored topic (subscribe with an enrolled read:# identity).
     ports: ["127.0.0.1:18080:8080", "127.0.0.1:11880:1883"]
 
   site1:
@@ -69,9 +69,11 @@ services:
     restart: unless-stopped
     environment:
       MACHINE_ULID: m1
-      MACHINE_TOKEN: m1-secret
+      MACHINE_KEY: /keys/m1-machine.key
       BROKER_ADDR: "edge1:1883"
       PUBLISH_INTERVAL_MS: "1000"
+    volumes:
+      - "./keys:/keys:ro"
     depends_on: [edge1]
 
   m2:
@@ -80,9 +82,11 @@ services:
     restart: unless-stopped
     environment:
       MACHINE_ULID: m2
-      MACHINE_TOKEN: m2-secret
+      MACHINE_KEY: /keys/m2-machine.key
       BROKER_ADDR: "edge2:1883"
       PUBLISH_INTERVAL_MS: "1000"
+    volumes:
+      - "./keys:/keys:ro"
     depends_on: [edge2]
 
 volumes:

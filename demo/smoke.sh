@@ -13,10 +13,11 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../deploy"
 
 TOK="X-Colca-Token: demo-admin-token"
-G=http://127.0.0.1:18080
-S1=http://127.0.0.1:18081
-E1=http://127.0.0.1:18082
-E2=http://127.0.0.1:18083
+# The API is TLS with the node's self-signed key (pinning model, no CA): -k.
+G=https://127.0.0.1:18080
+S1=https://127.0.0.1:18081
+E1=https://127.0.0.1:18082
+E2=https://127.0.0.1:18083
 CMD_TOPIC="colca/v1/_CmdParam/m1/site1/edge1/m1/set-speed"
 ACK_TOPIC="colca/v1/_Ack/m1/site1/edge1/m1/set-speed"
 
@@ -37,12 +38,12 @@ docker compose version >/dev/null 2>&1 || fail "'docker compose' (v2) is require
 # json_int <url-path> <python-expression-over-d> → prints the value, or nothing
 # when the node is not answering yet (the callers poll, so that is not an error).
 json_int() {
-  curl -sf -H "$TOK" "$1" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print($2)" 2>/dev/null || true
+  curl -skf -H "$TOK" "$1" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print($2)" 2>/dev/null || true
 }
 
 kv_dump() { # $1 = label, $2 = base url
   echo "   ┌─ KV @ $1"
-  curl -sf -H "$TOK" "$2/kv" 2>/dev/null | python3 -c '
+  curl -skf -H "$TOK" "$2/kv" 2>/dev/null | python3 -c '
 import json, sys
 entries = sorted(json.load(sys.stdin)["entries"], key=lambda e: e["path"])
 if not entries:
@@ -83,14 +84,36 @@ fi
 echo "── waiting for global health…"
 ok=0
 for _ in $(seq 1 60); do
-  if curl -sf "$G/healthz" >/dev/null 2>&1; then
+  if curl -skf "$G/healthz" >/dev/null 2>&1; then
     ok=1
     break
   fi
   sleep 1
 done
 [ "$ok" = 1 ] || fail "global never became healthy on $G/healthz"
-say "   global answers /healthz: $(curl -sf "$G/healthz")"
+say "   global answers /healthz: $(curl -skf "$G/healthz")"
+
+echo "── enrolling the tree: children at their parents, machines at their edges…"
+say "   the registry is runtime state: an identity exists at a node only after"
+say "   POST /enroll (entry-before-connect); everything below retries until then."
+enroll() { # $1 = base url, $2 = ulid, $3 = kind, $4 = mount, $5 = pubkey file
+  ok=0
+  for _ in $(seq 1 60); do
+    if curl -skf -H "$TOK" -H "Content-Type: application/json" -X POST "$1/enroll" \
+      -d "{\"ulid\":\"$2\",\"kind\":\"$3\",\"mount\":\"$4\",\"pubkey\":\"$(cat "$5")\"}" >/dev/null 2>&1; then
+      ok=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$ok" = 1 ] || fail "enrolling $2 at $1 failed"
+  say "   enrolled $2 ($3) at $1 under mount '$4'"
+}
+enroll "$G" n-site1 node site1 keys/site1.pub
+enroll "$S1" n-edge1 node edge1 keys/edge1.pub
+enroll "$S1" n-edge2 node edge2 keys/edge2.pub
+enroll "$E1" m1 machine m1 keys/m1-machine.pub
+enroll "$E2" m2 machine m2 keys/m2-machine.pub
 
 echo "── 1) uplink: metrics from both machines reach global with full paths"
 say "   m1 publishes colca/v1/_Metric/m1/temp to edge1 — global must store it as"
@@ -126,12 +149,12 @@ say "   issuing $CMD_TOPIC (correlation_id=$CORR, expires in 1h)"
 say "   note: /publish lands on GLOBAL's own bus (127.0.0.1:11880), not on m1's —"
 say "   the command only reaches m1 by travelling DOWN the tree, which is exactly"
 say "   what is asserted here."
-curl -sf -H "$TOK" -H "Content-Type: application/json" -X POST "$G/publish" \
+curl -skf -H "$TOK" -H "Content-Type: application/json" -X POST "$G/publish" \
   -d "{\"topic\":\"$CMD_TOPIC\",\"payload\":{\"correlation_id\":\"$CORR\",\"expires_at\":$EXP,\"params\":{\"speed\":7}}}" \
   >/dev/null || fail "publishing the command at global failed"
 ok=0
 for _ in $(seq 1 60); do
-  got=$(curl -sf -H "$TOK" "$G/fetch?stream=commands&cursor=smoke-$CORR&max=500" 2>/dev/null | python3 -c "
+  got=$(curl -skf -H "$TOK" "$G/fetch?stream=commands&cursor=smoke-$CORR&max=500" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 print(any(r['topic'] == '$ACK_TOPIC'

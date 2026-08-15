@@ -16,7 +16,7 @@ cat <<'BANNER'
       ▲ mTLS
    site1  (level 2)                 mounts: edge1 → n-edge1, edge2 → n-edge2
       ▲ mTLS      ▲ mTLS
-   edge1         edge2              clients: m1 → machine m1, m2 → machine m2
+   edge1         edge2              machines m1/m2 — enrolled keys, no shared secrets
       ▲ MQTT        ▲ MQTT
      m1            m2
 

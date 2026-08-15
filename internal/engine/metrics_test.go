@@ -29,11 +29,8 @@ func newMetricsEngine(t *testing.T) (*Engine, *metrics.Metrics) {
 	}
 	t.Cleanup(func() { s.Close() })
 	m := metrics.New(s, config.Retention{})
-	cfg := &config.Config{ULID: "n-edge1", Clients: []config.Client{
-		{ULID: "m1", Token: "tok", Mount: "m1"},
-		{ULID: "observer", Token: "observer-secret"},
-	}}
-	return New(s, cfg, nil, m), m
+	cfg := &config.Config{ULID: "n-edge1"}
+	return New(s, cfg, testIDs(), nil, m), m
 }
 
 // TestRejectPublishByReason pins the reason mapping for every reject branch in
@@ -71,10 +68,26 @@ func TestRejectPublishByReason(t *testing.T) {
 			},
 		},
 		{
-			name:   "IngestClient: client publishes a command",
-			reason: metrics.ReasonNotCommand,
+			name:   "IngestClient: command without a covering cmd grant",
+			reason: metrics.ReasonCmdDenied,
 			invoke: func(e *Engine) error {
 				_, err := e.IngestClient("m1", "colca/v1/_CmdParam/m1/x", []byte(`{"correlation_id":"c","expires_at":1}`))
+				return err
+			},
+		},
+		{
+			name:   "IngestClient: _EdgeNode at an ordinary door",
+			reason: metrics.ReasonRegistryContract,
+			invoke: func(e *Engine) error {
+				_, err := e.IngestClient("m1", "colca/v1/_EdgeNode/m1/x", []byte(`{"ulid":"m1"}`))
+				return err
+			},
+		},
+		{
+			name:   "IngestAdmin: _EdgeNode at the admin door",
+			reason: metrics.ReasonRegistryContract,
+			invoke: func(e *Engine) error {
+				_, err := e.IngestAdmin("colca/v1/_EdgeNode/x/y", []byte(`{"ulid":"x"}`))
 				return err
 			},
 		},
@@ -153,7 +166,7 @@ func TestRejectPublishByReason(t *testing.T) {
 			}
 			// No other reason may have moved.
 			for _, r := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation,
-				metrics.ReasonNoMount, metrics.ReasonNotCommand, metrics.ReasonAuth} {
+				metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract} {
 				if r == tc.reason {
 					continue
 				}
@@ -299,7 +312,8 @@ func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := map[string]float64{}
-	for _, reason := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation, metrics.ReasonNoMount, metrics.ReasonNotCommand, metrics.ReasonAuth} {
+	for _, reason := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation,
+		metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract} {
 		before[reason] = scrapeMetric(t, m, `colca_rejected_publishes_total{reason="`+reason+`"}`)
 	}
 
@@ -324,7 +338,8 @@ func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 		t.Fatal("schema-invalid payload must be rejected")
 	}
 
-	for _, reason := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation, metrics.ReasonNoMount, metrics.ReasonNotCommand, metrics.ReasonAuth} {
+	for _, reason := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation,
+		metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract} {
 		if v := scrapeMetric(t, m, `colca_rejected_publishes_total{reason="`+reason+`"}`); v != before[reason] {
 			t.Fatalf("colca_rejected_publishes_total{reason=%s} moved from %v to %v after refresh failures — must stay untouched", reason, before[reason], v)
 		}

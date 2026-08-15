@@ -29,14 +29,14 @@ func RunCatchup(p Params) (*Report, error) {
 	hubTarget := NextOffset(pair.Hub, "metrics") + uint64(p.Records)
 	pair.StopHub()
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second, Transport: apiTransport()}
 	for i := 0; i < p.Records; i++ {
 		payload := map[string]any{
 			"topic":   "colca/v1/_Metric/n-edge/m1/temp",
 			"payload": map[string]any{"v": float64(i)},
 		}
 		body, _ := json.Marshal(payload)
-		req, err := http.NewRequest("POST", "http://"+pair.Edge.APIAddr+"/publish", bytes.NewReader(body))
+		req, err := http.NewRequest("POST", "https://"+pair.Edge.APIAddr+"/publish", bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("prefill publish %d: %w", i, err)
 		}

@@ -23,11 +23,6 @@ repl:
 parent:
   url: https://127.0.0.1:9443
   pubkey: aabbcc
-children: []
-clients:
-  - ulid: m1
-    token: machine-secret
-    mount: m1
 `
 
 func TestLoad(t *testing.T) {
@@ -41,9 +36,6 @@ func TestLoad(t *testing.T) {
 	}
 	if c.ULID != "n-edge1" || c.Parent == nil || c.Parent.Pubkey != "aabbcc" {
 		t.Fatalf("%+v", c)
-	}
-	if c.Clients[0].Mount != "m1" {
-		t.Fatal("client mount")
 	}
 	if _, err := Load("/nonexistent.yaml"); err == nil {
 		t.Fatal("want error")
@@ -63,44 +55,13 @@ func TestLoad(t *testing.T) {
 	if c.Parent.URL != "https://127.0.0.1:9443" {
 		t.Fatalf("parent url: %+v", c.Parent)
 	}
-	if len(c.Children) != 0 {
-		t.Fatalf("children: %+v", c.Children)
-	}
-	if len(c.Clients) != 1 || c.Clients[0].ULID != "m1" || c.Clients[0].Token != "machine-secret" {
-		t.Fatalf("clients: %+v", c.Clients)
-	}
-}
-
-func TestValidateRejectsDuplicateMounts(t *testing.T) {
-	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
-		Children: []Child{{ULID: "a", Pubkey: "p1", Mount: "same"}, {ULID: "b", Pubkey: "p2", Mount: "same"}}}
-	if err := c.Validate(); err == nil {
-		t.Fatal("duplicate mounts must be a config error (static collision check)")
-	}
-}
-
-// The mount namespace is shared between children and clients: a client may not
-// claim a mount a child already owns, or it could steal that subtree.
-func TestValidateRejectsChildClientMountCollision(t *testing.T) {
-	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
-		Children: []Child{{ULID: "childA", Pubkey: "p1", Mount: "same"}},
-		Clients:  []Client{{ULID: "clientB", Token: "t", Mount: "same"}}}
-	err := c.Validate()
-	if err == nil {
-		t.Fatal("child/client mount collision must be a config error")
-	}
-	msg := err.Error()
-	for _, want := range []string{"same", "childA", "clientB"} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("error %q must name %q", msg, want)
-		}
-	}
 }
 
 func TestValidateRequiredFields(t *testing.T) {
 	base := func() *Config { return &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"} }
 
-	// A global node has no parent, no mqtt, no children and no clients.
+	// A global node has no parent and no mqtt. Machines and children are NOT
+	// config — they are runtime registry state (auth design §2).
 	if err := base().Validate(); err != nil {
 		t.Fatalf("minimal config must be valid: %v", err)
 	}
@@ -109,55 +70,10 @@ func TestValidateRequiredFields(t *testing.T) {
 		"no ulid":     func(c *Config) { c.ULID = "" },
 		"no data_dir": func(c *Config) { c.DataDir = "" },
 		"no key_file": func(c *Config) { c.KeyFile = "" },
-		"child without pubkey": func(c *Config) {
-			c.Children = []Child{{ULID: "a", Mount: "m"}}
-		},
-		"child without mount": func(c *Config) {
-			c.Children = []Child{{ULID: "a", Pubkey: "p"}}
-		},
-		"child without ulid": func(c *Config) {
-			c.Children = []Child{{Pubkey: "p", Mount: "m"}}
-		},
-		"client without token": func(c *Config) {
-			c.Clients = []Client{{ULID: "a", Mount: "m"}}
-		},
-		"client without ulid": func(c *Config) {
-			c.Clients = []Client{{Token: "t", Mount: "m"}}
-		},
 	} {
 		c := base()
 		mutate(c)
 		if err := c.Validate(); err == nil {
-			t.Errorf("%s: want error", name)
-		}
-	}
-}
-
-// A client without a mount is a read-only observer: it has no place in the
-// hierarchy to write into, so it may connect and subscribe but never publish
-// (engine.IngestClient rejects it — see engine.TestObserverClientMayNotPublish).
-// Several observers must not "collide" on the empty mount.
-func TestValidateAllowsMountlessObserverClients(t *testing.T) {
-	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
-		Children: []Child{{ULID: "n-edge1", Pubkey: "p1", Mount: "edge1"}},
-		Clients: []Client{
-			{ULID: "observer", Token: "observer-secret"},
-			{ULID: "observer2", Token: "observer2-secret"},
-			{ULID: "m1", Token: "m1-secret", Mount: "m1"},
-		}}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("mount-less observer clients must validate: %v", err)
-	}
-	if c.Clients[0].Mount != "" {
-		t.Fatalf("observer must stay mount-less: %+v", c.Clients[0])
-	}
-	// ulid and token stay mandatory for an observer.
-	for name, cl := range map[string]Client{
-		"observer without token": {ULID: "o"},
-		"observer without ulid":  {Token: "t"},
-	} {
-		bad := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Clients: []Client{cl}}
-		if err := bad.Validate(); err == nil {
 			t.Errorf("%s: want error", name)
 		}
 	}

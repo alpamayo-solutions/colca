@@ -1,7 +1,14 @@
 // Package httpapi exposes the node's local control surface: publish, cursor
-// fetch/ack, the KV projection, Prometheus metrics and a debug view. Every
-// route except /healthz and /metrics requires the admin token from the config
-// (header X-Colca-Token).
+// fetch/ack, the KV projection, the enrollment door, Prometheus metrics and a
+// debug view (auth design §4, §6.3).
+//
+// The listener speaks TLS with the node's own key (cert = key container,
+// trust = pinning; ClientAuth requests but does not require a client cert).
+// A caller is either a MACHINE (TLS client key resolved against the local
+// registry — reads are grant-scoped, cursors are namespaced) or the ADMIN
+// (X-Colca-Token — unscoped, and the only identity that may enroll/revoke).
+// /healthz and /metrics stay open: scrapers and probes carry neither certs
+// nor admin tokens.
 //
 // Payloads travel as json.RawMessage in both directions: they are never decoded
 // into map[string]any and re-encoded, so a number keeps the exact form the
@@ -9,14 +16,18 @@
 package httpapi
 
 import (
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -26,7 +37,29 @@ const (
 	maxMax     = 1000
 )
 
-func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Handler {
+// TLSConfig builds the API listener's TLS config: the node's own key as
+// server identity, client certs REQUESTED but not required — machine callers
+// present their pinned key, admin tooling and scrapers stay certless.
+func TLSConfig(id *identity.Identity, ulid string) (*tls.Config, error) {
+	cert, err := id.SelfSignedCert(ulid)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequestClientCert,
+		MinVersion:   tls.VersionTLS13,
+	}, nil
+}
+
+// caller is the resolved identity of one request: exactly one of admin or
+// entry is set.
+type caller struct {
+	admin bool
+	entry *uns.Entry
+}
+
+func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, m *metrics.Metrics) http.Handler {
 	mux := http.NewServeMux()
 
 	writeJSON := func(w http.ResponseWriter, code int, v any) {
@@ -34,29 +67,68 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 		w.WriteHeader(code)
 		_ = json.NewEncoder(w).Encode(v)
 	}
-	// auth rejects everything when no token is configured: an empty token is a
-	// missing secret, not a permission to skip authentication.
-	auth := func(next http.HandlerFunc) http.HandlerFunc {
+
+	// resolve identifies the caller (auth §6.3). A presented client cert MUST
+	// resolve to an enrolled machine — an unknown cert never falls through to
+	// token auth. The admin token rejects everything when unconfigured: an
+	// empty token is a missing secret, not a permission to skip authentication.
+	resolve := func(r *http.Request) (caller, bool) {
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			pub, err := identity.PeerPubHex(r.TLS.PeerCertificates[0].Raw)
+			if err != nil {
+				m.AuthReject(metrics.DoorHTTP, metrics.AuthUnknownKey)
+				return caller{}, false
+			}
+			entry, ok := reg.ByPubkey(pub)
+			if !ok {
+				m.AuthReject(metrics.DoorHTTP, metrics.AuthUnknownKey)
+				return caller{}, false
+			}
+			if entry.Kind != uns.KindMachine {
+				m.AuthReject(metrics.DoorHTTP, metrics.AuthKind)
+				return caller{}, false
+			}
+			return caller{entry: entry}, true
+		}
+		if cfg.API.Token != "" && r.Header.Get("X-Colca-Token") == cfg.API.Token {
+			return caller{admin: true}, true
+		}
+		m.AuthReject(metrics.DoorHTTP, metrics.AuthToken)
+		return caller{}, false
+	}
+
+	// auth admits machines and the admin; adminOnly admits only the admin.
+	auth := func(next func(w http.ResponseWriter, r *http.Request, c caller)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("X-Colca-Token") != cfg.API.Token || cfg.API.Token == "" {
-				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid or missing X-Colca-Token"})
+			c, ok := resolve(r)
+			if !ok {
+				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "no enrolled client key and no valid X-Colca-Token"})
+				return
+			}
+			next(w, r, c)
+		}
+	}
+	adminOnly := func(next http.HandlerFunc) http.HandlerFunc {
+		return auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+			if !c.admin {
+				writeJSON(w, http.StatusForbidden, map[string]any{"error": "admin only"})
 				return
 			}
 			next(w, r)
-		}
+		})
 	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ulid": cfg.ULID})
 	})
 
-	// /metrics is tokenless like /healthz: the API listener is loopback/
-	// in-cluster, and Prometheus scrape targets do not carry admin tokens.
+	// /metrics is certless/tokenless like /healthz: Prometheus scrape targets
+	// carry no admin tokens (they must accept the self-signed server cert).
 	if m != nil {
 		mux.Handle("GET /metrics", m.Handler())
 	}
 
-	mux.HandleFunc("POST /publish", auth(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /publish", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
 			Topic   string          `json:"topic"`
 			Payload json.RawMessage `json:"payload"`
@@ -65,11 +137,23 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		res, err := e.IngestAdmin(in.Topic, in.Payload)
+		var res engine.Result
+		var err error
+		if c.admin {
+			res, err = e.IngestAdmin(in.Topic, in.Payload)
+		} else {
+			// A machine publishing over HTTP is judged exactly like its MQTT
+			// publish: own zone, identity rule, cmd grants.
+			res, err = e.IngestClient(c.entry.ULID, in.Topic, in.Payload)
+		}
 		if err != nil {
 			// Grammar, unknown contract and payload validation are all
 			// "well-formed request, unacceptable content" → 422.
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error()})
+			return
+		}
+		if !res.Persisted {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "topic outside colca/# is not persisted"})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"stream": res.Stream, "offset": res.Offset, "topic": res.Topic})
@@ -88,7 +172,17 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 	// is never bumped past the hole here — /fetch is side-effect free and
 	// ack-driven, so a consumer with nothing readable past the LWM clears the
 	// gap by acking gap.to_offset (which puts its cursor exactly at the LWM).
-	mux.HandleFunc("GET /fetch", auth(func(w http.ResponseWriter, r *http.Request) {
+	//
+	// A machine caller sees only records inside its read grants — filtered, not
+	// erred: scope is a view, not a denial (the request itself is legitimate).
+	// The gap object rides OUTSIDE that filter on purpose: pruning is
+	// offset-based and stream-wide, so a cursor below the LWM has lost records
+	// regardless of which topics its grants cover — a consumer must learn its
+	// position is inside a hole even when every surviving record is filtered
+	// out of its view. The gap carries only stream offsets, which the same
+	// door already exposes to every authenticated caller via "next"; content
+	// stays grant-gated. Unauthenticated callers never reach the gap logic.
+	mux.HandleFunc("GET /fetch", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 		q := r.URL.Query()
 		stream, cursor := q.Get("stream"), q.Get("cursor")
 		// An unknown stream is a malformed request, not an empty result — and
@@ -102,13 +196,19 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 			limit = defaultMax
 		}
 		prefix := q.Get("prefix")
-		var filter func(string) bool
-		if prefix != "" {
-			// prefix filters on the uns hierarchy path, not on the raw topic.
-			filter = func(topic string) bool {
+		filter := func(topic string) bool {
+			if prefix != "" {
+				// prefix filters on the uns hierarchy path, not on the raw topic.
 				p, err := uns.Parse(topic)
-				return err == nil && strings.HasPrefix(p.Path, prefix)
+				if err != nil || !strings.HasPrefix(p.Path, prefix) {
+					return false
+				}
 			}
+			return c.admin || uns.Authorize(c.entry, uns.ActReadRecord, topic)
+		}
+		if c.entry != nil && !ownsCursor(c.entry, cursor) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: machine cursors are named {ulid}/..."})
+			return
 		}
 		from := e.Store().CursorGet(cursor, stream)
 		recs, next, err := e.Store().Read(stream, from, limit, filter)
@@ -134,8 +234,9 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 	}))
 
 	// POST /ack: the client acks the last PROCESSED offset, the store holds the
-	// next offset to read — hence offset+1.
-	mux.HandleFunc("POST /ack", auth(func(w http.ResponseWriter, r *http.Request) {
+	// next offset to read — hence offset+1. Machine cursors are namespaced
+	// {ulid}/... so one machine can never move another's cursor.
+	mux.HandleFunc("POST /ack", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
 			Cursor string `json:"cursor"`
 			Stream string `json:"stream"`
@@ -145,14 +246,23 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
+		if c.entry != nil && !ownsCursor(c.entry, in.Cursor) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: machine cursors are named {ulid}/..."})
+			return
+		}
 		moved := e.Store().CursorAck(in.Cursor, in.Stream, in.Offset+1)
 		writeJSON(w, http.StatusOK, map[string]any{"moved": moved})
 	}))
 
-	mux.HandleFunc("GET /kv", auth(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /kv", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 		entries := e.Store().KVScan(r.URL.Query().Get("prefix"))
 		out := make([]map[string]any, 0, len(entries))
+		denied := 0
 		for _, en := range entries {
+			if !c.admin && !uns.Authorize(c.entry, uns.ActReadRecord, en.Topic) {
+				denied++
+				continue
+			}
 			out = append(out, map[string]any{
 				"path":    en.Path,
 				"node_id": en.NodeID,
@@ -162,10 +272,51 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 				"offset":  en.Offset,
 			})
 		}
+		if denied > 0 {
+			m.ACLDeny(metrics.ACLRead)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"entries": out})
 	}))
 
-	mux.HandleFunc("GET /debug/state", auth(func(w http.ResponseWriter, r *http.Request) {
+	// The enrollment door (auth §4): the ONLY write path for registry entries,
+	// admin-guarded. Local-only — downward provisioning via a _CmdAdmin
+	// flow is the intended direction.
+	mux.HandleFunc("POST /enroll", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		body, err := readBody(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		ulid, off, err := reg.Enroll(body)
+		if err != nil {
+			code := http.StatusUnprocessableEntity
+			if errors.Is(err, registry.ErrConflict) {
+				code = http.StatusConflict
+			}
+			writeJSON(w, code, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ulid": ulid, "offset": off})
+	}))
+
+	mux.HandleFunc("DELETE /enroll/{ulid}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		off, err := reg.Revoke(r.PathValue("ulid"))
+		if err != nil {
+			if errors.Is(err, registry.ErrNotEnrolled) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "offset": off})
+	}))
+
+	mux.HandleFunc("GET /enroll", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"entries": reg.List()})
+	}))
+
+	mux.HandleFunc("GET /debug/state", adminOnly(func(w http.ResponseWriter, r *http.Request) {
 		streams := map[string]any{}
 		for _, st := range []string{"metrics", "entities", "commands"} {
 			streams[st] = map[string]any{"next_offset": e.Store().NextOffset(st)}
@@ -174,4 +325,17 @@ func Handler(e *engine.Engine, cfg *config.Config, m *metrics.Metrics) http.Hand
 	}))
 
 	return mux
+}
+
+// ownsCursor: a machine's cursors live under its own ULID prefix.
+func ownsCursor(e *uns.Entry, cursor string) bool {
+	return strings.HasPrefix(cursor, e.ULID+"/")
+}
+
+func readBody(r *http.Request) ([]byte, error) {
+	var raw json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }

@@ -30,43 +30,38 @@ type Result struct {
 	Topic     string // post-rewrite
 }
 
+// Mounts resolves identities to their registry entries — implemented by
+// *registry.Manager. The engine consults it for every identity question and
+// holds no identity state of its own (auth design §8).
+type Mounts interface {
+	MountOf(ulid string) (string, bool)
+	Get(ulid string) (*uns.Entry, bool)
+}
+
 type Engine struct {
 	store   *store.Store
 	cfg     *config.Config
 	deliver LocalDeliver
-	mounts  map[string]string // identity ulid → mount (clients + children)
+	ids     Mounts
 	log     *slog.Logger
 	metrics *metrics.Metrics // nil-safe: every method on a nil receiver is a no-op
 }
 
-// New builds an engine. The mount map covers both children and clients: they
-// share one mount namespace (config.Validate guarantees no collisions).
-//
-// A client without a mount is a read-only observer and is deliberately left OUT
-// of the map, so IngestClient rejects its publishes with "no mount registered"
-// instead of rewriting them into a topic with an empty path segment.
+// New builds an engine. ids is the identity registry (a client without a
+// mount is a read-only observer: MountOf misses, so IngestClient rejects its
+// publishes with "no mount registered").
 //
 // m may be nil (unit tests and any caller that does not care about metrics) —
 // every Metrics method is nil-safe.
-func New(s *store.Store, cfg *config.Config, deliver LocalDeliver, m *metrics.Metrics) *Engine {
-	mounts := map[string]string{}
-	for _, c := range cfg.Clients {
-		if c.Mount != "" {
-			mounts[c.ULID] = c.Mount
-		}
-	}
-	for _, c := range cfg.Children {
-		mounts[c.ULID] = c.Mount
-	}
-	return &Engine{store: s, cfg: cfg, deliver: deliver, mounts: mounts, log: slog.Default().With("node", cfg.ULID), metrics: m}
+func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m *metrics.Metrics) *Engine {
+	return &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m}
 }
 
 func (e *Engine) Store() *store.Store { return e.store }
 
 // MountOf resolves the mount a child or client is attached under.
 func (e *Engine) MountOf(ulid string) (string, bool) {
-	m, ok := e.mounts[ulid]
-	return m, ok
+	return e.ids.MountOf(ulid)
 }
 
 // IngestClient: a directly attached MQTT client (machine/service) publishes.
@@ -82,10 +77,27 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, err
 	}
+	// Registry entries enter through the enrollment door ONLY (auth §3): no
+	// client may author an _EdgeNode, not even its own.
+	if p.Contract == "_EdgeNode" {
+		e.metrics.RejectPublish(metrics.ReasonRegistryContract)
+		return Result{}, fmt.Errorf("client %s may not publish _EdgeNode — registry entries are enrollment-door only", identity)
+	}
 	class := uns.ClassOf(p.Contract)
 	if class == uns.ClassCmd {
-		e.metrics.RejectPublish(metrics.ReasonNotCommand)
-		return Result{}, fmt.Errorf("client %s may not publish %s", identity, p.Contract)
+		// A command needs a covering cmd grant (auth §5.3 ActCmd). Commands
+		// target ABSOLUTE node-local paths: no mount rewrite, no level-4
+		// identity requirement — the author is not the target's owner.
+		entry, ok := e.ids.Get(identity)
+		if !ok || !uns.Authorize(entry, uns.ActCmd, topic) {
+			e.metrics.RejectPublish(metrics.ReasonCmdDenied)
+			return Result{}, fmt.Errorf("client %s: no cmd grant covers %s", identity, topic)
+		}
+		if err := uns.Validate(p.Contract, payload); err != nil {
+			e.metrics.RejectPublish(metrics.ReasonValidation)
+			return Result{}, err
+		}
+		return e.persist(class, p, topic, payload)
 	}
 	if class == uns.ClassNone {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
@@ -99,7 +111,7 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		e.metrics.RejectPublish(metrics.ReasonValidation)
 		return Result{}, err
 	}
-	mount, ok := e.mounts[identity]
+	mount, ok := e.ids.MountOf(identity)
 	if !ok {
 		e.metrics.RejectPublish(metrics.ReasonNoMount)
 		return Result{}, fmt.Errorf("no mount registered for %s", identity)
@@ -127,6 +139,12 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 	if err != nil {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, err
+	}
+	// Even the admin token may not author registry entries through /publish —
+	// enrollment has its own door with its own validation (auth §3, §4).
+	if p.Contract == "_EdgeNode" {
+		e.metrics.RejectPublish(metrics.ReasonRegistryContract)
+		return Result{}, fmt.Errorf("_EdgeNode is enrollment-door only — use POST /enroll")
 	}
 	class := uns.ClassOf(p.Contract)
 	if class == uns.ClassNone {

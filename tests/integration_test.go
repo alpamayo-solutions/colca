@@ -17,6 +17,7 @@
 package tests
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,28 +29,34 @@ import (
 
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 
+	"github.com/alpamayo-solutions/colca/internal/authtest"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/node"
 )
 
-const (
-	tok    = "test-admin-token"
-	obsTok = "observer-secret"
-)
+const tok = "test-admin-token"
+
+// httpsClient accepts the nodes' self-signed API certs (pinning model, no CA).
+var httpsClient = &http.Client{Transport: &http.Transport{
+	TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}, // #nosec G402 -- test
+}}
 
 type topo struct {
 	global, site1, edge1, edge2 *node.Node
 	cfgs                        map[string]*config.Config
 	keys                        map[string]*identity.Identity
 	dirs                        map[string]string
+	m1, m2                      *authtest.Machine            // machines at edge1/edge2
+	obs                         map[string]*authtest.Machine // per-node read-all observers, keyed by node ulid
 }
 
 // startTopo builds the whole topology top-down: a parent must be listening
 // before its children can be configured with its resolved repl address.
 func startTopo(t *testing.T) *topo {
 	t.Helper()
-	tp := &topo{cfgs: map[string]*config.Config{}, keys: map[string]*identity.Identity{}, dirs: map[string]string{}}
+	tp := &topo{cfgs: map[string]*config.Config{}, keys: map[string]*identity.Identity{},
+		dirs: map[string]string{}, obs: map[string]*authtest.Machine{}}
 	base := t.TempDir()
 	for _, n := range []string{"n-global", "n-site1", "n-edge1", "n-edge2"} {
 		kp := filepath.Join(base, n+".key")
@@ -62,9 +69,8 @@ func startTopo(t *testing.T) *topo {
 	}
 	// EVERY node runs a broker, including the two that have no machine attached:
 	// the bus mirrors the store at every level, so a subscriber at the hub sees
-	// the whole tree. Every node also gets a mount-less `observer` client, which
-	// may subscribe but never publish.
-	mk := func(ulid string, parent *config.Parent, children []config.Child, clients []config.Client) *config.Config {
+	// the whole tree.
+	mk := func(ulid string, parent *config.Parent) *config.Config {
 		return &config.Config{
 			ULID: ulid, DataDir: tp.dirs[ulid], LogLevel: "debug",
 			KeyFile: filepath.Join(base, ulid+".key"),
@@ -73,47 +79,60 @@ func startTopo(t *testing.T) *topo {
 			// Node.MQTTAddr — never read cfg.MQTT.Addr, it stays "127.0.0.1:0".
 			MQTT:   config.Endpoint{Addr: "127.0.0.1:0"},
 			Repl:   config.Endpoint{Addr: "127.0.0.1:0"},
-			Parent: parent, Children: children,
-			Clients: append(clients, config.Client{ULID: "observer", Token: obsTok}),
+			Parent: parent,
 		}
 	}
+	// Every node gets a mount-less read-all `observer` identity (may subscribe
+	// to everything, can never publish); the two edges each mount one machine.
+	// Enrollment happens AFTER a node starts — entry-before-connect is the
+	// contract, and the registry is runtime state, not config.
+	enrollObserver := func(n *node.Node) {
+		o := authtest.NewMachine(t, "observer")
+		authtest.Enroll(t, n.Registry, o, "", "read:#")
+		tp.obs[n.Cfg.ULID] = o
+	}
 
-	gcfg := mk("n-global", nil, []config.Child{{ULID: "n-site1", Pubkey: tp.keys["n-site1"].PublicHex(), Mount: "site1"}}, nil)
+	gcfg := mk("n-global", nil)
 	g, err := node.Start(gcfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tp.global, tp.cfgs["n-global"] = g, gcfg
+	enrollObserver(g)
+	authtest.EnrollNode(t, g.Registry, "n-site1", tp.keys["n-site1"].PublicHex(), "site1")
 
 	scfg := mk("n-site1",
-		&config.Parent{URL: "https://" + g.ReplAddr, Pubkey: tp.keys["n-global"].PublicHex()},
-		[]config.Child{
-			{ULID: "n-edge1", Pubkey: tp.keys["n-edge1"].PublicHex(), Mount: "edge1"},
-			{ULID: "n-edge2", Pubkey: tp.keys["n-edge2"].PublicHex(), Mount: "edge2"},
-		}, nil)
+		&config.Parent{URL: "https://" + g.ReplAddr, Pubkey: tp.keys["n-global"].PublicHex()})
 	s, err := node.Start(scfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tp.site1, tp.cfgs["n-site1"] = s, scfg
+	enrollObserver(s)
+	authtest.EnrollNode(t, s.Registry, "n-edge1", tp.keys["n-edge1"].PublicHex(), "edge1")
+	authtest.EnrollNode(t, s.Registry, "n-edge2", tp.keys["n-edge2"].PublicHex(), "edge2")
 
 	e1cfg := mk("n-edge1",
-		&config.Parent{URL: "https://" + s.ReplAddr, Pubkey: tp.keys["n-site1"].PublicHex()},
-		nil, []config.Client{{ULID: "m1", Token: "m1-secret", Mount: "m1"}})
+		&config.Parent{URL: "https://" + s.ReplAddr, Pubkey: tp.keys["n-site1"].PublicHex()})
 	e1, err := node.Start(e1cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tp.edge1, tp.cfgs["n-edge1"] = e1, e1cfg
+	enrollObserver(e1)
+	tp.m1 = authtest.NewMachine(t, "m1")
+	authtest.Enroll(t, e1.Registry, tp.m1, "m1")
 
 	e2cfg := mk("n-edge2",
-		&config.Parent{URL: "https://" + s.ReplAddr, Pubkey: tp.keys["n-site1"].PublicHex()},
-		nil, []config.Client{{ULID: "m2", Token: "m2-secret", Mount: "m2"}})
+		&config.Parent{URL: "https://" + s.ReplAddr, Pubkey: tp.keys["n-site1"].PublicHex()})
 	e2, err := node.Start(e2cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	tp.edge2, tp.cfgs["n-edge2"] = e2, e2cfg
+	enrollObserver(e2)
+	tp.m2 = authtest.NewMachine(t, "m2")
+	authtest.Enroll(t, e2.Registry, tp.m2, "m2")
 
 	t.Cleanup(func() { e2.Stop(); e1.Stop(); s.Stop(); g.Stop() })
 	return tp
@@ -131,12 +150,12 @@ func api(t *testing.T, n *node.Node, method, path string, body any) map[string]a
 		}
 		rd = strings.NewReader(string(b))
 	}
-	req, err := http.NewRequest(method, "http://"+n.APIAddr+path, rd)
+	req, err := http.NewRequest(method, "https://"+n.APIAddr+path, rd)
 	if err != nil {
 		t.Fatalf("build request %s %s: %v", method, path, err)
 	}
 	req.Header.Set("X-Colca-Token", tok)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpsClient.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
@@ -190,10 +209,11 @@ func waitFor(t *testing.T, desc string, timeout time.Duration, cond func() bool)
 	t.Fatalf("timeout waiting for: %s", desc)
 }
 
-func machine(t *testing.T, addr, ulid, token string) pahomqtt.Client {
+func machine(t *testing.T, addr string, m *authtest.Machine) pahomqtt.Client {
 	t.Helper()
-	opts := pahomqtt.NewClientOptions().AddBroker("tcp://" + addr).
-		SetClientID(ulid).SetUsername(ulid).SetPassword(token).SetConnectTimeout(5 * time.Second)
+	opts := pahomqtt.NewClientOptions().AddBroker("ssl://" + addr).
+		SetTLSConfig(m.TLSConfig()).
+		SetClientID(m.ULID).SetUsername(m.ULID).SetConnectTimeout(5 * time.Second)
 	c := pahomqtt.NewClient(opts)
 	tk := c.Connect()
 	if !tk.WaitTimeout(10*time.Second) || tk.Error() != nil {
@@ -204,12 +224,13 @@ func machine(t *testing.T, addr, ulid, token string) pahomqtt.Client {
 }
 
 // observer connects a READ-ONLY client: it has no mount, so the engine rejects
-// everything it publishes ("no mount registered"), but it may subscribe. This is
-// how a backend service taps a node's bus.
-func observer(t *testing.T, addr, clientID string) pahomqtt.Client {
+// everything it publishes ("no mount registered"), but its read:# grant lets
+// it subscribe to everything. This is how a backend service taps a node's bus.
+func observer(t *testing.T, addr, clientID string, m *authtest.Machine) pahomqtt.Client {
 	t.Helper()
-	opts := pahomqtt.NewClientOptions().AddBroker("tcp://" + addr).
-		SetClientID(clientID).SetUsername("observer").SetPassword(obsTok).
+	opts := pahomqtt.NewClientOptions().AddBroker("ssl://" + addr).
+		SetTLSConfig(m.TLSConfig()).
+		SetClientID(clientID).SetUsername(m.ULID).
 		SetCleanSession(true).SetConnectTimeout(5 * time.Second)
 	c := pahomqtt.NewClient(opts)
 	tk := c.Connect()
@@ -275,7 +296,7 @@ func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 // chain and that the originating node id survives all three hops.
 func TestUplinkMountChainAndKV(t *testing.T) {
 	tp := startTopo(t)
-	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 	tk := m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 21.5}`)
 	tk.WaitTimeout(5 * time.Second)
 
@@ -317,8 +338,8 @@ func TestUplinkMountChainAndKV(t *testing.T) {
 // site without their mounts interfering.
 func TestTwoEdgesFanIn(t *testing.T) {
 	tp := startTopo(t)
-	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
-	m2 := machine(t, tp.edge2.MQTTAddr, "m2", "m2-secret")
+	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
+	m2 := machine(t, tp.edge2.MQTTAddr, tp.m2)
 	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 1}`).WaitTimeout(5 * time.Second)
 	m2.Publish("colca/v1/_Metric/m2/temp", 1, false, `{"v": 2}`).WaitTimeout(5 * time.Second)
 	waitFor(t, "both edges at global", 10*time.Second, func() bool {
@@ -331,10 +352,10 @@ func TestTwoEdgesFanIn(t *testing.T) {
 // to the machine and its ack back up three mount-inserting hops.
 func TestDownlinkCommandAckRoundtrip(t *testing.T) {
 	tp := startTopo(t)
-	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 
 	received := make(chan pahomqtt.Message, 1)
-	m1.Subscribe("colca/v1/_CmdParam/m1/#", 1, func(_ pahomqtt.Client, msg pahomqtt.Message) {
+	m1.Subscribe("colca/v1/_CmdParam/+/m1/#", 1, func(_ pahomqtt.Client, msg pahomqtt.Message) {
 		received <- msg
 	}).WaitTimeout(5 * time.Second)
 
@@ -375,7 +396,7 @@ func TestDownlinkCommandAckRoundtrip(t *testing.T) {
 // leaks past the gap, and that the buffer drains exactly once and in order.
 func TestOfflineBufferingCatchupOrder(t *testing.T) {
 	tp := startTopo(t)
-	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 
 	// take the site down → edge1 is offline towards its parent
 	tp.site1.Stop()
@@ -422,9 +443,9 @@ func TestOfflineBufferingCatchupOrder(t *testing.T) {
 // time, by the machine, not by the queue.
 func TestCommandExpiryDuringOffline(t *testing.T) {
 	tp := startTopo(t)
-	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 	acked := make(chan string, 2)
-	m1.Subscribe("colca/v1/_CmdParam/m1/#", 1, func(_ pahomqtt.Client, msg pahomqtt.Message) {
+	m1.Subscribe("colca/v1/_CmdParam/+/m1/#", 1, func(_ pahomqtt.Client, msg pahomqtt.Message) {
 		var cmd map[string]any
 		if err := json.Unmarshal(msg.Payload(), &cmd); err != nil {
 			return
@@ -480,22 +501,24 @@ func TestCommandExpiryDuringOffline(t *testing.T) {
 // here is on the STORE, never on the publish token.
 func TestAuthRejections(t *testing.T) {
 	tp := startTopo(t)
-	// wrong machine token → CONNECT refused
-	opts := pahomqtt.NewClientOptions().AddBroker("tcp://" + tp.edge1.MQTTAddr).
-		SetClientID("evil").SetUsername("m1").SetPassword("WRONG").SetConnectTimeout(3 * time.Second)
+	// un-enrolled key → CONNECT refused (the key IS the credential now)
+	evil := authtest.NewMachine(t, "m1") // right name, WRONG key
+	opts := pahomqtt.NewClientOptions().AddBroker("ssl://" + tp.edge1.MQTTAddr).
+		SetTLSConfig(evil.TLSConfig()).
+		SetClientID("evil").SetUsername("m1").SetConnectTimeout(3 * time.Second)
 	c := pahomqtt.NewClient(opts)
 	tk := c.Connect()
 	tk.WaitTimeout(5 * time.Second)
 	if tk.Error() == nil {
-		t.Fatal("wrong token must be refused")
+		t.Fatal("un-enrolled key must be refused")
 	}
 
 	// identity spoofing: m1 publishes with foreign level-4 id → not persisted anywhere
-	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 	m1.Publish("colca/v1/_Metric/m2/temp", 1, false, `{"v": 666}`).WaitTimeout(5 * time.Second)
 	time.Sleep(1 * time.Second)
-	if len(kvAt(t, tp.edge1, "")) != 0 {
-		t.Fatalf("spoofed publish persisted: %v", kvAt(t, tp.edge1, ""))
+	if got := kvAt(t, tp.edge1, "m1/m2"); len(got) != 0 {
+		t.Fatalf("spoofed publish persisted: %v", got)
 	}
 
 	// invalid payload → not persisted
@@ -511,7 +534,7 @@ func TestAuthRejections(t *testing.T) {
 // ten.
 func TestRestartDurabilityEdge(t *testing.T) {
 	tp := startTopo(t)
-	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 	for i := 1; i <= 10; i++ {
 		m1.Publish("colca/v1/_Metric/m1/d", 1, false, fmt.Sprintf(`{"v": %d}`, i)).WaitTimeout(5 * time.Second)
 	}
@@ -527,7 +550,7 @@ func TestRestartDurabilityEdge(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(e1b.Stop)
-	m1b := machine(t, e1b.MQTTAddr, "m1", "m1-secret")
+	m1b := machine(t, e1b.MQTTAddr, tp.m1)
 	m1b.Publish("colca/v1/_Metric/m1/d", 1, false, `{"v": 11}`).WaitTimeout(5 * time.Second)
 	waitFor(t, "11th after restart, no dupes", 15*time.Second, func() bool {
 		return len(fetchRecords(t, tp.global, "metrics", "dur2", "site1/edge1/m1/d", 100)) == 11
@@ -539,10 +562,10 @@ func TestRestartDurabilityEdge(t *testing.T) {
 // global node stored — three mount insertions away from what m1 published.
 func TestHubMQTTMirrorsWholeTree(t *testing.T) {
 	tp := startTopo(t)
-	obs := observer(t, tp.global.MQTTAddr, "hub-observer")
+	obs := observer(t, tp.global.MQTTAddr, "hub-observer", tp.obs["n-global"])
 	msgs := subscribeAll(t, obs, "colca/#")
 
-	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 21.5}`).WaitTimeout(5 * time.Second)
 
 	msg := awaitTopic(t, msgs, "colca/v1/_Metric/m1/site1/edge1/m1/temp", 15*time.Second)
@@ -560,7 +583,7 @@ func TestHubMQTTMirrorsWholeTree(t *testing.T) {
 // MQTT".
 func TestHTTPPublishVisibleOnMQTT(t *testing.T) {
 	tp := startTopo(t)
-	obs := observer(t, tp.global.MQTTAddr, "http-observer")
+	obs := observer(t, tp.global.MQTTAddr, "http-observer", tp.obs["n-global"])
 	msgs := subscribeAll(t, obs, "colca/#")
 
 	topic := "colca/v1/_CmdParam/m1/site1/edge1/m1/set-speed"
@@ -586,11 +609,11 @@ func TestHTTPPublishVisibleOnMQTT(t *testing.T) {
 // topics AND same payloads — and no command/ack topic may ever be retained.
 func TestRetainedSetEqualsKVView(t *testing.T) {
 	tp := startTopo(t)
-	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 
 	// state traffic: three metric paths (temp published twice — only the last
 	// value is state) and one entity.
-	cmds := subscribeAll(t, m1, "colca/v1/_CmdParam/m1/#")
+	cmds := subscribeAll(t, m1, "colca/v1/_CmdParam/+/m1/#")
 	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 1}`).WaitTimeout(5 * time.Second)
 	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 2}`).WaitTimeout(5 * time.Second)
 	m1.Publish("colca/v1/_Metric/m1/rpm", 1, false, `{"v": 900}`).WaitTimeout(5 * time.Second)
@@ -604,9 +627,11 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 	awaitTopic(t, cmds, "colca/v1/_CmdParam/m1/m1/set-speed", 20*time.Second)
 	m1.Publish("colca/v1/_Ack/m1/set-speed", 1, false, `{"correlation_id":"kv-eq-1","result_code":200}`).WaitTimeout(5 * time.Second)
 
-	// settle: all three state paths in KV, the ack in the commands stream
+	// settle: all three state paths in KV (plus the two _EdgeNode registry
+	// entities enrollment wrote — they are state like any other entity), the
+	// ack in the commands stream
 	waitFor(t, "state and ack persisted at edge1", 10*time.Second, func() bool {
-		if len(kvAt(t, tp.edge1, "")) != 3 {
+		if len(kvAt(t, tp.edge1, "")) != 5 {
 			return false
 		}
 		for _, r := range fetchRecords(t, tp.edge1, "commands", "kv-eq-settle", "", 100) {
@@ -627,7 +652,7 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 	// the retained set: everything a brand-new subscriber receives with no new
 	// publish happening. collectFor is the honest form — the set is complete
 	// only after nothing more arrives.
-	fresh := observer(t, tp.edge1.MQTTAddr, "kv-eq-observer")
+	fresh := observer(t, tp.edge1.MQTTAddr, "kv-eq-observer", tp.obs["n-edge1"])
 	retained := map[string]string{}
 	for _, m := range collectFor(subscribeAll(t, fresh, "colca/#"), 3*time.Second) {
 		if strings.HasPrefix(m.Topic(), "colca/v1/_Cmd") || strings.HasPrefix(m.Topic(), "colca/v1/_Ack/") {
@@ -667,11 +692,11 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 // command delivered before it connected is never replayed to it.
 func TestRetainedDeliversCurrentStateOnConnect(t *testing.T) {
 	tp := startTopo(t)
-	m1 := machine(t, tp.edge1.MQTTAddr, "m1", "m1-secret")
+	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 
 	// a command travels down and is delivered on edge1's bus BEFORE the fresh
 	// subscriber exists
-	cmds := subscribeAll(t, m1, "colca/v1/_CmdParam/m1/#")
+	cmds := subscribeAll(t, m1, "colca/v1/_CmdParam/+/m1/#")
 	api(t, tp.global, "POST", "/publish", map[string]any{
 		"topic":   "colca/v1/_CmdParam/m1/site1/edge1/m1/set-speed",
 		"payload": map[string]any{"correlation_id": "retain-1", "expires_at": float64(time.Now().Add(time.Hour).UnixMilli())},
@@ -685,7 +710,7 @@ func TestRetainedDeliversCurrentStateOnConnect(t *testing.T) {
 	})
 
 	// BRAND NEW subscriber, no publish after this point
-	fresh := observer(t, tp.edge1.MQTTAddr, "fresh-observer")
+	fresh := observer(t, tp.edge1.MQTTAddr, "fresh-observer", tp.obs["n-edge1"])
 	msgs := subscribeAll(t, fresh, "colca/#")
 
 	got := collectFor(msgs, 3*time.Second)

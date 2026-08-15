@@ -8,6 +8,7 @@
 package node
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/mqttsrv"
+	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/repl"
 	"github.com/alpamayo-solutions/colca/internal/retention"
 	"github.com/alpamayo-solutions/colca/internal/store"
@@ -31,12 +33,13 @@ import (
 // listener addresses (a config may ask for "127.0.0.1:0"); each is empty when
 // the node has no such listener.
 type Node struct {
-	Cfg     *config.Config
-	Store   *store.Store
-	Engine  *engine.Engine
-	MQTT    *mqttsrv.Server
-	ReplSrv *repl.Server
-	Metrics *metrics.Metrics
+	Cfg      *config.Config
+	Store    *store.Store
+	Engine   *engine.Engine
+	MQTT     *mqttsrv.Server
+	ReplSrv  *repl.Server
+	Metrics  *metrics.Metrics
+	Registry *registry.Manager
 
 	APIAddr  string // resolved HTTP API address ("" if no api configured)
 	ReplAddr string // resolved replication address ("" if this node has no children)
@@ -79,10 +82,19 @@ func Start(cfg *config.Config) (*Node, error) {
 		return nil, err
 	}
 
-	// 1. Broker first: New binds the socket, so MQTTAddr is known before Serve
-	//    and before the engine exists. The engine is late-bound below.
+	// 1. Registry: the identity source every door consults. Loads the r/
+	//    family; a corrupt persisted entry is fatal (fail-loud, like the
+	//    store's own counters).
+	reg, err := registry.New(st, cfg.ULID)
+	if err != nil {
+		return fail(fmt.Errorf("node %s: registry: %w", cfg.ULID, err))
+	}
+	n.Registry = reg
+
+	// 2. Broker: New binds the socket, so MQTTAddr is known before Serve and
+	//    before the engine exists. The engine is late-bound below.
 	if cfg.MQTT.Addr != "" {
-		mq, err := mqttsrv.New(cfg, nil, n.Metrics)
+		mq, err := mqttsrv.New(cfg, id, reg, nil, n.Metrics)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: mqtt listen %s: %w", cfg.ULID, cfg.MQTT.Addr, err))
 		}
@@ -90,16 +102,21 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.MQTTAddr = mq.Addr()
 	}
 
-	// 2. Engine: delivers downlinked commands into the local broker when there
+	// 3. Engine: delivers downlinked commands into the local broker when there
 	//    is one (a node without MQTT simply persists them).
 	var deliver engine.LocalDeliver
 	if n.MQTT != nil {
 		deliver = n.MQTT.DeliverLocal
 	}
-	n.Engine = engine.New(st, cfg, deliver, n.Metrics)
+	n.Engine = engine.New(st, cfg, reg, deliver, n.Metrics)
 
 	if n.MQTT != nil {
 		n.MQTT.SetEngine(n.Engine)
+		// Revocation / re-enroll kicks the live session immediately (auth §7),
+		// and registry changes mirror onto the local bus like any entity
+		// (enroll = retained _EdgeNode, revoke = retained-clear).
+		reg.SetKick(n.MQTT.Kick)
+		reg.SetDeliver(n.MQTT.DeliverLocal)
 		// Re-seed the broker's retained set from the KV projection. The two are
 		// ONE contract seen from two sides (engine.retainFor retains exactly the
 		// classes that project into KV), but mochi's retained store is in-memory:
@@ -130,25 +147,31 @@ func Start(cfg *config.Config) (*Node, error) {
 		}(n.MQTT)
 	}
 
-	// 3. Local HTTP control API.
+	// 4. Local HTTPS control API: TLS with the node's own key; machine callers
+	//    present their pinned client key, admin tooling uses the token (§6.3).
 	if cfg.API.Addr != "" {
+		tlsCfg, err := httpapi.TLSConfig(id, cfg.ULID)
+		if err != nil {
+			return fail(fmt.Errorf("node %s: api tls: %w", cfg.ULID, err))
+		}
 		ln, err := net.Listen("tcp", cfg.API.Addr)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: api listen %s: %w", cfg.ULID, cfg.API.Addr, err))
 		}
 		n.apiLn = ln
 		n.APIAddr = ln.Addr().String()
-		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, n.Metrics))}
+		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, n.Metrics))}
 		go func(srv *http.Server, ln net.Listener) {
-			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server stopped", "err", err)
 			}
 		}(n.httpSrv, ln)
 	}
 
-	// 4. Replication server — only meaningful for a node that has children.
-	if len(cfg.Children) > 0 && cfg.Repl.Addr != "" {
-		rs, err := repl.NewServer(cfg, n.Engine, id, n.Metrics)
+	// 5. Replication server — children are enrolled at runtime (kind "node"),
+	//    so the listener exists whenever a repl address is configured.
+	if cfg.Repl.Addr != "" {
+		rs, err := repl.NewServer(cfg, n.Engine, id, reg, n.Metrics)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: repl server: %w", cfg.ULID, err))
 		}
@@ -160,7 +183,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.ReplAddr = addr
 	}
 
-	// 5. Uplink + downlink loops towards the parent.
+	// 6. Uplink + downlink loops towards the parent.
 	if cfg.Parent != nil {
 		cl, err := repl.NewClient(cfg.Parent.URL, cfg.Parent.Pubkey, id)
 		if err != nil {
@@ -177,7 +200,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}()
 	}
 
-	// 6. Retention pruner. Joins the same WaitGroup as the repl loops: a prune
+	// 7. Retention pruner. Joins the same WaitGroup as the repl loops: a prune
 	//    batch or refresh append in flight must finish before Stop closes the
 	//    store. With retention.interval: 0 (explicit disable) Run returns
 	//    immediately; the default (absent) config prunes on the §3.1 defaults.

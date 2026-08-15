@@ -1,6 +1,7 @@
 package node
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,12 +14,18 @@ import (
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 
+	"github.com/alpamayo-solutions/colca/internal/authtest"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
 const tok = "test-admin-token"
+
+// httpsClient accepts the node's self-signed API cert (pinning model, no CA).
+var httpsClient = &http.Client{Transport: &http.Transport{
+	TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}, // #nosec G402 -- test
+}}
 
 func genKey(t *testing.T, path string) *identity.Identity {
 	t.Helper()
@@ -54,12 +61,12 @@ func apiCall(t *testing.T, n *Node, method, path string, body any) (int, map[str
 		}
 		rd = strings.NewReader(string(raw))
 	}
-	req, err := http.NewRequest(method, "http://"+n.APIAddr+path, rd)
+	req, err := http.NewRequest(method, "https://"+n.APIAddr+path, rd)
 	if err != nil {
 		t.Fatalf("new request %s %s: %v", method, path, err)
 	}
 	req.Header.Set("X-Colca-Token", tok)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpsClient.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
@@ -114,9 +121,9 @@ func TestStartStopResolvesAddressesAndReleasesPorts(t *testing.T) {
 		KeyFile:  keyFile,
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
-		// A repl address without children must NOT produce a listener.
-		Repl:    config.Endpoint{Addr: "127.0.0.1:0"},
-		Clients: []config.Client{{ULID: "m1", Token: "m1-secret", Mount: "m1"}},
+		// Children are enrolled at runtime, so a repl address ALWAYS produces
+		// a listener — a child enrolled later must be able to connect.
+		Repl: config.Endpoint{Addr: "127.0.0.1:0"},
 	}
 	n := mustStart(t, cfg)
 
@@ -126,14 +133,11 @@ func TestStartStopResolvesAddressesAndReleasesPorts(t *testing.T) {
 	if n.MQTTAddr == "" || strings.HasSuffix(n.MQTTAddr, ":0") {
 		t.Errorf("MQTTAddr = %q, want a resolved address", n.MQTTAddr)
 	}
-	if n.ReplAddr != "" {
-		t.Errorf("ReplAddr = %q, want empty (node has no children)", n.ReplAddr)
-	}
-	if n.ReplSrv != nil {
-		t.Error("ReplSrv is set although the node has no children")
+	if n.ReplAddr == "" || strings.HasSuffix(n.ReplAddr, ":0") {
+		t.Errorf("ReplAddr = %q, want a resolved address (repl addr configured)", n.ReplAddr)
 	}
 
-	resp, err := http.Get("http://" + n.APIAddr + "/healthz")
+	resp, err := httpsClient.Get("https://" + n.APIAddr + "/healthz")
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
@@ -200,22 +204,22 @@ func TestRestartSameDataDirKeepsOffsets(t *testing.T) {
 	}
 }
 
-// connectMQTT connects a paho client to a node's broker and fails the test on error.
-func connectMQTT(t *testing.T, addr, clientID, user, pass string) paho.Client {
+// connectMQTT connects a paho client over TLS with the machine's pinned key.
+func connectMQTT(t *testing.T, addr, clientID string, m *authtest.Machine) paho.Client {
 	t.Helper()
 	opts := paho.NewClientOptions().
-		AddBroker("tcp://" + addr).
+		AddBroker("ssl://" + addr).
+		SetTLSConfig(m.TLSConfig()).
 		SetClientID(clientID).
-		SetUsername(user).
-		SetPassword(pass).
+		SetUsername(m.ULID).
 		SetConnectTimeout(5 * time.Second)
 	cl := paho.NewClient(opts)
 	ctok := cl.Connect()
 	if !ctok.WaitTimeout(5 * time.Second) {
-		t.Fatalf("mqtt connect %s as %s: timed out", addr, user)
+		t.Fatalf("mqtt connect %s as %s: timed out", addr, m.ULID)
 	}
 	if err := ctok.Error(); err != nil {
-		t.Fatalf("mqtt connect %s as %s: %v", addr, user, err)
+		t.Fatalf("mqtt connect %s as %s: %v", addr, m.ULID, err)
 	}
 	t.Cleanup(func() { cl.Disconnect(100) })
 	return cl
@@ -251,14 +255,14 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 		KeyFile:  keyFile,
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
-		Clients: []config.Client{
-			{ULID: "m1", Token: "m1-secret", Mount: "m1"},
-			{ULID: "obs", Token: "obs-secret"}, // no mount → read-only observer
-		},
 	}
 
 	first := mustStart(t, cfg)
-	m1 := connectMQTT(t, first.MQTTAddr, "m1-pre", "m1", "m1-secret")
+	m1machine := authtest.NewMachine(t, "m1")
+	obsMachine := authtest.NewMachine(t, "obs")
+	authtest.Enroll(t, first.Registry, m1machine, "m1")
+	authtest.Enroll(t, first.Registry, obsMachine, "", "read:#")
+	m1 := connectMQTT(t, first.MQTTAddr, "m1-pre", m1machine)
 	// Two state topics: "pressure" is never touched again — only the KV
 	// re-seed can bring it back, so it is the assertion the mutation check
 	// bites on. "temp" gets a FRESH value right after the restart — it pins
@@ -285,7 +289,7 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 	// Seed-ordering assertion (the race a post-Serve replay would open): a
 	// FRESH value published immediately after the restart must win over the
 	// pre-restart snapshot value in the retained set.
-	m1b := connectMQTT(t, second.MQTTAddr, "m1-post", "m1", "m1-secret")
+	m1b := connectMQTT(t, second.MQTTAddr, "m1-post", m1machine)
 	publishMQTT(t, m1b, "colca/v1/_Metric/m1/temp", `{"v":2}`)
 
 	type received struct {
@@ -294,7 +298,7 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 		retained bool
 	}
 	msgs := make(chan received, 64)
-	obs := connectMQTT(t, second.MQTTAddr, "obs-post", "obs", "obs-secret")
+	obs := connectMQTT(t, second.MQTTAddr, "obs-post", obsMachine)
 	stok := obs.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
 		msgs <- received{topic: m.Topic(), payload: string(m.Payload()), retained: m.Retained()}
 	})
@@ -389,7 +393,6 @@ func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 		KeyFile: keyFile,
 		API:     config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:    config.Endpoint{Addr: "127.0.0.1:0"},
-		Clients: []config.Client{{ULID: "obs", Token: "obs-secret"}},
 	}
 	started := time.Now()
 	n := mustStart(t, cfg)
@@ -401,7 +404,7 @@ func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 
 	// The reseed count is exported on /metrics (tokenless), as a startup-cost
 	// witness: it must equal the number of seeded KV paths.
-	resp, err := http.Get("http://" + n.APIAddr + "/metrics")
+	resp, err := httpsClient.Get("https://" + n.APIAddr + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}
@@ -418,8 +421,11 @@ func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 	}
 
 	// The timing is only meaningful if the seed actually happened: spot-check
-	// one retained path on a fresh subscriber.
-	obs := connectMQTT(t, n.MQTTAddr, "obs-cost", "obs", "obs-secret")
+	// one retained path on a fresh subscriber. Enrolled AFTER Start, so the
+	// reseed count above stays exactly the seeded path count.
+	obsMachine := authtest.NewMachine(t, "obs")
+	authtest.Enroll(t, n.Registry, obsMachine, "", "read:#")
+	obs := connectMQTT(t, n.MQTTAddr, "obs-cost", obsMachine)
 	got := make(chan paho.Message, 1)
 	stok := obs.Subscribe("colca/v1/_Metric/m1/m1/temp9999", 1, func(_ paho.Client, m paho.Message) {
 		select {
@@ -457,12 +463,12 @@ func TestParentChildUplinkThroughNodes(t *testing.T) {
 		KeyFile:  parentKey,
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		Repl:     config.Endpoint{Addr: "127.0.0.1:0"},
-		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}},
 	}
 	parent := mustStart(t, parentCfg)
 	if parent.ReplAddr == "" || strings.HasSuffix(parent.ReplAddr, ":0") {
 		t.Fatalf("parent ReplAddr = %q, want a resolved address", parent.ReplAddr)
 	}
+	authtest.EnrollNode(t, parent.Registry, "n-child", childID.PublicHex(), "child1")
 	if parent.MQTTAddr != "" {
 		t.Errorf("parent MQTTAddr = %q, want empty (no mqtt configured)", parent.MQTTAddr)
 	}
@@ -475,28 +481,15 @@ func TestParentChildUplinkThroughNodes(t *testing.T) {
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 		Parent:   &config.Parent{URL: "https://" + parent.ReplAddr, Pubkey: parentID.PublicHex()},
-		Clients:  []config.Client{{ULID: "m1", Token: "m1-secret", Mount: "m1"}},
 	}
 	child := mustStart(t, childCfg)
 	if child.ReplAddr != "" {
 		t.Errorf("child ReplAddr = %q, want empty (no children)", child.ReplAddr)
 	}
 
-	opts := paho.NewClientOptions().
-		AddBroker("tcp://" + child.MQTTAddr).
-		SetClientID("m1-node-test").
-		SetUsername("m1").
-		SetPassword("m1-secret").
-		SetConnectTimeout(5 * time.Second)
-	cl := paho.NewClient(opts)
-	ctok := cl.Connect()
-	if !ctok.WaitTimeout(5 * time.Second) {
-		t.Fatal("mqtt connect: timed out")
-	}
-	if err := ctok.Error(); err != nil {
-		t.Fatalf("mqtt connect: %v", err)
-	}
-	defer cl.Disconnect(100)
+	m1machine := authtest.NewMachine(t, "m1")
+	authtest.Enroll(t, child.Registry, m1machine, "m1")
+	cl := connectMQTT(t, child.MQTTAddr, "m1-node-test", m1machine)
 
 	ptok := cl.Publish("colca/v1/_Metric/m1/temp", 1, false, []byte(`{"v":42}`))
 	if !ptok.WaitTimeout(5 * time.Second) {
@@ -623,14 +616,14 @@ func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
 		KeyFile:  keyFile,
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
-		Clients: []config.Client{
-			{ULID: "m1", Token: "m1-secret", Mount: "m1"},
-			{ULID: "obs", Token: "obs-secret"}, // no mount → read-only observer
-		},
 	}
 
 	first := mustStart(t, cfg)
-	m1 := connectMQTT(t, first.MQTTAddr, "m1-tomb", "m1", "m1-secret")
+	m1machine := authtest.NewMachine(t, "m1")
+	obsMachine := authtest.NewMachine(t, "obs")
+	authtest.Enroll(t, first.Registry, m1machine, "m1")
+	authtest.Enroll(t, first.Registry, obsMachine, "", "read:#")
+	m1 := connectMQTT(t, first.MQTTAddr, "m1-tomb", m1machine)
 	publishMQTT(t, m1, "colca/v1/_Metric/m1/pressure", `{"v":7}`)
 	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", `{"v":1}`)
 	// The tombstone: empty payload on the pressure path. PUBACK ⇒ persisted.
@@ -661,7 +654,7 @@ func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
 		retained       bool
 	}
 	msgs := make(chan received, 64)
-	obs := connectMQTT(t, second.MQTTAddr, "obs-tomb", "obs", "obs-secret")
+	obs := connectMQTT(t, second.MQTTAddr, "obs-tomb", obsMachine)
 	stok := obs.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
 		msgs <- received{topic: m.Topic(), payload: string(m.Payload()), retained: m.Retained()}
 	})
@@ -725,10 +718,13 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 		Repl:     config.Endpoint{Addr: "127.0.0.1:0"},
-		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}},
-		Clients:  []config.Client{{ULID: "obs", Token: "obs-secret"}}, // observer on the parent bus
 	}
 	parent := mustStart(t, parentCfg)
+	// Entry-before-connect: the child's key and the parent-bus observer are
+	// runtime registry state, enrolled before the child node starts.
+	authtest.EnrollNode(t, parent.Registry, "n-child", childID.PublicHex(), "child1")
+	obsMachine := authtest.NewMachine(t, "obs")
+	authtest.Enroll(t, parent.Registry, obsMachine, "", "read:#")
 
 	childCfg := &config.Config{
 		ULID:     "n-child",
@@ -738,11 +734,12 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 		Parent:   &config.Parent{URL: "https://" + parent.ReplAddr, Pubkey: parentID.PublicHex()},
-		Clients:  []config.Client{{ULID: "m1", Token: "m1-secret", Mount: "m1"}},
 	}
 	child := mustStart(t, childCfg)
 
-	m1 := connectMQTT(t, child.MQTTAddr, "m1-up", "m1", "m1-secret")
+	m1machine := authtest.NewMachine(t, "m1")
+	authtest.Enroll(t, child.Registry, m1machine, "m1")
+	m1 := connectMQTT(t, child.MQTTAddr, "m1-up", m1machine)
 	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", `{"v":42}`)
 	publishMQTT(t, m1, "colca/v1/_Metric/m1/keep", `{"v":1}`)
 
@@ -779,7 +776,7 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 		retained bool
 	}
 	liveMsgs := make(chan received, 64)
-	live := connectMQTT(t, parent.MQTTAddr, "obs-parent-live", "obs", "obs-secret")
+	live := connectMQTT(t, parent.MQTTAddr, "obs-parent-live", obsMachine)
 	ltok := live.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
 		liveMsgs <- received{topic: m.Topic(), payload: string(m.Payload()), retained: m.Retained()}
 	})
@@ -815,7 +812,7 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 	// The parent's retained set agrees: a fresh subscriber on the parent bus
 	// gets the sibling's retained value but nothing for the retired path.
 	msgs := make(chan received, 64)
-	obs := connectMQTT(t, parent.MQTTAddr, "obs-parent", "obs", "obs-secret")
+	obs := connectMQTT(t, parent.MQTTAddr, "obs-parent", obsMachine)
 	stok := obs.Subscribe("colca/#", 1, func(_ paho.Client, m paho.Message) {
 		msgs <- received{topic: m.Topic(), retained: m.Retained()}
 	})

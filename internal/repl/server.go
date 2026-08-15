@@ -5,8 +5,10 @@
 // Trust is pure key pinning — there is no CA anywhere. Both ends present a
 // self-signed certificate that is nothing but a container for their ed25519
 // node key. The parent authorises a request by looking the peer's leaf key up
-// in cfg.Children (never by anything in the request body); the child compares
-// the parent's leaf key against the pinned value from its own config.
+// in its local registry (kind "node"; never by anything in the request body);
+// the child compares the parent's leaf key against the pinned value from its
+// own config — the parent's registry entry for the child must exist BEFORE
+// the child connects (auth design §6.2, entry-before-connect).
 //
 // The child always speaks its own local coordinates. The parent decides where
 // they land: every replicated topic gets the child's mount inserted, and every
@@ -30,6 +32,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -46,11 +49,12 @@ const (
 )
 
 type Server struct {
-	cfg *config.Config
-	eng *engine.Engine
-	id  *identity.Identity
-	m   *metrics.Metrics // nil-safe: every Metrics method is a no-op on a nil receiver
-	log *slog.Logger
+	cfg     *config.Config
+	eng     *engine.Engine
+	id      *identity.Identity
+	reg     *registry.Manager
+	metrics *metrics.Metrics // nil-safe: every Metrics method is a no-op on a nil receiver
+	log     *slog.Logger
 
 	mu   sync.Mutex
 	http *http.Server
@@ -59,27 +63,35 @@ type Server struct {
 
 // NewServer builds a replication server. m may be nil (unit tests and any
 // caller that does not care about metrics).
-func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, m *metrics.Metrics) (*Server, error) {
-	return &Server{cfg: cfg, eng: eng, id: id, m: m, log: slog.Default().With("node", cfg.ULID, "comp", "repl-server")}, nil
+func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, reg *registry.Manager, m *metrics.Metrics) (*Server, error) {
+	return &Server{cfg: cfg, eng: eng, id: id, reg: reg, metrics: m,
+		log: slog.Default().With("node", cfg.ULID, "comp", "repl-server")}, nil
 }
 
-// childFromReq resolves the authenticated child from the TLS client cert
-// (pinned against the child registry). This is the ONLY source of identity —
-// nothing from the request body is trusted.
-func (s *Server) childFromReq(r *http.Request) (*config.Child, error) {
+// childFromReq resolves the authenticated child from the TLS client cert,
+// pinned against the local registry (kind "node"). This is the ONLY source of
+// identity — nothing from the request body is trusted. A machine key at this
+// door is rejected exactly like an unknown one, with its own metric reason.
+func (s *Server) childFromReq(r *http.Request) (*uns.Entry, error) {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
 		return nil, fmt.Errorf("no client certificate")
 	}
 	pub, err := identity.PeerPubHex(r.TLS.PeerCertificates[0].Raw)
 	if err != nil {
+		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
 		return nil, err
 	}
-	for i := range s.cfg.Children {
-		if s.cfg.Children[i].Pubkey == pub {
-			return &s.cfg.Children[i], nil
-		}
+	entry, ok := s.reg.ByPubkey(pub)
+	if !ok {
+		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
+		return nil, fmt.Errorf("client key %s not enrolled at this node", short(pub))
 	}
-	return nil, fmt.Errorf("client key %s not in child registry", short(pub))
+	if entry.Kind != uns.KindNode {
+		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthKind)
+		return nil, fmt.Errorf("identity %s is kind %q — the repl door is for nodes", entry.ULID, entry.Kind)
+	}
+	return entry, nil
 }
 
 // Start binds cfg.Repl.Addr and serves TLS in the background. It returns the
@@ -261,7 +273,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 					resp["next"] = lwm
 				}
 				resp["gap"] = gap
-				s.m.GapServed("commands", "downlink")
+				s.metrics.GapServed("commands", "downlink")
 			}
 			s.log.Debug("downlink", "child", child.ULID, "delivered", len(out), "next", resp["next"], "gap", hasGap)
 			writeJSON(w, resp)

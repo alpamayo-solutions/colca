@@ -44,11 +44,11 @@ func newParentFixture(t *testing.T) *parentFixture {
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
-	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"},
-		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}}}
-	peng := engine.New(ps, pcfg, nil, nil)
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
+	peng := engine.New(ps, pcfg, preg, nil, nil)
 	pm := metrics.New(ps, config.Retention{})
-	srv, addr := startServerWithMetrics(t, pcfg, peng, parentID, pm)
+	srv, addr := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
 	t.Cleanup(srv.Stop)
 	return &parentFixture{
 		ps: ps, pcfg: pcfg, peng: peng, pid: parentID, cid: childID, pm: pm,
@@ -164,18 +164,18 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
-	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"},
-		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}}}
-	peng := engine.New(ps, pcfg, nil, nil)
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
+	peng := engine.New(ps, pcfg, preg, nil, nil)
 
 	// Start once only to obtain a real address, then stop: the parent is down.
-	srv1, addr := startServer(t, pcfg, peng, parentID)
+	srv1, addr := startServer(t, pcfg, peng, parentID, preg)
 	srv1.Stop()
 	pcfg.Repl.Addr = addr
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	cm := metrics.New(cs, config.Retention{})
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, nil, nil)
+	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil)
 	for i := 1; i <= 5; i++ {
 		mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", fmt.Sprintf(`{"v":%d}`, i))
 	}
@@ -209,7 +209,7 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 
 	// Parent returns on the same address; the loop must jump 1 → 4 and push
 	// the survivors — never stall on the pruned range.
-	srv2, err := NewServer(pcfg, peng, parentID, nil)
+	srv2, err := NewServer(pcfg, peng, parentID, preg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestRunDownlinkContinuesPastGap(t *testing.T) {
 	dir := t.TempDir()
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	cm := metrics.New(cs, config.Retention{})
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, nil, nil)
+	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil)
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -293,7 +293,7 @@ func TestUplinkPassesStreamGapMarkerButNotCommands(t *testing.T) {
 
 	dir := t.TempDir()
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, nil, nil)
+	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil)
 	// Child's commands stream: a command (must stay), a gap marker and an ack
 	// (both must travel). Appended through the store: the marker is written by
 	// the pruner's prune batch in production, not through an ingest path.
@@ -345,7 +345,7 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, nil, nil)
+	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil)
 	for i := 1; i <= 3; i++ {
 		mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", fmt.Sprintf(`{"v":%d}`, i))
 	}

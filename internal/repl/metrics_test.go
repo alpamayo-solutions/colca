@@ -27,15 +27,15 @@ func TestUplinkMetricsProgressAndFailure(t *testing.T) {
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
-	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"},
-		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}}}
-	peng := engine.New(ps, pcfg, nil, nil)
-	srv, addr := startServer(t, pcfg, peng, parentID)
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
+	peng := engine.New(ps, pcfg, preg, nil, nil)
+	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
 	cm := metrics.New(cs, config.Retention{})
-	ceng := engine.New(cs, ccfg, nil, cm)
+	ceng := engine.New(cs, ccfg, regWithChildren(t, cs, ccfg.ULID), nil, cm)
 	mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", `{"v":1}`)
 
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
@@ -92,10 +92,10 @@ func TestDownlinkMetricsProgressAndFailure(t *testing.T) {
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
-	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"},
-		Children: []config.Child{{ULID: "n-child", Pubkey: childID.PublicHex(), Mount: "child1"}}}
-	peng := engine.New(ps, pcfg, nil, nil)
-	srv, addr := startServer(t, pcfg, peng, parentID)
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
+	peng := engine.New(ps, pcfg, preg, nil, nil)
+	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	// Seed one command so the first /downlink returns immediately instead of
 	// riding the 20s empty long-poll.
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
@@ -103,7 +103,7 @@ func TestDownlinkMetricsProgressAndFailure(t *testing.T) {
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
 	cm := metrics.New(cs, config.Retention{})
-	ceng := engine.New(cs, ccfg, nil, cm)
+	ceng := engine.New(cs, ccfg, regWithChildren(t, cs, ccfg.ULID), nil, cm)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 
 	const gauge = `colca_downlink_last_success_timestamp_seconds`

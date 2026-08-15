@@ -360,7 +360,10 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 	want := map[string]int{
 		"colca_stream_next_offset":                      3, // one per stream
 		"colca_ingest_records_total":                    3,
-		"colca_rejected_publishes_total":                6, // one per reason
+		"colca_rejected_publishes_total":                6,  // one per reason
+		"colca_auth_rejections_total":                   12, // door × reason
+		"colca_acl_denials_total":                       2,  // one per action
+		"colca_session_kicks_total":                     1,
 		"colca_uplink_last_success_timestamp_seconds":   3,
 		"colca_uplink_push_failures_total":              3,
 		"colca_downlink_last_success_timestamp_seconds": 1,
@@ -408,7 +411,7 @@ func TestIncrementSurface(t *testing.T) {
 		t.Errorf("ingest entities = %v, want 1", got)
 	}
 
-	for i, reason := range []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonNotCommand, ReasonAuth} {
+	for i, reason := range []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonCmdDenied, ReasonRegistryContract} {
 		for j := 0; j <= i; j++ {
 			m.RejectPublish(reason)
 		}
@@ -497,12 +500,15 @@ func TestIncrementSurface(t *testing.T) {
 func TestNilReceiverIsNoOp(t *testing.T) {
 	var m *Metrics
 	m.IngestRecord("metrics")
-	m.RejectPublish(ReasonAuth)
+	m.RejectPublish(ReasonGrammar)
 	m.UplinkPushed("metrics", time.Now())
 	m.UplinkPushFailed("metrics")
 	m.DownlinkFetched(time.Now())
 	m.DownlinkFetchFailed()
 	m.SetReseedCount(3)
+	m.AuthReject(DoorMQTT, AuthUnknownKey)
+	m.ACLDeny(ACLSub)
+	m.SessionKick()
 	m.RetentionPruneRun("metrics")
 	m.RetentionPruned("metrics", 1, 1)
 	m.RetentionGapRecorded("metrics")
