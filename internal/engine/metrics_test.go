@@ -1,39 +1,18 @@
 package engine
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
-// scrapeMetric parses the Prometheus text exposition from m.Handler() and
-// returns the value of one exact family+labels line, e.g.
-// `colca_rejected_publishes_total{reason="identity"}`. It fails the test if
-// the line is not present — every family here is pre-created and zero-valued,
-// so a missing line means the wrong family/label was asked for, not that the
-// metric hasn't fired yet.
-func scrapeMetric(t *testing.T, m *metrics.Metrics, line string) float64 {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	for _, l := range strings.Split(rec.Body.String(), "\n") {
-		if rest, ok := strings.CutPrefix(l, line+" "); ok {
-			v, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)
-			if err != nil {
-				t.Fatalf("parse metric line %q: %v", l, err)
-			}
-			return v
-		}
-	}
-	t.Fatalf("metric line %q not found in scrape:\n%s", line, rec.Body.String())
-	return 0
-}
+// scrapeMetric reads back one metric value through the shared test helper
+// (metricstest.Value) — see that package's doc comment for why this goes
+// through Handler() rather than a Collector/Gatherer accessor.
+var scrapeMetric = metricstest.Value
 
 // newMetricsEngine builds an engine wired to a live *metrics.Metrics (unlike
 // newEngine/newRecordingEngine, which pass nil to keep the plain behavioral

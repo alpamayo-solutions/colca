@@ -2,10 +2,6 @@ package mqttsrv
 
 import (
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"strconv"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,30 +11,14 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
-// scrapeMetric parses the Prometheus text exposition from m.Handler() and
-// returns the value of one exact family+labels line (see the identical helper
-// in internal/engine/metrics_test.go for the rationale: the increment surface
-// has no exported Collector accessor, so the HTTP-exposed contract is the test
-// seam).
-func scrapeMetric(t *testing.T, m *metrics.Metrics, line string) float64 {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	for _, l := range strings.Split(rec.Body.String(), "\n") {
-		if rest, ok := strings.CutPrefix(l, line+" "); ok {
-			v, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)
-			if err != nil {
-				t.Fatalf("parse metric line %q: %v", l, err)
-			}
-			return v
-		}
-	}
-	t.Fatalf("metric line %q not found in scrape:\n%s", line, rec.Body.String())
-	return 0
-}
+// scrapeMetric reads back one metric value through the shared test helper
+// (metricstest.Value) — see that package's doc comment for why this goes
+// through Handler() rather than a Collector/Gatherer accessor.
+var scrapeMetric = metricstest.Value
 
 // newBroker starts a broker on a random loopback port with one configured
 // client (m1/m1-secret mounted at "m1") and a real store. The engine is bound
@@ -369,6 +349,14 @@ func TestBrokerAuthFailureIncrementsRejectedReasonAuth(t *testing.T) {
 		SetClientID("bad-pass").
 		SetUsername("m1").
 		SetPassword("wrong").
+		// Pin the protocol version so paho makes exactly one physical connection.
+		// With protocolVersionExplicit left false, paho's attemptConnection retries
+		// a rejected CONNACK by opening a SECOND TCP connection and reconnecting
+		// with MQTT 3.1 (goto CONN in the client internals) — that second
+		// connection is a second, genuine CONNECT the broker's hook correctly
+		// rejects again, not a double-count bug in the hook. Mochi itself only
+		// ever invokes OnConnectAuthenticate once per TCP connection.
+		SetProtocolVersion(4).
 		SetConnectTimeout(5 * time.Second)
 	c := paho.NewClient(opts)
 	defer c.Disconnect(100)
@@ -380,21 +368,15 @@ func TestBrokerAuthFailureIncrementsRejectedReasonAuth(t *testing.T) {
 		t.Fatal("connect with wrong password succeeded, want error")
 	}
 
-	// mochi's connect handling may invoke OnConnectAuthenticate more than once
-	// for a single rejected CONNECT (observed: 2, from the underlying MQTT
-	// negotiation, not from anything this hook controls) — the contract this
-	// test pins is "a failed CONNECT counts as auth rejections", not an exact
-	// multiplicity mochi does not document.
-	afterFail := scrapeMetric(t, m, line)
-	if afterFail < 1 {
-		t.Fatalf("%s = %v after a failed CONNECT, want >= 1", line, afterFail)
+	if v := scrapeMetric(t, m, line); v != 1 {
+		t.Fatalf("%s = %v after one failed CONNECT, want exactly 1", line, v)
 	}
 
 	// A successful connect right after must not move the auth counter.
 	good := connect(t, addr, "m1-ok", "m1", "m1-secret")
 	defer good.Disconnect(100)
-	if v := scrapeMetric(t, m, line); v != afterFail {
-		t.Fatalf("%s = %v after a successful connect, want unchanged %v", line, v, afterFail)
+	if v := scrapeMetric(t, m, line); v != 1 {
+		t.Fatalf("%s = %v after a successful connect, want unchanged 1", line, v)
 	}
 }
 

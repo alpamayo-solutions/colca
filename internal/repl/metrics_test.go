@@ -1,38 +1,20 @@
 package repl
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 )
 
-// scrapeMetric parses the Prometheus text exposition from m.Handler() and
-// returns the value of one exact family+labels line. See the identical helper
-// in internal/engine/metrics_test.go for the rationale.
-func scrapeMetric(t *testing.T, m *metrics.Metrics, line string) float64 {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	for _, l := range strings.Split(rec.Body.String(), "\n") {
-		if rest, ok := strings.CutPrefix(l, line+" "); ok {
-			v, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)
-			if err != nil {
-				t.Fatalf("parse metric line %q: %v", l, err)
-			}
-			return v
-		}
-	}
-	t.Fatalf("metric line %q not found in scrape:\n%s", line, rec.Body.String())
-	return 0
-}
+// scrapeMetric reads back one metric value through the shared test helper
+// (metricstest.Value) — see that package's doc comment for why this goes
+// through Handler() rather than a Collector/Gatherer accessor.
+var scrapeMetric = metricstest.Value
 
 // TestUplinkMetricsProgressAndFailure pins repl health as numeric progress
 // the per-stream last-success gauge is 0 until the first
