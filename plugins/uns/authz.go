@@ -213,6 +213,14 @@ func Authorize(e *Entry, a Action, topic string) bool {
 		return false
 
 	case ActSub:
+		if isTimeSyncFilter(topic) {
+			// Time-sync design §2.2/§4: every authenticated machine session
+			// may subscribe colca/v1/_TimeSync/+, independent of its zone
+			// grants — the beacon is node-scoped, not path-scoped, so the
+			// normal readZones prefix comparison (which would deny a
+			// zone-scoped machine with no read:# grant) does not apply here.
+			return true
+		}
 		fixed, isUns := fixedPathPrefix(topic)
 		if !isUns {
 			return true // outside colca/# colca is a plain broker (§5.3)
@@ -247,6 +255,18 @@ func Authorize(e *Entry, a Action, topic string) bool {
 		return false
 	}
 	return false
+}
+
+// isTimeSyncFilter reports whether a subscribe filter names the _TimeSync
+// contract exactly at segment 2 (time-sync design §2.2): "colca/v1/_TimeSync",
+// "colca/v1/_TimeSync/+" or a concrete node ulid all match. A broader wildcard
+// that only INCLUDES _TimeSync in passing (e.g. "colca/#") does NOT match here
+// — such a filter is still judged by the normal zone rule below, exactly as
+// before this exception existed; only a filter that specifically names
+// _TimeSync gets the no-zone-required bypass.
+func isTimeSyncFilter(filter string) bool {
+	seg := strings.SplitN(filter, "/", 4)
+	return len(seg) >= 3 && seg[0] == "colca" && seg[1] == "v1" && seg[2] == "_TimeSync"
 }
 
 // fixedPathPrefix decomposes a subscription filter (§5.3 ActSub). isUns

@@ -153,6 +153,17 @@ func Start(cfg *config.Config) (*Node, error) {
 				log.Error("mqtt server stopped", "err", err)
 			}
 		}(n.MQTT)
+
+		// Periodic time-sync beacon (design §2.2): the per-session publish on
+		// establishment is wired inside mqttsrv's hook (OnSessionEstablished);
+		// this is the OTHER trigger, every time_sync.beacon_interval
+		// regardless of connection activity. Joins n.wg exactly like the repl
+		// loops and the pruner: Stop must wait for it before MQTT.Close() runs.
+		n.wg.Add(1)
+		go func(mq *mqttsrv.Server) {
+			defer n.wg.Done()
+			mq.RunBeacon(cfg.TimeSync.EffectiveBeaconInterval(), n.stop)
+		}(n.MQTT)
 	}
 
 	// 4. Local HTTPS control API: TLS with the node's own key; machine callers

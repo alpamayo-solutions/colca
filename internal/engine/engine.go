@@ -127,6 +127,16 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		return Result{}, fmt.Errorf("client %s may not publish _EdgeNode — registry entries are enrollment-door only", identity)
 	}
 	class := uns.ClassOf(p.Contract)
+	if class == uns.ClassTimeSync {
+		// Time-sync design §2.2/§4: _TimeSync is node-local-publish-only —
+		// only this node's own beacon loop may ever produce it, straight to
+		// the local bus. A client attempting it (even the exact canonical
+		// shape) is rejected here with its own reason, never with the
+		// generic "grammar" reason Parse's 4-segment relaxation would
+		// otherwise fall through to.
+		e.metrics.RejectPublish(metrics.ReasonTimeSync)
+		return Result{}, fmt.Errorf("client %s may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)", identity)
+	}
 	if class == uns.ClassCmd {
 		// A command needs a covering cmd grant (auth §5.3 ActCmd). Commands
 		// target ABSOLUTE node-local paths: no mount rewrite, no level-4
@@ -190,6 +200,12 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 		return Result{}, fmt.Errorf("_EdgeNode is enrollment-door only — use POST /enroll")
 	}
 	class := uns.ClassOf(p.Contract)
+	if class == uns.ClassTimeSync {
+		// Same rule as IngestClient: _TimeSync is node-local-publish-only,
+		// not even the admin token may author it through /publish.
+		e.metrics.RejectPublish(metrics.ReasonTimeSync)
+		return Result{}, fmt.Errorf("admin may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)")
+	}
 	if class == uns.ClassNone {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, fmt.Errorf("unknown contract %s", p.Contract)
@@ -276,6 +292,7 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 // the fourth way a record enters a node's store and it must converge here like
 // the other three — the replication server never talks to the store directly.
 func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord) (applied int, hwm uint64, err error) {
+	recs = e.rejectTimeSync(child, recs)
 	prev := e.store.HWMGet(child, stream)
 	got, hwm, err := e.store.ApplyReplicated(child, stream, recs)
 	if err != nil {
@@ -303,6 +320,29 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 		e.deliver(r.Topic, r.Payload, retainFor(uns.ClassOf(p.Contract)))
 	}
 	return len(got), hwm, nil
+}
+
+// rejectTimeSync drops any _TimeSync record from a replicated batch before it
+// ever reaches the store (time-sync design §2.2/§4): _TimeSync is ephemeral
+// and node-local-publish-only, so a well-behaved child's own store can never
+// legitimately contain one (its own engine already rejects it at the client
+// and admin doors, and the beacon loop never touches the store at all) — a
+// record with this shape arriving over replication can only be a forged or
+// buggy child offset. It is rejected exactly like a client/admin publish is,
+// with the same reject reason, and the rest of the batch is still applied
+// unchanged.
+func (e *Engine) rejectTimeSync(child string, recs []store.ReplRecord) []store.ReplRecord {
+	filtered := recs[:0:0]
+	for _, r := range recs {
+		if p, err := uns.Parse(r.Topic); err == nil && uns.ClassOf(p.Contract) == uns.ClassTimeSync {
+			e.metrics.RejectPublish(metrics.ReasonTimeSync)
+			e.log.Warn("rejected _TimeSync record from replication: ephemeral, node-local-publish-only (time-sync design §2.2)",
+				"child", child, "topic", r.Topic)
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	return filtered
 }
 
 // logOffsetJumps is the second net of spec §6.4: a child's stream offsets are

@@ -18,12 +18,13 @@ import (
 type Class int
 
 const (
-	ClassNone   Class = iota
-	ClassData         // _Metric …    write: owner (level4 == identity)
-	ClassEntity       // _EdgeNode, _SystemElement, _Signal
-	ClassCmd          // _Cmd*        write: ancestors/admin, flows down
-	ClassAck          // _Ack         write: owner, flows up
-	ClassGap          // _StreamGap   write: pruner only. Event, no KV, not retained (design §6.4).
+	ClassNone     Class = iota
+	ClassData           // _Metric …    write: owner (level4 == identity)
+	ClassEntity         // _EdgeNode, _SystemElement, _Signal
+	ClassCmd            // _Cmd*        write: ancestors/admin, flows down
+	ClassAck            // _Ack         write: owner, flows up
+	ClassGap            // _StreamGap   write: pruner only. Event, no KV, not retained (design §6.4).
+	ClassTimeSync       // _TimeSync    write: node-local-publish-only. Ephemeral: no stream, never persisted, never retained (time-sync design §2.2).
 )
 
 // Parsed is a decomposed UNS topic: colca/v1/_Contract/{node-id}/{path…}
@@ -35,9 +36,21 @@ type Parsed struct {
 func IsUns(topic string) bool { return strings.HasPrefix(topic, "colca/") }
 
 // Parse decomposes an UNS topic. It requires at least 5 segments (so there is
-// always a non-empty hierarchy path) and a _Contract at segment index 2.
+// always a non-empty hierarchy path) and a _Contract at segment index 2 — with
+// one exception: _TimeSync (time-sync design §2.2) is the only contract whose
+// wire topic has no hierarchy path at all (colca/v1/_TimeSync/{node-ulid},
+// exactly 4 segments). That shape is accepted here with an empty Path so the
+// engine's reject-path can classify and count a client's attempted _TimeSync
+// publish with its own reject reason instead of falling through to the
+// generic "grammar" rejection. No other contract gets this relaxation: doing
+// it length-only (instead of contract-gated) would let MountInsert/MountStrip
+// silently no-op on a 4-segment topic for contracts whose mount rewrite is
+// load-bearing (data/entity ownership).
 func Parse(topic string) (Parsed, error) {
 	seg := strings.Split(topic, "/")
+	if len(seg) == 4 && seg[2] == "_TimeSync" {
+		return Parsed{Prefix: seg[0], Version: seg[1], Contract: seg[2], NodeID: seg[3]}, nil
+	}
 	if len(seg) < 5 {
 		return Parsed{}, fmt.Errorf("uns grammar: need >=5 segments, got %d in %q", len(seg), topic)
 	}
@@ -67,6 +80,8 @@ func ClassOf(contract string) Class {
 		return ClassAck
 	case contract == "_StreamGap":
 		return ClassGap
+	case contract == "_TimeSync":
+		return ClassTimeSync
 	case strings.HasPrefix(contract, "_Cmd"):
 		return ClassCmd
 	}
@@ -91,8 +106,18 @@ func StreamFor(c Class) string {
 		return "commands"
 	case ClassGap:
 		return ""
+	case ClassTimeSync:
+		return "" // ephemeral: no stream, never persisted (time-sync design §2.2)
 	}
 	return ""
+}
+
+// TimeSyncTopic builds the wire topic for the periodic time beacon (time-sync
+// design §2.2): colca/v1/_TimeSync/{node-ulid} — the only UNS topic with no
+// hierarchy path at all (Parse's 4-segment exception below mirrors this
+// shape). nodeULID is the publishing node's own identity, never a machine's.
+func TimeSyncTopic(nodeULID string) string {
+	return "colca/v1/_TimeSync/" + nodeULID
 }
 
 // MountInsert inserts the mount name directly after segment 4 (node-id), i.e.
@@ -162,6 +187,13 @@ func Validate(contract string, payload []byte) error {
 		return reqNum("result_code")
 	case contract == "_EdgeNode" || contract == "_SystemElement" || contract == "_Signal":
 		return reqStr("ulid")
+	case contract == "_TimeSync":
+		// Reachable only from direct Validate callers (tests, defense in
+		// depth): the engine rejects _TimeSync by class before Validate is
+		// ever called on a client/admin/replicated publish (time-sync design
+		// §2.2/§4) — only the node's own beacon loop publishes this shape,
+		// straight to the local bus, bypassing Validate entirely.
+		return reqNum("now_ms")
 	case contract == "_StreamGap":
 		if err := reqStr("stream"); err != nil {
 			return err

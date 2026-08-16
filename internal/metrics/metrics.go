@@ -36,9 +36,15 @@ const (
 	// ReasonRegistryContract: _EdgeNode arrived at an ordinary ingest door —
 	// registry entries enter only through the enrollment endpoint (auth §3).
 	ReasonRegistryContract = "registry_contract"
+	// ReasonTimeSync: a _TimeSync publish arrived from a client, an admin
+	// caller, or a replicated batch (time-sync design §2.2/§4). _TimeSync is
+	// ephemeral and node-local-publish-only — only the node's own beacon loop
+	// may ever produce it, straight to the local bus, never through an
+	// ingest door.
+	ReasonTimeSync = "time_sync"
 )
 
-var reasons = []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonCmdDenied, ReasonRegistryContract}
+var reasons = []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonCmdDenied, ReasonRegistryContract, ReasonTimeSync}
 
 // Auth doors and rejection reasons — the label values of
 // colca_auth_rejections_total{door,reason} (auth design §9). CONNECT/request

@@ -9,8 +9,10 @@ package mqttsrv
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"log/slog"
 	"sync"
+	"time"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
 	"github.com/mochi-mqtt/server/v2/listeners"
@@ -49,6 +51,13 @@ type colcaHook struct {
 	cfg     *config.Config
 	log     *slog.Logger
 	metrics *metrics.Metrics // nil-safe: every Metrics method is a no-op on nil
+	// broker is the SAME *mqtt.Server New() builds around this hook — set at
+	// construction (New creates the server before the hook), never nil in
+	// practice. It exists so the hook can publish the time-sync beacon
+	// (design §2.2) directly, the same way Server.DeliverLocal does, without
+	// a back-reference to *Server (which does not exist yet when the hook is
+	// built).
+	broker *mqtt.Server
 }
 
 func (h *colcaHook) engine() *engine.Engine {
@@ -70,6 +79,7 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnConnectAuthenticate,
 		mqtt.OnACLCheck,
 		mqtt.OnPublish,
+		mqtt.OnSessionEstablished,
 	}, []byte{b})
 }
 
@@ -128,6 +138,44 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 		return false
 	}
 	return true
+}
+
+// OnSessionEstablished fires once per (re)connect, after OnConnectAuthenticate
+// has already run and the CONNACK has been sent (mochi server.go
+// attachClient) — i.e. every call here is an authenticated machine session
+// (the only kind this door accepts). Time-sync design §2.2: beacon on every
+// machine session establishment, so a reconnecting machine gets time within
+// milliseconds, before or with its redelivered command backlog. The periodic
+// beacon_interval cadence is a separate trigger (Server.RunBeacon), not this
+// hook.
+func (h *colcaHook) OnSessionEstablished(cl *mqtt.Client, pk packets.Packet) {
+	h.publishTimeSync()
+}
+
+// publishTimeSync publishes one _TimeSync beacon on this node's local bus
+// (design §2.2): topic colca/v1/_TimeSync/{node-ulid}, payload {"now_ms":
+// <int64>}, never retained — a retained time message is by definition stale.
+// now_ms is the engine's own authoritative-now estimate (AuthoritativeNow),
+// matching the convention repl/server.go already uses for /downlink and
+// /replicate responses. A no-op before the engine is bound (startup race
+// with a fast-connecting client) or if marshaling somehow fails (can't
+// happen for this fixed shape — defensive only).
+func (h *colcaHook) publishTimeSync() {
+	eng := h.engine()
+	if eng == nil {
+		return
+	}
+	payload, err := json.Marshal(struct {
+		NowMS int64 `json:"now_ms"`
+	}{eng.AuthoritativeNow().UnixMilli()})
+	if err != nil {
+		h.log.Warn("time-sync beacon not published: encode failed", "err", err)
+		return
+	}
+	topic := uns.TimeSyncTopic(h.cfg.ULID)
+	if err := h.broker.Publish(topic, payload, false, 1); err != nil {
+		h.log.Warn("time-sync beacon publish failed", "topic", topic, "err", err)
+	}
 }
 
 // OnPublish routes every authenticated client publish through the engine. A
@@ -193,7 +241,7 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, eng *
 	// namespace. If that cardinality becomes realistic, the real fix is
 	// chunked/paginated retained replay, not a further bump of this field.
 	s.Options.Capabilities.MaximumInflight = 65535
-	hook := &colcaHook{eng: eng, reg: reg, cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m}
+	hook := &colcaHook{eng: eng, reg: reg, cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s}
 	if err := s.AddHook(hook, nil); err != nil {
 		return nil, err
 	}
@@ -206,6 +254,34 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, eng *
 
 // SetEngine late-binds the engine the publish hook ingests into.
 func (s *Server) SetEngine(e *engine.Engine) { s.hook.setEngine(e) }
+
+// PublishTimeSync publishes one _TimeSync beacon (design §2.2). Exported so
+// node.Start's periodic loop (RunBeacon) and any direct caller (tests) can
+// trigger a beacon without going through a real MQTT session-establish event.
+func (s *Server) PublishTimeSync() { s.hook.publishTimeSync() }
+
+// RunBeacon publishes a _TimeSync beacon every interval until stop is closed
+// (design §2.2's periodic cadence — the per-session publish on establishment
+// is the separate OnSessionEstablished trigger above; together they give a
+// reconnecting machine time within milliseconds and every attached machine a
+// periodic refresh). interval <= 0 disables the periodic beacon entirely —
+// config.TimeSync.EffectiveBeaconInterval never itself returns <= 0, so this
+// guard is for direct callers/tests only.
+func (s *Server) RunBeacon(interval time.Duration, stop <-chan struct{}) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			s.PublishTimeSync()
+		}
+	}
+}
 
 // Kick disconnects every live session of the given identity (auth §7) — the
 // registry manager calls this on revoke and re-enroll. The next CONNECT is
