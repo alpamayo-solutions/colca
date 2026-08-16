@@ -39,9 +39,12 @@
 # disjoint in ports AND containers/networks/volumes by construction. Compose
 # has no arithmetic in ${...} interpolation, so per-port variables computed
 # by the harness are the mechanism; the defaults keep this file standalone.
+# COLCA_PORT_OFFSET/COLCA_PORT_* are the same repo-wide port-offset
+# convention node-manager uses (`colca generate --port-offset`) — see the
+# authoritative offset table in the "Port Offset Rules" section.
 # Per-purpose offset conventions are documented in
-# docs/source/development/testing.rst (0 dev/demo/smoke, 100 chaos in CI,
-# 200 system in CI).
+# docs/source/development/testing.rst (0 dev/demo/smoke, 400 chaos in CI,
+# 500 system in CI).
 #
 # Load-bearing detail — host observability under partition: Docker binds a
 # container's published-port forwarding to ONE endpoint (measured on Docker
