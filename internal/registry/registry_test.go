@@ -156,9 +156,12 @@ func TestRevoke(t *testing.T) {
 	if _, _, err := m.Enroll(entryJSON(t, machine("01M1", "z/a", pub("ab")))); err != nil {
 		t.Fatal(err)
 	}
-	off, err := m.Revoke("01M1")
+	off, wasDraining, err := m.Revoke("01M1")
 	if err != nil {
 		t.Fatalf("Revoke: %v", err)
+	}
+	if wasDraining {
+		t.Fatal("wasDraining must be false for a plain, never-drained entry")
 	}
 	if _, ok := m.Get("01M1"); ok {
 		t.Fatal("entry survived revoke")
@@ -178,7 +181,7 @@ func TestRevoke(t *testing.T) {
 	if kv := st.KVScan("z/a"); len(kv) != 0 {
 		t.Fatalf("KV survived revoke: %v", kv)
 	}
-	if _, err := m.Revoke("01M1"); !errors.Is(err, ErrNotEnrolled) {
+	if _, _, err := m.Revoke("01M1"); !errors.Is(err, ErrNotEnrolled) {
 		t.Fatalf("second revoke: %v, want ErrNotEnrolled", err)
 	}
 	// Revocation persists.
@@ -215,7 +218,7 @@ func TestEnrollAndRevokeMirrorToBus(t *testing.T) {
 	if _, _, err := m.Enroll(entryJSON(t, machine("01M1", "z/a", pub("ab")))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Revoke("01M1"); err != nil {
+	if _, _, err := m.Revoke("01M1"); err != nil {
 		t.Fatal(err)
 	}
 	if len(seen) != 2 {
@@ -394,8 +397,10 @@ func TestDrainingMountBoundaryAndClears(t *testing.T) {
 	if m.DrainingMount("other/x") {
 		t.Fatal("a path outside any draining mount must be false")
 	}
-	if _, err := m.Revoke("01N1"); err != nil {
+	if _, wasDraining, err := m.Revoke("01N1"); err != nil {
 		t.Fatal(err)
+	} else if !wasDraining {
+		t.Fatal("wasDraining must be true — the entry was draining at revoke time")
 	}
 	if m.DrainingMount("site1/edge1/x") {
 		t.Fatal("DrainingMount must be false once the drained child is revoked")

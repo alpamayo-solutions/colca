@@ -262,3 +262,122 @@ func TestDrainConcurrentEvaluationCompletesExactlyOnce(t *testing.T) {
 		t.Fatalf("colca_drains_active = %v, want 0", v)
 	}
 }
+
+// In a multi-hop tree (root A -> mid B -> leaf C, C
+// draining at B), a command authored ABOVE B — where B's own draining child
+// is invisible — must still be bounced once it relays down through B's
+// downlink-poll loop into engine.IngestDownlink, exactly as if it had been
+// admitted directly at B. Without the fix this reaches B's local commands
+// stream (already in B-local coordinates under C's mount) and C fetches it
+// normally through B's own /downlink door: the "chasing a moving tail"
+// failure §3.2 item 2 exists to prevent, reachable even though the direct
+// client/admin doors are covered.
+func TestDownlinkRelayRejectsCommandForDrainingGrandchildMount(t *testing.T) {
+	dir := t.TempDir()
+	rootID := mustIdentity(t, filepath.Join(dir, "root.key"))
+	midID := mustIdentity(t, filepath.Join(dir, "mid.key"))
+	leafID := mustIdentity(t, filepath.Join(dir, "leaf.key"))
+
+	// --- Root A: parent of B, has no idea C (B's own child) exists at all.
+	rs := mustStore(t, filepath.Join(dir, "rdata"))
+	rcfg := &config.Config{ULID: "n-root", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	rreg := regWithChildren(t, rs, rcfg.ULID, childSpec{"n-mid", midID.PublicHex(), "mid1"})
+	reng := engine.New(rs, rcfg, rreg, nil, nil, nil)
+	rsrv, raddr := startServer(t, rcfg, reng, rootID, rreg)
+	t.Cleanup(rsrv.Stop)
+
+	// --- Mid B: child of A, parent of C. C is draining HERE, at B — a fact
+	// with no representation anywhere in A's own registry.
+	ms := mustStore(t, filepath.Join(dir, "mdata"))
+	mcfg := &config.Config{ULID: "n-mid", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	mreg := regWithChildren(t, ms, mcfg.ULID, childSpec{"n-leaf", leafID.PublicHex(), "leaf1"})
+	mm := metrics.New(ms, config.Retention{}, nil)
+	mreg.SetMetrics(mm)
+	meng := engine.New(ms, mcfg, mreg, nil, mm, nil)
+	msrv, _ := startServerWithMetrics(t, mcfg, meng, midID, mreg, mm) // no client of B's own connects in this test
+	t.Cleanup(msrv.Stop)
+
+	mcl := mustClient(t, raddr, rootID.PublicHex(), midID)
+	mStop, mDone := make(chan struct{}), make(chan struct{})
+	go func() { defer close(mDone); RunDownlink(mcl, meng, nil, mStop) }()
+	t.Cleanup(func() { close(mStop); waitForClosed(t, "mid RunDownlink to stop", mDone, 5*time.Second) })
+
+	if _, err := mreg.Drain("n-leaf"); err != nil {
+		t.Fatalf("Drain C at B: %v", err)
+	}
+
+	// A admits this without complaint: from A's vantage point it is an
+	// ordinary command addressed somewhere under B's own mount — A's
+	// DrainingMount check only ever sees A's OWN registry, which has no
+	// entry for C at all.
+	mustIngestAdmin(t, reng, "colca/v1/_CmdParam/m1/mid1/leaf1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
+
+	// B's downlink-poll loop fetches it from A (arriving already stripped
+	// to B-local coordinates, path "leaf1/go") and must bounce it at
+	// engine.IngestDownlink — never persisting it into B's own commands
+	// stream, and counting it exactly like the direct-door rejections.
+	const rejectedLine = `colca_rejected_publishes_total{reason="draining"}`
+	waitFor(t, "B to relay and reject the command via IngestDownlink", 5*time.Second, func() bool {
+		return metricstest.Value(t, mm, rejectedLine) == 1
+	})
+	if off := meng.Store().NextOffset("commands"); off != 1 {
+		t.Fatalf("B's commands stream next offset = %d, want 1 — the relayed command must never be persisted", off)
+	}
+}
+
+// A live, unexpired command addressed to a draining
+// child's mount, never fetched, physically removed by retention BEFORE the
+// drain's own completion predicate ever sees it — the child's own
+// delivery-floor cursor never advanced past it, so this is indistinguishable
+// (from the drain's viewpoint) from the staleness-override scenario: some data this child was owed is now gone. The drain
+// must still terminate (never hang on data that can no longer arrive) but
+// must record outcome "gapped", never "delivered" — the design's own §3.2
+// definition of "delivered" is "fetched-and-acked on the downlink cursor",
+// which a pruned record never was.
+func TestDrainCompletesGappedNotDeliveredWhenRetentionPrunesUndeliveredCommand(t *testing.T) {
+	dir := t.TempDir()
+	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
+	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
+	ps := mustStore(t, filepath.Join(dir, "pdata"))
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
+	clk := clock.New(true, func() time.Time { return time.UnixMilli(1_000_000) })
+	peng := engine.New(ps, pcfg, preg, nil, nil, clk)
+	pm := metrics.New(ps, config.Retention{}, clk)
+	preg.SetMetrics(pm)
+	srv, _ := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
+	t.Cleanup(srv.Stop)
+
+	// A live command (expires_at far in the future) for the child's mount,
+	// queued but never fetched — the child's downlink cursor is still at its
+	// never-acked default (1).
+	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
+
+	if _, err := preg.Drain("n-child"); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	// Simulate retention (staleness-override or, just as commonly, ordinary
+	// age/size pruning on a stream this never-polled cursor never
+	// protected) physically removing the record before the child ever
+	// fetched it: prune the commands stream past offset 1, directly through
+	// the store, exactly as the pruner itself would commit it.
+	if n, err := ps.Prune("commands", 2, nil, nil); err != nil || n != 1 {
+		t.Fatalf("setup prune: removed=%d err=%v, want 1 record removed", n, err)
+	}
+
+	srv.evaluateAllDrains() // simulates one tick, per the pruner test precedent
+
+	if _, ok := preg.Get("n-child"); ok {
+		t.Fatal("the drain must still terminate — never hang on data a gap made permanently unreachable")
+	}
+	if v := metricstest.Value(t, pm, `colca_drains_completed_total{outcome="gapped"}`); v != 1 {
+		t.Fatalf(`colca_drains_completed_total{outcome="gapped"} = %v, want 1`, v)
+	}
+	if v := metricstest.Value(t, pm, `colca_drains_completed_total{outcome="delivered"}`); v != 0 {
+		t.Fatalf(`colca_drains_completed_total{outcome="delivered"} = %v, want 0 — a pruned, never-fetched command must NEVER be reported as delivered`, v)
+	}
+	if v := metricstest.Value(t, pm, `colca_drains_completed_total{outcome="expired"}`); v != 0 {
+		t.Fatalf(`colca_drains_completed_total{outcome="expired"} = %v, want 0 (this was gapped, not naturally expired)`, v)
+	}
+}

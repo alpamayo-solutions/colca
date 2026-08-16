@@ -574,7 +574,7 @@ func TestRevocationKicksAndBlocksReconnect(t *testing.T) {
 	}
 
 	const kickLine = `colca_session_kicks_total`
-	if _, err := w.reg.Revoke("m1"); err != nil {
+	if _, _, err := w.reg.Revoke("m1"); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 

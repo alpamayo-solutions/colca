@@ -386,9 +386,10 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_gap_received_total":                     3,
 		// Move-drain (design §3.2/§3.4): colca_drains_active is unlabeled
 		// (always one child, like the retention state-refresh counters) and
-		// colca_drains_completed_total pre-creates all three outcomes.
+		// colca_drains_completed_total pre-creates all four outcomes
+		// (delivered, expired, forced, gapped [delta]).
 		"colca_drains_active":          1,
-		"colca_drains_completed_total": 3,
+		"colca_drains_completed_total": 4,
 		// colca_cursor_position/lag/last_advance_age, colca_child_hwm,
 		// colca_repl_gap_applied_total and colca_drain_pending_commands are
 		// dynamic (no series until a cursor, child or draining child exists)

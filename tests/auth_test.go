@@ -123,7 +123,7 @@ func TestRevocationKicksAcrossTheTree(t *testing.T) {
 		t.Fatal("precondition: m1 not connected")
 	}
 
-	if _, err := tp.edge1.Registry.Revoke("m1"); err != nil {
+	if _, _, err := tp.edge1.Registry.Revoke("m1"); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)

@@ -366,16 +366,28 @@ func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
 	if _, err := e.IngestAdmin("colca/v1/_CmdParam/m1/m1/set-speed", payload); err == nil || !strings.Contains(err.Error(), "draining") {
 		t.Fatalf("admin cmd under a draining mount must be rejected mentioning 'draining', got %v", err)
 	}
+	// Nor is the parent->child relay door: in a
+	// multi-hop tree, a command authored ABOVE this node's own parent —
+	// where this node's own draining child is invisible — relays down and
+	// arrives here exactly like any other downlinked command. Without this
+	// check it would land straight in the draining mount, the "chasing a
+	// moving tail" failure the admission gate exists to prevent.
+	if _, err := e.IngestDownlink("colca/v1/_CmdParam/m1/m1/set-speed", payload, 4711); err == nil || !strings.Contains(err.Error(), "draining") {
+		t.Fatalf("downlinked cmd under a draining mount must be rejected mentioning 'draining', got %v", err)
+	}
 	if e.Store().NextOffset("commands") != 1 {
 		t.Fatal("rejected commands must not be persisted")
 	}
-	if v := metricstest.Value(t, m, rejectedLine); v != 2 {
-		t.Fatalf("%s = %v after 2 rejected attempts, want 2", rejectedLine, v)
+	if v := metricstest.Value(t, m, rejectedLine); v != 3 {
+		t.Fatalf("%s = %v after 3 rejected attempts (client+admin+downlink), want 3", rejectedLine, v)
 	}
 
-	// A command outside the draining mount is unaffected.
+	// A command outside the draining mount is unaffected, on all three doors.
 	if _, err := e.IngestAdmin("colca/v1/_CmdParam/hmi/hmi/ping", payload); err != nil {
-		t.Fatalf("cmd outside the draining mount must still be admitted: %v", err)
+		t.Fatalf("cmd outside the draining mount must still be admitted (admin): %v", err)
+	}
+	if _, err := e.IngestDownlink("colca/v1/_CmdParam/hmi/hmi/ping", payload, 4712); err != nil {
+		t.Fatalf("cmd outside the draining mount must still be admitted (downlink): %v", err)
 	}
 }
 
