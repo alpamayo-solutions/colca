@@ -381,3 +381,81 @@ func TestDrainCompletesGappedNotDeliveredWhenRetentionPrunesUndeliveredCommand(t
 		t.Fatalf(`colca_drains_completed_total{outcome="expired"} = %v, want 0 (this was gapped, not naturally expired)`, v)
 	}
 }
+
+// A gap and surviving pending
+// work are orthogonal facts, not alternatives. store.Gap only proves the
+// PREFIX [cursor, LWM) is lost — it says nothing about [LWM, next), which
+// can still hold a live, undelivered, unexpired command. The round-1 shape
+// (return gapped=true and skip the scan entirely) would auto-revoke here
+// while that surviving command sits unread — command abandonment, strictly
+// worse than the mislabeling round-1 targeted. The drain must keep waiting
+// on the surviving range exactly as if there were no gap at all, and only
+// once THAT clears does the earlier gap decide the outcome label (gapped,
+// not expired, even though the surviving command's own fate was expiry).
+func TestDrainWaitsOnSurvivingRangeDespiteGapThenCompletesGapped(t *testing.T) {
+	dir := t.TempDir()
+	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
+	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
+	ps := mustStore(t, filepath.Join(dir, "pdata"))
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
+
+	clkNow := int64(1_000_000)
+	clk := clock.New(true, func() time.Time { return time.UnixMilli(clkNow) })
+	peng := engine.New(ps, pcfg, preg, nil, nil, clk)
+	pm := metrics.New(ps, config.Retention{}, clk)
+	preg.SetMetrics(pm)
+	srv, _ := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
+	t.Cleanup(srv.Stop)
+
+	// Offset 1: will be pruned (the lost prefix, same setup as the sibling
+	// test above). Offset 2: a SEPARATE live command that SURVIVES the
+	// prune — this is the record round-1's short-circuit would have
+	// silently abandoned.
+	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/lost", `{"correlation_id":"c1","expires_at":99999999999}`)
+	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/survives", `{"correlation_id":"c2","expires_at":1500000}`)
+
+	if _, err := preg.Drain("n-child"); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	// Prune only offset 1 — offset 2 survives, unread, in [LWM, next).
+	if n, err := ps.Prune("commands", 2, nil, nil); err != nil || n != 1 {
+		t.Fatalf("setup prune: removed=%d err=%v, want 1 record removed", n, err)
+	}
+
+	// A gap exists (cursor 1 < LWM 2) AND a live, undelivered command sits
+	// at offset 2 (expires_at 1500000, clkNow 1000000 — still live). The
+	// drain must NOT complete: the gap does not excuse waiting on real,
+	// currently-live work.
+	srv.evaluateAllDrains()
+	if _, ok := preg.Get("n-child"); !ok {
+		t.Fatal("the drain must NOT complete while a live command survives past the gap in [LWM, next) — this is the round-2 regression")
+	}
+	if v := metricstest.Value(t, pm, `colca_drain_pending_commands{child="n-child"}`); v != 1 {
+		t.Fatalf(`colca_drain_pending_commands{child="n-child"} = %v, want 1 (the surviving live command)`, v)
+	}
+	if v := metricstest.Value(t, pm, `colca_drains_completed_total{outcome="gapped"}`); v != 0 {
+		t.Fatalf(`colca_drains_completed_total{outcome="gapped"} = %v, want 0 — must not complete yet`, v)
+	}
+
+	// Advance time past the surviving command's expiry and re-evaluate: now
+	// pending clears, and the EARLIER gap decides the outcome label — even
+	// though the surviving record's own fate was expiry, the drain has lost
+	// data it can never account for, so the honest label is "gapped", not
+	// "expired".
+	clkNow = 2_000_000
+	srv.evaluateAllDrains()
+	if _, ok := preg.Get("n-child"); ok {
+		t.Fatal("the drain must complete once the surviving range clears")
+	}
+	if v := metricstest.Value(t, pm, `colca_drains_completed_total{outcome="gapped"}`); v != 1 {
+		t.Fatalf(`colca_drains_completed_total{outcome="gapped"} = %v, want 1`, v)
+	}
+	if v := metricstest.Value(t, pm, `colca_drains_completed_total{outcome="expired"}`); v != 0 {
+		t.Fatalf(`colca_drains_completed_total{outcome="expired"} = %v, want 0 — gap outranks a surviving record's own expiry in the outcome label`, v)
+	}
+	if v := metricstest.Value(t, pm, `colca_drains_completed_total{outcome="delivered"}`); v != 0 {
+		t.Fatalf(`colca_drains_completed_total{outcome="delivered"} = %v, want 0`, v)
+	}
+}
