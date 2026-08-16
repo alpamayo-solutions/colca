@@ -308,10 +308,16 @@ func run() int {
 
 	opts.SetOnConnectHandler(func(c pahomqtt.Client) {
 		log.Info("CONNECTED", "broker", broker, "client_id", ulid)
-		// Time-sync design §2.3 rule 2: a fresh hold window starts on every
-		// (re)connect, BEFORE any subscription — a command routed through
-		// SetDefaultPublishHandler ahead of the SUBSCRIBE completing (see
-		// below) must still see the hold already open.
+		// Time-sync design §2.3 rule 2: refresh the hold here too, though
+		// the window that actually matters against redelivery races is
+		// already open by now — SetReconnectingHandler (or, for the very
+		// first connect, the call right before client.Connect() below)
+		// opens it BEFORE this connection attempt began, closing the race
+		// this call alone could not (a command routed through
+		// SetDefaultPublishHandler could otherwise reach handleCommand
+		// before this callback even runs — SetOrderMatters(false) gives no
+		// ordering guarantee between them). This call is a harmless,
+		// redundant refresh for the ordinary case, not the sole guarantee.
 		ts.Connect()
 
 		// Both SUBSCRIBE packets are issued CONCURRENTLY — c.Subscribe
@@ -370,6 +376,25 @@ func run() int {
 	})
 	opts.SetReconnectingHandler(func(_ pahomqtt.Client, _ *pahomqtt.ClientOptions) {
 		log.Info("reconnecting", "broker", broker)
+		// Time-sync design §2.3 rule 2: open the hold HERE, before the
+		// reconnect attempt even begins — not only in SetOnConnectHandler
+		// below. SetOrderMatters(false) (this client's own config) means
+		// inbound messages are dispatched on their own goroutines with no
+		// ordering guarantee relative to the onConnect callback, and a
+		// persistent (CleanSession=false) session can have queued commands
+		// REDELIVERED by the broker as soon as the connection re-
+		// establishes — potentially before onConnect's own ts.Connect()
+		// call has run. If that redelivered command's handler reaches
+		// ts.Await() first, it sees the zero-value syncState{} (holding
+		// false, offset 0) left over from before this reconnect even
+		// started, and decides on the raw, unsynced clock immediately —
+		// found in CI: a reconnect-hold decision
+		// landed in well under a second, not anywhere near hold_ms, which
+		// only a lost race with an ALREADY-OPEN hold (not a slow beacon)
+		// explains. Calling Connect() here closes the window: the hold is
+		// open before the TCP connection that could deliver anything even
+		// exists.
+		ts.Connect()
 	})
 	// With a persistent session the broker may push queued commands before the
 	// SUBSCRIBE of a fresh connection has been registered as a route; such a
@@ -390,6 +415,11 @@ func run() int {
 
 	client := pahomqtt.NewClient(opts)
 	log.Info("connecting", "broker", broker, "client_id", ulid, "interval", interval)
+	// Same reasoning as SetReconnectingHandler above: open the hold before
+	// this FIRST connection attempt begins too, not only on later
+	// reconnects — SetReconnectingHandler fires on retries after a failed
+	// or lost connection, not necessarily on this very first attempt.
+	ts.Connect()
 	// Connect() is called exactly once: SetConnectRetry(true) makes paho retry
 	// internally, so calling it again per iteration would stack connection
 	// attempts. The token completes when the connection is up (or is aborted).
