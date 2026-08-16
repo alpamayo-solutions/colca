@@ -30,6 +30,19 @@
 # other link — including the machine feeding the partitioned edge — keeps
 # flowing.
 #
+# Host ports — every published port is templated as ${COLCA_PORT_*:-<base>}:
+# unset (plain `docker compose up`, demo.sh, smoke.sh) gives today's fixed
+# base ports; the system-suite harness (tests/system/system_world.py, via
+# `dev.py test system --port-offset N`) computes the full variable set from
+# ONE offset (base+N each) and derives the compose project name from the same
+# offset (`deploy` at 0, `deploy-oN` otherwise), so concurrent worlds are
+# disjoint in ports AND containers/networks/volumes by construction. Compose
+# has no arithmetic in ${...} interpolation, so per-port variables computed
+# by the harness are the mechanism; the defaults keep this file standalone.
+# Per-purpose offset conventions are documented in
+# docs/source/development/testing.rst (0 dev/demo/smoke, 100 chaos in CI,
+# 200 system in CI).
+#
 # Load-bearing detail — host observability under partition: Docker binds a
 # container's published-port forwarding to ONE endpoint (measured on Docker
 # Desktop 29: the network attached at container create — compose picks it by
@@ -53,7 +66,9 @@ services:
       - "global-data:/data"
     # 11880 is the hub bus: every record replicated up from the whole tree is
     # mirrored there under its stored topic (subscribe with an enrolled read:# identity).
-    ports: ["127.0.0.1:18080:8080", "127.0.0.1:11880:1883"]
+    ports:
+      - "127.0.0.1:${COLCA_PORT_GLOBAL_API:-18080}:8080"
+      - "127.0.0.1:${COLCA_PORT_GLOBAL_MQTT:-11880}:1883"
     networks: [link3-hub]
 
   site1:
@@ -64,7 +79,9 @@ services:
       - "./config/site1.yaml:/etc/colca/site1.yaml:ro"
       - "./keys:/keys:ro"
       - "site1-data:/data"
-    ports: ["127.0.0.1:18081:8080", "127.0.0.1:11881:1883"]
+    ports:
+      - "127.0.0.1:${COLCA_PORT_SITE1_API:-18081}:8080"
+      - "127.0.0.1:${COLCA_PORT_SITE1_MQTT:-11881}:1883"
     depends_on: [global]
     networks:
       host-site1:    # observation net = primary: host ports survive partitions
@@ -80,7 +97,9 @@ services:
       - "./config/edge1.yaml:/etc/colca/edge1.yaml:ro"
       - "./keys:/keys:ro"
       - "edge1-data:/data"
-    ports: ["127.0.0.1:18082:8080", "127.0.0.1:11883:1883"]
+    ports:
+      - "127.0.0.1:${COLCA_PORT_EDGE1_API:-18082}:8080"
+      - "127.0.0.1:${COLCA_PORT_EDGE1_MQTT:-11883}:1883"
     depends_on: [site1]
     networks:
       host-edge1:    # observation net = primary: host ports survive partitions
@@ -96,7 +115,9 @@ services:
       - "./config/edge2.yaml:/etc/colca/edge2.yaml:ro"
       - "./keys:/keys:ro"
       - "edge2-data:/data"
-    ports: ["127.0.0.1:18083:8080", "127.0.0.1:11884:1883"]
+    ports:
+      - "127.0.0.1:${COLCA_PORT_EDGE2_API:-18083}:8080"
+      - "127.0.0.1:${COLCA_PORT_EDGE2_MQTT:-11884}:1883"
     depends_on: [site1]
     networks:
       host-edge2:    # observation net = primary: host ports survive partitions
