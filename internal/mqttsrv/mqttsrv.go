@@ -160,6 +160,18 @@ func (h *colcaHook) OnSessionEstablished(cl *mqtt.Client, pk packets.Packet) {
 // /replicate responses. A no-op before the engine is bound (startup race
 // with a fast-connecting client) or if marshaling somehow fails (can't
 // happen for this fixed shape — defensive only).
+//
+// Published at QoS 0, deliberately: time is
+// inherently ephemeral — only the latest sample is ever meaningful — and
+// mochi only ever queues a message into a client's persistent-session
+// Inflight map for QoS>0 (mqtt/server/v2@v2.7.9 server.go's
+// publishToClient: the Inflight.Set/resend path is entirely inside
+// `if out.FixedHeader.Qos > 0`). At QoS 0 a beacon published while a machine
+// is offline is simply dropped for that machine, never queued and replayed
+// on reconnect. That removes the whole class of stale-beacon redelivery: a
+// machine that was offline for ≥1 beacon_interval no longer receives a
+// backdated now_ms racing ahead of the fresh, connect-triggered one — it
+// only ever sees beacons published while it is actually connected.
 func (h *colcaHook) publishTimeSync() {
 	eng := h.engine()
 	if eng == nil {
@@ -173,7 +185,7 @@ func (h *colcaHook) publishTimeSync() {
 		return
 	}
 	topic := uns.TimeSyncTopic(h.cfg.ULID)
-	if err := h.broker.Publish(topic, payload, false, 1); err != nil {
+	if err := h.broker.Publish(topic, payload, false, 0); err != nil {
 		h.log.Warn("time-sync beacon publish failed", "topic", topic, "err", err)
 	}
 }

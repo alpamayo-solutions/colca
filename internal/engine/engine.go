@@ -292,13 +292,13 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 // the fourth way a record enters a node's store and it must converge here like
 // the other three — the replication server never talks to the store directly.
 func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord) (applied int, hwm uint64, err error) {
-	recs = e.rejectTimeSync(child, recs)
+	recs, droppedTimeSync := e.rejectTimeSync(child, recs)
 	prev := e.store.HWMGet(child, stream)
 	got, hwm, err := e.store.ApplyReplicated(child, stream, recs)
 	if err != nil {
 		return 0, hwm, err
 	}
-	e.logOffsetJumps(child, stream, prev, got)
+	e.logOffsetJumps(child, stream, prev, got, droppedTimeSync)
 	// Replication is a fourth entry path into this node's store, so it counts
 	// against colca_ingest_records_total exactly like the other three — the
 	// family measures records entering the store, not records entering
@@ -331,18 +331,31 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 // buggy child offset. It is rejected exactly like a client/admin publish is,
 // with the same reject reason, and the rest of the batch is still applied
 // unchanged.
-func (e *Engine) rejectTimeSync(child string, recs []store.ReplRecord) []store.ReplRecord {
-	filtered := recs[:0:0]
+//
+// It also returns the set of dropped ChildOffsets (nil if none were
+// dropped), so logOffsetJumps can tell a gap this drop itself created apart
+// from a genuine one: without that, a batch shaped
+// [real @1, forged _TimeSync @2, real @3] applies {1,3}, and the resulting
+// ChildOffset jump from 1 to 3 would otherwise be indistinguishable from a
+// real child-side data loss — logged at Error and counted against
+// colca_gap_applied, a metric whose whole point is "real, investigatable
+// loss," for an event that lost nothing.
+func (e *Engine) rejectTimeSync(child string, recs []store.ReplRecord) (filtered []store.ReplRecord, dropped map[uint64]bool) {
+	filtered = recs[:0:0]
 	for _, r := range recs {
 		if p, err := uns.Parse(r.Topic); err == nil && uns.ClassOf(p.Contract) == uns.ClassTimeSync {
 			e.metrics.RejectPublish(metrics.ReasonTimeSync)
 			e.log.Warn("rejected _TimeSync record from replication: ephemeral, node-local-publish-only (time-sync design §2.2)",
 				"child", child, "topic", r.Topic)
+			if dropped == nil {
+				dropped = make(map[uint64]bool)
+			}
+			dropped[r.ChildOffset] = true
 			continue
 		}
 		filtered = append(filtered, r)
 	}
-	return filtered
+	return filtered, dropped
 }
 
 // logOffsetJumps is the second net of spec §6.4: a child's stream offsets are
@@ -355,19 +368,41 @@ func (e *Engine) rejectTimeSync(child string, recs []store.ReplRecord) []store.R
 // The commands stream is exempt: its uplink is filtered (only _Ack and
 // _StreamGap travel up), so child-offset holes there are the filter working,
 // not data loss — the premise "gapless offsets" does not hold on that wire.
-func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []store.ReplRecord) {
+//
+// droppedTimeSync (rejectTimeSync's return) exempts a jump this SAME call's
+// own _TimeSync filtering created: a jump is only
+// logged/counted when at least one offset in the gap is NOT accounted for by
+// a dropped _TimeSync record — a gap partially explained by a drop but also
+// missing a genuinely unaccounted offset still logs, so this only removes
+// the false positive, never masks a real one.
+func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []store.ReplRecord, droppedTimeSync map[uint64]bool) {
 	if stream == "commands" {
 		return
 	}
 	last := prev
 	for _, r := range applied {
-		if r.ChildOffset > last+1 {
+		if r.ChildOffset > last+1 && !jumpFullyExplainedByDroppedTimeSync(last, r.ChildOffset, droppedTimeSync) {
 			e.log.Error("replication offset jump: this node never received the child offsets between have and got — likely pruned at the child before replication (spec §6.4 second net)",
 				"child", child, "stream", stream, "have", last, "got", r.ChildOffset)
 			e.metrics.GapApplied(child, stream)
 		}
 		last = r.ChildOffset
 	}
+}
+
+// jumpFullyExplainedByDroppedTimeSync reports whether EVERY offset strictly
+// between last and childOffset was dropped by this batch's own _TimeSync
+// filtering — i.e. the jump has no unaccounted offset and is not a real gap.
+func jumpFullyExplainedByDroppedTimeSync(last, childOffset uint64, dropped map[uint64]bool) bool {
+	if len(dropped) == 0 {
+		return false
+	}
+	for o := last + 1; o < childOffset; o++ {
+		if !dropped[o] {
+			return false
+		}
+	}
+	return true
 }
 
 // retainFor decides how a record appears on the local MQTT bus. Data and

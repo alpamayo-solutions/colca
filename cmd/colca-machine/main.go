@@ -332,7 +332,13 @@ func run() int {
 		// SetDefaultPublishHandler fallback below covers the case where the
 		// beacon (or a redelivered command) arrives before this SUBSCRIBE is
 		// registered as a route.
-		btk := c.Subscribe(beaconFilter, 1, onBeacon)
+		//
+		// QoS 0: the node now publishes the beacon
+		// at QoS 0 (mqttsrv.go), so the effective delivered QoS is
+		// min(0, sub.Qos) = 0 regardless of what's requested here — matching
+		// it explicitly documents that this subscription deliberately wants
+		// no at-least-once/redelivery semantics, not accidentally-QoS-0.
+		btk := c.Subscribe(beaconFilter, 0, onBeacon)
 		if !btk.WaitTimeout(subscribeTimeout) {
 			log.Error("subscribe not confirmed", "filter", beaconFilter, "waited", subscribeTimeout)
 			return
@@ -341,7 +347,7 @@ func run() int {
 			log.Error("subscribe failed", "filter", beaconFilter, "err", err)
 			return
 		}
-		log.Info("subscribed", "filter", beaconFilter, "qos", 1)
+		log.Info("subscribed", "filter", beaconFilter, "qos", 0)
 	})
 	opts.SetConnectionLostHandler(func(_ pahomqtt.Client, err error) {
 		log.Warn("CONNECTION LOST — reconnecting", "broker", broker, "err", err)
@@ -528,7 +534,22 @@ func isTimeSyncTopic(topic string) bool {
 // and records the offset sample. A malformed payload is logged and dropped —
 // this process must never crash on a message a node can send it, same rule
 // as handleCommand.
+//
+// A message flagged Duplicate() is a broker-side resend, never a fresh
+// sample, and is dropped outright: it must never be
+// allowed to satisfy the post-connect hold or update the offset, since a
+// resend necessarily carries an OLD now_ms racing a stale wall-clock
+// reading — exactly the "clock behind" corruption design §1.1 exists to
+// prevent. The beacon now publishes at QoS 0 (mqttsrv.go), which already
+// removes the one delivery path that could produce a resend in this
+// codebase's own broker (mochi only queues/resends QoS>0); this check is
+// defense in depth against any other source of a Duplicate-flagged message
+// and costs nothing, since _TimeSync is "only the latest matters" by design.
 func handleBeacon(log *slog.Logger, ts *timeSync, msg pahomqtt.Message) {
+	if msg.Duplicate() {
+		log.Debug("_TimeSync beacon ignored — broker-flagged duplicate/resend, never a fresh sample", "topic", msg.Topic())
+		return
+	}
 	var p struct {
 		NowMS int64 `json:"now_ms"`
 	}
