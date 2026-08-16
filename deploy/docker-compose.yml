@@ -137,6 +137,13 @@ services:
       MACHINE_KEY: /keys/m1-machine.key
       BROKER_ADDR: "edge1:1883"
       PUBLISH_INTERVAL_MS: "1000"
+      # colca-machine simulator-only clock skew (time-sync design §4,
+      # cmd/colca-machine/main.go's SIM_CLOCK_OFFSET_MS) -- a per-machine
+      # var so the chaos suite (tests/system/system_world.py's
+      # skew_machine()) can `docker compose up -d --force-recreate m1` with
+      # SIM_CLOCK_OFFSET_MS_M1 set in its env to skew just this machine's
+      # notion of wall time; unset (or 0) matches today's behaviour exactly.
+      SIM_CLOCK_OFFSET_MS: "${SIM_CLOCK_OFFSET_MS_M1:-0}"
     volumes:
       - "./keys:/keys:ro"
     depends_on: [edge1]
@@ -151,6 +158,8 @@ services:
       MACHINE_KEY: /keys/m2-machine.key
       BROKER_ADDR: "edge2:1883"
       PUBLISH_INTERVAL_MS: "1000"
+      # See m1's SIM_CLOCK_OFFSET_MS comment above.
+      SIM_CLOCK_OFFSET_MS: "${SIM_CLOCK_OFFSET_MS_M2:-0}"
     volumes:
       - "./keys:/keys:ro"
     depends_on: [edge2]
