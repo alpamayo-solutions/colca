@@ -51,6 +51,41 @@ func TestParseAndClass(t *testing.T) {
 	}
 }
 
+// Time-sync design §2.2: _TimeSync is the only contract whose wire topic has
+// no hierarchy path at all — Parse's one length exception, gated on the
+// contract so it can never accidentally widen to any other class.
+func TestTimeSyncTopicShape(t *testing.T) {
+	p, err := Parse("colca/v1/_TimeSync/n-edge1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Contract != "_TimeSync" || p.NodeID != "n-edge1" || p.Path != "" {
+		t.Fatalf("%+v", p)
+	}
+	if p.Prefix != "colca" || p.Version != "v1" {
+		t.Fatalf("%+v", p)
+	}
+	if ClassOf("_TimeSync") != ClassTimeSync || StreamFor(ClassOf("_TimeSync")) != "" {
+		t.Fatalf("_TimeSync class/stream: %v/%q", ClassOf("_TimeSync"), StreamFor(ClassOf("_TimeSync")))
+	}
+	if got := TimeSyncTopic("n-edge1"); got != "colca/v1/_TimeSync/n-edge1" {
+		t.Fatalf("TimeSyncTopic = %q", got)
+	}
+	// A padded (5+-segment) _TimeSync topic still parses normally through the
+	// ordinary >=5 path — the relaxation only ever ADDS the 4-segment shape.
+	p2, err := Parse("colca/v1/_TimeSync/n-edge1/extra")
+	if err != nil || p2.Path != "extra" {
+		t.Fatalf("padded _TimeSync topic: %+v, err=%v", p2, err)
+	}
+
+	// The relaxation is contract-gated, not length-only: any OTHER contract
+	// at 4 segments must still be a grammar error (same case already pinned
+	// generically in TestParseAndClass's "missing path" check for _Metric).
+	if _, err := Parse("colca/v1/_Metric/n-edge1"); err == nil {
+		t.Fatal("4-segment _Metric must still error — the relaxation is _TimeSync-only")
+	}
+}
+
 // Design §6.4: "topic colca/v1/_StreamGap/{node-ulid}/{stream} — level 4 is the
 // pruning node, ordinary uns grammar" — no Parse special case needed, and the
 // stream the marker describes is exactly Parsed.Path.
@@ -125,6 +160,7 @@ func TestValidate(t *testing.T) {
 		{"_EdgeNode", `{"ulid":"n-edge1","mount":"edge1","typ":"node"}`},
 		{"_StreamGap", `{"stream":"metrics","from_offset":57,"to_offset":49999,"first_ts":1755100000000,"last_ts":1755700000000,"overridden_cursors":["uplink"]}`},
 		{"_StreamGap", `{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":["downlink:child-01","uplink"]}`},
+		{"_TimeSync", `{"now_ms": 1755000000000}`},
 	}
 	for _, c := range ok {
 		if err := Validate(c[0], []byte(c[1])); err != nil {
@@ -149,6 +185,8 @@ func TestValidate(t *testing.T) {
 		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":[]}`},   // empty overridden_cursors
 		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":[""]}`}, // empty cursor name
 		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":[1]}`},  // non-string cursor name
+		{"_TimeSync", `{}`},                // missing now_ms
+		{"_TimeSync", `{"now_ms":"nope"}`}, // now_ms not a number
 	}
 	for _, c := range bad {
 		if err := Validate(c[0], []byte(c[1])); err == nil {
@@ -170,7 +208,7 @@ func TestValidateEmptyPayloadTombstoneRule(t *testing.T) {
 			t.Errorf("zero-length payload on KV-projecting %s must validate (tombstone): %v", contract, err)
 		}
 	}
-	for _, contract := range []string{"_CmdParam", "_Ack", "_StreamGap", "_Unknown"} {
+	for _, contract := range []string{"_CmdParam", "_Ack", "_StreamGap", "_TimeSync", "_Unknown"} {
 		if err := Validate(contract, nil); err == nil {
 			t.Errorf("empty payload on %s must be rejected — deletion is not meaningful for events", contract)
 		}

@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -136,6 +138,68 @@ func TestEdgeNodeRejectedAtOrdinaryDoors(t *testing.T) {
 	}
 	if kv := e.Store().KVScan("edge1/z/m9"); len(kv) != 1 {
 		t.Fatalf("replicated _EdgeNode must project into KV: %v", kv)
+	}
+}
+
+// Time-sync design §2.2/§4: _TimeSync is ephemeral and node-local-publish-only
+// — unlike _EdgeNode, it is rejected at EVERY ingest door including
+// replication, since a well-behaved child's own store can never legitimately
+// contain one (its own engine already rejects it before persistence). Both
+// the canonical (no-path) and a padded topic shape must be rejected with the
+// SAME dedicated reason, not the generic "grammar" reason Parse's 4-segment
+// relaxation would otherwise produce.
+func TestTimeSyncRejectedAtEveryIngestDoor(t *testing.T) {
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	cfg := &config.Config{ULID: "n-edge1"}
+	m := metrics.New(s, config.Retention{}, nil)
+	e := New(s, cfg, testIDs(), nil, m, nil)
+
+	const rejectedLine = `colca_rejected_publishes_total{reason="time_sync"}`
+	if v := metricstest.Value(t, m, rejectedLine); v != 0 {
+		t.Fatalf("%s = %v before any attempt, want 0", rejectedLine, v)
+	}
+
+	for _, topic := range []string{"colca/v1/_TimeSync/n-edge1", "colca/v1/_TimeSync/n-edge1/extra"} {
+		if _, err := e.IngestClient("m1", topic, []byte(`{"now_ms":1}`)); err == nil || !strings.Contains(err.Error(), "_TimeSync") {
+			t.Fatalf("client publish of %s must be rejected with a _TimeSync-specific error, got %v", topic, err)
+		}
+		if _, err := e.IngestAdmin(topic, []byte(`{"now_ms":1}`)); err == nil || !strings.Contains(err.Error(), "_TimeSync") {
+			t.Fatalf("admin publish of %s must be rejected with a _TimeSync-specific error, got %v", topic, err)
+		}
+	}
+	for _, stream := range []string{"metrics", "entities", "commands"} {
+		if off := e.Store().NextOffset(stream); off != 1 {
+			t.Fatalf("stream %s next offset = %d, want 1 (rejected _TimeSync must never persist)", stream, off)
+		}
+	}
+	if v := metricstest.Value(t, m, rejectedLine); v != 4 {
+		t.Fatalf("%s = %v after 4 rejected attempts (2 topic shapes x client+admin), want 4", rejectedLine, v)
+	}
+
+	// Replication: a forged child offset carrying a _TimeSync record is
+	// dropped before it reaches the store; sibling records in the same batch
+	// still apply, and the surviving higher offset still advances the hwm.
+	recs := []store.ReplRecord{
+		{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/child1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "child1/m1/a", KVNode: "m1"},
+		{ChildOffset: 2, Topic: "colca/v1/_TimeSync/n-child", Payload: []byte(`{"now_ms":1}`), TS: 1},
+		{ChildOffset: 3, Topic: "colca/v1/_Metric/m1/child1/m1/b", Payload: []byte(`{"v":2}`), TS: 2, KVPath: "child1/m1/b", KVNode: "m1"},
+	}
+	applied, hwm, err := e.IngestReplicated("n-child", "metrics", recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != 2 {
+		t.Fatalf("applied = %d, want 2 (the _TimeSync record must be dropped, never persisted)", applied)
+	}
+	if hwm != 3 {
+		t.Fatalf("hwm = %d, want 3", hwm)
+	}
+	if v := metricstest.Value(t, m, rejectedLine); v != 5 {
+		t.Fatalf("%s = %v after the replicated _TimeSync attempt, want 5", rejectedLine, v)
 	}
 }
 

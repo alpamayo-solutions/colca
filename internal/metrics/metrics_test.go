@@ -360,7 +360,7 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 	want := map[string]int{
 		"colca_stream_next_offset":                      3, // one per stream
 		"colca_ingest_records_total":                    3,
-		"colca_rejected_publishes_total":                6,  // one per reason
+		"colca_rejected_publishes_total":                7,  // one per reason
 		"colca_auth_rejections_total":                   12, // door × reason
 		"colca_acl_denials_total":                       2,  // one per action
 		"colca_session_kicks_total":                     1,

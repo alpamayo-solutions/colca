@@ -1,8 +1,10 @@
 package mqttsrv
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -350,6 +352,128 @@ func TestDeniedSubscribeLeaksNoRetained(t *testing.T) {
 	}
 }
 
+// Time-sync design §2.2: the node beacons on every machine session
+// establishment — a client already subscribed to the beacon filter sees a
+// fresh, unretained {"now_ms": ...} message the instant ANOTHER client
+// connects.
+func TestTimeSyncBeaconOnSessionEstablish(t *testing.T) {
+	w := newWorld(t)
+	sub := connect(t, w.srv.Addr(), "obs-timesync", w.obs)
+	msgs := make(chan paho.Message, 8)
+	tok := sub.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
+	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		t.Fatalf("subscribe: %v", tok.Error())
+	}
+
+	// obs's own connect already fired one beacon before this subscribe even
+	// existed (session establishment happens server-side before the client
+	// can issue SUBSCRIBE) — this connect is the one under test.
+	connect(t, w.srv.Addr(), "m1-timesync", w.m1)
+
+	select {
+	case m := <-msgs:
+		if want := "colca/v1/_TimeSync/n1"; m.Topic() != want {
+			t.Fatalf("beacon topic = %q, want %q", m.Topic(), want)
+		}
+		if m.Retained() {
+			t.Fatal("beacon must never be retained (design §2.2: a retained time message is by definition stale)")
+		}
+		var p struct {
+			NowMS int64 `json:"now_ms"`
+		}
+		if err := json.Unmarshal(m.Payload(), &p); err != nil {
+			t.Fatalf("beacon payload not JSON: %v (%s)", err, m.Payload())
+		}
+		if p.NowMS <= 0 {
+			t.Fatalf("beacon now_ms = %d, want a positive unix-ms timestamp", p.NowMS)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no beacon received for m1's session establishment")
+	}
+}
+
+// Time-sync design §2.2: the periodic beacon_interval trigger is independent
+// of connection activity — RunBeacon keeps publishing on a live subscriber
+// with no further connects.
+func TestTimeSyncBeaconPeriodicCadence(t *testing.T) {
+	w := newWorld(t)
+	sub := connect(t, w.srv.Addr(), "obs-cadence", w.obs)
+	msgs := make(chan paho.Message, 8)
+	tok := sub.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
+	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		t.Fatalf("subscribe: %v", tok.Error())
+	}
+	// obs's own connect-triggered beacon (session establishment happens
+	// server-side before the client can issue SUBSCRIBE) is already gone by
+	// the time the subscribe above lands — nothing to drain. This test pins
+	// the PERIODIC trigger only.
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go w.srv.RunBeacon(30*time.Millisecond, stop)
+
+	got := 0
+	deadline := time.After(3 * time.Second)
+	for got < 3 {
+		select {
+		case <-msgs:
+			got++
+		case <-deadline:
+			t.Fatalf("only received %d periodic beacon(s) in 3s at a 30ms interval, want at least 3", got)
+		}
+	}
+}
+
+// Time-sync design §2.2/§4: _TimeSync is node-local-publish-only — a client
+// attempting to publish it is rejected and counted with the dedicated reason.
+func TestTimeSyncPublishRejectedFromClient(t *testing.T) {
+	w := newWorld(t)
+	c := connect(t, w.srv.Addr(), "m1-pub-timesync", w.m1)
+
+	const rejectedLine = `colca_rejected_publishes_total{reason="time_sync"}`
+	before := scrapeMetric(t, w.m, rejectedLine)
+
+	// A rejected packet gets no PUBACK under MQTT 3.1.1, so the token never
+	// completes — the assertion is on the metric, not on the token.
+	tok := c.Publish("colca/v1/_TimeSync/n1", 1, false, []byte(`{"now_ms":1}`))
+	tok.WaitTimeout(500 * time.Millisecond)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for scrapeMetric(t, w.m, rejectedLine) == before {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never incremented after a client _TimeSync publish attempt", rejectedLine)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Time-sync design §2.2/§4: every machine session may subscribe the beacon
+// filter regardless of its zone grants — m1 has no read:# grant and its own
+// zone is "m1", nothing to do with _TimeSync, yet the subscribe must still
+// succeed.
+func TestTimeSyncSubscribeAllowedRegardlessOfZone(t *testing.T) {
+	w := newWorld(t)
+	c := connect(t, w.srv.Addr(), "m1-timesync-acl", w.m1)
+
+	const filter = "colca/v1/_TimeSync/+"
+	tok := c.Subscribe(filter, 1, func(paho.Client, paho.Message) {})
+	if !tok.WaitTimeout(5 * time.Second) {
+		t.Fatal("subscribe: timed out")
+	}
+	if err := tok.Error(); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if st, ok := tok.(*paho.SubscribeToken); ok {
+		if qos, found := st.Result()[filter]; found && qos == 0x80 {
+			t.Fatal("_TimeSync subscribe rejected (0x80) despite m1 having no read:# grant")
+		}
+	}
+	const denyLine = `colca_acl_denials_total{action="sub"}`
+	if v := scrapeMetric(t, w.m, denyLine); v != 0 {
+		t.Fatalf("%s = %v, want 0 (the _TimeSync subscribe must never be denied)", denyLine, v)
+	}
+}
+
 // Revocation kicks the live session and the key cannot reconnect (auth §7).
 func TestRevocationKicksAndBlocksReconnect(t *testing.T) {
 	w := newWorld(t)
@@ -436,6 +560,13 @@ drain:
 	for {
 		select {
 		case m := <-msgs:
+			// The time-sync beacon (design §2.2) fires on every session
+			// establishment, including both connects above — it is an
+			// unrelated feature to the no-double-delivery invariant this
+			// test pins, so it is filtered out here rather than asserted on.
+			if strings.HasPrefix(m.Topic(), "colca/v1/_TimeSync/") {
+				continue
+			}
 			got = append(got, m)
 		case <-deadline:
 			break drain

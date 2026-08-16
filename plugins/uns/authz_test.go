@@ -162,6 +162,32 @@ func TestAuthorizeSub(t *testing.T) {
 	}
 }
 
+// Time-sync design §2.2/§4: every authenticated machine session may subscribe
+// the beacon filter regardless of its zone grants — a mount-less observer
+// with NO grants at all still gets it, which a plain zone/read:# check would
+// deny.
+func TestAuthorizeSubTimeSyncBypassesZoneGrants(t *testing.T) {
+	cases := []struct {
+		name   string
+		e      *Entry
+		filter string
+		want   bool
+	}{
+		{"zone-scoped machine, canonical filter", entry("werk1/linie3"), "colca/v1/_TimeSync/+", true},
+		{"mountless machine with zero grants", entry(""), "colca/v1/_TimeSync/+", true},
+		{"concrete node ulid, no wildcard", entry("werk1/linie3"), "colca/v1/_TimeSync/n-edge1", true},
+		{"bare contract, no trailing segment", entry(""), "colca/v1/_TimeSync", true},
+		{"broad colca/# wildcard is judged normally, not bypassed", entry("werk1/linie3"), "colca/#", false},
+		{"broad colca/# wildcard WITH read:# still allowed (normal rule, not the bypass)", entry("", "read:#"), "colca/#", true},
+		{"different contract at the same position is not the bypass", entry("werk1/linie3"), "colca/v1/_Metric/+", false},
+	}
+	for _, c := range cases {
+		if got := Authorize(c.e, ActSub, c.filter); got != c.want {
+			t.Errorf("%s: Authorize(Sub, %q) = %v, want %v", c.name, c.filter, got, c.want)
+		}
+	}
+}
+
 func TestAuthorizeCmd(t *testing.T) {
 	withGrant := entry("hmi", "cmd:werk1/linie3/#:param,operate")
 	cases := []struct {
