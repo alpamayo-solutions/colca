@@ -56,6 +56,7 @@ func newAPI(t *testing.T) *api {
 
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
 	m := metrics.New(s, config.Retention{}, nil)
+	reg.SetMetrics(m) // move-drain design §3.4: colca_drains_active is registry-owned
 	e := engine.New(s, cfg, reg, nil, m, nil)
 
 	tlsCfg, err := TLSConfig(nodeID, "n-test")
@@ -307,6 +308,104 @@ func TestEnrollmentRoutes(t *testing.T) {
 	resp, _ = req(t, admin, "DELETE", a.url+"/enroll/m2", "tok", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("second revoke: want 404, got %d", resp.StatusCode)
+	}
+}
+
+// Move-drain door semantics (design §3.1): 404 for an unknown ulid, 409 for
+// a non-node entry (machines are out of scope, design §3.2 [delta]), 409 for
+// a second drain on the same child, 200 + status=draining on success — and
+// the drained identity keeps working (still authenticates, still fetches).
+func TestDrainRouteDoorSemantics(t *testing.T) {
+	a := newAPI(t)
+	admin := client(nil)
+
+	// Unknown ulid → 404.
+	resp, out := req(t, admin, "POST", a.url+"/enroll/nosuch/drain", "tok", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("drain unknown ulid: want 404, got %d (%v)", resp.StatusCode, out)
+	}
+
+	// A machine (kind=machine, already enrolled as a.m1) → 409.
+	resp, out = req(t, admin, "POST", a.url+"/enroll/"+a.m1.ULID+"/drain", "tok", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("drain a machine: want 409, got %d (%v)", resp.StatusCode, out)
+	}
+
+	// Enroll a node child, then drain it.
+	child := authtest.NewMachine(t, "n-child1")
+	authtest.EnrollNode(t, a.reg, child.ULID, child.Pubkey, "child1")
+	resp, out = req(t, admin, "POST", a.url+"/enroll/"+child.ULID+"/drain", "tok", nil)
+	if resp.StatusCode != http.StatusOK || out["status"] != "draining" {
+		t.Fatalf("drain: want 200 status=draining, got %d %v", resp.StatusCode, out)
+	}
+
+	// Second drain on the same child → 409.
+	resp, out = req(t, admin, "POST", a.url+"/enroll/"+child.ULID+"/drain", "tok", nil)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("second drain: want 409, got %d (%v)", resp.StatusCode, out)
+	}
+
+	// The list reflects the draining status.
+	_, out = req(t, admin, "GET", a.url+"/enroll", "tok", nil)
+	entries := out["entries"].([]any)
+	found := false
+	for _, raw := range entries {
+		e := raw.(map[string]any)
+		if e["ulid"] == child.ULID {
+			found = true
+			if e["status"] != "draining" {
+				t.Fatalf("listed entry status = %v, want draining", e["status"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("drained child missing from GET /enroll: %v", entries)
+	}
+}
+
+// Move-drain design §3.1/§3.4: DELETE stays immediate and works during an
+// active drain — no drain precondition on the kill-switch — and records the
+// "forced" outcome (colca_drains_completed_total{outcome="forced"}),
+// decrementing colca_drains_active.
+func TestDeleteDuringDrainIsImmediateAndRecordsForced(t *testing.T) {
+	a := newAPI(t)
+	admin := client(nil)
+
+	child := authtest.NewMachine(t, "n-child1")
+	authtest.EnrollNode(t, a.reg, child.ULID, child.Pubkey, "child1")
+	if resp, out := req(t, admin, "POST", a.url+"/enroll/"+child.ULID+"/drain", "tok", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("drain: %d %v", resp.StatusCode, out)
+	}
+	if v := metricstest.Value(t, a.m, `colca_drains_active`); v != 1 {
+		t.Fatalf("colca_drains_active after drain start = %v, want 1", v)
+	}
+
+	resp, out := req(t, admin, "DELETE", a.url+"/enroll/"+child.ULID, "tok", nil)
+	if resp.StatusCode != http.StatusOK || out["revoked"] != true {
+		t.Fatalf("DELETE during drain must succeed immediately: %d %v", resp.StatusCode, out)
+	}
+	if _, ok := a.reg.Get(child.ULID); ok {
+		t.Fatal("child must be gone from the registry after DELETE")
+	}
+	if v := metricstest.Value(t, a.m, `colca_drains_active`); v != 0 {
+		t.Fatalf("colca_drains_active after forced revoke = %v, want 0", v)
+	}
+	if v := metricstest.Value(t, a.m, `colca_drains_completed_total{outcome="forced"}`); v != 1 {
+		t.Fatalf(`colca_drains_completed_total{outcome="forced"} = %v, want 1`, v)
+	}
+	if v := metricstest.Value(t, a.m, `colca_drains_completed_total{outcome="delivered"}`); v != 0 {
+		t.Fatalf(`colca_drains_completed_total{outcome="delivered"} = %v, want 0 (this was forced, not delivered)`, v)
+	}
+
+	// A plain DELETE on a never-draining machine must NOT touch the drain
+	// counters at all — the "forced" bookkeeping is drain-specific.
+	m2 := authtest.NewMachine(t, "m2")
+	authtest.Enroll(t, a.reg, m2, "m2")
+	if resp, out := req(t, admin, "DELETE", a.url+"/enroll/m2", "tok", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("plain delete: %d %v", resp.StatusCode, out)
+	}
+	if v := metricstest.Value(t, a.m, `colca_drains_completed_total{outcome="forced"}`); v != 1 {
+		t.Fatalf(`plain (non-draining) DELETE must not add to forced outcomes, colca_drains_completed_total{outcome="forced"} = %v, want still 1`, v)
 	}
 }
 

@@ -360,7 +360,7 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 	want := map[string]int{
 		"colca_stream_next_offset":                      3, // one per stream
 		"colca_ingest_records_total":                    3,
-		"colca_rejected_publishes_total":                7,  // one per reason
+		"colca_rejected_publishes_total":                8,  // one per reason
 		"colca_auth_rejections_total":                   12, // door × reason
 		"colca_acl_denials_total":                       2,  // one per action
 		"colca_session_kicks_total":                     1,
@@ -384,10 +384,16 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_retention_state_refresh_failures_total": 1,
 		"colca_gap_served_total":                       6, // 3 streams × 2 surfaces
 		"colca_gap_received_total":                     3,
-		// colca_cursor_position/lag/last_advance_age, colca_child_hwm and
-		// colca_repl_gap_applied_total are dynamic (no series until a cursor or
-		// child exists) and deliberately excluded here, same precedent as the
-		// pre-existing cursor/child families.
+		// Move-drain (design §3.2/§3.4): colca_drains_active is unlabeled
+		// (always one child, like the retention state-refresh counters) and
+		// colca_drains_completed_total pre-creates all three outcomes.
+		"colca_drains_active":          1,
+		"colca_drains_completed_total": 3,
+		// colca_cursor_position/lag/last_advance_age, colca_child_hwm,
+		// colca_repl_gap_applied_total and colca_drain_pending_commands are
+		// dynamic (no series until a cursor, child or draining child exists)
+		// and deliberately excluded here, same precedent as the pre-existing
+		// cursor/child families.
 	}
 	for fam, children := range want {
 		if families[fam] != children {

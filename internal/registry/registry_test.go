@@ -253,6 +253,155 @@ func TestObserverTopicUsesPlaceholderSegment(t *testing.T) {
 	}
 }
 
+func node(ulid, mount, pub string) uns.Entry {
+	return uns.Entry{ULID: ulid, Pubkey: pub, Kind: uns.KindNode, Mount: mount}
+}
+
+// Move-drain design §3.1/§3.2: Drain persists status "draining" on a
+// kind=node entry, republishes its (now-draining) entity retained like any
+// entry update, but — unlike Enroll's re-enroll path — does NOT kick the
+// live session: the whole point is to keep the connection the queue drains
+// through alive.
+func TestDrainPersistsStatusAndDoesNotKick(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, err := New(st, "01NODE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kicked []string
+	m.SetKick(func(ulid string) { kicked = append(kicked, ulid) })
+	type delivery struct {
+		topic   string
+		payload []byte
+		retain  bool
+	}
+	var delivered []delivery
+	m.SetDeliver(func(topic string, payload []byte, retain bool) {
+		delivered = append(delivered, delivery{topic, payload, retain})
+	})
+
+	if _, _, err := m.Enroll(entryJSON(t, node("01N1", "z/child", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	delivered = nil // drop the enroll delivery, only the drain delivery matters below
+
+	off, err := m.Drain("01N1")
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if off == 0 {
+		t.Fatal("Drain returned a zero offset")
+	}
+	if len(kicked) != 0 {
+		t.Fatalf("Drain must not kick the live session, got %v", kicked)
+	}
+	if len(delivered) != 1 {
+		t.Fatalf("Drain must deliver exactly one retained entity update, got %v", delivered)
+	}
+	if !delivered[0].retain {
+		t.Fatalf("drain entity update must be retained, topic=%s", delivered[0].topic)
+	}
+	var deliveredEntry uns.Entry
+	if err := json.Unmarshal(delivered[0].payload, &deliveredEntry); err != nil {
+		t.Fatalf("drain delivery payload not valid entry JSON: %v", err)
+	}
+	if deliveredEntry.Status != uns.StatusDraining {
+		t.Fatalf("drain delivery status = %q, want %q", deliveredEntry.Status, uns.StatusDraining)
+	}
+	e, ok := m.Get("01N1")
+	if !ok || e.Status != uns.StatusDraining {
+		t.Fatalf("Get after Drain: %+v %v, want status=draining", e, ok)
+	}
+	// Identity stays fully intact: mount and pubkey unchanged.
+	if e.Mount != "z/child" || e.Pubkey != pub("ab") {
+		t.Fatalf("Drain must not touch mount/pubkey: %+v", e)
+	}
+	if _, ok := m.ByPubkey(pub("ab")); !ok {
+		t.Fatal("Drain must not invalidate the pubkey — the child must still authenticate")
+	}
+
+	// The persisted r/ entry carries the status too (design §3.2: "persisted
+	// in the r/ entry; survives restart").
+	m2, err := New(st, "01NODE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e2, ok := m2.Get("01N1")
+	if !ok || e2.Status != uns.StatusDraining {
+		t.Fatalf("status did not survive a fresh load from the store: %+v %v", e2, ok)
+	}
+}
+
+// Drain's error surface: 404-shaped (ErrNotEnrolled) for an unknown ulid,
+// 409-shaped (ErrNotNode) for a machine — move-drain applies only to
+// kind=node (design §3.2 [delta]) — and 409-shaped (ErrAlreadyDraining) for
+// a second Drain call on the same child.
+func TestDrainErrors(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, err := New(st, "01NODE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Drain("nosuch"); !errors.Is(err, ErrNotEnrolled) {
+		t.Fatalf("Drain of unknown ulid = %v, want ErrNotEnrolled", err)
+	}
+
+	if _, _, err := m.Enroll(entryJSON(t, machine("01M1", "z/a", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Drain("01M1"); !errors.Is(err, ErrNotNode) {
+		t.Fatalf("Drain of a machine = %v, want ErrNotNode", err)
+	}
+
+	if _, _, err := m.Enroll(entryJSON(t, node("01N1", "z/child", pub("cd")))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Drain("01N1"); err != nil {
+		t.Fatalf("first Drain: %v", err)
+	}
+	if _, err := m.Drain("01N1"); !errors.Is(err, ErrAlreadyDraining) {
+		t.Fatalf("second Drain = %v, want ErrAlreadyDraining", err)
+	}
+}
+
+// DrainingMount is the engine.Mounts extension the ClassCmd admission check
+// consults (move-drain design §3.2 item 2): true for any path under a
+// draining kind=node child's mount, respecting the path-separator boundary
+// (a sibling mount that merely shares a string prefix must not match), and
+// false once the drain ends (auto-revoke or DELETE removes the entry
+// entirely, so there is nothing left to match).
+func TestDrainingMountBoundaryAndClears(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, err := New(st, "01NODE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.Enroll(entryJSON(t, node("01N1", "site1/edge1", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	if m.DrainingMount("site1/edge1/x") {
+		t.Fatal("not draining yet — DrainingMount must be false")
+	}
+	if _, err := m.Drain("01N1"); err != nil {
+		t.Fatal(err)
+	}
+	if !m.DrainingMount("site1/edge1/x") {
+		t.Fatal("path under the draining mount must report true")
+	}
+	if m.DrainingMount("site1/edge10/x") {
+		t.Fatal("a sibling mount sharing only a string prefix must not match (path-separator boundary)")
+	}
+	if m.DrainingMount("other/x") {
+		t.Fatal("a path outside any draining mount must be false")
+	}
+	if _, err := m.Revoke("01N1"); err != nil {
+		t.Fatal(err)
+	}
+	if m.DrainingMount("site1/edge1/x") {
+		t.Fatal("DrainingMount must be false once the drained child is revoked")
+	}
+}
+
 func TestCorruptPersistedEntryFailsLoad(t *testing.T) {
 	dir := t.TempDir()
 	st := openStore(t, dir)

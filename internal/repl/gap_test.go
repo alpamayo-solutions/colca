@@ -20,6 +20,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // parentFixture is the standard mTLS parent + one registered child. pm is the
@@ -439,7 +440,7 @@ func unreachableAddr(t *testing.T) string {
 func TestDownlinkPollPersistsChildCursorAndClampsPrune(t *testing.T) {
 	f := newParentFixture(t)
 	seedParentCommands(t, f.ps, 2)
-	cursorName := downlinkCursorPrefix + f.childID
+	cursorName := uns.DownlinkCursorPrefix + f.childID
 
 	find := func() (store.CursorInfo, bool) {
 		for _, c := range f.ps.Cursors() {

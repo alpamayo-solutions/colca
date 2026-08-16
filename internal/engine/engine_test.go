@@ -15,26 +15,55 @@ import (
 )
 
 // fakeIDs is a test Mounts: ulid → entry.
-type fakeIDs map[string]*uns.Entry
+type fakeIDs struct {
+	entries  map[string]*uns.Entry
+	draining []string // mounts DrainingMount treats as under an active drain
+}
 
 func (f fakeIDs) MountOf(ulid string) (string, bool) {
-	e, ok := f[ulid]
+	e, ok := f.entries[ulid]
 	if !ok || e.Mount == "" {
 		return "", false
 	}
 	return e.Mount, true
 }
-func (f fakeIDs) Get(ulid string) (*uns.Entry, bool) { e, ok := f[ulid]; return e, ok }
+func (f fakeIDs) Get(ulid string) (*uns.Entry, bool) { e, ok := f.entries[ulid]; return e, ok }
+
+// DrainingMount mirrors registry.Manager.DrainingMount's own boundary rule
+// (path-separator, not string-prefix) against the test-configured set of
+// draining mounts.
+func (f fakeIDs) DrainingMount(path string) bool {
+	for _, mount := range f.draining {
+		if strings.HasPrefix(path, mount+"/") {
+			return true
+		}
+	}
+	return false
+}
 
 func testIDs() fakeIDs {
-	return fakeIDs{
+	return fakeIDs{entries: map[string]*uns.Entry{
 		"m1":       {ULID: "m1", Kind: uns.KindMachine, Mount: "m1"},
 		"observer": {ULID: "observer", Kind: uns.KindMachine},
 		"hmi":      {ULID: "hmi", Kind: uns.KindMachine, Mount: "hmi", Grants: []string{"cmd:m1/#:param"}},
-	}
+	}}
+}
+
+// testIDsWithDraining is testIDs plus mount "m1" under an active move-drain —
+// the ClassCmd admission check (engine.go) must reject any new command
+// addressed under it regardless of the caller's own grants.
+func testIDsWithDraining() fakeIDs {
+	f := testIDs()
+	f.draining = []string{"m1"}
+	return f
 }
 
 func newEngine(t *testing.T) *Engine {
+	t.Helper()
+	return newEngineWithIDs(t, testIDs())
+}
+
+func newEngineWithIDs(t *testing.T, ids fakeIDs) *Engine {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
 	if err != nil {
@@ -42,7 +71,7 @@ func newEngine(t *testing.T) *Engine {
 	}
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-edge1"}
-	return New(s, cfg, testIDs(), nil, nil, nil) // nils = no local MQTT delivery, no metrics, no clock in unit tests
+	return New(s, cfg, ids, nil, nil, nil) // nils = no local MQTT delivery, no metrics, no clock in unit tests
 }
 
 // delivery is one call of engine.LocalDeliver, recorded verbatim.
@@ -305,6 +334,48 @@ func TestClientCmdGrants(t *testing.T) {
 	// Invalid payload still rejected even with a grant.
 	if _, err := e.IngestClient("hmi", "colca/v1/_CmdParam/m1/m1/set", []byte(`{}`)); err == nil {
 		t.Fatal("cmd payload validation must still apply")
+	}
+}
+
+// Move-drain design §3.2 item 2: a mount under an active drain rejects new
+// ClassCmd publishes at admission — client (grant notwithstanding) and admin
+// alike — with reason "draining", not the ordinary "cmd_denied". A command
+// outside the draining mount is unaffected.
+func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	cfg := &config.Config{ULID: "n-edge1"}
+	m := metrics.New(s, config.Retention{}, nil)
+	e := New(s, cfg, testIDsWithDraining(), nil, m, nil)
+
+	const rejectedLine = `colca_rejected_publishes_total{reason="draining"}`
+	if v := metricstest.Value(t, m, rejectedLine); v != 0 {
+		t.Fatalf("%s = %v before any attempt, want 0", rejectedLine, v)
+	}
+
+	payload := []byte(`{"correlation_id":"c","expires_at":99999999999}`)
+	// A client with a covering grant still gets rejected — draining outranks
+	// the grant check (engine.go checks it first).
+	if _, err := e.IngestClient("hmi", "colca/v1/_CmdParam/m1/m1/set-speed", payload); err == nil || !strings.Contains(err.Error(), "draining") {
+		t.Fatalf("client cmd under a draining mount must be rejected mentioning 'draining', got %v", err)
+	}
+	// The admin token is not exempt either.
+	if _, err := e.IngestAdmin("colca/v1/_CmdParam/m1/m1/set-speed", payload); err == nil || !strings.Contains(err.Error(), "draining") {
+		t.Fatalf("admin cmd under a draining mount must be rejected mentioning 'draining', got %v", err)
+	}
+	if e.Store().NextOffset("commands") != 1 {
+		t.Fatal("rejected commands must not be persisted")
+	}
+	if v := metricstest.Value(t, m, rejectedLine); v != 2 {
+		t.Fatalf("%s = %v after 2 rejected attempts, want 2", rejectedLine, v)
+	}
+
+	// A command outside the draining mount is unaffected.
+	if _, err := e.IngestAdmin("colca/v1/_CmdParam/hmi/hmi/ping", payload); err != nil {
+		t.Fatalf("cmd outside the draining mount must still be admitted: %v", err)
 	}
 }
 
