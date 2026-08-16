@@ -72,8 +72,36 @@ func (s *Server) evaluateDrain(childULID string) {
 	if !ok || e.Status != uns.StatusDraining {
 		return
 	}
-	total, pending := s.drainPendingCommands(e)
+	total, pending, gapped := s.drainPendingCommands(e)
 	s.metrics.DrainPending(childULID, pending)
+
+	// [delta] Retention's staleness override (or, more
+	// commonly, ordinary age/size pruning racing a child that never once
+	// polled /downlink) can remove records from [cursor, LWM) before this
+	// child ever fetched them — store.Read then silently skips the hole, so
+	// an unguarded scan would undercount straight into a false "delivered".
+	// The design's own §3.2 clarification defines "delivered" as
+	// fetched-and-acked on the downlink cursor; a pruned record was neither,
+	// so this outcome can NEVER be "delivered" once a gap is detected — the
+	// drain still terminates (never blocks forever on data that can no
+	// longer arrive), just with an honest, distinct outcome. Conservative by
+	// construction: any cursor behind the LWM completes as "gapped",
+	// independent of whether the pruned range provably held a command for
+	// THIS mount specifically — the pruned range carries no per-mount
+	// record, so "might have" is treated exactly like "did".
+	if gapped {
+		if _, _, err := s.reg.Revoke(childULID); err != nil {
+			if errors.Is(err, registry.ErrNotEnrolled) {
+				return
+			}
+			s.log.Error("move-drain auto-revoke failed", "child", childULID, "err", err)
+			return
+		}
+		s.metrics.DrainCompleted(childULID, metrics.DrainOutcomeGapped)
+		s.log.Warn("move-drain complete, auto-revoked: retention pruned undelivered commands under this mount before this child fetched or they expired — outcome recorded as gapped, never delivered",
+			"child", childULID)
+		return
+	}
 	if pending > 0 {
 		return // still live, undelivered commands under the mount
 	}
@@ -81,7 +109,7 @@ func (s *Server) evaluateDrain(childULID string) {
 	if total > 0 {
 		outcome = metrics.DrainOutcomeExpired
 	}
-	if _, err := s.reg.Revoke(childULID); err != nil {
+	if _, _, err := s.reg.Revoke(childULID); err != nil {
 		if errors.Is(err, registry.ErrNotEnrolled) {
 			return // lost the race to a concurrent evaluation or a DELETE — not our error
 		}
@@ -96,21 +124,24 @@ func (s *Server) evaluateDrain(childULID string) {
 // at its downlink delivery-floor cursor (not the stream start), for ClassCmd
 // records not yet delivered. total counts every such record; pending is the
 // subset still live (expires_at >= AuthoritativeNow) — completion is
-// pending == 0 (design §3.2 item 3).
+// pending == 0 (design §3.2 item 3, erratum: the cursor boundary is
+// inclusive — offset >= cursor, since store.CursorGet's cursor IS the next
+// offset a consumer has not yet read; the record sitting exactly at that
+// offset has itself not been delivered).
 //
-// [delta] The design text (§3.2 item 3) says "offset > the downlink:{child}
-// cursor". This implementation scans from offset >= cursor instead, to match
-// the store's actual cursor semantics (store.CursorGet: "the NEXT offset a
-// named consumer should read from a stream" — the record sitting AT the
-// cursor position has itself not been delivered yet). Reading the design
-// text literally would let a drain complete while the very next undelivered
-// command — the one at exactly the cursor offset — is silently uncounted,
-// which contradicts the design's own termination guarantee ("deliver or
-// expire, literally"). Flagged for review per the design's own
-// [delta] convention.
-func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int) {
+// gapped is true when e's own delivery-floor cursor sits behind the
+// commands stream's current LWM (store.Gap) — retention pruned some or all
+// of [cursor, LWM) before this child (whose cursor may never have advanced
+// past its never-acked default) consumed it. When gapped, total/pending are
+// not computed at all: the pruned range's contents are gone and cannot be
+// re-examined, so nothing in it can be trusted as "delivered" — the caller must treat this as its own distinct outcome,
+// never as an empty/expired queue.
+func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped bool) {
 	st := s.eng.Store()
 	cursor := st.CursorGet(uns.DownlinkCursorPrefix+e.ULID, "commands")
+	if _, hasGap := st.Gap("commands", cursor); hasGap {
+		return 0, 0, true
+	}
 	next := st.NextOffset("commands")
 	nowMS := s.eng.AuthoritativeNow().UnixMilli()
 	filter := func(topic string) bool {
@@ -127,7 +158,7 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int) {
 		if err != nil {
 			s.log.Error("move-drain completion scan failed — treating as still pending (never falsely completes a drain)",
 				"child", e.ULID, "err", err)
-			return total + 1, pending + 1
+			return total + 1, pending + 1, false
 		}
 		for _, r := range recs {
 			total++
@@ -140,7 +171,7 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int) {
 		}
 		from = nxt
 	}
-	return total, pending
+	return total, pending, false
 }
 
 // commandStillLive reports whether a ClassCmd record's expires_at has not

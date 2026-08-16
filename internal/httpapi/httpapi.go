@@ -303,14 +303,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, m *met
 		ulid := r.PathValue("ulid")
 		// Move-drain design §3.1/§3.4: DELETE stays the immediate kill-switch
 		// — no drain precondition ever creeps into registry.Revoke itself
-		// (unchanged below). The only drain-awareness here is bookkeeping:
-		// looking BEFORE the revoke whether it was interrupting an active
-		// drain, purely to record the "forced" outcome after Revoke succeeds.
-		wasDraining := false
-		if e, ok := reg.Get(ulid); ok {
-			wasDraining = e.Status == uns.StatusDraining
-		}
-		off, err := reg.Revoke(ulid)
+		// (unchanged below). wasDraining is read by Revoke under its OWN
+		// lock, atomically with the removal — no separate pre-check call, no
+		// window for a concurrent POST .../drain to start and finish
+		// unaccounted between a check and this revoke.
+		off, wasDraining, err := reg.Revoke(ulid)
 		if err != nil {
 			if errors.Is(err, registry.ErrNotEnrolled) {
 				writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})

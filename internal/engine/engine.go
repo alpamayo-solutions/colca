@@ -305,7 +305,25 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, err
 	}
-	return e.persistTS(uns.ClassOf(p.Contract), p, topic, payload, ts)
+	class := uns.ClassOf(p.Contract)
+	if class == uns.ClassCmd && e.ids.DrainingMount(p.Path) {
+		// Move-drain design §3.2 item 2: the SAME admission rule as
+		// IngestClient/IngestAdmin, extended to this relay door. Without this
+		// check, a command authored ABOVE this node's own parent — where THIS
+		// node's own draining child is invisible — is admitted upstream,
+		// relays down through the downlink-poll loop, and lands straight in a
+		// mount this node is actively draining: the "chasing a moving tail"
+		// failure the admission gate exists to prevent, reachable in a
+		// multi-hop tree even though the direct doors (client/admin) are
+		// covered. The caller (repl.RunDownlink) already treats a per-record
+		// ingest error as "log and drop, cursor still advances" — the same
+		// handling every other IngestDownlink error gets today — so no retry
+		// loop, no stuck cursor, no gap-jump side effect: this is a single
+		// record rejected at persistence time, not a batch operation.
+		e.metrics.RejectPublish(metrics.ReasonDraining)
+		return Result{}, fmt.Errorf("downlink: %s is draining — no new commands admitted (move-drain design §3.2)", p.Path)
+	}
+	return e.persistTS(class, p, topic, payload, ts)
 }
 
 // IngestReplicated applies a batch pushed by a child: dedupe by high-water-mark,

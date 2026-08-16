@@ -59,9 +59,16 @@ const (
 	DrainOutcomeDelivered = "delivered" // the commands queue was already empty at completion
 	DrainOutcomeExpired   = "expired"   // undelivered leftovers timed out (expires_at < now)
 	DrainOutcomeForced    = "forced"    // DELETE /enroll/{ulid} interrupted an active drain
+	// DrainOutcomeGapped [delta]: retention pruned some or all of a
+	// draining child's undelivered commands before they were fetched or
+	// expired — a distinct, honest outcome so
+	// "delivered" never silently covers for data destroyed by an unrelated
+	// retention policy. Not in the original design §3.4 list; documented
+	// there with a [delta] marker alongside this constant.
+	DrainOutcomeGapped = "gapped"
 )
 
-var drainOutcomes = []string{DrainOutcomeDelivered, DrainOutcomeExpired, DrainOutcomeForced}
+var drainOutcomes = []string{DrainOutcomeDelivered, DrainOutcomeExpired, DrainOutcomeForced, DrainOutcomeGapped}
 
 // Auth doors and rejection reasons — the label values of
 // colca_auth_rejections_total{door,reason} (auth design §9). CONNECT/request

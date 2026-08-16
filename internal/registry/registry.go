@@ -184,14 +184,25 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 }
 
 // Revoke retires an enrolled identity: tombstone entity + r/ delete + KV
-// retirement in one batch, map swap, session kick (§3, §7).
-func (m *Manager) Revoke(ulid string) (offset uint64, err error) {
+// retirement in one batch, map swap, session kick (§3, §7). No drain
+// precondition here, ever (move-drain design §3.1/§3.2) — DELETE stays the
+// immediate kill-switch regardless of status.
+//
+// wasDraining reports whether the entry's status was "draining" at the exact
+// moment of removal (read under the SAME lock as the removal itself, so
+// there is no race window between checking and revoking) — the move-drain
+// "forced" outcome bookkeeping (httpapi.go) needs this and used to read it
+// via a separate, unlocked Get() call before Revoke; folding it into
+// Revoke's own return closes that window instead of just narrowing it. Pure
+// telemetry: it changes nothing about whether or how Revoke proceeds.
+func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err error) {
 	m.mu.Lock()
 	e, ok := m.byID[ulid]
 	if !ok {
 		m.mu.Unlock()
-		return 0, fmt.Errorf("revoke %s: %w", ulid, ErrNotEnrolled)
+		return 0, false, fmt.Errorf("revoke %s: %w", ulid, ErrNotEnrolled)
 	}
+	wasDraining = e.Status == uns.StatusDraining
 	topic, kvPath := topicFor(e)
 	off, err := m.st.RegistryDelete(ulid, "entities", store.Record{
 		Topic:  topic,
@@ -201,7 +212,7 @@ func (m *Manager) Revoke(ulid string) (offset uint64, err error) {
 	})
 	if err != nil {
 		m.mu.Unlock()
-		return 0, err
+		return 0, false, err
 	}
 	delete(m.byID, ulid)
 	delete(m.byPK, e.Pubkey)
@@ -214,7 +225,7 @@ func (m *Manager) Revoke(ulid string) (offset uint64, err error) {
 		deliver(topic, nil, true) // empty retained payload clears the retained copy
 	}
 	m.log.Info("identity revoked", "ulid", ulid)
-	return off, nil
+	return off, wasDraining, nil
 }
 
 // Drain begins a move-drain decommission of an enrolled kind=node child
@@ -237,6 +248,11 @@ func (m *Manager) Drain(ulid string) (offset uint64, err error) {
 		m.mu.Unlock()
 		return 0, fmt.Errorf("drain %s: %w", ulid, ErrNotEnrolled)
 	}
+	// Fast, typed gates for the HTTP layer's 404/409/409 mapping — Validate
+	// below re-enforces the same kind/status compatibility rule (so this
+	// method never drifts from it as Entry.Validate grows), but its generic
+	// error can't be matched with errors.Is the way ErrNotNode/
+	// ErrAlreadyDraining can.
 	if e.Kind != uns.KindNode {
 		m.mu.Unlock()
 		return 0, fmt.Errorf("drain %s: %w", ulid, ErrNotNode)
@@ -248,6 +264,14 @@ func (m *Manager) Drain(ulid string) (offset uint64, err error) {
 
 	updated := *e
 	updated.Status = uns.StatusDraining
+	// Same discipline as Enroll: every entry this package ever persists is
+	// validated through the one shape-of-truth (uns.Entry.Validate), not
+	// re-derived here — the two explicit gates above classify HTTP status
+	// codes, they do not replace this.
+	if err := updated.Validate(); err != nil {
+		m.mu.Unlock()
+		return 0, fmt.Errorf("drain %s: %w", ulid, err)
+	}
 	canonical, err := json.Marshal(&updated)
 	if err != nil {
 		m.mu.Unlock()
