@@ -17,6 +17,25 @@
 # COLCA_IMAGE selects the image for every container (default colca:dev, the tag
 # `make docker` builds): the level-4 system suite (tests/system) drives this
 # same file against whatever image dev.py resolved (bake tag or CI run tag).
+#
+# Per-LINK networks — one Docker network per tree edge, nothing shared wider:
+#
+#   link3-hub    global ↔ site1
+#   link2-edges  site1  ↔ edge1, edge2
+#   link1-m1     edge1  ↔ m1
+#   link1-m2     edge2  ↔ m2
+#
+# This is what lets the chaos suite partition a SINGLE link (`docker network
+# disconnect` of the child's endpoint from its uplink network) while every
+# other link — including the machine feeding the partitioned edge — keeps
+# flowing. Naming invariant (load-bearing): Docker attaches a container's
+# port-forwarding to its ALPHABETICALLY FIRST network, so every node's
+# downlink network (linkN…) must sort BEFORE its uplink network (linkN+1…) —
+# the depth-numbered names guarantee that. Then disconnecting a node from its
+# uplink never touches the endpoint its published 127.0.0.1 ports ride on,
+# and the host can still observe a partitioned node over HTTP/MQTT (the
+# chaos primitives' self-tests assert exactly this and go red if a Docker
+# version changes the rule).
 services:
   global:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -29,6 +48,7 @@ services:
     # 11880 is the hub bus: every record replicated up from the whole tree is
     # mirrored there under its stored topic (subscribe with an enrolled read:# identity).
     ports: ["127.0.0.1:18080:8080", "127.0.0.1:11880:1883"]
+    networks: [link3-hub]
 
   site1:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -40,6 +60,7 @@ services:
       - "site1-data:/data"
     ports: ["127.0.0.1:18081:8080", "127.0.0.1:11881:1883"]
     depends_on: [global]
+    networks: [link2-edges, link3-hub]
 
   edge1:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -51,6 +72,7 @@ services:
       - "edge1-data:/data"
     ports: ["127.0.0.1:18082:8080", "127.0.0.1:11883:1883"]
     depends_on: [site1]
+    networks: [link1-m1, link2-edges]
 
   edge2:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -62,6 +84,7 @@ services:
       - "edge2-data:/data"
     ports: ["127.0.0.1:18083:8080", "127.0.0.1:11884:1883"]
     depends_on: [site1]
+    networks: [link1-m2, link2-edges]
 
   m1:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -75,6 +98,7 @@ services:
     volumes:
       - "./keys:/keys:ro"
     depends_on: [edge1]
+    networks: [link1-m1]
 
   m2:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -88,9 +112,16 @@ services:
     volumes:
       - "./keys:/keys:ro"
     depends_on: [edge2]
+    networks: [link1-m2]
 
 volumes:
   global-data: {}
   site1-data: {}
   edge1-data: {}
   edge2-data: {}
+
+networks:
+  link1-m1: {}
+  link1-m2: {}
+  link2-edges: {}
+  link3-hub: {}
