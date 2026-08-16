@@ -228,7 +228,17 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	// advance (an idle re-poll with the same after writes nothing), and the
 	// ct/ last-advance stamp that puts these cursors under the §5.2 staleness
 	// window like every other cursor.
-	s.eng.Store().CursorAck(downlinkCursorPrefix+child.ULID, "commands", after)
+	s.eng.Store().CursorAck(uns.DownlinkCursorPrefix+child.ULID, "commands", after)
+
+	// Move-drain design §3.2: "completion is evaluated on every /downlink
+	// poll by that child" — the other trigger is the 30s periodic tick
+	// (RunDrainTicker). Cheap to call unconditionally when not draining
+	// (evaluateDrain's own registry lookup short-circuits), but the status
+	// check here avoids that lookup on the hot path for the common
+	// non-draining case.
+	if child.Status == uns.StatusDraining {
+		s.evaluateDrain(child.ULID)
+	}
 
 	// A child only ever sees commands for its own subtree.
 	filter := func(topic string) bool {

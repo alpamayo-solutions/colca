@@ -37,6 +37,11 @@ type Result struct {
 type Mounts interface {
 	MountOf(ulid string) (string, bool)
 	Get(ulid string) (*uns.Entry, bool)
+	// DrainingMount reports whether path falls under a currently draining
+	// kind=node child's mount (move-drain design §3.2 item 2) — consulted
+	// for every ClassCmd admission so a draining mount stops accepting new
+	// commands instead of chasing a moving tail.
+	DrainingMount(path string) bool
 }
 
 type Engine struct {
@@ -138,6 +143,15 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		return Result{}, fmt.Errorf("client %s may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)", identity)
 	}
 	if class == uns.ClassCmd {
+		// Move-drain design §3.2 item 2: a mount under an active drain stops
+		// accepting new commands at admission, independent of the caller's
+		// own grants — checked first so a draining destination is rejected
+		// for the reason that actually explains it, not folded into
+		// cmd_denied.
+		if e.ids.DrainingMount(p.Path) {
+			e.metrics.RejectPublish(metrics.ReasonDraining)
+			return Result{}, fmt.Errorf("client %s: %s is draining — no new commands admitted (move-drain design §3.2)", identity, p.Path)
+		}
 		// A command needs a covering cmd grant (auth §5.3 ActCmd). Commands
 		// target ABSOLUTE node-local paths: no mount rewrite, no level-4
 		// identity requirement — the author is not the target's owner.
@@ -205,6 +219,13 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 		// not even the admin token may author it through /publish.
 		e.metrics.RejectPublish(metrics.ReasonTimeSync)
 		return Result{}, fmt.Errorf("admin may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)")
+	}
+	if class == uns.ClassCmd && e.ids.DrainingMount(p.Path) {
+		// Same admission rule as IngestClient (move-drain design §3.2 item
+		// 2): not even the admin token may address a draining mount with a
+		// new command.
+		e.metrics.RejectPublish(metrics.ReasonDraining)
+		return Result{}, fmt.Errorf("admin: %s is draining — no new commands admitted (move-drain design §3.2)", p.Path)
 	}
 	if class == uns.ClassNone {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)

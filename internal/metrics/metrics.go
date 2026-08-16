@@ -14,6 +14,7 @@
 package metrics
 
 import (
+	"encoding/json"
 	"math"
 	"net/http"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // Reject reasons — the allowed label values of colca_rejected_publishes_total.
@@ -42,9 +44,24 @@ const (
 	// may ever produce it, straight to the local bus, never through an
 	// ingest door.
 	ReasonTimeSync = "time_sync"
+	// ReasonDraining: a ClassCmd publish (client or admin) targeted a mount
+	// currently under move-drain (move-drain design §3.2 item 2/§3.4) — new
+	// commands are refused at admission so the drain converges instead of
+	// chasing a moving tail.
+	ReasonDraining = "draining"
 )
 
-var reasons = []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonCmdDenied, ReasonRegistryContract, ReasonTimeSync}
+var reasons = []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonCmdDenied, ReasonRegistryContract, ReasonTimeSync, ReasonDraining}
+
+// Move-drain outcome labels — the allowed `outcome` values of
+// colca_drains_completed_total (move-drain design §3.2/§3.4).
+const (
+	DrainOutcomeDelivered = "delivered" // the commands queue was already empty at completion
+	DrainOutcomeExpired   = "expired"   // undelivered leftovers timed out (expires_at < now)
+	DrainOutcomeForced    = "forced"    // DELETE /enroll/{ulid} interrupted an active drain
+)
+
+var drainOutcomes = []string{DrainOutcomeDelivered, DrainOutcomeExpired, DrainOutcomeForced}
 
 // Auth doors and rejection reasons — the label values of
 // colca_auth_rejections_total{door,reason} (auth design §9). CONNECT/request
@@ -120,6 +137,12 @@ type Metrics struct {
 	gapServed      *prometheus.CounterVec // colca_gap_served_total{stream,surface}
 	gapReceived    *prometheus.CounterVec // colca_gap_received_total{stream}
 	replGapApplied *prometheus.CounterVec // colca_repl_gap_applied_total{child,stream}
+
+	// Move-drain (design §3.2/§3.4).
+	drainsActive         prometheus.Gauge       // colca_drains_active
+	drainPendingCommands *prometheus.GaugeVec   // colca_drain_pending_commands{child}
+	drainsCompleted      *prometheus.CounterVec // colca_drains_completed_total{outcome}
+	drainsCompletedBy    map[string]prometheus.Counter
 
 	ingestBy        map[string]prometheus.Counter
 	rejectedBy      map[string]prometheus.Counter
@@ -231,6 +254,18 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_repl_gap_applied_total",
 			Help: "Child-offset jumps observed in ApplyReplicated (design §6.4 second net), by child and stream. Resets on restart.",
 		}, []string{"child", "stream"}),
+		drainsActive: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_drains_active",
+			Help: "Enrolled kind=node children currently in a move-drain decommission (move-drain design §3.1/§3.4).",
+		}),
+		drainPendingCommands: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "colca_drain_pending_commands",
+			Help: "Live, undelivered ClassCmd records still blocking a draining child's completion, by child (move-drain design §3.2 item 3/§3.4).",
+		}, []string{"child"}),
+		drainsCompleted: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_drains_completed_total",
+			Help: "Move-drains that reached a terminal outcome, by outcome: delivered (queue empty), expired (leftovers timed out), forced (DELETE during drain). Resets on restart.",
+		}, []string{"outcome"}),
 	}
 	m.ingestBy = counterChildren(m.ingest, streams)
 	m.rejectedBy = counterChildren(m.rejected, reasons)
@@ -259,6 +294,24 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			m.authReject.WithLabelValues(d, r)
 		}
 	}
+	m.drainsCompletedBy = counterChildren(m.drainsCompleted, drainOutcomes)
+
+	// colca_drains_active starts at the count of entries persisted with
+	// status=draining (move-drain design §3.2: "status survives restart") —
+	// runtime Inc/Dec (DrainStarted/DrainCompleted) only ever adjusts THIS
+	// process' counter, so re-deriving the starting point from the store on
+	// every construction is what keeps it correct across a restart instead
+	// of silently resetting to 0 while children are still mid-drain.
+	draining := 0
+	for _, raw := range st.RegistryScan() {
+		var e struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(raw, &e); err == nil && e.Status == uns.StatusDraining {
+			draining++
+		}
+	}
+	m.drainsActive.Set(float64(draining))
 
 	// Time-sync (design §2.1/§2.4): read directly from clk at scrape time —
 	// GaugeFunc, not a pushed Set(), because colca_clock_sync_age_seconds is
@@ -295,6 +348,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied,
+		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
 		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
 	return m
@@ -539,6 +593,46 @@ func (m *Metrics) GapApplied(child, stream string) {
 		return
 	}
 	m.replGapApplied.WithLabelValues(child, stream).Inc()
+}
+
+// DrainStarted increments colca_drains_active — one enrolled kind=node child
+// began a move-drain decommission (move-drain design §3.1, POST
+// /enroll/{ulid}/drain).
+func (m *Metrics) DrainStarted() {
+	if m == nil {
+		return
+	}
+	m.drainsActive.Inc()
+}
+
+// DrainPending sets colca_drain_pending_commands{child} to the count of
+// live, undelivered ClassCmd records currently blocking child's drain
+// (move-drain design §3.2 item 3/§3.4). Called on every completion-predicate
+// evaluation, whether or not the drain completes this round.
+func (m *Metrics) DrainPending(child string, n int) {
+	if m == nil {
+		return
+	}
+	m.drainPendingCommands.WithLabelValues(child).Set(float64(n))
+}
+
+// DrainCompleted records one move-drain's terminal outcome (move-drain
+// design §3.4, one of DrainOutcome*): decrements colca_drains_active and
+// clears child's now-meaningless colca_drain_pending_commands series — by
+// the time a caller reaches this method, the registry has already revoked
+// child (or is in the process of the same DELETE that produced a "forced"
+// outcome), so the series describes an identity that no longer exists.
+func (m *Metrics) DrainCompleted(child, outcome string) {
+	if m == nil {
+		return
+	}
+	m.drainsActive.Dec()
+	m.drainPendingCommands.DeleteLabelValues(child)
+	if c, ok := m.drainsCompletedBy[outcome]; ok {
+		c.Inc()
+		return
+	}
+	m.drainsCompleted.WithLabelValues(outcome).Inc()
 }
 
 // storeCollector derives the gauge families from the store (and, for the

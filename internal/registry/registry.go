@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -26,6 +28,15 @@ var ErrNotEnrolled = errors.New("identity not enrolled at this node")
 // ErrConflict marks an enrollment that collides with an existing entry
 // (pubkey or mount uniqueness) — the HTTP layer maps it to 409.
 var ErrConflict = errors.New("enrollment conflict")
+
+// ErrNotNode marks a Drain request against an entry that is not kind=node —
+// machines are out of scope for move-drain (design §3.2 [delta]) — the HTTP
+// layer maps it to 409.
+var ErrNotNode = errors.New("move-drain applies only to kind=node entries")
+
+// ErrAlreadyDraining marks a Drain request against an entry already draining
+// — the HTTP layer maps it to 409.
+var ErrAlreadyDraining = errors.New("already draining")
 
 // observerSegment is the placeholder path segment for mountless observers'
 // _EdgeNode topics (the grammar needs a non-empty hierarchy path; "_"-prefixed
@@ -40,6 +51,7 @@ type Manager struct {
 	byPK    map[string]string // pubkey hex → ulid
 	kick    func(ulid string)
 	deliver func(topic string, payload []byte, retain bool)
+	m       *metrics.Metrics // late-bound; every Metrics method is nil-safe, so this may stay unset
 }
 
 // New loads every locally enrolled entry from the store. A corrupt persisted
@@ -80,6 +92,18 @@ func (m *Manager) SetKick(fn func(ulid string)) {
 func (m *Manager) SetDeliver(fn func(topic string, payload []byte, retain bool)) {
 	m.mu.Lock()
 	m.deliver = fn
+	m.mu.Unlock()
+}
+
+// SetMetrics late-binds the node's metrics registry (move-drain design
+// §3.4): Drain owns incrementing colca_drains_active itself, the same way
+// Enroll owns firing kick/deliver — a state transition the registry fully
+// understands needs no caller to remember a follow-up call. Never required:
+// every Metrics method is nil-safe, so an unset m simply means the gauge
+// stays unobserved (unit tests that do not wire metrics).
+func (m *Manager) SetMetrics(mt *metrics.Metrics) {
+	m.mu.Lock()
+	m.m = mt
 	m.mu.Unlock()
 }
 
@@ -191,6 +215,81 @@ func (m *Manager) Revoke(ulid string) (offset uint64, err error) {
 	}
 	m.log.Info("identity revoked", "ulid", ulid)
 	return off, nil
+}
+
+// Drain begins a move-drain decommission of an enrolled kind=node child
+// (move-drain design §3.1/§3.2): persists status "draining" on its entry —
+// its identity stays fully valid (connects, fetches /downlink, acks) — and
+// republishes the (now-draining) entity like any entry update. Unlike
+// Enroll's update path this does NOT kick the live session: a drain must not
+// interrupt the connection its own queue is draining through, and it never
+// rewrites pubkey/mount, so there is nothing else to reconcile.
+//
+// The completion predicate (item 3), the admission-time rejection of new
+// commands under a draining mount (item 2, DrainingMount below) and the
+// auto-revoke on completion (item 4) all live outside this package —
+// registry only owns the identity/lifecycle fact, never stream contents
+// (package doc comment).
+func (m *Manager) Drain(ulid string) (offset uint64, err error) {
+	m.mu.Lock()
+	e, ok := m.byID[ulid]
+	if !ok {
+		m.mu.Unlock()
+		return 0, fmt.Errorf("drain %s: %w", ulid, ErrNotEnrolled)
+	}
+	if e.Kind != uns.KindNode {
+		m.mu.Unlock()
+		return 0, fmt.Errorf("drain %s: %w", ulid, ErrNotNode)
+	}
+	if e.Status == uns.StatusDraining {
+		m.mu.Unlock()
+		return 0, fmt.Errorf("drain %s: %w", ulid, ErrAlreadyDraining)
+	}
+
+	updated := *e
+	updated.Status = uns.StatusDraining
+	canonical, err := json.Marshal(&updated)
+	if err != nil {
+		m.mu.Unlock()
+		return 0, err
+	}
+	topic, kvPath := topicFor(&updated)
+	off, err := m.st.RegistryPut(updated.ULID, canonical, "entities", store.Record{
+		Topic:   topic,
+		Payload: canonical,
+		TS:      time.Now().UnixMilli(),
+		KVPath:  kvPath,
+		KVNode:  updated.ULID,
+	})
+	if err != nil {
+		m.mu.Unlock()
+		return 0, err
+	}
+	m.byID[ulid] = &updated
+	deliver, metricsRef := m.deliver, m.m
+	m.mu.Unlock() // callbacks outside the lock — see Enroll
+	if deliver != nil {
+		deliver(topic, canonical, true) // entity = state, retained on the bus
+	}
+	metricsRef.DrainStarted() // nil-safe
+	m.log.Info("move-drain started", "ulid", ulid, "mount", updated.Mount)
+	return off, nil
+}
+
+// DrainingMount reports whether path (node-local coordinates, e.g. a
+// Parsed.Path) falls under any currently draining kind=node child's mount
+// (move-drain design §3.2 item 2). Implements the engine.Mounts extension
+// the ClassCmd admission check consults so new commands addressed under a
+// draining mount are rejected instead of chasing a moving tail.
+func (m *Manager) DrainingMount(path string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, e := range m.byID {
+		if e.Status == uns.StatusDraining && strings.HasPrefix(path, e.Mount+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) Get(ulid string) (*uns.Entry, bool) {

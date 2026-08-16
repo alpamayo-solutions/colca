@@ -28,7 +28,22 @@ type Entry struct {
 	Kind   Kind     `json:"kind"`
 	Mount  string   `json:"mount"` // placement; "" = read-only observer (machine only)
 	Grants []string `json:"grants,omitempty"`
+	// Status is the entry's lifecycle state (move-drain design §3.2):
+	// StatusActive or "" (absent ⇒ active, so entries persisted before this
+	// field existed need no migration) or StatusDraining. Only a kind=node
+	// entry may be StatusDraining — machines are out of scope for move-drain
+	// (design §3.2 [delta]: machine delivery rides broker QoS-1 session
+	// state, not a cursor, so there is nothing for a parent to drain
+	// against).
+	Status string `json:"status,omitempty"`
 }
+
+// Entry lifecycle states — the allowed values of Entry.Status (move-drain
+// design §3.2).
+const (
+	StatusActive   = "active"
+	StatusDraining = "draining"
+)
 
 // Registry is the in-memory map the doors consult (ulid → entry). Plain data:
 // lifecycle (loading, swapping, locking) is owned by the core's registry
@@ -61,6 +76,14 @@ func (e *Entry) Validate() error {
 		if err := validMount(e.Mount); err != nil {
 			return fmt.Errorf("entry %s: %w", e.ULID, err)
 		}
+	}
+	switch e.Status {
+	case "", StatusActive, StatusDraining:
+	default:
+		return fmt.Errorf("entry %s: status must be %q or %q, got %q", e.ULID, StatusActive, StatusDraining, e.Status)
+	}
+	if e.Status == StatusDraining && e.Kind != KindNode {
+		return fmt.Errorf("entry %s: only kind=%q entries may drain — machines are out of scope (move-drain design §3.2)", e.ULID, KindNode)
 	}
 	for _, g := range e.Grants {
 		if _, err := ParseGrant(g); err != nil {

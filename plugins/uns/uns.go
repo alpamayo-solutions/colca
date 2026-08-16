@@ -120,6 +120,16 @@ func TimeSyncTopic(nodeULID string) string {
 	return "colca/v1/_TimeSync/" + nodeULID
 }
 
+// DownlinkCursorPrefix names the PARENT-side cursor a repl server persists
+// per child on its own commands stream (move-drain design §3.2/§3.4,
+// carried over from spec §5.1 [delta]): DownlinkCursorPrefix+{child-ulid} on
+// stream "commands" is the delivery floor — the next offset that child has
+// not yet fetched via GET /downlink. Exported here (rather than living only
+// in internal/repl) so the move-drain completion predicate, which reads it
+// from internal/repl but is conceptually about registry lifecycle, and any
+// future reader agree on one name instead of two hand-kept copies.
+const DownlinkCursorPrefix = "downlink:"
+
 // MountInsert inserts the mount name directly after segment 4 (node-id), i.e.
 // at the head of the hierarchy path — the uplink rewrite done on every hop.
 func MountInsert(topic, mount string) string {

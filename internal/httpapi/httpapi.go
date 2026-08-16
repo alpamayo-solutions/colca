@@ -300,7 +300,17 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, m *met
 	}))
 
 	mux.HandleFunc("DELETE /enroll/{ulid}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
-		off, err := reg.Revoke(r.PathValue("ulid"))
+		ulid := r.PathValue("ulid")
+		// Move-drain design §3.1/§3.4: DELETE stays the immediate kill-switch
+		// — no drain precondition ever creeps into registry.Revoke itself
+		// (unchanged below). The only drain-awareness here is bookkeeping:
+		// looking BEFORE the revoke whether it was interrupting an active
+		// drain, purely to record the "forced" outcome after Revoke succeeds.
+		wasDraining := false
+		if e, ok := reg.Get(ulid); ok {
+			wasDraining = e.Status == uns.StatusDraining
+		}
+		off, err := reg.Revoke(ulid)
 		if err != nil {
 			if errors.Is(err, registry.ErrNotEnrolled) {
 				writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
@@ -309,7 +319,39 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, m *met
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		if wasDraining {
+			m.DrainCompleted(ulid, metrics.DrainOutcomeForced)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "offset": off})
+	}))
+
+	// Move-drain design §3.1: a deliberate, admin-initiated decommission of a
+	// kind=node child, distinct from the DELETE kill-switch above — the
+	// child stays fully functional (connects, fetches /downlink, acks) while
+	// its queue drains, and new commands addressed under its mount are
+	// rejected at admission (engine draining check, reason "draining"). The
+	// node auto-revokes through the same Revoke path once the completion
+	// predicate holds (repl.Server.evaluateDrain), or immediately via DELETE
+	// above (outcome "forced").
+	mux.HandleFunc("POST /enroll/{ulid}/drain", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		ulid := r.PathValue("ulid")
+		off, err := reg.Drain(ulid)
+		if err != nil {
+			code := http.StatusUnprocessableEntity
+			switch {
+			case errors.Is(err, registry.ErrNotEnrolled):
+				code = http.StatusNotFound
+			case errors.Is(err, registry.ErrNotNode), errors.Is(err, registry.ErrAlreadyDraining):
+				code = http.StatusConflict
+			}
+			writeJSON(w, code, map[string]any{"error": err.Error()})
+			return
+		}
+		// colca_drains_active is incremented by reg.Drain itself (registry
+		// design: a state transition it fully understands owns its own
+		// metric, the same way Enroll owns firing kick/deliver) — nothing to
+		// do here.
+		writeJSON(w, http.StatusOK, map[string]any{"ulid": ulid, "offset": off, "status": uns.StatusDraining})
 	}))
 
 	mux.HandleFunc("GET /enroll", adminOnly(func(w http.ResponseWriter, r *http.Request) {

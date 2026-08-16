@@ -98,6 +98,9 @@ func Start(cfg *config.Config) (*Node, error) {
 		return fail(fmt.Errorf("node %s: registry: %w", cfg.ULID, err))
 	}
 	n.Registry = reg
+	// Move-drain design §3.4: Drain owns incrementing colca_drains_active
+	// itself once this is wired, the same way kick/deliver are wired below.
+	reg.SetMetrics(n.Metrics)
 
 	// 2. Broker: New binds the socket, so MQTTAddr is known before Serve and
 	//    before the engine exists. The engine is late-bound below.
@@ -200,6 +203,19 @@ func Start(cfg *config.Config) (*Node, error) {
 			return fail(fmt.Errorf("node %s: repl listen %s: %w", cfg.ULID, cfg.Repl.Addr, err))
 		}
 		n.ReplAddr = addr
+
+		// Move-drain periodic sweep (design §3.2): the second completion
+		// trigger alongside every /downlink poll — covers a draining child
+		// that never polls again, and re-evaluates any drain that persisted
+		// through this restart. Only meaningful where kind=node children can
+		// be enrolled at all, i.e. wherever the repl door exists. Joins the
+		// same WaitGroup as the repl loops and the pruner: Stop must wait for
+		// an in-flight sweep before closing the store.
+		n.wg.Add(1)
+		go func() {
+			defer n.wg.Done()
+			rs.RunDrainTicker(n.stop)
+		}()
 	}
 
 	// 6. Uplink + downlink loops towards the parent.
