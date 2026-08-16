@@ -28,14 +28,20 @@
 # This is what lets the chaos suite partition a SINGLE link (`docker network
 # disconnect` of the child's endpoint from its uplink network) while every
 # other link — including the machine feeding the partitioned edge — keeps
-# flowing. Naming invariant (load-bearing): Docker attaches a container's
-# port-forwarding to its ALPHABETICALLY FIRST network, so every node's
-# downlink network (linkN…) must sort BEFORE its uplink network (linkN+1…) —
-# the depth-numbered names guarantee that. Then disconnecting a node from its
-# uplink never touches the endpoint its published 127.0.0.1 ports ride on,
-# and the host can still observe a partitioned node over HTTP/MQTT (the
-# chaos primitives' self-tests assert exactly this and go red if a Docker
-# version changes the rule).
+# flowing.
+#
+# Load-bearing detail — host observability under partition: Docker binds a
+# container's published-port forwarding to ONE endpoint (measured on Docker
+# Desktop 29: the network attached at container create — compose picks it by
+# `priority`, then name; `gw_priority` does NOT move the forwarding). So a
+# node that can be partitioned must never lose that endpoint: each one gets
+# a dedicated single-member OBSERVATION network (`host-<node>`) that wins
+# the primary pick under both rules — `priority: 100` and sorting before
+# every `link*` name — and that no chaos primitive ever disconnects. The
+# host can therefore always observe a partitioned node over HTTP/MQTT; the
+# chaos self-tests assert reachability DURING a partition and go red if a
+# Docker version changes the selection rule. Single-member networks carry no
+# node↔node connectivity, so they cannot leak around a severed link.
 services:
   global:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -60,7 +66,11 @@ services:
       - "site1-data:/data"
     ports: ["127.0.0.1:18081:8080", "127.0.0.1:11881:1883"]
     depends_on: [global]
-    networks: [link2-edges, link3-hub]
+    networks:
+      host-site1:    # observation net = primary: host ports survive partitions
+        priority: 100
+      link2-edges: {}
+      link3-hub: {}
 
   edge1:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -72,7 +82,11 @@ services:
       - "edge1-data:/data"
     ports: ["127.0.0.1:18082:8080", "127.0.0.1:11883:1883"]
     depends_on: [site1]
-    networks: [link1-m1, link2-edges]
+    networks:
+      host-edge1:    # observation net = primary: host ports survive partitions
+        priority: 100
+      link1-m1: {}
+      link2-edges: {}
 
   edge2:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -84,7 +98,11 @@ services:
       - "edge2-data:/data"
     ports: ["127.0.0.1:18083:8080", "127.0.0.1:11884:1883"]
     depends_on: [site1]
-    networks: [link1-m2, link2-edges]
+    networks:
+      host-edge2:    # observation net = primary: host ports survive partitions
+        priority: 100
+      link1-m2: {}
+      link2-edges: {}
 
   m1:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -121,6 +139,9 @@ volumes:
   edge2-data: {}
 
 networks:
+  host-edge1: {}
+  host-edge2: {}
+  host-site1: {}
   link1-m1: {}
   link1-m2: {}
   link2-edges: {}
