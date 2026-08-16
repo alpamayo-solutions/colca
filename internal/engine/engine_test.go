@@ -203,6 +203,80 @@ func TestTimeSyncRejectedAtEveryIngestDoor(t *testing.T) {
 	}
 }
 
+// Dropping a forged _TimeSync record from a replicated
+// batch must not falsely trip the §6.4 gap-jump detector — that log/metric
+// means genuine, investigatable child-side data loss, and dropping an
+// ephemeral _TimeSync record lost nothing. A gap only PARTIALLY explained by
+// a dropped _TimeSync record (a real offset is also genuinely missing) must
+// still log, unchanged — the fix removes the false positive, not real
+// detection.
+func TestTimeSyncDropDoesNotFalsePositiveGapJump(t *testing.T) {
+	const marker = "replication offset jump"
+
+	t.Run("gap fully explained by the dropped record is silent", func(t *testing.T) {
+		s, err := store.Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+		buf := captureLogs(t)
+		m := metrics.New(s, config.Retention{}, nil)
+		e := New(s, &config.Config{ULID: "n-parent"}, testIDs(), nil, m, nil)
+
+		recs := []store.ReplRecord{
+			{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/child1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "child1/m1/a", KVNode: "m1"},
+			{ChildOffset: 2, Topic: "colca/v1/_TimeSync/n-child", Payload: []byte(`{"now_ms":1}`), TS: 1},
+			{ChildOffset: 3, Topic: "colca/v1/_Metric/m1/child1/m1/b", Payload: []byte(`{"v":2}`), TS: 2, KVPath: "child1/m1/b", KVNode: "m1"},
+		}
+		applied, hwm, err := e.IngestReplicated("n-child", "metrics", recs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if applied != 2 || hwm != 3 {
+			t.Fatalf("applied=%d hwm=%d, want 2/3", applied, hwm)
+		}
+		if strings.Contains(buf.String(), marker) {
+			t.Fatalf("gap fully explained by a dropped _TimeSync record must not log a jump:\n%s", buf.String())
+		}
+		if body := scrapeBody(t, m); strings.Contains(body, `colca_repl_gap_applied_total{child="n-child",stream="metrics"}`) {
+			t.Fatalf("gap fully explained by a dropped _TimeSync record must not touch colca_repl_gap_applied_total:\n%s", body)
+		}
+	})
+
+	t.Run("a genuinely missing offset alongside a dropped record still logs", func(t *testing.T) {
+		s, err := store.Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+		buf := captureLogs(t)
+		m := metrics.New(s, config.Retention{}, nil)
+		e := New(s, &config.Config{ULID: "n-parent"}, testIDs(), nil, m, nil)
+
+		// Offset 2 is the forged _TimeSync (dropped, explained); offset 3 is
+		// ALSO simply absent from the batch — a real, separate loss — so the
+		// gap from 1 to 4 is only partially explained by the drop.
+		recs := []store.ReplRecord{
+			{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/child1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "child1/m1/a", KVNode: "m1"},
+			{ChildOffset: 2, Topic: "colca/v1/_TimeSync/n-child", Payload: []byte(`{"now_ms":1}`), TS: 1},
+			{ChildOffset: 4, Topic: "colca/v1/_Metric/m1/child1/m1/c", Payload: []byte(`{"v":3}`), TS: 3, KVPath: "child1/m1/c", KVNode: "m1"},
+		}
+		applied, hwm, err := e.IngestReplicated("n-child", "metrics", recs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if applied != 2 || hwm != 4 {
+			t.Fatalf("applied=%d hwm=%d, want 2/4", applied, hwm)
+		}
+		if !strings.Contains(buf.String(), marker) || !strings.Contains(buf.String(), "have=1") || !strings.Contains(buf.String(), "got=4") {
+			t.Fatalf("a partially-explained gap (real offset 3 also missing) must still log:\n%s", buf.String())
+		}
+		if body := scrapeBody(t, m); !strings.Contains(body, `colca_repl_gap_applied_total{child="n-child",stream="metrics"} 1`) {
+			t.Fatalf("a partially-explained gap must still increment colca_repl_gap_applied_total:\n%s", body)
+		}
+	})
+}
+
 // A client with a covering cmd grant may publish commands of the granted
 // class into the granted zone — absolute node-local paths, no mount rewrite,
 // no level-4 identity rule (auth §5.3 ActCmd).

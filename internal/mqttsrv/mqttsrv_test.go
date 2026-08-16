@@ -447,6 +447,97 @@ func TestTimeSyncPublishRejectedFromClient(t *testing.T) {
 	}
 }
 
+// The beacon publishes at QoS 0 specifically so it is
+// NEVER queued for an offline subscriber. Confirmed against the vendored
+// mochi-mqtt/server/v2 source: publishToClient only ever touches
+// cl.State.Inflight (the map attachClient's ResendInflightMessages replays
+// on reconnect) inside `if out.FixedHeader.Qos > 0` — at QoS 0 a publish to
+// an offline client is simply dropped, never queued. A persistent-session
+// (CleanSession=false) machine that misses beacons while disconnected must
+// NOT receive them backdated on reconnect — only fresh beacons published
+// while it is actually connected.
+func TestTimeSyncBeaconAtQoS0NeverQueuedForOfflineSubscriber(t *testing.T) {
+	w := newWorld(t)
+
+	dial := func(clientID string) paho.Client {
+		t.Helper()
+		opts := paho.NewClientOptions().
+			AddBroker("ssl://" + w.srv.Addr()).
+			SetTLSConfig(w.m1.TLSConfig()).
+			SetClientID(clientID).
+			SetUsername(w.m1.ULID).
+			SetProtocolVersion(4).
+			SetCleanSession(false). // persistent session — the property the bug depends on
+			SetConnectTimeout(5 * time.Second)
+		c := paho.NewClient(opts)
+		tok := c.Connect()
+		if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+			t.Fatalf("connect: %v", tok.Error())
+		}
+		return c
+	}
+
+	// Subscribe at QoS 1 deliberately, even though the real colca-machine
+	// subscribes at QoS 0 post-fix: mochi's effective delivered QoS is
+	// min(publish_qos, subscribe_qos), so subscribing at 0 here would clamp
+	// delivery to 0 regardless of what the node publishes at, and this test
+	// would no longer isolate — and could no longer catch a regression of —
+	// the PUBLISH-side QoS this fix is actually about.
+	msgs := make(chan paho.Message, 8)
+	c1 := dial("m1-persistent")
+	tok := c1.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
+	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		t.Fatalf("subscribe: %v", tok.Error())
+	}
+	// c1's own connect-triggered beacon fired before this subscribe even
+	// existed (session establishment happens server-side before the client
+	// can issue SUBSCRIBE) — trigger and drain one explicit beacon instead,
+	// to establish a known-good baseline before the "outage" below.
+	w.srv.PublishTimeSync()
+	select {
+	case <-msgs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no beacon received while c1 was connected and subscribed")
+	}
+
+	// "Outage": disconnect WITHOUT unsubscribing — the persistent session
+	// survives server-side (mochi's expire guard on Clean=false).
+	c1.Disconnect(100)
+	deadline := time.Now().Add(5 * time.Second)
+	for c1.IsConnectionOpen() {
+		if time.Now().After(deadline) {
+			t.Fatal("c1 never registered as disconnected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Beacons published while offline — the stale ones a QoS-1 beacon would
+	// have queued and redelivered on reconnect.
+	for i := 0; i < 3; i++ {
+		w.srv.PublishTimeSync()
+	}
+
+	// Reconnect with the SAME persistent session (same client ID). Only ONE
+	// beacon may arrive: this reconnect's own connect-triggered beacon.
+	c2 := dial("m1-persistent")
+	defer c2.Disconnect(100)
+	tok = c2.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
+	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+		t.Fatalf("re-subscribe on reconnect: %v", tok.Error())
+	}
+
+	select {
+	case <-msgs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no beacon on reconnect")
+	}
+	select {
+	case m := <-msgs:
+		t.Fatalf("a beacon arrived that must have been dropped for the offline subscriber (QoS 0 must never queue): topic=%s", m.Topic())
+	case <-time.After(700 * time.Millisecond):
+	}
+}
+
 // Time-sync design §2.2/§4: every machine session may subscribe the beacon
 // filter regardless of its zone grants — m1 has no read:# grant and its own
 // zone is "m1", nothing to do with _TimeSync, yet the subscribe must still

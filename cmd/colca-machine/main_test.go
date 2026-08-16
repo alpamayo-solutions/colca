@@ -2,10 +2,40 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
+
+	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 )
+
+// fakeBeaconMessage is a minimal pahomqtt.Message for driving handleBeacon
+// directly in tests — the paho Message interface is small enough that a real
+// broker round trip is unnecessary to pin the Duplicate() handling.
+type fakeBeaconMessage struct {
+	nowMS     int64
+	duplicate bool
+}
+
+func (m fakeBeaconMessage) Duplicate() bool   { return m.duplicate }
+func (m fakeBeaconMessage) Qos() byte         { return 0 }
+func (m fakeBeaconMessage) Retained() bool    { return false }
+func (m fakeBeaconMessage) Topic() string     { return "colca/v1/_TimeSync/n1" }
+func (m fakeBeaconMessage) MessageID() uint16 { return 0 }
+func (m fakeBeaconMessage) Payload() []byte {
+	b, _ := json.Marshal(struct {
+		NowMS int64 `json:"now_ms"`
+	}{m.nowMS})
+	return b
+}
+func (m fakeBeaconMessage) Ack() {}
+
+var _ pahomqtt.Message = fakeBeaconMessage{}
+
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // fakeClock is a manually-advanced wall clock (no real time.Sleep anywhere in
 // this file — testing.md's "poll with deadlines / fake clocks preferred"):
@@ -310,4 +340,105 @@ func TestIsTimeSyncTopic(t *testing.T) {
 			t.Errorf("isTimeSyncTopic(%q) = %v, want %v", topic, got, want)
 		}
 	}
+}
+
+// A broker-flagged duplicate/resent beacon — the
+// exact shape of a stale beacon a persistent MQTT session could otherwise
+// redeliver after an outage spanning >= 1 beacon_interval — must be dropped
+// outright by handleBeacon: it must not release the post-connect hold, and
+// it must not corrupt the offset. This pins the traced scenario
+// through mochi-mqtt/paho: on reconnect, ts.Connect() opens a fresh hold,
+// then a stale (Duplicate()==true) beacon carrying an OLD now_ms could
+// otherwise satisfy wasHolding and compute
+// offsetMS = old_now_ms - current_wall_receipt, understating authoritative
+// time by roughly the outage length — the "clock behind -> expired commands
+// execute" failure design §1.1 exists to prevent. A genuine (non-duplicate)
+// beacon that arrives afterwards must still work normally.
+func TestHandleBeaconIgnoresDuplicateFlaggedMessage(t *testing.T) {
+	fc := newFakeClock(epoch)
+	ts := newTimeSync(fc.Now, 10000) // 10s hold
+	ts.Connect()
+
+	// A stale beacon: Duplicate()=true, carrying a now_ms from long before
+	// the outage (simulates the redelivered pre-outage sample).
+	staleNowMS := epoch.Add(-10 * time.Minute).UnixMilli()
+	handleBeacon(discardLogger(), ts, fakeBeaconMessage{nowMS: staleNowMS, duplicate: true})
+
+	if ready, _, _ := decide(ts.Snapshot(), fc.Now()); ready {
+		t.Fatal("a duplicate-flagged beacon must not release the hold")
+	}
+	if got := ts.Snapshot().offsetMS; got != 0 {
+		t.Fatalf("a duplicate-flagged beacon must not update the offset, got offsetMS=%d (a real sample would show ~ -10 minutes = %d)",
+			got, epoch.UnixMilli()-staleNowMS)
+	}
+
+	// A genuine, fresh (non-duplicate) beacon must still work normally.
+	handleBeacon(discardLogger(), ts, fakeBeaconMessage{nowMS: fc.Now().UnixMilli(), duplicate: false})
+	ready, syncedNow, deadlineHit := decide(ts.Snapshot(), fc.Now())
+	if !ready || deadlineHit {
+		t.Fatalf("a genuine beacon must release the hold via the beacon path, got ready=%v deadlineHit=%v", ready, deadlineHit)
+	}
+	if !syncedNow.Equal(fc.Now()) {
+		t.Fatalf("synced_now after the genuine beacon = %v, want %v", syncedNow, fc.Now())
+	}
+}
+
+// Same scenario as above, but proving the concrete failure mode end to end
+// through result() — the mutation-evidence companion to
+// TestHandleBeaconIgnoresDuplicateFlaggedMessage. Per design §1.1, the
+// dangerous direction is a clock reading BEHIND true time: "genuinely
+// expired commands execute." A stale beacon's negative offset makes
+// synced_now UNDERSTATE true time, so a command that is ALREADY EXPIRED
+// relative to the real reconnect instant can look not-yet-expired relative
+// to the corrupted synced_now — a false 200 on a command that should 498.
+func TestStaleDuplicateBeaconWouldCorruptExpiryWithoutTheGuard(t *testing.T) {
+	// The reconnect happens at `epoch`. The command expired 1 minute BEFORE
+	// that, in real/authoritative time — a genuinely stale command that must
+	// 498 no matter what.
+	cmd := map[string]any{"expires_at": float64(epoch.Add(-1 * time.Minute).UnixMilli())}
+	// The stale, redelivered beacon reports authoritative time from 10
+	// minutes before the outage even started — an old now_ms a persistent
+	// session could requeue and redeliver on reconnect.
+	staleNowMS := epoch.Add(-10 * time.Minute).UnixMilli()
+
+	t.Run("guarded: the stale duplicate is ignored, decision stays correct", func(t *testing.T) {
+		fc := newFakeClock(epoch)
+		ts := newTimeSync(fc.Now, 10000)
+		ts.Connect()
+
+		handleBeacon(discardLogger(), ts, fakeBeaconMessage{nowMS: staleNowMS, duplicate: true})
+		if ready, _, _ := decide(ts.Snapshot(), fc.Now()); ready {
+			t.Fatal("precondition: must still be holding — the duplicate must not have released it")
+		}
+		// No genuine beacon arrives before the deadline: fail open on the
+		// last-known offset, which the duplicate never touched (still 0).
+		fc.Advance(10 * time.Second)
+		ready, syncedNow, deadlineHit := decide(ts.Snapshot(), fc.Now())
+		if !ready || !deadlineHit {
+			t.Fatalf("expected the deadline fail-open path, got ready=%v deadlineHit=%v", ready, deadlineHit)
+		}
+		code, msg := result(cmd, syncedNow.UnixMilli())
+		if code != codeExpired {
+			t.Fatalf("guarded path: code=%d (%s), want %d (codeExpired) — a genuinely stale command must still 498", code, msg, codeExpired)
+		}
+	})
+
+	t.Run("mutation check: skipping the Duplicate() guard reproduces the false-200 bug", func(t *testing.T) {
+		// Simulates main.go with handleBeacon's `if msg.Duplicate() { return }`
+		// removed: the stale sample is fed straight into ts.Beacon.
+		fc := newFakeClock(epoch)
+		ts := newTimeSync(fc.Now, 10000)
+		ts.Connect()
+		ts.Beacon(staleNowMS) // no Duplicate() check — the pre-fix behavior
+
+		ready, syncedNow, _ := decide(ts.Snapshot(), fc.Now())
+		if !ready {
+			t.Fatal("a beacon (even a stale one) releases the hold immediately")
+		}
+		code, msg := result(cmd, syncedNow.UnixMilli())
+		if code != codeOK {
+			t.Fatalf("mutation check failed: without the Duplicate() guard, got code=%d (%s), want codeOK (%d) — "+
+				"the bug did not reproduce, so this test cannot distinguish the guard from a no-op", code, msg, codeOK)
+		}
+	})
 }
