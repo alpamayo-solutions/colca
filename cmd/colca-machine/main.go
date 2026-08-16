@@ -313,37 +313,53 @@ func run() int {
 		// SetDefaultPublishHandler ahead of the SUBSCRIBE completing (see
 		// below) must still see the hold already open.
 		ts.Connect()
-		// Subscribing here (and not once after Connect) re-establishes the
-		// subscription after every reconnect — otherwise the machine goes deaf
-		// as soon as the edge node restarts.
-		tk := c.Subscribe(cmdFilter, 1, onCommand)
-		if !tk.WaitTimeout(subscribeTimeout) {
-			log.Error("subscribe not confirmed", "filter", cmdFilter, "waited", subscribeTimeout)
-			return
-		}
-		if err := tk.Error(); err != nil {
-			log.Error("subscribe failed", "filter", cmdFilter, "err", err)
-			return
-		}
-		log.Info("subscribed", "filter", cmdFilter, "qos", 1)
 
-		// Time-sync design §2.2: the node beacons on this very session
-		// establishment, so this subscribe races the beacon by design — the
-		// SetDefaultPublishHandler fallback below covers the case where the
-		// beacon (or a redelivered command) arrives before this SUBSCRIBE is
-		// registered as a route.
+		// Both SUBSCRIBE packets are issued CONCURRENTLY — c.Subscribe
+		// itself is non-blocking (it queues the packet and returns a
+		// token immediately); only WAITING on that token blocks. Calling
+		// Subscribe for cmd, THEN blocking on its token, THEN calling
+		// Subscribe for beacon (the original shape) meant a slow or
+		// contended broker's cmd SUBACK — bounded by the SAME
+		// subscribeTimeout order of magnitude as time_sync's hold_ms —
+		// could eat into the beacon subscribe's own share of the
+		// reconnect-hold window before its packet was even SENT. Found
+		// hardening the design §2.2 subscribe-triggered beacon fix: a CI run showed the reconnect-hold decision land on
+		// the deadline despite the structural fix, and this sequential
+		// coupling is the residual explanation once the primary
+		// connect-vs-subscribe race was already closed. Issuing both
+		// packets back-to-back before waiting on either token removes the
+		// coupling: the beacon SUBSCRIBE is in flight at essentially the
+		// same instant as the cmd one, not queued behind its full round
+		// trip.
+		cmdTok := c.Subscribe(cmdFilter, 1, onCommand)
+		// Time-sync design §2.2: the node beacons on this session's
+		// SUBSCRIBE to colca/v1/_TimeSync/+, so issuing it here — immediately,
+		// concurrently with the cmd subscribe above, not queued behind it —
+		// is what makes the reconnect hold (design §2.3 rule 2) land inside
+		// hold_ms deterministically, not merely usually.
 		//
 		// QoS 0: the node now publishes the beacon
 		// at QoS 0 (mqttsrv.go), so the effective delivered QoS is
 		// min(0, sub.Qos) = 0 regardless of what's requested here — matching
 		// it explicitly documents that this subscription deliberately wants
 		// no at-least-once/redelivery semantics, not accidentally-QoS-0.
-		btk := c.Subscribe(beaconFilter, 0, onBeacon)
-		if !btk.WaitTimeout(subscribeTimeout) {
+		beaconTok := c.Subscribe(beaconFilter, 0, onBeacon)
+
+		if !cmdTok.WaitTimeout(subscribeTimeout) {
+			log.Error("subscribe not confirmed", "filter", cmdFilter, "waited", subscribeTimeout)
+			return
+		}
+		if err := cmdTok.Error(); err != nil {
+			log.Error("subscribe failed", "filter", cmdFilter, "err", err)
+			return
+		}
+		log.Info("subscribed", "filter", cmdFilter, "qos", 1)
+
+		if !beaconTok.WaitTimeout(subscribeTimeout) {
 			log.Error("subscribe not confirmed", "filter", beaconFilter, "waited", subscribeTimeout)
 			return
 		}
-		if err := btk.Error(); err != nil {
+		if err := beaconTok.Error(); err != nil {
 			log.Error("subscribe failed", "filter", beaconFilter, "err", err)
 			return
 		}
