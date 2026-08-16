@@ -238,12 +238,20 @@ type TimeSync struct {
 	BeaconInterval Duration `yaml:"beacon_interval"`
 	// HoldMS is how long a machine buffers expiry decisions after
 	// (re)connect before proceeding on its last-known offset (design §2.3
-	// rule 2, default 10000). Parsed and validated here; not yet consumed —
-	// a later task builds the machine-side hold.
-	HoldMS int64 `yaml:"hold_ms"`
+	// rule 2). A pointer because absent and explicit-0 are NOT the same
+	// state (same rationale as Retention.Interval): absent means "apply the
+	// §2.5 default (10000)"; an operator who writes hold_ms: 0 means "no
+	// hold" (proceed immediately on last-known offset, skip the buffering
+	// window entirely) — a later task builds the machine-side hold that
+	// consumes this distinction.
+	HoldMS *int64 `yaml:"hold_ms"`
 	// DriftWarnMS is the |offset_ms| threshold past which colcad logs a
-	// warning (design §2.4, default 5000). Consumed by this task.
-	DriftWarnMS int64 `yaml:"drift_warn_ms"`
+	// warning (design §2.4). A pointer for the same reason as HoldMS: absent
+	// means "apply the §2.5 default (5000)"; an operator who writes
+	// drift_warn_ms: 0 means "warn on any nonzero offset" — a real,
+	// consumable setting (maximally sensitive drift alerting), not "use the
+	// default". Consumed by this task (engine.ApplyClockSample).
+	DriftWarnMS *int64 `yaml:"drift_warn_ms"`
 }
 
 const (
@@ -253,7 +261,11 @@ const (
 )
 
 // EffectiveBeaconInterval applies the §2.5 default (30s) when
-// BeaconInterval is unset (zero value).
+// BeaconInterval is unset (zero value). BeaconInterval stays a bare Duration
+// (not a pointer) because, unlike HoldMS/DriftWarnMS, an explicit
+// beacon_interval: 0 has no distinct meaning the design defines — "never
+// beacon" is not a documented setting — so zero-means-default is
+// unambiguous here.
 func (t TimeSync) EffectiveBeaconInterval() time.Duration {
 	if time.Duration(t.BeaconInterval) <= 0 {
 		return defaultBeaconInterval
@@ -261,35 +273,43 @@ func (t TimeSync) EffectiveBeaconInterval() time.Duration {
 	return time.Duration(t.BeaconInterval)
 }
 
-// EffectiveHoldMS applies the §2.5 default (10000) when HoldMS is unset
-// (zero value).
+// EffectiveHoldMS returns the §2.5 default (10000) when HoldMS is absent
+// (nil), or the configured value — including an explicit 0, which is the
+// operator's "no hold" (design §2.3 rule 2). Callers (task 2's machine hold
+// logic) MUST treat a returned 0 as "do not buffer at all", not as "use the
+// default" — that translation already happened here.
 func (t TimeSync) EffectiveHoldMS() int64 {
-	if t.HoldMS <= 0 {
+	if t.HoldMS == nil {
 		return defaultHoldMS
 	}
-	return t.HoldMS
+	return *t.HoldMS
 }
 
-// EffectiveDriftWarnMS applies the §2.5 default (5000) when DriftWarnMS is
-// unset (zero value).
+// EffectiveDriftWarnMS returns the §2.5 default (5000) when DriftWarnMS is
+// absent (nil), or the configured value — including an explicit 0, which is
+// the operator's "warn on any nonzero offset" (design §2.4). Callers
+// (engine.ApplyClockSample) MUST treat a returned 0 as that literal
+// threshold, not as "use the default" — that translation already happened
+// here.
 func (t TimeSync) EffectiveDriftWarnMS() int64 {
-	if t.DriftWarnMS <= 0 {
+	if t.DriftWarnMS == nil {
 		return defaultDriftWarnMS
 	}
-	return t.DriftWarnMS
+	return *t.DriftWarnMS
 }
 
 // validate checks the time_sync: block (design §2.5): non-negative values
-// only — zero is the documented "use the default" sentinel, not an error.
+// only — an absent field or an explicit 0 (HoldMS/DriftWarnMS) are both
+// meaningful, documented settings, not errors; only negative is rejected.
 func (t TimeSync) validate() error {
 	if time.Duration(t.BeaconInterval) < 0 {
 		return fmt.Errorf("config: time_sync.beacon_interval must not be negative, got %s", time.Duration(t.BeaconInterval))
 	}
-	if t.HoldMS < 0 {
-		return fmt.Errorf("config: time_sync.hold_ms must not be negative, got %d", t.HoldMS)
+	if t.HoldMS != nil && *t.HoldMS < 0 {
+		return fmt.Errorf("config: time_sync.hold_ms must not be negative, got %d", *t.HoldMS)
 	}
-	if t.DriftWarnMS < 0 {
-		return fmt.Errorf("config: time_sync.drift_warn_ms must not be negative, got %d", t.DriftWarnMS)
+	if t.DriftWarnMS != nil && *t.DriftWarnMS < 0 {
+		return fmt.Errorf("config: time_sync.drift_warn_ms must not be negative, got %d", *t.DriftWarnMS)
 	}
 	return nil
 }

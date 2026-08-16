@@ -458,18 +458,135 @@ time_sync:
 	}
 }
 
+// msPtr builds a *int64 for struct-literal test setup, mirroring the
+// pointer HoldMS/DriftWarnMS unmarshal into (nil = absent).
+func msPtr(v int64) *int64 { return &v }
+
 // TestTimeSyncValidationRejectsNegativeValues pins design §2.5's implicit
-// non-negative contract: zero is the documented "use the default" sentinel,
-// but a negative value is a config error, for all three fields.
+// non-negative contract: a negative value is a config error, for all three
+// fields — including an explicit negative HoldMS/DriftWarnMS, not just a
+// negative BeaconInterval.
 func TestTimeSyncValidationRejectsNegativeValues(t *testing.T) {
 	for name, ts := range map[string]TimeSync{
 		"negative beacon_interval": {BeaconInterval: Duration(-time.Second)},
-		"negative hold_ms":         {HoldMS: -1},
-		"negative drift_warn_ms":   {DriftWarnMS: -1},
+		"negative hold_ms":         {HoldMS: msPtr(-1)},
+		"negative drift_warn_ms":   {DriftWarnMS: msPtr(-1)},
 	} {
 		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", TimeSync: ts}
 		if err := c.Validate(); err == nil {
 			t.Fatalf("%s: want validation error", name)
 		}
 	}
+}
+
+// TestTimeSyncHoldMSAbsentVsExplicitZeroDiverge and its DriftWarnMS sibling
+// below are the fix for a bug: HoldMS/DriftWarnMS used to be bare
+// int64 fields where an explicit 0 was indistinguishable from "the key was
+// never written", silently collapsing both to the §2.5 default — the exact
+// ambiguity Retention.Interval was made a pointer to fix. These pin the
+// pointer-based three-state contract at the struct level: absent (nil)
+// applies the default; an explicit 0 is a real, distinct, consumable
+// setting.
+func TestTimeSyncHoldMSAbsentVsExplicitZeroDiverge(t *testing.T) {
+	absent := TimeSync{}
+	if got, want := absent.EffectiveHoldMS(), int64(10000); got != want {
+		t.Fatalf("absent hold_ms: got %d want default %d", got, want)
+	}
+	explicitZero := TimeSync{HoldMS: msPtr(0)}
+	if got, want := explicitZero.EffectiveHoldMS(), int64(0); got != want {
+		t.Fatalf("explicit hold_ms: 0 must mean \"no hold\" (0), not silently apply the default: got %d want %d", got, want)
+	}
+}
+
+func TestTimeSyncDriftWarnMSAbsentVsExplicitZeroDiverge(t *testing.T) {
+	absent := TimeSync{}
+	if got, want := absent.EffectiveDriftWarnMS(), int64(5000); got != want {
+		t.Fatalf("absent drift_warn_ms: got %d want default %d", got, want)
+	}
+	explicitZero := TimeSync{DriftWarnMS: msPtr(0)}
+	if got, want := explicitZero.EffectiveDriftWarnMS(), int64(0); got != want {
+		t.Fatalf("explicit drift_warn_ms: 0 must mean \"warn on any nonzero offset\" (0), not silently apply the default: got %d want %d", got, want)
+	}
+}
+
+// loadTimeSync mirrors loadRetention: writes a minimal config with a
+// time_sync: block built from body and loads it through the real YAML path.
+func loadTimeSync(t *testing.T, body string) (*Config, error) {
+	t.Helper()
+	doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nkey_file: /keys/edge1.key\n"
+	if body != "" {
+		doc += "time_sync:\n" + body
+	}
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return Load(p)
+}
+
+// TestTimeSyncHoldMSAndDriftWarnMSThreeStatesThroughLoad is the same
+// absent-vs-explicit-0 proof as the two struct-level tests above, but
+// through the real YAML Load path — the mutation evidence for the fix: an
+// operator writing "hold_ms: 0" or "drift_warn_ms: 0" in a real config file
+// must get the meaningful zero, not the default silently substituted back
+// in by an old bare-int64 field.
+func TestTimeSyncHoldMSAndDriftWarnMSThreeStatesThroughLoad(t *testing.T) {
+	t.Run("hold_ms absent defaults to 10000", func(t *testing.T) {
+		c, err := loadTimeSync(t, "  beacon_interval: 30s\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.TimeSync.HoldMS != nil {
+			t.Fatalf("hold_ms must be nil (absent), got %v", *c.TimeSync.HoldMS)
+		}
+		if got, want := c.TimeSync.EffectiveHoldMS(), int64(10000); got != want {
+			t.Fatalf("got %d want %d", got, want)
+		}
+	})
+
+	t.Run("no time_sync block at all defaults hold_ms to 10000", func(t *testing.T) {
+		c, err := loadTimeSync(t, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := c.TimeSync.EffectiveHoldMS(), int64(10000); got != want {
+			t.Fatalf("got %d want %d", got, want)
+		}
+	})
+
+	t.Run("explicit hold_ms: 0 means no hold, not the default", func(t *testing.T) {
+		c, err := loadTimeSync(t, "  hold_ms: 0\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.TimeSync.HoldMS == nil {
+			t.Fatal("hold_ms must be non-nil — the key was explicitly written")
+		}
+		if got := c.TimeSync.EffectiveHoldMS(); got != 0 {
+			t.Fatalf("explicit hold_ms:0 must mean no hold (EffectiveHoldMS()==0), got %d", got)
+		}
+	})
+
+	t.Run("explicit drift_warn_ms: 0 means warn on any offset, not the default", func(t *testing.T) {
+		c, err := loadTimeSync(t, "  drift_warn_ms: 0\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.TimeSync.DriftWarnMS == nil {
+			t.Fatal("drift_warn_ms must be non-nil — the key was explicitly written")
+		}
+		if got := c.TimeSync.EffectiveDriftWarnMS(); got != 0 {
+			t.Fatalf("explicit drift_warn_ms:0 must mean warn on any offset (EffectiveDriftWarnMS()==0), got %d", got)
+		}
+	})
+
+	t.Run("explicit hold_ms: 20000", func(t *testing.T) {
+		c, err := loadTimeSync(t, "  hold_ms: 20000\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := c.TimeSync.EffectiveHoldMS(), int64(20000); got != want {
+			t.Fatalf("got %d want %d", got, want)
+		}
+	})
 }

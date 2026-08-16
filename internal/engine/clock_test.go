@@ -74,7 +74,8 @@ func TestEngineApplyClockSampleWarnsPastDriftThreshold(t *testing.T) {
 	buf := captureLogs(t)
 	wall := time.UnixMilli(0)
 	clk := clock.New(false, func() time.Time { return wall })
-	cfg := &config.Config{ULID: "n-child", TimeSync: config.TimeSync{DriftWarnMS: 1000}}
+	driftWarnMS := int64(1000)
+	cfg := &config.Config{ULID: "n-child", TimeSync: config.TimeSync{DriftWarnMS: &driftWarnMS}}
 	e := newClockEngine(t, cfg, clk, nil)
 
 	e.ApplyClockSample(500) // 500ms drift, under the 1000ms threshold
