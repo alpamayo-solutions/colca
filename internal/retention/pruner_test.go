@@ -35,7 +35,7 @@ func mustParts(t *testing.T) (*store.Store, *engine.Engine) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return st, engine.New(st, cfg, reg, nil, nil)
+	return st, engine.New(st, cfg, reg, nil, nil, nil)
 }
 
 func newPruner(t *testing.T, st *store.Store, eng *engine.Engine, ret config.Retention) *Pruner {
@@ -48,7 +48,7 @@ func newPruner(t *testing.T, st *store.Store, eng *engine.Engine, ret config.Ret
 // ..._gap_records_total, ..._state_refresh_*_total).
 func newPrunerWithMetrics(t *testing.T, st *store.Store, eng *engine.Engine, ret config.Retention) (*Pruner, *metrics.Metrics) {
 	t.Helper()
-	m := metrics.New(st, ret)
+	m := metrics.New(st, ret, nil)
 	return NewPruner(st, eng, ret, m, nodeULID), m
 }
 

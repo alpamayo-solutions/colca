@@ -3,6 +3,7 @@ package repl
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -46,8 +47,8 @@ func newParentFixture(t *testing.T) *parentFixture {
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil)
-	pm := metrics.New(ps, config.Retention{})
+	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
+	pm := metrics.New(ps, config.Retention{}, nil)
 	srv, addr := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
 	t.Cleanup(srv.Stop)
 	return &parentFixture{
@@ -87,25 +88,34 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 		t.Fatalf("prune: %d %v", n, err)
 	}
 
+	before := time.Now().UnixMilli()
 	resp, err := f.cl.http.Get("https://" + f.addr + "/downlink?after=1&max=10")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	after := time.Now().UnixMilli()
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("downlink: %d %v", resp.StatusCode, err)
 	}
 	b64 := func(i int) string {
 		return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`{"correlation_id":"c%d","expires_at":99999999999}`, i)))
 	}
+	// now_ms (time-sync design §2.1) is a live timestamp — checked
+	// separately for plausibility and stripped before the exact-shape
+	// comparison of everything else on the wire.
+	rest, nowMS := stripNowMS(t, body)
+	if nowMS < before || nowMS > after {
+		t.Fatalf("now_ms %d outside [%d, %d] — the parent is root here, so it must stamp its own raw wall clock", nowMS, before, after)
+	}
 	// Mount-stripped topics, parent offsets, records beginning at the LWM.
 	want := `{"gap":{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":10,"last_ts":20,"approx":false},` +
 		`"next":5,"records":[` +
 		`{"o":3,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(3) + `","ts":30},` +
-		`{"o":4,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(4) + `","ts":40}]}` + "\n"
-	if string(body) != want {
-		t.Fatalf("downlink gap wire shape:\n got %s\nwant %s", body, want)
+		`{"o":4,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(4) + `","ts":40}]}`
+	if rest != want {
+		t.Fatalf("downlink gap wire shape:\n got %s\nwant %s", rest, want)
 	}
 
 	// At or past the LWM: no gap key.
@@ -115,12 +125,38 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	}
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
+	rest, _ = stripNowMS(t, body)
 	want = `{"next":5,"records":[` +
 		`{"o":3,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(3) + `","ts":30},` +
-		`{"o":4,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(4) + `","ts":40}]}` + "\n"
-	if string(body) != want {
-		t.Fatalf("downlink without gap:\n got %s\nwant %s", body, want)
+		`{"o":4,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(4) + `","ts":40}]}`
+	if rest != want {
+		t.Fatalf("downlink without gap:\n got %s\nwant %s", rest, want)
 	}
+}
+
+// stripNowMS decodes body, removes the now_ms key, and re-marshals
+// deterministically (encoding/json sorts map keys) so exact-wire-shape
+// assertions can check everything EXCEPT the live timestamp, which callers
+// verify separately for plausibility.
+func stripNowMS(t *testing.T, body []byte) (rest string, nowMS int64) {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatalf("decode response %s: %v", body, err)
+	}
+	raw, ok := m["now_ms"]
+	if !ok {
+		t.Fatalf("response missing now_ms (time-sync design §2.1): %s", body)
+	}
+	if err := json.Unmarshal(raw, &nowMS); err != nil {
+		t.Fatalf("now_ms not an int64: %v", err)
+	}
+	delete(m, "now_ms")
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("re-marshal without now_ms: %v", err)
+	}
+	return string(b), nowMS
 }
 
 // A gap answers the long poll immediately, and when no records survived the
@@ -166,7 +202,7 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil)
+	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
 
 	// Start once only to obtain a real address, then stop: the parent is down.
 	srv1, addr := startServer(t, pcfg, peng, parentID, preg)
@@ -174,8 +210,8 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 	pcfg.Repl.Addr = addr
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
-	cm := metrics.New(cs, config.Retention{})
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil)
+	cm := metrics.New(cs, config.Retention{}, nil)
+	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil, nil)
 	for i := 1; i <= 5; i++ {
 		mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", fmt.Sprintf(`{"v":%d}`, i))
 	}
@@ -252,8 +288,8 @@ func TestRunDownlinkContinuesPastGap(t *testing.T) {
 
 	dir := t.TempDir()
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
-	cm := metrics.New(cs, config.Retention{})
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil)
+	cm := metrics.New(cs, config.Retention{}, nil)
+	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil, nil)
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -293,7 +329,7 @@ func TestUplinkPassesStreamGapMarkerButNotCommands(t *testing.T) {
 
 	dir := t.TempDir()
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil)
+	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil, nil)
 	// Child's commands stream: a command (must stay), a gap marker and an ack
 	// (both must travel). Appended through the store: the marker is written by
 	// the pruner's prune batch in production, not through an ingest path.
@@ -345,7 +381,7 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil)
+	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil, nil)
 	for i := 1; i <= 3; i++ {
 		mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", fmt.Sprintf(`{"v":%d}`, i))
 	}

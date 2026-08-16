@@ -101,7 +101,7 @@ func TestCollectorDerivesGaugesFromStoreAtScrape(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := New(s, config.Retention{})
+	m := New(s, config.Retention{}, nil)
 	expect := `
 # HELP colca_child_hwm Highest child offset already applied, per (child, stream).
 # TYPE colca_child_hwm gauge
@@ -162,7 +162,7 @@ func TestRetentionGaugesDerivedFromStoreAndPolicy(t *testing.T) {
 	cfg := config.Retention{Streams: map[string]config.StreamRetention{
 		"metrics": {MaxAge: config.Duration(time.Hour)},
 	}}
-	m := New(s, cfg)
+	m := New(s, cfg, nil)
 
 	if got, want := gaugeValue(t, m, "colca_stream_low_water_mark", map[string]string{"stream": "metrics"}), 1.0; got != want {
 		t.Fatalf("colca_stream_low_water_mark = %v, want %v (nothing pruned yet)", got, want)
@@ -216,7 +216,7 @@ func TestBlockedByCursorCountsEveryProtectingCursorBelowTarget(t *testing.T) {
 	cfg := config.Retention{Streams: map[string]config.StreamRetention{
 		"metrics": {MaxAge: config.Duration(time.Hour)},
 	}}
-	m := New(s, cfg)
+	m := New(s, cfg, nil)
 
 	if blocked := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "metrics"}); blocked != 2 {
 		t.Fatalf("colca_retention_blocked_by_cursor = %v, want 2 (both cursors independently block)", blocked)
@@ -246,7 +246,7 @@ func TestBlockedByCursorZeroWhenPolicyWantsNothingPruned(t *testing.T) {
 	cfg := config.Retention{Streams: map[string]config.StreamRetention{
 		"commands": {MaxAge: config.Duration(1000 * 24 * time.Hour)}, // far older than any record
 	}}
-	m := New(s, cfg)
+	m := New(s, cfg, nil)
 	if got := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "commands"}); got != 0 {
 		t.Fatalf("colca_retention_blocked_by_cursor = %v, want 0 (policy wants nothing pruned)", got)
 	}
@@ -332,7 +332,7 @@ func TestCursorLagFloorsAtZero(t *testing.T) {
 	if !s.CursorAck("eager", "metrics", 9) {
 		t.Fatal("seed cursor")
 	}
-	m := New(s, config.Retention{})
+	m := New(s, config.Retention{}, nil)
 	expect := `
 # HELP colca_cursor_lag_records Records the cursor has not read yet: next_offset - position, floored at 0.
 # TYPE colca_cursor_lag_records gauge
@@ -348,7 +348,7 @@ colca_cursor_lag_records{cursor="eager",stream="metrics"} 0
 // (pre-created children) — dashboards and Plan C queries never see a missing
 // family on an idle node.
 func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
-	m := New(mustStore(t), config.Retention{})
+	m := New(mustStore(t), config.Retention{}, nil)
 	got, err := m.reg.Gather()
 	if err != nil {
 		t.Fatal(err)
@@ -399,7 +399,7 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 
 // The increment surface lands on the right child with the right value.
 func TestIncrementSurface(t *testing.T) {
-	m := New(mustStore(t), config.Retention{})
+	m := New(mustStore(t), config.Retention{}, nil)
 
 	m.IngestRecord("metrics")
 	m.IngestRecord("metrics")

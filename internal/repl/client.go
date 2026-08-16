@@ -73,38 +73,45 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity) (*Client, er
 }
 
 func (c *Client) Replicate(stream string, recs []store.ReplRecord) (hwm uint64, err error) {
-	return c.replicate(context.Background(), stream, recs)
+	hwm, _, err = c.replicate(context.Background(), stream, recs)
+	return hwm, err
 }
 
-func (c *Client) replicate(ctx context.Context, stream string, recs []store.ReplRecord) (hwm uint64, err error) {
+// replicate is the ctx-carrying implementation Replicate and RunUplink share.
+// nowMS is the parent's now_ms from the response envelope (time-sync design
+// §2.1) — callers that care about clock sync (RunUplink) apply it via
+// engine.ApplyClockSample; Replicate's exported wrapper drops it, since
+// direct callers (tests) do not need it.
+func (c *Client) replicate(ctx context.Context, stream string, recs []store.ReplRecord) (hwm uint64, nowMS int64, err error) {
 	wire := make([]wireRec, len(recs))
 	for i, r := range recs {
 		wire[i] = wireRec{O: r.ChildOffset, T: r.Topic, P: r.Payload, TS: r.TS}
 	}
 	body, err := json.Marshal(map[string]any{"stream": stream, "records": wire})
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/replicate", bytes.NewReader(body))
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("replicate: http %d", resp.StatusCode)
+		return 0, 0, fmt.Errorf("replicate: http %d", resp.StatusCode)
 	}
 	var out struct {
-		HWM uint64 `json:"hwm"`
+		HWM   uint64 `json:"hwm"`
+		NowMS int64  `json:"now_ms"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return out.HWM, nil
+	return out.HWM, out.NowMS, nil
 }
 
 type DownRec struct {
@@ -118,38 +125,45 @@ type DownRec struct {
 // inside a hole the parent's retention pruned (spec §6.2) — next then already
 // points past it.
 func (c *Client) Downlink(after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, error) {
-	return c.downlink(context.Background(), after, max, timeout)
+	recs, next, gap, _, err := c.downlink(context.Background(), after, max, timeout)
+	return recs, next, gap, err
 }
 
-func (c *Client) downlink(ctx context.Context, after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, error) {
+// downlink is the ctx-carrying implementation Downlink and RunDownlink
+// share. nowMS is the parent's now_ms from the response envelope (time-sync
+// design §2.1) — RunDownlink applies it via engine.ApplyClockSample before
+// ingesting recs (design §2.3 rule 4); Downlink's exported wrapper drops it,
+// since direct callers (tests) do not need it.
+func (c *Client) downlink(ctx context.Context, after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, int64, error) {
 	hc := *c.http
 	hc.Timeout = timeout + 10*time.Second
 	url := fmt.Sprintf("%s/downlink?after=%d&max=%d", c.base, after, max)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, after, nil, err
+		return nil, after, nil, 0, err
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, after, nil, err
+		return nil, after, nil, 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, after, nil, fmt.Errorf("downlink: http %d", resp.StatusCode)
+		return nil, after, nil, 0, fmt.Errorf("downlink: http %d", resp.StatusCode)
 	}
 	var out struct {
 		Records []wireRec      `json:"records"`
 		Next    uint64         `json:"next"`
 		Gap     *store.GapSpan `json:"gap"`
+		NowMS   int64          `json:"now_ms"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, after, nil, err
+		return nil, after, nil, 0, err
 	}
 	recs := make([]DownRec, len(out.Records))
 	for i, r := range out.Records {
 		recs[i] = DownRec{ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS}
 	}
-	return recs, out.Next, out.Gap, nil
+	return recs, out.Next, out.Gap, out.NowMS, nil
 }
 
 // RunUplink pushes metrics+entities fully and only _Ack and _StreamGap from
@@ -207,7 +221,8 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 				for i, r := range recs {
 					batch[i] = store.ReplRecord{ChildOffset: r.Offset, Topic: r.Topic, Payload: r.Payload, TS: r.TS}
 				}
-				if _, err := c.replicate(ctx, st.name, batch); err != nil {
+				_, nowMS, err := c.replicate(ctx, st.name, batch)
+				if err != nil {
 					select {
 					case <-stop:
 						return // the request was aborted by our own shutdown, not a real failure
@@ -217,6 +232,10 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 					m.UplinkPushFailed(st.name)
 					continue // parent down → cursor stays, offline buffering in action
 				}
+				// Every /replicate response carries the parent's now_ms
+				// (time-sync design §2.1) — keep the offset fresh regardless
+				// of which stream happened to trigger this push.
+				eng.ApplyClockSample(nowMS)
 				pushed = true
 			}
 			eng.Store().CursorAck(uplinkCursor, st.name, next)
@@ -248,7 +267,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		default:
 		}
 		after := eng.Store().CursorGet(downlinkCursor, downlinkStream)
-		recs, next, gap, err := c.downlink(ctx, after, replBatch, downlinkWait)
+		recs, next, gap, nowMS, err := c.downlink(ctx, after, replBatch, downlinkWait)
 		if err != nil {
 			select {
 			case <-stop:
@@ -265,6 +284,11 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			continue
 		}
 		m.DownlinkFetched(time.Now())
+		// Time-sync design §2.3 rule 4: the offset learned from this
+		// response is applied BEFORE its records are ingested, so the first
+		// poll after reconnect refreshes time before any expiry decision
+		// downstream of it.
+		eng.ApplyClockSample(nowMS)
 		if gap != nil {
 			// Spec §6.3, downlink half: log, count, continue — next already
 			// points past the hole and the cursor advances through the normal

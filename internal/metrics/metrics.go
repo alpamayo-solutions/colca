@@ -14,12 +14,14 @@
 package metrics
 
 import (
+	"math"
 	"net/http"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
@@ -132,7 +134,15 @@ type Metrics struct {
 // to derive colca_retention_pressure and colca_retention_blocked_by_cursor at
 // scrape time (EffectiveStream applies the §3.1 defaults the same way the
 // pruner does).
-func New(st *store.Store, cfg config.Retention) *Metrics {
+//
+// clk is the node's authoritative-time state (time-sync design §2.1/§2.4);
+// it must be the SAME *clock.Clock instance passed to the node's
+// *engine.Engine (see engine.New's doc comment) or these gauges report state
+// nobody ever updates. clk may be nil (unit tests that do not exercise
+// time-sync): colca_clock_offset_ms reads 0 and colca_clock_sync_age_seconds
+// reads +Inf ("never synced"), same as a non-root node before its first
+// sample.
+func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m := &Metrics{
 		reg: prometheus.NewRegistry(),
 		ingest: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -244,12 +254,42 @@ func New(st *store.Store, cfg config.Retention) *Metrics {
 		}
 	}
 
+	// Time-sync (design §2.1/§2.4): read directly from clk at scrape time —
+	// GaugeFunc, not a pushed Set(), because colca_clock_sync_age_seconds is
+	// genuinely "seconds since the last sample right now", not a value any
+	// write path could push in advance. clk == nil (unit tests that never
+	// wire time-sync) reads exactly like a non-root node that has never
+	// synced: offset 0, age +Inf.
+	clockOffset := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "colca_clock_offset_ms",
+		Help: "Current authoritative-time offset estimate in milliseconds (design §2.1/§2.4): offset_ms = now_ms - wall_receipt from the most recent /downlink or /replicate response. Always 0 on the root and on a node that has never synced.",
+	}, func() float64 {
+		if clk == nil {
+			return 0
+		}
+		return float64(clk.OffsetMS())
+	})
+	clockSyncAge := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "colca_clock_sync_age_seconds",
+		Help: "Seconds since the last accepted offset sample (design §2.4). The root exports 0 by definition. +Inf means never synced.",
+	}, func() float64 {
+		if clk == nil {
+			return math.Inf(1)
+		}
+		// clk.Now(), not time.Now(): this stays on the SAME injectable clock
+		// the rest of the time-sync decision logic uses (mandatory per
+		// design §2.1 — no bare time.Now() in this feature's decision code),
+		// so a test with a fake clock sees a deterministic age.
+		return clk.SyncAgeSeconds(clk.Now())
+	})
+
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
 		m.downlinkOK, m.downlinkFail, m.reseed,
 		m.authReject, m.aclDeny, m.kicks,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied,
+		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
 	return m
 }

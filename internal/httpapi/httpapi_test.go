@@ -55,8 +55,8 @@ func newAPI(t *testing.T) *api {
 	authtest.Enroll(t, reg, m1, "m1")
 
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
-	m := metrics.New(s, config.Retention{})
-	e := engine.New(s, cfg, reg, nil, m)
+	m := metrics.New(s, config.Retention{}, nil)
+	e := engine.New(s, cfg, reg, nil, m, nil)
 
 	tlsCfg, err := TLSConfig(nodeID, "n-test")
 	if err != nil {
@@ -693,7 +693,7 @@ func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptes
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(Handler(engine.New(s, cfg, reg, nil, m), cfg, reg, m))
+	srv := httptest.NewServer(Handler(engine.New(s, cfg, reg, nil, m, nil), cfg, reg, m))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -716,7 +716,7 @@ func TestEmptyConfiguredTokenDeniesEveryone(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	srv := plainHandler(t, cfg, metrics.New(st, config.Retention{}))
+	srv := plainHandler(t, cfg, metrics.New(st, config.Retention{}, nil))
 
 	for _, token := range []string{"", "tok"} {
 		resp, _ := req(t, srv.Client(), "GET", srv.URL+"/kv", token, nil)

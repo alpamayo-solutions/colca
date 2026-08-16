@@ -197,7 +197,11 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Debug("replicate", "child", child.ULID, "stream", in.Stream, "received", len(repl), "applied", applied, "hwm", hwm)
-	writeJSON(w, map[string]any{"hwm": hwm})
+	// now_ms is stamped at response-write time, after IngestReplicated has
+	// already run — the parent's own authoritative-now estimate (time-sync
+	// design §2.1), not raw local time, so corrections telescope down the
+	// tree. The root has no offset, so this is its raw clock.
+	writeJSON(w, map[string]any{"hwm": hwm, "now_ms": s.eng.AuthoritativeNow().UnixMilli()})
 }
 
 func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
@@ -263,7 +267,12 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 				}
 				out = append(out, wireRec{O: rec.Offset, T: stripped, P: rec.Payload, TS: rec.TS})
 			}
-			resp := map[string]any{"records": out, "next": next}
+			// now_ms is stamped HERE, at response-write time — after the long
+			// poll wait, so sample error is one-way network latency (ms), not
+			// the poll duration (up to longPollFor). It is the parent's own
+			// authoritative-now estimate (time-sync design §2.1), not raw
+			// local time; the root has no offset, so this is its raw clock.
+			resp := map[string]any{"records": out, "next": next, "now_ms": s.eng.AuthoritativeNow().UnixMilli()}
 			if hasGap {
 				// §6.3: "next already points past the hole". With surviving
 				// records Read guarantees that; with none it would stay at

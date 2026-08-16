@@ -47,6 +47,10 @@ type Config struct {
 	// Retention configures the background pruner (design §3). Absent entirely
 	// = every default in the §3.1 table applies (pruning ON by default).
 	Retention Retention `yaml:"retention"`
+
+	// TimeSync configures the authoritative-time protocol (time-sync design
+	// §2.5). Absent entirely = every default below applies (default-on).
+	TimeSync TimeSync `yaml:"time_sync"`
 }
 
 // Duration is a time.Duration that unmarshals from Go duration syntax
@@ -222,6 +226,74 @@ func (r Retention) EffectiveStream(stream string) StreamRetention {
 	return s
 }
 
+// TimeSync configures the authoritative-time protocol (time-sync design
+// §2.1/§2.5): telescoping clock offsets learned from /downlink and
+// /replicate responses, plus the MQTT time beacon and the machine hold
+// window a later task consumes. Default-on with zero config — an absent
+// time_sync: block gets every default below (design §2.5 [delta]).
+type TimeSync struct {
+	// BeaconInterval is how often the node re-publishes colca/v1/_TimeSync
+	// while machines are attached (design §2.2, default 30s). Parsed and
+	// validated here; not yet consumed — a later task builds the beacon.
+	BeaconInterval Duration `yaml:"beacon_interval"`
+	// HoldMS is how long a machine buffers expiry decisions after
+	// (re)connect before proceeding on its last-known offset (design §2.3
+	// rule 2, default 10000). Parsed and validated here; not yet consumed —
+	// a later task builds the machine-side hold.
+	HoldMS int64 `yaml:"hold_ms"`
+	// DriftWarnMS is the |offset_ms| threshold past which colcad logs a
+	// warning (design §2.4, default 5000). Consumed by this task.
+	DriftWarnMS int64 `yaml:"drift_warn_ms"`
+}
+
+const (
+	defaultBeaconInterval = 30 * time.Second
+	defaultHoldMS         = int64(10000)
+	defaultDriftWarnMS    = int64(5000)
+)
+
+// EffectiveBeaconInterval applies the §2.5 default (30s) when
+// BeaconInterval is unset (zero value).
+func (t TimeSync) EffectiveBeaconInterval() time.Duration {
+	if time.Duration(t.BeaconInterval) <= 0 {
+		return defaultBeaconInterval
+	}
+	return time.Duration(t.BeaconInterval)
+}
+
+// EffectiveHoldMS applies the §2.5 default (10000) when HoldMS is unset
+// (zero value).
+func (t TimeSync) EffectiveHoldMS() int64 {
+	if t.HoldMS <= 0 {
+		return defaultHoldMS
+	}
+	return t.HoldMS
+}
+
+// EffectiveDriftWarnMS applies the §2.5 default (5000) when DriftWarnMS is
+// unset (zero value).
+func (t TimeSync) EffectiveDriftWarnMS() int64 {
+	if t.DriftWarnMS <= 0 {
+		return defaultDriftWarnMS
+	}
+	return t.DriftWarnMS
+}
+
+// validate checks the time_sync: block (design §2.5): non-negative values
+// only — zero is the documented "use the default" sentinel, not an error.
+func (t TimeSync) validate() error {
+	if time.Duration(t.BeaconInterval) < 0 {
+		return fmt.Errorf("config: time_sync.beacon_interval must not be negative, got %s", time.Duration(t.BeaconInterval))
+	}
+	if t.HoldMS < 0 {
+		return fmt.Errorf("config: time_sync.hold_ms must not be negative, got %d", t.HoldMS)
+	}
+	if t.DriftWarnMS < 0 {
+		return fmt.Errorf("config: time_sync.drift_warn_ms must not be negative, got %d", t.DriftWarnMS)
+	}
+	return nil
+}
+
 // Load reads a YAML config from path and validates it.
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
@@ -245,7 +317,10 @@ func (c *Config) Validate() error {
 	if c.ULID == "" || c.DataDir == "" || c.KeyFile == "" {
 		return fmt.Errorf("config: ulid, data_dir, key_file are required")
 	}
-	return c.Retention.validate()
+	if err := c.Retention.validate(); err != nil {
+		return err
+	}
+	return c.TimeSync.validate()
 }
 
 // validate checks the retention: block (design §3.1/§3.4): non-negative

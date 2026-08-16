@@ -29,13 +29,13 @@ func TestUplinkMetricsProgressAndFailure(t *testing.T) {
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil)
+	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
-	cm := metrics.New(cs, config.Retention{})
-	ceng := engine.New(cs, ccfg, regWithChildren(t, cs, ccfg.ULID), nil, cm)
+	cm := metrics.New(cs, config.Retention{}, nil)
+	ceng := engine.New(cs, ccfg, regWithChildren(t, cs, ccfg.ULID), nil, cm, nil)
 	mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", `{"v":1}`)
 
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
@@ -94,7 +94,7 @@ func TestDownlinkMetricsProgressAndFailure(t *testing.T) {
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil)
+	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	// Seed one command so the first /downlink returns immediately instead of
 	// riding the 20s empty long-poll.
@@ -102,8 +102,8 @@ func TestDownlinkMetricsProgressAndFailure(t *testing.T) {
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
-	cm := metrics.New(cs, config.Retention{})
-	ceng := engine.New(cs, ccfg, regWithChildren(t, cs, ccfg.ULID), nil, cm)
+	cm := metrics.New(cs, config.Retention{}, nil)
+	ceng := engine.New(cs, ccfg, regWithChildren(t, cs, ccfg.ULID), nil, cm, nil)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 
 	const gauge = `colca_downlink_last_success_timestamp_seconds`

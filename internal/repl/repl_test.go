@@ -27,7 +27,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	defer ps.Close()
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil)
+	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
 	srv, err := NewServer(pcfg, peng, parentID, preg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestStopReleasesPortAndKillsLongPoll(t *testing.T) {
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil)
+	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
 
 	// Stop before Start must not panic.
 	unstarted, err := NewServer(pcfg, peng, parentID, preg, nil)
@@ -180,7 +180,7 @@ func TestDownlinkOnlyOwnMountCommands(t *testing.T) {
 	preg := regWithChildren(t, ps, pcfg.ULID,
 		childSpec{"n-child1", child1ID.PublicHex(), "child1"},
 		childSpec{"n-child2", child2ID.PublicHex(), "child2"})
-	peng := engine.New(ps, pcfg, preg, nil, nil)
+	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	defer srv.Stop()
 
@@ -227,7 +227,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil)
+	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
 
 	// Start once only to obtain a real address, then stop: the parent is down.
 	srv1, addr := startServer(t, pcfg, peng, parentID, preg)
@@ -236,7 +236,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
-	ceng := engine.New(cs, ccfg, regWithChildren(t, cs, ccfg.ULID), nil, nil)
+	ceng := engine.New(cs, ccfg, regWithChildren(t, cs, ccfg.ULID), nil, nil, nil)
 	mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", `{"v":1}`)
 	mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", `{"v":2}`)
 	// commands stream: 1 = a command (must never be mirrored back up), 2 = an ack.
@@ -336,7 +336,7 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil)
+	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	defer srv.Stop()
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
@@ -349,7 +349,7 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 			t.Errorf("a command must not be retained on the local bus: %s", topic)
 		}
 		delivered <- topic
-	}, nil)
+	}, nil, nil)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 
 	stop := make(chan struct{})
@@ -402,7 +402,7 @@ func TestMachineKindRejectedAtReplDoor(t *testing.T) {
 	if _, _, err := preg.Enroll(entry); err != nil {
 		t.Fatal(err)
 	}
-	peng := engine.New(ps, pcfg, preg, nil, nil)
+	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	defer srv.Stop()
 

@@ -60,14 +60,14 @@ func newWorld(t *testing.T) *world {
 
 	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
 		MQTT: config.Endpoint{Addr: "127.0.0.1:0"}}
-	m := metrics.New(st, config.Retention{})
+	m := metrics.New(st, config.Retention{}, nil)
 	w.m = m
 	s, err := New(cfg, nodeID, reg, nil, m)
 	if err != nil {
 		st.Close()
 		t.Fatalf("New: %v", err)
 	}
-	s.SetEngine(engine.New(st, cfg, reg, s.DeliverLocal, m))
+	s.SetEngine(engine.New(st, cfg, reg, s.DeliverLocal, m, nil))
 	reg.SetKick(s.Kick)
 	go func() { _ = s.Serve() }()
 	t.Cleanup(func() {

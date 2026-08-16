@@ -28,9 +28,9 @@ func newMetricsEngine(t *testing.T) (*Engine, *metrics.Metrics) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	m := metrics.New(s, config.Retention{})
+	m := metrics.New(s, config.Retention{}, nil)
 	cfg := &config.Config{ULID: "n-edge1"}
-	return New(s, cfg, testIDs(), nil, m), m
+	return New(s, cfg, testIDs(), nil, m, nil), m
 }
 
 // TestRejectPublishByReason pins the reason mapping for every reject branch in

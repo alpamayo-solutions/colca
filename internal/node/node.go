@@ -16,7 +16,9 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/httpapi"
@@ -74,7 +76,13 @@ func Start(cfg *config.Config) (*Node, error) {
 		return nil, fmt.Errorf("node %s: open store %s: %w", cfg.ULID, cfg.DataDir, err)
 	}
 
-	n := &Node{Cfg: cfg, Store: st, Metrics: metrics.New(st, cfg.Retention), stop: make(chan struct{})}
+	// clk is this node's authoritative-time state (time-sync design §2.1): a
+	// node with no configured parent is the root/authority. Built once and
+	// shared between Metrics (scrape-time gauges) and Engine (offset
+	// read/write) — they must be the SAME instance (engine.New's doc
+	// comment).
+	clk := clock.New(cfg.Parent == nil, time.Now)
+	n := &Node{Cfg: cfg, Store: st, Metrics: metrics.New(st, cfg.Retention, clk), stop: make(chan struct{})}
 	log := slog.Default().With("node", cfg.ULID, "comp", "node")
 	// From here on every error path unwinds through Stop.
 	fail := func(err error) (*Node, error) {
@@ -108,7 +116,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	if n.MQTT != nil {
 		deliver = n.MQTT.DeliverLocal
 	}
-	n.Engine = engine.New(st, cfg, reg, deliver, n.Metrics)
+	n.Engine = engine.New(st, cfg, reg, deliver, n.Metrics, clk)
 
 	if n.MQTT != nil {
 		n.MQTT.SetEngine(n.Engine)

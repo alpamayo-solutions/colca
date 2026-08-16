@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
@@ -45,6 +46,7 @@ type Engine struct {
 	ids     Mounts
 	log     *slog.Logger
 	metrics *metrics.Metrics // nil-safe: every method on a nil receiver is a no-op
+	clk     *clock.Clock
 }
 
 // New builds an engine. ids is the identity registry (a client without a
@@ -53,11 +55,52 @@ type Engine struct {
 //
 // m may be nil (unit tests and any caller that does not care about metrics) —
 // every Metrics method is nil-safe.
-func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m *metrics.Metrics) *Engine {
-	return &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m}
+//
+// clk may be nil, in which case New builds a default one from cfg (root =
+// cfg.Parent == nil, time-sync design §2.1) using the real wall clock. A
+// caller that also wires *metrics.Metrics to read this node's clock state
+// (node.Start does; most unit tests do not need to) MUST build the *clock.Clock
+// itself and pass the SAME instance to both constructors — metrics.New's
+// gauges and this engine's offset state must be the same object, or the
+// gauges report state nobody ever updates.
+func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m *metrics.Metrics, clk *clock.Clock) *Engine {
+	if clk == nil {
+		clk = clock.New(cfg.Parent == nil, time.Now)
+	}
+	return &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk}
 }
 
 func (e *Engine) Store() *store.Store { return e.store }
+
+// AuthoritativeNow returns this node's current best estimate of the time
+// authority's clock (time-sync design §2.1): wall_now + the offset learned
+// from the most recent /downlink or /replicate response, or raw wall time
+// on the root and on a node that has never synced.
+func (e *Engine) AuthoritativeNow() time.Time {
+	return e.clk.AuthoritativeNow()
+}
+
+// ApplyClockSample records one offset sample learned from a parent's
+// now_ms (time-sync design §2.1/§2.3 rule 4) and warns when the resulting
+// drift exceeds time_sync.drift_warn_ms (design §2.4). Callers (RunUplink,
+// RunDownlink) apply this BEFORE ingesting the records that arrived in the
+// same response, so the first poll after reconnect refreshes time before any
+// expiry decision downstream of it. A no-op on the root (clock.ApplySample).
+func (e *Engine) ApplyClockSample(nowMS int64) (offsetMS int64) {
+	offsetMS = e.clk.ApplySample(nowMS)
+	if warn := e.cfg.TimeSync.EffectiveDriftWarnMS(); abs64(offsetMS) > warn {
+		e.log.Warn("clock drift exceeds warn threshold (time-sync design §2.4)",
+			"offset_ms", offsetMS, "drift_warn_ms", warn)
+	}
+	return offsetMS
+}
+
+func abs64(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
 
 // MountOf resolves the mount a child or client is attached under.
 func (e *Engine) MountOf(ulid string) (string, bool) {

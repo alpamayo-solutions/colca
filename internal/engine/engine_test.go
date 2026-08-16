@@ -40,7 +40,7 @@ func newEngine(t *testing.T) *Engine {
 	}
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-edge1"}
-	return New(s, cfg, testIDs(), nil, nil) // nils = no local MQTT delivery, no metrics in unit tests
+	return New(s, cfg, testIDs(), nil, nil, nil) // nils = no local MQTT delivery, no metrics, no clock in unit tests
 }
 
 // delivery is one call of engine.LocalDeliver, recorded verbatim.
@@ -80,7 +80,7 @@ func newRecordingEngine(t *testing.T) (*Engine, *recorder) {
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-edge1"}
 	rec := &recorder{}
-	return New(s, cfg, testIDs(), rec.deliver, nil), rec
+	return New(s, cfg, testIDs(), rec.deliver, nil, nil), rec
 }
 
 func TestClientPublishMountAndKV(t *testing.T) {
@@ -400,7 +400,7 @@ func newCapturedEngine(t *testing.T) (*Engine, *bytes.Buffer) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return New(s, &config.Config{ULID: "n-parent"}, testIDs(), nil, nil), buf
+	return New(s, &config.Config{ULID: "n-parent"}, testIDs(), nil, nil, nil), buf
 }
 
 func replBatchAt(topic string, offsets ...uint64) []store.ReplRecord {
