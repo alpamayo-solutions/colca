@@ -157,11 +157,13 @@ func Start(cfg *config.Config) (*Node, error) {
 			}
 		}(n.MQTT)
 
-		// Periodic time-sync beacon (design §2.2): the per-session publish on
-		// establishment is wired inside mqttsrv's hook (OnSessionEstablished);
-		// this is the OTHER trigger, every time_sync.beacon_interval
-		// regardless of connection activity. Joins n.wg exactly like the repl
-		// loops and the pruner: Stop must wait for it before MQTT.Close() runs.
+		// Periodic time-sync beacon (design §2.2): the per-subscribe publish
+		// is wired inside mqttsrv's hook (OnSubscribed, as amended [delta] —
+		// session-establishment was deterministically racy and was replaced,
+		// not supplemented); this is the OTHER trigger, every
+		// time_sync.beacon_interval regardless of subscription activity.
+		// Joins n.wg exactly like the repl loops and the pruner: Stop must
+		// wait for it before MQTT.Close() runs.
 		n.wg.Add(1)
 		go func(mq *mqttsrv.Server) {
 			defer n.wg.Done()

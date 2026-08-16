@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,7 +80,7 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnConnectAuthenticate,
 		mqtt.OnACLCheck,
 		mqtt.OnPublish,
-		mqtt.OnSessionEstablished,
+		mqtt.OnSubscribed,
 	}, []byte{b})
 }
 
@@ -140,16 +141,45 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 	return true
 }
 
-// OnSessionEstablished fires once per (re)connect, after OnConnectAuthenticate
-// has already run and the CONNACK has been sent (mochi server.go
-// attachClient) — i.e. every call here is an authenticated machine session
-// (the only kind this door accepts). Time-sync design §2.2: beacon on every
-// machine session establishment, so a reconnecting machine gets time within
-// milliseconds, before or with its redelivered command backlog. The periodic
-// beacon_interval cadence is a separate trigger (Server.RunBeacon), not this
-// hook.
-func (h *colcaHook) OnSessionEstablished(cl *mqtt.Client, pk packets.Packet) {
-	h.publishTimeSync()
+// OnSubscribed fires after mochi has registered a client's subscription(s)
+// (auth §6: every filter already passed the read-grant ACL check by this
+// point — see OnACLCheck below). Time-sync design §2.2 (as amended,
+// [delta]): beacon on subscribe to colca/v1/_TimeSync/+ (or the exact
+// per-node topic), not on bare session establishment — see
+// matchesOwnBeacon's doc comment for why session-establishment was
+// deterministically racy and had to be replaced, not merely supplemented.
+// Subscribing to _TimeSync is the moment delivery to THIS client becomes
+// possible at all, so triggering here is unconditionally correct: no
+// earlier point could have worked, and no later point is needed. A
+// reconnecting machine (cmd/colca-machine's onConnect: subscribe cmd, then
+// subscribe beacon) gets its beacon within one broker round trip of its own
+// SUBSCRIBE packet — milliseconds, deterministically, not racing anything.
+//
+// A client's SUBSCRIBE packet may carry several filters; this only needs to
+// fire once even if more than one happens to match (never possible in
+// practice today — colca-machine always subscribes _TimeSync alone — but
+// correct regardless).
+func (h *colcaHook) OnSubscribed(cl *mqtt.Client, pk packets.Packet, reasonCodes []byte) {
+	for _, sub := range pk.Filters {
+		if h.matchesOwnBeacon(sub.Filter) {
+			h.publishTimeSync()
+			return
+		}
+	}
+}
+
+// matchesOwnBeacon reports whether filter would let its subscriber receive
+// THIS node's _TimeSync beacon (colca/v1/_TimeSync/{this node's ulid} —
+// uns.TimeSyncTopic). _TimeSync topics are always exactly 4 segments
+// (plugins/uns.Parse's dedicated special case), so a matching filter is
+// either the exact topic or ends in a single-level wildcard at that
+// position — cmd/colca-machine always subscribes "colca/v1/_TimeSync/+"
+// (design §2.2), matched here alongside the exact form for any other
+// well-behaved subscriber (e.g. the observer identity).
+func (h *colcaHook) matchesOwnBeacon(filter string) bool {
+	seg := strings.Split(filter, "/")
+	return len(seg) == 4 && seg[0] == "colca" && seg[1] == "v1" && seg[2] == "_TimeSync" &&
+		(seg[3] == "+" || seg[3] == h.cfg.ULID)
 }
 
 // publishTimeSync publishes one _TimeSync beacon on this node's local bus
@@ -269,16 +299,16 @@ func (s *Server) SetEngine(e *engine.Engine) { s.hook.setEngine(e) }
 
 // PublishTimeSync publishes one _TimeSync beacon (design §2.2). Exported so
 // node.Start's periodic loop (RunBeacon) and any direct caller (tests) can
-// trigger a beacon without going through a real MQTT session-establish event.
+// trigger a beacon without going through a real MQTT subscribe event.
 func (s *Server) PublishTimeSync() { s.hook.publishTimeSync() }
 
 // RunBeacon publishes a _TimeSync beacon every interval until stop is closed
-// (design §2.2's periodic cadence — the per-session publish on establishment
-// is the separate OnSessionEstablished trigger above; together they give a
-// reconnecting machine time within milliseconds and every attached machine a
-// periodic refresh). interval <= 0 disables the periodic beacon entirely —
-// config.TimeSync.EffectiveBeaconInterval never itself returns <= 0, so this
-// guard is for direct callers/tests only.
+// (design §2.2's periodic cadence — the per-subscribe publish is the
+// separate OnSubscribed trigger above; together they give a reconnecting
+// machine time within milliseconds of its own subscribe and every attached
+// machine a periodic refresh). interval <= 0 disables the periodic beacon
+// entirely — config.TimeSync.EffectiveBeaconInterval never itself returns
+// <= 0, so this guard is for direct callers/tests only.
 func (s *Server) RunBeacon(interval time.Duration, stop <-chan struct{}) {
 	if interval <= 0 {
 		return

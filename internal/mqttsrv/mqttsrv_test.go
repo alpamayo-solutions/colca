@@ -356,40 +356,77 @@ func TestDeniedSubscribeLeaksNoRetained(t *testing.T) {
 // establishment — a client already subscribed to the beacon filter sees a
 // fresh, unretained {"now_ms": ...} message the instant ANOTHER client
 // connects.
-func TestTimeSyncBeaconOnSessionEstablish(t *testing.T) {
+// Time-sync design §2.2 (as amended, [delta]): the beacon fires on
+// SUBSCRIBE to colca/v1/_TimeSync/+ (OnSubscribed, mqttsrv.go), not on bare
+// session establishment — see the erratum above §2.3's normative rule for
+// why the original session-establishment trigger was deterministically
+// racy (mochi fires OnSessionEstablished right after CONNACK, structurally
+// before the client can have completed its own SUBSCRIBE, so at QoS 0 that
+// first publish was reliably lost to the very client it targeted) and had
+// to be REPLACED, not merely supplemented.
+//
+// This is the direct regression test for that defect: the SUBSCRIBING
+// client itself — not just an already-subscribed bystander — must receive
+// its own beacon, deterministically, within one broker round trip of its
+// own SUBSCRIBE packet. It also re-proves the broadcast property the old
+// test covered (a bystander subscribed beforehand still sees a beacon
+// triggered by someone else's subscribe), so both properties stay pinned
+// in one place instead of silently regressing if only the bystander path
+// were re-tested.
+func TestTimeSyncBeaconOnSubscribe(t *testing.T) {
 	w := newWorld(t)
-	sub := connect(t, w.srv.Addr(), "obs-timesync", w.obs)
-	msgs := make(chan paho.Message, 8)
-	tok := sub.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
+
+	bystander := connect(t, w.srv.Addr(), "obs-timesync", w.obs)
+	byMsgs := make(chan paho.Message, 8)
+	btok := bystander.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { byMsgs <- m })
+	if !btok.WaitTimeout(5*time.Second) || btok.Error() != nil {
+		t.Fatalf("bystander subscribe: %v", btok.Error())
+	}
+	// The bystander's OWN subscribe already triggered (and this test does
+	// not care about) its own baseline beacon; drain it so the assertion
+	// below is unambiguously about the client-under-test's subscribe.
+	select {
+	case <-byMsgs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no beacon for the bystander's own subscribe (baseline)")
+	}
+
+	c := connect(t, w.srv.Addr(), "m1-subscribe-timesync", w.m1)
+	ownMsgs := make(chan paho.Message, 8)
+	tok := c.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { ownMsgs <- m })
 	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
 		t.Fatalf("subscribe: %v", tok.Error())
 	}
 
-	// obs's own connect already fired one beacon before this subscribe even
-	// existed (session establishment happens server-side before the client
-	// can issue SUBSCRIBE) — this connect is the one under test.
-	connect(t, w.srv.Addr(), "m1-timesync", w.m1)
-
-	select {
-	case m := <-msgs:
-		if want := "colca/v1/_TimeSync/n1"; m.Topic() != want {
-			t.Fatalf("beacon topic = %q, want %q", m.Topic(), want)
+	checkBeacon := func(t *testing.T, msgs chan paho.Message, who string) {
+		t.Helper()
+		select {
+		case m := <-msgs:
+			if want := "colca/v1/_TimeSync/n1"; m.Topic() != want {
+				t.Fatalf("%s: beacon topic = %q, want %q", who, m.Topic(), want)
+			}
+			if m.Retained() {
+				t.Fatalf("%s: beacon must never be retained (design §2.2: a retained time message is by definition stale)", who)
+			}
+			var p struct {
+				NowMS int64 `json:"now_ms"`
+			}
+			if err := json.Unmarshal(m.Payload(), &p); err != nil {
+				t.Fatalf("%s: beacon payload not JSON: %v (%s)", who, err, m.Payload())
+			}
+			if p.NowMS <= 0 {
+				t.Fatalf("%s: beacon now_ms = %d, want a positive unix-ms timestamp", who, p.NowMS)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: no beacon received", who)
 		}
-		if m.Retained() {
-			t.Fatal("beacon must never be retained (design §2.2: a retained time message is by definition stale)")
-		}
-		var p struct {
-			NowMS int64 `json:"now_ms"`
-		}
-		if err := json.Unmarshal(m.Payload(), &p); err != nil {
-			t.Fatalf("beacon payload not JSON: %v (%s)", err, m.Payload())
-		}
-		if p.NowMS <= 0 {
-			t.Fatalf("beacon now_ms = %d, want a positive unix-ms timestamp", p.NowMS)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no beacon received for m1's session establishment")
 	}
+
+	// The defect this hook fixes: the SUBSCRIBING client's own subscribe
+	// must deterministically produce a beacon for itself.
+	checkBeacon(t, ownMsgs, "subscribing client")
+	// The broadcast still reaches an unrelated bystander too.
+	checkBeacon(t, byMsgs, "bystander")
 }
 
 // Time-sync design §2.2: the periodic beacon_interval trigger is independent
@@ -403,10 +440,12 @@ func TestTimeSyncBeaconPeriodicCadence(t *testing.T) {
 	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
 		t.Fatalf("subscribe: %v", tok.Error())
 	}
-	// obs's own connect-triggered beacon (session establishment happens
-	// server-side before the client can issue SUBSCRIBE) is already gone by
-	// the time the subscribe above lands — nothing to drain. This test pins
-	// the PERIODIC trigger only.
+	// obs's own subscribe above already triggered (and lands in msgs as)
+	// one baseline beacon (design §2.2 as amended: beacon-on-subscribe) —
+	// not drained separately, just folded into the "at least 3" tally below
+	// alongside the periodic ones; this test's actual claim (RunBeacon
+	// keeps publishing independent of further connection activity) does
+	// not depend on distinguishing which beacon came from which trigger.
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -489,15 +528,15 @@ func TestTimeSyncBeaconAtQoS0NeverQueuedForOfflineSubscriber(t *testing.T) {
 	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
 		t.Fatalf("subscribe: %v", tok.Error())
 	}
-	// c1's own connect-triggered beacon fired before this subscribe even
-	// existed (session establishment happens server-side before the client
-	// can issue SUBSCRIBE) — trigger and drain one explicit beacon instead,
-	// to establish a known-good baseline before the "outage" below.
-	w.srv.PublishTimeSync()
+	// c1's own SUBSCRIBE deterministically triggers its baseline beacon
+	// (design §2.2 as amended, [delta]: beacon-on-subscribe, not on bare
+	// session establishment) — no manual trigger-and-drain needed to
+	// establish a known-good baseline before the "outage" below, unlike
+	// the old connect-triggered design this replaced.
 	select {
 	case <-msgs:
 	case <-time.After(5 * time.Second):
-		t.Fatal("no beacon received while c1 was connected and subscribed")
+		t.Fatal("no beacon received for c1's own subscribe")
 	}
 
 	// "Outage": disconnect WITHOUT unsubscribing — the persistent session
@@ -517,8 +556,9 @@ func TestTimeSyncBeaconAtQoS0NeverQueuedForOfflineSubscriber(t *testing.T) {
 		w.srv.PublishTimeSync()
 	}
 
-	// Reconnect with the SAME persistent session (same client ID). Only ONE
-	// beacon may arrive: this reconnect's own connect-triggered beacon.
+	// Reconnect with the SAME persistent session (same client ID) and
+	// re-subscribe. Only ONE beacon may arrive: this reconnect's own
+	// subscribe-triggered beacon (design §2.2 as amended).
 	c2 := dial("m1-persistent")
 	defer c2.Disconnect(100)
 	tok = c2.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
