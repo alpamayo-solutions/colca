@@ -407,3 +407,69 @@ func TestLoadRejectsInvalidYAMLAndInvalidConfig(t *testing.T) {
 		t.Fatal("config missing data_dir/key_file must error")
 	}
 }
+
+// TestTimeSyncDefaultsWhenAbsent pins time-sync design §2.5: default-on with
+// zero config — an absent time_sync: block validates and every Effective*
+// getter returns the documented default.
+func TestTimeSyncDefaultsWhenAbsent(t *testing.T) {
+	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("config with no time_sync: block must validate: %v", err)
+	}
+	if got, want := c.TimeSync.EffectiveBeaconInterval(), 30*time.Second; got != want {
+		t.Fatalf("beacon_interval default: got %s want %s", got, want)
+	}
+	if got, want := c.TimeSync.EffectiveHoldMS(), int64(10000); got != want {
+		t.Fatalf("hold_ms default: got %d want %d", got, want)
+	}
+	if got, want := c.TimeSync.EffectiveDriftWarnMS(), int64(5000); got != want {
+		t.Fatalf("drift_warn_ms default: got %d want %d", got, want)
+	}
+}
+
+// TestTimeSyncRoundTrip pins that explicit YAML values load verbatim and
+// override every default (design §2.5).
+func TestTimeSyncRoundTrip(t *testing.T) {
+	yamlDoc := `
+ulid: n-edge1
+data_dir: /tmp/colca-test
+key_file: /keys/edge1.key
+time_sync:
+  beacon_interval: 45s
+  hold_ms: 20000
+  drift_warn_ms: 2500
+`
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte(yamlDoc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := c.TimeSync.EffectiveBeaconInterval(), 45*time.Second; got != want {
+		t.Fatalf("beacon_interval: got %s want %s", got, want)
+	}
+	if got, want := c.TimeSync.EffectiveHoldMS(), int64(20000); got != want {
+		t.Fatalf("hold_ms: got %d want %d", got, want)
+	}
+	if got, want := c.TimeSync.EffectiveDriftWarnMS(), int64(2500); got != want {
+		t.Fatalf("drift_warn_ms: got %d want %d", got, want)
+	}
+}
+
+// TestTimeSyncValidationRejectsNegativeValues pins design §2.5's implicit
+// non-negative contract: zero is the documented "use the default" sentinel,
+// but a negative value is a config error, for all three fields.
+func TestTimeSyncValidationRejectsNegativeValues(t *testing.T) {
+	for name, ts := range map[string]TimeSync{
+		"negative beacon_interval": {BeaconInterval: Duration(-time.Second)},
+		"negative hold_ms":         {HoldMS: -1},
+		"negative drift_warn_ms":   {DriftWarnMS: -1},
+	} {
+		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", TimeSync: ts}
+		if err := c.Validate(); err == nil {
+			t.Fatalf("%s: want validation error", name)
+		}
+	}
+}
