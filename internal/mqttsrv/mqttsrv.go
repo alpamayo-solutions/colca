@@ -310,6 +310,16 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 		MinVersion:   tls.VersionTLS13,
 	}
 
+	// Every listener gets its own *tls.Config instance. crypto/tls mutates a
+	// Config it is handed (e.g. net/http's ServeTLS calling
+	// http2ConfigureServer, which appends to NextProtos via
+	// onceSetNextProtoDefaults) concurrently with crypto/tls itself reading
+	// that same Config during another listener's handshake — sharing one
+	// pointer across listeners is a data race even when the listeners never
+	// touch each other's connections. humanTLS was previously handed to both
+	// human-tcp and human-ws as the same instance; tlsCfg is only handed to
+	// one listener today but is cloned too so "one Config per listener"
+	// stays an invariant, not something that happens to hold.
 	s := mqtt.New(&mqtt.Options{InlineClient: true})
 	// A fresh subscriber replaying the retained set (the bus's "current state
 	// on connect" contract) can burst thousands of QoS-1 messages to one
@@ -329,14 +339,14 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	}
 	srv := &Server{S: s, hook: hook, cfg: cfg, metrics: m, sweepStop: make(chan struct{})}
 	if cfg.MQTT.Addr != "" {
-		tcp := listeners.NewTCP(listeners.Config{ID: "tls", Address: cfg.MQTT.Addr, TLSConfig: tlsCfg})
+		tcp := listeners.NewTCP(listeners.Config{ID: "tls", Address: cfg.MQTT.Addr, TLSConfig: tlsCfg.Clone()})
 		if err := s.AddListener(tcp); err != nil {
 			return nil, err
 		}
 		srv.tcp = tcp
 	}
 	if cfg.MQTTHuman.TCPAddr != "" {
-		h := listeners.NewTCP(listeners.Config{ID: listenerHumanTCP, Address: cfg.MQTTHuman.TCPAddr, TLSConfig: humanTLS})
+		h := listeners.NewTCP(listeners.Config{ID: listenerHumanTCP, Address: cfg.MQTTHuman.TCPAddr, TLSConfig: humanTLS.Clone()})
 		if err := s.AddListener(h); err != nil {
 			return nil, err
 		}
@@ -352,7 +362,7 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 		if err != nil {
 			return nil, err
 		}
-		w := listeners.NewWebsocket(listeners.Config{ID: listenerHumanWS, Address: wsAddr, TLSConfig: humanTLS})
+		w := listeners.NewWebsocket(listeners.Config{ID: listenerHumanWS, Address: wsAddr, TLSConfig: humanTLS.Clone()})
 		if err := s.AddListener(w); err != nil {
 			return nil, err
 		}
