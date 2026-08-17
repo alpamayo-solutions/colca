@@ -38,6 +38,9 @@ const (
 	// ReasonRegistryContract: _EdgeNode arrived at an ordinary ingest door —
 	// registry entries enter only through the enrollment endpoint (auth §3).
 	ReasonRegistryContract = "registry_contract"
+	// ReasonHumanWrite: a human published a data/entity/ack contract — the
+	// World-2 rule (humans command, machines write state; human-authz §5.2).
+	ReasonHumanWrite = "human_write"
 	// ReasonTimeSync: a _TimeSync publish arrived from a client, an admin
 	// caller, or a replicated batch (time-sync design §2.2/§4). _TimeSync is
 	// ephemeral and node-local-publish-only — only the node's own beacon loop
@@ -51,7 +54,7 @@ const (
 	ReasonDraining = "draining"
 )
 
-var reasons = []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonCmdDenied, ReasonRegistryContract, ReasonTimeSync, ReasonDraining}
+var reasons = []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonTimeSync, ReasonDraining}
 
 // Move-drain outcome labels — the allowed `outcome` values of
 // colca_drains_completed_total (move-drain design §3.2/§3.4).
@@ -125,6 +128,10 @@ type Metrics struct {
 	authReject   *prometheus.CounterVec
 	aclDeny      *prometheus.CounterVec
 	kicks        prometheus.Counter
+	// Human world (human-authz design §7).
+	humanSessions prometheus.Gauge   // colca_human_sessions
+	jwksKeys      prometheus.Gauge   // colca_jwks_keys
+	jwksFailures  prometheus.Counter // colca_jwks_refresh_failures_total
 
 	// Retention (design §8): pruner-side counters.
 	prunedRecords *prometheus.CounterVec // colca_retention_pruned_records_total{stream}
@@ -219,7 +226,19 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}, []string{"action"}),
 		kicks: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_session_kicks_total",
-			Help: "Live MQTT sessions disconnected by a registry change (revoke or re-enroll). Resets on restart.",
+			Help: "Live MQTT sessions disconnected by a registry change or token expiry. Resets on restart.",
+		}),
+		humanSessions: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_human_sessions",
+			Help: "Live token-authenticated MQTT sessions on the human doors.",
+		}),
+		jwksKeys: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_jwks_keys",
+			Help: "Issuer signing keys currently cached (0 on a node with an auth block is alertable).",
+		}),
+		jwksFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_jwks_refresh_failures_total",
+			Help: "Failed JWKS fetches (cached keys keep serving). Resets on restart.",
 		}),
 		prunedRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_retention_pruned_records_total",
@@ -351,7 +370,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
 		m.downlinkOK, m.downlinkFail, m.reseed,
-		m.authReject, m.aclDeny, m.kicks,
+		m.authReject, m.aclDeny, m.kicks, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied,
@@ -382,6 +401,30 @@ func (m *Metrics) ACLDeny(action string) {
 }
 
 // SessionKick counts one live session disconnected by a registry change.
+// SetHumanSessions tracks the live human-door session count.
+func (m *Metrics) SetHumanSessions(n int) {
+	if m == nil {
+		return
+	}
+	m.humanSessions.Set(float64(n))
+}
+
+// SetJWKSKeys reports how many issuer signing keys are cached (tokenauth.Metrics).
+func (m *Metrics) SetJWKSKeys(n int) {
+	if m == nil {
+		return
+	}
+	m.jwksKeys.Set(float64(n))
+}
+
+// JWKSRefreshFailed counts one failed JWKS fetch (tokenauth.Metrics).
+func (m *Metrics) JWKSRefreshFailed() {
+	if m == nil {
+		return
+	}
+	m.jwksFailures.Inc()
+}
+
 func (m *Metrics) SessionKick() {
 	if m == nil {
 		return

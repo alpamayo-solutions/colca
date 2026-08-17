@@ -211,3 +211,79 @@ func TestAuthorizeCmd(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminGrantVerb(t *testing.T) {
+	if g, err := ParseGrant("admin:#"); err != nil || g.Verb != "admin" || g.Prefix != "#" {
+		t.Fatalf("admin:# must parse: %+v %v", g, err)
+	}
+	// Zone-scoped admin is RESERVED grammar (§3): it must be rejected with an
+	// error that names the reservation, so introducing it later is additive.
+	if _, err := ParseGrant("admin:werk1/#"); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("admin:werk1/# must be rejected as reserved, got %v", err)
+	}
+	if _, err := ParseGrant("admin:"); err == nil {
+		t.Fatal("admin: with empty prefix must be rejected")
+	}
+}
+
+func TestTokenEntry(t *testing.T) {
+	e, err := TokenEntry("kc-sub-1", []string{"read:werk1/#", "cmd:werk1/#:param", "admin:#"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Kind != KindHuman || e.ULID != "kc-sub-1" || e.Mount != "" {
+		t.Fatalf("TokenEntry shape: %+v", e)
+	}
+	if !e.IsAdmin() {
+		t.Fatal("IsAdmin must be true with admin:#")
+	}
+	if _, err := TokenEntry("", nil); err == nil {
+		t.Fatal("empty sub must be rejected")
+	}
+	if _, err := TokenEntry("s", []string{"write:z/#"}); err == nil {
+		t.Fatal("bad grant must be rejected")
+	}
+	noAdmin, err := TokenEntry("s2", []string{"read:z/#"})
+	if err != nil || noAdmin.IsAdmin() {
+		t.Fatalf("IsAdmin must be false without admin:#: %v %v", noAdmin, err)
+	}
+	// Grants absent = read nothing (spec §2.1): no default zone for humans.
+	bare, err := TokenEntry("s3", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if Authorize(bare, ActReadRecord, "colca/v1/_Metric/x/anything") {
+		t.Fatal("a human with no grants must read nothing")
+	}
+}
+
+// admin unlocks ROUTES, never data: it does not widen read or cmd (§3).
+func TestAdminDoesNotImplyReadOrCmd(t *testing.T) {
+	e, err := TokenEntry("boss", []string{"admin:#"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if Authorize(e, ActReadRecord, "colca/v1/_Metric/x/werk1/temp") {
+		t.Fatal("admin:# must not grant record reads")
+	}
+	if Authorize(e, ActSub, "colca/#") {
+		t.Fatal("admin:# must not grant subscriptions")
+	}
+	if Authorize(e, ActCmd, "colca/v1/_CmdParam/m1/werk1/go") {
+		t.Fatal("admin:# must not grant commands")
+	}
+}
+
+// Enrollment stays a machine/node affair: humans are tokens, and registry
+// identities may not hold admin (provisioning is the _CmdAdmin flow, §3).
+func TestEnrollmentRejectsHumanAndAdminGrants(t *testing.T) {
+	human := &Entry{ULID: "h1", Pubkey: strings.Repeat("ab", 32), Kind: KindHuman, Mount: ""}
+	if err := human.Validate(); err == nil {
+		t.Fatal("KindHuman must be rejected by enrollment validation")
+	}
+	m := entry("werk1/cnc5")
+	m.Grants = []string{"admin:#"}
+	if err := m.Validate(); err == nil {
+		t.Fatal("a machine entry holding admin:# must be rejected")
+	}
+}

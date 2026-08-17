@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -24,16 +25,22 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/registry"
+	"github.com/alpamayo-solutions/colca/internal/tokenauth"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // Server is the embedded broker plus its Colca hook.
 type Server struct {
-	S       *mqtt.Server
-	tcp     *listeners.TCP
-	hook    *colcaHook
-	cfg     *config.Config
-	metrics *metrics.Metrics
+	S        *mqtt.Server
+	tcp      *listeners.TCP
+	humanTCP *listeners.TCP
+	humanWS  *listeners.Websocket
+	hook     *colcaHook
+	cfg      *config.Config
+	metrics  *metrics.Metrics
+
+	sweepStop chan struct{}
+	sweepOnce sync.Once
 }
 
 // colcaHook authenticates clients against the registry (TLS peer key →
@@ -49,6 +56,8 @@ type colcaHook struct {
 	mu      sync.RWMutex
 	eng     *engine.Engine
 	reg     *registry.Manager
+	ver     *tokenauth.Verifier // nil when the node has no auth: block
+	humans  *humanSessions
 	cfg     *config.Config
 	log     *slog.Logger
 	metrics *metrics.Metrics // nil-safe: every Metrics method is a no-op on nil
@@ -80,6 +89,7 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnConnectAuthenticate,
 		mqtt.OnACLCheck,
 		mqtt.OnPublish,
+		mqtt.OnDisconnect,
 		mqtt.OnSubscribed,
 	}, []byte{b})
 }
@@ -90,6 +100,9 @@ func (h *colcaHook) Provides(b byte) bool {
 // the identity to OnPublish/OnACLCheck, so the equality check pins it to the
 // key.
 func (h *colcaHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bool {
+	if isHumanListener(cl) {
+		return h.authenticateHuman(cl, pk)
+	}
 	user := string(pk.Connect.Username)
 	tc, ok := cl.Net.Conn.(*tls.Conn)
 	if !ok || len(tc.ConnectionState().PeerCertificates) == 0 {
@@ -131,6 +144,9 @@ func (h *colcaHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bo
 func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 	if write {
 		return true
+	}
+	if isHumanListener(cl) {
+		return h.humanACL(cl, topic)
 	}
 	entry, ok := h.reg.Get(string(cl.Properties.Username))
 	if !ok || !uns.Authorize(entry, uns.ActSub, topic) {
@@ -242,6 +258,24 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		h.log.Warn("publish rejected: no engine bound", "identity", ident, "topic", pk.TopicName)
 		return pk, packets.ErrRejectPacket
 	}
+	if isHumanListener(cl) {
+		// Humans: uns topics go through IngestHuman (commands only, §5.2);
+		// non-UNS stays plain broker traffic exactly like machines.
+		if !uns.IsUns(pk.TopicName) {
+			return pk, nil
+		}
+		s, ok := h.humans.get(cl.ID)
+		if !ok || time.Now().After(s.exp) {
+			return pk, packets.ErrRejectPacket
+		}
+		res, err := eng.IngestHuman(s.entry, pk.TopicName, pk.Payload)
+		if err != nil {
+			h.log.Warn("human publish rejected", "sub", s.sub, "topic", pk.TopicName, "err", err)
+			return pk, packets.ErrRejectPacket
+		}
+		h.log.Debug("human ingest", "sub", s.sub, "topic", res.Topic, "stream", res.Stream, "offset", res.Offset)
+		return pk, packets.CodeSuccessIgnore
+	}
 	res, err := eng.IngestClient(ident, pk.TopicName, pk.Payload)
 	if err != nil {
 		h.log.Warn("publish rejected", "identity", ident, "topic", pk.TopicName, "err", err)
@@ -260,7 +294,7 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 // runs. The server cert wraps the node's own key (cert = key container, trust
 // = pinning — repl's exact posture). eng may be nil and be supplied later via
 // SetEngine. m may be nil (every Metrics method is nil-safe).
-func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, eng *engine.Engine, m *metrics.Metrics) (*Server, error) {
+func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *tokenauth.Verifier, eng *engine.Engine, m *metrics.Metrics) (*Server, error) {
 	cert, err := id.SelfSignedCert(cfg.ULID)
 	if err != nil {
 		return nil, err
@@ -268,6 +302,11 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, eng *
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		ClientAuth:   tls.RequireAnyClientCert, // pinning happens in OnConnectAuthenticate
+		MinVersion:   tls.VersionTLS13,
+	}
+	// Human doors carry no client certs — the credential is the JWT (§5.1).
+	humanTLS := &tls.Config{
+		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS13,
 	}
 
@@ -283,15 +322,69 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, eng *
 	// namespace. If that cardinality becomes realistic, the real fix is
 	// chunked/paginated retained replay, not a further bump of this field.
 	s.Options.Capabilities.MaximumInflight = 65535
-	hook := &colcaHook{eng: eng, reg: reg, cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s}
+	hook := &colcaHook{eng: eng, reg: reg, ver: ver, humans: newHumanSessions(),
+		cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s}
 	if err := s.AddHook(hook, nil); err != nil {
 		return nil, err
 	}
-	tcp := listeners.NewTCP(listeners.Config{ID: "tls", Address: cfg.MQTT.Addr, TLSConfig: tlsCfg})
-	if err := s.AddListener(tcp); err != nil {
-		return nil, err
+	srv := &Server{S: s, hook: hook, cfg: cfg, metrics: m, sweepStop: make(chan struct{})}
+	if cfg.MQTT.Addr != "" {
+		tcp := listeners.NewTCP(listeners.Config{ID: "tls", Address: cfg.MQTT.Addr, TLSConfig: tlsCfg})
+		if err := s.AddListener(tcp); err != nil {
+			return nil, err
+		}
+		srv.tcp = tcp
 	}
-	return &Server{S: s, tcp: tcp, hook: hook, cfg: cfg, metrics: m}, nil
+	if cfg.MQTTHuman.TCPAddr != "" {
+		h := listeners.NewTCP(listeners.Config{ID: listenerHumanTCP, Address: cfg.MQTTHuman.TCPAddr, TLSConfig: humanTLS})
+		if err := s.AddListener(h); err != nil {
+			return nil, err
+		}
+		srv.humanTCP = h
+	}
+	if cfg.MQTTHuman.WSAddr != "" {
+		// mochi's Websocket listener binds inside Serve and its Address()
+		// echoes the CONFIG string, so a ":0" port would be unreportable.
+		// Pre-resolve it: bind, read the kernel-assigned port, release, and
+		// hand the concrete address to the listener. The reuse window is
+		// microseconds and only ":0" configs (tests) take this path.
+		wsAddr, err := resolveAddr(cfg.MQTTHuman.WSAddr)
+		if err != nil {
+			return nil, err
+		}
+		w := listeners.NewWebsocket(listeners.Config{ID: listenerHumanWS, Address: wsAddr, TLSConfig: humanTLS})
+		if err := s.AddListener(w); err != nil {
+			return nil, err
+		}
+		srv.humanWS = w
+	}
+	if srv.humanTCP != nil || srv.humanWS != nil {
+		go srv.runSweeper(srv.sweepStop)
+	}
+	return srv, nil
+}
+
+// resolveAddr turns a ":0" listen address into a concrete one by briefly
+// binding it. Addresses with fixed ports pass through untouched.
+func resolveAddr(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port != "0" {
+		return addr, err
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return "", err
+	}
+	resolved := ln.Addr().String()
+	_ = ln.Close()
+	if host == "" {
+		return resolved, nil
+	}
+	_, p, err := net.SplitHostPort(resolved)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(host, p), nil
 }
 
 // SetEngine late-binds the engine the publish hook ingests into.
@@ -337,11 +430,35 @@ func (s *Server) Kick(ulid string) {
 	}
 }
 
-// Addr returns the resolved listener address (meaningful for ":0" configs).
-func (s *Server) Addr() string { return s.tcp.Address() }
+// Addr returns the resolved machine-listener address ("" when the node has
+// no machine door — a human-only broker is legal, design §4).
+func (s *Server) Addr() string {
+	if s.tcp == nil {
+		return ""
+	}
+	return s.tcp.Address()
+}
+
+// HumanTCPAddr / HumanWSAddr report the resolved human-door addresses ("" when
+// not configured).
+func (s *Server) HumanTCPAddr() string {
+	if s.humanTCP == nil {
+		return ""
+	}
+	return s.humanTCP.Address()
+}
+func (s *Server) HumanWSAddr() string {
+	if s.humanWS == nil {
+		return ""
+	}
+	return s.humanWS.Address()
+}
 
 func (s *Server) Serve() error { return s.S.Serve() }
-func (s *Server) Close() error { return s.S.Close() }
+func (s *Server) Close() error {
+	s.sweepOnce.Do(func() { close(s.sweepStop) })
+	return s.S.Close()
+}
 
 // DeliverLocal publishes into the local broker. It matches engine.LocalDeliver
 // and is how every record the engine appends reaches this node's MQTT bus,

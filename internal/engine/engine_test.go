@@ -199,14 +199,20 @@ func TestTimeSyncRejectedAtEveryIngestDoor(t *testing.T) {
 		if _, err := e.IngestAdmin(topic, []byte(`{"now_ms":1}`)); err == nil || !strings.Contains(err.Error(), "_TimeSync") {
 			t.Fatalf("admin publish of %s must be rejected with a _TimeSync-specific error, got %v", topic, err)
 		}
+		// The human door too (merge composition, human-authz × time-sync):
+		// rejected with the dedicated time_sync reason, not human_write —
+		// and no grant, however wide, changes that.
+		if _, err := e.IngestHuman(humanEntry(t, "read:#", "cmd:#:admin", "admin:#"), topic, []byte(`{"now_ms":1}`)); err == nil || !strings.Contains(err.Error(), "_TimeSync") {
+			t.Fatalf("human publish of %s must be rejected with a _TimeSync-specific error, got %v", topic, err)
+		}
 	}
 	for _, stream := range []string{"metrics", "entities", "commands"} {
 		if off := e.Store().NextOffset(stream); off != 1 {
 			t.Fatalf("stream %s next offset = %d, want 1 (rejected _TimeSync must never persist)", stream, off)
 		}
 	}
-	if v := metricstest.Value(t, m, rejectedLine); v != 4 {
-		t.Fatalf("%s = %v after 4 rejected attempts (2 topic shapes x client+admin), want 4", rejectedLine, v)
+	if v := metricstest.Value(t, m, rejectedLine); v != 6 {
+		t.Fatalf("%s = %v after 6 rejected attempts (2 topic shapes x client+admin+human), want 6", rejectedLine, v)
 	}
 
 	// Replication: a forged child offset carrying a _TimeSync record is
@@ -227,8 +233,8 @@ func TestTimeSyncRejectedAtEveryIngestDoor(t *testing.T) {
 	if hwm != 3 {
 		t.Fatalf("hwm = %d, want 3", hwm)
 	}
-	if v := metricstest.Value(t, m, rejectedLine); v != 5 {
-		t.Fatalf("%s = %v after the replicated _TimeSync attempt, want 5", rejectedLine, v)
+	if v := metricstest.Value(t, m, rejectedLine); v != 7 {
+		t.Fatalf("%s = %v after the replicated _TimeSync attempt, want 7", rejectedLine, v)
 	}
 }
 
@@ -337,6 +343,74 @@ func TestClientCmdGrants(t *testing.T) {
 	}
 }
 
+// humanEntry builds the ephemeral token entry the doors hand to IngestHuman.
+func humanEntry(t *testing.T, grants ...string) *uns.Entry {
+	t.Helper()
+	e, err := uns.TokenEntry("kc-sub-anna", grants)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// Humans command and nothing else (World-2 rule, human-authz §5.2).
+func TestIngestHumanCommandsOnly(t *testing.T) {
+	e := newEngine(t)
+	payload := []byte(`{"correlation_id":"c","expires_at":99999999999999}`)
+
+	// Granted command persists to the commands stream, no rewrite.
+	res, err := e.IngestHuman(humanEntry(t, "cmd:m1/#:param"), "colca/v1/_CmdParam/m1/m1/set-speed", payload)
+	if err != nil {
+		t.Fatalf("granted human cmd rejected: %v", err)
+	}
+	if res.Stream != "commands" {
+		t.Fatalf("%+v", res)
+	}
+	recs, _, _ := e.Store().Read("commands", res.Offset, 1, nil)
+	if recs[0].Topic != "colca/v1/_CmdParam/m1/m1/set-speed" {
+		t.Fatalf("human cmd must not be rewritten: %s", recs[0].Topic)
+	}
+
+	// Class outside the grant → cmd_denied.
+	if _, err := e.IngestHuman(humanEntry(t, "cmd:m1/#:param"), "colca/v1/_CmdMaintain/m1/m1/cal", payload); err == nil {
+		t.Fatal("ungranted class must be rejected")
+	}
+	// No grant at all → cmd_denied.
+	if _, err := e.IngestHuman(humanEntry(t), "colca/v1/_CmdParam/m1/m1/x", payload); err == nil {
+		t.Fatal("grantless human cmd must be rejected")
+	}
+
+	// Data / entity / ack: rejected regardless of grants — there IS no grant
+	// that allows a human to write state.
+	before := map[string]uint64{}
+	for _, s := range []string{"metrics", "entities", "commands"} {
+		before[s] = e.Store().NextOffset(s)
+	}
+	wide := humanEntry(t, "read:#", "cmd:#:admin", "admin:#")
+	for _, topic := range []string{
+		"colca/v1/_Metric/m1/m1/temp",
+		"colca/v1/_Signal/m1/m1/cfg",
+		"colca/v1/_Ack/m1/m1/set-speed",
+	} {
+		if _, err := e.IngestHuman(wide, topic, []byte(`{"v":1,"ulid":"x","correlation_id":"c","result_code":1}`)); err == nil {
+			t.Fatalf("human write of %s must be rejected", topic)
+		}
+	}
+	// _EdgeNode: enrollment-door rule wins over the human_write rule.
+	if _, err := e.IngestHuman(wide, "colca/v1/_EdgeNode/x/y", []byte(`{"ulid":"x"}`)); err == nil {
+		t.Fatal("human _EdgeNode publish must be rejected")
+	}
+	// Invalid payload on a granted command still validates.
+	if _, err := e.IngestHuman(humanEntry(t, "cmd:m1/#:param"), "colca/v1/_CmdParam/m1/m1/x", []byte(`{}`)); err == nil {
+		t.Fatal("cmd payload validation must still apply")
+	}
+	for _, s := range []string{"metrics", "entities"} {
+		if got := e.Store().NextOffset(s); got != before[s] {
+			t.Fatalf("rejected human writes persisted to %s: %d → %d", s, before[s], got)
+		}
+	}
+}
+
 // Move-drain design §3.2 item 2: a mount under an active drain rejects new
 // ClassCmd publishes at admission — client (grant notwithstanding) and admin
 // alike — with reason "draining", not the ordinary "cmd_denied". A command
@@ -388,6 +462,19 @@ func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
 	}
 	if _, err := e.IngestDownlink("colca/v1/_CmdParam/hmi/hmi/ping", payload, 4712); err != nil {
 		t.Fatalf("cmd outside the draining mount must still be admitted (downlink): %v", err)
+	}
+
+	// The human door is a door too ("at every door", move-drain design §3.2
+	// item 2): a human's covering cmd grant does not exempt them from the
+	// draining admission gate.
+	if _, err := e.IngestHuman(humanEntry(t, "cmd:m1/#:param"), "colca/v1/_CmdParam/m1/m1/set-speed", payload); err == nil || !strings.Contains(err.Error(), "draining") {
+		t.Fatalf("human cmd under a draining mount must be rejected mentioning 'draining', got %v", err)
+	}
+	if v := metricstest.Value(t, m, rejectedLine); v != 4 {
+		t.Fatalf("%s = %v after 4 rejected attempts (client+admin+downlink+human), want 4", rejectedLine, v)
+	}
+	if _, err := e.IngestHuman(humanEntry(t, "cmd:hmi/#:param"), "colca/v1/_CmdParam/hmi/hmi/ping", payload); err != nil {
+		t.Fatalf("cmd outside the draining mount must still be admitted (human): %v", err)
 	}
 }
 

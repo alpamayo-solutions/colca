@@ -29,6 +29,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/repl"
 	"github.com/alpamayo-solutions/colca/internal/retention"
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"github.com/alpamayo-solutions/colca/internal/tokenauth"
 )
 
 // Node is a running Colca node. The three *Addr fields carry the RESOLVED
@@ -46,6 +47,9 @@ type Node struct {
 	APIAddr  string // resolved HTTP API address ("" if no api configured)
 	ReplAddr string // resolved replication address ("" if this node has no children)
 	MQTTAddr string // resolved MQTT address ("" if no mqtt configured)
+	// Human doors (human-authz design §5.1); "" when not configured.
+	MQTTHumanTCPAddr string
+	MQTTHumanWSAddr  string
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -102,15 +106,39 @@ func Start(cfg *config.Config) (*Node, error) {
 	// itself once this is wired, the same way kick/deliver are wired below.
 	reg.SetMetrics(n.Metrics)
 
-	// 2. Broker: New binds the socket, so MQTTAddr is known before Serve and
-	//    before the engine exists. The engine is late-bound below.
-	if cfg.MQTT.Addr != "" {
-		mq, err := mqttsrv.New(cfg, id, reg, nil, n.Metrics)
+	// 1b. Token verifier: the human identity world (human-authz §2). Built
+	//     before the doors that consume it; the refresh loop joins the node
+	//     WaitGroup so Stop never closes the store under a JWKS persist.
+	var ver *tokenauth.Verifier
+	if cfg.Auth != nil {
+		ver, err = tokenauth.New(tokenauth.Config{
+			Issuer:   cfg.Auth.Issuer,
+			Audience: cfg.Auth.Audience,
+			JWKSURL:  cfg.Auth.JWKSURL,
+			Refresh:  cfg.Auth.EffectiveRefresh(),
+		}, st, n.Metrics)
 		if err != nil {
-			return fail(fmt.Errorf("node %s: mqtt listen %s: %w", cfg.ULID, cfg.MQTT.Addr, err))
+			return fail(fmt.Errorf("node %s: tokenauth: %w", cfg.ULID, err))
+		}
+		n.wg.Add(1)
+		go func() {
+			defer n.wg.Done()
+			ver.Run(n.stop)
+		}()
+	}
+
+	// 2. Broker: New binds the sockets, so the addrs are known before Serve
+	//    and before the engine exists. The engine is late-bound below. A node
+	//    with ONLY human listeners is legal (§4).
+	if cfg.MQTT.Addr != "" || cfg.MQTTHuman.TCPAddr != "" || cfg.MQTTHuman.WSAddr != "" {
+		mq, err := mqttsrv.New(cfg, id, reg, ver, nil, n.Metrics)
+		if err != nil {
+			return fail(fmt.Errorf("node %s: mqtt listen: %w", cfg.ULID, err))
 		}
 		n.MQTT = mq
 		n.MQTTAddr = mq.Addr()
+		n.MQTTHumanTCPAddr = mq.HumanTCPAddr()
+		n.MQTTHumanWSAddr = mq.HumanWSAddr()
 	}
 
 	// 3. Engine: delivers downlinked commands into the local broker when there
@@ -184,7 +212,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.apiLn = ln
 		n.APIAddr = ln.Addr().String()
-		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, n.Metrics))}
+		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics))}
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server stopped", "err", err)

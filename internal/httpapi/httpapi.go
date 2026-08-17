@@ -19,6 +19,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/registry"
+	"github.com/alpamayo-solutions/colca/internal/tokenauth"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -52,14 +54,17 @@ func TLSConfig(id *identity.Identity, ulid string) (*tls.Config, error) {
 	}, nil
 }
 
-// caller is the resolved identity of one request: exactly one of admin or
-// entry is set.
+// caller is the resolved identity of one request: exactly one of admin,
+// machine (entry, human == nil) or human (entry + human) is set. For humans
+// the entry IS human.Entry (KindHuman) — the read-scope and cursor-ownership
+// code paths work identically for machines and humans through it.
 type caller struct {
 	admin bool
 	entry *uns.Entry
+	human *tokenauth.Verified
 }
 
-func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, m *metrics.Metrics) http.Handler {
+func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics) http.Handler {
 	mux := http.NewServeMux()
 
 	writeJSON := func(w http.ResponseWriter, code int, v any) {
@@ -90,6 +95,20 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, m *met
 			}
 			return caller{entry: entry}, true
 		}
+		// Bearer = human (human-authz §5.3). A PRESENTED token that fails is
+		// 401 — it never falls through to the admin token check.
+		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			if ver == nil {
+				m.AuthReject(metrics.DoorHTTP, tokenauth.ReasonBadToken)
+				return caller{}, false // no auth: block → the human world does not exist here
+			}
+			v, reason, err := ver.Verify(strings.TrimPrefix(h, "Bearer "))
+			if err != nil {
+				m.AuthReject(metrics.DoorHTTP, reason)
+				return caller{}, false
+			}
+			return caller{entry: v.Entry, human: v}, true
+		}
 		if cfg.API.Token != "" && r.Header.Get("X-Colca-Token") == cfg.API.Token {
 			return caller{admin: true}, true
 		}
@@ -108,11 +127,18 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, m *met
 			next(w, r, c)
 		}
 	}
+	// adminOnly admits the static token AND humans carrying admin:# (§3):
+	// same routes, two credentials — human admin actions are attributable
+	// (sub in the log), token actions are not.
 	adminOnly := func(next http.HandlerFunc) http.HandlerFunc {
 		return auth(func(w http.ResponseWriter, r *http.Request, c caller) {
-			if !c.admin {
-				writeJSON(w, http.StatusForbidden, map[string]any{"error": "admin only"})
+			if !c.admin && (c.human == nil || !c.human.Entry.IsAdmin()) {
+				writeJSON(w, http.StatusForbidden, map[string]any{"error": "admin only (token or admin:# grant)"})
 				return
+			}
+			if c.human != nil {
+				slog.Default().Info("admin action by human", "sub", c.human.Sub,
+					"username", c.human.Username, "path", r.URL.Path, "method", r.Method)
 			}
 			next(w, r)
 		})
@@ -139,9 +165,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, m *met
 		}
 		var res engine.Result
 		var err error
-		if c.admin {
+		switch {
+		case c.admin:
 			res, err = e.IngestAdmin(in.Topic, in.Payload)
-		} else {
+		case c.human != nil:
+			// Humans command and nothing else (§5.2) — IngestHuman enforces it.
+			res, err = e.IngestHuman(c.entry, in.Topic, in.Payload)
+		default:
 			// A machine publishing over HTTP is judged exactly like its MQTT
 			// publish: own zone, identity rule, cmd grants.
 			res, err = e.IngestClient(c.entry.ULID, in.Topic, in.Payload)

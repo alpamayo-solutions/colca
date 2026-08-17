@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/authtest"
 	"github.com/alpamayo-solutions/colca/internal/config"
@@ -21,7 +22,35 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"github.com/alpamayo-solutions/colca/internal/tokenauth"
+	"github.com/alpamayo-solutions/colca/internal/tokenauth/tokentest"
 )
+
+// bearerReq performs a request authenticated with a Bearer token.
+func bearerReq(t *testing.T, hc *http.Client, method, url, token string, body any) (*http.Response, map[string]any) {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		if raw, ok := body.([]byte); ok {
+			buf.Write(raw)
+		} else if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := http.NewRequest(method, url, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Authorization", "Bearer "+token)
+	resp, err := hc.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	return resp, out
+}
 
 // api is the fixture: a TLS server exactly as node assembly builds it, with
 // one enrolled machine (m1, mount "m1") and the admin token "tok". st and m
@@ -34,6 +63,12 @@ type api struct {
 	m1  *authtest.Machine
 	st  *store.Store
 	m   *metrics.Metrics
+	iss *tokentest.Issuer
+}
+
+// mint issues a valid human token for the fixture's issuer.
+func (a *api) mint(sub string, grants []string) string {
+	return a.iss.Mint(sub, grants, time.Now().Add(5*time.Minute))
 }
 
 func newAPI(t *testing.T) *api {
@@ -59,6 +94,15 @@ func newAPI(t *testing.T) *api {
 	reg.SetMetrics(m) // move-drain design §3.4: colca_drains_active is registry-owned
 	e := engine.New(s, cfg, reg, nil, m, nil)
 
+	iss := tokentest.NewIssuer(t)
+	ver, err := tokenauth.New(tokenauth.Config{
+		Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL(),
+	}, s, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primeVerifier(t, ver)
+
 	tlsCfg, err := TLSConfig(nodeID, "n-test")
 	if err != nil {
 		t.Fatal(err)
@@ -67,11 +111,22 @@ func newAPI(t *testing.T) *api {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: Handler(e, cfg, reg, m)}
+	srv := &http.Server{Handler: Handler(e, cfg, reg, ver, m)}
 	go func() { _ = srv.Serve(tls.NewListener(ln, tlsCfg)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
-	return &api{url: "https://" + ln.Addr().String(), eng: e, reg: reg, m1: m1, st: s, m: m}
+	return &api{url: "https://" + ln.Addr().String(), eng: e, reg: reg, m1: m1, st: s, m: m, iss: iss}
+}
+
+// primeVerifier runs one immediate JWKS fetch (Run's first tick, no loop).
+func primeVerifier(t *testing.T, ver *tokenauth.Verifier) {
+	t.Helper()
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { ver.Run(stop); close(done) }()
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	<-done
 }
 
 // client builds an HTTP client: with a machine identity when mch != nil,
@@ -792,7 +847,7 @@ func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptes
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(Handler(engine.New(s, cfg, reg, nil, m, nil), cfg, reg, m))
+	srv := httptest.NewServer(Handler(engine.New(s, cfg, reg, nil, m, nil), cfg, reg, nil, m))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -866,5 +921,139 @@ func TestFetchGapServedToScopedMachine(t *testing.T) {
 	_, body = raw(t, mc, "GET", a.url+"/fetch?stream=metrics&cursor=m1/c", "", "")
 	if strings.Contains(body, `"gap"`) {
 		t.Fatalf("gap must clear after acking past the LWM: %s", body)
+	}
+}
+
+// ---- human callers (human-authz design §5.3) ----
+
+// The §5.3 route matrix for a HUMAN caller: scoped reads, {sub}/ cursors,
+// commands-only publish, admin routes gated on admin:#.
+func TestHumanRouteMatrix(t *testing.T) {
+	a := newAPI(t)
+	admin := client(nil)
+	hc := client(nil) // humans are certless; the token is the credential
+
+	// Seed: one record in the granted zone, one outside.
+	for _, tp := range []string{"colca/v1/_Metric/m1/m1/temp", "colca/v1/_Metric/x/elsewhere/temp"} {
+		if resp, out := req(t, admin, "POST", a.url+"/publish", "tok",
+			map[string]any{"topic": tp, "payload": map[string]any{"v": 1.0}}); resp.StatusCode != 200 {
+			t.Fatalf("seed %s: %d %v", tp, resp.StatusCode, out)
+		}
+	}
+	tok := a.mint("anna", []string{"read:m1/#", "cmd:m1/#:param"})
+
+	// fetch: scoped to read grants, cursor must be {sub}/-namespaced.
+	resp, _ := bearerReq(t, hc, "GET", a.url+"/fetch?stream=metrics&cursor=foreign&max=10", tok, nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("un-namespaced human cursor: want 403, got %d", resp.StatusCode)
+	}
+	_, out := bearerReq(t, hc, "GET", a.url+"/fetch?stream=metrics&cursor=anna/c&max=10", tok, nil)
+	recs := out["records"].([]any)
+	if len(recs) != 1 || recs[0].(map[string]any)["topic"] != "colca/v1/_Metric/m1/m1/temp" {
+		t.Fatalf("human fetch must be scoped to grants: %v", recs)
+	}
+
+	// ack: own cursor moves, foreign cursor 403.
+	if resp, _ := bearerReq(t, hc, "POST", a.url+"/ack", tok,
+		map[string]any{"cursor": "anna/c", "stream": "metrics", "offset": 1}); resp.StatusCode != 200 {
+		t.Fatalf("human ack own cursor: %d", resp.StatusCode)
+	}
+	if resp, _ := bearerReq(t, hc, "POST", a.url+"/ack", tok,
+		map[string]any{"cursor": "m1/c", "stream": "metrics", "offset": 1}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("human ack foreign cursor: want 403, got %d", resp.StatusCode)
+	}
+
+	// kv: scoped.
+	_, out = bearerReq(t, hc, "GET", a.url+"/kv", tok, nil)
+	for _, e := range out["entries"].([]any) {
+		if e.(map[string]any)["path"] == "elsewhere/temp" {
+			t.Fatalf("out-of-scope kv entry leaked to human: %v", out)
+		}
+	}
+
+	// publish: command with grant OK; data → 422 human_write.
+	if resp, out := bearerReq(t, hc, "POST", a.url+"/publish", tok, map[string]any{
+		"topic":   "colca/v1/_CmdParam/m1/m1/set-speed",
+		"payload": map[string]any{"correlation_id": "h1", "expires_at": float64(99999999999999)},
+	}); resp.StatusCode != 200 || out["stream"] != "commands" {
+		t.Fatalf("human command publish: %d %v", resp.StatusCode, out)
+	}
+	if resp, _ := bearerReq(t, hc, "POST", a.url+"/publish", tok, map[string]any{
+		"topic": "colca/v1/_Metric/m1/m1/temp", "payload": map[string]any{"v": 666.0},
+	}); resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("human data publish: want 422, got %d", resp.StatusCode)
+	}
+
+	// admin routes: 403 without admin:#.
+	for _, probe := range []struct{ method, path string }{
+		{"GET", "/enroll"}, {"GET", "/debug/state"},
+	} {
+		if resp, _ := bearerReq(t, hc, probe.method, a.url+probe.path, tok, nil); resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s %s as non-admin human: want 403, got %d", probe.method, probe.path, resp.StatusCode)
+		}
+	}
+}
+
+// admin:# unlocks the admin surface for a human — attributable admin actions.
+func TestHumanAdminGrant(t *testing.T) {
+	a := newAPI(t)
+	hc := client(nil)
+	adminTok := a.mint("boss", []string{"admin:#"})
+
+	m2 := authtest.NewMachine(t, "m2")
+	resp, out := bearerReq(t, hc, "POST", a.url+"/enroll", adminTok, m2.EntryJSON(t, "machine", "m2"))
+	if resp.StatusCode != 200 || out["ulid"] != "m2" {
+		t.Fatalf("human admin enroll: %d %v", resp.StatusCode, out)
+	}
+	if resp, _ := bearerReq(t, hc, "GET", a.url+"/enroll", adminTok, nil); resp.StatusCode != 200 {
+		t.Fatalf("human admin list: %d", resp.StatusCode)
+	}
+	if resp, _ := bearerReq(t, hc, "DELETE", a.url+"/enroll/m2", adminTok, nil); resp.StatusCode != 200 {
+		t.Fatalf("human admin revoke: %d", resp.StatusCode)
+	}
+	// admin does NOT widen reads: fetch returns only what read grants cover
+	// (boss has none → zero records despite seeded data).
+	if resp, out := req(t, client(nil), "POST", a.url+"/publish", "tok",
+		map[string]any{"topic": "colca/v1/_Metric/m1/m1/t", "payload": map[string]any{"v": 1.0}}); resp.StatusCode != 200 {
+		t.Fatalf("seed: %v", out)
+	}
+	_, out = bearerReq(t, hc, "GET", a.url+"/fetch?stream=metrics&cursor=boss/c&max=10", adminTok, nil)
+	if recs := out["records"].([]any); len(recs) != 0 {
+		t.Fatalf("admin:# must not widen reads, got %v", recs)
+	}
+}
+
+// Failed bearer credentials never fall through — not to the admin token, not
+// to anonymous.
+func TestBearerFailuresAreTerminal(t *testing.T) {
+	a := newAPI(t)
+	hc := client(nil)
+
+	expired := a.iss.MintOpt(tokentest.MintOpts{Sub: "anna", Exp: time.Now().Add(-3 * time.Minute)})
+	resp, _ := bearerReq(t, hc, "GET", a.url+"/fetch?stream=metrics&cursor=anna/c&max=1", expired, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expired bearer: want 401, got %d", resp.StatusCode)
+	}
+
+	// Bad bearer + VALID admin token in the same request: still 401 (mutation
+	// guard for the no-fallthrough rule).
+	r, err := http.NewRequest("GET", a.url+"/debug/state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Authorization", "Bearer garbage")
+	r.Header.Set("X-Colca-Token", "tok")
+	res, err := hc.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bad bearer with valid admin token: want 401 (no fallthrough), got %d", res.StatusCode)
+	}
+
+	// Metrics: the http door counted the rejections.
+	if v := metricstest.Value(t, a.m, `colca_auth_rejections_total{door="http",reason="`+tokenauth.ReasonExpired+`"}`); v < 1 {
+		t.Fatalf("expired bearer not counted: %v", v)
 	}
 }

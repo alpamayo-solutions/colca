@@ -17,6 +17,11 @@ type Kind string
 const (
 	KindMachine Kind = "machine"
 	KindNode    Kind = "node"
+	// KindHuman is an EPHEMERAL kind: a verified OIDC token becomes a
+	// KindHuman entry via TokenEntry (human-authz design §2.3). It is valid
+	// for Authorize but rejected by enrollment validation — humans are
+	// tokens, never registry entries.
+	KindHuman Kind = "human"
 )
 
 // Entry is one registry entry — the identity triple plus its declared grants
@@ -69,6 +74,8 @@ func (e *Entry) Validate() error {
 		if e.Mount == "" {
 			return fmt.Errorf("entry %s: a node needs a mount — only machines may be mountless observers", e.ULID)
 		}
+	case KindHuman:
+		return fmt.Errorf("entry %s: humans are tokens, not registry entries — KindHuman cannot be enrolled", e.ULID)
 	default:
 		return fmt.Errorf("entry %s: kind must be %q or %q, got %q", e.ULID, KindMachine, KindNode, e.Kind)
 	}
@@ -86,8 +93,14 @@ func (e *Entry) Validate() error {
 		return fmt.Errorf("entry %s: only kind=%q entries may drain — machines are out of scope (move-drain design §3.2)", e.ULID, KindNode)
 	}
 	for _, g := range e.Grants {
-		if _, err := ParseGrant(g); err != nil {
+		pg, err := ParseGrant(g)
+		if err != nil {
 			return fmt.Errorf("entry %s: %w", e.ULID, err)
+		}
+		if pg.Verb == "admin" {
+			// Registry identities may not hold admin: machine provisioning is
+			// the (deferred) _CmdAdmin flow, human admin rides in tokens.
+			return fmt.Errorf("entry %s: %q — machines and nodes may not hold admin grants", e.ULID, g)
 		}
 	}
 	return nil
@@ -133,6 +146,21 @@ func ParseGrant(s string) (Grant, error) {
 			return Grant{}, err
 		}
 		return Grant{Verb: "read", Prefix: p}, nil
+	case "admin":
+		if len(parts) != 2 {
+			return Grant{}, fmt.Errorf("grant %q: admin grant is admin:#", s)
+		}
+		p, err := parsePrefix(s, parts[1])
+		if err != nil {
+			return Grant{}, err
+		}
+		if p != "#" {
+			// Reserved grammar (human-authz design §3): the zone-scoped form
+			// parses structurally but is not implemented — rejecting it here
+			// keeps a later introduction additive instead of breaking.
+			return Grant{}, fmt.Errorf("grant %q: zone-scoped admin is reserved and not implemented — use admin:#", s)
+		}
+		return Grant{Verb: "admin", Prefix: "#"}, nil
 	case "cmd":
 		if len(parts) != 3 {
 			return Grant{}, fmt.Errorf("grant %q: cmd grant is cmd:<zone>:<class,...>", s)
@@ -152,8 +180,36 @@ func ParseGrant(s string) (Grant, error) {
 		}
 		return Grant{Verb: "cmd", Prefix: p, Classes: classes}, nil
 	default:
-		return Grant{}, fmt.Errorf("grant %q: verb must be read or cmd", s)
+		return Grant{}, fmt.Errorf("grant %q: verb must be read, cmd or admin", s)
 	}
+}
+
+// TokenEntry builds the EPHEMERAL entry a verified OIDC token maps to
+// (human-authz design §2.3): identity = the token's sub, no mount (humans own
+// no zone — the World-2 rule falls out structurally), grants = the
+// colca_grants claim. Validated here, never by Entry.Validate (that is the
+// enrollment gate and demands a pubkey), never persisted.
+func TokenEntry(sub string, grants []string) (*Entry, error) {
+	if sub == "" {
+		return nil, fmt.Errorf("token entry: empty sub")
+	}
+	for _, g := range grants {
+		if _, err := ParseGrant(g); err != nil {
+			return nil, fmt.Errorf("token entry %s: %w", sub, err)
+		}
+	}
+	return &Entry{ULID: sub, Kind: KindHuman, Grants: grants}, nil
+}
+
+// IsAdmin reports whether the entry carries the admin:# grant — it unlocks
+// the ADMIN ROUTES only and never widens read or cmd (§3).
+func (e *Entry) IsAdmin() bool {
+	for _, g := range e.Grants {
+		if pg, err := ParseGrant(g); err == nil && pg.Verb == "admin" {
+			return true
+		}
+	}
+	return false
 }
 
 func parsePrefix(grant, p string) (string, error) {

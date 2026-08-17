@@ -11,4 +11,12 @@ log_level: debug
 key_file: /keys/global.key
 api: { addr: ":8080", token: "demo-admin-token" }
 mqtt: { addr: ":1883" }
+# Human doors (JWT): live only when the human-auth compose profile runs the
+# keycloak container; otherwise the verifier retries its JWKS fetch and the
+# doors reject every token (machines are unaffected).
+mqtt_human: { tcp_addr: ":8884", ws_addr: ":8885" }
+auth:
+  issuer: http://keycloak:8080/realms/colca
+  audience: colca
+  jwks_url: http://keycloak:8080/realms/colca/protocol/openid-connect/certs
 repl: { addr: ":9443" }

@@ -69,10 +69,18 @@ services:
       - "global-data:/data"
     # 11880 is the hub bus: every record replicated up from the whole tree is
     # mirrored there under its stored topic (subscribe with an enrolled read:# identity).
+    # 11890/11891 are the HUMAN doors (JWT over TLS: raw MQTT / WebSocket) —
+    # usable only when the human-auth profile (keycloak) is up; without it the
+    # hub keeps retrying its JWKS fetch and the doors reject every token.
     ports:
       - "127.0.0.1:${COLCA_PORT_GLOBAL_API:-18080}:8080"
       - "127.0.0.1:${COLCA_PORT_GLOBAL_MQTT:-11880}:1883"
-    networks: [link3-hub]
+      - "127.0.0.1:${COLCA_PORT_GLOBAL_HUMAN_MQTT:-11890}:8884"
+      - "127.0.0.1:${COLCA_PORT_GLOBAL_HUMAN_WS:-11891}:8885"
+    networks:
+      link3-hub:     # keep upstream's primary pick: host ports bind here
+        priority: 100
+      kc-global: {}  # global ↔ keycloak only (JWKS fetch), pairwise by design
 
   site1:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -107,6 +115,7 @@ services:
     networks:
       host-edge1:    # observation net = primary: host ports survive partitions
         priority: 100
+      kc-edge1: {}   # edge1 ↔ keycloak only (JWKS fetch), pairwise by design
       link1-m1: {}
       link2-edges: {}
 
@@ -165,6 +174,34 @@ services:
     depends_on: [edge2]
     networks: [link1-m2]
 
+  # Real Keycloak for the human-auth world (level-4 suite; opt-in for demos):
+  # upstream image in dev mode importing the minimal colca realm. The exact
+  # upstream base the Colca standard image builds on (quay 26.6.3) — the
+  # full standard image needs Postgres + the Colca realm template and is
+  # deliberately NOT dragged into the colca deploy.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.6.3
+    profiles: ["human-auth"]
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin-demo-password
+      # Pin the issuer: tokens minted through the host port (127.0.0.1:18095)
+      # must carry the SAME iss the nodes validate against (the in-network
+      # name), or every token dies on the issuer check.
+      KC_HOSTNAME: http://keycloak:8080
+    volumes:
+      - "./config/colca-realm.json:/opt/keycloak/data/import/colca-realm.json:ro"
+    ports:
+      - "127.0.0.1:${COLCA_PORT_KEYCLOAK:-18095}:8080"
+    # Pairwise kc-* networks: each auth-bearing node (an `auth:` block in its
+    # config template — global and edge1 today) reaches keycloak for its JWKS
+    # fetch over its OWN two-member network. No kc-* network ever carries
+    # node↔node traffic, so the chaos suite's "nothing leaks around a severed
+    # link" invariant holds, and no chaos primitive disconnects kc-* — token
+    # verification keeps working during partitions, like HEAD's flat network.
+    networks: [kc-edge1, kc-global]
+
 volumes:
   global-data: {}
   site1-data: {}
@@ -175,6 +212,8 @@ networks:
   host-edge1: {}
   host-edge2: {}
   host-site1: {}
+  kc-edge1: {}
+  kc-global: {}
   link1-m1: {}
   link1-m2: {}
   link2-edges: {}

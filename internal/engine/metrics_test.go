@@ -166,7 +166,7 @@ func TestRejectPublishByReason(t *testing.T) {
 			}
 			// No other reason may have moved.
 			for _, r := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation,
-				metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract} {
+				metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract, metrics.ReasonHumanWrite} {
 				if r == tc.reason {
 					continue
 				}
@@ -313,7 +313,7 @@ func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 	}
 	before := map[string]float64{}
 	for _, reason := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation,
-		metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract} {
+		metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract, metrics.ReasonHumanWrite} {
 		before[reason] = scrapeMetric(t, m, `colca_rejected_publishes_total{reason="`+reason+`"}`)
 	}
 
@@ -339,7 +339,7 @@ func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 	}
 
 	for _, reason := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation,
-		metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract} {
+		metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract, metrics.ReasonHumanWrite} {
 		if v := scrapeMetric(t, m, `colca_rejected_publishes_total{reason="`+reason+`"}`); v != before[reason] {
 			t.Fatalf("colca_rejected_publishes_total{reason=%s} moved from %v to %v after refresh failures — must stay untouched", reason, before[reason], v)
 		}

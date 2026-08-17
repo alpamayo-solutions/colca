@@ -5,8 +5,10 @@ go 1.25.1
 require (
 	github.com/cockroachdb/pebble/v2 v2.1.6
 	github.com/eclipse/paho.mqtt.golang v1.5.1
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/mochi-mqtt/server/v2 v2.7.9
 	github.com/prometheus/client_golang v1.16.0
+	github.com/prometheus/client_model v0.3.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -34,7 +36,6 @@ require (
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
 	github.com/minio/minlz v1.0.1-0.20250507153514-87eb42fe8882 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_model v0.3.0 // indirect
 	github.com/prometheus/common v0.42.0 // indirect
 	github.com/prometheus/procfs v0.10.1 // indirect
 	github.com/rogpeppe/go-internal v1.9.0 // indirect

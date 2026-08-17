@@ -16,6 +16,31 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Auth is the human-identity issuer block (human-authz design §4): the OIDC
+// coordinates colca validates human JWTs against — offline, via the JWKS.
+// Absent = the human world does not exist on this node.
+type Auth struct {
+	Issuer      string   `yaml:"issuer"`
+	Audience    string   `yaml:"audience"`
+	JWKSURL     string   `yaml:"jwks_url"`
+	JWKSRefresh Duration `yaml:"jwks_refresh"` // 0 → 1h (EffectiveRefresh)
+}
+
+// EffectiveRefresh is the JWKS refresh cadence with the §4 default applied.
+func (a *Auth) EffectiveRefresh() time.Duration {
+	if a.JWKSRefresh == 0 {
+		return time.Hour
+	}
+	return time.Duration(a.JWKSRefresh)
+}
+
+// MQTTHuman are the token-authenticated MQTT listeners (§4): raw MQTT over
+// TLS and MQTT over WebSocket over TLS. Either may be empty.
+type MQTTHuman struct {
+	TCPAddr string `yaml:"tcp_addr"`
+	WSAddr  string `yaml:"ws_addr"`
+}
+
 type Endpoint struct {
 	Addr string `yaml:"addr"`
 }
@@ -43,6 +68,10 @@ type Config struct {
 	MQTT     Endpoint `yaml:"mqtt"`
 	Repl     Endpoint `yaml:"repl"`
 	Parent   *Parent  `yaml:"parent"`
+
+	// Human world (human-authz design §4).
+	Auth      *Auth     `yaml:"auth"`
+	MQTTHuman MQTTHuman `yaml:"mqtt_human"`
 
 	// Retention configures the background pruner (design §3). Absent entirely
 	// = every default in the §3.1 table applies (pruning ON by default).
@@ -336,6 +365,19 @@ func Load(path string) (*Config, error) {
 func (c *Config) Validate() error {
 	if c.ULID == "" || c.DataDir == "" || c.KeyFile == "" {
 		return fmt.Errorf("config: ulid, data_dir, key_file are required")
+	}
+	if (c.MQTTHuman.TCPAddr != "" || c.MQTTHuman.WSAddr != "") && c.Auth == nil {
+		// Fail at startup, not at the first CONNECT: a token door with no
+		// verifier authenticates nobody (design §4).
+		return fmt.Errorf("config: mqtt_human requires an auth: block — a token door with no verifier authenticates nobody")
+	}
+	if c.Auth != nil {
+		if c.Auth.Issuer == "" || c.Auth.Audience == "" || c.Auth.JWKSURL == "" {
+			return fmt.Errorf("config: auth needs issuer, audience and jwks_url")
+		}
+		if c.Auth.JWKSRefresh < 0 {
+			return fmt.Errorf("config: auth.jwks_refresh must not be negative")
+		}
 	}
 	if err := c.Retention.validate(); err != nil {
 		return err

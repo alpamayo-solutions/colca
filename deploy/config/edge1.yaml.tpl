@@ -6,6 +6,10 @@ key_file: /keys/edge1.key
 api: { addr: ":8080", token: "demo-admin-token" }
 mqtt: { addr: ":1883" }
 repl: { addr: ":9443" }
+auth:
+  issuer: http://keycloak:8080/realms/colca
+  audience: colca
+  jwks_url: http://keycloak:8080/realms/colca/protocol/openid-connect/certs
 parent:
   url: https://site1:9443
   pubkey: ${PUB_SITE1}

@@ -57,6 +57,67 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+// Human-authz design §4: auth issuer block + human MQTT listeners.
+func TestAuthAndHumanMQTTConfig(t *testing.T) {
+	doc := `
+ulid: n-edge1
+data_dir: /tmp/colca-test
+key_file: /keys/edge1.key
+auth:
+  issuer: https://kc.example/realms/colca
+  audience: colca
+  jwks_url: https://kc.example/realms/colca/protocol/openid-connect/certs
+  jwks_refresh: 30m
+mqtt_human:
+  tcp_addr: ":8884"
+  ws_addr: ":8885"
+`
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Auth == nil || c.Auth.Issuer != "https://kc.example/realms/colca" ||
+		c.Auth.Audience != "colca" || time.Duration(c.Auth.JWKSRefresh) != 30*time.Minute {
+		t.Fatalf("auth block: %+v", c.Auth)
+	}
+	if c.MQTTHuman.TCPAddr != ":8884" || c.MQTTHuman.WSAddr != ":8885" {
+		t.Fatalf("mqtt_human block: %+v", c.MQTTHuman)
+	}
+
+	// refresh absent → 1h effective default
+	base := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		Auth: &Auth{Issuer: "i", Audience: "a", JWKSURL: "j"}}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("auth without mqtt_human must validate: %v", err)
+	}
+	if got := base.Auth.EffectiveRefresh(); got != time.Hour {
+		t.Fatalf("EffectiveRefresh default: %v", got)
+	}
+
+	for name, c := range map[string]*Config{
+		"mqtt_human without auth": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+			MQTTHuman: MQTTHuman{TCPAddr: ":8884"}},
+		"ws without auth": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+			MQTTHuman: MQTTHuman{WSAddr: ":8885"}},
+		"auth missing issuer": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+			Auth: &Auth{Audience: "a", JWKSURL: "j"}},
+		"auth missing audience": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+			Auth: &Auth{Issuer: "i", JWKSURL: "j"}},
+		"auth missing jwks_url": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+			Auth: &Auth{Issuer: "i", Audience: "a"}},
+		"negative refresh": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+			Auth: &Auth{Issuer: "i", Audience: "a", JWKSURL: "j", JWKSRefresh: Duration(-time.Hour)}},
+	} {
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: want validation error", name)
+		}
+	}
+}
+
 func TestValidateRequiredFields(t *testing.T) {
 	base := func() *Config { return &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"} }
 

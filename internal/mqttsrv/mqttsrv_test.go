@@ -64,7 +64,7 @@ func newWorld(t *testing.T) *world {
 		MQTT: config.Endpoint{Addr: "127.0.0.1:0"}}
 	m := metrics.New(st, config.Retention{}, nil)
 	w.m = m
-	s, err := New(cfg, nodeID, reg, nil, m)
+	s, err := New(cfg, nodeID, reg, nil, nil, m)
 	if err != nil {
 		st.Close()
 		t.Fatalf("New: %v", err)

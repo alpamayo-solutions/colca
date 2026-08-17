@@ -1,0 +1,160 @@
+{
+  "realm": "colca",
+  "enabled": true,
+  "accessTokenLifespan": 300,
+  "clientScopes": [
+    {
+      "name": "colca-grants",
+      "description": "colca grant strings aggregated from user and group attributes into the colca_grants claim.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "colca_grants",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "aggregate.attrs": "true",
+            "multivalued": "true",
+            "user.attribute": "colca_grants",
+            "claim.name": "colca_grants",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "colca-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "colca",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "consentRequired": false,
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+            "lightweight.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "colca",
+      "name": "Colca (human access)",
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "enabled": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "fullScopeAllowed": false,
+      "redirectUris": [
+        "*"
+      ],
+      "webOrigins": [
+        "+"
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "email",
+        "colca-grants"
+      ],
+      "optionalClientScopes": []
+    }
+  ],
+  "groups": [
+    {
+      "name": "site1-operators",
+      "attributes": {
+        "colca_grants": [
+          "read:site1/#",
+          "cmd:site1/edge1/m1/#:param"
+        ]
+      }
+    },
+    {
+      "name": "colca-admins",
+      "attributes": {
+        "colca_grants": [
+          "admin:#",
+          "read:#"
+        ]
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "anna",
+      "enabled": true,
+      "email": "anna@colca.test",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "anna-demo-password",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/site1-operators"
+      ],
+      "firstName": "Anna",
+      "lastName": "Colca",
+      "requiredActions": []
+    },
+    {
+      "username": "boss",
+      "enabled": true,
+      "email": "boss@colca.test",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "boss-demo-password",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/colca-admins"
+      ],
+      "firstName": "Boss",
+      "lastName": "Colca",
+      "requiredActions": []
+    },
+    {
+      "username": "nobody",
+      "enabled": true,
+      "email": "nobody@colca.test",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "nobody-demo-password",
+          "temporary": false
+        }
+      ],
+      "groups": [],
+      "firstName": "Nobody",
+      "lastName": "Colca",
+      "requiredActions": []
+    }
+  ]
+}

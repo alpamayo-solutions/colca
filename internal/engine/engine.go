@@ -195,6 +195,63 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 	return e.persist(class, rp, rewritten, payload)
 }
 
+// IngestHuman: a verified human (KindHuman entry from a token) publishes.
+// Humans command and NOTHING else (World-2 rule, human-authz design §5.2):
+// the only accepted class is ClassCmd, gated by the entry's cmd grants —
+// data, entity and ack contracts are rejected with ReasonHumanWrite and no
+// grant can override that. Commands target ABSOLUTE node-local paths, no
+// rewrite, no level-4 identity rule — exactly like admin-issued commands.
+func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Result, error) {
+	if !uns.IsUns(topic) {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
+		return Result{}, fmt.Errorf("human publish must be colca/#")
+	}
+	p, err := uns.Parse(topic)
+	if err != nil {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
+		return Result{}, err
+	}
+	if p.Contract == "_EdgeNode" {
+		e.metrics.RejectPublish(metrics.ReasonRegistryContract)
+		return Result{}, fmt.Errorf("_EdgeNode is enrollment-door only — use POST /enroll")
+	}
+	class := uns.ClassOf(p.Contract)
+	if class == uns.ClassNone {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
+		return Result{}, fmt.Errorf("unknown contract %s", p.Contract)
+	}
+	if class == uns.ClassTimeSync {
+		// Same rule as IngestClient/IngestAdmin (time-sync design §2.2/§4):
+		// _TimeSync is node-local-publish-only. Checked before the World-2
+		// rule so the rejection carries the reason that actually explains it
+		// (time_sync), not the generic human_write.
+		e.metrics.RejectPublish(metrics.ReasonTimeSync)
+		return Result{}, fmt.Errorf("human %s may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)", entry.ULID)
+	}
+	if class != uns.ClassCmd {
+		e.metrics.RejectPublish(metrics.ReasonHumanWrite)
+		return Result{}, fmt.Errorf("human %s may not publish %s — humans command, machines write state", entry.ULID, p.Contract)
+	}
+	if e.ids.DrainingMount(p.Path) {
+		// Move-drain design §3.2 item 2 — "at every door": a human's cmd
+		// grant does not exempt them from the draining admission gate.
+		// Checked first (like IngestClient) so a draining destination is
+		// rejected for the reason that explains it, not folded into
+		// cmd_denied.
+		e.metrics.RejectPublish(metrics.ReasonDraining)
+		return Result{}, fmt.Errorf("human %s: %s is draining — no new commands admitted (move-drain design §3.2)", entry.ULID, p.Path)
+	}
+	if !uns.Authorize(entry, uns.ActCmd, topic) {
+		e.metrics.RejectPublish(metrics.ReasonCmdDenied)
+		return Result{}, fmt.Errorf("human %s: no cmd grant covers %s", entry.ULID, topic)
+	}
+	if err := uns.Validate(p.Contract, payload); err != nil {
+		e.metrics.RejectPublish(metrics.ReasonValidation)
+		return Result{}, err
+	}
+	return e.persist(class, p, topic, payload)
+}
+
 // IngestAdmin: local HTTP API with admin token — publishes in node-local
 // coordinates, no rewrite, commands allowed, still validated.
 func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {

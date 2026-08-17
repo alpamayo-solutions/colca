@@ -33,6 +33,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/node"
+	"github.com/alpamayo-solutions/colca/internal/tokenauth/tokentest"
 )
 
 const tok = "test-admin-token"
@@ -49,6 +50,7 @@ type topo struct {
 	dirs                        map[string]string
 	m1, m2                      *authtest.Machine            // machines at edge1/edge2
 	obs                         map[string]*authtest.Machine // per-node read-all observers, keyed by node ulid
+	iss                         *tokentest.Issuer            // fake OIDC issuer every node trusts (human world)
 }
 
 // startTopo builds the whole topology top-down: a parent must be listening
@@ -56,7 +58,8 @@ type topo struct {
 func startTopo(t *testing.T) *topo {
 	t.Helper()
 	tp := &topo{cfgs: map[string]*config.Config{}, keys: map[string]*identity.Identity{},
-		dirs: map[string]string{}, obs: map[string]*authtest.Machine{}}
+		dirs: map[string]string{}, obs: map[string]*authtest.Machine{},
+		iss: tokentest.NewIssuer(t)}
 	base := t.TempDir()
 	for _, n := range []string{"n-global", "n-site1", "n-edge1", "n-edge2"} {
 		kp := filepath.Join(base, n+".key")
@@ -80,6 +83,14 @@ func startTopo(t *testing.T) *topo {
 			MQTT:   config.Endpoint{Addr: "127.0.0.1:0"},
 			Repl:   config.Endpoint{Addr: "127.0.0.1:0"},
 			Parent: parent,
+			// Every node trusts the same fake issuer and opens both human
+			// doors (human-authz §4/§5.1) — the human contract is tested at
+			// every level of the tree.
+			Auth: &config.Auth{Issuer: tp.iss.Iss(), Audience: tp.iss.Aud(), JWKSURL: tp.iss.JWKSURL()},
+			MQTTHuman: config.MQTTHuman{
+				TCPAddr: "127.0.0.1:0",
+				WSAddr:  "127.0.0.1:0",
+			},
 		}
 	}
 	// Every node gets a mount-less read-all `observer` identity (may subscribe
