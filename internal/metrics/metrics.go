@@ -133,6 +133,10 @@ type Metrics struct {
 	jwksKeys      prometheus.Gauge   // colca_jwks_keys
 	jwksFailures  prometheus.Counter // colca_jwks_refresh_failures_total
 
+	// CmdAdmin world (cmdadmin design §9).
+	adminCmds  *prometheus.CounterVec // colca_admin_cmds_total{verb,result}
+	nodePrefix *prometheus.GaugeVec   // colca_node_prefix_info{prefix}
+
 	// Retention (design §8): pruner-side counters.
 	prunedRecords *prometheus.CounterVec // colca_retention_pruned_records_total{stream}
 	prunedBytes   *prometheus.CounterVec // colca_retention_pruned_bytes_total{stream}
@@ -240,6 +244,14 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_jwks_refresh_failures_total",
 			Help: "Failed JWKS fetches (cached keys keep serving). Resets on restart.",
 		}),
+		adminCmds: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_admin_cmds_total",
+			Help: "CmdAdmin commands executed at this node, by verb and outcome. Resets on restart.",
+		}, []string{"verb", "result"}),
+		nodePrefix: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "colca_node_prefix_info",
+			Help: "The node's root-frame prefix as taught by its parent (info gauge, value 1; absent until learned).",
+		}, []string{"prefix"}),
 		prunedRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_retention_pruned_records_total",
 			Help: "Records removed by the retention pruner, by stream. Resets on restart.",
@@ -371,6 +383,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
 		m.downlinkOK, m.downlinkFail, m.reseed,
 		m.authReject, m.aclDeny, m.kicks, m.humanSessions, m.jwksKeys, m.jwksFailures,
+		m.adminCmds, m.nodePrefix,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied,
@@ -415,6 +428,25 @@ func (m *Metrics) SetJWKSKeys(n int) {
 		return
 	}
 	m.jwksKeys.Set(float64(n))
+}
+
+// AdminCmd counts one executed CmdAdmin command by verb and outcome
+// (ok | conflict | invalid | expired | error).
+func (m *Metrics) AdminCmd(verb, result string) {
+	if m == nil {
+		return
+	}
+	m.adminCmds.WithLabelValues(verb, result).Inc()
+}
+
+// SetNodePrefix reports the currently taught root-frame prefix as an info
+// gauge: exactly one label value carries 1, older values are dropped.
+func (m *Metrics) SetNodePrefix(p string) {
+	if m == nil {
+		return
+	}
+	m.nodePrefix.Reset()
+	m.nodePrefix.WithLabelValues(p).Set(1)
 }
 
 // JWKSRefreshFailed counts one failed JWKS fetch (tokenauth.Metrics).

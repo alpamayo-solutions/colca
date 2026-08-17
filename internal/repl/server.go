@@ -219,6 +219,23 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		limit = defaultDownlinkMax
 	}
 
+	// hello=1 answers immediately instead of long-polling: the child's first
+	// contact after (re)connect learns its root-frame prefix (cmdadmin design
+	// §3) in one RTT instead of one long-poll cycle — a fresh node must not
+	// stay fail-closed for humans until the first idle poll drains.
+	if r.URL.Query().Get("hello") == "1" {
+		resp := map[string]any{"records": []wireRec{}, "next": after}
+		if p, ok := s.eng.Prefix(); ok {
+			childPrefix := child.Mount
+			if p != "" {
+				childPrefix = p + "/" + child.Mount
+			}
+			resp["prefix"] = childPrefix
+		}
+		writeJSON(w, resp)
+		return
+	}
+
 	// Spec §5.1 [delta]: persist the child's downlink progress as an ordinary
 	// named cursor, c/downlink:{child-ulid}/commands ← max(existing, after),
 	// keyed by the AUTHENTICATED identity (the after parameter only carries the
@@ -283,6 +300,17 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			// authoritative-now estimate (time-sync design §2.1), not raw
 			// local time; the root has no offset, so this is its raw clock.
 			resp := map[string]any{"records": out, "next": next, "now_ms": s.eng.AuthoritativeNow().UnixMilli()}
+			// Prefix hand-down (cmdadmin design §3): the parent knows its own
+			// root-frame prefix and the child's mount, so every downlink
+			// response teaches the child its prefix. Omitted while this
+			// node's own prefix is still unknown — never guess frames.
+			if p, ok := s.eng.Prefix(); ok {
+				childPrefix := child.Mount
+				if p != "" {
+					childPrefix = p + "/" + child.Mount
+				}
+				resp["prefix"] = childPrefix
+			}
 			if hasGap {
 				// §6.3: "next already points past the hole". With surviving
 				// records Read guarantees that; with none it would stay at

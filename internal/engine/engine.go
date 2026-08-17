@@ -7,6 +7,7 @@ package engine
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/clock"
@@ -52,6 +53,17 @@ type Engine struct {
 	log     *slog.Logger
 	metrics *metrics.Metrics // nil-safe: every method on a nil receiver is a no-op
 	clk     *clock.Clock
+
+	// Root-frame prefix (cmdadmin design §3): taught by the parent on the
+	// downlink, persisted, unknown until first taught. The root sets "" at
+	// startup (known-empty by construction — it has no parent).
+	prefixMu    sync.RWMutex
+	prefix      string
+	prefixKnown bool
+
+	// admin executes _CmdAdmin verbs against the local registry (cmdadmin
+	// design §5); nil until SetAdmin — execution then acks 500, fail-loud.
+	admin AdminExec
 }
 
 // New builds an engine. ids is the identity registry (a client without a
@@ -72,7 +84,43 @@ func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m
 	if clk == nil {
 		clk = clock.New(cfg.Parent == nil, time.Now)
 	}
-	return &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk}
+	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk}
+	if p, ok := s.PrefixGet(); ok {
+		e.prefix, e.prefixKnown = p, true
+		m.SetNodePrefix(p)
+	}
+	return e
+}
+
+// Prefix returns the node's root-frame prefix; ok=false until first taught.
+func (e *Engine) Prefix() (string, bool) {
+	e.prefixMu.RLock()
+	defer e.prefixMu.RUnlock()
+	return e.prefix, e.prefixKnown
+}
+
+// SetPrefix stores a (re-)taught root-frame prefix. Idempotent: an unchanged
+// value writes nothing. A change is persisted synchronously, logged, and
+// reflected in colca_node_prefix_info — new token verifications use it
+// immediately; live human sessions keep their at-connect translation.
+func (e *Engine) SetPrefix(p string) {
+	e.prefixMu.Lock()
+	if e.prefixKnown && e.prefix == p {
+		e.prefixMu.Unlock()
+		return
+	}
+	old, hadOld := e.prefix, e.prefixKnown
+	e.prefix, e.prefixKnown = p, true
+	e.prefixMu.Unlock()
+	if err := e.store.PrefixPut(p); err != nil {
+		e.log.Error("prefix persistence failed — active in-memory only", "prefix", p, "err", err)
+	}
+	e.metrics.SetNodePrefix(p)
+	if hadOld {
+		e.log.Info("node prefix changed", "old", old, "new", p)
+	} else {
+		e.log.Info("node prefix learned", "prefix", p)
+	}
 }
 
 func (e *Engine) Store() *store.Store { return e.store }
@@ -164,7 +212,11 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 			e.metrics.RejectPublish(metrics.ReasonValidation)
 			return Result{}, err
 		}
-		return e.persist(class, p, topic, payload)
+		res, err := e.persist(class, p, topic, payload)
+		if err == nil {
+			e.maybeExecAdmin(p, payload) // self-target admin via the machine door (design §5)
+		}
+		return res, err
 	}
 	if class == uns.ClassNone {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
@@ -249,7 +301,11 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 		e.metrics.RejectPublish(metrics.ReasonValidation)
 		return Result{}, err
 	}
-	return e.persist(class, p, topic, payload)
+	res, err := e.persist(class, p, topic, payload)
+	if err == nil {
+		e.maybeExecAdmin(p, payload) // self-target admin via the human door (design §5)
+	}
+	return res, err
 }
 
 // IngestAdmin: local HTTP API with admin token — publishes in node-local
@@ -292,7 +348,11 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 		e.metrics.RejectPublish(metrics.ReasonValidation)
 		return Result{}, err
 	}
-	return e.persist(class, p, topic, payload)
+	res, err := e.persist(class, p, topic, payload)
+	if err == nil {
+		e.maybeExecAdmin(p, payload) // self-target admin via the admin token (design §5)
+	}
+	return res, err
 }
 
 // IngestRefresh is the retention pruner's §6.5 state-refresh entry (spec §6.5
@@ -380,7 +440,11 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 		e.metrics.RejectPublish(metrics.ReasonDraining)
 		return Result{}, fmt.Errorf("downlink: %s is draining — no new commands admitted (move-drain design §3.2)", p.Path)
 	}
-	return e.persistTS(class, p, topic, payload, ts)
+	res, err := e.persistTS(class, p, topic, payload, ts)
+	if err == nil {
+		e.maybeExecAdmin(p, payload) // the target executes downlinked admin commands (design §5)
+	}
+	return res, err
 }
 
 // IngestReplicated applies a batch pushed by a child: dedupe by high-water-mark,

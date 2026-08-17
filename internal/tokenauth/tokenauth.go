@@ -72,6 +72,31 @@ type Verifier struct {
 	mu        sync.RWMutex
 	keys      map[string]crypto.PublicKey
 	lastFetch time.Time // last unknown-kid-triggered fetch attempt (rate limit)
+
+	// prefixFn supplies the node's root-frame prefix for grant translation
+	// (cmdadmin design §3). The default is root behavior — prefix "" known —
+	// so a verifier without a source (unit tests, the root node before
+	// wiring) evaluates grants verbatim, which is the behavior at the hub.
+	prefixMu sync.RWMutex
+	prefixFn func() (string, bool)
+}
+
+// SetPrefixSource wires the node's prefix into grant translation; fn is
+// called on every Verify (it is a cheap engine read).
+func (v *Verifier) SetPrefixSource(fn func() (string, bool)) {
+	v.prefixMu.Lock()
+	v.prefixFn = fn
+	v.prefixMu.Unlock()
+}
+
+func (v *Verifier) prefixNow() (string, bool) {
+	v.prefixMu.RLock()
+	fn := v.prefixFn
+	v.prefixMu.RUnlock()
+	if fn == nil {
+		return "", true
+	}
+	return fn()
 }
 
 // New builds a verifier and loads the persisted JWKS if one exists. NO
@@ -214,7 +239,8 @@ func (v *Verifier) Verify(token string) (*Verified, string, error) {
 		return nil, ReasonBadToken, fmt.Errorf("token rejected: unreadable exp")
 	}
 	grants := stringList(claims["colca_grants"])
-	entry, err := uns.TokenEntry(sub, grants)
+	prefix, prefixKnown := v.prefixNow()
+	entry, err := uns.TokenEntry(sub, grants, prefix, prefixKnown)
 	if err != nil {
 		return nil, ReasonBadToken, fmt.Errorf("token rejected: %w", err)
 	}

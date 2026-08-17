@@ -346,7 +346,7 @@ func TestClientCmdGrants(t *testing.T) {
 // humanEntry builds the ephemeral token entry the doors hand to IngestHuman.
 func humanEntry(t *testing.T, grants ...string) *uns.Entry {
 	t.Helper()
-	e, err := uns.TokenEntry("kc-sub-anna", grants)
+	e, err := uns.TokenEntry("kc-sub-anna", grants, "", true)
 	if err != nil {
 		t.Fatal(err)
 	}

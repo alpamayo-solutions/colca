@@ -148,6 +148,18 @@ func Start(cfg *config.Config) (*Node, error) {
 		deliver = n.MQTT.DeliverLocal
 	}
 	n.Engine = engine.New(st, cfg, reg, deliver, n.Metrics, clk)
+	// CmdAdmin execution drives the SAME registry writes as the enrollment
+	// door — one write path inside (cmdadmin design §5).
+	n.Engine.SetAdmin(reg)
+	// Root-frame prefix (cmdadmin design §3): a node without a parent IS the
+	// root — its prefix is known-empty by construction. Children learn theirs
+	// from the downlink hand-down; grant translation reads it per Verify.
+	if cfg.Parent == nil {
+		n.Engine.SetPrefix("")
+	}
+	if ver != nil {
+		ver.SetPrefixSource(n.Engine.Prefix)
+	}
 
 	if n.MQTT != nil {
 		n.MQTT.SetEngine(n.Engine)

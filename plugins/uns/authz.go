@@ -187,9 +187,12 @@ func ParseGrant(s string) (Grant, error) {
 // TokenEntry builds the EPHEMERAL entry a verified OIDC token maps to
 // (human-authz design §2.3): identity = the token's sub, no mount (humans own
 // no zone — the World-2 rule falls out structurally), grants = the
-// colca_grants claim. Validated here, never by Entry.Validate (that is the
+// colca_grants claim. Grants are authored in ROOT frame (cmdadmin design §3)
+// and translated here into the local frame of the verifying node, whose
+// root-frame prefix is prefix (prefixKnown=false: never learned — scoped
+// grants fail closed). Validated here, never by Entry.Validate (that is the
 // enrollment gate and demands a pubkey), never persisted.
-func TokenEntry(sub string, grants []string) (*Entry, error) {
+func TokenEntry(sub string, grants []string, prefix string, prefixKnown bool) (*Entry, error) {
 	if sub == "" {
 		return nil, fmt.Errorf("token entry: empty sub")
 	}
@@ -198,7 +201,66 @@ func TokenEntry(sub string, grants []string) (*Entry, error) {
 			return nil, fmt.Errorf("token entry %s: %w", sub, err)
 		}
 	}
-	return &Entry{ULID: sub, Kind: KindHuman, Grants: grants}, nil
+	return &Entry{ULID: sub, Kind: KindHuman, Grants: TranslateGrants(prefix, prefixKnown, grants)}, nil
+}
+
+// TranslateGrants rewrites ROOT-frame grant strings into the local frame of
+// a node whose root-frame prefix is prefix (cmdadmin design §3). known=false
+// means the node has never learned its prefix: scoped grants fail closed,
+// frame-invariant ones (zone "#", the admin verb) survive. Grants that do
+// not reach this node's subtree are dropped; order is preserved. Malformed
+// strings are skipped — TokenEntry gates grammar before translation.
+func TranslateGrants(prefix string, known bool, grants []string) []string {
+	var out []string
+	for _, g := range grants {
+		pg, err := ParseGrant(g)
+		if err != nil {
+			continue
+		}
+		if pg.Verb == "admin" || pg.Prefix == "#" {
+			out = append(out, g)
+			continue
+		}
+		if !known {
+			continue
+		}
+		zone, ok := translateZone(prefix, pg.Prefix)
+		if !ok {
+			continue
+		}
+		out = append(out, rebuildGrant(pg.Verb, zone, pg.Classes))
+	}
+	return out
+}
+
+// translateZone maps a root-frame zone into the local frame of prefix.
+// prefix "" is the root: identity. A zone covering the node collapses to
+// "#" (this whole node is inside it); a zone inside the node's subtree is
+// stripped to local coordinates; anything else does not apply here. The
+// boundary is always the path separator — "site10" is not below "site1".
+func translateZone(prefix, zone string) (string, bool) {
+	if prefix == "" {
+		return zone, true
+	}
+	if zone == prefix || strings.HasPrefix(prefix, zone+"/") {
+		return "#", true
+	}
+	if strings.HasPrefix(zone, prefix+"/") {
+		return zone[len(prefix)+1:], true
+	}
+	return "", false
+}
+
+// rebuildGrant renders a translated grant back into the §5.1 grammar.
+func rebuildGrant(verb, zone string, classes []string) string {
+	z := zone
+	if z != "#" {
+		z += "/#"
+	}
+	if verb == "cmd" {
+		return "cmd:" + z + ":" + strings.Join(classes, ",")
+	}
+	return verb + ":" + z
 }
 
 // IsAdmin reports whether the entry carries the admin:# grant — it unlocks

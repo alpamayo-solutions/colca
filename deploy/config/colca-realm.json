@@ -95,7 +95,8 @@
       "attributes": {
         "colca_grants": [
           "admin:#",
-          "read:#"
+          "read:#",
+          "cmd:#:admin"
         ]
       }
     }

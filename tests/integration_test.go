@@ -146,6 +146,17 @@ func startTopo(t *testing.T) *topo {
 	authtest.Enroll(t, e2.Registry, tp.m2, "m2")
 
 	t.Cleanup(func() { e2.Stop(); e1.Stop(); s.Stop(); g.Stop() })
+
+	// Every non-root node must know its root-frame prefix before tests run
+	// (cmdadmin design §3): human grants are root-frame, and a node that has
+	// not yet learned its prefix fails closed on scoped grants — a legitimate
+	// startup state, but a race in tests. The first downlink poll teaches it.
+	for ulid, n := range map[string]*node.Node{"n-site1": s, "n-edge1": e1, "n-edge2": e2} {
+		waitFor(t, ulid+" learns its prefix", 15*time.Second, func() bool {
+			_, ok := n.Engine.Prefix()
+			return ok
+		})
+	}
 	return tp
 }
 

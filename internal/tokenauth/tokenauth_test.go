@@ -177,3 +177,45 @@ func TestFailedRefreshKeepsCachedKeys(t *testing.T) {
 		t.Fatalf("cached keys must keep serving after a failed refresh: %s %v", reason, err)
 	}
 }
+
+// Root-frame grants are translated at verification using the node's prefix
+// (cmdadmin design §3). Without a source the verifier behaves as root.
+func TestVerifyTranslatesGrantsWithPrefixSource(t *testing.T) {
+	iss, v := world(t)
+	tok := iss.Mint("anna", []string{"read:site1/#", "cmd:site1/edge1/m1/#:param", "admin:#"}, time.Now().Add(5*time.Minute))
+
+	// Default (no source): root behavior — grants verbatim.
+	got, _, err := v.Verify(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Entry.Grants) != 3 || got.Entry.Grants[0] != "read:site1/#" {
+		t.Fatalf("root grants = %v", got.Entry.Grants)
+	}
+
+	// Mid-tree node: translated to local frame.
+	v.SetPrefixSource(func() (string, bool) { return "site1/edge1", true })
+	got, _, err = v.Verify(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"read:#", "cmd:m1/#:param", "admin:#"}
+	if len(got.Entry.Grants) != len(want) {
+		t.Fatalf("translated grants = %v, want %v", got.Entry.Grants, want)
+	}
+	for i := range want {
+		if got.Entry.Grants[i] != want[i] {
+			t.Fatalf("translated grants = %v, want %v", got.Entry.Grants, want)
+		}
+	}
+
+	// Prefix never learned: scoped grants fail closed, admin survives.
+	v.SetPrefixSource(func() (string, bool) { return "", false })
+	got, _, err = v.Verify(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Entry.Grants) != 1 || got.Entry.Grants[0] != "admin:#" {
+		t.Fatalf("fail-closed grants = %v, want [admin:#]", got.Entry.Grants)
+	}
+}

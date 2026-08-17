@@ -121,45 +121,64 @@ type DownRec struct {
 // inside a hole the parent's retention pruned (spec §6.2) — next then already
 // points past it.
 func (c *Client) Downlink(after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, error) {
-	recs, next, gap, _, err := c.downlink(context.Background(), after, max, timeout)
+	recs, next, gap, _, _, err := c.downlink(context.Background(), after, max, timeout)
 	return recs, next, gap, err
 }
 
-// downlink is the ctx-carrying implementation Downlink and RunDownlink
+// DownlinkWithPrefix is Downlink plus the parent-taught root-frame prefix
+// (cmdadmin design §3); prefix is nil when the parent did not hand one down.
+func (c *Client) DownlinkWithPrefix(after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, *string, error) {
+	recs, next, gap, _, prefix, err := c.downlink(context.Background(), after, max, timeout)
+	return recs, next, gap, prefix, err
+}
+
+// hello performs the immediate-answer first contact (cmdadmin design §3):
+// no long poll, no records consumed — it exists to learn the prefix in one
+// RTT right after the loop starts.
+func (c *Client) hello(ctx context.Context) (*string, error) {
+	_, _, _, _, prefix, err := c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=1&max=1&hello=1", c.base), 10*time.Second)
+	return prefix, err
+}
+
+// downlink is the ctx-carrying implementation the wrappers and RunDownlink
 // share. nowMS is the parent's now_ms from the response envelope (time-sync
 // design §2.1) — RunDownlink applies it via engine.ApplyClockSample before
-// ingesting recs (design §2.3 rule 4); Downlink's exported wrapper drops it,
-// since direct callers (tests) do not need it.
-func (c *Client) downlink(ctx context.Context, after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, int64, error) {
+// ingesting recs (design §2.3 rule 4). prefix is the parent-taught root-frame
+// prefix (cmdadmin design §3), nil when the parent did not hand one down.
+func (c *Client) downlink(ctx context.Context, after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, int64, *string, error) {
+	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&max=%d", c.base, after, max), timeout)
+}
+
+func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, int64, *string, error) {
 	hc := *c.http
 	hc.Timeout = timeout + 10*time.Second
-	url := fmt.Sprintf("%s/downlink?after=%d&max=%d", c.base, after, max)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, after, nil, 0, err
+		return nil, 0, nil, 0, nil, err
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, after, nil, 0, err
+		return nil, 0, nil, 0, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, after, nil, 0, fmt.Errorf("downlink: http %d", resp.StatusCode)
+		return nil, 0, nil, 0, nil, fmt.Errorf("downlink: http %d", resp.StatusCode)
 	}
 	var out struct {
 		Records []wireRec      `json:"records"`
 		Next    uint64         `json:"next"`
 		Gap     *store.GapSpan `json:"gap"`
 		NowMS   int64          `json:"now_ms"`
+		Prefix  *string        `json:"prefix"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, after, nil, 0, err
+		return nil, 0, nil, 0, nil, err
 	}
 	recs := make([]DownRec, len(out.Records))
 	for i, r := range out.Records {
 		recs[i] = DownRec{ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS}
 	}
-	return recs, out.Next, out.Gap, out.NowMS, nil
+	return recs, out.Next, out.Gap, out.NowMS, out.Prefix, nil
 }
 
 // RunUplink pushes metrics+entities fully and only _Ack and _StreamGap from
@@ -256,6 +275,12 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
+	// First contact: learn the root-frame prefix in one RTT (cmdadmin design
+	// §3) instead of after the first long-poll drains. Failure is fine — the
+	// regular polls below carry the prefix on every response.
+	if prefix, err := c.hello(ctx); err == nil && prefix != nil {
+		eng.SetPrefix(*prefix)
+	}
 	for {
 		select {
 		case <-stop:
@@ -263,7 +288,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		default:
 		}
 		after := eng.Store().CursorGet(downlinkCursor, downlinkStream)
-		recs, next, gap, nowMS, err := c.downlink(ctx, after, replBatch, downlinkWait)
+		recs, next, gap, nowMS, prefix, err := c.downlink(ctx, after, replBatch, downlinkWait)
 		if err != nil {
 			select {
 			case <-stop:
@@ -285,6 +310,9 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		// poll after reconnect refreshes time before any expiry decision
 		// downstream of it.
 		eng.ApplyClockSample(nowMS)
+		if prefix != nil {
+			eng.SetPrefix(*prefix) // idempotent: every poll may carry it
+		}
 		if gap != nil {
 			// Spec §6.3, downlink half: log, count, continue — next already
 			// points past the hole and the cursor advances through the normal

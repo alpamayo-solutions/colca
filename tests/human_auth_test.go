@@ -69,9 +69,11 @@ func bearer(t *testing.T, n *node.Node, method, path, token, body string) (int, 
 
 // A human at the SITE with a read grant for edge1's subtree sees edge1's
 // replicated data live over BOTH human doors and cannot subscribe to edge2's.
+// The grant is ROOT-frame (cmdadmin design §3): site1 learned its prefix from
+// the hub and translates read:site1/edge1/# to its local read:edge1/#.
 func TestHumanScopedReadOnTree(t *testing.T) {
 	tp := startTopo(t)
-	tok := tp.iss.Mint("anna", []string{"read:edge1/#"}, time.Now().Add(5*time.Minute))
+	tok := tp.iss.Mint("anna", []string{"read:site1/edge1/#"}, time.Now().Add(5*time.Minute))
 
 	for _, scheme := range []string{"ssl", "wss"} {
 		t.Run(scheme, func(t *testing.T) {

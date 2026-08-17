@@ -227,7 +227,7 @@ func TestAdminGrantVerb(t *testing.T) {
 }
 
 func TestTokenEntry(t *testing.T) {
-	e, err := TokenEntry("kc-sub-1", []string{"read:werk1/#", "cmd:werk1/#:param", "admin:#"})
+	e, err := TokenEntry("kc-sub-1", []string{"read:werk1/#", "cmd:werk1/#:param", "admin:#"}, "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,18 +237,18 @@ func TestTokenEntry(t *testing.T) {
 	if !e.IsAdmin() {
 		t.Fatal("IsAdmin must be true with admin:#")
 	}
-	if _, err := TokenEntry("", nil); err == nil {
+	if _, err := TokenEntry("", nil, "", true); err == nil {
 		t.Fatal("empty sub must be rejected")
 	}
-	if _, err := TokenEntry("s", []string{"write:z/#"}); err == nil {
+	if _, err := TokenEntry("s", []string{"write:z/#"}, "", true); err == nil {
 		t.Fatal("bad grant must be rejected")
 	}
-	noAdmin, err := TokenEntry("s2", []string{"read:z/#"})
+	noAdmin, err := TokenEntry("s2", []string{"read:z/#"}, "", true)
 	if err != nil || noAdmin.IsAdmin() {
 		t.Fatalf("IsAdmin must be false without admin:#: %v %v", noAdmin, err)
 	}
 	// Grants absent = read nothing (spec §2.1): no default zone for humans.
-	bare, err := TokenEntry("s3", nil)
+	bare, err := TokenEntry("s3", nil, "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestTokenEntry(t *testing.T) {
 
 // admin unlocks ROUTES, never data: it does not widen read or cmd (§3).
 func TestAdminDoesNotImplyReadOrCmd(t *testing.T) {
-	e, err := TokenEntry("boss", []string{"admin:#"})
+	e, err := TokenEntry("boss", []string{"admin:#"}, "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,5 +285,77 @@ func TestEnrollmentRejectsHumanAndAdminGrants(t *testing.T) {
 	m.Grants = []string{"admin:#"}
 	if err := m.Validate(); err == nil {
 		t.Fatal("a machine entry holding admin:# must be rejected")
+	}
+}
+
+// Root-frame grant translation (cmdadmin design §3): grants are authored in
+// root frame; TranslateGrants rewrites them into the local frame of a node
+// whose root-frame prefix is known — or fails closed for scoped grants when
+// the prefix was never learned.
+func TestTranslateGrants(t *testing.T) {
+	cases := []struct {
+		name, prefix string
+		known        bool
+		in, want     []string
+	}{
+		{"root identity", "", true,
+			[]string{"read:site1/#", "cmd:site1/edge1/m1/#:param"},
+			[]string{"read:site1/#", "cmd:site1/edge1/m1/#:param"}},
+		{"inside subtree strips", "site1/edge1", true,
+			[]string{"cmd:site1/edge1/m1/#:param"}, []string{"cmd:m1/#:param"}},
+		{"zone covers node", "site1/edge1", true,
+			[]string{"read:site1/#"}, []string{"read:#"}},
+		{"zone equals node", "site1", true,
+			[]string{"read:site1/#"}, []string{"read:#"}},
+		{"disjoint dropped", "site1/edge1", true,
+			[]string{"read:site2/#"}, nil},
+		{"sibling boundary not prefix", "site1", true,
+			[]string{"read:site10/#"}, nil},
+		{"hash invariant", "site1/edge1", true,
+			[]string{"read:#", "cmd:#:admin", "admin:#"},
+			[]string{"read:#", "cmd:#:admin", "admin:#"}},
+		{"unknown prefix fails closed", "", false,
+			[]string{"read:site1/#", "read:#", "admin:#"},
+			[]string{"read:#", "admin:#"}},
+		{"multi-class cmd preserved", "site1", true,
+			[]string{"cmd:site1/edge1/#:param,operate"},
+			[]string{"cmd:edge1/#:param,operate"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := TranslateGrants(c.prefix, c.known, c.in)
+			if len(got) != len(c.want) {
+				t.Fatalf("TranslateGrants(%q,%v,%v) = %v, want %v", c.prefix, c.known, c.in, got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("TranslateGrants(%q,%v,%v) = %v, want %v", c.prefix, c.known, c.in, got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// TokenEntry applies the translation: a mid-tree node sees local-frame grants.
+func TestTokenEntryTranslates(t *testing.T) {
+	e, err := TokenEntry("anna", []string{"read:site1/#", "cmd:site1/edge1/m1/#:param", "read:site2/#"}, "site1/edge1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"read:#", "cmd:m1/#:param"}
+	if len(e.Grants) != len(want) || e.Grants[0] != want[0] || e.Grants[1] != want[1] {
+		t.Fatalf("translated grants = %v, want %v", e.Grants, want)
+	}
+	// Malformed grants still die on validation regardless of frame.
+	if _, err := TokenEntry("s", []string{"write:z/#"}, "site1", true); err == nil {
+		t.Fatal("bad grant must be rejected even with a prefix")
+	}
+	// Unknown prefix: scoped grants gone, admin survives.
+	closed, err := TokenEntry("s2", []string{"read:site1/#", "admin:#"}, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closed.Grants) != 1 || closed.Grants[0] != "admin:#" {
+		t.Fatalf("fail-closed grants = %v, want [admin:#]", closed.Grants)
 	}
 }

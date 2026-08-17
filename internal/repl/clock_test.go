@@ -38,7 +38,7 @@ func TestServerStampsNowMSFromEngineAuthoritativeNow(t *testing.T) {
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
 
 	// /downlink
-	_, _, _, nowMS, err := cl.downlink(t.Context(), 1, 10, 5*time.Second)
+	_, _, _, nowMS, _, err := cl.downlink(t.Context(), 1, 10, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
