@@ -457,15 +457,67 @@ func run() int {
 			return 0
 		case <-ticker.C:
 			seq++
-			v := 20 + 5*math.Sin(float64(seq)/10)
-			payload := fmt.Sprintf(`{"v": %.2f, "seq": %d}`, v, seq)
-			log.Debug("publish metric", "topic", metricTopic, "seq", seq, "v", v)
-			// Confirmed off the loop: while the broker is away the tokens stay
-			// pending, and blocking here would stall both the metric cadence
-			// and the shutdown path.
-			go confirm(log, client.Publish(metricTopic, 1, false, payload), "metric publish", "topic", metricTopic, "seq", seq)
+			// Serialized on purpose (machine-hop ordering contract, design
+			// §2.6 [delta]): this blocks the tick until seq's PUBACK lands,
+			// so at most one seq is ever inflight. See publishSeqSerialized.
+			publishSeqSerialized(ctx, log, client.Publish, metricTopic, seq)
 		}
 	}
+}
+
+// publishSeqSerialized publishes one seq's metric and blocks (bounded, via
+// waitForConfirm) until it is confirmed — or ctx cancels — before returning.
+// The caller (the ticker loop above) must not call this again for seq+1
+// until it returns; that is the entire mechanism behind the machine-hop
+// ordering contract (design §2.6 [delta]).
+//
+// Why this closes the race: paho's MemoryStore-backed persist replays
+// whatever is still stored on ANY reconnect (client.go's resume(), which
+// iterates a plain, randomly-ordered Go map) concurrently with the app's own
+// new Publish() calls. With >1 seq inflight across a reconnect, an old
+// unacked seq can be re-queued onto the wire AFTER a newer seq that was
+// published while the old one was still outstanding — a duplicate-free,
+// loss-free single-seq displacement (exactly-once holds; arrival order
+// doesn't). Keeping the store's outstanding set at ≤1 entry removes the
+// "newer" message that could ever race past it: there is nothing left to
+// reorder. publish is client.Publish itself (a function value, not the
+// whole Client) so tests can substitute a fake without a broker.
+//
+// SetOrderMatters(false) (set on this client's options) governs INBOUND
+// callback dispatch — whether onCommand/onBeacon calls may run concurrently
+// with each other and with OnConnect — not outbound publish serialization.
+// It is orthogonal to and compatible with this function's guarantee: nothing
+// here relies on inbound ordering, and nothing about inbound dispatch
+// ordering could reintroduce >1 inflight outbound seq.
+func publishSeqSerialized(ctx context.Context, log *slog.Logger, publish func(topic string, qos byte, retained bool, payload interface{}) pahomqtt.Token, topic string, seq int) {
+	v := 20 + 5*math.Sin(float64(seq)/10)
+	payload := fmt.Sprintf(`{"v": %.2f, "seq": %d}`, v, seq)
+	log.Debug("publish metric", "topic", topic, "seq", seq, "v", v)
+	waitForConfirm(ctx, log, publish(topic, 1, false, payload), "metric publish", "topic", topic, "seq", seq)
+}
+
+// waitForConfirm blocks until tok completes, logging progress at
+// publishTimeout intervals rather than giving up. Giving up early would let
+// the ticker loop start a second inflight publish while this one is still
+// unacked — reopening exactly the concurrent-resume() race
+// publishSeqSerialized exists to close — so this retries the wait, not the
+// publish, until either tok completes or ctx is cancelled (shutdown).
+func waitForConfirm(ctx context.Context, log *slog.Logger, tok pahomqtt.Token, what string, attrs ...any) bool {
+	for !tok.WaitTimeout(publishTimeout) {
+		select {
+		case <-ctx.Done():
+			log.Info(what+" abandoned — shutdown signal while waiting for PUBACK", attrs...)
+			return false
+		default:
+		}
+		log.Warn(what+" not yet confirmed — still waiting", append(append([]any{}, attrs...), "waited_at_least", publishTimeout)...)
+	}
+	if err := tok.Error(); err != nil {
+		log.Warn(what+" failed", append(attrs, "err", err)...)
+		return false
+	}
+	log.Debug(what+" confirmed", attrs...)
+	return true
 }
 
 // publishInterval reads PUBLISH_INTERVAL_MS; anything unparseable or <= 0 falls

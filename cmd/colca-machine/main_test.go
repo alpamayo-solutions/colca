@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -439,6 +442,144 @@ func TestStaleDuplicateBeaconWouldCorruptExpiryWithoutTheGuard(t *testing.T) {
 		if code != codeOK {
 			t.Fatalf("mutation check failed: without the Duplicate() guard, got code=%d (%s), want codeOK (%d) — "+
 				"the bug did not reproduce, so this test cannot distinguish the guard from a no-op", code, msg, codeOK)
+		}
+	})
+}
+
+// fakeToken is a minimal pahomqtt.Token for driving publishSeqSerialized and
+// waitForConfirm without a real broker: complete() closes done, which is
+// what both WaitTimeout and Done rely on. err is always nil here — these
+// tests are about inflight-count ordering, not error handling (already
+// covered by confirm's existing use in handleCommand's ack path).
+type fakeToken struct{ done chan struct{} }
+
+func newFakeToken() *fakeToken { return &fakeToken{done: make(chan struct{})} }
+
+func (t *fakeToken) Wait() bool { <-t.done; return true }
+func (t *fakeToken) WaitTimeout(d time.Duration) bool {
+	select {
+	case <-t.done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+func (t *fakeToken) Done() <-chan struct{} { return t.done }
+func (t *fakeToken) Error() error          { return nil }
+func (t *fakeToken) complete()             { close(t.done) }
+
+var _ pahomqtt.Token = (*fakeToken)(nil)
+
+// TestSeqPublishesAreSerialized pins the machine-hop ordering contract
+// (design §2.6 [delta]): the ticker loop must never start a seq's Publish()
+// call while an earlier seq's token is still unconfirmed. This is the whole
+// mechanism that makes paho's resume() replay on reconnect (a randomly-
+// iterated Go map, client.go's MemoryStore.All()) harmless — with ≤1 entry
+// ever outstanding, there is nothing "newer" it could displace an older seq
+// behind.
+//
+// Both subtests drive the SAME production publish signature
+// (func(topic string, qos byte, retained bool, payload interface{}) Token)
+// through a fake token that only completes when the test says so, so the
+// only variable between them is which loop body issues the calls.
+func TestSeqPublishesAreSerialized(t *testing.T) {
+	const n = 3
+
+	t.Run("serialized: publishSeqSerialized keeps at most one seq inflight", func(t *testing.T) {
+		var inflight, maxInflight int32
+		tokCh := make(chan *fakeToken, n)
+		publish := func(topic string, qos byte, retained bool, payload interface{}) pahomqtt.Token {
+			cur := atomic.AddInt32(&inflight, 1)
+			for {
+				m := atomic.LoadInt32(&maxInflight)
+				if cur <= m || atomic.CompareAndSwapInt32(&maxInflight, m, cur) {
+					break
+				}
+			}
+			tok := newFakeToken()
+			tokCh <- tok
+			return tok
+		}
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for seq := 1; seq <= n; seq++ {
+				publishSeqSerialized(context.Background(), discardLogger(), publish, "topic", seq)
+			}
+		}()
+
+		for i := 0; i < n; i++ {
+			select {
+			case tok := <-tokCh:
+				atomic.AddInt32(&inflight, -1)
+				tok.complete()
+			case <-time.After(2 * time.Second):
+				t.Fatalf("timed out waiting for seq %d's publish call — the serialized loop appears stuck", i+1)
+			}
+		}
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("producer loop never finished after every token was completed")
+		}
+
+		if maxInflight > 1 {
+			t.Fatalf("max concurrent inflight seq publishes = %d, want <= 1 (serialization broken)", maxInflight)
+		}
+	})
+
+	// Mutation evidence: reproduces the PRE-FIX main.go loop body
+	// (`go confirm(log, client.Publish(...), ...)`, never waited on by the
+	// loop itself) and shows it lets all n seqs pile up inflight
+	// simultaneously — the exact condition that lets paho's resume() replay
+	// an old seq after a newer one.
+	t.Run("mutation check: fire-and-forget (pre-fix pattern) allows >1 inflight", func(t *testing.T) {
+		var callCount int32
+		var mu sync.Mutex
+		var tokens []*fakeToken
+		publish := func(topic string, qos byte, retained bool, payload interface{}) pahomqtt.Token {
+			atomic.AddInt32(&callCount, 1)
+			tok := newFakeToken()
+			mu.Lock()
+			tokens = append(tokens, tok)
+			mu.Unlock()
+			return tok
+		}
+
+		log := discardLogger()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for seq := 1; seq <= n; seq++ {
+				v := 20 + 5*math.Sin(float64(seq)/10)
+				payload := fmt.Sprintf(`{"v": %.2f, "seq": %d}`, v, seq)
+				go confirm(log, publish("topic", 1, false, payload), "metric publish", "topic", "topic", "seq", seq)
+			}
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("fire-and-forget producer loop never finished — it should never block on a token")
+		}
+
+		if got := atomic.LoadInt32(&callCount); got != n {
+			t.Fatalf("expected all %d seqs published without blocking, got %d calls", n, got)
+		}
+		// The loop already finished (done closed) and NONE of the tokens have
+		// been completed yet: all n were simultaneously inflight at that
+		// instant. A correctly-serialized loop could not have reached "done"
+		// without completing each token one at a time first.
+		mu.Lock()
+		pending := len(tokens)
+		mu.Unlock()
+		if pending != n {
+			t.Fatalf("mutation check failed: expected %d simultaneously-inflight (uncompleted) tokens when the "+
+				"loop finished, got %d — this test cannot distinguish serialized from fire-and-forget, strengthen it", n, pending)
+		}
+		for _, tok := range tokens {
+			tok.complete() // let the background confirm() goroutines finish instead of leaking past the test
 		}
 	})
 }
