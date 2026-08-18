@@ -49,7 +49,7 @@ func adminEngine(t *testing.T) (*Engine, *fakeAdmin) {
 	ids.entries["provisioner"] = &uns.Entry{ULID: "provisioner", Kind: uns.KindMachine, Mount: "provisioner", Grants: []string{"cmd:#:admin"}}
 	e := New(s, cfg, ids, nil, nil, nil)
 	fa := &fakeAdmin{}
-	e.SetAdmin(fa)
+	e.SetExecutor(Executors(NewAdminExecutor(fa)))
 	return e, fa
 }
 
@@ -205,14 +205,17 @@ func TestExecAdminSelfTargetLocalDoors(t *testing.T) {
 	}
 }
 
-// No admin executor wired (unit-style node): fail loud with a 500 ack.
-func TestExecAdminWithoutExecutor(t *testing.T) {
+// A node whose registry never got wired still answers — loudly, with 500.
+// Silence is reserved for commands no executor claims at all, which is how a
+// machine's command rides through untouched.
+func TestExecAdminWithoutARegistry(t *testing.T) {
 	s, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
 	e := New(s, &config.Config{ULID: "n-edge1"}, testIDs(), nil, nil, nil)
+	e.SetExecutor(Executors(NewAdminExecutor(nil)))
 	if _, err := e.IngestDownlink("colca/v1/_CmdAdmin/n-edge1/enroll", enrollPayload("c-12", futureMS()), 1); err != nil {
 		t.Fatal(err)
 	}

@@ -134,7 +134,7 @@ type Metrics struct {
 	jwksFailures  prometheus.Counter // colca_jwks_refresh_failures_total
 
 	// CmdAdmin world (cmdadmin design §9).
-	adminCmds  *prometheus.CounterVec // colca_admin_cmds_total{verb,result}
+	nodeCmds   *prometheus.CounterVec // colca_node_cmds_total{contract,verb,result}
 	nodePrefix *prometheus.GaugeVec   // colca_node_prefix_info{prefix}
 
 	// Schema bundle (schema-bundle design §11).
@@ -248,10 +248,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_jwks_refresh_failures_total",
 			Help: "Failed JWKS fetches (cached keys keep serving). Resets on restart.",
 		}),
-		adminCmds: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "colca_admin_cmds_total",
-			Help: "CmdAdmin commands executed at this node, by verb and outcome. Resets on restart.",
-		}, []string{"verb", "result"}),
+		nodeCmds: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_node_cmds_total",
+			Help: "Commands executed BY this node (as opposed to riding through to a machine), by contract, verb and outcome. Resets on restart.",
+		}, []string{"contract", "verb", "result"}),
 		nodePrefix: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "colca_node_prefix_info",
 			Help: "The node's root-frame prefix as taught by its parent (info gauge, value 1; absent until learned).",
@@ -395,7 +395,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
 		m.downlinkOK, m.downlinkFail, m.reseed,
 		m.authReject, m.aclDeny, m.kicks, m.humanSessions, m.jwksKeys, m.jwksFailures,
-		m.adminCmds, m.nodePrefix, m.bundleInfo, m.bundleContracts,
+		m.nodeCmds, m.nodePrefix, m.bundleInfo, m.bundleContracts,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied,
@@ -442,13 +442,13 @@ func (m *Metrics) SetJWKSKeys(n int) {
 	m.jwksKeys.Set(float64(n))
 }
 
-// AdminCmd counts one executed CmdAdmin command by verb and outcome
-// (ok | conflict | invalid | expired | error).
-func (m *Metrics) AdminCmd(verb, result string) {
+// NodeCmd counts one command executed by this node, by contract, verb and
+// outcome (ok | conflict | invalid | expired | error).
+func (m *Metrics) NodeCmd(contract, verb, result string) {
 	if m == nil {
 		return
 	}
-	m.adminCmds.WithLabelValues(verb, result).Inc()
+	m.nodeCmds.WithLabelValues(contract, verb, result).Inc()
 }
 
 // SetBundleInfo reports the active contract authority (schema-bundle design

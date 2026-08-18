@@ -31,6 +31,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/retention"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/internal/tokenauth"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // Node is a running Colca node. The three *Addr fields carry the RESOLVED
@@ -149,9 +150,14 @@ func Start(cfg *config.Config) (*Node, error) {
 		deliver = n.MQTT.DeliverLocal
 	}
 	n.Engine = engine.New(st, cfg, reg, deliver, n.Metrics, clk)
-	// CmdAdmin execution drives the SAME registry writes as the enrollment
-	// door — one write path inside (cmdadmin design §5).
-	n.Engine.SetAdmin(reg)
+	// Command execution: the engine dispatches by contract, each executor owns
+	// its own verbs. _CmdAdmin drives the SAME registry writes as the
+	// enrollment door — one write path inside (cmdadmin design §5). The data
+	// model lives in the plugin, so the core never learns what a signal is
+	// (data-model binding design §7).
+	domain := uns.NewConfigExec(n.Engine.EntityStore(), cfg.Plugin)
+	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain))
+	n.Engine.SetObserver(domain)
 	// Schema bundle (schema-bundle design §6/§7): explicit path, or the
 	// baked default when present, or the builtin floor. Any configured-but-
 	// bad bundle refuses to start — a broker that silently fell back to

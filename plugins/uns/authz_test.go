@@ -95,16 +95,56 @@ func TestEntryValidate(t *testing.T) {
 
 func TestCmdClass(t *testing.T) {
 	cases := map[string]string{
-		"_CmdParam":    "param",
-		"_CmdOperate":  "operate",
-		"_CmdMaintain": "maintain",
-		"_CmdAdmin":    "admin",
-		"_CmdFoo":      "admin", // unknown command contracts demand the highest class (§5.1)
+		"_CmdParam":     "param",
+		"_CmdOperate":   "operate",
+		"_CmdMaintain":  "maintain",
+		"_CmdConfigure": "configure",
+		"_CmdAdmin":     "admin",
+		"_CmdFoo":       "admin", // unknown command contracts demand the highest class (§5.1)
 	}
 	for contract, want := range cases {
 		if got := CmdClass(contract); got != want {
 			t.Errorf("CmdClass(%s) = %q, want %q", contract, got, want)
 		}
+	}
+}
+
+// Editing the data model is not a point on the equipment-hazard ladder: the
+// person who binds a signal must not thereby be able to send maintenance
+// commands to a PLC, and the maintenance technician must not silently gain the
+// ability to rewrite the model (data-model binding design §3.3).
+func TestConfigureAndMaintainDoNotImplyEachOther(t *testing.T) {
+	const (
+		configureCmd = "colca/v1/_CmdConfigure/n1/werk1/signal/upsert"
+		maintainCmd  = "colca/v1/_CmdMaintain/n1/werk1/cnc5/calibrate"
+	)
+	cfg := entry("", "cmd:werk1/#:configure")
+	if !Authorize(cfg, ActCmd, configureCmd) {
+		t.Error("a configure grant must admit a configure command")
+	}
+	if Authorize(cfg, ActCmd, maintainCmd) {
+		t.Error("a configure grant must not admit equipment maintenance")
+	}
+
+	maint := entry("", "cmd:werk1/#:maintain")
+	if !Authorize(maint, ActCmd, maintainCmd) {
+		t.Error("a maintain grant must admit a maintain command")
+	}
+	if Authorize(maint, ActCmd, configureCmd) {
+		t.Error("a maintain grant must not admit data-model editing")
+	}
+}
+
+func TestConfigureIsAGrantableClass(t *testing.T) {
+	g, err := ParseGrant("cmd:werk1/#:configure,param")
+	if err != nil {
+		t.Fatalf("cmd:...:configure rejected: %v", err)
+	}
+	if g.Verb != "cmd" || len(g.Classes) != 2 {
+		t.Fatalf("parsed %+v, want a cmd grant with two classes", g)
+	}
+	if _, err := ParseGrant("cmd:werk1/#:configur"); err == nil {
+		t.Fatal("a misspelled class must be rejected, not silently ignored")
 	}
 }
 

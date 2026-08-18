@@ -86,6 +86,12 @@ type Config struct {
 	// builtin floor. SHA256, when set, is the deployment revision's pin: a
 	// bundle whose content digest mismatches refuses to start.
 	Contracts Contracts `yaml:"contracts"`
+
+	// Plugin is an opaque settings bag handed to the domain plugin. The core
+	// never reads a key from it: what these mean is the plugin's business, and
+	// keeping them out of the typed config above is what stops domain
+	// vocabulary from leaking into the broker's own configuration surface.
+	Plugin map[string]string `yaml:"plugin"`
 }
 
 // Contracts is the schema-bundle block (schema-bundle design §6.1).

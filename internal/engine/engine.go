@@ -62,9 +62,15 @@ type Engine struct {
 	prefix      string
 	prefixKnown bool
 
-	// admin executes _CmdAdmin verbs against the local registry (cmdadmin
-	// design §5); nil until SetAdmin — execution then acks 500, fail-loud.
-	admin AdminExec
+	// exec executes commands addressed to this node (cmdadmin design §5). The
+	// engine owns the mechanism; the executor owns what a verb means, which is
+	// how domain knowledge stays out of the core. Nil until SetExecutor — the
+	// node then executes nothing.
+	exec CommandExecutor
+
+	// observer is told about records persisted through this node's own doors,
+	// so the domain plugin can react to state the core does not interpret.
+	observer RecordObserver
 
 	// contracts is the loaded schema-bundle table (nil = builtin floor).
 	// Static per process: set once at startup, before any door serves.
@@ -213,7 +219,7 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		}
 		res, err := e.persist(class, p, topic, payload)
 		if err == nil {
-			e.maybeExecAdmin(p, payload) // self-target admin via the machine door (design §5)
+			e.maybeExec(p, payload) // commands addressed to this node execute here (cmdadmin design §5)
 		}
 		return res, err
 	}
@@ -239,7 +245,13 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, err
 	}
-	return e.persist(class, rp, rewritten, payload)
+	res, err := e.persist(class, rp, rewritten, payload)
+	if err == nil {
+		// State a machine published here, offered to the domain plugin — the
+		// core does not interpret it (data-model binding design §7).
+		e.observe(rp, rewritten, payload)
+	}
+	return res, err
 }
 
 // IngestHuman: a verified human (KindHuman entry from a token) publishes.
@@ -291,7 +303,7 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 	}
 	res, err := e.persist(class, p, topic, payload)
 	if err == nil {
-		e.maybeExecAdmin(p, payload) // self-target admin via the human door (design §5)
+		e.maybeExec(p, payload) // commands addressed to this node execute here (cmdadmin design §5)
 	}
 	return res, err
 }
@@ -338,7 +350,7 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 	}
 	res, err := e.persist(class, p, topic, payload)
 	if err == nil {
-		e.maybeExecAdmin(p, payload) // self-target admin via the admin token (design §5)
+		e.maybeExec(p, payload) // commands addressed to this node execute here (cmdadmin design §5)
 	}
 	return res, err
 }
@@ -430,7 +442,7 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 	}
 	res, err := e.persistTS(class, p, topic, payload, ts)
 	if err == nil {
-		e.maybeExecAdmin(p, payload) // the target executes downlinked admin commands (design §5)
+		e.maybeExec(p, payload) // the target executes downlinked commands (cmdadmin design §5)
 	}
 	return res, err
 }

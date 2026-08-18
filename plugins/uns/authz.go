@@ -131,7 +131,15 @@ type Grant struct {
 	Classes []string
 }
 
-var cmdClasses = map[string]bool{"param": true, "operate": true, "maintain": true, "admin": true}
+// Hazard classes. param/operate/maintain/admin form a ladder of how dangerous
+// a command is to the equipment; "configure" is deliberately NOT on that
+// ladder — it covers editing the node's data model, which touches nothing
+// physical. Keeping it separate is what lets an editor bind signals without
+// thereby being able to send maintenance commands to a PLC (data-model binding
+// design §3.3).
+var cmdClasses = map[string]bool{
+	"param": true, "operate": true, "maintain": true, "configure": true, "admin": true,
+}
 
 // ParseGrant parses the §5.1 grammar: "read:zone/#" or "cmd:zone/#:class,...".
 func ParseGrant(s string) (Grant, error) {
@@ -175,7 +183,7 @@ func ParseGrant(s string) (Grant, error) {
 		}
 		for _, c := range classes {
 			if !cmdClasses[c] {
-				return Grant{}, fmt.Errorf("grant %q: unknown cmd class %q (param|operate|maintain|admin)", s, c)
+				return Grant{}, fmt.Errorf("grant %q: unknown cmd class %q (param|operate|maintain|configure|admin)", s, c)
 			}
 		}
 		return Grant{Verb: "cmd", Prefix: p, Classes: classes}, nil
@@ -295,6 +303,8 @@ func CmdClass(contract string) string {
 		return "operate"
 	case "_CmdMaintain":
 		return "maintain"
+	case "_CmdConfigure":
+		return "configure"
 	default:
 		return "admin"
 	}

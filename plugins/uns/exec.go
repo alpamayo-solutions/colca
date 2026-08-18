@@ -1,0 +1,34 @@
+package uns
+
+// EntityStore is the node's record surface as this plugin needs it: read the
+// current state of an entity, list the entities of one contract belonging to
+// one identity, write a record as the node.
+//
+// It is declared HERE, in stdlib types only, and satisfied by an adapter on the
+// core side. Go interfaces are structural, so that adapter needs no import from
+// this package and this package needs none from the core — which is what keeps
+// `go list -deps` on this package at "standard library only" (arch_test.go)
+// while still letting domain logic touch storage.
+type EntityStore interface {
+	// KVGet returns the current payload stored at a topic, if any.
+	KVGet(topic string) ([]byte, bool)
+	// KVScan returns the current records of one contract published under one
+	// identity — the level-4 ULID, not a path, so the answer is the same at
+	// every level of the tree.
+	KVScan(contract, nodeID string) []KVRecord
+	// Publish writes a record as this node, in the node's own frame.
+	Publish(topic string, payload []byte) error
+	// NodeID is the identity this node publishes under.
+	NodeID() string
+}
+
+// KVRecord is one entity record as the store currently holds it.
+type KVRecord struct {
+	// Topic is the full stored topic, so Parse gives back contract, identity
+	// and the record's position.
+	Topic string
+	// Path is the record's position in this node's frame.
+	Path    string
+	NodeID  string
+	Payload []byte
+}
