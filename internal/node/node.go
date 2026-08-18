@@ -73,9 +73,18 @@ func Start(cfg *config.Config) (*Node, error) {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
 
-	id, err := identity.Load(cfg.KeyFile)
+	// First boot mints this node's identity; every later boot loads it. The key
+	// must not come from the generated deployment directory — that directory is
+	// tarred, signed and published as a revision (design §5).
+	id, minted, err := identity.LoadOrGenerate(cfg.KeyFile)
 	if err != nil {
-		return nil, fmt.Errorf("node %s: load key %s: %w", cfg.ULID, cfg.KeyFile, err)
+		return nil, fmt.Errorf("node %s: key %s: %w", cfg.ULID, cfg.KeyFile, err)
+	}
+	if minted {
+		// At INFO with the pubkey, because this is the moment an operator needs
+		// it: nothing can enroll this node until its parent holds this key.
+		slog.Info("minted this node's identity — enroll it at its parent",
+			"node", cfg.ULID, "key_file", cfg.KeyFile, "pubkey", id.PublicHex())
 	}
 	st, err := store.Open(cfg.DataDir)
 	if err != nil {
@@ -260,7 +269,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.apiLn = ln
 		n.APIAddr = ln.Addr().String()
-		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics))}
+		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, id.PublicHex()))}
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server stopped", "err", err)

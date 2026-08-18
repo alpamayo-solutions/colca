@@ -10,9 +10,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -32,6 +35,39 @@ func Generate(path string) (*Identity, error) {
 		return nil, err
 	}
 	return &Identity{Priv: priv}, nil
+}
+
+// LoadOrGenerate returns the identity at path, minting one if the file does not
+// exist yet. The bool reports whether it minted.
+//
+// First boot mints; every later boot loads. That is what keeps a node's private
+// key out of the generated deployment directory: `colca revision` tars, signs
+// and publishes that directory, so a key placed there would become a
+// distributed artifact — and one bundle installed on several devices would give
+// them all the same identity. Neither `colca deploy` nor the OTA agent removes
+// volumes, so a key minted on the device survives every update.
+//
+// A file that exists but cannot be parsed is an ERROR, never a reason to mint.
+// Replacing it would silently change the node's identity and orphan it from the
+// parent that pinned the old key — a recoverable situation turned into a
+// mysterious one.
+func LoadOrGenerate(path string) (*Identity, bool, error) {
+	id, err := Load(path)
+	if err == nil {
+		return id, false, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, false, fmt.Errorf("identity %s exists but is unusable "+
+			"(refusing to mint over it — that would change this node's identity): %w", path, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, false, fmt.Errorf("identity %s: %w", path, err)
+	}
+	id, err = Generate(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("identity %s: %w", path, err)
+	}
+	return id, true, nil
 }
 
 func Load(path string) (*Identity, error) {

@@ -64,7 +64,10 @@ type caller struct {
 	human *tokenauth.Verified
 }
 
-func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics) http.Handler {
+// Handler builds the node's HTTP surface. pubkey is this node's public key in
+// hex — served on /healthz so a parent can enroll this node before trusting
+// it, which is the only order enrollment can happen in.
+func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, pubkey string) http.Handler {
 	mux := http.NewServeMux()
 
 	writeJSON := func(w http.ResponseWriter, code int, v any) {
@@ -145,7 +148,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ulid": cfg.ULID})
+		// The ULID and pubkey are what `colca node enroll` reads. Enrollment
+		// happens BEFORE this node is trusted by anything, so both have to be
+		// readable at the one unauthenticated door.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "ulid": cfg.ULID, "pubkey": pubkey})
 	})
 
 	// /metrics is certless/tokenless like /healthz: Prometheus scrape targets

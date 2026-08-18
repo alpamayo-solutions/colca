@@ -120,7 +120,7 @@ func newAPI(t *testing.T) *api {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: Handler(e, cfg, reg, ver, m)}
+	srv := &http.Server{Handler: Handler(e, cfg, reg, ver, m, nodeID.PublicHex())}
 	go func() { _ = srv.Serve(tls.NewListener(ln, tlsCfg)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
@@ -859,7 +859,7 @@ func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptes
 	}
 	eng := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m))
+	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, "deadbeef"))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -1067,5 +1067,33 @@ func TestBearerFailuresAreTerminal(t *testing.T) {
 	// Metrics: the http door counted the rejections.
 	if v := metricstest.Value(t, a.m, `colca_auth_rejections_total{door="http",reason="`+tokenauth.ReasonExpired+`"}`); v < 1 {
 		t.Fatalf("expired bearer not counted: %v", v)
+	}
+}
+
+func TestHealthzCarriesThePubkeySoAParentCanEnrollIt(t *testing.T) {
+	// Enrollment needs the child's ULID and pubkey BEFORE the child is trusted
+	// by anything, so /healthz — the one unauthenticated door — is where they
+	// have to be readable. Without it, enrolling a node means a shell on it.
+	srv := plainHandler(t, &config.Config{ULID: "n-edge-a", API: config.API{Token: "tok"}}, nil)
+
+	resp, err := srv.Client().Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var body struct {
+		ULID   string `json:"ulid"`
+		Pubkey string `json:"pubkey"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.ULID != "n-edge-a" {
+		t.Fatalf("ulid = %q", body.ULID)
+	}
+	if body.Pubkey != "deadbeef" {
+		t.Fatalf("pubkey = %q — /healthz must carry it, or enrollment needs a shell on the device",
+			body.Pubkey)
 	}
 }
