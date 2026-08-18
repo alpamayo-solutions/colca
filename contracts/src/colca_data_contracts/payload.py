@@ -497,3 +497,38 @@ class Signal(Payload):
         if data.get("index_type") is not None:
             data["index_type"] = IndexType(data["index_type"])
         return cls(**data)
+
+
+# ---------------------------------------------------------------------------
+# Colca command classes (schema-bundle design §3).
+# The class hierarchy IS the routing information: anything deriving from Cmd
+# lands in the commands stream under the hazard class its name carries
+# (_CmdParam → param, _CmdOperate → operate, _CmdMaintain → maintain,
+# _CmdAdmin → admin). The wire contract at the colca door is
+# correlation_id + expires_at (unix milliseconds); created_at is a
+# franzmq-base field colca publishers do not stamp — the bundle generator
+# drops it from `required` for every cmd-class contract.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CmdParam(Cmd):
+    """Parameters & setpoints (reversible)."""
+
+
+@dataclass
+class CmdOperate(Cmd):
+    """Start/stop, job control."""
+
+
+@dataclass
+class CmdMaintain(Cmd):
+    """Calibration, config updates."""
+
+
+@dataclass
+class CmdAdmin(Cmd):
+    """Node administration: provisioning (enroll/revoke), restart, firmware.
+
+    Executed by the target NODE, not a machine (colca cmdadmin design §5);
+    verb-specific fields (entry, ulid) ride in the open payload."""

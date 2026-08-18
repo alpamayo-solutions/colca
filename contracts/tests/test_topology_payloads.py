@@ -18,13 +18,15 @@ def test_signal_registered():
 
 
 def test_system_element_topic_format():
-    topic = Topic(payload_type=SystemElementPayload, context=["factory", "line1", "m6"])
-    assert str(topic) == "colca/v1/_SystemElement/factory/line1/m6"
+    topic = Topic(payload_type=SystemElementPayload, node_id="n-edge1",
+                  context=["factory", "line1", "m6"])
+    assert str(topic) == "colca/v1/_SystemElement/n-edge1/factory/line1/m6"
 
 
 def test_signal_topic_format():
-    topic = Topic(payload_type=SignalPayload, context=["factory", "line1", "m6", "machine_state"])
-    assert str(topic) == "colca/v1/_Signal/factory/line1/m6/machine_state"
+    topic = Topic(payload_type=SignalPayload, node_id="n-edge1",
+                  context=["factory", "line1", "m6", "machine_state"])
+    assert str(topic) == "colca/v1/_Signal/n-edge1/factory/line1/m6/machine_state"
 
 
 def test_system_element_roundtrip_minimal():

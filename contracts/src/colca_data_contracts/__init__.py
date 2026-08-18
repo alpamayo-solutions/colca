@@ -16,14 +16,30 @@ from franzmq.topic import Topic
 # All Colca services use "colca/v1/" as the topic namespace.
 # Dataclass defaults are compiled into __init__ at class definition time,
 # so we must replace __init__ to change the effective default.
+#
+# The wrapper forwards whatever it is given instead of restating franzmq's
+# parameter list: franzmq 0.5.0 added `node_id` at level 4, and services move to
+# it one at a time (their franzmq pin is the switch — schema-bundle design §9.2).
+# A hard-coded signature here would break whichever half of the fleet it does
+# not match.
 _original_topic_init = Topic.__init__
+_TOPIC_FIELDS = list(Topic.__dataclass_fields__)
+_PREFIX_INDEX = _TOPIC_FIELDS.index("prefix")
 
 
-def _topic_init_with_root_prefix(self, payload_type=None, prefix="colca", version="v1", context=()):
-    _original_topic_init(self, payload_type=payload_type, prefix=prefix, version=version, context=context)
+def _topic_init_with_root_prefix(self, *args, **kwargs):
+    if len(args) <= _PREFIX_INDEX and "prefix" not in kwargs:
+        kwargs["prefix"] = "colca"
+    _original_topic_init(self, *args, **kwargs)
 
 
 Topic.__init__ = _topic_init_with_root_prefix
+
+from colca_data_contracts.topics import (  # noqa: E402
+    TOPICS_CARRY_NODE_ID,
+    node_id,
+    node_topic,
+)
 
 from colca_data_contracts.payload import (
     ServiceType,
@@ -94,6 +110,10 @@ def _patched_default(self, obj):
 json.JSONEncoder.default = _patched_default
 
 __all__ = [
+    # Topics
+    "node_id",
+    "node_topic",
+    "TOPICS_CARRY_NODE_ID",
     # Extended base types
     "ServiceType",
     "Metric",
