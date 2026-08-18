@@ -389,7 +389,7 @@ func (p *Pruner) refreshEntities(from, to uint64) bool {
 			continue
 		}
 		parsed, err := uns.Parse(e.Topic)
-		if err != nil || uns.ClassOf(parsed.Contract) != uns.ClassEntity {
+		if err != nil || p.eng.ClassOf(parsed.Contract) != uns.ClassEntity {
 			continue // metrics-class KV entries share the projection; only entities refresh (§6.5)
 		}
 		applied, err := p.publish(e.Topic, e.Payload, e.Offset)

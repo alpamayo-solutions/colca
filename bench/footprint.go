@@ -111,7 +111,7 @@ mqtt:
 	var peak uint64 = idle
 	for time.Now().Before(stopAt) {
 		seq++
-		payload, _ := json.Marshal(map[string]any{"v": float64(seq)})
+		payload, _ := json.Marshal(map[string]any{"v": float64(seq), "value": float64(seq), "signal_id": "bench"})
 		tk := m.Publish("colca/v1/_Metric/m1/temp", 1, false, payload)
 		if !tk.WaitTimeout(10*time.Second) || tk.Error() != nil {
 			return nil, fmt.Errorf("publish under load: %w", tk.Error())

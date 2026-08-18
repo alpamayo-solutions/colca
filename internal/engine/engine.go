@@ -12,6 +12,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/contracts"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -64,6 +65,10 @@ type Engine struct {
 	// admin executes _CmdAdmin verbs against the local registry (cmdadmin
 	// design §5); nil until SetAdmin — execution then acks 500, fail-loud.
 	admin AdminExec
+
+	// contracts is the loaded schema-bundle table (nil = builtin floor).
+	// Static per process: set once at startup, before any door serves.
+	contracts *contracts.Table
 }
 
 // New builds an engine. ids is the identity registry (a client without a
@@ -170,16 +175,14 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 	}
 	p, err := uns.Parse(topic)
 	if err != nil {
-		e.metrics.RejectPublish(metrics.ReasonGrammar)
-		return Result{}, err
+		return e.reject(metrics.ReasonGrammar, "%w", err)
 	}
 	// Registry entries enter through the enrollment door ONLY (auth §3): no
 	// client may author an _EdgeNode, not even its own.
 	if p.Contract == "_EdgeNode" {
-		e.metrics.RejectPublish(metrics.ReasonRegistryContract)
-		return Result{}, fmt.Errorf("client %s may not publish _EdgeNode — registry entries are enrollment-door only", identity)
+		return e.reject(metrics.ReasonRegistryContract, "client %s may not publish _EdgeNode — registry entries are enrollment-door only", identity)
 	}
-	class := uns.ClassOf(p.Contract)
+	class := e.ClassOf(p.Contract)
 	if class == uns.ClassTimeSync {
 		// Time-sync design §2.2/§4: _TimeSync is node-local-publish-only —
 		// only this node's own beacon loop may ever produce it, straight to
@@ -187,8 +190,7 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		// shape) is rejected here with its own reason, never with the
 		// generic "grammar" reason Parse's 4-segment relaxation would
 		// otherwise fall through to.
-		e.metrics.RejectPublish(metrics.ReasonTimeSync)
-		return Result{}, fmt.Errorf("client %s may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)", identity)
+		return e.reject(metrics.ReasonTimeSync, "client %s may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)", identity)
 	}
 	if class == uns.ClassCmd {
 		// Move-drain design §3.2 item 2: a mount under an active drain stops
@@ -197,20 +199,17 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		// for the reason that actually explains it, not folded into
 		// cmd_denied.
 		if e.ids.DrainingMount(p.Path) {
-			e.metrics.RejectPublish(metrics.ReasonDraining)
-			return Result{}, fmt.Errorf("client %s: %s is draining — no new commands admitted (move-drain design §3.2)", identity, p.Path)
+			return e.reject(metrics.ReasonDraining, "client %s: %s is draining — no new commands admitted (move-drain design §3.2)", identity, p.Path)
 		}
 		// A command needs a covering cmd grant (auth §5.3 ActCmd). Commands
 		// target ABSOLUTE node-local paths: no mount rewrite, no level-4
 		// identity requirement — the author is not the target's owner.
 		entry, ok := e.ids.Get(identity)
 		if !ok || !uns.Authorize(entry, uns.ActCmd, topic) {
-			e.metrics.RejectPublish(metrics.ReasonCmdDenied)
-			return Result{}, fmt.Errorf("client %s: no cmd grant covers %s", identity, topic)
+			return e.reject(metrics.ReasonCmdDenied, "client %s: no cmd grant covers %s", identity, topic)
 		}
-		if err := uns.Validate(p.Contract, payload); err != nil {
-			e.metrics.RejectPublish(metrics.ReasonValidation)
-			return Result{}, err
+		if err := e.validateContract(p.Contract, payload); err != nil {
+			return e.reject(metrics.ReasonValidation, "%w", err)
 		}
 		res, err := e.persist(class, p, topic, payload)
 		if err == nil {
@@ -219,21 +218,17 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		return res, err
 	}
 	if class == uns.ClassNone {
-		e.metrics.RejectPublish(metrics.ReasonGrammar)
-		return Result{}, fmt.Errorf("client %s may not publish %s", identity, p.Contract)
+		return e.reject(metrics.ReasonGrammar, "client %s may not publish %s", identity, p.Contract)
 	}
 	if p.NodeID != identity {
-		e.metrics.RejectPublish(metrics.ReasonIdentity)
-		return Result{}, fmt.Errorf("identity rule: level-4 %q != authenticated identity %q", p.NodeID, identity)
+		return e.reject(metrics.ReasonIdentity, "identity rule: level-4 %q != authenticated identity %q", p.NodeID, identity)
 	}
-	if err := uns.Validate(p.Contract, payload); err != nil {
-		e.metrics.RejectPublish(metrics.ReasonValidation)
-		return Result{}, err
+	if err := e.validateContract(p.Contract, payload); err != nil {
+		return e.reject(metrics.ReasonValidation, "%w", err)
 	}
 	mount, ok := e.ids.MountOf(identity)
 	if !ok {
-		e.metrics.RejectPublish(metrics.ReasonNoMount)
-		return Result{}, fmt.Errorf("no mount registered for %s", identity)
+		return e.reject(metrics.ReasonNoMount, "no mount registered for %s", identity)
 	}
 	rewritten := uns.MountInsert(topic, mount)
 	rp, err := uns.Parse(rewritten)
@@ -255,22 +250,18 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 // rewrite, no level-4 identity rule — exactly like admin-issued commands.
 func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Result, error) {
 	if !uns.IsUns(topic) {
-		e.metrics.RejectPublish(metrics.ReasonGrammar)
-		return Result{}, fmt.Errorf("human publish must be colca/#")
+		return e.reject(metrics.ReasonGrammar, "human publish must be colca/#")
 	}
 	p, err := uns.Parse(topic)
 	if err != nil {
-		e.metrics.RejectPublish(metrics.ReasonGrammar)
-		return Result{}, err
+		return e.reject(metrics.ReasonGrammar, "%w", err)
 	}
 	if p.Contract == "_EdgeNode" {
-		e.metrics.RejectPublish(metrics.ReasonRegistryContract)
-		return Result{}, fmt.Errorf("_EdgeNode is enrollment-door only — use POST /enroll")
+		return e.reject(metrics.ReasonRegistryContract, "_EdgeNode is enrollment-door only — use POST /enroll")
 	}
-	class := uns.ClassOf(p.Contract)
+	class := e.ClassOf(p.Contract)
 	if class == uns.ClassNone {
-		e.metrics.RejectPublish(metrics.ReasonGrammar)
-		return Result{}, fmt.Errorf("unknown contract %s", p.Contract)
+		return e.reject(metrics.ReasonGrammar, "unknown contract %s", p.Contract)
 	}
 	if class == uns.ClassTimeSync {
 		// Same rule as IngestClient/IngestAdmin (time-sync design §2.2/§4):
@@ -290,16 +281,13 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 		// Checked first (like IngestClient) so a draining destination is
 		// rejected for the reason that explains it, not folded into
 		// cmd_denied.
-		e.metrics.RejectPublish(metrics.ReasonDraining)
-		return Result{}, fmt.Errorf("human %s: %s is draining — no new commands admitted (move-drain design §3.2)", entry.ULID, p.Path)
+		return e.reject(metrics.ReasonDraining, "human %s: %s is draining — no new commands admitted (move-drain design §3.2)", entry.ULID, p.Path)
 	}
 	if !uns.Authorize(entry, uns.ActCmd, topic) {
-		e.metrics.RejectPublish(metrics.ReasonCmdDenied)
-		return Result{}, fmt.Errorf("human %s: no cmd grant covers %s", entry.ULID, topic)
+		return e.reject(metrics.ReasonCmdDenied, "human %s: no cmd grant covers %s", entry.ULID, topic)
 	}
-	if err := uns.Validate(p.Contract, payload); err != nil {
-		e.metrics.RejectPublish(metrics.ReasonValidation)
-		return Result{}, err
+	if err := e.validateContract(p.Contract, payload); err != nil {
+		return e.reject(metrics.ReasonValidation, "%w", err)
 	}
 	res, err := e.persist(class, p, topic, payload)
 	if err == nil {
@@ -326,7 +314,7 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 		e.metrics.RejectPublish(metrics.ReasonRegistryContract)
 		return Result{}, fmt.Errorf("_EdgeNode is enrollment-door only — use POST /enroll")
 	}
-	class := uns.ClassOf(p.Contract)
+	class := e.ClassOf(p.Contract)
 	if class == uns.ClassTimeSync {
 		// Same rule as IngestClient: _TimeSync is node-local-publish-only,
 		// not even the admin token may author it through /publish.
@@ -344,7 +332,7 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, fmt.Errorf("unknown contract %s", p.Contract)
 	}
-	if err := uns.Validate(p.Contract, payload); err != nil {
+	if err := e.validateContract(p.Contract, payload); err != nil {
 		e.metrics.RejectPublish(metrics.ReasonValidation)
 		return Result{}, err
 	}
@@ -384,14 +372,14 @@ func (e *Engine) IngestRefresh(topic string, payload []byte, ifKVOffset uint64) 
 	if err != nil {
 		return Result{}, false, err
 	}
-	class := uns.ClassOf(p.Contract)
+	class := e.ClassOf(p.Contract)
 	if class != uns.ClassData && class != uns.ClassEntity {
 		return Result{}, false, fmt.Errorf("refresh publish requires a KV-projecting contract, got %s", p.Contract)
 	}
 	if len(payload) == 0 {
 		return Result{}, false, fmt.Errorf("refresh publish must not be empty (a refresh cannot tombstone)")
 	}
-	if err := uns.Validate(p.Contract, payload); err != nil {
+	if err := e.validateContract(p.Contract, payload); err != nil {
 		return Result{}, false, err
 	}
 	streamName := uns.StreamFor(class)
@@ -422,7 +410,7 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, err
 	}
-	class := uns.ClassOf(p.Contract)
+	class := e.ClassOf(p.Contract)
 	if class == uns.ClassCmd && e.ids.DrainingMount(p.Path) {
 		// Move-drain design §3.2 item 2: the SAME admission rule as
 		// IngestClient/IngestAdmin, extended to this relay door. Without this
@@ -477,7 +465,7 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 				"child", child, "stream", stream, "topic", r.Topic, "err", perr)
 			continue
 		}
-		e.deliver(r.Topic, r.Payload, retainFor(uns.ClassOf(p.Contract)))
+		e.deliver(r.Topic, r.Payload, retainFor(e.ClassOf(p.Contract)))
 	}
 	return len(got), hwm, nil
 }

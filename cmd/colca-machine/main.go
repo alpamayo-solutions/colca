@@ -491,7 +491,12 @@ func run() int {
 // ordering could reintroduce >1 inflight outbound seq.
 func publishSeqSerialized(ctx context.Context, log *slog.Logger, publish func(topic string, qos byte, retained bool, payload interface{}) pahomqtt.Token, topic string, seq int) {
 	v := 20 + 5*math.Sin(float64(seq)/10)
-	payload := fmt.Sprintf(`{"v": %.2f, "seq": %d}`, v, seq)
+	// DUAL shape during the schema-bundle cutover (design §12): the real
+	// _Metric contract requires value+signal_id (bundle-validated doors);
+	// the builtin floor's stand-in requires v (bare trees, in-process
+	// suites). Both present = valid at every door; additionalProperties
+	// stays open by the §4.1 subset, so seq rides along untouched.
+	payload := fmt.Sprintf(`{"v": %.2f, "value": %.2f, "signal_id": %q, "seq": %d}`, v, v, topic, seq)
 	log.Debug("publish metric", "topic", topic, "seq", seq, "v", v)
 	waitForConfirm(ctx, log, publish(topic, 1, false, payload), "metric publish", "topic", topic, "seq", seq)
 }

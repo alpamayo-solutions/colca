@@ -36,7 +36,7 @@ func RunCardinality(p Params) (*Report, error) {
 	for i := 0; i < p.Paths; i++ {
 		body, _ := json.Marshal(map[string]any{
 			"topic":   fmt.Sprintf("colca/v1/_Metric/n-edge/line%d/sig%d", i/100, i%100),
-			"payload": map[string]any{"v": float64(i)},
+			"payload": map[string]any{"v": float64(i), "value": float64(i), "signal_id": "bench"},
 		})
 		req, _ := http.NewRequest("POST", "https://"+pair.Edge.APIAddr+"/publish", bytes.NewReader(body))
 		req.Header.Set("X-Colca-Token", BenchToken)

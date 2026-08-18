@@ -33,7 +33,7 @@ func RunCatchup(p Params) (*Report, error) {
 	for i := 0; i < p.Records; i++ {
 		payload := map[string]any{
 			"topic":   "colca/v1/_Metric/n-edge/m1/temp",
-			"payload": map[string]any{"v": float64(i)},
+			"payload": map[string]any{"v": float64(i), "value": float64(i), "signal_id": "bench"},
 		}
 		body, _ := json.Marshal(payload)
 		req, err := http.NewRequest("POST", "https://"+pair.Edge.APIAddr+"/publish", bytes.NewReader(body))

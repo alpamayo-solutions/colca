@@ -80,7 +80,24 @@ type Config struct {
 	// TimeSync configures the authoritative-time protocol (time-sync design
 	// §2.5). Absent entirely = every default below applies (default-on).
 	TimeSync TimeSync `yaml:"time_sync"`
+
+	// Contracts configures the generated schema bundle (schema-bundle design
+	// §6/§7). Absent = the baked default path if that file exists, else the
+	// builtin floor. SHA256, when set, is the deployment revision's pin: a
+	// bundle whose content digest mismatches refuses to start.
+	Contracts Contracts `yaml:"contracts"`
 }
+
+// Contracts is the schema-bundle block (schema-bundle design §6.1).
+type Contracts struct {
+	Bundle string `yaml:"bundle"`
+	SHA256 string `yaml:"sha256"`
+}
+
+// BakedBundlePath is where the image build copies the bundle generated from
+// the same commit (design §6.1 channel 1). Used only when the config does
+// not name a bundle explicitly and the file exists.
+const BakedBundlePath = "/etc/colca/contracts-bundle.json"
 
 // Duration is a time.Duration that unmarshals from Go duration syntax
 // ("336h", "5m" — design §3.1: "Go duration syntax; no \"d\" unit") or the

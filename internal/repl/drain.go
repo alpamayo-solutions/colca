@@ -160,7 +160,7 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped 
 	nowMS := s.eng.AuthoritativeNow().UnixMilli()
 	filter := func(topic string) bool {
 		p, err := uns.Parse(topic)
-		if err != nil || uns.ClassOf(p.Contract) != uns.ClassCmd {
+		if err != nil || s.eng.ClassOf(p.Contract) != uns.ClassCmd {
 			return false
 		}
 		// Same mount boundary check as the /downlink filter (server.go): the

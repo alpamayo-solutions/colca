@@ -137,6 +137,10 @@ type Metrics struct {
 	adminCmds  *prometheus.CounterVec // colca_admin_cmds_total{verb,result}
 	nodePrefix *prometheus.GaugeVec   // colca_node_prefix_info{prefix}
 
+	// Schema bundle (schema-bundle design §11).
+	bundleInfo      *prometheus.GaugeVec // colca_contracts_bundle_info{version,digest,source}
+	bundleContracts prometheus.Gauge     // colca_contracts_bundle_contracts
+
 	// Retention (design §8): pruner-side counters.
 	prunedRecords *prometheus.CounterVec // colca_retention_pruned_records_total{stream}
 	prunedBytes   *prometheus.CounterVec // colca_retention_pruned_bytes_total{stream}
@@ -252,6 +256,14 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_node_prefix_info",
 			Help: "The node's root-frame prefix as taught by its parent (info gauge, value 1; absent until learned).",
 		}, []string{"prefix"}),
+		bundleInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "colca_contracts_bundle_info",
+			Help: "Identity of the loaded contracts bundle (info gauge, value 1). source=builtin means the floor rules apply — the one-glance answer to which rules this node enforces.",
+		}, []string{"version", "digest", "source"}),
+		bundleContracts: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_contracts_bundle_contracts",
+			Help: "Number of contracts the loaded bundle carries (0 under the builtin floor).",
+		}),
 		prunedRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_retention_pruned_records_total",
 			Help: "Records removed by the retention pruner, by stream. Resets on restart.",
@@ -383,7 +395,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
 		m.downlinkOK, m.downlinkFail, m.reseed,
 		m.authReject, m.aclDeny, m.kicks, m.humanSessions, m.jwksKeys, m.jwksFailures,
-		m.adminCmds, m.nodePrefix,
+		m.adminCmds, m.nodePrefix, m.bundleInfo, m.bundleContracts,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied,
@@ -437,6 +449,17 @@ func (m *Metrics) AdminCmd(verb, result string) {
 		return
 	}
 	m.adminCmds.WithLabelValues(verb, result).Inc()
+}
+
+// SetBundleInfo reports the active contract authority (schema-bundle design
+// §11): version/digest of the loaded bundle, or source=builtin for the floor.
+func (m *Metrics) SetBundleInfo(version, digest, source string, contracts int) {
+	if m == nil {
+		return
+	}
+	m.bundleInfo.Reset()
+	m.bundleInfo.WithLabelValues(version, digest, source).Set(1)
+	m.bundleContracts.Set(float64(contracts))
 }
 
 // SetNodePrefix reports the currently taught root-frame prefix as an info

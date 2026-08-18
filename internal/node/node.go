@@ -20,6 +20,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/contracts"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/httpapi"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -151,6 +152,27 @@ func Start(cfg *config.Config) (*Node, error) {
 	// CmdAdmin execution drives the SAME registry writes as the enrollment
 	// door — one write path inside (cmdadmin design §5).
 	n.Engine.SetAdmin(reg)
+	// Schema bundle (schema-bundle design §6/§7): explicit path, or the
+	// baked default when present, or the builtin floor. Any configured-but-
+	// bad bundle refuses to start — a broker that silently fell back to
+	// weaker validation would be a validated namespace in name only.
+	bundlePath := cfg.Contracts.Bundle
+	if bundlePath == "" {
+		if _, err := os.Stat(config.BakedBundlePath); err == nil {
+			bundlePath = config.BakedBundlePath
+		}
+	}
+	if bundlePath != "" {
+		tbl, err := contracts.Load(bundlePath, cfg.Contracts.SHA256)
+		if err != nil {
+			return fail(fmt.Errorf("node %s: %w", cfg.ULID, err))
+		}
+		n.Engine.SetContracts(tbl)
+		version, digest, count := tbl.Info()
+		log.Info("contracts bundle loaded", "path", bundlePath, "version", version,
+			"digest", digest[:12], "contracts", count)
+	}
+	n.Metrics.SetBundleInfo(n.Engine.BundleInfo())
 	// Root-frame prefix (cmdadmin design §3): a node without a parent IS the
 	// root — its prefix is known-empty by construction. Children learn theirs
 	// from the downlink hand-down; grant translation reads it per Verify.

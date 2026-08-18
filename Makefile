@@ -7,7 +7,9 @@ build:
 	CGO_ENABLED=0 go build -o bin/colca-keygen ./cmd/colca-keygen
 	CGO_ENABLED=0 go build -o bin/colca-machine ./cmd/colca-machine
 docker:
-	docker build -f deploy/Dockerfile -t colca:dev .
+	cd .. && uv run scripts/dev.py bundle --context
+	docker build -f deploy/Dockerfile -t colca:dev \
+		--build-context contracts-bundle=../test-results/bundle-ctx .
 # demo runs demo/demo.sh, which executes demo/smoke.sh with narration. That
 # script is the human walkthrough only — the AUTHORITATIVE CI gate for these
 # assertions is the pytest system suite (tests/system, smoke marker), which

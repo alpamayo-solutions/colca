@@ -19,4 +19,12 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/colcad ./cmd/colcad \
 # resolved to on 2026-08-14, so runtime behaviour is unchanged.
 FROM gcr.io/distroless/static-debian12@sha256:6447365a6337c3732f412d1b74357b30a633831955b2bc45552b0086be907687
 COPY --from=build /out/ /usr/local/bin/
+# The contracts bundle generated from the SAME commit (schema-bundle design
+# §6.1 channel 1): colcad loads it from this baked default path unless the
+# config names another bundle. The named context is supplied by every build
+# caller (bake target `colca`, colca/Makefile, dev.py) after running
+# `uv run scripts/dev.py bundle --context`.
+# contracts-bundle is a buildx NAMED CONTEXT (docker-bake.hcl), not a stage.
+# hadolint ignore=DL3022
+COPY --from=contracts-bundle contracts-bundle.json /etc/colca/contracts-bundle.json
 ENTRYPOINT ["/usr/local/bin/colcad"]

@@ -248,6 +248,40 @@ func (h *colcaHook) publishTimeSync() {
 // mount-rewritten form instead, so a subscriber on colca/# sees each record once.
 // A non-UNS topic is not persisted and must be distributed normally: outside
 // colca/# Colca is just a broker.
+// rejectCode maps an engine rejection to the MQTT-5 PUBACK reason code
+// (schema-bundle design §8.1). MQTT 3.1.1 clients and QoS 0 publishes have no
+// protocol channel for a negative ack — mochi only writes these codes into a
+// QoS>=1 PUBACK for MQTT 5 sessions; everywhere else the packet is simply
+// dropped, exactly as before, and the metrics reason stays the observable.
+func rejectCode(cl *mqtt.Client, err error) error {
+	if cl.Properties.ProtocolVersion < 5 {
+		// MQTT 3.1.1 has no PUBACK reason field — an acked packet reads as
+		// SUCCESS there, so the pre-bundle silent drop is the only honest
+		// answer for v3 sessions.
+		return packets.ErrRejectPacket
+	}
+	switch engine.ReasonOf(err) {
+	case metrics.ReasonGrammar:
+		// The topic itself is not a valid uns coordinate — includes
+		// "unknown contract", which lives in the topic.
+		return packets.ErrTopicNameInvalid
+	case metrics.ReasonValidation:
+		return packets.ErrPayloadFormatInvalid
+	case metrics.ReasonIdentity, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract,
+		metrics.ReasonNoMount, metrics.ReasonHumanWrite, metrics.ReasonTimeSync:
+		// All authorization facts: who may write what where. no_mount is an
+		// authorization fact too (§8.1 [delta]) — a read-only observer has
+		// no write standing.
+		return packets.ErrNotAuthorized
+	case metrics.ReasonDraining:
+		// Temporarily refused: the destination is being decommissioned —
+		// wait or retarget; not an authorization verdict.
+		return packets.ErrServerBusy
+	default:
+		return packets.ErrRejectPacket // untyped: keep the silent-drop behavior
+	}
+}
+
 func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
 	ident := string(cl.Properties.Username)
 	if ident == "" {
@@ -271,7 +305,7 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		res, err := eng.IngestHuman(s.entry, pk.TopicName, pk.Payload)
 		if err != nil {
 			h.log.Warn("human publish rejected", "sub", s.sub, "topic", pk.TopicName, "err", err)
-			return pk, packets.ErrRejectPacket
+			return pk, rejectCode(cl, err)
 		}
 		h.log.Debug("human ingest", "sub", s.sub, "topic", res.Topic, "stream", res.Stream, "offset", res.Offset)
 		return pk, packets.CodeSuccessIgnore
@@ -279,7 +313,7 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 	res, err := eng.IngestClient(ident, pk.TopicName, pk.Payload)
 	if err != nil {
 		h.log.Warn("publish rejected", "identity", ident, "topic", pk.TopicName, "err", err)
-		return pk, packets.ErrRejectPacket
+		return pk, rejectCode(cl, err)
 	}
 	if res.Persisted {
 		h.log.Debug("mqtt ingest", "identity", ident, "topic_in", pk.TopicName,

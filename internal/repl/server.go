@@ -176,7 +176,9 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		topic := uns.MountInsert(rec.T, child.Mount)
 		rr := store.ReplRecord{ChildOffset: rec.O, Topic: topic, Payload: rec.P, TS: rec.TS}
 		if p, err := uns.Parse(topic); err == nil {
-			cl := uns.ClassOf(p.Contract)
+			// Route by the ENGINE authority (bundle-aware): a bundle-declared
+			// data/entity contract must KV-project here like at any door.
+			cl := s.eng.ClassOf(p.Contract)
 			if cl == uns.ClassData || cl == uns.ClassEntity {
 				rr.KVPath, rr.KVNode = p.Path, p.NodeID
 				// A replicated tombstone retires the path here too (retention
@@ -260,7 +262,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	// A child only ever sees commands for its own subtree.
 	filter := func(topic string) bool {
 		p, err := uns.Parse(topic)
-		if err != nil || uns.ClassOf(p.Contract) != uns.ClassCmd {
+		if err != nil || s.eng.ClassOf(p.Contract) != uns.ClassCmd {
 			return false
 		}
 		return strings.HasPrefix(p.Path, child.Mount+"/")
