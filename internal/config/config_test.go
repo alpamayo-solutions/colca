@@ -651,3 +651,39 @@ func TestTimeSyncHoldMSAndDriftWarnMSThreeStatesThroughLoad(t *testing.T) {
 		}
 	})
 }
+
+func loadDoc(t *testing.T, doc string) *Config {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "node.yaml")
+	if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestTLSBlockIsOptionalAndParsed(t *testing.T) {
+	c := loadDoc(t, `
+ulid: n-a
+data_dir: /data
+key_file: /keys/n.key
+tls:
+  cert_file: /certs/node.crt
+  key_file: /certs/node.key
+`)
+	if c.TLS.CertFile != "/certs/node.crt" || c.TLS.KeyFile != "/certs/node.key" {
+		t.Fatalf("tls parsed as %+v", c.TLS)
+	}
+
+	bare := loadDoc(t, `
+ulid: n-a
+data_dir: /data
+key_file: /keys/n.key
+`)
+	if bare.TLS.CertFile != "" || bare.TLS.KeyFile != "" {
+		t.Fatalf("a config with no tls block got %+v", bare.TLS)
+	}
+}

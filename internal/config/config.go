@@ -41,6 +41,22 @@ type MQTTHuman struct {
 	WSAddr  string `yaml:"ws_addr"`
 }
 
+// TLS is an OPTIONAL certificate for the doors whose trust is not pinning.
+//
+// colcad self-signs by default (the certificate is a container for the node's
+// ed25519 key, and trust comes from pinning that key), which is right for a
+// machine or an enrolled child and unacceptable to a browser. A node that
+// ordinary clients reach names a certificate here instead.
+//
+// It applies to the human MQTT/WebSocket doors and the HTTP API, and NOT to
+// replication or the machine door — see identity.ServerCert for why that
+// boundary is forced rather than chosen. Where the certificate comes from
+// (ACME, a private PKI, a customer file) is deliberately outside colcad.
+type TLS struct {
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+}
+
 type Endpoint struct {
 	Addr string `yaml:"addr"`
 }
@@ -64,6 +80,7 @@ type Config struct {
 	DataDir  string   `yaml:"data_dir"`
 	LogLevel string   `yaml:"log_level"`
 	KeyFile  string   `yaml:"key_file"`
+	TLS      TLS      `yaml:"tls"`
 	API      API      `yaml:"api"`
 	MQTT     Endpoint `yaml:"mqtt"`
 	Repl     Endpoint `yaml:"repl"`

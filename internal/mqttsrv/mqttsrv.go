@@ -354,6 +354,10 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 // = pinning — repl's exact posture). eng may be nil and be supplied later via
 // SetEngine. m may be nil (every Metrics method is nil-safe).
 func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *tokenauth.Verifier, eng *engine.Engine, m *metrics.Metrics) (*Server, error) {
+	// The MACHINE door keeps the key container, always. Trust there is pinning:
+	// the node pins the client's key, and swapping the server certificate for a
+	// CA-issued one would buy nothing (colca-machine never verifies it) while
+	// breaking the symmetry replication depends on.
 	cert, err := id.SelfSignedCert(cfg.ULID)
 	if err != nil {
 		return nil, err
@@ -363,9 +367,15 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 		ClientAuth:   tls.RequireAnyClientCert, // pinning happens in OnConnectAuthenticate
 		MinVersion:   tls.VersionTLS13,
 	}
-	// Human doors carry no client certs — the credential is the JWT (§5.1).
+	// Human doors carry no client certs — the credential is the JWT (§5.1) — so
+	// these are the doors where a browser-trusted certificate means something,
+	// and the ones a configured tls: block applies to.
+	humanCert, err := identity.ServerCert(id, cfg.ULID, cfg.TLS.CertFile, cfg.TLS.KeyFile)
+	if err != nil {
+		return nil, err
+	}
 	humanTLS := &tls.Config{
-		Certificates: []tls.Certificate{cert},
+		Certificates: []tls.Certificate{humanCert},
 		MinVersion:   tls.VersionTLS13,
 	}
 

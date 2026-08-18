@@ -112,7 +112,7 @@ func newAPI(t *testing.T) *api {
 	}
 	primeVerifier(t, ver)
 
-	tlsCfg, err := TLSConfig(nodeID, "n-test")
+	tlsCfg, err := TLSConfig(nodeID, "n-test", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

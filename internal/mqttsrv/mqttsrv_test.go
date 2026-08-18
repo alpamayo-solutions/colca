@@ -1,8 +1,12 @@
 package mqttsrv
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -876,5 +880,95 @@ cleared:
 		case <-deadline:
 			t.Fatal("fresh subscriber never received the sibling's retained value")
 		}
+	}
+}
+
+// --- a supplied certificate reaches the human doors, and only those ---------
+
+// suppliedPair writes a throwaway certificate whose CommonName is "supplied",
+// so a test can tell it apart from the node's own key container.
+func suppliedPair(t *testing.T) (certFile, keyFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	certFile, keyFile = filepath.Join(dir, "s.crt"), filepath.Join(dir, "s.key")
+
+	other, err := identity.Generate(filepath.Join(dir, "other.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := other.SelfSignedCert("supplied")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(other.Priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, block := range map[string]*pem.Block{
+		certFile: {Type: "CERTIFICATE", Bytes: cert.Certificate[0]},
+		keyFile:  {Type: "PRIVATE KEY", Bytes: keyDER},
+	} {
+		if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return certFile, keyFile
+}
+
+// dialCommonName opens a TLS connection (presenting a client cert, which the
+// machine door requires) and reports the CommonName the server presented.
+func dialCommonName(t *testing.T, addr string, client *tls.Config) string {
+	t.Helper()
+	cfg := client.Clone()
+	cfg.InsecureSkipVerify = true // #nosec G402 -- reading the cert IS the test
+	conn, err := tls.Dial("tcp", addr, cfg)
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
+	}
+	defer conn.Close()
+	return conn.ConnectionState().PeerCertificates[0].Subject.CommonName
+}
+
+func TestASuppliedCertificateServesTheHumanDoorAndNotTheMachineDoor(t *testing.T) {
+	// The machine door must keep the key container: trust on the pinned doors is
+	// "the certificate carries the peer's ed25519 key", and replication's child
+	// pins its parent exactly that way. A CA-issued certificate there would
+	// break every uplink beneath the node.
+	certFile, keyFile := suppliedPair(t)
+
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	nodeID, err := identity.Generate(filepath.Join(t.TempDir(), "n1.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := registry.New(st, "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
+		MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
+		MQTTHuman: config.MQTTHuman{TCPAddr: "127.0.0.1:0"},
+		Auth:      &config.Auth{Issuer: "http://issuer.test", Audience: "colca", JWKSURL: "http://issuer.test/jwks"},
+		TLS:       config.TLS{CertFile: certFile, KeyFile: keyFile},
+	}
+	s, err := New(cfg, nodeID, reg, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+	go func() { _ = s.Serve() }()
+
+	client := authtest.NewMachine(t, "probe").TLSConfig()
+	if got := dialCommonName(t, s.HumanTCPAddr(), client); got != "supplied" {
+		t.Errorf("human door served %q, want the supplied certificate", got)
+	}
+	if got := dialCommonName(t, s.Addr(), client); got != "n1" {
+		t.Errorf("machine door served %q, want the node's key container — a child "+
+			"pinning this node can no longer verify it", got)
 	}
 }

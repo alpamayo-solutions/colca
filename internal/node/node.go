@@ -259,7 +259,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	// 4. Local HTTPS control API: TLS with the node's own key; machine callers
 	//    present their pinned client key, admin tooling uses the token (§6.3).
 	if cfg.API.Addr != "" {
-		tlsCfg, err := httpapi.TLSConfig(id, cfg.ULID)
+		tlsCfg, err := httpapi.TLSConfig(id, cfg.ULID, cfg.TLS.CertFile, cfg.TLS.KeyFile)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: api tls: %w", cfg.ULID, err))
 		}

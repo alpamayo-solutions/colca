@@ -39,11 +39,16 @@ const (
 	maxMax     = 1000
 )
 
-// TLSConfig builds the API listener's TLS config: the node's own key as
-// server identity, client certs REQUESTED but not required — machine callers
-// present their pinned key, admin tooling and scrapers stay certless.
-func TLSConfig(id *identity.Identity, ulid string) (*tls.Config, error) {
-	cert, err := id.SelfSignedCert(ulid)
+// TLSConfig builds the API listener's TLS config: client certs REQUESTED but
+// not required — machine callers present their pinned key, admin tooling and
+// scrapers stay certless.
+//
+// The SERVER certificate is the supplied pair when the node configures one, and
+// its own key container otherwise. Nothing pins this door's server certificate
+// (clients here authenticate themselves, not the node), so it is one of the
+// doors where a browser-trusted certificate is both possible and useful.
+func TLSConfig(id *identity.Identity, ulid, certFile, keyFile string) (*tls.Config, error) {
+	cert, err := identity.ServerCert(id, ulid, certFile, keyFile)
 	if err != nil {
 		return nil, err
 	}

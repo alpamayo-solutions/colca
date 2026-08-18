@@ -95,6 +95,34 @@ func (i *Identity) PublicHex() string {
 }
 
 // SelfSignedCert returns a TLS cert wrapping the ed25519 key (cert = key container, trust = pinning).
+// ServerCert is the certificate a listener serves: the supplied pair when both
+// paths are set, and otherwise this node's self-signed key container.
+//
+// It is for the doors whose trust is NOT pinning — the human MQTT/WebSocket
+// doors and the HTTP API. Replication and the machine door must keep the key
+// container, because a child pins its parent by extracting the ed25519 key from
+// the certificate it is served (repl/client.go): a CA-issued certificate there
+// breaks every uplink beneath this node. Callers pass empty paths for those.
+//
+// A half-configured or unreadable pair is an ERROR, never a silent fallback.
+// Falling back would leave the node serving exactly what the operator
+// configured it not to serve, and looking healthy while doing it.
+func ServerCert(id *Identity, cn, certFile, keyFile string) (tls.Certificate, error) {
+	switch {
+	case certFile == "" && keyFile == "":
+		return id.SelfSignedCert(cn)
+	case certFile == "" || keyFile == "":
+		return tls.Certificate{}, fmt.Errorf(
+			"tls: cert_file and key_file must be set together (got cert_file=%q key_file=%q)",
+			certFile, keyFile)
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("tls: loading %s / %s: %w", certFile, keyFile, err)
+	}
+	return cert, nil
+}
+
 func (i *Identity) SelfSignedCert(cn string) (tls.Certificate, error) {
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(time.Now().UnixNano()),
