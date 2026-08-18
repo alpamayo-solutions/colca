@@ -1,11 +1,12 @@
 # colca/Makefile
-.PHONY: test build docker demo smoke ci bench bench-scenarios bench-check
+.PHONY: test build docker demo world world-down smoke ci bench bench-scenarios bench-check
 test:
 	go test ./... -race -count=1 -v
 build:
 	CGO_ENABLED=0 go build -o bin/colcad ./cmd/colcad
 	CGO_ENABLED=0 go build -o bin/colca-keygen ./cmd/colca-keygen
 	CGO_ENABLED=0 go build -o bin/colca-machine ./cmd/colca-machine
+	CGO_ENABLED=0 go build -o bin/colca-grantsync ./cmd/colca-grantsync
 docker:
 	cd .. && uv run scripts/dev.py bundle --context
 	docker build -f deploy/Dockerfile -t colca:dev \
@@ -16,6 +17,12 @@ docker:
 # `smoke` below delegates to. Do not let smoke.sh's assertions drift from it.
 demo: docker
 	bash demo/demo.sh
+# An interactive world that STAYS up (the level-4 topology, enrolled and
+# seeded): see docs/source/development/testing.rst.
+world:
+	cd .. && uv run scripts/dev.py world up
+world-down:
+	cd .. && uv run scripts/dev.py world down
 smoke: docker
 	cd .. && COLCA_IMAGE=colca:dev uv run scripts/dev.py test system -m smoke
 ci: test docker smoke

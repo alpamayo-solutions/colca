@@ -78,7 +78,7 @@
     },
     {
       "clientId": "colca-authz",
-      "name": "Colca authorization objects — element resources and the permissions granting against them. Issues no human tokens; it exists to own the resource server, which Keycloak refuses to hang off the public colca client.",
+      "name": "Colca authorization objects — one resource per system element, and the permissions granting groups against them. Issues no human tokens; it exists to own the resource server, which Keycloak refuses to hang off the public colca client.",
       "protocol": "openid-connect",
       "publicClient": false,
       "secret": "colca-authz-dev-secret",
