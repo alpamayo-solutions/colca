@@ -60,6 +60,7 @@ from colca_data_contracts.payload import (
     DBDump,
     AnnotationType as AnnotationTypePayload,
     MetadataType as MetadataTypePayload,
+    Group as GroupPayload,
     SystemElement as SystemElementPayload,
     Signal as SignalPayload,
 )
@@ -138,6 +139,7 @@ __all__ = [
     # Hub-owned type payloads
     "AnnotationTypePayload",
     "MetadataTypePayload",
+    "GroupPayload",
     # Topology payloads (retained, edge-owned)
     "SystemElementPayload",
     "SignalPayload",

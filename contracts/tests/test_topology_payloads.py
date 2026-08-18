@@ -59,7 +59,7 @@ def test_system_element_roundtrip_minimal():
     assert decoded.id == "01H..."
     assert decoded.name == "M6"
     assert decoded.description == ""
-    assert decoded.parent_topic is None
+    assert decoded.parent_id is None
     assert decoded.implements == []
     assert decoded.interface_coverage == {}
     assert decoded.metadata == {}
@@ -70,7 +70,7 @@ def test_system_element_roundtrip_full():
         id="01HKABC",
         name="M6",
         description="Main mixer on line 1",
-        parent_topic="factory/line1",
+        parent_id="01HPARENT",
         implements=["MBMachine"],
         interface_coverage={"MBMachine": {"machine_state": "ok"}},
         external_asset_id="WO-1234",
@@ -86,7 +86,7 @@ def test_system_element_roundtrip_full():
     assert decoded.id == original.id
     assert decoded.name == original.name
     assert decoded.description == original.description
-    assert decoded.parent_topic == original.parent_topic
+    assert decoded.parent_id == original.parent_id
     assert decoded.implements == original.implements
     assert decoded.interface_coverage == original.interface_coverage
     assert decoded.external_asset_id == original.external_asset_id
@@ -179,3 +179,19 @@ def test_signal_with_only_id_name_is_valid():
     encoded = sig.encode()
     decoded = SignalPayload.decode(encoded, timestamp=0)
     assert decoded == sig
+
+
+def test_system_element_names_its_parent_by_identity():
+    """A record's topic is rewritten at every hop but its payload is not, so a
+    path stored inside one means something else at an ancestor. The parent
+    reference must be frame-invariant (binding design §3.2)."""
+    se = SystemElementPayload(id="01HCHILD", name="Linie 3", parent_id="01HPARENT")
+    decoded = SystemElementPayload.decode(se.encode(), timestamp=0)
+
+    assert decoded.parent_id == "01HPARENT"
+    assert "parent_topic" not in SystemElementPayload.__dataclass_fields__
+
+
+def test_a_root_element_has_no_parent():
+    root = SystemElementPayload(id="01HROOT", name="Werk1")
+    assert SystemElementPayload.decode(root.encode(), timestamp=0).parent_id is None

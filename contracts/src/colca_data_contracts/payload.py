@@ -395,17 +395,51 @@ class MetadataType(Payload):
 
 
 @dataclass
-class Interface(Payload):
-    """Interface definition published as retained MQTT.
+class Group(Payload):
+    """A group of humans and the grants its members hold.
 
-    Topic: colca/v1/_Interface/{name}/v{version}
-    Published by the api service at boot. Subscribers (UI, dataops, dm CLI)
-    consume this to discover the available interface registry and the
-    signals each interface requires. ``signals`` carries the *resolved*
-    list (parents already merged), so consumers don't need to walk
-    ``extends`` themselves.
+    Topic: ``colca/v1/_Group/{authoring-node}/{id}``. A definition: authored once,
+    needed at every node that authorizes a human, and the same thing at all of
+    them (definition-stream design §8).
+
+    A group is emphatically NOT an identity. It has no key, it never connects,
+    and it is never a candidate at any door — which is why it lives here rather
+    than in the registry: the registry's invariant is an identity with a pinned
+    key, and a group has neither half.
+
+    A token names the groups its bearer belongs to; the node unions their
+    grants. Membership therefore lives in the identity provider and changes
+    nobody's node state.
     """
 
+    id: str
+    name: str
+    #: Grant strings in the uns grammar (``read:<element>/#``,
+    #: ``cmd:<element>/#:classes``, ``admin:#``). Validated at authoring time by
+    #: the reconciler and again by the node that applies the definition.
+    grants: List[str] = field(default_factory=list)
+    description: str = ""
+
+    @classmethod
+    def decode(cls, json_str: str, timestamp: int) -> "Group":
+        data = json.loads(json_str)
+        return cls(**data)
+
+
+@dataclass
+class Interface(Payload):
+    """An interface definition: what a system element must offer to claim it.
+
+    Topic: ``colca/v1/_Interface/{authoring-node}/{id}``. A definition, so it
+    descends the tree and is applied as state at every node below its author
+    (definition-stream design §2). ``signals`` carries the *resolved* list
+    (parents already merged), so consumers don't need to walk ``extends``.
+    """
+
+    #: The definition's identity — its path on the wire, and what a system
+    #: element references when it claims to implement this interface. A
+    #: definition without one could not be addressed at all.
+    id: str
     name: str
     version: str = "1.0"
     description: str = ""
@@ -420,18 +454,26 @@ class Interface(Payload):
 
 @dataclass
 class SystemElement(Payload):
-    """Topology entity published as retained MQTT.
+    """A position in the plant — and therefore in the namespace.
 
-    Topic: colca/v1/_SystemElement/{_topic_context_section}
-    Published by the api service on SystemElement create/update; soft-delete publishes
-    a retained empty payload (tombstone). Consumed by the Topology UI view and,
-    in a later iteration, by hub-side mqtt-to-api for replication.
+    Topic: ``colca/v1/_SystemElement/{node-id}/{path…}``. Elements nest in
+    elements; nodes and machines get their address by binding to one; signals
+    are leaves. The record's own topic is its position, so nothing here restates
+    it (id-grants design §3).
+
+    The parent is named by **identity**: a record's topic is rewritten at every
+    hop while its payload is not, so a path stored in here would silently mean
+    something else at an ancestor.
+
+    Written by the node in response to a `_CmdConfigure` command; a retired
+    element is a retained empty payload (tombstone).
     """
 
     id: str
     name: str
     description: str = ""
-    parent_topic: Optional[str] = None  # Parent _topic_context_section, None for root
+    #: ULID of the enclosing element; None for a root.
+    parent_id: Optional[str] = None
     implements: List[str] = field(default_factory=list)  # Interface names this SE fulfils (Phase 2)
     interface_coverage: Dict[str, Dict[str, str]] = field(default_factory=dict)  # Per-interface signal coverage
     external_asset_id: Optional[str] = None

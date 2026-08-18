@@ -46,9 +46,15 @@ CLASS_TABLE: dict[str, str] = {
     "_Signal": "entity",
     "_DataTags": "entity",
     "_ServiceDetails": "entity",
-    "_AnnotationType": "entity",
-    "_MetadataType": "entity",
-    "_Interface": "entity",
+    # Definitions: authored once, needed everywhere below the author, and the
+    # same thing at every node — so they descend and are applied as state
+    # (definition-stream design §2). They were "entity" only because there was
+    # no downward flow to put them on, which meant they replicated the wrong
+    # way, away from the nodes that need them.
+    "_Group": "definition",
+    "_AnnotationType": "definition",
+    "_MetadataType": "definition",
+    "_Interface": "definition",
     "_AlarmNotificationConfig": "entity",
 }
 
@@ -237,7 +243,10 @@ def build_bundle(git_sha: str = "unknown") -> tuple[dict, str]:
         )
         if bad := _lint_subset(schema, identifier):
             raise SystemExit(f"generate_bundle: schema outside the §4.1 subset: {bad}")
-        tombstone = TOMBSTONE_OVERRIDES.get(identifier, klass in ("data", "entity"))
+        # State classes are retractable: an empty payload retires the path.
+        # Definitions are state too — a group or a type has to be withdrawable,
+        # and a tombstone is how (definition-stream design §4).
+        tombstone = TOMBSTONE_OVERRIDES.get(identifier, klass in ("data", "entity", "definition"))
         contracts[identifier] = {"class": klass, "tombstone": tombstone, "schema": schema}
 
     body = {

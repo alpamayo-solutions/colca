@@ -81,7 +81,7 @@ def test_subset_lint_only_allowed_keywords():
     body, _ = gb.build_bundle()
     for ident, entry in body["contracts"].items():
         assert gb._lint_subset(entry["schema"], ident) == []
-        assert entry["class"] in ("data", "entity", "cmd", "ack"), ident
+        assert entry["class"] in ("data", "entity", "definition", "cmd", "ack"), ident
         assert isinstance(entry["tombstone"], bool), ident
 
 
@@ -174,3 +174,28 @@ def test_metric_real_shape():
     assert m["class"] == "data" and m["tombstone"] is True
     assert sorted(m["schema"]["required"]) == ["signal_id", "value"]
     assert m["schema"]["properties"]["signal_id"]["minLength"] == 1
+
+
+def test_definitions_are_their_own_class_and_retractable():
+    """A definition descends and is applied as state (definition-stream design
+    §2): its own routing class, and an empty payload retracts it.
+
+    The three type contracts were "entity" until this stream existed, which
+    meant they replicated the wrong way — up, away from the nodes that need
+    them.
+    """
+    body, _ = gb.build_bundle()
+    for ident in ("_Group", "_MetadataType", "_AnnotationType", "_Interface"):
+        entry = body["contracts"][ident]
+        assert entry["class"] == "definition", (ident, entry["class"])
+        assert entry["tombstone"] is True, ident
+
+
+def test_every_definition_is_addressable_by_id():
+    """A definition's path IS its identity, so one without an id could not be
+    filed at all (definition-stream design §3)."""
+    body, _ = gb.build_bundle()
+    for ident, entry in body["contracts"].items():
+        if entry["class"] != "definition":
+            continue
+        assert "id" in entry["schema"]["required"], ident
