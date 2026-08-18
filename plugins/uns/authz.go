@@ -57,6 +57,49 @@ const (
 	StatusDraining = "draining"
 )
 
+// IsDraining reports whether this entry is mid-move: still enrolled and still
+// serving reads, but admitting no new commands and being drained toward a new
+// parent (move-drain design §3.2). The core asks this instead of comparing
+// Status so the encoding of "draining" — including the absent-means-active
+// rule — stays one fact in one place.
+func (e *Entry) IsDraining() bool { return e.Status == StatusDraining }
+
+// MarkDraining moves the entry into the draining state. The transition belongs
+// here rather than at the caller for the same reason IsDraining does: the
+// registry owns WHEN an entry drains, this package owns what draining IS.
+func (e *Entry) MarkDraining() { e.Status = StatusDraining }
+
+// CanDrain reports whether this entry is eligible to drain at all. Only nodes
+// are: a machine's delivery rides broker QoS-1 session state rather than a
+// cursor, so there is nothing for a parent to drain against (move-drain design
+// §3.2 [delta]).
+func (e *Entry) CanDrain() bool { return e.Kind == KindNode }
+
+// Door is one of the ways an identity can present itself to a node. Which kinds
+// may use which door is a domain rule (auth §2.1, §6), so it is answered here
+// rather than re-derived from Kind at each listener.
+type Door int
+
+const (
+	DoorMQTT Door = iota // the machine-facing broker door
+	DoorHTTP             // the machine-facing HTTP door
+	DoorRepl             // the node-to-node replication door
+)
+
+// MayUseDoor reports whether this identity is allowed to present itself at the
+// given door. Machines connect to the MQTT and HTTP doors, nodes to the
+// replication door; humans arrive as tokens and are authorized per publish
+// rather than per door, so they hold no door of their own.
+func (e *Entry) MayUseDoor(d Door) bool {
+	switch d {
+	case DoorMQTT, DoorHTTP:
+		return e.Kind == KindMachine
+	case DoorRepl:
+		return e.Kind == KindNode
+	}
+	return false
+}
+
 // Registry is the in-memory map the doors consult (ulid → entry). Plain data:
 // lifecycle (loading, swapping, locking) is owned by the core's registry
 // manager, never here.

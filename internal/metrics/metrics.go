@@ -379,10 +379,11 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	// of silently resetting to 0 while children are still mid-drain.
 	draining := 0
 	for _, raw := range st.RegistryScan() {
-		var e struct {
-			Status string `json:"status"`
-		}
-		if err := json.Unmarshal(raw, &e); err == nil && e.Status == uns.StatusDraining {
+		// Decoded as the real entry rather than a local struct carrying just
+		// the status field: the entry's JSON shape has one owner, and asking
+		// it whether it drains keeps that rule out of here entirely.
+		var e uns.Entry
+		if err := json.Unmarshal(raw, &e); err == nil && e.IsDraining() {
 			draining++
 		}
 	}

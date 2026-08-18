@@ -35,16 +35,6 @@ var allowedKeywords = map[string]bool{
 	"minItems": true, "additionalProperties": true,
 }
 
-var classByName = map[string]uns.Class{
-	"data":   uns.ClassData,
-	"entity": uns.ClassEntity,
-	// A definition descends and is applied as state (definition-stream design
-	// §2): its path is its own identity, so nothing rewrites it at a hop.
-	"definition": uns.ClassDefinition,
-	"cmd":    uns.ClassCmd,
-	"ack":    uns.ClassAck,
-}
-
 // Rule is everything the engine needs to judge one contract.
 type Rule struct {
 	Class     uns.Class
@@ -133,9 +123,9 @@ func Load(path, wantSHA string) (*Table, error) {
 		if err := json.Unmarshal(rawEntry, &e); err != nil {
 			return nil, fmt.Errorf("contracts bundle %s: contract %s unparseable: %w", path, name, err)
 		}
-		class, ok := classByName[e.Class]
+		class, ok := uns.ClassFromManifest(e.Class)
 		if !ok {
-			return nil, fmt.Errorf("contracts bundle %s: contract %s has unknown class %q (want data|entity|cmd|ack)", path, name, e.Class)
+			return nil, fmt.Errorf("contracts bundle %s: contract %s has unknown class %q (want data|entity|definition|cmd|ack)", path, name, e.Class)
 		}
 		if err := lintSubset(e.Schema, name); err != nil {
 			return nil, fmt.Errorf("contracts bundle %s: %w", path, err)

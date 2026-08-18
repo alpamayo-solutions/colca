@@ -93,7 +93,7 @@ func (s *Server) childFromReq(r *http.Request) (*uns.Entry, string, error) {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
 		return nil, "", fmt.Errorf("client key %s not enrolled at this node", short(pub))
 	}
-	if entry.Kind != uns.KindNode {
+	if !entry.MayUseDoor(uns.DoorRepl) {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthKind)
 		return nil, "", fmt.Errorf("identity %s is kind %q — the repl door is for nodes", entry.ULID, entry.Kind)
 	}
@@ -233,7 +233,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 			// Route by the ENGINE authority (bundle-aware): a bundle-declared
 			// data/entity contract must KV-project here like at any door.
 			cl := s.eng.ClassOf(p.Contract)
-			if cl == uns.ClassData || cl == uns.ClassEntity {
+			if uns.IsOwnedState(cl) {
 				rr.KVPath, rr.KVNode = p.Path, p.NodeID
 				// A replicated tombstone retires the path here too (retention
 				// design §7.1): the empty payload is the wire truth, derived
@@ -317,14 +317,14 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	// (evaluateDrain's own registry lookup short-circuits), but the status
 	// check here avoids that lookup on the hot path for the common
 	// non-draining case.
-	if child.Status == uns.StatusDraining {
+	if child.IsDraining() {
 		s.evaluateDrain(child.ULID)
 	}
 
 	// A child only ever sees commands for its own subtree.
 	filter := func(topic string) bool {
 		p, err := uns.Parse(topic)
-		if err != nil || s.eng.ClassOf(p.Contract) != uns.ClassCmd {
+		if err != nil || !uns.IsCommand(s.eng.ClassOf(p.Contract)) {
 			return false
 		}
 		return strings.HasPrefix(p.Path, mount+"/")

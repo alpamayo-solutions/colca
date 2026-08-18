@@ -10,10 +10,12 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
@@ -41,6 +43,9 @@ type Server struct {
 
 	sweepStop chan struct{}
 	sweepOnce sync.Once
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // colcaHook authenticates clients against the registry (TLS peer key →
@@ -68,6 +73,11 @@ type colcaHook struct {
 	// a back-reference to *Server (which does not exist yet when the hook is
 	// built).
 	broker *mqtt.Server
+	// closing is raised by Server.Close before it drains. While it is set the
+	// door refuses every new connection, which is what lets the drain below
+	// actually reach an empty client map instead of chasing arrivals. See
+	// Server.Close for why an empty map is required, not merely tidy.
+	closing atomic.Bool
 }
 
 func (h *colcaHook) engine() *engine.Engine {
@@ -110,6 +120,12 @@ func (h *colcaHook) Provides(b byte) bool {
 // the identity to OnPublish/OnACLCheck, so the equality check pins it to the
 // key.
 func (h *colcaHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bool {
+	// Refused before anything else once the node is shutting down: a rejected
+	// connection returns from attachClient before Clients.Add, so it can never
+	// become the queued writer Server.Close must avoid.
+	if h.closing.Load() {
+		return false
+	}
 	if isHumanListener(cl) {
 		return h.authenticateHuman(cl, pk)
 	}
@@ -132,7 +148,7 @@ func (h *colcaHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bo
 		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthUnknownKey)
 		return false
 	}
-	if entry.Kind != uns.KindMachine {
+	if !entry.MayUseDoor(uns.DoorMQTT) {
 		h.log.Warn("mqtt auth rejected: kind may not use this door", "user", user, "kind", entry.Kind)
 		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthKind)
 		return false
@@ -509,10 +525,72 @@ func (s *Server) HumanWSAddr() string {
 }
 
 func (s *Server) Serve() error { return s.S.Serve() }
+
+// drainDeadline bounds the wait for connected clients to go away in Close.
+// Reaching it is not fatal — Close proceeds and mochi tears the rest down —
+// it only re-opens the small race the drain exists to remove, so it is set
+// far above the time a client takes to notice Stop and unwind.
+const drainDeadline = 5 * time.Second
+
+// Close shuts the broker down: it stops accepting connections, drains the ones
+// it has, and only then closes the listeners.
+//
+// The drain is load-bearing, not politeness. mochi's Clients.GetByListener
+// (clients.go:95) takes a read lock and then calls Clients.Len, which takes the
+// same read lock a second time. Go's RWMutex blocks a recursive read lock as
+// soon as a writer is queued, and Clients.Delete — the writer — is exactly what
+// a client runs when it disconnects (server.go, end of attachClient). Closing
+// the listeners while any client is unwinding therefore risks a permanent
+// deadlock between Server.Close and that client, hanging shutdown forever.
+// Observed as a 10-minute test timeout in TestTimeSyncBeaconPeriodicCadence.
+//
+// Emptying the client map first removes the writer, so the recursive read lock
+// is uncontended and cannot block. The bug is upstream (mochi-mqtt v2.7.9, the
+// latest release) and should be fixed there — GetByListener has no reason to
+// call Len rather than len(cl.internal) — but a node must not hang on shutdown
+// while that lands, and draining before closing is correct on its own merits.
+// Close is idempotent: mochi's Server.Close closes an unbuffered done channel
+// and panics on a second call, so a node that shuts down twice — a deferred
+// close plus an explicit one — would crash on the way out.
 func (s *Server) Close() error {
-	s.sweepOnce.Do(func() { close(s.sweepStop) })
-	return s.S.Close()
+	s.closeOnce.Do(func() {
+		s.sweepOnce.Do(func() { close(s.sweepStop) })
+
+		s.hook.closing.Store(true)
+		for _, cl := range s.S.Clients.GetAll() {
+			cl.Stop(errServerClosing)
+		}
+		// Wait for every attachClient goroutine to return, not for the client
+		// map to empty: mochi deletes a client on disconnect only when its
+		// session expires, so a persistent session stays in the map by design
+		// and an empty map is not reachable. What matters is that no goroutine
+		// is left in a position to call Clients.Add or Clients.Delete — the
+		// writers whose queuing is what blocks GetByListener's recursive read
+		// lock. ClientsWg reaching zero is exactly that condition.
+		//
+		// mochi waits on the same WaitGroup, but inside CloseAll and only AFTER
+		// closing each listener (listeners.go:134) — i.e. after the call that
+		// can already have deadlocked. Waiting here is the missing ordering.
+		drained := make(chan struct{})
+		go func() {
+			s.S.Listeners.ClientsWg.Wait()
+			close(drained)
+		}()
+		select {
+		case <-drained:
+		case <-time.After(drainDeadline):
+			slog.Default().Warn("broker close: clients still unwinding after drain deadline — closing anyway",
+				"deadline", drainDeadline)
+		}
+		s.closeErr = s.S.Close()
+	})
+	return s.closeErr
 }
+
+// errServerClosing is the stop cause handed to every client the drain evicts,
+// so a disconnect during shutdown is distinguishable in logs from a client that
+// dropped on its own.
+var errServerClosing = errors.New("server closing")
 
 // DeliverLocal publishes into the local broker. It matches engine.LocalDeliver
 // and is how every record the engine appends reaches this node's MQTT bus,

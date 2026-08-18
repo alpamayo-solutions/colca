@@ -54,7 +54,7 @@ func (s *Server) RunDrainTicker(stop <-chan struct{}) {
 // registry — the periodic tick's and the post-restart entry point.
 func (s *Server) evaluateAllDrains() {
 	for _, e := range s.reg.List() {
-		if e.Status == uns.StatusDraining {
+		if e.IsDraining() {
 			s.evaluateDrain(e.ULID)
 		}
 	}
@@ -77,7 +77,7 @@ func (s *Server) evaluateAllDrains() {
 // gets, never whether the drain is allowed to complete right now.
 func (s *Server) evaluateDrain(childULID string) {
 	e, ok := s.reg.Get(childULID)
-	if !ok || e.Status != uns.StatusDraining {
+	if !ok || !e.IsDraining() {
 		return
 	}
 	total, pending, gapped := s.drainPendingCommands(e)
@@ -170,7 +170,7 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped 
 	nowMS := s.eng.AuthoritativeNow().UnixMilli()
 	filter := func(topic string) bool {
 		p, err := uns.Parse(topic)
-		if err != nil || s.eng.ClassOf(p.Contract) != uns.ClassCmd {
+		if err != nil || !uns.IsCommand(s.eng.ClassOf(p.Contract)) {
 			return false
 		}
 		// Same mount boundary check as the /downlink filter (server.go): the

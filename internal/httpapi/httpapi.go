@@ -89,7 +89,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				m.AuthReject(metrics.DoorHTTP, metrics.AuthUnknownKey)
 				return caller{}, false
 			}
-			if entry.Kind != uns.KindMachine {
+			if !entry.MayUseDoor(uns.DoorHTTP) {
 				m.AuthReject(metrics.DoorHTTP, metrics.AuthKind)
 				return caller{}, false
 			}

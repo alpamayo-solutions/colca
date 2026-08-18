@@ -252,7 +252,7 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 		m.mu.Unlock()
 		return 0, false, fmt.Errorf("revoke %s: %w", ulid, ErrNotEnrolled)
 	}
-	wasDraining = e.Status == uns.StatusDraining
+	wasDraining = e.IsDraining()
 	// Revoke is the kill switch and never waits for the namespace to be
 	// healthy: an entry whose element stopped resolving still loses its
 	// identity here and now. Its _EdgeNode record cannot be addressed in that
@@ -314,17 +314,17 @@ func (m *Manager) Drain(ulid string) (offset uint64, err error) {
 	// method never drifts from it as Entry.Validate grows), but its generic
 	// error can't be matched with errors.Is the way ErrNotNode/
 	// ErrAlreadyDraining can.
-	if e.Kind != uns.KindNode {
+	if !e.CanDrain() {
 		m.mu.Unlock()
 		return 0, fmt.Errorf("drain %s: %w", ulid, ErrNotNode)
 	}
-	if e.Status == uns.StatusDraining {
+	if e.IsDraining() {
 		m.mu.Unlock()
 		return 0, fmt.Errorf("drain %s: %w", ulid, ErrAlreadyDraining)
 	}
 
 	updated := *e
-	updated.Status = uns.StatusDraining
+	updated.MarkDraining()
 	// Same discipline as Enroll: every entry this package ever persists is
 	// validated through the one shape-of-truth (uns.Entry.Validate), not
 	// re-derived here — the two explicit gates above classify HTTP status
@@ -374,7 +374,7 @@ func (m *Manager) DrainingMount(path string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, e := range m.byID {
-		if e.Status != uns.StatusDraining {
+		if !e.IsDraining() {
 			continue
 		}
 		if mount, ok := m.mountOf(e); ok && strings.HasPrefix(path, mount+"/") {

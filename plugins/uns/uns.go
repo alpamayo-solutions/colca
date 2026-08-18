@@ -1,10 +1,20 @@
-// Package uns is the Colca-specific plugin layer: topic grammar, contract
-// classes, mount insert/strip and payload validation for the `colca/#` namespace.
+// Package uns is where ALL Colca domain knowledge lives: topic grammar,
+// contract classes, mount insert/strip, payload validation, the identity and
+// grant model, and the element namespace for the `colca/#` namespace.
 //
-// It has no dependencies beyond the Go standard library and must never import
-// the core — the core stays generic, the domain knowledge lives here. The core
-// calls into this package (engine, httpapi, repl); never the other way around.
-// Enforced by arch_test.go.
+// It depends on the Go standard library only, so it can never reach back into
+// colca's infrastructure — that ceiling is what keeps domain knowledge from
+// scattering. The core imports this package (engine, httpapi, repl, retention,
+// registry …) and that direction is by design; the reverse is forbidden and
+// enforced by TestPluginDependsOnStdlibOnly. Where the domain needs something
+// from infrastructure, it declares the port here and the core implements it
+// (EntityStore, Bindings, Placements, Namespace, Scope).
+//
+// The core asks this package questions; it never switches on its vocabulary.
+// A decision spelled `class == uns.ClassCmd` inside internal/ is a domain rule
+// living in two packages at once, so decisions go through predicates —
+// IsState, IsCommand, IsOwnedState, Entry.IsDraining, Entry.MayUseDoor — and
+// TestCoreAsksQuestionsRatherThanSwitchingOnVocabulary keeps it that way.
 package uns
 
 import (
@@ -18,14 +28,14 @@ import (
 type Class int
 
 const (
-	ClassNone     Class = iota
-	ClassData           // _Metric …    write: owner (level4 == identity)
-	ClassEntity         // _EdgeNode, _SystemElement, _Signal
-	ClassDefinition     // _Group, _MetadataType …  write: any node, flows DOWN, applied as state
-	ClassCmd            // _Cmd*        write: ancestors/admin, flows down
-	ClassAck            // _Ack         write: owner, flows up
-	ClassGap            // _StreamGap   write: pruner only. Event, no KV, not retained (design §6.4).
-	ClassTimeSync       // _TimeSync    write: node-local-publish-only. Ephemeral: no stream, never persisted, never retained (time-sync design §2.2).
+	ClassNone       Class = iota
+	ClassData             // _Metric …    write: owner (level4 == identity)
+	ClassEntity           // _EdgeNode, _SystemElement, _Signal
+	ClassDefinition       // _Group, _MetadataType …  write: any node, flows DOWN, applied as state
+	ClassCmd              // _Cmd*        write: ancestors/admin, flows down
+	ClassAck              // _Ack         write: owner, flows up
+	ClassGap              // _StreamGap   write: pruner only. Event, no KV, not retained (design §6.4).
+	ClassTimeSync         // _TimeSync    write: node-local-publish-only. Ephemeral: no stream, never persisted, never retained (time-sync design §2.2).
 )
 
 // Parsed is a decomposed UNS topic: colca/v1/_Contract/{node-id}/{path…}
@@ -101,6 +111,76 @@ func ClassOf(contract string) Class {
 // the retained flag and the tombstone rule — can never drift apart.
 func IsState(c Class) bool {
 	return c == ClassData || c == ClassEntity || c == ClassDefinition
+}
+
+// The predicates below exist so the core can ask what a class DOES without
+// learning which class it is. Every one of them is a domain fact that used to
+// be spelled out as a `class == Class…` comparison inside internal/ — i.e. a
+// rule living in two packages at once. Adding a class here is the whole change;
+// no door, no replicator and no pruner has to be edited to agree.
+
+// IsKnown reports whether the contract resolved to a class this node handles at
+// all. ClassNone is the "no such contract" answer from ClassOf and from the
+// bundle authority alike: the validated namespace rejects it rather than
+// storing something nothing can interpret.
+func IsKnown(c Class) bool { return c != ClassNone }
+
+// IsCommand reports whether a record belongs to the command flow: it targets an
+// ABSOLUTE node-local path (no mount rewrite, no level-4 identity rule, because
+// the author is not the target's owner), needs a covering cmd grant, is refused
+// while its destination drains, and travels DOWN the tree.
+func IsCommand(c Class) bool { return c == ClassCmd }
+
+// IsNodeLocal reports whether a class may only ever be produced by the node
+// itself. No door accepts one from a client, a human or an admin — the beacon
+// loop publishes it straight to the local bus, and it is ephemeral: no stream,
+// never persisted, never retained (time-sync design §2.2).
+func IsNodeLocal(c Class) bool { return c == ClassTimeSync }
+
+// IsOwnedState reports whether a class is state that an identity authors under
+// its OWN mount — the set that KV-projects at mount-rewritten coordinates and
+// replicates UP the tree. Definitions are state too (IsState covers them), but
+// they descend instead: their path is their own identity and no hop rewrites
+// them, so they are deliberately not in this set.
+func IsOwnedState(c Class) bool { return c == ClassData || c == ClassEntity }
+
+// IsDefinition reports whether a class travels DOWN the tree and is applied
+// unconditionally as state wherever it lands. A definition's path is its own
+// identity, so no hop rewrites it — which is what lets the same definition mean
+// the same thing at every node (definition-stream design §2).
+func IsDefinition(c Class) bool { return c == ClassDefinition }
+
+// NeedsStateRefresh reports whether the pruner must re-append a class's KV
+// entries to keep them alive across a retention boundary (retention §6.5).
+//
+// It is exactly the state nothing else re-supplies. Entities are authored here
+// and would simply be lost when their original records age out. Definitions
+// arrive on the downlink and the parent re-sends them, so refreshing locally
+// would duplicate work. Data are samples — ageing out is the point.
+func NeedsStateRefresh(c Class) bool { return c == ClassEntity }
+
+// ClassFromManifest maps a bundle manifest's class name to its Class. The
+// manifest's vocabulary is domain vocabulary, so it is spelled here and not in
+// the loader — the loader's job is to reject what it cannot map, not to know
+// what the names mean.
+//
+// ClassGap and ClassTimeSync have no manifest name on purpose: both are
+// node-authored and builtin, so a bundle can never declare one (schema-bundle
+// design §10.2).
+func ClassFromManifest(name string) (Class, bool) {
+	switch name {
+	case "data":
+		return ClassData, true
+	case "entity":
+		return ClassEntity, true
+	case "definition":
+		return ClassDefinition, true
+	case "cmd":
+		return ClassCmd, true
+	case "ack":
+		return ClassAck, true
+	}
+	return ClassNone, false
 }
 
 // StreamFor maps a class to the persistent stream that stores it.

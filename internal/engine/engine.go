@@ -253,7 +253,7 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		return e.reject(metrics.ReasonRegistryContract, "client %s may not publish _EdgeNode — registry entries are enrollment-door only", identity)
 	}
 	class := e.ClassOf(p.Contract)
-	if class == uns.ClassTimeSync {
+	if uns.IsNodeLocal(class) {
 		// Time-sync design §2.2/§4: _TimeSync is node-local-publish-only —
 		// only this node's own beacon loop may ever produce it, straight to
 		// the local bus. A client attempting it (even the exact canonical
@@ -262,7 +262,7 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		// otherwise fall through to.
 		return e.reject(metrics.ReasonTimeSync, "client %s may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)", identity)
 	}
-	if class == uns.ClassCmd {
+	if uns.IsCommand(class) {
 		// Move-drain design §3.2 item 2: a mount under an active drain stops
 		// accepting new commands at admission, independent of the caller's
 		// own grants — checked first so a draining destination is rejected
@@ -287,7 +287,7 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		}
 		return res, err
 	}
-	if class == uns.ClassNone {
+	if !uns.IsKnown(class) {
 		return e.reject(metrics.ReasonGrammar, "client %s may not publish %s", identity, p.Contract)
 	}
 	if p.NodeID != identity {
@@ -336,10 +336,10 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 		return e.reject(metrics.ReasonRegistryContract, "_EdgeNode is enrollment-door only — use POST /enroll")
 	}
 	class := e.ClassOf(p.Contract)
-	if class == uns.ClassNone {
+	if !uns.IsKnown(class) {
 		return e.reject(metrics.ReasonGrammar, "unknown contract %s", p.Contract)
 	}
-	if class == uns.ClassTimeSync {
+	if uns.IsNodeLocal(class) {
 		// Same rule as IngestClient/IngestAdmin (time-sync design §2.2/§4):
 		// _TimeSync is node-local-publish-only. Checked before the World-2
 		// rule so the rejection carries the reason that actually explains it
@@ -347,7 +347,7 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 		e.metrics.RejectPublish(metrics.ReasonTimeSync)
 		return Result{}, fmt.Errorf("human %s may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)", entry.ULID)
 	}
-	if class != uns.ClassCmd {
+	if !uns.IsCommand(class) {
 		e.metrics.RejectPublish(metrics.ReasonHumanWrite)
 		return Result{}, fmt.Errorf("human %s may not publish %s — humans command, machines write state", entry.ULID, p.Contract)
 	}
@@ -391,20 +391,20 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 		return Result{}, fmt.Errorf("_EdgeNode is enrollment-door only — use POST /enroll")
 	}
 	class := e.ClassOf(p.Contract)
-	if class == uns.ClassTimeSync {
+	if uns.IsNodeLocal(class) {
 		// Same rule as IngestClient: _TimeSync is node-local-publish-only,
 		// not even the admin token may author it through /publish.
 		e.metrics.RejectPublish(metrics.ReasonTimeSync)
 		return Result{}, fmt.Errorf("admin may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)")
 	}
-	if class == uns.ClassCmd && e.ids.DrainingMount(p.Path) {
+	if uns.IsCommand(class) && e.ids.DrainingMount(p.Path) {
 		// Same admission rule as IngestClient (move-drain design §3.2 item
 		// 2): not even the admin token may address a draining mount with a
 		// new command.
 		e.metrics.RejectPublish(metrics.ReasonDraining)
 		return Result{}, fmt.Errorf("admin: %s is draining — no new commands admitted (move-drain design §3.2)", p.Path)
 	}
-	if class == uns.ClassNone {
+	if !uns.IsKnown(class) {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, fmt.Errorf("unknown contract %s", p.Contract)
 	}
@@ -449,7 +449,7 @@ func (e *Engine) IngestRefresh(topic string, payload []byte, ifKVOffset uint64) 
 		return Result{}, false, err
 	}
 	class := e.ClassOf(p.Contract)
-	if class != uns.ClassData && class != uns.ClassEntity {
+	if !uns.IsOwnedState(class) {
 		return Result{}, false, fmt.Errorf("refresh publish requires a KV-projecting contract, got %s", p.Contract)
 	}
 	if len(payload) == 0 {
@@ -487,7 +487,7 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 		return Result{}, err
 	}
 	class := e.ClassOf(p.Contract)
-	if class == uns.ClassCmd && e.ids.DrainingMount(p.Path) {
+	if uns.IsCommand(class) && e.ids.DrainingMount(p.Path) {
 		// Move-drain design §3.2 item 2: the SAME admission rule as
 		// IngestClient/IngestAdmin, extended to this relay door. Without this
 		// check, a command authored ABOVE this node's own parent — where THIS
@@ -528,7 +528,7 @@ func (e *Engine) IngestDownlinkDefinition(topic string, payload []byte, ts int64
 		return e.reject(metrics.ReasonGrammar, "%w", err)
 	}
 	class := e.ClassOf(p.Contract)
-	if class != uns.ClassDefinition {
+	if !uns.IsDefinition(class) {
 		// The parent sent something that is not a definition on the definitions
 		// channel. Refuse it rather than filing it: the channel's whole contract
 		// is that what arrives on it is applied unconditionally.
@@ -600,7 +600,7 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 func (e *Engine) rejectTimeSync(child string, recs []store.ReplRecord) (filtered []store.ReplRecord, dropped map[uint64]bool) {
 	filtered = recs[:0:0]
 	for _, r := range recs {
-		if p, err := uns.Parse(r.Topic); err == nil && uns.ClassOf(p.Contract) == uns.ClassTimeSync {
+		if p, err := uns.Parse(r.Topic); err == nil && uns.IsNodeLocal(uns.ClassOf(p.Contract)) {
 			e.metrics.RejectPublish(metrics.ReasonTimeSync)
 			e.log.Warn("rejected _TimeSync record from replication: ephemeral, node-local-publish-only (time-sync design §2.2)",
 				"child", child, "topic", r.Topic)
