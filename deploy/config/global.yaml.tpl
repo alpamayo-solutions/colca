@@ -10,7 +10,7 @@ data_dir: /data
 log_level: debug
 key_file: /keys/global.key
 api: { addr: ":8080", token: "demo-admin-token" }
-mqtt: { addr: ":1883" }
+mqtt: { addr: ":8883" }
 # Human doors (JWT): live only when the human-auth compose profile runs the
 # keycloak container; otherwise the verifier retries its JWKS fetch and the
 # doors reject every token (machines are unaffected).

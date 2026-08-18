@@ -242,7 +242,7 @@ func main() { os.Exit(run()) }
 func run() int {
 	ulid := env("MACHINE_ULID", "m1")
 	keyPath := env("MACHINE_KEY", "/keys/"+ulid+"-machine.key")
-	broker := env("BROKER_ADDR", "127.0.0.1:1883")
+	broker := env("BROKER_ADDR", "127.0.0.1:8883")
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("machine", ulid)
 	interval := publishInterval(log)
 
