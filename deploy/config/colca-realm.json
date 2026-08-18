@@ -75,6 +75,19 @@
         "colca-grants"
       ],
       "optionalClientScopes": []
+    },
+    {
+      "clientId": "colca-authz",
+      "name": "Colca authorization objects — element resources and the permissions granting against them. Issues no human tokens; it exists to own the resource server, which Keycloak refuses to hang off the public colca client.",
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "colca-authz-dev-secret",
+      "enabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "authorizationServicesEnabled": true,
+      "fullScopeAllowed": true
     }
   ],
   "groups": [
@@ -86,6 +99,19 @@
     }
   ],
   "users": [
+    {
+      "username": "service-account-colca-authz",
+      "enabled": true,
+      "serviceAccountClientId": "colca-authz",
+      "clientRoles": {
+        "realm-management": [
+          "view-clients",
+          "manage-authorization",
+          "query-groups",
+          "view-users"
+        ]
+      }
+    },
     {
       "username": "anna",
       "enabled": true,

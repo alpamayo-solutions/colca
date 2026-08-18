@@ -81,6 +81,7 @@ services:
       link3-hub:     # keep upstream's primary pick: host ports bind here
         priority: 100
       kc-global: {}  # global ↔ keycloak only (JWKS fetch), pairwise by design
+      gs-global: {}  # global ↔ grantsync only, pairwise for the same reason
 
   site1:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -200,7 +201,46 @@ services:
     # node↔node traffic, so the chaos suite's "nothing leaks around a severed
     # link" invariant holds, and no chaos primitive disconnects kc-* — token
     # verification keeps working during partitions, like HEAD's flat network.
-    networks: [kc-edge1, kc-global]
+    networks: [kc-edge1, kc-global, gs-keycloak]
+
+  # The grant-sync service: Keycloak's grants become _Group definitions in the
+  # tree, and the tree's elements become authz resources somebody can grant on.
+  # A SIBLING of colcad from the same image, never part of it — Keycloak stays
+  # out of the node core and out of the message path.
+  #
+  # It talks to the ROOT node only. Definitions descend on their own, so there is
+  # nothing to run per node, and an edge that is offline picks them up when it
+  # reconnects.
+  #
+  # Its OWN profile, not human-auth, and the reason is worth stating: this
+  # service CONVERGES. Any _Group definition authored at the root that Keycloak
+  # does not account for is one it retracts — which is correct in production and
+  # ruinous in a test world where other suites author group definitions by hand.
+  # So it starts only when a test (or an operator) asks for it by name:
+  #   docker compose --profile human-auth --profile grant-sync up -d
+  grantsync:
+    image: ${COLCA_IMAGE:-colca:dev}
+    entrypoint: ["/usr/local/bin/colca-grantsync"]
+    profiles: ["grant-sync"]
+    restart: unless-stopped
+    environment:
+      # The node API is mTLS-fronted with the per-run CA gen-keys.sh mints, so
+      # there is nothing stable to pin in a demo world — hence the named
+      # opt-out rather than a CA file. A real deployment sets COLCA_CA_FILE.
+      COLCA_URL: https://global:8080
+      COLCA_INSECURE: "true"
+      COLCA_TOKEN: demo-admin-token
+      KC_URL: http://keycloak:8080
+      KC_REALM: colca
+      KC_CLIENT_SECRET: colca-authz-dev-secret
+      OWNER: colca-demo
+      SYNC_INTERVAL_MS: "${GRANTSYNC_INTERVAL_MS:-5000}"
+    ports:
+      - "127.0.0.1:${COLCA_PORT_GRANTSYNC:-19090}:9090"
+    depends_on: [global, keycloak]
+    # Its own pairwise networks, keeping the kc-* invariant intact: no network
+    # this service joins ever carries node↔node traffic either.
+    networks: [gs-global, gs-keycloak]
 
 volumes:
   global-data: {}
@@ -212,6 +252,8 @@ networks:
   host-edge1: {}
   host-edge2: {}
   host-site1: {}
+  gs-global: {}
+  gs-keycloak: {}
   kc-edge1: {}
   kc-global: {}
   link1-m1: {}

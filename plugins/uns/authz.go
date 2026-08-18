@@ -7,6 +7,7 @@ package uns
 import (
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -216,6 +217,64 @@ type Grant struct {
 // design §3.3).
 var cmdClasses = map[string]bool{
 	"param": true, "operate": true, "maintain": true, "configure": true, "admin": true,
+}
+
+// CmdClasses lists the hazard classes a cmd grant may name, sorted. Callers
+// that need to enumerate them — a provisioning surface offering the choices, a
+// service compiling grants — ask here rather than writing the list down again.
+func CmdClasses() []string {
+	out := make([]string, 0, len(cmdClasses))
+	for class := range cmdClasses {
+		out = append(out, class)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// FormatGrant renders a Grant back into the §5.1 grammar.
+//
+// It exists so that CONSTRUCTING a grant and PARSING one live in the same
+// package: anything that builds grant strings elsewhere would be a second
+// statement of the grammar, and the two would drift the first time it gains a
+// verb. Round-trip: ParseGrant(FormatGrant(g)) == g for every valid g, which
+// authz_test.go asserts.
+//
+// An empty Element means the whole namespace ("#"), the same convention
+// ParseGrant reads.
+func FormatGrant(g Grant) (string, error) {
+	// ParseGrant yields "#" for the whole namespace; an empty Element means the
+	// same thing, so both spellings are accepted and render identically.
+	element := g.Element
+	if element == "#" {
+		element = ""
+	}
+	zone := "#"
+	if element != "" {
+		zone = element + "/#"
+	}
+	switch g.Verb {
+	case "read":
+		return "read:" + zone, nil
+	case "admin":
+		if element != "" {
+			return "", fmt.Errorf("grant: zone-scoped admin is reserved and not implemented")
+		}
+		return "admin:#", nil
+	case "cmd":
+		if len(g.Classes) == 0 {
+			return "", fmt.Errorf("grant: a cmd grant needs at least one class")
+		}
+		classes := append([]string(nil), g.Classes...)
+		sort.Strings(classes)
+		for _, c := range classes {
+			if !cmdClasses[c] {
+				return "", fmt.Errorf("grant: unknown cmd class %q", c)
+			}
+		}
+		return "cmd:" + zone + ":" + strings.Join(classes, ","), nil
+	default:
+		return "", fmt.Errorf("grant: verb must be read, cmd or admin, got %q", g.Verb)
+	}
 }
 
 // ParseGrant parses the §5.1 grammar: "read:<element>/#" or

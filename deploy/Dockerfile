@@ -7,9 +7,13 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# All three binaries live in one image: colcad runs a node, colca-machine is the
-# demo machine simulator, colca-keygen is available for in-container key setup.
+# All four binaries live in one image: colcad runs a node, colca-grantsync
+# carries grants between Keycloak and the tree (a SIBLING of colcad, never part
+# of it — Keycloak stays out of the node core and out of the message path),
+# colca-machine is the demo machine simulator, and colca-keygen is available for
+# in-container key setup.
 RUN CGO_ENABLED=0 go build -trimpath -o /out/colcad ./cmd/colcad \
+ && CGO_ENABLED=0 go build -trimpath -o /out/colca-grantsync ./cmd/colca-grantsync \
  && CGO_ENABLED=0 go build -trimpath -o /out/colca-machine ./cmd/colca-machine \
  && CGO_ENABLED=0 go build -trimpath -o /out/colca-keygen ./cmd/colca-keygen
 

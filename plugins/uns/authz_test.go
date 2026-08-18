@@ -520,3 +520,67 @@ func TestANodeThatKnowsNothingFailsClosedOnScopedGrantsOnly(t *testing.T) {
 		t.Error("cmd:#:admin is frame-invariant and must survive an unknown position")
 	}
 }
+
+// --- FormatGrant: constructing and parsing live in one package ---------------
+
+func TestFormatGrantRoundTripsThroughParseGrant(t *testing.T) {
+	// The claim that makes it safe for anything to BUILD grants by asking here
+	// instead of writing the grammar down again.
+	for _, want := range []string{
+		"read:#",
+		"read:01HM6/#",
+		"admin:#",
+		"cmd:#:operate",
+		"cmd:01HM6/#:operate",
+		"cmd:01HM6/#:configure,maintain,operate,param",
+	} {
+		parsed, err := ParseGrant(want)
+		if err != nil {
+			t.Fatalf("ParseGrant(%q): %v", want, err)
+		}
+		got, err := FormatGrant(parsed)
+		if err != nil {
+			t.Fatalf("FormatGrant(%+v): %v", parsed, err)
+		}
+		if got != want {
+			t.Errorf("round trip: %q -> %+v -> %q", want, parsed, got)
+		}
+	}
+}
+
+func TestFormatGrantSortsClassesSoTheSameGrantIsTheSameString(t *testing.T) {
+	// Callers diff these strings against stored ones; unstable ordering would
+	// make every comparison report a change.
+	got, err := FormatGrant(Grant{Verb: "cmd", Element: "01HM6",
+		Classes: []string{"operate", "configure", "param"}})
+	if err != nil {
+		t.Fatalf("FormatGrant: %v", err)
+	}
+	if got != "cmd:01HM6/#:configure,operate,param" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestFormatGrantRefusesWhatParseGrantWouldRefuse(t *testing.T) {
+	for name, g := range map[string]Grant{
+		"unknown verb":      {Verb: "delete", Element: "01HM6"},
+		"unknown class":     {Verb: "cmd", Element: "01HM6", Classes: []string{"sudo"}},
+		"cmd with no class": {Verb: "cmd", Element: "01HM6"},
+		"zone-scoped admin": {Verb: "admin", Element: "01HM6"},
+	} {
+		if _, err := FormatGrant(g); err == nil {
+			t.Errorf("%s: FormatGrant accepted %+v", name, g)
+		}
+	}
+}
+
+func TestCmdClassesListsExactlyTheClassesParseGrantAccepts(t *testing.T) {
+	for _, class := range CmdClasses() {
+		if _, err := ParseGrant("cmd:01HM6/#:" + class); err != nil {
+			t.Errorf("CmdClasses offers %q which ParseGrant rejects: %v", class, err)
+		}
+	}
+	if _, err := ParseGrant("cmd:01HM6/#:" + strings.Join(CmdClasses(), ",")); err != nil {
+		t.Errorf("the full class list does not parse: %v", err)
+	}
+}
