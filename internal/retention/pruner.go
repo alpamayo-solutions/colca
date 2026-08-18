@@ -23,7 +23,16 @@ import (
 
 // streams mirrors the store's fixed stream set (same precedent as the metrics
 // package).
+//
+// `definitions` is deliberately absent: it is never pruned by age or size
+// (definition-stream design §6). A definition has no read side to fall back on,
+// so a pruned one is a node that no longer knows what a type or a group is,
+// with nowhere to ask. It is compacted instead — latest per path — which is a
+// different algorithm and lives outside this policy loop.
 var streams = []string{"metrics", "entities", "commands"}
+
+// definitionsStream is reclaimed by compaction instead (compactDefinitions).
+const definitionsStream = "definitions"
 
 // Pruner is the per-node background pruner. One instance per node; Run is its
 // only goroutine entry point.
@@ -104,6 +113,29 @@ func (p *Pruner) runOnce() {
 	for _, stream := range streams {
 		p.pruneStream(stream)
 	}
+	p.compactDefinitions()
+}
+
+// compactDefinitions runs the definitions stream's own reclamation
+// (definition-stream design §6). It is not in the loop above because it is not
+// the same operation: the policy prunes a contiguous prefix by age and size,
+// and this drops whatever a later record superseded, wherever it sits.
+//
+// No policy knobs, deliberately. There is nothing to tune — a superseded
+// definition is dead the moment its successor lands, and a retraction lives
+// exactly until every consumer has read it.
+func (p *Pruner) compactDefinitions() {
+	st, err := p.st.Compact(definitionsStream)
+	if err != nil {
+		p.log.Error("compacting the definitions stream failed — it keeps growing until this clears",
+			"stream", definitionsStream, "err", err)
+		return
+	}
+	if st.Superseded == 0 && st.Tombstones == 0 {
+		return
+	}
+	p.log.Info("definitions compacted", "stream", definitionsStream,
+		"superseded", st.Superseded, "tombstones", st.Tombstones, "bytes", st.Bytes)
 }
 
 // overriddenCursor is one cursor the staleness policy stopped protecting and

@@ -304,10 +304,10 @@ func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/a", `{"ulid":"A1"}`) // offset 1
-	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/b", `{"ulid":"B1"}`) // offset 2
-	seed("colca/v1/_Signal/"+nodeULID+"/line1/c", `{"ulid":"C1"}`)        // offset 3
-	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/a", `{"ulid":"A2"}`) // offset 4 — update of line1/a
+	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/a", `{"id":"A1"}`) // offset 1
+	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/b", `{"id":"B1"}`) // offset 2
+	seed("colca/v1/_Signal/"+nodeULID+"/line1/c", `{"id":"C1"}`)        // offset 3
+	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/a", `{"id":"A2"}`) // offset 4 — update of line1/a
 	// A metric-class KV entry whose Offset (in the METRICS stream) lands
 	// numerically inside the refresh range [3,5): the §6.5 entity-class
 	// filter must skip it — KV offsets from different streams share nothing.
@@ -359,10 +359,10 @@ func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 		}
 		refreshed[r.Topic] = string(r.Payload)
 	}
-	if got := refreshed["colca/v1/_SystemElement/"+nodeULID+"/line1/a"]; got != `{"ulid":"A2"}` {
+	if got := refreshed["colca/v1/_SystemElement/"+nodeULID+"/line1/a"]; got != `{"id":"A2"}` {
 		t.Fatalf("line1/a refresh = %q, want the CURRENT value {\"ulid\":\"A2\"}", got)
 	}
-	if got := refreshed["colca/v1/_Signal/"+nodeULID+"/line1/c"]; got != `{"ulid":"C1"}` {
+	if got := refreshed["colca/v1/_Signal/"+nodeULID+"/line1/c"]; got != `{"id":"C1"}` {
 		t.Fatalf("line1/c refresh = %q, want {\"ulid\":\"C1\"}", got)
 	}
 
@@ -587,9 +587,9 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/a", `{"ulid":"A1"}`) // offset 1
-	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/b", `{"ulid":"B1"}`) // offset 2
-	seed("colca/v1/_Signal/"+nodeULID+"/line1/c", `{"ulid":"C1"}`)        // offset 3
+	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/a", `{"id":"A1"}`) // offset 1
+	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/b", `{"id":"B1"}`) // offset 2
+	seed("colca/v1/_Signal/"+nodeULID+"/line1/c", `{"id":"C1"}`)        // offset 3
 	if !st.CursorAck("uplink", "entities", 2) {                         // offsets 2..3 unread
 		t.Fatal("ack must move")
 	}
@@ -663,7 +663,7 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 	if got := recs[2].Topic; got != "colca/v1/_Signal/"+nodeULID+"/line1/c" {
 		t.Fatalf("retried refresh = %q, want line1/c", got)
 	}
-	if string(recs[2].Payload) != `{"ulid":"C1"}` {
+	if string(recs[2].Payload) != `{"id":"C1"}` {
 		t.Fatalf("retried refresh payload = %q", recs[2].Payload)
 	}
 	if next := st.NextOffset("entities"); next != 7 {
@@ -749,8 +749,8 @@ func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
 	topicA := "colca/v1/_SystemElement/" + nodeULID + "/line1/a"
 	topicB := "colca/v1/_SystemElement/" + nodeULID + "/line1/b"
 	for _, s := range []struct{ topic, payload string }{
-		{topicA, `{"ulid":"A1"}`}, // entities offset 1
-		{topicB, `{"ulid":"B1"}`}, // entities offset 2
+		{topicA, `{"id":"A1"}`}, // entities offset 1
+		{topicB, `{"id":"B1"}`}, // entities offset 2
 	} {
 		if _, err := eng.IngestAdmin(s.topic, []byte(s.payload)); err != nil {
 			t.Fatal(err)
@@ -811,7 +811,38 @@ func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
 		t.Fatalf("obligation %+v not cleared — a guard skip must count as completion", r)
 	}
 	// The untouched sibling keeps its state.
-	if kv := st.KVScan("line1/a"); len(kv) != 1 || string(kv[0].Payload) != `{"ulid":"A1"}` {
+	if kv := st.KVScan("line1/a"); len(kv) != 1 || string(kv[0].Payload) != `{"id":"A1"}` {
 		t.Fatalf("sibling path damaged: %+v", kv)
+	}
+}
+
+
+// The pruner's cycle reclaims the definitions stream too — by compaction, not
+// by policy (definition-stream design §6). Without this the stream would grow
+// forever however the retention config is tuned, because no policy applies to
+// it at all.
+func TestRunOnceCompactsTheDefinitionsStream(t *testing.T) {
+	st, eng := mustParts(t)
+	for _, payload := range []string{`{"id":"01HGRP-OPS","v":1}`, `{"id":"01HGRP-OPS","v":2}`} {
+		if _, _, err := st.Append("definitions", []store.Record{{
+			Topic: "colca/v1/_Group/" + nodeULID + "/01HGRP-OPS", Payload: []byte(payload), TS: 1,
+			KVPath: "01HGRP-OPS", KVNode: nodeULID,
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	p := newPruner(t, st, eng, config.Retention{})
+	p.runOnce()
+
+	recs, _, err := st.Read("definitions", 1, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("definitions after a cycle = %d records, want the superseded one gone", len(recs))
+	}
+	if string(recs[0].Payload) != `{"id":"01HGRP-OPS","v":2}` {
+		t.Fatalf("the surviving record is not the latest: %s", recs[0].Payload)
 	}
 }

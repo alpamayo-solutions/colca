@@ -21,6 +21,7 @@ const (
 	ClassNone     Class = iota
 	ClassData           // _Metric …    write: owner (level4 == identity)
 	ClassEntity         // _EdgeNode, _SystemElement, _Signal
+	ClassDefinition     // _Group, _MetadataType …  write: any node, flows DOWN, applied as state
 	ClassCmd            // _Cmd*        write: ancestors/admin, flows down
 	ClassAck            // _Ack         write: owner, flows up
 	ClassGap            // _StreamGap   write: pruner only. Event, no KV, not retained (design §6.4).
@@ -76,6 +77,8 @@ func ClassOf(contract string) Class {
 		return ClassData
 	case contract == "_EdgeNode" || contract == "_SystemElement" || contract == "_Signal":
 		return ClassEntity
+	case contract == "_Group":
+		return ClassDefinition
 	case contract == "_Ack":
 		return ClassAck
 	case contract == "_StreamGap":
@@ -86,6 +89,18 @@ func ClassOf(contract string) Class {
 		return ClassCmd
 	}
 	return ClassNone
+}
+
+// IsState reports whether a class is STATE rather than an event: latest value
+// per path, KV-projected, retained on the bus, and retractable by an empty
+// payload (the tombstone). Data, entities and definitions are state; commands,
+// acks and gap markers are events, which is why retaining them would re-deliver
+// stale instructions to every new subscriber.
+//
+// One definition of "state" so the three places that care — the KV projection,
+// the retained flag and the tombstone rule — can never drift apart.
+func IsState(c Class) bool {
+	return c == ClassData || c == ClassEntity || c == ClassDefinition
 }
 
 // StreamFor maps a class to the persistent stream that stores it.
@@ -102,6 +117,8 @@ func StreamFor(c Class) string {
 		return "metrics"
 	case ClassEntity:
 		return "entities"
+	case ClassDefinition:
+		return "definitions"
 	case ClassCmd, ClassAck:
 		return "commands"
 	case ClassGap:
@@ -129,6 +146,14 @@ func TimeSyncTopic(nodeULID string) string {
 // from internal/repl but is conceptually about registry lifecycle, and any
 // future reader agree on one name instead of two hand-kept copies.
 const DownlinkCursorPrefix = "downlink:"
+
+// DownlinkDefCursorPrefix is the same idea for the definitions stream
+// (definition-stream design §5): DownlinkDefCursorPrefix+{child-ulid} on stream
+// "definitions" is how far that child has read. It is separate from the command
+// cursor because the two streams advance independently — and because
+// compaction's floor is this cursor, so a definition may only be superseded
+// once every child has read past it.
+const DownlinkDefCursorPrefix = "downlink-def:"
 
 // MountInsert inserts the mount name directly after segment 4 (node-id), i.e.
 // at the head of the hierarchy path — the uplink rewrite done on every hop.
@@ -166,7 +191,7 @@ func Validate(contract string, payload []byte) error {
 	// empty payload was never a valid value and deletion is not meaningful
 	// (§7.3): commands/acks/gaps are events, there is nothing to retire.
 	if len(payload) == 0 {
-		if c := ClassOf(contract); c == ClassData || c == ClassEntity {
+		if IsState(ClassOf(contract)) {
 			return nil
 		}
 		return fmt.Errorf("%s: empty payload (tombstone) is only valid for KV-projecting state contracts", contract)
@@ -195,8 +220,15 @@ func Validate(contract string, payload []byte) error {
 			return err
 		}
 		return reqNum("result_code")
-	case contract == "_EdgeNode" || contract == "_SystemElement" || contract == "_Signal":
+	case contract == "_EdgeNode":
+		// A registry entry names itself by the enrolled identity.
 		return reqStr("ulid")
+	case contract == "_SystemElement" || contract == "_Signal" || contract == "_Group":
+		// Data-model records name themselves by "id" — the field grants and
+		// bindings reference them through. They shared _EdgeNode's "ulid" rule
+		// until the binding cutover renamed it; a floor that still asked for
+		// "ulid" rejected every real element and signal.
+		return reqStr("id")
 	case contract == "_TimeSync":
 		// Reachable only from direct Validate callers (tests, defense in
 		// depth): the engine rejects _TimeSync by class before Validate is

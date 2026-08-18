@@ -184,7 +184,7 @@ func TestScopedSubscribeOnReplicatedTree(t *testing.T) {
 	tp := startTopo(t)
 
 	analyst := authtest.NewMachine(t, "analyst")
-	authtest.Enroll(t, tp.site1.Registry, analyst, "", "read:edge1/#")
+	authtest.Enroll(t, tp.site1.Registry, analyst, "", "read:"+authtest.ElementID("edge1")+"/#")
 	c := machine(t, tp.site1.MQTTAddr, analyst)
 
 	// edge2's subtree is out of scope → SUBACK failure (0x80).
@@ -235,7 +235,8 @@ func TestCmdGrantEndToEnd(t *testing.T) {
 	tp := startTopo(t)
 
 	hmi := authtest.NewMachine(t, "hmi")
-	authtest.Enroll(t, tp.edge1.Registry, hmi, "hmi", "cmd:m1/#:param", "read:m1/#")
+	authtest.EnrollAt(t, tp.edge1.Registry, tp.edge1.Engine, hmi, "hmi",
+		"cmd:"+authtest.ElementID("m1")+"/#:param", "read:"+authtest.ElementID("m1")+"/#")
 	hc := machine(t, tp.edge1.MQTTAddr, hmi)
 
 	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)

@@ -8,6 +8,15 @@ func streamKey(stream string, off uint64) []byte {
 	return append([]byte("s\x00"+stream+"\x00"), be64(off)...)
 }
 func streamPrefix(stream string) []byte    { return []byte("s\x00" + stream + "\x00") }
+
+// offsetOf reads the offset back out of a stream key (the trailing big-endian
+// uint64 streamKey appended).
+func offsetOf(key []byte) (uint64, bool) {
+	if len(key) < 8 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint64(key[len(key)-8:]), true
+}
 func metaKey(stream string) []byte         { return []byte("m\x00" + stream) }
 func kvKey(path, nodeID string) []byte     { return []byte("k\x00" + path + "\x00" + nodeID) }
 func kvPrefix(prefix string) []byte        { return []byte("k\x00" + prefix) }

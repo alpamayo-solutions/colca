@@ -5,8 +5,10 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -55,12 +57,14 @@ type Engine struct {
 	metrics *metrics.Metrics // nil-safe: every method on a nil receiver is a no-op
 	clk     *clock.Clock
 
-	// Root-frame prefix (cmdadmin design §3): taught by the parent on the
-	// downlink, persisted, unknown until first taught. The root sets "" at
-	// startup (known-empty by construction — it has no parent).
-	prefixMu    sync.RWMutex
-	prefix      string
-	prefixKnown bool
+	// The node's position in the tree (id-grants design §4): the chain of
+	// elements from the root down to the one this node binds to, taught by the
+	// parent on the downlink, persisted, unknown until first taught. The root
+	// sets the empty chain at startup (known-empty by construction — it has no
+	// parent). The root-frame prefix is rendered from it, never stored.
+	posMu         sync.RWMutex
+	ancestry      uns.Ancestry
+	ancestryKnown bool
 
 	// exec executes commands addressed to this node (cmdadmin design §5). The
 	// engine owns the mechanism; the executor owns what a verb means, which is
@@ -75,6 +79,13 @@ type Engine struct {
 	// contracts is the loaded schema-bundle table (nil = builtin floor).
 	// Static per process: set once at startup, before any door serves.
 	contracts *contracts.Table
+
+	// elements is this node's id → local path projection of the
+	// `_SystemElement` records it holds (id-grants design §4). The engine owns
+	// it because every door already reaches the engine, and because observe()
+	// is where records land — so the index is current without anyone
+	// remembering to refresh it.
+	elements *uns.ElementIndex
 }
 
 // New builds an engine. ids is the identity registry (a client without a
@@ -96,41 +107,68 @@ func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m
 		clk = clock.New(cfg.Parent == nil, time.Now)
 	}
 	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk}
-	if p, ok := s.PrefixGet(); ok {
-		e.prefix, e.prefixKnown = p, true
-		m.SetNodePrefix(p)
+	e.elements = uns.NewElementIndex(e.EntityStore())
+	if raw, ok := s.AncestryGet(); ok {
+		var a uns.Ancestry
+		if err := json.Unmarshal(raw, &a); err != nil {
+			// Fail loud, not closed-and-quiet: a node that silently forgot where
+			// it sits answers every scoped grant with "no", which looks like a
+			// permissions problem and is really a corrupt store.
+			e.log.Error("persisted ancestry is unreadable — this node does not know its position "+
+				"until its parent teaches it again", "err", err)
+		} else {
+			e.ancestry, e.ancestryKnown = a, true
+			m.SetNodePrefix(a.Prefix())
+		}
 	}
 	return e
 }
 
-// Prefix returns the node's root-frame prefix; ok=false until first taught.
-func (e *Engine) Prefix() (string, bool) {
-	e.prefixMu.RLock()
-	defer e.prefixMu.RUnlock()
-	return e.prefix, e.prefixKnown
+// Ancestry returns the node's position in the tree; ok=false until first
+// taught.
+func (e *Engine) Ancestry() (uns.Ancestry, bool) {
+	e.posMu.RLock()
+	defer e.posMu.RUnlock()
+	return e.ancestry, e.ancestryKnown
 }
 
-// SetPrefix stores a (re-)taught root-frame prefix. Idempotent: an unchanged
-// value writes nothing. A change is persisted synchronously, logged, and
-// reflected in colca_node_prefix_info — new token verifications use it
-// immediately; live human sessions keep their at-connect translation.
-func (e *Engine) SetPrefix(p string) {
-	e.prefixMu.Lock()
-	if e.prefixKnown && e.prefix == p {
-		e.prefixMu.Unlock()
+// Prefix renders the node's root-frame path from its ancestry; ok=false until
+// first taught. Derived on every call — the path is never the stored truth, so
+// there is no second copy of it to go stale.
+func (e *Engine) Prefix() (string, bool) {
+	a, ok := e.Ancestry()
+	if !ok {
+		return "", false
+	}
+	return a.Prefix(), true
+}
+
+// SetAncestry stores a (re-)taught position. Idempotent: an unchanged chain
+// writes nothing. A change is persisted synchronously, logged, and reflected in
+// colca_node_prefix_info — new token verifications use it immediately; live
+// human sessions keep their at-connect translation.
+func (e *Engine) SetAncestry(a uns.Ancestry) {
+	raw, err := json.Marshal(a)
+	if err != nil {
+		e.log.Error("ancestry encode failed — position not updated", "err", err)
 		return
 	}
-	old, hadOld := e.prefix, e.prefixKnown
-	e.prefix, e.prefixKnown = p, true
-	e.prefixMu.Unlock()
-	if err := e.store.PrefixPut(p); err != nil {
-		e.log.Error("prefix persistence failed — active in-memory only", "prefix", p, "err", err)
+	e.posMu.Lock()
+	if e.ancestryKnown && slices.Equal(e.ancestry, a) {
+		e.posMu.Unlock()
+		return
 	}
-	e.metrics.SetNodePrefix(p)
+	old, hadOld := e.ancestry, e.ancestryKnown
+	e.ancestry, e.ancestryKnown = a, true
+	e.posMu.Unlock()
+	if err := e.store.AncestryPut(raw); err != nil {
+		e.log.Error("ancestry persistence failed — active in-memory only", "ancestry", a, "err", err)
+	}
+	e.metrics.SetNodePrefix(a.Prefix())
 	if hadOld {
-		e.log.Info("node prefix changed", "old", old, "new", p)
+		e.log.Info("node position changed", "old", old.Prefix(), "new", a.Prefix())
 	} else {
-		e.log.Info("node prefix learned", "prefix", p)
+		e.log.Info("node position learned", "prefix", a.Prefix())
 	}
 }
 
@@ -170,6 +208,32 @@ func abs64(n int64) int64 {
 func (e *Engine) MountOf(ulid string) (string, bool) {
 	return e.ids.MountOf(ulid)
 }
+
+// Elements is this node's namespace: the element index every placement
+// question resolves through.
+func (e *Engine) Elements() *uns.ElementIndex { return e.elements }
+
+// scope couples the two halves of "where is that element": the index answers
+// for everything at or below this node, the ancestry for everything above it.
+// A grant may name either, so the decision function gets both through here.
+type scope struct{ e *Engine }
+
+func (s scope) PathOf(elementID string) (string, bool) { return s.e.elements.PathOf(elementID) }
+
+func (s scope) Reaches(elementID string) bool {
+	a, ok := s.e.Ancestry()
+	return ok && a.Covers(elementID)
+}
+
+// Scope is what Authorize resolves grants through at this node.
+func (e *Engine) Scope() uns.Scope { return scope{e} }
+
+// Groups resolves a token's group ids against the `_Group` definitions this
+// node holds (definition-stream design §8).
+func (e *Engine) Groups() *uns.GroupIndex { return uns.NewGroupIndex(e.EntityStore()) }
+
+// NodeID is the identity this node publishes under.
+func (e *Engine) NodeID() string { return e.cfg.ULID }
 
 // IngestClient: a directly attached MQTT client (machine/service) publishes.
 // Rules: uns grammar, class must be data/entity/ack, level-4 == identity, mount
@@ -211,7 +275,7 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		// target ABSOLUTE node-local paths: no mount rewrite, no level-4
 		// identity requirement — the author is not the target's owner.
 		entry, ok := e.ids.Get(identity)
-		if !ok || !uns.Authorize(entry, uns.ActCmd, topic) {
+		if !ok || !uns.Authorize(e.Scope(), entry, uns.ActCmd, topic) {
 			return e.reject(metrics.ReasonCmdDenied, "client %s: no cmd grant covers %s", identity, topic)
 		}
 		if err := e.validateContract(p.Contract, payload); err != nil {
@@ -295,7 +359,7 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 		// cmd_denied.
 		return e.reject(metrics.ReasonDraining, "human %s: %s is draining — no new commands admitted (move-drain design §3.2)", entry.ULID, p.Path)
 	}
-	if !uns.Authorize(entry, uns.ActCmd, topic) {
+	if !uns.Authorize(e.Scope(), entry, uns.ActCmd, topic) {
 		return e.reject(metrics.ReasonCmdDenied, "human %s: no cmd grant covers %s", entry.ULID, topic)
 	}
 	if err := e.validateContract(p.Contract, payload); err != nil {
@@ -447,6 +511,36 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 	return res, err
 }
 
+// IngestDownlinkDefinition applies a definition handed down by the parent
+// (definition-stream design §5).
+//
+// The difference from IngestDownlink is the whole difference between the two
+// downward flows: a command is EXECUTED at its target, a definition is APPLIED
+// everywhere it lands. So this persists, KV-projects and mirrors retained onto
+// the bus — and never calls maybeExec, because there is nothing to run.
+//
+// The topic is stored exactly as it arrived. A definition has no position, so
+// there is no mount to strip and nothing to rewrite: what the parent holds and
+// what this node holds are the same bytes.
+func (e *Engine) IngestDownlinkDefinition(topic string, payload []byte, ts int64) (Result, error) {
+	p, err := uns.Parse(topic)
+	if err != nil {
+		return e.reject(metrics.ReasonGrammar, "%w", err)
+	}
+	class := e.ClassOf(p.Contract)
+	if class != uns.ClassDefinition {
+		// The parent sent something that is not a definition on the definitions
+		// channel. Refuse it rather than filing it: the channel's whole contract
+		// is that what arrives on it is applied unconditionally.
+		return e.reject(metrics.ReasonGrammar,
+			"downlink definitions: %s is %v, not a definition", p.Contract, class)
+	}
+	if err := e.validateContract(p.Contract, payload); err != nil {
+		return e.reject(metrics.ReasonValidation, "%w", err)
+	}
+	return e.persistTS(class, p, topic, payload, ts)
+}
+
 // IngestReplicated applies a batch pushed by a child: dedupe by high-water-mark,
 // then mirror every NEWLY applied record onto the local MQTT bus. Replication is
 // the fourth way a record enters a node's store and it must converge here like
@@ -466,9 +560,6 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 	for range got {
 		e.metrics.IngestRecord(stream)
 	}
-	if e.deliver == nil {
-		return len(got), hwm, nil
-	}
 	for _, r := range got {
 		p, perr := uns.Parse(r.Topic)
 		if perr != nil {
@@ -477,7 +568,13 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 				"child", child, "stream", stream, "topic", r.Topic, "err", perr)
 			continue
 		}
-		e.deliver(r.Topic, r.Payload, retainFor(e.ClassOf(p.Contract)))
+		// An element a child published is a position in THIS node's namespace
+		// too, at the mount-inserted path — that is how an ancestor can answer a
+		// grant naming an element deep in its subtree (id-grants design §4).
+		e.elements.Observe(p.Contract, r.Topic, r.Payload)
+		if e.deliver != nil {
+			e.deliver(r.Topic, r.Payload, retainFor(e.ClassOf(p.Contract)))
+		}
 	}
 	return len(got), hwm, nil
 }
@@ -569,7 +666,7 @@ func jumpFullyExplainedByDroppedTimeSync(last, childOffset uint64, dropped map[u
 // entities are STATE: they are retained, which is exactly the set that also
 // gets a KV projection. Commands and acks are EVENTS: retaining them would
 // re-deliver stale commands to every new subscriber.
-func retainFor(c uns.Class) bool { return c == uns.ClassData || c == uns.ClassEntity }
+func retainFor(c uns.Class) bool { return uns.IsState(c) }
 
 func (e *Engine) persist(class uns.Class, p uns.Parsed, topic string, payload []byte) (Result, error) {
 	return e.persistTS(class, p, topic, payload, time.Now().UnixMilli())
@@ -588,7 +685,7 @@ func (e *Engine) persist(class uns.Class, p uns.Parsed, topic string, payload []
 func (e *Engine) persistTS(class uns.Class, p uns.Parsed, topic string, payload []byte, ts int64) (Result, error) {
 	streamName := uns.StreamFor(class)
 	rec := store.Record{Topic: topic, Payload: payload, TS: ts}
-	if class == uns.ClassData || class == uns.ClassEntity {
+	if uns.IsState(class) {
 		rec.KVPath, rec.KVNode = p.Path, p.NodeID
 		// Empty payload on a KV-projecting class is the tombstone (retention
 		// design §7.1): the record is appended as history, the KV key is
@@ -603,6 +700,13 @@ func (e *Engine) persistTS(class uns.Class, p uns.Parsed, topic string, payload 
 	}
 	e.metrics.IngestRecord(streamName)
 	e.log.Debug("ingest", "stream", streamName, "offset", first, "topic", topic)
+	// The namespace index tracks every persisted record, not just the ones a
+	// machine published: an element authored through the data-model door lands
+	// via IngestAdmin, and a stale index would mount identities at positions
+	// that moved. This sits below every Ingest* path for that reason — unlike
+	// the plugin observer, which is deliberately only offered what a machine
+	// published.
+	e.elements.Observe(p.Contract, topic, payload)
 	if e.deliver != nil {
 		e.deliver(topic, payload, retainFor(class))
 	}

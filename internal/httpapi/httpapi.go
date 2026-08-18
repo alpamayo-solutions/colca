@@ -234,7 +234,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 					return false
 				}
 			}
-			return c.admin || uns.Authorize(c.entry, uns.ActReadRecord, topic)
+			return c.admin || uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic)
 		}
 		if c.entry != nil && !ownsCursor(c.entry, cursor) {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: machine cursors are named {ulid}/..."})
@@ -289,7 +289,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		out := make([]map[string]any, 0, len(entries))
 		denied := 0
 		for _, en := range entries {
-			if !c.admin && !uns.Authorize(c.entry, uns.ActReadRecord, en.Topic) {
+			if !c.admin && !uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, en.Topic) {
 				denied++
 				continue
 			}

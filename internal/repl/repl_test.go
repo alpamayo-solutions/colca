@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -26,8 +27,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	ps, _ := store.Open(filepath.Join(dir, "pdata"))
 	defer ps.Close()
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
 	srv, err := NewServer(pcfg, peng, parentID, preg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -111,8 +111,7 @@ func TestStopReleasesPortAndKillsLongPoll(t *testing.T) {
 
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
 
 	// Stop before Start must not panic.
 	unstarted, err := NewServer(pcfg, peng, parentID, preg, nil)
@@ -177,10 +176,9 @@ func TestDownlinkOnlyOwnMountCommands(t *testing.T) {
 
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID,
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil,
 		childSpec{"n-child1", child1ID.PublicHex(), "child1"},
 		childSpec{"n-child2", child2ID.PublicHex(), "child2"})
-	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	defer srv.Stop()
 
@@ -226,8 +224,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
 
 	// Start once only to obtain a real address, then stop: the parent is down.
 	srv1, addr := startServer(t, pcfg, peng, parentID, preg)
@@ -236,7 +233,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
-	ceng := engine.New(cs, ccfg, regWithChildren(t, cs, ccfg.ULID), nil, nil, nil)
+	_, ceng := nodeParts(t, cs, ccfg, nil, nil, nil)
 	mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", `{"v":1}`)
 	mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", `{"v":2}`)
 	// commands stream: 1 = a command (must never be mirrored back up), 2 = an ack.
@@ -335,8 +332,7 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	defer srv.Stop()
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
@@ -344,7 +340,7 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
 	delivered := make(chan string, 4)
-	ceng := engine.New(cs, ccfg, regWithChildren(t, cs, ccfg.ULID), func(topic string, payload []byte, retain bool) {
+	_, ceng := nodeParts(t, cs, ccfg, func(topic string, payload []byte, retain bool) {
 		if retain {
 			t.Errorf("a command must not be retained on the local bus: %s", topic)
 		}
@@ -397,12 +393,12 @@ func TestMachineKindRejectedAtReplDoor(t *testing.T) {
 
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID)
-	entry, _ := json.Marshal(uns.Entry{ULID: "m-x", Pubkey: machineID.PublicHex(), Kind: uns.KindMachine, Mount: "mx"})
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil)
+	entry, _ := json.Marshal(uns.Entry{ULID: "m-x", Pubkey: machineID.PublicHex(),
+		Kind: uns.KindMachine, Element: placeElement(t, peng, "mx")})
 	if _, _, err := preg.Enroll(entry); err != nil {
 		t.Fatal(err)
 	}
-	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	defer srv.Stop()
 
@@ -418,17 +414,27 @@ func TestMachineKindRejectedAtReplDoor(t *testing.T) {
 }
 
 // childSpec is a fixture child: enrolled as kind node at the parent's
-// registry (entry-before-connect by construction).
+// registry (entry-before-connect by construction), at the element sitting at
+// Mount.
 type childSpec struct{ ULID, Pubkey, Mount string }
 
-func regWithChildren(t *testing.T, st *store.Store, nodeULID string, children ...childSpec) *registry.Manager {
+// nodeParts builds a registry and an engine wired to each other exactly the way
+// node.Start does — the registry resolving placements through the engine's
+// element index — then places each child's element and enrolls it there.
+// Placement comes first because an identity binds to an element, never to a
+// path (id-grants design §4).
+func nodeParts(t *testing.T, st *store.Store, cfg *config.Config, deliver engine.LocalDeliver,
+	m *metrics.Metrics, clk *clock.Clock, children ...childSpec) (*registry.Manager, *engine.Engine) {
 	t.Helper()
-	reg, err := registry.New(st, nodeULID)
+	reg, err := registry.New(st, cfg.ULID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	eng := engine.New(st, cfg, reg, deliver, m, clk)
+	reg.SetNamespace(eng.Elements())
 	for _, ch := range children {
-		b, err := json.Marshal(uns.Entry{ULID: ch.ULID, Pubkey: ch.Pubkey, Kind: uns.KindNode, Mount: ch.Mount})
+		element := placeElement(t, eng, ch.Mount)
+		b, err := json.Marshal(uns.Entry{ULID: ch.ULID, Pubkey: ch.Pubkey, Kind: uns.KindNode, Element: element})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -436,7 +442,22 @@ func regWithChildren(t *testing.T, st *store.Store, nodeULID string, children ..
 			t.Fatalf("enroll child %s: %v", ch.ULID, err)
 		}
 	}
-	return reg
+	return reg, eng
+}
+
+// placeElement authors a system element at path in the node's own namespace and
+// returns its id.
+func placeElement(t *testing.T, eng *engine.Engine, path string) string {
+	t.Helper()
+	id := "el-" + strings.ReplaceAll(path, "/", "-")
+	payload, err := json.Marshal(map[string]string{"id": id, "name": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.IngestAdmin("colca/v1/_SystemElement/"+eng.NodeID()+"/"+path, payload); err != nil {
+		t.Fatalf("place element at %s: %v", path, err)
+	}
+	return id
 }
 
 func mustIdentity(t *testing.T, path string) *identity.Identity {

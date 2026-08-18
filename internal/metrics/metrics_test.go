@@ -115,6 +115,7 @@ colca_cursor_lag_records{cursor="hub",stream="metrics"} 1
 # HELP colca_stream_next_offset Next offset the stream will assign (derived from the store at scrape time).
 # TYPE colca_stream_next_offset gauge
 colca_stream_next_offset{stream="commands"} 1
+colca_stream_next_offset{stream="definitions"} 1
 colca_stream_next_offset{stream="entities"} 3
 colca_stream_next_offset{stream="metrics"} 4
 `
@@ -134,6 +135,7 @@ colca_cursor_lag_records{cursor="hub",stream="metrics"} 3
 # HELP colca_stream_next_offset Next offset the stream will assign (derived from the store at scrape time).
 # TYPE colca_stream_next_offset gauge
 colca_stream_next_offset{stream="commands"} 1
+colca_stream_next_offset{stream="definitions"} 1
 colca_stream_next_offset{stream="entities"} 3
 colca_stream_next_offset{stream="metrics"} 6
 `
@@ -358,12 +360,15 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		families[mf.GetName()] = len(mf.GetMetric())
 	}
 	want := map[string]int{
-		"colca_stream_next_offset":                      3, // one per stream
-		"colca_ingest_records_total":                    3,
+		"colca_stream_next_offset":                      4, // one per stream
+		"colca_ingest_records_total":                    4,
 		"colca_rejected_publishes_total":                9,  // one per reason
 		"colca_auth_rejections_total":                   12, // door × reason
 		"colca_acl_denials_total":                       2,  // one per action
 		"colca_session_kicks_total":                     1,
+		// The uplink families cover only the streams that RISE: definitions
+		// descend, so a gauge for them would sit at zero forever and read like
+		// a broken uplink (definition-stream design §4).
 		"colca_uplink_last_success_timestamp_seconds":   3,
 		"colca_uplink_push_failures_total":              3,
 		"colca_downlink_last_success_timestamp_seconds": 1,
@@ -371,8 +376,11 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_retained_reseed_records":                 1,
 		// Retention (design §8): collector-derived gauges, always one child per
 		// known stream regardless of activity.
-		"colca_stream_low_water_mark":                  3,
-		"colca_stream_live_bytes":                      3,
+		"colca_stream_low_water_mark":                  4,
+		"colca_stream_live_bytes":                      4,
+		// The retention families cover only the streams the POLICY prunes.
+		// Definitions are compacted instead, so a pressure gauge for them would
+		// report progress toward a policy that does not exist (design §6).
 		"colca_retention_pressure":                     3,
 		"colca_retention_blocked_by_cursor":            3,
 		"colca_retention_pruned_records_total":         3,
@@ -382,8 +390,13 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_retention_state_refresh_records_total":  1, // unlabeled
 		"colca_retention_state_refresh_skipped_total":  1,
 		"colca_retention_state_refresh_failures_total": 1,
-		"colca_gap_served_total":                       6, // 3 streams × 2 surfaces
-		"colca_gap_received_total":                     3,
+		"colca_gap_served_total":                       8, // 4 streams × 2 surfaces
+		"colca_gap_received_total":                     4,
+		// The definition channel (design §5). Applied is the happy path;
+		// rejected is worth alerting on, because a refused definition parks the
+		// node's cursor and nothing behind it arrives either.
+		"colca_definitions_applied_total":              1,
+		"colca_definitions_rejected_total":             1,
 		// Move-drain (design §3.2/§3.4): colca_drains_active is unlabeled
 		// (always one child, like the retention state-refresh counters) and
 		// colca_drains_completed_total pre-creates all four outcomes

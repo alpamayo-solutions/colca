@@ -47,8 +47,7 @@ func newParentFixture(t *testing.T) *parentFixture {
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
 	pm := metrics.New(ps, config.Retention{}, nil)
 	srv, addr := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
 	t.Cleanup(srv.Stop)
@@ -111,7 +110,10 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 		t.Fatalf("now_ms %d outside [%d, %d] — the parent is root here, so it must stamp its own raw wall clock", nowMS, before, after)
 	}
 	// Mount-stripped topics, parent offsets, records beginning at the LWM.
-	want := `{"gap":{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":10,"last_ts":20,"approx":false},` +
+	// Every response also carries the definitions half (definition-stream
+	// design §5) — empty here, and its own cursor, independent of the command
+	// one.
+	want := `{"def_next":1,"definitions":[],"gap":{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":10,"last_ts":20,"approx":false},` +
 		`"next":5,"records":[` +
 		`{"o":3,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(3) + `","ts":30},` +
 		`{"o":4,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(4) + `","ts":40}]}`
@@ -127,7 +129,7 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	rest, _ = stripNowMS(t, body)
-	want = `{"next":5,"records":[` +
+	want = `{"def_next":1,"definitions":[],"next":5,"records":[` +
 		`{"o":3,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(3) + `","ts":30},` +
 		`{"o":4,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(4) + `","ts":40}]}`
 	if rest != want {
@@ -202,8 +204,7 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil, nil)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
 
 	// Start once only to obtain a real address, then stop: the parent is down.
 	srv1, addr := startServer(t, pcfg, peng, parentID, preg)
@@ -212,7 +213,7 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	cm := metrics.New(cs, config.Retention{}, nil)
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil, nil)
+	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
 	for i := 1; i <= 5; i++ {
 		mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", fmt.Sprintf(`{"v":%d}`, i))
 	}
@@ -290,7 +291,7 @@ func TestRunDownlinkContinuesPastGap(t *testing.T) {
 	dir := t.TempDir()
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	cm := metrics.New(cs, config.Retention{}, nil)
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil, nil)
+	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -330,7 +331,7 @@ func TestUplinkPassesStreamGapMarkerButNotCommands(t *testing.T) {
 
 	dir := t.TempDir()
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil, nil)
+	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
 	// Child's commands stream: a command (must stay), a gap marker and an ack
 	// (both must travel). Appended through the store: the marker is written by
 	// the pruner's prune batch in production, not through an ingest path.
@@ -382,7 +383,7 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
-	ceng := engine.New(cs, &config.Config{ULID: "n-child"}, regWithChildren(t, cs, "n-child"), nil, nil, nil)
+	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
 	for i := 1; i <= 3; i++ {
 		mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", fmt.Sprintf(`{"v":%d}`, i))
 	}

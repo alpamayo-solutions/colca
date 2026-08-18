@@ -308,7 +308,7 @@ func TestGapAppliedCountsOffsetJumpsOnly(t *testing.T) {
 func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 	e, m := newMetricsEngine(t)
 	topic := "colca/v1/_SystemElement/n-edge1/line1/press"
-	if _, err := e.IngestAdmin(topic, []byte(`{"ulid":"P1"}`)); err != nil { // entities offset 1
+	if _, err := e.IngestAdmin(topic, []byte(`{"id":"P1"}`)); err != nil { // entities offset 1
 		t.Fatal(err)
 	}
 	before := map[string]float64{}

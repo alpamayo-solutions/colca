@@ -57,7 +57,6 @@ func newHumanWorld(t *testing.T) *humanWorld {
 	verifierPrime(t, ver)
 
 	w := &humanWorld{st: st, reg: reg, iss: iss, ver: ver, m: m, m1: authtest.NewMachine(t, "m1")}
-	authtest.Enroll(t, reg, w.m1, "m1")
 
 	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
 		MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
@@ -69,7 +68,12 @@ func newHumanWorld(t *testing.T) *humanWorld {
 		st.Close()
 		t.Fatal(err)
 	}
-	s.SetEngine(engine.New(st, cfg, reg, s.DeliverLocal, m, nil))
+	eng := engine.New(st, cfg, reg, s.DeliverLocal, m, nil)
+	s.SetEngine(eng)
+	// Placement resolves through the engine's element index, so the element m1
+	// binds to is authored before it enrolls (id-grants design §4).
+	reg.SetNamespace(eng.Elements())
+	authtest.EnrollAt(t, reg, eng, w.m1, "m1")
 	reg.SetKick(s.Kick)
 	go func() { _ = s.Serve() }()
 	t.Cleanup(func() {
@@ -125,7 +129,7 @@ func humanConnect(t *testing.T, addr, scheme, username, token string) (paho.Clie
 func TestHumanDoorsConnectAndScope(t *testing.T) {
 	w := newHumanWorld(t)
 	future := time.Now().Add(5 * time.Minute)
-	tok := w.iss.Mint("anna", []string{"read:m1/#"}, future)
+	tok := w.iss.Mint("anna", []string{"read:" + authtest.ElementID("m1") + "/#"}, future)
 
 	for name, dial := range map[string]struct{ addr, scheme string }{
 		"tcp": {w.srv.HumanTCPAddr(), "ssl"},
@@ -206,7 +210,7 @@ func TestHumanDoorRejections(t *testing.T) {
 // exp, sweeper kick, fresh-token reconnect works (§5.1).
 func TestHumanExpiryKick(t *testing.T) {
 	w := newHumanWorld(t)
-	shortTok := w.iss.Mint("anna", []string{"read:m1/#"}, time.Now().Add(2*time.Second))
+	shortTok := w.iss.Mint("anna", []string{"read:" + authtest.ElementID("m1") + "/#"}, time.Now().Add(2*time.Second))
 
 	c, err := humanConnect(t, w.srv.HumanTCPAddr(), "ssl", "anna", shortTok)
 	if err != nil {
@@ -248,7 +252,7 @@ func TestHumanExpiryKick(t *testing.T) {
 
 	// A fresh token reconnects fine.
 	c2, err := humanConnect(t, w.srv.HumanTCPAddr(), "ssl", "anna",
-		w.iss.Mint("anna", []string{"read:m1/#"}, time.Now().Add(5*time.Minute)))
+		w.iss.Mint("anna", []string{"read:" + authtest.ElementID("m1") + "/#"}, time.Now().Add(5*time.Minute)))
 	if err != nil {
 		t.Fatalf("fresh-token reconnect: %v", err)
 	}
@@ -259,7 +263,7 @@ func TestHumanExpiryKick(t *testing.T) {
 func TestHumanPublishThroughDoor(t *testing.T) {
 	w := newHumanWorld(t)
 	future := time.Now().Add(5 * time.Minute)
-	tok := w.iss.Mint("hmi-user", []string{"cmd:m1/#:param", "read:m1/#"}, future)
+	tok := w.iss.Mint("hmi-user", []string{"cmd:" + authtest.ElementID("m1") + "/#:param", "read:" + authtest.ElementID("m1") + "/#"}, future)
 
 	c, err := humanConnect(t, w.srv.HumanTCPAddr(), "ssl", "hmi-user", tok)
 	if err != nil {

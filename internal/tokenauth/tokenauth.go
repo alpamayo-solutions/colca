@@ -73,30 +73,25 @@ type Verifier struct {
 	keys      map[string]crypto.PublicKey
 	lastFetch time.Time // last unknown-kid-triggered fetch attempt (rate limit)
 
-	// prefixFn supplies the node's root-frame prefix for grant translation
-	// (cmdadmin design §3). The default is root behavior — prefix "" known —
-	// so a verifier without a source (unit tests, the root node before
-	// wiring) evaluates grants verbatim, which is the behavior at the hub.
-	prefixMu sync.RWMutex
-	prefixFn func() (string, bool)
+	// groupsIdx resolves a token's group ids to grants. Late-bound: the index
+	// is a projection of records the engine holds, and the verifier is built
+	// before the engine. Nil until wired, which resolves every group to nothing
+	// — the fail-closed direction.
+	groupsMu  sync.RWMutex
+	groupsIdx *uns.GroupIndex
 }
 
-// SetPrefixSource wires the node's prefix into grant translation; fn is
-// called on every Verify (it is a cheap engine read).
-func (v *Verifier) SetPrefixSource(fn func() (string, bool)) {
-	v.prefixMu.Lock()
-	v.prefixFn = fn
-	v.prefixMu.Unlock()
+// SetGroupIndex wires the group resolver (node startup).
+func (v *Verifier) SetGroupIndex(idx *uns.GroupIndex) {
+	v.groupsMu.Lock()
+	v.groupsIdx = idx
+	v.groupsMu.Unlock()
 }
 
-func (v *Verifier) prefixNow() (string, bool) {
-	v.prefixMu.RLock()
-	fn := v.prefixFn
-	v.prefixMu.RUnlock()
-	if fn == nil {
-		return "", true
-	}
-	return fn()
+func (v *Verifier) groups() *uns.GroupIndex {
+	v.groupsMu.RLock()
+	defer v.groupsMu.RUnlock()
+	return v.groupsIdx
 }
 
 // New builds a verifier and loads the persisted JWKS if one exists. NO
@@ -239,10 +234,22 @@ func (v *Verifier) Verify(token string) (*Verified, string, error) {
 		return nil, ReasonBadToken, fmt.Errorf("token rejected: unreadable exp")
 	}
 	grants := stringList(claims["colca_grants"])
-	prefix, prefixKnown := v.prefixNow()
-	entry, err := uns.TokenEntry(sub, grants, prefix, prefixKnown)
+	// No translation: a grant names a system element, and an element id means
+	// the same thing at every node (id-grants design §4). The frame arithmetic
+	// this used to do at verification is a lookup at decision time now.
+	//
+	// The groups claim is where a human's authority normally comes from
+	// (definition-stream design §8): the token names groups, the node resolves
+	// them against the definitions its parent pushed down. Membership lives in
+	// the identity provider; grants live in the tree.
+	entry, problems, err := uns.TokenEntryWithGroups(sub, grants, stringList(claims["groups"]), v.groups())
 	if err != nil {
 		return nil, ReasonBadToken, fmt.Errorf("token rejected: %w", err)
+	}
+	for _, problem := range problems {
+		// Not fatal, and deliberately: one stale membership must cost the human
+		// that group, not everything they hold.
+		v.log.Warn("token: a group contributed no grants", "sub", sub, "err", problem)
 	}
 	username, _ := claims["preferred_username"].(string)
 	return &Verified{Entry: entry, Sub: sub, Username: username, Exp: exp.Time}, "", nil

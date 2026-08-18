@@ -18,6 +18,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/authtest"
 	"github.com/alpamayo-solutions/colca/internal/node"
 )
 
@@ -36,8 +37,8 @@ func bundleFixture(t *testing.T, version string, extra map[string]any) string {
 	}
 	contractsMap := map[string]any{
 		"_Metric":        obj("data", true, []string{"v"}, map[string]any{"v": numeric}),
-		"_SystemElement": obj("entity", true, []string{"ulid"}, map[string]any{"ulid": str}),
-		"_Signal":        obj("entity", true, []string{"ulid"}, map[string]any{"ulid": str}),
+		"_SystemElement": obj("entity", true, []string{"id"}, map[string]any{"id": str}),
+		"_Signal":        obj("entity", true, []string{"id"}, map[string]any{"id": str}),
 		"_Ack":           obj("ack", false, []string{"correlation_id", "result_code"}, map[string]any{"correlation_id": str, "result_code": numeric}),
 		"_CmdParam":      obj("cmd", false, []string{"correlation_id", "expires_at"}, map[string]any{"correlation_id": str, "expires_at": numeric}),
 		"_CmdAdmin":      obj("cmd", false, []string{"correlation_id", "expires_at"}, map[string]any{"correlation_id": str, "expires_at": numeric}),
@@ -152,10 +153,12 @@ func TestBundleRolloutSkewAcrossTheTree(t *testing.T) {
 	}
 }
 
-// authtestEnrollNode enrolls a child node key at the parent (kind node).
+// authtestEnrollNode places an element at mount and enrolls a child node key
+// there (kind node) — placement first, because an identity binds to an element.
 func authtestEnrollNode(t *testing.T, parent *node.Node, ulid, pubkey, mount string) {
 	t.Helper()
-	b, err := json.Marshal(map[string]any{"ulid": ulid, "pubkey": pubkey, "kind": "node", "mount": mount})
+	b, err := json.Marshal(map[string]any{"ulid": ulid, "pubkey": pubkey, "kind": "node",
+		"element": authtest.Place(t, parent.Engine, mount)})
 	if err != nil {
 		t.Fatal(err)
 	}

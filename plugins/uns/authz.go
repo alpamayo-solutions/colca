@@ -28,11 +28,18 @@ const (
 // (§2.1). The JSON form is both the enrollment wire shape and the persisted
 // r/{ulid} value.
 type Entry struct {
-	ULID   string   `json:"ulid"`
-	Pubkey string   `json:"pubkey"` // hex ed25519 public key, pinned on connect
-	Kind   Kind     `json:"kind"`
-	Mount  string   `json:"mount"` // placement; "" = read-only observer (machine only)
-	Grants []string `json:"grants,omitempty"`
+	ULID   string `json:"ulid"`
+	Pubkey string `json:"pubkey"` // hex ed25519 public key, pinned on connect
+	Kind   Kind   `json:"kind"`
+	// Element is the system element this identity binds to — its placement,
+	// named by identity rather than by path (id-grants design §4). "" = a
+	// read-only observer, which binds to nothing (machine only). The path it
+	// mounts at is resolved through the Namespace every time one is needed, so
+	// renaming or reparenting the element moves the mount with no
+	// re-enrollment; a path stored here would freeze the position as it was at
+	// enrollment.
+	Element string   `json:"element,omitempty"`
+	Grants  []string `json:"grants,omitempty"`
 	// Status is the entry's lifecycle state (move-drain design §3.2):
 	// StatusActive or "" (absent ⇒ active, so entries persisted before this
 	// field existed need no migration) or StatusDraining. Only a kind=node
@@ -69,18 +76,18 @@ func (e *Entry) Validate() error {
 	}
 	switch e.Kind {
 	case KindMachine:
-		// empty mount = read-only observer, allowed
+		// no element = read-only observer, allowed
 	case KindNode:
-		if e.Mount == "" {
-			return fmt.Errorf("entry %s: a node needs a mount — only machines may be mountless observers", e.ULID)
+		if e.Element == "" {
+			return fmt.Errorf("entry %s: a node needs an element to bind to — only machines may be element-less observers", e.ULID)
 		}
 	case KindHuman:
 		return fmt.Errorf("entry %s: humans are tokens, not registry entries — KindHuman cannot be enrolled", e.ULID)
 	default:
 		return fmt.Errorf("entry %s: kind must be %q or %q, got %q", e.ULID, KindMachine, KindNode, e.Kind)
 	}
-	if e.Mount != "" {
-		if err := validMount(e.Mount); err != nil {
+	if e.Element != "" {
+		if err := validElementID(e.Element); err != nil {
 			return fmt.Errorf("entry %s: %w", e.ULID, err)
 		}
 	}
@@ -106,28 +113,55 @@ func (e *Entry) Validate() error {
 	return nil
 }
 
-// validMount rejects mounts that would break the topic grammar or collide with
-// reserved segments (the "_"-prefix namespace is reserved: "_observer" is the
-// placeholder path segment for mountless entries' _EdgeNode topics, §2.2).
-func validMount(m string) error {
-	for _, seg := range strings.Split(m, "/") {
-		if seg == "" {
-			return fmt.Errorf("mount %q: empty path segment", m)
-		}
-		if strings.HasPrefix(seg, "_") {
-			return fmt.Errorf("mount %q: segments starting with %q are reserved", m, "_")
-		}
+// validElementID rejects anything that is not an identity. An element id names
+// a thing, never a place: a value carrying "/" is somebody writing a path here,
+// which is exactly the mistake this design removes, and wildcards would make an
+// identity match more than one element.
+//
+// ":" is out too, because a grant is "verb:element:classes" — an id carrying a
+// colon would split into a different grant than the one that was authored, and
+// silently.
+func validElementID(id string) error {
+	if strings.ContainsAny(id, "/+#:") {
+		return fmt.Errorf("element %q: an element is named by identity, not by path", id)
 	}
 	return nil
 }
 
+// Namespace resolves an element id to this node's local path for it — the
+// projection of the `_SystemElement` records the node holds (id-grants design
+// §4). *ElementIndex implements it. Everything that needs a place asks here at
+// the moment it needs one instead of remembering a path.
+type Namespace interface {
+	PathOf(elementID string) (string, bool)
+}
+
+// Scope is everything a node knows about where elements are: the ones it holds
+// itself, plus whether an element is the node itself or one of its ancestors.
+//
+// A grant may name either end, so the decision function needs both halves. The
+// node cannot answer the second one from its own records — an ancestor's
+// `_SystemElement` records live at that ancestor — which is why its position is
+// taught to it on the downlink.
+type Scope interface {
+	Namespace
+	// Reaches reports whether the element is this node or above it. A grant on
+	// such an element covers everything here.
+	Reaches(elementID string) bool
+}
+
 // Grant is one parsed grant. Verb is "read" or "cmd" — write is not a grant:
 // writing is identity (own ULID at level 4, path inside own mount) and never
-// widens (§5.1). Prefix is the zone without a trailing "/#" ("#" alone means
-// everything). Classes is non-empty exactly for cmd grants.
+// widens (§5.1). Element is the system element the grant names, without a
+// trailing "/#" ("#" alone means everything); it covers that element and
+// everything below it. Classes is non-empty exactly for cmd grants.
+//
+// A grant names an element, never a path (id-grants design §4): the same string
+// then means the same subtree at every node, survives renames and reparents
+// untouched, and needs no frame translation on the way down the tree.
 type Grant struct {
 	Verb    string
-	Prefix  string
+	Element string
 	Classes []string
 }
 
@@ -141,7 +175,9 @@ var cmdClasses = map[string]bool{
 	"param": true, "operate": true, "maintain": true, "configure": true, "admin": true,
 }
 
-// ParseGrant parses the §5.1 grammar: "read:zone/#" or "cmd:zone/#:class,...".
+// ParseGrant parses the §5.1 grammar: "read:<element>/#" or
+// "cmd:<element>/#:class,...". The zone is an element id, or "#" for
+// everything.
 func ParseGrant(s string) (Grant, error) {
 	parts := strings.SplitN(s, ":", 3)
 	switch parts[0] {
@@ -149,31 +185,31 @@ func ParseGrant(s string) (Grant, error) {
 		if len(parts) != 2 {
 			return Grant{}, fmt.Errorf("grant %q: read grant is read:<zone>", s)
 		}
-		p, err := parsePrefix(s, parts[1])
+		z, err := parseZone(s, parts[1])
 		if err != nil {
 			return Grant{}, err
 		}
-		return Grant{Verb: "read", Prefix: p}, nil
+		return Grant{Verb: "read", Element: z}, nil
 	case "admin":
 		if len(parts) != 2 {
 			return Grant{}, fmt.Errorf("grant %q: admin grant is admin:#", s)
 		}
-		p, err := parsePrefix(s, parts[1])
+		z, err := parseZone(s, parts[1])
 		if err != nil {
 			return Grant{}, err
 		}
-		if p != "#" {
+		if z != "#" {
 			// Reserved grammar (human-authz design §3): the zone-scoped form
 			// parses structurally but is not implemented — rejecting it here
 			// keeps a later introduction additive instead of breaking.
 			return Grant{}, fmt.Errorf("grant %q: zone-scoped admin is reserved and not implemented — use admin:#", s)
 		}
-		return Grant{Verb: "admin", Prefix: "#"}, nil
+		return Grant{Verb: "admin", Element: "#"}, nil
 	case "cmd":
 		if len(parts) != 3 {
 			return Grant{}, fmt.Errorf("grant %q: cmd grant is cmd:<zone>:<class,...>", s)
 		}
-		p, err := parsePrefix(s, parts[1])
+		z, err := parseZone(s, parts[1])
 		if err != nil {
 			return Grant{}, err
 		}
@@ -186,21 +222,24 @@ func ParseGrant(s string) (Grant, error) {
 				return Grant{}, fmt.Errorf("grant %q: unknown cmd class %q (param|operate|maintain|configure|admin)", s, c)
 			}
 		}
-		return Grant{Verb: "cmd", Prefix: p, Classes: classes}, nil
+		return Grant{Verb: "cmd", Element: z, Classes: classes}, nil
 	default:
 		return Grant{}, fmt.Errorf("grant %q: verb must be read, cmd or admin", s)
 	}
 }
 
 // TokenEntry builds the EPHEMERAL entry a verified OIDC token maps to
-// (human-authz design §2.3): identity = the token's sub, no mount (humans own
-// no zone — the World-2 rule falls out structurally), grants = the
-// colca_grants claim. Grants are authored in ROOT frame (cmdadmin design §3)
-// and translated here into the local frame of the verifying node, whose
-// root-frame prefix is prefix (prefixKnown=false: never learned — scoped
-// grants fail closed). Validated here, never by Entry.Validate (that is the
-// enrollment gate and demands a pubkey), never persisted.
-func TokenEntry(sub string, grants []string, prefix string, prefixKnown bool) (*Entry, error) {
+// (human-authz design §2.3): identity = the token's sub, no element (humans own
+// no zone — the World-2 rule falls out structurally), grants = the colca_grants
+// claim. Validated here, never by Entry.Validate (that is the enrollment gate
+// and demands a pubkey), never persisted.
+//
+// Grants arrive exactly as authored and are stored exactly as authored. There
+// is no frame to translate into any more: a grant names a system element, and
+// an element id means the same thing at every node in the tree (id-grants
+// design §4). What used to be prefix arithmetic at verification time is now a
+// lookup at decision time — see zoneOf.
+func TokenEntry(sub string, grants []string) (*Entry, error) {
 	if sub == "" {
 		return nil, fmt.Errorf("token entry: empty sub")
 	}
@@ -209,66 +248,40 @@ func TokenEntry(sub string, grants []string, prefix string, prefixKnown bool) (*
 			return nil, fmt.Errorf("token entry %s: %w", sub, err)
 		}
 	}
-	return &Entry{ULID: sub, Kind: KindHuman, Grants: TranslateGrants(prefix, prefixKnown, grants)}, nil
+	return &Entry{ULID: sub, Kind: KindHuman, Grants: grants}, nil
 }
 
-// TranslateGrants rewrites ROOT-frame grant strings into the local frame of
-// a node whose root-frame prefix is prefix (cmdadmin design §3). known=false
-// means the node has never learned its prefix: scoped grants fail closed,
-// frame-invariant ones (zone "#", the admin verb) survive. Grants that do
-// not reach this node's subtree are dropped; order is preserved. Malformed
-// strings are skipped — TokenEntry gates grammar before translation.
-func TranslateGrants(prefix string, known bool, grants []string) []string {
-	var out []string
-	for _, g := range grants {
-		pg, err := ParseGrant(g)
-		if err != nil {
+// TokenEntryWithGroups is TokenEntry for a token that names GROUPS rather than
+// carrying grant strings (definition-stream design §8): the entry's grants are
+// the union of what those groups hold at this node, plus any grants the token
+// carries directly.
+//
+// Membership therefore lives in the identity provider and grants live in the
+// tree, which is what makes adding a person to a group change their token and
+// nobody's node state.
+//
+// A group that does not resolve contributes nothing and comes back in problems
+// for the caller to log. That is the fail-closed direction: the human keeps
+// whatever else they hold and loses exactly the group that could not be found.
+func TokenEntryWithGroups(sub string, grants, groupIDs []string, idx *GroupIndex) (*Entry, []error, error) {
+	e, err := TokenEntry(sub, grants)
+	if err != nil {
+		return nil, nil, err
+	}
+	if idx == nil || len(groupIDs) == 0 {
+		return e, nil, nil
+	}
+	fromGroups, problems := idx.GrantsFor(groupIDs)
+	for _, g := range fromGroups {
+		if _, perr := ParseGrant(g); perr != nil {
+			// A malformed grant inside a definition is an authoring error that
+			// escaped validation upstream. Drop it, say so, keep the rest.
+			problems = append(problems, fmt.Errorf("group grant %q: %w", g, perr))
 			continue
 		}
-		if pg.Verb == "admin" || pg.Prefix == "#" {
-			out = append(out, g)
-			continue
-		}
-		if !known {
-			continue
-		}
-		zone, ok := translateZone(prefix, pg.Prefix)
-		if !ok {
-			continue
-		}
-		out = append(out, rebuildGrant(pg.Verb, zone, pg.Classes))
+		e.Grants = append(e.Grants, g)
 	}
-	return out
-}
-
-// translateZone maps a root-frame zone into the local frame of prefix.
-// prefix "" is the root: identity. A zone covering the node collapses to
-// "#" (this whole node is inside it); a zone inside the node's subtree is
-// stripped to local coordinates; anything else does not apply here. The
-// boundary is always the path separator — "site10" is not below "site1".
-func translateZone(prefix, zone string) (string, bool) {
-	if prefix == "" {
-		return zone, true
-	}
-	if zone == prefix || strings.HasPrefix(prefix, zone+"/") {
-		return "#", true
-	}
-	if strings.HasPrefix(zone, prefix+"/") {
-		return zone[len(prefix)+1:], true
-	}
-	return "", false
-}
-
-// rebuildGrant renders a translated grant back into the §5.1 grammar.
-func rebuildGrant(verb, zone string, classes []string) string {
-	z := zone
-	if z != "#" {
-		z += "/#"
-	}
-	if verb == "cmd" {
-		return "cmd:" + z + ":" + strings.Join(classes, ",")
-	}
-	return verb + ":" + z
+	return e, problems, nil
 }
 
 // IsAdmin reports whether the entry carries the admin:# grant — it unlocks
@@ -282,15 +295,26 @@ func (e *Entry) IsAdmin() bool {
 	return false
 }
 
-func parsePrefix(grant, p string) (string, error) {
-	if p == "#" {
+// parseZone accepts "#" (everything) or one element id, with or without the
+// trailing "/#" that reads as "and below" — an element grant always covers the
+// element's whole subtree, so both forms mean the same thing.
+//
+// A path-shaped zone is refused, and the message says why: a path means
+// different things at different nodes and stops meaning anything at all when
+// somebody renames a position, which is the entire reason grants moved to
+// identities.
+func parseZone(grant, z string) (string, error) {
+	if z == "#" {
 		return "#", nil
 	}
-	p = strings.TrimSuffix(p, "/#")
-	if p == "" {
-		return "", fmt.Errorf("grant %q: empty zone prefix", grant)
+	z = strings.TrimSuffix(z, "/#")
+	if z == "" {
+		return "", fmt.Errorf("grant %q: empty zone", grant)
 	}
-	return p, nil
+	if err := validElementID(z); err != nil {
+		return "", fmt.Errorf("grant %q: a grant names one system element, not a path (%w)", grant, err)
+	}
+	return z, nil
 }
 
 // CmdClass maps a command contract to its hazard class (§5.1). Unknown _Cmd*
@@ -331,16 +355,50 @@ func coverPath(zone, path string) bool {
 	return path == zone || strings.HasPrefix(path, zone+"/")
 }
 
+// zoneOf resolves one element id into the local coverage it grants:
+//
+//   - "#" — everything, either because the grant says so or because the element
+//     IS this node or an ancestor of it, in which case the whole node is inside
+//     the granted subtree;
+//   - a local path — the element sits here, and the grant reaches it and below;
+//   - nothing at all — this node has never heard of the element, so the grant is
+//     inert here. That is also the fail-closed answer for a node that has not
+//     yet learned its position: it reaches nothing, holds nothing above itself,
+//     and every scoped grant evaporates while "#" grants keep working.
+//
+// This is the whole of what changed when grants moved to identities. Everything
+// after it — coverPath, the three actions — compares local paths exactly as
+// before.
+func zoneOf(sc Scope, elementID string) (string, bool) {
+	if elementID == "#" {
+		return "#", true
+	}
+	if sc == nil || elementID == "" {
+		return "", false
+	}
+	if sc.Reaches(elementID) {
+		return "#", true
+	}
+	return sc.PathOf(elementID)
+}
+
 // readZones is the entry's effective read scope: the default own zone (§5.2,
-// mountless observers have none) plus every explicit read grant.
-func readZones(e *Entry) []string {
+// element-less observers have none) plus every explicit read grant, each
+// resolved through the node's scope at this moment — so a renamed element is
+// read under its new path immediately and a reparented one moves with its
+// subtree.
+func readZones(sc Scope, e *Entry) []string {
 	var zones []string
-	if e.Mount != "" {
-		zones = append(zones, e.Mount)
+	if zone, ok := zoneOf(sc, e.Element); ok {
+		zones = append(zones, zone)
 	}
 	for _, g := range e.Grants {
-		if pg, err := ParseGrant(g); err == nil && pg.Verb == "read" {
-			zones = append(zones, pg.Prefix)
+		pg, err := ParseGrant(g)
+		if err != nil || pg.Verb != "read" {
+			continue
+		}
+		if zone, ok := zoneOf(sc, pg.Element); ok {
+			zones = append(zones, zone)
 		}
 	}
 	return zones
@@ -349,14 +407,14 @@ func readZones(e *Entry) []string {
 // Authorize is the one decision function (§5.3): pure prefix comparison,
 // in-memory, no I/O. Invalid grants never reach here — Entry.Validate gates
 // enrollment — so ParseGrant errors inside are treated as absent grants.
-func Authorize(e *Entry, a Action, topic string) bool {
+func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 	switch a {
 	case ActReadRecord:
 		p, err := Parse(topic)
 		if err != nil {
 			return false // only uns records exist in the store: fail closed
 		}
-		for _, z := range readZones(e) {
+		for _, z := range readZones(sc, e) {
 			if coverPath(z, p.Path) {
 				return true
 			}
@@ -376,7 +434,7 @@ func Authorize(e *Entry, a Action, topic string) bool {
 		if !isUns {
 			return true // outside colca/# colca is a plain broker (§5.3)
 		}
-		for _, z := range readZones(e) {
+		for _, z := range readZones(sc, e) {
 			if z == "#" {
 				return true
 			}
@@ -394,7 +452,11 @@ func Authorize(e *Entry, a Action, topic string) bool {
 		class := CmdClass(p.Contract)
 		for _, g := range e.Grants {
 			pg, err := ParseGrant(g)
-			if err != nil || pg.Verb != "cmd" || !coverPath(pg.Prefix, p.Path) {
+			if err != nil || pg.Verb != "cmd" {
+				continue
+			}
+			zone, ok := zoneOf(sc, pg.Element)
+			if !ok || !coverPath(zone, p.Path) {
 				continue
 			}
 			for _, c := range pg.Classes {

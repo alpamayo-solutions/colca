@@ -32,12 +32,19 @@ func world(t *testing.T) (*tokentest.Issuer, *Verifier) {
 	return iss, v
 }
 
+// atWerk1 is a node holding one element, 01HWERK1, at path "werk1" — enough
+// scope for a verified grant to resolve to something.
+type atWerk1 struct{}
+
+func (atWerk1) PathOf(id string) (string, bool) { return "werk1", id == "01HWERK1" }
+func (atWerk1) Reaches(string) bool             { return false }
+
 func TestVerifyTruthTable(t *testing.T) {
 	iss, v := world(t)
 	future := time.Now().Add(5 * time.Minute)
 
 	t.Run("valid token", func(t *testing.T) {
-		tok := iss.MintOpt(tokentest.MintOpts{Sub: "anna", Grants: []string{"read:werk1/#"},
+		tok := iss.MintOpt(tokentest.MintOpts{Sub: "anna", Grants: []string{"read:01HWERK1/#"},
 			Exp: future, Username: "anna@plant"})
 		got, reason, err := v.Verify(tok)
 		if err != nil || reason != "" {
@@ -46,7 +53,7 @@ func TestVerifyTruthTable(t *testing.T) {
 		if got.Sub != "anna" || got.Username != "anna@plant" || got.Entry.Kind != uns.KindHuman {
 			t.Fatalf("verified shape: %+v", got)
 		}
-		if !uns.Authorize(got.Entry, uns.ActReadRecord, "colca/v1/_Metric/x/werk1/temp") {
+		if !uns.Authorize(atWerk1{}, got.Entry, uns.ActReadRecord, "colca/v1/_Metric/x/werk1/temp") {
 			t.Fatal("grant from the claim must authorize")
 		}
 		if got.Exp.Unix() != future.Unix() {
@@ -92,7 +99,7 @@ func TestVerifyTruthTable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got.Entry.Grants) != 0 || uns.Authorize(got.Entry, uns.ActSub, "colca/#") {
+		if len(got.Entry.Grants) != 0 || uns.Authorize(nil, got.Entry, uns.ActSub, "colca/#") {
 			t.Fatalf("bare token must carry no authority: %+v", got.Entry)
 		}
 	})
@@ -153,7 +160,7 @@ func TestJWKSPersistsAcrossRestartOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 	v1.refresh() // fetch + persist
-	tok := iss.Mint("anna", []string{"read:z/#"}, time.Now().Add(5*time.Minute))
+	tok := iss.Mint("anna", []string{"read:01HZ/#"}, time.Now().Add(5*time.Minute))
 	iss.CloseServer()
 
 	v2, err := New(Config{Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL()}, st, nil)
@@ -178,44 +185,37 @@ func TestFailedRefreshKeepsCachedKeys(t *testing.T) {
 	}
 }
 
-// Root-frame grants are translated at verification using the node's prefix
-// (cmdadmin design §3). Without a source the verifier behaves as root.
-func TestVerifyTranslatesGrantsWithPrefixSource(t *testing.T) {
+// A verified token's grants arrive exactly as authored and are stored exactly
+// as authored: a grant names a system element, and an element id means the same
+// thing at every node (id-grants design §4). What used to be prefix arithmetic
+// here is a lookup at decision time now, so there is nothing left to translate
+// and nothing about the verifier that depends on where the node sits.
+func TestVerifyKeepsGrantsVerbatim(t *testing.T) {
 	iss, v := world(t)
-	tok := iss.Mint("anna", []string{"read:site1/#", "cmd:site1/edge1/m1/#:param", "admin:#"}, time.Now().Add(5*time.Minute))
+	authored := []string{"read:01HSITE1/#", "cmd:01HM1/#:param", "admin:#"}
+	tok := iss.Mint("anna", authored, time.Now().Add(5*time.Minute))
 
-	// Default (no source): root behavior — grants verbatim.
 	got, _, err := v.Verify(tok)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Entry.Grants) != 3 || got.Entry.Grants[0] != "read:site1/#" {
-		t.Fatalf("root grants = %v", got.Entry.Grants)
+	if len(got.Entry.Grants) != len(authored) {
+		t.Fatalf("grants = %v, want %v", got.Entry.Grants, authored)
 	}
-
-	// Mid-tree node: translated to local frame.
-	v.SetPrefixSource(func() (string, bool) { return "site1/edge1", true })
-	got, _, err = v.Verify(tok)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"read:#", "cmd:m1/#:param", "admin:#"}
-	if len(got.Entry.Grants) != len(want) {
-		t.Fatalf("translated grants = %v, want %v", got.Entry.Grants, want)
-	}
-	for i := range want {
-		if got.Entry.Grants[i] != want[i] {
-			t.Fatalf("translated grants = %v, want %v", got.Entry.Grants, want)
+	for i := range authored {
+		if got.Entry.Grants[i] != authored[i] {
+			t.Fatalf("grants = %v, want %v", got.Entry.Grants, authored)
 		}
 	}
+}
 
-	// Prefix never learned: scoped grants fail closed, admin survives.
-	v.SetPrefixSource(func() (string, bool) { return "", false })
-	got, _, err = v.Verify(tok)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Entry.Grants) != 1 || got.Entry.Grants[0] != "admin:#" {
-		t.Fatalf("fail-closed grants = %v, want [admin:#]", got.Entry.Grants)
+// A path-shaped grant is refused at verification, not silently dropped: it is
+// an authoring mistake, and the token carrying it should fail loudly.
+func TestVerifyRejectsAPathShapedGrant(t *testing.T) {
+	iss, v := world(t)
+	tok := iss.Mint("anna", []string{"read:site1/edge1/#"}, time.Now().Add(5*time.Minute))
+
+	if _, reason, err := v.Verify(tok); err == nil || reason != ReasonBadToken {
+		t.Fatalf("Verify = (%q, %v), want a bad-token rejection", reason, err)
 	}
 }

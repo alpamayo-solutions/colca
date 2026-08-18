@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -34,9 +35,19 @@ func (s *entityStore) KVGet(topic string) ([]byte, bool) {
 // entity set, which is the set a human curates — hundreds to thousands, not the
 // metric stream.
 func (s *entityStore) KVScan(contract, nodeID string) []uns.KVRecord {
+	return s.scan(contract, func(kv store.KVEntry) bool { return kv.NodeID == nodeID })
+}
+
+// KVScanAll is KVScan without the identity filter: every record of the contract
+// this node holds, at the path it holds it under.
+func (s *entityStore) KVScanAll(contract string) []uns.KVRecord {
+	return s.scan(contract, func(store.KVEntry) bool { return true })
+}
+
+func (s *entityStore) scan(contract string, keep func(store.KVEntry) bool) []uns.KVRecord {
 	var out []uns.KVRecord
 	for _, kv := range s.e.store.KVScan("") {
-		if kv.NodeID != nodeID {
+		if !keep(kv) {
 			continue
 		}
 		p, err := uns.Parse(kv.Topic)

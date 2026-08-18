@@ -118,7 +118,7 @@ func (h *colcaHook) humanACL(cl *mqtt.Client, topic string) bool {
 	if !ok || time.Now().After(s.exp) {
 		return false
 	}
-	if !uns.Authorize(s.entry, uns.ActSub, topic) {
+	if !uns.Authorize(h.scope(), s.entry, uns.ActSub, topic) {
 		h.log.Warn("human subscribe/read denied", "sub", s.sub, "filter", topic)
 		h.metrics.ACLDeny(metrics.ACLSub)
 		return false

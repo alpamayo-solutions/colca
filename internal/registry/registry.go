@@ -26,8 +26,14 @@ import (
 var ErrNotEnrolled = errors.New("identity not enrolled at this node")
 
 // ErrConflict marks an enrollment that collides with an existing entry
-// (pubkey or mount uniqueness) — the HTTP layer maps it to 409.
+// (pubkey or element uniqueness) — the HTTP layer maps it to 409.
 var ErrConflict = errors.New("enrollment conflict")
+
+// ErrUnknownElement marks an enrollment that binds to an element this node does
+// not hold. Unlike a collision it is not a fight over something that exists —
+// the entry names a place that is simply absent — so the HTTP layer answers 422
+// rather than 409: author the element, then enroll.
+var ErrUnknownElement = errors.New("unknown element")
 
 // ErrNotNode marks a Drain request against an entry that is not kind=node —
 // machines are out of scope for move-drain (design §3.2 [delta]) — the HTTP
@@ -38,7 +44,7 @@ var ErrNotNode = errors.New("move-drain applies only to kind=node entries")
 // — the HTTP layer maps it to 409.
 var ErrAlreadyDraining = errors.New("already draining")
 
-// observerSegment is the placeholder path segment for mountless observers'
+// observerSegment is the placeholder path segment for element-less observers'
 // _EdgeNode topics (the grammar needs a non-empty hierarchy path; "_"-prefixed
 // segments are reserved, so no real zone can collide with it).
 const observerSegment = "_observer"
@@ -52,6 +58,11 @@ type Manager struct {
 	kick    func(ulid string)
 	deliver func(topic string, payload []byte, retain bool)
 	m       *metrics.Metrics // late-bound; every Metrics method is nil-safe, so this may stay unset
+	// ns resolves an entry's element to this node's local path for it. Late-
+	// bound: the namespace is a projection of records the engine holds, and the
+	// engine is built after the registry. Until it is wired nothing resolves,
+	// which is the fail-closed answer — an unplaced identity has no place.
+	ns uns.Namespace
 }
 
 // New loads every locally enrolled entry from the store. A corrupt persisted
@@ -107,20 +118,50 @@ func (m *Manager) SetMetrics(mt *metrics.Metrics) {
 	m.mu.Unlock()
 }
 
-// topicFor builds the entry's _EdgeNode entity topic: level 4 = the enrolled
-// identity, path = its placement (§2.2).
-func topicFor(e *uns.Entry) (topic, kvPath string) {
-	p := e.Mount
-	if p == "" {
-		p = observerSegment
+// SetNamespace late-binds the element resolver every placement question goes
+// through (id-grants design §4). Wiring hands it the node's element index.
+func (m *Manager) SetNamespace(ns uns.Namespace) {
+	m.mu.Lock()
+	m.ns = ns
+	m.mu.Unlock()
+}
+
+// mountOf resolves an entry's placement at this moment. The caller holds at
+// least the read lock. ok=false for an element-less observer (nothing to place)
+// and for an element this node cannot resolve (fail closed — never guess a
+// place).
+func (m *Manager) mountOf(e *uns.Entry) (string, bool) {
+	if e.Element == "" || m.ns == nil {
+		return "", false
 	}
-	return "colca/v1/_EdgeNode/" + e.ULID + "/" + p, p
+	return m.ns.PathOf(e.Element)
+}
+
+// topicFor builds the entry's _EdgeNode entity topic: level 4 = the enrolled
+// identity, path = its placement resolved right now (§2.2). ok=false only when
+// a bound element does not resolve — an element-less observer files under the
+// placeholder segment and is fine.
+func (m *Manager) topicFor(e *uns.Entry) (topic, kvPath string, ok bool) {
+	p := observerSegment
+	if e.Element != "" {
+		resolved, found := m.mountOf(e)
+		if !found {
+			return "", "", false
+		}
+		p = resolved
+	}
+	return "colca/v1/_EdgeNode/" + e.ULID + "/" + p, p, true
 }
 
 // Enroll validates and persists a new or updated entry (§4): entry-shape
-// checks via uns, uniqueness of pubkey and (non-empty) mount across OTHER
+// checks via uns, uniqueness of pubkey and (non-empty) element across OTHER
 // entries, then the atomic store batch and the map swap. Re-enrolling an
 // existing ULID is an update and kicks the live session.
+//
+// An entry that binds to an element this node does not hold is refused: the
+// element is what gives the identity a place, so enrolling against an unknown
+// one would produce an identity that can authenticate and write nowhere. Author
+// the element first (`_CmdConfigure element/upsert`), then enroll.
 func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err error) {
 	var e uns.Entry
 	if err := json.Unmarshal(entryJSON, &e); err != nil {
@@ -135,12 +176,17 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 		m.mu.Unlock()
 		return "", 0, fmt.Errorf("enroll %s: pubkey already enrolled for %s: %w", e.ULID, other, ErrConflict)
 	}
-	if e.Mount != "" {
+	if e.Element != "" {
 		for _, ex := range m.byID {
-			if ex.ULID != e.ULID && ex.Mount == e.Mount {
+			if ex.ULID != e.ULID && ex.Element == e.Element {
 				m.mu.Unlock()
-				return "", 0, fmt.Errorf("enroll %s: mount %q already held by %s: %w", e.ULID, e.Mount, ex.ULID, ErrConflict)
+				return "", 0, fmt.Errorf("enroll %s: element %s already bound by %s: %w", e.ULID, e.Element, ex.ULID, ErrConflict)
 			}
+		}
+		if _, ok := m.mountOf(&e); !ok {
+			m.mu.Unlock()
+			return "", 0, fmt.Errorf("enroll %s: element %s is not placed at this node — author it first: %w",
+				e.ULID, e.Element, ErrUnknownElement)
 		}
 	}
 
@@ -149,7 +195,11 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 		m.mu.Unlock()
 		return "", 0, err
 	}
-	topic, kvPath := topicFor(&e)
+	topic, kvPath, ok := m.topicFor(&e)
+	if !ok {
+		m.mu.Unlock()
+		return "", 0, fmt.Errorf("enroll %s: element %s is not placed at this node: %w", e.ULID, e.Element, ErrUnknownElement)
+	}
 	off, err := m.st.RegistryPut(e.ULID, canonical, "entities", store.Record{
 		Topic:   topic,
 		Payload: canonical,
@@ -179,7 +229,7 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 	if deliver != nil {
 		deliver(topic, canonical, true) // entity = state, retained on the bus
 	}
-	m.log.Info("identity enrolled", "ulid", e.ULID, "kind", e.Kind, "mount", e.Mount, "updated", existed)
+	m.log.Info("identity enrolled", "ulid", e.ULID, "kind", e.Kind, "element", e.Element, "mount", kvPath, "updated", existed)
 	return e.ULID, off, nil
 }
 
@@ -203,7 +253,18 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 		return 0, false, fmt.Errorf("revoke %s: %w", ulid, ErrNotEnrolled)
 	}
 	wasDraining = e.Status == uns.StatusDraining
-	topic, kvPath := topicFor(e)
+	// Revoke is the kill switch and never waits for the namespace to be
+	// healthy: an entry whose element stopped resolving still loses its
+	// identity here and now. Its _EdgeNode record cannot be addressed in that
+	// case, so it is left behind and logged loudly. Reaching this requires the
+	// element to have been deleted out from under a bound entry, which
+	// element/delete refuses.
+	topic, kvPath, placed := m.topicFor(e)
+	if !placed {
+		m.log.Error("revoking an identity whose element no longer resolves — its _EdgeNode record is orphaned",
+			"ulid", ulid, "element", e.Element)
+		topic, kvPath = "colca/v1/_EdgeNode/"+ulid+"/"+observerSegment, observerSegment
+	}
 	off, err := m.st.RegistryDelete(ulid, "entities", store.Record{
 		Topic:  topic,
 		TS:     time.Now().UnixMilli(),
@@ -277,7 +338,11 @@ func (m *Manager) Drain(ulid string) (offset uint64, err error) {
 		m.mu.Unlock()
 		return 0, err
 	}
-	topic, kvPath := topicFor(&updated)
+	topic, kvPath, placed := m.topicFor(&updated)
+	if !placed {
+		m.mu.Unlock()
+		return 0, fmt.Errorf("drain %s: element %s is not placed at this node: %w", ulid, updated.Element, ErrUnknownElement)
+	}
 	off, err := m.st.RegistryPut(updated.ULID, canonical, "entities", store.Record{
 		Topic:   topic,
 		Payload: canonical,
@@ -296,7 +361,7 @@ func (m *Manager) Drain(ulid string) (offset uint64, err error) {
 		deliver(topic, canonical, true) // entity = state, retained on the bus
 	}
 	metricsRef.DrainStarted() // nil-safe
-	m.log.Info("move-drain started", "ulid", ulid, "mount", updated.Mount)
+	m.log.Info("move-drain started", "ulid", ulid, "element", updated.Element, "mount", kvPath)
 	return off, nil
 }
 
@@ -309,11 +374,33 @@ func (m *Manager) DrainingMount(path string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, e := range m.byID {
-		if e.Status == uns.StatusDraining && strings.HasPrefix(path, e.Mount+"/") {
+		if e.Status != uns.StatusDraining {
+			continue
+		}
+		if mount, ok := m.mountOf(e); ok && strings.HasPrefix(path, mount+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+// BoundTo lists the identities bound to an element, sorted. The data-model door
+// consults it before retiring a position: an entry whose element disappeared
+// would keep authenticating with nowhere to write.
+func (m *Manager) BoundTo(elementID string) []string {
+	if elementID == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []string
+	for _, e := range m.byID {
+		if e.Element == elementID {
+			out = append(out, e.ULID)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (m *Manager) Get(ulid string) (*uns.Entry, bool) {
@@ -334,17 +421,18 @@ func (m *Manager) ByPubkey(pubkeyHex string) (*uns.Entry, bool) {
 	return e, ok
 }
 
-// MountOf is the engine's mount source (engine.Mounts interface).
+// MountOf is the engine's mount source (engine.Mounts interface): the path the
+// identity's element sits at right now. An element-less observer has no place
+// to write into, and neither does an identity whose element this node cannot
+// resolve — both miss, and the engine rejects the publish.
 func (m *Manager) MountOf(ulid string) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	e, ok := m.byID[ulid]
-	if !ok || e.Mount == "" {
-		// A mountless observer has no place to write into — same contract as
-		// the old "client without a mount" rule.
+	if !ok {
 		return "", false
 	}
-	return e.Mount, true
+	return m.mountOf(e)
 }
 
 // List returns the locally enrolled entries sorted by ULID (GET /enroll).

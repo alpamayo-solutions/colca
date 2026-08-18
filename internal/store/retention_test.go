@@ -14,7 +14,7 @@ import (
 // one record at a given offset: len(stream key) + len(encoded value).
 func recCost(t *testing.T, stream string, off uint64, topic string, payload []byte, ts int64) uint64 {
 	t.Helper()
-	val, err := json.Marshal(recEnc{topic, payload, ts})
+	val, err := json.Marshal(recEnc{Topic: topic, Payload: payload, TS: ts})
 	if err != nil {
 		t.Fatal(err)
 	}

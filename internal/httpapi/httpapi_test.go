@@ -71,6 +71,13 @@ func (a *api) mint(sub string, grants []string) string {
 	return a.iss.Mint(sub, grants, time.Now().Add(5*time.Minute))
 }
 
+// place authors an element at path in the fixture node's namespace and returns
+// its id — what an enrollment binds to (id-grants design §4).
+func (a *api) place(t *testing.T, path string) string {
+	t.Helper()
+	return authtest.Place(t, a.eng, path)
+}
+
 func newAPI(t *testing.T) *api {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -86,13 +93,15 @@ func newAPI(t *testing.T) *api {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m1 := authtest.NewMachine(t, "m1")
-	authtest.Enroll(t, reg, m1, "m1")
-
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
 	m := metrics.New(s, config.Retention{}, nil)
 	reg.SetMetrics(m) // move-drain design §3.4: colca_drains_active is registry-owned
 	e := engine.New(s, cfg, reg, nil, m, nil)
+	// The registry resolves placements through the engine's element index, so
+	// the wiring — and the element — come before any enrollment (id-grants §4).
+	reg.SetNamespace(e.Elements())
+	m1 := authtest.NewMachine(t, "m1")
+	authtest.EnrollAt(t, reg, e, m1, "m1")
 
 	iss := tokentest.NewIssuer(t)
 	ver, err := tokenauth.New(tokenauth.Config{
@@ -322,7 +331,7 @@ func TestEnrollmentRoutes(t *testing.T) {
 	admin := client(nil)
 
 	m2 := authtest.NewMachine(t, "m2")
-	resp, out := req(t, admin, "POST", a.url+"/enroll", "tok", m2.EntryJSON(t, "machine", "m2"))
+	resp, out := req(t, admin, "POST", a.url+"/enroll", "tok", m2.EntryJSON(t, "machine", a.place(t, "m2")))
 	if resp.StatusCode != 200 || out["ulid"] != "m2" {
 		t.Fatalf("enroll: %d %v", resp.StatusCode, out)
 	}
@@ -334,7 +343,7 @@ func TestEnrollmentRoutes(t *testing.T) {
 
 	// duplicate pubkey → 409
 	dup := &authtest.Machine{ULID: "m3", Pubkey: m2.Pubkey}
-	resp, _ = req(t, admin, "POST", a.url+"/enroll", "tok", dup.EntryJSON(t, "machine", "m3"))
+	resp, _ = req(t, admin, "POST", a.url+"/enroll", "tok", dup.EntryJSON(t, "machine", a.place(t, "m3")))
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("dup pubkey: want 409, got %d", resp.StatusCode)
 	}
@@ -388,7 +397,7 @@ func TestDrainRouteDoorSemantics(t *testing.T) {
 
 	// Enroll a node child, then drain it.
 	child := authtest.NewMachine(t, "n-child1")
-	authtest.EnrollNode(t, a.reg, child.ULID, child.Pubkey, "child1")
+	authtest.EnrollNodeAt(t, a.reg, a.eng, child.ULID, child.Pubkey, "child1")
 	resp, out = req(t, admin, "POST", a.url+"/enroll/"+child.ULID+"/drain", "tok", nil)
 	if resp.StatusCode != http.StatusOK || out["status"] != "draining" {
 		t.Fatalf("drain: want 200 status=draining, got %d %v", resp.StatusCode, out)
@@ -427,7 +436,7 @@ func TestDeleteDuringDrainIsImmediateAndRecordsForced(t *testing.T) {
 	admin := client(nil)
 
 	child := authtest.NewMachine(t, "n-child1")
-	authtest.EnrollNode(t, a.reg, child.ULID, child.Pubkey, "child1")
+	authtest.EnrollNodeAt(t, a.reg, a.eng, child.ULID, child.Pubkey, "child1")
 	if resp, out := req(t, admin, "POST", a.url+"/enroll/"+child.ULID+"/drain", "tok", nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("drain: %d %v", resp.StatusCode, out)
 	}
@@ -455,7 +464,7 @@ func TestDeleteDuringDrainIsImmediateAndRecordsForced(t *testing.T) {
 	// A plain DELETE on a never-draining machine must NOT touch the drain
 	// counters at all — the "forced" bookkeeping is drain-specific.
 	m2 := authtest.NewMachine(t, "m2")
-	authtest.Enroll(t, a.reg, m2, "m2")
+	authtest.EnrollAt(t, a.reg, a.eng, m2, "m2")
 	if resp, out := req(t, admin, "DELETE", a.url+"/enroll/m2", "tok", nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("plain delete: %d %v", resp.StatusCode, out)
 	}
@@ -812,9 +821,10 @@ func TestDebugStateFieldCorrectness(t *testing.T) {
 	for stream, v := range out["streams"].(map[string]any) {
 		before[stream] = v.(map[string]any)["next_offset"].(float64)
 	}
-	// The fixture baseline itself is deterministic: one enrolled machine.
-	if before["metrics"] != 1 || before["entities"] != 2 || before["commands"] != 1 {
-		t.Fatalf("fixture baseline offsets = %v, want metrics=1 entities=2 commands=1", before)
+	// The fixture baseline itself is deterministic: one enrolled machine, which
+	// is two entity records — the element it binds to, then its _EdgeNode.
+	if before["metrics"] != 1 || before["entities"] != 3 || before["commands"] != 1 {
+		t.Fatalf("fixture baseline offsets = %v, want metrics=1 entities=3 commands=1", before)
 	}
 
 	if resp, pub := req(t, admin, "POST", a.url+"/publish", "tok", map[string]any{
@@ -847,7 +857,9 @@ func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptes
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(Handler(engine.New(s, cfg, reg, nil, m, nil), cfg, reg, nil, m))
+	eng := engine.New(s, cfg, reg, nil, m, nil)
+	reg.SetNamespace(eng.Elements())
+	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -940,7 +952,7 @@ func TestHumanRouteMatrix(t *testing.T) {
 			t.Fatalf("seed %s: %d %v", tp, resp.StatusCode, out)
 		}
 	}
-	tok := a.mint("anna", []string{"read:m1/#", "cmd:m1/#:param"})
+	tok := a.mint("anna", []string{"read:" + authtest.ElementID("m1") + "/#", "cmd:" + authtest.ElementID("m1") + "/#:param"})
 
 	// fetch: scoped to read grants, cursor must be {sub}/-namespaced.
 	resp, _ := bearerReq(t, hc, "GET", a.url+"/fetch?stream=metrics&cursor=foreign&max=10", tok, nil)
@@ -1001,7 +1013,7 @@ func TestHumanAdminGrant(t *testing.T) {
 	adminTok := a.mint("boss", []string{"admin:#"})
 
 	m2 := authtest.NewMachine(t, "m2")
-	resp, out := bearerReq(t, hc, "POST", a.url+"/enroll", adminTok, m2.EntryJSON(t, "machine", "m2"))
+	resp, out := bearerReq(t, hc, "POST", a.url+"/enroll", adminTok, m2.EntryJSON(t, "machine", a.place(t, "m2")))
 	if resp.StatusCode != 200 || out["ulid"] != "m2" {
 		t.Fatalf("human admin enroll: %d %v", resp.StatusCode, out)
 	}

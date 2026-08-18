@@ -16,10 +16,23 @@ type EntityStore interface {
 	// identity — the level-4 ULID, not a path, so the answer is the same at
 	// every level of the tree.
 	KVScan(contract, nodeID string) []KVRecord
+	// KVScanAll returns the current records of one contract whoever published
+	// them, each at the path THIS node holds it under. The element index needs
+	// this: a child's elements arrive here mount-inserted, already in this
+	// node's frame, and they are as much a position here as the node's own.
+	KVScanAll(contract string) []KVRecord
 	// Publish writes a record as this node, in the node's own frame.
 	Publish(topic string, payload []byte) error
 	// NodeID is the identity this node publishes under.
 	NodeID() string
+}
+
+// Bindings answers which identities bind to an element. Declared here for the
+// same reason as EntityStore and satisfied the same way — the core's registry
+// manager fits it structurally, without either side importing the other.
+type Bindings interface {
+	// BoundTo lists the ULIDs of the identities bound to an element.
+	BoundTo(elementID string) []string
 }
 
 // KVRecord is one entity record as the store currently holds it.

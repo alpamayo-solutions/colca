@@ -260,7 +260,7 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 	first := mustStart(t, cfg)
 	m1machine := authtest.NewMachine(t, "m1")
 	obsMachine := authtest.NewMachine(t, "obs")
-	authtest.Enroll(t, first.Registry, m1machine, "m1")
+	authtest.EnrollAt(t, first.Registry, first.Engine, m1machine, "m1")
 	authtest.Enroll(t, first.Registry, obsMachine, "", "read:#")
 	m1 := connectMQTT(t, first.MQTTAddr, "m1-pre", m1machine)
 	// Two state topics: "pressure" is never touched again — only the KV
@@ -468,7 +468,7 @@ func TestParentChildUplinkThroughNodes(t *testing.T) {
 	if parent.ReplAddr == "" || strings.HasSuffix(parent.ReplAddr, ":0") {
 		t.Fatalf("parent ReplAddr = %q, want a resolved address", parent.ReplAddr)
 	}
-	authtest.EnrollNode(t, parent.Registry, "n-child", childID.PublicHex(), "child1")
+	authtest.EnrollNodeAt(t, parent.Registry, parent.Engine, "n-child", childID.PublicHex(), "child1")
 	if parent.MQTTAddr != "" {
 		t.Errorf("parent MQTTAddr = %q, want empty (no mqtt configured)", parent.MQTTAddr)
 	}
@@ -488,7 +488,7 @@ func TestParentChildUplinkThroughNodes(t *testing.T) {
 	}
 
 	m1machine := authtest.NewMachine(t, "m1")
-	authtest.Enroll(t, child.Registry, m1machine, "m1")
+	authtest.EnrollAt(t, child.Registry, child.Engine, m1machine, "m1")
 	cl := connectMQTT(t, child.MQTTAddr, "m1-node-test", m1machine)
 
 	ptok := cl.Publish("colca/v1/_Metric/m1/temp", 1, false, []byte(`{"v":42}`))
@@ -621,7 +621,7 @@ func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
 	first := mustStart(t, cfg)
 	m1machine := authtest.NewMachine(t, "m1")
 	obsMachine := authtest.NewMachine(t, "obs")
-	authtest.Enroll(t, first.Registry, m1machine, "m1")
+	authtest.EnrollAt(t, first.Registry, first.Engine, m1machine, "m1")
 	authtest.Enroll(t, first.Registry, obsMachine, "", "read:#")
 	m1 := connectMQTT(t, first.MQTTAddr, "m1-tomb", m1machine)
 	publishMQTT(t, m1, "colca/v1/_Metric/m1/pressure", `{"v":7}`)
@@ -722,7 +722,7 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 	parent := mustStart(t, parentCfg)
 	// Entry-before-connect: the child's key and the parent-bus observer are
 	// runtime registry state, enrolled before the child node starts.
-	authtest.EnrollNode(t, parent.Registry, "n-child", childID.PublicHex(), "child1")
+	authtest.EnrollNodeAt(t, parent.Registry, parent.Engine, "n-child", childID.PublicHex(), "child1")
 	obsMachine := authtest.NewMachine(t, "obs")
 	authtest.Enroll(t, parent.Registry, obsMachine, "", "read:#")
 
@@ -738,7 +738,7 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 	child := mustStart(t, childCfg)
 
 	m1machine := authtest.NewMachine(t, "m1")
-	authtest.Enroll(t, child.Registry, m1machine, "m1")
+	authtest.EnrollAt(t, child.Registry, child.Engine, m1machine, "m1")
 	m1 := connectMQTT(t, child.MQTTAddr, "m1-up", m1machine)
 	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", `{"v":42}`)
 	publishMQTT(t, m1, "colca/v1/_Metric/m1/keep", `{"v":1}`)

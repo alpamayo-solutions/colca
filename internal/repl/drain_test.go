@@ -8,10 +8,8 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
-	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
-	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -28,9 +26,8 @@ func TestDrainLifecycleDeliveredThenAutoRevoke(t *testing.T) {
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
 	clk := clock.New(true, func() time.Time { return time.UnixMilli(1_000_000) })
-	peng := engine.New(ps, pcfg, preg, nil, nil, clk)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, clk, childSpec{"n-child", childID.PublicHex(), "child1"})
 	pm := metrics.New(ps, config.Retention{}, clk)
 	preg.SetMetrics(pm) // move-drain design §3.4: colca_drains_active is registry-owned
 	srv, addr := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
@@ -106,11 +103,9 @@ func TestDrainExpiryBoundedCompletion(t *testing.T) {
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-
 	clkNow := int64(1_000_000)
 	clk := clock.New(true, func() time.Time { return time.UnixMilli(clkNow) })
-	peng := engine.New(ps, pcfg, preg, nil, nil, clk)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, clk, childSpec{"n-child", childID.PublicHex(), "child1"})
 	pm := metrics.New(ps, config.Retention{}, clk)
 	preg.SetMetrics(pm) // move-drain design §3.4: colca_drains_active is registry-owned
 	srv, _ := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
@@ -168,8 +163,7 @@ func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 			t.Fatalf("open store: %v", err)
 		}
 		pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-		preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-		peng := engine.New(ps, pcfg, preg, nil, nil, clk)
+		preg, peng := nodeParts(t, ps, pcfg, nil, nil, clk, childSpec{"n-child", childID.PublicHex(), "child1"})
 		mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":1000000}`)
 		if _, err := preg.Drain("n-child"); err != nil {
 			t.Fatalf("Drain: %v", err)
@@ -186,15 +180,16 @@ func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 	// "Second process": reopen the same store, rebuild the stack fresh.
 	ps2 := mustStore(t, storeDir)
 	pcfg2 := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg2, err := registry.New(ps2, pcfg2.ULID)
-	if err != nil {
-		t.Fatalf("reload registry: %v", err)
-	}
+	preg2, peng2 := nodeParts(t, ps2, pcfg2, nil, nil, clk)
 	e2, ok := preg2.Get("n-child")
 	if !ok || e2.Status != uns.StatusDraining {
 		t.Fatalf("status did not survive the restart: %+v %v", e2, ok)
 	}
-	peng2 := engine.New(ps2, pcfg2, preg2, nil, nil, clk)
+	// The child's placement survives too: its element record is in the store,
+	// so the rebuilt namespace resolves the same mount without re-enrollment.
+	if mount, ok := preg2.MountOf("n-child"); !ok || mount != "child1" {
+		t.Fatalf("mount after restart = %q %v, want child1", mount, ok)
+	}
 	pm2 := metrics.New(ps2, config.Retention{}, clk)
 	preg2.SetMetrics(pm2) // move-drain design §3.4: colca_drains_active is registry-owned
 	if v := metricstest.Value(t, pm2, `colca_drains_active`); v != 1 {
@@ -228,9 +223,8 @@ func TestDrainConcurrentEvaluationCompletesExactlyOnce(t *testing.T) {
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
 	clk := clock.New(true, func() time.Time { return time.UnixMilli(1_000_000) })
-	peng := engine.New(ps, pcfg, preg, nil, nil, clk)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, clk, childSpec{"n-child", childID.PublicHex(), "child1"})
 	pm := metrics.New(ps, config.Retention{}, clk)
 	preg.SetMetrics(pm) // move-drain design §3.4: colca_drains_active is registry-owned
 	srv, _ := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
@@ -281,8 +275,7 @@ func TestDownlinkRelayRejectsCommandForDrainingGrandchildMount(t *testing.T) {
 	// --- Root A: parent of B, has no idea C (B's own child) exists at all.
 	rs := mustStore(t, filepath.Join(dir, "rdata"))
 	rcfg := &config.Config{ULID: "n-root", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	rreg := regWithChildren(t, rs, rcfg.ULID, childSpec{"n-mid", midID.PublicHex(), "mid1"})
-	reng := engine.New(rs, rcfg, rreg, nil, nil, nil)
+	rreg, reng := nodeParts(t, rs, rcfg, nil, nil, nil, childSpec{"n-mid", midID.PublicHex(), "mid1"})
 	rsrv, raddr := startServer(t, rcfg, reng, rootID, rreg)
 	t.Cleanup(rsrv.Stop)
 
@@ -290,10 +283,9 @@ func TestDownlinkRelayRejectsCommandForDrainingGrandchildMount(t *testing.T) {
 	// with no representation anywhere in A's own registry.
 	ms := mustStore(t, filepath.Join(dir, "mdata"))
 	mcfg := &config.Config{ULID: "n-mid", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	mreg := regWithChildren(t, ms, mcfg.ULID, childSpec{"n-leaf", leafID.PublicHex(), "leaf1"})
 	mm := metrics.New(ms, config.Retention{}, nil)
+	mreg, meng := nodeParts(t, ms, mcfg, nil, mm, nil, childSpec{"n-leaf", leafID.PublicHex(), "leaf1"})
 	mreg.SetMetrics(mm)
-	meng := engine.New(ms, mcfg, mreg, nil, mm, nil)
 	msrv, _ := startServerWithMetrics(t, mcfg, meng, midID, mreg, mm) // no client of B's own connects in this test
 	t.Cleanup(msrv.Stop)
 
@@ -340,9 +332,8 @@ func TestDrainCompletesGappedNotDeliveredWhenRetentionPrunesUndeliveredCommand(t
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
 	clk := clock.New(true, func() time.Time { return time.UnixMilli(1_000_000) })
-	peng := engine.New(ps, pcfg, preg, nil, nil, clk)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, clk, childSpec{"n-child", childID.PublicHex(), "child1"})
 	pm := metrics.New(ps, config.Retention{}, clk)
 	preg.SetMetrics(pm)
 	srv, _ := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
@@ -398,11 +389,9 @@ func TestDrainWaitsOnSurvivingRangeDespiteGapThenCompletesGapped(t *testing.T) {
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-
 	clkNow := int64(1_000_000)
 	clk := clock.New(true, func() time.Time { return time.UnixMilli(clkNow) })
-	peng := engine.New(ps, pcfg, preg, nil, nil, clk)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, clk, childSpec{"n-child", childID.PublicHex(), "child1"})
 	pm := metrics.New(ps, config.Retention{}, clk)
 	preg.SetMetrics(pm)
 	srv, _ := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)

@@ -76,6 +76,16 @@ func (h *colcaHook) engine() *engine.Engine {
 	return h.eng
 }
 
+// scope is what the ACL checks resolve grants through. Nil before the engine is
+// late-bound, which denies every scoped grant — a broker not yet wired to its
+// node knows neither where things sit nor where it sits itself.
+func (h *colcaHook) scope() uns.Scope {
+	if eng := h.engine(); eng != nil {
+		return eng.Scope()
+	}
+	return nil
+}
+
 func (h *colcaHook) setEngine(e *engine.Engine) {
 	h.mu.Lock()
 	h.eng = e
@@ -149,7 +159,7 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 		return h.humanACL(cl, topic)
 	}
 	entry, ok := h.reg.Get(string(cl.Properties.Username))
-	if !ok || !uns.Authorize(entry, uns.ActSub, topic) {
+	if !ok || !uns.Authorize(h.scope(), entry, uns.ActSub, topic) {
 		h.log.Warn("mqtt subscribe denied", "ulid", string(cl.Properties.Username), "filter", topic)
 		h.metrics.ACLDeny(metrics.ACLSub)
 		return false

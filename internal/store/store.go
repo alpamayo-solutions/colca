@@ -17,7 +17,7 @@ import (
 )
 
 // streams is the fixed set of streams a store maintains offsets for.
-var streams = []string{"metrics", "entities", "commands"}
+var streams = []string{"metrics", "entities", "commands", "definitions"}
 
 type Record struct {
 	Topic   string `json:"t"`
@@ -146,6 +146,10 @@ type recEnc struct {
 	Topic   string `json:"t"`
 	Payload []byte `json:"p"`
 	TS      int64  `json:"ts"`
+	// size is the encoded length of THIS record as stored, filled in by
+	// scanRecords. Never serialized — it is what the byte accounting needs and
+	// only the reader can know it.
+	size uint64 `json:"-"`
 }
 type kvEnc struct {
 	Topic   string `json:"t"`
@@ -162,7 +166,7 @@ type kvEnc struct {
 // the batch instead of set. Deleting an absent key is a no-op in Pebble, so a
 // replayed tombstone is idempotent by construction.
 func addRecord(b *pebble.Batch, stream string, off uint64, topic string, payload []byte, ts int64, kvPath, kvNode string, del bool) (uint64, error) {
-	val, err := json.Marshal(recEnc{topic, payload, ts})
+	val, err := json.Marshal(recEnc{Topic: topic, Payload: payload, TS: ts})
 	if err != nil {
 		return 0, err
 	}

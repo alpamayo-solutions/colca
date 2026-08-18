@@ -155,9 +155,19 @@ func Start(cfg *config.Config) (*Node, error) {
 	// enrollment door — one write path inside (cmdadmin design §5). The data
 	// model lives in the plugin, so the core never learns what a signal is
 	// (data-model binding design §7).
-	domain := uns.NewConfigExec(n.Engine.EntityStore(), cfg.Plugin)
+	domain := uns.NewConfigExec(n.Engine.EntityStore(), reg, cfg.Plugin)
 	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain))
 	n.Engine.SetObserver(domain)
+	// The registry resolves placements through the engine's element index
+	// (id-grants design §4). Wired here rather than at construction because the
+	// namespace is a projection of records the engine holds, and the registry
+	// is built first — every door consults it, so it has to exist earliest.
+	reg.SetNamespace(n.Engine.Elements())
+	if ver != nil {
+		// A human's grants come from the groups their token names, resolved
+		// against the definitions this node holds (definition-stream design §8).
+		ver.SetGroupIndex(n.Engine.Groups())
+	}
 	// Schema bundle (schema-bundle design §6/§7): explicit path, or the
 	// baked default when present, or the builtin floor. Any configured-but-
 	// bad bundle refuses to start — a broker that silently fell back to
@@ -179,14 +189,12 @@ func Start(cfg *config.Config) (*Node, error) {
 			"digest", digest[:12], "contracts", count)
 	}
 	n.Metrics.SetBundleInfo(n.Engine.BundleInfo())
-	// Root-frame prefix (cmdadmin design §3): a node without a parent IS the
-	// root — its prefix is known-empty by construction. Children learn theirs
-	// from the downlink hand-down; grant translation reads it per Verify.
+	// Position in the tree (id-grants design §4): a node without a parent IS
+	// the root — it sits on nothing above itself, so its chain is known-empty
+	// by construction. Children learn theirs from the downlink hand-down;
+	// grant translation reads the rendered prefix per Verify.
 	if cfg.Parent == nil {
-		n.Engine.SetPrefix("")
-	}
-	if ver != nil {
-		ver.SetPrefixSource(n.Engine.Prefix)
+		n.Engine.SetAncestry(uns.Ancestry{})
 	}
 
 	if n.MQTT != nil {

@@ -16,6 +16,25 @@ import (
 // RunFootprint answers the "lightweight" claim with a number: RSS of the REAL
 // colcad binary (not the in-process harness) as a standalone edge node — idle,
 // then under one machine publishing flat out for Duration.
+// postAdmin POSTs an admin-token request to the running colcad and fails on any
+// non-2xx, so a scenario never proceeds on a silently rejected setup step.
+func postAdmin(hc *http.Client, apiAddr, path string, body []byte) error {
+	req, err := http.NewRequest("POST", "https://"+apiAddr+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Colca-Token", BenchToken)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("POST %s: HTTP %d", path, resp.StatusCode)
+	}
+	return nil
+}
+
 func RunFootprint(p Params) (*Report, error) {
 	dir := p.WorkDir
 	keyPath := filepath.Join(dir, "fp.key")
@@ -74,19 +93,18 @@ mqtt:
 	if err != nil {
 		return nil, err
 	}
-	entry, _ := json.Marshal(map[string]any{"ulid": "m1", "pubkey": m1id.PublicHex(), "kind": "machine", "mount": "m1"})
-	req, err := http.NewRequest("POST", "https://"+apiAddr+"/enroll", bytes.NewReader(entry))
-	if err != nil {
-		return nil, err
+	// m1 binds to an element, so the element has to exist first — published
+	// through the same admin door a deployment would use.
+	element, _ := json.Marshal(map[string]any{
+		"topic":   "colca/v1/_SystemElement/n-fp/m1",
+		"payload": map[string]string{"id": "el-m1", "name": "m1"},
+	})
+	if err := postAdmin(hc, apiAddr, "/publish", element); err != nil {
+		return nil, fmt.Errorf("place element for m1: %w", err)
 	}
-	req.Header.Set("X-Colca-Token", BenchToken)
-	resp, err := hc.Do(req)
-	if err != nil {
+	entry, _ := json.Marshal(map[string]any{"ulid": "m1", "pubkey": m1id.PublicHex(), "kind": "machine", "element": "el-m1"})
+	if err := postAdmin(hc, apiAddr, "/enroll", entry); err != nil {
 		return nil, fmt.Errorf("enroll m1: %w", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("enroll m1: HTTP %d", resp.StatusCode)
 	}
 	m1cert, err := m1id.SelfSignedCert("m1")
 	if err != nil {

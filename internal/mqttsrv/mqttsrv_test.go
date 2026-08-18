@@ -57,9 +57,6 @@ func newWorld(t *testing.T) *world {
 		m1:  authtest.NewMachine(t, "m1"),
 		obs: authtest.NewMachine(t, "observer"),
 	}
-	authtest.Enroll(t, reg, w.m1, "m1")
-	authtest.Enroll(t, reg, w.obs, "", "read:#")
-
 	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
 		MQTT: config.Endpoint{Addr: "127.0.0.1:0"}}
 	m := metrics.New(st, config.Retention{}, nil)
@@ -69,7 +66,13 @@ func newWorld(t *testing.T) *world {
 		st.Close()
 		t.Fatalf("New: %v", err)
 	}
-	s.SetEngine(engine.New(st, cfg, reg, s.DeliverLocal, m, nil))
+	eng := engine.New(st, cfg, reg, s.DeliverLocal, m, nil)
+	s.SetEngine(eng)
+	// Placement resolves through the engine's element index, so the element m1
+	// binds to is authored before it enrolls (id-grants design §4).
+	reg.SetNamespace(eng.Elements())
+	authtest.EnrollAt(t, reg, eng, w.m1, "m1")
+	authtest.Enroll(t, reg, w.obs, "", "read:#")
 	reg.SetKick(s.Kick)
 	go func() { _ = s.Serve() }()
 	t.Cleanup(func() {
@@ -696,6 +699,12 @@ drain:
 			// unrelated feature to the no-double-delivery invariant this
 			// test pins, so it is filtered out here rather than asserted on.
 			if strings.HasPrefix(m.Topic(), "colca/v1/_TimeSync/") {
+				continue
+			}
+			// Likewise the fixture's own element record: it is retained state
+			// authored during setup, replayed to any new colca/# subscriber, and
+			// says nothing about how THIS publish was delivered.
+			if strings.HasPrefix(m.Topic(), "colca/v1/_SystemElement/") {
 				continue
 			}
 			got = append(got, m)

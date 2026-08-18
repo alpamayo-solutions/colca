@@ -73,7 +73,7 @@ func bearer(t *testing.T, n *node.Node, method, path, token, body string) (int, 
 // the hub and translates read:site1/edge1/# to its local read:edge1/#.
 func TestHumanScopedReadOnTree(t *testing.T) {
 	tp := startTopo(t)
-	tok := tp.iss.Mint("anna", []string{"read:site1/edge1/#"}, time.Now().Add(5*time.Minute))
+	tok := tp.iss.Mint("anna", []string{"read:" + authtest.ElementID("edge1") + "/#"}, time.Now().Add(5*time.Minute))
 
 	for _, scheme := range []string{"ssl", "wss"} {
 		t.Run(scheme, func(t *testing.T) {
@@ -103,8 +103,9 @@ func TestHumanCommandsThroughTree(t *testing.T) {
 	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 	cmds := subscribeAll(t, m1, "colca/v1/_CmdParam/+/m1/#")
 
+	awaitElement(t, tp.global, "site1/edge1/m1") // the grants' elements must have reached the hub
 	tok := tp.iss.Mint("operator-ole",
-		[]string{"cmd:site1/edge1/m1/#:param", "read:site1/edge1/#"}, time.Now().Add(5*time.Minute))
+		[]string{"cmd:" + authtest.ElementID("m1") + "/#:param", "read:" + authtest.ElementID("edge1") + "/#"}, time.Now().Add(5*time.Minute))
 	c := human(t, tp.global, "ssl", "operator-ole", tok)
 
 	corr := unique("h-corr")
@@ -147,7 +148,7 @@ func TestHumanAdminEnrollsOverBearer(t *testing.T) {
 	adminTok := tp.iss.Mint("boss", []string{"admin:#"}, time.Now().Add(5*time.Minute))
 
 	m3 := authtest.NewMachine(t, "m3")
-	entry := string(m3.EntryJSON(t, "machine", "m3"))
+	entry := string(m3.EntryJSON(t, "machine", authtest.Place(t, tp.edge1.Engine, "m3")))
 	code, body := bearer(t, tp.edge1, "POST", "/enroll", adminTok, entry)
 	if code != 200 {
 		t.Fatalf("human admin enroll: %d %s", code, body)

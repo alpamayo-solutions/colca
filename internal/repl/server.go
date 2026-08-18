@@ -72,26 +72,80 @@ func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, re
 // pinned against the local registry (kind "node"). This is the ONLY source of
 // identity — nothing from the request body is trusted. A machine key at this
 // door is rejected exactly like an unknown one, with its own metric reason.
-func (s *Server) childFromReq(r *http.Request) (*uns.Entry, error) {
+//
+// It also returns the child's mount, resolved from its element at this moment
+// (id-grants design §4): every path this door builds or strips is built from
+// that value, so a renamed element takes effect on the next request instead of
+// needing a re-enrollment. A child whose element does not resolve is turned
+// away — there is no position to insert its records at.
+func (s *Server) childFromReq(r *http.Request) (*uns.Entry, string, error) {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
-		return nil, fmt.Errorf("no client certificate")
+		return nil, "", fmt.Errorf("no client certificate")
 	}
 	pub, err := identity.PeerPubHex(r.TLS.PeerCertificates[0].Raw)
 	if err != nil {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
-		return nil, err
+		return nil, "", err
 	}
 	entry, ok := s.reg.ByPubkey(pub)
 	if !ok {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
-		return nil, fmt.Errorf("client key %s not enrolled at this node", short(pub))
+		return nil, "", fmt.Errorf("client key %s not enrolled at this node", short(pub))
 	}
 	if entry.Kind != uns.KindNode {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthKind)
-		return nil, fmt.Errorf("identity %s is kind %q — the repl door is for nodes", entry.ULID, entry.Kind)
+		return nil, "", fmt.Errorf("identity %s is kind %q — the repl door is for nodes", entry.ULID, entry.Kind)
 	}
-	return entry, nil
+	mount, placed := s.eng.MountOf(entry.ULID)
+	if !placed {
+		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthKind)
+		return nil, "", fmt.Errorf("identity %s binds to element %s, which is not placed at this node",
+			entry.ULID, entry.Element)
+	}
+	return entry, mount, nil
+}
+
+// addDefinitions puts whatever definitions the child has not read yet into the
+// response (definition-stream design §5).
+//
+// Two things this deliberately does NOT do, and both are the same reason: a
+// definition has no position. It is not filtered to the child's subtree —
+// nothing addresses it at one child — and its topic is not touched, so what the
+// child stores is byte-identical to what this node stores. Commands need both
+// operations; definitions need neither, which is why this is five lines and the
+// command path is not.
+func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter uint64, limit int) {
+	recs, next, err := s.eng.Store().Read("definitions", defAfter, limit, nil)
+	if err != nil {
+		// Durable state the child does not get this round; it will ask again.
+		// Never fail the whole poll over it — commands must keep flowing.
+		s.log.Error("downlink: reading definitions failed — the child stays behind on them",
+			"child", childULID, "err", err)
+		return
+	}
+	out := make([]wireRec, 0, len(recs))
+	for _, rec := range recs {
+		out = append(out, wireRec{O: rec.Offset, T: rec.Topic, P: rec.Payload, TS: rec.TS})
+	}
+	resp["definitions"], resp["def_next"] = out, next
+}
+
+// ancestryFor builds the position a child mounted at mount must know: this
+// node's own chain, extended by every element from here down to the child's
+// (id-grants design §4). ok=false while this node's own position is unknown —
+// a guessed chain is worse than none, because grants would resolve against a
+// frame nobody chose.
+//
+// The elements come from this node's own index, which is exactly why the child
+// cannot do this for itself: those records live here, published under this
+// node's identity, and the child never sees them.
+func (s *Server) ancestryFor(mount string) (uns.Ancestry, bool) {
+	own, ok := s.eng.Ancestry()
+	if !ok {
+		return nil, false
+	}
+	return own.Extend(s.eng.Elements(), mount), true
 }
 
 // Start binds cfg.Repl.Addr and serves TLS in the background. It returns the
@@ -157,7 +211,7 @@ type wireRec struct {
 }
 
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
-	child, err := s.childFromReq(r)
+	child, mount, err := s.childFromReq(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -173,7 +227,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 
 	repl := make([]store.ReplRecord, 0, len(in.Records))
 	for _, rec := range in.Records {
-		topic := uns.MountInsert(rec.T, child.Mount)
+		topic := uns.MountInsert(rec.T, mount)
 		rr := store.ReplRecord{ChildOffset: rec.O, Topic: topic, Payload: rec.P, TS: rec.TS}
 		if p, err := uns.Parse(topic); err == nil {
 			// Route by the ENGINE authority (bundle-aware): a bundle-declared
@@ -207,7 +261,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
-	child, err := s.childFromReq(r)
+	child, mount, err := s.childFromReq(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -216,24 +270,27 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	if after == 0 {
 		after = 1
 	}
+	// The child's position on the definitions stream, independent of its
+	// command position.
+	defAfter, _ := strconv.ParseUint(r.URL.Query().Get("def_after"), 10, 64)
+	if defAfter == 0 {
+		defAfter = 1
+	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("max"))
 	if limit <= 0 || limit > maxDownlinkMax {
 		limit = defaultDownlinkMax
 	}
 
 	// hello=1 answers immediately instead of long-polling: the child's first
-	// contact after (re)connect learns its root-frame prefix (cmdadmin design
-	// §3) in one RTT instead of one long-poll cycle — a fresh node must not
-	// stay fail-closed for humans until the first idle poll drains.
+	// contact after (re)connect learns its position (id-grants design §4) in
+	// one RTT instead of one long-poll cycle — a fresh node must not stay
+	// fail-closed for humans until the first idle poll drains.
 	if r.URL.Query().Get("hello") == "1" {
 		resp := map[string]any{"records": []wireRec{}, "next": after}
-		if p, ok := s.eng.Prefix(); ok {
-			childPrefix := child.Mount
-			if p != "" {
-				childPrefix = p + "/" + child.Mount
-			}
-			resp["prefix"] = childPrefix
+		if a, ok := s.ancestryFor(mount); ok {
+			resp["ancestry"] = a
 		}
+		s.addDefinitions(resp, child.ULID, defAfter, limit)
 		writeJSON(w, resp)
 		return
 	}
@@ -248,6 +305,11 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	// ct/ last-advance stamp that puts these cursors under the §5.2 staleness
 	// window like every other cursor.
 	s.eng.Store().CursorAck(uns.DownlinkCursorPrefix+child.ULID, "commands", after)
+	// The definitions cursor is the child's own, separate position: a child
+	// caught up on commands may still be behind on definitions and vice versa,
+	// and one stream must never drag the other's floor along (definition-stream
+	// design §5).
+	s.eng.Store().CursorAck(uns.DownlinkDefCursorPrefix+child.ULID, "definitions", defAfter)
 
 	// Move-drain design §3.2: "completion is evaluated on every /downlink
 	// poll by that child" — the other trigger is the 30s periodic tick
@@ -265,7 +327,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		if err != nil || s.eng.ClassOf(p.Contract) != uns.ClassCmd {
 			return false
 		}
-		return strings.HasPrefix(p.Path, child.Mount+"/")
+		return strings.HasPrefix(p.Path, mount+"/")
 	}
 
 	ctx := r.Context()
@@ -287,10 +349,14 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		// making the child wait out the long poll to learn its position is
 		// inside a pruned hole would stall §6.3's log-and-continue handling.
 		gap, hasGap := s.eng.Store().Gap("commands", after)
-		if len(recs) > 0 || hasGap || time.Now().After(deadline) {
+		// A definition waiting is as good a reason to answer as a command: a
+		// child must not sit out a 20s poll while policy it needs is already
+		// here.
+		hasDefs := s.eng.Store().NextOffset("definitions") > defAfter
+		if len(recs) > 0 || hasGap || hasDefs || time.Now().After(deadline) {
 			out := make([]wireRec, 0, len(recs))
 			for _, rec := range recs {
-				stripped, ok := uns.MountStrip(rec.Topic, child.Mount)
+				stripped, ok := uns.MountStrip(rec.Topic, mount)
 				if !ok {
 					continue
 				}
@@ -302,17 +368,14 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			// authoritative-now estimate (time-sync design §2.1), not raw
 			// local time; the root has no offset, so this is its raw clock.
 			resp := map[string]any{"records": out, "next": next, "now_ms": s.eng.AuthoritativeNow().UnixMilli()}
-			// Prefix hand-down (cmdadmin design §3): the parent knows its own
-			// root-frame prefix and the child's mount, so every downlink
-			// response teaches the child its prefix. Omitted while this
-			// node's own prefix is still unknown — never guess frames.
-			if p, ok := s.eng.Prefix(); ok {
-				childPrefix := child.Mount
-				if p != "" {
-					childPrefix = p + "/" + child.Mount
-				}
-				resp["prefix"] = childPrefix
+			// Position hand-down (id-grants design §4): the parent knows its own
+			// chain and where the child sits inside it, so every downlink
+			// response teaches the child its position. Omitted while this
+			// node's own position is still unknown — never guess frames.
+			if a, ok := s.ancestryFor(mount); ok {
+				resp["ancestry"] = a
 			}
+			s.addDefinitions(resp, child.ULID, defAfter, limit)
 			if hasGap {
 				// §6.3: "next already points past the hole". With surviving
 				// records Read guarantees that; with none it would stay at

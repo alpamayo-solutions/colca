@@ -96,24 +96,62 @@ say "   global answers /healthz: $(curl -skf "$G/healthz")"
 echo "── enrolling the tree: children at their parents, machines at their edges…"
 say "   the registry is runtime state: an identity exists at a node only after"
 say "   POST /enroll (entry-before-connect); everything below retries until then."
-enroll() { # $1 = base url, $2 = ulid, $3 = kind, $4 = mount, $5 = pubkey file
+# An identity binds to a system element, not to a path (id-grants design §4),
+# so the element is authored first and the entry names it. The mount is then
+# wherever that element sits, now and after any later rename.
+place() { # $1 = base url, $2 = node ulid, $3 = path -> echoes the element id
+  element="el-$(echo "$3" | tr '/' '-')"
+  ok=0
+  for _ in $(seq 1 60); do
+    if curl -skf -H "$TOK" -H "Content-Type: application/json" -X POST "$1/publish" \
+      -d "{\"topic\":\"colca/v1/_SystemElement/$2/$3\",\"payload\":{\"id\":\"$element\",\"name\":\"$3\"}}" >/dev/null 2>&1; then
+      ok=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$ok" = 1 ] || fail "placing element at $3 on $1 failed"
+  echo "$element"
+}
+enroll() { # $1 = base url, $2 = ulid, $3 = kind, $4 = mount, $5 = pubkey file, $6 = node ulid
+  element=$(place "$1" "$6" "$4")
   ok=0
   for _ in $(seq 1 60); do
     if curl -skf -H "$TOK" -H "Content-Type: application/json" -X POST "$1/enroll" \
-      -d "{\"ulid\":\"$2\",\"kind\":\"$3\",\"mount\":\"$4\",\"pubkey\":\"$(cat "$5")\"}" >/dev/null 2>&1; then
+      -d "{\"ulid\":\"$2\",\"kind\":\"$3\",\"element\":\"$element\",\"pubkey\":\"$(cat "$5")\"}" >/dev/null 2>&1; then
       ok=1
       break
     fi
     sleep 1
   done
   [ "$ok" = 1 ] || fail "enrolling $2 at $1 failed"
-  say "   enrolled $2 ($3) at $1 under mount '$4'"
+  say "   enrolled $2 ($3) at $1 on element $element, which sits at '$4'"
 }
-enroll "$G" n-site1 node site1 keys/site1.pub
-enroll "$S1" n-edge1 node edge1 keys/edge1.pub
-enroll "$S1" n-edge2 node edge2 keys/edge2.pub
-enroll "$E1" m1 machine m1 keys/m1-machine.pub
-enroll "$E2" m2 machine m2 keys/m2-machine.pub
+# Groups are definitions, authored once at the root and descending to every
+# node below it (definition-stream design §8). Keycloak carries who is in which
+# group; what a group MAY do lives here.
+define_group() { # $1 = base url, $2 = node ulid, $3 = group id, $4 = grants JSON array
+  ok=0
+  for _ in $(seq 1 60); do
+    if curl -skf -H "$TOK" -H "Content-Type: application/json" -X POST "$1/publish" \
+      -d "{\"topic\":\"colca/v1/_Group/$2/$3\",\"payload\":{\"id\":\"$3\",\"name\":\"$3\",\"grants\":$4}}" >/dev/null 2>&1; then
+      ok=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$ok" = 1 ] || fail "defining group $3 at $1 failed"
+  say "   defined group $3 with grants $4"
+}
+
+enroll "$G" n-site1 node site1 keys/site1.pub n-global
+enroll "$S1" n-edge1 node edge1 keys/edge1.pub n-site1
+enroll "$S1" n-edge2 node edge2 keys/edge2.pub n-site1
+enroll "$E1" m1 machine m1 keys/m1-machine.pub n-edge1
+enroll "$E2" m2 machine m2 keys/m2-machine.pub n-edge2
+
+define_group "$G" n-global 01HGRP-SITE1-OPERATORS '["read:el-site1/#","cmd:el-m1/#:param"]'
+define_group "$G" n-global 01HGRP-ADMINS '["admin:#","read:#","cmd:#:admin"]'
 
 echo "── 1) uplink: metrics from both machines reach global with full paths"
 say "   m1 publishes colca/v1/_Metric/m1/temp to edge1 — global must store it as"

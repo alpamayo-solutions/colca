@@ -5,7 +5,7 @@
   "clientScopes": [
     {
       "name": "colca-grants",
-      "description": "colca grant strings aggregated from user and group attributes into the colca_grants claim.",
+      "description": "The groups a human belongs to, as ids in the groups claim. Grants themselves live in _Group definitions in the tree (definition-stream design §8), so Keycloak carries membership and nothing else.",
       "protocol": "openid-connect",
       "attributes": {
         "include.in.token.scope": "true",
@@ -13,16 +13,13 @@
       },
       "protocolMappers": [
         {
-          "name": "colca_grants",
+          "name": "colca_groups",
           "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "protocolMapper": "oidc-group-membership-mapper",
           "consentRequired": false,
           "config": {
-            "aggregate.attrs": "true",
-            "multivalued": "true",
-            "user.attribute": "colca_grants",
-            "claim.name": "colca_grants",
-            "jsonType.label": "String",
+            "full.path": "false",
+            "claim.name": "groups",
             "access.token.claim": "true",
             "id.token.claim": "true",
             "userinfo.token.claim": "true",
@@ -82,23 +79,10 @@
   ],
   "groups": [
     {
-      "name": "site1-operators",
-      "attributes": {
-        "colca_grants": [
-          "read:site1/#",
-          "cmd:site1/edge1/m1/#:param"
-        ]
-      }
+      "name": "01HGRP-SITE1-OPERATORS"
     },
     {
-      "name": "colca-admins",
-      "attributes": {
-        "colca_grants": [
-          "admin:#",
-          "read:#",
-          "cmd:#:admin"
-        ]
-      }
+      "name": "01HGRP-ADMINS"
     }
   ],
   "users": [
@@ -115,7 +99,7 @@
         }
       ],
       "groups": [
-        "/site1-operators"
+        "/01HGRP-SITE1-OPERATORS"
       ],
       "firstName": "Anna",
       "lastName": "Colca",
@@ -134,7 +118,7 @@
         }
       ],
       "groups": [
-        "/colca-admins"
+        "/01HGRP-ADMINS"
       ],
       "firstName": "Boss",
       "lastName": "Colca",

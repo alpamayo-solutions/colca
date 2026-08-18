@@ -14,18 +14,21 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// fakeIDs is a test Mounts: ulid → entry.
+// fakeIDs is a test Mounts: ulid → entry, plus the placement a real registry
+// would resolve through the element index. The two are separate here because
+// the engine only ever asks for the answer, never for how it was reached.
 type fakeIDs struct {
 	entries  map[string]*uns.Entry
-	draining []string // mounts DrainingMount treats as under an active drain
+	mounts   map[string]string // ulid → this node's local path for it
+	draining []string          // mounts DrainingMount treats as under an active drain
 }
 
 func (f fakeIDs) MountOf(ulid string) (string, bool) {
-	e, ok := f.entries[ulid]
-	if !ok || e.Mount == "" {
+	mount, ok := f.mounts[ulid]
+	if !ok || mount == "" {
 		return "", false
 	}
-	return e.Mount, true
+	return mount, true
 }
 func (f fakeIDs) Get(ulid string) (*uns.Entry, bool) { e, ok := f.entries[ulid]; return e, ok }
 
@@ -42,11 +45,14 @@ func (f fakeIDs) DrainingMount(path string) bool {
 }
 
 func testIDs() fakeIDs {
-	return fakeIDs{entries: map[string]*uns.Entry{
-		"m1":       {ULID: "m1", Kind: uns.KindMachine, Mount: "m1"},
-		"observer": {ULID: "observer", Kind: uns.KindMachine},
-		"hmi":      {ULID: "hmi", Kind: uns.KindMachine, Mount: "hmi", Grants: []string{"cmd:m1/#:param"}},
-	}}
+	return fakeIDs{
+		entries: map[string]*uns.Entry{
+			"m1":       {ULID: "m1", Kind: uns.KindMachine, Element: "el-m1"},
+			"observer": {ULID: "observer", Kind: uns.KindMachine},
+			"hmi":      {ULID: "hmi", Kind: uns.KindMachine, Element: "el-hmi", Grants: []string{"cmd:el-m1/#:param"}},
+		},
+		mounts: map[string]string{"m1": "m1", "hmi": "hmi"},
+	}
 }
 
 // testIDsWithDraining is testIDs plus mount "m1" under an active move-drain —
@@ -71,7 +77,23 @@ func newEngineWithIDs(t *testing.T, ids fakeIDs) *Engine {
 	}
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-edge1"}
-	return New(s, cfg, ids, nil, nil, nil) // nils = no local MQTT delivery, no metrics, no clock in unit tests
+	e := New(s, cfg, ids, nil, nil, nil) // nils = no local MQTT delivery, no metrics, no clock in unit tests
+	placeTestElements(t, e)
+	return e
+}
+
+// placeTestElements gives the fixture node the elements its identities bind to
+// and its grants name. Grants resolve through the element index (id-grants
+// design §4), so a fixture without them would deny everything for the right
+// reason and prove nothing.
+func placeTestElements(t *testing.T, e *Engine) {
+	t.Helper()
+	for _, el := range []struct{ id, path string }{{"el-m1", "m1"}, {"el-hmi", "hmi"}} {
+		topic := "colca/v1/_SystemElement/" + e.NodeID() + "/" + el.path
+		if _, err := e.IngestAdmin(topic, []byte(`{"id":"`+el.id+`","name":"`+el.path+`"}`)); err != nil {
+			t.Fatalf("place element %s at %s: %v", el.id, el.path, err)
+		}
+	}
 }
 
 // delivery is one call of engine.LocalDeliver, recorded verbatim.
@@ -94,6 +116,14 @@ func (r *recorder) deliver(topic string, payload []byte, retain bool) {
 	r.seen = append(r.seen, delivery{Topic: topic, Payload: string(payload), Retain: retain})
 }
 
+// reset drops what the fixture's own setup delivered, so a test sees only the
+// traffic it produced itself.
+func (r *recorder) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = nil
+}
+
 func (r *recorder) got() []delivery {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -111,7 +141,10 @@ func newRecordingEngine(t *testing.T) (*Engine, *recorder) {
 	t.Cleanup(func() { s.Close() })
 	cfg := &config.Config{ULID: "n-edge1"}
 	rec := &recorder{}
-	return New(s, cfg, testIDs(), rec.deliver, nil, nil), rec
+	e := New(s, cfg, testIDs(), rec.deliver, nil, nil)
+	placeTestElements(t, e)
+	rec.reset() // the fixture's own placements are setup, not traffic under test
+	return e, rec
 }
 
 func TestClientPublishMountAndKV(t *testing.T) {
@@ -149,14 +182,15 @@ func TestClientIdentityRule(t *testing.T) {
 // is rejected at both ordinary ingest doors, no matter who sends it.
 func TestEdgeNodeRejectedAtOrdinaryDoors(t *testing.T) {
 	e := newEngine(t)
+	before := e.Store().NextOffset("entities") // the fixture's own element placements
 	if _, err := e.IngestClient("m1", "colca/v1/_EdgeNode/m1/somewhere", []byte(`{"ulid":"m1"}`)); err == nil {
 		t.Fatal("client _EdgeNode publish must be rejected")
 	}
 	if _, err := e.IngestAdmin("colca/v1/_EdgeNode/x/somewhere", []byte(`{"ulid":"x"}`)); err == nil {
 		t.Fatal("admin _EdgeNode publish must be rejected")
 	}
-	if e.Store().NextOffset("entities") != 1 {
-		t.Fatal("rejected _EdgeNode must not be persisted")
+	if got := e.Store().NextOffset("entities"); got != before {
+		t.Fatalf("rejected _EdgeNode must not be persisted: entities %d → %d", before, got)
 	}
 	// Replication is NOT an ordinary door: a child's already-enrolled fact
 	// rides upward like any entity (rejecting it would hole the stream).
@@ -346,7 +380,7 @@ func TestClientCmdGrants(t *testing.T) {
 // humanEntry builds the ephemeral token entry the doors hand to IngestHuman.
 func humanEntry(t *testing.T, grants ...string) *uns.Entry {
 	t.Helper()
-	e, err := uns.TokenEntry("kc-sub-anna", grants, "", true)
+	e, err := uns.TokenEntry("kc-sub-anna", grants)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +393,7 @@ func TestIngestHumanCommandsOnly(t *testing.T) {
 	payload := []byte(`{"correlation_id":"c","expires_at":99999999999999}`)
 
 	// Granted command persists to the commands stream, no rewrite.
-	res, err := e.IngestHuman(humanEntry(t, "cmd:m1/#:param"), "colca/v1/_CmdParam/m1/m1/set-speed", payload)
+	res, err := e.IngestHuman(humanEntry(t, "cmd:el-m1/#:param"), "colca/v1/_CmdParam/m1/m1/set-speed", payload)
 	if err != nil {
 		t.Fatalf("granted human cmd rejected: %v", err)
 	}
@@ -372,7 +406,7 @@ func TestIngestHumanCommandsOnly(t *testing.T) {
 	}
 
 	// Class outside the grant → cmd_denied.
-	if _, err := e.IngestHuman(humanEntry(t, "cmd:m1/#:param"), "colca/v1/_CmdMaintain/m1/m1/cal", payload); err == nil {
+	if _, err := e.IngestHuman(humanEntry(t, "cmd:el-m1/#:param"), "colca/v1/_CmdMaintain/m1/m1/cal", payload); err == nil {
 		t.Fatal("ungranted class must be rejected")
 	}
 	// No grant at all → cmd_denied.
@@ -401,7 +435,7 @@ func TestIngestHumanCommandsOnly(t *testing.T) {
 		t.Fatal("human _EdgeNode publish must be rejected")
 	}
 	// Invalid payload on a granted command still validates.
-	if _, err := e.IngestHuman(humanEntry(t, "cmd:m1/#:param"), "colca/v1/_CmdParam/m1/m1/x", []byte(`{}`)); err == nil {
+	if _, err := e.IngestHuman(humanEntry(t, "cmd:el-m1/#:param"), "colca/v1/_CmdParam/m1/m1/x", []byte(`{}`)); err == nil {
 		t.Fatal("cmd payload validation must still apply")
 	}
 	for _, s := range []string{"metrics", "entities"} {
@@ -424,6 +458,7 @@ func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
 	cfg := &config.Config{ULID: "n-edge1"}
 	m := metrics.New(s, config.Retention{}, nil)
 	e := New(s, cfg, testIDsWithDraining(), nil, m, nil)
+	placeTestElements(t, e)
 
 	const rejectedLine = `colca_rejected_publishes_total{reason="draining"}`
 	if v := metricstest.Value(t, m, rejectedLine); v != 0 {
@@ -467,13 +502,13 @@ func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
 	// The human door is a door too ("at every door", move-drain design §3.2
 	// item 2): a human's covering cmd grant does not exempt them from the
 	// draining admission gate.
-	if _, err := e.IngestHuman(humanEntry(t, "cmd:m1/#:param"), "colca/v1/_CmdParam/m1/m1/set-speed", payload); err == nil || !strings.Contains(err.Error(), "draining") {
+	if _, err := e.IngestHuman(humanEntry(t, "cmd:el-m1/#:param"), "colca/v1/_CmdParam/m1/m1/set-speed", payload); err == nil || !strings.Contains(err.Error(), "draining") {
 		t.Fatalf("human cmd under a draining mount must be rejected mentioning 'draining', got %v", err)
 	}
 	if v := metricstest.Value(t, m, rejectedLine); v != 4 {
 		t.Fatalf("%s = %v after 4 rejected attempts (client+admin+downlink+human), want 4", rejectedLine, v)
 	}
-	if _, err := e.IngestHuman(humanEntry(t, "cmd:hmi/#:param"), "colca/v1/_CmdParam/hmi/hmi/ping", payload); err != nil {
+	if _, err := e.IngestHuman(humanEntry(t, "cmd:el-hmi/#:param"), "colca/v1/_CmdParam/hmi/hmi/ping", payload); err != nil {
 		t.Fatalf("cmd outside the draining mount must still be admitted (human): %v", err)
 	}
 }
@@ -815,7 +850,7 @@ func TestEmptyPayloadTombstonesKVAndDeliversRetainedClear(t *testing.T) {
 	}
 
 	// Entity class through the admin path.
-	if _, err := e.IngestAdmin("colca/v1/_Signal/m1/m1/sig-a", []byte(`{"ulid":"sig-a"}`)); err != nil {
+	if _, err := e.IngestAdmin("colca/v1/_Signal/m1/m1/sig-a", []byte(`{"id":"sig-a"}`)); err != nil {
 		t.Fatal(err)
 	}
 	res, err = e.IngestAdmin("colca/v1/_Signal/m1/m1/sig-a", nil)
@@ -928,14 +963,18 @@ func TestIngestReplicatedTombstoneRetiresKVAndClearsRetained(t *testing.T) {
 func TestIngestRefreshGuardAndSkipSemantics(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 	topic := "colca/v1/_SystemElement/n-edge1/line1/press"
-	if _, err := e.IngestAdmin(topic, []byte(`{"ulid":"P1"}`)); err != nil { // entities offset 1
+	// Offsets are relative to whatever the fixture already wrote (its own
+	// element placements), so the test states the CAS position it means rather
+	// than assuming an empty stream.
+	seeded, err := e.IngestAdmin(topic, []byte(`{"id":"P1"}`))
+	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Guard holds: applied with full delivery semantics.
-	res, applied, err := e.IngestRefresh(topic, []byte(`{"ulid":"P1"}`), 1)
-	if err != nil || !applied || !res.Persisted || res.Offset != 2 {
-		t.Fatalf("refresh = (%+v, %v, %v), want applied at offset 2", res, applied, err)
+	res, applied, err := e.IngestRefresh(topic, []byte(`{"id":"P1"}`), seeded.Offset)
+	if err != nil || !applied || !res.Persisted || res.Offset != seeded.Offset+1 {
+		t.Fatalf("refresh = (%+v, %v, %v), want applied at offset %d", res, applied, err, seeded.Offset+1)
 	}
 	got := rec.got()
 	if len(got) != 2 || got[1].Topic != topic || !got[1].Retain {
@@ -948,7 +987,7 @@ func TestIngestRefreshGuardAndSkipSemantics(t *testing.T) {
 	}
 	before := e.Store().NextOffset("entities")
 	deliveries := len(rec.got())
-	res, applied, err = e.IngestRefresh(topic, []byte(`{"ulid":"P1"}`), 2)
+	res, applied, err = e.IngestRefresh(topic, []byte(`{"id":"P1"}`), seeded.Offset+1)
 	if err != nil || applied || res.Persisted {
 		t.Fatalf("stale refresh = (%+v, %v, %v), want a clean skip", res, applied, err)
 	}

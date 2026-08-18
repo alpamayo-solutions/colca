@@ -157,7 +157,11 @@ func TestValidate(t *testing.T) {
 		{"_Metric", `{"v": 3.14, "ts": 123}`},
 		{"_CmdParam", `{"correlation_id":"abc","expires_at": 99999999999, "params":{"speed":5}}`},
 		{"_Ack", `{"correlation_id":"abc","result_code":200,"message":"ok"}`},
-		{"_EdgeNode", `{"ulid":"n-edge1","mount":"edge1","typ":"node"}`},
+		{"_EdgeNode", `{"ulid":"n-edge1","element":"01HEDGE1","typ":"node"}`},
+		// A data-model record names itself by "id", not by "ulid" — that is
+		// the field grants and bindings reference it through.
+		{"_SystemElement", `{"id":"01HLINE1","name":"Linie 1"}`},
+		{"_Signal", `{"id":"01HSIG1","name":"Temperatur"}`},
 		{"_StreamGap", `{"stream":"metrics","from_offset":57,"to_offset":49999,"first_ts":1755100000000,"last_ts":1755700000000,"overridden_cursors":["uplink"]}`},
 		{"_StreamGap", `{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":["downlink:child-01","uplink"]}`},
 		{"_TimeSync", `{"now_ms": 1755000000000}`},
@@ -187,6 +191,11 @@ func TestValidate(t *testing.T) {
 		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":[1]}`},  // non-string cursor name
 		{"_TimeSync", `{}`},                // missing now_ms
 		{"_TimeSync", `{"now_ms":"nope"}`}, // now_ms not a number
+		// The identity fields do not cross over: an element carrying only the
+		// registry's field name is unaddressable, and vice versa.
+		{"_SystemElement", `{"ulid":"01HLINE1","name":"Linie 1"}`},
+		{"_Signal", `{"ulid":"01HSIG1"}`},
+		{"_EdgeNode", `{"id":"n-edge1"}`},
 	}
 	for _, c := range bad {
 		if err := Validate(c[0], []byte(c[1])); err == nil {
@@ -212,5 +221,35 @@ func TestValidateEmptyPayloadTombstoneRule(t *testing.T) {
 		if err := Validate(contract, nil); err == nil {
 			t.Errorf("empty payload on %s must be rejected — deletion is not meaningful for events", contract)
 		}
+	}
+}
+
+// A definition is its own stream and its own class (definition-stream design
+// §2/§4): state, so an empty payload retracts it, and nowhere near the command
+// path.
+func TestDefinitionsAreStateInTheirOwnStream(t *testing.T) {
+	if got := ClassOf("_Group"); got != ClassDefinition {
+		t.Fatalf("ClassOf(_Group) = %v, want ClassDefinition", got)
+	}
+	if got := StreamFor(ClassDefinition); got != "definitions" {
+		t.Fatalf("StreamFor(ClassDefinition) = %q, want definitions", got)
+	}
+	if !IsState(ClassDefinition) {
+		t.Fatal("a definition is state: KV-projected, retained, retractable")
+	}
+	// The tombstone: an empty payload retracts a definition, the way it retires
+	// a data or entity path — and the way it is still refused for events.
+	if err := Validate("_Group", nil); err != nil {
+		t.Fatalf("a definition tombstone must be valid: %v", err)
+	}
+	if err := Validate("_CmdParam", nil); err == nil {
+		t.Fatal("an empty command is still not a tombstone — events have nothing to retire")
+	}
+	// A definition names itself by "id", like the other data-model records.
+	if err := Validate("_Group", []byte(`{"id":"01HGRP","name":"Ops"}`)); err != nil {
+		t.Fatalf("_Group must validate on the builtin floor: %v", err)
+	}
+	if err := Validate("_Group", []byte(`{"name":"Ops"}`)); err == nil {
+		t.Fatal("a definition with no id is unreachable and must be rejected")
 	}
 }

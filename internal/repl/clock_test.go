@@ -7,7 +7,6 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
-	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
@@ -26,8 +25,7 @@ func TestServerStampsNowMSFromEngineAuthoritativeNow(t *testing.T) {
 
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg := regWithChildren(t, ps, pcfg.ULID, childSpec{"n-child", childID.PublicHex(), "child1"})
-	peng := engine.New(ps, pcfg, preg, nil, nil, clk)
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, clk, childSpec{"n-child", childID.PublicHex(), "child1"})
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	defer srv.Stop()
 
@@ -38,10 +36,11 @@ func TestServerStampsNowMSFromEngineAuthoritativeNow(t *testing.T) {
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
 
 	// /downlink
-	_, _, _, nowMS, _, err := cl.downlink(t.Context(), 1, 10, 5*time.Second)
+	res, err := cl.downlink(t.Context(), 1, 1, 10, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
+	nowMS := res.NowMS
 	if nowMS != authorityMS {
 		t.Fatalf("/downlink now_ms = %d, want %d (the server's AuthoritativeNow)", nowMS, authorityMS)
 	}
@@ -80,9 +79,8 @@ func TestThreeLevelChainTelescopesToRootClock(t *testing.T) {
 	midID := mustIdentity(t, filepath.Join(dir, "mid.key"))
 	rs := mustStore(t, filepath.Join(dir, "rdata"))
 	rcfg := &config.Config{ULID: "n-root", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	rreg := regWithChildren(t, rs, rcfg.ULID, childSpec{"n-mid", midID.PublicHex(), "mid1"})
 	rclk := clock.New(true, func() time.Time { return T })
-	reng := engine.New(rs, rcfg, rreg, nil, nil, rclk)
+	rreg, reng := nodeParts(t, rs, rcfg, nil, nil, rclk, childSpec{"n-mid", midID.PublicHex(), "mid1"})
 	rsrv, raddr := startServer(t, rcfg, reng, rootID, rreg)
 	defer rsrv.Stop()
 	// A command addressed under M's mount so M's first downlink poll returns
@@ -93,9 +91,8 @@ func TestThreeLevelChainTelescopesToRootClock(t *testing.T) {
 	leafID := mustIdentity(t, filepath.Join(dir, "leaf.key"))
 	ms := mustStore(t, filepath.Join(dir, "mdata"))
 	mcfg := &config.Config{ULID: "n-mid", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	mreg := regWithChildren(t, ms, mcfg.ULID, childSpec{"n-leaf", leafID.PublicHex(), "leaf1"})
 	mclk := clock.New(false, func() time.Time { return T.Add(-5 * time.Second) })
-	meng := engine.New(ms, mcfg, mreg, nil, nil, mclk)
+	mreg, meng := nodeParts(t, ms, mcfg, nil, nil, mclk, childSpec{"n-leaf", leafID.PublicHex(), "leaf1"})
 	msrv, maddr := startServer(t, mcfg, meng, midID, mreg)
 	defer msrv.Stop()
 
@@ -121,7 +118,7 @@ func TestThreeLevelChainTelescopesToRootClock(t *testing.T) {
 	ls := mustStore(t, lsdir)
 	lcfg := &config.Config{ULID: "n-leaf"}
 	lclk := clock.New(false, func() time.Time { return T.Add(-20 * time.Second) })
-	leng := engine.New(ls, lcfg, regWithChildren(t, ls, lcfg.ULID), nil, nil, lclk)
+	_, leng := nodeParts(t, ls, lcfg, nil, nil, lclk)
 
 	lcl := mustClient(t, maddr, midID.PublicHex(), leafID)
 	lStop, lDone := make(chan struct{}), make(chan struct{})
@@ -147,7 +144,7 @@ func TestNeverSyncedNodeServesOwnWallClockOverRepl(t *testing.T) {
 	clk := clock.New(false, func() time.Time { return raw })
 	s := mustStore(t, t.TempDir())
 	cfg := &config.Config{ULID: "n-child"}
-	eng := engine.New(s, cfg, regWithChildren(t, s, cfg.ULID), nil, nil, clk)
+	_, eng := nodeParts(t, s, cfg, nil, nil, clk)
 
 	if got := eng.AuthoritativeNow(); !got.Equal(raw) {
 		t.Fatalf("never-synced AuthoritativeNow = %v, want raw wall clock %v", got, raw)

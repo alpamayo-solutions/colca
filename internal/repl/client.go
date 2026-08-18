@@ -24,6 +24,11 @@ const (
 	// downlinkStream is a pseudo-stream name: the cursor tracks PARENT offsets,
 	// which are unrelated to the local commands stream — never mix the two.
 	downlinkStream = "commands-parent"
+	// The definitions half of the same idea: a separate cursor over a separate
+	// pseudo-stream, because a node caught up on commands may still be behind
+	// on definitions (definition-stream design §5).
+	downlinkDefCursor = "downlink-def"
+	downlinkDefStream = "definitions-parent"
 
 	replBatch    = 200
 	uplinkIdle   = 150 * time.Millisecond
@@ -117,68 +122,114 @@ type DownRec struct {
 	TS           int64
 }
 
+// downResult is one decoded downlink response. Definitions ride the same
+// response as commands but keep their own records and their own cursor: the two
+// streams advance independently (definition-stream design §5).
+type downResult struct {
+	Records     []DownRec
+	Next        uint64
+	Gap         *store.GapSpan
+	NowMS       int64
+	Ancestry    *uns.Ancestry
+	Definitions []DownRec
+	DefNext     uint64
+}
+
 // Downlink polls the parent once. gap is non-nil when the poll position lies
 // inside a hole the parent's retention pruned (spec §6.2) — next then already
 // points past it.
 func (c *Client) Downlink(after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, error) {
-	recs, next, gap, _, _, err := c.downlink(context.Background(), after, max, timeout)
-	return recs, next, gap, err
+	res, err := c.downlink(context.Background(), after, 1, max, timeout)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return res.Records, res.Next, res.Gap, nil
 }
 
-// DownlinkWithPrefix is Downlink plus the parent-taught root-frame prefix
-// (cmdadmin design §3); prefix is nil when the parent did not hand one down.
-func (c *Client) DownlinkWithPrefix(after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, *string, error) {
-	recs, next, gap, _, prefix, err := c.downlink(context.Background(), after, max, timeout)
-	return recs, next, gap, prefix, err
+// DownlinkWithAncestry is Downlink plus the parent-taught position (id-grants
+// design §4); ancestry is nil when the parent did not hand one down.
+func (c *Client) DownlinkWithAncestry(after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, *uns.Ancestry, error) {
+	res, err := c.downlink(context.Background(), after, 1, max, timeout)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	return res.Records, res.Next, res.Gap, res.Ancestry, nil
 }
 
-// hello performs the immediate-answer first contact (cmdadmin design §3):
-// no long poll, no records consumed — it exists to learn the prefix in one
-// RTT right after the loop starts.
-func (c *Client) hello(ctx context.Context) (*string, error) {
-	_, _, _, _, prefix, err := c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=1&max=1&hello=1", c.base), 10*time.Second)
-	return prefix, err
+// DownlinkDefinitions is Downlink from the definitions side: the records the
+// parent handed down and the next position on that stream
+// (definition-stream design §5).
+func (c *Client) DownlinkDefinitions(defAfter uint64, max int, timeout time.Duration) ([]DownRec, uint64, error) {
+	res, err := c.downlink(context.Background(), 1, defAfter, max, timeout)
+	if err != nil {
+		return nil, 0, err
+	}
+	return res.Definitions, res.DefNext, nil
+}
+
+// hello performs the immediate-answer first contact (id-grants design §4):
+// no long poll, no records consumed — it exists to learn the position, and
+// whatever definitions are already waiting, in one RTT right after the loop
+// starts.
+func (c *Client) hello(ctx context.Context, defAfter uint64) (downResult, error) {
+	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=1&max=1&hello=1&def_after=%d",
+		c.base, defAfter), 10*time.Second)
 }
 
 // downlink is the ctx-carrying implementation the wrappers and RunDownlink
-// share. nowMS is the parent's now_ms from the response envelope (time-sync
+// share. NowMS is the parent's now_ms from the response envelope (time-sync
 // design §2.1) — RunDownlink applies it via engine.ApplyClockSample before
-// ingesting recs (design §2.3 rule 4). prefix is the parent-taught root-frame
-// prefix (cmdadmin design §3), nil when the parent did not hand one down.
-func (c *Client) downlink(ctx context.Context, after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, int64, *string, error) {
-	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&max=%d", c.base, after, max), timeout)
+// ingesting anything (design §2.3 rule 4). Ancestry is the parent-taught
+// position (id-grants design §4), nil when the parent did not hand one down.
+func (c *Client) downlink(ctx context.Context, after, defAfter uint64, max int, timeout time.Duration) (downResult, error) {
+	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d",
+		c.base, after, defAfter, max), timeout)
 }
 
-func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, int64, *string, error) {
+func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Duration) (downResult, error) {
 	hc := *c.http
 	hc.Timeout = timeout + 10*time.Second
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, 0, nil, 0, nil, err
+		return downResult{}, err
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, 0, nil, 0, nil, err
+		return downResult{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, 0, nil, 0, nil, fmt.Errorf("downlink: http %d", resp.StatusCode)
+		return downResult{}, fmt.Errorf("downlink: http %d", resp.StatusCode)
 	}
 	var out struct {
-		Records []wireRec      `json:"records"`
-		Next    uint64         `json:"next"`
-		Gap     *store.GapSpan `json:"gap"`
-		NowMS   int64          `json:"now_ms"`
-		Prefix  *string        `json:"prefix"`
+		Records     []wireRec      `json:"records"`
+		Next        uint64         `json:"next"`
+		Gap         *store.GapSpan `json:"gap"`
+		NowMS       int64          `json:"now_ms"`
+		Ancestry    *uns.Ancestry  `json:"ancestry"`
+		Definitions []wireRec      `json:"definitions"`
+		DefNext     uint64         `json:"def_next"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, 0, nil, 0, nil, err
+		return downResult{}, err
 	}
-	recs := make([]DownRec, len(out.Records))
-	for i, r := range out.Records {
-		recs[i] = DownRec{ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS}
+	return downResult{
+		Records:     toDownRecs(out.Records),
+		Next:        out.Next,
+		Gap:         out.Gap,
+		NowMS:       out.NowMS,
+		Ancestry:    out.Ancestry,
+		Definitions: toDownRecs(out.Definitions),
+		DefNext:     out.DefNext,
+	}, nil
+}
+
+func toDownRecs(in []wireRec) []DownRec {
+	out := make([]DownRec, len(in))
+	for i, r := range in {
+		out[i] = DownRec{ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS}
 	}
-	return recs, out.Next, out.Gap, out.NowMS, out.Prefix, nil
+	return out
 }
 
 // RunUplink pushes metrics+entities fully and only _Ack and _StreamGap from
@@ -196,6 +247,9 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 	}{
 		{"metrics", nil},
 		{"entities", nil},
+		// `definitions` is deliberately absent and must stay absent
+		// (definition-stream design §4): definitions descend. A child pushing
+		// them upward would let a leaf author policy for the whole tree.
 		{"commands", func(topic string) bool {
 			p, err := uns.Parse(topic)
 			return err == nil && (p.Contract == "_Ack" || p.Contract == "_StreamGap")
@@ -269,17 +323,22 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 	}
 }
 
-// RunDownlink fetches commands from the parent and hands them to the engine
-// (persist with the parent's original timestamp + local delivery). m may be
-// nil (every Metrics method is nil-safe).
+// RunDownlink fetches from the parent and hands the result to the engine:
+// commands are executed at their target, definitions are applied wherever they
+// land (definition-stream design §5). m may be nil (every Metrics method is
+// nil-safe).
 func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
-	// First contact: learn the root-frame prefix in one RTT (cmdadmin design
-	// §3) instead of after the first long-poll drains. Failure is fine — the
-	// regular polls below carry the prefix on every response.
-	if prefix, err := c.hello(ctx); err == nil && prefix != nil {
-		eng.SetPrefix(*prefix)
+	// First contact: learn the node's position, and whatever definitions are
+	// already waiting, in one RTT (id-grants design §4) instead of after the
+	// first long-poll drains. Failure is fine — the regular polls below carry
+	// both on every response.
+	if res, err := c.hello(ctx, eng.Store().CursorGet(downlinkDefCursor, downlinkDefStream)); err == nil {
+		if res.Ancestry != nil {
+			eng.SetAncestry(*res.Ancestry)
+		}
+		applyDefinitions(c, eng, m, res)
 	}
 	for {
 		select {
@@ -288,7 +347,9 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		default:
 		}
 		after := eng.Store().CursorGet(downlinkCursor, downlinkStream)
-		recs, next, gap, nowMS, prefix, err := c.downlink(ctx, after, replBatch, downlinkWait)
+		defAfter := eng.Store().CursorGet(downlinkDefCursor, downlinkDefStream)
+		res, err := c.downlink(ctx, after, defAfter, replBatch, downlinkWait)
+		recs, next, gap, nowMS, ancestry := res.Records, res.Next, res.Gap, res.NowMS, res.Ancestry
 		if err != nil {
 			select {
 			case <-stop:
@@ -310,8 +371,8 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		// poll after reconnect refreshes time before any expiry decision
 		// downstream of it.
 		eng.ApplyClockSample(nowMS)
-		if prefix != nil {
-			eng.SetPrefix(*prefix) // idempotent: every poll may carry it
+		if ancestry != nil {
+			eng.SetAncestry(*ancestry) // idempotent: every poll may carry it
 		}
 		if gap != nil {
 			// Spec §6.3, downlink half: log, count, continue — next already
@@ -328,9 +389,33 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 				c.log.Error("downlink ingest", "topic", r.Topic, "err", err)
 			}
 		}
+		applyDefinitions(c, eng, m, res)
 		if next > after {
 			eng.Store().CursorAck(downlinkCursor, downlinkStream, next)
 		}
+	}
+}
+
+// applyDefinitions stores what the parent handed down and advances the
+// definitions cursor.
+//
+// The cursor moves only after every record in the batch was applied, and a
+// record that fails leaves it where it was: a definition the node failed to
+// store must be offered again, because unlike a command there is no read side
+// to recover it from later. That is the same reason the stream is compacted
+// rather than pruned (definition-stream design §6).
+func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res downResult) {
+	for _, r := range res.Definitions {
+		if _, err := eng.IngestDownlinkDefinition(r.Topic, r.Payload, r.TS); err != nil {
+			c.log.Error("downlink definition not applied — leaving the cursor so it is offered again",
+				"topic", r.Topic, "err", err)
+			m.DefinitionRejected()
+			return
+		}
+		m.DefinitionApplied()
+	}
+	if res.DefNext > eng.Store().CursorGet(downlinkDefCursor, downlinkDefStream) {
+		eng.Store().CursorAck(downlinkDefCursor, downlinkDefStream, res.DefNext)
 	}
 }
 

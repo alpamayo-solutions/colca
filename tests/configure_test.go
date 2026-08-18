@@ -43,10 +43,11 @@ func bindingBundle(t *testing.T) string {
 	})
 }
 
-// enrollMachineAt enrolls a machine key at a node (kind machine).
+// enrollMachineAt places an element at mount and enrolls a machine key there.
 func enrollMachineAt(t *testing.T, n *node.Node, ulid, pubkey, mount string) {
 	t.Helper()
-	b, err := json.Marshal(map[string]any{"ulid": ulid, "pubkey": pubkey, "kind": "machine", "mount": mount})
+	b, err := json.Marshal(map[string]any{"ulid": ulid, "pubkey": pubkey, "kind": "machine",
+		"element": authtest.Place(t, n.Engine, mount)})
 	if err != nil {
 		t.Fatal(err)
 	}

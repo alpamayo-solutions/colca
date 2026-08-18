@@ -110,7 +110,7 @@ func startTopo(t *testing.T) *topo {
 	}
 	tp.global, tp.cfgs["n-global"] = g, gcfg
 	enrollObserver(g)
-	authtest.EnrollNode(t, g.Registry, "n-site1", tp.keys["n-site1"].PublicHex(), "site1")
+	authtest.EnrollNodeAt(t, g.Registry, g.Engine, "n-site1", tp.keys["n-site1"].PublicHex(), "site1")
 
 	scfg := mk("n-site1",
 		&config.Parent{URL: "https://" + g.ReplAddr, Pubkey: tp.keys["n-global"].PublicHex()})
@@ -120,8 +120,8 @@ func startTopo(t *testing.T) *topo {
 	}
 	tp.site1, tp.cfgs["n-site1"] = s, scfg
 	enrollObserver(s)
-	authtest.EnrollNode(t, s.Registry, "n-edge1", tp.keys["n-edge1"].PublicHex(), "edge1")
-	authtest.EnrollNode(t, s.Registry, "n-edge2", tp.keys["n-edge2"].PublicHex(), "edge2")
+	authtest.EnrollNodeAt(t, s.Registry, s.Engine, "n-edge1", tp.keys["n-edge1"].PublicHex(), "edge1")
+	authtest.EnrollNodeAt(t, s.Registry, s.Engine, "n-edge2", tp.keys["n-edge2"].PublicHex(), "edge2")
 
 	e1cfg := mk("n-edge1",
 		&config.Parent{URL: "https://" + s.ReplAddr, Pubkey: tp.keys["n-site1"].PublicHex()})
@@ -132,7 +132,7 @@ func startTopo(t *testing.T) *topo {
 	tp.edge1, tp.cfgs["n-edge1"] = e1, e1cfg
 	enrollObserver(e1)
 	tp.m1 = authtest.NewMachine(t, "m1")
-	authtest.Enroll(t, e1.Registry, tp.m1, "m1")
+	authtest.EnrollAt(t, e1.Registry, e1.Engine, tp.m1, "m1")
 
 	e2cfg := mk("n-edge2",
 		&config.Parent{URL: "https://" + s.ReplAddr, Pubkey: tp.keys["n-site1"].PublicHex()})
@@ -143,7 +143,7 @@ func startTopo(t *testing.T) *topo {
 	tp.edge2, tp.cfgs["n-edge2"] = e2, e2cfg
 	enrollObserver(e2)
 	tp.m2 = authtest.NewMachine(t, "m2")
-	authtest.Enroll(t, e2.Registry, tp.m2, "m2")
+	authtest.EnrollAt(t, e2.Registry, e2.Engine, tp.m2, "m2")
 
 	t.Cleanup(func() { e2.Stop(); e1.Stop(); s.Stop(); g.Stop() })
 
@@ -194,6 +194,26 @@ func api(t *testing.T, n *node.Node, method, path string, body any) map[string]a
 		t.Fatalf("%s %s → %d: %v", method, path, resp.StatusCode, out)
 	}
 	return out
+}
+
+// awaitElement waits until n holds the system element sitting at path.
+//
+// A grant naming an element deep in the tree is inert at an ancestor until that
+// element's record has replicated up to it (id-grants design §4): the ancestor
+// places elements from its own subtree at their mount-inserted paths, and it
+// cannot place one it has not received yet. Provisioning propagates; the wait
+// is what makes a test observe that rather than race it.
+func awaitElement(t *testing.T, n *node.Node, path string) {
+	t.Helper()
+	waitFor(t, "the element at "+path+" to reach "+n.Cfg.ULID, 20*time.Second, func() bool {
+		for _, e := range kvAt(t, n, path) {
+			topic, _ := e.(map[string]any)["topic"].(string)
+			if strings.HasPrefix(topic, "colca/v1/_SystemElement/") {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func kvAt(t *testing.T, n *node.Node, prefix string) []any {
@@ -639,7 +659,7 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 1}`).WaitTimeout(5 * time.Second)
 	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 2}`).WaitTimeout(5 * time.Second)
 	m1.Publish("colca/v1/_Metric/m1/rpm", 1, false, `{"v": 900}`).WaitTimeout(5 * time.Second)
-	m1.Publish("colca/v1/_Signal/m1/cfg", 1, false, `{"ulid":"sig-1"}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Signal/m1/cfg", 1, false, `{"id":"sig-1"}`).WaitTimeout(5 * time.Second)
 
 	// command/ack traffic through the same node's streams
 	api(t, tp.global, "POST", "/publish", map[string]any{
@@ -650,10 +670,10 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 	m1.Publish("colca/v1/_Ack/m1/set-speed", 1, false, `{"correlation_id":"kv-eq-1","result_code":200}`).WaitTimeout(5 * time.Second)
 
 	// settle: all three state paths in KV (plus the two _EdgeNode registry
-	// entities enrollment wrote — they are state like any other entity), the
-	// ack in the commands stream
+	// entities enrollment wrote and the one _SystemElement m1 binds to — all
+	// state like any other entity), the ack in the commands stream
 	waitFor(t, "state and ack persisted at edge1", 10*time.Second, func() bool {
-		if len(kvAt(t, tp.edge1, "")) != 5 {
+		if len(kvAt(t, tp.edge1, "")) != 6 {
 			return false
 		}
 		for _, r := range fetchRecords(t, tp.edge1, "commands", "kv-eq-settle", "", 100) {
@@ -761,5 +781,45 @@ func TestRetainedDeliversCurrentStateOnConnect(t *testing.T) {
 	}
 	if p["v"].(float64) != 33.25 {
 		t.Fatalf("retained value is not the current one: %v", p)
+	}
+}
+
+// A definition authored at the ROOT reaches a level-3 edge through two hops
+// with no special routing, and arrives byte-identical: a node applies it to its
+// own store, and its children read it from there (definition-stream design §5).
+//
+// This is the transitivity the design claims falls out of the transport rather
+// than being built into it — nothing in the code knows how deep the tree is.
+func TestDefinitionAuthoredAtTheRootReachesEveryLevel(t *testing.T) {
+	tp := startTopo(t)
+	const topic = "colca/v1/_Group/n-global/01HGRP-OPS"
+
+	api(t, tp.global, "POST", "/publish", map[string]any{
+		"topic": topic,
+		"payload": map[string]any{
+			"id": "01HGRP-OPS", "name": "Ops", "grants": []any{"read:el-edge1/#"},
+		},
+	})
+
+	for _, n := range []*node.Node{tp.site1, tp.edge1, tp.edge2} {
+		waitFor(t, "the definition to reach "+n.Cfg.ULID, 20*time.Second, func() bool {
+			for _, e := range kvAt(t, n, "01HGRP-OPS") {
+				if e.(map[string]any)["topic"] == topic {
+					return true
+				}
+			}
+			return false
+		})
+	}
+
+	// Byte-identical at the bottom: no mount was inserted on the way down,
+	// because a definition has no position to translate.
+	recs := fetchRecords(t, tp.edge1, "definitions", unique("def-cursor"), "", 100)
+	var seen []string
+	for _, r := range recs {
+		seen = append(seen, r.(map[string]any)["topic"].(string))
+	}
+	if len(seen) != 1 || seen[0] != topic {
+		t.Fatalf("edge1's definitions stream = %v, want exactly %q unchanged", seen, topic)
 	}
 }

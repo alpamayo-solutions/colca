@@ -104,7 +104,22 @@ var aclActions = []string{ACLSub, ACLRead}
 
 // streams mirrors the store's fixed stream set (store.streams; the same list
 // the /debug/state route enumerates).
-var streams = []string{"metrics", "entities", "commands"}
+// streams is every persistent stream — what has an offset, live bytes and an
+// ingest count.
+var streams = []string{"metrics", "entities", "commands", "definitions"}
+
+// uplinkStreams is the subset that RISES. `definitions` is absent because they
+// descend and never rise (definition-stream design §4): a "last uplink success"
+// gauge for a stream the uplink never touches would sit at zero forever and read
+// exactly like a broken uplink.
+var uplinkStreams = []string{"metrics", "entities", "commands"}
+
+// retentionStreams is the subset the retention POLICY applies to. `definitions`
+// is absent for the same reason it is absent from the pruner's own list
+// (definition-stream design §6): it is never pruned by age or size, so a
+// pressure or blocked-by-cursor gauge for it would report progress toward a
+// policy that does not exist.
+var retentionStreams = []string{"metrics", "entities", "commands"}
 
 // gapSurfaces — the allowed `surface` label values of colca_gap_served_total
 // (design §8): `fetch` is GET /fetch (any stream), `downlink` is GET
@@ -164,6 +179,8 @@ type Metrics struct {
 	drainsActive         prometheus.Gauge       // colca_drains_active
 	drainPendingCommands *prometheus.GaugeVec   // colca_drain_pending_commands{child}
 	drainsCompleted      *prometheus.CounterVec // colca_drains_completed_total{outcome}
+	definitionsApplied   prometheus.Counter     // colca_definitions_applied_total
+	definitionsRejected  prometheus.Counter     // colca_definitions_rejected_total
 	drainsCompletedBy    map[string]prometheus.Counter
 
 	ingestBy        map[string]prometheus.Counter
@@ -316,19 +333,27 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_drains_completed_total",
 			Help: "Move-drains that reached a terminal outcome, by outcome: delivered (queue empty), expired (leftovers timed out), forced (DELETE during drain). Resets on restart.",
 		}, []string{"outcome"}),
+		definitionsApplied: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_definitions_applied_total",
+			Help: "Definitions handed down by the parent and applied here as state (definition-stream design §5). Resets on restart; the current SET is the KV view, not this counter.",
+		}),
+		definitionsRejected: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_definitions_rejected_total",
+			Help: "Definitions the parent handed down that this node refused (bad grammar, wrong class, failed validation). Non-zero means policy or types are NOT arriving and the node's cursor is parked on the offending record — always worth an alert.",
+		}),
 	}
 	m.ingestBy = counterChildren(m.ingest, streams)
 	m.rejectedBy = counterChildren(m.rejected, reasons)
-	m.uplinkFailBy = counterChildren(m.uplinkFail, streams)
+	m.uplinkFailBy = counterChildren(m.uplinkFail, uplinkStreams)
 	m.aclDenyBy = counterChildren(m.aclDeny, aclActions)
-	m.uplinkOKBy = make(map[string]prometheus.Gauge, len(streams))
-	for _, s := range streams {
+	m.uplinkOKBy = make(map[string]prometheus.Gauge, len(uplinkStreams))
+	for _, s := range uplinkStreams {
 		m.uplinkOKBy[s] = m.uplinkOK.WithLabelValues(s)
 	}
-	m.prunedRecordsBy = counterChildren(m.prunedRecords, streams)
-	m.prunedBytesBy = counterChildren(m.prunedBytes, streams)
-	m.pruneRunsBy = counterChildren(m.pruneRuns, streams)
-	m.gapRecordsBy = counterChildren(m.gapRecords, streams)
+	m.prunedRecordsBy = counterChildren(m.prunedRecords, retentionStreams)
+	m.prunedBytesBy = counterChildren(m.prunedBytes, retentionStreams)
+	m.pruneRunsBy = counterChildren(m.pruneRuns, retentionStreams)
+	m.gapRecordsBy = counterChildren(m.gapRecords, retentionStreams)
 	m.gapReceivedBy = counterChildren(m.gapReceived, streams)
 	m.gapServedBy = make(map[string]map[string]prometheus.Counter, len(streams))
 	for _, s := range streams {
@@ -400,6 +425,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied,
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
+		m.definitionsApplied, m.definitionsRejected,
 		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
 	return m
@@ -740,6 +766,28 @@ func (m *Metrics) DrainCompleted(child, outcome string) {
 	m.drainsCompleted.WithLabelValues(outcome).Inc()
 }
 
+// DefinitionApplied counts one definition applied from the downlink
+// (definition-stream design §5).
+func (m *Metrics) DefinitionApplied() {
+	if m == nil {
+		return
+	}
+	m.definitionsApplied.Inc()
+}
+
+// DefinitionRejected counts one definition this node refused to apply.
+//
+// Worth alerting on: unlike a rejected client publish, which costs one client
+// one message, a rejected definition parks the node's definition cursor — so
+// nothing behind it arrives either, and the node quietly stops learning about
+// new groups and types.
+func (m *Metrics) DefinitionRejected() {
+	if m == nil {
+		return
+	}
+	m.definitionsRejected.Inc()
+}
+
 // storeCollector derives the gauge families from the store (and, for the
 // retention families, the node's retention policy) at scrape time.
 type storeCollector struct {
@@ -832,7 +880,7 @@ func (c *storeCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(descCursorAdvanceAge, prometheus.GaugeValue,
 			age, cur.Name, cur.Stream)
 	}
-	for _, s := range streams {
+	for _, s := range retentionStreams {
 		ch <- prometheus.MustNewConstMetric(descRetentionPressure, prometheus.GaugeValue,
 			c.pressure(s, now), s)
 		ch <- prometheus.MustNewConstMetric(descBlockedByCursor, prometheus.GaugeValue,

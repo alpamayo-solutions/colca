@@ -58,8 +58,8 @@ func mirrorBundle(t *testing.T) *contracts.Table {
 	str := map[string]any{"type": "string", "minLength": 1}
 	return writeBundle(t, map[string]any{
 		"_Metric":        obj("data", true, []string{"v"}, map[string]any{"v": numeric}),
-		"_SystemElement": obj("entity", true, []string{"ulid"}, map[string]any{"ulid": str}),
-		"_Signal":        obj("entity", true, []string{"ulid"}, map[string]any{"ulid": str}),
+		"_SystemElement": obj("entity", true, []string{"id"}, map[string]any{"id": str}),
+		"_Signal":        obj("entity", true, []string{"id"}, map[string]any{"id": str}),
 		"_Ack":           obj("ack", false, []string{"correlation_id", "result_code"}, map[string]any{"correlation_id": str, "result_code": numeric}),
 		"_CmdParam":      obj("cmd", false, []string{"correlation_id", "expires_at"}, map[string]any{"correlation_id": str, "expires_at": numeric}),
 	})
@@ -81,8 +81,9 @@ func TestFloorParityCorpus(t *testing.T) {
 		{"_Metric", `{"v": "not-a-number"}`},
 		{"_Metric", `{}`},
 		{"_Metric", ``}, // tombstone: data class admits it
-		{"_SystemElement", `{"ulid": "x"}`},
-		{"_SystemElement", `{"ulid": ""}`},
+		{"_SystemElement", `{"id": "x"}`},
+		{"_SystemElement", `{"id": ""}`},
+		{"_SystemElement", `{"ulid": "x"}`}, // the registry's field name is not this contract's
 		{"_SystemElement", ``},
 		{"_Ack", `{"correlation_id": "c", "result_code": 200}`},
 		{"_Ack", `{"correlation_id": "c"}`},
@@ -114,8 +115,10 @@ func bundleEngine(t *testing.T) *Engine {
 	// to "admin" (conservative by construction) — a bundle-declared new
 	// command contract therefore demands the highest grant class until the
 	// plugin names its hazard class. Pinned below.
-	ids.entries["writer"] = &uns.Entry{ULID: "writer", Kind: uns.KindMachine, Mount: "writer", Grants: []string{"cmd:#:admin"}}
-	ids.entries["paramonly"] = &uns.Entry{ULID: "paramonly", Kind: uns.KindMachine, Mount: "paramonly", Grants: []string{"cmd:#:param"}}
+	ids.entries["writer"] = &uns.Entry{ULID: "writer", Kind: uns.KindMachine, Element: "el-writer", Grants: []string{"cmd:#:admin"}}
+	ids.mounts["writer"] = "writer"
+	ids.entries["paramonly"] = &uns.Entry{ULID: "paramonly", Kind: uns.KindMachine, Element: "el-paramonly", Grants: []string{"cmd:#:param"}}
+	ids.mounts["paramonly"] = "paramonly"
 	e := New(s, &config.Config{ULID: "n-edge1"}, ids, nil, nil, nil)
 	numeric := map[string]any{"type": "number"}
 	str := map[string]any{"type": "string", "minLength": 1}

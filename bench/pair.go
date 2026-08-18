@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
@@ -42,7 +43,23 @@ type Pair struct {
 
 // enroll generates a key for ulid, enrolls it (kind machine) at reg and
 // returns the identity.
-func enroll(dir string, reg *registry.Manager, ulid, mount string, grants ...string) (*benchIdentity, error) {
+// place authors a system element at path in n's own namespace and returns its
+// id. An identity binds to an element, not to a path (id-grants design §4), so
+// every placed enrollment needs this first.
+func place(n *node.Node, path string) (string, error) {
+	elementID := "el-" + strings.ReplaceAll(path, "/", "-")
+	payload, err := json.Marshal(map[string]string{"id": elementID, "name": path})
+	if err != nil {
+		return "", err
+	}
+	topic := "colca/v1/_SystemElement/" + n.Cfg.ULID + "/" + path
+	if _, err := n.Engine.IngestAdmin(topic, payload); err != nil {
+		return "", fmt.Errorf("place element at %s: %w", path, err)
+	}
+	return elementID, nil
+}
+
+func enroll(dir string, reg *registry.Manager, ulid, element string, grants ...string) (*benchIdentity, error) {
 	id, err := identity.Generate(filepath.Join(dir, ulid+".key"))
 	if err != nil {
 		return nil, err
@@ -51,7 +68,7 @@ func enroll(dir string, reg *registry.Manager, ulid, mount string, grants ...str
 	if err != nil {
 		return nil, err
 	}
-	entry, err := json.Marshal(uns.Entry{ULID: ulid, Pubkey: id.PublicHex(), Kind: uns.KindMachine, Mount: mount, Grants: grants})
+	entry, err := json.Marshal(uns.Entry{ULID: ulid, Pubkey: id.PublicHex(), Kind: uns.KindMachine, Element: element, Grants: grants})
 	if err != nil {
 		return nil, err
 	}
@@ -97,8 +114,14 @@ func StartPair(dir string, machines int) (*Pair, error) {
 		hub.Stop()
 		return nil, err
 	}
-	// The edge's node key must be enrolled at the hub before the edge dials in.
-	childEntry, err := json.Marshal(uns.Entry{ULID: "n-edge", Pubkey: edgeID.PublicHex(), Kind: uns.KindNode, Mount: "edge1"})
+	// The edge's node key must be enrolled at the hub before the edge dials in,
+	// and the element it binds to must exist before that.
+	edgeElement, err := place(hub, "edge1")
+	if err != nil {
+		hub.Stop()
+		return nil, err
+	}
+	childEntry, err := json.Marshal(uns.Entry{ULID: "n-edge", Pubkey: edgeID.PublicHex(), Kind: uns.KindNode, Element: edgeElement})
 	if err != nil {
 		hub.Stop()
 		return nil, err
@@ -122,7 +145,13 @@ func StartPair(dir string, machines int) (*Pair, error) {
 	p.Edge, p.EdgeCfg = edge, edgeCfg
 	for i := 1; i <= machines; i++ {
 		ulid := fmt.Sprintf("m%d", i)
-		mid, err := enroll(dir, edge.Registry, ulid, ulid)
+		machineElement, err := place(edge, ulid)
+		if err != nil {
+			edge.Stop()
+			hub.Stop()
+			return nil, err
+		}
+		mid, err := enroll(dir, edge.Registry, ulid, machineElement)
 		if err != nil {
 			edge.Stop()
 			hub.Stop()

@@ -38,6 +38,9 @@ var allowedKeywords = map[string]bool{
 var classByName = map[string]uns.Class{
 	"data":   uns.ClassData,
 	"entity": uns.ClassEntity,
+	// A definition descends and is applied as state (definition-stream design
+	// §2): its path is its own identity, so nothing rewrites it at a hop.
+	"definition": uns.ClassDefinition,
 	"cmd":    uns.ClassCmd,
 	"ack":    uns.ClassAck,
 }

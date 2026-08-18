@@ -146,6 +146,16 @@ func (s *Server) evaluateDrain(childULID string) {
 // naturally reaches 0 on its own — it never itself decides completion.
 func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped bool) {
 	st := s.eng.Store()
+	mount, placed := s.eng.MountOf(e.ULID)
+	if !placed {
+		// The child's element stopped resolving mid-drain. Nothing can be said
+		// about what is still addressed to it, and "nothing pending" would
+		// auto-revoke it — so report one pending record and let the drain wait
+		// for the namespace to come back.
+		s.log.Error("move-drain: the draining child's element does not resolve — treating as still pending",
+			"child", e.ULID, "element", e.Element)
+		return 1, 1, false
+	}
 	cursor := st.CursorGet(uns.DownlinkCursorPrefix+e.ULID, "commands")
 	_, gapped = st.Gap("commands", cursor)
 	from := cursor
@@ -165,7 +175,7 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped 
 		}
 		// Same mount boundary check as the /downlink filter (server.go): the
 		// path separator is the boundary, "mount10" is not under "mount1".
-		return strings.HasPrefix(p.Path, e.Mount+"/")
+		return strings.HasPrefix(p.Path, mount+"/")
 	}
 	for from < next {
 		recs, nxt, err := st.Read("commands", from, drainScanBatch, filter)
