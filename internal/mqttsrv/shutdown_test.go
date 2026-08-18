@@ -9,6 +9,16 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 )
 
+// closeBudget is how long a shutdown may take before the test calls it hung. It
+// is deliberately far above any real shutdown: the failure it catches is a
+// deadlock, where Close never returns at all, so any finite bound works and a
+// generous one cannot flake on a loaded CI runner.
+const closeBudget = 30 * time.Second
+
+// promptCloseBudget is the tighter bound for the "shutdown is not merely finite,
+// it is quick" claim.
+const promptCloseBudget = 5 * time.Second
+
 // Shutdown used to be able to hang forever. mochi's Clients.GetByListener
 // (clients.go:95) holds a read lock and then calls Clients.Len, which takes the
 // same read lock again; Go blocks that second acquisition the moment a writer
@@ -18,9 +28,10 @@ import (
 // TestTimeSyncBeaconPeriodicCadence, i.e. as an unrelated test, which is why it
 // gets its own named coverage here.
 //
-// Server.Close now raises the door's closing flag, evicts the clients it has and
-// waits for the map to empty before touching the listeners, so no writer can be
-// queued when GetByListener runs.
+// Server.Close now raises the door's closing flag, disconnects its clients from
+// a copied snapshot (holding no lock), and shuts the listeners down with a
+// no-op closer — so closeListenerClients is never reached with clients in
+// flight, and GetByListener never runs with a writer queued behind it.
 
 // A node must finish shutting down while clients are attached — the case that
 // deadlocked. The deadline is the assertion: on the old code Close never
@@ -41,18 +52,15 @@ func TestCloseReturnsWithClientsAttached(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Close with clients attached: %v", err)
 		}
-	case <-time.After(drainDeadline + 10*time.Second):
+	case <-time.After(closeBudget):
 		t.Fatal("Close did not return with clients attached — shutdown deadlocked (see mqttsrv.Server.Close)")
 	}
 }
 
-// The drain must COMPLETE, not merely time out. Falling through on the deadline
-// is the safety valve, and it re-opens the very race the drain removes — so a
-// Close that routinely burned the full deadline would be the deadlock waiting to
-// happen again. Clients that were told to stop unwind in milliseconds, so
-// finishing well inside the deadline is the observable difference between
-// "drained" and "gave up".
-func TestCloseDrainsRatherThanTimingOut(t *testing.T) {
+// Shutdown must be prompt, not merely finite. A Close that crawled would mean
+// clients are not unwinding when told to, which is the state the deadlock needs;
+// a client that has been disconnected unwinds in milliseconds.
+func TestCloseIsPromptWithAClientAttached(t *testing.T) {
 	w := newWorld(t)
 	connect(t, w.srv.Addr(), "drain-me", w.m1)
 
@@ -60,9 +68,10 @@ func TestCloseDrainsRatherThanTimingOut(t *testing.T) {
 	if err := w.srv.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed >= drainDeadline {
-		t.Fatalf("Close took %v, i.e. it hit the %v drain deadline instead of draining — "+
-			"clients are not unwinding on Stop, and the shutdown race is still reachable", elapsed, drainDeadline)
+	if elapsed := time.Since(start); elapsed >= promptCloseBudget {
+		t.Fatalf("Close took %v, over the %v a disconnected client needs to unwind — "+
+			"shutdown is stalling somewhere, and a stalled shutdown is what the deadlock needs",
+			elapsed, promptCloseBudget)
 	}
 }
 
@@ -122,7 +131,7 @@ func TestCloseRacesDisconnectingClients(t *testing.T) {
 			if err != nil {
 				t.Fatalf("round %d: Close: %v", round, err)
 			}
-		case <-time.After(drainDeadline + 10*time.Second):
+		case <-time.After(closeBudget):
 			t.Fatalf("round %d: Close did not return while clients were disconnecting — "+
 				"shutdown deadlocked (see mqttsrv.Server.Close)", round)
 		}
