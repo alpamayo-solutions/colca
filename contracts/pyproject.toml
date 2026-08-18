@@ -13,15 +13,16 @@ authors = [
     { name = "Colca contributors" }
 ]
 dependencies = [
-    # Transition window (schema-bundle design §9.2/§12a): franzmq 0.5.0 moved the
-    # publisher's identity to topic level 4, and services cut over to the
-    # embedded broker one at a time — their own franzmq pin is the switch. An
-    # exact pin here would make that switch global, because every service that
-    # depends on this package by path resolves against it. The range closes to
-    # ==0.5.0 when the last consumer has moved; until then the boundary
-    # check (scripts/check_dependency_boundary.py) is what keeps the skew
-    # readable.
-    "franzmq>=0.4.1,<0.6",
+    # Transition window (schema-bundle design §9.2/§12a): 0.5.0 moved the
+    # publisher's identity to topic level 4 and 0.6.x aligned authentication and
+    # acknowledgement with the broker. Services cut over one at a time and their
+    # own franzmq pin is the switch, so an exact pin here would make that switch
+    # global — every service depending on this package by path resolves against
+    # it. The range spans the migration (the connector is already on 0.6.x, the
+    # rest still on 0.4.1) and closes to an exact pin when the last consumer has
+    # moved; until then scripts/check-dependency-boundary.py is what keeps
+    # the skew readable.
+    "franzmq>=0.4.1,<0.7",
     "python-decouple>=3.8",
 ]
 

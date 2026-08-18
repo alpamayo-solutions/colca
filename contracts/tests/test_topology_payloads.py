@@ -23,6 +23,29 @@ def test_system_element_topic_format():
     assert str(topic) == "colca/v1/_SystemElement/n-edge1/factory/line1/m6"
 
 
+def test_signal_carries_its_binding():
+    """The tag→signal binding lives on the Signal; DataTagContext is gone."""
+    sig = SignalPayload(
+        id="01HSIG", name="temp",
+        connector="opcua-1", tag_id="ns=2;s=Temp",
+        is_published=True, is_logged=True,
+        system_element_id="01HSE",
+    )
+    decoded = SignalPayload.decode(sig.encode(), timestamp=0)
+
+    assert (decoded.connector, decoded.tag_id) == ("opcua-1", "ns=2;s=Temp")
+    assert decoded.is_published and decoded.is_logged
+    assert decoded.system_element_id == "01HSE"
+
+
+def test_signal_holds_no_path_references():
+    """A record's topic is rewritten at every hop; its payload is not, so a path
+    stored inside one means something else at an ancestor (design §3.2)."""
+    fields = SignalPayload.__dataclass_fields__
+    assert "topic_name" not in fields
+    assert "system_element_topic" not in fields
+
+
 def test_signal_topic_format():
     topic = Topic(payload_type=SignalPayload, node_id="n-edge1",
                   context=["factory", "line1", "m6", "machine_state"])
@@ -81,7 +104,9 @@ def test_signal_roundtrip_minimal():
     decoded = SignalPayload.decode(encoded, timestamp=0)
     assert decoded.id == "01H..."
     assert decoded.name == "machine_state"
-    assert decoded.source == ""
+    assert decoded.connector is None
+    assert decoded.tag_id is None
+    assert decoded.is_published is False
     assert decoded.data_type is None
     assert decoded.index_type is None
     assert decoded.metadata == {}
@@ -93,11 +118,13 @@ def test_signal_roundtrip_full():
         id="01HSIG",
         name="machine_state",
         description="Standardised machine state enum",
-        system_element_topic="factory/line1/m6",
-        source="computed",
+        system_element_id="01HSE",
+        connector="opcua-1",
+        tag_id="ns=2;s=MachineState",
+        is_published=True,
+        is_logged=True,
         data_type=DataType.STRING,
         index_type=IndexType.TIME,
-        topic_name="factory/line1/m6/machine_state",
         unit=None,
         precision=None,
         min_value=None,
@@ -114,11 +141,12 @@ def test_signal_roundtrip_full():
     assert decoded.id == original.id
     assert decoded.name == original.name
     assert decoded.description == original.description
-    assert decoded.system_element_topic == original.system_element_topic
-    assert decoded.source == original.source
+    assert decoded.system_element_id == original.system_element_id
+    assert decoded.connector == original.connector
+    assert decoded.tag_id == original.tag_id
+    assert decoded.is_published and decoded.is_logged
     assert decoded.data_type == DataType.STRING
     assert decoded.index_type == IndexType.TIME
-    assert decoded.topic_name == original.topic_name
     assert decoded.config == original.config
     assert decoded.metadata == original.metadata
     assert decoded.implements_contract == original.implements_contract

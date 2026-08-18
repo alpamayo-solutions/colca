@@ -450,23 +450,37 @@ class SystemElement(Payload):
 
 @dataclass
 class Signal(Payload):
-    """Topology entity published as retained MQTT.
+    """Topology entity, authored by the node.
 
-    Topic: colca/v1/_Signal/{_topic_context_section}
-    Superset of SignalData (still embedded in DataTagContext
-    until the Schritt-2 migration replaces SignalData with this type).
-    Published by the api service on Signal create/update; soft-delete publishes a
-    retained empty payload (tombstone).
+    Topic: ``colca/v1/_Signal/{node-id}/{path…}`` — the record's own topic is its
+    position in the namespace, so nothing here restates it.
+
+    The signal also carries its **binding**: the one data tag it reads from,
+    named by ``(connector, tag_id)``. That replaces the DataTagContext, whose
+    many-tags-to-one-signal relationship was never adopted (data-model binding
+    design §2). The reference is a pair of identities rather than a path
+    because a record's topic is rewritten at every hop while its payload is
+    not — a path stored in here would silently mean something else at an
+    ancestor (§3.2).
+
+    Written by the node in response to a `_CmdConfigure` command; a retired
+    signal is a retained empty payload (tombstone).
     """
 
     id: str
     name: str
     description: str = ""
-    system_element_topic: Optional[str] = None  # _topic_context_section of owner
-    source: str = ""
+    #: ULID of the SystemElement that owns this signal.
+    system_element_id: Optional[str] = None
+    #: ULID of the connector owning the bound tag, and the tag's id in its catalogue.
+    connector: Optional[str] = None
+    tag_id: Optional[str] = None
+    #: The connector publishes metrics for this signal.
+    is_published: bool = False
+    #: The read side historises it (consumed by the historian bridge).
+    is_logged: bool = False
     data_type: Optional[DataType] = None
     index_type: Optional[IndexType] = None
-    topic_name: str = ""
     unit: Optional[str] = None
     precision: Optional[int] = None
     min_value: Optional[float] = None
@@ -504,7 +518,7 @@ class Signal(Payload):
 # The class hierarchy IS the routing information: anything deriving from Cmd
 # lands in the commands stream under the hazard class its name carries
 # (_CmdParam → param, _CmdOperate → operate, _CmdMaintain → maintain,
-# _CmdAdmin → admin). The wire contract at the colca door is
+# _CmdConfigure → configure, _CmdAdmin → admin). The wire contract at the colca door is
 # correlation_id + expires_at (unix milliseconds); created_at is a
 # franzmq-base field colca publishers do not stamp — the bundle generator
 # drops it from `required` for every cmd-class contract.
@@ -524,6 +538,21 @@ class CmdOperate(Cmd):
 @dataclass
 class CmdMaintain(Cmd):
     """Calibration, config updates."""
+
+
+@dataclass
+class CmdConfigure(Cmd):
+    """Data-model editing: signal bindings and the elements that hold them.
+
+    Verbs (the path at the target node): ``signal/upsert``, ``signal/delete``,
+    ``signal/autobind``. Executed by the target NODE, which then writes the
+    resulting `_Signal` records under its own identity — a human may command
+    but may not author state (data-model binding design §4).
+
+    Its own hazard class rather than `maintain`: the four machine classes are a
+    ladder of how dangerous a command is to the equipment, and editing the data
+    model is not on that ladder. Someone who may bind a signal must not thereby
+    be allowed to send maintenance commands to a PLC (§3.3)."""
 
 
 @dataclass

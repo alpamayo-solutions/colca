@@ -33,9 +33,42 @@ def test_determinism_two_runs_one_digest():
 
 def test_inventory_every_registered_class_exactly_once():
     body, _ = gb.build_bundle()
-    assert set(body["contracts"]) == set(PAYLOAD_CLASSES), (
-        "bundle inventory must equal the payload registry (§14.3: full set, unpruned)"
+    assert set(body["contracts"]) == set(PAYLOAD_CLASSES) - set(gb.NOT_ON_THE_WIRE), (
+        "bundle inventory must equal the payload registry minus the contracts "
+        "deliberately kept off the wire (§14.3: full set, unpruned)"
     )
+
+
+def test_contracts_kept_off_the_wire_are_absent_and_say_why():
+    body, _ = gb.build_bundle()
+    for contract, reason in gb.NOT_ON_THE_WIRE.items():
+        assert contract not in body["contracts"], f"{contract} must not be publishable"
+        # A bare exclusion list rots into a junk drawer; every entry names the
+        # producer or container that keeps the Python type alive.
+        assert len(reason) > 40, f"{contract}: give a reason, not a label"
+
+
+def test_the_retired_binding_contracts_are_off_the_wire():
+    """DataTagContext is retired; a door that does not know it rejects it."""
+    body, _ = gb.build_bundle()
+    assert "_DataTagContext" not in body["contracts"]
+    assert "_DataTagContexts" not in body["contracts"]
+
+
+def test_the_catalogue_is_one_record_carrying_its_own_revision():
+    body, _ = gb.build_bundle()
+    assert "_DataTags" in body["contracts"], "the catalogue is a wire contract"
+    assert "_DataTag" not in body["contracts"], "a single tag is not a record"
+    # The content hash is what lets a connector skip republishing an unchanged
+    # catalogue, which is the whole reason one fat record is affordable.
+    from colca_data_contracts import DataTag, DataTags
+    tags = [DataTag(id="a", name="A", is_writable=False, is_readable=True)]
+    first = DataTags(data_tags=tags, connector="opcua-1")
+    same = DataTags(data_tags=list(tags), connector="opcua-1")
+    other = DataTags(data_tags=tags + [DataTag(id="b", name="B", is_writable=False, is_readable=True)],
+                     connector="opcua-1")
+    assert first.version == same.version
+    assert first.version != other.version
 
 
 def test_builtin_only_contracts_absent():
@@ -93,6 +126,8 @@ def _dummy(t):
 def test_parity_golden_encodes_validate_and_mutants_reject():
     body, _ = gb.build_bundle()
     for ident, cls in sorted(PAYLOAD_CLASSES.items()):
+        if ident in gb.NOT_ON_THE_WIRE:
+            continue  # no schema to be parity-checked against
         entry = body["contracts"][ident]
         schema = entry["schema"]
         validator = jsonschema.Draft202012Validator(schema)
@@ -123,7 +158,8 @@ def test_cmd_contracts_carry_the_door_contract():
     """The colca command door needs correlation_id + expires_at; created_at is
     dropped from required (publishers do not stamp it)."""
     body, _ = gb.build_bundle()
-    for ident in ("_CmdParam", "_CmdOperate", "_CmdMaintain", "_CmdAdmin", "_Cmd", "_ApiWriteCmd"):
+    for ident in ("_CmdParam", "_CmdOperate", "_CmdMaintain", "_CmdConfigure",
+                  "_CmdAdmin", "_Cmd", "_ApiWriteCmd"):
         entry = body["contracts"][ident]
         assert entry["class"] == "cmd", ident
         req = entry["schema"].get("required", [])

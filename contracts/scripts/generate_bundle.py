@@ -44,10 +44,7 @@ CLASS_TABLE: dict[str, str] = {
     "_DBDump": "data",
     "_SystemElement": "entity",
     "_Signal": "entity",
-    "_DataTag": "entity",
     "_DataTags": "entity",
-    "_DataTagContext": "entity",
-    "_DataTagContexts": "entity",
     "_ServiceDetails": "entity",
     "_AnnotationType": "entity",
     "_MetadataType": "entity",
@@ -82,6 +79,27 @@ TOMBSTONE_OVERRIDES: dict[str, bool] = {}
 # colca binary itself — they must never appear in a bundle, and the loader
 # refuses a bundle that declares them.
 BUILTIN_ONLY = {"_StreamGap", "_EdgeNode", "_TimeSync"}
+
+# Registered payload classes that are deliberately NOT offered to the broker,
+# with the reason each one is here. They stay Python types because something
+# still constructs them; they are absent from the bundle because nothing may
+# publish them, and a door that does not know a contract rejects it (0x90).
+#
+# This is not a place to park contracts that are merely unused — every entry
+# names a concrete producer or container, and the entry leaves when that does.
+NOT_ON_THE_WIRE: dict[str, str] = {
+    "_DataTag": (
+        "an element of the _DataTags catalogue, never a record of its own: "
+        "discovery is atomic, so a single tag is not a valid state "
+        "(data-model binding design §3.1)"
+    ),
+    "_DataTagContext": (
+        "retired from the wire with the DataTagContext model; still serialized "
+        "by the un-migrated Django publisher until both are deleted "
+        "(data-model binding design §2, §11)"
+    ),
+    "_DataTagContexts": "as _DataTagContext — the list form of the same retired contract",
+}
 
 # The JSON-Schema keyword subset the loader enforces (design §4.1).
 ALLOWED_KEYWORDS = {
@@ -209,6 +227,8 @@ def build_bundle(git_sha: str = "unknown") -> tuple[dict, str]:
                 f"generate_bundle: {identifier} is builtin-only (design §10.2) and must never "
                 f"be a registered payload class"
             )
+        if identifier in NOT_ON_THE_WIRE:
+            continue
         klass = _class_of(identifier, cls)
         schema = _schema_for_dataclass(
             cls,
