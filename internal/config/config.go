@@ -67,12 +67,17 @@ type Parent struct {
 }
 
 type API struct {
+	// Addr is the mTLS/token-authenticated API door. Conventionally ":443" —
+	// HTTPS, so an operator's tooling reaches this node as https://node with
+	// no port suffix (local-service-trust design §4).
 	Addr  string `yaml:"addr"`
 	Token string `yaml:"token"`
 	// LocalAddr is the unpublished, plaintext local HTTP door (local-service-
 	// trust design §4): reachability from inside the deployment's own
 	// network IS the credential, so this listener carries no TLSConfig and
-	// serves no admin routes. Absent = no local API door on this node.
+	// serves no admin routes. Conventionally ":80" — plaintext HTTP, so a
+	// local service's configuration becomes http://colca with no port.
+	// Absent = no local API door on this node.
 	LocalAddr string `yaml:"local_addr"`
 }
 
@@ -93,7 +98,10 @@ type Config struct {
 
 	// MQTTLocal is the unpublished, plaintext local door (local-service-trust
 	// design §4): reachability from inside the deployment's own network IS
-	// the credential, so this listener carries no TLSConfig. Absent = no
+	// the credential, so this listener carries no TLSConfig. Conventionally
+	// ":1883" — the conventional plaintext MQTT port, used deliberately
+	// because the "1883 announces plaintext" rule was written for a port a
+	// scanner can reach, and this listener is never published. Absent = no
 	// local door on this node.
 	MQTTLocal Endpoint `yaml:"mqtt_local"`
 
