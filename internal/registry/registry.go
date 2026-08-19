@@ -64,6 +64,14 @@ type Manager struct {
 	// engine is built after the registry. Until it is wired nothing resolves,
 	// which is the fail-closed answer — an unplaced identity has no place.
 	ns uns.Namespace
+	// place and upsert are self-registration's mount-authoring dependencies
+	// (local-service-trust design §3.2), late-bound like ns: place answers
+	// which element already sits at a path, upsert authors one there when
+	// Register's declared mount is missing. Both nil until SetAuthoring wires
+	// them, which is fine — Register is not reachable before the doors that
+	// call it are wired either.
+	place  uns.Placements
+	upsert func(path, elementID string) error
 }
 
 // New loads every locally enrolled entry from the store. A corrupt persisted
@@ -131,6 +139,28 @@ func (m *Manager) SetNamespace(ns uns.Namespace) {
 	m.mu.Lock()
 	m.ns = ns
 	m.mu.Unlock()
+}
+
+// SetAuthoring late-binds the mount-declaration dependencies self-registration
+// needs (local-service-trust design §3.2): place answers which element already
+// sits at a path — the same uns.Placements port a parent's Ancestry.Extend
+// consults — and upsert authors one there when a declared mount is missing.
+// Late-bound in the same style as SetNamespace: both are projections of
+// records the engine holds, built after the registry.
+func (m *Manager) SetAuthoring(place uns.Placements, upsert func(path, elementID string) error) {
+	m.mu.Lock()
+	m.place = place
+	m.upsert = upsert
+	m.mu.Unlock()
+}
+
+// Placements exposes the authoring dependency SetAuthoring wired, so a caller
+// (a door, or a test) can ask what this node has placed without a second
+// resolver of its own.
+func (m *Manager) Placements() uns.Placements {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.place
 }
 
 // mountOf resolves an entry's placement at this moment. The caller holds at
