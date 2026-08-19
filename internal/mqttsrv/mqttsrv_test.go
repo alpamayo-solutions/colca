@@ -364,6 +364,49 @@ func TestAMachineKeyIsNotAcceptedOnTheLocalDoor(t *testing.T) {
 	}
 }
 
+// A machine (or child node) may be given a friendly `name` — uns.Entry.Validate
+// permits it on any kind, and Manager.Enroll indexes any non-empty Name into
+// byName regardless of kind (registry.go). That makes it resolvable through
+// ByName, not merely the ULID collision TestAMachineKeyIsNotAcceptedOnTheLocalDoor
+// covers, and Register's own idempotent-reconnect branch ("entry exists? return
+// it") does no kind check — so without the post-Register MayUseDoor(DoorLocal)
+// check, a certless local session could present that name and be handed the
+// machine's own ULID: its topic identity, its grants, its mount. Nothing in the
+// tree sets Name on a machine or node today, so this was latent rather than
+// live — one operator action away.
+func TestALocalNameThatResolvesToAKeyedIdentityByNameIsRefused(t *testing.T) {
+	s := startServerWithLocalDoor(t)
+	element := authtest.Place(t, s.eng, "press3")
+	m := authtest.NewMachine(t, "01JNAMEDMACHINE")
+	entry := uns.Entry{ULID: m.ULID, Pubkey: m.Pubkey, Kind: uns.KindMachine, Name: "friendly-name", Element: element}
+	raw, err := json.Marshal(&entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.reg.Enroll(raw); err != nil {
+		t.Fatalf("enroll a named machine: %v", err)
+	}
+	// Get(name) must NOT be the thing catching this: "friendly-name" is not
+	// anyone's ULID, so that check passes clean through, and only the
+	// post-Register MayUseDoor check can still refuse it.
+	if _, ok := s.reg.Get("friendly-name"); ok {
+		t.Fatal("precondition broken: \"friendly-name\" must not itself be a ulid")
+	}
+
+	const line = `colca_auth_rejections_total{door="local",reason="kind"}`
+	if v := scrapeMetric(t, s.m, line); v != 0 {
+		t.Fatalf("%s = %v before any connect, want 0", line, v)
+	}
+
+	c := dialPlainMQTT(t, s.LocalAddr(), "friendly-name")
+	if err := c.Connect(); err == nil {
+		t.Fatal("a machine's friendly name was claimed by a certless client on the local door")
+	}
+	if v := scrapeMetric(t, s.m, line); v != 1 {
+		t.Fatalf("%s = %v after the named-machine CONNECT, want exactly 1", line, v)
+	}
+}
+
 // TestRetainedReplayDeliversAllMessages is a behavioral regression test for
 // the data-loss bug the cardinality benchmark scenario found
 // (colca/bench/cardinality.go): a fresh subscriber replaying the retained set

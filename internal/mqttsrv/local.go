@@ -35,17 +35,31 @@ func mountDeclaration(pk packets.Packet) string {
 // network position already proved the door, so there is nothing left to prove
 // about the identity beyond resolving it to a registry entry.
 //
-// The one case this refuses is a name that already resolves — by ULID, not by
-// name — to a KEYED identity (a machine or a child node enrolled on 8883/9443).
-// Register alone would not catch that: its own uniqueness check is scoped to
-// the byName index (registry.go's Enroll), a different key space than byID, so
-// presenting a machine's ULID as a "name" here would fall straight through to
-// self-registration and silently mint an unrelated kind=local entry rather than
-// refuse the connection. A name is how the local door finds ITS OWN entries;
-// a keyed identity is found by key, and letting its ULID double as a name on
-// this door would blur a boundary that is supposed to stay sharp — the local
-// door hands out no identity whose whole point is that it proves itself with a
-// key.
+// Two checks refuse a name that resolves to a KEYED identity (a machine or a
+// child node), and both are needed — they catch it through different paths:
+//
+//   - h.reg.Get(name): a name that collides with some OTHER entry's ULID.
+//     Register alone would not catch this — its own uniqueness check is
+//     scoped to the byName index (registry.go's Enroll), a different key
+//     space than byID — so presenting a machine's ULID as a "name" here would
+//     otherwise fall straight through to self-registration and silently mint
+//     an unrelated kind=local entry.
+//   - entry.MayUseDoor(uns.DoorLocal), checked AFTER Register returns:
+//     uns.Entry.Validate permits a `name` field on KindMachine and KindNode
+//     too, and Manager.Enroll indexes ANY non-empty Name into byName
+//     regardless of kind (registry.go). So an operator who gives a machine or
+//     child node a friendly `name` makes it resolvable by ByName — and
+//     Register's own idempotent-reconnect path (registry/local.go: "entry
+//     exists? return it, no kind check") would hand that keyed identity's
+//     ULID to a certless local session. This is the check that actually
+//     closes that hole: it asks the domain a question rather than
+//     enumerating the ways a name might resolve to something keyed, so it
+//     also subsumes the Get(name) case above and any future kind.
+//
+// A name is how the local door finds ITS OWN entries; a keyed identity is
+// found by key, and letting a name double for one on this door would blur a
+// boundary that is supposed to stay sharp — the local door hands out no
+// identity whose whole point is that it proves itself with a key.
 func (h *colcaHook) authenticateLocal(cl *mqtt.Client, pk packets.Packet) bool {
 	name := string(pk.Connect.Username)
 	if name == "" {
@@ -62,6 +76,11 @@ func (h *colcaHook) authenticateLocal(cl *mqtt.Client, pk packets.Packet) bool {
 	if err != nil {
 		h.log.Warn("local door rejected: registration failed", "name", name, "err", err)
 		h.metrics.AuthReject(metrics.DoorLocal, metrics.AuthRegister)
+		return false
+	}
+	if !entry.MayUseDoor(uns.DoorLocal) {
+		h.log.Warn("local door rejected: name resolves to a keyed identity", "name", name, "ulid", entry.ULID, "kind", entry.Kind)
+		h.metrics.AuthReject(metrics.DoorLocal, metrics.AuthKind)
 		return false
 	}
 	// mochi carries Username to OnPublish/OnACLCheck, and every later lookup is
