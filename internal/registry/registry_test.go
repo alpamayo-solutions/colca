@@ -123,6 +123,10 @@ func TestEnrollValidationAndUniqueness(t *testing.T) {
 		{"invalid entry", machine("", "z/c", pub("ef"))},
 		{"element named by a path", uns.Entry{ULID: "01M4", Pubkey: pub("12"), Kind: uns.KindMachine, Element: "z/c"}},
 		{"element not placed at this node", uns.Entry{ULID: "01M5", Pubkey: pub("34"), Kind: uns.KindMachine, Element: "el-nowhere"}},
+		// The element-less read-only observer is gone (design §7): a machine
+		// must be placed, same as a node — nothing proved an unplaced identity
+		// belongs to this deployment.
+		{"element-less machine", machine("01O1", "", pub("56"))},
 	}
 	for _, c := range cases {
 		if _, _, err := m.Enroll(entryJSON(t, c.e)); err == nil {
@@ -131,13 +135,6 @@ func TestEnrollValidationAndUniqueness(t *testing.T) {
 	}
 	if _, _, err := m.Enroll([]byte("{not json")); err == nil {
 		t.Error("malformed JSON: expected rejection")
-	}
-	// Two element-less observers may coexist (nothing to collide).
-	if _, _, err := m.Enroll(entryJSON(t, machine("01O1", "", pub("56")))); err != nil {
-		t.Errorf("observer 1: %v", err)
-	}
-	if _, _, err := m.Enroll(entryJSON(t, machine("01O2", "", pub("78")))); err != nil {
-		t.Errorf("observer 2: %v", err)
 	}
 }
 
@@ -245,27 +242,6 @@ func TestEnrollAndRevokeMirrorToBus(t *testing.T) {
 	}
 	if seen[1].topic != seen[0].topic || !seen[1].retain || seen[1].payload != 0 {
 		t.Fatalf("revoke delivery = %+v, want empty retained clear on the same topic", seen[1])
-	}
-}
-
-func TestObserverTopicUsesPlaceholderSegment(t *testing.T) {
-	st := openStore(t, t.TempDir())
-	m, _ := newManager(t, st)
-	_, off, err := m.Enroll(entryJSON(t, uns.Entry{
-		ULID: "01O1", Pubkey: pub("ab"), Kind: uns.KindMachine, Grants: []string{"read:z/#"},
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	recs, _, err := st.Read("entities", off, 1, nil)
-	if err != nil || len(recs) != 1 {
-		t.Fatalf("read: %v err=%v", recs, err)
-	}
-	if recs[0].Topic != "colca/v1/_EdgeNode/01O1/_observer" {
-		t.Fatalf("observer topic = %q", recs[0].Topic)
-	}
-	if _, err := uns.Parse(recs[0].Topic); err != nil {
-		t.Fatalf("observer topic must satisfy the grammar: %v", err)
 	}
 }
 
@@ -482,8 +458,11 @@ func TestBoundToNamesTheIdentitiesStandingOnAnElement(t *testing.T) {
 	if got := m.BoundTo(elementAt("z/b")); len(got) != 0 {
 		t.Fatalf("BoundTo(z/b) = %v, want nothing", got)
 	}
+	// "" is not a position query (design §7: an empty element now means
+	// bound-to-the-node for the one kind that may go unplaced) — BoundTo
+	// short-circuits it rather than answer a question it was never asked.
 	if got := m.BoundTo(""); len(got) != 0 {
-		t.Fatalf("BoundTo(%q) = %v — an element-less observer binds to nothing", "", got)
+		t.Fatalf("BoundTo(%q) = %v, want nothing", "", got)
 	}
 	if _, _, err := m.Revoke("01M1"); err != nil {
 		t.Fatal(err)

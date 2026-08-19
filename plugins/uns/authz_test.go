@@ -23,6 +23,10 @@ func (nsByPath) Reaches(string) bool { return false }
 
 var ns = nsByPath{}
 
+// hex64 is a syntactically valid ed25519 pubkey (64 hex chars) — for tests
+// that only need Validate to get past the pubkey shape check.
+var hex64 = strings.Repeat("ab", 32)
+
 // mapScope is the explicit test scope: which elements sit where at this node,
 // and which ones are this node or above it. Used where the answer has to CHANGE
 // — a rename, a reparent, an inherited grant.
@@ -135,10 +139,61 @@ func TestEntryValidate(t *testing.T) {
 			t.Errorf("%s: expected validation error", c.name)
 		}
 	}
-	// A machine observer (bound to nothing) is valid.
-	obs := entry("", readAt("werk1"))
-	if err := obs.Validate(); err != nil {
-		t.Fatalf("observer entry rejected: %v", err)
+}
+
+// A local service is the one kind that may be unplaced: the local door
+// already proved it belongs to this deployment. A machine or a node must be
+// placed explicitly — the element-less read-only observer is gone (design
+// §7): bound-to-nothing and bound-to-everything must never be the same
+// stored value.
+func TestALocalEntryNeedsANameAndNoPubkey(t *testing.T) {
+	e := &Entry{ULID: "01J", Kind: KindLocal, Name: "connector-opcua", Element: "el-press3"}
+	if err := e.Validate(); err != nil {
+		t.Fatalf("a valid local entry was rejected: %v", err)
+	}
+	nameless := &Entry{ULID: "01J", Kind: KindLocal, Element: "el-press3"}
+	if err := nameless.Validate(); err == nil {
+		t.Fatal("a nameless local entry validated; the name is how the local door finds it")
+	}
+	keyed := &Entry{ULID: "01J", Kind: KindLocal, Name: "connector-opcua", Element: "el-press3", Pubkey: hex64}
+	if err := keyed.Validate(); err == nil {
+		t.Fatal("a local entry carrying a pubkey validated; the door is its proof, it holds no key")
+	}
+}
+
+// Unplaced is a position, not a missing value: a local service with no element is
+// bound to the NODE. A machine's is required — the local door proved a local
+// service belongs to this deployment, and nothing proved that about a machine.
+func TestALocalServiceMayBeUnplaced(t *testing.T) {
+	e := &Entry{ULID: "01J", Kind: KindLocal, Name: "dataops"}
+	if err := e.Validate(); err != nil {
+		t.Fatalf("an unplaced local service was rejected: %v", err)
+	}
+}
+
+func TestAMachineOrNodeMustBePlaced(t *testing.T) {
+	for _, e := range []*Entry{
+		{ULID: "01J", Pubkey: hex64, Kind: KindMachine},
+		{ULID: "01J", Pubkey: hex64, Kind: KindNode},
+	} {
+		if err := e.Validate(); err == nil {
+			t.Fatalf("kind %q validated unplaced; only a local service may be", e.Kind)
+		}
+	}
+}
+
+func TestLocalIdentitiesUseOnlyTheLocalDoor(t *testing.T) {
+	l := &Entry{Kind: KindLocal}
+	if !l.MayUseDoor(DoorLocal) {
+		t.Fatal("a local identity was refused the local door")
+	}
+	for _, d := range []Door{DoorMQTT, DoorHTTP, DoorRepl} {
+		if l.MayUseDoor(d) {
+			t.Fatalf("a local identity was admitted at door %v; it holds no key to present there", d)
+		}
+	}
+	if (&Entry{Kind: KindMachine}).MayUseDoor(DoorLocal) {
+		t.Fatal("a machine was admitted at the local door; that door proves nothing about it")
 	}
 }
 

@@ -18,6 +18,12 @@ type Kind string
 const (
 	KindMachine Kind = "machine"
 	KindNode    Kind = "node"
+	// KindLocal is a service inside the node's own deployment. It is the one
+	// kind with no pubkey: it presents itself at a door that is unreachable
+	// from outside the deployment, and reaching that door is the proof
+	// (local-service-trust design §3). It is also the one kind that may be
+	// unplaced — see Entry.Element.
+	KindLocal Kind = "local"
 	// KindHuman is an EPHEMERAL kind: a verified OIDC token becomes a
 	// KindHuman entry via TokenEntry (human-authz design §2.3). It is valid
 	// for Authorize but rejected by enrollment validation — humans are
@@ -30,15 +36,21 @@ const (
 // r/{ulid} value.
 type Entry struct {
 	ULID   string `json:"ulid"`
-	Pubkey string `json:"pubkey"` // hex ed25519 public key, pinned on connect
+	Pubkey string `json:"pubkey"` // hex ed25519 public key, pinned on connect. KindLocal holds none — the door is its proof.
 	Kind   Kind   `json:"kind"`
+	// Name identifies a KindLocal entry — it holds no pubkey, so this is how
+	// the local door finds its entry (local-service-trust design §3).
+	Name string `json:"name,omitempty"`
 	// Element is the system element this identity binds to — its placement,
-	// named by identity rather than by path (id-grants design §4). "" = a
-	// read-only observer, which binds to nothing (machine only). The path it
-	// mounts at is resolved through the Namespace every time one is needed, so
-	// renaming or reparenting the element moves the mount with no
-	// re-enrollment; a path stored here would freeze the position as it was at
-	// enrollment.
+	// named by identity rather than by path (id-grants design §4). "" means
+	// bound to THE NODE ITSELF: a complete position, not a missing value.
+	// Only KindLocal may be unplaced — the local door already proved it
+	// belongs to this deployment. A machine or a node must be placed
+	// explicitly at enrollment: nothing proved that about an identity arriving
+	// from outside the deployment. The path it mounts at is resolved through
+	// the Namespace every time one is needed, so renaming or reparenting the
+	// element moves the mount with no re-enrollment; a path stored here would
+	// freeze the position as it was at enrollment.
 	Element string   `json:"element,omitempty"`
 	Grants  []string `json:"grants,omitempty"`
 	// Status is the entry's lifecycle state (move-drain design §3.2):
@@ -85,18 +97,25 @@ const (
 	DoorMQTT Door = iota // the machine-facing broker door
 	DoorHTTP             // the machine-facing HTTP door
 	DoorRepl             // the node-to-node replication door
+	// DoorLocal is unpublished and plaintext, reachable only from inside the
+	// node's own deployment network — reaching it is the credential
+	// (local-service-trust design §3).
+	DoorLocal
 )
 
 // MayUseDoor reports whether this identity is allowed to present itself at the
 // given door. Machines connect to the MQTT and HTTP doors, nodes to the
-// replication door; humans arrive as tokens and are authorized per publish
-// rather than per door, so they hold no door of their own.
+// replication door, local services to the local door; humans arrive as tokens
+// and are authorized per publish rather than per door, so they hold no door of
+// their own.
 func (e *Entry) MayUseDoor(d Door) bool {
 	switch d {
 	case DoorMQTT, DoorHTTP:
 		return e.Kind == KindMachine
 	case DoorRepl:
 		return e.Kind == KindNode
+	case DoorLocal:
+		return e.Kind == KindLocal
 	}
 	return false
 }
@@ -112,23 +131,32 @@ func (e *Entry) Validate() error {
 	if e.ULID == "" {
 		return fmt.Errorf("entry: ulid is required")
 	}
-	if len(e.Pubkey) != 64 {
-		return fmt.Errorf("entry %s: pubkey must be 64 hex chars (ed25519), got %d", e.ULID, len(e.Pubkey))
-	}
-	if _, err := hex.DecodeString(e.Pubkey); err != nil {
-		return fmt.Errorf("entry %s: pubkey is not hex: %w", e.ULID, err)
-	}
 	switch e.Kind {
-	case KindMachine:
-		// no element = read-only observer, allowed
-	case KindNode:
-		if e.Element == "" {
-			return fmt.Errorf("entry %s: a node needs an element to bind to — only machines may be element-less observers", e.ULID)
+	case KindMachine, KindNode:
+		if len(e.Pubkey) != 64 {
+			return fmt.Errorf("entry %s: pubkey must be 64 hex chars (ed25519), got %d", e.ULID, len(e.Pubkey))
+		}
+		if _, err := hex.DecodeString(e.Pubkey); err != nil {
+			return fmt.Errorf("entry %s: pubkey is not hex: %w", e.ULID, err)
+		}
+	case KindLocal:
+		if e.Name == "" {
+			return fmt.Errorf("entry %s: a local service needs a name — it is how the local door finds its entry", e.ULID)
+		}
+		if e.Pubkey != "" {
+			return fmt.Errorf("entry %s: a local service holds no key; the door is its proof", e.ULID)
 		}
 	case KindHuman:
 		return fmt.Errorf("entry %s: humans are tokens, not registry entries — KindHuman cannot be enrolled", e.ULID)
 	default:
-		return fmt.Errorf("entry %s: kind must be %q or %q, got %q", e.ULID, KindMachine, KindNode, e.Kind)
+		return fmt.Errorf("entry %s: kind must be %q, %q or %q, got %q", e.ULID, KindMachine, KindNode, KindLocal, e.Kind)
+	}
+	// An element is optional, and absent means bound to the NODE — a complete
+	// answer, not a missing value. Required for the kinds whose belonging to
+	// this deployment nothing has proved: the local door already proved that
+	// about a KindLocal entry, so it alone may go unplaced.
+	if e.Element == "" && e.Kind != KindLocal {
+		return fmt.Errorf("entry %s: a %s must be placed at a system element", e.ULID, e.Kind)
 	}
 	if e.Element != "" {
 		if err := validElementID(e.Element); err != nil {
@@ -500,9 +528,10 @@ func zoneOf(sc Scope, elementID string) (string, bool) {
 }
 
 // readZones is the entry's effective read scope: the default own zone (§5.2,
-// element-less observers have none) plus every explicit read grant, each
-// resolved through the node's scope at this moment — so a renamed element is
-// read under its new path immediately and a reparented one moves with its
+// an unplaced entry resolves none here yet — zoneOf treats "" as "no zone",
+// not yet as "the whole node") plus every explicit read grant, each resolved
+// through the node's scope at this moment — so a renamed element is read
+// under its new path immediately and a reparented one moves with its
 // subtree.
 func readZones(sc Scope, e *Entry) []string {
 	var zones []string

@@ -81,7 +81,9 @@ func enroll(dir string, reg *registry.Manager, ulid, element string, grants ...s
 // StartPair builds and starts a hub and an edge, mTLS-linked with the edge
 // mounted at "edge1" on the hub, and returns them running. It enrolls
 // `machines` MQTT identities at the edge (m1..mN, each mounted at its own
-// ulid) plus a mount-less read-all observer at the hub.
+// ulid) plus a read-all observer at the hub, mounted at "observer" (a machine
+// must be placed; it reads everything through its read:# grant, not through
+// its own placement).
 func StartPair(dir string, machines int) (*Pair, error) {
 	hubKey := filepath.Join(dir, "hub.key")
 	edgeKey := filepath.Join(dir, "edge.key")
@@ -109,7 +111,12 @@ func StartPair(dir string, machines int) (*Pair, error) {
 	hubCfg.Repl.Addr = hub.ReplAddr
 
 	p := &Pair{Hub: hub, HubCfg: hubCfg, Machines: machines, machineIDs: map[string]*benchIdentity{}}
-	p.observerID, err = enroll(dir, hub.Registry, "observer", "", "read:#")
+	observerElement, err := place(hub, "observer")
+	if err != nil {
+		hub.Stop()
+		return nil, err
+	}
+	p.observerID, err = enroll(dir, hub.Registry, "observer", observerElement, "read:#")
 	if err != nil {
 		hub.Stop()
 		return nil, err

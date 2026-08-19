@@ -93,13 +93,15 @@ func startTopo(t *testing.T) *topo {
 			},
 		}
 	}
-	// Every node gets a mount-less read-all `observer` identity (may subscribe
-	// to everything, can never publish); the two edges each mount one machine.
-	// Enrollment happens AFTER a node starts — entry-before-connect is the
-	// contract, and the registry is runtime state, not config.
+	// Every node gets a read-all `observer` identity (may subscribe to
+	// everything via its read:# grant, can never publish; its own placement at
+	// "observer" carries no extra scope beyond that grant). The two edges each
+	// mount one machine besides. Enrollment happens AFTER a node starts —
+	// entry-before-connect is the contract, and the registry is runtime state,
+	// not config.
 	enrollObserver := func(n *node.Node) {
 		o := authtest.NewMachine(t, "observer")
-		authtest.Enroll(t, n.Registry, o, "", "read:#")
+		authtest.EnrollAt(t, n.Registry, n.Engine, o, "observer", "read:#")
 		tp.obs[n.Cfg.ULID] = o
 	}
 
@@ -670,10 +672,12 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 	m1.Publish("colca/v1/_Ack/m1/set-speed", 1, false, `{"correlation_id":"kv-eq-1","result_code":200}`).WaitTimeout(5 * time.Second)
 
 	// settle: all three state paths in KV (plus the two _EdgeNode registry
-	// entities enrollment wrote and the one _SystemElement m1 binds to — all
-	// state like any other entity), the ack in the commands stream
+	// entities enrollment wrote and the two _SystemElement records m1 and the
+	// observer each bind to — a machine must be placed now, so the observer's
+	// own enrollment authors one too — all state like any other entity), the
+	// ack in the commands stream
 	waitFor(t, "state and ack persisted at edge1", 10*time.Second, func() bool {
-		if len(kvAt(t, tp.edge1, "")) != 6 {
+		if len(kvAt(t, tp.edge1, "")) != 7 {
 			return false
 		}
 		for _, r := range fetchRecords(t, tp.edge1, "commands", "kv-eq-settle", "", 100) {

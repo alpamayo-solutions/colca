@@ -31,7 +31,8 @@ import (
 var scrapeMetric = metricstest.Value
 
 // world is the broker fixture: TLS listener, registry with two enrolled
-// machines (m1 mounted at "m1"; observer mountless with read:#), engine
+// machines (m1 mounted at "m1"; obs mounted at "obs" with read:# — reads
+// everything through the grant, not through its own placement), engine
 // late-bound like node assembly does, kick wired.
 type world struct {
 	srv     *Server
@@ -76,7 +77,7 @@ func newWorld(t *testing.T) *world {
 	// binds to is authored before it enrolls (id-grants design §4).
 	reg.SetNamespace(eng.Elements())
 	authtest.EnrollAt(t, reg, eng, w.m1, "m1")
-	authtest.Enroll(t, reg, w.obs, "", "read:#")
+	authtest.EnrollAt(t, reg, eng, w.obs, "obs", "read:#")
 	reg.SetKick(s.Kick)
 	go func() { _ = s.Serve() }()
 	t.Cleanup(func() {

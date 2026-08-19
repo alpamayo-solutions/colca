@@ -261,7 +261,7 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 	m1machine := authtest.NewMachine(t, "m1")
 	obsMachine := authtest.NewMachine(t, "obs")
 	authtest.EnrollAt(t, first.Registry, first.Engine, m1machine, "m1")
-	authtest.Enroll(t, first.Registry, obsMachine, "", "read:#")
+	authtest.EnrollAt(t, first.Registry, first.Engine, obsMachine, "obs", "read:#")
 	m1 := connectMQTT(t, first.MQTTAddr, "m1-pre", m1machine)
 	// Two state topics: "pressure" is never touched again — only the KV
 	// re-seed can bring it back, so it is the assertion the mutation check
@@ -424,7 +424,7 @@ func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 	// one retained path on a fresh subscriber. Enrolled AFTER Start, so the
 	// reseed count above stays exactly the seeded path count.
 	obsMachine := authtest.NewMachine(t, "obs")
-	authtest.Enroll(t, n.Registry, obsMachine, "", "read:#")
+	authtest.EnrollAt(t, n.Registry, n.Engine, obsMachine, "obs", "read:#")
 	obs := connectMQTT(t, n.MQTTAddr, "obs-cost", obsMachine)
 	got := make(chan paho.Message, 1)
 	stok := obs.Subscribe("colca/v1/_Metric/m1/m1/temp9999", 1, func(_ paho.Client, m paho.Message) {
@@ -622,7 +622,7 @@ func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
 	m1machine := authtest.NewMachine(t, "m1")
 	obsMachine := authtest.NewMachine(t, "obs")
 	authtest.EnrollAt(t, first.Registry, first.Engine, m1machine, "m1")
-	authtest.Enroll(t, first.Registry, obsMachine, "", "read:#")
+	authtest.EnrollAt(t, first.Registry, first.Engine, obsMachine, "obs", "read:#")
 	m1 := connectMQTT(t, first.MQTTAddr, "m1-tomb", m1machine)
 	publishMQTT(t, m1, "colca/v1/_Metric/m1/pressure", `{"v":7}`)
 	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", `{"v":1}`)
@@ -724,7 +724,7 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 	// runtime registry state, enrolled before the child node starts.
 	authtest.EnrollNodeAt(t, parent.Registry, parent.Engine, "n-child", childID.PublicHex(), "child1")
 	obsMachine := authtest.NewMachine(t, "obs")
-	authtest.Enroll(t, parent.Registry, obsMachine, "", "read:#")
+	authtest.EnrollAt(t, parent.Registry, parent.Engine, obsMachine, "obs", "read:#")
 
 	childCfg := &config.Config{
 		ULID:     "n-child",
