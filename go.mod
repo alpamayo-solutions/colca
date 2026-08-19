@@ -8,6 +8,7 @@ require (
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/mochi-mqtt/server/v2 v2.7.9
+	github.com/oklog/ulid/v2 v2.1.2
 	github.com/prometheus/client_golang v1.16.0
 	github.com/prometheus/client_model v0.3.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
