@@ -107,6 +107,16 @@ func tryConnect(addr, clientID string, m *authtest.Machine, username string) (pa
 		SetClientID(clientID).
 		SetUsername(username).
 		SetProtocolVersion(4). // one physical connect per attempt (no 3.1 downgrade retry)
+		// paho reconnects on its own by default, which puts the client
+		// population outside the test's control: every test that drops a
+		// connection (revocation kicks, shutdown) gets a reconnect it never
+		// asked for. In the shutdown tests that reconnect lands DURING
+		// Listeners.CloseAll — an attachClient Add(1) concurrent with the
+		// Wait() that ends CloseAll, which is mochi's documented WaitGroup
+		// misuse (server.go:407-408 vs listeners.go:134) and fails -race.
+		// Tests here reconnect by calling tryConnect again, never implicitly.
+		SetAutoReconnect(false).
+		SetConnectRetry(false).
 		SetConnectTimeout(5 * time.Second)
 	c := paho.NewClient(opts)
 	tok := c.Connect()
