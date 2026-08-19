@@ -49,12 +49,13 @@ func (c *ConfigExec) Handles(contract string) bool { return contract == "_CmdCon
 //
 // The only reaction is the lifecycle trigger: a connector's catalogue arriving
 // with nothing bound to it yet gets bound, running the exact binding logic the
-// `signal/autobind` verb runs. It needs no identity lookup of its own — the
-// arriving record already carries what autobind would have had to COMPUTE
-// (its own topic and its own tags) — it only asks whether any of ITS tags
-// already have a signal, which is what tells a fresh connector from a
-// republish. Autobind is idempotent by invariant, so this path needs no
-// coordination with the people and commands that may also invoke it — the
+// `signal/autobind` verb runs. The record being SHAPED like a catalogue is not
+// proof it IS one — anything with read scope can see another connector's tag
+// ids, so a record naming real tag ids is not enough either — only a path some
+// enrolled entry's own identity computes to is (local-service-trust design
+// §6), which is why entryOwns runs before anything in the record is trusted.
+// Once past that gate, autobind is idempotent by invariant, so this path needs
+// no coordination with the people and commands that may also invoke it — the
 // second caller simply finds nothing left to do.
 func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	if !c.autobindNew || contract != "_DataTags" || len(payload) == 0 {
@@ -63,6 +64,9 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	p, err := Parse(topic)
 	if err != nil {
 		return
+	}
+	if !c.entryOwns(p.Path) {
+		return // no enrolled entry's computed catalogue topic matches: ignore it
 	}
 	var cat catalogue
 	if err := json.Unmarshal(payload, &cat); err != nil {
@@ -75,6 +79,22 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 		}
 	}
 	c.bindCatalogue(p.Path, payload)
+}
+
+// entryOwns reports whether some identity this node has enrolled computes
+// path as its own catalogue topic — the read-side mirror of what autobind
+// computes forward (mount + name), run over the local registry rather than
+// over records. The registry is a handful of identities, so this scan costs
+// nothing; it is a scan over IDENTITIES, which is what the reverted design's
+// scan over RECORDS was not.
+func (c *ConfigExec) entryOwns(path string) bool {
+	for _, e := range c.bound.Entries() {
+		mount, _ := c.elements.PathOf(e.Element)
+		if joinPath(mount, e.Name) == path {
+			return true
+		}
+	}
+	return false
 }
 
 // signalRef is one record to write: where it goes, and what goes there.

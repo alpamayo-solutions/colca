@@ -27,6 +27,12 @@ type EntityStore interface {
 	NodeID() string
 }
 
+// EntryRef is the part of a registry entry the domain needs to compute where
+// it publishes: its identity, its name, and its element. Returned by
+// Bindings.Entries rather than *uns.Entry to keep the port narrow, the same
+// reason EntryOf returns two fields instead of the whole entry.
+type EntryRef struct{ ULID, Name, Element string }
+
 // Bindings answers which identities bind to an element, and who one identity
 // is. Declared here for the same reason as EntityStore and satisfied the same
 // way — the core's registry manager fits it structurally, without either side
@@ -42,6 +48,15 @@ type Bindings interface {
 	// §6). Returning the two fields rather than *uns.Entry keeps this port
 	// narrow and stops the domain depending on the entry's whole shape.
 	EntryOf(ulid string) (name, element string, ok bool)
+	// Entries lists the identities enrolled at this node, so the domain can
+	// ask which of them, if any, a record's arrival position belongs to — the
+	// lifecycle trigger's version of the same computation autobind runs
+	// forward. The registry only lists; it has no notion of what a catalogue
+	// topic looks like — that knowledge stays in this package (design §4/§6).
+	// The list is the local registry, a handful of identities, so a scan over
+	// it costs nothing; the reverted design's mistake was scanning RECORDS,
+	// not identities.
+	Entries() []EntryRef
 }
 
 // KVRecord is one entity record as the store currently holds it.

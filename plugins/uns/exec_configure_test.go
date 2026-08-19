@@ -196,7 +196,9 @@ type entryFake struct {
 }
 
 // registryFake is a stand-in for the registry: which identity is which
-// (EntryOf) — BoundTo is unused here, kept only to satisfy Bindings.
+// (EntryOf), and the full list of what's enrolled (Entries, for the lifecycle
+// trigger's legitimacy check) — BoundTo is unused here, kept only to satisfy
+// Bindings.
 type registryFake struct {
 	entries map[string]entryFake
 }
@@ -206,6 +208,14 @@ func newRegistryFake() *registryFake { return &registryFake{entries: map[string]
 func (r *registryFake) EntryOf(ulid string) (string, string, bool) {
 	e, ok := r.entries[ulid]
 	return e.name, e.element, ok
+}
+
+func (r *registryFake) Entries() []EntryRef {
+	out := make([]EntryRef, 0, len(r.entries))
+	for ulid, e := range r.entries {
+		out = append(out, EntryRef{ULID: ulid, Name: e.name, Element: e.element})
+	}
+	return out
 }
 
 func (r *registryFake) BoundTo(string) []string { return nil }
@@ -360,6 +370,13 @@ func rebind(t *testing.T, c *ConfigExec, signalID, newTag string) {
 // The catalogue is found by COMPUTING its topic from the connector's entry, so a
 // record published anywhere else is never read — including one that mimics the
 // connector's name at a different path.
+//
+// This is the test a scan-based lookup fails under mutation, and it fails
+// NONDETERMINISTICALLY: which of the two same-named records a scan finds
+// depends on map iteration order, so a reintroduced scan passes some runs and
+// fails others. That flakiness is not a property of this test — it is the
+// reverted design's own bug (a search can match more than one record)
+// surfacing exactly where it should.
 func TestAutobindReadsOnlyTheComputedCatalogueTopic(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "el-press3", "line1/press3")
@@ -406,8 +423,14 @@ func TestASignalPointsAtTheTagsIdentityAndKeepsItsOwn(t *testing.T) {
 	}
 }
 
-// The claim the composed id destroyed: rebinding must not change identity.
-func TestRebindingASignalLeavesItsIdentityIntact(t *testing.T) {
+// Rebinding — the only mechanism for it is signal/upsert with the same id and
+// a different data_tag — must leave the id untouched. Every Metric carries
+// signal_id, so an id that moved on rebind would orphan that measurement
+// point's whole history under the old one. (Composed-id minting itself is
+// TestASignalPointsAtTheTagsIdentityAndKeepsItsOwn's claim, not this one: this
+// test pins that upsert preserves whatever id it is given, which is the
+// property that actually protects history across a rebind.)
+func TestRebindingASignalPreservesItsID(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "el-press3", "line1/press3")
 	bindEntry(t, c, "01JCONN", "opcua-press", "el-press3")
@@ -545,6 +568,7 @@ func TestAutobindMakesTagNamesAddressable(t *testing.T) {
 
 func TestNewConnectorIsBoundOnArrivalWhenEnabled(t *testing.T) {
 	c := newTriggerConfigExec(t)
+	bindEntry(t, c, "01JCONN", "opcua-1", "")
 	topic := "colca/v1/_DataTags/n1/opcua-1"
 	payload := mustJSON(map[string]any{"data_tags": tags("t1")})
 
@@ -552,6 +576,24 @@ func TestNewConnectorIsBoundOnArrivalWhenEnabled(t *testing.T) {
 
 	if got := signalsAt(c); len(got) != 1 {
 		t.Fatalf("signals = %+v, want the catalogue bound on arrival", got)
+	}
+}
+
+// A record shaped exactly like a real catalogue — even one naming real tag
+// ids — triggers nothing if it arrives at a path no enrolled entry's computed
+// topic matches. Read scope lets any service see another connector's tag ids,
+// so the shape and the ids prove nothing; only an entry's own identity
+// computing to this path does.
+func TestObserveIgnoresARecordAtAPathNoEntryOwns(t *testing.T) {
+	c := newTriggerConfigExec(t)
+	bindEntry(t, c, "01JCONN", "opcua-press", "")
+
+	forged := "colca/v1/_DataTags/n1/junk/opcua-press"
+	payload := mustJSON(map[string]any{"data_tags": tagsWithIDs("01JTAG1")})
+	c.Observe("_DataTags", forged, payload)
+
+	if got := signalsAt(c); len(got) != 0 {
+		t.Fatalf("signals = %+v, want none — the trigger fired on a path no entry owns", got)
 	}
 }
 
@@ -571,6 +613,7 @@ func TestNothingHappensOnArrivalWhenDisabled(t *testing.T) {
 // must not re-bind tags a person has since deleted on purpose.
 func TestARepublishedCatalogueIsNotANewConnector(t *testing.T) {
 	c := newTriggerConfigExec(t)
+	bindEntry(t, c, "01JCONN", "opcua-1", "")
 	topic := "colca/v1/_DataTags/n1/opcua-1"
 	payload := mustJSON(map[string]any{"data_tags": tags("t1", "t2")})
 
@@ -767,6 +810,7 @@ type bindings map[string][]string
 
 func (b bindings) BoundTo(elementID string) []string     { return b[elementID] }
 func (b bindings) EntryOf(string) (string, string, bool) { return "", "", false }
+func (b bindings) Entries() []EntryRef                   { return nil }
 
 // Retiring a position an identity binds to would leave that identity able to
 // authenticate with nowhere to write — its mount resolves through this very

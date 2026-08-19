@@ -483,6 +483,20 @@ func (m *Manager) EntryOf(ulid string) (name, element string, ok bool) {
 	return e.Name, e.Element, true
 }
 
+// Entries lists the identities this node has enrolled (uns.Bindings port):
+// the lifecycle trigger asks which of them, if any, an arriving record's
+// position belongs to. This package only lists — it has no notion of what a
+// catalogue topic looks like; that computation lives in plugins/uns.
+func (m *Manager) Entries() []uns.EntryRef {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]uns.EntryRef, 0, len(m.byID))
+	for _, e := range m.byID {
+		out = append(out, uns.EntryRef{ULID: e.ULID, Name: e.Name, Element: e.Element})
+	}
+	return out
+}
+
 func (m *Manager) Get(ulid string) (*uns.Entry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
