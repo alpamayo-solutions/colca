@@ -417,6 +417,27 @@ func TestAutobindRefusesAConnectorThisNodeDoesNotHold(t *testing.T) {
 	}
 }
 
+// An entry bound to an element this node cannot resolve must not silently
+// read as unplaced (bound to the node itself, mount ""): PathOf fails closed
+// on an unresolvable element, and autobind must too, or it would compute the
+// wrong catalogue topic instead of refusing.
+func TestAutobindRefusesAConnectorBoundToAnUnresolvableElement(t *testing.T) {
+	c := newConfigExec(t)
+	// el-ghost is never placed, so PathOf(el-ghost) fails.
+	bindEntry(t, c, "01JCONN", "opcua-press", "el-ghost")
+	// Planted at the topic a silent fallback-to-unplaced would compute
+	// (mount ""): if the unresolvable element were mistaken for "unplaced"
+	// instead of refused, autobind would find this and succeed with 200
+	// instead of refusing — so a wrong implementation cannot pass by
+	// accident of there being no catalogue to read either way.
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/opcua-press", tags("t1"))
+
+	code, msg, result := c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+	if code != 409 || result != "conflict" || !strings.Contains(msg, "opcua-press") {
+		t.Fatalf("code %d result %q msg %q — want 409/conflict naming the connector", code, result, msg)
+	}
+}
+
 func TestASignalPointsAtTheTagsIdentityAndKeepsItsOwn(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "el-press3", "line1/press3")
@@ -606,6 +627,25 @@ func TestObserveIgnoresARecordAtAPathNoEntryOwns(t *testing.T) {
 
 	if got := signalsAt(c); len(got) != 0 {
 		t.Fatalf("signals = %+v, want none — the trigger fired on a path no entry owns", got)
+	}
+}
+
+// entryOwns compares the FULL topic, not just the path: a record whose path
+// coincidentally matches a local entry's computed path but arrived under a
+// DIFFERENT node id — the shape a child's record carries once mount-inserted
+// at a parent — must not be treated as that local entry's own catalogue.
+func TestObserveIgnoresARecordAtTheRightPathButAnotherNode(t *testing.T) {
+	c := newTriggerConfigExec(t)
+	bindEntry(t, c, "01JCONN", "opcua-1", "")
+
+	// Same path this entry's own topic would compute to (mount "", name
+	// "opcua-1"), but filed under a different node id.
+	wrongNode := "colca/v1/_DataTags/n-other/opcua-1"
+	payload := mustJSON(map[string]any{"data_tags": tagsWithIDs("01JTAG1")})
+	c.Observe("_DataTags", wrongNode, payload)
+
+	if got := signalsAt(c); len(got) != 0 {
+		t.Fatalf("signals = %+v, want none — entryOwns matched on path alone, ignoring the node", got)
 	}
 }
 

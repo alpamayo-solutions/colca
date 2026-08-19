@@ -72,7 +72,7 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	if err != nil {
 		return
 	}
-	if !c.entryOwns(p.Path) {
+	if !c.entryOwns(topic) {
 		return // no enrolled entry's computed catalogue topic matches: ignore it
 	}
 	var cat catalogue
@@ -89,19 +89,39 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 }
 
 // entryOwns reports whether some identity this node has enrolled computes
-// path as its own catalogue topic — the read-side mirror of what autobind
-// computes forward (mount + name), run over the local registry rather than
-// over records. The registry is a handful of identities, so this scan costs
-// nothing; it is a scan over IDENTITIES, which is what the reverted design's
-// scan over RECORDS was not.
-func (c *ConfigExec) entryOwns(path string) bool {
+// topic as its own catalogue topic — the read-side mirror of what autobind
+// computes forward (node + mount + name), run over the local registry rather
+// than over records. The comparison is the FULL topic, node id included, not
+// just the path: two records that agree on path but not on which node
+// published them are not the same catalogue, and comparing paths alone would
+// let one stand in for the other. The registry is a handful of identities, so
+// this scan costs nothing; it is a scan over IDENTITIES, which is what the
+// reverted design's scan over RECORDS was not.
+func (c *ConfigExec) entryOwns(topic string) bool {
 	for _, e := range c.bound.Entries() {
-		mount, _ := c.elements.PathOf(e.Element)
-		if joinPath(mount, e.Name) == path {
+		mount, ok := c.mountFor(e.Element)
+		if !ok {
+			continue // cannot place this entry here: it owns nothing
+		}
+		if "colca/v1/_DataTags/"+c.store.NodeID()+"/"+joinPath(mount, e.Name) == topic {
 			return true
 		}
 	}
 	return false
+}
+
+// mountFor resolves an identity's element to this node's local path,
+// distinguishing "legitimately unplaced" (element == "", bound to the node
+// itself) from "cannot be resolved here" (element names something this node
+// does not hold). PathOf already fails closed on the latter (elements.go
+// §PathOf); this wrapper is what stops a caller from collapsing that failure
+// into the empty mount an unplaced identity gets, which would silently widen
+// where that identity is treated as bound.
+func (c *ConfigExec) mountFor(element string) (mount string, ok bool) {
+	if element == "" {
+		return "", true
+	}
+	return c.elements.PathOf(element)
 }
 
 // signalRef is one record to write: where it goes, and what goes there.
@@ -285,7 +305,14 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string) {
 		// at the node that owns the identity.
 		return 404, "signal/autobind: " + body.Connector + " is not enrolled at this node", "invalid"
 	}
-	mount, _ := c.elements.PathOf(element) // "" for an unplaced identity: the node itself
+	mount, ok := c.mountFor(element)
+	if !ok {
+		// The entry is enrolled and placed, but this node cannot resolve
+		// where — fail closed rather than treat it as unplaced, or a
+		// connector this node genuinely cannot locate would read as bound to
+		// the node itself and its catalogue topic would be computed wrong.
+		return 409, "signal/autobind: " + name + " is bound to an element this node cannot resolve", "conflict"
+	}
 	catTopic := "colca/v1/_DataTags/" + c.store.NodeID() + "/" + joinPath(mount, name)
 	raw, found := c.store.KVGet(catTopic)
 	if !found {
