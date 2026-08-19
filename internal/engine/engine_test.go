@@ -287,7 +287,18 @@ func TestLevel4MustBeThisNode(t *testing.T) {
 // tests/node/test_node_contract.py::test_a_publish_outside_the_write_scope_is_rejected).
 func TestAPublishOutsideTheWriteScopeIsRejected(t *testing.T) {
 	e := newTestEngineScoped(t, "n1", "el-press3", "line1/press3")
-	_, err := e.IngestClient("01JSVC", "colca/v1/_Metric/n1/line1/press4/temp", metricPayload)
+
+	// Inside the granted element's subtree: admitted. Asserted first so a
+	// broken placement (el-press3 never actually resolving to line1/press3)
+	// cannot make the rejection below pass for the wrong reason — a scope
+	// that grants nothing rejects everything too.
+	res, err := e.IngestClient("01JSVC", "colca/v1/_Metric/n1/line1/press3/leaf", metricPayload)
+	if err != nil || !res.Persisted {
+		t.Fatalf("a publish inside the granted write scope was rejected: %v", err)
+	}
+
+	// Outside it: denied, even though grammar/level-4 are otherwise fine.
+	_, err = e.IngestClient("01JSVC", "colca/v1/_Metric/n1/line1/press4/temp", metricPayload)
 	if err == nil {
 		t.Fatal("a scoped service wrote outside its subtree")
 	}

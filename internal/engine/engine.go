@@ -27,13 +27,16 @@ import (
 // from two sides.
 type LocalDeliver func(topic string, payload []byte, retain bool)
 
-// Result describes what an ingest did. Topic is the post-rewrite topic, i.e.
-// exactly what was persisted.
+// Result describes what an ingest did. Topic is exactly what was persisted —
+// a client's own publish stores its topic unchanged (local-service-trust
+// design §2/§5: no client-path rewrite any more), but a replicated record
+// still carries the child's mount inserted by IngestReplicated's parent-side
+// hop, so Topic there is post-insertion.
 type Result struct {
 	Persisted bool
 	Stream    string
 	Offset    uint64
-	Topic     string // post-rewrite
+	Topic     string // as persisted — post mount-insertion for replicated records
 }
 
 // Mounts resolves identities to their registry entries — implemented by
@@ -665,8 +668,10 @@ func (e *Engine) persist(class uns.Class, p uns.Parsed, topic string, payload []
 
 // persistTS writes the record (plus, for data/entity, its KV projection) in one
 // atomic batch and then mirrors it onto the local MQTT bus under the STORED
-// topic. p must be the parse of topic, i.e. post-rewrite, so KVPath and KVNode
-// carry the local coordinates and the originating node id.
+// topic. p must be the parse of topic exactly as it will be persisted — for a
+// client publish that is the topic unchanged, for a replicated record it is
+// already mount-inserted — so KVPath and KVNode always carry this node's own
+// local coordinates and the originating node id.
 //
 // The order is load-bearing: the bus must never show something that is not
 // durable, so delivery happens only after Append returned successfully. This is
