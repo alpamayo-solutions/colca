@@ -479,15 +479,17 @@ func CmdClass(contract string) string {
 	}
 }
 
-// Action selects which §5.3 rule Authorize applies. Publishing data/entities
-// has no Action: the write rule is identity (level-4 == ULID + mount rewrite),
-// enforced structurally by the engine.
+// Action selects which §5.3 rule Authorize applies.
 type Action int
 
 const (
 	ActSub        Action = iota // MQTT subscription filter (may contain wildcards)
 	ActReadRecord               // one concrete stored record / KV entry
 	ActCmd                      // publishing a _Cmd* contract
+	// ActPub: publishing owned state. It returned when writing stopped being an
+	// identity rule — level 4 is the node for every publisher now, so nothing
+	// about the topic says who may write it (local-service-trust design §5).
+	ActPub
 )
 
 // coverPath reports whether zone covers path: exact zone or below it. "#"
@@ -541,6 +543,39 @@ func readZones(sc Scope, e *Entry) []string {
 	for _, g := range e.Grants {
 		pg, err := ParseGrant(g)
 		if err != nil || pg.Verb != "read" {
+			continue
+		}
+		if zone, ok := zoneOf(sc, pg.Element); ok {
+			zones = append(zones, zone)
+		}
+	}
+	return zones
+}
+
+// writeZones is the entry's effective write scope, the twin of readZones. A
+// LOCAL service's binding carries an implicit write over its own subtree: the
+// door already proved it belongs to this deployment. A machine's binding
+// carries no such thing — outside the deployment, position says where it
+// sits, never what it may do. That single clause is the whole local/external
+// difference. Every explicit write: grant, on either kind, is resolved
+// through the node's scope at this moment, exactly as readZones does.
+func writeZones(sc Scope, e *Entry) []string {
+	var zones []string
+	if e.Kind == KindLocal {
+		if e.Element == "" {
+			// Unplaced: no element ever resolves to the empty local path (a node
+			// authors no element for itself), so this is checked on the entry
+			// directly rather than routed through zoneOf. Bound to the node
+			// itself, so the zone is everything here — not a special default, it
+			// is what "attached to this node and nowhere narrower" means.
+			zones = append(zones, "#")
+		} else if zone, ok := zoneOf(sc, e.Element); ok {
+			zones = append(zones, zone)
+		}
+	}
+	for _, g := range e.Grants {
+		pg, err := ParseGrant(g)
+		if err != nil || pg.Verb != "write" {
 			continue
 		}
 		if zone, ok := zoneOf(sc, pg.Element); ok {
@@ -609,6 +644,18 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 				if c == class {
 					return true
 				}
+			}
+		}
+		return false
+
+	case ActPub:
+		p, err := Parse(topic)
+		if err != nil {
+			return false
+		}
+		for _, z := range writeZones(sc, e) {
+			if coverPath(z, p.Path) {
+				return true
 			}
 		}
 		return false

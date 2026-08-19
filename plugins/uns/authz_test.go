@@ -38,6 +38,12 @@ type mapScope struct {
 func (m mapScope) PathOf(id string) (string, bool) { p, ok := m.paths[id]; return p, ok }
 func (m mapScope) Reaches(id string) bool          { return id != "" && m.above[id] }
 
+// testScope builds a Scope from element id → local path, with no ancestors —
+// a shorthand for mapScope{paths: ...} where a case only needs placements.
+func testScope(paths map[string]string) Scope {
+	return mapScope{paths: paths}
+}
+
 // elementAt is the id of the element sitting at path.
 func elementAt(path string) string {
 	if path == "" {
@@ -672,5 +678,52 @@ func TestWriteGrantRoundTrips(t *testing.T) {
 func TestAWriteGrantTakesNoClasses(t *testing.T) {
 	if _, err := ParseGrant("write:el-press3/#:param"); err == nil {
 		t.Fatal("write:...:param parsed; a write grant carries no hazard classes")
+	}
+}
+
+// --- ActPub: writing is decided from the identity's binding -----------------
+
+// scope: el-press3 sits at "line1/press3".
+func TestALocalServiceWritesItsOwnSubtreeWithNoGrant(t *testing.T) {
+	sc := testScope(map[string]string{"el-press3": "line1/press3"})
+	svc := &Entry{ULID: "01J", Kind: KindLocal, Name: "conn", Element: "el-press3"}
+
+	if !Authorize(sc, svc, ActPub, "colca/v1/_Metric/n1/line1/press3/temp") {
+		t.Fatal("a local service was denied a write inside its own subtree")
+	}
+	if Authorize(sc, svc, ActPub, "colca/v1/_Metric/n1/line1/press4/temp") {
+		t.Fatal("a local service wrote outside its subtree; binding is the scope")
+	}
+}
+
+func TestAnUnplacedLocalServiceWritesAnywhereOnTheNode(t *testing.T) {
+	sc := testScope(map[string]string{"el-press3": "line1/press3"})
+	svc := &Entry{ULID: "01J", Kind: KindLocal, Name: "dataops"} // no element: bound to the node
+
+	if !Authorize(sc, svc, ActPub, "colca/v1/_Metric/n1/anywhere/at/all") {
+		t.Fatal("an unplaced local service was denied; bound to the node means the whole node")
+	}
+}
+
+func TestAMachineNeedsAnExplicitWriteGrant(t *testing.T) {
+	sc := testScope(map[string]string{"el-press3": "line1/press3"})
+	m := &Entry{ULID: "01J", Pubkey: hex64, Kind: KindMachine, Element: "el-press3"}
+
+	if Authorize(sc, m, ActPub, "colca/v1/_Metric/n1/line1/press3/temp") {
+		t.Fatal("a machine wrote with no write grant; outside the deployment, position is not permission")
+	}
+	m.Grants = []string{"write:el-press3/#"}
+	if !Authorize(sc, m, ActPub, "colca/v1/_Metric/n1/line1/press3/temp") {
+		t.Fatal("a machine with a covering write grant was denied")
+	}
+}
+
+func TestAGrantNamingAnUnheldElementIsInert(t *testing.T) {
+	sc := testScope(map[string]string{"el-press3": "line1/press3"})
+	m := &Entry{ULID: "01J", Pubkey: hex64, Kind: KindMachine, Element: "el-press3",
+		Grants: []string{"write:el-elsewhere/#"}}
+
+	if Authorize(sc, m, ActPub, "colca/v1/_Metric/n1/other/place") {
+		t.Fatal("a grant naming an element this node has never heard of granted something")
 	}
 }
