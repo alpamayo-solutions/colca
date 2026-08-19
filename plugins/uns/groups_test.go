@@ -146,7 +146,7 @@ func TestARetractedGroupGrantsNothing(t *testing.T) {
 // applies.
 func TestAMalformedGrantInsideAGroupIsDroppedNotFatal(t *testing.T) {
 	f := newStore("n-edge1")
-	withGroup(f, "n-global", "01HGRP-OPS", "read:01HLINE1/#", "write:01HLINE1/#")
+	withGroup(f, "n-global", "01HGRP-OPS", "read:01HLINE1/#", "cmd:01HLINE1/#")
 
 	e, problems, err := TokenEntryWithGroups("anna", nil, []string{"01HGRP-OPS"}, NewGroupIndex(f))
 	if err != nil {
@@ -155,7 +155,7 @@ func TestAMalformedGrantInsideAGroupIsDroppedNotFatal(t *testing.T) {
 	if len(e.Grants) != 1 || e.Grants[0] != "read:01HLINE1/#" {
 		t.Fatalf("grants = %v, want the valid one kept", e.Grants)
 	}
-	if len(problems) != 1 || !strings.Contains(problems[0].Error(), "write:") {
+	if len(problems) != 1 || !strings.Contains(problems[0].Error(), "cmd:") {
 		t.Fatalf("problems = %v, want the malformed grant named", problems)
 	}
 }

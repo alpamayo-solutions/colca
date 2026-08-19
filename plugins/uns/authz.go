@@ -194,9 +194,10 @@ type Scope interface {
 	Reaches(elementID string) bool
 }
 
-// Grant is one parsed grant. Verb is "read" or "cmd" — write is not a grant:
-// writing is identity (own ULID at level 4, path inside own mount) and never
-// widens (§5.1). Element is the system element the grant names, without a
+// Grant is one parsed grant. Verb is "read", "write", "cmd" or "admin". A
+// write grant names a zone and nothing else — hazard classes belong to cmd,
+// which acts on equipment; writing state carries no such ladder (local-service-
+// trust design §5). Element is the system element the grant names, without a
 // trailing "/#" ("#" alone means everything); it covers that element and
 // everything below it. Classes is non-empty exactly for cmd grants.
 //
@@ -255,6 +256,8 @@ func FormatGrant(g Grant) (string, error) {
 	switch g.Verb {
 	case "read":
 		return "read:" + zone, nil
+	case "write":
+		return "write:" + zone, nil
 	case "admin":
 		if element != "" {
 			return "", fmt.Errorf("grant: zone-scoped admin is reserved and not implemented")
@@ -273,7 +276,7 @@ func FormatGrant(g Grant) (string, error) {
 		}
 		return "cmd:" + zone + ":" + strings.Join(classes, ","), nil
 	default:
-		return "", fmt.Errorf("grant: verb must be read, cmd or admin, got %q", g.Verb)
+		return "", fmt.Errorf("grant: verb must be read, write, cmd or admin, got %q", g.Verb)
 	}
 }
 
@@ -292,6 +295,18 @@ func ParseGrant(s string) (Grant, error) {
 			return Grant{}, err
 		}
 		return Grant{Verb: "read", Element: z}, nil
+	case "write":
+		// A write grant names a zone and nothing else. Hazard classes belong to
+		// commands, which act on equipment; writing state carries no such ladder
+		// (design §5).
+		if len(parts) != 2 {
+			return Grant{}, fmt.Errorf("grant %q: write grant is write:<zone>", s)
+		}
+		z, err := parseZone(s, parts[1])
+		if err != nil {
+			return Grant{}, err
+		}
+		return Grant{Verb: "write", Element: z}, nil
 	case "admin":
 		if len(parts) != 2 {
 			return Grant{}, fmt.Errorf("grant %q: admin grant is admin:#", s)
@@ -326,7 +341,7 @@ func ParseGrant(s string) (Grant, error) {
 		}
 		return Grant{Verb: "cmd", Element: z, Classes: classes}, nil
 	default:
-		return Grant{}, fmt.Errorf("grant %q: verb must be read, cmd or admin", s)
+		return Grant{}, fmt.Errorf("grant %q: verb must be read, write, cmd or admin", s)
 	}
 }
 

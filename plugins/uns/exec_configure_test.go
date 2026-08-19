@@ -704,12 +704,12 @@ func TestDefinitionUpsertRefusesAGroupWithAMalformedGrant(t *testing.T) {
 
 	code, msg, result := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops",
-			"grants": []string{"read:01HLINE1/#", "write:01HLINE1/#"}}))
+			"grants": []string{"read:01HLINE1/#", "cmd:01HLINE1/#"}}))
 
 	if code != 422 || result != "invalid" {
 		t.Fatalf("code %d result %q, want 422/invalid", code, result)
 	}
-	if !strings.Contains(msg, "write:") {
+	if !strings.Contains(msg, "cmd:") {
 		t.Fatalf("message %q must name the offending grant", msg)
 	}
 	if got := keysOf(f); len(got) != 0 {

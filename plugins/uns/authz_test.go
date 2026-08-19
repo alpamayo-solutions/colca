@@ -72,12 +72,13 @@ func TestParseGrant(t *testing.T) {
 		{in: "read:#", verb: "read", element: "#"},
 		{in: "cmd:01HLINE1/#:param,operate", verb: "cmd", element: "01HLINE1", classes: []string{"param", "operate"}},
 		{in: "cmd:01HM6:admin", verb: "cmd", element: "01HM6", classes: []string{"admin"}},
-		{in: "write:01HLINE1/#", wantErr: true},      // write is identity, never a grant (§5.1)
-		{in: "read:", wantErr: true},                 // empty zone
-		{in: "cmd:01HLINE1/#", wantErr: true},        // cmd without classes
-		{in: "cmd:01HLINE1/#:", wantErr: true},       // empty classes
-		{in: "cmd:01HLINE1/#:reboot", wantErr: true}, // unknown class
-		{in: "grant:01HLINE1/#", wantErr: true},      // unknown verb
+		{in: "write:01HLINE1/#", verb: "write", element: "01HLINE1"},
+		{in: "write:01HLINE1/#:param", wantErr: true}, // write grants carry no classes
+		{in: "read:", wantErr: true},                  // empty zone
+		{in: "cmd:01HLINE1/#", wantErr: true},         // cmd without classes
+		{in: "cmd:01HLINE1/#:", wantErr: true},        // empty classes
+		{in: "cmd:01HLINE1/#:reboot", wantErr: true},  // unknown class
+		{in: "grant:01HLINE1/#", wantErr: true},       // unknown verb
 		{in: "", wantErr: true},
 		// A path-shaped zone is the mistake this design removes: it means
 		// different things at different nodes and stops meaning anything at all
@@ -125,7 +126,7 @@ func TestEntryValidate(t *testing.T) {
 		// A grant is verb:element:classes — an id with a colon would parse into
 		// a different grant than the one authored.
 		{"element with a colon", func(e *Entry) { e.Element = "el:werk1" }},
-		{"bad grant", func(e *Entry) { e.Grants = []string{"write:01HZ/#"} }},
+		{"bad grant", func(e *Entry) { e.Grants = []string{"cmd:01HZ/#"} }},
 	}
 	for _, c := range cases {
 		e := entry("werk1/linie3/cnc5")
@@ -328,7 +329,7 @@ func TestTokenEntry(t *testing.T) {
 	if _, err := TokenEntry("", nil); err == nil {
 		t.Fatal("empty sub must be rejected")
 	}
-	if _, err := TokenEntry("s", []string{"write:01HZ/#"}); err == nil {
+	if _, err := TokenEntry("s", []string{"cmd:01HZ/#"}); err == nil {
 		t.Fatal("bad grant must be rejected")
 	}
 	noAdmin, err := TokenEntry("s2", []string{readAt("z")})
@@ -582,5 +583,39 @@ func TestCmdClassesListsExactlyTheClassesParseGrantAccepts(t *testing.T) {
 	}
 	if _, err := ParseGrant("cmd:01HM6/#:" + strings.Join(CmdClasses(), ",")); err != nil {
 		t.Errorf("the full class list does not parse: %v", err)
+	}
+}
+
+// --- write: a grant verb, not an identity rule ------------------------------
+
+func TestParseGrantReadsTheWriteVerb(t *testing.T) {
+	g, err := ParseGrant("write:el-press3/#")
+	if err != nil {
+		t.Fatalf("ParseGrant: %v", err)
+	}
+	if g.Verb != "write" || g.Element != "el-press3" || len(g.Classes) != 0 {
+		t.Fatalf("got %+v; want {Verb:write Element:el-press3 Classes:[]}", g)
+	}
+}
+
+func TestWriteGrantRoundTrips(t *testing.T) {
+	for _, s := range []string{"write:#", "write:el-press3/#"} {
+		g, err := ParseGrant(s)
+		if err != nil {
+			t.Fatalf("ParseGrant(%q): %v", s, err)
+		}
+		back, err := FormatGrant(g)
+		if err != nil {
+			t.Fatalf("FormatGrant(%+v): %v", g, err)
+		}
+		if back != s {
+			t.Fatalf("round-trip %q → %q", s, back)
+		}
+	}
+}
+
+func TestAWriteGrantTakesNoClasses(t *testing.T) {
+	if _, err := ParseGrant("write:el-press3/#:param"); err == nil {
+		t.Fatal("write:...:param parsed; a write grant carries no hazard classes")
 	}
 }

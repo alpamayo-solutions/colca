@@ -74,7 +74,7 @@ func TestVerifyTruthTable(t *testing.T) {
 		{"alg HS256", tokentest.MintOpts{Sub: "s", Exp: future, Alg: "HS256"}, ReasonBadToken},
 		{"wrong key signature", tokentest.MintOpts{Sub: "s", Exp: future, WrongKey: true}, ReasonBadToken},
 		{"empty sub", tokentest.MintOpts{Sub: "", Exp: future}, ReasonBadToken},
-		{"bad grant in claim", tokentest.MintOpts{Sub: "s", Exp: future, Grants: []string{"write:z/#"}}, ReasonBadToken},
+		{"bad grant in claim", tokentest.MintOpts{Sub: "s", Exp: future, Grants: []string{"cmd:z/#"}}, ReasonBadToken},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
