@@ -32,7 +32,10 @@ func (m *Manager) Register(name, declaredMount string) (*uns.Entry, error) {
 	}
 	if e, ok := m.ByName(name); ok {
 		if declaredMount != "" {
-			if bound, ok := m.MountOf(e.ULID); ok && bound != declaredMount {
+			m.mu.RLock()
+			bound, resolved := m.mountOf(e)
+			m.mu.RUnlock()
+			if resolved && bound != normalizeMount(declaredMount) {
 				m.log.Info("local service declares a mount it is not bound to — the entry wins",
 					"name", name, "declared", declaredMount, "bound", bound)
 			}
@@ -86,10 +89,18 @@ func (m *Manager) elementFor(mount string) (string, error) {
 		}
 		id, ok := place.IDAt(local)
 		if !ok {
-			// Same id convention the bench harness's place() and a parent's
-			// enroll-time authoring already use for a path-derived element:
-			// "el-" plus the path with "/" flattened to "-".
-			id = "el-" + strings.ReplaceAll(local, "/", "-")
+			// Minted, never derived from the path — the production precedent
+			// is node-manager's ensure_element (node.py): "el-" + a random
+			// suffix, never the path. A path-derived id is a real defect, not
+			// a style choice: rename this element (its id stays, its path
+			// moves), then let any service later declare the OLD path.
+			// IDAt would miss, so a deterministic id would be re-minted
+			// identically and ElementIndex.apply (elements.go) would re-point
+			// that SAME id back to the old path on collision — silently
+			// undoing the rename through the id instead of through the entry,
+			// exactly what the seed-not-maintain rule exists to prevent.
+			// Reuses newULID rather than adding a second randomness source.
+			id = "el-" + newULID()
 			if err := upsert(local, id); err != nil {
 				return "", fmt.Errorf("register: could not author %s: %w", local, err)
 			}
@@ -97,6 +108,22 @@ func (m *Manager) elementFor(mount string) (string, error) {
 		leaf = id
 	}
 	return leaf, nil
+}
+
+// normalizeMount strips empty segments (a leading/trailing/doubled "/") so
+// "line1/press3", "/line1/press3" and "line1/press3/" compare equal.
+// elementFor already discards empty segments while authoring a mount, so the
+// drift comparison above must fold the same way, or a merely cosmetic
+// difference in how the declaration was written reads as drift.
+func normalizeMount(mount string) string {
+	segs := strings.Split(mount, "/")
+	kept := segs[:0]
+	for _, s := range segs {
+		if s != "" {
+			kept = append(kept, s)
+		}
+	}
+	return strings.Join(kept, "/")
 }
 
 // newULID mints a fresh identity for a local service registering for the

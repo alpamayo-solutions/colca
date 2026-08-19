@@ -1,10 +1,26 @@
 package registry
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
+
+// captureLogs routes slog.Default through a buffer for the duration of the
+// test; a Manager built AFTER the call logs into it (its own copy of this
+// helper — internal/repl and internal/engine each keep one too, since a
+// package-private test helper cannot be shared across packages).
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
 
 // authoredPlacements is the test uns.Placements: a plain path→id map, mutated
 // by the upsert closure below exactly as the real element/upsert executor
@@ -111,6 +127,46 @@ func TestADeclarationDoesNotMoveAnExistingEntry(t *testing.T) {
 	}
 	if e.Element != "el-press3" {
 		t.Fatalf("reconnect moved the service back to %q; the declaration maintained the entry", e.Element)
+	}
+}
+
+// Spec §3.2's second safety rule: a declaration that disagrees with the
+// entry's current binding is logged, so drift is visible rather than silent.
+// TestADeclarationDoesNotMoveAnExistingEntry above always redeclares "",
+// which never even reaches the comparison — this is the test that actually
+// exercises it, with a declaration that genuinely disagrees.
+func TestADeclarationThatDisagreesWithTheEntryIsLoggedButDoesNotMoveIt(t *testing.T) {
+	logs := captureLogs(t) // must run before the Manager is built (see captureLogs)
+	m := newTestManagerWithElements(t, map[string]string{
+		"line1/press3": "el-press3",
+		"line2/press9": "el-press9",
+	})
+	if _, err := m.Register("conn", "line1/press3"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	reposition(t, m, "conn", "el-press9") // an operator moves it to line2/press9
+
+	e, err := m.Register("conn", "line1/press3") // redeclares the ORIGINAL, now-stale mount
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if e.Element != "el-press9" {
+		t.Fatalf("bound to %q; the disagreeing declaration moved the entry", e.Element)
+	}
+	if !strings.Contains(logs.String(), "declares a mount it is not bound to") {
+		t.Fatalf("drift between the declaration and the bound entry must be logged:\n%s", logs.String())
+	}
+
+	// A declaration that only differs cosmetically (a leading slash) from the
+	// bound path must not be logged as drift: elementFor discards empty
+	// segments while authoring a mount, so the drift comparison has to fold
+	// the same way.
+	before := strings.Count(logs.String(), "declares a mount it is not bound to")
+	if _, err := m.Register("conn", "/line2/press9"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if after := strings.Count(logs.String(), "declares a mount it is not bound to"); after != before {
+		t.Fatalf("a cosmetically different but equal declaration logged drift: %d occurrences, want %d", after, before)
 	}
 }
 
