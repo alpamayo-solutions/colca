@@ -183,16 +183,16 @@ func TestRegisterIsIdempotentAcrossReconnects(t *testing.T) {
 	}
 }
 
-// newULID mints via oklog/ulid/v2 (architecture principle 2: a 130-bit
+// NewULID mints via oklog/ulid/v2 (architecture principle 2: a 130-bit
 // Crockford base32 text form is a specification, so this package generates it
 // through the canonical library rather than a second implementation of its
 // own). The shape (26 characters) and the freshness (two calls never
 // collide) are ours to pin; the bit layout inside that shape is the
 // library's business, not this package's.
 func TestNewULIDIsA26CharacterStringThatDiffersAcrossCalls(t *testing.T) {
-	a, b := newULID(), newULID()
+	a, b := NewULID(), NewULID()
 	if len(a) != 26 || len(b) != 26 {
-		t.Fatalf("newULID lengths = %d, %d; want 26", len(a), len(b))
+		t.Fatalf("NewULID lengths = %d, %d; want 26", len(a), len(b))
 	}
 	if a == b {
 		t.Fatalf("two successive calls minted the same id: %q", a)

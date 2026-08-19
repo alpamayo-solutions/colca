@@ -2,6 +2,7 @@ package uns
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -100,7 +101,7 @@ func signalsUnder(f *fakeStore, node string) map[string]boundSignal {
 
 func TestUpsertWritesEachSignalAtItsPath(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, map[string]any{
 		"signals": []any{
@@ -120,7 +121,7 @@ func TestUpsertWritesEachSignalAtItsPath(t *testing.T) {
 
 func TestUpsertRejectsEntriesItCannotPlace(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	for _, tc := range []struct {
 		name string
@@ -144,7 +145,7 @@ func TestUpsertRejectsEntriesItCannotPlace(t *testing.T) {
 func TestUpsertSurfacesADoorRejection(t *testing.T) {
 	f := newStore("n-edge1")
 	f.fail["colca/v1/_Signal/n-edge1/line1/bad"] = "validation: missing required field name"
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, map[string]any{
 		"signals": []any{map[string]any{"path": "line1/bad", "signal": map[string]any{"id": "s"}}},
@@ -160,7 +161,7 @@ func TestUpsertSurfacesADoorRejection(t *testing.T) {
 func TestDeleteTombstonesTheRecord(t *testing.T) {
 	f := newStore("n-edge1")
 	f.records["colca/v1/_Signal/n-edge1/line1/temp"] = mustJSON(map[string]any{"id": "s1", "name": "temp"})
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	code, _, _ := c.Execute("_CmdConfigure", "signal/delete", body(t, map[string]any{
 		"paths": []string{"line1/temp"},
@@ -176,7 +177,7 @@ func TestDeleteTombstonesTheRecord(t *testing.T) {
 
 func TestDeleteOfAnAbsentSignalIs404(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "signal/delete", body(t, map[string]any{
 		"paths": []string{"line1/nothing"},
@@ -229,18 +230,29 @@ func (n fakeNamespace) PathOf(elementID string) (string, bool) {
 	return p, ok
 }
 
+// counterIDs is a deterministic stand-in for the production ULID minter — a
+// counter, not a special-cased production path, so autobind's tests can
+// assert on ids without pulling a real ULID library into this package.
+func counterIDs() func() string {
+	n := 0
+	return func() string {
+		n++
+		return fmt.Sprintf("sig-%d", n)
+	}
+}
+
 // newConfigExec builds an executor over a fake store, a fake registry and a
 // fake namespace — everything autobind needs to COMPUTE a catalogue's topic
 // without touching a real tree.
 func newConfigExec(t *testing.T) *ConfigExec {
 	t.Helper()
-	return NewConfigExec(newStore("n1"), newRegistryFake(), fakeNamespace{}, nil)
+	return NewConfigExec(newStore("n1"), newRegistryFake(), fakeNamespace{}, counterIDs(), nil)
 }
 
 // newTriggerConfigExec is newConfigExec with the lifecycle trigger enabled.
 func newTriggerConfigExec(t *testing.T) *ConfigExec {
 	t.Helper()
-	return NewConfigExec(newStore("n1"), newRegistryFake(), fakeNamespace{},
+	return NewConfigExec(newStore("n1"), newRegistryFake(), fakeNamespace{}, counterIDs(),
 		map[string]string{"autobind": "on_new_connector"})
 }
 
@@ -651,7 +663,7 @@ func TestObserveIgnoresEverythingElse(t *testing.T) {
 }
 
 func TestConfigExecClaimsOnlyItsContract(t *testing.T) {
-	c := NewConfigExec(newStore("n-edge1"), nil, nil, nil)
+	c := NewConfigExec(newStore("n-edge1"), nil, nil, nil, nil)
 	if !c.Handles("_CmdConfigure") {
 		t.Error("must claim _CmdConfigure")
 	}
@@ -663,7 +675,7 @@ func TestConfigExecClaimsOnlyItsContract(t *testing.T) {
 }
 
 func TestUnknownConfigureVerbIsAnswered(t *testing.T) {
-	c := NewConfigExec(newStore("n-edge1"), nil, nil, nil)
+	c := NewConfigExec(newStore("n-edge1"), nil, nil, nil, nil)
 	code, msg, _ := c.Execute("_CmdConfigure", "signal/rebuild", body(t, map[string]any{}))
 	if code != 422 || !strings.Contains(msg, "signal/rebuild") {
 		t.Fatalf("code %d msg %q — a command aimed at the node deserves an answer", code, msg)
@@ -696,7 +708,7 @@ func elementsUnder(f *fakeStore, node string) map[string]string {
 
 func TestElementUpsertWritesEachElementAtItsPath(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "element/upsert", elementBody(t,
 		element("line1", "01HLINE1", "Linie 1"),
@@ -716,7 +728,7 @@ func TestElementUpsertWritesEachElementAtItsPath(t *testing.T) {
 // conflict with the current state rather than a malformed request.
 func TestElementUpsertRefusesACollidingSibling(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
 
 	code, msg, result := c.Execute("_CmdConfigure", "element/upsert",
@@ -734,7 +746,7 @@ func TestElementUpsertRefusesACollidingSibling(t *testing.T) {
 // arrives — it must not be mistaken for a collision.
 func TestElementUpsertOfTheSameElementIsNotACollision(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
 
 	code, msg, _ := c.Execute("_CmdConfigure", "element/upsert",
@@ -747,7 +759,7 @@ func TestElementUpsertOfTheSameElementIsNotACollision(t *testing.T) {
 
 func TestElementUpsertRejectsWhatCannotBeAddressed(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	for _, tc := range []struct {
 		name  string
@@ -765,7 +777,7 @@ func TestElementUpsertRejectsWhatCannotBeAddressed(t *testing.T) {
 
 func TestElementDeleteTombstonesTheRecord(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
 
 	code, _, _ := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
@@ -785,7 +797,7 @@ func TestElementDeleteTombstonesTheRecord(t *testing.T) {
 // parent goes inert.
 func TestElementDeleteRefusesWhileChildrenRemain(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t,
 		element("line1", "01HLINE1", "Linie 1"),
 		element("line1/m6", "01HM6", "Maschine 6"),
@@ -817,7 +829,7 @@ func (b bindings) Entries() []EntryRef                   { return nil }
 // element. The refusal names who is in the way.
 func TestElementDeleteRefusesWhileAnIdentityBindsToIt(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, bindings{"01HM6": {"m6-connector"}}, nil, nil)
+	c := NewConfigExec(f, bindings{"01HM6": {"m6-connector"}}, nil, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1/m6", "01HM6", "Maschine 6")))
 
 	code, msg, result := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
@@ -836,7 +848,7 @@ func TestElementDeleteRefusesWhileAnIdentityBindsToIt(t *testing.T) {
 // must gate on an actual binding, not on the presence of a registry.
 func TestElementDeleteProceedsWhenNothingBindsToIt(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, bindings{"01HOTHER": {"someone-else"}}, nil, nil)
+	c := NewConfigExec(f, bindings{"01HOTHER": {"someone-else"}}, nil, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1/m6", "01HM6", "Maschine 6")))
 
 	if code, msg, _ := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
@@ -848,7 +860,7 @@ func TestElementDeleteProceedsWhenNothingBindsToIt(t *testing.T) {
 
 func TestElementDeleteOfAnAbsentElementIs404(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
 		"paths": []string{"nothing"},
@@ -884,7 +896,7 @@ func keysOf(f *fakeStore) []string {
 // carries the authoring node and the id and nothing else (design §3).
 func TestDefinitionUpsertFilesUnderTheIdWithNoPosition(t *testing.T) {
 	f := newStore("n-global")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops", "grants": []string{"read:01HLINE1/#"}}))
@@ -911,7 +923,7 @@ func TestDefinitionUpsertRefusesWhatItCannotAddress(t *testing.T) {
 	}
 	for _, tc := range cases {
 		f := newStore("n-global")
-		c := NewConfigExec(f, nil, nil, nil)
+		c := NewConfigExec(f, nil, nil, nil, nil)
 		code, msg, result := c.Execute("_CmdConfigure", "definition/upsert", tc.body)
 		if code != 422 || result != "invalid" {
 			t.Errorf("%s: code %d result %q, want 422/invalid", tc.name, code, result)
@@ -926,7 +938,7 @@ func TestDefinitionUpsertRefusesWhatItCannotAddress(t *testing.T) {
 // caller at the wrong door, and saying so beats filing the record somewhere odd.
 func TestDefinitionUpsertRefusesAContractThatIsNotADefinition(t *testing.T) {
 	f := newStore("n-global")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	for _, contract := range []string{"_SystemElement", "_Metric", "_CmdParam", ""} {
 		code, msg, _ := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, contract,
@@ -942,7 +954,7 @@ func TestDefinitionUpsertRefusesAContractThatIsNotADefinition(t *testing.T) {
 
 func TestDefinitionDeleteTombstonesAndReportsAbsence(t *testing.T) {
 	f := newStore("n-global")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 	c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops"}))
 
@@ -966,7 +978,7 @@ func TestDefinitionDeleteTombstonesAndReportsAbsence(t *testing.T) {
 // otherwise drop the bad grant and log it for as long as the definition exists.
 func TestDefinitionUpsertRefusesAGroupWithAMalformedGrant(t *testing.T) {
 	f := newStore("n-global")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	code, msg, result := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops",
@@ -987,7 +999,7 @@ func TestDefinitionUpsertRefusesAGroupWithAMalformedGrant(t *testing.T) {
 // it is refused at the same door.
 func TestDefinitionUpsertRefusesAGroupGrantNamingAPath(t *testing.T) {
 	f := newStore("n-global")
-	c := NewConfigExec(f, nil, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops", "grants": []string{"read:site1/edge1/#"}}))

@@ -1,8 +1,6 @@
 package uns
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -27,6 +25,15 @@ type ConfigExec struct {
 	// needs it for the same computation: an entry names an element, not a
 	// path, and the path is what the catalogue topic is built from.
 	elements Namespace
+	// newID mints a fresh identity for a newly autobound signal — a ULID, per
+	// this system's convention (node ids, registry entries, elements, and
+	// Signal.id in the data model). plugins/uns is stdlib-only (arch_test.go),
+	// so it cannot encode one itself; the domain declares this port and the
+	// core supplies it with github.com/oklog/ulid/v2, the same library
+	// registry/local.go already uses to mint an entry's ULID. A test may
+	// inject a counter here for deterministic ids instead of special-casing
+	// production code.
+	newID func() string
 	// autobindNew binds a connector's catalogue the first time the node sees
 	// one, without waiting for anyone to ask (settings key
 	// "autobind" = "on_new_connector").
@@ -36,9 +43,9 @@ type ConfigExec struct {
 // NewConfigExec builds the executor. settings is the node's opaque plugin bag;
 // unknown keys are ignored, so an operator's typo disables a feature rather
 // than stopping a node.
-func NewConfigExec(s EntityStore, bound Bindings, elements Namespace, settings map[string]string) *ConfigExec {
+func NewConfigExec(s EntityStore, bound Bindings, elements Namespace, newID func() string, settings map[string]string) *ConfigExec {
 	return &ConfigExec{
-		store: s, bound: bound, elements: elements,
+		store: s, bound: bound, elements: elements, newID: newID,
 		autobindNew: settings["autobind"] == "on_new_connector",
 	}
 }
@@ -328,7 +335,7 @@ func (c *ConfigExec) bindCatalogue(under string, raw []byte) (int, string, strin
 			// to. Every Metric carries signal_id, so rebinding this signal to
 			// a different tag later must leave it — and the whole metric
 			// history under it — untouched (design §6).
-			"id":           newSignalID(),
+			"id":           c.newID(),
 			"name":         leaf,
 			"data_tag":     tag.ID,
 			"is_published": true,
@@ -358,21 +365,6 @@ func joinPath(mount, leaf string) string {
 		return leaf
 	}
 	return mount + "/" + leaf
-}
-
-// newSignalID mints a fresh identity for a newly autobound signal.
-//
-// Not a ULID: encoding one is knowledge this package does not otherwise need,
-// and plugins/uns is stdlib-only (arch_test.go), which rules out importing a
-// ULID library here. What has to hold is independence from anything the
-// signal is bound to — a random 128-bit value hex-encoded gives that, which is
-// the only property autobind relies on.
-func newSignalID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic("signal/autobind: could not mint a signal id: " + err.Error())
-	}
-	return hex.EncodeToString(b[:])
 }
 
 func (c *ConfigExec) signalTopic(path string) string {

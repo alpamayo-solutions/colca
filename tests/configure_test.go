@@ -154,6 +154,11 @@ func TestAutobindIssuedAtTheParentBindsAtTheChild(t *testing.T) {
 		if payload["data_tag"] == "" {
 			t.Errorf("%s: binding not recorded: %v", topic, payload)
 		}
+		// Minted through the same port every other identity in this system
+		// uses — a ULID, 26 Crockford base32 characters.
+		if id, _ := payload["id"].(string); len(id) != 26 {
+			t.Errorf("%s: signal id = %q, want a 26-character ULID", topic, id)
+		}
 		leaf := topic[strings.LastIndex(topic, "/")+1:]
 		if strings.ContainsAny(leaf, "+# ") {
 			t.Errorf("%s: leaf %q is not one addressable segment", topic, leaf)

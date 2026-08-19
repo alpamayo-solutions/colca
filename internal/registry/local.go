@@ -47,7 +47,7 @@ func (m *Manager) Register(name, declaredMount string) (*uns.Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	entry := uns.Entry{ULID: newULID(), Kind: uns.KindLocal, Name: name, Element: element}
+	entry := uns.Entry{ULID: NewULID(), Kind: uns.KindLocal, Name: name, Element: element}
 	raw, err := json.Marshal(&entry)
 	if err != nil {
 		return nil, err
@@ -99,8 +99,8 @@ func (m *Manager) elementFor(mount string) (string, error) {
 			// that SAME id back to the old path on collision — silently
 			// undoing the rename through the id instead of through the entry,
 			// exactly what the seed-not-maintain rule exists to prevent.
-			// Reuses newULID rather than adding a second randomness source.
-			id = "el-" + newULID()
+			// Reuses NewULID rather than adding a second randomness source.
+			id = "el-" + NewULID()
 			if err := upsert(local, id); err != nil {
 				return "", fmt.Errorf("register: could not author %s: %w", local, err)
 			}
@@ -126,18 +126,19 @@ func normalizeMount(mount string) string {
 	return strings.Join(kept, "/")
 }
 
-// newULID mints a fresh identity for a local service registering for the
-// first time. Every other kind's ULID arrives from outside this node — a
-// machine or child node is enrolled with an identity someone else already
-// minted (a human's CLI, or a parent authoring a child at `colca node
-// enroll`) — but a local service presents only a name, so Register is the
-// first place in this codebase that must mint one itself.
+// NewULID mints a fresh ULID — this system's one identity format (node ids,
+// registry entries, elements, and every Signal.id in the data model).
+// Exported because it is not only Register's need: a local service
+// registering for the first time mints its own entry ULID here, and
+// plugins/uns — stdlib-only (arch_test.go) and unable to import a ULID
+// library itself — declares minting as a port that the core wires with this
+// same function (see NewConfigExec's newID parameter in internal/node).
 //
 // The encoding is oklog/ulid/v2's, not ours: a 130-bit Crockford base32 text
 // form is a specification, and a hand-rolled second implementation of a
 // specification is exactly the re-implemented-knowledge case architecture
 // principle 2 rules out — generate or use the one definition, never
 // reimplement it.
-func newULID() string {
+func NewULID() string {
 	return ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
 }
