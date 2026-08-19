@@ -54,7 +54,7 @@ type Manager struct {
 	log     *slog.Logger
 	mu      sync.RWMutex
 	byID    uns.Registry      // ulid → entry
-	byPK    map[string]string // pubkey hex → ulid
+	byPK    map[string]string // pubkey hex → ulid; KindLocal holds none, so "" is never indexed here
 	byName  map[string]string // name → ulid (KindLocal only; a second index, same shape as byPK)
 	kick    func(ulid string)
 	deliver func(topic string, payload []byte, retain bool)
@@ -85,7 +85,9 @@ func New(st *store.Store, nodeULID string) (*Manager, error) {
 			return nil, fmt.Errorf("registry: persisted entry %s invalid: %w", ulid, err)
 		}
 		m.byID[e.ULID] = &e
-		m.byPK[e.Pubkey] = e.ULID
+		if e.Pubkey != "" {
+			m.byPK[e.Pubkey] = e.ULID
+		}
 		if e.Name != "" {
 			m.byName[e.Name] = e.ULID
 		}
@@ -177,9 +179,15 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 	}
 
 	m.mu.Lock()
-	if other, ok := m.byPK[e.Pubkey]; ok && other != e.ULID {
-		m.mu.Unlock()
-		return "", 0, fmt.Errorf("enroll %s: pubkey already enrolled for %s: %w", e.ULID, other, ErrConflict)
+	// KindLocal carries no pubkey (Entry.Validate rejects a non-empty one for
+	// it), so "" is not a real key to dedupe on here — every local entry
+	// would otherwise collide with the first one enrolled, regardless of
+	// name. Uniqueness for KindLocal is byName's job (below).
+	if e.Pubkey != "" {
+		if other, ok := m.byPK[e.Pubkey]; ok && other != e.ULID {
+			m.mu.Unlock()
+			return "", 0, fmt.Errorf("enroll %s: pubkey already enrolled for %s: %w", e.ULID, other, ErrConflict)
+		}
 	}
 	if e.Name != "" {
 		if other, ok := m.byName[e.Name]; ok && other != e.ULID {
@@ -225,13 +233,17 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 
 	prev, existed := m.byID[e.ULID]
 	if existed {
-		delete(m.byPK, prev.Pubkey)
+		if prev.Pubkey != "" {
+			delete(m.byPK, prev.Pubkey)
+		}
 		if prev.Name != "" {
 			delete(m.byName, prev.Name)
 		}
 	}
 	m.byID[e.ULID] = &e
-	m.byPK[e.Pubkey] = e.ULID
+	if e.Pubkey != "" {
+		m.byPK[e.Pubkey] = e.ULID
+	}
 	if e.Name != "" {
 		m.byName[e.Name] = e.ULID
 	}
@@ -293,7 +305,9 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 		return 0, false, err
 	}
 	delete(m.byID, ulid)
-	delete(m.byPK, e.Pubkey)
+	if e.Pubkey != "" {
+		delete(m.byPK, e.Pubkey)
+	}
 	if e.Name != "" {
 		delete(m.byName, e.Name)
 	}

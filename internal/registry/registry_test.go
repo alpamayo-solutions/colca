@@ -505,21 +505,59 @@ func TestByNameFindsALocalEntry(t *testing.T) {
 	}
 }
 
+// KindLocal carries no pubkey (Entry.Validate requires it blank), so a bare
+// "" must never be dedup-checked as though it were a real key — otherwise the
+// FIRST local service ever enrolled at a node permanently blocks every other
+// one, regardless of name, since they'd all collide on the shared blank
+// pubkey before the name check is even reached. Found by mutation-checking
+// TestTwoLocalServicesCannotShareAName: with the name-uniqueness check
+// deleted, that test still passed — not via the name-uniqueness code path
+// it's meant to pin, but via this pre-existing blank-pubkey collision (dating
+// to KindLocal's introduction), which fires first and produces the
+// same ErrConflict for the wrong reason.
+func TestTwoLocalServicesWithDifferentNamesBothEnroll(t *testing.T) {
+	m := newTestManager(t)
+	mustEnroll(t, m, `{"ulid":"01JA","kind":"local","name":"connA"}`)
+	if _, _, err := m.Enroll([]byte(`{"ulid":"01JB","kind":"local","name":"connB"}`)); err != nil {
+		t.Fatalf("second local entry with a different name: err = %v; want success", err)
+	}
+	if _, ok := m.ByName("connA"); !ok {
+		t.Fatal("connA missing after a second local entry enrolled")
+	}
+	if _, ok := m.ByName("connB"); !ok {
+		t.Fatal("connB missing after enrollment")
+	}
+}
+
 // Name uniqueness is enforced beside pubkey uniqueness: two local services
 // cannot both present the same name at the door, or ByName could not tell
-// them apart.
+// them apart. Both entries are left unplaced (no element) on purpose: Enroll's
+// element-uniqueness check is guarded by `if e.Element != ""`, so two unplaced
+// entries can never trip it, and placement is optional for KindLocal (Task
+// 3) — that leaves exactly one rule able to reject the second entry, the
+// name-uniqueness guard this test is named after. (An earlier version of
+// this test gave both entries the same element too, which meant the
+// pre-existing element-uniqueness check fired first and the test passed even
+// with the name check deleted — confirmed by mutation-check.)
 func TestTwoLocalServicesCannotShareAName(t *testing.T) {
 	m := newTestManager(t)
-	mustEnroll(t, m, `{"ulid":"01JA","kind":"local","name":"conn","element":"el-press3"}`)
+	mustEnroll(t, m, `{"ulid":"01JA","kind":"local","name":"conn"}`)
 
-	_, _, err := m.Enroll([]byte(`{"ulid":"01JB","kind":"local","name":"conn","element":"el-press3"}`))
+	_, _, err := m.Enroll([]byte(`{"ulid":"01JB","kind":"local","name":"conn"}`))
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("second entry with the same name: err = %v; want ErrConflict", err)
 	}
 }
 
 // A revoked entry's name must not keep resolving — the index must not
-// outlive the entry it points at.
+// outlive the entry it points at. The direct ByName-after-Revoke assertion
+// below is necessary but not sufficient: ByName's second step looks the ulid
+// up in byID, which Revoke also deletes, so ByName would report a miss even
+// if byName itself were never cleaned up — that mutation was confirmed to
+// leave this test green. What isolates a stale byName entry is re-enrolling
+// a NEW identity under the freed name: if byName still pointed at the
+// revoked ulid, Enroll's uniqueness check would reject the newcomer as a
+// conflict with an identity that no longer exists.
 func TestByNameForgetsARevokedEntry(t *testing.T) {
 	m := newTestManager(t)
 	mustEnroll(t, m, `{"ulid":"01JSVC","kind":"local","name":"conn","element":"el-press3"}`)
@@ -528,5 +566,8 @@ func TestByNameForgetsARevokedEntry(t *testing.T) {
 	}
 	if _, ok := m.ByName("conn"); ok {
 		t.Fatal("a revoked name still resolves; the index outlived its entry")
+	}
+	if _, _, err := m.Enroll([]byte(`{"ulid":"01JB","kind":"local","name":"conn"}`)); err != nil {
+		t.Fatalf("re-enrolling the freed name: %v; want success — byName must not still point at the revoked ulid", err)
 	}
 }
