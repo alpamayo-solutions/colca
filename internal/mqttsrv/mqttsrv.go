@@ -34,6 +34,7 @@ import (
 type Server struct {
 	S        *mqtt.Server
 	tcp      *listeners.TCP
+	local    *listeners.TCP
 	humanTCP *listeners.TCP
 	humanWS  *listeners.Websocket
 	hook     *colcaHook
@@ -124,6 +125,9 @@ func (h *colcaHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bo
 	// become the queued writer Server.Close must avoid.
 	if h.closing.Load() {
 		return false
+	}
+	if isLocalListener(cl) {
+		return h.authenticateLocal(cl, pk)
 	}
 	if isHumanListener(cl) {
 		return h.authenticateHuman(cl, pk)
@@ -415,6 +419,17 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 		}
 		srv.tcp = tcp
 	}
+	if cfg.MQTTLocal.Addr != "" {
+		// No TLSConfig: this listener never leaves the deployment network, and a
+		// certificate here would be one every local service must then obtain —
+		// the provisioning act this design removes (local-service-trust design
+		// §4).
+		l := listeners.NewTCP(listeners.Config{ID: listenerLocal, Address: cfg.MQTTLocal.Addr})
+		if err := s.AddListener(l); err != nil {
+			return nil, err
+		}
+		srv.local = l
+	}
 	if cfg.MQTTHuman.TCPAddr != "" {
 		h := listeners.NewTCP(listeners.Config{ID: listenerHumanTCP, Address: cfg.MQTTHuman.TCPAddr, TLSConfig: humanTLS.Clone()})
 		if err := s.AddListener(h); err != nil {
@@ -517,6 +532,29 @@ func (s *Server) Addr() string {
 		return ""
 	}
 	return s.tcp.Address()
+}
+
+// LocalAddr returns the resolved local-door address ("" when the node has no
+// local door). Unlike Addr, this is never published (design §4) — it exists
+// for a local service's own config and for tests to dial directly.
+func (s *Server) LocalAddr() string {
+	if s.local == nil {
+		return ""
+	}
+	return s.local.Address()
+}
+
+// Registry exposes the identity registry this broker authenticates against.
+func (s *Server) Registry() *registry.Manager { return s.hook.reg }
+
+// Elements exposes the node's element index, so a caller can resolve a bound
+// identity's placement (e.g. a self-registered local service's declared
+// mount) without a second reference to the engine.
+func (s *Server) Elements() *uns.ElementIndex {
+	if eng := s.hook.engine(); eng != nil {
+		return eng.Elements()
+	}
+	return nil
 }
 
 // HumanTCPAddr / HumanWSAddr report the resolved human-door addresses ("" when

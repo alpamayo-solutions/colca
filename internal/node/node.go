@@ -9,12 +9,14 @@ package node
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +51,11 @@ type Node struct {
 	APIAddr  string // resolved HTTP API address ("" if no api configured)
 	ReplAddr string // resolved replication address ("" if this node has no children)
 	MQTTAddr string // resolved MQTT address ("" if no mqtt configured)
+	// MQTTLocalAddr is the resolved local-door address ("" if not configured).
+	// Unlike the other *Addr fields this is never meant to be published
+	// (local-service-trust design §4) — it exists for local services' own
+	// configuration and for tests.
+	MQTTLocalAddr string
 	// Human doors (human-authz design §5.1); "" when not configured.
 	MQTTHumanTCPAddr string
 	MQTTHumanWSAddr  string
@@ -140,14 +147,16 @@ func Start(cfg *config.Config) (*Node, error) {
 
 	// 2. Broker: New binds the sockets, so the addrs are known before Serve
 	//    and before the engine exists. The engine is late-bound below. A node
-	//    with ONLY human listeners is legal (§4).
-	if cfg.MQTT.Addr != "" || cfg.MQTTHuman.TCPAddr != "" || cfg.MQTTHuman.WSAddr != "" {
+	//    with ONLY human listeners is legal (§4), and so is one with only a
+	//    local door.
+	if cfg.MQTT.Addr != "" || cfg.MQTTLocal.Addr != "" || cfg.MQTTHuman.TCPAddr != "" || cfg.MQTTHuman.WSAddr != "" {
 		mq, err := mqttsrv.New(cfg, id, reg, ver, nil, n.Metrics)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: mqtt listen: %w", cfg.ULID, err))
 		}
 		n.MQTT = mq
 		n.MQTTAddr = mq.Addr()
+		n.MQTTLocalAddr = mq.LocalAddr()
 		n.MQTTHumanTCPAddr = mq.HumanTCPAddr()
 		n.MQTTHumanWSAddr = mq.HumanWSAddr()
 	}
@@ -172,6 +181,35 @@ func Start(cfg *config.Config) (*Node, error) {
 	// namespace is a projection of records the engine holds, and the registry
 	// is built first — every door consults it, so it has to exist earliest.
 	reg.SetNamespace(n.Engine.Elements())
+	// A local service's self-registration (local-service-trust design §3.2)
+	// authors the elements along a declared mount that does not exist yet, the
+	// same way `colca node enroll --mount` does for a child node: through the
+	// ONE authoring path in this system, domain.Execute("_CmdConfigure",
+	// "element/upsert", ...) — never a second, direct write to the element
+	// index. Wired here because this is the first point both dependencies
+	// exist: n.Engine.Elements() (uns.Placements, via IDAt) and domain (built
+	// just above). Without this, Register's declared-mount branch fails closed
+	// with "mount authoring is not wired at this node" and every local CONNECT
+	// carrying a mount is refused.
+	reg.SetAuthoring(n.Engine.Elements(), func(path, elementID string) error {
+		name := path
+		if i := strings.LastIndexByte(path, '/'); i >= 0 {
+			name = path[i+1:]
+		}
+		payload, err := json.Marshal(map[string]any{
+			"elements": []map[string]any{
+				{"path": path, "element": map[string]any{"id": elementID, "name": name}},
+			},
+		})
+		if err != nil {
+			return err
+		}
+		code, msg, _ := domain.Execute("_CmdConfigure", "element/upsert", payload)
+		if code != 200 {
+			return fmt.Errorf("author element at %s: %s", path, msg)
+		}
+		return nil
+	})
 	if ver != nil {
 		// A human's grants come from the groups their token names, resolved
 		// against the definitions this node holds (definition-stream design §8).

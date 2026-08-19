@@ -1,11 +1,13 @@
 package mqttsrv
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	pahov5 "github.com/eclipse/paho.golang/paho"
 	paho "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/alpamayo-solutions/colca/internal/authtest"
@@ -23,6 +26,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // scrapeMetric reads back one metric value through the shared test helper
@@ -41,6 +45,7 @@ type world struct {
 	reg     *registry.Manager
 	m       *metrics.Metrics
 	m1, obs *authtest.Machine
+	eng     *engine.Engine
 }
 
 func newWorld(t *testing.T) *world {
@@ -74,6 +79,7 @@ func newWorld(t *testing.T) *world {
 	}
 	eng := engine.New(st, cfg, reg, s.DeliverLocal, m, nil)
 	s.SetEngine(eng)
+	w.eng = eng
 	// Placement resolves through the engine's element index, so the element m1
 	// binds to is authored before it enrolls (id-grants design §4).
 	reg.SetNamespace(eng.Elements())
@@ -144,6 +150,217 @@ func waitRecords(t *testing.T, st *store.Store, stream string, want int, d time.
 			t.Fatalf("timeout waiting for %d record(s) in %s, have %d: %+v", want, stream, len(recs), recs)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// startServerWithLocalDoor builds a world with the local MQTT door enabled and
+// self-registration's mount-authoring wired EXACTLY as node.New wires it
+// (node.go, right after reg.SetNamespace): domain.Execute("_CmdConfigure",
+// "element/upsert", ...) is the one authoring path in this system. A declared
+// mount must go through it here too — a test that wired a shortcut instead
+// could pass while node.go's own wiring stayed missing, which is precisely the
+// gap found earlier (nothing called Manager.SetAuthoring anywhere).
+func startServerWithLocalDoor(t *testing.T) *world {
+	t.Helper()
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	nodeID, err := identity.Generate(filepath.Join(t.TempDir(), "n1.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := registry.New(st, "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &world{st: st, reg: reg}
+	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
+		MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
+		MQTTLocal: config.Endpoint{Addr: "127.0.0.1:0"},
+	}
+	m := metrics.New(st, config.Retention{}, nil)
+	w.m = m
+	s, err := New(cfg, nodeID, reg, nil, nil, m)
+	if err != nil {
+		st.Close()
+		t.Fatalf("New: %v", err)
+	}
+	eng := engine.New(st, cfg, reg, s.DeliverLocal, m, nil)
+	s.SetEngine(eng)
+	w.eng = eng
+	domain := uns.NewConfigExec(eng.EntityStore(), reg, cfg.Plugin)
+	eng.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain))
+	eng.SetObserver(domain)
+	reg.SetNamespace(eng.Elements())
+	reg.SetAuthoring(eng.Elements(), func(path, elementID string) error {
+		name := path
+		if i := strings.LastIndexByte(path, '/'); i >= 0 {
+			name = path[i+1:]
+		}
+		payload, err := json.Marshal(map[string]any{
+			"elements": []map[string]any{
+				{"path": path, "element": map[string]any{"id": elementID, "name": name}},
+			},
+		})
+		if err != nil {
+			return err
+		}
+		code, msg, _ := domain.Execute("_CmdConfigure", "element/upsert", payload)
+		if code != 200 {
+			return fmt.Errorf("author element at %s: %s", path, msg)
+		}
+		return nil
+	})
+	reg.SetKick(s.Kick)
+	go func() { _ = s.Serve() }()
+	t.Cleanup(func() {
+		s.Close()
+		st.Close()
+	})
+	w.srv = s
+	return w
+}
+
+func (w *world) LocalAddr() string           { return w.srv.LocalAddr() }
+func (w *world) Registry() *registry.Manager { return w.srv.Registry() }
+func (w *world) Elements() *uns.ElementIndex { return w.srv.Elements() }
+
+// enrollMachine enrolls a fresh machine identity at ulid, placed at path, the
+// ordinary way (auth §6.1) — for tests asserting the local door refuses to
+// hand out a keyed identity by name.
+func enrollMachine(t *testing.T, w *world, ulid, path string) *authtest.Machine {
+	t.Helper()
+	m := authtest.NewMachine(t, ulid)
+	authtest.EnrollAt(t, w.reg, w.eng, m, path)
+	return m
+}
+
+// localClient is a not-yet-connected local-door dial. Connect() performs the
+// actual net.Dial + MQTT v5 CONNECT and returns its error instead of failing
+// the test, mirroring tryConnect's split from connect — a test asserting a
+// REJECTED connect needs the error, not a t.Fatal baked into the dial itself.
+//
+// This uses paho.golang (MQTT v5), not the usual test client (tryConnect,
+// paho.mqtt.golang pinned via SetProtocolVersion(4)): the `mount` declaration
+// rides a CONNECT user property, which MQTT 3.1.1 has no room for. The dial is
+// plain net.Dial, never tls.Dial — the local door carries no TLSConfig at all
+// (design §4).
+type localClient struct {
+	t        *testing.T
+	addr     string
+	username string
+	mount    string
+}
+
+func dialPlainMQTT(t *testing.T, addr, username string, opts ...func(*localClient)) *localClient {
+	t.Helper()
+	c := &localClient{t: t, addr: addr, username: username}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+func withMountProperty(mount string) func(*localClient) {
+	return func(c *localClient) { c.mount = mount }
+}
+
+func (c *localClient) Connect() error {
+	c.t.Helper()
+	conn, err := net.Dial("tcp", c.addr)
+	if err != nil {
+		return err
+	}
+	props := &pahov5.ConnectProperties{}
+	if c.mount != "" {
+		props.User.Add("mount", c.mount)
+	}
+	pc := pahov5.NewClient(pahov5.ClientConfig{Conn: conn})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ca, err := pc.Connect(ctx, &pahov5.Connect{
+		ClientID:     "local-" + c.username,
+		Username:     c.username,
+		UsernameFlag: true,
+		KeepAlive:    30,
+		CleanStart:   true,
+		Properties:   props,
+	})
+	if err != nil {
+		return err
+	}
+	if ca.ReasonCode != 0 {
+		return fmt.Errorf("local CONNACK refused: reason %d", ca.ReasonCode)
+	}
+	c.t.Cleanup(func() { _ = pc.Disconnect(&pahov5.Disconnect{ReasonCode: 0}) })
+	return nil
+}
+
+// The local door is the door with no key to present at all (local-service-
+// trust design §4): a plain TCP dial, no TLS, admitted on a name alone. The
+// `mount` CONNECT user property is read only at the moment the entry is
+// created (§3.2), and Register's own auto-authoring must resolve it — which
+// exercises the SetAuthoring wiring end to end, not merely Register in
+// isolation (see startServerWithLocalDoor's doc comment for why that
+// distinction matters here).
+func TestTheLocalDoorAdmitsAClientWithNoCertificate(t *testing.T) {
+	s := startServerWithLocalDoor(t)
+	c := dialPlainMQTT(t, s.LocalAddr(), "connector-opcua", withMountProperty("line1/press3"))
+
+	if err := c.Connect(); err != nil {
+		t.Fatalf("the local door refused a certless client: %v", err)
+	}
+	e, ok := s.Registry().ByName("connector-opcua")
+	if !ok {
+		t.Fatal("connecting did not register the service")
+	}
+	if e.Kind != uns.KindLocal {
+		t.Fatalf("registered kind = %q, want %q", e.Kind, uns.KindLocal)
+	}
+	path, ok := s.Elements().PathOf(e.Element)
+	if !ok {
+		t.Fatalf("entry's element %q does not resolve to any path", e.Element)
+	}
+	if path != "line1/press3" {
+		t.Fatalf("registered at %q; want the declared mount line1/press3", path)
+	}
+}
+
+func TestTheLocalDoorRequiresAName(t *testing.T) {
+	s := startServerWithLocalDoor(t)
+	const line = `colca_auth_rejections_total{door="local",reason="no_name"}`
+	if v := scrapeMetric(t, s.m, line); v != 0 {
+		t.Fatalf("%s = %v before any connect, want 0", line, v)
+	}
+	if err := dialPlainMQTT(t, s.LocalAddr(), "").Connect(); err == nil {
+		t.Fatal("a nameless client was admitted; the name is how its scope is found")
+	}
+	if v := scrapeMetric(t, s.m, line); v != 1 {
+		t.Fatalf("%s = %v after the nameless CONNECT, want exactly 1 — the rejection must fire for the reason this test names", line, v)
+	}
+}
+
+func TestAMachineKeyIsNotAcceptedOnTheLocalDoor(t *testing.T) {
+	s := startServerWithLocalDoor(t)
+	// A machine ULID enrolled on 8883 must not be assumable by name here.
+	enrollMachine(t, s, "01JMACHINE", "el-press3")
+	const line = `colca_auth_rejections_total{door="local",reason="kind"}`
+	if v := scrapeMetric(t, s.m, line); v != 0 {
+		t.Fatalf("%s = %v before any connect, want 0", line, v)
+	}
+
+	c := dialPlainMQTT(t, s.LocalAddr(), "01JMACHINE")
+	if err := c.Connect(); err == nil {
+		t.Fatal("a machine's identity was claimed by name on the local door")
+	}
+	if v := scrapeMetric(t, s.m, line); v != 1 {
+		t.Fatalf("%s = %v after the collision CONNECT, want exactly 1 — the rejection must fire for the reason this test names, not merely fail some other way", line, v)
+	}
+	// And the local door must not have quietly minted an unrelated kind=local
+	// entry under this name instead of refusing outright.
+	if _, ok := s.Registry().ByName("01JMACHINE"); ok {
+		t.Fatal("the collision silently registered a new local entry instead of being refused")
 	}
 }
 

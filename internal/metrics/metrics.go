@@ -82,15 +82,22 @@ const (
 	DoorMQTT = "mqtt"
 	DoorHTTP = "http"
 	DoorRepl = "repl"
+	// DoorLocal is the unpublished, plaintext local door (local-service-trust
+	// design §4): reachability is the credential, so rejections here are rare
+	// (a missing name, or a name colliding with a keyed identity's ULID) but
+	// still counted like every other door.
+	DoorLocal = "local"
 
 	AuthUnknownKey       = "unknown_key"       // TLS peer key not in the local registry (incl. revoked)
 	AuthKind             = "kind"              // entry exists but its kind may not use this door
 	AuthUsernameMismatch = "username_mismatch" // MQTT username != the key's enrolled ULID
 	AuthToken            = "token"             // admin token missing or wrong
+	AuthNoName           = "no_name"           // local door CONNECT carried no username
+	AuthRegister         = "register"          // local door self-registration failed
 )
 
-var authDoors = []string{DoorMQTT, DoorHTTP, DoorRepl}
-var authReasons = []string{AuthUnknownKey, AuthKind, AuthUsernameMismatch, AuthToken}
+var authDoors = []string{DoorMQTT, DoorHTTP, DoorRepl, DoorLocal}
+var authReasons = []string{AuthUnknownKey, AuthKind, AuthUsernameMismatch, AuthToken, AuthNoName, AuthRegister}
 
 // ACL denial actions — label values of colca_acl_denials_total{action}:
 // read-side denials only (sub = MQTT subscribe filter, read = HTTP record

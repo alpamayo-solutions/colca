@@ -86,6 +86,12 @@ type Config struct {
 	Repl     Endpoint `yaml:"repl"`
 	Parent   *Parent  `yaml:"parent"`
 
+	// MQTTLocal is the unpublished, plaintext local door (local-service-trust
+	// design §4): reachability from inside the deployment's own network IS
+	// the credential, so this listener carries no TLSConfig. Absent = no
+	// local door on this node.
+	MQTTLocal Endpoint `yaml:"mqtt_local"`
+
 	// Human world (human-authz design §4).
 	Auth      *Auth     `yaml:"auth"`
 	MQTTHuman MQTTHuman `yaml:"mqtt_human"`
