@@ -33,6 +33,34 @@ const promptCloseBudget = 5 * time.Second
 // no-op closer — so closeListenerClients is never reached with clients in
 // flight, and GetByListener never runs with a writer queued behind it.
 
+// waitAttached blocks until the broker has finished attaching want clients.
+//
+// paho's Connect returns when the CONNACK arrives, which is BEFORE mochi has
+// finished attachClient — so a test that closes immediately can be shutting
+// down while a handshake is still in flight. That is not the claim any of these
+// tests make ("Close returns with clients ATTACHED"), and it trips a race in
+// mochi itself: attachClient does `defer ClientsWg.Done()` and then
+// `ClientsWg.Add(1)` (server.go:407-408), while Listeners.CloseAll ends with
+// ClientsWg.Wait() (listeners.go:134) — an Add concurrent with a Wait, which
+// the race detector fails the build over.
+//
+// Waiting here does not paper over that: it makes each test set up the state it
+// says it is testing. The residual window — a connection accepted at the exact
+// instant of shutdown — is mochi's to close, and is invisible outside -race.
+func waitAttached(t *testing.T, w *world, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if n := w.srv.S.Clients.Len(); n >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d clients attached before shutdown", w.srv.S.Clients.Len(), want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // A node must finish shutting down while clients are attached — the case that
 // deadlocked. The deadline is the assertion: on the old code Close never
 // returned at all, so any bound catches it.
@@ -43,6 +71,7 @@ func TestCloseReturnsWithClientsAttached(t *testing.T) {
 	for i := range 4 {
 		connect(t, addr, fmt.Sprintf("shutdown-client-%d", i), w.m1)
 	}
+	waitAttached(t, w, 4)
 
 	done := make(chan error, 1)
 	go func() { done <- w.srv.Close() }()
@@ -63,6 +92,7 @@ func TestCloseReturnsWithClientsAttached(t *testing.T) {
 func TestCloseIsPromptWithAClientAttached(t *testing.T) {
 	w := newWorld(t)
 	connect(t, w.srv.Addr(), "drain-me", w.m1)
+	waitAttached(t, w, 1)
 
 	start := time.Now()
 	if err := w.srv.Close(); err != nil {
@@ -116,6 +146,9 @@ func TestCloseRacesDisconnectingClients(t *testing.T) {
 		for i := range 3 {
 			clients = append(clients, connect(t, addr, fmt.Sprintf("racer-%d-%d", round, i), w.m1))
 		}
+		// The race this test means is Close against DISCONNECTING clients, not
+		// Close against a handshake that has not finished attaching.
+		waitAttached(t, w, 3)
 
 		var wg sync.WaitGroup
 		for _, c := range clients {
