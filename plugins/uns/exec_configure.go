@@ -1,6 +1,8 @@
 package uns
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -17,8 +19,14 @@ import (
 type ConfigExec struct {
 	store EntityStore
 	// bound answers which identities bind to an element, so retiring a position
-	// cannot strand the things standing on it.
+	// cannot strand the things standing on it, and who an identity is — the
+	// name and element autobind needs to COMPUTE a connector's catalogue
+	// topic (local-service-trust design §6).
 	bound Bindings
+	// elements resolves an element to this node's local path for it. Autobind
+	// needs it for the same computation: an entry names an element, not a
+	// path, and the path is what the catalogue topic is built from.
+	elements Namespace
 	// autobindNew binds a connector's catalogue the first time the node sees
 	// one, without waiting for anyone to ask (settings key
 	// "autobind" = "on_new_connector").
@@ -28,8 +36,11 @@ type ConfigExec struct {
 // NewConfigExec builds the executor. settings is the node's opaque plugin bag;
 // unknown keys are ignored, so an operator's typo disables a feature rather
 // than stopping a node.
-func NewConfigExec(s EntityStore, bound Bindings, settings map[string]string) *ConfigExec {
-	return &ConfigExec{store: s, bound: bound, autobindNew: settings["autobind"] == "on_new_connector"}
+func NewConfigExec(s EntityStore, bound Bindings, elements Namespace, settings map[string]string) *ConfigExec {
+	return &ConfigExec{
+		store: s, bound: bound, elements: elements,
+		autobindNew: settings["autobind"] == "on_new_connector",
+	}
 }
 
 func (c *ConfigExec) Handles(contract string) bool { return contract == "_CmdConfigure" }
@@ -37,27 +48,33 @@ func (c *ConfigExec) Handles(contract string) bool { return contract == "_CmdCon
 // Observe reacts to a record the node just persisted.
 //
 // The only reaction is the lifecycle trigger: a connector's catalogue arriving
-// with nothing bound to it yet gets bound, running the exact code the
-// `signal/autobind` verb runs. Autobind is idempotent by invariant, so this
-// path needs no coordination with the people and commands that may also invoke
-// it — the second caller simply finds nothing left to do.
+// with nothing bound to it yet gets bound, running the exact binding logic the
+// `signal/autobind` verb runs. It needs no identity lookup of its own — the
+// arriving record already carries what autobind would have had to COMPUTE
+// (its own topic and its own tags) — it only asks whether any of ITS tags
+// already have a signal, which is what tells a fresh connector from a
+// republish. Autobind is idempotent by invariant, so this path needs no
+// coordination with the people and commands that may also invoke it — the
+// second caller simply finds nothing left to do.
 func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
-	if !c.autobindNew || contract != "_DataTags" {
-		return
+	if !c.autobindNew || contract != "_DataTags" || len(payload) == 0 {
+		return // not the trigger's contract, or the catalogue was retired
 	}
 	p, err := Parse(topic)
-	if err != nil || len(payload) == 0 {
-		return // unparseable, or the catalogue was retired
+	if err != nil {
+		return
 	}
-	if len(c.boundTags(p.NodeID)) > 0 {
-		return // already bound: this is a republish, not a new connector
+	var cat catalogue
+	if err := json.Unmarshal(payload, &cat); err != nil {
+		return
 	}
-	c.autobind(mustBody(autobindBody{Connector: p.NodeID}))
-}
-
-func mustBody(v autobindBody) []byte {
-	b, _ := json.Marshal(v)
-	return b
+	bound := c.boundTags()
+	for _, tag := range cat.DataTags {
+		if bound[tag.ID] {
+			return // already bound: this is a republish, not a new connector
+		}
+	}
+	c.bindCatalogue(p.Path, payload)
 }
 
 // signalRef is one record to write: where it goes, and what goes there.
@@ -128,8 +145,10 @@ type autobindBody struct {
 
 // catalogue is the part of a connector's _DataTags record this needs.
 type catalogue struct {
-	Connector string `json:"connector"`
-	DataTags  []struct {
+	DataTags []struct {
+		// ID is the tag's own identity — a ULID minted by the connector at
+		// discovery, stable across rediscovery (design §6). Signal.data_tag
+		// points at this, never at Name or a source address.
 		ID       string `json:"id"`
 		Name     string `json:"name"`
 		DataType string `json:"data_type"`
@@ -137,11 +156,12 @@ type catalogue struct {
 }
 
 // boundSignal is the part of a _Signal record that identifies its binding.
+// There is no connector field: the connector is reached THROUGH the tag,
+// never stored beside it (design §6).
 type boundSignal struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Connector string `json:"connector"`
-	TagID     string `json:"tag_id"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	DataTag string `json:"data_tag"`
 }
 
 func (c *ConfigExec) Execute(contract, verb string, payload []byte) (int, string, string) {
@@ -230,24 +250,49 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string) {
 	if body.Connector == "" {
 		return 422, "signal/autobind: no connector given", "invalid"
 	}
-	under := body.Under
-	if under == "" {
-		under = body.Connector
-	}
 
-	records := c.store.KVScan("_DataTags", body.Connector)
-	if len(records) == 0 {
+	name, element, ok := c.bound.EntryOf(body.Connector)
+	if !ok {
+		// Not enrolled here. A parent asked to bind a connector only its child
+		// holds must refuse, not guess — the command travels down and executes
+		// at the node that owns the identity.
+		return 404, "signal/autobind: " + body.Connector + " is not enrolled at this node", "invalid"
+	}
+	mount, _ := c.elements.PathOf(element) // "" for an unplaced identity: the node itself
+	catTopic := "colca/v1/_DataTags/" + c.store.NodeID() + "/" + joinPath(mount, name)
+	raw, found := c.store.KVGet(catTopic)
+	if !found {
 		// Nothing to bind against yet — the connector has not published its
 		// catalogue. A retry after it does will succeed, so this is a conflict
 		// with the current state, not a bad request.
-		return 409, "signal/autobind: " + body.Connector + " has published no catalogue", "conflict"
+		return 409, "signal/autobind: " + name + " has published no catalogue", "conflict"
 	}
+
+	under := body.Under
+	if under == "" {
+		under = joinPath(mount, name)
+	}
+	return c.bindCatalogue(under, raw)
+}
+
+// bindCatalogue creates one signal per unbound tag in a catalogue, placed
+// under one path. Shared by the explicit `signal/autobind` verb (which
+// computes the catalogue and the default placement from the registry) and the
+// lifecycle trigger (which already has both, straight from the record it just
+// observed).
+//
+// Idempotent by invariant: a tag that already has a signal is skipped and an
+// existing binding is never overwritten, so re-running changes nothing. That is
+// what lets the same verb be issued by a person, replayed from the commands
+// stream after an offline period, or fired by a node lifecycle trigger, without
+// any of those paths needing to know about the others.
+func (c *ConfigExec) bindCatalogue(under string, raw []byte) (int, string, string) {
 	var cat catalogue
-	if err := json.Unmarshal(records[0].Payload, &cat); err != nil {
+	if err := json.Unmarshal(raw, &cat); err != nil {
 		return 422, "signal/autobind: unreadable catalogue: " + err.Error(), "invalid"
 	}
 
-	bound := c.boundTags(body.Connector)
+	bound := c.boundTags()
 	taken := c.takenPaths()
 
 	created, skipped := 0, 0
@@ -259,10 +304,13 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string) {
 		leaf := uniquePath(sanitize(tag.Name), under, taken)
 		path := under + "/" + leaf
 		signal := map[string]any{
-			"id":           body.Connector + ":" + tag.ID,
+			// The signal's own identity: never composed from what it is bound
+			// to. Every Metric carries signal_id, so rebinding this signal to
+			// a different tag later must leave it — and the whole metric
+			// history under it — untouched (design §6).
+			"id":           newSignalID(),
 			"name":         leaf,
-			"connector":    body.Connector,
-			"tag_id":       tag.ID,
+			"data_tag":     tag.ID,
 			"is_published": true,
 			"metadata":     map[string]any{"tag_name": tag.Name},
 		}
@@ -282,20 +330,49 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string) {
 	return 200, fmt.Sprintf(`{"created":%d,"skipped":%d}`, created, skipped), "ok"
 }
 
+// joinPath composes a mount and a leaf into one path. An unplaced identity's
+// mount is "" (bound to the node itself), and the result must still be one
+// clean path — no leading or doubled slash.
+func joinPath(mount, leaf string) string {
+	if mount == "" {
+		return leaf
+	}
+	return mount + "/" + leaf
+}
+
+// newSignalID mints a fresh identity for a newly autobound signal.
+//
+// Not a ULID: encoding one is knowledge this package does not otherwise need,
+// and plugins/uns is stdlib-only (arch_test.go), which rules out importing a
+// ULID library here. What has to hold is independence from anything the
+// signal is bound to — a random 128-bit value hex-encoded gives that, which is
+// the only property autobind relies on.
+func newSignalID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("signal/autobind: could not mint a signal id: " + err.Error())
+	}
+	return hex.EncodeToString(b[:])
+}
+
 func (c *ConfigExec) signalTopic(path string) string {
 	return "colca/v1/_Signal/" + c.store.NodeID() + "/" + path
 }
 
-// boundTags is the set of tag ids of one connector that already have a signal.
-func (c *ConfigExec) boundTags(connector string) map[string]bool {
+// boundTags is the set of tag ids that already have a signal — the answer to
+// "which of this catalogue's tags need no work". A tag's id is its own ULID,
+// minted by the connector that discovered it, so this set is exact without
+// scoping it to a connector: nothing about a connector appears on a signal any
+// more (design §6) — the tag id alone is what a signal points at.
+func (c *ConfigExec) boundTags() map[string]bool {
 	bound := map[string]bool{}
 	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
 		var s boundSignal
 		if json.Unmarshal(rec.Payload, &s) != nil {
 			continue
 		}
-		if s.Connector == connector && s.TagID != "" {
-			bound[s.TagID] = true
+		if s.DataTag != "" {
+			bound[s.DataTag] = true
 		}
 	}
 	return bound

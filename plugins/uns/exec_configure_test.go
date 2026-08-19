@@ -80,16 +80,6 @@ func body(t *testing.T, v any) []byte {
 	return b
 }
 
-func withCatalogue(f *fakeStore, connector string, tags ...map[string]any) {
-	f.records["colca/v1/_DataTags/"+connector+"/"+connector+"/catalogue"] = mustJSON(map[string]any{
-		"connector": connector, "data_tags": tags,
-	})
-}
-
-func tag(id, name string) map[string]any {
-	return map[string]any{"id": id, "name": name, "data_type": "float"}
-}
-
 func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
@@ -110,7 +100,7 @@ func signalsUnder(f *fakeStore, node string) map[string]boundSignal {
 
 func TestUpsertWritesEachSignalAtItsPath(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, map[string]any{
 		"signals": []any{
@@ -130,7 +120,7 @@ func TestUpsertWritesEachSignalAtItsPath(t *testing.T) {
 
 func TestUpsertRejectsEntriesItCannotPlace(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	for _, tc := range []struct {
 		name string
@@ -154,7 +144,7 @@ func TestUpsertRejectsEntriesItCannotPlace(t *testing.T) {
 func TestUpsertSurfacesADoorRejection(t *testing.T) {
 	f := newStore("n-edge1")
 	f.fail["colca/v1/_Signal/n-edge1/line1/bad"] = "validation: missing required field name"
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, map[string]any{
 		"signals": []any{map[string]any{"path": "line1/bad", "signal": map[string]any{"id": "s"}}},
@@ -170,7 +160,7 @@ func TestUpsertSurfacesADoorRejection(t *testing.T) {
 func TestDeleteTombstonesTheRecord(t *testing.T) {
 	f := newStore("n-edge1")
 	f.records["colca/v1/_Signal/n-edge1/line1/temp"] = mustJSON(map[string]any{"id": "s1", "name": "temp"})
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	code, _, _ := c.Execute("_CmdConfigure", "signal/delete", body(t, map[string]any{
 		"paths": []string{"line1/temp"},
@@ -186,7 +176,7 @@ func TestDeleteTombstonesTheRecord(t *testing.T) {
 
 func TestDeleteOfAnAbsentSignalIs404(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "signal/delete", body(t, map[string]any{
 		"paths": []string{"line1/nothing"},
@@ -199,63 +189,283 @@ func TestDeleteOfAnAbsentSignalIs404(t *testing.T) {
 
 // ── autobind ──────────────────────────────────────────────────────────────
 
-func TestAutobindBindsEveryTagOfAFreshCatalogue(t *testing.T) {
-	f := newStore("n-edge1")
-	withCatalogue(f, "opcua-1", tag("ns=2;s=Temp", "Temp"), tag("ns=2;s=Speed", "Speed"))
-	c := NewConfigExec(f, nil, nil)
+// entryFake is one registry entry as the autobind tests need it: who it is
+// (its name) and where it is bound (its element, "" for unplaced).
+type entryFake struct {
+	name, element string
+}
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{
-		"connector": "opcua-1",
-	}))
+// registryFake is a stand-in for the registry: which identity is which
+// (EntryOf) — BoundTo is unused here, kept only to satisfy Bindings.
+type registryFake struct {
+	entries map[string]entryFake
+}
 
-	if code != 200 || !strings.Contains(msg, `"created":2`) {
-		t.Fatalf("autobind = %d %q, want 200 with 2 created", code, msg)
+func newRegistryFake() *registryFake { return &registryFake{entries: map[string]entryFake{}} }
+
+func (r *registryFake) EntryOf(ulid string) (string, string, bool) {
+	e, ok := r.entries[ulid]
+	return e.name, e.element, ok
+}
+
+func (r *registryFake) BoundTo(string) []string { return nil }
+
+// fakeNamespace is a stand-in for the node's element index: element id → its
+// local path.
+type fakeNamespace map[string]string
+
+func (n fakeNamespace) PathOf(elementID string) (string, bool) {
+	p, ok := n[elementID]
+	return p, ok
+}
+
+// newConfigExec builds an executor over a fake store, a fake registry and a
+// fake namespace — everything autobind needs to COMPUTE a catalogue's topic
+// without touching a real tree.
+func newConfigExec(t *testing.T) *ConfigExec {
+	t.Helper()
+	return NewConfigExec(newStore("n1"), newRegistryFake(), fakeNamespace{}, nil)
+}
+
+// newTriggerConfigExec is newConfigExec with the lifecycle trigger enabled.
+func newTriggerConfigExec(t *testing.T) *ConfigExec {
+	t.Helper()
+	return NewConfigExec(newStore("n1"), newRegistryFake(), fakeNamespace{},
+		map[string]string{"autobind": "on_new_connector"})
+}
+
+// place records that elementID sits at path, so PathOf resolves it exactly as
+// the real element index would once the element is authored there.
+func place(t *testing.T, c *ConfigExec, elementID, path string) {
+	t.Helper()
+	ns, ok := c.elements.(fakeNamespace)
+	if !ok {
+		t.Fatalf("place: %T is not a fakeNamespace", c.elements)
 	}
-	got := signalsUnder(f, "n-edge1")
-	if len(got) != 2 {
-		t.Fatalf("signals = %+v, want 2", got)
+	ns[elementID] = path
+}
+
+// bindEntry enrolls ulid as an identity named name, bound to element — the
+// registry's answer EntryOf(ulid) will give from here on.
+func bindEntry(t *testing.T, c *ConfigExec, ulid, name, element string) {
+	t.Helper()
+	reg, ok := c.bound.(*registryFake)
+	if !ok {
+		t.Fatalf("bindEntry: %T is not a registryFake", c.bound)
 	}
-	if got["opcua-1/Temp"].TagID != "ns=2;s=Temp" || got["opcua-1/Temp"].Connector != "opcua-1" {
-		t.Fatalf("binding not recorded: %+v", got["opcua-1/Temp"])
+	reg.entries[ulid] = entryFake{name: name, element: element}
+}
+
+// publishCatalogue writes a catalogue record directly at topic, bypassing
+// autobind entirely — this is what lets the forgery test prove a record
+// published anywhere but the computed topic is never read.
+func publishCatalogue(t *testing.T, c *ConfigExec, topic string, tags []map[string]any) {
+	t.Helper()
+	f, ok := c.store.(*fakeStore)
+	if !ok {
+		t.Fatalf("publishCatalogue: %T is not a fakeStore", c.store)
+	}
+	if err := f.Publish(topic, mustJSON(map[string]any{"data_tags": tags})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// tags builds a minimal catalogue tag list, one tag per id given.
+func tags(ids ...string) []map[string]any {
+	out := make([]map[string]any, len(ids))
+	for i, id := range ids {
+		out[i] = map[string]any{"id": id, "name": "tag-" + id, "data_type": "float"}
+	}
+	return out
+}
+
+// tagsWithIDs is tags, named at call sites where the point is specifically
+// that the tag carries its OWN identity — a ULID the connector minted — and
+// not a source address (design §6).
+func tagsWithIDs(ids ...string) []map[string]any { return tags(ids...) }
+
+// signalsAt is every _Signal record this executor's node holds, by path.
+func signalsAt(c *ConfigExec) map[string]boundSignal {
+	out := map[string]boundSignal{}
+	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
+		var s boundSignal
+		if json.Unmarshal(rec.Payload, &s) == nil {
+			out[rec.Path] = s
+		}
+	}
+	return out
+}
+
+// boundTagIDs is the set of tag ids bound to a signal at this node, sorted.
+func boundTagIDs(t *testing.T, c *ConfigExec, connector string) []string {
+	t.Helper()
+	var out []string
+	for _, s := range signalsAt(c) {
+		if s.DataTag != "" {
+			out = append(out, s.DataTag)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// oneSignal returns the sole _Signal record this node holds, failing the test
+// if there is not exactly one.
+func oneSignal(t *testing.T, c *ConfigExec) boundSignal {
+	t.Helper()
+	got := signalsAt(c)
+	if len(got) != 1 {
+		t.Fatalf("signals = %+v, want exactly 1", got)
+	}
+	for _, s := range got {
+		return s
+	}
+	panic("unreachable")
+}
+
+// signalByID finds the _Signal record with the given id.
+func signalByID(t *testing.T, c *ConfigExec, id string) boundSignal {
+	t.Helper()
+	for _, s := range signalsAt(c) {
+		if s.ID == id {
+			return s
+		}
+	}
+	t.Fatalf("no signal with id %q", id)
+	return boundSignal{}
+}
+
+// rebind points an already-bound signal at a different tag, the way a person
+// curating the model would — through the same signal/upsert door, at the
+// signal's own path, keeping its id.
+func rebind(t *testing.T, c *ConfigExec, signalID, newTag string) {
+	t.Helper()
+	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
+		var s boundSignal
+		if json.Unmarshal(rec.Payload, &s) != nil || s.ID != signalID {
+			continue
+		}
+		s.DataTag = newTag
+		code, msg, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, map[string]any{
+			"signals": []any{map[string]any{"path": rec.Path, "signal": s}},
+		}))
+		if code != 200 {
+			t.Fatalf("rebind: upsert = %d %s", code, msg)
+		}
+		return
+	}
+	t.Fatalf("rebind: no signal with id %q", signalID)
+}
+
+// The catalogue is found by COMPUTING its topic from the connector's entry, so a
+// record published anywhere else is never read — including one that mimics the
+// connector's name at a different path.
+func TestAutobindReadsOnlyTheComputedCatalogueTopic(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "el-press3", "line1/press3")
+	bindEntry(t, c, "01JCONN", "opcua-press", "el-press3")
+
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/press3/opcua-press", tags("t1"))
+	// A forgery: right name, wrong place. Nothing may read it.
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/junk/opcua-press", tags("t9"))
+
+	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+	if code != 200 {
+		t.Fatalf("autobind = %d %s", code, msg)
+	}
+	got := boundTagIDs(t, c, "01JCONN")
+	if len(got) != 1 || got[0] != "t1" {
+		t.Fatalf("bound %v; want only t1 — a record outside the computed topic was read", got)
+	}
+}
+
+func TestAutobindRefusesAConnectorThisNodeDoesNotHold(t *testing.T) {
+	c := newConfigExec(t)
+	code, _, _ := c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JNOBODY"}`))
+	if code != 404 {
+		t.Fatalf("autobind for an unknown connector = %d; want 404 — a parent must not "+
+			"guess at a connector only its child holds", code)
+	}
+}
+
+func TestASignalPointsAtTheTagsIdentityAndKeepsItsOwn(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "el-press3", "line1/press3")
+	bindEntry(t, c, "01JCONN", "opcua-press", "el-press3")
+	// The catalogue's tags carry their own ULIDs, minted by the connector.
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/press3/opcua-press", tagsWithIDs("01JTAG1"))
+	c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+
+	s := oneSignal(t, c)
+	if s.DataTag != "01JTAG1" {
+		t.Fatalf("signal.data_tag = %q; want the tag's ULID", s.DataTag)
+	}
+	if s.ID == "" || strings.Contains(s.ID, "01JTAG1") || strings.Contains(s.ID, "01JCONN") {
+		t.Fatalf("signal.id = %q; a signal's identity must be its own, not composed "+
+			"from what it is bound to — every Metric carries signal_id", s.ID)
+	}
+}
+
+// The claim the composed id destroyed: rebinding must not change identity.
+func TestRebindingASignalLeavesItsIdentityIntact(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "el-press3", "line1/press3")
+	bindEntry(t, c, "01JCONN", "opcua-press", "el-press3")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/press3/opcua-press", tagsWithIDs("01JTAG1"))
+	c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+	before := oneSignal(t, c)
+
+	rebind(t, c, before.ID, "01JTAG2")
+
+	after := signalByID(t, c, before.ID)
+	if after.ID != before.ID {
+		t.Fatalf("rebinding changed the signal id %q → %q; every Metric ever published "+
+			"for this point references the old one", before.ID, after.ID)
+	}
+	if after.DataTag != "01JTAG2" {
+		t.Fatalf("signal.data_tag = %q; want the new tag", after.DataTag)
 	}
 }
 
 // The property that lets a person, a replayed command and a lifecycle trigger
 // all issue this verb without coordinating.
 func TestAutobindIsIdempotent(t *testing.T) {
-	f := newStore("n-edge1")
-	withCatalogue(f, "opcua-1", tag("ns=2;s=Temp", "Temp"), tag("ns=2;s=Speed", "Speed"))
-	c := NewConfigExec(f, nil, nil)
+	c := newConfigExec(t)
+	place(t, c, "el-1", "line1/m6")
+	bindEntry(t, c, "01JCONN", "opcua-1", "el-1")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/m6/opcua-1", tags("t1", "t2"))
 
-	c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "opcua-1"}))
-	before := signalsUnder(f, "n-edge1")
+	c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	before := signalsAt(c)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "opcua-1"}))
+	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
 
 	if code != 200 || !strings.Contains(msg, `"created":0`) || !strings.Contains(msg, `"skipped":2`) {
 		t.Fatalf("second run = %d %q, want 0 created / 2 skipped", code, msg)
 	}
-	if after := signalsUnder(f, "n-edge1"); len(after) != len(before) {
+	if after := signalsAt(c); len(after) != len(before) {
 		t.Fatalf("second run changed the model: %d → %d signals", len(before), len(after))
 	}
 }
 
 // Autobind fills gaps; it never touches a binding someone curated.
 func TestAutobindNeverOverwritesAnExistingBinding(t *testing.T) {
-	f := newStore("n-edge1")
-	withCatalogue(f, "opcua-1", tag("ns=2;s=Temp", "Temp"), tag("ns=2;s=Speed", "Speed"))
-	f.records["colca/v1/_Signal/n-edge1/line1/m6/temperature"] = mustJSON(map[string]any{
-		"id": "curated", "name": "temperature", "connector": "opcua-1", "tag_id": "ns=2;s=Temp",
+	c := newConfigExec(t)
+	place(t, c, "el-1", "line1/m6")
+	bindEntry(t, c, "01JCONN", "opcua-1", "el-1")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/m6/opcua-1", tags("t1", "t2"))
+	f := c.store.(*fakeStore)
+	f.records["colca/v1/_Signal/n1/line1/m6/temperature"] = mustJSON(map[string]any{
+		"id": "curated", "name": "temperature", "data_tag": "t1",
 		"is_published": true, "precision": 2,
 	})
-	c := NewConfigExec(f, nil, nil)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "opcua-1"}))
+	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
 
 	if code != 200 || !strings.Contains(msg, `"created":1`) || !strings.Contains(msg, `"skipped":1`) {
 		t.Fatalf("autobind = %d %q, want 1 created / 1 skipped", code, msg)
 	}
-	curated := f.records["colca/v1/_Signal/n-edge1/line1/m6/temperature"]
+	curated := f.records["colca/v1/_Signal/n1/line1/m6/temperature"]
 	var kept map[string]any
 	if err := json.Unmarshal(curated, &kept); err != nil {
 		t.Fatal(err)
@@ -266,11 +476,11 @@ func TestAutobindNeverOverwritesAnExistingBinding(t *testing.T) {
 }
 
 func TestAutobindWithoutACatalogueIsAConflict(t *testing.T) {
-	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
+	c := newConfigExec(t)
+	bindEntry(t, c, "01JCONN", "opcua-1", "")
 
 	code, msg, result := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{
-		"connector": "opcua-1",
+		"connector": "01JCONN",
 	}))
 
 	// A retry after the connector publishes will succeed, so this is a conflict
@@ -281,36 +491,36 @@ func TestAutobindWithoutACatalogueIsAConflict(t *testing.T) {
 }
 
 func TestAutobindPlacesSignalsUnderTheGivenPath(t *testing.T) {
-	f := newStore("n-edge1")
-	withCatalogue(f, "opcua-1", tag("t1", "Temp"))
-	c := NewConfigExec(f, nil, nil)
+	c := newConfigExec(t)
+	bindEntry(t, c, "01JCONN", "opcua-1", "")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/opcua-1", tags("t1"))
 
 	c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{
-		"connector": "opcua-1", "under": "line1/m6",
+		"connector": "01JCONN", "under": "line1/m6",
 	}))
 
-	if _, ok := signalsUnder(f, "n-edge1")["line1/m6/Temp"]; !ok {
-		t.Fatalf("signals = %+v, want one under line1/m6", signalsUnder(f, "n-edge1"))
+	if _, ok := signalsAt(c)["line1/m6/tag-t1"]; !ok {
+		t.Fatalf("signals = %+v, want one under line1/m6", signalsAt(c))
 	}
 }
 
 // Browse names are not topic segments: separators and wildcards cannot survive,
 // and two tags may still collide afterwards. Nothing may be silently dropped.
 func TestAutobindMakesTagNamesAddressable(t *testing.T) {
-	f := newStore("n-edge1")
-	withCatalogue(f, "opcua-1",
-		tag("t1", "Line 1/Temp"),
-		tag("t2", "Line 1#Temp"),
-		tag("t3", "+"),
-	)
-	c := NewConfigExec(f, nil, nil)
+	c := newConfigExec(t)
+	bindEntry(t, c, "01JCONN", "opcua-1", "")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/opcua-1", []map[string]any{
+		{"id": "t1", "name": "Line 1/Temp", "data_type": "float"},
+		{"id": "t2", "name": "Line 1#Temp", "data_type": "float"},
+		{"id": "t3", "name": "+", "data_type": "float"},
+	})
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "opcua-1"}))
+	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
 	if code != 200 || !strings.Contains(msg, `"created":3`) {
 		t.Fatalf("autobind = %d %q, want 3 created", code, msg)
 	}
 
-	got := signalsUnder(f, "n-edge1")
+	got := signalsAt(c)
 	if len(got) != 3 {
 		t.Fatalf("3 tags produced %d signals — a collision swallowed one: %+v", len(got), got)
 	}
@@ -321,7 +531,7 @@ func TestAutobindMakesTagNamesAddressable(t *testing.T) {
 		}
 	}
 	// The original name is not lost, only the addressing form changed.
-	for _, rec := range f.KVScan("_Signal", "n-edge1") {
+	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
 		var s struct {
 			Metadata map[string]any `json:"metadata"`
 		}
@@ -334,25 +544,25 @@ func TestAutobindMakesTagNamesAddressable(t *testing.T) {
 // ── lifecycle trigger ─────────────────────────────────────────────────────
 
 func TestNewConnectorIsBoundOnArrivalWhenEnabled(t *testing.T) {
-	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, map[string]string{"autobind": "on_new_connector"})
-	withCatalogue(f, "opcua-1", tag("t1", "Temp"))
+	c := newTriggerConfigExec(t)
+	topic := "colca/v1/_DataTags/n1/opcua-1"
+	payload := mustJSON(map[string]any{"data_tags": tags("t1")})
 
-	c.Observe("_DataTags", "colca/v1/_DataTags/opcua-1/opcua-1/catalogue", f.records["colca/v1/_DataTags/opcua-1/opcua-1/catalogue"])
+	c.Observe("_DataTags", topic, payload)
 
-	if got := signalsUnder(f, "n-edge1"); len(got) != 1 {
+	if got := signalsAt(c); len(got) != 1 {
 		t.Fatalf("signals = %+v, want the catalogue bound on arrival", got)
 	}
 }
 
 func TestNothingHappensOnArrivalWhenDisabled(t *testing.T) {
-	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
-	withCatalogue(f, "opcua-1", tag("t1", "Temp"))
+	c := newConfigExec(t)
+	topic := "colca/v1/_DataTags/n1/opcua-1"
+	payload := mustJSON(map[string]any{"data_tags": tags("t1")})
 
-	c.Observe("_DataTags", "colca/v1/_DataTags/opcua-1/opcua-1/catalogue", f.records["colca/v1/_DataTags/opcua-1/opcua-1/catalogue"])
+	c.Observe("_DataTags", topic, payload)
 
-	if got := signalsUnder(f, "n-edge1"); len(got) != 0 {
+	if got := signalsAt(c); len(got) != 0 {
 		t.Fatalf("signals = %+v — binding must be opt-in", got)
 	}
 }
@@ -360,36 +570,45 @@ func TestNothingHappensOnArrivalWhenDisabled(t *testing.T) {
 // A connector republishing its catalogue is not a new connector: the trigger
 // must not re-bind tags a person has since deleted on purpose.
 func TestARepublishedCatalogueIsNotANewConnector(t *testing.T) {
-	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, map[string]string{"autobind": "on_new_connector"})
-	withCatalogue(f, "opcua-1", tag("t1", "Temp"), tag("t2", "Speed"))
-	topic := "colca/v1/_DataTags/opcua-1/opcua-1/catalogue"
+	c := newTriggerConfigExec(t)
+	topic := "colca/v1/_DataTags/n1/opcua-1"
+	payload := mustJSON(map[string]any{"data_tags": tags("t1", "t2")})
 
-	c.Observe("_DataTags", topic, f.records[topic])
+	c.Observe("_DataTags", topic, payload)
 	// The operator deletes one binding deliberately.
-	c.Execute("_CmdConfigure", "signal/delete", body(t, map[string]any{"paths": []string{"opcua-1/Speed"}}))
-	c.Observe("_DataTags", topic, f.records[topic])
+	var deletedPath string
+	for path, s := range signalsAt(c) {
+		if s.DataTag == "t2" {
+			deletedPath = path
+		}
+	}
+	if deletedPath == "" {
+		t.Fatal("setup: no signal bound to t2")
+	}
+	c.Execute("_CmdConfigure", "signal/delete", body(t, map[string]any{"paths": []string{deletedPath}}))
+	c.Observe("_DataTags", topic, payload)
 
-	if _, revived := signalsUnder(f, "n-edge1")["opcua-1/Speed"]; revived {
-		t.Fatal("a republished catalogue revived a deliberately deleted binding")
+	for _, s := range signalsAt(c) {
+		if s.DataTag == "t2" {
+			t.Fatal("a republished catalogue revived a deliberately deleted binding")
+		}
 	}
 }
 
 func TestObserveIgnoresEverythingElse(t *testing.T) {
-	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, map[string]string{"autobind": "on_new_connector"})
-	withCatalogue(f, "opcua-1", tag("t1", "Temp"))
+	c := newTriggerConfigExec(t)
+	topic := "colca/v1/_DataTags/n1/opcua-1"
 
-	c.Observe("_Metric", "colca/v1/_Metric/opcua-1/opcua-1/temp", []byte(`{"value":1}`))
-	c.Observe("_DataTags", "colca/v1/_DataTags/opcua-1/opcua-1/catalogue", nil) // retired catalogue
+	c.Observe("_Metric", "colca/v1/_Metric/n1/opcua-1/temp", []byte(`{"value":1}`))
+	c.Observe("_DataTags", topic, nil) // retired catalogue
 
-	if got := signalsUnder(f, "n-edge1"); len(got) != 0 {
+	if got := signalsAt(c); len(got) != 0 {
 		t.Fatalf("signals = %+v, want none", got)
 	}
 }
 
 func TestConfigExecClaimsOnlyItsContract(t *testing.T) {
-	c := NewConfigExec(newStore("n-edge1"), nil, nil)
+	c := NewConfigExec(newStore("n-edge1"), nil, nil, nil)
 	if !c.Handles("_CmdConfigure") {
 		t.Error("must claim _CmdConfigure")
 	}
@@ -401,7 +620,7 @@ func TestConfigExecClaimsOnlyItsContract(t *testing.T) {
 }
 
 func TestUnknownConfigureVerbIsAnswered(t *testing.T) {
-	c := NewConfigExec(newStore("n-edge1"), nil, nil)
+	c := NewConfigExec(newStore("n-edge1"), nil, nil, nil)
 	code, msg, _ := c.Execute("_CmdConfigure", "signal/rebuild", body(t, map[string]any{}))
 	if code != 422 || !strings.Contains(msg, "signal/rebuild") {
 		t.Fatalf("code %d msg %q — a command aimed at the node deserves an answer", code, msg)
@@ -434,7 +653,7 @@ func elementsUnder(f *fakeStore, node string) map[string]string {
 
 func TestElementUpsertWritesEachElementAtItsPath(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "element/upsert", elementBody(t,
 		element("line1", "01HLINE1", "Linie 1"),
@@ -454,7 +673,7 @@ func TestElementUpsertWritesEachElementAtItsPath(t *testing.T) {
 // conflict with the current state rather than a malformed request.
 func TestElementUpsertRefusesACollidingSibling(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
 
 	code, msg, result := c.Execute("_CmdConfigure", "element/upsert",
@@ -472,7 +691,7 @@ func TestElementUpsertRefusesACollidingSibling(t *testing.T) {
 // arrives — it must not be mistaken for a collision.
 func TestElementUpsertOfTheSameElementIsNotACollision(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
 
 	code, msg, _ := c.Execute("_CmdConfigure", "element/upsert",
@@ -485,7 +704,7 @@ func TestElementUpsertOfTheSameElementIsNotACollision(t *testing.T) {
 
 func TestElementUpsertRejectsWhatCannotBeAddressed(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	for _, tc := range []struct {
 		name  string
@@ -503,7 +722,7 @@ func TestElementUpsertRejectsWhatCannotBeAddressed(t *testing.T) {
 
 func TestElementDeleteTombstonesTheRecord(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
 
 	code, _, _ := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
@@ -523,7 +742,7 @@ func TestElementDeleteTombstonesTheRecord(t *testing.T) {
 // parent goes inert.
 func TestElementDeleteRefusesWhileChildrenRemain(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t,
 		element("line1", "01HLINE1", "Linie 1"),
 		element("line1/m6", "01HM6", "Maschine 6"),
@@ -541,17 +760,20 @@ func TestElementDeleteRefusesWhileChildrenRemain(t *testing.T) {
 	}
 }
 
-// bindings is a stub registry: which identities stand on which element.
+// bindings is a stub registry: which identities stand on which element. It
+// satisfies Bindings without carrying entries — the element-delete guard
+// tests below only exercise BoundTo.
 type bindings map[string][]string
 
-func (b bindings) BoundTo(elementID string) []string { return b[elementID] }
+func (b bindings) BoundTo(elementID string) []string     { return b[elementID] }
+func (b bindings) EntryOf(string) (string, string, bool) { return "", "", false }
 
 // Retiring a position an identity binds to would leave that identity able to
 // authenticate with nowhere to write — its mount resolves through this very
 // element. The refusal names who is in the way.
 func TestElementDeleteRefusesWhileAnIdentityBindsToIt(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, bindings{"01HM6": {"m6-connector"}}, nil)
+	c := NewConfigExec(f, bindings{"01HM6": {"m6-connector"}}, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1/m6", "01HM6", "Maschine 6")))
 
 	code, msg, result := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
@@ -570,7 +792,7 @@ func TestElementDeleteRefusesWhileAnIdentityBindsToIt(t *testing.T) {
 // must gate on an actual binding, not on the presence of a registry.
 func TestElementDeleteProceedsWhenNothingBindsToIt(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, bindings{"01HOTHER": {"someone-else"}}, nil)
+	c := NewConfigExec(f, bindings{"01HOTHER": {"someone-else"}}, nil, nil)
 	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1/m6", "01HM6", "Maschine 6")))
 
 	if code, msg, _ := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
@@ -582,7 +804,7 @@ func TestElementDeleteProceedsWhenNothingBindsToIt(t *testing.T) {
 
 func TestElementDeleteOfAnAbsentElementIs404(t *testing.T) {
 	f := newStore("n-edge1")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
 		"paths": []string{"nothing"},
@@ -618,7 +840,7 @@ func keysOf(f *fakeStore) []string {
 // carries the authoring node and the id and nothing else (design §3).
 func TestDefinitionUpsertFilesUnderTheIdWithNoPosition(t *testing.T) {
 	f := newStore("n-global")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops", "grants": []string{"read:01HLINE1/#"}}))
@@ -645,7 +867,7 @@ func TestDefinitionUpsertRefusesWhatItCannotAddress(t *testing.T) {
 	}
 	for _, tc := range cases {
 		f := newStore("n-global")
-		c := NewConfigExec(f, nil, nil)
+		c := NewConfigExec(f, nil, nil, nil)
 		code, msg, result := c.Execute("_CmdConfigure", "definition/upsert", tc.body)
 		if code != 422 || result != "invalid" {
 			t.Errorf("%s: code %d result %q, want 422/invalid", tc.name, code, result)
@@ -660,7 +882,7 @@ func TestDefinitionUpsertRefusesWhatItCannotAddress(t *testing.T) {
 // caller at the wrong door, and saying so beats filing the record somewhere odd.
 func TestDefinitionUpsertRefusesAContractThatIsNotADefinition(t *testing.T) {
 	f := newStore("n-global")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	for _, contract := range []string{"_SystemElement", "_Metric", "_CmdParam", ""} {
 		code, msg, _ := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, contract,
@@ -676,7 +898,7 @@ func TestDefinitionUpsertRefusesAContractThatIsNotADefinition(t *testing.T) {
 
 func TestDefinitionDeleteTombstonesAndReportsAbsence(t *testing.T) {
 	f := newStore("n-global")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 	c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops"}))
 
@@ -700,7 +922,7 @@ func TestDefinitionDeleteTombstonesAndReportsAbsence(t *testing.T) {
 // otherwise drop the bad grant and log it for as long as the definition exists.
 func TestDefinitionUpsertRefusesAGroupWithAMalformedGrant(t *testing.T) {
 	f := newStore("n-global")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	code, msg, result := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops",
@@ -721,7 +943,7 @@ func TestDefinitionUpsertRefusesAGroupWithAMalformedGrant(t *testing.T) {
 // it is refused at the same door.
 func TestDefinitionUpsertRefusesAGroupGrantNamingAPath(t *testing.T) {
 	f := newStore("n-global")
-	c := NewConfigExec(f, nil, nil)
+	c := NewConfigExec(f, nil, nil, nil)
 
 	code, msg, _ := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops", "grants": []string{"read:site1/edge1/#"}}))

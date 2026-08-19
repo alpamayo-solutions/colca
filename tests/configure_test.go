@@ -24,18 +24,18 @@ func bindingBundle(t *testing.T) string {
 	str := map[string]any{"type": "string", "minLength": 1}
 	return bundleFixture(t, "binding", map[string]any{
 		// The real shape, not the skew fixture's placeholder: id + name are what
-		// a signal must carry, and the binding fields ride alongside.
+		// a signal must carry, and data_tag is the binding — the tag's own
+		// identity, not a connector (design §6).
 		"_Signal": map[string]any{"class": "entity", "tombstone": true,
 			"schema": map[string]any{"type": "object",
 				"properties": map[string]any{
-					"id": str, "name": str, "connector": str, "tag_id": str,
+					"id": str, "name": str, "data_tag": str,
 					"is_published": map[string]any{"type": "boolean"},
 				},
 				"required": []any{"id", "name"}}},
 		"_DataTags": map[string]any{"class": "entity", "tombstone": true,
 			"schema": map[string]any{"type": "object",
-				"properties": map[string]any{"connector": str, "data_tags": map[string]any{"type": "array"}},
-				"required":   []any{"connector"}}},
+				"properties": map[string]any{"data_tags": map[string]any{"type": "array"}}}},
 		"_CmdConfigure": map[string]any{"class": "cmd", "tombstone": false,
 			"schema": map[string]any{"type": "object",
 				"properties": map[string]any{"correlation_id": str, "expires_at": map[string]any{"type": "number"}},
@@ -44,14 +44,16 @@ func bindingBundle(t *testing.T) string {
 }
 
 // enrollMachineAt places an element at mount and enrolls a machine key there,
-// with an explicit write: grant over its own zone — a machine gets no
-// implicit write (auth §5), so a connector that will publish its catalogue
-// needs one just as a real deployment's would.
+// named ulid (autobind's tests reuse the ulid as a human-readable name — real
+// deployments mint a ULID and name separately), with an explicit write: grant
+// over its own zone — a machine gets no implicit write (auth §5), so a
+// connector that will publish its catalogue needs one just as a real
+// deployment's would.
 func enrollMachineAt(t *testing.T, n *node.Node, ulid, pubkey, mount string) {
 	t.Helper()
 	element := authtest.Place(t, n.Engine, mount)
 	b, err := json.Marshal(map[string]any{"ulid": ulid, "pubkey": pubkey, "kind": "machine",
-		"element": element, "grants": []string{"write:" + element + "/#"}})
+		"name": ulid, "element": element, "grants": []string{"write:" + element + "/#"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,12 +82,6 @@ func signalsAt(t *testing.T, n *node.Node, contract string) map[string]map[strin
 }
 
 func TestAutobindIssuedAtTheParentBindsAtTheChild(t *testing.T) {
-	t.Skip("quarantined by task-7/8 (colca-local-service-trust design): level 4 is now always " +
-		"the node's own ULID for every publisher (design §2/§5), so a catalogue's KVNode is the " +
-		"node, not the connector's identity any more. exec_configure.go:238 still does " +
-		"KVScan(\"_DataTags\", body.Connector) — a lookup keyed on connector-as-nodeID that now " +
-		"matches nothing (design §6.1). Un-quarantines when a later change (\"the catalogue carries the " +
-		"service name\") lands KVScanSuffix, keyed on the path's last segment instead of level 4.")
 	base := t.TempDir()
 	keys := map[string]*identity.Identity{}
 	for _, n := range []string{"n-parent", "n-child"} {
@@ -125,14 +121,15 @@ func TestAutobindIssuedAtTheParentBindsAtTheChild(t *testing.T) {
 	defer child.Stop()
 
 	// A connector enrolls at the child and publishes its catalogue — one
-	// record, the whole discovery result, under its own identity.
+	// record, the whole discovery result, at the topic its own entry computes
+	// to: node/mount/name (design §6), not a path it gets to choose.
 	conn := authtest.NewMachine(t, "opcua-1")
 	enrollMachineAt(t, child, "opcua-1", conn.Pubkey, "opcua-1")
 	c := machine(t, child.MQTTAddr, conn)
-	catalogue := `{"connector":"opcua-1","data_tags":[` +
-		`{"id":"ns=2;s=Temp","name":"Temp","data_type":"float"},` +
-		`{"id":"ns=2;s=Speed","name":"Line 1/Speed","data_type":"float"}]}`
-	if tk := c.Publish("colca/v1/_DataTags/n-child/opcua-1/catalogue", 1, true, catalogue); !tk.WaitTimeout(5 * time.Second) {
+	catalogue := `{"data_tags":[` +
+		`{"id":"01JTAG-TEMP","name":"Temp","data_type":"float"},` +
+		`{"id":"01JTAG-SPEED","name":"Line 1/Speed","data_type":"float"}]}`
+	if tk := c.Publish("colca/v1/_DataTags/n-child/opcua-1/opcua-1", 1, true, catalogue); !tk.WaitTimeout(5 * time.Second) {
 		t.Fatal("catalogue publish: no PUBACK")
 	}
 	waitFor(t, "catalogue stored at the child", 10*time.Second, func() bool {
@@ -154,7 +151,7 @@ func TestAutobindIssuedAtTheParentBindsAtTheChild(t *testing.T) {
 		if !strings.HasPrefix(topic, "colca/v1/_Signal/n-child/") {
 			t.Errorf("%s: signals are authored by the node, not by the connector", topic)
 		}
-		if payload["connector"] != "opcua-1" || payload["tag_id"] == "" {
+		if payload["data_tag"] == "" {
 			t.Errorf("%s: binding not recorded: %v", topic, payload)
 		}
 		leaf := topic[strings.LastIndex(topic, "/")+1:]
@@ -195,6 +192,18 @@ func TestAutobindWithoutACatalogueAcksConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer n.Stop()
+
+	// The connector is enrolled — this node knows who it is, by name — but has
+	// published nothing yet: a retry after it does will succeed, so this is a
+	// conflict with the current state, not an unknown identity (that case is
+	// TestAutobindRefusesAConnectorThisNodeDoesNotHold at the unit level).
+	b, err := json.Marshal(map[string]any{"ulid": "never-seen", "kind": "local", "name": "never-seen"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := n.Registry.Enroll(b); err != nil {
+		t.Fatalf("enroll local service: %v", err)
+	}
 
 	corr := cmdAdmin(t, n, "colca/v1/_CmdConfigure/n-solo/signal/autobind",
 		map[string]any{"connector": "never-seen"})

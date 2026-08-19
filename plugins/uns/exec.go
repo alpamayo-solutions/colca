@@ -27,12 +27,21 @@ type EntityStore interface {
 	NodeID() string
 }
 
-// Bindings answers which identities bind to an element. Declared here for the
-// same reason as EntityStore and satisfied the same way — the core's registry
-// manager fits it structurally, without either side importing the other.
+// Bindings answers which identities bind to an element, and who one identity
+// is. Declared here for the same reason as EntityStore and satisfied the same
+// way — the core's registry manager fits it structurally, without either side
+// importing the other.
 type Bindings interface {
 	// BoundTo lists the ULIDs of the identities bound to an element.
 	BoundTo(elementID string) []string
+	// EntryOf answers who an identity is and where it is bound: its name and
+	// its element ("" for unplaced — bound to the node itself). ok is false
+	// when this node has never enrolled that identity. Autobind needs both to
+	// COMPUTE where that identity's catalogue sits, rather than searching for
+	// records that look like they might be its (local-service-trust design
+	// §6). Returning the two fields rather than *uns.Entry keeps this port
+	// narrow and stops the domain depending on the entry's whole shape.
+	EntryOf(ulid string) (name, element string, ok bool)
 }
 
 // KVRecord is one entity record as the store currently holds it.

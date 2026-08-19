@@ -1128,7 +1128,7 @@ func newLocalHandler(t *testing.T) *localAPI {
 	m := metrics.New(s, config.Retention{}, nil)
 	reg.SetMetrics(m)
 	eng := engine.New(s, cfg, reg, nil, m, nil)
-	domain := uns.NewConfigExec(eng.EntityStore(), reg, cfg.Plugin)
+	domain := uns.NewConfigExec(eng.EntityStore(), reg, eng.Elements(), cfg.Plugin)
 	eng.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain))
 	eng.SetObserver(domain)
 	reg.SetNamespace(eng.Elements())

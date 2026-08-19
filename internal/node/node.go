@@ -176,7 +176,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	// enrollment door — one write path inside (cmdadmin design §5). The data
 	// model lives in the plugin, so the core never learns what a signal is
 	// (data-model binding design §7).
-	domain := uns.NewConfigExec(n.Engine.EntityStore(), reg, cfg.Plugin)
+	domain := uns.NewConfigExec(n.Engine.EntityStore(), reg, n.Engine.Elements(), cfg.Plugin)
 	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain))
 	n.Engine.SetObserver(domain)
 	// The registry resolves placements through the engine's element index

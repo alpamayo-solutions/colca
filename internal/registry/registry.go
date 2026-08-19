@@ -469,6 +469,20 @@ func (m *Manager) BoundTo(elementID string) []string {
 	return out
 }
 
+// EntryOf answers who an identity is and where it is bound (uns.Bindings port):
+// autobind needs both to COMPUTE where that identity's catalogue sits, rather
+// than searching for records that look like they might be its
+// (local-service-trust design §6).
+func (m *Manager) EntryOf(ulid string) (name, element string, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.byID[ulid]
+	if !ok {
+		return "", "", false
+	}
+	return e.Name, e.Element, true
+}
+
 func (m *Manager) Get(ulid string) (*uns.Entry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
