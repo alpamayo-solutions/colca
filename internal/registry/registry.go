@@ -55,6 +55,7 @@ type Manager struct {
 	mu      sync.RWMutex
 	byID    uns.Registry      // ulid → entry
 	byPK    map[string]string // pubkey hex → ulid
+	byName  map[string]string // name → ulid (KindLocal only; a second index, same shape as byPK)
 	kick    func(ulid string)
 	deliver func(topic string, payload []byte, retain bool)
 	m       *metrics.Metrics // late-bound; every Metrics method is nil-safe, so this may stay unset
@@ -69,10 +70,11 @@ type Manager struct {
 // entry is fatal: silently skipping it would revoke an identity by accident.
 func New(st *store.Store, nodeULID string) (*Manager, error) {
 	m := &Manager{
-		st:   st,
-		log:  slog.Default().With("node", nodeULID, "comp", "registry"),
-		byID: uns.Registry{},
-		byPK: map[string]string{},
+		st:     st,
+		log:    slog.Default().With("node", nodeULID, "comp", "registry"),
+		byID:   uns.Registry{},
+		byPK:   map[string]string{},
+		byName: map[string]string{},
 	}
 	for ulid, raw := range st.RegistryScan() {
 		var e uns.Entry
@@ -84,6 +86,9 @@ func New(st *store.Store, nodeULID string) (*Manager, error) {
 		}
 		m.byID[e.ULID] = &e
 		m.byPK[e.Pubkey] = e.ULID
+		if e.Name != "" {
+			m.byName[e.Name] = e.ULID
+		}
 	}
 	return m, nil
 }
@@ -176,6 +181,12 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 		m.mu.Unlock()
 		return "", 0, fmt.Errorf("enroll %s: pubkey already enrolled for %s: %w", e.ULID, other, ErrConflict)
 	}
+	if e.Name != "" {
+		if other, ok := m.byName[e.Name]; ok && other != e.ULID {
+			m.mu.Unlock()
+			return "", 0, fmt.Errorf("enroll %s: name %q already enrolled for %s: %w", e.ULID, e.Name, other, ErrConflict)
+		}
+	}
 	if e.Element != "" {
 		for _, ex := range m.byID {
 			if ex.ULID != e.ULID && ex.Element == e.Element {
@@ -215,9 +226,15 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 	prev, existed := m.byID[e.ULID]
 	if existed {
 		delete(m.byPK, prev.Pubkey)
+		if prev.Name != "" {
+			delete(m.byName, prev.Name)
+		}
 	}
 	m.byID[e.ULID] = &e
 	m.byPK[e.Pubkey] = e.ULID
+	if e.Name != "" {
+		m.byName[e.Name] = e.ULID
+	}
 	kick, deliver := m.kick, m.deliver
 	// Callbacks fire OUTSIDE the lock: the broker's delivery path re-enters
 	// this registry (per-delivery ACL check) in the same goroutine — invoking
@@ -277,6 +294,9 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 	}
 	delete(m.byID, ulid)
 	delete(m.byPK, e.Pubkey)
+	if e.Name != "" {
+		delete(m.byName, e.Name)
+	}
 	kick, deliver := m.kick, m.deliver
 	m.mu.Unlock() // callbacks outside the lock — see Enroll
 	if kick != nil {
@@ -414,6 +434,20 @@ func (m *Manager) ByPubkey(pubkeyHex string) (*uns.Entry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	ulid, ok := m.byPK[pubkeyHex]
+	if !ok {
+		return nil, false
+	}
+	e, ok := m.byID[ulid]
+	return e, ok
+}
+
+// ByName resolves a KindLocal entry by the name it presents on connect
+// (local-service-trust design §3) — the local door's equivalent of
+// ByPubkey, since a local service holds no key for the doors to pin on.
+func (m *Manager) ByName(name string) (*uns.Entry, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ulid, ok := m.byName[name]
 	if !ok {
 		return nil, false
 	}

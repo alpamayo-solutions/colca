@@ -71,6 +71,23 @@ func newManager(t *testing.T, st *store.Store, paths ...string) (*Manager, ns) {
 	return m, n
 }
 
+// newTestManager builds a manager for the name-index tests below: a fresh
+// store plus a namespace resolving "el-press3" (elementAt("press3")), the
+// element every local-service entry in this file binds to.
+func newTestManager(t *testing.T) *Manager {
+	t.Helper()
+	m, _ := newManager(t, openStore(t, t.TempDir()), "press3")
+	return m
+}
+
+// mustEnroll enrolls a raw entry JSON string, failing the test on error.
+func mustEnroll(t *testing.T, m *Manager, entryJSON string) {
+	t.Helper()
+	if _, _, err := m.Enroll([]byte(entryJSON)); err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+}
+
 func TestEnrollLookupAndPersistence(t *testing.T) {
 	dir := t.TempDir()
 	st := openStore(t, dir)
@@ -469,5 +486,47 @@ func TestBoundToNamesTheIdentitiesStandingOnAnElement(t *testing.T) {
 	}
 	if got := m.BoundTo(elementAt("z/a")); len(got) != 0 {
 		t.Fatalf("BoundTo after revoke = %v, want nothing", got)
+	}
+}
+
+// Every entry stays keyed by ULID, local ones included; name is a second
+// index, exactly as pubkey is (byPK) — ByName resolves through it, the local
+// door's equivalent of ByPubkey (local-service-trust design §3).
+func TestByNameFindsALocalEntry(t *testing.T) {
+	m := newTestManager(t)
+	mustEnroll(t, m, `{"ulid":"01JSVC","kind":"local","name":"connector-opcua","element":"el-press3"}`)
+
+	e, ok := m.ByName("connector-opcua")
+	if !ok || e.ULID != "01JSVC" {
+		t.Fatalf("ByName = %v, %v; want the entry 01JSVC", e, ok)
+	}
+	if _, ok := m.ByName("nobody"); ok {
+		t.Fatal("ByName resolved a name that was never enrolled")
+	}
+}
+
+// Name uniqueness is enforced beside pubkey uniqueness: two local services
+// cannot both present the same name at the door, or ByName could not tell
+// them apart.
+func TestTwoLocalServicesCannotShareAName(t *testing.T) {
+	m := newTestManager(t)
+	mustEnroll(t, m, `{"ulid":"01JA","kind":"local","name":"conn","element":"el-press3"}`)
+
+	_, _, err := m.Enroll([]byte(`{"ulid":"01JB","kind":"local","name":"conn","element":"el-press3"}`))
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("second entry with the same name: err = %v; want ErrConflict", err)
+	}
+}
+
+// A revoked entry's name must not keep resolving — the index must not
+// outlive the entry it points at.
+func TestByNameForgetsARevokedEntry(t *testing.T) {
+	m := newTestManager(t)
+	mustEnroll(t, m, `{"ulid":"01JSVC","kind":"local","name":"conn","element":"el-press3"}`)
+	if _, _, err := m.Revoke("01JSVC"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if _, ok := m.ByName("conn"); ok {
+		t.Fatal("a revoked name still resolves; the index outlived its entry")
 	}
 }
