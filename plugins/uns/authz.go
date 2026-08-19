@@ -88,6 +88,30 @@ func (e *Entry) MarkDraining() { e.Status = StatusDraining }
 // §3.2 [delta]).
 func (e *Entry) CanDrain() bool { return e.Kind == KindNode }
 
+// LocalCursorPrefix namespaces a KindLocal entry's cursors by the NAME it
+// presented rather than its minted ULID (local-service-trust design §4): a
+// local caller never learns the ULID Register mints for it on first sight —
+// only the name it presented — so cursors namespaced by ULID (every other
+// kind's rule) would be permanently unreachable from the local door. The name
+// is unique across the registry (enrollment's byName uniqueness check), so it
+// still keeps two local services from colliding on /ack, which is the one
+// thing this namespacing has to guarantee.
+const LocalCursorPrefix = "c/"
+
+// CursorPrefix names the prefix this entry's own cursors must carry — the
+// identifier boundary /fetch and /ack use to refuse one identity moving
+// another's cursor. Every kind but KindLocal owns cursors under its own ULID,
+// which the caller already knows (a machine's pinned key, a human's token
+// subject IS its ULID via TokenEntry). KindLocal is the one identity that
+// does not: it knows only the name it presented, so it owns cursors under
+// LocalCursorPrefix+name instead.
+func (e *Entry) CursorPrefix() string {
+	if e.Kind == KindLocal {
+		return LocalCursorPrefix + e.Name + "/"
+	}
+	return e.ULID + "/"
+}
+
 // Door is one of the ways an identity can present itself to a node. Which kinds
 // may use which door is a domain rule (auth §2.1, §6), so it is answered here
 // rather than re-derived from Kind at each listener.

@@ -322,7 +322,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return c.admin || uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic)
 		}
 		if c.entry != nil && !ownsCursor(c.entry, cursor) {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: machine cursors are named {ulid}/..."})
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: this identity's cursors are named " + c.entry.CursorPrefix() + "..."})
 			return
 		}
 		from := e.Store().CursorGet(cursor, stream)
@@ -349,8 +349,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	}))
 
 	// POST /ack: the client acks the last PROCESSED offset, the store holds the
-	// next offset to read — hence offset+1. Machine cursors are namespaced
-	// {ulid}/... so one machine can never move another's cursor.
+	// next offset to read — hence offset+1. Cursors are namespaced by
+	// uns.Entry.CursorPrefix ({ulid}/... for a machine or human, c/{name}/...
+	// for a local service) so one identity can never move another's cursor.
 	mux.HandleFunc("POST /ack", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
 			Cursor string `json:"cursor"`
@@ -362,7 +363,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		if c.entry != nil && !ownsCursor(c.entry, in.Cursor) {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: machine cursors are named {ulid}/..."})
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: this identity's cursors are named " + c.entry.CursorPrefix() + "..."})
 			return
 		}
 		moved := e.Store().CursorAck(in.Cursor, in.Stream, in.Offset+1)
@@ -488,9 +489,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	return mux
 }
 
-// ownsCursor: a machine's cursors live under its own ULID prefix.
+// ownsCursor: a cursor belongs to the caller when it carries the caller's
+// cursor prefix. That boundary is a domain question (uns.Entry.CursorPrefix):
+// ULID-prefixed for every keyed identity, name-prefixed for a local service,
+// which never learns the ULID Register minted for it (local-service-trust
+// design §4).
 func ownsCursor(e *uns.Entry, cursor string) bool {
-	return strings.HasPrefix(cursor, e.ULID+"/")
+	return strings.HasPrefix(cursor, e.CursorPrefix())
 }
 
 func readBody(r *http.Request) ([]byte, error) {

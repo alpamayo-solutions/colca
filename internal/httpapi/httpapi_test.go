@@ -1110,6 +1110,7 @@ type localAPI struct {
 	http.Handler
 	reg *registry.Manager
 	eng *engine.Engine
+	m   *metrics.Metrics
 }
 
 func newLocalHandler(t *testing.T) *localAPI {
@@ -1151,7 +1152,7 @@ func newLocalHandler(t *testing.T) *localAPI {
 		return nil
 	})
 	h := Handler(eng, cfg, reg, nil, m, "deadbeef", true)
-	return &localAPI{Handler: h, reg: reg, eng: eng}
+	return &localAPI{Handler: h, reg: reg, eng: eng, m: m}
 }
 
 // testRegistry gives a test direct access to the registry a local handler was
@@ -1218,11 +1219,22 @@ func TestTheLocalHandlerServesHealthAndMetrics(t *testing.T) {
 
 func TestTheLocalHandlerRequiresAName(t *testing.T) {
 	h := newLocalHandler(t)
+	const line = `colca_auth_rejections_total{door="local",reason="no_name"}`
+	if v := metricstest.Value(t, h.m, line); v != 0 {
+		t.Fatalf("%s = %v before any request, want 0", line, v)
+	}
+
 	req := httptest.NewRequest("GET", "/kv", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("nameless request on the local door = %d; want 401 — the name is how its scope is found", rec.Code)
+	}
+	// A 401 for the WRONG reason would still pass a status-only assertion —
+	// pin the reason the code actually produces, mirroring the MQTT twin
+	// (mqttsrv_test.go's TestTheLocalDoorRequiresAName).
+	if v := metricstest.Value(t, h.m, line); v != 1 {
+		t.Fatalf("%s = %v after the nameless request, want exactly 1", line, v)
 	}
 }
 
@@ -1256,6 +1268,11 @@ func TestTheLocalHandlerRefusesAKeyedIdentityFoundByName(t *testing.T) {
 		t.Fatal("precondition broken: \"friendly-name\" must not itself be a ulid")
 	}
 
+	const line = `colca_auth_rejections_total{door="local",reason="kind"}`
+	if v := metricstest.Value(t, h.m, line); v != 0 {
+		t.Fatalf("%s = %v before any request, want 0", line, v)
+	}
+
 	req := httptest.NewRequest("GET", "/kv", nil)
 	req.Header.Set("X-Colca-Service", "friendly-name")
 	rec := httptest.NewRecorder()
@@ -1264,11 +1281,165 @@ func TestTheLocalHandlerRefusesAKeyedIdentityFoundByName(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("a machine's friendly name was claimed by a certless request on the local door: got %d, want 401", rec.Code)
 	}
+	// A 401 for the WRONG reason would still pass a status-only assertion —
+	// pin the reason the code actually produces, mirroring the MQTT twin
+	// (mqttsrv_test.go's TestALocalNameThatResolvesToAKeyedIdentityByNameIsRefused).
+	if v := metricstest.Value(t, h.m, line); v != 1 {
+		t.Fatalf("%s = %v after the named-machine request, want exactly 1", line, v)
+	}
 	// And the request must not have been treated as SOME other newly-minted
 	// local identity either — the machine's own entry is what must stay
 	// untouched, not just "some name got refused".
 	got, ok := reg.Get(m.ULID)
 	if !ok || got.Kind != uns.KindMachine {
 		t.Fatal("the machine entry itself must be untouched by the refused request")
+	}
+}
+
+// The MQTT door has a twin (TestAMachineKeyIsNotAcceptedOnTheLocalDoor): a
+// machine ULID enrolled on the main door must not be assumable by name on the
+// local door either. Register alone would not catch this — its own
+// uniqueness check is scoped to the byName index, a different key space than
+// byID — so this is what the reg.Get(name) pre-check in resolve exists for.
+// Without a dedicated test the collision guard had zero coverage: deleting it
+// left the whole suite green.
+func TestTheLocalHandlerRefusesANameThatCollidesWithAnotherEntrysULID(t *testing.T) {
+	h := newLocalHandler(t)
+	reg := testRegistry(t, h)
+	element := authtest.Place(t, h.eng, "press3")
+	m := authtest.NewMachine(t, "01JMACHINE")
+	authtest.Enroll(t, reg, m, element)
+
+	const line = `colca_auth_rejections_total{door="local",reason="kind"}`
+	if v := metricstest.Value(t, h.m, line); v != 0 {
+		t.Fatalf("%s = %v before any request, want 0", line, v)
+	}
+
+	req := httptest.NewRequest("GET", "/kv", nil)
+	req.Header.Set("X-Colca-Service", "01JMACHINE")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a machine's identity was claimed by ulid-as-name on the local door: got %d, want 401", rec.Code)
+	}
+	if v := metricstest.Value(t, h.m, line); v != 1 {
+		t.Fatalf("%s = %v after the collision request, want exactly 1", line, v)
+	}
+	// The local door must not have quietly minted an unrelated kind=local
+	// entry under this name instead of refusing outright.
+	if _, ok := reg.ByName("01JMACHINE"); ok {
+		t.Fatal("the collision silently registered a new local entry instead of being refused")
+	}
+}
+
+// registerLocal sends the CONNECT-equivalent GET a local service makes on
+// first contact, so subsequent /fetch and /ack calls in a test have a real
+// registered (and, when mount != "", placed) entry behind them — not a name
+// the test merely intends to use.
+func registerLocal(t *testing.T, h *localAPI, name, mount string) {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/kv", nil)
+	req.Header.Set("X-Colca-Service", name)
+	if mount != "" {
+		req.Header.Set("X-Colca-Mount", mount)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("registering %q at mount %q: %d %s", name, mount, rec.Code, rec.Body.String())
+	}
+}
+
+// A local caller never learns the ULID Register mints for it — only the name
+// it presented — so ownsCursor's ULID-prefix rule (correct for a machine or a
+// human, who both already know their own identifier) made /fetch and /ack
+// permanently unreachable from this door: no cursor name it could construct
+// would ever pass. Design §4 specifies the fix: cursors namespaced by NAME
+// under "c/{name}/…". This proves both routes actually work end to end —
+// not merely that the cursor-ownership check stops 403ing — by seeding a
+// real record in the entry's own (implicitly readable) zone and reading it
+// back through /fetch, then moving the cursor through /ack.
+func TestTheLocalHandlerFetchAndAckWorkWithANameNamespacedCursor(t *testing.T) {
+	h := newLocalHandler(t)
+	registerLocal(t, h, "connector-opcua", "press3")
+
+	if _, err := h.eng.IngestAdmin("colca/v1/_Metric/n-test/press3/temp", []byte(`{"v":1.0}`)); err != nil {
+		t.Fatalf("seed metric: %v", err)
+	}
+
+	cursor := uns.LocalCursorPrefix + "connector-opcua/c1"
+	fetchReq := httptest.NewRequest("GET", "/fetch?stream=metrics&cursor="+cursor+"&max=10", nil)
+	fetchReq.Header.Set("X-Colca-Service", "connector-opcua")
+	fetchRec := httptest.NewRecorder()
+	h.ServeHTTP(fetchRec, fetchReq)
+	if fetchRec.Code != 200 {
+		t.Fatalf("GET /fetch with a name-namespaced cursor = %d: %s", fetchRec.Code, fetchRec.Body.String())
+	}
+	var out struct {
+		Records []map[string]any `json:"records"`
+	}
+	if err := json.NewDecoder(fetchRec.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Records) != 1 {
+		t.Fatalf("records = %v, want the one seeded metric — own-zone read is implicit for a placed entry (readZones)", out.Records)
+	}
+	offset, ok := out.Records[0]["offset"].(float64)
+	if !ok {
+		t.Fatalf("record has no numeric offset: %v", out.Records[0])
+	}
+
+	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":%d}`, cursor, int64(offset))
+	ackReq := httptest.NewRequest("POST", "/ack", strings.NewReader(ackBody))
+	ackReq.Header.Set("X-Colca-Service", "connector-opcua")
+	ackRec := httptest.NewRecorder()
+	h.ServeHTTP(ackRec, ackReq)
+	if ackRec.Code != 200 {
+		t.Fatalf("POST /ack with a name-namespaced cursor = %d: %s", ackRec.Code, ackRec.Body.String())
+	}
+	var ackOut struct {
+		Moved bool `json:"moved"`
+	}
+	if err := json.NewDecoder(ackRec.Body).Decode(&ackOut); err != nil {
+		t.Fatal(err)
+	}
+	if !ackOut.Moved {
+		t.Fatal("POST /ack reported moved=false; the cursor did not actually advance")
+	}
+
+	// And the cursor genuinely moved: fetching again from the same cursor now
+	// returns nothing left to read.
+	fetchReq2 := httptest.NewRequest("GET", "/fetch?stream=metrics&cursor="+cursor+"&max=10", nil)
+	fetchReq2.Header.Set("X-Colca-Service", "connector-opcua")
+	fetchRec2 := httptest.NewRecorder()
+	h.ServeHTTP(fetchRec2, fetchReq2)
+	var out2 struct {
+		Records []map[string]any `json:"records"`
+	}
+	if err := json.NewDecoder(fetchRec2.Body).Decode(&out2); err != nil {
+		t.Fatal(err)
+	}
+	if len(out2.Records) != 0 {
+		t.Fatalf("records after ack = %v, want none — /ack must have actually moved the cursor", out2.Records)
+	}
+}
+
+// One local service must never be able to move another's cursor: that is the
+// one thing name-namespacing has to guarantee (design §4: "so two local
+// services cannot collide on /ack").
+func TestTheLocalHandlerRefusesToAckAnotherServicesCursor(t *testing.T) {
+	h := newLocalHandler(t)
+	registerLocal(t, h, "connector-a", "")
+	registerLocal(t, h, "connector-b", "")
+
+	body := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":0}`, uns.LocalCursorPrefix+"connector-a/c1")
+	req := httptest.NewRequest("POST", "/ack", strings.NewReader(body))
+	req.Header.Set("X-Colca-Service", "connector-b")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("connector-b acking connector-a's cursor = %d, want 403", rec.Code)
 	}
 }
