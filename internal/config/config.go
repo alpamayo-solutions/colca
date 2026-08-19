@@ -69,6 +69,11 @@ type Parent struct {
 type API struct {
 	Addr  string `yaml:"addr"`
 	Token string `yaml:"token"`
+	// LocalAddr is the unpublished, plaintext local HTTP door (local-service-
+	// trust design §4): reachability from inside the deployment's own
+	// network IS the credential, so this listener carries no TLSConfig and
+	// serves no admin routes. Absent = no local API door on this node.
+	LocalAddr string `yaml:"local_addr"`
 }
 
 // Config is a node's full configuration. Only ULID, DataDir and KeyFile are

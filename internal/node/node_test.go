@@ -119,7 +119,7 @@ func TestStartStopResolvesAddressesAndReleasesPorts(t *testing.T) {
 		DataDir:  filepath.Join(base, "data"),
 		LogLevel: "debug",
 		KeyFile:  keyFile,
-		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
+		API:      config.API{Addr: "127.0.0.1:0", LocalAddr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 		// Children are enrolled at runtime, so a repl address ALWAYS produces
 		// a listener — a child enrolled later must be able to connect.
@@ -129,6 +129,9 @@ func TestStartStopResolvesAddressesAndReleasesPorts(t *testing.T) {
 
 	if n.APIAddr == "" || strings.HasSuffix(n.APIAddr, ":0") {
 		t.Errorf("APIAddr = %q, want a resolved address", n.APIAddr)
+	}
+	if n.LocalAPIAddr == "" || strings.HasSuffix(n.LocalAPIAddr, ":0") {
+		t.Errorf("LocalAPIAddr = %q, want a resolved address", n.LocalAPIAddr)
 	}
 	if n.MQTTAddr == "" || strings.HasSuffix(n.MQTTAddr, ":0") {
 		t.Errorf("MQTTAddr = %q, want a resolved address", n.MQTTAddr)
@@ -153,10 +156,34 @@ func TestStartStopResolvesAddressesAndReleasesPorts(t *testing.T) {
 		t.Errorf("/healthz ulid = %v, want n1", health["ulid"])
 	}
 
+	// The local API door is plain HTTP, no TLS, no credential (local-service-
+	// trust design §4) — a plain http.Get proves that end to end, not merely
+	// that Handler(local=true) behaves correctly in isolation.
+	localResp, err := http.Get("http://" + n.LocalAPIAddr + "/healthz")
+	if err != nil {
+		t.Fatalf("GET local /healthz: %v", err)
+	}
+	defer localResp.Body.Close()
+	if localResp.StatusCode != http.StatusOK {
+		t.Errorf("GET local /healthz status = %d, want 200", localResp.StatusCode)
+	}
+	// And the admin surface must not exist there at all: a 404, not a 401/403.
+	enrollResp, err := http.Post("http://"+n.LocalAPIAddr+"/enroll", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("POST local /enroll: %v", err)
+	}
+	defer enrollResp.Body.Close()
+	if enrollResp.StatusCode != http.StatusNotFound {
+		t.Errorf("POST local /enroll status = %d, want 404 (route never mounted)", enrollResp.StatusCode)
+	}
+
 	n.Stop()
 
 	if err := canListen(t, n.APIAddr); err != nil {
 		t.Errorf("api port %s still bound after Stop: %v", n.APIAddr, err)
+	}
+	if err := canListen(t, n.LocalAPIAddr); err != nil {
+		t.Errorf("local api port %s still bound after Stop: %v", n.LocalAPIAddr, err)
 	}
 	if err := canListen(t, n.MQTTAddr); err != nil {
 		t.Errorf("mqtt port %s still bound after Stop: %v", n.MQTTAddr, err)

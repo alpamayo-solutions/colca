@@ -51,11 +51,12 @@ type Node struct {
 	APIAddr  string // resolved HTTP API address ("" if no api configured)
 	ReplAddr string // resolved replication address ("" if this node has no children)
 	MQTTAddr string // resolved MQTT address ("" if no mqtt configured)
-	// MQTTLocalAddr is the resolved local-door address ("" if not configured).
-	// Unlike the other *Addr fields this is never meant to be published
-	// (local-service-trust design §4) — it exists for local services' own
-	// configuration and for tests.
+	// MQTTLocalAddr and LocalAPIAddr are the resolved local-door addresses
+	// ("" if not configured). Unlike the other *Addr fields these are never
+	// meant to be published (local-service-trust design §4) — they exist for
+	// local services' own configuration and for tests.
 	MQTTLocalAddr string
+	LocalAPIAddr  string
 	// Human doors (human-authz design §5.1); "" when not configured.
 	MQTTHumanTCPAddr string
 	MQTTHumanWSAddr  string
@@ -65,9 +66,11 @@ type Node struct {
 	// wg tracks everything that touches the store outside of a listener the
 	// server packages own: the repl loops and in-flight API handlers. Stop waits
 	// for it before closing the store — Pebble panics on use after Close.
-	wg      sync.WaitGroup
-	httpSrv *http.Server
-	apiLn   net.Listener
+	wg          sync.WaitGroup
+	httpSrv     *http.Server
+	apiLn       net.Listener
+	localAPISrv *http.Server
+	localAPILn  net.Listener
 }
 
 // Start builds and starts a node from cfg. On any failure after the store is
@@ -307,12 +310,33 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.apiLn = ln
 		n.APIAddr = ln.Addr().String()
-		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, id.PublicHex()))}
+		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, id.PublicHex(), false))}
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server stopped", "err", err)
 			}
 		}(n.httpSrv, ln)
+	}
+
+	// 4b. The local HTTP door: plaintext, no TLS, no admin routes
+	//     (local-service-trust design §4) — reachability from inside the
+	//     deployment's own network IS the credential, exactly like the local
+	//     MQTT door above. /healthz and /metrics are served here too, so
+	//     Prometheus (itself a local service) scrapes over plain HTTP and
+	//     never needs the insecure_skip_verify a self-signed door required.
+	if cfg.API.LocalAddr != "" {
+		ln, err := net.Listen("tcp", cfg.API.LocalAddr)
+		if err != nil {
+			return fail(fmt.Errorf("node %s: local api listen %s: %w", cfg.ULID, cfg.API.LocalAddr, err))
+		}
+		n.localAPILn = ln
+		n.LocalAPIAddr = ln.Addr().String()
+		n.localAPISrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, id.PublicHex(), true))}
+		go func(srv *http.Server, ln net.Listener) {
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("local api server stopped", "err", err)
+			}
+		}(n.localAPISrv, ln)
 	}
 
 	// 5. Replication server — children are enrolled at runtime (kind "node"),
@@ -399,6 +423,12 @@ func (n *Node) Stop() {
 		}
 		if n.apiLn != nil {
 			_ = n.apiLn.Close() // idempotent; guarantees the port is free
+		}
+		if n.localAPISrv != nil {
+			_ = n.localAPISrv.Close()
+		}
+		if n.localAPILn != nil {
+			_ = n.localAPILn.Close() // idempotent; guarantees the port is free
 		}
 		if n.ReplSrv != nil {
 			n.ReplSrv.Stop()

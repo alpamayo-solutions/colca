@@ -24,6 +24,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/internal/tokenauth"
 	"github.com/alpamayo-solutions/colca/internal/tokenauth/tokentest"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // bearerReq performs a request authenticated with a Bearer token.
@@ -120,7 +121,7 @@ func newAPI(t *testing.T) *api {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: Handler(e, cfg, reg, ver, m, nodeID.PublicHex())}
+	srv := &http.Server{Handler: Handler(e, cfg, reg, ver, m, nodeID.PublicHex(), false)}
 	go func() { _ = srv.Serve(tls.NewListener(ln, tlsCfg)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
@@ -859,7 +860,7 @@ func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptes
 	}
 	eng := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, "deadbeef"))
+	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, "deadbeef", false))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -1095,5 +1096,179 @@ func TestHealthzCarriesThePubkeySoAParentCanEnrollIt(t *testing.T) {
 	if body.Pubkey != "deadbeef" {
 		t.Fatalf("pubkey = %q — /healthz must carry it, or enrollment needs a shell on the device",
 			body.Pubkey)
+	}
+}
+
+// localAPI is the fixture for the local HTTP door (local-service-trust design
+// §4): no TLS, no admin routes, and self-registration's mount-authoring wired
+// EXACTLY as node.Start wires it — domain.Execute("_CmdConfigure",
+// "element/upsert", ...) is the one authoring path in this system. Mirrors
+// mqttsrv_test.go's startServerWithLocalDoor so both local doors are proven
+// against the same wiring, not a test-only shortcut that could pass while
+// node.go's own wiring stayed broken.
+type localAPI struct {
+	http.Handler
+	reg *registry.Manager
+	eng *engine.Engine
+}
+
+func newLocalHandler(t *testing.T) *localAPI {
+	t.Helper()
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	cfg := &config.Config{ULID: "n-test"}
+	reg, err := registry.New(s, cfg.ULID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := metrics.New(s, config.Retention{}, nil)
+	reg.SetMetrics(m)
+	eng := engine.New(s, cfg, reg, nil, m, nil)
+	domain := uns.NewConfigExec(eng.EntityStore(), reg, cfg.Plugin)
+	eng.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain))
+	eng.SetObserver(domain)
+	reg.SetNamespace(eng.Elements())
+	reg.SetAuthoring(eng.Elements(), func(path, elementID string) error {
+		name := path
+		if i := strings.LastIndexByte(path, '/'); i >= 0 {
+			name = path[i+1:]
+		}
+		payload, err := json.Marshal(map[string]any{
+			"elements": []map[string]any{
+				{"path": path, "element": map[string]any{"id": elementID, "name": name}},
+			},
+		})
+		if err != nil {
+			return err
+		}
+		code, msg, _ := domain.Execute("_CmdConfigure", "element/upsert", payload)
+		if code != 200 {
+			return fmt.Errorf("author element at %s: %s", path, msg)
+		}
+		return nil
+	})
+	h := Handler(eng, cfg, reg, nil, m, "deadbeef", true)
+	return &localAPI{Handler: h, reg: reg, eng: eng}
+}
+
+// testRegistry gives a test direct access to the registry a local handler was
+// built over, so it can assert what self-registration actually wrote.
+func testRegistry(t *testing.T, h *localAPI) *registry.Manager {
+	t.Helper()
+	return h.reg
+}
+
+func TestTheLocalHandlerIdentifiesByHeaderAndRegisters(t *testing.T) {
+	h := newLocalHandler(t)
+	req := httptest.NewRequest("GET", "/kv", nil)
+	req.Header.Set("X-Colca-Service", "connector-opcua")
+	req.Header.Set("X-Colca-Mount", "line1/press3")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("GET /kv on the local door = %d; want 200 with no credential", rec.Code)
+	}
+	entry, ok := testRegistry(t, h).ByName("connector-opcua")
+	if !ok {
+		t.Fatal("the request did not register the service")
+	}
+	if entry.Kind != uns.KindLocal {
+		t.Fatalf("registered kind = %q, want %q", entry.Kind, uns.KindLocal)
+	}
+	path, ok := h.eng.Elements().PathOf(entry.Element)
+	if !ok {
+		t.Fatalf("entry's element %q does not resolve to any path", entry.Element)
+	}
+	if path != "line1/press3" {
+		t.Fatalf("registered at %q; want the declared mount line1/press3", path)
+	}
+}
+
+func TestTheLocalHandlerRefusesAdminRoutes(t *testing.T) {
+	h := newLocalHandler(t)
+	for _, route := range []struct{ method, path string }{
+		{"POST", "/enroll"}, {"DELETE", "/enroll/01J"}, {"GET", "/debug/state"},
+	} {
+		req := httptest.NewRequest(route.method, route.path, strings.NewReader("{}"))
+		req.Header.Set("X-Colca-Service", "connector-opcua")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 404 {
+			t.Fatalf("%s %s on the local door = %d; provisioning is not a local service's job",
+				route.method, route.path, rec.Code)
+		}
+	}
+}
+
+func TestTheLocalHandlerServesHealthAndMetrics(t *testing.T) {
+	h := newLocalHandler(t)
+	for _, path := range []string{"/healthz", "/metrics"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != 200 {
+			t.Fatalf("GET %s on the local door = %d; Prometheus is itself a local service", path, rec.Code)
+		}
+	}
+}
+
+func TestTheLocalHandlerRequiresAName(t *testing.T) {
+	h := newLocalHandler(t)
+	req := httptest.NewRequest("GET", "/kv", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("nameless request on the local door = %d; want 401 — the name is how its scope is found", rec.Code)
+	}
+}
+
+// A machine (or child node) may be given a friendly `name` — uns.Entry.Validate
+// permits it on any kind, and Manager.Enroll indexes any non-empty Name into
+// byName regardless of kind (registry.go). That makes it resolvable through
+// ByName, and Register's own idempotent-reconnect branch ("entry exists?
+// return it") does no kind check — so without the post-Register
+// MayUseDoor(DoorLocal) check, a certless local request could present that
+// name and be handed the machine's own ULID: its topic identity, its grants,
+// its mount. Mirrors mqttsrv_test.go's
+// TestALocalNameThatResolvesToAKeyedIdentityByNameIsRefused so both local
+// doors are pinned against the identical hole.
+func TestTheLocalHandlerRefusesAKeyedIdentityFoundByName(t *testing.T) {
+	h := newLocalHandler(t)
+	reg := testRegistry(t, h)
+	element := authtest.Place(t, h.eng, "press3")
+	m := authtest.NewMachine(t, "01JNAMEDMACHINE")
+	entry := uns.Entry{ULID: m.ULID, Pubkey: m.Pubkey, Kind: uns.KindMachine, Name: "friendly-name", Element: element}
+	raw, err := json.Marshal(&entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reg.Enroll(raw); err != nil {
+		t.Fatalf("enroll a named machine: %v", err)
+	}
+	// Get(name) must NOT be the thing catching this: "friendly-name" is not
+	// anyone's ULID, so that pre-check passes clean through, and only the
+	// post-Register MayUseDoor check can still refuse it.
+	if _, ok := reg.Get("friendly-name"); ok {
+		t.Fatal("precondition broken: \"friendly-name\" must not itself be a ulid")
+	}
+
+	req := httptest.NewRequest("GET", "/kv", nil)
+	req.Header.Set("X-Colca-Service", "friendly-name")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a machine's friendly name was claimed by a certless request on the local door: got %d, want 401", rec.Code)
+	}
+	// And the request must not have been treated as SOME other newly-minted
+	// local identity either — the machine's own entry is what must stay
+	// untouched, not just "some name got refused".
+	got, ok := reg.Get(m.ULID)
+	if !ok || got.Kind != uns.KindMachine {
+		t.Fatal("the machine entry itself must be untouched by the refused request")
 	}
 }
