@@ -64,9 +64,9 @@ func TestPubackReasonCodesMQTT5(t *testing.T) {
 		payload string
 		want    byte
 	}{
-		{"valid publish", "colca/v1/_Metric/m1/temp", `{"v": 1}`, 0x00},
-		{"schema invalid", "colca/v1/_Metric/m1/temp", `{"nope": 1}`, 0x99},
-		{"foreign level-4", "colca/v1/_Metric/m2/temp", `{"v": 1}`, 0x87},
+		{"valid publish", "colca/v1/_Metric/n1/m1/temp", `{"v": 1}`, 0x00},
+		{"schema invalid", "colca/v1/_Metric/n1/m1/temp", `{"nope": 1}`, 0x99},
+		{"wrong level-4", "colca/v1/_Metric/m2/temp", `{"v": 1}`, 0x87},
 		{"unknown contract", "colca/v1/_Bogus/m1/x", `{}`, 0x90},
 		{"cmd without grant", "colca/v1/_CmdParam/m1/m1/go", `{"correlation_id":"c","expires_at":9000000000000}`, 0x87},
 		{"registry contract", "colca/v1/_EdgeNode/m1/x", `{"ulid":"u"}`, 0x87},

@@ -99,14 +99,15 @@ func TestEnrollLookupAndPersistence(t *testing.T) {
 	if ulid != "01M1" || off == 0 {
 		t.Fatalf("Enroll returned ulid=%q off=%d", ulid, off)
 	}
-	if e, ok := m.Get("01M1"); !ok || e.Element != elementAt("z/cnc5") {
+	e, ok := m.Get("01M1")
+	if !ok || e.Element != elementAt("z/cnc5") {
 		t.Fatalf("Get after enroll: %v %v", e, ok)
 	}
-	if e, ok := m.ByPubkey(pub("ab")); !ok || e.ULID != "01M1" {
-		t.Fatalf("ByPubkey after enroll: %v %v", e, ok)
+	if epk, ok := m.ByPubkey(pub("ab")); !ok || epk.ULID != "01M1" {
+		t.Fatalf("ByPubkey after enroll: %v %v", epk, ok)
 	}
-	if mount, ok := m.MountOf("01M1"); !ok || mount != "z/cnc5" {
-		t.Fatalf("MountOf: %q %v", mount, ok)
+	if mount, ok := m.mountOf(e); !ok || mount != "z/cnc5" {
+		t.Fatalf("mountOf: %q %v", mount, ok)
 	}
 	if got := m.List(); len(got) != 1 || got[0].ULID != "01M1" {
 		t.Fatalf("List: %v", got)
@@ -422,15 +423,19 @@ func TestARenamedElementMovesTheMountWithNoReEnrollment(t *testing.T) {
 	if _, _, err := m.Enroll(entryJSON(t, machine("01M1", "z/a", pub("ab")))); err != nil {
 		t.Fatal(err)
 	}
-	if mount, ok := m.MountOf("01M1"); !ok || mount != "z/a" {
-		t.Fatalf("before the rename MountOf = %q %v, want z/a", mount, ok)
+	e, ok := m.Get("01M1")
+	if !ok {
+		t.Fatal("Get after enroll")
+	}
+	if mount, ok := m.mountOf(e); !ok || mount != "z/a" {
+		t.Fatalf("before the rename mountOf = %q %v, want z/a", mount, ok)
 	}
 
 	// The element is renamed in the namespace. Nothing touches the registry.
 	elements[elementAt("z/a")] = "z/a-neu"
 
-	if mount, ok := m.MountOf("01M1"); !ok || mount != "z/a-neu" {
-		t.Fatalf("after the rename MountOf = %q %v, want z/a-neu", mount, ok)
+	if mount, ok := m.mountOf(e); !ok || mount != "z/a-neu" {
+		t.Fatalf("after the rename mountOf = %q %v, want z/a-neu", mount, ok)
 	}
 	// The binding is to the element, not to either path: a second identity
 	// still cannot take the position, whatever it is currently called.
@@ -448,9 +453,13 @@ func TestAnIdentityWhoseElementStopsResolvingHasNoMount(t *testing.T) {
 	if _, _, err := m.Enroll(entryJSON(t, machine("01M1", "z/a", pub("ab")))); err != nil {
 		t.Fatal(err)
 	}
+	e, ok := m.Get("01M1")
+	if !ok {
+		t.Fatal("Get after enroll")
+	}
 	delete(elements, elementAt("z/a"))
-	if mount, ok := m.MountOf("01M1"); ok {
-		t.Fatalf("MountOf = %q %v, want a miss — the element is gone", mount, ok)
+	if mount, ok := m.mountOf(e); ok {
+		t.Fatalf("mountOf = %q %v, want a miss — the element is gone", mount, ok)
 	}
 	// Revoke stays the kill switch regardless: an unresolvable element must
 	// never keep an identity alive.

@@ -116,10 +116,9 @@ func bundleEngine(t *testing.T) *Engine {
 	// command contract therefore demands the highest grant class until the
 	// plugin names its hazard class. Pinned below.
 	ids.entries["writer"] = &uns.Entry{ULID: "writer", Kind: uns.KindMachine, Element: "el-writer", Grants: []string{"cmd:#:admin"}}
-	ids.mounts["writer"] = "writer"
 	ids.entries["paramonly"] = &uns.Entry{ULID: "paramonly", Kind: uns.KindMachine, Element: "el-paramonly", Grants: []string{"cmd:#:param"}}
-	ids.mounts["paramonly"] = "paramonly"
 	e := New(s, &config.Config{ULID: "n-edge1"}, ids, nil, nil, nil)
+	placeTestElements(t, e)
 	numeric := map[string]any{"type": "number"}
 	str := map[string]any{"type": "string", "minLength": 1}
 	e.SetContracts(writeBundle(t, map[string]any{
@@ -135,7 +134,7 @@ func bundleEngine(t *testing.T) *Engine {
 func TestBundleDeclaredContractRoutesAndValidates(t *testing.T) {
 	e := bundleEngine(t)
 
-	res, err := e.IngestClient("m1", "colca/v1/_Reading/m1/temp", []byte(`{"value": 3, "signal_id": "s1"}`))
+	res, err := e.IngestClient("m1", "colca/v1/_Reading/n-edge1/m1/temp", []byte(`{"value": 3, "signal_id": "s1"}`))
 	if err != nil {
 		t.Fatalf("new data contract must ingest under the bundle: %v", err)
 	}
@@ -144,7 +143,7 @@ func TestBundleDeclaredContractRoutesAndValidates(t *testing.T) {
 	}
 
 	// Schema enforced: missing signal_id rejected with the validation reason.
-	_, err = e.IngestClient("m1", "colca/v1/_Reading/m1/temp", []byte(`{"value": 3}`))
+	_, err = e.IngestClient("m1", "colca/v1/_Reading/n-edge1/m1/temp", []byte(`{"value": 3}`))
 	if err == nil || ReasonOf(err) != "validation" {
 		t.Fatalf("schema reject must carry reason=validation, got %v (reason %q)", err, ReasonOf(err))
 	}
@@ -183,7 +182,7 @@ func TestBundleTombstoneFlag(t *testing.T) {
 	e := bundleEngine(t)
 
 	// data + tombstone:true → empty payload retires the path.
-	if _, err := e.IngestClient("m1", "colca/v1/_Reading/m1/temp", nil); err != nil {
+	if _, err := e.IngestClient("m1", "colca/v1/_Reading/n-edge1/m1/temp", nil); err != nil {
 		t.Fatalf("tombstone on a tombstonable contract must be accepted: %v", err)
 	}
 	// cmd + tombstone:false → rejected.
@@ -224,16 +223,16 @@ func TestRejectErrorsCarryReasons(t *testing.T) {
 			_, err := e.IngestClient("m1", "colca/v1/_EdgeNode/m1/x", []byte(`{"ulid":"u"}`))
 			return err
 		}},
-		{"identity", func() error {
+		{"node_id", func() error {
 			_, err := e.IngestClient("m1", "colca/v1/_Metric/m2/temp", []byte(`{"v":1}`))
 			return err
 		}},
 		{"validation", func() error {
-			_, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", []byte(`{"nope":1}`))
+			_, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", []byte(`{"nope":1}`))
 			return err
 		}},
-		{"no_mount", func() error {
-			_, err := e.IngestClient("observer", "colca/v1/_Metric/observer/t", []byte(`{"v":1}`))
+		{"write_denied", func() error {
+			_, err := e.IngestClient("hmi", "colca/v1/_Metric/n-edge1/hmi/t", []byte(`{"v":1}`))
 			return err
 		}},
 		{"cmd_denied", func() error {

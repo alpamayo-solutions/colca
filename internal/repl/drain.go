@@ -146,7 +146,7 @@ func (s *Server) evaluateDrain(childULID string) {
 // naturally reaches 0 on its own — it never itself decides completion.
 func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped bool) {
 	st := s.eng.Store()
-	mount, placed := s.eng.MountOf(e.ULID)
+	mount, placed := s.eng.Elements().PathOf(e.Element)
 	if !placed {
 		// The child's element stopped resolving mid-drain. Nothing can be said
 		// about what is still addressed to it, and "nothing pending" would

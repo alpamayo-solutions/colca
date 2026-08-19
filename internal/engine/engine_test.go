@@ -14,22 +14,14 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// fakeIDs is a test Mounts: ulid → entry, plus the placement a real registry
-// would resolve through the element index. The two are separate here because
-// the engine only ever asks for the answer, never for how it was reached.
+// fakeIDs is a test Mounts: ulid → entry. The engine asks Authorize for the
+// write-scope answer now (auth §5, writeZones) — there is no separate mount
+// to fake.
 type fakeIDs struct {
 	entries  map[string]*uns.Entry
-	mounts   map[string]string // ulid → this node's local path for it
-	draining []string          // mounts DrainingMount treats as under an active drain
+	draining []string // mounts DrainingMount treats as under an active drain
 }
 
-func (f fakeIDs) MountOf(ulid string) (string, bool) {
-	mount, ok := f.mounts[ulid]
-	if !ok || mount == "" {
-		return "", false
-	}
-	return mount, true
-}
 func (f fakeIDs) Get(ulid string) (*uns.Entry, bool) { e, ok := f.entries[ulid]; return e, ok }
 
 // DrainingMount mirrors registry.Manager.DrainingMount's own boundary rule
@@ -44,14 +36,17 @@ func (f fakeIDs) DrainingMount(path string) bool {
 	return false
 }
 
+// testIDs' "m1" carries an explicit write: grant over its own zone — a
+// machine gets no implicit write, unlike a local service (auth §5, table
+// §3), so the fixture states that grant the same way a real deployment would.
+// "hmi" carries a cmd grant only, which is exactly what the no-write-scope
+// tests need: an entry that authenticates and reads but may not write.
 func testIDs() fakeIDs {
 	return fakeIDs{
 		entries: map[string]*uns.Entry{
-			"m1":       {ULID: "m1", Kind: uns.KindMachine, Element: "el-m1"},
-			"observer": {ULID: "observer", Kind: uns.KindMachine},
-			"hmi":      {ULID: "hmi", Kind: uns.KindMachine, Element: "el-hmi", Grants: []string{"cmd:el-m1/#:param"}},
+			"m1":  {ULID: "m1", Kind: uns.KindMachine, Element: "el-m1", Grants: []string{"write:el-m1/#"}},
+			"hmi": {ULID: "hmi", Kind: uns.KindMachine, Element: "el-hmi", Grants: []string{"cmd:el-m1/#:param"}},
 		},
-		mounts: map[string]string{"m1": "m1", "hmi": "hmi"},
 	}
 }
 
@@ -130,8 +125,7 @@ func (r *recorder) got() []delivery {
 	return append([]delivery(nil), r.seen...)
 }
 
-// newRecordingEngine is newEngine plus a recording LocalDeliver, and a second
-// mount-less "observer" client (read-only, may not publish).
+// newRecordingEngine is newEngine plus a recording LocalDeliver.
 func newRecordingEngine(t *testing.T) (*Engine, *recorder) {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -147,9 +141,13 @@ func newRecordingEngine(t *testing.T) (*Engine, *recorder) {
 	return e, rec
 }
 
-func TestClientPublishMountAndKV(t *testing.T) {
+// The mount rewrite is gone: level 4 is the node's own ULID for every
+// publisher, and the path a client publishes is stored EXACTLY as sent — "m1"
+// writes at "m1/temp" because that is where its write:el-m1/# grant covers,
+// not because the engine inserted anything.
+func TestClientPublishNoRewriteAndKV(t *testing.T) {
 	e := newEngine(t)
-	res, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", []byte(`{"v":7}`))
+	res, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", []byte(`{"v":7}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,25 +155,143 @@ func TestClientPublishMountAndKV(t *testing.T) {
 		t.Fatalf("%+v", res)
 	}
 	recs, _, _ := e.Store().Read("metrics", 1, 10, nil)
-	if recs[0].Topic != "colca/v1/_Metric/m1/m1/temp" {
-		t.Fatalf("mount rewrite failed: %s", recs[0].Topic)
+	if recs[0].Topic != "colca/v1/_Metric/n-edge1/m1/temp" {
+		t.Fatalf("stored topic %q, want the published path unchanged — there is no mount rewrite any more", recs[0].Topic)
 	}
 	kv := e.Store().KVScan("m1/temp")
-	if len(kv) != 1 || kv[0].NodeID != "m1" {
-		t.Fatalf("kv: %+v", kv)
+	if len(kv) != 1 || kv[0].NodeID != "n-edge1" {
+		t.Fatalf("kv: %+v, want NodeID n-edge1 (the node, not the publishing client)", kv)
 	}
 }
 
-func TestClientIdentityRule(t *testing.T) {
+// Level 4 must be THIS node's own ULID for every publisher — not the
+// client's identity, which no longer appears in the topic at all (auth §2).
+func TestClientLevel4MustBeThisNode(t *testing.T) {
 	e := newEngine(t)
 	_, err := e.IngestClient("m1", "colca/v1/_Metric/OTHER/temp", []byte(`{"v":1}`))
-	if err == nil || !strings.Contains(err.Error(), "identity") {
-		t.Fatalf("level-4 rule not enforced: %v", err)
+	if err == nil || ReasonOf(err) != metrics.ReasonNodeID {
+		t.Fatalf("level-4 rule not enforced: %v (reason %q)", err, ReasonOf(err))
 	}
 	_, err = e.IngestClient("m1", "colca/v1/_CmdParam/m1/x", []byte(`{"correlation_id":"c","expires_at":1}`))
 	if err == nil {
-		t.Fatal("clients must not publish commands")
+		t.Fatal("an ungranted client must not publish commands")
 	}
+}
+
+// metricPayload is a valid _Metric body, shared by the write-rule tests below
+// (task-7/8, local-service-trust design §2/§5) — none of them care about the
+// payload's content, only about whether the publish is admitted.
+var metricPayload = []byte(`{"v":1}`)
+
+// newTestEngine builds a fresh engine identified by nodeULID, whose OWN
+// element is "el-root" (a one-step ancestry: this node IS el-root), and
+// enrolls one KindLocal service "01JSVC" bound to that same element — i.e.
+// bound to the node itself. writeZones resolves el-root's zone through
+// Scope.Reaches (it is the node's own element) to "#": the local service may
+// write anywhere on the node, exactly what "bound to the node itself" means
+// (design §2, §3).
+func newTestEngine(t *testing.T, nodeULID string) *Engine {
+	t.Helper()
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	cfg := &config.Config{ULID: nodeULID}
+	ids := fakeIDs{entries: map[string]*uns.Entry{
+		"01JSVC": {ULID: "01JSVC", Kind: uns.KindLocal, Name: "svc", Element: "el-root"},
+	}}
+	e := New(s, cfg, ids, nil, nil, nil)
+	e.SetAncestry(uns.Ancestry{{Element: "el-root", Name: nodeULID}})
+	return e
+}
+
+// newTestEngineScoped is newTestEngine, but the local service "01JSVC" binds
+// to elementID placed at path instead of the node's own root — its write
+// scope narrows to that subtree (writeZones, auth §5.2).
+func newTestEngineScoped(t *testing.T, nodeULID, elementID, path string) *Engine {
+	t.Helper()
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	cfg := &config.Config{ULID: nodeULID}
+	ids := fakeIDs{entries: map[string]*uns.Entry{
+		"01JSVC": {ULID: "01JSVC", Kind: uns.KindLocal, Name: "svc", Element: elementID},
+	}}
+	e := New(s, cfg, ids, nil, nil, nil)
+	topic := "colca/v1/_SystemElement/" + nodeULID + "/" + path
+	if _, err := e.IngestAdmin(topic, []byte(`{"id":"`+elementID+`","name":"`+path+`"}`)); err != nil {
+		t.Fatalf("place element %s at %s: %v", elementID, path, err)
+	}
+	return e
+}
+
+// lastTopic reads back the topic of the most recently persisted metrics-
+// stream record — asserting what the engine actually STORED, not what a
+// Result claims, since the whole point of this task is that the stored topic
+// is the published one, unchanged.
+func lastTopic(t *testing.T, e *Engine) string {
+	t.Helper()
+	next := e.Store().NextOffset("metrics")
+	if next < 2 {
+		t.Fatalf("lastTopic: metrics stream is empty (next offset %d)", next)
+	}
+	recs, _, err := e.Store().Read("metrics", next-1, 1, nil)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("lastTopic: read metrics offset %d: recs=%v err=%v", next-1, recs, err)
+	}
+	return recs[0].Topic
+}
+
+// assertRejectReason fails the test unless err is an engine rejection
+// carrying exactly the given metrics reason. Takes the error itself (via
+// ReasonOf, engine.go's typed accessor) rather than the engine — nothing
+// about "why was the last publish rejected" is state the *Engine holds.
+func assertRejectReason(t *testing.T, err error, want string) {
+	t.Helper()
+	if got := ReasonOf(err); got != want {
+		t.Fatalf("reject reason = %q, want %q (err: %v)", got, want, err)
+	}
+}
+
+// A local service publishes inside its own scope: no rewrite, level 4 is the
+// node's own ULID (local-service-trust design §2, §5, task-8 brief).
+func TestAClientPublishesUnderTheNodesULID(t *testing.T) {
+	e := newTestEngine(t, "n1")
+	res, err := e.IngestClient("01JSVC", "colca/v1/_Metric/n1/line1/temp", metricPayload)
+	if err != nil {
+		t.Fatalf("IngestClient: %v", err)
+	}
+	if !res.Persisted {
+		t.Fatal("a local service's publish inside its scope was not persisted")
+	}
+	if got := lastTopic(t, e); got != "colca/v1/_Metric/n1/line1/temp" {
+		t.Fatalf("stored topic %q; want the path exactly as published — there is no rewrite any more", got)
+	}
+}
+
+// Level 4 must name THIS node, whoever the publisher is.
+func TestLevel4MustBeThisNode(t *testing.T) {
+	e := newTestEngine(t, "n1")
+	_, err := e.IngestClient("01JSVC", "colca/v1/_Metric/other-node/line1/temp", metricPayload)
+	if err == nil {
+		t.Fatal("a client filed a record under another node's ULID")
+	}
+	assertRejectReason(t, err, metrics.ReasonNodeID)
+}
+
+// A service scoped to one subtree cannot write outside it — the level-3 proof
+// of this task's write rule (task-7/8 brief; un-quarantines
+// tests/node/test_node_contract.py::test_a_publish_outside_the_write_scope_is_rejected).
+func TestAPublishOutsideTheWriteScopeIsRejected(t *testing.T) {
+	e := newTestEngineScoped(t, "n1", "el-press3", "line1/press3")
+	_, err := e.IngestClient("01JSVC", "colca/v1/_Metric/n1/line1/press4/temp", metricPayload)
+	if err == nil {
+		t.Fatal("a scoped service wrote outside its subtree")
+	}
+	assertRejectReason(t, err, metrics.ReasonWriteDenied)
 }
 
 // Registry entries enter through the enrollment door ONLY (auth §3): _EdgeNode
@@ -515,9 +631,9 @@ func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
 
 func TestValidationReject(t *testing.T) {
 	e := newEngine(t)
-	_, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", []byte(`{"v":"bad"}`))
-	if err == nil {
-		t.Fatal("invalid payload must be rejected")
+	_, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", []byte(`{"v":"bad"}`))
+	if err == nil || ReasonOf(err) != metrics.ReasonValidation {
+		t.Fatalf("invalid payload must be rejected with reason validation, got %v (reason %q)", err, ReasonOf(err))
 	}
 	if e.Store().NextOffset("metrics") != 1 {
 		t.Fatal("rejected payload must not be persisted")
@@ -550,19 +666,19 @@ func TestNonUnsIgnored(t *testing.T) {
 	}
 }
 
-// The bus mirrors the STORE, so what a subscriber sees is the canonical,
-// mount-rewritten topic — never the raw topic the machine published — and a
-// metric is state, so it is retained.
+// The bus mirrors the STORE, so what a subscriber sees is exactly the topic
+// the client published — there is no rewrite any more — and a metric is
+// state, so it is retained.
 func TestIngestClientDeliversCanonicalTopicRetained(t *testing.T) {
 	e, rec := newRecordingEngine(t)
-	if _, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", []byte(`{"v":7}`)); err != nil {
+	if _, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", []byte(`{"v":7}`)); err != nil {
 		t.Fatal(err)
 	}
 	got := rec.got()
 	if len(got) != 1 {
 		t.Fatalf("want exactly one delivery, got %d: %+v", len(got), got)
 	}
-	want := delivery{Topic: "colca/v1/_Metric/m1/m1/temp", Payload: `{"v":7}`, Retain: true}
+	want := delivery{Topic: "colca/v1/_Metric/n-edge1/m1/temp", Payload: `{"v":7}`, Retain: true}
 	if got[0] != want {
 		t.Fatalf("delivery = %+v, want %+v", got[0], want)
 	}
@@ -624,30 +740,31 @@ func TestIngestDownlinkDeliversOnce(t *testing.T) {
 // The bus must never show something the store rejected.
 func TestRejectedPublishDeliversNothing(t *testing.T) {
 	e, rec := newRecordingEngine(t)
-	if _, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", []byte(`{"v":"bad"}`)); err == nil {
+	if _, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", []byte(`{"v":"bad"}`)); err == nil {
 		t.Fatal("invalid payload must be rejected")
 	}
 	if _, err := e.IngestClient("m1", "colca/v1/_Metric/OTHER/temp", []byte(`{"v":1}`)); err == nil {
-		t.Fatal("identity violation must be rejected")
+		t.Fatal("wrong level-4 must be rejected")
 	}
 	if got := rec.got(); len(got) != 0 {
 		t.Fatalf("a rejected publish must deliver nothing, got %+v", got)
 	}
 }
 
-// A mount-less client is a read-only observer: it may connect and subscribe,
-// but the engine refuses everything it publishes, and nothing reaches the bus.
-func TestObserverClientMayNotPublish(t *testing.T) {
+// An identity with no write grant covering the topic — "hmi" holds only a
+// cmd grant — may connect and subscribe, but the engine refuses everything it
+// publishes, and nothing reaches the bus (auth §5, writeZones).
+func TestClientWithNoWriteScopeMayNotPublish(t *testing.T) {
 	e, rec := newRecordingEngine(t)
-	_, err := e.IngestClient("observer", "colca/v1/_Metric/observer/temp", []byte(`{"v":1}`))
-	if err == nil || !strings.Contains(err.Error(), "no mount registered") {
-		t.Fatalf("observer publish must be rejected with 'no mount registered', got %v", err)
+	_, err := e.IngestClient("hmi", "colca/v1/_Metric/n-edge1/hmi/temp", []byte(`{"v":1}`))
+	if err == nil || ReasonOf(err) != metrics.ReasonWriteDenied {
+		t.Fatalf("publish with no write scope must be rejected with reason write_denied, got %v (reason %q)", err, ReasonOf(err))
 	}
 	if e.Store().NextOffset("metrics") != 1 {
-		t.Fatal("observer publish must not be persisted")
+		t.Fatal("publish with no write scope must not be persisted")
 	}
 	if got := rec.got(); len(got) != 0 {
-		t.Fatalf("observer publish must deliver nothing, got %+v", got)
+		t.Fatalf("publish with no write scope must deliver nothing, got %+v", got)
 	}
 }
 
@@ -825,16 +942,16 @@ func TestIngestReplicatedLogsOffsetJumps(t *testing.T) {
 // tombstone. The engine appends the record as history (correct class/stream,
 // validation's field checks bypassed by the §7 rule), deletes the KV key in the
 // same batch, and mirrors the empty payload retained — the retained-clear —
-// onto the bus. Exercised for both KV classes: data (client path, mount
-// rewrite) and entity (admin path, no rewrite).
+// onto the bus. Exercised for both KV classes: data (client path, no rewrite)
+// and entity (admin path, no rewrite).
 func TestEmptyPayloadTombstonesKVAndDeliversRetainedClear(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 
 	// Data class through the client path.
-	if _, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", []byte(`{"v":7}`)); err != nil {
+	if _, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", []byte(`{"v":7}`)); err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", nil)
+	res, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", nil)
 	if err != nil {
 		t.Fatalf("empty payload on _Metric must be accepted as a tombstone: %v", err)
 	}
@@ -845,8 +962,8 @@ func TestEmptyPayloadTombstonesKVAndDeliversRetainedClear(t *testing.T) {
 		t.Fatalf("tombstone did not retire the KV key: %+v", got)
 	}
 	recs, _, _ := e.Store().Read("metrics", 1, 10, nil)
-	if len(recs) != 2 || len(recs[1].Payload) != 0 || recs[1].Topic != "colca/v1/_Metric/m1/m1/temp" {
-		t.Fatalf("tombstone record = %+v, want empty payload under the canonical topic", recs)
+	if len(recs) != 2 || len(recs[1].Payload) != 0 || recs[1].Topic != "colca/v1/_Metric/n-edge1/m1/temp" {
+		t.Fatalf("tombstone record = %+v, want empty payload under the topic published, unchanged", recs)
 	}
 
 	// Entity class through the admin path.
@@ -870,7 +987,7 @@ func TestEmptyPayloadTombstonesKVAndDeliversRetainedClear(t *testing.T) {
 	if len(got) != 4 {
 		t.Fatalf("want 4 deliveries (2 sets + 2 clears), got %d: %+v", len(got), got)
 	}
-	if want := (delivery{Topic: "colca/v1/_Metric/m1/m1/temp", Payload: "", Retain: true}); got[1] != want {
+	if want := (delivery{Topic: "colca/v1/_Metric/n-edge1/m1/temp", Payload: "", Retain: true}); got[1] != want {
 		t.Fatalf("metric clear delivery = %+v, want %+v", got[1], want)
 	}
 	if want := (delivery{Topic: "colca/v1/_Signal/m1/m1/sig-a", Payload: "", Retain: true}); got[3] != want {
@@ -886,8 +1003,8 @@ func TestEmptyPayloadRejectedForNonKVClasses(t *testing.T) {
 	if _, err := e.IngestAdmin("colca/v1/_CmdParam/m1/m1/set-speed", nil); err == nil {
 		t.Fatal("empty _CmdParam payload must be rejected — commands cannot be tombstoned")
 	}
-	if _, err := e.IngestClient("m1", "colca/v1/_Ack/m1/set-speed", nil); err == nil {
-		t.Fatal("empty _Ack payload must be rejected — acks cannot be tombstoned")
+	if _, err := e.IngestClient("m1", "colca/v1/_Ack/n-edge1/set-speed", nil); err == nil || ReasonOf(err) != metrics.ReasonValidation {
+		t.Fatalf("empty _Ack payload must be rejected with reason validation — acks cannot be tombstoned, got %v (reason %q)", err, ReasonOf(err))
 	}
 	if e.Store().NextOffset("commands") != 1 {
 		t.Fatal("rejected empty payloads must not be persisted")
@@ -897,8 +1014,8 @@ func TestEmptyPayloadRejectedForNonKVClasses(t *testing.T) {
 	}
 }
 
-// The level-4 identity rule already gates tombstones: an empty payload is a
-// publish like any other, so a client cannot retire another node's path.
+// The level-4-is-this-node rule already gates tombstones: an empty payload is
+// a publish like any other, so a client cannot retire another NODE's path.
 func TestClientCannotTombstoneForeignPath(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 	// A path owned by node OTHER, seeded as replicated state would be.
@@ -908,8 +1025,8 @@ func TestClientCannotTombstoneForeignPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := e.IngestClient("m1", "colca/v1/_Metric/OTHER/x/temp", nil)
-	if err == nil || !strings.Contains(err.Error(), "identity") {
-		t.Fatalf("foreign tombstone must fail the identity rule, got: %v", err)
+	if err == nil || ReasonOf(err) != metrics.ReasonNodeID {
+		t.Fatalf("foreign tombstone must fail the level-4 rule, got: %v (reason %q)", err, ReasonOf(err))
 	}
 	if got := e.Store().KVScan("x/temp"); len(got) != 1 {
 		t.Fatalf("foreign KV entry must survive the rejected tombstone: %+v", got)

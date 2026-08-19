@@ -46,9 +46,7 @@ func adminEngine(t *testing.T) (*Engine, *fakeAdmin) {
 	cfg := &config.Config{ULID: "n-edge1"}
 	ids := testIDs()
 	ids.entries["n-child"] = &uns.Entry{ULID: "n-child", Kind: uns.KindNode, Element: "el-child1"}
-	ids.mounts["n-child"] = "child1"
 	ids.entries["provisioner"] = &uns.Entry{ULID: "provisioner", Kind: uns.KindMachine, Element: "el-provisioner", Grants: []string{"cmd:#:admin"}}
-	ids.mounts["provisioner"] = "provisioner"
 	e := New(s, cfg, ids, nil, nil, nil)
 	fa := &fakeAdmin{}
 	e.SetExecutor(Executors(NewAdminExecutor(fa)))

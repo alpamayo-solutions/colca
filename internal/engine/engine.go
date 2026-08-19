@@ -1,7 +1,8 @@
 // Package engine is the single place every write converges: the MQTT hook, the
 // HTTP publish endpoint, replication apply and downlink apply all go through
-// one of the Ingest* methods. Grammar, identity rule, mount rewrite, payload
-// validation and the atomic persist live here and nowhere else.
+// one of the Ingest* methods. Grammar, the level-4-is-this-node rule, the
+// write-scope authorization check, payload validation and the atomic persist
+// live here and nowhere else.
 package engine
 
 import (
@@ -39,7 +40,6 @@ type Result struct {
 // *registry.Manager. The engine consults it for every identity question and
 // holds no identity state of its own (auth design §8).
 type Mounts interface {
-	MountOf(ulid string) (string, bool)
 	Get(ulid string) (*uns.Entry, bool)
 	// DrainingMount reports whether path falls under a currently draining
 	// kind=node child's mount (move-drain design §3.2 item 2) — consulted
@@ -88,9 +88,10 @@ type Engine struct {
 	elements *uns.ElementIndex
 }
 
-// New builds an engine. ids is the identity registry (a client without a
-// mount is a read-only observer: MountOf misses, so IngestClient rejects its
-// publishes with "no mount registered").
+// New builds an engine. ids is the identity registry: IngestClient admits a
+// publish iff the identity's write scope (auth §5, writeZones) covers the
+// topic's path — a local service unplaced or otherwise, a machine with no
+// covering write: grant.
 //
 // m may be nil (unit tests and any caller that does not care about metrics) —
 // every Metrics method is nil-safe.
@@ -204,11 +205,6 @@ func abs64(n int64) int64 {
 	return n
 }
 
-// MountOf resolves the mount a child or client is attached under.
-func (e *Engine) MountOf(ulid string) (string, bool) {
-	return e.ids.MountOf(ulid)
-}
-
 // Elements is this node's namespace: the element index every placement
 // question resolves through.
 func (e *Engine) Elements() *uns.ElementIndex { return e.elements }
@@ -236,9 +232,9 @@ func (e *Engine) Groups() *uns.GroupIndex { return uns.NewGroupIndex(e.EntitySto
 func (e *Engine) NodeID() string { return e.cfg.ULID }
 
 // IngestClient: a directly attached MQTT client (machine/service) publishes.
-// Rules: uns grammar, class must be data/entity/ack, level-4 == identity, mount
-// rewrite, validate, persist. A non-UNS topic is not an error — it is normal
-// broker traffic that simply is not persisted.
+// Rules: uns grammar, class must be data/entity/ack, level-4 == this node,
+// write-scope authorization, validate, persist. A non-UNS topic is not an
+// error — it is normal broker traffic that simply is not persisted.
 func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, error) {
 	if !uns.IsUns(topic) {
 		return Result{Persisted: false}, nil // normal broker behavior outside colca/#
@@ -290,30 +286,25 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 	if !uns.IsKnown(class) {
 		return e.reject(metrics.ReasonGrammar, "client %s may not publish %s", identity, p.Contract)
 	}
-	if p.NodeID != identity {
-		return e.reject(metrics.ReasonIdentity, "identity rule: level-4 %q != authenticated identity %q", p.NodeID, identity)
+	// Ownership resolves to NODES, never to services: level 4 is this node's
+	// ULID for every publisher here, so a service's identity decides whether a
+	// write is allowed and never appears in the topic (local-service-trust
+	// design §2, §5).
+	if p.NodeID != e.cfg.ULID {
+		return e.reject(metrics.ReasonNodeID, "level-4 %q is not this node (%q)", p.NodeID, e.cfg.ULID)
 	}
 	if err := e.validateContract(p.Contract, payload); err != nil {
 		return e.reject(metrics.ReasonValidation, "%w", err)
 	}
-	mount, ok := e.ids.MountOf(identity)
-	if !ok {
-		return e.reject(metrics.ReasonNoMount, "no mount registered for %s", identity)
+	entry, ok := e.ids.Get(identity)
+	if !ok || !uns.Authorize(e.Scope(), entry, uns.ActPub, topic) {
+		return e.reject(metrics.ReasonWriteDenied, "client %s: no write scope covers %s", identity, topic)
 	}
-	rewritten := uns.MountInsert(topic, mount)
-	rp, err := uns.Parse(rewritten)
-	if err != nil {
-		// Defensive: MountInsert only adds a path segment to an already-parsed
-		// topic, so this can't fail in practice — but a rejection is a
-		// rejection, and it is still a grammar failure if it ever does.
-		e.metrics.RejectPublish(metrics.ReasonGrammar)
-		return Result{}, err
-	}
-	res, err := e.persist(class, rp, rewritten, payload)
+	res, err := e.persist(class, p, topic, payload)
 	if err == nil {
 		// State a machine published here, offered to the domain plugin — the
 		// core does not interpret it (data-model binding design §7).
-		e.observe(rp, rewritten, payload)
+		e.observe(p, topic, payload)
 	}
 	return res, err
 }

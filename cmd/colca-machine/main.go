@@ -1,12 +1,14 @@
 // Command colca-machine is the demo machine simulator: a long-running MQTT
 // client that behaves like a real machine attached to a Colca edge node.
 //
-// It publishes a sine-shaped temperature metric to colca/v1/_Metric/{ulid}/temp
-// every PUBLISH_INTERVAL_MS, subscribes to colca/v1/_CmdParam/{ulid}/# and acks
-// every command it receives to colca/v1/_Ack/{ulid}/{command-name} with result
-// code 200, or 498 when the command's expires_at (unix milliseconds) already
-// passed — expiry is decided by the machine at execution time, never by the
-// queue.
+// Ownership resolves to nodes, never to services (local-service-trust design
+// §2): topic level 4 is the NODE_ULID env var, not this machine's own
+// identity. It publishes a sine-shaped temperature metric to
+// colca/v1/_Metric/{node-ulid}/{ulid}/temp every PUBLISH_INTERVAL_MS,
+// subscribes to colca/v1/_CmdParam/{ulid}/# and acks every command it receives
+// to colca/v1/_Ack/{node-ulid}/{ulid}/{command-name} with result code 200, or
+// 498 when the command's expires_at (unix milliseconds) already passed —
+// expiry is decided by the machine at execution time, never by the queue.
 //
 // Expiry is decided against SYNCED time, not the machine's raw wall clock
 // (the time sync move drain design
@@ -244,6 +246,17 @@ func run() int {
 	keyPath := env("MACHINE_KEY", "/keys/"+ulid+"-machine.key")
 	broker := env("BROKER_ADDR", "127.0.0.1:8883")
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("machine", ulid)
+
+	// Ownership resolves to NODES, never to services (local-service-trust
+	// design §2): topic level 4 is the NODE this machine is attached to, not
+	// its own identity — the engine rejects anything else. Required, not
+	// defaulted: guessing a node ulid would silently mint traffic no real
+	// node admits.
+	nodeULID := env("NODE_ULID", "")
+	if nodeULID == "" {
+		log.Error("NODE_ULID is required — colca-machine publishes under the node's own identity now, not its own (local-service-trust design §2)")
+		return 1
+	}
 	interval := publishInterval(log)
 
 	// Time-sync design §2.1/§2.3: the machine's own wall-clock read point
@@ -270,7 +283,7 @@ func run() int {
 		return 1
 	}
 
-	metricTopic := "colca/v1/_Metric/" + ulid + "/temp"
+	metricTopic := "colca/v1/_Metric/" + nodeULID + "/" + ulid + "/temp"
 	// Path-anchored (node-id level is a wildcard for readers): the machine's
 	// default read grant covers its own zone, which is where its commands land.
 	cmdFilter := "colca/v1/_CmdParam/+/" + ulid + "/#"
@@ -281,7 +294,7 @@ func run() int {
 	defer stopSignals()
 
 	onCommand := func(c pahomqtt.Client, msg pahomqtt.Message) {
-		handleCommand(ctx, log, c, ulid, ts, msg)
+		handleCommand(ctx, log, c, ulid, nodeULID, ts, msg)
 	}
 	onBeacon := func(_ pahomqtt.Client, msg pahomqtt.Message) {
 		handleBeacon(log, ts, msg)
@@ -546,7 +559,7 @@ func publishInterval(log *slog.Logger) time.Duration {
 // until a post-connect beacon lands or the hold deadline passes — never
 // rejected. This runs in the message's own goroutine (SetOrderMatters(false)
 // above), so blocking here for up to hold_ms never stalls the router.
-func handleCommand(ctx context.Context, log *slog.Logger, c pahomqtt.Client, ulid string, ts *timeSync, msg pahomqtt.Message) {
+func handleCommand(ctx context.Context, log *slog.Logger, c pahomqtt.Client, ulid, nodeULID string, ts *timeSync, msg pahomqtt.Message) {
 	topic := msg.Topic()
 	var cmd map[string]any
 	if err := json.Unmarshal(msg.Payload(), &cmd); err != nil {
@@ -577,7 +590,7 @@ func handleCommand(ctx context.Context, log *slog.Logger, c pahomqtt.Client, uli
 		log.Warn("COMMAND not acked — command topic has no name segment", "topic", topic, "correlation_id", corr)
 		return
 	}
-	ackTopic := "colca/v1/_Ack/" + ulid + "/" + name
+	ackTopic := "colca/v1/_Ack/" + nodeULID + "/" + ulid + "/" + name
 	ack, err := json.Marshal(map[string]any{"correlation_id": corr, "result_code": code, "message": message})
 	if err != nil {
 		log.Error("COMMAND not acked — cannot encode ack", "topic", topic, "correlation_id", corr, "err", err)

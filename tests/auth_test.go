@@ -199,8 +199,8 @@ func TestScopedSubscribeOnReplicatedTree(t *testing.T) {
 	// edge1's subtree is granted: live replicated data arrives.
 	msgs := subscribeAll(t, c, "colca/v1/_Metric/+/edge1/#")
 	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
-	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 5}`).WaitTimeout(5 * time.Second)
-	awaitTopic(t, msgs, "colca/v1/_Metric/m1/edge1/m1/temp", 15*time.Second)
+	m1.Publish("colca/v1/_Metric/n-edge1/m1/temp", 1, false, `{"v": 5}`).WaitTimeout(5 * time.Second)
+	awaitTopic(t, msgs, "colca/v1/_Metric/n-edge1/edge1/m1/temp", 15*time.Second)
 }
 
 // TestEdgeNodeRejectedAtEveryOrdinaryDoor: no door but the enrollment

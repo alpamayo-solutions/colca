@@ -50,14 +50,15 @@ func TestCmdAdminRemoteEnrollAndRevokeThroughTree(t *testing.T) {
 	tp := startTopo(t)
 	m9 := authtest.NewMachine(t, "m9")
 
+	element9 := authtest.Place(t, tp.edge1.Engine, "m9")
 	corr := cmdAdmin(t, tp.global, "colca/v1/_CmdAdmin/n-edge1/site1/edge1/enroll", map[string]any{
 		"entry": map[string]any{"ulid": "m9", "pubkey": m9.Pubkey, "kind": "machine",
-			"element": authtest.Place(t, tp.edge1.Engine, "m9")},
+			"element": element9, "grants": []any{"write:" + element9 + "/#"}},
 	})
 	awaitAdminAck(t, tp.global, "colca/v1/_Ack/n-edge1/site1/edge1/enroll", corr, 200)
 
 	c := machine(t, tp.edge1.MQTTAddr, m9)
-	if tk := c.Publish("colca/v1/_Metric/m9/temp", 1, false, `{"v": 42}`); !tk.WaitTimeout(5 * time.Second) {
+	if tk := c.Publish("colca/v1/_Metric/n-edge1/m9/temp", 1, false, `{"v": 42}`); !tk.WaitTimeout(5 * time.Second) {
 		t.Fatal("remote-enrolled machine publish: no PUBACK")
 	}
 	waitFor(t, "m9's metric in the hub KV", 15*time.Second, func() bool {
@@ -89,7 +90,8 @@ func TestCmdAdminExecutesAfterOfflineCatchup(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	corr := cmdAdmin(t, tp.global, "colca/v1/_CmdAdmin/n-edge1/site1/edge1/enroll", map[string]any{
-		"entry": map[string]any{"ulid": "m9", "pubkey": m9.Pubkey, "kind": "machine", "element": element},
+		"entry": map[string]any{"ulid": "m9", "pubkey": m9.Pubkey, "kind": "machine",
+			"element": element, "grants": []any{"write:" + element + "/#"}},
 	})
 
 	// While the target is down there is no ack — the command waits durably.
@@ -111,7 +113,7 @@ func TestCmdAdminExecutesAfterOfflineCatchup(t *testing.T) {
 	awaitAdminAck(t, tp.global, "colca/v1/_Ack/n-edge1/site1/edge1/enroll", corr, 200)
 
 	c := machine(t, e1.MQTTAddr, m9)
-	if tk := c.Publish("colca/v1/_Metric/m9/temp", 1, false, `{"v": 7}`); !tk.WaitTimeout(5 * time.Second) {
+	if tk := c.Publish("colca/v1/_Metric/n-edge1/m9/temp", 1, false, `{"v": 7}`); !tk.WaitTimeout(5 * time.Second) {
 		t.Fatal("post-catchup publish: no PUBACK")
 	}
 }
@@ -130,7 +132,7 @@ func TestCmdAdminExpiredNeverExecutes(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	corr := cmdAdmin(t, tp.global, "colca/v1/_CmdAdmin/n-edge1/site1/edge1/enroll", map[string]any{
-		"entry": map[string]any{"ulid": "m9", "pubkey": m9.Pubkey, "kind": "machine", "element": element},
+		"entry":      map[string]any{"ulid": "m9", "pubkey": m9.Pubkey, "kind": "machine", "element": element},
 		"expires_at": time.Now().Add(500 * time.Millisecond).UnixMilli(),
 	})
 	time.Sleep(700 * time.Millisecond) // now it is expired — and still undelivered

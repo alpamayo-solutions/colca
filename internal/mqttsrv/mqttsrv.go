@@ -268,9 +268,10 @@ func (h *colcaHook) publishTimeSync() {
 //
 // A persisted packet is answered with packets.CodeSuccessIgnore: mochi sets
 // pk.Ignore, which makes publishToSubscribers and the retain handling return
-// early while the client still gets its PUBACK. The client's RAW topic is
-// therefore never distributed — the engine publishes the CANONICAL,
-// mount-rewritten form instead, so a subscriber on colca/# sees each record once.
+// early while the client still gets its PUBACK. Mochi's own fanout is skipped
+// — the engine's LocalDeliver mirror redistributes the STORED record instead,
+// so a subscriber on colca/# sees each record once, through the same path every
+// other ingest door (admin, human, replication) already uses.
 // A non-UNS topic is not persisted and must be distributed normally: outside
 // colca/# Colca is just a broker.
 // rejectCode maps an engine rejection to the MQTT-5 PUBACK reason code
@@ -292,11 +293,11 @@ func rejectCode(cl *mqtt.Client, err error) error {
 		return packets.ErrTopicNameInvalid
 	case metrics.ReasonValidation:
 		return packets.ErrPayloadFormatInvalid
-	case metrics.ReasonIdentity, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract,
-		metrics.ReasonNoMount, metrics.ReasonHumanWrite, metrics.ReasonTimeSync:
-		// All authorization facts: who may write what where. no_mount is an
-		// authorization fact too (§8.1 [delta]) — a read-only observer has
-		// no write standing.
+	case metrics.ReasonNodeID, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract,
+		metrics.ReasonWriteDenied, metrics.ReasonHumanWrite, metrics.ReasonTimeSync:
+		// All authorization facts: who may write what where. write_denied is
+		// an authorization fact too (§8.1 [delta]) — an identity whose write
+		// scope does not cover the topic has no write standing there.
 		return packets.ErrNotAuthorized
 	case metrics.ReasonDraining:
 		// Temporarily refused: the destination is being decommissioned —

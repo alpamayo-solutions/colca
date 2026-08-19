@@ -146,6 +146,7 @@ services:
       MACHINE_ULID: m1
       MACHINE_KEY: /keys/m1-machine.key
       BROKER_ADDR: "edge1:8883"
+      NODE_ULID: n-edge1
       PUBLISH_INTERVAL_MS: "1000"
       # colca-machine simulator-only clock skew (time-sync design §4,
       # cmd/colca-machine/main.go's SIM_CLOCK_OFFSET_MS) -- a per-machine
@@ -167,6 +168,7 @@ services:
       MACHINE_ULID: m2
       MACHINE_KEY: /keys/m2-machine.key
       BROKER_ADDR: "edge2:8883"
+      NODE_ULID: n-edge2
       PUBLISH_INTERVAL_MS: "1000"
       # See m1's SIM_CLOCK_OFFSET_MS comment above.
       SIM_CLOCK_OFFSET_MS: "${SIM_CLOCK_OFFSET_MS_M2:-0}"

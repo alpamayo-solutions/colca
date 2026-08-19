@@ -31,9 +31,10 @@ import (
 var scrapeMetric = metricstest.Value
 
 // world is the broker fixture: TLS listener, registry with two enrolled
-// machines (m1 mounted at "m1"; obs mounted at "obs" with read:# — reads
-// everything through the grant, not through its own placement), engine
-// late-bound like node assembly does, kick wired.
+// machines (m1 mounted at "m1" with an explicit write:el-m1/# grant — a
+// machine gets no implicit write, auth §5; obs mounted at "obs" with read:#
+// — reads everything through the grant, not through its own placement),
+// engine late-bound like node assembly does, kick wired.
 type world struct {
 	srv     *Server
 	st      *store.Store
@@ -76,7 +77,7 @@ func newWorld(t *testing.T) *world {
 	// Placement resolves through the engine's element index, so the element m1
 	// binds to is authored before it enrolls (id-grants design §4).
 	reg.SetNamespace(eng.Elements())
-	authtest.EnrollAt(t, reg, eng, w.m1, "m1")
+	authtest.EnrollAt(t, reg, eng, w.m1, "m1", "write:"+authtest.ElementID("m1")+"/#")
 	authtest.EnrollAt(t, reg, eng, w.obs, "obs", "read:#")
 	reg.SetKick(s.Kick)
 	go func() { _ = s.Serve() }()
@@ -220,10 +221,10 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 		}
 	})
 
-	t.Run("client publish is ingested with mount rewrite", func(t *testing.T) {
+	t.Run("client publish is ingested with no rewrite", func(t *testing.T) {
 		c := connect(t, addr, "m1-pub", w.m1)
 
-		tok := c.Publish("colca/v1/_Metric/m1/temp", 1, false, []byte(`{"v":1}`))
+		tok := c.Publish("colca/v1/_Metric/n1/m1/temp", 1, false, []byte(`{"v":1}`))
 		if !tok.WaitTimeout(5 * time.Second) {
 			t.Fatal("publish: timed out waiting for PUBACK")
 		}
@@ -235,12 +236,12 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 		if len(recs) != 1 {
 			t.Fatalf("metrics records = %d, want 1: %+v", len(recs), recs)
 		}
-		if want := "colca/v1/_Metric/m1/m1/temp"; recs[0].Topic != want {
+		if want := "colca/v1/_Metric/n1/m1/temp"; recs[0].Topic != want {
 			t.Errorf("topic = %q, want %q", recs[0].Topic, want)
 		}
 	})
 
-	t.Run("spoofed identity is rejected and never persisted", func(t *testing.T) {
+	t.Run("wrong level-4 is rejected and never persisted", func(t *testing.T) {
 		c := connect(t, addr, "m1-spoof", w.m1)
 
 		// A rejected packet gets no PUBACK under MQTT 3.1.1, so the token never
@@ -254,7 +255,7 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 			t.Fatalf("read metrics: %v", err)
 		}
 		if len(recs) != 1 {
-			t.Fatalf("metrics records = %d, want 1 (spoofed publish must not persist): %+v", len(recs), recs)
+			t.Fatalf("metrics records = %d, want 1 (wrong-level-4 publish must not persist): %+v", len(recs), recs)
 		}
 	})
 
@@ -684,9 +685,10 @@ func TestBrokerAuthFailureIncrementsDoorMetric(t *testing.T) {
 	}
 }
 
-// The no-double-delivery guarantee: a client's raw publish is suppressed
-// (CodeSuccessIgnore) and only the engine's canonical, mount-rewritten form is
-// distributed. A subscriber on colca/# must see each record exactly once.
+// The no-double-delivery guarantee: mochi's own fanout of a client's raw
+// publish is suppressed (CodeSuccessIgnore) and only the engine's LocalDeliver
+// mirror of the STORED record is distributed. A subscriber on colca/# must see
+// each record exactly once.
 func TestClientPublishDistributedOnlyAsCanonicalTopic(t *testing.T) {
 	w := newWorld(t)
 
@@ -698,7 +700,7 @@ func TestClientPublishDistributedOnlyAsCanonicalTopic(t *testing.T) {
 	}
 
 	pub := connect(t, w.srv.Addr(), "m1-pub", w.m1)
-	ptok := pub.Publish("colca/v1/_Metric/m1/temp", 1, false, []byte(`{"v":42}`))
+	ptok := pub.Publish("colca/v1/_Metric/n1/m1/temp", 1, false, []byte(`{"v":42}`))
 	if !ptok.WaitTimeout(5 * time.Second) {
 		t.Fatal("publish: timed out waiting for PUBACK (CodeSuccessIgnore must still ack)")
 	}
@@ -734,8 +736,8 @@ drain:
 		}
 		t.Fatalf("want exactly 1 message on colca/#, got %d: %v", len(got), topics)
 	}
-	if want := "colca/v1/_Metric/m1/m1/temp"; got[0].Topic() != want {
-		t.Fatalf("topic = %q, want the canonical %q", got[0].Topic(), want)
+	if want := "colca/v1/_Metric/n1/m1/temp"; got[0].Topic() != want {
+		t.Fatalf("topic = %q, want the stored topic unchanged %q", got[0].Topic(), want)
 	}
 	if w.st.NextOffset("metrics") != 2 {
 		t.Fatalf("metrics next offset = %d, want 2", w.st.NextOffset("metrics"))
@@ -790,8 +792,8 @@ func TestTombstoneClearsRetainedOnBroker(t *testing.T) {
 	w := newWorld(t)
 	s, st := w.srv, w.st
 	const (
-		tombTopic = "colca/v1/_Metric/m1/m1/temp" // canonical (post-mount) form
-		keepTopic = "colca/v1/_Metric/m1/m1/keep"
+		tombTopic = "colca/v1/_Metric/n1/m1/temp" // level 4 is the node; no rewrite
+		keepTopic = "colca/v1/_Metric/n1/m1/keep"
 	)
 
 	m1 := connect(t, s.Addr(), "m1-tomb", w.m1)
@@ -803,8 +805,8 @@ func TestTombstoneClearsRetainedOnBroker(t *testing.T) {
 			t.Fatalf("publish %s: %v", topic, tok.Error())
 		}
 	}
-	pub("colca/v1/_Metric/m1/temp", `{"v":7}`)
-	pub("colca/v1/_Metric/m1/keep", `{"v":1}`)
+	pub("colca/v1/_Metric/n1/m1/temp", `{"v":7}`)
+	pub("colca/v1/_Metric/n1/m1/keep", `{"v":1}`)
 
 	// A subscriber online BEFORE the tombstone: it must see the live clear.
 	type msg struct {
@@ -833,7 +835,7 @@ func TestTombstoneClearsRetainedOnBroker(t *testing.T) {
 	}
 
 	// The tombstone: empty payload through the normal client publish path.
-	pub("colca/v1/_Metric/m1/temp", "")
+	pub("colca/v1/_Metric/n1/m1/temp", "")
 
 	// PUBACK means the engine persisted it — the KV key must be gone.
 	if got := st.KVScan("m1/temp"); len(got) != 0 {

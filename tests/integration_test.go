@@ -5,12 +5,15 @@
 //	   ▲ mTLS
 //	n-site1  (level 2)                mounts: edge1 → n-edge1, edge2 → n-edge2
 //	   ▲ mTLS          ▲ mTLS
-//	n-edge1  (level 3) n-edge2        edge1 mounts client m1, edge2 mounts client m2
+//	n-edge1  (level 3) n-edge2        edge1 holds client m1, edge2 holds client m2
 //
 // Everything here is real: generated ed25519 keys, mTLS between the nodes,
 // embedded MQTT brokers with paho clients as machines, Pebble data directories
-// on disk. The topic strings asserted below are the specification of the mount
-// rewrite chain — they are not negotiable.
+// on disk. The topic strings asserted below are the specification of the
+// NODE-to-node replication mount chain (still a rewrite: each ancestor
+// inserts the child's mount into the path on the way up) — they are not
+// negotiable. A client's own publish carries no rewrite any more: level 4 is
+// always the node it is attached to, and the path is exactly what it sent.
 //
 // The suite is deliberately sequential (no t.Parallel): the nodes bind real
 // ports and share a process-wide slog default.
@@ -134,7 +137,7 @@ func startTopo(t *testing.T) *topo {
 	tp.edge1, tp.cfgs["n-edge1"] = e1, e1cfg
 	enrollObserver(e1)
 	tp.m1 = authtest.NewMachine(t, "m1")
-	authtest.EnrollAt(t, e1.Registry, e1.Engine, tp.m1, "m1")
+	authtest.EnrollAt(t, e1.Registry, e1.Engine, tp.m1, "m1", "write:"+authtest.ElementID("m1")+"/#")
 
 	e2cfg := mk("n-edge2",
 		&config.Parent{URL: "https://" + s.ReplAddr, Pubkey: tp.keys["n-site1"].PublicHex()})
@@ -145,7 +148,7 @@ func startTopo(t *testing.T) *topo {
 	tp.edge2, tp.cfgs["n-edge2"] = e2, e2cfg
 	enrollObserver(e2)
 	tp.m2 = authtest.NewMachine(t, "m2")
-	authtest.EnrollAt(t, e2.Registry, e2.Engine, tp.m2, "m2")
+	authtest.EnrollAt(t, e2.Registry, e2.Engine, tp.m2, "m2", "write:"+authtest.ElementID("m2")+"/#")
 
 	t.Cleanup(func() { e2.Stop(); e1.Stop(); s.Stop(); g.Stop() })
 
@@ -267,9 +270,10 @@ func machine(t *testing.T, addr string, m *authtest.Machine) pahomqtt.Client {
 	return c
 }
 
-// observer connects a READ-ONLY client: it has no mount, so the engine rejects
-// everything it publishes ("no mount registered"), but its read:# grant lets
-// it subscribe to everything. This is how a backend service taps a node's bus.
+// observer connects a READ-ONLY client: it holds no write: grant, so the
+// engine rejects everything it publishes ("write_denied"), but its read:#
+// grant lets it subscribe to everything. This is how a backend service taps a
+// node's bus.
 func observer(t *testing.T, addr, clientID string, m *authtest.Machine) pahomqtt.Client {
 	t.Helper()
 	opts := pahomqtt.NewClientOptions().AddBroker("ssl://" + addr).
@@ -341,7 +345,7 @@ func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 func TestUplinkMountChainAndKV(t *testing.T) {
 	tp := startTopo(t)
 	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
-	tk := m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 21.5}`)
+	tk := m1.Publish("colca/v1/_Metric/n-edge1/m1/temp", 1, false, `{"v": 21.5}`)
 	tk.WaitTimeout(5 * time.Second)
 
 	waitFor(t, "metric at global", 10*time.Second, func() bool {
@@ -349,10 +353,10 @@ func TestUplinkMountChainAndKV(t *testing.T) {
 	})
 	entries := kvAt(t, tp.global, "site1/edge1/m1/temp")
 	e := entries[0].(map[string]any)
-	if e["topic"] != "colca/v1/_Metric/m1/site1/edge1/m1/temp" {
+	if e["topic"] != "colca/v1/_Metric/n-edge1/site1/edge1/m1/temp" {
 		t.Fatalf("topic at global: %v", e["topic"])
 	}
-	if e["node_id"] != "m1" {
+	if e["node_id"] != "n-edge1" {
 		t.Fatalf("provenance lost: %v", e["node_id"])
 	}
 	// intermediate views
@@ -360,20 +364,20 @@ func TestUplinkMountChainAndKV(t *testing.T) {
 		return len(kvAt(t, tp.edge1, "m1/temp")) == 1
 	})
 	edgeEntry := kvAt(t, tp.edge1, "m1/temp")[0].(map[string]any)
-	if edgeEntry["topic"] != "colca/v1/_Metric/m1/m1/temp" {
+	if edgeEntry["topic"] != "colca/v1/_Metric/n-edge1/m1/temp" {
 		t.Fatalf("edge view: %v", edgeEntry["topic"])
 	}
-	if edgeEntry["node_id"] != "m1" {
+	if edgeEntry["node_id"] != "n-edge1" {
 		t.Fatalf("provenance lost at edge1: %v", edgeEntry["node_id"])
 	}
 	waitFor(t, "metric at site1", 10*time.Second, func() bool {
 		return len(kvAt(t, tp.site1, "edge1/m1/temp")) == 1
 	})
 	siteEntry := kvAt(t, tp.site1, "edge1/m1/temp")[0].(map[string]any)
-	if siteEntry["topic"] != "colca/v1/_Metric/m1/edge1/m1/temp" {
+	if siteEntry["topic"] != "colca/v1/_Metric/n-edge1/edge1/m1/temp" {
 		t.Fatalf("site view: %v", siteEntry["topic"])
 	}
-	if siteEntry["node_id"] != "m1" {
+	if siteEntry["node_id"] != "n-edge1" {
 		t.Fatalf("provenance lost at site1: %v", siteEntry["node_id"])
 	}
 }
@@ -384,8 +388,8 @@ func TestTwoEdgesFanIn(t *testing.T) {
 	tp := startTopo(t)
 	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 	m2 := machine(t, tp.edge2.MQTTAddr, tp.m2)
-	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 1}`).WaitTimeout(5 * time.Second)
-	m2.Publish("colca/v1/_Metric/m2/temp", 1, false, `{"v": 2}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Metric/n-edge1/m1/temp", 1, false, `{"v": 1}`).WaitTimeout(5 * time.Second)
+	m2.Publish("colca/v1/_Metric/n-edge2/m2/temp", 1, false, `{"v": 2}`).WaitTimeout(5 * time.Second)
 	waitFor(t, "both edges at global", 10*time.Second, func() bool {
 		return len(kvAt(t, tp.global, "site1/edge1/m1/temp")) == 1 &&
 			len(kvAt(t, tp.global, "site1/edge2/m2/temp")) == 1
@@ -419,12 +423,12 @@ func TestDownlinkCommandAckRoundtrip(t *testing.T) {
 	}
 
 	// machine acks
-	m1.Publish("colca/v1/_Ack/m1/set-speed", 1, false, `{"correlation_id":"corr-1","result_code":200,"message":"done"}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Ack/n-edge1/m1/set-speed", 1, false, `{"correlation_id":"corr-1","result_code":200,"message":"done"}`).WaitTimeout(5 * time.Second)
 
 	waitFor(t, "ack visible at global", 10*time.Second, func() bool {
 		for _, r := range fetchRecords(t, tp.global, "commands", "acktest", "", 100) {
 			rec := r.(map[string]any)
-			if rec["topic"] == "colca/v1/_Ack/m1/site1/edge1/m1/set-speed" {
+			if rec["topic"] == "colca/v1/_Ack/n-edge1/site1/edge1/m1/set-speed" {
 				var p map[string]any
 				if err := json.Unmarshal([]byte(mustJSON(rec["payload"])), &p); err != nil {
 					return false
@@ -447,7 +451,7 @@ func TestOfflineBufferingCatchupOrder(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	for i := 1; i <= 50; i++ {
-		m1.Publish("colca/v1/_Metric/m1/seq", 1, false, fmt.Sprintf(`{"v": %d}`, i)).WaitTimeout(5 * time.Second)
+		m1.Publish("colca/v1/_Metric/n-edge1/m1/seq", 1, false, fmt.Sprintf(`{"v": %d}`, i)).WaitTimeout(5 * time.Second)
 	}
 	// edge buffered locally, global saw nothing
 	if len(kvAt(t, tp.global, "site1/edge1/m1/seq")) != 0 {
@@ -501,7 +505,7 @@ func TestCommandExpiryDuringOffline(t *testing.T) {
 		parts := strings.Split(msg.Topic(), "/")
 		name := parts[len(parts)-1]
 		ack, _ := json.Marshal(map[string]any{"correlation_id": cmd["correlation_id"], "result_code": code, "message": name})
-		m1.Publish("colca/v1/_Ack/m1/"+name, 1, false, ack)
+		m1.Publish("colca/v1/_Ack/n-edge1/m1/"+name, 1, false, ack)
 		acked <- fmt.Sprintf("%s:%d", cmd["correlation_id"], code)
 	}).WaitTimeout(5 * time.Second)
 
@@ -557,16 +561,19 @@ func TestAuthRejections(t *testing.T) {
 		t.Fatal("un-enrolled key must be refused")
 	}
 
-	// identity spoofing: m1 publishes with foreign level-4 id → not persisted anywhere
+	// write-scope violation: m1 tries to write under m2's zone → not persisted
+	// anywhere. Level 4 is always this node's own ULID now, so there is no more
+	// "foreign identity at level 4" to spoof — the write-scope check is what
+	// keeps m1 out of m2's zone.
 	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
-	m1.Publish("colca/v1/_Metric/m2/temp", 1, false, `{"v": 666}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Metric/n-edge1/m2/temp", 1, false, `{"v": 666}`).WaitTimeout(5 * time.Second)
 	time.Sleep(1 * time.Second)
-	if got := kvAt(t, tp.edge1, "m1/m2"); len(got) != 0 {
-		t.Fatalf("spoofed publish persisted: %v", got)
+	if got := kvAt(t, tp.edge1, "m2/temp"); len(got) != 0 {
+		t.Fatalf("out-of-scope publish persisted: %v", got)
 	}
 
 	// invalid payload → not persisted
-	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v":"not-a-number"}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Metric/n-edge1/m1/temp", 1, false, `{"v":"not-a-number"}`).WaitTimeout(5 * time.Second)
 	time.Sleep(1 * time.Second)
 	if len(kvAt(t, tp.edge1, "m1/temp")) != 0 {
 		t.Fatal("invalid payload persisted")
@@ -580,7 +587,7 @@ func TestRestartDurabilityEdge(t *testing.T) {
 	tp := startTopo(t)
 	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 	for i := 1; i <= 10; i++ {
-		m1.Publish("colca/v1/_Metric/m1/d", 1, false, fmt.Sprintf(`{"v": %d}`, i)).WaitTimeout(5 * time.Second)
+		m1.Publish("colca/v1/_Metric/n-edge1/m1/d", 1, false, fmt.Sprintf(`{"v": %d}`, i)).WaitTimeout(5 * time.Second)
 	}
 	waitFor(t, "10 at global", 15*time.Second, func() bool {
 		return len(fetchRecords(t, tp.global, "metrics", "dur", "site1/edge1/m1/d", 100)) == 10
@@ -595,7 +602,7 @@ func TestRestartDurabilityEdge(t *testing.T) {
 	}
 	t.Cleanup(e1b.Stop)
 	m1b := machine(t, e1b.MQTTAddr, tp.m1)
-	m1b.Publish("colca/v1/_Metric/m1/d", 1, false, `{"v": 11}`).WaitTimeout(5 * time.Second)
+	m1b.Publish("colca/v1/_Metric/n-edge1/m1/d", 1, false, `{"v": 11}`).WaitTimeout(5 * time.Second)
 	waitFor(t, "11th after restart, no dupes", 15*time.Second, func() bool {
 		return len(fetchRecords(t, tp.global, "metrics", "dur2", "site1/edge1/m1/d", 100)) == 11
 	})
@@ -610,9 +617,9 @@ func TestHubMQTTMirrorsWholeTree(t *testing.T) {
 	msgs := subscribeAll(t, obs, "colca/#")
 
 	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
-	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 21.5}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Metric/n-edge1/m1/temp", 1, false, `{"v": 21.5}`).WaitTimeout(5 * time.Second)
 
-	msg := awaitTopic(t, msgs, "colca/v1/_Metric/m1/site1/edge1/m1/temp", 15*time.Second)
+	msg := awaitTopic(t, msgs, "colca/v1/_Metric/n-edge1/site1/edge1/m1/temp", 15*time.Second)
 	var p map[string]any
 	if err := json.Unmarshal(msg.Payload(), &p); err != nil {
 		t.Fatalf("hub bus payload is not JSON: %v (%s)", err, msg.Payload())
@@ -658,10 +665,10 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 	// state traffic: three metric paths (temp published twice — only the last
 	// value is state) and one entity.
 	cmds := subscribeAll(t, m1, "colca/v1/_CmdParam/+/m1/#")
-	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 1}`).WaitTimeout(5 * time.Second)
-	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 2}`).WaitTimeout(5 * time.Second)
-	m1.Publish("colca/v1/_Metric/m1/rpm", 1, false, `{"v": 900}`).WaitTimeout(5 * time.Second)
-	m1.Publish("colca/v1/_Signal/m1/cfg", 1, false, `{"id":"sig-1"}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Metric/n-edge1/m1/temp", 1, false, `{"v": 1}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Metric/n-edge1/m1/temp", 1, false, `{"v": 2}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Metric/n-edge1/m1/rpm", 1, false, `{"v": 900}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Signal/n-edge1/m1/cfg", 1, false, `{"id":"sig-1"}`).WaitTimeout(5 * time.Second)
 
 	// command/ack traffic through the same node's streams
 	api(t, tp.global, "POST", "/publish", map[string]any{
@@ -669,7 +676,7 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 		"payload": map[string]any{"correlation_id": "kv-eq-1", "expires_at": float64(time.Now().Add(time.Hour).UnixMilli())},
 	})
 	awaitTopic(t, cmds, "colca/v1/_CmdParam/m1/m1/set-speed", 20*time.Second)
-	m1.Publish("colca/v1/_Ack/m1/set-speed", 1, false, `{"correlation_id":"kv-eq-1","result_code":200}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Ack/n-edge1/m1/set-speed", 1, false, `{"correlation_id":"kv-eq-1","result_code":200}`).WaitTimeout(5 * time.Second)
 
 	// settle: all three state paths in KV (plus the two _EdgeNode registry
 	// entities enrollment wrote and the two _SystemElement records m1 and the
@@ -681,7 +688,7 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 			return false
 		}
 		for _, r := range fetchRecords(t, tp.edge1, "commands", "kv-eq-settle", "", 100) {
-			if r.(map[string]any)["topic"] == "colca/v1/_Ack/m1/m1/set-speed" {
+			if r.(map[string]any)["topic"] == "colca/v1/_Ack/n-edge1/m1/set-speed" {
 				return true
 			}
 		}
@@ -727,7 +734,7 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 		}
 	}
 	// the overwritten path must carry the LAST value in both views
-	if got := retained["colca/v1/_Metric/m1/m1/temp"]; got != `{"v":2}` {
+	if got := retained["colca/v1/_Metric/n-edge1/m1/temp"]; got != `{"v":2}` {
 		t.Fatalf("overwritten path retained stale state: %s (want {\"v\":2})", got)
 	}
 }
@@ -750,7 +757,7 @@ func TestRetainedDeliversCurrentStateOnConnect(t *testing.T) {
 	awaitTopic(t, cmds, "colca/v1/_CmdParam/m1/m1/set-speed", 20*time.Second)
 
 	// metrics have flowed
-	m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 33.25}`).WaitTimeout(5 * time.Second)
+	m1.Publish("colca/v1/_Metric/n-edge1/m1/temp", 1, false, `{"v": 33.25}`).WaitTimeout(5 * time.Second)
 	waitFor(t, "metric stored at edge1", 10*time.Second, func() bool {
 		return len(kvAt(t, tp.edge1, "m1/temp")) == 1
 	})
@@ -763,7 +770,7 @@ func TestRetainedDeliversCurrentStateOnConnect(t *testing.T) {
 	var metric pahomqtt.Message
 	for _, m := range got {
 		switch m.Topic() {
-		case "colca/v1/_Metric/m1/m1/temp":
+		case "colca/v1/_Metric/n-edge1/m1/temp":
 			metric = m
 		case "colca/v1/_CmdParam/m1/m1/set-speed":
 			t.Fatal("a command was retained and replayed to a fresh subscriber — commands are events, not state")

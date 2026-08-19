@@ -35,7 +35,7 @@ func TestPairUplinkAndHubRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload, _ := json.Marshal(map[string]any{"v": 1.5, "value": 1.5, "signal_id": "bench"})
-	if tk := m.Publish("colca/v1/_Metric/m1/temp", 1, false, payload); !tk.WaitTimeout(5*time.Second) || tk.Error() != nil {
+	if tk := m.Publish("colca/v1/_Metric/n-edge/m1/temp", 1, false, payload); !tk.WaitTimeout(5*time.Second) || tk.Error() != nil {
 		t.Fatalf("publish: %v", tk.Error())
 	}
 
@@ -43,18 +43,18 @@ func TestPairUplinkAndHubRestart(t *testing.T) {
 	for {
 		select {
 		case topic := <-got:
-			if topic == "colca/v1/_Metric/m1/edge1/m1/temp" {
+			if topic == "colca/v1/_Metric/n-edge/edge1/m1/temp" {
 				goto restart
 			}
 		case <-deadline:
-			t.Fatal("hub observer never saw colca/v1/_Metric/m1/edge1/m1/temp")
+			t.Fatal("hub observer never saw colca/v1/_Metric/n-edge/edge1/m1/temp")
 		}
 	}
 
 restart:
 	before := NextOffset(p.Hub, "metrics")
 	p.StopHub()
-	if tk := m.Publish("colca/v1/_Metric/m1/temp", 1, false, payload); !tk.WaitTimeout(5*time.Second) || tk.Error() != nil {
+	if tk := m.Publish("colca/v1/_Metric/n-edge/m1/temp", 1, false, payload); !tk.WaitTimeout(5*time.Second) || tk.Error() != nil {
 		t.Fatalf("publish while hub down: %v", tk.Error())
 	}
 	if err := p.StartHub(); err != nil {

@@ -260,15 +260,15 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 	first := mustStart(t, cfg)
 	m1machine := authtest.NewMachine(t, "m1")
 	obsMachine := authtest.NewMachine(t, "obs")
-	authtest.EnrollAt(t, first.Registry, first.Engine, m1machine, "m1")
+	authtest.EnrollAt(t, first.Registry, first.Engine, m1machine, "m1", "write:"+authtest.ElementID("m1")+"/#")
 	authtest.EnrollAt(t, first.Registry, first.Engine, obsMachine, "obs", "read:#")
 	m1 := connectMQTT(t, first.MQTTAddr, "m1-pre", m1machine)
 	// Two state topics: "pressure" is never touched again — only the KV
 	// re-seed can bring it back, so it is the assertion the mutation check
 	// bites on. "temp" gets a FRESH value right after the restart — it pins
 	// the seed-before-Serve ordering instead.
-	publishMQTT(t, m1, "colca/v1/_Metric/m1/pressure", `{"v":7}`)
-	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", `{"v":1}`)
+	publishMQTT(t, m1, "colca/v1/_Metric/n1/m1/pressure", `{"v":7}`)
+	publishMQTT(t, m1, "colca/v1/_Metric/n1/m1/temp", `{"v":1}`)
 	// A command in the commands stream: it must NOT come back retained.
 	code, out := apiCall(t, first, http.MethodPost, "/publish", map[string]any{
 		"topic":   "colca/v1/_CmdParam/m1/m1/set-speed",
@@ -290,7 +290,7 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 	// FRESH value published immediately after the restart must win over the
 	// pre-restart snapshot value in the retained set.
 	m1b := connectMQTT(t, second.MQTTAddr, "m1-post", m1machine)
-	publishMQTT(t, m1b, "colca/v1/_Metric/m1/temp", `{"v":2}`)
+	publishMQTT(t, m1b, "colca/v1/_Metric/n1/m1/temp", `{"v":2}`)
 
 	type received struct {
 		topic    string
@@ -320,7 +320,7 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 			if strings.HasPrefix(m.topic, "colca/v1/_Cmd") {
 				t.Fatalf("a command was replayed to a fresh post-restart subscriber: %s (retained=%v)", m.topic, m.retained)
 			}
-			if m.topic == "colca/v1/_Metric/m1/m1/temp" || m.topic == "colca/v1/_Metric/m1/m1/pressure" {
+			if m.topic == "colca/v1/_Metric/n1/m1/temp" || m.topic == "colca/v1/_Metric/n1/m1/pressure" {
 				seen[m.topic] = m
 			}
 		case <-deadline:
@@ -328,12 +328,12 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 		}
 	}
 	// The untouched topic can only come from the KV re-seed.
-	pressure := seen["colca/v1/_Metric/m1/m1/pressure"]
+	pressure := seen["colca/v1/_Metric/n1/m1/pressure"]
 	if !pressure.retained || !strings.Contains(pressure.payload, `"v":7`) {
 		t.Errorf("pressure after restart = %+v, want retained {\"v\":7} restored from KV", pressure)
 	}
 	// The re-published topic must show the FRESH value, not the stale snapshot.
-	temp := seen["colca/v1/_Metric/m1/m1/temp"]
+	temp := seen["colca/v1/_Metric/n1/m1/temp"]
 	if !temp.retained {
 		t.Errorf("post-restart temp arrived unretained — retained flag lost across restart")
 	}
@@ -488,10 +488,10 @@ func TestParentChildUplinkThroughNodes(t *testing.T) {
 	}
 
 	m1machine := authtest.NewMachine(t, "m1")
-	authtest.EnrollAt(t, child.Registry, child.Engine, m1machine, "m1")
+	authtest.EnrollAt(t, child.Registry, child.Engine, m1machine, "m1", "write:"+authtest.ElementID("m1")+"/#")
 	cl := connectMQTT(t, child.MQTTAddr, "m1-node-test", m1machine)
 
-	ptok := cl.Publish("colca/v1/_Metric/m1/temp", 1, false, []byte(`{"v":42}`))
+	ptok := cl.Publish("colca/v1/_Metric/n-child/m1/temp", 1, false, []byte(`{"v":42}`))
 	if !ptok.WaitTimeout(5 * time.Second) {
 		t.Fatal("mqtt publish: timed out waiting for PUBACK")
 	}
@@ -529,11 +529,11 @@ func TestParentChildUplinkThroughNodes(t *testing.T) {
 	if !ok {
 		t.Fatalf("parent KV entry is not an object: %v", entries[0])
 	}
-	if want := "colca/v1/_Metric/m1/child1/m1/temp"; entry["topic"] != want {
+	if want := "colca/v1/_Metric/n-child/child1/m1/temp"; entry["topic"] != want {
 		t.Errorf("parent KV topic = %v, want %q", entry["topic"], want)
 	}
-	if entry["node_id"] != "m1" {
-		t.Errorf("parent KV node_id = %v, want m1", entry["node_id"])
+	if entry["node_id"] != "n-child" {
+		t.Errorf("parent KV node_id = %v, want n-child", entry["node_id"])
 	}
 	if entry["path"] != "child1/m1/temp" {
 		t.Errorf("parent KV path = %v, want child1/m1/temp", entry["path"])
@@ -621,13 +621,13 @@ func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
 	first := mustStart(t, cfg)
 	m1machine := authtest.NewMachine(t, "m1")
 	obsMachine := authtest.NewMachine(t, "obs")
-	authtest.EnrollAt(t, first.Registry, first.Engine, m1machine, "m1")
+	authtest.EnrollAt(t, first.Registry, first.Engine, m1machine, "m1", "write:"+authtest.ElementID("m1")+"/#")
 	authtest.EnrollAt(t, first.Registry, first.Engine, obsMachine, "obs", "read:#")
 	m1 := connectMQTT(t, first.MQTTAddr, "m1-tomb", m1machine)
-	publishMQTT(t, m1, "colca/v1/_Metric/m1/pressure", `{"v":7}`)
-	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", `{"v":1}`)
+	publishMQTT(t, m1, "colca/v1/_Metric/n1/m1/pressure", `{"v":7}`)
+	publishMQTT(t, m1, "colca/v1/_Metric/n1/m1/temp", `{"v":1}`)
 	// The tombstone: empty payload on the pressure path. PUBACK ⇒ persisted.
-	publishMQTT(t, m1, "colca/v1/_Metric/m1/pressure", "")
+	publishMQTT(t, m1, "colca/v1/_Metric/n1/m1/pressure", "")
 	if got := first.Store.KVScan("m1/pressure"); len(got) != 0 {
 		t.Fatalf("KV key survived the tombstone before restart: %+v", got)
 	}
@@ -672,10 +672,10 @@ func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
 	for {
 		select {
 		case m := <-msgs:
-			if m.topic == "colca/v1/_Metric/m1/m1/pressure" {
+			if m.topic == "colca/v1/_Metric/n1/m1/pressure" {
 				t.Fatalf("tombstoned path resurrected via reseed: %+v", m)
 			}
-			if m.topic == "colca/v1/_Metric/m1/m1/temp" {
+			if m.topic == "colca/v1/_Metric/n1/m1/temp" {
 				if !m.retained || !strings.Contains(m.payload, `"v":1`) {
 					t.Fatalf("surviving path = %+v, want retained {\"v\":1}", m)
 				}
@@ -690,7 +690,7 @@ graceDrain:
 	for {
 		select {
 		case m := <-msgs:
-			if m.topic == "colca/v1/_Metric/m1/m1/pressure" {
+			if m.topic == "colca/v1/_Metric/n1/m1/pressure" {
 				t.Fatalf("tombstoned path resurrected via reseed: %+v", m)
 			}
 		case <-grace.C:
@@ -738,10 +738,10 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 	child := mustStart(t, childCfg)
 
 	m1machine := authtest.NewMachine(t, "m1")
-	authtest.EnrollAt(t, child.Registry, child.Engine, m1machine, "m1")
+	authtest.EnrollAt(t, child.Registry, child.Engine, m1machine, "m1", "write:"+authtest.ElementID("m1")+"/#")
 	m1 := connectMQTT(t, child.MQTTAddr, "m1-up", m1machine)
-	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", `{"v":42}`)
-	publishMQTT(t, m1, "colca/v1/_Metric/m1/keep", `{"v":1}`)
+	publishMQTT(t, m1, "colca/v1/_Metric/n-child/m1/temp", `{"v":42}`)
+	publishMQTT(t, m1, "colca/v1/_Metric/n-child/m1/keep", `{"v":1}`)
 
 	// waitParentKV polls the parent KV until prefix holds want entries.
 	waitParentKV := func(prefix string, want int, why string) {
@@ -788,7 +788,7 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 	}
 
 	// The tombstone at the child: empty payload through the normal publish path.
-	publishMQTT(t, m1, "colca/v1/_Metric/m1/temp", "")
+	publishMQTT(t, m1, "colca/v1/_Metric/n-child/m1/temp", "")
 
 	// It replicates upward and retires the parent's KV copy…
 	waitParentKV("child1/m1/temp", 0, "tombstone did not retire the parent KV")
@@ -804,7 +804,7 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 		case <-clearDeadline:
 			t.Fatal("empty-payload clear never arrived on the parent bus")
 		}
-		if m.topic == "colca/v1/_Metric/m1/child1/m1/temp" && m.payload == "" {
+		if m.topic == "colca/v1/_Metric/n-child/child1/m1/temp" && m.payload == "" {
 			break
 		}
 	}
@@ -826,10 +826,10 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 	for {
 		select {
 		case m := <-msgs:
-			if m.topic == "colca/v1/_Metric/m1/child1/m1/temp" && m.retained {
+			if m.topic == "colca/v1/_Metric/n-child/child1/m1/temp" && m.retained {
 				t.Fatalf("retired path still retained on the parent bus: %+v", m)
 			}
-			if m.topic == "colca/v1/_Metric/m1/child1/m1/keep" && m.retained {
+			if m.topic == "colca/v1/_Metric/n-child/child1/m1/keep" && m.retained {
 				goto graceDrain
 			}
 		case <-deadline:
@@ -841,7 +841,7 @@ graceDrain:
 	for {
 		select {
 		case m := <-msgs:
-			if m.topic == "colca/v1/_Metric/m1/child1/m1/temp" && m.retained {
+			if m.topic == "colca/v1/_Metric/n-child/child1/m1/temp" && m.retained {
 				t.Fatalf("retired path still retained on the parent bus: %+v", m)
 			}
 		case <-grace.C:

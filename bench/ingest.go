@@ -54,7 +54,7 @@ func RunIngest(p Params) (*Report, error) {
 			return nil, err
 		}
 		clients = append(clients, m)
-		topic := fmt.Sprintf("colca/v1/_Metric/m%d/temp", i)
+		topic := fmt.Sprintf("colca/v1/_Metric/n-edge/m%d/temp", i)
 		wg.Add(1)
 		go func(m pahomqtt.Client, topic string) {
 			defer wg.Done()

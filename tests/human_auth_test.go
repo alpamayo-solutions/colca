@@ -81,8 +81,8 @@ func TestHumanScopedReadOnTree(t *testing.T) {
 			msgs := subscribeAll(t, c, "colca/v1/_Metric/+/edge1/#")
 
 			m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
-			m1.Publish("colca/v1/_Metric/m1/temp", 1, false, `{"v": 9}`).WaitTimeout(5 * time.Second)
-			awaitTopic(t, msgs, "colca/v1/_Metric/m1/edge1/m1/temp", 15*time.Second)
+			m1.Publish("colca/v1/_Metric/n-edge1/m1/temp", 1, false, `{"v": 9}`).WaitTimeout(5 * time.Second)
+			awaitTopic(t, msgs, "colca/v1/_Metric/n-edge1/edge1/m1/temp", 15*time.Second)
 
 			// edge2's subtree is out of scope → SUBACK 0x80.
 			dtok := c.Subscribe("colca/v1/+/+/edge2/#", 1, func(pahomqtt.Client, pahomqtt.Message) {})
@@ -118,13 +118,13 @@ func TestHumanCommandsThroughTree(t *testing.T) {
 	if !strings.Contains(string(msg.Payload()), corr) {
 		t.Fatalf("command payload: %s", msg.Payload())
 	}
-	m1.Publish("colca/v1/_Ack/m1/set-speed", 1, false,
+	m1.Publish("colca/v1/_Ack/n-edge1/m1/set-speed", 1, false,
 		fmt.Sprintf(`{"correlation_id":%q,"result_code":200}`, corr)).WaitTimeout(5 * time.Second)
 
 	waitFor(t, "ack visible at global", 15*time.Second, func() bool {
 		for _, r := range fetchRecords(t, tp.global, "commands", unique("h-ack"), "", 200) {
 			rec := r.(map[string]any)
-			if rec["topic"] == "colca/v1/_Ack/m1/site1/edge1/m1/set-speed" &&
+			if rec["topic"] == "colca/v1/_Ack/n-edge1/site1/edge1/m1/set-speed" &&
 				strings.Contains(mustJSON(rec["payload"]), corr) {
 				return true
 			}

@@ -19,8 +19,9 @@ var scrapeMetric = metricstest.Value
 
 // newMetricsEngine builds an engine wired to a live *metrics.Metrics (unlike
 // newEngine/newRecordingEngine, which pass nil to keep the plain behavioral
-// tests metrics-agnostic). It has the same two clients as newRecordingEngine:
-// "m1" mounted at "m1", and "observer" with no mount (a read-only client).
+// tests metrics-agnostic). It has the same clients as newRecordingEngine: "m1"
+// (an explicit write:el-m1/# grant) and "hmi" (a cmd grant only, no write
+// standing).
 func newMetricsEngine(t *testing.T) (*Engine, *metrics.Metrics) {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -30,7 +31,9 @@ func newMetricsEngine(t *testing.T) (*Engine, *metrics.Metrics) {
 	t.Cleanup(func() { s.Close() })
 	m := metrics.New(s, config.Retention{}, nil)
 	cfg := &config.Config{ULID: "n-edge1"}
-	return New(s, cfg, testIDs(), nil, m, nil), m
+	e := New(s, cfg, testIDs(), nil, m, nil)
+	placeTestElements(t, e)
+	return e, m
 }
 
 // TestRejectPublishByReason pins the reason mapping for every reject branch in
@@ -44,8 +47,8 @@ func TestRejectPublishByReason(t *testing.T) {
 		invoke func(e *Engine) error
 	}{
 		{
-			name:   "IngestClient: level-4 != identity",
-			reason: metrics.ReasonIdentity,
+			name:   "IngestClient: level-4 is not this node",
+			reason: metrics.ReasonNodeID,
 			invoke: func(e *Engine) error {
 				_, err := e.IngestClient("m1", "colca/v1/_Metric/OTHER/temp", []byte(`{"v":1}`))
 				return err
@@ -95,15 +98,15 @@ func TestRejectPublishByReason(t *testing.T) {
 			name:   "IngestClient: payload fails validation",
 			reason: metrics.ReasonValidation,
 			invoke: func(e *Engine) error {
-				_, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", []byte(`{"v":"bad"}`))
+				_, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", []byte(`{"v":"bad"}`))
 				return err
 			},
 		},
 		{
-			name:   "IngestClient: mount-less client (observer)",
-			reason: metrics.ReasonNoMount,
+			name:   "IngestClient: no write scope covers the topic",
+			reason: metrics.ReasonWriteDenied,
 			invoke: func(e *Engine) error {
-				_, err := e.IngestClient("observer", "colca/v1/_Metric/observer/temp", []byte(`{"v":1}`))
+				_, err := e.IngestClient("hmi", "colca/v1/_Metric/n-edge1/hmi/temp", []byte(`{"v":1}`))
 				return err
 			},
 		},
@@ -165,8 +168,8 @@ func TestRejectPublishByReason(t *testing.T) {
 				t.Fatalf("%s = %v after one trigger, want exactly 1", line, after)
 			}
 			// No other reason may have moved.
-			for _, r := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation,
-				metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract, metrics.ReasonHumanWrite} {
+			for _, r := range []string{metrics.ReasonNodeID, metrics.ReasonGrammar, metrics.ReasonValidation,
+				metrics.ReasonWriteDenied, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract, metrics.ReasonHumanWrite} {
 				if r == tc.reason {
 					continue
 				}
@@ -190,22 +193,22 @@ func TestIngestRecordOnPersistNotOnReject(t *testing.T) {
 		t.Fatalf("%s = %v before any publish, want 0", line, v)
 	}
 
-	if _, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", []byte(`{"v":7}`)); err != nil {
+	if _, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", []byte(`{"v":7}`)); err != nil {
 		t.Fatal(err)
 	}
 	if v := scrapeMetric(t, m, line); v != 1 {
 		t.Fatalf("%s = %v after one successful persist, want 1", line, v)
 	}
 
-	// A rejected publish (identity violation) must not move the ingest counter.
+	// A rejected publish (wrong level-4) must not move the ingest counter.
 	if _, err := e.IngestClient("m1", "colca/v1/_Metric/OTHER/temp", []byte(`{"v":1}`)); err == nil {
-		t.Fatal("identity violation must be rejected")
+		t.Fatal("wrong level-4 must be rejected")
 	}
 	if v := scrapeMetric(t, m, line); v != 1 {
 		t.Fatalf("%s = %v after a rejected publish, want unchanged 1", line, v)
 	}
-	if v := scrapeMetric(t, m, `colca_rejected_publishes_total{reason="identity"}`); v != 1 {
-		t.Fatalf("rejected/identity = %v, want 1", v)
+	if v := scrapeMetric(t, m, `colca_rejected_publishes_total{reason="node_id"}`); v != 1 {
+		t.Fatalf("rejected/node_id = %v, want 1", v)
 	}
 }
 
@@ -312,8 +315,8 @@ func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := map[string]float64{}
-	for _, reason := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation,
-		metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract, metrics.ReasonHumanWrite} {
+	for _, reason := range []string{metrics.ReasonNodeID, metrics.ReasonGrammar, metrics.ReasonValidation,
+		metrics.ReasonWriteDenied, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract, metrics.ReasonHumanWrite} {
 		before[reason] = scrapeMetric(t, m, `colca_rejected_publishes_total{reason="`+reason+`"}`)
 	}
 
@@ -338,8 +341,8 @@ func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 		t.Fatal("schema-invalid payload must be rejected")
 	}
 
-	for _, reason := range []string{metrics.ReasonIdentity, metrics.ReasonGrammar, metrics.ReasonValidation,
-		metrics.ReasonNoMount, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract, metrics.ReasonHumanWrite} {
+	for _, reason := range []string{metrics.ReasonNodeID, metrics.ReasonGrammar, metrics.ReasonValidation,
+		metrics.ReasonWriteDenied, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract, metrics.ReasonHumanWrite} {
 		if v := scrapeMetric(t, m, `colca_rejected_publishes_total{reason="`+reason+`"}`); v != before[reason] {
 			t.Fatalf("colca_rejected_publishes_total{reason=%s} moved from %v to %v after refresh failures — must stay untouched", reason, before[reason], v)
 		}
@@ -352,9 +355,9 @@ func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 func TestNilMetricsIsSafe(t *testing.T) {
 	e := newEngine(t) // built with New(..., nil, nil)
 	if _, err := e.IngestClient("m1", "colca/v1/_Metric/OTHER/temp", []byte(`{"v":1}`)); err == nil {
-		t.Fatal("want identity rejection")
+		t.Fatal("want level-4 rejection")
 	}
-	if _, err := e.IngestClient("m1", "colca/v1/_Metric/m1/temp", []byte(`{"v":9}`)); err != nil {
+	if _, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", []byte(`{"v":9}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := e.IngestReplicated("n-edge1", "metrics", []store.ReplRecord{

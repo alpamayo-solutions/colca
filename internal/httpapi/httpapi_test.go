@@ -101,7 +101,7 @@ func newAPI(t *testing.T) *api {
 	// the wiring — and the element — come before any enrollment (id-grants §4).
 	reg.SetNamespace(e.Elements())
 	m1 := authtest.NewMachine(t, "m1")
-	authtest.EnrollAt(t, reg, e, m1, "m1")
+	authtest.EnrollAt(t, reg, e, m1, "m1", "write:"+authtest.ElementID("m1")+"/#")
 
 	iss := tokentest.NewIssuer(t)
 	ver, err := tokenauth.New(tokenauth.Config{
@@ -264,11 +264,11 @@ func TestMachineRouteMatrix(t *testing.T) {
 	}
 
 	// machine publish: own zone OK (engine rules apply)
-	resp, _ := req(t, mc, "POST", a.url+"/publish", "", map[string]any{"topic": "colca/v1/_Metric/m1/rpm", "payload": map[string]any{"v": 2.0}})
+	resp, _ := req(t, mc, "POST", a.url+"/publish", "", map[string]any{"topic": "colca/v1/_Metric/n-test/m1/rpm", "payload": map[string]any{"v": 2.0}})
 	if resp.StatusCode != 200 {
 		t.Fatalf("machine publish: %d", resp.StatusCode)
 	}
-	// machine publish outside its identity → 422 (engine identity rule)
+	// machine publish with the wrong level-4 → 422 (engine level-4 rule)
 	resp, _ = req(t, mc, "POST", a.url+"/publish", "", map[string]any{"topic": "colca/v1/_Metric/other/x", "payload": map[string]any{"v": 2.0}})
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("machine spoof publish: want 422, got %d", resp.StatusCode)

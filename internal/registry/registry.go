@@ -44,10 +44,11 @@ var ErrNotNode = errors.New("move-drain applies only to kind=node entries")
 // — the HTTP layer maps it to 409.
 var ErrAlreadyDraining = errors.New("already draining")
 
-// observerSegment is the placeholder path segment for element-less observers'
-// _EdgeNode topics (the grammar needs a non-empty hierarchy path; "_"-prefixed
-// segments are reserved, so no real zone can collide with it).
-const observerSegment = "_observer"
+// unplacedSegment is the placeholder path segment for an unplaced identity's
+// _EdgeNode topic — element-less means bound to the node itself (design §2),
+// not to nothing, but the grammar still needs a non-empty hierarchy path.
+// "_"-prefixed segments are reserved, so no real zone can collide with it.
+const unplacedSegment = "_unplaced"
 
 type Manager struct {
 	st      *store.Store
@@ -176,10 +177,11 @@ func (m *Manager) mountOf(e *uns.Entry) (string, bool) {
 
 // topicFor builds the entry's _EdgeNode entity topic: level 4 = the enrolled
 // identity, path = its placement resolved right now (§2.2). ok=false only when
-// a bound element does not resolve — an element-less observer files under the
-// placeholder segment and is fine.
+// a bound element does not resolve — an unplaced identity (bound to the node
+// itself, never a missing value, design §2) files under the placeholder
+// segment and is fine.
 func (m *Manager) topicFor(e *uns.Entry) (topic, kvPath string, ok bool) {
-	p := observerSegment
+	p := unplacedSegment
 	if e.Element != "" {
 		resolved, found := m.mountOf(e)
 		if !found {
@@ -322,7 +324,7 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 	if !placed {
 		m.log.Error("revoking an identity whose element no longer resolves — its _EdgeNode record is orphaned",
 			"ulid", ulid, "element", e.Element)
-		topic, kvPath = "colca/v1/_EdgeNode/"+ulid+"/"+observerSegment, observerSegment
+		topic, kvPath = "colca/v1/_EdgeNode/"+ulid+"/"+unplacedSegment, unplacedSegment
 	}
 	off, err := m.st.RegistryDelete(ulid, "entities", store.Record{
 		Topic:  topic,
@@ -497,20 +499,6 @@ func (m *Manager) ByName(name string) (*uns.Entry, bool) {
 	}
 	e, ok := m.byID[ulid]
 	return e, ok
-}
-
-// MountOf is the engine's mount source (engine.Mounts interface): the path the
-// identity's element sits at right now. An element-less observer has no place
-// to write into, and neither does an identity whose element this node cannot
-// resolve — both miss, and the engine rejects the publish.
-func (m *Manager) MountOf(ulid string) (string, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	e, ok := m.byID[ulid]
-	if !ok {
-		return "", false
-	}
-	return m.mountOf(e)
 }
 
 // List returns the locally enrolled entries sorted by ULID (GET /enroll).

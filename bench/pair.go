@@ -158,7 +158,9 @@ func StartPair(dir string, machines int) (*Pair, error) {
 			hub.Stop()
 			return nil, err
 		}
-		mid, err := enroll(dir, edge.Registry, ulid, machineElement)
+		// A machine gets no implicit write (auth §5) — an explicit write:
+		// grant over its own zone is what lets it publish at all.
+		mid, err := enroll(dir, edge.Registry, ulid, machineElement, "write:"+machineElement+"/#")
 		if err != nil {
 			edge.Stop()
 			hub.Stop()

@@ -102,7 +102,8 @@ mqtt:
 	if err := postAdmin(hc, apiAddr, "/publish", element); err != nil {
 		return nil, fmt.Errorf("place element for m1: %w", err)
 	}
-	entry, _ := json.Marshal(map[string]any{"ulid": "m1", "pubkey": m1id.PublicHex(), "kind": "machine", "element": "el-m1"})
+	entry, _ := json.Marshal(map[string]any{"ulid": "m1", "pubkey": m1id.PublicHex(), "kind": "machine", "element": "el-m1",
+		"grants": []string{"write:el-m1/#"}})
 	if err := postAdmin(hc, apiAddr, "/enroll", entry); err != nil {
 		return nil, fmt.Errorf("enroll m1: %w", err)
 	}
@@ -130,7 +131,7 @@ mqtt:
 	for time.Now().Before(stopAt) {
 		seq++
 		payload, _ := json.Marshal(map[string]any{"v": float64(seq), "value": float64(seq), "signal_id": "bench"})
-		tk := m.Publish("colca/v1/_Metric/m1/temp", 1, false, payload)
+		tk := m.Publish("colca/v1/_Metric/n-fp/m1/temp", 1, false, payload)
 		if !tk.WaitTimeout(10*time.Second) || tk.Error() != nil {
 			return nil, fmt.Errorf("publish under load: %w", tk.Error())
 		}

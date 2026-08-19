@@ -187,7 +187,7 @@ func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 	}
 	// The child's placement survives too: its element record is in the store,
 	// so the rebuilt namespace resolves the same mount without re-enrollment.
-	if mount, ok := preg2.MountOf("n-child"); !ok || mount != "child1" {
+	if mount, ok := peng2.Elements().PathOf(e2.Element); !ok || mount != "child1" {
 		t.Fatalf("mount after restart = %q %v, want child1", mount, ok)
 	}
 	pm2 := metrics.New(ps2, config.Retention{}, clk)

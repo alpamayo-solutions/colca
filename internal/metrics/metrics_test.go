@@ -360,12 +360,12 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		families[mf.GetName()] = len(mf.GetMetric())
 	}
 	want := map[string]int{
-		"colca_stream_next_offset":                      4, // one per stream
-		"colca_ingest_records_total":                    4,
-		"colca_rejected_publishes_total":                9,  // one per reason
-		"colca_auth_rejections_total":                   12, // door × reason
-		"colca_acl_denials_total":                       2,  // one per action
-		"colca_session_kicks_total":                     1,
+		"colca_stream_next_offset":       4, // one per stream
+		"colca_ingest_records_total":     4,
+		"colca_rejected_publishes_total": 9,  // one per reason
+		"colca_auth_rejections_total":    12, // door × reason
+		"colca_acl_denials_total":        2,  // one per action
+		"colca_session_kicks_total":      1,
 		// The uplink families cover only the streams that RISE: definitions
 		// descend, so a gauge for them would sit at zero forever and read like
 		// a broken uplink (definition-stream design §4).
@@ -376,8 +376,8 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_retained_reseed_records":                 1,
 		// Retention (design §8): collector-derived gauges, always one child per
 		// known stream regardless of activity.
-		"colca_stream_low_water_mark":                  4,
-		"colca_stream_live_bytes":                      4,
+		"colca_stream_low_water_mark": 4,
+		"colca_stream_live_bytes":     4,
 		// The retention families cover only the streams the POLICY prunes.
 		// Definitions are compacted instead, so a pressure gauge for them would
 		// report progress toward a policy that does not exist (design §6).
@@ -395,8 +395,8 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		// The definition channel (design §5). Applied is the happy path;
 		// rejected is worth alerting on, because a refused definition parks the
 		// node's cursor and nothing behind it arrives either.
-		"colca_definitions_applied_total":              1,
-		"colca_definitions_rejected_total":             1,
+		"colca_definitions_applied_total":  1,
+		"colca_definitions_rejected_total": 1,
 		// Move-drain (design §3.2/§3.4): colca_drains_active is unlabeled
 		// (always one child, like the retention state-refresh counters) and
 		// colca_drains_completed_total pre-creates all four outcomes
@@ -431,7 +431,7 @@ func TestIncrementSurface(t *testing.T) {
 		t.Errorf("ingest entities = %v, want 1", got)
 	}
 
-	for i, reason := range []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite} {
+	for i, reason := range []string{ReasonNodeID, ReasonGrammar, ReasonValidation, ReasonWriteDenied, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite} {
 		for j := 0; j <= i; j++ {
 			m.RejectPublish(reason)
 		}

@@ -97,7 +97,7 @@ func (s *Server) childFromReq(r *http.Request) (*uns.Entry, string, error) {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthKind)
 		return nil, "", fmt.Errorf("identity %s is kind %q — the repl door is for nodes", entry.ULID, entry.Kind)
 	}
-	mount, placed := s.eng.MountOf(entry.ULID)
+	mount, placed := s.eng.Elements().PathOf(entry.Element)
 	if !placed {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthKind)
 		return nil, "", fmt.Errorf("identity %s binds to element %s, which is not placed at this node",

@@ -30,11 +30,11 @@ import (
 
 // Reject reasons — the allowed label values of colca_rejected_publishes_total.
 const (
-	ReasonIdentity   = "identity"   // topic level 4 does not match the sender's identity
-	ReasonGrammar    = "grammar"    // topic does not parse as uns grammar
-	ReasonValidation = "validation" // payload fails the contract's schema
-	ReasonNoMount    = "no_mount"   // no mount configured for the sender
-	ReasonCmdDenied  = "cmd_denied" // a client's _Cmd* publish had no covering cmd grant
+	ReasonNodeID      = "node_id"      // topic level 4 is not this node
+	ReasonGrammar     = "grammar"      // topic does not parse as uns grammar
+	ReasonValidation  = "validation"   // payload fails the contract's schema
+	ReasonWriteDenied = "write_denied" // no write scope covers the topic
+	ReasonCmdDenied   = "cmd_denied"   // a client's _Cmd* publish had no covering cmd grant
 	// ReasonRegistryContract: _EdgeNode arrived at an ordinary ingest door —
 	// registry entries enter only through the enrollment endpoint (auth §3).
 	ReasonRegistryContract = "registry_contract"
@@ -54,7 +54,7 @@ const (
 	ReasonDraining = "draining"
 )
 
-var reasons = []string{ReasonIdentity, ReasonGrammar, ReasonValidation, ReasonNoMount, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonTimeSync, ReasonDraining}
+var reasons = []string{ReasonNodeID, ReasonGrammar, ReasonValidation, ReasonWriteDenied, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonTimeSync, ReasonDraining}
 
 // Move-drain outcome labels — the allowed `outcome` values of
 // colca_drains_completed_total (move-drain design §3.2/§3.4).
