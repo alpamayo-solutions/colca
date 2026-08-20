@@ -176,12 +176,31 @@ class NotificationDispatched(Payload):
 
 @dataclass
 class DataTag(Payload):
+    """One entry of a connector's catalogue (never a record of its own — the
+    catalogue is the unit, data-model binding design §3.1).
+
+    ``id`` is a ULID the connector mints at discovery and keeps stable across
+    rediscovery by matching ``source`` against its previous catalogue (design
+    §6): a signal's binding (``Signal.data_tag``) names this, never ``source``
+    or ``name``, so the id must outlive the discovery that created it.
+
+    ``source`` is the natural key — the tag's full address within the source
+    (what OPC-UA computes as its browse path, a Modbus/Jetter register name).
+    It replaces ``hierarchy``, which modelled the tag's position inside the
+    SOURCE: a second tree parallel to the plant model, already duplicated (the
+    old id was ``hierarchy + name`` joined) and empty for every protocol but
+    OPC-UA. The natural key becomes ``(connector, source)``.
+    """
     id: str
     name: str
+    source: str
     is_writable: bool
     is_readable: bool
     data_type: Optional[str] = None
-    hierarchy: List[str] = field(default_factory=list)
+    #: True when this tag no longer exists at the source (carried forward
+    #: from the previous catalogue rather than dropped, so a signal bound to
+    #: it stays bound instead of silently rebinding — design §6).
+    is_stale: bool = False
     meta: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -497,13 +516,18 @@ class Signal(Payload):
     Topic: ``colca/v1/_Signal/{node-id}/{path…}`` — the record's own topic is its
     position in the namespace, so nothing here restates it.
 
-    The signal also carries its **binding**: the one data tag it reads from,
-    named by ``(connector, tag_id)``. That replaces the DataTagContext, whose
-    many-tags-to-one-signal relationship was never adopted (data-model binding
-    design §2). The reference is a pair of identities rather than a path
-    because a record's topic is rewritten at every hop while its payload is
-    not — a path stored in here would silently mean something else at an
-    ancestor (§3.2).
+    The signal also carries its **binding**: a direct FK to the one data tag
+    it reads from, ``data_tag`` → ``DataTag.id``. That replaces the
+    DataTagContext, whose many-tags-to-one-signal relationship was never
+    adopted (data-model binding design §2), and it replaces an earlier
+    ``(connector, tag_id)`` pair — the connector is reached THROUGH the tag,
+    never stored beside it (local-service-trust design §6): a signal's own
+    identity is never a function of what it is bound to, so rebinding it to a
+    different tag leaves its id, and therefore its whole metric history,
+    untouched. The reference is an identity rather than a path because a
+    record's topic is rewritten at every hop while its payload is not — a
+    path stored in here would silently mean something else at an ancestor
+    (§3.2).
 
     Written by the node in response to a `_CmdConfigure` command; a retired
     signal is a retained empty payload (tombstone).
@@ -514,9 +538,10 @@ class Signal(Payload):
     description: str = ""
     #: ULID of the SystemElement that owns this signal.
     system_element_id: Optional[str] = None
-    #: ULID of the connector owning the bound tag, and the tag's id in its catalogue.
-    connector: Optional[str] = None
-    tag_id: Optional[str] = None
+    #: ULID of the DataTag this signal reads from (its natural key is
+    #: (connector, source); the connector that owns it is reached through the
+    #: tag, never stored here).
+    data_tag: Optional[str] = None
     #: The connector publishes metrics for this signal.
     is_published: bool = False
     #: The read side historises it (consumed by the historian bridge).

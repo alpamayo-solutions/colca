@@ -62,10 +62,10 @@ def test_the_catalogue_is_one_record_carrying_its_own_revision():
     # The content hash is what lets a connector skip republishing an unchanged
     # catalogue, which is the whole reason one fat record is affordable.
     from colca_data_contracts import DataTag, DataTags
-    tags = [DataTag(id="a", name="A", is_writable=False, is_readable=True)]
+    tags = [DataTag(id="a", name="A", source="Sensors/A", is_writable=False, is_readable=True)]
     first = DataTags(data_tags=tags, connector="opcua-1")
     same = DataTags(data_tags=list(tags), connector="opcua-1")
-    other = DataTags(data_tags=tags + [DataTag(id="b", name="B", is_writable=False, is_readable=True)],
+    other = DataTags(data_tags=tags + [DataTag(id="b", name="B", source="Sensors/B", is_writable=False, is_readable=True)],
                      connector="opcua-1")
     assert first.version == same.version
     assert first.version != other.version

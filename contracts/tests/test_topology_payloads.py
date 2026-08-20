@@ -24,16 +24,17 @@ def test_system_element_topic_format():
 
 
 def test_signal_carries_its_binding():
-    """The tag→signal binding lives on the Signal; DataTagContext is gone."""
+    """The tag→signal binding lives on the Signal as a direct FK to the tag's
+    id; DataTagContext and the (connector, tag_id) pair are both gone."""
     sig = SignalPayload(
         id="01HSIG", name="temp",
-        connector="opcua-1", tag_id="ns=2;s=Temp",
+        data_tag="01HTAG",
         is_published=True, is_logged=True,
         system_element_id="01HSE",
     )
     decoded = SignalPayload.decode(sig.encode(), timestamp=0)
 
-    assert (decoded.connector, decoded.tag_id) == ("opcua-1", "ns=2;s=Temp")
+    assert decoded.data_tag == "01HTAG"
     assert decoded.is_published and decoded.is_logged
     assert decoded.system_element_id == "01HSE"
 
@@ -104,8 +105,7 @@ def test_signal_roundtrip_minimal():
     decoded = SignalPayload.decode(encoded, timestamp=0)
     assert decoded.id == "01H..."
     assert decoded.name == "machine_state"
-    assert decoded.connector is None
-    assert decoded.tag_id is None
+    assert decoded.data_tag is None
     assert decoded.is_published is False
     assert decoded.data_type is None
     assert decoded.index_type is None
@@ -119,8 +119,7 @@ def test_signal_roundtrip_full():
         name="machine_state",
         description="Standardised machine state enum",
         system_element_id="01HSE",
-        connector="opcua-1",
-        tag_id="ns=2;s=MachineState",
+        data_tag="01HTAG",
         is_published=True,
         is_logged=True,
         data_type=DataType.STRING,
@@ -142,8 +141,7 @@ def test_signal_roundtrip_full():
     assert decoded.name == original.name
     assert decoded.description == original.description
     assert decoded.system_element_id == original.system_element_id
-    assert decoded.connector == original.connector
-    assert decoded.tag_id == original.tag_id
+    assert decoded.data_tag == original.data_tag
     assert decoded.is_published and decoded.is_logged
     assert decoded.data_type == DataType.STRING
     assert decoded.index_type == IndexType.TIME
