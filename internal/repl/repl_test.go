@@ -45,9 +45,9 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 
 	// child pushes two metric records (child-local topics, child offsets 1,2)
 	recs := []store.ReplRecord{
-		{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":1}`), TS: 1,
+		{ChildOffset: 1, OriginOffset: 41, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":1}`), TS: 1,
 			WrittenBy: "svc-connector", AsUser: "anna@example.com"},
-		{ChildOffset: 2, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":2}`), TS: 2},
+		{ChildOffset: 2, OriginOffset: 42, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":2}`), TS: 2},
 	}
 	hwm, err := cl.Replicate("metrics", recs)
 	if err != nil {
@@ -64,7 +64,11 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	if stored[0].WrittenBy != "svc-connector" || stored[0].AsUser != "anna@example.com" {
 		t.Fatalf("uplink lost attribution: %+v", stored[0])
 	}
-	if kv := ps.KVScan("child1/m1/temp"); len(kv) != 1 || string(kv[0].Payload) != `{"v":2}` {
+	if stored[0].OriginOffset != 41 || stored[1].OriginOffset != 42 {
+		t.Fatalf("uplink lost owner offsets: %+v", stored)
+	}
+	if kv := ps.KVScan("child1/m1/temp"); len(kv) != 1 ||
+		string(kv[0].Payload) != `{"v":2}` || kv[0].OriginOffset != 42 {
 		t.Fatalf("kv on replicate: %+v", kv)
 	}
 

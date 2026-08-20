@@ -55,10 +55,12 @@ func (s *entityStore) scan(contract string, keep func(store.KVEntry) bool) []uns
 			continue
 		}
 		out = append(out, uns.KVRecord{
-			Topic:   kv.Topic,
-			Path:    p.Path,
-			NodeID:  kv.NodeID,
-			Payload: kv.Payload,
+			Topic:        kv.Topic,
+			Path:         p.Path,
+			NodeID:       kv.NodeID,
+			Payload:      kv.Payload,
+			Offset:       kv.Offset,
+			OriginOffset: kv.OriginOffset,
 		})
 	}
 	return out
@@ -75,4 +77,23 @@ func (s *entityStore) Publish(topic string, payload []byte) (uns.StateWrite, err
 		Offset: result.Offset,
 		Topic:  result.Topic,
 	}, err
+}
+
+// PublishBatch is the domain command commit boundary. The engine validates the
+// complete result set before it opens one Pebble batch; the adapter merely
+// translates the engine's durable coordinates back into plugin-owned types.
+func (s *entityStore) PublishBatch(records []uns.StateRecord) ([]uns.StateWrite, error) {
+	results, err := s.e.ingestAdminStateBatch(records, Attribution{WrittenBy: "admin"})
+	if err != nil {
+		return nil, err
+	}
+	writes := make([]uns.StateWrite, len(results))
+	for i, result := range results {
+		writes[i] = uns.StateWrite{
+			Stream: result.Stream,
+			Offset: result.Offset,
+			Topic:  result.Topic,
+		}
+	}
+	return writes, nil
 }

@@ -25,8 +25,21 @@ type EntityStore interface {
 	// the durable stream position produced by the write. Command acknowledgements
 	// carry that position so an API can wait for its exact projected state.
 	Publish(topic string, payload []byte) (StateWrite, error)
+	// PublishBatch validates and commits a complete command result as one
+	// atomic state transition. Either every record receives a durable stream
+	// position and becomes current KV state, or none of them do.
+	PublishBatch(records []StateRecord) ([]StateWrite, error)
 	// NodeID is the identity this node publishes under.
 	NodeID() string
+}
+
+// StateRecord is one desired state mutation produced by a domain command.
+// An empty payload is the contract's tombstone when that contract permits it.
+// It deliberately carries no stream, offset or owner choice: the engine
+// validates the topic and derives those authoritative values at commit time.
+type StateRecord struct {
+	Topic   string
+	Payload []byte
 }
 
 // StateWrite identifies one state record produced while executing a command.
@@ -79,4 +92,11 @@ type KVRecord struct {
 	Path    string
 	NodeID  string
 	Payload []byte
+	// Offset is the entity stream version that produced this current state.
+	// It is local to the node and remains the coordinate for retention/CAS.
+	Offset uint64
+	// OriginOffset is the owner node's entity-stream coordinate. Replication
+	// keeps it unchanged across hops, so an ancestor's Edit projection and
+	// the owner executing a command compare the same version.
+	OriginOffset uint64
 }

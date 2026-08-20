@@ -33,6 +33,16 @@ func bindingBundle(t *testing.T) string {
 					"is_published": map[string]any{"type": "boolean"},
 				},
 				"required": []any{"id", "name"}}},
+		"_Constant": map[string]any{"class": "entity", "tombstone": true,
+			"schema": map[string]any{"type": "object",
+				"properties": map[string]any{
+					"id": str, "name": str,
+					"data_type": map[string]any{"type": "string", "enum": []any{
+						"float64", "int64", "boolean", "string", "datetime", "json",
+					}},
+					"value": map[string]any{},
+				},
+				"required": []any{"id", "name", "data_type", "value"}}},
 		"_DataTags": map[string]any{"class": "entity", "tombstone": true,
 			"schema": map[string]any{"type": "object",
 				"properties": map[string]any{"data_tags": map[string]any{"type": "array"}}}},
@@ -213,4 +223,55 @@ func TestAutobindWithoutACatalogueAcksConflict(t *testing.T) {
 	corr := cmdAdmin(t, n, "colca/v1/_CmdConfigure/n-solo/signal/autobind",
 		map[string]any{"connector": "never-seen"})
 	awaitAdminAck(t, n, "colca/v1/_Ack/n-solo/signal/autobind", corr, 409)
+}
+
+func TestConfigureConstantUpsertAndDeleteAreRetainedState(t *testing.T) {
+	base := t.TempDir()
+	if _, err := identity.Generate(filepath.Join(base, "n-constant.key")); err != nil {
+		t.Fatal(err)
+	}
+	n, err := node.Start(&config.Config{
+		ULID: "n-constant", DataDir: filepath.Join(base, "data"), LogLevel: "debug",
+		KeyFile:   filepath.Join(base, "n-constant.key"),
+		API:       config.API{Addr: "127.0.0.1:0", Token: tok},
+		Repl:      config.Endpoint{Addr: "127.0.0.1:0"},
+		Contracts: config.Contracts{Bundle: bindingBundle(t)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Stop()
+
+	path := "line1/m6/target-speed"
+	corr := cmdAdmin(t, n, "colca/v1/_CmdConfigure/n-constant/constant/upsert", map[string]any{
+		"constants": []any{map[string]any{
+			"path": path,
+			"constant": map[string]any{
+				"id": "01HCONSTANT", "name": "Target speed",
+				"data_type": "int64", "value": 18000,
+			},
+		}},
+	})
+	awaitAdminAck(t, n, "colca/v1/_Ack/n-constant/constant/upsert", corr, 200)
+	topic := "colca/v1/_Constant/n-constant/" + path
+	current := map[string]any{}
+	for _, raw := range kvAt(t, n, path) {
+		entry := raw.(map[string]any)
+		if entry["topic"] == topic {
+			current = entry["payload"].(map[string]any)
+		}
+	}
+	if current["value"] != float64(18000) {
+		t.Fatalf("constant not retained at %s: %v", topic, current)
+	}
+
+	corr = cmdAdmin(t, n, "colca/v1/_CmdConfigure/n-constant/constant/delete", map[string]any{
+		"paths": []string{path},
+	})
+	awaitAdminAck(t, n, "colca/v1/_Ack/n-constant/constant/delete", corr, 200)
+	for _, raw := range kvAt(t, n, path) {
+		if raw.(map[string]any)["topic"] == topic {
+			t.Fatalf("constant survived its tombstone: %v", raw)
+		}
+	}
 }

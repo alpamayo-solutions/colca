@@ -208,6 +208,7 @@ func (s *Server) Stop() {
 
 type wireRec struct {
 	O  uint64 `json:"o"`
+	OO uint64 `json:"oo,omitempty"`
 	T  string `json:"t"`
 	P  []byte `json:"p"`
 	TS int64  `json:"ts"`
@@ -234,7 +235,8 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	for _, rec := range in.Records {
 		topic := uns.MountInsert(rec.T, mount)
 		rr := store.ReplRecord{
-			ChildOffset: rec.O, Topic: topic, Payload: rec.P, TS: rec.TS,
+			ChildOffset: rec.O, OriginOffset: rec.OO,
+			Topic: topic, Payload: rec.P, TS: rec.TS,
 			WrittenBy: rec.WB, AsUser: rec.AU,
 		}
 		if p, err := uns.Parse(topic); err == nil {

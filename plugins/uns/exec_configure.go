@@ -137,6 +137,17 @@ type upsertBody struct {
 	Signals []signalRef `json:"signals"`
 }
 
+// constantRef is one typed authored value and its position. Constants are not
+// signals: they have no acquisition binding or metric topic.
+type constantRef struct {
+	Path     string          `json:"path"`
+	Constant json.RawMessage `json:"constant"`
+}
+
+type constantUpsertBody struct {
+	Constants []constantRef `json:"constants"`
+}
+
 type deleteBody struct {
 	Paths []string `json:"paths"`
 }
@@ -263,6 +274,10 @@ func (c *ConfigExec) execute(contract, verb string, payload []byte) (int, string
 		return c.delete(payload)
 	case "signal/autobind":
 		return c.autobind(payload)
+	case "constant/upsert":
+		return c.constantUpsert(payload)
+	case "constant/delete":
+		return c.constantDelete(payload)
 	case "element/upsert":
 		return c.elementUpsert(payload)
 	case "element/delete":
@@ -278,6 +293,117 @@ func (c *ConfigExec) execute(contract, verb string, payload []byte) (int, string
 	default:
 		return 422, fmt.Sprintf("unknown configure verb %q", verb), "invalid"
 	}
+}
+
+func (c *ConfigExec) constantUpsert(payload []byte) (int, string, string) {
+	var body constantUpsertBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return 422, "constant/upsert: unreadable payload: " + err.Error(), "invalid"
+	}
+	if len(body.Constants) == 0 {
+		return 422, "constant/upsert: no constants given", "invalid"
+	}
+
+	type pending struct {
+		path, topic string
+		payload     []byte
+	}
+	writes := make([]pending, 0, len(body.Constants))
+	seen := make(map[string]bool, len(body.Constants))
+	for i, ref := range body.Constants {
+		if err := validatePositionPath(ref.Path); err != nil {
+			return 422, fmt.Sprintf("constant/upsert: entry %d: %v", i, err), "invalid"
+		}
+		if len(ref.Constant) == 0 {
+			return 422, fmt.Sprintf("constant/upsert: entry %d has no constant", i), "invalid"
+		}
+		incoming, err := validateConstantPayload(ref.Constant)
+		if err != nil {
+			return 422, fmt.Sprintf("constant/upsert: entry %d: %v", i, err), "invalid"
+		}
+		topic := c.constantTopic(ref.Path)
+		if seen[topic] {
+			return 422, fmt.Sprintf("constant/upsert: entry %d repeats path %s", i, ref.Path), "invalid"
+		}
+		seen[topic] = true
+		if existing, ok := c.store.KVGet(topic); ok {
+			held, err := validateConstantPayload(existing)
+			if err != nil || held.ID != incoming.ID {
+				heldID := held.ID
+				if heldID == "" {
+					heldID = "an unreadable retained record"
+				}
+				return 409, fmt.Sprintf("constant/upsert: %s is already constant %s — two constants "+
+					"cannot share one position", ref.Path, heldID), "conflict"
+			}
+		}
+		writes = append(writes, pending{path: ref.Path, topic: topic, payload: ref.Constant})
+	}
+
+	// Everything above is read-only. Publishing starts only after every entry
+	// has passed shape, type, duplicate-path and retained-identity validation.
+	for _, write := range writes {
+		if err := c.publish(write.topic, write.payload); err != nil {
+			return 422, fmt.Sprintf("constant/upsert: %s rejected: %v", write.path, err), "invalid"
+		}
+	}
+	return 200, fmt.Sprintf("upserted %d", len(writes)), "ok"
+}
+
+func (c *ConfigExec) constantDelete(payload []byte) (int, string, string) {
+	var body deleteBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return 422, "constant/delete: unreadable payload: " + err.Error(), "invalid"
+	}
+	if len(body.Paths) == 0 {
+		return 422, "constant/delete: no paths given", "invalid"
+	}
+	topics := make([]string, 0, len(body.Paths))
+	missing := make([]string, 0)
+	seen := make(map[string]bool, len(body.Paths))
+	for i, path := range body.Paths {
+		if err := validatePositionPath(path); err != nil {
+			return 422, fmt.Sprintf("constant/delete: entry %d: %v", i, err), "invalid"
+		}
+		topic := c.constantTopic(path)
+		if seen[topic] {
+			return 422, fmt.Sprintf("constant/delete: entry %d repeats path %s", i, path), "invalid"
+		}
+		seen[topic] = true
+		if _, ok := c.store.KVGet(topic); !ok {
+			missing = append(missing, path)
+		}
+		topics = append(topics, topic)
+	}
+	if len(missing) > 0 {
+		return 404, "constant/delete: no constant at " + strings.Join(missing, ", "), "invalid"
+	}
+	for i, topic := range topics {
+		if err := c.publish(topic, nil); err != nil {
+			return 500, fmt.Sprintf("constant/delete: %s failed: %v", body.Paths[i], err), "error"
+		}
+	}
+	return 200, fmt.Sprintf("deleted %d", len(topics)), "ok"
+}
+
+func validatePositionPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("path is required")
+	}
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "" {
+			return fmt.Errorf("path %q is not canonical", path)
+		}
+		if strings.ContainsAny(segment, "+#") {
+			return fmt.Errorf("path %q contains an MQTT wildcard", path)
+		}
+		for _, char := range segment {
+			if char < 0x20 || char == 0x7f {
+				return fmt.Errorf("path %q contains a control character", path)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *ConfigExec) entityUpsert(payload []byte) (int, string, string) {
@@ -528,6 +654,10 @@ func joinPath(mount, leaf string) string {
 
 func (c *ConfigExec) signalTopic(path string) string {
 	return "colca/v1/_Signal/" + c.store.NodeID() + "/" + path
+}
+
+func (c *ConfigExec) constantTopic(path string) string {
+	return "colca/v1/_Constant/" + c.store.NodeID() + "/" + path
 }
 
 // boundTags is the set of tag ids that already have a signal — the answer to

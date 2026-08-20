@@ -1,8 +1,11 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/cockroachdb/pebble/v2"
 )
 
 func mustOpen(t *testing.T) *Store {
@@ -47,6 +50,79 @@ func TestAppendReadOffsets(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Offset != 5 {
 		t.Fatalf("filtered: %+v", got)
+	}
+}
+
+func TestAtomicBatchAppendsConsecutiveOffsetsAndProjectsEveryKVRow(t *testing.T) {
+	s := mustOpen(t)
+	originalApply := s.appendApply
+	applyCalls := 0
+	s.appendApply = func(batch *pebble.Batch, opts *pebble.WriteOptions) error {
+		applyCalls++
+		if opts != pebble.Sync {
+			t.Fatalf("append used write options %p, want pebble.Sync %p", opts, pebble.Sync)
+		}
+		return originalApply(batch, opts)
+	}
+
+	first, last, err := s.Append("entities", []Record{
+		{
+			Topic: "colca/v1/_Signal/n-edge1/line1/temp", Payload: []byte(`{"id":"sig-temp","name":"Temperature"}`),
+			TS: 1, KVPath: "line1/temp", KVNode: "n-edge1",
+		},
+		{
+			Topic: "colca/v1/_Signal/n-edge1/line1/speed", Payload: []byte(`{"id":"sig-speed","name":"Speed"}`),
+			TS: 1, KVPath: "line1/speed", KVNode: "n-edge1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != 1 || last != 2 {
+		t.Fatalf("atomic batch offsets = %d..%d, want 1..2", first, last)
+	}
+	if applyCalls != 1 {
+		t.Fatalf("atomic batch applied %d Pebble batches, want exactly 1", applyCalls)
+	}
+	if got := s.NextOffset("entities"); got != 3 {
+		t.Fatalf("next entities offset = %d, want 3", got)
+	}
+	if got := s.KVScan("line1/"); len(got) != 2 {
+		t.Fatalf("projected KV rows = %+v, want both batch records", got)
+	}
+}
+
+func TestAtomicBatchStorageFailureLeavesNoStreamOrKVState(t *testing.T) {
+	s := mustOpen(t)
+	s.appendApply = func(*pebble.Batch, *pebble.WriteOptions) error {
+		return errors.New("injected apply failure")
+	}
+
+	_, _, err := s.Append("entities", []Record{
+		{
+			Topic: "colca/v1/_Signal/n-edge1/line1/temp", Payload: []byte(`{"id":"sig-temp","name":"Temperature"}`),
+			TS: 1, KVPath: "line1/temp", KVNode: "n-edge1",
+		},
+		{
+			Topic: "colca/v1/_Signal/n-edge1/line1/speed", Payload: []byte(`{"id":"sig-speed","name":"Speed"}`),
+			TS: 1, KVPath: "line1/speed", KVNode: "n-edge1",
+		},
+	})
+	if err == nil || err.Error() != "injected apply failure" {
+		t.Fatalf("Append error = %v, want injected apply failure", err)
+	}
+	if got := s.NextOffset("entities"); got != 1 {
+		t.Fatalf("failed batch advanced next offset to %d, want 1", got)
+	}
+	records, next, readErr := s.Read("entities", 1, 10, nil)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(records) != 0 || next != 1 {
+		t.Fatalf("failed batch left stream state: records=%+v next=%d", records, next)
+	}
+	if got := s.KVScan("line1/"); len(got) != 0 {
+		t.Fatalf("failed batch left KV state: %+v", got)
 	}
 }
 
@@ -232,6 +308,59 @@ func TestApplyReplicatedDedupe(t *testing.T) {
 	}
 	if s.NextOffset("metrics") != 4 {
 		t.Fatalf("local offsets: %d", s.NextOffset("metrics"))
+	}
+}
+
+func TestOriginOffsetSurvivesMultipleReplicationHops(t *testing.T) {
+	topic := "colca/v1/_SystemElement/n-edge1/line1"
+	child := mustOpen(t)
+	if _, _, err := child.Append("entities", []Record{{
+		Topic: topic, Payload: []byte(`{"id":"line1"}`), TS: 1,
+		KVPath: "line1", KVNode: "n-edge1",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	childRecords, _, err := child.Read("entities", 1, 10, nil)
+	if err != nil || len(childRecords) != 1 {
+		t.Fatalf("child read = (%+v, %v)", childRecords, err)
+	}
+
+	parent := mustOpen(t)
+	if _, _, err := parent.Append("entities", []Record{{
+		Topic: "colca/v1/_SystemElement/n-parent/local", Payload: []byte(`{"id":"local"}`), TS: 1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := parent.ApplyReplicated("n-edge1", "entities", []ReplRecord{{
+		ChildOffset: childRecords[0].Offset, OriginOffset: childRecords[0].OriginOffset,
+		Topic: topic, Payload: childRecords[0].Payload, TS: childRecords[0].TS,
+		KVPath: "edge1/line1", KVNode: "n-edge1",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	parentRecords, _, err := parent.Read("entities", 2, 10, nil)
+	if err != nil || len(parentRecords) != 1 {
+		t.Fatalf("parent read = (%+v, %v)", parentRecords, err)
+	}
+	if parentRecords[0].Offset != 2 || parentRecords[0].OriginOffset != 1 {
+		t.Fatalf("parent coordinates = local %d origin %d, want 2/1", parentRecords[0].Offset, parentRecords[0].OriginOffset)
+	}
+	entries := parent.KVScan("edge1/line1")
+	if len(entries) != 1 || entries[0].Offset != 2 || entries[0].OriginOffset != 1 {
+		t.Fatalf("parent KV did not preserve owner coordinate: %+v", entries)
+	}
+
+	grandparent := mustOpen(t)
+	if _, _, err := grandparent.ApplyReplicated("n-parent", "entities", []ReplRecord{{
+		ChildOffset: parentRecords[0].Offset, OriginOffset: parentRecords[0].OriginOffset,
+		Topic: topic, Payload: parentRecords[0].Payload, TS: parentRecords[0].TS,
+		KVPath: "site1/edge1/line1", KVNode: "n-edge1",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	grandparentRecords, _, err := grandparent.Read("entities", 1, 10, nil)
+	if err != nil || len(grandparentRecords) != 1 || grandparentRecords[0].OriginOffset != 1 {
+		t.Fatalf("grandparent lost owner coordinate: records=%+v err=%v", grandparentRecords, err)
 	}
 }
 

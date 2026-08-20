@@ -529,7 +529,7 @@ func TestUnknownClientCertNeverFallsThrough(t *testing.T) {
 }
 
 // Wire-shape guard: /fetch keeps its exact response fields (records with
-// offset/topic/payload/ts and attribution, plus next) — the retention gap object composes
+// local/owner offsets, topic/payload/ts and attribution, plus next) — the retention gap object composes
 // into this same response, so the base shape is a contract.
 func TestFetchWireShape(t *testing.T) {
 	a := newAPI(t)
@@ -544,7 +544,7 @@ func TestFetchWireShape(t *testing.T) {
 		t.Fatalf("%v", out)
 	}
 	rec := recs[0].(map[string]any)
-	for _, k := range []string{"offset", "topic", "payload", "ts", "written_by", "as_user"} {
+	for _, k := range []string{"offset", "origin_offset", "topic", "payload", "ts", "written_by", "as_user"} {
 		if _, ok := rec[k]; !ok {
 			t.Fatalf("record missing %q: %v", k, rec)
 		}
@@ -591,8 +591,8 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		t.Fatal("ack must move")
 	}
 
-	surviving := `{"as_user":"","offset":4,"payload":{"v":4},"topic":"` + topic + `","ts":4000,"written_by":""},` +
-		`{"as_user":"","offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}`
+	surviving := `{"as_user":"","offset":4,"origin_offset":4,"payload":{"v":4},"topic":"` + topic + `","ts":4000,"written_by":""},` +
+		`{"as_user":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}`
 
 	resp, body := raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
 	if resp.StatusCode != http.StatusOK {
@@ -627,7 +627,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		t.Fatalf("ack past the LWM must move the cursor: %v", out)
 	}
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
-	want = `{"next":6,"records":[{"as_user":"","offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
+	want = `{"next":6,"records":[{"as_user":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
 	if body != want {
 		t.Fatalf("after ack past LWM the gap object must disappear:\n got %s\nwant %s", body, want)
 	}

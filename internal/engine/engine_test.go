@@ -164,6 +164,71 @@ func TestClientPublishNoRewriteAndKV(t *testing.T) {
 	}
 }
 
+func TestEntityStorePublishBatchCommitsValidatedEntityStateAtomically(t *testing.T) {
+	e, delivered := newRecordingEngine(t)
+	before := e.Store().NextOffset("entities")
+	records := []uns.StateRecord{
+		{
+			Topic:   "colca/v1/_Signal/n-edge1/line1/temp",
+			Payload: []byte(`{"id":"sig-temp","name":"Temperature"}`),
+		},
+		{
+			Topic:   "colca/v1/_Signal/n-edge1/line1/speed",
+			Payload: []byte(`{"id":"sig-speed","name":"Speed"}`),
+		},
+	}
+
+	writes, err := e.EntityStore().PublishBatch(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(writes) != 2 {
+		t.Fatalf("writes = %+v, want 2", writes)
+	}
+	for i, write := range writes {
+		if write.Stream != "entities" || write.Offset != before+uint64(i) || write.Topic != records[i].Topic {
+			t.Fatalf("write %d = %+v, want entities/%d/%s", i, write, before+uint64(i), records[i].Topic)
+		}
+	}
+	if got := e.Store().NextOffset("entities"); got != before+2 {
+		t.Fatalf("next entities offset = %d, want %d", got, before+2)
+	}
+	if got := e.Store().KVScan("line1/"); len(got) != 2 {
+		t.Fatalf("KV rows = %+v, want both records", got)
+	}
+	if got := delivered.got(); len(got) != 2 || !got[0].Retain || !got[1].Retain {
+		t.Fatalf("retained deliveries = %+v, want both records after commit", got)
+	}
+}
+
+func TestEntityStorePublishBatchRejectsLateInvalidRecordWithoutWrites(t *testing.T) {
+	e, delivered := newRecordingEngine(t)
+	before := e.Store().NextOffset("entities")
+
+	_, err := e.EntityStore().PublishBatch([]uns.StateRecord{
+		{
+			Topic:   "colca/v1/_Signal/n-edge1/line1/temp",
+			Payload: []byte(`{"id":"sig-temp","name":"Temperature"}`),
+		},
+		{
+			Topic:   "colca/v1/_Signal/n-edge1/line1/speed",
+			Payload: []byte(`{"name":"missing required id"}`),
+		},
+	})
+	if err == nil {
+		t.Fatal("PublishBatch accepted a schema-invalid second record")
+	}
+	if got := e.Store().NextOffset("entities"); got != before {
+		t.Fatalf("rejected batch advanced next offset to %d, want %d", got, before)
+	}
+	if got := e.Store().KVScan("line1/"); len(got) != 0 {
+		t.Fatalf("rejected batch left KV state: %+v", got)
+	}
+	if got := delivered.got(); len(got) != 0 {
+		t.Fatalf("rejected batch reached local bus: %+v", got)
+	}
+}
+
 // Level 4 must be THIS node's own ULID for every publisher — not the
 // client's identity, which no longer appears in the topic at all (auth §2).
 func TestClientLevel4MustBeThisNode(t *testing.T) {

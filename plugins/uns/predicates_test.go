@@ -51,6 +51,17 @@ func TestOnlyEntitiesNeedStateRefresh(t *testing.T) {
 	}
 }
 
+func TestOnlyEntityClassIsEntityState(t *testing.T) {
+	if !IsEntityState(ClassEntity) {
+		t.Error("entity records must be accepted by the atomic entity-state port")
+	}
+	for _, c := range []Class{ClassData, ClassDefinition, ClassCmd, ClassAck, ClassGap, ClassTimeSync, ClassNone} {
+		if IsEntityState(c) {
+			t.Errorf("class %v must not enter an atomic entity-state batch", c)
+		}
+	}
+}
+
 // An unknown contract is the one answer that must never be treated as routable:
 // ClassOf and the bundle authority both return ClassNone for it.
 func TestOnlyClassNoneIsUnknown(t *testing.T) {

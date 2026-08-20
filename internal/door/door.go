@@ -50,10 +50,11 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 
 // Record is one stored record as the door returns it.
 type Record struct {
-	Offset  int64           `json:"offset"`
-	Topic   string          `json:"topic"`
-	Payload json.RawMessage `json:"payload"`
-	TS      int64           `json:"ts"`
+	Offset       int64           `json:"offset"`
+	OriginOffset int64           `json:"origin_offset"`
+	Topic        string          `json:"topic"`
+	Payload      json.RawMessage `json:"payload"`
+	TS           int64           `json:"ts"`
 }
 
 // Page is one /fetch response.

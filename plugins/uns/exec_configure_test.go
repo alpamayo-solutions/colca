@@ -10,14 +10,18 @@ import (
 
 // fakeStore is an in-memory EntityStore: the plugin's whole view of the node.
 type fakeStore struct {
-	node    string
-	records map[string][]byte // topic → payload (nil = tombstoned)
-	fail    map[string]string // topic → error to return from Publish
-	offset  uint64
+	node          string
+	records       map[string][]byte // topic → payload (nil = tombstoned)
+	recordOffsets map[string]uint64 // topic → current retained version
+	fail          map[string]string // topic → error to return from Publish
+	offset        uint64
+	batchCalls    int
 }
 
 func newStore(node string) *fakeStore {
-	return &fakeStore{node: node, records: map[string][]byte{}, fail: map[string]string{}}
+	return &fakeStore{
+		node: node, records: map[string][]byte{}, recordOffsets: map[string]uint64{}, fail: map[string]string{},
+	}
 }
 
 func (f *fakeStore) NodeID() string { return f.node }
@@ -37,7 +41,9 @@ func (f *fakeStore) KVScan(contract, nodeID string) []KVRecord {
 		if err != nil || p.Contract != contract || p.NodeID != nodeID {
 			continue
 		}
-		out = append(out, KVRecord{Topic: topic, Path: p.Path, NodeID: p.NodeID, Payload: payload})
+		out = append(out, KVRecord{
+			Topic: topic, Path: p.Path, NodeID: p.NodeID, Payload: payload, Offset: f.recordOffsets[topic],
+		})
 	}
 	return out
 }
@@ -52,7 +58,9 @@ func (f *fakeStore) KVScanAll(contract string) []KVRecord {
 		if err != nil || p.Contract != contract {
 			continue
 		}
-		out = append(out, KVRecord{Topic: topic, Path: p.Path, NodeID: p.NodeID, Payload: payload})
+		out = append(out, KVRecord{
+			Topic: topic, Path: p.Path, NodeID: p.NodeID, Payload: payload, Offset: f.recordOffsets[topic],
+		})
 	}
 	return out
 }
@@ -70,10 +78,30 @@ func (f *fakeStore) Publish(topic string, payload []byte) (StateWrite, error) {
 	}
 	if len(payload) == 0 {
 		f.records[topic] = nil
+		delete(f.recordOffsets, topic)
 		return write, nil
 	}
 	f.records[topic] = payload
+	f.recordOffsets[topic] = write.Offset
 	return write, nil
+}
+
+func (f *fakeStore) PublishBatch(records []StateRecord) ([]StateWrite, error) {
+	for _, record := range records {
+		if msg, bad := f.fail[record.Topic]; bad {
+			return nil, errString(msg)
+		}
+	}
+	f.batchCalls++
+	writes := make([]StateWrite, 0, len(records))
+	for _, record := range records {
+		write, err := f.Publish(record.Topic, record.Payload)
+		if err != nil {
+			return nil, err
+		}
+		writes = append(writes, write)
+	}
+	return writes, nil
 }
 
 type errString string
@@ -916,6 +944,148 @@ func TestElementDeleteOfAnAbsentElementIs404(t *testing.T) {
 
 	if code != 404 || !strings.Contains(msg, "nothing") {
 		t.Fatalf("code %d msg %q — want 404 naming the path", code, msg)
+	}
+}
+
+// ── constants ─────────────────────────────────────────────────────────────
+
+func constant(path, id, dataType string, value any) map[string]any {
+	return map[string]any{
+		"path": path,
+		"constant": map[string]any{
+			"id": id, "name": path[strings.LastIndex(path, "/")+1:],
+			"data_type": dataType, "value": value,
+		},
+	}
+}
+
+func constantBody(t *testing.T, entries ...map[string]any) []byte {
+	t.Helper()
+	return body(t, map[string]any{"constants": entries})
+}
+
+func constantsUnder(f *fakeStore, node string) map[string]placedConstant {
+	out := map[string]placedConstant{}
+	for _, rec := range f.KVScan("_Constant", node) {
+		var value placedConstant
+		if json.Unmarshal(rec.Payload, &value) == nil {
+			out[rec.Path] = value
+		}
+	}
+	return out
+}
+
+func TestConstantUpsertWritesTypedValuesAtTheirPaths(t *testing.T) {
+	f := newStore("n-edge1")
+	c := NewConfigExec(f, nil, nil, nil, nil)
+
+	code, msg, _ := c.Execute("_CmdConfigure", "constant/upsert", constantBody(t,
+		constant("line1/m6/target-speed", "01HINT", "int64", 18000),
+		constant("line1/m6/enabled", "01HBOOL", "boolean", true),
+		constant("line1/m6/recipe", "01HJSON", "json", map[string]any{"sku": "A-42"}),
+	))
+
+	if code != 200 {
+		t.Fatalf("constant upsert = %d %q, want 200", code, msg)
+	}
+	got := constantsUnder(f, "n-edge1")
+	if len(got) != 3 || got["line1/m6/target-speed"].ID != "01HINT" {
+		t.Fatalf("stored constants = %+v", got)
+	}
+}
+
+func TestConstantUpsertValidatesTheWholeBatchBeforeWriting(t *testing.T) {
+	f := newStore("n-edge1")
+	c := NewConfigExec(f, nil, nil, nil, nil)
+
+	code, msg, _ := c.Execute("_CmdConfigure", "constant/upsert", constantBody(t,
+		constant("line1/m6/valid", "01HVALID", "string", "ready"),
+		constant("line1/m6/invalid", "01HINVALID", "int64", 1.5),
+	))
+
+	if code != 422 || !strings.Contains(msg, "entry 1") {
+		t.Fatalf("constant upsert = %d %q, want 422 naming entry 1", code, msg)
+	}
+	if got := constantsUnder(f, "n-edge1"); len(got) != 0 {
+		t.Fatalf("a rejected batch wrote partial state: %+v", got)
+	}
+}
+
+func TestConstantUpsertRejectsEveryInvalidTypeAndPath(t *testing.T) {
+	cases := []struct {
+		name     string
+		entry    map[string]any
+		wantCode int
+	}{
+		{"no path", constant("", "01H", "string", "x"), 422},
+		{"non canonical path", constant("line1//speed", "01H", "string", "x"), 422},
+		{"wildcard path", constant("line1/+/speed", "01H", "string", "x"), 422},
+		{"float64", constant("c", "01H", "float64", "1.2"), 422},
+		{"int64", constant("c", "01H", "int64", 1.2), 422},
+		{"boolean", constant("c", "01H", "boolean", "true"), 422},
+		{"boolean null", constant("c", "01H", "boolean", nil), 422},
+		{"string", constant("c", "01H", "string", 42), 422},
+		{"string null", constant("c", "01H", "string", nil), 422},
+		{"datetime", constant("c", "01H", "datetime", "20 August 2026"), 422},
+		{"unknown type", constant("c", "01H", "decimal", 1), 422},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStore("n-edge1")
+			c := NewConfigExec(f, nil, nil, nil, nil)
+			code, _, _ := c.Execute("_CmdConfigure", "constant/upsert", constantBody(t, tc.entry))
+			if code != tc.wantCode {
+				t.Fatalf("code = %d, want %d", code, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestConstantUpsertRefusesAPathOwnedByAnotherConstant(t *testing.T) {
+	f := newStore("n-edge1")
+	c := NewConfigExec(f, nil, nil, nil, nil)
+	c.Execute("_CmdConfigure", "constant/upsert", constantBody(t,
+		constant("line1/m6/target-speed", "01HOLD", "int64", 18000),
+	))
+
+	code, msg, result := c.Execute("_CmdConfigure", "constant/upsert", constantBody(t,
+		constant("line1/m6/target-speed", "01HOTHER", "int64", 19000),
+	))
+
+	if code != 409 || result != "conflict" || !strings.Contains(msg, "01HOLD") {
+		t.Fatalf("code %d result %q msg %q, want collision naming 01HOLD", code, result, msg)
+	}
+	if got := constantsUnder(f, "n-edge1")["line1/m6/target-speed"].ID; got != "01HOLD" {
+		t.Fatalf("colliding write replaced %q", got)
+	}
+}
+
+func TestConstantDeleteValidatesAllPathsThenWritesTombstones(t *testing.T) {
+	f := newStore("n-edge1")
+	c := NewConfigExec(f, nil, nil, nil, nil)
+	c.Execute("_CmdConfigure", "constant/upsert", constantBody(t,
+		constant("line1/m6/a", "01HA", "string", "a"),
+		constant("line1/m6/b", "01HB", "string", "b"),
+	))
+
+	code, msg, _ := c.Execute("_CmdConfigure", "constant/delete", body(t, map[string]any{
+		"paths": []string{"line1/m6/a", "missing"},
+	}))
+	if code != 404 || !strings.Contains(msg, "missing") {
+		t.Fatalf("delete = %d %q, want 404 naming missing", code, msg)
+	}
+	if got := constantsUnder(f, "n-edge1"); len(got) != 2 {
+		t.Fatalf("rejected delete wrote partial tombstones: %+v", got)
+	}
+
+	code, msg, _ = c.Execute("_CmdConfigure", "constant/delete", body(t, map[string]any{
+		"paths": []string{"line1/m6/a", "line1/m6/b"},
+	}))
+	if code != 200 {
+		t.Fatalf("delete = %d %q, want 200", code, msg)
+	}
+	if got := constantsUnder(f, "n-edge1"); len(got) != 0 {
+		t.Fatalf("constants survived tombstones: %+v", got)
 	}
 }
 

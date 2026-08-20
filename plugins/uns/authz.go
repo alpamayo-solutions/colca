@@ -499,7 +499,7 @@ func CmdClass(contract string) string {
 		return "operate"
 	case "_CmdMaintain":
 		return "maintain"
-	case "_CmdConfigure":
+	case "_CmdConfigure", "_CmdEdit":
 		return "configure"
 	default:
 		return "admin"

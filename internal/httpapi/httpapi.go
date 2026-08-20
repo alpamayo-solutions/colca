@@ -351,12 +351,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		out := make([]map[string]any, 0, len(recs))
 		for _, rec := range recs {
 			out = append(out, map[string]any{
-				"offset":     rec.Offset,
-				"topic":      rec.Topic,
-				"payload":    json.RawMessage(rec.Payload),
-				"ts":         rec.TS,
-				"written_by": rec.WrittenBy,
-				"as_user":    rec.AsUser,
+				"offset":        rec.Offset,
+				"origin_offset": rec.OriginOffset,
+				"topic":         rec.Topic,
+				"payload":       json.RawMessage(rec.Payload),
+				"ts":            rec.TS,
+				"written_by":    rec.WrittenBy,
+				"as_user":       rec.AsUser,
 			})
 		}
 		resp := map[string]any{"records": out, "next": next}

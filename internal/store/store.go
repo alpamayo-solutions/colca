@@ -20,11 +20,12 @@ import (
 var streams = []string{"metrics", "entities", "commands", "definitions"}
 
 type Record struct {
-	Topic     string `json:"t"`
-	Payload   []byte `json:"p"`
-	TS        int64  `json:"ts"`
-	WrittenBy string `json:"wb,omitempty"`
-	AsUser    string `json:"au,omitempty"`
+	Topic        string `json:"t"`
+	Payload      []byte `json:"p"`
+	TS           int64  `json:"ts"`
+	WrittenBy    string `json:"wb,omitempty"`
+	AsUser       string `json:"au,omitempty"`
+	OriginOffset uint64 `json:"oo,omitempty"`
 	// optional KV projection written in the same atomic batch:
 	KVPath string `json:"-"` // hierarchy path (segments after contract, post-mount)
 	KVNode string `json:"-"` // node-id (level 4)
@@ -38,12 +39,13 @@ type Record struct {
 }
 
 type StoredRecord struct {
-	Offset    uint64
-	Topic     string
-	Payload   []byte
-	TS        int64
-	WrittenBy string
-	AsUser    string
+	Offset       uint64
+	OriginOffset uint64
+	Topic        string
+	Payload      []byte
+	TS           int64
+	WrittenBy    string
+	AsUser       string
 }
 
 type KVEntry struct {
@@ -51,6 +53,7 @@ type KVEntry struct {
 	Payload             []byte
 	TS                  int64
 	Offset              uint64
+	OriginOffset        uint64
 }
 
 type Store struct {
@@ -59,6 +62,9 @@ type Store struct {
 	next  map[string]uint64 // next offset per stream
 	lwm   map[string]uint64 // low-water mark per stream: lowest retained offset
 	bytes map[string]uint64 // live logical bytes per stream (stream key + encoded value)
+	// appendApply is Pebble's atomic apply boundary. Keeping the bound method
+	// injectable lets tests prove an apply failure changes neither stream nor KV.
+	appendApply func(*pebble.Batch, *pebble.WriteOptions) error
 }
 
 // Open opens (or creates) the store at dir and restores the next offset,
@@ -69,7 +75,10 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{}}
+	s := &Store{
+		db: db, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{},
+		appendApply: db.Apply,
+	}
 	for _, stream := range streams {
 		next, err := readCounter(db, metaKey(stream), 1, "meta", stream)
 		if err != nil {
@@ -149,21 +158,23 @@ func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (u
 func (s *Store) Close() error { return s.db.Close() }
 
 type recEnc struct {
-	Topic     string `json:"t"`
-	Payload   []byte `json:"p"`
-	TS        int64  `json:"ts"`
-	WrittenBy string `json:"wb,omitempty"`
-	AsUser    string `json:"au,omitempty"`
+	Topic        string `json:"t"`
+	Payload      []byte `json:"p"`
+	TS           int64  `json:"ts"`
+	WrittenBy    string `json:"wb,omitempty"`
+	AsUser       string `json:"au,omitempty"`
+	OriginOffset uint64 `json:"oo,omitempty"`
 	// size is the encoded length of THIS record as stored, filled in by
 	// scanRecords. Never serialized — it is what the byte accounting needs and
 	// only the reader can know it.
 	size uint64 `json:"-"`
 }
 type kvEnc struct {
-	Topic   string `json:"t"`
-	Payload []byte `json:"p"`
-	TS      int64  `json:"ts"`
-	Offset  uint64 `json:"o"`
+	Topic        string `json:"t"`
+	Payload      []byte `json:"p"`
+	TS           int64  `json:"ts"`
+	Offset       uint64 `json:"o"`
+	OriginOffset uint64 `json:"oo,omitempty"`
 }
 
 // addRecord writes one stream record (and its optional KV projection) into the
@@ -174,9 +185,13 @@ type kvEnc struct {
 // the batch instead of set. Deleting an absent key is a no-op in Pebble, so a
 // replayed tombstone is idempotent by construction.
 func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, error) {
+	originOffset := rec.OriginOffset
+	if originOffset == 0 {
+		originOffset = off
+	}
 	val, err := json.Marshal(recEnc{
 		Topic: rec.Topic, Payload: rec.Payload, TS: rec.TS,
-		WrittenBy: rec.WrittenBy, AsUser: rec.AsUser,
+		WrittenBy: rec.WrittenBy, AsUser: rec.AsUser, OriginOffset: originOffset,
 	})
 	if err != nil {
 		return 0, err
@@ -191,7 +206,10 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 				return 0, err
 			}
 		} else {
-			kval, err := json.Marshal(kvEnc{rec.Topic, rec.Payload, rec.TS, off})
+			kval, err := json.Marshal(kvEnc{
+				Topic: rec.Topic, Payload: rec.Payload, TS: rec.TS,
+				Offset: off, OriginOffset: originOffset,
+			})
 			if err != nil {
 				return 0, err
 			}
@@ -239,7 +257,7 @@ func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, 
 	if err := b.Set(bytesKey(stream), be64(liveBytes), nil); err != nil {
 		return 0, 0, err
 	}
-	if err := s.db.Apply(b, pebble.Sync); err != nil {
+	if err := s.appendApply(b, pebble.Sync); err != nil {
 		return 0, 0, err
 	}
 	s.next[stream] = off
@@ -250,17 +268,21 @@ func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, 
 // kvOffset returns the Offset field of the current KV entry for the canonical
 // topic at (path, node), ok=false when the key is absent or undecodable.
 // Callers hold s.mu.
-func (s *Store) kvOffset(path, node, topic string) (uint64, bool) {
+func (s *Store) kvOffsets(path, node, topic string) (local, origin uint64, ok bool) {
 	v, closer, err := s.db.Get(kvKey(path, node, topic))
 	if err != nil {
-		return 0, false
+		return 0, 0, false
 	}
 	defer closer.Close()
 	var e kvEnc
 	if json.Unmarshal(v, &e) != nil {
-		return 0, false
+		return 0, 0, false
 	}
-	return e.Offset, true
+	origin = e.OriginOffset
+	if origin == 0 {
+		origin = e.Offset
+	}
+	return e.Offset, origin, true
 }
 
 // AppendIfKVUnchanged appends rec — stream record AND KV projection — only if
@@ -283,10 +305,14 @@ func (s *Store) AppendIfKVUnchanged(stream string, rec Record, ifKVOffset uint64
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cur, ok := s.kvOffset(rec.KVPath, rec.KVNode, rec.Topic)
+	cur, origin, ok := s.kvOffsets(rec.KVPath, rec.KVNode, rec.Topic)
 	if !ok || cur != ifKVOffset {
 		return 0, false, nil // retired or superseded since the snapshot — skip entirely
 	}
+	// A retention refresh re-states the same owner-authored version. Keeping its
+	// origin coordinate prevents an ancestor's local refresh offset from
+	// becoming a false Edit version at that ancestor.
+	rec.OriginOffset = origin
 	first, _, err := s.appendLocked(stream, []Record{rec})
 	if err != nil {
 		return 0, false, err
@@ -324,7 +350,8 @@ func (s *Store) Read(stream string, from uint64, max int, filter func(string) bo
 			continue
 		}
 		out = append(out, StoredRecord{
-			Offset: off, Topic: e.Topic, Payload: e.Payload, TS: e.TS,
+			Offset: off, OriginOffset: originOffset(e.OriginOffset, off),
+			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 			WrittenBy: e.WrittenBy, AsUser: e.AsUser,
 		})
 	}
@@ -512,14 +539,15 @@ func (s *Store) HWMs() []HWMInfo {
 // ReplRecord is a record as it travels from a child node to its parent. The
 // json tags are the wire format — do not rename them.
 type ReplRecord struct {
-	ChildOffset uint64 `json:"o"`
-	Topic       string `json:"t"`
-	Payload     []byte `json:"p"`
-	TS          int64  `json:"ts"`
-	WrittenBy   string `json:"wb,omitempty"`
-	AsUser      string `json:"au,omitempty"`
-	KVPath      string `json:"kp,omitempty"`
-	KVNode      string `json:"kn,omitempty"`
+	ChildOffset  uint64 `json:"o"`
+	OriginOffset uint64 `json:"oo,omitempty"`
+	Topic        string `json:"t"`
+	Payload      []byte `json:"p"`
+	TS           int64  `json:"ts"`
+	WrittenBy    string `json:"wb,omitempty"`
+	AsUser       string `json:"au,omitempty"`
+	KVPath       string `json:"kp,omitempty"`
+	KVNode       string `json:"kn,omitempty"`
 	// Delete mirrors Record.Delete (retention design §7.1): ApplyReplicated
 	// deletes the KV key in its batch instead of setting it. The parent's
 	// replication server derives it the same way the engine does — empty
@@ -553,10 +581,16 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 		if r.ChildOffset <= hwm {
 			continue
 		}
+		if r.OriginOffset == 0 {
+			// Compatibility with a direct/legacy child: at the first hop its
+			// child offset is the owner-authored coordinate.
+			r.OriginOffset = r.ChildOffset
+		}
 		n, err := addRecord(b, stream, off, Record{
 			Topic: r.Topic, Payload: r.Payload, TS: r.TS,
 			WrittenBy: r.WrittenBy, AsUser: r.AsUser,
-			KVPath: r.KVPath, KVNode: r.KVNode, Delete: r.Delete,
+			OriginOffset: r.OriginOffset,
+			KVPath:       r.KVPath, KVNode: r.KVNode, Delete: r.Delete,
 		})
 		if err != nil {
 			return nil, prev, err
@@ -1143,15 +1177,23 @@ func (s *Store) KVScan(prefix string) []KVEntry {
 			continue
 		}
 		out = append(out, KVEntry{
-			Path:    key[:pathSep],
-			NodeID:  rest[:nodeSep],
-			Topic:   e.Topic,
-			Payload: e.Payload,
-			TS:      e.TS,
-			Offset:  e.Offset,
+			Path:         key[:pathSep],
+			NodeID:       rest[:nodeSep],
+			Topic:        e.Topic,
+			Payload:      e.Payload,
+			TS:           e.TS,
+			Offset:       e.Offset,
+			OriginOffset: originOffset(e.OriginOffset, e.Offset),
 		})
 	}
 	return out
+}
+
+func originOffset(origin, local uint64) uint64 {
+	if origin != 0 {
+		return origin
+	}
+	return local
 }
 
 // DiskMetrics is a point-in-time snapshot of the bytes Pebble has pushed to

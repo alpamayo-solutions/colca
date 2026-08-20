@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
@@ -93,6 +94,67 @@ func TestLocalCommandResultAndAckNameTheProducedStateOffset(t *testing.T) {
 	writes, ok := ack["state_writes"].([]any)
 	if !ok || len(writes) != 1 || writes[0].(map[string]any)["offset"].(float64) != 7 {
 		t.Fatalf("ack state_writes = %#v", ack["state_writes"])
+	}
+}
+
+func TestEditCommandCommitsStateAndDurableReplayReceiptTogether(t *testing.T) {
+	e := execEngine(t, nil)
+	parent, err := e.IngestAdmin(
+		"colca/v1/_SystemElement/n-edge1/line1",
+		[]byte(`{"id":"el-line1","name":"Line 1"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetExecutor(uns.NewEditExec(e.EntityStore()))
+	payload, err := json.Marshal(map[string]any{
+		"operation_id":   "operation-1",
+		"correlation_id": "correlation-1",
+		"expires_at":     futureMS(),
+		"expected_versions": map[string]string{
+			"system-element:el-line1": fmt.Sprint(parent.Offset),
+		},
+		"intent": map[string]any{
+			"type":      "create",
+			"entity":    map[string]any{"kind": "constant", "id": "const-target"},
+			"parent_id": "el-line1",
+			"attributes": map[string]any{
+				"name": "Target", "data_type": "int64", "value": 7,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := e.IngestAdmin("colca/v1/_CmdEdit/n-edge1/apply", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Command == nil || result.Command.ResultCode != 200 || len(result.Command.StateWrites) != 1 {
+		t.Fatalf("edit result = %+v", result.Command)
+	}
+	if got := result.Command.StateWrites[0]; got.Offset != parent.Offset+1 || got.Topic != "colca/v1/_Constant/n-edge1/line1/Target" {
+		t.Fatalf("edit state write = %+v", got)
+	}
+	if got := e.Store().KVScan("_colca/edit/operations/"); len(got) != 1 {
+		t.Fatalf("durable replay receipts = %+v, want 1", got)
+	}
+	entitiesNext := e.Store().NextOffset("entities")
+
+	// Replace the executor to prove replay comes from retained COLCA state,
+	// not an in-process map.
+	e.SetExecutor(uns.NewEditExec(e.EntityStore()))
+	replayed, err := e.IngestAdmin("colca/v1/_CmdEdit/n-edge1/apply", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Command == nil || len(replayed.Command.StateWrites) != 1 ||
+		replayed.Command.StateWrites[0] != result.Command.StateWrites[0] {
+		t.Fatalf("durable replay = %+v, want original %+v", replayed.Command, result.Command)
+	}
+	if got := e.Store().NextOffset("entities"); got != entitiesNext {
+		t.Fatalf("durable replay appended entity state: next=%d want=%d", got, entitiesNext)
 	}
 }
 

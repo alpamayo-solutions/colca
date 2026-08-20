@@ -87,7 +87,7 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 	wire := make([]wireRec, len(recs))
 	for i, r := range recs {
 		wire[i] = wireRec{
-			O: r.ChildOffset, T: r.Topic, P: r.Payload, TS: r.TS,
+			O: r.ChildOffset, OO: r.OriginOffset, T: r.Topic, P: r.Payload, TS: r.TS,
 			WB: r.WrittenBy, AU: r.AsUser,
 		}
 	}
@@ -297,7 +297,8 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 				batch := make([]store.ReplRecord, len(recs))
 				for i, r := range recs {
 					batch[i] = store.ReplRecord{
-						ChildOffset: r.Offset, Topic: r.Topic, Payload: r.Payload, TS: r.TS,
+						ChildOffset: r.Offset, OriginOffset: r.OriginOffset,
+						Topic: r.Topic, Payload: r.Payload, TS: r.TS,
 						WrittenBy: r.WrittenBy, AsUser: r.AsUser,
 					}
 				}

@@ -24,11 +24,13 @@ func TestParseAndClass(t *testing.T) {
 		"_CmdAdmin": {ClassCmd, "commands"}, "_Ack": {ClassAck, "commands"},
 		// demo topology: every _Cmd* contract is a command, never ClassNone
 		"_CmdOperate": {ClassCmd, "commands"}, "_CmdMaintain": {ClassCmd, "commands"},
-		"_Signal":         {ClassEntity, "entities"},
-		"_MetadataType":   {ClassDefinition, "definitions"},
-		"_AnnotationType": {ClassDefinition, "definitions"},
-		"_Interface":      {ClassDefinition, "definitions"},
-		"_ExternalSystem": {ClassDefinition, "definitions"},
+		"_Signal":             {ClassEntity, "entities"},
+		"_Constant":           {ClassEntity, "entities"},
+		"_EditOperation": {ClassEntity, "entities"},
+		"_MetadataType":       {ClassDefinition, "definitions"},
+		"_AnnotationType":     {ClassDefinition, "definitions"},
+		"_Interface":          {ClassDefinition, "definitions"},
+		"_ExternalSystem":     {ClassDefinition, "definitions"},
 		// _StreamGap (design §6.4) is its own class. StreamFor deliberately
 		// answers "" for it — unlike every other class it has no single fixed
 		// stream, it targets whichever stream it describes (Parsed.Path, see
@@ -168,6 +170,8 @@ func TestValidate(t *testing.T) {
 		// the field grants and bindings reference it through.
 		{"_SystemElement", `{"id":"01HLINE1","name":"Linie 1"}`},
 		{"_Signal", `{"id":"01HSIG1","name":"Temperatur"}`},
+		{"_Constant", `{"id":"01HCONST1","name":"Target speed","data_type":"int64","value":18000}`},
+		{"_EditOperation", `{"id":"op-1","digest":"abc","message":"created","result":"ok","topics":["colca/v1/_Constant/n1/a"]}`},
 		{"_StreamGap", `{"stream":"metrics","from_offset":57,"to_offset":49999,"first_ts":1755100000000,"last_ts":1755700000000,"overridden_cursors":["uplink"]}`},
 		{"_StreamGap", `{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":["downlink:child-01","uplink"]}`},
 		{"_TimeSync", `{"now_ms": 1755000000000}`},
@@ -201,6 +205,10 @@ func TestValidate(t *testing.T) {
 		// registry's field name is unaddressable, and vice versa.
 		{"_SystemElement", `{"ulid":"01HLINE1","name":"Linie 1"}`},
 		{"_Signal", `{"ulid":"01HSIG1"}`},
+		{"_Constant", `{"id":"01HCONST1","name":"Target speed","data_type":"int64"}`},
+		{"_Constant", `{"id":"01HCONST1","name":"Target speed","data_type":"int64","value":1.5}`},
+		{"_Constant", `{"id":"01HCONST1","name":"Target speed","data_type":"date","value":"2026-08-20"}`},
+		{"_EditOperation", `{"id":"op-1","message":"created","result":"ok","topics":["colca/v1/_Constant/n1/a"]}`},
 		{"_EnrolledIdentity", `{"id":"n-edge1"}`},
 	}
 	for _, c := range bad {
@@ -215,7 +223,7 @@ func TestValidate(t *testing.T) {
 // retires the path. For events (commands, acks, gap markers) and unknown
 // contracts deletion is not meaningful and the empty payload stays rejected.
 func TestValidateEmptyPayloadTombstoneRule(t *testing.T) {
-	for _, contract := range []string{"_Metric", "_EnrolledIdentity", "_Node", "_SystemElement", "_Signal"} {
+	for _, contract := range []string{"_Metric", "_EnrolledIdentity", "_Node", "_SystemElement", "_Signal", "_Constant", "_EditOperation"} {
 		if err := Validate(contract, nil); err != nil {
 			t.Errorf("empty payload on KV-projecting %s must validate (tombstone): %v", contract, err)
 		}

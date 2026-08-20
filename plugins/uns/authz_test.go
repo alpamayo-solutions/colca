@@ -218,6 +218,7 @@ func TestCmdClass(t *testing.T) {
 		"_CmdOperate":   "operate",
 		"_CmdMaintain":  "maintain",
 		"_CmdConfigure": "configure",
+		"_CmdEdit": "configure",
 		"_CmdAdmin":     "admin",
 		"_CmdFoo":       "admin", // unknown command contracts demand the highest class (§5.1)
 	}

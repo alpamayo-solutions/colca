@@ -529,6 +529,98 @@ func (e *Engine) IngestAdminAs(topic string, payload []byte, writtenBy, asUser s
 	return res, err
 }
 
+// ingestAdminStateBatch commits the complete retained-entity result of one
+// domain command. Validation is intentionally front-loaded: every topic,
+// schema, author and tombstone rule is checked before Store.Append sees a
+// record, then one synced Pebble batch appends the stream history and updates
+// every KV projection. A late invalid record therefore cannot leave an early
+// record applied.
+func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution Attribution) ([]Result, error) {
+	if len(records) == 0 {
+		return []Result{}, nil
+	}
+
+	type preparedRecord struct {
+		parsed uns.Parsed
+		class  uns.Class
+		record store.Record
+	}
+	prepared := make([]preparedRecord, 0, len(records))
+	ts := time.Now().UnixMilli()
+	for i, input := range records {
+		if !uns.IsUns(input.Topic) {
+			e.metrics.RejectPublish(metrics.ReasonGrammar)
+			return nil, fmt.Errorf("admin state batch record %d must be colca/#", i)
+		}
+		parsed, err := uns.Parse(input.Topic)
+		if err != nil {
+			e.metrics.RejectPublish(metrics.ReasonGrammar)
+			return nil, fmt.Errorf("admin state batch record %d: %w", i, err)
+		}
+		if parsed.Contract == "_EnrolledIdentity" {
+			e.metrics.RejectPublish(metrics.ReasonRegistryContract)
+			return nil, fmt.Errorf("admin state batch record %d: _EnrolledIdentity is enrollment-door only — use POST /enroll", i)
+		}
+		class := e.ClassOf(parsed.Contract)
+		if uns.IsNodeLocal(class) {
+			e.metrics.RejectPublish(metrics.ReasonTimeSync)
+			return nil, fmt.Errorf("admin state batch record %d may not publish _TimeSync: ephemeral, node-local-publish-only", i)
+		}
+		if !uns.IsKnown(class) {
+			e.metrics.RejectPublish(metrics.ReasonGrammar)
+			return nil, fmt.Errorf("admin state batch record %d: unknown contract %s", i, parsed.Contract)
+		}
+		if !uns.IsEntityState(class) {
+			e.metrics.RejectPublish(metrics.ReasonValidation)
+			return nil, fmt.Errorf("admin state batch record %d: %s is not retained entity state", i, parsed.Contract)
+		}
+		if parsed.NodeID != e.cfg.ULID {
+			e.metrics.RejectPublish(metrics.ReasonIdentity)
+			return nil, fmt.Errorf("admin state batch record %d: author %q must equal local node %q", i, parsed.NodeID, e.cfg.ULID)
+		}
+		if err := e.validateContract(parsed.Contract, input.Payload); err != nil {
+			e.metrics.RejectPublish(metrics.ReasonValidation)
+			return nil, fmt.Errorf("admin state batch record %d: %w", i, err)
+		}
+		if err := e.validateAdminStateAuthor(parsed, input.Payload); err != nil {
+			e.metrics.RejectPublish(metrics.ReasonIdentity)
+			return nil, fmt.Errorf("admin state batch record %d: %w", i, err)
+		}
+
+		prepared = append(prepared, preparedRecord{
+			parsed: parsed,
+			class:  class,
+			record: store.Record{
+				Topic: input.Topic, Payload: input.Payload, TS: ts,
+				WrittenBy: attribution.WrittenBy, AsUser: attribution.AsUser,
+				KVPath: parsed.Path, KVNode: parsed.NodeID, Delete: len(input.Payload) == 0,
+			},
+		})
+	}
+
+	storeRecords := make([]store.Record, len(prepared))
+	for i := range prepared {
+		storeRecords[i] = prepared[i].record
+	}
+	first, _, err := e.store.Append("entities", storeRecords)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]Result, len(prepared))
+	for i, item := range prepared {
+		offset := first + uint64(i)
+		e.metrics.IngestRecord("entities")
+		e.log.Debug("atomic entity ingest", "stream", "entities", "offset", offset, "topic", item.record.Topic)
+		e.elements.Observe(item.parsed.Contract, item.record.Topic, item.record.Payload)
+		if e.deliver != nil {
+			e.deliver(item.record.Topic, item.record.Payload, retainFor(item.class))
+		}
+		results[i] = Result{Persisted: true, Stream: "entities", Offset: offset, Topic: item.record.Topic}
+	}
+	return results, nil
+}
+
 // IngestRefresh is the retention pruner's §6.5 state-refresh entry (spec §6.5
 // [delta]) — an admin-grade publish that applies ONLY IF the KV entry for the
 // topic's (contract, path, node) still sits at ifKVOffset, evaluated as a true

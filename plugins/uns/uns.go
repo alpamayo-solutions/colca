@@ -18,9 +18,12 @@
 package uns
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Class is the routing class of a contract; it decides the stream a record
@@ -30,7 +33,7 @@ type Class int
 const (
 	ClassNone       Class = iota
 	ClassData             // _Metric …    node-owned state, authorized by write scope
-	ClassEntity           // _Node, _EnrolledIdentity, _SystemElement, _Signal
+	ClassEntity           // _Node, _EnrolledIdentity, _SystemElement, _Signal, _Constant
 	ClassDefinition       // _Group, _MetadataType …  write: any node, flows DOWN, applied as state
 	ClassCmd              // _Cmd*        write: ancestors/admin, flows down
 	ClassAck              // _Ack         write: owner, flows up
@@ -87,7 +90,8 @@ func ClassOf(contract string) Class {
 		return ClassData
 	case contract == "_EnrolledIdentity" || contract == "_Node" ||
 		contract == "_ServiceDetails" || contract == "_SystemElement" ||
-		contract == "_Signal" || contract == "_ExternalReference":
+		contract == "_Signal" || contract == "_Constant" || contract == "_ExternalReference" ||
+		contract == "_EditOperation":
 		return ClassEntity
 	case contract == "_Group" || contract == "_MetadataType" ||
 		contract == "_AnnotationType" || contract == "_Interface" ||
@@ -147,6 +151,12 @@ func IsNodeLocal(c Class) bool { return c == ClassTimeSync }
 // they descend instead: their path is their own identity and no hop rewrites
 // them, so they are deliberately not in this set.
 func IsOwnedState(c Class) bool { return c == ClassData || c == ClassEntity }
+
+// IsEntityState reports whether a class belongs to the retained entity graph.
+// Command executors use this narrower answer when they atomically materialize
+// an Edit intent: metrics and definitions are state too, but neither may
+// be smuggled into an entity mutation batch.
+func IsEntityState(c Class) bool { return c == ClassEntity }
 
 // IsDefinition reports whether a class travels DOWN the tree and is applied
 // unconditionally as state wherever it lands. A definition's path is its own
@@ -307,6 +317,32 @@ func Validate(contract string, payload []byte) error {
 	case contract == "_EnrolledIdentity":
 		// A registry entry names itself by the enrolled identity.
 		return reqStr("ulid")
+	case contract == "_Constant":
+		_, err := validateConstantPayload(payload)
+		return err
+	case contract == "_EditOperation":
+		if err := reqStr("id"); err != nil {
+			return err
+		}
+		if err := reqStr("digest"); err != nil {
+			return err
+		}
+		if err := reqStr("message"); err != nil {
+			return err
+		}
+		if err := reqStr("result"); err != nil {
+			return err
+		}
+		topics, ok := m["topics"].([]any)
+		if !ok || len(topics) == 0 {
+			return fmt.Errorf("%s: field %q must be a non-empty array", contract, "topics")
+		}
+		for _, topic := range topics {
+			if value, ok := topic.(string); !ok || value == "" {
+				return fmt.Errorf("%s: field %q must contain only non-empty strings", contract, "topics")
+			}
+		}
+		return nil
 	case contract == "_Node" || contract == "_ServiceDetails" ||
 		contract == "_SystemElement" || contract == "_Signal" ||
 		contract == "_ExternalReference" || contract == "_Group" ||
@@ -350,4 +386,81 @@ func Validate(contract string, payload []byte) error {
 		return reqNum("expires_at")
 	}
 	return fmt.Errorf("unknown contract %q — validated namespace rejects unknown contracts", contract)
+}
+
+// placedConstant is the authoritative authored value stored at one namespace
+// path. Value stays raw so int64 validation never passes through float64 and
+// silently loses precision before the record reaches storage.
+type placedConstant struct {
+	ID       string          `json:"id"`
+	Name     string          `json:"name"`
+	DataType string          `json:"data_type"`
+	Value    json.RawMessage `json:"value"`
+}
+
+func validateConstantPayload(payload []byte) (placedConstant, error) {
+	var constant placedConstant
+	if err := json.Unmarshal(payload, &constant); err != nil {
+		return placedConstant{}, fmt.Errorf("_Constant: payload is not valid JSON: %w", err)
+	}
+	if constant.ID == "" {
+		return placedConstant{}, fmt.Errorf("_Constant: field %q must be a non-empty string", "id")
+	}
+	if constant.Name == "" {
+		return placedConstant{}, fmt.Errorf("_Constant: field %q must be a non-empty string", "name")
+	}
+	if len(constant.Value) == 0 {
+		return placedConstant{}, fmt.Errorf("_Constant: field %q is required", "value")
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(constant.Value))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return placedConstant{}, fmt.Errorf("_Constant: field %q is not valid JSON", "value")
+	}
+	wrongType := func() (placedConstant, error) {
+		return placedConstant{}, fmt.Errorf("_Constant: value does not match data_type %q", constant.DataType)
+	}
+
+	switch constant.DataType {
+	case "float64":
+		number, ok := value.(json.Number)
+		if !ok {
+			return wrongType()
+		}
+		if _, err := strconv.ParseFloat(number.String(), 64); err != nil {
+			return wrongType()
+		}
+	case "int64":
+		number, ok := value.(json.Number)
+		if !ok {
+			return wrongType()
+		}
+		if _, err := strconv.ParseInt(number.String(), 10, 64); err != nil {
+			return wrongType()
+		}
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return wrongType()
+		}
+	case "string":
+		if _, ok := value.(string); !ok {
+			return wrongType()
+		}
+	case "datetime":
+		text, ok := value.(string)
+		if !ok {
+			return wrongType()
+		}
+		if _, err := time.Parse(time.RFC3339, text); err != nil {
+			return placedConstant{}, fmt.Errorf("_Constant: datetime value must use RFC 3339: %w", err)
+		}
+	case "json":
+		// The outer unmarshal already proved that value is valid JSON. Unlike
+		// the scalar types, JSON deliberately accepts objects, arrays and null.
+	default:
+		return placedConstant{}, fmt.Errorf("_Constant: unsupported data_type %q", constant.DataType)
+	}
+	return constant, nil
 }
