@@ -112,6 +112,169 @@ func TestEditCreateUpdateDeleteUsesTypedEntityIntent(t *testing.T) {
 	}
 }
 
+func TestEditUpdateComposesEntityAndExternalReferencesInOneBatch(t *testing.T) {
+	f := newStore("n-edge1")
+	entityVersion := seedEditEntity(t, f, "_SystemElement", "line1", map[string]any{
+		"id": "el-line1", "name": "Line 1",
+	})
+	seedEditEntity(t, f, "_ExternalSystem", "tcdb", map[string]any{
+		"id": "ext-tcdb", "key": "tcdb", "name": "TCDB", "system_type": "database",
+	})
+	keepVersion := seedEditEntity(t, f, "_ExternalReference", "_colca/external-references/ref-keep", map[string]any{
+		"id": "ref-keep", "source_entity": "SystemElement", "source_object_id": "el-line1",
+		"relationship_type": "access:equipment", "external_system_id": "ext-tcdb",
+		"external_table": "equipment", "external_column": "id", "external_row_id": "7",
+	})
+	removeVersion := seedEditEntity(t, f, "_ExternalReference", "_colca/external-references/ref-remove", map[string]any{
+		"id": "ref-remove", "source_entity": "SystemElement", "source_object_id": "el-line1",
+		"relationship_type": "maintenance:asset", "external_system_id": "ext-tcdb",
+		"external_table": "assets", "external_column": "id", "external_row_id": "old",
+	})
+	exec := NewEditExec(f)
+	payload := editBody(t, "op-reference-compose", map[string]uint64{
+		"system-element:el-line1":       entityVersion,
+		"external-reference:ref-keep":   keepVersion,
+		"external-reference:ref-remove": removeVersion,
+	}, map[string]any{
+		"type": "update", "entity": map[string]any{"kind": "system-element", "id": "el-line1"},
+		"attributes": map[string]any{"description": "Packaging line"},
+		"external_references": []map[string]any{
+			{
+				"client_id": "keep", "id": "ref-keep", "version": fmt.Sprint(keepVersion),
+				"source_entity": "SystemElement", "source_object_id": "el-line1",
+				"relationship_type": "access:equipment", "external_system_id": "ext-tcdb",
+				"external_table": "equipment", "external_column": "id", "external_row_id": "7",
+				"description": "Primary equipment",
+			},
+			{
+				"client_id": "new", "id": "ref-new",
+				"source_entity": "SystemElement", "source_object_id": "el-line1",
+				"relationship_type": "maintenance:asset", "external_system_id": "ext-tcdb",
+				"external_table": "assets", "external_column": "id", "external_row_id": "new",
+			},
+		},
+	})
+
+	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+
+	if code != 200 || len(writes) != 4 || f.batchCalls != 1 {
+		t.Fatalf("reference composition = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
+	}
+	if _, ok := f.KVGet("colca/v1/_ExternalReference/n-edge1/_colca/external-references/ref-remove"); ok {
+		t.Fatal("removed reference remains retained")
+	}
+	for _, topic := range []string{
+		"colca/v1/_ExternalReference/n-edge1/_colca/external-references/ref-keep",
+		"colca/v1/_ExternalReference/n-edge1/_colca/external-references/ref-new",
+	} {
+		if _, ok := f.KVGet(topic); !ok {
+			t.Fatalf("desired reference missing at %s", topic)
+		}
+	}
+	entity, _ := f.KVGet("colca/v1/_SystemElement/n-edge1/line1")
+	var entityPayload map[string]any
+	if err := json.Unmarshal(entity, &entityPayload); err != nil {
+		t.Fatal(err)
+	}
+	if entityPayload["description"] != "Packaging line" {
+		t.Fatalf("entity update was not in the batch: %+v", entityPayload)
+	}
+
+	batchCalls := f.batchCalls
+	code, _, _, replayWrites := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	if code != 200 || len(replayWrites) != len(writes) || f.batchCalls != batchCalls {
+		t.Fatalf("reference replay wrote again: code=%d writes=%+v batches=%d", code, replayWrites, f.batchCalls)
+	}
+}
+
+func TestEditDeleteTombstonesOwnedExternalReferencesInOneBatch(t *testing.T) {
+	f := newStore("n-edge1")
+	signalVersion := seedEditEntity(t, f, "_Signal", "line1/temp", map[string]any{
+		"id": "sig-temp", "name": "Temperature", "system_element_id": "el-line1",
+	})
+	referenceVersion := seedEditEntity(t, f, "_ExternalReference", "_colca/external-references/ref-temp", map[string]any{
+		"id": "ref-temp", "source_entity": "Signal", "source_object_id": "sig-temp",
+		"relationship_type": "maintenance:asset", "external_system_id": "ext-cmms",
+		"external_table": "assets", "external_row_id": "A-7",
+	})
+	exec := NewEditExec(f)
+	intent := map[string]any{
+		"type": "delete", "entity": map[string]any{"kind": "signal", "id": "sig-temp"},
+		"cascade": false,
+	}
+
+	before := f.offset
+	code, _, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+		t, "op-delete-missing-reference-version", map[string]uint64{
+			"signal:sig-temp": signalVersion,
+		}, intent,
+	))
+	if code != 422 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
+		t.Fatalf("missing reference version = %d writes=%+v offset=%d batches=%d", code, writes, f.offset, f.batchCalls)
+	}
+
+	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+		t, "op-delete-with-reference", map[string]uint64{
+			"signal:sig-temp":             signalVersion,
+			"external-reference:ref-temp": referenceVersion,
+		}, intent,
+	))
+	if code != 200 || len(writes) != 2 || f.batchCalls != 1 {
+		t.Fatalf("delete with reference = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
+	}
+	for _, topic := range []string{
+		"colca/v1/_Signal/n-edge1/line1/temp",
+		"colca/v1/_ExternalReference/n-edge1/_colca/external-references/ref-temp",
+	} {
+		if _, ok := f.KVGet(topic); ok {
+			t.Fatalf("delete left retained state at %s", topic)
+		}
+	}
+}
+
+func TestEditReferenceOnlyUpdateRejectsInvalidAndNoopWithoutWriting(t *testing.T) {
+	f := newStore("n-edge1")
+	entityVersion := seedEditEntity(t, f, "_Signal", "line1/temp", map[string]any{
+		"id": "sig-temp", "name": "Temperature", "system_element_id": "el-line1",
+	})
+	seedEditEntity(t, f, "_ExternalSystem", "tcdb", map[string]any{
+		"id": "ext-tcdb", "key": "tcdb", "name": "TCDB", "system_type": "database",
+	})
+	exec := NewEditExec(f)
+	baseIntent := map[string]any{
+		"type": "update", "entity": map[string]any{"kind": "signal", "id": "sig-temp"},
+	}
+
+	invalid := map[string]any{}
+	for key, value := range baseIntent {
+		invalid[key] = value
+	}
+	invalid["external_references"] = []map[string]any{{
+		"client_id": "new", "id": "ref-new", "source_entity": "Signal", "source_object_id": "other",
+		"relationship_type": "access:equipment", "external_system_id": "ext-missing",
+		"external_table": "equipment", "external_row_id": "7",
+	}}
+	before := f.offset
+	code, _, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+		t, "op-invalid-reference", map[string]uint64{"signal:sig-temp": entityVersion}, invalid,
+	))
+	if code != 422 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
+		t.Fatalf("invalid reference = %d writes=%+v offset=%d batches=%d", code, writes, f.offset, f.batchCalls)
+	}
+
+	noop := map[string]any{}
+	for key, value := range baseIntent {
+		noop[key] = value
+	}
+	noop["external_references"] = []map[string]any{}
+	code, _, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+		t, "op-reference-noop", map[string]uint64{"signal:sig-temp": entityVersion}, noop,
+	))
+	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
+		t.Fatalf("reference no-op = %d writes=%+v offset=%d batches=%d", code, writes, f.offset, f.batchCalls)
+	}
+}
+
 func TestEditPlacementMovesAWholeEntitySubtreeInOneBatch(t *testing.T) {
 	f := newStore("n-edge1")
 	seedEditEntity(t, f, "_SystemElement", "line1", map[string]any{"id": "el-line1", "name": "Line 1"})

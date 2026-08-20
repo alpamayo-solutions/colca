@@ -48,15 +48,30 @@ type editEntityKey struct {
 }
 
 type editIntent struct {
-	Type           string                      `json:"type"`
-	Entity         editEntityKey          `json:"entity"`
-	ParentID       string                      `json:"parent_id"`
-	TargetParentID string                      `json:"target_parent_id"`
-	Segment        string                      `json:"segment"`
-	Attributes     map[string]json.RawMessage  `json:"attributes"`
-	Cascade        bool                        `json:"cascade"`
-	ConnectorID    string                      `json:"connector_id"`
-	Operations     []editBindingOperation `json:"operations"`
+	Type               string                        `json:"type"`
+	Entity             editEntityKey            `json:"entity"`
+	ParentID           string                        `json:"parent_id"`
+	TargetParentID     string                        `json:"target_parent_id"`
+	Segment            string                        `json:"segment"`
+	Attributes         map[string]json.RawMessage    `json:"attributes"`
+	ExternalReferences *[]editExternalReference `json:"external_references"`
+	Cascade            bool                          `json:"cascade"`
+	ConnectorID        string                        `json:"connector_id"`
+	Operations         []editBindingOperation   `json:"operations"`
+}
+
+type editExternalReference struct {
+	ClientID         string `json:"client_id"`
+	ID               string `json:"id"`
+	Version          string `json:"version"`
+	SourceEntity     string `json:"source_entity"`
+	SourceObjectID   string `json:"source_object_id"`
+	RelationshipType string `json:"relationship_type"`
+	ExternalSystemID string `json:"external_system_id"`
+	ExternalTable    string `json:"external_table"`
+	ExternalColumn   string `json:"external_column"`
+	ExternalRowID    string `json:"external_row_id"`
+	Description      string `json:"description"`
 }
 
 type editBindingOperation struct {
@@ -186,7 +201,7 @@ func (w *EditExec) ExecuteWithWrites(
 		return w.remember(envelope.OperationID, digest, 422, "intent.type is required", "invalid", nil)
 	}
 
-	entities, catalogues, versions, snapshotErr := w.snapshot()
+	entities, catalogues, externalSystems, versions, snapshotErr := w.snapshot()
 	if snapshotErr != nil {
 		return 409, snapshotErr.Error(), "conflict", nil
 	}
@@ -194,7 +209,9 @@ func (w *EditExec) ExecuteWithWrites(
 		return w.remember(envelope.OperationID, digest, 409, message, "conflict", nil)
 	}
 
-	code, message, result, records := w.compose(intent, expectedVersions, entities, catalogues)
+	code, message, result, records := w.compose(
+		intent, expectedVersions, entities, catalogues, externalSystems,
+	)
 	if code != 200 {
 		return w.remember(envelope.OperationID, digest, code, message, result, nil)
 	}
@@ -391,6 +408,7 @@ func parseExpectedVersions(raw map[string]json.RawMessage) (map[string]uint64, e
 func (w *EditExec) snapshot() (
 	map[string]editSnapshot,
 	map[string]editCatalogueSnapshot,
+	map[string]bool,
 	map[string]uint64,
 	error,
 ) {
@@ -400,15 +418,15 @@ func (w *EditExec) snapshot() (
 		for _, record := range w.store.KVScan(contract, w.store.NodeID()) {
 			var payload map[string]json.RawMessage
 			if err := json.Unmarshal(record.Payload, &payload); err != nil {
-				return nil, nil, nil, fmt.Errorf("retained %s at %s is unreadable", contract, record.Path)
+				return nil, nil, nil, nil, fmt.Errorf("retained %s at %s is unreadable", contract, record.Path)
 			}
 			id, err := rawString(payload["id"])
 			if err != nil || id == "" {
-				return nil, nil, nil, fmt.Errorf("retained %s at %s has no identity", contract, record.Path)
+				return nil, nil, nil, nil, fmt.Errorf("retained %s at %s has no identity", contract, record.Path)
 			}
 			key := entityVersionKey(kind, id)
 			if held, exists := entities[key]; exists && held.Record.Topic != record.Topic {
-				return nil, nil, nil, fmt.Errorf("duplicate retained identity %s", key)
+				return nil, nil, nil, nil, fmt.Errorf("duplicate retained identity %s", key)
 			}
 			entities[key] = editSnapshot{Key: key, Kind: kind, Record: record, Payload: payload}
 			versions[key] = editRecordVersion(record)
@@ -419,15 +437,27 @@ func (w *EditExec) snapshot() (
 	for _, record := range w.store.KVScan("_DataTags", w.store.NodeID()) {
 		var catalogue editCatalogue
 		if err := json.Unmarshal(record.Payload, &catalogue); err != nil || catalogue.Connector == "" {
-			return nil, nil, nil, fmt.Errorf("retained _DataTags at %s is unreadable", record.Path)
+			return nil, nil, nil, nil, fmt.Errorf("retained _DataTags at %s is unreadable", record.Path)
 		}
 		if held, exists := catalogues[catalogue.Connector]; exists && held.Record.Topic != record.Topic {
-			return nil, nil, nil, fmt.Errorf("duplicate retained catalogue %s", catalogue.Connector)
+			return nil, nil, nil, nil, fmt.Errorf("duplicate retained catalogue %s", catalogue.Connector)
 		}
 		catalogues[catalogue.Connector] = editCatalogueSnapshot{Record: record, Catalogue: catalogue}
 		versions["catalogue:"+catalogue.Connector] = editRecordVersion(record)
 	}
-	return entities, catalogues, versions, nil
+	externalSystems := map[string]bool{}
+	for _, record := range w.store.KVScanAll("_ExternalSystem") {
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(record.Payload, &payload); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("retained _ExternalSystem at %s is unreadable", record.Path)
+		}
+		id, err := rawString(payload["id"])
+		if err != nil || id == "" {
+			return nil, nil, nil, nil, fmt.Errorf("retained _ExternalSystem at %s has no identity", record.Path)
+		}
+		externalSystems[id] = true
+	}
+	return entities, catalogues, externalSystems, versions, nil
 }
 
 func editRecordVersion(record KVRecord) uint64 {
@@ -461,12 +491,13 @@ func (w *EditExec) compose(
 	expected map[string]uint64,
 	entities map[string]editSnapshot,
 	catalogues map[string]editCatalogueSnapshot,
+	externalSystems map[string]bool,
 ) (int, string, string, []StateRecord) {
 	switch intent.Type {
 	case "create":
 		return w.composeCreate(intent, expected, entities)
 	case "update":
-		return w.composeUpdate(intent, expected, entities)
+		return w.composeUpdate(intent, expected, entities, externalSystems)
 	case "delete":
 		return w.composeDelete(intent, expected, entities)
 	case "placement":
@@ -542,6 +573,7 @@ func (w *EditExec) composeUpdate(
 	intent editIntent,
 	expected map[string]uint64,
 	entities map[string]editSnapshot,
+	externalSystems map[string]bool,
 ) (int, string, string, []StateRecord) {
 	_, key, err := validateEntityKey(intent.Entity)
 	if err != nil {
@@ -551,9 +583,10 @@ func (w *EditExec) composeUpdate(
 	if code != 0 {
 		return code, "update: " + message, resultFor(code), nil
 	}
-	if len(intent.Attributes) == 0 {
-		return 422, "update: attributes are required", "invalid", nil
+	if len(intent.Attributes) == 0 && intent.ExternalReferences == nil {
+		return 422, "update: attributes or external_references are required", "invalid", nil
 	}
+	records := []StateRecord{}
 	merged := cloneRawMap(current.Payload)
 	for name, value := range intent.Attributes {
 		merged[name] = append(json.RawMessage(nil), value...)
@@ -571,11 +604,134 @@ func (w *EditExec) composeUpdate(
 			merged["system_element_id"] = append(json.RawMessage(nil), parent...)
 		}
 	}
-	payload, err := json.Marshal(merged)
-	if err != nil {
-		return 422, "update: attributes are not encodable", "invalid", nil
+	if len(intent.Attributes) > 0 && !rawMapsEqual(merged, current.Payload) {
+		payload, err := json.Marshal(merged)
+		if err != nil {
+			return 422, "update: attributes are not encodable", "invalid", nil
+		}
+		records = append(records, StateRecord{Topic: current.Record.Topic, Payload: payload})
 	}
-	return 200, "updated " + key, "ok", []StateRecord{{Topic: current.Record.Topic, Payload: payload}}
+	if intent.ExternalReferences != nil {
+		code, message, referenceRecords := w.composeExternalReferences(
+			intent, expected, entities, externalSystems,
+		)
+		if code != 200 {
+			return code, "update: " + message, resultFor(code), nil
+		}
+		records = append(records, referenceRecords...)
+	}
+	if len(records) == 0 {
+		return 409, "update_unchanged: " + key, "conflict", nil
+	}
+	if len(records) > editMutationLimit {
+		return 422, fmt.Sprintf("update: at most %d entities may be changed atomically", editMutationLimit), "invalid", nil
+	}
+	return 200, fmt.Sprintf("updated %s with %d state changes", key, len(records)), "ok", records
+}
+
+func (w *EditExec) composeExternalReferences(
+	intent editIntent,
+	expected map[string]uint64,
+	entities map[string]editSnapshot,
+	externalSystems map[string]bool,
+) (int, string, []StateRecord) {
+	sourceEntity := editSourceEntity(intent.Entity.Kind)
+	if sourceEntity == "" {
+		return 422, "external references are unsupported for this entity kind", nil
+	}
+	current := map[string]editSnapshot{}
+	for _, candidate := range entities {
+		if candidate.Kind != "external-reference" {
+			continue
+		}
+		heldSource, _ := rawString(candidate.Payload["source_entity"])
+		heldObject, _ := rawString(candidate.Payload["source_object_id"])
+		if heldSource == sourceEntity && heldObject == intent.Entity.ID {
+			current[strings.TrimPrefix(candidate.Key, "external-reference:")] = candidate
+			if message := requireExpected(expected, candidate.Key); message != "" {
+				return 422, message, nil
+			}
+		}
+	}
+
+	desiredIDs := map[string]bool{}
+	clientIDs := map[string]bool{}
+	semanticKeys := map[string]bool{}
+	newRecords := map[string]StateRecord{}
+	for index, reference := range *intent.ExternalReferences {
+		if reference.ClientID == "" || clientIDs[reference.ClientID] {
+			return 422, fmt.Sprintf("external reference %d has a missing or duplicate client_id", index), nil
+		}
+		clientIDs[reference.ClientID] = true
+		if reference.ID == "" || desiredIDs[reference.ID] {
+			return 422, fmt.Sprintf("external reference %d has a missing or duplicate id", index), nil
+		}
+		desiredIDs[reference.ID] = true
+		if reference.SourceEntity != sourceEntity || reference.SourceObjectID != intent.Entity.ID {
+			return 422, fmt.Sprintf("foreign_reference: %s has invalid source ownership", reference.ID), nil
+		}
+		if reference.RelationshipType == "" || reference.ExternalSystemID == "" || reference.ExternalTable == "" || reference.ExternalRowID == "" {
+			return 422, fmt.Sprintf("external reference %s is incomplete", reference.ID), nil
+		}
+		if !externalSystems[reference.ExternalSystemID] {
+			return 422, "external_system_not_found: " + reference.ExternalSystemID, nil
+		}
+		semanticKey := strings.Join([]string{
+			reference.RelationshipType, reference.ExternalSystemID,
+			reference.ExternalTable, reference.ExternalRowID,
+		}, "\x00")
+		if semanticKeys[semanticKey] {
+			return 422, "duplicate_external_reference", nil
+		}
+		semanticKeys[semanticKey] = true
+
+		key := entityVersionKey("external-reference", reference.ID)
+		existing, belongsToSource := current[reference.ID]
+		if held, exists := entities[key]; exists && !belongsToSource {
+			return 422, "foreign_reference: " + held.Key, nil
+		}
+		if belongsToSource {
+			if reference.Version == "" || reference.Version != strconv.FormatUint(editRecordVersion(existing.Record), 10) {
+				return 409, "stale_version: " + key, nil
+			}
+		} else if reference.Version != "" {
+			return 422, "foreign_reference: " + key, nil
+		}
+
+		payload := externalReferencePayload(reference)
+		if belongsToSource && externalReferenceMatches(existing.Payload, payload) {
+			continue
+		}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return 422, "external reference payload is not encodable", nil
+		}
+		topic := editTopic(
+			"_ExternalReference", w.store.NodeID(), "_colca/external-references/"+reference.ID,
+		)
+		newRecords[topic] = StateRecord{Topic: topic, Payload: encoded}
+	}
+
+	records := []StateRecord{}
+	removedTopics := []string{}
+	for id, existing := range current {
+		if !desiredIDs[id] {
+			removedTopics = append(removedTopics, existing.Record.Topic)
+		}
+	}
+	sort.Strings(removedTopics)
+	for _, topic := range removedTopics {
+		records = append(records, StateRecord{Topic: topic})
+	}
+	newTopics := make([]string, 0, len(newRecords))
+	for topic := range newRecords {
+		newTopics = append(newTopics, topic)
+	}
+	sort.Strings(newTopics)
+	for _, topic := range newTopics {
+		records = append(records, newRecords[topic])
+	}
+	return 200, "external references validated", records
 }
 
 func (w *EditExec) composeDelete(
@@ -602,12 +758,28 @@ func (w *EditExec) composeDelete(
 		if len(selected) > 1 && !intent.Cascade {
 			return 409, fmt.Sprintf("delete_impact: %s still contains %d entities", key, len(selected)-1), "conflict", nil
 		}
-		if intent.Cascade {
-			for _, candidate := range selected {
-				if message := requireExpected(expected, candidate.Key); message != "" {
-					return 422, "delete: " + message, "invalid", nil
-				}
-			}
+	}
+	ownedSources := map[string]bool{}
+	for _, candidate := range selected {
+		sourceEntity := editSourceEntity(candidate.Kind)
+		sourceID, _ := rawString(candidate.Payload["id"])
+		if sourceEntity != "" && sourceID != "" {
+			ownedSources[sourceEntity+"\x00"+sourceID] = true
+		}
+	}
+	for _, candidate := range entities {
+		if candidate.Kind != "external-reference" {
+			continue
+		}
+		sourceEntity, _ := rawString(candidate.Payload["source_entity"])
+		sourceID, _ := rawString(candidate.Payload["source_object_id"])
+		if ownedSources[sourceEntity+"\x00"+sourceID] {
+			selected = append(selected, candidate)
+		}
+	}
+	for _, candidate := range selected {
+		if message := requireExpected(expected, candidate.Key); message != "" {
+			return 422, "delete: " + message, "invalid", nil
 		}
 	}
 	if len(selected) > editMutationLimit {
@@ -933,6 +1105,53 @@ func cloneRawMap(source map[string]json.RawMessage) map[string]json.RawMessage {
 		clone[key] = append(json.RawMessage(nil), value...)
 	}
 	return clone
+}
+
+func rawMapsEqual(left, right map[string]json.RawMessage) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+}
+
+func editSourceEntity(kind string) string {
+	return map[string]string{
+		"system-element": "SystemElement",
+		"signal":         "Signal",
+		"constant":       "Constant",
+		"colca-node":    "Node",
+	}[kind]
+}
+
+func externalReferencePayload(reference editExternalReference) map[string]json.RawMessage {
+	return map[string]json.RawMessage{
+		"id":                 rawJSON(reference.ID),
+		"source_entity":      rawJSON(reference.SourceEntity),
+		"source_object_id":   rawJSON(reference.SourceObjectID),
+		"relationship_type":  rawJSON(reference.RelationshipType),
+		"external_system_id": rawJSON(reference.ExternalSystemID),
+		"external_table":     rawJSON(reference.ExternalTable),
+		"external_column":    rawJSON(reference.ExternalColumn),
+		"external_row_id":    rawJSON(reference.ExternalRowID),
+		"description":        rawJSON(reference.Description),
+	}
+}
+
+func externalReferenceMatches(
+	current map[string]json.RawMessage,
+	desired map[string]json.RawMessage,
+) bool {
+	for _, field := range []string{
+		"id", "source_entity", "source_object_id", "relationship_type",
+		"external_system_id", "external_table", "external_column",
+		"external_row_id", "description",
+	} {
+		currentValue, currentErr := rawString(current[field])
+		desiredValue, desiredErr := rawString(desired[field])
+		if currentErr != nil || desiredErr != nil || currentValue != desiredValue {
+			return false
+		}
+	}
+	return true
 }
 
 func rawJSON(value any) json.RawMessage {
