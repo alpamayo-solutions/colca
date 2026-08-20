@@ -27,9 +27,11 @@ type Record struct {
 	KVPath string `json:"-"` // hierarchy path (segments after contract, post-mount)
 	KVNode string `json:"-"` // node-id (level 4)
 	// Delete marks the record as a tombstone (retention design §7.1): the KV
-	// key k/{KVPath}\x00{KVNode} is DELETED in the same atomic batch instead of
-	// set. The stream record itself is appended as usual — the retirement is
-	// history. Set by the engine on an empty payload for a KV-projecting class.
+	// key k/{KVPath}\x00{KVNode}\x00{Topic} is DELETED in the same atomic batch
+	// instead of set. Topic carries the contract identity, so retiring one
+	// contract never removes another at the same node/path. The stream record
+	// itself is appended as usual — the retirement is history. Set by the engine
+	// on an empty payload for a KV-projecting class.
 	Delete bool `json:"-"`
 }
 
@@ -176,7 +178,7 @@ func addRecord(b *pebble.Batch, stream string, off uint64, topic string, payload
 	}
 	if kvPath != "" {
 		if del {
-			if err := b.Delete(kvKey(kvPath, kvNode), nil); err != nil {
+			if err := b.Delete(kvKey(kvPath, kvNode, topic), nil); err != nil {
 				return 0, err
 			}
 		} else {
@@ -184,7 +186,7 @@ func addRecord(b *pebble.Batch, stream string, off uint64, topic string, payload
 			if err != nil {
 				return 0, err
 			}
-			if err := b.Set(kvKey(kvPath, kvNode), kval, nil); err != nil {
+			if err := b.Set(kvKey(kvPath, kvNode, topic), kval, nil); err != nil {
 				return 0, err
 			}
 		}
@@ -236,10 +238,11 @@ func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, 
 	return first, last, nil
 }
 
-// kvOffset returns the Offset field of the current KV entry for (path, node),
-// ok=false when the key is absent or undecodable. Callers hold s.mu.
-func (s *Store) kvOffset(path, node string) (uint64, bool) {
-	v, closer, err := s.db.Get(kvKey(path, node))
+// kvOffset returns the Offset field of the current KV entry for the canonical
+// topic at (path, node), ok=false when the key is absent or undecodable.
+// Callers hold s.mu.
+func (s *Store) kvOffset(path, node, topic string) (uint64, bool) {
+	v, closer, err := s.db.Get(kvKey(path, node, topic))
 	if err != nil {
 		return 0, false
 	}
@@ -252,10 +255,11 @@ func (s *Store) kvOffset(path, node string) (uint64, bool) {
 }
 
 // AppendIfKVUnchanged appends rec — stream record AND KV projection — only if
-// the current KV entry for (rec.KVPath, rec.KVNode) still exists with Offset
-// == ifKVOffset. The guard is evaluated under s.mu, the same mutex every KV
-// write serializes on, so it is a true compare-and-swap: nothing can retire or
-// supersede the entry between the check and the batch application.
+// the current KV entry for (rec.KVPath, rec.KVNode, rec.Topic) still exists
+// with Offset == ifKVOffset. The topic carries the contract identity. The
+// guard is evaluated under s.mu, the same mutex every KV write serializes on,
+// so it is a true compare-and-swap: nothing can retire or supersede the entry
+// between the check and the batch application.
 //
 // This is the §6.5 state refresh's append path (spec §6.5 [delta]) and its
 // only intended caller: a refresh re-states a KV snapshot, and a tombstone
@@ -270,7 +274,7 @@ func (s *Store) AppendIfKVUnchanged(stream string, rec Record, ifKVOffset uint64
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cur, ok := s.kvOffset(rec.KVPath, rec.KVNode)
+	cur, ok := s.kvOffset(rec.KVPath, rec.KVNode, rec.Topic)
 	if !ok || cur != ifKVOffset {
 		return 0, false, nil // retired or superseded since the snapshot — skip entirely
 	}
@@ -1091,7 +1095,8 @@ func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time
 }
 
 // KVScan returns the current KV projection for every path starting with prefix.
-// An empty prefix scans the whole projection.
+// An empty prefix scans the whole projection. Multiple contracts at the same
+// node/path are returned as separate entries.
 func (s *Store) KVScan(prefix string) []KVEntry {
 	lb := kvPrefix(prefix)
 	ub := append(append([]byte{}, lb...), 0xFF)
@@ -1103,9 +1108,16 @@ func (s *Store) KVScan(prefix string) []KVEntry {
 	var out []KVEntry
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := string(iter.Key()[2:]) // strip "k\x00"
-		// key = path \x00 nodeID
-		sep := strings.IndexByte(key, 0)
-		if sep < 0 {
+		// key = path \x00 nodeID \x00 canonical-topic. The topic is also stored
+		// in the value; keeping it in the key makes contract identity part of
+		// replacement/deletion semantics without changing path-first scans.
+		pathSep := strings.IndexByte(key, 0)
+		if pathSep < 0 {
+			continue
+		}
+		rest := key[pathSep+1:]
+		nodeSep := strings.IndexByte(rest, 0)
+		if nodeSep < 0 {
 			continue
 		}
 		var e kvEnc
@@ -1113,8 +1125,8 @@ func (s *Store) KVScan(prefix string) []KVEntry {
 			continue
 		}
 		out = append(out, KVEntry{
-			Path:    key[:sep],
-			NodeID:  key[sep+1:],
+			Path:    key[:pathSep],
+			NodeID:  rest[:nodeSep],
 			Topic:   e.Topic,
 			Payload: e.Payload,
 			TS:      e.TS,

@@ -290,10 +290,20 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 	authtest.EnrollAt(t, first.Registry, first.Engine, m1machine, "m1", "write:"+authtest.ElementID("m1")+"/#")
 	authtest.EnrollAt(t, first.Registry, first.Engine, obsMachine, "obs", "read:#")
 	m1 := connectMQTT(t, first.MQTTAddr, "m1-pre", m1machine)
-	// Two state topics: "pressure" is never touched again — only the KV
+	// Two data topics: "pressure" is never touched again — only the KV
 	// re-seed can bring it back, so it is the assertion the mutation check
 	// bites on. "temp" gets a FRESH value right after the restart — it pins
 	// the seed-before-Serve ordering instead.
+	//
+	// A _Signal deliberately occupies the exact same node/path as pressure.
+	// Both are retained state, so the restart must restore both contracts; a KV
+	// key that omits the contract loses the signal as soon as the metric lands.
+	if _, err := first.Engine.IngestAdmin(
+		"colca/v1/_Signal/n1/m1/pressure",
+		[]byte(`{"id":"01HSIGPRESSURE","name":"pressure"}`),
+	); err != nil {
+		t.Fatalf("publish same-path signal: %v", err)
+	}
 	publishMQTT(t, m1, "colca/v1/_Metric/n1/m1/pressure", `{"v":7}`)
 	publishMQTT(t, m1, "colca/v1/_Metric/n1/m1/temp", `{"v":1}`)
 	// A command in the commands stream: it must NOT come back retained.
@@ -336,28 +346,34 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 		t.Fatalf("mqtt subscribe colca/#: %v", err)
 	}
 
-	// Drain until BOTH canonical metric topics arrived (deadline-bounded),
+	// Drain until both metrics and the same-path signal arrived (deadline-bounded),
 	// then keep draining briefly: if a command had been wrongly retained it
 	// would be replayed in the same on-subscribe burst.
 	seen := map[string]received{}
 	deadline := time.After(10 * time.Second)
-	for len(seen) < 2 {
+	for len(seen) < 3 {
 		select {
 		case m := <-msgs:
 			if strings.HasPrefix(m.topic, "colca/v1/_Cmd") {
 				t.Fatalf("a command was replayed to a fresh post-restart subscriber: %s (retained=%v)", m.topic, m.retained)
 			}
-			if m.topic == "colca/v1/_Metric/n1/m1/temp" || m.topic == "colca/v1/_Metric/n1/m1/pressure" {
+			if m.topic == "colca/v1/_Metric/n1/m1/temp" ||
+				m.topic == "colca/v1/_Metric/n1/m1/pressure" ||
+				m.topic == "colca/v1/_Signal/n1/m1/pressure" {
 				seen[m.topic] = m
 			}
 		case <-deadline:
-			t.Fatalf("fresh post-restart subscriber got %d of the 2 retained metric topics within 10s (saw: %v) — the retained set was not re-seeded from KV", len(seen), seen)
+			t.Fatalf("fresh post-restart subscriber got %d of the 3 retained state topics within 10s (saw: %v) — the retained set was not re-seeded from contract-aware KV", len(seen), seen)
 		}
 	}
 	// The untouched topic can only come from the KV re-seed.
 	pressure := seen["colca/v1/_Metric/n1/m1/pressure"]
 	if !pressure.retained || !strings.Contains(pressure.payload, `"v":7`) {
 		t.Errorf("pressure after restart = %+v, want retained {\"v\":7} restored from KV", pressure)
+	}
+	signal := seen["colca/v1/_Signal/n1/m1/pressure"]
+	if !signal.retained || !strings.Contains(signal.payload, `"id":"01HSIGPRESSURE"`) {
+		t.Errorf("same-path signal after restart = %+v, want the retained _Signal restored independently of _Metric", signal)
 	}
 	// The re-published topic must show the FRESH value, not the stale snapshot.
 	temp := seen["colca/v1/_Metric/n1/m1/temp"]

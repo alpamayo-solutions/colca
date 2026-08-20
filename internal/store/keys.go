@@ -7,7 +7,7 @@ func be64(v uint64) []byte { b := make([]byte, 8); binary.BigEndian.PutUint64(b,
 func streamKey(stream string, off uint64) []byte {
 	return append([]byte("s\x00"+stream+"\x00"), be64(off)...)
 }
-func streamPrefix(stream string) []byte    { return []byte("s\x00" + stream + "\x00") }
+func streamPrefix(stream string) []byte { return []byte("s\x00" + stream + "\x00") }
 
 // offsetOf reads the offset back out of a stream key (the trailing big-endian
 // uint64 streamKey appended).
@@ -17,8 +17,16 @@ func offsetOf(key []byte) (uint64, bool) {
 	}
 	return binary.BigEndian.Uint64(key[len(key)-8:]), true
 }
-func metaKey(stream string) []byte         { return []byte("m\x00" + stream) }
-func kvKey(path, nodeID string) []byte     { return []byte("k\x00" + path + "\x00" + nodeID) }
+func metaKey(stream string) []byte { return []byte("m\x00" + stream) }
+
+// kvKey identifies one current-state record. Path and node keep hierarchy
+// scans efficient; the canonical MQTT topic makes the key contract-aware (and
+// also preserves protocol version/class identity). Different retained
+// contracts may legitimately occupy the same node/path — for example a
+// _Signal definition and its latest _Metric value.
+func kvKey(path, nodeID, topic string) []byte {
+	return []byte("k\x00" + path + "\x00" + nodeID + "\x00" + topic)
+}
 func kvPrefix(prefix string) []byte        { return []byte("k\x00" + prefix) }
 func cursorKey(name, stream string) []byte { return []byte("c\x00" + name + "\x00" + stream) }
 

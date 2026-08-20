@@ -30,15 +30,15 @@ func (s *Store) RegistryPut(ulid string, entry []byte, stream string, rec Record
 
 // RegistryDelete removes the registry entry, appends the retirement record
 // (empty-payload _EdgeNode tombstone) and deletes the identity's KV
-// projection (rec.KVPath/KVNode) in ONE synced batch — a revoked identity
+// projection (rec.KVPath/KVNode/Topic) in ONE synced batch — a revoked identity
 // must not survive a restart's retained-set reseed. rec's KV fields are used
 // for DELETION here; the record itself is appended without a KV set.
 func (s *Store) RegistryDelete(ulid string, stream string, rec Record) (uint64, error) {
-	kvPath, kvNode := rec.KVPath, rec.KVNode
+	kvPath, kvNode, kvTopic := rec.KVPath, rec.KVNode, rec.Topic
 	rec.KVPath, rec.KVNode = "", ""
 	return s.registryBatch(stream, rec, func(b *pebble.Batch) error {
 		if kvPath != "" {
-			if err := b.Delete(kvKey(kvPath, kvNode), nil); err != nil {
+			if err := b.Delete(kvKey(kvPath, kvNode, kvTopic), nil); err != nil {
 				return err
 			}
 		}

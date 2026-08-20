@@ -415,8 +415,8 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 
 // IngestRefresh is the retention pruner's §6.5 state-refresh entry (spec §6.5
 // [delta]) — an admin-grade publish that applies ONLY IF the KV entry for the
-// topic's (path, node) still sits at ifKVOffset, evaluated as a true CAS under
-// the store mutex (AppendIfKVUnchanged). A tombstone (§7) or newer write
+// topic's (contract, path, node) still sits at ifKVOffset, evaluated as a true
+// CAS under the store mutex (AppendIfKVUnchanged). A tombstone (§7) or newer write
 // landing between the pruner's KVScan snapshot and this call makes the
 // re-statement stale: applying it would resurrect a retired path or clobber
 // the newer value, so the WHOLE record is skipped — no stream append, no

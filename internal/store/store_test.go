@@ -74,6 +74,105 @@ func TestDurabilityAcrossReopen(t *testing.T) {
 	}
 }
 
+// A hierarchy position can carry several kinds of current state. The
+// contract-bearing topic is therefore part of KV identity: a _Signal and its
+// latest _Metric at the same node/path must coexist, and an update or tombstone
+// for one must not affect the other.
+func TestKVProjectionSeparatesContractsAtTheSameNodeAndPath(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		path        = "line1/press/temp"
+		nodeID      = "n-edge1"
+		signalTopic = "colca/v1/_Signal/n-edge1/line1/press/temp"
+		metricTopic = "colca/v1/_Metric/n-edge1/line1/press/temp"
+	)
+	if _, _, err := s.Append("entities", []Record{{
+		Topic: signalTopic, Payload: []byte(`{"id":"01HSIG","name":"temp"}`),
+		TS: 1, KVPath: path, KVNode: nodeID,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Append("metrics", []Record{{
+		Topic: metricTopic, Payload: []byte(`{"v":7}`),
+		TS: 2, KVPath: path, KVNode: nodeID,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := s.KVScan(path)
+	if len(entries) != 2 {
+		t.Fatalf("same-path KV entries = %d, want 2 contracts: %+v", len(entries), entries)
+	}
+	byTopic := map[string]KVEntry{}
+	for _, entry := range entries {
+		byTopic[entry.Topic] = entry
+	}
+	if string(byTopic[signalTopic].Payload) != `{"id":"01HSIG","name":"temp"}` ||
+		string(byTopic[metricTopic].Payload) != `{"v":7}` {
+		t.Fatalf("same-path contracts did not coexist independently: %+v", entries)
+	}
+
+	if _, _, err := s.Append("metrics", []Record{{
+		Topic: metricTopic, Payload: []byte(`{"v":8}`),
+		TS: 3, KVPath: path, KVNode: nodeID,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	entries = s.KVScan(path)
+	if len(entries) != 2 {
+		t.Fatalf("metric update replaced the signal: %+v", entries)
+	}
+	byTopic = map[string]KVEntry{}
+	for _, entry := range entries {
+		byTopic[entry.Topic] = entry
+	}
+	if string(byTopic[signalTopic].Payload) != `{"id":"01HSIG","name":"temp"}` ||
+		string(byTopic[metricTopic].Payload) != `{"v":8}` {
+		t.Fatalf("metric update changed the wrong contract: %+v", entries)
+	}
+
+	// The retention refresh compare-and-swap is contract-specific too. The
+	// metric now has a different current offset at this same path; it must not
+	// make a refresh of the still-current signal look stale.
+	if _, applied, err := s.AppendIfKVUnchanged("entities", Record{
+		Topic: signalTopic, Payload: []byte(`{"id":"01HSIG","name":"temperature"}`),
+		TS: 4, KVPath: path, KVNode: nodeID,
+	}, byTopic[signalTopic].Offset); err != nil || !applied {
+		t.Fatalf("same-path metric interfered with signal CAS: applied=%v err=%v", applied, err)
+	}
+
+	if _, _, err := s.Append("metrics", []Record{{
+		Topic: metricTopic, TS: 5, KVPath: path, KVNode: nodeID, Delete: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	entries = s.KVScan(path)
+	if len(entries) != 1 || entries[0].Topic != signalTopic {
+		t.Fatalf("metric tombstone removed another contract: %+v", entries)
+	}
+	if string(entries[0].Payload) != `{"id":"01HSIG","name":"temperature"}` {
+		t.Fatalf("signal refresh did not survive metric tombstone: %+v", entries)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	entries = s.KVScan(path)
+	if len(entries) != 1 || entries[0].Topic != signalTopic {
+		t.Fatalf("contract-aware KV state changed across reopen: %+v", entries)
+	}
+}
+
 func TestCursorMonotonicAck(t *testing.T) {
 	s := mustOpen(t)
 	if got := s.CursorGet("hub", "metrics"); got != 1 {
