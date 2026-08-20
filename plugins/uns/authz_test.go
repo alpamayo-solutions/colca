@@ -167,6 +167,15 @@ func TestALocalEntryNeedsANameAndNoPubkey(t *testing.T) {
 	}
 }
 
+func TestALocalServiceNameIsOneTopicSegment(t *testing.T) {
+	for _, name := range []string{"connector/opcua", "connector+", "connector#"} {
+		e := &Entry{ULID: "01J", Kind: KindLocal, Name: name}
+		if err := e.Validate(); err == nil {
+			t.Errorf("local name %q validated; names key cursors and catalogue topics and must be one segment", name)
+		}
+	}
+}
+
 // Unplaced is a position, not a missing value: a local service with no element is
 // bound to the NODE. A machine's is required — the local door proved a local
 // service belongs to this deployment, and nothing proved that about a machine.

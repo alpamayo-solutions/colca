@@ -167,6 +167,9 @@ func (e *Entry) Validate() error {
 		if e.Name == "" {
 			return fmt.Errorf("entry %s: a local service needs a name — it is how the local door finds its entry", e.ULID)
 		}
+		if strings.ContainsAny(e.Name, "/+#") {
+			return fmt.Errorf("entry %s: local service name %q must be one MQTT topic segment", e.ULID, e.Name)
+		}
 		if e.Pubkey != "" {
 			return fmt.Errorf("entry %s: a local service holds no key; the door is its proof", e.ULID)
 		}

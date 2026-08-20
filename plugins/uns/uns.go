@@ -29,7 +29,7 @@ type Class int
 
 const (
 	ClassNone       Class = iota
-	ClassData             // _Metric …    write: owner (level4 == identity)
+	ClassData             // _Metric …    node-owned state, authorized by write scope
 	ClassEntity           // _EdgeNode, _SystemElement, _Signal
 	ClassDefinition       // _Group, _MetadataType …  write: any node, flows DOWN, applied as state
 	ClassCmd              // _Cmd*        write: ancestors/admin, flows down
