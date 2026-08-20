@@ -1190,6 +1190,114 @@ func TestTheLocalHandlerIdentifiesByHeaderAndRegisters(t *testing.T) {
 	}
 }
 
+func TestLocalSelfReturnsTheMintedIdentityAndAuthoritativeMount(t *testing.T) {
+	h := newLocalHandler(t)
+	// Seed an unrelated element first. A client that guesses its own mount by
+	// taking the first visible _SystemElement can now return the wrong answer;
+	// /self must resolve the caller's registry binding directly.
+	authtest.Place(t, h.eng, "unrelated")
+
+	req := httptest.NewRequest("GET", "/self", nil)
+	req.Header.Set("X-Colca-Service", "connector-opcua")
+	req.Header.Set("X-Colca-Mount", "line1/press3")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /self = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		ULID    string `json:"ulid"`
+		Name    string `json:"name"`
+		Element string `json:"element"`
+		Mount   string `json:"mount"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ULID == "" || got.ULID == got.Name {
+		t.Fatalf("self-registration did not return a separately minted identity: %+v", got)
+	}
+	if got.Name != "connector-opcua" || got.Mount != "line1/press3" || got.Element == "" {
+		t.Fatalf("GET /self = %+v; want the named service at its declared mount", got)
+	}
+	entry, ok := h.reg.Get(got.ULID)
+	if !ok || entry.Name != got.Name || entry.Element != got.Element {
+		t.Fatalf("GET /self does not describe the registry entry: response=%+v entry=%+v", got, entry)
+	}
+}
+
+func TestLocalSelfRegistersAnUndeclaredServiceAtTheNode(t *testing.T) {
+	h := newLocalHandler(t)
+	req := httptest.NewRequest("GET", "/self", nil)
+	req.Header.Set("X-Colca-Service", "dataops")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /self = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		ULID    string `json:"ulid"`
+		Element string `json:"element"`
+		Mount   string `json:"mount"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ULID == "" || got.Element != "" || got.Mount != "" {
+		t.Fatalf("unplaced GET /self = %+v; want a minted identity bound to the node", got)
+	}
+}
+
+func TestLocalSelfReflectsOperatorRepositionInsteadOfTheDeclaration(t *testing.T) {
+	h := newLocalHandler(t)
+	registerLocal(t, h, "connector-opcua", "line1/press3")
+	entry, ok := h.reg.ByName("connector-opcua")
+	if !ok {
+		t.Fatal("local service was not registered")
+	}
+
+	repositioned := *entry
+	repositioned.Element = authtest.Place(t, h.eng, "line2/press9")
+	raw, err := json.Marshal(&repositioned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.reg.Enroll(raw); err != nil {
+		t.Fatalf("reposition local service: %v", err)
+	}
+
+	// The container still declares its original startup mount. Register must
+	// treat that declaration as a seed only, and /self must return the current
+	// registry position chosen by the operator.
+	req := httptest.NewRequest("GET", "/self", nil)
+	req.Header.Set("X-Colca-Service", "connector-opcua")
+	req.Header.Set("X-Colca-Mount", "line1/press3")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /self after reposition = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Element string `json:"element"`
+		Mount   string `json:"mount"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Element != repositioned.Element || got.Mount != "line2/press9" {
+		t.Fatalf("GET /self after reposition = %+v; want current entry at line2/press9", got)
+	}
+}
+
+func TestSelfIsNotMountedOnTheExternalAPIDoor(t *testing.T) {
+	a := newAPI(t)
+	resp, _ := req(t, client(nil), "GET", a.url+"/self", "tok", nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /self on external API = %d; want 404", resp.StatusCode)
+	}
+}
+
 func TestTheLocalHandlerRefusesAdminRoutes(t *testing.T) {
 	h := newLocalHandler(t)
 	for _, route := range []struct{ method, path string }{

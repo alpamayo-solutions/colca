@@ -394,6 +394,39 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		writeJSON(w, http.StatusOK, map[string]any{"entries": out})
 	}))
 
+	// GET /self is the local service's bootstrap view of the registry entry
+	// the door resolved for this request. It is deliberately local-only: a
+	// service needs the ULID minted during self-registration and its CURRENT
+	// mount in order to publish an identity-bearing catalogue at the right
+	// topic. Neither fact is metadata the service may guess from visible KV
+	// records. The entry remains the single source of truth, so an operator's
+	// reparent is reflected immediately and a stale X-Colca-Mount declaration
+	// never moves it back.
+	if local {
+		mux.HandleFunc("GET /self", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+			mount := ""
+			if c.entry.Element != "" {
+				var ok bool
+				mount, ok = e.Elements().PathOf(c.entry.Element)
+				if !ok {
+					// A bound entry whose element is absent from this node's
+					// namespace is inconsistent state. Never collapse it into
+					// the unplaced position: that would silently widen scope.
+					writeJSON(w, http.StatusConflict, map[string]any{
+						"error": "the local service's bound element is not present in this node's namespace",
+					})
+					return
+				}
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ulid":    c.entry.ULID,
+				"name":    c.entry.Name,
+				"element": c.entry.Element,
+				"mount":   mount,
+			})
+		}))
+	}
+
 	// Admin routes: never mounted on the local door at all (design §4) — a
 	// route that was never registered 404s, which tells a caller nothing;
 	// a route that exists and refuses would 403, which confirms it exists.
