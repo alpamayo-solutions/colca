@@ -142,7 +142,7 @@ def test_subset_lint_only_allowed_keywords():
     body, _ = gb.build_bundle()
     for ident, entry in body["contracts"].items():
         assert gb._lint_subset(entry["schema"], ident) == []
-        assert entry["class"] in ("data", "entity", "definition", "cmd", "ack"), ident
+        assert entry["class"] in ("data", "entity", "definition", "cmd", "ack", "audit"), ident
         assert isinstance(entry["tombstone"], bool), ident
 
 
@@ -250,6 +250,29 @@ def test_metric_real_shape():
     assert m["class"] == "data" and m["tombstone"] is True
     assert sorted(m["schema"]["required"]) == ["signal_id", "value"]
     assert m["schema"]["properties"]["signal_id"]["minLength"] == 1
+
+
+def test_audit_event_is_append_only_and_has_stable_required_fields():
+    body, _ = gb.build_bundle()
+    event = body["contracts"]["_AuditEvent"]
+
+    assert event["class"] == "audit"
+    assert event["tombstone"] is False
+    assert set(event["schema"]["required"]) == {
+        "event_id",
+        "source",
+        "action",
+        "outcome",
+        "actor_kind",
+        "occurred_at",
+    }
+    assert event["schema"]["properties"]["source"]["enum"] == [
+        "colca",
+        "api",
+        "keycloak",
+        "projector",
+        "node_manager",
+    ]
 
 
 def test_definitions_are_their_own_class_and_retractable():

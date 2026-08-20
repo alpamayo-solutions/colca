@@ -54,9 +54,45 @@ class ConstantDataType(BaseStrEnum):
     JSON = "json"
 
 
+class AuditSource(BaseStrEnum):
+    COLCA = "colca"
+    API = "api"
+    KEYCLOAK = "keycloak"
+    PROJECTOR = "projector"
+    NODE_MANAGER = "node_manager"
+
+
+class AuditAction(BaseStrEnum):
+    SIGN_IN = "sign_in"
+    SIGN_OUT = "sign_out"
+    AUTHORIZE = "authorize"
+    IDENTITY_ADMIN = "identity_admin"
+    CREDENTIAL_ADMIN = "credential_admin"
+    EXECUTE = "execute"
+    REBUILD = "rebuild"
+    RESTORE = "restore"
+    SECURITY_CONFIG = "security_config"
+
+
+class AuditOutcome(BaseStrEnum):
+    SUCCESS = "success"
+    FAILURE = "failure"
+    DENIED = "denied"
+
+
+class ActorKind(BaseStrEnum):
+    HUMAN = "human"
+    SERVICE = "service"
+    NODE = "node"
+    SYSTEM = "system"
+    ANONYMOUS = "anonymous"
+
+
 class CustomEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, (ServiceType, ConstantDataType)):
+        if isinstance(obj, (
+            ServiceType, ConstantDataType, AuditSource, AuditAction, AuditOutcome, ActorKind,
+        )):
             return str(obj)
         if isinstance(obj, datetime.datetime):
             return obj.isoformat()
@@ -120,6 +156,27 @@ class ServiceDetails(Payload):
     is_active: bool = True
     metadata: Dict[str, Any] = field(default_factory=dict)
     architecture_metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AuditEvent(Payload):
+    """A non-state security event that travels only toward ancestor nodes."""
+
+    event_id: str
+    source: AuditSource
+    action: AuditAction
+    outcome: AuditOutcome
+    actor_kind: ActorKind
+    occurred_at: int
+    operation: Optional[str] = None
+    actor_id: Optional[str] = None
+    actor_label: Optional[str] = None
+    entity_type: Optional[str] = None
+    entity_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    reason_code: Optional[str] = None
+    changed_fields: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 def _sorted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

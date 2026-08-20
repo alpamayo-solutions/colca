@@ -61,6 +61,7 @@ CLASS_TABLE: dict[str, str] = {
     "_Interface": "definition",
     "_ExternalSystem": "definition",
     "_AlarmNotificationConfig": "entity",
+    "_AuditEvent": "audit",
 }
 
 # Fields required beyond the no-default rule: door contracts the dataclass

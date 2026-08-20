@@ -43,6 +43,11 @@ from colca_data_contracts.topics import (  # noqa: E402
 
 from colca_data_contracts.payload import (
     ServiceType,
+    AuditSource,
+    AuditAction,
+    AuditOutcome,
+    ActorKind,
+    AuditEvent,
     CustomEncoder,
     Metric,
     Node as NodePayload,
@@ -95,6 +100,14 @@ from colca_data_contracts.machine_state import (
     StateReason,
 )
 
+from colca_data_contracts.local_service import (
+    LocalServiceIdentity,
+    connect_local_mqtt,
+    publish_local_service_details,
+    resolve_local_identity,
+    service_details_topic,
+)
+
 from colca_data_contracts.semantic import SEMANTIC_CONTRACTS
 
 # Register all Colca payload classes into franzmq's PAYLOAD_CLASSES
@@ -125,6 +138,11 @@ __all__ = [
     "TOPICS_CARRY_NODE_ID",
     # Extended base types
     "ServiceType",
+    "AuditSource",
+    "AuditAction",
+    "AuditOutcome",
+    "ActorKind",
+    "AuditEvent",
     "Metric",
     "NodePayload",
     "ServiceDetails",
@@ -177,6 +195,12 @@ __all__ = [
     "sanitize",
     "SanitizingFormatter",
     "COLCA_LOG_FORMAT",
+    # Local Colca service trust
+    "LocalServiceIdentity",
+    "connect_local_mqtt",
+    "publish_local_service_details",
+    "resolve_local_identity",
+    "service_details_topic",
     # Semantic contracts
     "SEMANTIC_CONTRACTS",
 ]
