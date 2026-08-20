@@ -332,7 +332,11 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		if !ok || time.Now().After(s.exp) {
 			return pk, packets.ErrRejectPacket
 		}
-		res, err := eng.IngestHuman(s.entry, pk.TopicName, pk.Payload)
+		actor := s.username
+		if actor == "" {
+			actor = s.sub
+		}
+		res, err := eng.IngestHumanAs(s.entry, actor, pk.TopicName, pk.Payload)
 		if err != nil {
 			h.log.Warn("human publish rejected", "sub", s.sub, "topic", pk.TopicName, "err", err)
 			return pk, rejectCode(cl, err)

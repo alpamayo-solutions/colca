@@ -56,7 +56,10 @@ func TestDurabilityAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
-	if _, _, err := s.Append("metrics", []Record{{Topic: "a", Payload: []byte("1"), TS: 1}}); err != nil {
+	if _, _, err := s.Append("metrics", []Record{{
+		Topic: "a", Payload: []byte("1"), TS: 1,
+		WrittenBy: "svc-connector", AsUser: "anna@example.com",
+	}}); err != nil {
 		t.Fatalf("append before reopen: %v", err)
 	}
 	s.Close()
@@ -71,6 +74,10 @@ func TestDurabilityAcrossReopen(t *testing.T) {
 	}
 	if first != 2 || last != 2 {
 		t.Fatalf("offset continuity broken: %d..%d", first, last)
+	}
+	got, _, err := s2.Read("metrics", 1, 1, nil)
+	if err != nil || len(got) != 1 || got[0].WrittenBy != "svc-connector" || got[0].AsUser != "anna@example.com" {
+		t.Fatalf("attribution not durable across reopen: %+v, %v", got, err)
 	}
 }
 

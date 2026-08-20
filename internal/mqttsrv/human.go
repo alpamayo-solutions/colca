@@ -26,9 +26,10 @@ const (
 
 // humanSession is one live token-authenticated session.
 type humanSession struct {
-	entry *uns.Entry
-	sub   string
-	exp   time.Time
+	entry    *uns.Entry
+	sub      string
+	username string
+	exp      time.Time
 }
 
 // humanSessions is the session table keyed by MQTT client id. Client ids are
@@ -102,7 +103,9 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthUsernameMismatch)
 		return false
 	}
-	n := h.humans.put(cl.ID, humanSession{entry: v.Entry, sub: v.Sub, exp: v.Exp})
+	n := h.humans.put(cl.ID, humanSession{
+		entry: v.Entry, sub: v.Sub, username: v.Username, exp: v.Exp,
+	})
 	h.metrics.SetHumanSessions(n)
 	h.log.Debug("human authenticated", "sub", v.Sub, "username", v.Username,
 		"exp", v.Exp, "listener", cl.Net.Listener)

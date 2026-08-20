@@ -39,6 +39,14 @@ type Result struct {
 	Topic     string // as persisted — post mount-insertion for replicated records
 }
 
+// Attribution is the immutable authorship envelope stored with a record.
+// WrittenBy is the authenticated publishing identity; AsUser is populated
+// when that identity acted on behalf of a verified human.
+type Attribution struct {
+	WrittenBy string
+	AsUser    string
+}
+
 // Mounts resolves identities to their registry entries — implemented by
 // *registry.Manager. The engine consults it for every identity question and
 // holds no identity state of its own (auth design §8).
@@ -280,9 +288,10 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		if err := e.validateContract(p.Contract, payload); err != nil {
 			return e.reject(metrics.ReasonValidation, "%w", err)
 		}
-		res, err := e.persist(class, p, topic, payload)
+		attribution := Attribution{WrittenBy: identity}
+		res, err := e.persistAttributed(class, p, topic, payload, attribution)
 		if err == nil {
-			e.maybeExec(p, payload) // commands addressed to this node execute here (cmdadmin design §5)
+			e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
 		}
 		return res, err
 	}
@@ -303,7 +312,10 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 	if !ok || !uns.Authorize(e.Scope(), entry, uns.ActPub, topic) {
 		return e.reject(metrics.ReasonWriteDenied, "client %s: no write scope covers %s", identity, topic)
 	}
-	res, err := e.persist(class, p, topic, payload)
+	// The client already publishes the canonical absolute node-local topic.
+	// Preserve the newer immutable author attribution without reviving the
+	// removed client-path mount rewrite.
+	res, err := e.persistAttributed(class, p, topic, payload, Attribution{WrittenBy: identity})
 	if err == nil {
 		// State a machine published here, offered to the domain plugin — the
 		// core does not interpret it (data-model binding design §7).
@@ -319,6 +331,13 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 // grant can override that. Commands target ABSOLUTE node-local paths, no
 // rewrite, no level-4 identity rule — exactly like admin-issued commands.
 func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Result, error) {
+	return e.IngestHumanAs(entry, entry.ULID, topic, payload)
+}
+
+// IngestHumanAs is IngestHuman with the verified display label retained in
+// the record envelope. Authorization still uses entry; the label is evidence,
+// never an authority input.
+func (e *Engine) IngestHumanAs(entry *uns.Entry, asUser, topic string, payload []byte) (Result, error) {
 	if !uns.IsUns(topic) {
 		return e.reject(metrics.ReasonGrammar, "human publish must be colca/#")
 	}
@@ -359,9 +378,10 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 	if err := e.validateContract(p.Contract, payload); err != nil {
 		return e.reject(metrics.ReasonValidation, "%w", err)
 	}
-	res, err := e.persist(class, p, topic, payload)
+	attribution := Attribution{WrittenBy: entry.ULID, AsUser: asUser}
+	res, err := e.persistAttributed(class, p, topic, payload, attribution)
 	if err == nil {
-		e.maybeExec(p, payload) // commands addressed to this node execute here (cmdadmin design §5)
+		e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
 	}
 	return res, err
 }
@@ -369,6 +389,12 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 // IngestAdmin: local HTTP API with admin token — publishes in node-local
 // coordinates, no rewrite, commands allowed, still validated.
 func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
+	return e.IngestAdminAs(topic, payload, "admin", "")
+}
+
+// IngestAdminAs is the attributed admin-service door. The static token is the
+// authority; these labels are stored evidence supplied by that trusted caller.
+func (e *Engine) IngestAdminAs(topic string, payload []byte, writtenBy, asUser string) (Result, error) {
 	if !uns.IsUns(topic) {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, fmt.Errorf("admin publish must be colca/#")
@@ -406,9 +432,10 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 		e.metrics.RejectPublish(metrics.ReasonValidation)
 		return Result{}, err
 	}
-	res, err := e.persist(class, p, topic, payload)
+	attribution := Attribution{WrittenBy: writtenBy, AsUser: asUser}
+	res, err := e.persistAttributed(class, p, topic, payload, attribution)
 	if err == nil {
-		e.maybeExec(p, payload) // commands addressed to this node execute here (cmdadmin design §5)
+		e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
 	}
 	return res, err
 }
@@ -453,7 +480,10 @@ func (e *Engine) IngestRefresh(topic string, payload []byte, ifKVOffset uint64) 
 		return Result{}, false, err
 	}
 	streamName := uns.StreamFor(class)
-	rec := store.Record{Topic: topic, Payload: payload, TS: time.Now().UnixMilli(), KVPath: p.Path, KVNode: p.NodeID}
+	rec := store.Record{
+		Topic: topic, Payload: payload, TS: time.Now().UnixMilli(),
+		WrittenBy: "colca-retention", KVPath: p.Path, KVNode: p.NodeID,
+	}
 	off, applied, err := e.store.AppendIfKVUnchanged(streamName, rec, ifKVOffset)
 	if err != nil {
 		return Result{}, false, err
@@ -475,6 +505,12 @@ func (e *Engine) IngestRefresh(topic string, payload []byte, ifKVOffset uint64) 
 // refreshed by a hop. Local MQTT delivery is not done here: persistTS mirrors
 // every appended record onto the bus, so doing it again would publish twice.
 func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result, error) {
+	return e.IngestDownlinkAttributed(topic, payload, ts, Attribution{})
+}
+
+// IngestDownlinkAttributed preserves the authorship stamped at the command's
+// origin while keeping the original timestamp.
+func (e *Engine) IngestDownlinkAttributed(topic string, payload []byte, ts int64, attribution Attribution) (Result, error) {
 	p, err := uns.Parse(topic)
 	if err != nil {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
@@ -498,9 +534,9 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 		e.metrics.RejectPublish(metrics.ReasonDraining)
 		return Result{}, fmt.Errorf("downlink: %s is draining — no new commands admitted (move-drain design §3.2)", p.Path)
 	}
-	res, err := e.persistTS(class, p, topic, payload, ts)
+	res, err := e.persistTSAttributed(class, p, topic, payload, ts, attribution)
 	if err == nil {
-		e.maybeExec(p, payload) // the target executes downlinked commands (cmdadmin design §5)
+		e.maybeExec(p, payload, attribution) // the target executes downlinked commands (cmdadmin design §5)
 	}
 	return res, err
 }
@@ -517,6 +553,12 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 // there is no mount to strip and nothing to rewrite: what the parent holds and
 // what this node holds are the same bytes.
 func (e *Engine) IngestDownlinkDefinition(topic string, payload []byte, ts int64) (Result, error) {
+	return e.IngestDownlinkDefinitionAttributed(topic, payload, ts, Attribution{})
+}
+
+// IngestDownlinkDefinitionAttributed preserves definition authorship through
+// every descendant that stores the record.
+func (e *Engine) IngestDownlinkDefinitionAttributed(topic string, payload []byte, ts int64, attribution Attribution) (Result, error) {
 	p, err := uns.Parse(topic)
 	if err != nil {
 		return e.reject(metrics.ReasonGrammar, "%w", err)
@@ -532,7 +574,7 @@ func (e *Engine) IngestDownlinkDefinition(topic string, payload []byte, ts int64
 	if err := e.validateContract(p.Contract, payload); err != nil {
 		return e.reject(metrics.ReasonValidation, "%w", err)
 	}
-	return e.persistTS(class, p, topic, payload, ts)
+	return e.persistTSAttributed(class, p, topic, payload, ts, attribution)
 }
 
 // IngestReplicated applies a batch pushed by a child: dedupe by high-water-mark,
@@ -663,7 +705,11 @@ func jumpFullyExplainedByDroppedTimeSync(last, childOffset uint64, dropped map[u
 func retainFor(c uns.Class) bool { return uns.IsState(c) }
 
 func (e *Engine) persist(class uns.Class, p uns.Parsed, topic string, payload []byte) (Result, error) {
-	return e.persistTS(class, p, topic, payload, time.Now().UnixMilli())
+	return e.persistAttributed(class, p, topic, payload, Attribution{})
+}
+
+func (e *Engine) persistAttributed(class uns.Class, p uns.Parsed, topic string, payload []byte, attribution Attribution) (Result, error) {
+	return e.persistTSAttributed(class, p, topic, payload, time.Now().UnixMilli(), attribution)
 }
 
 // persistTS writes the record (plus, for data/entity, its KV projection) in one
@@ -679,8 +725,15 @@ func (e *Engine) persist(class uns.Class, p uns.Parsed, topic string, payload []
 // stream is also published on that node's bus" for client, admin and downlink
 // ingest alike.
 func (e *Engine) persistTS(class uns.Class, p uns.Parsed, topic string, payload []byte, ts int64) (Result, error) {
+	return e.persistTSAttributed(class, p, topic, payload, ts, Attribution{})
+}
+
+func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string, payload []byte, ts int64, attribution Attribution) (Result, error) {
 	streamName := uns.StreamFor(class)
-	rec := store.Record{Topic: topic, Payload: payload, TS: ts}
+	rec := store.Record{
+		Topic: topic, Payload: payload, TS: ts,
+		WrittenBy: attribution.WrittenBy, AsUser: attribution.AsUser,
+	}
 	if uns.IsState(class) {
 		rec.KVPath, rec.KVNode = p.Path, p.NodeID
 		// Empty payload on a KV-projecting class is the tombstone (retention

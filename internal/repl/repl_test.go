@@ -45,7 +45,8 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 
 	// child pushes two metric records (child-local topics, child offsets 1,2)
 	recs := []store.ReplRecord{
-		{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":1}`), TS: 1},
+		{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":1}`), TS: 1,
+			WrittenBy: "svc-connector", AsUser: "anna@example.com"},
 		{ChildOffset: 2, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":2}`), TS: 2},
 	}
 	hwm, err := cl.Replicate("metrics", recs)
@@ -59,6 +60,9 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	stored, _, _ := ps.Read("metrics", 1, 10, nil)
 	if len(stored) != 2 || stored[0].Topic != "colca/v1/_Metric/m1/child1/m1/temp" {
 		t.Fatalf("mount-insert on replicate failed: %+v", stored)
+	}
+	if stored[0].WrittenBy != "svc-connector" || stored[0].AsUser != "anna@example.com" {
+		t.Fatalf("uplink lost attribution: %+v", stored[0])
 	}
 	if kv := ps.KVScan("child1/m1/temp"); len(kv) != 1 || string(kv[0].Payload) != `{"v":2}` {
 		t.Fatalf("kv on replicate: %+v", kv)
@@ -74,7 +78,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	}
 
 	// parent stores a command for the child zone; child fetches → stripped
-	peng.IngestAdmin("colca/v1/_CmdParam/m1/child1/m1/go", []byte(`{"correlation_id":"c1","expires_at":99999999999}`))
+	peng.IngestAdminAs("colca/v1/_CmdParam/m1/child1/m1/go", []byte(`{"correlation_id":"c1","expires_at":99999999999}`), "api", "anna@example.com")
 	dl, next, gap, err := cl.Downlink(1, 10, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -84,6 +88,9 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	}
 	if len(dl) != 1 || dl[0].Topic != "colca/v1/_CmdParam/m1/m1/go" {
 		t.Fatalf("downlink: %+v", dl)
+	}
+	if dl[0].WrittenBy != "api" || dl[0].AsUser != "anna@example.com" {
+		t.Fatalf("downlink lost attribution: %+v", dl[0])
 	}
 	if next != 2 {
 		t.Fatalf("next %d", next)

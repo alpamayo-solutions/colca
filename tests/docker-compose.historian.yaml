@@ -1,0 +1,25 @@
+# Boundary world for the historian bridge: one real Timescale.
+#
+# The idempotence claim — applying a page twice leaves one row — rests on a
+# unique index, and only a real database has one. The unit suite proves the loop
+# and the decoder; this proves the sink.
+#
+# Port 15433 rather than 5432 so a running dev deployment never collides.
+
+name: historian-boundary
+
+services:
+  timescale:
+    image: timescale/timescaledb:2.26.4-pg17
+    environment:
+      POSTGRES_PASSWORD: boundary
+      POSTGRES_USER: boundary
+      POSTGRES_DB: boundary
+    ports:
+      - "127.0.0.1:15433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U boundary -d boundary"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s

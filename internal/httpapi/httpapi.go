@@ -241,8 +241,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 
 	mux.HandleFunc("POST /publish", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
-			Topic   string          `json:"topic"`
-			Payload json.RawMessage `json:"payload"`
+			Topic     string          `json:"topic"`
+			Payload   json.RawMessage `json:"payload"`
+			WrittenBy string          `json:"written_by"`
+			AsUser    string          `json:"as_user"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -252,10 +254,21 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		var err error
 		switch {
 		case c.admin:
-			res, err = e.IngestAdmin(in.Topic, in.Payload)
+			writtenBy := in.WrittenBy
+			if writtenBy == "" {
+				writtenBy = r.Header.Get("X-Colca-Service")
+			}
+			if writtenBy == "" {
+				writtenBy = "admin"
+			}
+			res, err = e.IngestAdminAs(in.Topic, in.Payload, writtenBy, in.AsUser)
 		case c.human != nil:
 			// Humans command and nothing else (§5.2) — IngestHuman enforces it.
-			res, err = e.IngestHuman(c.entry, in.Topic, in.Payload)
+			actor := c.human.Username
+			if actor == "" {
+				actor = c.human.Sub
+			}
+			res, err = e.IngestHumanAs(c.entry, actor, in.Topic, in.Payload)
 		default:
 			// A machine publishing over HTTP is judged exactly like its MQTT
 			// publish: own zone, identity rule, cmd grants.
@@ -334,10 +347,12 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		out := make([]map[string]any, 0, len(recs))
 		for _, rec := range recs {
 			out = append(out, map[string]any{
-				"offset":  rec.Offset,
-				"topic":   rec.Topic,
-				"payload": json.RawMessage(rec.Payload),
-				"ts":      rec.TS,
+				"offset":     rec.Offset,
+				"topic":      rec.Topic,
+				"payload":    json.RawMessage(rec.Payload),
+				"ts":         rec.TS,
+				"written_by": rec.WrittenBy,
+				"as_user":    rec.AsUser,
 			})
 		}
 		resp := map[string]any{"records": out, "next": next}

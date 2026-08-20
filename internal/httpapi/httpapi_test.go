@@ -210,7 +210,10 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 		t.Fatalf("want 401, got %d", resp.StatusCode)
 	}
 
-	resp, out := req(t, admin, "POST", a.url+"/publish", "tok", map[string]any{"topic": "colca/v1/_Metric/n-test/x", "payload": map[string]any{"v": 1.0}})
+	resp, out := req(t, admin, "POST", a.url+"/publish", "tok", map[string]any{
+		"topic": "colca/v1/_Metric/n-test/x", "payload": map[string]any{"v": 1.0},
+		"written_by": "api", "as_user": "anna@example.com",
+	})
 	if resp.StatusCode != 200 || out["stream"] != "metrics" {
 		t.Fatalf("%d %v", resp.StatusCode, out)
 	}
@@ -224,6 +227,8 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 	_, out = req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=c1&max=10", "tok", nil)
 	if recs := out["records"].([]any); len(recs) != 1 {
 		t.Fatalf("%v", out)
+	} else if rec := recs[0].(map[string]any); rec["written_by"] != "api" || rec["as_user"] != "anna@example.com" {
+		t.Fatalf("attribution did not survive publish/fetch: %v", rec)
 	}
 	_, out = req(t, admin, "POST", a.url+"/ack", "tok", map[string]any{"cursor": "c1", "stream": "metrics", "offset": 1})
 	if out["moved"] != true {
@@ -496,7 +501,7 @@ func TestUnknownClientCertNeverFallsThrough(t *testing.T) {
 }
 
 // Wire-shape guard: /fetch keeps its exact response fields (records with
-// offset/topic/payload/ts, plus next) — the retention gap object composes
+// offset/topic/payload/ts and attribution, plus next) — the retention gap object composes
 // into this same response, so the base shape is a contract.
 func TestFetchWireShape(t *testing.T) {
 	a := newAPI(t)
@@ -511,7 +516,7 @@ func TestFetchWireShape(t *testing.T) {
 		t.Fatalf("%v", out)
 	}
 	rec := recs[0].(map[string]any)
-	for _, k := range []string{"offset", "topic", "payload", "ts"} {
+	for _, k := range []string{"offset", "topic", "payload", "ts", "written_by", "as_user"} {
 		if _, ok := rec[k]; !ok {
 			t.Fatalf("record missing %q: %v", k, rec)
 		}
@@ -558,8 +563,8 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		t.Fatal("ack must move")
 	}
 
-	surviving := `{"offset":4,"payload":{"v":4},"topic":"` + topic + `","ts":4000},` +
-		`{"offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000}`
+	surviving := `{"as_user":"","offset":4,"payload":{"v":4},"topic":"` + topic + `","ts":4000,"written_by":""},` +
+		`{"as_user":"","offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}`
 
 	resp, body := raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
 	if resp.StatusCode != http.StatusOK {
@@ -594,7 +599,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		t.Fatalf("ack past the LWM must move the cursor: %v", out)
 	}
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
-	want = `{"next":6,"records":[{"offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000}]}` + "\n"
+	want = `{"next":6,"records":[{"as_user":"","offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
 	if body != want {
 		t.Fatalf("after ack past LWM the gap object must disappear:\n got %s\nwant %s", body, want)
 	}

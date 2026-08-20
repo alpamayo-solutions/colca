@@ -57,7 +57,7 @@ func (s *Store) registryBatch(stream string, rec Record, mut func(*pebble.Batch)
 	}
 	b := s.db.NewBatch()
 	defer b.Close()
-	n, err := addRecord(b, stream, off, rec.Topic, rec.Payload, rec.TS, rec.KVPath, rec.KVNode, rec.Delete)
+	n, err := addRecord(b, stream, off, rec)
 	if err != nil {
 		return 0, err
 	}

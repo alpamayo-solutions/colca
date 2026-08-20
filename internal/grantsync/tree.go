@@ -14,12 +14,13 @@
 package grantsync
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/alpamayo-solutions/colca/internal/door"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -107,11 +108,20 @@ func ParseKV(entries []KVEntry) TreeView {
 	return view
 }
 
-// NodeClient talks to one colca node's admin HTTP API.
+// NodeClient talks to one colca node.
+//
+// Tree is grantsync's own — it parses the KV projection into a TreeView. Every
+// generic call (publish, ulid) comes from the shared door client, so there is
+// one implementation of the node's HTTP contract rather than a copy per
+// service.
 type NodeClient struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
+}
+
+func (c *NodeClient) door() *door.Client {
+	return &door.Client{BaseURL: c.BaseURL, Token: c.Token, HTTP: c.HTTP}
 }
 
 func (c *NodeClient) client() *http.Client {
@@ -155,54 +165,13 @@ func (c *NodeClient) Tree(ctx context.Context) (TreeView, error) {
 
 // ULID asks the node who it is, so the service does not have to be told.
 func (c *NodeClient) ULID(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/healthz", nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return "", fmt.Errorf("reading %s/healthz: %w", c.BaseURL, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("reading %s/healthz: HTTP %d", c.BaseURL, resp.StatusCode)
-	}
-	var payload struct {
-		ULID string `json:"ulid"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("reading %s/healthz: %w", c.BaseURL, err)
-	}
-	if payload.ULID == "" {
-		return "", fmt.Errorf("reading %s/healthz: no ulid in the response", c.BaseURL)
-	}
-	return payload.ULID, nil
+	return c.door().ULID(ctx)
 }
 
 // Publish posts one record through the node's admin publish door — the same
 // door a human in a UI would use.
 func (c *NodeClient) Publish(ctx context.Context, topic string, payload any) error {
-	body, err := json.Marshal(map[string]any{"topic": topic, "payload": payload})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/publish",
-		bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("X-Colca-Token", c.Token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.client().Do(req)
-	if err != nil {
-		return fmt.Errorf("publishing %s: %w", topic, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		reason, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("publishing %s: HTTP %d: %s", topic, resp.StatusCode, truncate(reason, 300))
-	}
-	return nil
+	return c.door().Publish(ctx, topic, payload)
 }
 
 func truncate(b []byte, n int) string {

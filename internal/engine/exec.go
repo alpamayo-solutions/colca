@@ -89,7 +89,7 @@ type cmdEnvelope struct {
 }
 
 // maybeExec runs after a _Cmd* record was persisted by a trusted-down path.
-func (e *Engine) maybeExec(p uns.Parsed, payload []byte) {
+func (e *Engine) maybeExec(p uns.Parsed, payload []byte, attribution Attribution) {
 	if p.NodeID != e.cfg.ULID || e.exec == nil || !e.exec.Handles(p.Contract) {
 		return
 	}
@@ -108,18 +108,18 @@ func (e *Engine) maybeExec(p uns.Parsed, payload []byte) {
 	// Expiry is checked before the executor sees it: a command whose window
 	// closed must not take effect, whatever it would have done.
 	if env.ExpiresAt <= time.Now().UnixMilli() {
-		e.ack(p.Contract, verb, env.CorrelationID, 498, "expired", "expired")
+		e.ack(p.Contract, verb, env.CorrelationID, 498, "expired", "expired", attribution)
 		return
 	}
 
 	code, msg, result := e.exec.Execute(p.Contract, verb, payload)
-	e.ack(p.Contract, verb, env.CorrelationID, code, msg, result)
+	e.ack(p.Contract, verb, env.CorrelationID, code, msg, result, attribution)
 }
 
 // ack publishes the execution outcome into the node's own commands stream (own
 // frame — uplink mount-insert rebuilds the path hop by hop, cmdadmin design §6)
 // and counts the metric.
-func (e *Engine) ack(contract, verb, corr string, code int, msg, result string) {
+func (e *Engine) ack(contract, verb, corr string, code int, msg, result string, attribution Attribution) {
 	e.metrics.NodeCmd(contract, verb, result)
 	topic := "colca/v1/_Ack/" + e.cfg.ULID + "/" + verb
 	payload, err := json.Marshal(map[string]any{
@@ -134,7 +134,8 @@ func (e *Engine) ack(contract, verb, corr string, code int, msg, result string) 
 		e.log.Error("command: ack topic invalid", "topic", topic, "err", err)
 		return
 	}
-	if _, err := e.persist(uns.ClassAck, p, topic, payload); err != nil {
+	ackAttribution := Attribution{WrittenBy: e.cfg.ULID, AsUser: attribution.AsUser}
+	if _, err := e.persistAttributed(uns.ClassAck, p, topic, payload, ackAttribution); err != nil {
 		e.log.Error("command: ack persist failed", "topic", topic, "correlation_id", corr, "err", err)
 		return
 	}

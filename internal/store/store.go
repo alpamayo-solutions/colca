@@ -20,9 +20,11 @@ import (
 var streams = []string{"metrics", "entities", "commands", "definitions"}
 
 type Record struct {
-	Topic   string `json:"t"`
-	Payload []byte `json:"p"`
-	TS      int64  `json:"ts"`
+	Topic     string `json:"t"`
+	Payload   []byte `json:"p"`
+	TS        int64  `json:"ts"`
+	WrittenBy string `json:"wb,omitempty"`
+	AsUser    string `json:"au,omitempty"`
 	// optional KV projection written in the same atomic batch:
 	KVPath string `json:"-"` // hierarchy path (segments after contract, post-mount)
 	KVNode string `json:"-"` // node-id (level 4)
@@ -36,10 +38,12 @@ type Record struct {
 }
 
 type StoredRecord struct {
-	Offset  uint64
-	Topic   string
-	Payload []byte
-	TS      int64
+	Offset    uint64
+	Topic     string
+	Payload   []byte
+	TS        int64
+	WrittenBy string
+	AsUser    string
 }
 
 type KVEntry struct {
@@ -145,9 +149,11 @@ func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (u
 func (s *Store) Close() error { return s.db.Close() }
 
 type recEnc struct {
-	Topic   string `json:"t"`
-	Payload []byte `json:"p"`
-	TS      int64  `json:"ts"`
+	Topic     string `json:"t"`
+	Payload   []byte `json:"p"`
+	TS        int64  `json:"ts"`
+	WrittenBy string `json:"wb,omitempty"`
+	AsUser    string `json:"au,omitempty"`
 	// size is the encoded length of THIS record as stored, filled in by
 	// scanRecords. Never serialized — it is what the byte accounting needs and
 	// only the reader can know it.
@@ -167,8 +173,11 @@ type kvEnc struct {
 // del is the tombstone flag (retention design §7.1): the KV key is deleted in
 // the batch instead of set. Deleting an absent key is a no-op in Pebble, so a
 // replayed tombstone is idempotent by construction.
-func addRecord(b *pebble.Batch, stream string, off uint64, topic string, payload []byte, ts int64, kvPath, kvNode string, del bool) (uint64, error) {
-	val, err := json.Marshal(recEnc{Topic: topic, Payload: payload, TS: ts})
+func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, error) {
+	val, err := json.Marshal(recEnc{
+		Topic: rec.Topic, Payload: rec.Payload, TS: rec.TS,
+		WrittenBy: rec.WrittenBy, AsUser: rec.AsUser,
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -176,17 +185,17 @@ func addRecord(b *pebble.Batch, stream string, off uint64, topic string, payload
 	if err := b.Set(key, val, nil); err != nil {
 		return 0, err
 	}
-	if kvPath != "" {
-		if del {
-			if err := b.Delete(kvKey(kvPath, kvNode, topic), nil); err != nil {
+	if rec.KVPath != "" {
+		if rec.Delete {
+			if err := b.Delete(kvKey(rec.KVPath, rec.KVNode, rec.Topic), nil); err != nil {
 				return 0, err
 			}
 		} else {
-			kval, err := json.Marshal(kvEnc{topic, payload, ts, off})
+			kval, err := json.Marshal(kvEnc{rec.Topic, rec.Payload, rec.TS, off})
 			if err != nil {
 				return 0, err
 			}
-			if err := b.Set(kvKey(kvPath, kvNode, topic), kval, nil); err != nil {
+			if err := b.Set(kvKey(rec.KVPath, rec.KVNode, rec.Topic), kval, nil); err != nil {
 				return 0, err
 			}
 		}
@@ -216,7 +225,7 @@ func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, 
 	defer b.Close()
 	liveBytes := s.bytes[stream]
 	for _, r := range recs {
-		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode, r.Delete)
+		n, err := addRecord(b, stream, off, r)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -314,7 +323,10 @@ func (s *Store) Read(stream string, from uint64, max int, filter func(string) bo
 		if filter != nil && !filter(e.Topic) {
 			continue
 		}
-		out = append(out, StoredRecord{Offset: off, Topic: e.Topic, Payload: e.Payload, TS: e.TS})
+		out = append(out, StoredRecord{
+			Offset: off, Topic: e.Topic, Payload: e.Payload, TS: e.TS,
+			WrittenBy: e.WrittenBy, AsUser: e.AsUser,
+		})
 	}
 	return out, next, nil
 }
@@ -504,6 +516,8 @@ type ReplRecord struct {
 	Topic       string `json:"t"`
 	Payload     []byte `json:"p"`
 	TS          int64  `json:"ts"`
+	WrittenBy   string `json:"wb,omitempty"`
+	AsUser      string `json:"au,omitempty"`
 	KVPath      string `json:"kp,omitempty"`
 	KVNode      string `json:"kn,omitempty"`
 	// Delete mirrors Record.Delete (retention design §7.1): ApplyReplicated
@@ -539,7 +553,11 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 		if r.ChildOffset <= hwm {
 			continue
 		}
-		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode, r.Delete)
+		n, err := addRecord(b, stream, off, Record{
+			Topic: r.Topic, Payload: r.Payload, TS: r.TS,
+			WrittenBy: r.WrittenBy, AsUser: r.AsUser,
+			KVPath: r.KVPath, KVNode: r.KVNode, Delete: r.Delete,
+		})
 		if err != nil {
 			return nil, prev, err
 		}
@@ -915,7 +933,7 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	}
 	off := s.next[stream]
 	for _, r := range out.GapRecords {
-		n, err := addRecord(b, stream, off, r.Topic, r.Payload, r.TS, r.KVPath, r.KVNode, r.Delete)
+		n, err := addRecord(b, stream, off, r)
 		if err != nil {
 			return 0, err
 		}

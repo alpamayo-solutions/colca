@@ -126,7 +126,10 @@ func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter 
 	}
 	out := make([]wireRec, 0, len(recs))
 	for _, rec := range recs {
-		out = append(out, wireRec{O: rec.Offset, T: rec.Topic, P: rec.Payload, TS: rec.TS})
+		out = append(out, wireRec{
+			O: rec.Offset, T: rec.Topic, P: rec.Payload, TS: rec.TS,
+			WB: rec.WrittenBy, AU: rec.AsUser,
+		})
 	}
 	resp["definitions"], resp["def_next"] = out, next
 }
@@ -208,6 +211,8 @@ type wireRec struct {
 	T  string `json:"t"`
 	P  []byte `json:"p"`
 	TS int64  `json:"ts"`
+	WB string `json:"wb,omitempty"`
+	AU string `json:"au,omitempty"`
 }
 
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +233,10 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	repl := make([]store.ReplRecord, 0, len(in.Records))
 	for _, rec := range in.Records {
 		topic := uns.MountInsert(rec.T, mount)
-		rr := store.ReplRecord{ChildOffset: rec.O, Topic: topic, Payload: rec.P, TS: rec.TS}
+		rr := store.ReplRecord{
+			ChildOffset: rec.O, Topic: topic, Payload: rec.P, TS: rec.TS,
+			WrittenBy: rec.WB, AsUser: rec.AU,
+		}
 		if p, err := uns.Parse(topic); err == nil {
 			// Route by the ENGINE authority (bundle-aware): a bundle-declared
 			// data/entity contract must KV-project here like at any door.
@@ -360,7 +368,10 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 				if !ok {
 					continue
 				}
-				out = append(out, wireRec{O: rec.Offset, T: stripped, P: rec.Payload, TS: rec.TS})
+				out = append(out, wireRec{
+					O: rec.Offset, T: stripped, P: rec.Payload, TS: rec.TS,
+					WB: rec.WrittenBy, AU: rec.AsUser,
+				})
 			}
 			// now_ms is stamped HERE, at response-write time — after the long
 			// poll wait, so sample error is one-way network latency (ms), not

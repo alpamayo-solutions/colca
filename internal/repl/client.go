@@ -86,7 +86,10 @@ func (c *Client) Replicate(stream string, recs []store.ReplRecord) (hwm uint64, 
 func (c *Client) replicate(ctx context.Context, stream string, recs []store.ReplRecord) (hwm uint64, nowMS int64, err error) {
 	wire := make([]wireRec, len(recs))
 	for i, r := range recs {
-		wire[i] = wireRec{O: r.ChildOffset, T: r.Topic, P: r.Payload, TS: r.TS}
+		wire[i] = wireRec{
+			O: r.ChildOffset, T: r.Topic, P: r.Payload, TS: r.TS,
+			WB: r.WrittenBy, AU: r.AsUser,
+		}
 	}
 	body, err := json.Marshal(map[string]any{"stream": stream, "records": wire})
 	if err != nil {
@@ -120,6 +123,8 @@ type DownRec struct {
 	Topic        string
 	Payload      []byte
 	TS           int64
+	WrittenBy    string
+	AsUser       string
 }
 
 // downResult is one decoded downlink response. Definitions ride the same
@@ -227,7 +232,10 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 func toDownRecs(in []wireRec) []DownRec {
 	out := make([]DownRec, len(in))
 	for i, r := range in {
-		out[i] = DownRec{ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS}
+		out[i] = DownRec{
+			ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS,
+			WrittenBy: r.WB, AsUser: r.AU,
+		}
 	}
 	return out
 }
@@ -288,7 +296,10 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 			if len(recs) > 0 {
 				batch := make([]store.ReplRecord, len(recs))
 				for i, r := range recs {
-					batch[i] = store.ReplRecord{ChildOffset: r.Offset, Topic: r.Topic, Payload: r.Payload, TS: r.TS}
+					batch[i] = store.ReplRecord{
+						ChildOffset: r.Offset, Topic: r.Topic, Payload: r.Payload, TS: r.TS,
+						WrittenBy: r.WrittenBy, AsUser: r.AsUser,
+					}
 				}
 				_, nowMS, err := c.replicate(ctx, st.name, batch)
 				if err != nil {
@@ -385,7 +396,9 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			m.GapReceived("commands")
 		}
 		for _, r := range recs {
-			if _, err := eng.IngestDownlink(r.Topic, r.Payload, r.TS); err != nil {
+			if _, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
+				WrittenBy: r.WrittenBy, AsUser: r.AsUser,
+			}); err != nil {
 				c.log.Error("downlink ingest", "topic", r.Topic, "err", err)
 			}
 		}
@@ -406,7 +419,9 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 // rather than pruned (definition-stream design §6).
 func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res downResult) {
 	for _, r := range res.Definitions {
-		if _, err := eng.IngestDownlinkDefinition(r.Topic, r.Payload, r.TS); err != nil {
+		if _, err := eng.IngestDownlinkDefinitionAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
+			WrittenBy: r.WrittenBy, AsUser: r.AsUser,
+		}); err != nil {
 			c.log.Error("downlink definition not applied — leaving the cursor so it is offered again",
 				"topic", r.Topic, "err", err)
 			m.DefinitionRejected()
