@@ -467,6 +467,39 @@ func (e *Entry) IsAdmin() bool {
 	return false
 }
 
+// MayPublishAudit is the local-trust producer boundary for `_AuditEvent`.
+// External machine, human and node identities never gain it through grants;
+// the authenticated local registry kind is the authority.
+func (e *Entry) MayPublishAudit() bool { return e != nil && e.Kind == KindLocal }
+
+// ActorKind translates authenticated registry/token kinds into the stable
+// audit-envelope vocabulary. Machine processes are service actors; the
+// distinction between keyed and local services remains in WrittenBy and the
+// registry rather than creating a second actor vocabulary.
+func (e *Entry) ActorKind() string {
+	if e == nil {
+		return ""
+	}
+	switch e.Kind {
+	case KindHuman:
+		return "human"
+	case KindNode:
+		return "node"
+	case KindMachine, KindLocal:
+		return "service"
+	default:
+		return ""
+	}
+}
+
+// MayImplicitlyConfigure reports the one command authority implied by local
+// placement: an unplaced in-network service is node-scoped and may edit that
+// node's model. A placed service is subtree-scoped and needs an explicit cmd
+// grant. `_CmdAdmin` and every other command are never implicit.
+func (e *Entry) MayImplicitlyConfigure(contract string) bool {
+	return e != nil && e.Kind == KindLocal && e.Element == "" && CmdClass(contract) == "configure"
+}
+
 // parseZone accepts "#" (everything) or one element id, with or without the
 // trailing "/#" that reads as "and below" — an element grant always covers the
 // element's whole subtree, so both forms mean the same thing.
@@ -556,15 +589,17 @@ func zoneOf(sc Scope, elementID string) (string, bool) {
 	return sc.PathOf(elementID)
 }
 
-// readZones is the entry's effective read scope: the default own zone (§5.2,
-// an unplaced entry resolves none here yet — zoneOf treats "" as "no zone",
-// not yet as "the whole node") plus every explicit read grant, each resolved
-// through the node's scope at this moment — so a renamed element is read
-// under its new path immediately and a reparented one moves with its
-// subtree.
+// readZones is the entry's effective read scope: the default own zone (§5.2)
+// plus every explicit read grant, each resolved through the node's scope at
+// this moment — so a renamed element is read under its new path immediately
+// and a reparented one moves with its subtree. An unplaced LOCAL service is
+// bound to the node itself and therefore reads the whole node; an unplaced
+// external identity still resolves no default zone.
 func readZones(sc Scope, e *Entry) []string {
 	var zones []string
-	if zone, ok := zoneOf(sc, e.Element); ok {
+	if e.Kind == KindLocal && e.Element == "" {
+		zones = append(zones, "#")
+	} else if zone, ok := zoneOf(sc, e.Element); ok {
 		zones = append(zones, zone)
 	}
 	for _, g := range e.Grants {

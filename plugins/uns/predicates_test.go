@@ -30,7 +30,7 @@ func TestDefinitionsAreStateButNotOwnedState(t *testing.T) {
 // Events are neither. Retaining a command would re-deliver stale instructions
 // to every new subscriber, which is the whole reason the split exists.
 func TestEventsAreNeitherStateNorOwnedState(t *testing.T) {
-	for _, c := range []Class{ClassCmd, ClassAck, ClassGap, ClassTimeSync} {
+	for _, c := range []Class{ClassCmd, ClassAck, ClassGap, ClassTimeSync, ClassAudit} {
 		if IsState(c) || IsOwnedState(c) {
 			t.Errorf("class %v is an event and must not be state", c)
 		}
@@ -44,7 +44,7 @@ func TestOnlyEntitiesNeedStateRefresh(t *testing.T) {
 	if !NeedsStateRefresh(ClassEntity) {
 		t.Error("entities are authored here and nothing re-supplies them — they must refresh")
 	}
-	for _, c := range []Class{ClassData, ClassDefinition, ClassCmd, ClassAck, ClassGap, ClassTimeSync} {
+	for _, c := range []Class{ClassData, ClassDefinition, ClassCmd, ClassAck, ClassGap, ClassTimeSync, ClassAudit} {
 		if NeedsStateRefresh(c) {
 			t.Errorf("class %v must not refresh: it is either re-supplied or meant to age out", c)
 		}
@@ -68,7 +68,7 @@ func TestOnlyClassNoneIsUnknown(t *testing.T) {
 	if IsKnown(ClassNone) {
 		t.Error("ClassNone is the unknown-contract answer and must not read as known")
 	}
-	for _, c := range []Class{ClassData, ClassEntity, ClassDefinition, ClassCmd, ClassAck, ClassGap, ClassTimeSync} {
+	for _, c := range []Class{ClassData, ClassEntity, ClassDefinition, ClassCmd, ClassAck, ClassGap, ClassTimeSync, ClassAudit} {
 		if !IsKnown(c) {
 			t.Errorf("class %v is a real class and must read as known", c)
 		}
@@ -82,7 +82,7 @@ func TestOnlyClassNoneIsUnknown(t *testing.T) {
 func TestManifestVocabularyExcludesBuiltinAuthoredClasses(t *testing.T) {
 	for name, want := range map[string]Class{
 		"data": ClassData, "entity": ClassEntity, "definition": ClassDefinition,
-		"cmd": ClassCmd, "ack": ClassAck,
+		"cmd": ClassCmd, "ack": ClassAck, "audit": ClassAudit,
 	} {
 		got, ok := ClassFromManifest(name)
 		if !ok || got != want {
@@ -93,6 +93,27 @@ func TestManifestVocabularyExcludesBuiltinAuthoredClasses(t *testing.T) {
 		if got, ok := ClassFromManifest(name); ok {
 			t.Errorf("manifest class %q must not map (got %v) — builtin-authored classes are not declarable", name, got)
 		}
+	}
+}
+
+func TestOnlyOwnedEventsAndStateFlowUp(t *testing.T) {
+	for _, c := range []Class{ClassData, ClassEntity, ClassAck, ClassGap, ClassAudit} {
+		if !FlowsUp(c) {
+			t.Errorf("class %v must flow upward", c)
+		}
+	}
+	for _, c := range []Class{ClassDefinition, ClassCmd, ClassTimeSync, ClassNone} {
+		if FlowsUp(c) {
+			t.Errorf("class %v must not flow upward", c)
+		}
+	}
+	p, _ := Parse("colca/v1/_AuditEvent/n1/_colca/audit/e1")
+	if !MatchesUplinkStream(ClassAudit, p, "audit") || MatchesUplinkStream(ClassAudit, p, "entities") {
+		t.Fatal("audit records must replicate only on the audit stream")
+	}
+	gap, _ := Parse("colca/v1/_StreamGap/n1/audit")
+	if !MatchesUplinkStream(ClassGap, gap, "audit") || MatchesUplinkStream(ClassGap, gap, "metrics") {
+		t.Fatal("gap markers replicate in the stream their topic names")
 	}
 }
 

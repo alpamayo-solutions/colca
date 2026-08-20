@@ -195,7 +195,10 @@ func (e *Engine) ack(
 		e.log.Error("command: ack topic invalid", "topic", topic, "err", err)
 		return
 	}
-	ackAttribution := Attribution{WrittenBy: e.cfg.ULID, AsUser: attribution.AsUser}
+	ackAttribution := Attribution{
+		WrittenBy: e.cfg.ULID, ActorID: attribution.ActorID,
+		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
+	}
 	if _, err := e.persistAttributed(uns.ClassAck, p, topic, payload, ackAttribution); err != nil {
 		e.log.Error("command: ack persist failed", "topic", topic, "correlation_id", outcome.CorrelationID, "err", err)
 		return

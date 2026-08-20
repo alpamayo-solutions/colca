@@ -42,11 +42,27 @@ type Result struct {
 }
 
 // Attribution is the immutable authorship envelope stored with a record.
-// WrittenBy is the authenticated publishing identity; AsUser is populated
-// when that identity acted on behalf of a verified human.
+// WrittenBy is the authenticated publishing identity. ActorID is the stable
+// subject it acted as; ActorLabel is only a display snapshot.
 type Attribution struct {
-	WrittenBy string
-	AsUser    string
+	WrittenBy  string
+	ActorID    string
+	ActorLabel string
+	ActorKind  string
+}
+
+func attributionForEntry(entry *uns.Entry) Attribution {
+	if entry == nil {
+		return Attribution{}
+	}
+	label := entry.Name
+	if label == "" {
+		label = entry.ULID
+	}
+	return Attribution{
+		WrittenBy: entry.ULID, ActorID: entry.ULID,
+		ActorLabel: label, ActorKind: entry.ActorKind(),
+	}
 }
 
 // Mounts resolves identities to their registry entries — implemented by
@@ -99,6 +115,10 @@ type Engine struct {
 	// is where records land — so the index is current without anyone
 	// remembering to refresh it.
 	elements *uns.ElementIndex
+
+	// auditID is injectable for deterministic event tests. Audit writes bypass
+	// the public ingest doors; see audit.go.
+	auditID func(time.Time) string
 }
 
 // New builds an engine. ids is the identity registry: IngestClient admits a
@@ -120,7 +140,7 @@ func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m
 	if clk == nil {
 		clk = clock.New(cfg.Parent == nil, time.Now)
 	}
-	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk}
+	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk, auditID: newAuditID}
 	e.elements = uns.NewElementIndex(e.EntityStore())
 	if raw, ok := s.AncestryGet(); ok {
 		var a uns.Ancestry
@@ -329,6 +349,35 @@ func (e *Engine) validateAdminStateAuthor(p uns.Parsed, payload []byte) error {
 // write-scope authorization, validate, persist. A non-UNS topic is not an
 // error — it is normal broker traffic that simply is not persisted.
 func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, error) {
+	return e.ingestClientAttributed(identity, topic, payload, nil)
+}
+
+// IngestLocalAttributed accepts a stable actor envelope only from a registered
+// local service. The local HTTP door is the trust boundary; external machine
+// and human doors derive actors from their verified credentials instead.
+func (e *Engine) IngestLocalAttributed(identity, topic string, payload []byte, actor Attribution) (Result, error) {
+	entry, ok := e.ids.Get(identity)
+	if !ok || !entry.MayUseDoor(uns.DoorLocal) {
+		return e.rejectDenied(metrics.ReasonWriteDenied, attributionForEntry(entry), "publish", nil,
+			"identity %s may not supply local actor attribution", identity)
+	}
+	if actor.ActorID == "" || !uns.ValidActorKind(actor.ActorKind) {
+		return e.reject(metrics.ReasonIdentity, "local actor attribution requires actor_id and a valid actor_kind")
+	}
+	actor.WrittenBy = entry.ULID
+	if actor.ActorLabel == "" {
+		actor.ActorLabel = actor.ActorID
+	}
+	return e.ingestClientAttributed(identity, topic, payload, &actor)
+}
+
+func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, supplied *Attribution) (Result, error) {
+	actorFor := func(entry *uns.Entry) Attribution {
+		if supplied != nil {
+			return *supplied
+		}
+		return attributionForEntry(entry)
+	}
 	if !uns.IsUns(topic) {
 		return Result{Persisted: false}, nil // normal broker behavior outside colca/#
 	}
@@ -364,18 +413,43 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		// target ABSOLUTE node-local paths: no mount rewrite, no level-4
 		// identity requirement — the author is not the target's owner.
 		entry, ok := e.ids.Get(identity)
-		if !ok || !uns.Authorize(e.Scope(), entry, uns.ActCmd, topic) {
-			return e.reject(metrics.ReasonCmdDenied, "client %s: no cmd grant covers %s", identity, topic)
+		implicitLocalConfigure := ok && p.NodeID == e.cfg.ULID && entry.MayImplicitlyConfigure(p.Contract)
+		if !ok || (!implicitLocalConfigure && !uns.Authorize(e.Scope(), entry, uns.ActCmd, topic)) {
+			actor := Attribution{ActorID: identity, ActorLabel: identity, ActorKind: "service"}
+			if ok {
+				actor = actorFor(entry)
+			}
+			return e.rejectDenied(metrics.ReasonCmdDenied, actor, "execute", &p, "client %s: no cmd grant covers %s", identity, topic)
 		}
 		if err := e.validateContract(p.Contract, payload); err != nil {
 			return e.reject(metrics.ReasonValidation, "%w", err)
 		}
-		attribution := Attribution{WrittenBy: identity}
+		attribution := actorFor(entry)
 		res, err := e.persistAttributed(class, p, topic, payload, attribution)
 		if err == nil {
-			e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
+			res.Command = e.maybeExec(p, payload, attribution) // return the synchronous outcome to local API callers
 		}
 		return res, err
+	}
+	if uns.IsAudit(class) {
+		entry, ok := e.ids.Get(identity)
+		if !ok || !entry.MayPublishAudit() {
+			actor := Attribution{ActorID: identity, ActorLabel: identity, ActorKind: "service"}
+			if ok {
+				actor = actorFor(entry)
+			}
+			return e.rejectDenied(metrics.ReasonWriteDenied, actor, "publish", &p, "client %s may not publish _AuditEvent — the audit door is local-only", identity)
+		}
+		if p.NodeID != e.cfg.ULID {
+			return e.reject(metrics.ReasonNodeID, "level-4 %q is not this node (%q)", p.NodeID, e.cfg.ULID)
+		}
+		if err := e.validateContract(p.Contract, payload); err != nil {
+			return e.reject(metrics.ReasonValidation, "%w", err)
+		}
+		if err := uns.ValidateAuditTopic(p, payload); err != nil {
+			return e.reject(metrics.ReasonIdentity, "%w", err)
+		}
+		return e.persistAttributed(class, p, topic, payload, actorFor(entry))
 	}
 	if !uns.IsKnown(class) {
 		return e.reject(metrics.ReasonGrammar, "client %s may not publish %s", identity, p.Contract)
@@ -395,12 +469,16 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 	}
 	entry, ok := e.ids.Get(identity)
 	if !ok || !uns.Authorize(e.Scope(), entry, uns.ActPub, topic) {
-		return e.reject(metrics.ReasonWriteDenied, "client %s: no write scope covers %s", identity, topic)
+		actor := Attribution{ActorID: identity, ActorLabel: identity, ActorKind: "service"}
+		if ok {
+			actor = actorFor(entry)
+		}
+		return e.rejectDenied(metrics.ReasonWriteDenied, actor, "publish", &p, "client %s: no write scope covers %s", identity, topic)
 	}
 	// The client already publishes the canonical absolute node-local topic.
 	// Preserve the newer immutable author attribution without reviving the
 	// removed client-path mount rewrite.
-	res, err := e.persistAttributed(class, p, topic, payload, Attribution{WrittenBy: identity})
+	res, err := e.persistAttributed(class, p, topic, payload, actorFor(entry))
 	if err == nil {
 		// State a machine published here, offered to the domain plugin — the
 		// core does not interpret it (data-model binding design §7).
@@ -416,13 +494,13 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 // grant can override that. Commands target ABSOLUTE node-local paths, no
 // rewrite, no level-4 identity rule — exactly like admin-issued commands.
 func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Result, error) {
-	return e.IngestHumanAs(entry, entry.ULID, topic, payload)
+	return e.IngestHumanAttributed(entry, entry.ULID, topic, payload)
 }
 
-// IngestHumanAs is IngestHuman with the verified display label retained in
+// IngestHumanAttributed is IngestHuman with the verified display label retained in
 // the record envelope. Authorization still uses entry; the label is evidence,
 // never an authority input.
-func (e *Engine) IngestHumanAs(entry *uns.Entry, asUser, topic string, payload []byte) (Result, error) {
+func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic string, payload []byte) (Result, error) {
 	if !uns.IsUns(topic) {
 		return e.reject(metrics.ReasonGrammar, "human publish must be colca/#")
 	}
@@ -445,9 +523,13 @@ func (e *Engine) IngestHumanAs(entry *uns.Entry, asUser, topic string, payload [
 		e.metrics.RejectPublish(metrics.ReasonTimeSync)
 		return Result{}, fmt.Errorf("human %s may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)", entry.ULID)
 	}
+	if uns.IsAudit(class) {
+		return e.rejectDenied(metrics.ReasonWriteDenied, attributionForEntry(entry), "publish", &p,
+			"human %s may not publish _AuditEvent — the audit producer is local-only", entry.ULID)
+	}
 	if !uns.IsCommand(class) {
-		e.metrics.RejectPublish(metrics.ReasonHumanWrite)
-		return Result{}, fmt.Errorf("human %s may not publish %s — humans command, machines write state", entry.ULID, p.Contract)
+		return e.rejectDenied(metrics.ReasonHumanWrite, attributionForEntry(entry), "publish", &p,
+			"human %s may not publish %s — humans command, machines write state", entry.ULID, p.Contract)
 	}
 	if e.ids.DrainingMount(p.Path) {
 		// Move-drain design §3.2 item 2 — "at every door": a human's cmd
@@ -458,12 +540,16 @@ func (e *Engine) IngestHumanAs(entry *uns.Entry, asUser, topic string, payload [
 		return e.reject(metrics.ReasonDraining, "human %s: %s is draining — no new commands admitted (move-drain design §3.2)", entry.ULID, p.Path)
 	}
 	if !uns.Authorize(e.Scope(), entry, uns.ActCmd, topic) {
-		return e.reject(metrics.ReasonCmdDenied, "human %s: no cmd grant covers %s", entry.ULID, topic)
+		return e.rejectDenied(metrics.ReasonCmdDenied, attributionForEntry(entry), "execute", &p,
+			"human %s: no cmd grant covers %s", entry.ULID, topic)
 	}
 	if err := e.validateContract(p.Contract, payload); err != nil {
 		return e.reject(metrics.ReasonValidation, "%w", err)
 	}
-	attribution := Attribution{WrittenBy: entry.ULID, AsUser: asUser}
+	attribution := Attribution{
+		WrittenBy: entry.ULID, ActorID: entry.ULID,
+		ActorLabel: actorLabel, ActorKind: "human",
+	}
 	res, err := e.persistAttributed(class, p, topic, payload, attribution)
 	if err == nil {
 		res.Command = e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
@@ -474,12 +560,14 @@ func (e *Engine) IngestHumanAs(entry *uns.Entry, asUser, topic string, payload [
 // IngestAdmin: local HTTP API with admin token — publishes in node-local
 // coordinates, no rewrite, commands allowed, still validated.
 func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
-	return e.IngestAdminAs(topic, payload, "admin", "")
+	return e.IngestAdminAttributed(topic, payload, Attribution{
+		WrittenBy: "admin", ActorID: "admin", ActorLabel: "admin", ActorKind: "system",
+	})
 }
 
-// IngestAdminAs is the attributed admin-service door. The static token is the
-// authority; these labels are stored evidence supplied by that trusted caller.
-func (e *Engine) IngestAdminAs(topic string, payload []byte, writtenBy, asUser string) (Result, error) {
+// IngestAdminAttributed is the attributed admin-service door. The static token
+// is the authority; the envelope is evidence supplied by that trusted caller.
+func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution Attribution) (Result, error) {
 	if !uns.IsUns(topic) {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
 		return Result{}, fmt.Errorf("admin publish must be colca/#")
@@ -502,6 +590,10 @@ func (e *Engine) IngestAdminAs(topic string, payload []byte, writtenBy, asUser s
 		e.metrics.RejectPublish(metrics.ReasonTimeSync)
 		return Result{}, fmt.Errorf("admin may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)")
 	}
+	if uns.IsAudit(class) {
+		return e.rejectDenied(metrics.ReasonWriteDenied, attribution, "publish", &p,
+			"admin may not publish _AuditEvent — use the local audit producer")
+	}
 	if uns.IsCommand(class) && e.ids.DrainingMount(p.Path) {
 		// Same admission rule as IngestClient (move-drain design §3.2 item
 		// 2): not even the admin token may address a draining mount with a
@@ -521,7 +613,6 @@ func (e *Engine) IngestAdminAs(topic string, payload []byte, writtenBy, asUser s
 		e.metrics.RejectPublish(metrics.ReasonIdentity)
 		return Result{}, err
 	}
-	attribution := Attribution{WrittenBy: writtenBy, AsUser: asUser}
 	res, err := e.persistAttributed(class, p, topic, payload, attribution)
 	if err == nil {
 		res.Command = e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
@@ -592,7 +683,8 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 			class:  class,
 			record: store.Record{
 				Topic: input.Topic, Payload: input.Payload, TS: ts,
-				WrittenBy: attribution.WrittenBy, AsUser: attribution.AsUser,
+				WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
+				ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
 				KVPath: parsed.Path, KVNode: parsed.NodeID, Delete: len(input.Payload) == 0,
 			},
 		})
@@ -913,7 +1005,8 @@ func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string
 	streamName := uns.StreamFor(class)
 	rec := store.Record{
 		Topic: topic, Payload: payload, TS: ts,
-		WrittenBy: attribution.WrittenBy, AsUser: attribution.AsUser,
+		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
+		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
 	}
 	if uns.IsState(class) {
 		rec.KVPath, rec.KVNode = p.Path, p.NodeID

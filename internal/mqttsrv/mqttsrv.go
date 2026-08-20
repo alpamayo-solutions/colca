@@ -102,6 +102,22 @@ func (h *colcaHook) setEngine(e *engine.Engine) {
 	h.mu.Unlock()
 }
 
+func (h *colcaHook) auditDenied(operation, reason, door string, entry *uns.Entry, metadata map[string]any) {
+	eng := h.engine()
+	if eng == nil {
+		return
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["door"] = door
+	d := engine.AuditDenial{Operation: operation, ReasonCode: reason, Metadata: metadata}
+	if entry != nil {
+		d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.Name, entry.ActorKind()
+	}
+	_ = eng.RecordDenial(d)
+}
+
 func (h *colcaHook) ID() string { return "colca" }
 
 func (h *colcaHook) Provides(b byte) bool {
@@ -137,28 +153,33 @@ func (h *colcaHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bo
 	if !ok || len(tc.ConnectionState().PeerCertificates) == 0 {
 		h.log.Warn("mqtt auth rejected: no client certificate", "user", user)
 		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthUnknownKey)
+		h.auditDenied("authenticate", metrics.AuthUnknownKey, metrics.DoorMQTT, nil, nil)
 		return false
 	}
 	pub, err := identity.PeerPubHex(tc.ConnectionState().PeerCertificates[0].Raw)
 	if err != nil {
 		h.log.Warn("mqtt auth rejected: unusable client certificate", "user", user, "err", err)
 		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthUnknownKey)
+		h.auditDenied("authenticate", metrics.AuthUnknownKey, metrics.DoorMQTT, nil, nil)
 		return false
 	}
 	entry, ok := h.reg.ByPubkey(pub)
 	if !ok {
 		h.log.Warn("mqtt auth rejected: key not enrolled", "user", user)
 		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthUnknownKey)
+		h.auditDenied("authenticate", metrics.AuthUnknownKey, metrics.DoorMQTT, nil, nil)
 		return false
 	}
 	if !entry.MayUseDoor(uns.DoorMQTT) {
 		h.log.Warn("mqtt auth rejected: kind may not use this door", "user", user, "kind", entry.Kind)
 		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthKind)
+		h.auditDenied("authenticate", metrics.AuthKind, metrics.DoorMQTT, entry, nil)
 		return false
 	}
 	if user != entry.ULID {
 		h.log.Warn("mqtt auth rejected: username != enrolled ulid", "user", user, "ulid", entry.ULID)
 		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthUsernameMismatch)
+		h.auditDenied("authenticate", metrics.AuthUsernameMismatch, metrics.DoorMQTT, entry, nil)
 		return false
 	}
 	h.log.Debug("mqtt client authenticated", "ulid", entry.ULID)
@@ -181,6 +202,8 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 	if !ok || !uns.Authorize(h.scope(), entry, uns.ActSub, topic) {
 		h.log.Warn("mqtt subscribe denied", "ulid", string(cl.Properties.Username), "filter", topic)
 		h.metrics.ACLDeny(metrics.ACLSub)
+		h.auditDenied("read", "subscribe_denied", metrics.DoorMQTT, entry,
+			map[string]any{"filter": topic})
 		return false
 	}
 	return true
@@ -336,7 +359,7 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		if actor == "" {
 			actor = s.sub
 		}
-		res, err := eng.IngestHumanAs(s.entry, actor, pk.TopicName, pk.Payload)
+		res, err := eng.IngestHumanAttributed(s.entry, actor, pk.TopicName, pk.Payload)
 		if err != nil {
 			h.log.Warn("human publish rejected", "sub", s.sub, "topic", pk.TopicName, "err", err)
 			return pk, rejectCode(cl, err)

@@ -17,11 +17,8 @@
 //
 // Configuration is environment only:
 //
-//	COLCA_URL         node's API base URL                (default https://colca:8080)
-//	COLCA_TOKEN       that node's admin token            (default empty: local door)
+//	COLCA_URL         node's local API base URL          (default http://colca)
 //	COLCA_SERVICE     service name for the local door    (default historian)
-//	COLCA_CA_FILE     CA bundle trusted for that node    (default: system roots)
-//	COLCA_INSECURE    skip node TLS verification         (default false; dev only)
 //	DATABASE_URL      Postgres/Timescale DSN             (required)
 //	DB_MAX_CONNS      pool size                          (default 4)
 //	FETCH_MAX         records per page                   (default 500)
@@ -31,8 +28,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -49,10 +44,7 @@ import (
 
 type config struct {
 	colcaURL     string
-	colcaToken   string
 	colcaService string
-	caFile       string
-	insecure     bool
 	dsn          string
 	maxConns     int32
 	fetchMax     int
@@ -72,12 +64,6 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	httpClient, err := nodeHTTP(cfg)
-	if err != nil {
-		log.Error("node TLS", "err", err)
-		os.Exit(2)
-	}
 
 	pool, err := historian.Open(ctx, cfg.dsn, cfg.maxConns)
 	if err != nil {
@@ -99,9 +85,7 @@ func main() {
 	bridge := &historian.Bridge{
 		Door: &door.Client{
 			BaseURL: cfg.colcaURL,
-			Token:   cfg.colcaToken,
 			Service: cfg.colcaService,
-			HTTP:    httpClient,
 		},
 		Store:     sink,
 		Log:       log,
@@ -142,11 +126,8 @@ func ensureSchema(ctx context.Context, sink *historian.Sink, log *slog.Logger,
 
 func load() (config, error) {
 	cfg := config{
-		colcaURL:     env("COLCA_URL", "https://colca:8080"),
-		colcaToken:   os.Getenv("COLCA_TOKEN"),
+		colcaURL:     env("COLCA_URL", "http://colca"),
 		colcaService: env("COLCA_SERVICE", "historian"),
-		caFile:       os.Getenv("COLCA_CA_FILE"),
-		insecure:     env("COLCA_INSECURE", "false") == "true",
 		dsn:          os.Getenv("DATABASE_URL"),
 		httpAddr:     env("HTTP_ADDR", ":9091"),
 	}
@@ -173,30 +154,6 @@ func intEnv(key string, fallback int) int {
 		}
 	}
 	return fallback
-}
-
-// nodeHTTP trusts the node the way the operator configured it: a CA bundle, the
-// system roots, or (dev only) nothing at all. A node serves its own self-signed
-// certificate unless one was supplied, which is why the bundle is a knob.
-func nodeHTTP(cfg config) (*http.Client, error) {
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	if cfg.insecure {
-		tlsCfg.InsecureSkipVerify = true
-	} else if cfg.caFile != "" {
-		pem, err := os.ReadFile(cfg.caFile)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", cfg.caFile, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("%s contains no certificates", cfg.caFile)
-		}
-		tlsCfg.RootCAs = pool
-	}
-	return &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
-	}, nil
 }
 
 // serveObservability exposes liveness and the one number that matters

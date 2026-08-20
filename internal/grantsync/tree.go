@@ -117,11 +117,14 @@ func ParseKV(entries []KVEntry) TreeView {
 type NodeClient struct {
 	BaseURL string
 	Token   string
+	Service string
 	HTTP    *http.Client
 }
 
 func (c *NodeClient) door() *door.Client {
-	return &door.Client{BaseURL: c.BaseURL, Token: c.Token, HTTP: c.HTTP}
+	return &door.Client{
+		BaseURL: c.BaseURL, Token: c.Token, Service: c.Service, HTTP: c.HTTP,
+	}
 }
 
 func (c *NodeClient) client() *http.Client {
@@ -140,7 +143,12 @@ func (c *NodeClient) Tree(ctx context.Context) (TreeView, error) {
 	if err != nil {
 		return TreeView{}, err
 	}
-	req.Header.Set("X-Colca-Token", c.Token)
+	if c.Token != "" {
+		req.Header.Set("X-Colca-Token", c.Token)
+	}
+	if c.Service != "" {
+		req.Header.Set("X-Colca-Service", c.Service)
+	}
 	resp, err := c.client().Do(req)
 	if err != nil {
 		return TreeView{}, fmt.Errorf("reading %s/kv: %w", c.BaseURL, err)
@@ -168,8 +176,7 @@ func (c *NodeClient) ULID(ctx context.Context) (string, error) {
 	return c.door().ULID(ctx)
 }
 
-// Publish posts one record through the node's admin publish door — the same
-// door a human in a UI would use.
+// Publish posts one record through the configured node door.
 func (c *NodeClient) Publish(ctx context.Context, topic string, payload any) error {
 	return c.door().Publish(ctx, topic, payload)
 }

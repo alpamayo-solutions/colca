@@ -114,20 +114,20 @@ var aclActions = []string{ACLSub, ACLRead}
 // the /debug/state route enumerates).
 // streams is every persistent stream — what has an offset, live bytes and an
 // ingest count.
-var streams = []string{"metrics", "entities", "commands", "definitions"}
+var streams = []string{"metrics", "entities", "commands", "definitions", "audit"}
 
 // uplinkStreams is the subset that RISES. `definitions` is absent because they
 // descend and never rise (definition-stream design §4): a "last uplink success"
 // gauge for a stream the uplink never touches would sit at zero forever and read
 // exactly like a broken uplink.
-var uplinkStreams = []string{"metrics", "entities", "commands"}
+var uplinkStreams = []string{"metrics", "entities", "commands", "audit"}
 
 // retentionStreams is the subset the retention POLICY applies to. `definitions`
 // is absent for the same reason it is absent from the pruner's own list
 // (definition-stream design §6): it is never pruned by age or size, so a
 // pressure or blocked-by-cursor gauge for it would report progress toward a
 // policy that does not exist.
-var retentionStreams = []string{"metrics", "entities", "commands"}
+var retentionStreams = []string{"metrics", "entities", "commands", "audit"}
 
 // gapSurfaces — the allowed `surface` label values of colca_gap_served_total
 // (design §8): `fetch` is GET /fetch (any stream), `downlink` is GET
@@ -189,6 +189,7 @@ type Metrics struct {
 	drainsCompleted      *prometheus.CounterVec // colca_drains_completed_total{outcome}
 	definitionsApplied   prometheus.Counter     // colca_definitions_applied_total
 	definitionsRejected  prometheus.Counter     // colca_definitions_rejected_total
+	auditWriteFailures   prometheus.Counter     // colca_audit_write_failures_total
 	drainsCompletedBy    map[string]prometheus.Counter
 
 	ingestBy        map[string]prometheus.Counter
@@ -349,6 +350,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_definitions_rejected_total",
 			Help: "Definitions the parent handed down that this node refused (bad grammar, wrong class, failed validation). Non-zero means policy or types are NOT arriving and the node's cursor is parked on the offending record — always worth an alert.",
 		}),
+		auditWriteFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_audit_write_failures_total",
+			Help: "Security audit events that could not be durably appended. The protected operation remains denied. Resets on restart.",
+		}),
 	}
 	m.ingestBy = counterChildren(m.ingest, streams)
 	m.rejectedBy = counterChildren(m.rejected, reasons)
@@ -434,10 +439,19 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied,
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
-		m.definitionsApplied, m.definitionsRejected,
+		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
 		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
 	return m
+}
+
+// AuditWriteFailure counts an internal security event that could not be
+// persisted. It is deliberately separate from rejected publishes: the audit
+// append is internal evidence, not another attempt at the protected action.
+func (m *Metrics) AuditWriteFailure() {
+	if m != nil {
+		m.auditWriteFailures.Inc()
+	}
 }
 
 // AuthReject counts one identity turned away at a door.

@@ -21,11 +21,9 @@
 //
 // Configuration is environment only:
 //
-//	COLCA_URL           root node's API base URL           (required, https://)
-//	COLCA_TOKEN         that node's admin token            (required)
+//	COLCA_URL           root node's local API base URL     (default http://colca)
+//	COLCA_SERVICE       local service name                 (default grantsync)
 //	COLCA_ROOT_ULID     the root's ULID                    (default: read from /healthz)
-//	COLCA_CA_FILE       CA bundle trusted for that node    (default: system roots)
-//	COLCA_INSECURE      skip node TLS verification         (default false; dev only)
 //	KC_URL              Keycloak base URL incl. /auth      (required)
 //	KC_REALM            realm                              (default colca)
 //	KC_CLIENT_ID        service account to read/write as   (default colca-authz)
@@ -40,8 +38,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -61,15 +57,13 @@ import (
 
 type config struct {
 	colcaURL      string
-	colcaToken    string
+	colcaService  string
 	rootULID      string
 	kcURL         string
 	kcRealm       string
 	kcClientID    string
 	kcSecret      string
 	kcAuthzClient string
-	caFile        string
-	insecure      bool
 	owner         string
 	interval      time.Duration
 	once          bool
@@ -82,11 +76,9 @@ type config struct {
 // is harder to diagnose than one that refuses to start and says why.
 func loadConfig(getenv func(string) string) (config, error) {
 	c := config{
-		colcaURL:      strings.TrimRight(getenv("COLCA_URL"), "/"),
-		colcaToken:    getenv("COLCA_TOKEN"),
+		colcaURL:      strings.TrimRight(or(getenv("COLCA_URL"), "http://colca"), "/"),
+		colcaService:  or(getenv("COLCA_SERVICE"), "grantsync"),
 		rootULID:      getenv("COLCA_ROOT_ULID"),
-		caFile:        getenv("COLCA_CA_FILE"),
-		insecure:      truthy(getenv("COLCA_INSECURE")),
 		kcURL:         strings.TrimRight(getenv("KC_URL"), "/"),
 		kcRealm:       or(getenv("KC_REALM"), "colca"),
 		kcClientID:    or(getenv("KC_CLIENT_ID"), "colca-authz"),
@@ -100,8 +92,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 
 	var missing []string
 	for name, value := range map[string]string{
-		"COLCA_URL":        c.colcaURL,
-		"COLCA_TOKEN":      c.colcaToken,
 		"KC_URL":           c.kcURL,
 		"KC_CLIENT_SECRET": c.kcSecret,
 		"OWNER":            c.owner,
@@ -163,12 +153,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	nodeHTTP, err := nodeTransport(cfg)
-	if err != nil {
-		log.Error("refusing to start", "error", err)
-		os.Exit(2)
+	node := &grantsync.NodeClient{
+		BaseURL: cfg.colcaURL,
+		Service: cfg.colcaService,
+		HTTP:    &http.Client{Timeout: 30 * time.Second},
 	}
-	node := &grantsync.NodeClient{BaseURL: cfg.colcaURL, Token: cfg.colcaToken, HTTP: nodeHTTP}
 	rootULID := cfg.rootULID
 	if rootULID == "" {
 		rootULID, err = node.ULID(ctx)
@@ -209,35 +198,6 @@ func main() {
 		"realm", cfg.kcRealm, "dry_run", cfg.dryRun)
 	syncer.Run(ctx, cfg.interval)
 	log.Info("stopped")
-}
-
-// nodeTransport builds the client used against the colca node.
-//
-// A node's API is mTLS-fronted and presents a certificate from the deployment's
-// own PKI, so trusting it means naming that CA. COLCA_INSECURE exists for the
-// demo world, where the CA is generated per run and there is nothing to pin —
-// it is a deliberate, named opt-out rather than a default, because a service
-// that skips verification silently is one nobody notices skipping it.
-func nodeTransport(cfg config) (*http.Client, error) {
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
-	switch {
-	case cfg.insecure:
-		tlsConfig.InsecureSkipVerify = true
-	case cfg.caFile != "":
-		pem, err := os.ReadFile(cfg.caFile)
-		if err != nil {
-			return nil, fmt.Errorf("COLCA_CA_FILE: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("COLCA_CA_FILE %s holds no usable certificate", cfg.caFile)
-		}
-		tlsConfig.RootCAs = pool
-	}
-	return &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsConfig},
-	}, nil
 }
 
 func serve(ctx context.Context, addr string, reg *prometheus.Registry, log *slog.Logger) {

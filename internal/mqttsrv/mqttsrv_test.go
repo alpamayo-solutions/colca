@@ -1010,7 +1010,7 @@ func TestNonUnsTopicStillDistributed(t *testing.T) {
 	w := newWorld(t)
 	// Baseline: enrollments already appended _EnrolledIdentity entities.
 	base := map[string]uint64{}
-	for _, stream := range []string{"metrics", "entities", "commands"} {
+	for _, stream := range []string{"metrics", "entities", "commands", "definitions", "audit"} {
 		base[stream] = w.st.NextOffset(stream)
 	}
 
@@ -1035,7 +1035,7 @@ func TestNonUnsTopicStillDistributed(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("non-UNS message never arrived")
 	}
-	for _, stream := range []string{"metrics", "entities", "commands"} {
+	for _, stream := range []string{"metrics", "entities", "commands", "definitions", "audit"} {
 		if off := w.st.NextOffset(stream); off != base[stream] {
 			t.Fatalf("%s next offset moved %d → %d (non-UNS must not persist)", stream, base[stream], off)
 		}

@@ -61,6 +61,18 @@ type Server struct {
 	ln   net.Listener
 }
 
+func (s *Server) auditDenied(operation, reason string, entry *uns.Entry, metadata map[string]any) {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["door"] = metrics.DoorRepl
+	d := engine.AuditDenial{Operation: operation, ReasonCode: reason, Metadata: metadata}
+	if entry != nil {
+		d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.Name, entry.ActorKind()
+	}
+	_ = s.eng.RecordDenial(d)
+}
+
 // NewServer builds a replication server. m may be nil (unit tests and any
 // caller that does not care about metrics).
 func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, reg *registry.Manager, m *metrics.Metrics) (*Server, error) {
@@ -81,25 +93,30 @@ func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, re
 func (s *Server) childFromReq(r *http.Request) (*uns.Entry, string, error) {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
+		s.auditDenied("authenticate", metrics.AuthUnknownKey, nil, map[string]any{"route": r.URL.Path})
 		return nil, "", fmt.Errorf("no client certificate")
 	}
 	pub, err := identity.PeerPubHex(r.TLS.PeerCertificates[0].Raw)
 	if err != nil {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
+		s.auditDenied("authenticate", metrics.AuthUnknownKey, nil, map[string]any{"route": r.URL.Path})
 		return nil, "", err
 	}
 	entry, ok := s.reg.ByPubkey(pub)
 	if !ok {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
+		s.auditDenied("authenticate", metrics.AuthUnknownKey, nil, map[string]any{"route": r.URL.Path})
 		return nil, "", fmt.Errorf("client key %s not enrolled at this node", short(pub))
 	}
 	if !entry.MayUseDoor(uns.DoorRepl) {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthKind)
+		s.auditDenied("authenticate", metrics.AuthKind, entry, map[string]any{"route": r.URL.Path})
 		return nil, "", fmt.Errorf("identity %s is kind %q — the repl door is for nodes", entry.ULID, entry.Kind)
 	}
 	mount, placed := s.eng.Elements().PathOf(entry.Element)
 	if !placed {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthKind)
+		s.auditDenied("authenticate", metrics.AuthKind, entry, map[string]any{"route": r.URL.Path})
 		return nil, "", fmt.Errorf("identity %s binds to element %s, which is not placed at this node",
 			entry.ULID, entry.Element)
 	}
@@ -128,7 +145,7 @@ func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter 
 	for _, rec := range recs {
 		out = append(out, wireRec{
 			O: rec.Offset, T: rec.Topic, P: rec.Payload, TS: rec.TS,
-			WB: rec.WrittenBy, AU: rec.AsUser,
+			WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind,
 		})
 	}
 	resp["definitions"], resp["def_next"] = out, next
@@ -207,13 +224,15 @@ func (s *Server) Stop() {
 }
 
 type wireRec struct {
-	O  uint64 `json:"o"`
-	OO uint64 `json:"oo,omitempty"`
-	T  string `json:"t"`
-	P  []byte `json:"p"`
-	TS int64  `json:"ts"`
-	WB string `json:"wb,omitempty"`
-	AU string `json:"au,omitempty"`
+	O   uint64 `json:"o"`
+	OO  uint64 `json:"oo,omitempty"`
+	T   string `json:"t"`
+	P   []byte `json:"p"`
+	TS  int64  `json:"ts"`
+	WB  string `json:"wb,omitempty"`
+	AID string `json:"aid,omitempty"`
+	AL  string `json:"al,omitempty"`
+	AK  string `json:"ak,omitempty"`
 }
 
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
@@ -233,24 +252,47 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 
 	repl := make([]store.ReplRecord, 0, len(in.Records))
 	for _, rec := range in.Records {
+		childParsed, parseErr := uns.Parse(rec.T)
+		if parseErr != nil {
+			http.Error(w, parseErr.Error(), http.StatusBadRequest)
+			return
+		}
+		childClass := s.eng.ClassOf(childParsed.Contract)
+		// Direction and stream are properties of the child's record. In
+		// particular, _StreamGap names its physical stream in Path before any
+		// hierarchy mount is inserted.
+		if uns.IsKnown(childClass) && !uns.MatchesUplinkStream(childClass, childParsed, in.Stream) {
+			s.auditDenied("replicate", "direction_denied", child,
+				map[string]any{"route": r.URL.Path, "stream": in.Stream, "contract": childParsed.Contract})
+			http.Error(w, fmt.Sprintf("contract %s may not replicate upward on stream %s", childParsed.Contract, in.Stream), http.StatusForbidden)
+			return
+		}
 		topic := uns.MountInsert(rec.T, mount)
+		parsed, parseErr := uns.Parse(topic)
+		if parseErr != nil {
+			http.Error(w, parseErr.Error(), http.StatusBadRequest)
+			return
+		}
+		class := s.eng.ClassOf(parsed.Contract)
+		// During a rolling bundle update the parent may not know a new contract
+		// the child already routes. Preserve that record on the named stream;
+		// enforce direction and stream binding whenever this node does know the
+		// class. The bundle-skew test pins this forward-compatible handoff.
 		rr := store.ReplRecord{
 			ChildOffset: rec.O, OriginOffset: rec.OO,
 			Topic: topic, Payload: rec.P, TS: rec.TS,
-			WrittenBy: rec.WB, AsUser: rec.AU,
+			WrittenBy: rec.WB, ActorID: rec.AID,
+			ActorLabel: rec.AL, ActorKind: rec.AK,
 		}
-		if p, err := uns.Parse(topic); err == nil {
-			// Route by the ENGINE authority (bundle-aware): a bundle-declared
-			// data/entity contract must KV-project here like at any door.
-			cl := s.eng.ClassOf(p.Contract)
-			if uns.IsOwnedState(cl) {
-				rr.KVPath, rr.KVNode = p.Path, p.NodeID
-				// A replicated tombstone retires the path here too (retention
-				// design §7.1): the empty payload is the wire truth, derived
-				// exactly like the engine derives it on first ingest, so every
-				// ancestor's KV + retained set converge on the same fact.
-				rr.Delete = len(rec.P) == 0
-			}
+		// Route by the ENGINE authority (bundle-aware): a bundle-declared
+		// data/entity contract must KV-project here like at any door.
+		if uns.IsOwnedState(class) {
+			rr.KVPath, rr.KVNode = parsed.Path, parsed.NodeID
+			// A replicated tombstone retires the path here too (retention
+			// design §7.1): the empty payload is the wire truth, derived
+			// exactly like the engine derives it on first ingest, so every
+			// ancestor's KV + retained set converge on the same fact.
+			rr.Delete = len(rec.P) == 0
 		}
 		repl = append(repl, rr)
 	}
@@ -372,7 +414,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 				}
 				out = append(out, wireRec{
 					O: rec.Offset, T: stripped, P: rec.Payload, TS: rec.TS,
-					WB: rec.WrittenBy, AU: rec.AsUser,
+					WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind,
 				})
 			}
 			// now_ms is stamped HERE, at response-write time — after the long

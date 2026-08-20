@@ -226,6 +226,7 @@ func TestRetentionDefaultsWhenAbsent(t *testing.T) {
 		"metrics":  336 * time.Hour,
 		"entities": 8760 * time.Hour,
 		"commands": 2160 * time.Hour,
+		"audit":    8760 * time.Hour,
 	}
 	for stream, wantAge := range cases {
 		eff := c.Retention.EffectiveStream(stream)

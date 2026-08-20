@@ -31,6 +31,7 @@ func TestParseAndClass(t *testing.T) {
 		"_AnnotationType":     {ClassDefinition, "definitions"},
 		"_Interface":          {ClassDefinition, "definitions"},
 		"_ExternalSystem":     {ClassDefinition, "definitions"},
+		"_AuditEvent":         {ClassAudit, "audit"},
 		// _StreamGap (design §6.4) is its own class. StreamFor deliberately
 		// answers "" for it — unlike every other class it has no single fixed
 		// stream, it targets whichever stream it describes (Parsed.Path, see
@@ -98,7 +99,7 @@ func TestTimeSyncTopicShape(t *testing.T) {
 // pruning node, ordinary uns grammar" — no Parse special case needed, and the
 // stream the marker describes is exactly Parsed.Path.
 func TestStreamGapTargetsDescribedStream(t *testing.T) {
-	for _, stream := range []string{"metrics", "entities", "commands"} {
+	for _, stream := range []string{"metrics", "entities", "commands", "audit"} {
 		topic := "colca/v1/_StreamGap/n-edge1/" + stream
 		p, err := Parse(topic)
 		if err != nil {
@@ -110,6 +111,25 @@ func TestStreamGapTargetsDescribedStream(t *testing.T) {
 		if ClassOf(p.Contract) != ClassGap {
 			t.Fatalf("%s: class = %v, want ClassGap", topic, ClassOf(p.Contract))
 		}
+	}
+}
+
+func TestAuditEventIsAnUpwardAppendOnlyEvent(t *testing.T) {
+	if !IsAudit(ClassOf("_AuditEvent")) {
+		t.Fatal("_AuditEvent must have the audit domain class")
+	}
+	if IsState(ClassAudit) || IsOwnedState(ClassAudit) || IsDefinition(ClassAudit) || IsCommand(ClassAudit) {
+		t.Fatal("audit must be an append-only event, not state or a downward command/definition")
+	}
+	if got := StreamFor(ClassAudit); got != "audit" {
+		t.Fatalf("audit stream = %q", got)
+	}
+	if err := Validate("_AuditEvent", nil); err == nil {
+		t.Fatal("an audit event cannot be tombstoned")
+	}
+	payload := []byte(`{"event_id":"evt-1","source":"api","action":"authorize","outcome":"denied","actor_kind":"human","occurred_at":1}`)
+	if err := Validate("_AuditEvent", payload); err != nil {
+		t.Fatalf("valid audit event rejected: %v", err)
 	}
 }
 

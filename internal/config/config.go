@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-
 	"gopkg.in/yaml.v3"
 )
 
@@ -243,7 +242,7 @@ type StreamRetention struct {
 }
 
 // Retention is the retention: block (design §3.1). Streams is keyed by
-// stream name (metrics/entities/commands — the only names uns.StreamFor ever
+// stream name (metrics/entities/commands/audit — the retained event streams
 // produces); a missing entry gets the full default row.
 //
 // Interval is a pointer because absent and explicit-0 are NOT the same
@@ -278,6 +277,7 @@ var defaultStreamMaxAge = map[string]time.Duration{
 	"metrics":  336 * time.Hour,  // 14 days
 	"entities": 8760 * time.Hour, // 365 days
 	"commands": 2160 * time.Hour, // 90 days
+	"audit":    8760 * time.Hour, // 365 days
 }
 
 // knownStreams are the only stream names the system ever produces
@@ -285,7 +285,7 @@ var defaultStreamMaxAge = map[string]time.Duration{
 // set can never match a real stream, so it is rejected as a config error
 // rather than silently doing nothing (design §3.2: per-stream, not per-path,
 // retention over a closed set of streams).
-var knownStreams = map[string]bool{"metrics": true, "entities": true, "commands": true}
+var knownStreams = map[string]bool{"metrics": true, "entities": true, "commands": true, "audit": true}
 
 // EffectiveInterval returns the pruner cadence: the §3.1 default (5m) when
 // Interval is absent (nil), or the configured value — including an explicit
@@ -453,7 +453,7 @@ func (r Retention) validate() error {
 	}
 	for name, s := range r.Streams {
 		if !knownStreams[name] {
-			return fmt.Errorf("config: retention.streams: unknown stream %q, want one of metrics, entities, commands", name)
+			return fmt.Errorf("config: retention.streams: unknown stream %q, want one of metrics, entities, commands, audit", name)
 		}
 		if time.Duration(s.MaxAge) < 0 {
 			return fmt.Errorf("config: retention.streams.%s.max_age must not be negative, got %s", name, time.Duration(s.MaxAge))

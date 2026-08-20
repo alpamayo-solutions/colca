@@ -65,8 +65,11 @@ func TestUnrelatedContractsAndJunkTopicsAreIgnored(t *testing.T) {
 
 func TestTreeReadsBothProjectionsFromOneCall(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Colca-Token"); got != "tok" {
-			t.Errorf("token header was %q", got)
+		if got := r.Header.Get("X-Colca-Service"); got != "grantsync" {
+			t.Errorf("service header was %q", got)
+		}
+		if got := r.Header.Get("X-Colca-Token"); got != "" {
+			t.Errorf("local tree read carried token %q", got)
 		}
 		_, _ = w.Write([]byte(`{"entries":[
 			{"topic":"colca/v1/_SystemElement/01HROOT/site1","node_id":"01HROOT","payload":{"id":"01HSITE1"}},
@@ -75,7 +78,7 @@ func TestTreeReadsBothProjectionsFromOneCall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	view, err := (&NodeClient{BaseURL: srv.URL, Token: "tok"}).Tree(context.Background())
+	view, err := (&NodeClient{BaseURL: srv.URL, Service: "grantsync"}).Tree(context.Background())
 	if err != nil {
 		t.Fatalf("Tree: %v", err)
 	}
@@ -99,7 +102,7 @@ func TestTreeFailsLoudOnAnErrorStatusThatParsesAsAnEmptyTree(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := (&NodeClient{BaseURL: srv.URL, Token: "t"}).Tree(context.Background()); err == nil {
+	if _, err := (&NodeClient{BaseURL: srv.URL, Service: "grantsync"}).Tree(context.Background()); err == nil {
 		t.Fatal("a 503 with a parseable body returned no error — it would look like an empty tree")
 	}
 }
@@ -110,7 +113,7 @@ func TestTreeFailsLoudOnAnUnreadableBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := (&NodeClient{BaseURL: srv.URL, Token: "t"}).Tree(context.Background()); err == nil {
+	if _, err := (&NodeClient{BaseURL: srv.URL, Service: "grantsync"}).Tree(context.Background()); err == nil {
 		t.Fatal("unparseable body returned no error")
 	}
 }
@@ -124,7 +127,7 @@ func TestPublishPostsTheEnvelopeAndSurfacesRefusals(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := (&NodeClient{BaseURL: srv.URL, Token: "t"}).Publish(
+	err := (&NodeClient{BaseURL: srv.URL, Service: "grantsync"}).Publish(
 		context.Background(), "colca/v1/_CmdConfigure/01HROOT/definition/upsert",
 		map[string]any{"correlation_id": "x"})
 	if err == nil {
@@ -141,7 +144,7 @@ func TestULIDIsReadFromHealthz(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := (&NodeClient{BaseURL: srv.URL}).ULID(context.Background())
+	got, err := (&NodeClient{BaseURL: srv.URL, Service: "grantsync"}).ULID(context.Background())
 	if err != nil || got != "01HROOT" {
 		t.Fatalf("ULID = %q, %v", got, err)
 	}

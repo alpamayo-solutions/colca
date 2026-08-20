@@ -33,6 +33,22 @@ func (e *Engine) reject(reason, format string, args ...any) (Result, error) {
 	return Result{}, &RejectError{Reason: reason, Err: fmt.Errorf(format, args...)}
 }
 
+// rejectDenied preserves an authorization denial before returning the same
+// typed error as reject. Audit persistence is best-effort only in the sense
+// that its failure cannot turn the protected operation into an allow.
+func (e *Engine) rejectDenied(reason string, actor Attribution, operation string, p *uns.Parsed, format string, args ...any) (Result, error) {
+	d := AuditDenial{
+		Operation: operation, ReasonCode: reason,
+		ActorID: actor.ActorID, ActorLabel: actor.ActorLabel, ActorKind: actor.ActorKind,
+	}
+	if p != nil {
+		d.EntityType, d.EntityID = p.Contract, p.Path
+		d.Metadata = map[string]any{"contract": p.Contract}
+	}
+	e.recordDenial(d)
+	return e.reject(reason, format, args...)
+}
+
 var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true, "_TimeSync": true}
 
 // SetContracts installs the loaded bundle table (node startup; nil = floor).

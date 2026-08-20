@@ -39,6 +39,7 @@ const (
 	ClassAck              // _Ack         write: owner, flows up
 	ClassGap              // _StreamGap   write: pruner only. Event, no KV, not retained (design §6.4).
 	ClassTimeSync         // _TimeSync    write: node-local-publish-only. Ephemeral: no stream, never persisted, never retained (time-sync design §2.2).
+	ClassAudit            // _AuditEvent  append-only security event, local/internal write, flows up
 )
 
 // Parsed is a decomposed UNS topic: colca/v1/_Contract/{node-id}/{path…}
@@ -103,6 +104,8 @@ func ClassOf(contract string) Class {
 		return ClassGap
 	case contract == "_TimeSync":
 		return ClassTimeSync
+	case contract == "_AuditEvent":
+		return ClassAudit
 	case strings.HasPrefix(contract, "_Cmd"):
 		return ClassCmd
 	}
@@ -164,6 +167,62 @@ func IsEntityState(c Class) bool { return c == ClassEntity }
 // the same thing at every node (definition-stream design §2).
 func IsDefinition(c Class) bool { return c == ClassDefinition }
 
+// IsAudit reports whether a record is a security event. Audit events are
+// append-only, never KV-projected, and rise without being filtered.
+func IsAudit(c Class) bool { return c == ClassAudit }
+
+// ValidActorKind is the stable attribution vocabulary shared by every record
+// envelope and `_AuditEvent` payload.
+func ValidActorKind(kind string) bool {
+	switch kind {
+	case "human", "service", "node", "system", "anonymous":
+		return true
+	default:
+		return false
+	}
+}
+
+// FlowsUp reports whether a child may offer the class to its parent. Commands
+// and definitions travel down; time sync never leaves the local bus.
+func FlowsUp(c Class) bool {
+	return c == ClassData || c == ClassEntity || c == ClassAck || c == ClassGap || c == ClassAudit
+}
+
+// MatchesUplinkStream binds an upward record's domain class to the physical
+// stream named by the replication request. Gap markers live in the stream
+// named by their topic path; every other upward class has one fixed stream.
+func MatchesUplinkStream(c Class, p Parsed, stream string) bool {
+	if !FlowsUp(c) {
+		return false
+	}
+	if c == ClassGap {
+		return p.Path == stream
+	}
+	return StreamFor(c) == stream
+}
+
+// ValidateAuditTopic pins the append-only event identity to the canonical
+// `_colca/audit/{event-id}` path at its authoring node.
+func ValidateAuditTopic(p Parsed, payload []byte) error {
+	if p.Contract != "_AuditEvent" {
+		return fmt.Errorf("audit topic validator received %s", p.Contract)
+	}
+	var value struct {
+		EventID string `json:"event_id"`
+	}
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return fmt.Errorf("_AuditEvent: payload is not valid JSON: %w", err)
+	}
+	if value.EventID == "" {
+		return fmt.Errorf("_AuditEvent: field %q must be a non-empty string", "event_id")
+	}
+	want := "_colca/audit/" + value.EventID
+	if p.Path != want {
+		return fmt.Errorf("_AuditEvent path %q does not name event_id %q", p.Path, value.EventID)
+	}
+	return nil
+}
+
 // NeedsStateRefresh reports whether the pruner must re-append a class's KV
 // entries to keep them alive across a retention boundary (retention §6.5).
 //
@@ -193,6 +252,8 @@ func ClassFromManifest(name string) (Class, bool) {
 		return ClassCmd, true
 	case "ack":
 		return ClassAck, true
+	case "audit":
+		return ClassAudit, true
 	}
 	return ClassNone, false
 }
@@ -215,6 +276,8 @@ func StreamFor(c Class) string {
 		return "definitions"
 	case ClassCmd, ClassAck:
 		return "commands"
+	case ClassAudit:
+		return "audit"
 	case ClassGap:
 		return ""
 	case ClassTimeSync:
@@ -306,6 +369,18 @@ func Validate(contract string, payload []byte) error {
 		}
 		return nil
 	}
+	reqOneOf := func(k string, allowed ...string) error {
+		v, ok := m[k].(string)
+		if !ok || v == "" {
+			return fmt.Errorf("%s: field %q must be a non-empty string", contract, k)
+		}
+		for _, candidate := range allowed {
+			if v == candidate {
+				return nil
+			}
+		}
+		return fmt.Errorf("%s: field %q has unsupported value %q", contract, k, v)
+	}
 	switch {
 	case contract == "_Metric":
 		return reqNum("v")
@@ -314,6 +389,48 @@ func Validate(contract string, payload []byte) error {
 			return err
 		}
 		return reqNum("result_code")
+	case contract == "_AuditEvent":
+		if err := reqStr("event_id"); err != nil {
+			return err
+		}
+		if err := reqOneOf("source", "colca", "api", "keycloak", "projector", "node_manager"); err != nil {
+			return err
+		}
+		if err := reqOneOf("action", "sign_in", "sign_out", "authorize", "identity_admin", "credential_admin", "execute", "rebuild", "restore", "security_config"); err != nil {
+			return err
+		}
+		if err := reqOneOf("outcome", "success", "failure", "denied"); err != nil {
+			return err
+		}
+		if err := reqOneOf("actor_kind", "human", "service", "node", "system", "anonymous"); err != nil {
+			return err
+		}
+		if err := reqNum("occurred_at"); err != nil {
+			return err
+		}
+		if raw, exists := m["metadata"]; exists {
+			metadata, ok := raw.(map[string]any)
+			if !ok {
+				return fmt.Errorf("%s: field %q must be an object", contract, "metadata")
+			}
+			for key, value := range metadata {
+				switch value.(type) {
+				case nil, string, float64, bool:
+					// Safe scalar; source-specific allow-lists are producer-side.
+				case []any:
+					for _, item := range value.([]any) {
+						switch item.(type) {
+						case nil, string, float64, bool:
+						default:
+							return fmt.Errorf("%s: metadata %q contains a nested value", contract, key)
+						}
+					}
+				default:
+					return fmt.Errorf("%s: metadata %q must be a scalar or scalar array", contract, key)
+				}
+			}
+		}
+		return nil
 	case contract == "_EnrolledIdentity":
 		// A registry entry names itself by the enrolled identity.
 		return reqStr("ulid")

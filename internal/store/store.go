@@ -17,15 +17,17 @@ import (
 )
 
 // streams is the fixed set of streams a store maintains offsets for.
-var streams = []string{"metrics", "entities", "commands", "definitions"}
+var streams = []string{"metrics", "entities", "commands", "definitions", "audit"}
 
 type Record struct {
 	Topic        string `json:"t"`
 	Payload      []byte `json:"p"`
 	TS           int64  `json:"ts"`
 	WrittenBy    string `json:"wb,omitempty"`
-	AsUser       string `json:"au,omitempty"`
 	OriginOffset uint64 `json:"oo,omitempty"`
+	ActorID      string `json:"aid,omitempty"`
+	ActorLabel   string `json:"al,omitempty"`
+	ActorKind    string `json:"ak,omitempty"`
 	// optional KV projection written in the same atomic batch:
 	KVPath string `json:"-"` // hierarchy path (segments after contract, post-mount)
 	KVNode string `json:"-"` // node-id (level 4)
@@ -45,7 +47,9 @@ type StoredRecord struct {
 	Payload      []byte
 	TS           int64
 	WrittenBy    string
-	AsUser       string
+	ActorID      string
+	ActorLabel   string
+	ActorKind    string
 }
 
 type KVEntry struct {
@@ -162,8 +166,10 @@ type recEnc struct {
 	Payload      []byte `json:"p"`
 	TS           int64  `json:"ts"`
 	WrittenBy    string `json:"wb,omitempty"`
-	AsUser       string `json:"au,omitempty"`
 	OriginOffset uint64 `json:"oo,omitempty"`
+	ActorID      string `json:"aid,omitempty"`
+	ActorLabel   string `json:"al,omitempty"`
+	ActorKind    string `json:"ak,omitempty"`
 	// size is the encoded length of THIS record as stored, filled in by
 	// scanRecords. Never serialized — it is what the byte accounting needs and
 	// only the reader can know it.
@@ -191,7 +197,8 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 	}
 	val, err := json.Marshal(recEnc{
 		Topic: rec.Topic, Payload: rec.Payload, TS: rec.TS,
-		WrittenBy: rec.WrittenBy, AsUser: rec.AsUser, OriginOffset: originOffset,
+		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
+		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, OriginOffset: originOffset,
 	})
 	if err != nil {
 		return 0, err
@@ -352,7 +359,8 @@ func (s *Store) Read(stream string, from uint64, max int, filter func(string) bo
 		out = append(out, StoredRecord{
 			Offset: off, OriginOffset: originOffset(e.OriginOffset, off),
 			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
-			WrittenBy: e.WrittenBy, AsUser: e.AsUser,
+			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
+			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind,
 		})
 	}
 	return out, next, nil
@@ -545,7 +553,9 @@ type ReplRecord struct {
 	Payload      []byte `json:"p"`
 	TS           int64  `json:"ts"`
 	WrittenBy    string `json:"wb,omitempty"`
-	AsUser       string `json:"au,omitempty"`
+	ActorID      string `json:"aid,omitempty"`
+	ActorLabel   string `json:"al,omitempty"`
+	ActorKind    string `json:"ak,omitempty"`
 	KVPath       string `json:"kp,omitempty"`
 	KVNode       string `json:"kn,omitempty"`
 	// Delete mirrors Record.Delete (retention design §7.1): ApplyReplicated
@@ -588,7 +598,8 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 		}
 		n, err := addRecord(b, stream, off, Record{
 			Topic: r.Topic, Payload: r.Payload, TS: r.TS,
-			WrittenBy: r.WrittenBy, AsUser: r.AsUser,
+			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
 			OriginOffset: r.OriginOffset,
 			KVPath:       r.KVPath, KVNode: r.KVNode, Delete: r.Delete,
 		})

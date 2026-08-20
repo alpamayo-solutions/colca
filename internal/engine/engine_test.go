@@ -337,6 +337,76 @@ func TestAClientPublishesUnderTheNodesULID(t *testing.T) {
 	}
 }
 
+func TestOnlyLocalServicePublishesCanonicalAuditEvent(t *testing.T) {
+	e := newTestEngine(t, "n1")
+	payload := []byte(`{"event_id":"evt-1","source":"api","action":"authorize","outcome":"denied","actor_kind":"human","occurred_at":1}`)
+	topic := "colca/v1/_AuditEvent/n1/_colca/audit/evt-1"
+	res, err := e.IngestClient("01JSVC", topic, payload)
+	if err != nil {
+		t.Fatalf("local audit publish: %v", err)
+	}
+	if !res.Persisted || res.Stream != "audit" {
+		t.Fatalf("audit result = %+v", res)
+	}
+	if kv := e.Store().KVScan(""); len(kv) != 0 {
+		t.Fatalf("audit event reached KV: %+v", kv)
+	}
+
+	if _, err := e.IngestClient("01JSVC", "colca/v1/_AuditEvent/n1/_colca/audit/other", payload); err == nil {
+		t.Fatal("topic event id may not disagree with the payload")
+	}
+	if _, err := e.IngestAdmin(topic, payload); err == nil {
+		t.Fatal("admin-token door must not publish _AuditEvent")
+	}
+
+	machine := newEngine(t)
+	if _, err := machine.IngestClient("m1", "colca/v1/_AuditEvent/n-edge1/_colca/audit/evt-1", payload); err == nil {
+		t.Fatal("external machine door must not publish _AuditEvent")
+	}
+}
+
+func TestLocalConfigureAuthorityFollowsPlacement(t *testing.T) {
+	payload := []byte(`{"correlation_id":"c-local","expires_at":9999999999999}`)
+	topic := "colca/v1/_CmdConfigure/n-edge1/definition/upsert"
+
+	unplacedIDs := fakeIDs{entries: map[string]*uns.Entry{
+		"svc-api": {ULID: "svc-api", Kind: uns.KindLocal},
+	}}
+	unplaced := newEngineWithIDs(t, unplacedIDs)
+	unplaced.SetExecutor(&recordingExec{contract: "_CmdConfigure"})
+	res, err := unplaced.IngestClient("svc-api", topic, payload)
+	if err != nil {
+		t.Fatalf("unplaced local configure: %v", err)
+	}
+	if res.Command == nil {
+		t.Fatal("local configure executed without returning its command outcome")
+	}
+	if _, err := unplaced.IngestClient(
+		"svc-api", "colca/v1/_CmdAdmin/n-edge1/enroll", payload,
+	); err == nil {
+		t.Fatal("unplaced local service gained implicit _CmdAdmin")
+	}
+
+	placedIDs := fakeIDs{entries: map[string]*uns.Entry{
+		"svc-ui": {ULID: "svc-ui", Kind: uns.KindLocal, Element: "el-ui"},
+	}}
+	placed := newEngineWithIDs(t, placedIDs)
+	if _, err := placed.IngestAdmin(
+		"colca/v1/_SystemElement/n-edge1/ui", []byte(`{"id":"el-ui","name":"ui"}`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := placed.IngestClient("svc-ui", topic, payload); err == nil {
+		t.Fatal("placed local service configured without a cmd grant")
+	}
+	placedIDs.entries["svc-ui"].Grants = []string{"cmd:el-ui/#:configure"}
+	if _, err := placed.IngestClient(
+		"svc-ui", "colca/v1/_CmdConfigure/n-edge1/ui/signal/upsert", payload,
+	); err != nil {
+		t.Fatalf("placed local configure with covering grant: %v", err)
+	}
+}
+
 // Level 4 must name THIS node, whoever the publisher is.
 func TestLevel4MustBeThisNode(t *testing.T) {
 	e := newTestEngine(t, "n1")
@@ -477,7 +547,7 @@ func TestTimeSyncRejectedAtEveryIngestDoor(t *testing.T) {
 			t.Fatalf("human publish of %s must be rejected with a _TimeSync-specific error, got %v", topic, err)
 		}
 	}
-	for _, stream := range []string{"metrics", "entities", "commands"} {
+	for _, stream := range []string{"metrics", "entities", "commands", "definitions", "audit"} {
 		if off := e.Store().NextOffset(stream); off != 1 {
 			t.Fatalf("stream %s next offset = %d, want 1 (rejected _TimeSync must never persist)", stream, off)
 		}
@@ -654,7 +724,7 @@ func TestIngestHumanCommandsOnly(t *testing.T) {
 	// Data / entity / ack: rejected regardless of grants — there IS no grant
 	// that allows a human to write state.
 	before := map[string]uint64{}
-	for _, s := range []string{"metrics", "entities", "commands"} {
+	for _, s := range []string{"metrics", "entities", "commands", "audit"} {
 		before[s] = e.Store().NextOffset(s)
 	}
 	wide := humanEntry(t, "read:#", "cmd:#:admin", "admin:#")
@@ -874,7 +944,8 @@ func TestRejectedPublishDeliversNothing(t *testing.T) {
 
 // An identity with no write grant covering the topic — "hmi" holds only a
 // cmd grant — may connect and subscribe, but the engine refuses everything it
-// publishes, and nothing reaches the bus (auth §5, writeZones).
+// publishes. The rejected metric never reaches the bus; the security audit
+// event does, unretained (auth §5, writeZones).
 func TestClientWithNoWriteScopeMayNotPublish(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 	_, err := e.IngestClient("hmi", "colca/v1/_Metric/n-edge1/hmi/temp", []byte(`{"v":1}`))
@@ -884,8 +955,8 @@ func TestClientWithNoWriteScopeMayNotPublish(t *testing.T) {
 	if e.Store().NextOffset("metrics") != 1 {
 		t.Fatal("publish with no write scope must not be persisted")
 	}
-	if got := rec.got(); len(got) != 0 {
-		t.Fatalf("publish with no write scope must deliver nothing, got %+v", got)
+	if got := rec.got(); len(got) != 1 || !strings.Contains(got[0].Topic, "/_AuditEvent/") || got[0].Retain {
+		t.Fatalf("publish denial must deliver only one unretained audit event, got %+v", got)
 	}
 }
 

@@ -212,7 +212,8 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 
 	resp, out := req(t, admin, "POST", a.url+"/publish", "tok", map[string]any{
 		"topic": "colca/v1/_Metric/n-test/x", "payload": map[string]any{"v": 1.0},
-		"written_by": "api", "as_user": "anna@example.com",
+		"written_by": "api", "actor_id": "user-anna",
+		"actor_label": "anna@example.com", "actor_kind": "human",
 	})
 	if resp.StatusCode != 200 || out["stream"] != "metrics" {
 		t.Fatalf("%d %v", resp.StatusCode, out)
@@ -227,7 +228,8 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 	_, out = req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=c1&max=10", "tok", nil)
 	if recs := out["records"].([]any); len(recs) != 1 {
 		t.Fatalf("%v", out)
-	} else if rec := recs[0].(map[string]any); rec["written_by"] != "api" || rec["as_user"] != "anna@example.com" {
+	} else if rec := recs[0].(map[string]any); rec["written_by"] != "api" ||
+		rec["actor_id"] != "user-anna" || rec["actor_label"] != "anna@example.com" || rec["actor_kind"] != "human" {
 		t.Fatalf("attribution did not survive publish/fetch: %v", rec)
 	}
 	_, out = req(t, admin, "POST", a.url+"/ack", "tok", map[string]any{"cursor": "c1", "stream": "metrics", "offset": 1})
@@ -254,7 +256,7 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 	r2.Body.Close()
 }
 
-func TestLocalConfigureResponseNamesProducedStateOffset(t *testing.T) {
+func TestAdminConfigureResponseNamesProducedStateOffset(t *testing.T) {
 	a := newAPI(t)
 	a.eng.SetExecutor(engine.Executors(uns.NewConfigExec(a.eng.EntityStore(), a.reg, nil, nil, nil)))
 
@@ -544,7 +546,7 @@ func TestFetchWireShape(t *testing.T) {
 		t.Fatalf("%v", out)
 	}
 	rec := recs[0].(map[string]any)
-	for _, k := range []string{"offset", "origin_offset", "topic", "payload", "ts", "written_by", "as_user"} {
+	for _, k := range []string{"offset", "origin_offset", "topic", "payload", "ts", "written_by", "actor_id", "actor_label", "actor_kind"} {
 		if _, ok := rec[k]; !ok {
 			t.Fatalf("record missing %q: %v", k, rec)
 		}
@@ -591,8 +593,8 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		t.Fatal("ack must move")
 	}
 
-	surviving := `{"as_user":"","offset":4,"origin_offset":4,"payload":{"v":4},"topic":"` + topic + `","ts":4000,"written_by":""},` +
-		`{"as_user":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}`
+	surviving := `{"actor_id":"","actor_kind":"","actor_label":"","offset":4,"origin_offset":4,"payload":{"v":4},"topic":"` + topic + `","ts":4000,"written_by":""},` +
+		`{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}`
 
 	resp, body := raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
 	if resp.StatusCode != http.StatusOK {
@@ -627,7 +629,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		t.Fatalf("ack past the LWM must move the cursor: %v", out)
 	}
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
-	want = `{"next":6,"records":[{"as_user":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
+	want = `{"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
 	if body != want {
 		t.Fatalf("after ack past LWM the gap object must disappear:\n got %s\nwant %s", body, want)
 	}
@@ -857,8 +859,9 @@ func TestDebugStateFieldCorrectness(t *testing.T) {
 	}
 	// The fixture baseline itself is deterministic: one enrolled machine, which
 	// is two entity records — the element it binds to, then its _EnrolledIdentity.
-	if before["metrics"] != 1 || before["entities"] != 3 || before["commands"] != 1 {
-		t.Fatalf("fixture baseline offsets = %v, want metrics=1 entities=3 commands=1", before)
+	if before["metrics"] != 1 || before["entities"] != 3 || before["commands"] != 1 ||
+		before["definitions"] != 1 || before["audit"] != 1 {
+		t.Fatalf("fixture baseline offsets = %v, want all event streams enumerated", before)
 	}
 
 	if resp, pub := req(t, admin, "POST", a.url+"/publish", "tok", map[string]any{
@@ -869,7 +872,9 @@ func TestDebugStateFieldCorrectness(t *testing.T) {
 
 	_, out = req(t, admin, "GET", a.url+"/debug/state", "tok", nil)
 	streams := out["streams"].(map[string]any)
-	for stream, delta := range map[string]float64{"metrics": 1, "entities": 0, "commands": 0} {
+	for stream, delta := range map[string]float64{
+		"metrics": 1, "entities": 0, "commands": 0, "definitions": 0, "audit": 0,
+	} {
 		got := streams[stream].(map[string]any)["next_offset"].(float64)
 		if want := before[stream] + delta; got != want {
 			t.Fatalf("debug state %s.next_offset = %v, want %v", stream, got, want)
@@ -1242,6 +1247,7 @@ func TestLocalSelfReturnsTheMintedIdentityAndAuthoritativeMount(t *testing.T) {
 	var got struct {
 		ULID    string `json:"ulid"`
 		Name    string `json:"name"`
+		Node    string `json:"node"`
 		Element string `json:"element"`
 		Mount   string `json:"mount"`
 	}
@@ -1251,7 +1257,7 @@ func TestLocalSelfReturnsTheMintedIdentityAndAuthoritativeMount(t *testing.T) {
 	if got.ULID == "" || got.ULID == got.Name {
 		t.Fatalf("self-registration did not return a separately minted identity: %+v", got)
 	}
-	if got.Name != "connector-opcua" || got.Mount != "line1/press3" || got.Element == "" {
+	if got.Name != "connector-opcua" || got.Node != h.eng.NodeID() || got.Mount != "line1/press3" || got.Element == "" {
 		t.Fatalf("GET /self = %+v; want the named service at its declared mount", got)
 	}
 	entry, ok := h.reg.Get(got.ULID)
@@ -1279,6 +1285,43 @@ func TestLocalSelfRegistersAnUndeclaredServiceAtTheNode(t *testing.T) {
 	}
 	if got.ULID == "" || got.Element != "" || got.Mount != "" {
 		t.Fatalf("unplaced GET /self = %+v; want a minted identity bound to the node", got)
+	}
+}
+
+func TestLocalConfigureResponseNamesProducedStateOffset(t *testing.T) {
+	h := newLocalHandler(t)
+	body := []byte(`{
+		"topic":"colca/v1/_CmdConfigure/n-test/definition/upsert",
+		"payload":{
+			"correlation_id":"api-local-rw-1",
+			"expires_at":9999999999999,
+			"definitions":[{
+				"contract":"_ExternalSystem",
+				"definition":{"id":"ext-local-1","key":"tcdb","name":"TCDB","system_type":"database"}
+			}]
+		}
+	}`)
+	req := httptest.NewRequest("POST", "/publish", bytes.NewReader(body))
+	req.Header.Set("X-Colca-Service", "api")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("local publish = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	command, ok := out["command"].(map[string]any)
+	if !ok || command["result_code"].(float64) != 200 {
+		t.Fatalf("local response omitted command outcome: %v", out)
+	}
+	writes := command["state_writes"].([]any)
+	write := writes[0].(map[string]any)
+	if write["stream"] != "definitions" || write["offset"].(float64) == 0 {
+		t.Fatalf("local command outcome omitted produced state: %v", command)
 	}
 }
 

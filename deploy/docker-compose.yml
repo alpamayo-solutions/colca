@@ -226,12 +226,8 @@ services:
     profiles: ["grant-sync"]
     restart: unless-stopped
     environment:
-      # The node API is mTLS-fronted with the per-run CA gen-keys.sh mints, so
-      # there is nothing stable to pin in a demo world — hence the named
-      # opt-out rather than a CA file. A real deployment sets COLCA_CA_FILE.
-      COLCA_URL: https://global:443
-      COLCA_INSECURE: "true"
-      COLCA_TOKEN: demo-admin-token
+      COLCA_URL: http://global
+      COLCA_SERVICE: grantsync
       KC_URL: http://keycloak:8080
       KC_REALM: colca
       KC_CLIENT_SECRET: colca-authz-dev-secret

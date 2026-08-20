@@ -65,22 +65,26 @@ func (h *colcaHook) authenticateLocal(cl *mqtt.Client, pk packets.Packet) bool {
 	if name == "" {
 		h.log.Warn("local door rejected: no name given")
 		h.metrics.AuthReject(metrics.DoorLocal, metrics.AuthNoName)
+		h.auditDenied("authenticate", metrics.AuthNoName, metrics.DoorLocal, nil, nil)
 		return false
 	}
 	if e, ok := h.reg.Get(name); ok && !e.MayUseDoor(uns.DoorLocal) {
 		h.log.Warn("local door rejected: name collides with a keyed identity's ulid", "name", name, "kind", e.Kind)
 		h.metrics.AuthReject(metrics.DoorLocal, metrics.AuthKind)
+		h.auditDenied("authenticate", metrics.AuthKind, metrics.DoorLocal, e, nil)
 		return false
 	}
 	entry, err := h.reg.Register(name, mountDeclaration(pk))
 	if err != nil {
 		h.log.Warn("local door rejected: registration failed", "name", name, "err", err)
 		h.metrics.AuthReject(metrics.DoorLocal, metrics.AuthRegister)
+		h.auditDenied("authenticate", metrics.AuthRegister, metrics.DoorLocal, nil, nil)
 		return false
 	}
 	if !entry.MayUseDoor(uns.DoorLocal) {
 		h.log.Warn("local door rejected: name resolves to a keyed identity", "name", name, "ulid", entry.ULID, "kind", entry.Kind)
 		h.metrics.AuthReject(metrics.DoorLocal, metrics.AuthKind)
+		h.auditDenied("authenticate", metrics.AuthKind, metrics.DoorLocal, entry, nil)
 		return false
 	}
 	// mochi carries Username to OnPublish/OnACLCheck, and every later lookup is

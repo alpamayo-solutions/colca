@@ -88,7 +88,7 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 	for i, r := range recs {
 		wire[i] = wireRec{
 			O: r.ChildOffset, OO: r.OriginOffset, T: r.Topic, P: r.Payload, TS: r.TS,
-			WB: r.WrittenBy, AU: r.AsUser,
+			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind,
 		}
 	}
 	body, err := json.Marshal(map[string]any{"stream": stream, "records": wire})
@@ -124,7 +124,9 @@ type DownRec struct {
 	Payload      []byte
 	TS           int64
 	WrittenBy    string
-	AsUser       string
+	ActorID      string
+	ActorLabel   string
+	ActorKind    string
 }
 
 // downResult is one decoded downlink response. Definitions ride the same
@@ -234,13 +236,14 @@ func toDownRecs(in []wireRec) []DownRec {
 	for i, r := range in {
 		out[i] = DownRec{
 			ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS,
-			WrittenBy: r.WB, AsUser: r.AU,
+			WrittenBy: r.WB, ActorID: r.AID,
+			ActorLabel: r.AL, ActorKind: r.AK,
 		}
 	}
 	return out
 }
 
-// RunUplink pushes metrics+entities fully and only _Ack and _StreamGap from
+// RunUplink pushes metrics+entities+audit fully and only _Ack and _StreamGap from
 // commands, forever (until stop is closed). Commands flow down, acks flow up —
 // a command is never mirrored back to the node it came from; _StreamGap
 // markers must pass so a pruned commands stream stays honest upstream (spec
@@ -255,6 +258,7 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 	}{
 		{"metrics", nil},
 		{"entities", nil},
+		{"audit", nil},
 		// `definitions` is deliberately absent and must stay absent
 		// (definition-stream design §4): definitions descend. A child pushing
 		// them upward would let a leaf author policy for the whole tree.
@@ -299,7 +303,8 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 					batch[i] = store.ReplRecord{
 						ChildOffset: r.Offset, OriginOffset: r.OriginOffset,
 						Topic: r.Topic, Payload: r.Payload, TS: r.TS,
-						WrittenBy: r.WrittenBy, AsUser: r.AsUser,
+						WrittenBy: r.WrittenBy, ActorID: r.ActorID,
+						ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
 					}
 				}
 				_, nowMS, err := c.replicate(ctx, st.name, batch)
@@ -398,7 +403,8 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		}
 		for _, r := range recs {
 			if _, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
-				WrittenBy: r.WrittenBy, AsUser: r.AsUser,
+				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
+				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
 			}); err != nil {
 				c.log.Error("downlink ingest", "topic", r.Topic, "err", err)
 			}
@@ -421,7 +427,8 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res downResult) {
 	for _, r := range res.Definitions {
 		if _, err := eng.IngestDownlinkDefinitionAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
-			WrittenBy: r.WrittenBy, AsUser: r.AsUser,
+			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
 		}); err != nil {
 			c.log.Error("downlink definition not applied — leaving the cursor so it is offered again",
 				"topic", r.Topic, "err", err)

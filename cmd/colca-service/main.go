@@ -1,13 +1,12 @@
-// Command colca-service publishes one _ServiceDetails record using an already
-// provisioned machine identity. Enrollment and key creation remain explicit
-// operator actions; this process receives neither an admin token nor authority
-// to alter the registry.
+// Command colca-service publishes one _ServiceDetails record for a service
+// that cannot publish its own observed state. It uses Colca's deployment-local
+// HTTP door: the service name selects a stable registry entry and no key,
+// certificate, token, or enrollment step exists.
 package main
 
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,8 +15,6 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-
-	"github.com/alpamayo-solutions/colca/internal/identity"
 )
 
 type serviceDetails struct {
@@ -34,6 +31,14 @@ type serviceDetails struct {
 	ArchitectureMetadata map[string]any `json:"architecture_metadata"`
 }
 
+type localIdentity struct {
+	ULID    string `json:"ulid"`
+	Name    string `json:"name"`
+	Node    string `json:"node"`
+	Element string `json:"element"`
+	Mount   string `json:"mount"`
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "colca-service:", err)
@@ -46,8 +51,8 @@ func run() error {
 	if err := json.Unmarshal([]byte(os.Getenv("SERVICE_DETAILS_JSON")), &details); err != nil {
 		return fmt.Errorf("SERVICE_DETAILS_JSON: %w", err)
 	}
-	if details.ID == "" || details.Name == "" || details.ColcaNodeID == "" {
-		return fmt.Errorf("service id, name and colca_node_id are required")
+	if details.Name == "" || details.ServiceType == "" {
+		return fmt.Errorf("service name and service_type are required")
 	}
 	details.IsActive = true
 	if details.Hierarchy == nil {
@@ -60,44 +65,32 @@ func run() error {
 		details.ArchitectureMetadata = map[string]any{}
 	}
 
-	keyPath := os.Getenv("COLCA_SERVICE_KEY")
-	if keyPath == "" {
-		keyPath = "/identity/service.key"
-	}
-	id, err := identity.Load(keyPath)
-	if err != nil {
-		return fmt.Errorf("load provisioned identity: %w", err)
-	}
-	cert, err := id.SelfSignedCert(details.ID)
-	if err != nil {
-		return err
-	}
-	tlsConfig := &tls.Config{
-		Certificates:       []tls.Certificate{cert},
-		InsecureSkipVerify: true, // #nosec G402 -- node-local API may use its self-signed key container
-		MinVersion:         tls.VersionTLS13,
-	}
-	client := &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsConfig},
-	}
+	client := &http.Client{Timeout: 10 * time.Second}
 	baseURL := os.Getenv("COLCA_URL")
 	if baseURL == "" {
-		baseURL = "https://colca:8080"
+		baseURL = "http://colca"
 	}
-	mount := os.Getenv("COLCA_SERVICE_MOUNT")
-	if mount != "" {
-		mount += "/"
+	declaredMount := os.Getenv("COLCA_SERVICE_MOUNT")
+
+	identity, err := self(client, baseURL, details.Name, declaredMount)
+	if err != nil {
+		return fmt.Errorf("resolve local identity: %w", err)
 	}
-	// Local trust pins level 4 to the Colca node. The authenticated machine
-	// identity remains the payload id and immutable written_by attribution.
-	topic := "colca/v1/_ServiceDetails/" + details.ColcaNodeID + "/" + mount + "_service"
+	details.ID = identity.ULID
+	details.ColcaNodeID = identity.Node
+	details.SystemElementID = identity.Element
+	details.Hierarchy = splitMount(identity.Mount)
+	topicMount := identity.Mount
+	if topicMount != "" {
+		topicMount += "/"
+	}
+	topic := "colca/v1/_ServiceDetails/" + identity.Node + "/" + topicMount + "_service"
 	publish := func(payload any) error {
 		body := map[string]any{"topic": topic}
 		if payload != nil {
 			body["payload"] = payload
 		}
-		return postJSON(client, baseURL+"/publish", body)
+		return postJSON(client, baseURL+"/publish", details.Name, declaredMount, body)
 	}
 
 	deadline := time.Now().Add(2 * time.Minute)
@@ -130,12 +123,63 @@ func run() error {
 	}
 }
 
-func postJSON(client *http.Client, url string, body any) error {
+func self(client *http.Client, baseURL, name, mount string) (localIdentity, error) {
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/self", nil)
+	if err != nil {
+		return localIdentity{}, err
+	}
+	localHeaders(req, name, mount)
+	resp, err := client.Do(req)
+	if err != nil {
+		return localIdentity{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return localIdentity{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, body)
+	}
+	var identity localIdentity
+	if err := json.NewDecoder(resp.Body).Decode(&identity); err != nil {
+		return localIdentity{}, err
+	}
+	if identity.ULID == "" || identity.Node == "" || identity.Name != name {
+		return localIdentity{}, fmt.Errorf("invalid /self response for %q", name)
+	}
+	return identity, nil
+}
+
+func splitMount(mount string) []string {
+	if mount == "" {
+		return []string{}
+	}
+	var parts []string
+	for _, part := range bytes.Split([]byte(mount), []byte("/")) {
+		if len(part) > 0 {
+			parts = append(parts, string(part))
+		}
+	}
+	return parts
+}
+
+func localHeaders(req *http.Request, name, mount string) {
+	req.Header.Set("X-Colca-Service", name)
+	if mount != "" {
+		req.Header.Set("X-Colca-Mount", mount)
+	}
+}
+
+func postJSON(client *http.Client, url, name, mount string, body any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	resp, err := client.Post(url, "application/json", bytes.NewReader(encoded))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(encoded))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	localHeaders(req, name, mount)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

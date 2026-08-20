@@ -268,6 +268,24 @@ func TestConfigureIsAGrantableClass(t *testing.T) {
 	}
 }
 
+func TestOnlyUnplacedLocalServiceGetsImplicitConfigure(t *testing.T) {
+	unplaced := &Entry{ULID: "svc-api", Kind: KindLocal}
+	placed := &Entry{ULID: "svc-ui", Kind: KindLocal, Element: "01HLINE1"}
+	machine := &Entry{ULID: "m1", Kind: KindMachine, Element: "01HLINE1"}
+
+	if !unplaced.MayImplicitlyConfigure("_CmdConfigure") {
+		t.Fatal("an unplaced local service must be able to configure its node")
+	}
+	for name, entry := range map[string]*Entry{"placed local": placed, "machine": machine} {
+		if entry.MayImplicitlyConfigure("_CmdConfigure") {
+			t.Errorf("%s gained implicit configure", name)
+		}
+	}
+	if unplaced.MayImplicitlyConfigure("_CmdAdmin") || unplaced.MayImplicitlyConfigure("_CmdParam") {
+		t.Fatal("implicit local authority must not widen beyond _CmdConfigure")
+	}
+}
+
 func TestAuthorizeReadRecord(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -289,6 +307,22 @@ func TestAuthorizeReadRecord(t *testing.T) {
 		if got := Authorize(ns, c.e, ActReadRecord, c.topic); got != c.want {
 			t.Errorf("%s: Authorize(ReadRecord, %q) = %v, want %v", c.name, c.topic, got, c.want)
 		}
+	}
+}
+
+func TestUnplacedLocalServiceReadsAndSubscribesAcrossItsNode(t *testing.T) {
+	local := &Entry{ULID: "svc-projector", Kind: KindLocal, Name: "projector"}
+	topic := "colca/v1/_AuditEvent/n-edge1/_colca/audit/evt-1"
+	if !Authorize(ns, local, ActReadRecord, topic) {
+		t.Fatal("an unplaced local projector was denied node-scoped record reads")
+	}
+	if !Authorize(ns, local, ActSub, "colca/#") {
+		t.Fatal("an unplaced local subscriber was denied the node-wide bus")
+	}
+
+	machine := &Entry{ULID: "m1", Kind: KindMachine, Element: ""}
+	if Authorize(ns, machine, ActReadRecord, topic) || Authorize(ns, machine, ActSub, "colca/#") {
+		t.Fatal("the local-service rule widened an unplaced external identity")
 	}
 }
 

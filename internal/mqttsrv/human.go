@@ -89,6 +89,7 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 		// this is a programming error — but a door must fail closed, not open.
 		h.log.Error("human door with no verifier — rejecting", "listener", cl.Net.Listener)
 		h.metrics.AuthReject(metrics.DoorMQTT, tokenauth.ReasonBadToken)
+		h.auditDenied("authenticate", tokenauth.ReasonBadToken, metrics.DoorMQTT, nil, nil)
 		return false
 	}
 	user := string(pk.Connect.Username)
@@ -96,11 +97,13 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 	if err != nil {
 		h.log.Warn("human auth rejected", "user", user, "reason", reason, "err", err)
 		h.metrics.AuthReject(metrics.DoorMQTT, reason)
+		h.auditDenied("authenticate", reason, metrics.DoorMQTT, nil, nil)
 		return false
 	}
 	if user != v.Sub {
 		h.log.Warn("human auth rejected: username != sub", "user", user, "sub", v.Sub)
 		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthUsernameMismatch)
+		h.auditDenied("authenticate", metrics.AuthUsernameMismatch, metrics.DoorMQTT, v.Entry, nil)
 		return false
 	}
 	n := h.humans.put(cl.ID, humanSession{
@@ -124,6 +127,8 @@ func (h *colcaHook) humanACL(cl *mqtt.Client, topic string) bool {
 	if !uns.Authorize(h.scope(), s.entry, uns.ActSub, topic) {
 		h.log.Warn("human subscribe/read denied", "sub", s.sub, "filter", topic)
 		h.metrics.ACLDeny(metrics.ACLSub)
+		h.auditDenied("read", "subscribe_denied", metrics.DoorMQTT, s.entry,
+			map[string]any{"filter": topic})
 		return false
 	}
 	return true

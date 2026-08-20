@@ -47,7 +47,7 @@ func fakeNode(t *testing.T, kvBody string, kvStatus int) (*NodeClient, *publishe
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return &NodeClient{BaseURL: srv.URL, Token: "t"}, seen
+	return &NodeClient{BaseURL: srv.URL, Service: "grantsync"}, seen
 }
 
 const treeWithOneElement = `{"entries":[

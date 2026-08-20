@@ -96,6 +96,16 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		w.WriteHeader(code)
 		_ = json.NewEncoder(w).Encode(v)
 	}
+	auditDenied := func(r *http.Request, door, reason string, entry *uns.Entry) {
+		d := engine.AuditDenial{
+			Operation: "authenticate", ReasonCode: reason,
+			Metadata: map[string]any{"door": door, "route": r.URL.Path, "method": r.Method},
+		}
+		if entry != nil {
+			d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.Name, entry.ActorKind()
+		}
+		_ = e.RecordDenial(d)
+	}
 
 	var resolve func(r *http.Request) (caller, bool)
 	if local {
@@ -134,19 +144,23 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			name := r.Header.Get("X-Colca-Service")
 			if name == "" {
 				m.AuthReject(metrics.DoorLocal, metrics.AuthNoName)
+				auditDenied(r, metrics.DoorLocal, metrics.AuthNoName, nil)
 				return caller{}, false
 			}
 			if known, ok := reg.Get(name); ok && !known.MayUseDoor(uns.DoorLocal) {
 				m.AuthReject(metrics.DoorLocal, metrics.AuthKind)
+				auditDenied(r, metrics.DoorLocal, metrics.AuthKind, known)
 				return caller{}, false
 			}
 			entry, err := reg.Register(name, r.Header.Get("X-Colca-Mount"))
 			if err != nil {
 				m.AuthReject(metrics.DoorLocal, metrics.AuthRegister)
+				auditDenied(r, metrics.DoorLocal, metrics.AuthRegister, nil)
 				return caller{}, false
 			}
 			if !entry.MayUseDoor(uns.DoorLocal) {
 				m.AuthReject(metrics.DoorLocal, metrics.AuthKind)
+				auditDenied(r, metrics.DoorLocal, metrics.AuthKind, entry)
 				return caller{}, false
 			}
 			return caller{entry: entry}, true
@@ -162,15 +176,18 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				pub, err := identity.PeerPubHex(r.TLS.PeerCertificates[0].Raw)
 				if err != nil {
 					m.AuthReject(metrics.DoorHTTP, metrics.AuthUnknownKey)
+					auditDenied(r, metrics.DoorHTTP, metrics.AuthUnknownKey, nil)
 					return caller{}, false
 				}
 				entry, ok := reg.ByPubkey(pub)
 				if !ok {
 					m.AuthReject(metrics.DoorHTTP, metrics.AuthUnknownKey)
+					auditDenied(r, metrics.DoorHTTP, metrics.AuthUnknownKey, nil)
 					return caller{}, false
 				}
 				if !entry.MayUseDoor(uns.DoorHTTP) {
 					m.AuthReject(metrics.DoorHTTP, metrics.AuthKind)
+					auditDenied(r, metrics.DoorHTTP, metrics.AuthKind, entry)
 					return caller{}, false
 				}
 				return caller{entry: entry}, true
@@ -180,11 +197,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 				if ver == nil {
 					m.AuthReject(metrics.DoorHTTP, tokenauth.ReasonBadToken)
+					auditDenied(r, metrics.DoorHTTP, tokenauth.ReasonBadToken, nil)
 					return caller{}, false // no auth: block → the human world does not exist here
 				}
 				v, reason, err := ver.Verify(strings.TrimPrefix(h, "Bearer "))
 				if err != nil {
 					m.AuthReject(metrics.DoorHTTP, reason)
+					auditDenied(r, metrics.DoorHTTP, reason, nil)
 					return caller{}, false
 				}
 				return caller{entry: v.Entry, human: v}, true
@@ -193,6 +212,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				return caller{admin: true}, true
 			}
 			m.AuthReject(metrics.DoorHTTP, metrics.AuthToken)
+			auditDenied(r, metrics.DoorHTTP, metrics.AuthToken, nil)
 			return caller{}, false
 		}
 	}
@@ -214,6 +234,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	adminOnly := func(next http.HandlerFunc) http.HandlerFunc {
 		return auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 			if !c.admin && (c.human == nil || !c.human.Entry.IsAdmin()) {
+				auditDenied(r, metrics.DoorHTTP, "admin_denied", c.entry)
 				writeJSON(w, http.StatusForbidden, map[string]any{"error": "admin only (token or admin:# grant)"})
 				return
 			}
@@ -241,10 +262,12 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 
 	mux.HandleFunc("POST /publish", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
-			Topic     string          `json:"topic"`
-			Payload   json.RawMessage `json:"payload"`
-			WrittenBy string          `json:"written_by"`
-			AsUser    string          `json:"as_user"`
+			Topic      string          `json:"topic"`
+			Payload    json.RawMessage `json:"payload"`
+			WrittenBy  string          `json:"written_by"`
+			ActorID    string          `json:"actor_id"`
+			ActorLabel string          `json:"actor_label"`
+			ActorKind  string          `json:"actor_kind"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -261,18 +284,39 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			if writtenBy == "" {
 				writtenBy = "admin"
 			}
-			res, err = e.IngestAdminAs(in.Topic, in.Payload, writtenBy, in.AsUser)
+			actorID := in.ActorID
+			actorLabel := in.ActorLabel
+			actorKind := in.ActorKind
+			if actorID == "" {
+				actorID = writtenBy
+			}
+			if actorLabel == "" {
+				actorLabel = actorID
+			}
+			if actorKind == "" {
+				actorKind = "system"
+			}
+			res, err = e.IngestAdminAttributed(in.Topic, in.Payload, engine.Attribution{
+				WrittenBy: writtenBy, ActorID: actorID,
+				ActorLabel: actorLabel, ActorKind: actorKind,
+			})
 		case c.human != nil:
 			// Humans command and nothing else (§5.2) — IngestHuman enforces it.
 			actor := c.human.Username
 			if actor == "" {
 				actor = c.human.Sub
 			}
-			res, err = e.IngestHumanAs(c.entry, actor, in.Topic, in.Payload)
+			res, err = e.IngestHumanAttributed(c.entry, actor, in.Topic, in.Payload)
 		default:
 			// A machine publishing over HTTP is judged exactly like its MQTT
 			// publish: own zone, identity rule, cmd grants.
-			res, err = e.IngestClient(c.entry.ULID, in.Topic, in.Payload)
+			if local && in.ActorID != "" {
+				res, err = e.IngestLocalAttributed(c.entry.ULID, in.Topic, in.Payload, engine.Attribution{
+					ActorID: in.ActorID, ActorLabel: in.ActorLabel, ActorKind: in.ActorKind,
+				})
+			} else {
+				res, err = e.IngestClient(c.entry.ULID, in.Topic, in.Payload)
+			}
 		}
 		if err != nil {
 			// Grammar, unknown contract and payload validation are all
@@ -339,6 +383,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return c.admin || uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic)
 		}
 		if c.entry != nil && !ownsCursor(c.entry, cursor) {
+			_ = e.RecordDenial(engine.AuditDenial{Operation: "read", ReasonCode: "cursor_denied",
+				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": stream, "cursor": cursor}})
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: this identity's cursors are named " + c.entry.CursorPrefix() + "..."})
 			return
 		}
@@ -357,7 +404,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				"payload":       json.RawMessage(rec.Payload),
 				"ts":            rec.TS,
 				"written_by":    rec.WrittenBy,
-				"as_user":       rec.AsUser,
+				"actor_id":      rec.ActorID,
+				"actor_label":   rec.ActorLabel,
+				"actor_kind":    rec.ActorKind,
 			})
 		}
 		resp := map[string]any{"records": out, "next": next}
@@ -383,6 +432,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		if c.entry != nil && !ownsCursor(c.entry, in.Cursor) {
+			_ = e.RecordDenial(engine.AuditDenial{Operation: "ack", ReasonCode: "cursor_denied",
+				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream, "cursor": in.Cursor}})
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: this identity's cursors are named " + c.entry.CursorPrefix() + "..."})
 			return
 		}
@@ -441,6 +493,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusOK, map[string]any{
 				"ulid":    c.entry.ULID,
 				"name":    c.entry.Name,
+				"node":    e.NodeID(),
 				"element": c.entry.Element,
 				"mount":   mount,
 			})
@@ -532,7 +585,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 
 		mux.HandleFunc("GET /debug/state", adminOnly(func(w http.ResponseWriter, r *http.Request) {
 			streams := map[string]any{}
-			for _, st := range []string{"metrics", "entities", "commands"} {
+			for _, st := range []string{"metrics", "entities", "commands", "definitions", "audit"} {
 				streams[st] = map[string]any{"next_offset": e.Store().NextOffset(st)}
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"ulid": cfg.ULID, "streams": streams})

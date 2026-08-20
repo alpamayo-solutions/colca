@@ -13,7 +13,7 @@ func env(pairs map[string]string) func(string) string {
 func complete() map[string]string {
 	return map[string]string{
 		"COLCA_URL":        "http://global:8080",
-		"COLCA_TOKEN":      "tok",
+		"COLCA_SERVICE":    "grantsync",
 		"KC_URL":           "http://keycloak:8080",
 		"KC_CLIENT_SECRET": "secret",
 		"OWNER":            "dev-hub",
@@ -28,7 +28,7 @@ func TestConfigNamesEveryMissingVariableAtOnce(t *testing.T) {
 	if err == nil {
 		t.Fatal("started with nothing configured")
 	}
-	for _, want := range []string{"COLCA_TOKEN", "KC_URL", "KC_CLIENT_SECRET", "OWNER"} {
+	for _, want := range []string{"KC_URL", "KC_CLIENT_SECRET", "OWNER"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not name %s: %v", want, err)
 		}
@@ -39,7 +39,10 @@ func TestConfigNamesEveryMissingVariableAtOnce(t *testing.T) {
 }
 
 func TestConfigDefaults(t *testing.T) {
-	cfg, err := loadConfig(env(complete()))
+	vars := complete()
+	delete(vars, "COLCA_URL")
+	delete(vars, "COLCA_SERVICE")
+	cfg, err := loadConfig(env(vars))
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
@@ -54,6 +57,9 @@ func TestConfigDefaults(t *testing.T) {
 	}
 	if cfg.httpAddr != ":9090" {
 		t.Errorf("http addr default is %q", cfg.httpAddr)
+	}
+	if cfg.colcaURL != "http://colca" || cfg.colcaService != "grantsync" {
+		t.Errorf("local Colca defaults are %q / %q", cfg.colcaURL, cfg.colcaService)
 	}
 	if cfg.once || cfg.dryRun {
 		t.Errorf("once/dry-run should default off: %+v", cfg)
