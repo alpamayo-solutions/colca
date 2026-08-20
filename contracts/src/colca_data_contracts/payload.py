@@ -37,9 +37,26 @@ class ServiceType(BaseStrEnum):
     UNKNOWN = "unknown"
 
 
+class ConstantDataType(BaseStrEnum):
+    """Value types supported by first-class Colca configuration constants.
+
+    Constants intentionally use the App 2 editor contract's width-explicit
+    numeric names. Signal ``DataType`` keeps its existing ``int``/``float``
+    wire values because acquired telemetry and authored configuration are
+    separate contracts.
+    """
+
+    FLOAT64 = "float64"
+    INT64 = "int64"
+    BOOLEAN = "boolean"
+    STRING = "string"
+    DATETIME = "datetime"
+    JSON = "json"
+
+
 class CustomEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, ServiceType):
+        if isinstance(obj, (ServiceType, ConstantDataType)):
             return str(obj)
         if isinstance(obj, datetime.datetime):
             return obj.isoformat()
@@ -621,6 +638,60 @@ class Signal(Payload):
         return cls(**data)
 
 
+@dataclass
+class Constant(Payload):
+    """A typed, retained configuration value positioned in the namespace.
+
+    Topic: ``colca/v1/_Constant/{node-id}/{path…}``. A Constant is not a Signal:
+    it has no acquisition binding or metric topic, and its current value is the
+    value retained in this record.
+    """
+
+    id: str
+    name: str
+    data_type: ConstantDataType
+    value: Any
+    description: str = ""
+    system_element_id: Optional[str] = None
+    unit: Optional[str] = None
+    precision: Optional[int] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    @property
+    def __dict__(self):
+        data = super().__dict__.copy()
+        data["data_type"] = str(self.data_type)
+        return data
+
+    @classmethod
+    def decode(cls, json_str: str, timestamp: int) -> "Constant":
+        data = json.loads(json_str)
+        data["data_type"] = ConstantDataType(data["data_type"])
+        return cls(**data)
+
+
+@dataclass
+class EditOperation(Payload):
+    """Bounded, node-local success receipt for atomic Edit replay.
+
+    The receipt is committed after its state records in the same entity batch.
+    Its own stream offset therefore reconstructs the exact consecutive offsets
+    of ``topics`` after a node restart.
+    """
+
+    id: str
+    digest: str
+    message: str
+    result: str
+    topics: List[str]
+
+    @classmethod
+    def decode(cls, json_str: str, timestamp: int) -> "EditOperation":
+        return cls(**json.loads(json_str))
+
+
 # ---------------------------------------------------------------------------
 # Colca command classes (schema-bundle design §3).
 # The class hierarchy IS the routing information: anything deriving from Cmd
@@ -661,6 +732,22 @@ class CmdConfigure(Cmd):
     ladder of how dangerous a command is to the equipment, and editing the data
     model is not on that ladder. Someone who may bind a signal must not thereby
     be allowed to send maintenance commands to a PLC (§3.3)."""
+
+
+@dataclass
+class CmdEdit(Cmd):
+    """One versioned, idempotent Edit mutation intent.
+
+    ``intent`` stays an open object at the schema-bundle boundary because its
+    discriminator and operation-specific fields are validated by the target
+    node's Edit executor. The command never carries raw UNS topics or a
+    caller-composed list of state records.
+    """
+
+    operation_id: str = ""
+    intent: Dict[str, Any] = field(default_factory=dict)
+    # Decimal strings keep uint64 stream offsets exact in JavaScript clients.
+    expected_versions: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

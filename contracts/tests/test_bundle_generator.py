@@ -85,6 +85,7 @@ def test_projected_contract_catalogue_has_the_approved_direction():
         "_ServiceDetails",
         "_SystemElement",
         "_Signal",
+        "_Constant",
         "_ExternalReference",
     }
     expected_definitions = {
@@ -105,6 +106,28 @@ def test_projected_contract_catalogue_has_the_approved_direction():
         for contract in expected_definitions
         if body["contracts"].get(contract, {}).get("class") == "definition"
     } == expected_definitions
+
+
+def test_constant_contract_is_positioned_retractable_and_value_typed():
+    body, _ = gb.build_bundle()
+    constant = body["contracts"]["_Constant"]
+
+    assert constant["class"] == "entity"
+    assert constant["tombstone"] is True
+    assert set(constant["schema"]["required"]) >= {
+        "id",
+        "name",
+        "data_type",
+        "value",
+    }
+    assert constant["schema"]["properties"]["data_type"]["enum"] == [
+        "float64",
+        "int64",
+        "boolean",
+        "string",
+        "datetime",
+        "json",
+    ]
 
 
 def test_enrollment_contract_is_builtin_and_edge_node_is_retired():
@@ -197,13 +220,28 @@ def test_cmd_contracts_carry_the_door_contract():
     dropped from required (publishers do not stamp it)."""
     body, _ = gb.build_bundle()
     for ident in ("_CmdParam", "_CmdOperate", "_CmdMaintain", "_CmdConfigure",
-                  "_CmdAdmin", "_Cmd", "_ApiWriteCmd"):
+                  "_CmdEdit", "_CmdAdmin", "_Cmd", "_ApiWriteCmd"):
         entry = body["contracts"][ident]
         assert entry["class"] == "cmd", ident
         req = entry["schema"].get("required", [])
         assert "correlation_id" in req and "expires_at" in req, (ident, req)
         assert "created_at" not in req, (ident, req)
         assert entry["tombstone"] is False, ident
+
+
+def test_edit_command_requires_one_versioned_idempotent_intent():
+    body, _ = gb.build_bundle()
+    schema = body["contracts"]["_CmdEdit"]["schema"]
+
+    assert schema["properties"]["intent"] == {"type": "object"}
+    assert schema["properties"]["expected_versions"] == {"type": "object"}
+    assert set(schema["required"]) >= {
+        "operation_id",
+        "intent",
+        "expected_versions",
+        "correlation_id",
+        "expires_at",
+    }
 
 
 def test_metric_real_shape():

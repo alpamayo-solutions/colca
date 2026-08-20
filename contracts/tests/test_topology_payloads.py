@@ -1,4 +1,4 @@
-"""Tests for the topology payload contracts (SystemElement, Signal)."""
+"""Tests for the positioned topology payload contracts."""
 
 import json
 
@@ -6,7 +6,12 @@ from franzmq.data_contracts import PAYLOAD_CLASSES
 from franzmq.data_contracts.base import DataType, IndexType
 from franzmq.topic import Topic
 
-from colca_data_contracts import SystemElementPayload, SignalPayload
+from colca_data_contracts import (
+    ConstantDataType,
+    ConstantPayload,
+    SignalPayload,
+    SystemElementPayload,
+)
 
 
 def test_system_element_registered():
@@ -15,6 +20,10 @@ def test_system_element_registered():
 
 def test_signal_registered():
     assert PAYLOAD_CLASSES.get("_Signal") is SignalPayload
+
+
+def test_constant_registered():
+    assert PAYLOAD_CLASSES.get("_Constant") is ConstantPayload
 
 
 def test_system_element_topic_format():
@@ -51,6 +60,15 @@ def test_signal_topic_format():
     topic = Topic(payload_type=SignalPayload, node_id="n-edge1",
                   context=["factory", "line1", "m6", "machine_state"])
     assert str(topic) == "colca/v1/_Signal/n-edge1/factory/line1/m6/machine_state"
+
+
+def test_constant_topic_format():
+    topic = Topic(
+        payload_type=ConstantPayload,
+        node_id="n-edge1",
+        context=["factory", "line1", "m6", "target_speed"],
+    )
+    assert str(topic) == "colca/v1/_Constant/n-edge1/factory/line1/m6/target_speed"
 
 
 def test_system_element_roundtrip_minimal():
@@ -157,6 +175,29 @@ def test_signal_enums_serialised_as_strings():
     parsed = json.loads(encoded)
     assert parsed["data_type"] == str(DataType.FLOAT)
     assert parsed["index_type"] == str(IndexType.TIME)
+
+
+def test_constant_roundtrip_preserves_typed_value_and_metadata():
+    original = ConstantPayload(
+        id="01HCONSTANT",
+        name="Target speed",
+        description="Nominal filler speed",
+        system_element_id="01HSE",
+        data_type=ConstantDataType.INT64,
+        value=18_000,
+        unit="bph",
+        precision=0,
+        metadata={"owner": "Production"},
+        created_at="2026-05-11T10:00:00+00:00",
+        updated_at="2026-05-11T10:05:00+00:00",
+    )
+
+    decoded = ConstantPayload.decode(original.encode(), timestamp=0)
+
+    assert decoded == original
+    encoded = json.loads(original.encode())
+    assert encoded["data_type"] == "int64"
+    assert encoded["value"] == 18_000
 
 
 def test_system_element_with_only_id_name_is_valid():

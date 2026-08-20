@@ -44,6 +44,8 @@ CLASS_TABLE: dict[str, str] = {
     "_DBDump": "data",
     "_SystemElement": "entity",
     "_Signal": "entity",
+    "_Constant": "entity",
+    "_EditOperation": "entity",
     "_DataTags": "entity",
     "_Node": "entity",
     "_ServiceDetails": "entity",
@@ -67,6 +69,7 @@ CLASS_TABLE: dict[str, str] = {
 REQUIRED_EXTRA: dict[str, list[str]] = {
     "_Metric": ["signal_id"],
     "_Ack": ["result_code"],
+    "_CmdEdit": ["operation_id", "intent", "expected_versions"],
 }
 
 # Fields DROPPED from required although the dataclass has no default:

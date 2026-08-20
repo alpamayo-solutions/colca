@@ -67,6 +67,10 @@ from colca_data_contracts.payload import (
     ExternalReference as ExternalReferencePayload,
     SystemElement as SystemElementPayload,
     Signal as SignalPayload,
+    ConstantDataType,
+    Constant as ConstantPayload,
+    CmdEdit,
+    EditOperation as EditOperationPayload,
 )
 
 from colca_data_contracts.logging import (
@@ -151,6 +155,10 @@ __all__ = [
     # Topology payloads (retained, edge-owned)
     "SystemElementPayload",
     "SignalPayload",
+    "ConstantDataType",
+    "ConstantPayload",
+    "CmdEdit",
+    "EditOperationPayload",
     # MachineState contract enums
     "MachineState",
     "OperatingMode",
