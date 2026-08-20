@@ -93,8 +93,14 @@ func TestRegisterAuthorsAMissingDeclaredMount(t *testing.T) {
 	if id, ok := m.Placements().IDAt("line1/press3"); !ok || id != e.Element {
 		t.Fatalf("line1/press3 holds %q, entry bound to %q; the branch was not authored", id, e.Element)
 	}
-	if _, ok := m.Placements().IDAt("line1"); !ok {
+	branchID, ok := m.Placements().IDAt("line1")
+	if !ok {
 		t.Fatal("the intermediate segment line1 was not authored; the path has a hole in it")
+	}
+	for path, id := range map[string]string{"line1": branchID, "line1/press3": e.Element} {
+		if len(id) != 26 {
+			t.Fatalf("authored element %s has id %q (%d characters); SystemElement requires a 26-character ULID", path, id, len(id))
+		}
 	}
 }
 

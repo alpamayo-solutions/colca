@@ -45,7 +45,7 @@ func testPool(t *testing.T) *Sink {
             value_number  double precision,
             value_text    text,
             value_bool    boolean,
-            edge_node_id  text,
+            colca_node_id text,
             signal_id     text NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS historian_metric_signal_id_timestamp_uniq

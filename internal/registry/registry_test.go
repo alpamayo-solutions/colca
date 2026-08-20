@@ -115,7 +115,7 @@ func TestEnrollLookupAndPersistence(t *testing.T) {
 
 	// The entity record landed in the entities stream under the enrolled topic.
 	recs, _, err := st.Read("entities", off, 1, nil)
-	if err != nil || len(recs) != 1 || recs[0].Topic != "colca/v1/_EdgeNode/01M1/z/cnc5" {
+	if err != nil || len(recs) != 1 || recs[0].Topic != "colca/v1/_EnrolledIdentity/01NODE/_colca/identities/01M1" {
 		t.Fatalf("entity record: %v err=%v", recs, err)
 	}
 
@@ -229,7 +229,7 @@ func TestRevoke(t *testing.T) {
 }
 
 // Registry changes mirror onto the local bus like any entity: enroll delivers
-// the retained _EdgeNode, revoke delivers an empty retained payload (the MQTT
+// the retained _EnrolledIdentity, revoke delivers an empty retained payload (the MQTT
 // retained-clear), both AFTER the map swap and outside the manager's lock.
 func TestEnrollAndRevokeMirrorToBus(t *testing.T) {
 	st := openStore(t, t.TempDir())
@@ -255,11 +255,30 @@ func TestEnrollAndRevokeMirrorToBus(t *testing.T) {
 	if len(seen) != 2 {
 		t.Fatalf("deliveries = %v, want enroll + revoke", seen)
 	}
-	if seen[0].topic != "colca/v1/_EdgeNode/01M1/z/a" || !seen[0].retain || seen[0].payload == 0 {
+	if seen[0].topic != "colca/v1/_EnrolledIdentity/01NODE/_colca/identities/01M1" || !seen[0].retain || seen[0].payload == 0 {
 		t.Fatalf("enroll delivery = %+v, want retained entity payload", seen[0])
 	}
 	if seen[1].topic != seen[0].topic || !seen[1].retain || seen[1].payload != 0 {
 		t.Fatalf("revoke delivery = %+v, want empty retained clear on the same topic", seen[1])
+	}
+}
+
+func TestObserverUsesStableSecurityInventoryTopic(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "z")
+	_, off, err := m.Enroll(entryJSON(t, machine("01O1", "z", pub("ab"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, _, err := st.Read("entities", off, 1, nil)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("read: %v err=%v", recs, err)
+	}
+	if recs[0].Topic != "colca/v1/_EnrolledIdentity/01NODE/_colca/identities/01O1" {
+		t.Fatalf("observer topic = %q", recs[0].Topic)
+	}
+	if _, err := uns.Parse(recs[0].Topic); err != nil {
+		t.Fatalf("observer topic must satisfy the grammar: %v", err)
 	}
 }
 
@@ -406,7 +425,7 @@ func TestCorruptPersistedEntryFailsLoad(t *testing.T) {
 	dir := t.TempDir()
 	st := openStore(t, dir)
 	if _, err := st.RegistryPut("01BAD", []byte("{corrupt"), "entities",
-		store.Record{Topic: "colca/v1/_EdgeNode/01BAD/x", Payload: []byte("{corrupt"), TS: 1}); err != nil {
+		store.Record{Topic: "colca/v1/_EnrolledIdentity/01NODE/_colca/identities/01BAD", Payload: []byte("{corrupt"), TS: 1}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := New(st, "01NODE"); err == nil {

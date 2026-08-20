@@ -6,7 +6,20 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
+
+type stateWritingExec struct{ recordingExec }
+
+func (r *stateWritingExec) ExecuteWithWrites(
+	contract, verb string,
+	payload []byte,
+) (int, string, string, []uns.StateWrite) {
+	code, message, result := r.Execute(contract, verb, payload)
+	return code, message, result, []uns.StateWrite{{
+		Stream: "entities", Offset: 7, Topic: "colca/v1/_Node/n-edge1/_colca/nodes/n-edge1",
+	}}
+}
 
 // recordingExec claims one contract and records what it was asked to do.
 type recordingExec struct {
@@ -59,6 +72,27 @@ func TestExecutorReceivesClaimedContracts(t *testing.T) {
 	}
 	if ack := ackFor(t, e, "signal/autobind", "c-1"); ack == nil || ack["result_code"].(float64) != 200 {
 		t.Fatalf("ack = %v, want 200", ack)
+	}
+}
+
+func TestLocalCommandResultAndAckNameTheProducedStateOffset(t *testing.T) {
+	exec := &stateWritingExec{recordingExec: recordingExec{contract: "_CmdConfigure"}}
+	e := execEngine(t, Executors(exec))
+
+	res, err := e.IngestAdmin(
+		"colca/v1/_CmdConfigure/n-edge1/entity/upsert",
+		cmdPayload("c-state"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Command == nil || len(res.Command.StateWrites) != 1 || res.Command.StateWrites[0].Offset != 7 {
+		t.Fatalf("command outcome = %+v", res.Command)
+	}
+	ack := ackFor(t, e, "entity/upsert", "c-state")
+	writes, ok := ack["state_writes"].([]any)
+	if !ok || len(writes) != 1 || writes[0].(map[string]any)["offset"].(float64) != 7 {
+		t.Fatalf("ack state_writes = %#v", ack["state_writes"])
 	}
 }
 

@@ -251,7 +251,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.MQTT.SetEngine(n.Engine)
 		// Revocation / re-enroll kicks the live session immediately (auth §7),
 		// and registry changes mirror onto the local bus like any entity
-		// (enroll = retained _EdgeNode, revoke = retained-clear).
+		// (enroll = retained _EnrolledIdentity, revoke = retained-clear).
 		reg.SetKick(n.MQTT.Kick)
 		reg.SetDeliver(n.MQTT.DeliverLocal)
 		// Re-seed the broker's retained set from the KV projection. The two are

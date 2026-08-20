@@ -13,6 +13,7 @@ type fakeStore struct {
 	node    string
 	records map[string][]byte // topic → payload (nil = tombstoned)
 	fail    map[string]string // topic → error to return from Publish
+	offset  uint64
 }
 
 func newStore(node string) *fakeStore {
@@ -56,16 +57,23 @@ func (f *fakeStore) KVScanAll(contract string) []KVRecord {
 	return out
 }
 
-func (f *fakeStore) Publish(topic string, payload []byte) error {
+func (f *fakeStore) Publish(topic string, payload []byte) (StateWrite, error) {
 	if msg, bad := f.fail[topic]; bad {
-		return errString(msg)
+		return StateWrite{}, errString(msg)
+	}
+	parsed, _ := Parse(topic)
+	f.offset++
+	write := StateWrite{
+		Stream: StreamFor(ClassOf(parsed.Contract)),
+		Offset: f.offset,
+		Topic:  topic,
 	}
 	if len(payload) == 0 {
 		f.records[topic] = nil
-		return nil
+		return write, nil
 	}
 	f.records[topic] = payload
-	return nil
+	return write, nil
 }
 
 type errString string
@@ -287,7 +295,7 @@ func publishCatalogue(t *testing.T, c *ConfigExec, topic string, tags []map[stri
 	if !ok {
 		t.Fatalf("publishCatalogue: %T is not a fakeStore", c.store)
 	}
-	if err := f.Publish(topic, mustJSON(map[string]any{"data_tags": tags})); err != nil {
+	if _, err := f.Publish(topic, mustJSON(map[string]any{"data_tags": tags})); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -946,6 +954,43 @@ func TestDefinitionUpsertFilesUnderTheIdWithNoPosition(t *testing.T) {
 	}
 	if f.records["colca/v1/_Group/n-global/01HGRP-OPS"] == nil {
 		t.Fatalf("definition not written at its id; store holds %v", keysOf(f))
+	}
+}
+
+func TestPlatformEntityCommandDerivesReservedPathAndReportsStateWrite(t *testing.T) {
+	f := newStore("n-local")
+	c := NewConfigExec(f, nil, nil, nil, nil)
+	payload := body(t, map[string]any{"entities": []map[string]any{{
+		"contract": "_Node",
+		"entity": map[string]any{
+			"id": "n-local", "name": "line-1", "root_system_element_id": "root",
+		},
+	}}})
+
+	code, msg, _, writes := c.ExecuteWithWrites("_CmdConfigure", "entity/upsert", payload)
+	if code != 200 {
+		t.Fatalf("entity/upsert = %d (%s), want 200", code, msg)
+	}
+	wantTopic := "colca/v1/_Node/n-local/_colca/nodes/n-local"
+	if f.records[wantTopic] == nil {
+		t.Fatalf("node not written at reserved inventory path: %v", keysOf(f))
+	}
+	if len(writes) != 1 || writes[0].Stream != "entities" || writes[0].Offset != 1 || writes[0].Topic != wantTopic {
+		t.Fatalf("state writes = %+v", writes)
+	}
+}
+
+func TestPlatformEntityCommandRefusesObservedServiceState(t *testing.T) {
+	f := newStore("n-local")
+	c := NewConfigExec(f, nil, nil, nil, nil)
+	payload := body(t, map[string]any{"entities": []map[string]any{{
+		"contract": "_ServiceDetails",
+		"entity":   map[string]any{"id": "svc-1", "name": "api"},
+	}}})
+
+	code, msg, _, writes := c.ExecuteWithWrites("_CmdConfigure", "entity/upsert", payload)
+	if code != 422 || !strings.Contains(msg, "own writer") || len(writes) != 0 {
+		t.Fatalf("observed service = %d %q writes=%+v, want refused", code, msg, writes)
 	}
 }
 

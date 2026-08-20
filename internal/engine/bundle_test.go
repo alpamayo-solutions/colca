@@ -205,9 +205,9 @@ func TestBuiltinOnlyContractsBypassTheBundle(t *testing.T) {
 	if e.ClassOf("_TimeSync") != uns.ClassTimeSync {
 		t.Fatal("_TimeSync must keep its builtin class under a bundle")
 	}
-	// And _EdgeNode is still enrollment-door-only at the doors.
-	if _, err := e.IngestClient("m1", "colca/v1/_EdgeNode/m1/x", []byte(`{"ulid": "u"}`)); err == nil {
-		t.Fatal("_EdgeNode must stay enrollment-door-only under a bundle")
+	// And _EnrolledIdentity is still enrollment-door-only at the doors.
+	if _, err := e.IngestClient("m1", "colca/v1/_EnrolledIdentity/m1/_colca/identities/u", []byte(`{"ulid": "u"}`)); err == nil {
+		t.Fatal("_EnrolledIdentity must stay enrollment-door-only under a bundle")
 	}
 }
 
@@ -220,7 +220,7 @@ func TestRejectErrorsCarryReasons(t *testing.T) {
 	}{
 		{"grammar", func() error { _, err := e.IngestClient("m1", "colca/v1/bad", nil); return err }},
 		{"registry_contract", func() error {
-			_, err := e.IngestClient("m1", "colca/v1/_EdgeNode/m1/x", []byte(`{"ulid":"u"}`))
+			_, err := e.IngestClient("m1", "colca/v1/_EnrolledIdentity/m1/_colca/identities/u", []byte(`{"ulid":"u"}`))
 			return err
 		}},
 		{"node_id", func() error {

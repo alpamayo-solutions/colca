@@ -17,12 +17,18 @@ func TestParseAndClass(t *testing.T) {
 		class  Class
 		stream string
 	}{
-		"_Metric": {ClassData, "metrics"}, "_EdgeNode": {ClassEntity, "entities"},
-		"_SystemElement": {ClassEntity, "entities"}, "_CmdParam": {ClassCmd, "commands"},
+		"_Metric": {ClassData, "metrics"}, "_EnrolledIdentity": {ClassEntity, "entities"},
+		"_Node": {ClassEntity, "entities"}, "_ServiceDetails": {ClassEntity, "entities"},
+		"_ExternalReference": {ClassEntity, "entities"},
+		"_SystemElement":     {ClassEntity, "entities"}, "_CmdParam": {ClassCmd, "commands"},
 		"_CmdAdmin": {ClassCmd, "commands"}, "_Ack": {ClassAck, "commands"},
 		// demo topology: every _Cmd* contract is a command, never ClassNone
 		"_CmdOperate": {ClassCmd, "commands"}, "_CmdMaintain": {ClassCmd, "commands"},
-		"_Signal": {ClassEntity, "entities"},
+		"_Signal":         {ClassEntity, "entities"},
+		"_MetadataType":   {ClassDefinition, "definitions"},
+		"_AnnotationType": {ClassDefinition, "definitions"},
+		"_Interface":      {ClassDefinition, "definitions"},
+		"_ExternalSystem": {ClassDefinition, "definitions"},
 		// _StreamGap (design §6.4) is its own class. StreamFor deliberately
 		// answers "" for it — unlike every other class it has no single fixed
 		// stream, it targets whichever stream it describes (Parsed.Path, see
@@ -157,7 +163,7 @@ func TestValidate(t *testing.T) {
 		{"_Metric", `{"v": 3.14, "ts": 123}`},
 		{"_CmdParam", `{"correlation_id":"abc","expires_at": 99999999999, "params":{"speed":5}}`},
 		{"_Ack", `{"correlation_id":"abc","result_code":200,"message":"ok"}`},
-		{"_EdgeNode", `{"ulid":"n-edge1","element":"01HEDGE1","typ":"node"}`},
+		{"_EnrolledIdentity", `{"ulid":"n-edge1","element":"01HEDGE1","kind":"node","grants":[],"status":"active","pubkey":"aa"}`},
 		// A data-model record names itself by "id", not by "ulid" — that is
 		// the field grants and bindings reference it through.
 		{"_SystemElement", `{"id":"01HLINE1","name":"Linie 1"}`},
@@ -195,7 +201,7 @@ func TestValidate(t *testing.T) {
 		// registry's field name is unaddressable, and vice versa.
 		{"_SystemElement", `{"ulid":"01HLINE1","name":"Linie 1"}`},
 		{"_Signal", `{"ulid":"01HSIG1"}`},
-		{"_EdgeNode", `{"id":"n-edge1"}`},
+		{"_EnrolledIdentity", `{"id":"n-edge1"}`},
 	}
 	for _, c := range bad {
 		if err := Validate(c[0], []byte(c[1])); err == nil {
@@ -209,7 +215,7 @@ func TestValidate(t *testing.T) {
 // retires the path. For events (commands, acks, gap markers) and unknown
 // contracts deletion is not meaningful and the empty payload stays rejected.
 func TestValidateEmptyPayloadTombstoneRule(t *testing.T) {
-	for _, contract := range []string{"_Metric", "_EdgeNode", "_SystemElement", "_Signal"} {
+	for _, contract := range []string{"_Metric", "_EnrolledIdentity", "_Node", "_SystemElement", "_Signal"} {
 		if err := Validate(contract, nil); err != nil {
 			t.Errorf("empty payload on KV-projecting %s must validate (tombstone): %v", contract, err)
 		}

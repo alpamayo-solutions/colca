@@ -305,34 +305,79 @@ func TestAPublishOutsideTheWriteScopeIsRejected(t *testing.T) {
 	assertRejectReason(t, err, metrics.ReasonWriteDenied)
 }
 
-// Registry entries enter through the enrollment door ONLY (auth §3): _EdgeNode
+func TestProjectedEntityAuthorsCannotImpersonateNodesOrServices(t *testing.T) {
+	e := newEngine(t)
+
+	if _, err := e.IngestClient("m1", "colca/v1/_ServiceDetails/n-edge1/m1/_service", []byte(
+		`{"id":"m1","name":"opcua","service_type":"connector","colca_node_id":"other"}`)); err == nil {
+		t.Fatal("a service must not claim a different Colca node")
+	}
+	if _, err := e.IngestClient("m1", "colca/v1/_ServiceDetails/n-edge1/m1/_service", []byte(
+		`{"id":"other","name":"opcua","service_type":"connector","colca_node_id":"n-edge1"}`)); err == nil {
+		t.Fatal("a service record id must equal its authenticated identity")
+	}
+	if _, err := e.IngestClient("m1", "colca/v1/_ServiceDetails/n-edge1/m1/_service", []byte(
+		`{"id":"m1","name":"opcua","service_type":"connector","colca_node_id":"n-edge1"}`)); err != nil {
+		t.Fatalf("the service's own registration must be accepted: %v", err)
+	}
+
+	if _, err := e.IngestClient("m1", "colca/v1/_Node/n-edge1/_colca/nodes/m1", []byte(
+		`{"id":"m1","name":"fake","root_system_element_id":"el-m1"}`)); err == nil {
+		t.Fatal("a machine door must not author a Colca node")
+	}
+	if _, err := e.IngestAdmin("colca/v1/_Node/other/_colca/nodes/other", []byte(
+		`{"id":"other","name":"fake","root_system_element_id":"el-m1"}`)); err == nil {
+		t.Fatal("the local admin door must not author another Colca node")
+	}
+	if _, err := e.IngestAdmin("colca/v1/_Node/n-edge1/_colca/nodes/n-edge1", []byte(
+		`{"id":"n-edge1","name":"edge1","root_system_element_id":"el-m1"}`)); err != nil {
+		t.Fatalf("the node must be able to author its own Colca record: %v", err)
+	}
+}
+
+func TestDefinitionsAreAuthoredByTheLocalNodeOnly(t *testing.T) {
+	e := newEngine(t)
+	payload := []byte(`{"id":"meta-1","name":"work_order","data_type":"string"}`)
+
+	if _, err := e.IngestClient("m1", "colca/v1/_MetadataType/n-edge1/meta-1", payload); err == nil {
+		t.Fatal("a machine door must not author a global definition")
+	}
+	if _, err := e.IngestAdmin("colca/v1/_MetadataType/other/meta-1", payload); err == nil {
+		t.Fatal("the local admin door must not impersonate another definition author")
+	}
+	if _, err := e.IngestAdmin("colca/v1/_MetadataType/n-edge1/meta-1", payload); err != nil {
+		t.Fatalf("the node must be able to author its own definition: %v", err)
+	}
+}
+
+// Registry entries enter through the enrollment door ONLY (auth §3): _EnrolledIdentity
 // is rejected at both ordinary ingest doors, no matter who sends it.
-func TestEdgeNodeRejectedAtOrdinaryDoors(t *testing.T) {
+func TestEnrolledIdentityRejectedAtOrdinaryDoors(t *testing.T) {
 	e := newEngine(t)
 	before := e.Store().NextOffset("entities") // the fixture's own element placements
-	if _, err := e.IngestClient("m1", "colca/v1/_EdgeNode/m1/somewhere", []byte(`{"ulid":"m1"}`)); err == nil {
-		t.Fatal("client _EdgeNode publish must be rejected")
+	if _, err := e.IngestClient("m1", "colca/v1/_EnrolledIdentity/n-edge1/_colca/identities/m1", []byte(`{"ulid":"m1"}`)); err == nil {
+		t.Fatal("client _EnrolledIdentity publish must be rejected")
 	}
-	if _, err := e.IngestAdmin("colca/v1/_EdgeNode/x/somewhere", []byte(`{"ulid":"x"}`)); err == nil {
-		t.Fatal("admin _EdgeNode publish must be rejected")
+	if _, err := e.IngestAdmin("colca/v1/_EnrolledIdentity/n-edge1/_colca/identities/x", []byte(`{"ulid":"x"}`)); err == nil {
+		t.Fatal("admin _EnrolledIdentity publish must be rejected")
 	}
 	if got := e.Store().NextOffset("entities"); got != before {
-		t.Fatalf("rejected _EdgeNode must not be persisted: entities %d → %d", before, got)
+		t.Fatalf("rejected _EnrolledIdentity must not be persisted: entities %d → %d", before, got)
 	}
 	// Replication is NOT an ordinary door: a child's already-enrolled fact
 	// rides upward like any entity (rejecting it would hole the stream).
-	recs := []store.ReplRecord{{ChildOffset: 1, Topic: "colca/v1/_EdgeNode/m9/edge1/z/m9",
-		Payload: []byte(`{"ulid":"m9"}`), TS: 1, KVPath: "edge1/z/m9", KVNode: "m9"}}
+	recs := []store.ReplRecord{{ChildOffset: 1, Topic: "colca/v1/_EnrolledIdentity/child1/edge1/_colca/identities/m9",
+		Payload: []byte(`{"ulid":"m9"}`), TS: 1, KVPath: "edge1/_colca/identities/m9", KVNode: "child1"}}
 	if _, _, err := e.IngestReplicated("child1", "entities", recs); err != nil {
-		t.Fatalf("replicated _EdgeNode must be accepted: %v", err)
+		t.Fatalf("replicated _EnrolledIdentity must be accepted: %v", err)
 	}
-	if kv := e.Store().KVScan("edge1/z/m9"); len(kv) != 1 {
-		t.Fatalf("replicated _EdgeNode must project into KV: %v", kv)
+	if kv := e.Store().KVScan("edge1/_colca/identities/m9"); len(kv) != 1 {
+		t.Fatalf("replicated _EnrolledIdentity must project into KV: %v", kv)
 	}
 }
 
 // Time-sync design §2.2/§4: _TimeSync is ephemeral and node-local-publish-only
-// — unlike _EdgeNode, it is rejected at EVERY ingest door including
+// — unlike _EnrolledIdentity, it is rejected at EVERY ingest door including
 // replication, since a well-behaved child's own store can never legitimately
 // contain one (its own engine already rejects it before persistence). Both
 // the canonical (no-path) and a padded topic shape must be rejected with the
@@ -557,9 +602,9 @@ func TestIngestHumanCommandsOnly(t *testing.T) {
 			t.Fatalf("human write of %s must be rejected", topic)
 		}
 	}
-	// _EdgeNode: enrollment-door rule wins over the human_write rule.
-	if _, err := e.IngestHuman(wide, "colca/v1/_EdgeNode/x/y", []byte(`{"ulid":"x"}`)); err == nil {
-		t.Fatal("human _EdgeNode publish must be rejected")
+	// _EnrolledIdentity: enrollment-door rule wins over the human_write rule.
+	if _, err := e.IngestHuman(wide, "colca/v1/_EnrolledIdentity/n-edge1/_colca/identities/x", []byte(`{"ulid":"x"}`)); err == nil {
+		t.Fatal("human _EnrolledIdentity publish must be rejected")
 	}
 	// Invalid payload on a granted command still validates.
 	if _, err := e.IngestHuman(humanEntry(t, "cmd:el-m1/#:param"), "colca/v1/_CmdParam/m1/m1/x", []byte(`{}`)); err == nil {

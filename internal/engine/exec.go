@@ -34,6 +34,24 @@ type CommandExecutor interface {
 	Execute(contract, verb string, payload []byte) (code int, message, result string)
 }
 
+type stateWritingCommandExecutor interface {
+	ExecuteWithWrites(
+		contract, verb string,
+		payload []byte,
+	) (code int, message, result string, writes []uns.StateWrite)
+}
+
+// CommandOutcome is returned synchronously to local HTTP command callers and
+// is also persisted in the normal _Ack event. StateWrites are the exact
+// records the command produced, so callers wait on state rather than merely
+// waiting for the command event itself.
+type CommandOutcome struct {
+	CorrelationID string           `json:"correlation_id"`
+	ResultCode    int              `json:"result_code"`
+	Message       string           `json:"message"`
+	StateWrites   []uns.StateWrite `json:"state_writes,omitempty"`
+}
+
 // SetExecutor wires the executor in (node startup). An engine without one
 // leaves every command it receives unexecuted and unacked.
 func (e *Engine) SetExecutor(x CommandExecutor) { e.exec = x }
@@ -80,6 +98,23 @@ func (m multiExec) Execute(contract, verb string, payload []byte) (int, string, 
 	return 500, "no executor claims " + contract, "error"
 }
 
+func (m multiExec) ExecuteWithWrites(
+	contract, verb string,
+	payload []byte,
+) (int, string, string, []uns.StateWrite) {
+	for _, x := range m {
+		if !x.Handles(contract) {
+			continue
+		}
+		if writer, ok := x.(stateWritingCommandExecutor); ok {
+			return writer.ExecuteWithWrites(contract, verb, payload)
+		}
+		code, message, result := x.Execute(contract, verb, payload)
+		return code, message, result, nil
+	}
+	return 500, "no executor claims " + contract, "error", nil
+}
+
 // cmdEnvelope is the part of a command payload every class shares (cmdadmin
 // design §2): correlation_id routes the ack, expires_at bounds execution.
 // Everything else is the verb's own business and stays in the raw payload.
@@ -89,9 +124,13 @@ type cmdEnvelope struct {
 }
 
 // maybeExec runs after a _Cmd* record was persisted by a trusted-down path.
-func (e *Engine) maybeExec(p uns.Parsed, payload []byte, attribution Attribution) {
+func (e *Engine) maybeExec(
+	p uns.Parsed,
+	payload []byte,
+	attribution Attribution,
+) *CommandOutcome {
 	if p.NodeID != e.cfg.ULID || e.exec == nil || !e.exec.Handles(p.Contract) {
-		return
+		return nil
 	}
 	verb := p.Path // at the target the mount-stripped path IS the verb
 
@@ -102,31 +141,53 @@ func (e *Engine) maybeExec(p uns.Parsed, payload []byte, attribution Attribution
 		e.log.Error("command: unexecutable payload — no ack possible",
 			"contract", p.Contract, "verb", verb, "err", err)
 		e.metrics.NodeCmd(p.Contract, verb, "invalid")
-		return
+		return nil
 	}
 
 	// Expiry is checked before the executor sees it: a command whose window
 	// closed must not take effect, whatever it would have done.
 	if env.ExpiresAt <= time.Now().UnixMilli() {
-		e.ack(p.Contract, verb, env.CorrelationID, 498, "expired", "expired", attribution)
-		return
+		outcome := &CommandOutcome{
+			CorrelationID: env.CorrelationID,
+			ResultCode:    498,
+			Message:       "expired",
+		}
+		e.ack(p.Contract, verb, outcome, "expired", attribution)
+		return outcome
 	}
 
-	code, msg, result := e.exec.Execute(p.Contract, verb, payload)
-	e.ack(p.Contract, verb, env.CorrelationID, code, msg, result, attribution)
+	var code int
+	var msg, result string
+	var writes []uns.StateWrite
+	if writer, ok := e.exec.(stateWritingCommandExecutor); ok {
+		code, msg, result, writes = writer.ExecuteWithWrites(p.Contract, verb, payload)
+	} else {
+		code, msg, result = e.exec.Execute(p.Contract, verb, payload)
+	}
+	outcome := &CommandOutcome{
+		CorrelationID: env.CorrelationID,
+		ResultCode:    code,
+		Message:       msg,
+		StateWrites:   writes,
+	}
+	e.ack(p.Contract, verb, outcome, result, attribution)
+	return outcome
 }
 
 // ack publishes the execution outcome into the node's own commands stream (own
 // frame — uplink mount-insert rebuilds the path hop by hop, cmdadmin design §6)
 // and counts the metric.
-func (e *Engine) ack(contract, verb, corr string, code int, msg, result string, attribution Attribution) {
+func (e *Engine) ack(
+	contract, verb string,
+	outcome *CommandOutcome,
+	result string,
+	attribution Attribution,
+) {
 	e.metrics.NodeCmd(contract, verb, result)
 	topic := "colca/v1/_Ack/" + e.cfg.ULID + "/" + verb
-	payload, err := json.Marshal(map[string]any{
-		"correlation_id": corr, "result_code": code, "message": msg,
-	})
+	payload, err := json.Marshal(outcome)
 	if err != nil {
-		e.log.Error("command: ack encode failed", "verb", verb, "correlation_id", corr, "err", err)
+		e.log.Error("command: ack encode failed", "verb", verb, "correlation_id", outcome.CorrelationID, "err", err)
 		return
 	}
 	p, err := uns.Parse(topic)
@@ -136,9 +197,10 @@ func (e *Engine) ack(contract, verb, corr string, code int, msg, result string, 
 	}
 	ackAttribution := Attribution{WrittenBy: e.cfg.ULID, AsUser: attribution.AsUser}
 	if _, err := e.persistAttributed(uns.ClassAck, p, topic, payload, ackAttribution); err != nil {
-		e.log.Error("command: ack persist failed", "topic", topic, "correlation_id", corr, "err", err)
+		e.log.Error("command: ack persist failed", "topic", topic, "correlation_id", outcome.CorrelationID, "err", err)
 		return
 	}
 	e.log.Info("command executed", "contract", contract, "verb", verb,
-		"correlation_id", corr, "result_code", code, "message", msg)
+		"correlation_id", outcome.CorrelationID, "result_code", outcome.ResultCode,
+		"message", outcome.Message)
 }

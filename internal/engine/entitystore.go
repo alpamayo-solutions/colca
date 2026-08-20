@@ -68,7 +68,11 @@ func (s *entityStore) scan(contract string, keep func(store.KVEntry) bool) []uns
 // coordinates, no mount rewrite, still validated against the loaded bundle. A
 // record the node itself authors goes through the same door as everything else
 // — there is no privileged write that skips validation.
-func (s *entityStore) Publish(topic string, payload []byte) error {
-	_, err := s.e.IngestAdmin(topic, payload)
-	return err
+func (s *entityStore) Publish(topic string, payload []byte) (uns.StateWrite, error) {
+	result, err := s.e.IngestAdmin(topic, payload)
+	return uns.StateWrite{
+		Stream: result.Stream,
+		Offset: result.Offset,
+		Topic:  result.Topic,
+	}, err
 }

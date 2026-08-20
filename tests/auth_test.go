@@ -2,7 +2,7 @@
 // §12): unknown keys at every
 // door, revocation kicks, fleet inventory with local-only authority, scoped
 // subscriptions on replicated data, the enrollment-door-only rule for
-// _EdgeNode, and cmd grants.
+// _EnrolledIdentity, and cmd grants.
 package tests
 
 import (
@@ -137,12 +137,12 @@ func TestRevocationKicksAcrossTheTree(t *testing.T) {
 		t.Fatal("revoked key reconnected")
 	}
 
-	// The retirement (empty-payload _EdgeNode) replicates upward like any
+	// The retirement (empty-payload _EnrolledIdentity) replicates upward like any
 	// entity record: the hub's entities history shows it under the full path.
 	waitFor(t, "retirement record at global", 15*time.Second, func() bool {
-		for _, r := range fetchRecords(t, tp.global, "entities", "auth-revoke", "site1/edge1/m1", 100) {
+		for _, r := range fetchRecords(t, tp.global, "entities", "auth-revoke", "site1/edge1/_colca/identities/m1", 100) {
 			rec := r.(map[string]any)
-			if rec["topic"] == "colca/v1/_EdgeNode/m1/site1/edge1/m1" && rec["payload"] == nil {
+			if rec["topic"] == "colca/v1/_EnrolledIdentity/n-edge1/site1/edge1/_colca/identities/m1" && rec["payload"] == nil {
 				return true
 			}
 		}
@@ -151,24 +151,24 @@ func TestRevocationKicksAcrossTheTree(t *testing.T) {
 }
 
 // TestFleetInventoryAndLocalAuthority: an enrollment at a leaf is VISIBLE at
-// the hub (fleet inventory via the replicated _EdgeNode entity) but does NOT
+// the hub (security inventory via the replicated _EnrolledIdentity entity) but does NOT
 // authenticate there — authority is local, delegation like DNS (§2.2).
 func TestFleetInventoryAndLocalAuthority(t *testing.T) {
 	tp := startTopo(t)
 
 	// m1's registry entity replicates up under the mount-prefixed path.
 	waitFor(t, "m1 inventory entry at global", 15*time.Second, func() bool {
-		return len(kvAt(t, tp.global, "site1/edge1/m1")) >= 1
+		return len(kvAt(t, tp.global, "site1/edge1/_colca/identities/m1")) >= 1
 	})
-	entries := kvAt(t, tp.global, "site1/edge1/m1")
+	entries := kvAt(t, tp.global, "site1/edge1/_colca/identities/m1")
 	found := false
 	for _, e := range entries {
-		if e.(map[string]any)["topic"] == "colca/v1/_EdgeNode/m1/site1/edge1/m1" {
+		if e.(map[string]any)["topic"] == "colca/v1/_EnrolledIdentity/n-edge1/site1/edge1/_colca/identities/m1" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("m1's _EdgeNode entity not in the hub inventory: %v", entries)
+		t.Fatalf("m1's _EnrolledIdentity entity not in the hub inventory: %v", entries)
 	}
 
 	// But the hub does NOT authenticate m1's key: enrolled-at-leaf ≠ trusted-at-hub.
@@ -203,29 +203,29 @@ func TestScopedSubscribeOnReplicatedTree(t *testing.T) {
 	awaitTopic(t, msgs, "colca/v1/_Metric/n-edge1/edge1/m1/temp", 15*time.Second)
 }
 
-// TestEdgeNodeRejectedAtEveryOrdinaryDoor: no door but the enrollment
+// TestEnrolledIdentityRejectedAtEveryOrdinaryDoor: no door but the enrollment
 // endpoint accepts a registry contract — not the machine's MQTT publish, not
 // the machine's HTTP publish, not even the admin's /publish.
-func TestEdgeNodeRejectedAtEveryOrdinaryDoor(t *testing.T) {
+func TestEnrolledIdentityRejectedAtEveryOrdinaryDoor(t *testing.T) {
 	tp := startTopo(t)
 	entitiesBefore := tp.edge1.Store.NextOffset("entities")
 
 	// MQTT door (no PUBACK for rejected packets — assert on the store).
 	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
-	m1.Publish("colca/v1/_EdgeNode/m1/m1", 1, false, `{"ulid":"m1"}`).WaitTimeout(time.Second)
+	m1.Publish("colca/v1/_EnrolledIdentity/m1/_colca/identities/m1", 1, false, `{"ulid":"m1"}`).WaitTimeout(time.Second)
 	time.Sleep(500 * time.Millisecond)
 	if got := tp.edge1.Store.NextOffset("entities"); got != entitiesBefore {
-		t.Fatalf("_EdgeNode via MQTT persisted: entities %d → %d", entitiesBefore, got)
+		t.Fatalf("_EnrolledIdentity via MQTT persisted: entities %d → %d", entitiesBefore, got)
 	}
 
 	// Admin /publish.
 	code := apiStatus(t, "https://"+tp.edge1.APIAddr, "POST", "/publish", tok,
-		`{"topic":"colca/v1/_EdgeNode/x/somewhere","payload":{"ulid":"x"}}`)
+		`{"topic":"colca/v1/_EnrolledIdentity/n1/_colca/identities/x","payload":{"ulid":"x"}}`)
 	if code != 422 {
-		t.Fatalf("_EdgeNode via admin /publish: want 422, got %d", code)
+		t.Fatalf("_EnrolledIdentity via admin /publish: want 422, got %d", code)
 	}
 	if got := tp.edge1.Store.NextOffset("entities"); got != entitiesBefore {
-		t.Fatal("_EdgeNode via admin /publish persisted")
+		t.Fatal("_EnrolledIdentity via admin /publish persisted")
 	}
 }
 

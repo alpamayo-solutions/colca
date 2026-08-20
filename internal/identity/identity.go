@@ -139,6 +139,20 @@ func (i *Identity) SelfSignedCert(cn string) (tls.Certificate, error) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: i.Priv}, nil
 }
 
+// WriteSelfSignedCert writes the public certificate that wraps this identity's
+// key. The private key remains at the separately permissioned key path.
+func (i *Identity) WriteSelfSignedCert(path, cn string) error {
+	cert, err := i.SelfSignedCert(cn)
+	if err != nil {
+		return err
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})
+	if err := os.WriteFile(path, pemBytes, 0o644); err != nil { // #nosec G306 -- certificate is public
+		return fmt.Errorf("write certificate %s: %w", path, err)
+	}
+	return nil
+}
+
 // PeerPubHex extracts the hex pubkey from a peer leaf certificate (for pinning).
 func PeerPubHex(rawCert []byte) (string, error) {
 	c, err := x509.ParseCertificate(rawCert)

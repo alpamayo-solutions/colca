@@ -254,6 +254,34 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 	r2.Body.Close()
 }
 
+func TestLocalConfigureResponseNamesProducedStateOffset(t *testing.T) {
+	a := newAPI(t)
+	a.eng.SetExecutor(engine.Executors(uns.NewConfigExec(a.eng.EntityStore(), a.reg, nil, nil, nil)))
+
+	resp, out := req(t, client(nil), "POST", a.url+"/publish", "tok", map[string]any{
+		"topic": "colca/v1/_CmdConfigure/n-test/definition/upsert",
+		"payload": map[string]any{
+			"correlation_id": "api-rw-1",
+			"expires_at":     time.Now().Add(time.Minute).UnixMilli(),
+			"definitions": []map[string]any{{
+				"contract": "_ExternalSystem",
+				"definition": map[string]any{
+					"id": "ext-1", "key": "tcdb", "name": "TCDB", "system_type": "database",
+				},
+			}},
+		},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("publish = %d, body %v", resp.StatusCode, out)
+	}
+	command := out["command"].(map[string]any)
+	writes := command["state_writes"].([]any)
+	write := writes[0].(map[string]any)
+	if command["result_code"].(float64) != 200 || write["stream"] != "definitions" || write["offset"].(float64) == 0 {
+		t.Fatalf("command outcome = %v", command)
+	}
+}
+
 // The §6.3 route matrix for a MACHINE caller: data routes allowed and scoped,
 // admin routes forbidden.
 func TestMachineRouteMatrix(t *testing.T) {
@@ -307,7 +335,7 @@ func TestMachineRouteMatrix(t *testing.T) {
 		t.Fatalf("machine ack foreign cursor: want 403, got %d", resp.StatusCode)
 	}
 
-	// machine kv: scope-filtered (own zone + own _EdgeNode entry visible, the
+	// machine kv: scope-filtered (own zone + own _EnrolledIdentity entry visible, the
 	// foreign record not)
 	_, out = req(t, mc, "GET", a.url+"/kv", "", nil)
 	for _, e := range out["entries"].([]any) {
@@ -479,11 +507,11 @@ func TestDeleteDuringDrainIsImmediateAndRecordsForced(t *testing.T) {
 	}
 }
 
-// _EdgeNode may not enter through /publish — not even with the admin token.
-func TestEdgeNodeRejectedOnPublish(t *testing.T) {
+// _EnrolledIdentity may not enter through /publish — not even with the admin token.
+func TestEnrolledIdentityRejectedOnPublish(t *testing.T) {
 	a := newAPI(t)
 	resp, out := req(t, client(nil), "POST", a.url+"/publish", "tok",
-		map[string]any{"topic": "colca/v1/_EdgeNode/x/somewhere", "payload": map[string]any{"ulid": "x"}})
+		map[string]any{"topic": "colca/v1/_EnrolledIdentity/n1/_colca/identities/x", "payload": map[string]any{"ulid": "x"}})
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("want 422, got %d (%v)", resp.StatusCode, out)
 	}
@@ -813,7 +841,7 @@ func TestFetchPrefixAndMax(t *testing.T) {
 
 // /debug/state reports the node's ulid and correct per-stream next offsets —
 // field correctness, not just a 200. Offsets are relative to the fixture's
-// own baseline (enrollment appends an _EdgeNode record to entities), so the
+// own baseline (enrollment appends an _EnrolledIdentity record to entities), so the
 // assertion pins the DELTA a publish causes plus the exact ulid.
 func TestDebugStateFieldCorrectness(t *testing.T) {
 	a := newAPI(t)
@@ -828,7 +856,7 @@ func TestDebugStateFieldCorrectness(t *testing.T) {
 		before[stream] = v.(map[string]any)["next_offset"].(float64)
 	}
 	// The fixture baseline itself is deterministic: one enrolled machine, which
-	// is two entity records — the element it binds to, then its _EdgeNode.
+	// is two entity records — the element it binds to, then its _EnrolledIdentity.
 	if before["metrics"] != 1 || before["entities"] != 3 || before["commands"] != 1 {
 		t.Fatalf("fixture baseline offsets = %v, want metrics=1 entities=3 commands=1", before)
 	}

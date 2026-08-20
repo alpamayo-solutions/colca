@@ -18,7 +18,8 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/colcad ./cmd/colcad \
  && CGO_ENABLED=0 go build -trimpath -o /out/colca-grantsync ./cmd/colca-grantsync \
  && CGO_ENABLED=0 go build -trimpath -o /out/colca-historian ./cmd/colca-historian \
  && CGO_ENABLED=0 go build -trimpath -o /out/colca-machine ./cmd/colca-machine \
- && CGO_ENABLED=0 go build -trimpath -o /out/colca-keygen ./cmd/colca-keygen
+ && CGO_ENABLED=0 go build -trimpath -o /out/colca-keygen ./cmd/colca-keygen \
+ && CGO_ENABLED=0 go build -trimpath -o /out/colca-service ./cmd/colca-service
 
 # Pinned by digest, not by tag: distroless publishes no semver tags for
 # static-debian12 — only latest/nonroot/debug — and hadolint rejects both an

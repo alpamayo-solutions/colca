@@ -33,9 +33,10 @@ const (
 	ReasonNodeID      = "node_id"      // topic level 4 is not this node
 	ReasonGrammar     = "grammar"      // topic does not parse as uns grammar
 	ReasonValidation  = "validation"   // payload fails the contract's schema
+	ReasonIdentity    = "identity"     // payload authorship contradicts the authenticated identity
 	ReasonWriteDenied = "write_denied" // no write scope covers the topic
 	ReasonCmdDenied   = "cmd_denied"   // a client's _Cmd* publish had no covering cmd grant
-	// ReasonRegistryContract: _EdgeNode arrived at an ordinary ingest door —
+	// ReasonRegistryContract: _EnrolledIdentity arrived at an ordinary ingest door —
 	// registry entries enter only through the enrollment endpoint (auth §3).
 	ReasonRegistryContract = "registry_contract"
 	// ReasonHumanWrite: a human published a data/entity/ack contract — the
@@ -54,7 +55,7 @@ const (
 	ReasonDraining = "draining"
 )
 
-var reasons = []string{ReasonNodeID, ReasonGrammar, ReasonValidation, ReasonWriteDenied, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonTimeSync, ReasonDraining}
+var reasons = []string{ReasonNodeID, ReasonGrammar, ReasonValidation, ReasonIdentity, ReasonWriteDenied, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonTimeSync, ReasonDraining}
 
 // Move-drain outcome labels — the allowed `outcome` values of
 // colca_drains_completed_total (move-drain design §3.2/§3.4).

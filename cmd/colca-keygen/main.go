@@ -19,8 +19,9 @@ import (
 
 func main() {
 	writeCert := flag.Bool("cert", false, "also write <out.key>.crt (PEM self-signed cert wrapping the key)")
+	ifMissing := flag.Bool("if-missing", false, "load an existing key or generate it once; never rotate it")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: colca-keygen [-cert] <out.key>  (prints pubkey hex to stdout)")
+		fmt.Fprintln(os.Stderr, "usage: colca-keygen [-cert] [-if-missing] <out.key>  (prints pubkey hex to stdout)")
 	}
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -28,7 +29,7 @@ func main() {
 		os.Exit(2)
 	}
 	keyPath := flag.Arg(0)
-	id, err := identity.Generate(keyPath)
+	id, err := generate(keyPath, *ifMissing)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -47,4 +48,12 @@ func main() {
 		}
 	}
 	fmt.Println(id.PublicHex())
+}
+
+func generate(keyPath string, ifMissing bool) (*identity.Identity, error) {
+	if ifMissing {
+		id, _, err := identity.LoadOrGenerate(keyPath)
+		return id, err
+	}
+	return identity.Generate(keyPath)
 }

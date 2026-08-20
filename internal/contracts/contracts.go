@@ -25,7 +25,7 @@ import (
 
 // builtinOnly are contracts produced and validated by the colca binary
 // itself (design §10.2); a bundle declaring one is a load error.
-var builtinOnly = map[string]bool{"_StreamGap": true, "_EdgeNode": true, "_TimeSync": true}
+var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true, "_TimeSync": true}
 
 // allowedKeywords is the §4.1 schema subset, re-enforced at load so a bundle
 // can never pull capabilities the broker did not sign up for.

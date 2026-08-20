@@ -50,7 +50,7 @@ func RowFrom(topic string, payload []byte, ts int64) (Row, error) {
 
 	var body struct {
 		SignalID  string          `json:"signal_id"`
-		NodeID    string          `json:"edge_node_id"`
+		NodeID    string          `json:"colca_node_id"`
 		Timestamp *json.Number    `json:"timestamp"`
 		Value     json.RawMessage `json:"value"`
 		Deleted   bool            `json:"deleted"`

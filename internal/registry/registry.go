@@ -44,15 +44,10 @@ var ErrNotNode = errors.New("move-drain applies only to kind=node entries")
 // — the HTTP layer maps it to 409.
 var ErrAlreadyDraining = errors.New("already draining")
 
-// unplacedSegment is the placeholder path segment for an unplaced identity's
-// _EdgeNode topic — element-less means bound to the node itself (design §2),
-// not to nothing, but the grammar still needs a non-empty hierarchy path.
-// "_"-prefixed segments are reserved, so no real zone can collide with it.
-const unplacedSegment = "_unplaced"
-
 type Manager struct {
 	st      *store.Store
 	log     *slog.Logger
+	nodeID  string
 	mu      sync.RWMutex
 	byID    uns.Registry      // ulid → entry
 	byPK    map[string]string // pubkey hex → ulid; KindLocal holds none, so "" is never indexed here
@@ -81,6 +76,7 @@ func New(st *store.Store, nodeULID string) (*Manager, error) {
 	m := &Manager{
 		st:     st,
 		log:    slog.Default().With("node", nodeULID, "comp", "registry"),
+		nodeID: nodeULID,
 		byID:   uns.Registry{},
 		byPK:   map[string]string{},
 		byName: map[string]string{},
@@ -113,7 +109,7 @@ func (m *Manager) SetKick(fn func(ulid string)) {
 }
 
 // SetDeliver late-binds the local-bus mirror (engine.LocalDeliver shape): an
-// enrolled entry's _EdgeNode entity is state and appears retained on the bus
+// enrolled entry's _EnrolledIdentity entity is state and appears retained on the bus
 // like any engine-persisted entity; a revocation clears the retained copy by
 // delivering an empty retained payload (MQTT retained-clear semantics).
 func (m *Manager) SetDeliver(fn func(topic string, payload []byte, retain bool)) {
@@ -175,21 +171,12 @@ func (m *Manager) mountOf(e *uns.Entry) (string, bool) {
 	return m.ns.PathOf(e.Element)
 }
 
-// topicFor builds the entry's _EdgeNode entity topic: level 4 = the enrolled
-// identity, path = its placement resolved right now (§2.2). ok=false only when
-// a bound element does not resolve — an unplaced identity (bound to the node
-// itself, never a missing value, design §2) files under the placeholder
-// segment and is fine.
-func (m *Manager) topicFor(e *uns.Entry) (topic, kvPath string, ok bool) {
-	p := unplacedSegment
-	if e.Element != "" {
-		resolved, found := m.mountOf(e)
-		if !found {
-			return "", "", false
-		}
-		p = resolved
-	}
-	return "colca/v1/_EdgeNode/" + e.ULID + "/" + p, p, true
+// topicFor builds the security-inventory entity topic. Level 4 is the node
+// that enrolled the identity; the enrolled identity remains the record id in
+// the reserved inventory path. Placement controls authorization, not topology.
+func (m *Manager) topicFor(e *uns.Entry) (topic, kvPath string) {
+	p := "_colca/identities/" + e.ULID
+	return "colca/v1/_EnrolledIdentity/" + m.nodeID + "/" + p, p
 }
 
 // Enroll validates and persists a new or updated entry (§4): entry-shape
@@ -246,17 +233,13 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 		m.mu.Unlock()
 		return "", 0, err
 	}
-	topic, kvPath, ok := m.topicFor(&e)
-	if !ok {
-		m.mu.Unlock()
-		return "", 0, fmt.Errorf("enroll %s: element %s is not placed at this node: %w", e.ULID, e.Element, ErrUnknownElement)
-	}
+	topic, kvPath := m.topicFor(&e)
 	off, err := m.st.RegistryPut(e.ULID, canonical, "entities", store.Record{
 		Topic:   topic,
 		Payload: canonical,
 		TS:      time.Now().UnixMilli(),
 		KVPath:  kvPath,
-		KVNode:  e.ULID,
+		KVNode:  m.nodeID,
 	})
 	if err != nil {
 		m.mu.Unlock()
@@ -316,21 +299,14 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 	wasDraining = e.IsDraining()
 	// Revoke is the kill switch and never waits for the namespace to be
 	// healthy: an entry whose element stopped resolving still loses its
-	// identity here and now. Its _EdgeNode record cannot be addressed in that
-	// case, so it is left behind and logged loudly. Reaching this requires the
-	// element to have been deleted out from under a bound entry, which
-	// element/delete refuses.
-	topic, kvPath, placed := m.topicFor(e)
-	if !placed {
-		m.log.Error("revoking an identity whose element no longer resolves — its _EdgeNode record is orphaned",
-			"ulid", ulid, "element", e.Element)
-		topic, kvPath = "colca/v1/_EdgeNode/"+ulid+"/"+unplacedSegment, unplacedSegment
-	}
+	// identity here and now. Security inventory has a stable reserved address,
+	// so revocation does not depend on the element still resolving.
+	topic, kvPath := m.topicFor(e)
 	off, err := m.st.RegistryDelete(ulid, "entities", store.Record{
 		Topic:  topic,
 		TS:     time.Now().UnixMilli(),
 		KVPath: kvPath,
-		KVNode: ulid,
+		KVNode: m.nodeID,
 	})
 	if err != nil {
 		m.mu.Unlock()
@@ -404,17 +380,19 @@ func (m *Manager) Drain(ulid string) (offset uint64, err error) {
 		m.mu.Unlock()
 		return 0, err
 	}
-	topic, kvPath, placed := m.topicFor(&updated)
-	if !placed {
-		m.mu.Unlock()
-		return 0, fmt.Errorf("drain %s: element %s is not placed at this node: %w", ulid, updated.Element, ErrUnknownElement)
+	if updated.Element != "" {
+		if _, placed := m.mountOf(&updated); !placed {
+			m.mu.Unlock()
+			return 0, fmt.Errorf("drain %s: element %s is not placed at this node: %w", ulid, updated.Element, ErrUnknownElement)
+		}
 	}
+	topic, kvPath := m.topicFor(&updated)
 	off, err := m.st.RegistryPut(updated.ULID, canonical, "entities", store.Record{
 		Topic:   topic,
 		Payload: canonical,
 		TS:      time.Now().UnixMilli(),
 		KVPath:  kvPath,
-		KVNode:  updated.ULID,
+		KVNode:  m.nodeID,
 	})
 	if err != nil {
 		m.mu.Unlock()

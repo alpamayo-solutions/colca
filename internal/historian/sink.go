@@ -17,7 +17,7 @@ import (
 // double-write even if the marker were somehow lost.
 const insertMetric = `
 INSERT INTO historian_metric
-    (timestamp, value_json, value_number, value_text, value_bool, edge_node_id, signal_id)
+    (timestamp, value_json, value_number, value_text, value_bool, colca_node_id, signal_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (signal_id, timestamp) DO NOTHING`
 

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,7 @@ type Result struct {
 	Stream    string
 	Offset    uint64
 	Topic     string // as persisted — post mount-insertion for replicated records
+	Command   *CommandOutcome
 }
 
 // Attribution is the immutable authorship envelope stored with a record.
@@ -242,6 +244,86 @@ func (e *Engine) Groups() *uns.GroupIndex { return uns.NewGroupIndex(e.EntitySto
 // NodeID is the identity this node publishes under.
 func (e *Engine) NodeID() string { return e.cfg.ULID }
 
+func stateIdentity(payload []byte) (id, colcaNodeID string, err error) {
+	if len(payload) == 0 { // a tombstone carries its identity in the topic
+		return "", "", nil
+	}
+	var value struct {
+		ID           string `json:"id"`
+		ColcaNodeID string `json:"colca_node_id"`
+	}
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return "", "", err
+	}
+	return value.ID, value.ColcaNodeID, nil
+}
+
+// validateClientStateAuthor adds payload-level authorship checks after the
+// local-trust door has pinned level 4 to this node. The authenticated service
+// identity remains evidence and authority; it never replaces the node in the
+// topic.
+func (e *Engine) validateClientStateAuthor(identity string, p uns.Parsed, payload []byte) error {
+	if uns.IsDefinition(e.ClassOf(p.Contract)) {
+		return fmt.Errorf("%s is node-authored definition state", p.Contract)
+	}
+	if p.Contract == "_Node" || p.Contract == "_ExternalReference" {
+		return fmt.Errorf("%s is node-authored entity state", p.Contract)
+	}
+	if p.Contract != "_ServiceDetails" {
+		return nil
+	}
+	id, colcaNodeID, err := stateIdentity(payload)
+	if err != nil {
+		return err
+	}
+	if id != "" && id != identity {
+		return fmt.Errorf("_ServiceDetails id %q must equal authenticated identity %q", id, identity)
+	}
+	if colcaNodeID != "" && colcaNodeID != e.cfg.ULID {
+		return fmt.Errorf("_ServiceDetails colca_node_id %q must equal local node %q", colcaNodeID, e.cfg.ULID)
+	}
+	if p.Path != "_service" && !strings.HasSuffix(p.Path, "/_service") {
+		return fmt.Errorf("_ServiceDetails path %q must end in reserved _service leaf", p.Path)
+	}
+	return nil
+}
+
+// validateAdminStateAuthor pins node-authored records to this node. Replicated
+// records do not pass through this door and keep their original node author.
+func (e *Engine) validateAdminStateAuthor(p uns.Parsed, payload []byte) error {
+	if p.Contract == "_ServiceDetails" {
+		return fmt.Errorf("_ServiceDetails is observed state authored by the service identity")
+	}
+	class := e.ClassOf(p.Contract)
+	if p.Contract != "_Node" && p.Contract != "_ExternalReference" && !uns.IsDefinition(class) {
+		return nil
+	}
+	if p.NodeID != e.cfg.ULID {
+		return fmt.Errorf("%s author %q must equal local node %q", p.Contract, p.NodeID, e.cfg.ULID)
+	}
+	id, _, err := stateIdentity(payload)
+	if err != nil {
+		return err
+	}
+	if p.Contract == "_Node" {
+		wantPath := "_colca/nodes/" + e.cfg.ULID
+		if p.Path != wantPath || (id != "" && id != e.cfg.ULID) {
+			return fmt.Errorf("_Node must describe local node %q at %q", e.cfg.ULID, wantPath)
+		}
+		return nil
+	}
+	if p.Contract == "_ExternalReference" {
+		if id != "" && p.Path != "_colca/external-references/"+id {
+			return fmt.Errorf("_ExternalReference path %q does not name payload id %q", p.Path, id)
+		}
+		return nil
+	}
+	if id != "" && p.Path != id {
+		return fmt.Errorf("%s path %q does not name definition id %q", p.Contract, p.Path, id)
+	}
+	return nil
+}
+
 // IngestClient: a directly attached MQTT client (machine/service) publishes.
 // Rules: uns grammar, class must be data/entity/ack, level-4 == this node,
 // write-scope authorization, validate, persist. A non-UNS topic is not an
@@ -255,9 +337,9 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 		return e.reject(metrics.ReasonGrammar, "%w", err)
 	}
 	// Registry entries enter through the enrollment door ONLY (auth §3): no
-	// client may author an _EdgeNode, not even its own.
-	if p.Contract == "_EdgeNode" {
-		return e.reject(metrics.ReasonRegistryContract, "client %s may not publish _EdgeNode — registry entries are enrollment-door only", identity)
+	// client may author an _EnrolledIdentity, not even its own.
+	if p.Contract == "_EnrolledIdentity" {
+		return e.reject(metrics.ReasonRegistryContract, "client %s may not publish _EnrolledIdentity — registry entries are enrollment-door only", identity)
 	}
 	class := e.ClassOf(p.Contract)
 	if uns.IsNodeLocal(class) {
@@ -308,6 +390,9 @@ func (e *Engine) IngestClient(identity, topic string, payload []byte) (Result, e
 	if err := e.validateContract(p.Contract, payload); err != nil {
 		return e.reject(metrics.ReasonValidation, "%w", err)
 	}
+	if err := e.validateClientStateAuthor(identity, p, payload); err != nil {
+		return e.reject(metrics.ReasonIdentity, "%w", err)
+	}
 	entry, ok := e.ids.Get(identity)
 	if !ok || !uns.Authorize(e.Scope(), entry, uns.ActPub, topic) {
 		return e.reject(metrics.ReasonWriteDenied, "client %s: no write scope covers %s", identity, topic)
@@ -345,8 +430,8 @@ func (e *Engine) IngestHumanAs(entry *uns.Entry, asUser, topic string, payload [
 	if err != nil {
 		return e.reject(metrics.ReasonGrammar, "%w", err)
 	}
-	if p.Contract == "_EdgeNode" {
-		return e.reject(metrics.ReasonRegistryContract, "_EdgeNode is enrollment-door only — use POST /enroll")
+	if p.Contract == "_EnrolledIdentity" {
+		return e.reject(metrics.ReasonRegistryContract, "_EnrolledIdentity is enrollment-door only — use POST /enroll")
 	}
 	class := e.ClassOf(p.Contract)
 	if !uns.IsKnown(class) {
@@ -381,7 +466,7 @@ func (e *Engine) IngestHumanAs(entry *uns.Entry, asUser, topic string, payload [
 	attribution := Attribution{WrittenBy: entry.ULID, AsUser: asUser}
 	res, err := e.persistAttributed(class, p, topic, payload, attribution)
 	if err == nil {
-		e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
+		res.Command = e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
 	}
 	return res, err
 }
@@ -406,9 +491,9 @@ func (e *Engine) IngestAdminAs(topic string, payload []byte, writtenBy, asUser s
 	}
 	// Even the admin token may not author registry entries through /publish —
 	// enrollment has its own door with its own validation (auth §3, §4).
-	if p.Contract == "_EdgeNode" {
+	if p.Contract == "_EnrolledIdentity" {
 		e.metrics.RejectPublish(metrics.ReasonRegistryContract)
-		return Result{}, fmt.Errorf("_EdgeNode is enrollment-door only — use POST /enroll")
+		return Result{}, fmt.Errorf("_EnrolledIdentity is enrollment-door only — use POST /enroll")
 	}
 	class := e.ClassOf(p.Contract)
 	if uns.IsNodeLocal(class) {
@@ -432,10 +517,14 @@ func (e *Engine) IngestAdminAs(topic string, payload []byte, writtenBy, asUser s
 		e.metrics.RejectPublish(metrics.ReasonValidation)
 		return Result{}, err
 	}
+	if err := e.validateAdminStateAuthor(p, payload); err != nil {
+		e.metrics.RejectPublish(metrics.ReasonIdentity)
+		return Result{}, err
+	}
 	attribution := Attribution{WrittenBy: writtenBy, AsUser: asUser}
 	res, err := e.persistAttributed(class, p, topic, payload, attribution)
 	if err == nil {
-		e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
+		res.Command = e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
 	}
 	return res, err
 }

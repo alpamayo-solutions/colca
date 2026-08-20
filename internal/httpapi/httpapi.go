@@ -284,7 +284,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "topic outside colca/# is not persisted"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"stream": res.Stream, "offset": res.Offset, "topic": res.Topic})
+		body := map[string]any{"stream": res.Stream, "offset": res.Offset, "topic": res.Topic}
+		if res.Command != nil {
+			body["command"] = res.Command
+		}
+		writeJSON(w, http.StatusOK, body)
 	}))
 
 	// GET /fetch reads from the cursor's current position and never advances it:

@@ -89,9 +89,10 @@ func (m *Manager) elementFor(mount string) (string, error) {
 		}
 		id, ok := place.IDAt(local)
 		if !ok {
-			// Minted, never derived from the path — the production precedent
-			// is node-manager's ensure_element (node.py): "el-" + a random
-			// suffix, never the path. A path-derived id is a real defect, not
+			// Minted, never derived from the path. SystemElement.id is a
+			// 26-character ULID throughout the API contract, so the canonical
+			// ULID is used directly rather than adding a prefix that the
+			// projection cannot store. A path-derived id is a real defect, not
 			// a style choice: rename this element (its id stays, its path
 			// moves), then let any service later declare the OLD path.
 			// IDAt would miss, so a deterministic id would be re-minted
@@ -100,7 +101,7 @@ func (m *Manager) elementFor(mount string) (string, error) {
 			// undoing the rename through the id instead of through the entry,
 			// exactly what the seed-not-maintain rule exists to prevent.
 			// Reuses NewULID rather than adding a second randomness source.
-			id = "el-" + NewULID()
+			id = NewULID()
 			if err := upsert(local, id); err != nil {
 				return "", fmt.Errorf("register: could not author %s: %w", local, err)
 			}

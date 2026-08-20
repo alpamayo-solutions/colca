@@ -30,7 +30,7 @@ type Class int
 const (
 	ClassNone       Class = iota
 	ClassData             // _Metric …    node-owned state, authorized by write scope
-	ClassEntity           // _EdgeNode, _SystemElement, _Signal
+	ClassEntity           // _Node, _EnrolledIdentity, _SystemElement, _Signal
 	ClassDefinition       // _Group, _MetadataType …  write: any node, flows DOWN, applied as state
 	ClassCmd              // _Cmd*        write: ancestors/admin, flows down
 	ClassAck              // _Ack         write: owner, flows up
@@ -85,9 +85,13 @@ func ClassOf(contract string) Class {
 	switch {
 	case contract == "_Metric":
 		return ClassData
-	case contract == "_EdgeNode" || contract == "_SystemElement" || contract == "_Signal":
+	case contract == "_EnrolledIdentity" || contract == "_Node" ||
+		contract == "_ServiceDetails" || contract == "_SystemElement" ||
+		contract == "_Signal" || contract == "_ExternalReference":
 		return ClassEntity
-	case contract == "_Group":
+	case contract == "_Group" || contract == "_MetadataType" ||
+		contract == "_AnnotationType" || contract == "_Interface" ||
+		contract == "_ExternalSystem":
 		return ClassDefinition
 	case contract == "_Ack":
 		return ClassAck
@@ -300,12 +304,16 @@ func Validate(contract string, payload []byte) error {
 			return err
 		}
 		return reqNum("result_code")
-	case contract == "_EdgeNode":
+	case contract == "_EnrolledIdentity":
 		// A registry entry names itself by the enrolled identity.
 		return reqStr("ulid")
-	case contract == "_SystemElement" || contract == "_Signal" || contract == "_Group":
+	case contract == "_Node" || contract == "_ServiceDetails" ||
+		contract == "_SystemElement" || contract == "_Signal" ||
+		contract == "_ExternalReference" || contract == "_Group" ||
+		contract == "_MetadataType" || contract == "_AnnotationType" ||
+		contract == "_Interface" || contract == "_ExternalSystem":
 		// Data-model records name themselves by "id" — the field grants and
-		// bindings reference them through. They shared _EdgeNode's "ulid" rule
+		// bindings reference them through. They shared the registry's "ulid" rule
 		// until the binding cutover renamed it; a floor that still asked for
 		// "ulid" rejected every real element and signal.
 		return reqStr("id")

@@ -79,18 +79,18 @@ func TestRejectPublishByReason(t *testing.T) {
 			},
 		},
 		{
-			name:   "IngestClient: _EdgeNode at an ordinary door",
+			name:   "IngestClient: _EnrolledIdentity at an ordinary door",
 			reason: metrics.ReasonRegistryContract,
 			invoke: func(e *Engine) error {
-				_, err := e.IngestClient("m1", "colca/v1/_EdgeNode/m1/x", []byte(`{"ulid":"m1"}`))
+				_, err := e.IngestClient("m1", "colca/v1/_EnrolledIdentity/m1/_colca/identities/m1", []byte(`{"ulid":"m1"}`))
 				return err
 			},
 		},
 		{
-			name:   "IngestAdmin: _EdgeNode at the admin door",
+			name:   "IngestAdmin: _EnrolledIdentity at the admin door",
 			reason: metrics.ReasonRegistryContract,
 			invoke: func(e *Engine) error {
-				_, err := e.IngestAdmin("colca/v1/_EdgeNode/x/y", []byte(`{"ulid":"x"}`))
+				_, err := e.IngestAdmin("colca/v1/_EnrolledIdentity/n1/_colca/identities/x", []byte(`{"ulid":"x"}`))
 				return err
 			},
 		},

@@ -5,7 +5,7 @@ import (
 )
 
 // Registry family tests (auth design §2.2): one atomic batch writes the
-// r/{ulid} entry together with its _EdgeNode entity record. Atomicity is by
+// r/{ulid} entry together with its _EnrolledIdentity entity record. Atomicity is by
 // construction — RegistryPut/RegistryDelete build ONE pebble batch applied
 // with Sync. Mutation check (documented, not automated): splitting either
 // method into two Apply calls makes the reopen assertions below racy against
@@ -18,11 +18,11 @@ func testEntryJSON(ulid string) []byte {
 
 func entityRec(ulid string) Record {
 	return Record{
-		Topic:   "colca/v1/_EdgeNode/" + ulid + "/z/" + ulid,
+		Topic:   "colca/v1/_EnrolledIdentity/01NODE/_colca/identities/" + ulid,
 		Payload: testEntryJSON(ulid),
 		TS:      42,
-		KVPath:  "z/" + ulid,
-		KVNode:  ulid,
+		KVPath:  "_colca/identities/" + ulid,
+		KVNode:  "01NODE",
 	}
 }
 
@@ -53,8 +53,8 @@ func TestRegistryPutScanAndReopen(t *testing.T) {
 	if err != nil || len(recs) != 1 || recs[0].Topic != entityRec("01M1").Topic {
 		t.Fatalf("entity record not in stream: recs=%v err=%v", recs, err)
 	}
-	kv := s.KVScan("z/01M1")
-	if len(kv) != 1 || kv[0].NodeID != "01M1" {
+	kv := s.KVScan("_colca/identities/01M1")
+	if len(kv) != 1 || kv[0].NodeID != "01NODE" {
 		t.Fatalf("KV projection missing: %v", kv)
 	}
 
@@ -101,7 +101,10 @@ func TestRegistryDelete(t *testing.T) {
 	if _, err := s.RegistryPut("01M1", testEntryJSON("01M1"), "entities", entityRec("01M1")); err != nil {
 		t.Fatal(err)
 	}
-	tomb := Record{Topic: entityRec("01M1").Topic, Payload: nil, TS: 43, KVPath: "z/01M1", KVNode: "01M1"}
+	tomb := Record{
+		Topic: entityRec("01M1").Topic, Payload: nil, TS: 43,
+		KVPath: "_colca/identities/01M1", KVNode: "01NODE",
+	}
 	off, err := s.RegistryDelete("01M1", "entities", tomb)
 	if err != nil {
 		t.Fatalf("RegistryDelete: %v", err)
@@ -114,7 +117,7 @@ func TestRegistryDelete(t *testing.T) {
 	}
 	// The identity's KV projection is retired in the same batch — a restart's
 	// retained-set reseed must not resurrect a revoked identity.
-	if kv := s.KVScan("z/01M1"); len(kv) != 0 {
+	if kv := s.KVScan("_colca/identities/01M1"); len(kv) != 0 {
 		t.Fatalf("KV entry survived revocation: %v", kv)
 	}
 	// The tombstone record is in the stream (history keeps the retirement).

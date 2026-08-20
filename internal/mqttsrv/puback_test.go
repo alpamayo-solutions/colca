@@ -69,7 +69,7 @@ func TestPubackReasonCodesMQTT5(t *testing.T) {
 		{"wrong level-4", "colca/v1/_Metric/m2/temp", `{"v": 1}`, 0x87},
 		{"unknown contract", "colca/v1/_Bogus/m1/x", `{}`, 0x90},
 		{"cmd without grant", "colca/v1/_CmdParam/m1/m1/go", `{"correlation_id":"c","expires_at":9000000000000}`, 0x87},
-		{"registry contract", "colca/v1/_EdgeNode/m1/x", `{"ulid":"u"}`, 0x87},
+		{"registry contract", "colca/v1/_EnrolledIdentity/m1/_colca/identities/u", `{"ulid":"u"}`, 0x87},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

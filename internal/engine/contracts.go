@@ -2,7 +2,7 @@
 // bundle the bundle answers class, tombstonability and schema for every
 // contract it carries — fully replacing the builtin floor, never merging.
 // Without one, the floor (plugins/uns) applies unchanged. The builtin-only
-// contracts (_StreamGap, _EdgeNode, _TimeSync) are ALWAYS answered by the
+// contracts (_StreamGap, _EnrolledIdentity, _TimeSync) are ALWAYS answered by the
 // binary: their producers live in this process, so their rules evolve with
 // it (§10.2) and a bundle may not redeclare them (loader-enforced).
 package engine
@@ -33,7 +33,7 @@ func (e *Engine) reject(reason, format string, args ...any) (Result, error) {
 	return Result{}, &RejectError{Reason: reason, Err: fmt.Errorf(format, args...)}
 }
 
-var builtinOnly = map[string]bool{"_StreamGap": true, "_EdgeNode": true, "_TimeSync": true}
+var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true, "_TimeSync": true}
 
 // SetContracts installs the loaded bundle table (node startup; nil = floor).
 func (e *Engine) SetContracts(t *contracts.Table) { e.contracts = t }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // ConfigExec answers `_CmdConfigure`: editing the node's data model.
@@ -15,7 +16,9 @@ import (
 // command and produces the same records. That is what makes "define it once"
 // true by construction rather than by discipline.
 type ConfigExec struct {
-	store EntityStore
+	store  EntityStore
+	mu     sync.Mutex
+	writes []StateWrite
 	// bound answers which identities bind to an element, so retiring a position
 	// cannot strand the things standing on it, and who an identity is — the
 	// name and element autobind needs to COMPUTE a connector's catalogue
@@ -179,6 +182,27 @@ type definitionDeleteBody struct {
 	Definitions []definitionDeleteRef `json:"definitions"`
 }
 
+// entityRef is one positionless platform-inventory entity whose path is
+// derived by the node. Plant-positioned elements and signals keep their
+// dedicated verbs because their placement is part of the command.
+type entityRef struct {
+	Contract string          `json:"contract"`
+	Entity   json.RawMessage `json:"entity"`
+}
+
+type entityUpsertBody struct {
+	Entities []entityRef `json:"entities"`
+}
+
+type entityDeleteRef struct {
+	Contract string `json:"contract"`
+	ID       string `json:"id"`
+}
+
+type entityDeleteBody struct {
+	Entities []entityDeleteRef `json:"entities"`
+}
+
 // identified is the part of any definition record this needs: the id that IS
 // its address.
 type identified struct {
@@ -212,6 +236,26 @@ type boundSignal struct {
 }
 
 func (c *ConfigExec) Execute(contract, verb string, payload []byte) (int, string, string) {
+	code, message, result, _ := c.ExecuteWithWrites(contract, verb, payload)
+	return code, message, result
+}
+
+// ExecuteWithWrites is the read-your-writes extension consumed by the engine.
+// The ordinary Execute method remains the stable executor interface for
+// command handlers that do not produce state.
+func (c *ConfigExec) ExecuteWithWrites(
+	contract, verb string,
+	payload []byte,
+) (int, string, string, []StateWrite) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writes = nil
+	code, message, result := c.execute(contract, verb, payload)
+	writes := append([]StateWrite(nil), c.writes...)
+	return code, message, result, writes
+}
+
+func (c *ConfigExec) execute(contract, verb string, payload []byte) (int, string, string) {
 	switch verb {
 	case "signal/upsert":
 		return c.upsert(payload)
@@ -223,6 +267,10 @@ func (c *ConfigExec) Execute(contract, verb string, payload []byte) (int, string
 		return c.elementUpsert(payload)
 	case "element/delete":
 		return c.elementDelete(payload)
+	case "entity/upsert":
+		return c.entityUpsert(payload)
+	case "entity/delete":
+		return c.entityDelete(payload)
 	case "definition/upsert":
 		return c.definitionUpsert(payload)
 	case "definition/delete":
@@ -230,6 +278,90 @@ func (c *ConfigExec) Execute(contract, verb string, payload []byte) (int, string
 	default:
 		return 422, fmt.Sprintf("unknown configure verb %q", verb), "invalid"
 	}
+}
+
+func (c *ConfigExec) entityUpsert(payload []byte) (int, string, string) {
+	var body entityUpsertBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return 422, "entity/upsert: unreadable payload: " + err.Error(), "invalid"
+	}
+	if len(body.Entities) == 0 {
+		return 422, "entity/upsert: no entities given", "invalid"
+	}
+	for i, ref := range body.Entities {
+		if err := c.checkCommandEntity(ref.Contract); err != nil {
+			return 422, fmt.Sprintf("entity/upsert: entry %d: %v", i, err), "invalid"
+		}
+		var incoming identified
+		if err := json.Unmarshal(ref.Entity, &incoming); err != nil || incoming.ID == "" {
+			return 422, fmt.Sprintf("entity/upsert: entry %d has no id", i), "invalid"
+		}
+		topic := c.commandEntityTopic(ref.Contract, incoming.ID)
+		if err := c.publish(topic, ref.Entity); err != nil {
+			return 422, fmt.Sprintf("entity/upsert: %s %s rejected: %v",
+				ref.Contract, incoming.ID, err), "invalid"
+		}
+	}
+	return 200, fmt.Sprintf("upserted %d", len(body.Entities)), "ok"
+}
+
+func (c *ConfigExec) entityDelete(payload []byte) (int, string, string) {
+	var body entityDeleteBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return 422, "entity/delete: unreadable payload: " + err.Error(), "invalid"
+	}
+	if len(body.Entities) == 0 {
+		return 422, "entity/delete: no entities given", "invalid"
+	}
+	var missing []string
+	for i, ref := range body.Entities {
+		if err := c.checkCommandEntity(ref.Contract); err != nil {
+			return 422, fmt.Sprintf("entity/delete: entry %d: %v", i, err), "invalid"
+		}
+		if ref.ID == "" {
+			return 422, fmt.Sprintf("entity/delete: entry %d has no id", i), "invalid"
+		}
+		topic := c.commandEntityTopic(ref.Contract, ref.ID)
+		if _, ok := c.store.KVGet(topic); !ok {
+			missing = append(missing, ref.Contract+" "+ref.ID)
+			continue
+		}
+		if err := c.publish(topic, nil); err != nil {
+			return 500, fmt.Sprintf("entity/delete: %s %s failed: %v",
+				ref.Contract, ref.ID, err), "error"
+		}
+	}
+	if len(missing) > 0 {
+		return 404, "entity/delete: no entity at " + strings.Join(missing, ", "), "invalid"
+	}
+	return 200, fmt.Sprintf("deleted %d", len(body.Entities)), "ok"
+}
+
+func (c *ConfigExec) checkCommandEntity(contract string) error {
+	switch contract {
+	case "_Node", "_ExternalReference":
+		return nil
+	case "_ServiceDetails", "_EnrolledIdentity":
+		return fmt.Errorf("%s is observed state and has its own writer", contract)
+	default:
+		return fmt.Errorf("%s is not a platform-inventory entity authored by this command", contract)
+	}
+}
+
+func (c *ConfigExec) commandEntityTopic(contract, id string) string {
+	leaf := map[string]string{
+		"_Node":        "nodes",
+		"_ExternalReference": "external-references",
+	}[contract]
+	return "colca/v1/" + contract + "/" + c.store.NodeID() + "/_colca/" + leaf + "/" + id
+}
+
+func (c *ConfigExec) publish(topic string, payload []byte) error {
+	write, err := c.store.Publish(topic, payload)
+	if err == nil {
+		c.writes = append(c.writes, write)
+	}
+	return err
 }
 
 func (c *ConfigExec) upsert(payload []byte) (int, string, string) {
@@ -247,7 +379,7 @@ func (c *ConfigExec) upsert(payload []byte) (int, string, string) {
 		if len(ref.Signal) == 0 {
 			return 422, fmt.Sprintf("signal/upsert: entry %d has no signal", i), "invalid"
 		}
-		if err := c.store.Publish(c.signalTopic(ref.Path), ref.Signal); err != nil {
+		if err := c.publish(c.signalTopic(ref.Path), ref.Signal); err != nil {
 			// The bundle rejected it, or the store did. Either way the caller
 			// learns which entry and why rather than a bare failure.
 			return 422, fmt.Sprintf("signal/upsert: %s rejected: %v", ref.Path, err), "invalid"
@@ -272,7 +404,7 @@ func (c *ConfigExec) delete(payload []byte) (int, string, string) {
 			continue
 		}
 		// An empty payload is the tombstone: the path is retired, not blanked.
-		if err := c.store.Publish(topic, nil); err != nil {
+		if err := c.publish(topic, nil); err != nil {
 			return 500, fmt.Sprintf("signal/delete: %s failed: %v", path, err), "error"
 		}
 	}
@@ -375,7 +507,7 @@ func (c *ConfigExec) bindCatalogue(under string, raw []byte) (int, string, strin
 		if err != nil {
 			return 500, "signal/autobind: encode failed: " + err.Error(), "error"
 		}
-		if err := c.store.Publish(c.signalTopic(path), encoded); err != nil {
+		if err := c.publish(c.signalTopic(path), encoded); err != nil {
 			return 422, fmt.Sprintf("signal/autobind: %s rejected: %v", path, err), "invalid"
 		}
 		taken[path] = true
@@ -495,7 +627,7 @@ func (c *ConfigExec) elementUpsert(payload []byte) (int, string, string) {
 					"cannot share one position", ref.Path, held.ID), "conflict"
 			}
 		}
-		if err := c.store.Publish(topic, ref.Element); err != nil {
+		if err := c.publish(topic, ref.Element); err != nil {
 			return 422, fmt.Sprintf("element/upsert: %s rejected: %v", ref.Path, err), "invalid"
 		}
 	}
@@ -535,7 +667,7 @@ func (c *ConfigExec) elementDelete(payload []byte) (int, string, string) {
 			return 409, fmt.Sprintf("element/delete: %s is still bound by %s", path,
 				strings.Join(bound, ", ")), "conflict"
 		}
-		if err := c.store.Publish(topic, nil); err != nil {
+		if err := c.publish(topic, nil); err != nil {
 			return 500, fmt.Sprintf("element/delete: %s failed: %v", path, err), "error"
 		}
 	}
@@ -590,7 +722,7 @@ func (c *ConfigExec) definitionUpsert(payload []byte) (int, string, string) {
 			return 422, fmt.Sprintf("definition/upsert: %s %s: %v",
 				ref.Contract, incoming.ID, err), "invalid"
 		}
-		if err := c.store.Publish(c.definitionTopic(ref.Contract, incoming.ID), ref.Definition); err != nil {
+		if err := c.publish(c.definitionTopic(ref.Contract, incoming.ID), ref.Definition); err != nil {
 			return 422, fmt.Sprintf("definition/upsert: %s %s rejected: %v",
 				ref.Contract, incoming.ID, err), "invalid"
 		}
@@ -621,7 +753,7 @@ func (c *ConfigExec) definitionDelete(payload []byte) (int, string, string) {
 			missing = append(missing, ref.Contract+" "+ref.ID)
 			continue
 		}
-		if err := c.store.Publish(topic, nil); err != nil {
+		if err := c.publish(topic, nil); err != nil {
 			return 500, fmt.Sprintf("definition/delete: %s %s failed: %v",
 				ref.Contract, ref.ID, err), "error"
 		}

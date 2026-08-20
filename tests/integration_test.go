@@ -678,7 +678,7 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 	awaitTopic(t, cmds, "colca/v1/_CmdParam/m1/m1/set-speed", 20*time.Second)
 	m1.Publish("colca/v1/_Ack/n-edge1/m1/set-speed", 1, false, `{"correlation_id":"kv-eq-1","result_code":200}`).WaitTimeout(5 * time.Second)
 
-	// settle: all three state paths in KV (plus the two _EdgeNode registry
+	// settle: all three state paths in KV (plus the two _EnrolledIdentity registry
 	// entities enrollment wrote and the two _SystemElement records m1 and the
 	// observer each bind to — a machine must be placed now, so the observer's
 	// own enrollment authors one too — all state like any other entity), the

@@ -1008,7 +1008,7 @@ drain:
 // must be distributed unchanged — and non-UNS subscriptions need no grant.
 func TestNonUnsTopicStillDistributed(t *testing.T) {
 	w := newWorld(t)
-	// Baseline: enrollments already appended _EdgeNode entities.
+	// Baseline: enrollments already appended _EnrolledIdentity entities.
 	base := map[string]uint64{}
 	for _, stream := range []string{"metrics", "entities", "commands"} {
 		base[stream] = w.st.NextOffset(stream)
