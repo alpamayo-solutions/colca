@@ -3,7 +3,7 @@ ulid: n-edge1
 data_dir: /data
 log_level: debug
 key_file: /keys/edge1.key
-api: { addr: ":8080", token: "demo-admin-token" }
+api: { addr: ":443", token: "demo-admin-token" }
 mqtt: { addr: ":8883" }
 repl: { addr: ":9443" }
 auth:

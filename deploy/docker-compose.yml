@@ -73,7 +73,7 @@ services:
     # usable only when the human-auth profile (keycloak) is up; without it the
     # hub keeps retrying its JWKS fetch and the doors reject every token.
     ports:
-      - "127.0.0.1:${COLCA_PORT_GLOBAL_API:-18080}:8080"
+      - "127.0.0.1:${COLCA_PORT_GLOBAL_API:-18080}:443"
       - "127.0.0.1:${COLCA_PORT_GLOBAL_MQTT:-11880}:8883"
       - "127.0.0.1:${COLCA_PORT_GLOBAL_HUMAN_MQTT:-11890}:8884"
       - "127.0.0.1:${COLCA_PORT_GLOBAL_HUMAN_WS:-11891}:8885"
@@ -92,7 +92,7 @@ services:
       - "./keys:/keys:ro"
       - "site1-data:/data"
     ports:
-      - "127.0.0.1:${COLCA_PORT_SITE1_API:-18081}:8080"
+      - "127.0.0.1:${COLCA_PORT_SITE1_API:-18081}:443"
       - "127.0.0.1:${COLCA_PORT_SITE1_MQTT:-11881}:8883"
     depends_on: [global]
     networks:
@@ -110,7 +110,7 @@ services:
       - "./keys:/keys:ro"
       - "edge1-data:/data"
     ports:
-      - "127.0.0.1:${COLCA_PORT_EDGE1_API:-18082}:8080"
+      - "127.0.0.1:${COLCA_PORT_EDGE1_API:-18082}:443"
       - "127.0.0.1:${COLCA_PORT_EDGE1_MQTT:-11883}:8883"
     depends_on: [site1]
     networks:
@@ -129,7 +129,7 @@ services:
       - "./keys:/keys:ro"
       - "edge2-data:/data"
     ports:
-      - "127.0.0.1:${COLCA_PORT_EDGE2_API:-18083}:8080"
+      - "127.0.0.1:${COLCA_PORT_EDGE2_API:-18083}:443"
       - "127.0.0.1:${COLCA_PORT_EDGE2_MQTT:-11884}:8883"
     depends_on: [site1]
     networks:
@@ -229,7 +229,7 @@ services:
       # The node API is mTLS-fronted with the per-run CA gen-keys.sh mints, so
       # there is nothing stable to pin in a demo world — hence the named
       # opt-out rather than a CA file. A real deployment sets COLCA_CA_FILE.
-      COLCA_URL: https://global:8080
+      COLCA_URL: https://global:443
       COLCA_INSECURE: "true"
       COLCA_TOKEN: demo-admin-token
       KC_URL: http://keycloak:8080
