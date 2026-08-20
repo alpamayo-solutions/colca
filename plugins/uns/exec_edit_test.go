@@ -448,6 +448,7 @@ func TestEditRejectsMalformedIntentKindsWithoutWriting(t *testing.T) {
 		{"delete", map[string]any{"type": "delete", "entity": map[string]any{"kind": "unknown", "id": "x"}}},
 		{"placement", map[string]any{"type": "placement", "entity": map[string]any{"kind": "system-element", "id": "x"}}},
 		{"binding", map[string]any{"type": "binding", "connector_id": "connector-1"}},
+		{"node attachment", map[string]any{"type": "node_attachment", "entity": map[string]any{"kind": "constant", "id": "x"}, "action": "drain"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newStore("n-edge1")
@@ -457,5 +458,157 @@ func TestEditRejectsMalformedIntentKindsWithoutWriting(t *testing.T) {
 				t.Fatalf("malformed %s = %d writes=%+v batches=%d offset=%d", tc.name, code, writes, f.batchCalls, f.offset)
 			}
 		})
+	}
+}
+
+type fakeNodeAttachmentWriter struct {
+	store        *fakeStore
+	remountCalls int
+	drainCalls   int
+}
+
+func (f *fakeNodeAttachmentWriter) RemountNode(entryJSON []byte) (uint64, int, string) {
+	f.remountCalls++
+	var attachment editNodeAttachment
+	if err := json.Unmarshal(entryJSON, &attachment); err != nil {
+		return 0, 422, err.Error()
+	}
+	topic := "colca/v1/_EnrolledIdentity/" + f.store.NodeID() + "/_colca/identities/" + attachment.ULID
+	write, err := f.store.Publish(topic, entryJSON)
+	if err != nil {
+		return 0, 500, err.Error()
+	}
+	return write.Offset, 200, "node attachment remounted"
+}
+
+func (f *fakeNodeAttachmentWriter) DrainNode(ulid string) (uint64, int, string) {
+	f.drainCalls++
+	topic := "colca/v1/_EnrolledIdentity/" + f.store.NodeID() + "/_colca/identities/" + ulid
+	payload, ok := f.store.KVGet(topic)
+	if !ok {
+		return 0, 409, "node attachment not found"
+	}
+	var attachment editNodeAttachment
+	if err := json.Unmarshal(payload, &attachment); err != nil {
+		return 0, 500, err.Error()
+	}
+	attachment.Status = StatusDraining
+	write, err := f.store.Publish(topic, bodyJSON(attachment))
+	if err != nil {
+		return 0, 500, err.Error()
+	}
+	return write.Offset, 200, "node attachment draining"
+}
+
+func bodyJSON(value any) []byte {
+	payload, _ := json.Marshal(value)
+	return payload
+}
+
+func seedNodeAttachment(t *testing.T, store *fakeStore, childID, mountID string) uint64 {
+	t.Helper()
+	return seedEditEntity(
+		t,
+		store,
+		"_EnrolledIdentity",
+		"_colca/identities/"+childID,
+		map[string]any{
+			"ulid":    childID,
+			"pubkey":  strings.Repeat("ab", 32),
+			"kind":    "node",
+			"element": mountID,
+			"grants":  []string{"read:/**", "write:/line/**"},
+		},
+	)
+}
+
+func TestEditNodeAttachmentRemountPreservesIdentityAndReplaysDurably(t *testing.T) {
+	store := newStore("parent-node")
+	oldMountVersion := seedEditEntity(t, store, "_SystemElement", "old", map[string]any{
+		"id": "mount-old", "name": "Old mount",
+	})
+	_ = oldMountVersion
+	newMountVersion := seedEditEntity(t, store, "_SystemElement", "new", map[string]any{
+		"id": "mount-new", "name": "New mount",
+	})
+	attachmentVersion := seedNodeAttachment(t, store, "child-node", "mount-old")
+	writer := &fakeNodeAttachmentWriter{store: store}
+	exec := NewEditExec(store, writer)
+	payload := editBody(t, "op-node-remount", map[string]uint64{
+		"node-attachment:child-node": attachmentVersion,
+		"system-element:mount-new":   newMountVersion,
+	}, map[string]any{
+		"type":   "node_attachment",
+		"entity": map[string]any{"kind": "colca-node", "id": "child-node"},
+		"action": "remount", "mount_system_element_id": "mount-new",
+	})
+
+	code, message, result, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	if code != 200 || result != "ok" || len(writes) != 1 || writer.remountCalls != 1 {
+		t.Fatalf("remount = %d %q %q writes=%+v calls=%d", code, message, result, writes, writer.remountCalls)
+	}
+	retained, ok := store.KVGet("colca/v1/_EnrolledIdentity/parent-node/_colca/identities/child-node")
+	if !ok {
+		t.Fatal("remount removed the retained attachment")
+	}
+	var attachment editNodeAttachment
+	if err := json.Unmarshal(retained, &attachment); err != nil {
+		t.Fatal(err)
+	}
+	if attachment.Element != "mount-new" || attachment.Pubkey != strings.Repeat("ab", 32) || len(attachment.Grants) != 2 {
+		t.Fatalf("remount did not preserve the identity envelope: %+v", attachment)
+	}
+
+	batchCalls := store.batchCalls
+	exec = NewEditExec(store, writer)
+	replayCode, replayMessage, replayResult, replayWrites := exec.ExecuteWithWrites(
+		"_CmdEdit", "apply", payload,
+	)
+	if replayCode != code || replayMessage != message || replayResult != result ||
+		len(replayWrites) != 1 || replayWrites[0] != writes[0] ||
+		writer.remountCalls != 1 || store.batchCalls != batchCalls {
+		t.Fatalf(
+			"durable replay changed result or wrote again: %d %q %q %+v calls=%d batches=%d",
+			replayCode, replayMessage, replayResult, replayWrites, writer.remountCalls, store.batchCalls,
+		)
+	}
+}
+
+func TestEditNodeAttachmentRejectsStaleVersionAndStartsDrain(t *testing.T) {
+	store := newStore("parent-node")
+	attachmentVersion := seedNodeAttachment(t, store, "child-node", "mount-old")
+	writer := &fakeNodeAttachmentWriter{store: store}
+	exec := NewEditExec(store, writer)
+
+	stale := editBody(t, "op-node-stale", map[string]uint64{
+		"node-attachment:child-node": attachmentVersion + 1,
+	}, map[string]any{
+		"type":   "node_attachment",
+		"entity": map[string]any{"kind": "colca-node", "id": "child-node"},
+		"action": "drain",
+	})
+	code, message, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", stale)
+	if code != 409 || !strings.Contains(message, "stale_version") || len(writes) != 0 || writer.drainCalls != 0 {
+		t.Fatalf("stale drain = %d %q writes=%+v calls=%d", code, message, writes, writer.drainCalls)
+	}
+
+	drain := editBody(t, "op-node-drain", map[string]uint64{
+		"node-attachment:child-node": attachmentVersion,
+	}, map[string]any{
+		"type":   "node_attachment",
+		"entity": map[string]any{"kind": "colca-node", "id": "child-node"},
+		"action": "drain",
+	})
+	code, message, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", drain)
+	if code != 200 || len(writes) != 1 || writer.drainCalls != 1 {
+		t.Fatalf("drain = %d %q writes=%+v calls=%d", code, message, writes, writer.drainCalls)
+	}
+	retained, _ := store.KVGet("colca/v1/_EnrolledIdentity/parent-node/_colca/identities/child-node")
+	var attachment editNodeAttachment
+	if err := json.Unmarshal(retained, &attachment); err != nil {
+		t.Fatal(err)
+	}
+	if attachment.Status != StatusDraining {
+		t.Fatalf("drain status = %q, want %q", attachment.Status, StatusDraining)
 	}
 }

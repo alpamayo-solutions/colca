@@ -19,11 +19,20 @@ const editMutationLimit = 200
 // transition. Paths, topics and state records are derived here, never supplied
 // by the browser or API transport.
 type EditExec struct {
-	store EntityStore
-	mu    sync.Mutex
+	store       EntityStore
+	attachments NodeAttachmentWriter
+	mu          sync.Mutex
 
 	replays     map[string]editReplay
 	replayOrder []string
+}
+
+// NodeAttachmentWriter is the registry-owned mutation seam used by the
+// Edit executor. The core adapter classifies registry errors; the domain
+// plugin never imports the core registry package.
+type NodeAttachmentWriter interface {
+	RemountNode(entryJSON []byte) (offset uint64, status int, message string)
+	DrainNode(ulid string) (offset uint64, status int, message string)
 }
 
 type editReplay struct {
@@ -58,6 +67,19 @@ type editIntent struct {
 	Cascade            bool                          `json:"cascade"`
 	ConnectorID        string                        `json:"connector_id"`
 	Operations         []editBindingOperation   `json:"operations"`
+	Action             string                        `json:"action"`
+	MountSystemElement string                        `json:"mount_system_element_id"`
+}
+
+type editNodeAttachment struct {
+	ULID    string   `json:"ulid"`
+	Pubkey  string   `json:"pubkey"`
+	Kind    string   `json:"kind"`
+	Name    string   `json:"name,omitempty"`
+	Element string   `json:"element,omitempty"`
+	Grants  []string `json:"grants,omitempty"`
+	Status  string   `json:"status,omitempty"`
+	Record  KVRecord `json:"-"`
 }
 
 type editExternalReference struct {
@@ -105,11 +127,12 @@ type editCatalogueSnapshot struct {
 }
 
 type editOperationReceipt struct {
-	ID      string   `json:"id"`
-	Digest  string   `json:"digest"`
-	Message string   `json:"message"`
-	Result  string   `json:"result"`
-	Topics  []string `json:"topics"`
+	ID      string       `json:"id"`
+	Digest  string       `json:"digest"`
+	Message string       `json:"message"`
+	Result  string       `json:"result"`
+	Topics  []string     `json:"topics"`
+	Writes  []StateWrite `json:"writes,omitempty"`
 }
 
 var editContracts = map[string]string{
@@ -128,8 +151,14 @@ var editKinds = map[string]string{
 	"_ExternalReference": "external-reference",
 }
 
-func NewEditExec(store EntityStore) *EditExec {
-	return &EditExec{store: store, replays: map[string]editReplay{}}
+func NewEditExec(store EntityStore, attachmentWriters ...NodeAttachmentWriter) *EditExec {
+	var attachments NodeAttachmentWriter
+	if len(attachmentWriters) > 0 {
+		attachments = attachmentWriters[0]
+	}
+	return &EditExec{
+		store: store, attachments: attachments, replays: map[string]editReplay{},
+	}
 }
 
 func (w *EditExec) Handles(contract string) bool { return contract == "_CmdEdit" }
@@ -201,12 +230,24 @@ func (w *EditExec) ExecuteWithWrites(
 		return w.remember(envelope.OperationID, digest, 422, "intent.type is required", "invalid", nil)
 	}
 
-	entities, catalogues, externalSystems, versions, snapshotErr := w.snapshot()
+	entities, attachments, catalogues, externalSystems, versions, snapshotErr := w.snapshot()
 	if snapshotErr != nil {
 		return 409, snapshotErr.Error(), "conflict", nil
 	}
+	if intent.Type == "node_attachment" && nodeAttachmentAlreadyApplied(
+		intent, expectedVersions, attachments, versions,
+	) {
+		return w.rememberAttachmentReplay(
+			envelope.OperationID, digest, intent, attachments,
+		)
+	}
 	if message := validateSuppliedVersions(expectedVersions, versions); message != "" {
 		return w.remember(envelope.OperationID, digest, 409, message, "conflict", nil)
+	}
+	if intent.Type == "node_attachment" {
+		return w.executeNodeAttachment(
+			envelope.OperationID, digest, intent, expectedVersions, entities, attachments,
+		)
 	}
 
 	code, message, result, records := w.compose(
@@ -250,6 +291,202 @@ func (w *EditExec) remember(
 		delete(w.replays, oldest)
 	}
 	return code, message, result, cloneStateWrites(writes)
+}
+
+func nodeAttachmentAlreadyApplied(
+	intent editIntent,
+	expected map[string]uint64,
+	attachments map[string]editNodeAttachment,
+	versions map[string]uint64,
+) bool {
+	if intent.Entity.Kind != "colca-node" || intent.Entity.ID == "" {
+		return false
+	}
+	attachment, ok := attachments[intent.Entity.ID]
+	if !ok {
+		return false
+	}
+	attachmentKey := "node-attachment:" + intent.Entity.ID
+	expectedAttachment, ok := expected[attachmentKey]
+	if !ok || expectedAttachment > editRecordVersion(attachment.Record) {
+		return false
+	}
+	for key, wanted := range expected {
+		if key == attachmentKey {
+			continue
+		}
+		if versions[key] != wanted {
+			return false
+		}
+	}
+	switch intent.Action {
+	case "drain":
+		return intent.MountSystemElement == "" && attachment.Status == StatusDraining
+	case "remount":
+		targetKey := entityVersionKey("system-element", intent.MountSystemElement)
+		_, targetExpected := expected[targetKey]
+		return targetExpected && intent.MountSystemElement != "" &&
+			attachment.Status != StatusDraining &&
+			attachment.Element == intent.MountSystemElement
+	default:
+		return false
+	}
+}
+
+func (w *EditExec) rememberAttachmentReplay(
+	operationID string,
+	digest [sha256.Size]byte,
+	intent editIntent,
+	attachments map[string]editNodeAttachment,
+) (int, string, string, []StateWrite) {
+	attachment := attachments[intent.Entity.ID]
+	write := StateWrite{
+		Stream: "entities", Offset: attachment.Record.Offset, Topic: attachment.Record.Topic,
+	}
+	message := fmt.Sprintf("node attachment %s already applied", intent.Action)
+	if err := w.persistStandaloneReceipt(
+		operationID, digest, message, "ok", []StateWrite{write},
+	); err != nil {
+		return 500, "edit receipt failed: " + err.Error(), "error", nil
+	}
+	return w.remember(operationID, digest, 200, message, "ok", []StateWrite{write})
+}
+
+func (w *EditExec) executeNodeAttachment(
+	operationID string,
+	digest [sha256.Size]byte,
+	intent editIntent,
+	expected map[string]uint64,
+	entities map[string]editSnapshot,
+	attachments map[string]editNodeAttachment,
+) (int, string, string, []StateWrite) {
+	if intent.Entity.Kind != "colca-node" || intent.Entity.ID == "" {
+		return w.remember(
+			operationID, digest, 422,
+			"node_attachment: entity must identify a colca-node", "invalid", nil,
+		)
+	}
+	attachmentKey := "node-attachment:" + intent.Entity.ID
+	if message := requireExpected(expected, attachmentKey); message != "" {
+		return w.remember(operationID, digest, 422, "node_attachment: "+message, "invalid", nil)
+	}
+	attachment, ok := attachments[intent.Entity.ID]
+	if !ok {
+		return w.remember(
+			operationID, digest, 409,
+			"node_attachment_not_found: "+intent.Entity.ID, "conflict", nil,
+		)
+	}
+	if w.attachments == nil {
+		return w.remember(
+			operationID, digest, 500, "node attachment writer is not configured", "error", nil,
+		)
+	}
+
+	var (
+		offset  uint64
+		code    int
+		message string
+	)
+	switch intent.Action {
+	case "drain":
+		if intent.MountSystemElement != "" {
+			return w.remember(
+				operationID, digest, 422,
+				"node_attachment: drain does not accept mount_system_element_id", "invalid", nil,
+			)
+		}
+		offset, code, message = w.attachments.DrainNode(intent.Entity.ID)
+	case "remount":
+		if attachment.Status == StatusDraining {
+			return w.remember(
+				operationID, digest, 409,
+				"node_attachment_draining: "+intent.Entity.ID, "conflict", nil,
+			)
+		}
+		if intent.MountSystemElement == "" {
+			return w.remember(
+				operationID, digest, 422,
+				"node_attachment: remount requires mount_system_element_id", "invalid", nil,
+			)
+		}
+		if _, targetCode, targetMessage := requireEntity(
+			expected, entities, "system-element", intent.MountSystemElement,
+		); targetCode != 0 {
+			return w.remember(
+				operationID, digest, targetCode,
+				"node_attachment: "+targetMessage, resultFor(targetCode), nil,
+			)
+		}
+		updated := attachment
+		updated.Record = KVRecord{}
+		updated.Element = intent.MountSystemElement
+		encoded, err := json.Marshal(updated)
+		if err != nil {
+			return w.remember(
+				operationID, digest, 422,
+				"node_attachment: attachment is not encodable", "invalid", nil,
+			)
+		}
+		offset, code, message = w.attachments.RemountNode(encoded)
+	default:
+		return w.remember(
+			operationID, digest, 422,
+			fmt.Sprintf("node_attachment: unknown action %q", intent.Action), "invalid", nil,
+		)
+	}
+	if code != 200 {
+		if code == 0 {
+			code = 500
+		}
+		if message == "" {
+			message = "node attachment mutation failed"
+		}
+		return w.remember(operationID, digest, code, message, resultFor(code), nil)
+	}
+	if offset == 0 {
+		return 500, "node attachment mutation returned no state coordinate", "error", nil
+	}
+	write := StateWrite{Stream: "entities", Offset: offset, Topic: attachment.Record.Topic}
+	if err := w.persistStandaloneReceipt(
+		operationID, digest, message, "ok", []StateWrite{write},
+	); err != nil {
+		return 500, "edit receipt failed: " + err.Error(), "error", nil
+	}
+	return w.remember(operationID, digest, 200, message, "ok", []StateWrite{write})
+}
+
+func (w *EditExec) persistStandaloneReceipt(
+	operationID string,
+	digest [sha256.Size]byte,
+	message, result string,
+	writes []StateWrite,
+) error {
+	batch := make([]StateRecord, 0, 2)
+	operationRecords := w.operationRecords()
+	prune := len(operationRecords) - editReplayLimit + 1
+	if prune > 0 {
+		for _, record := range operationRecords[:prune] {
+			batch = append(batch, StateRecord{Topic: record.Topic})
+		}
+	}
+	topics := make([]string, len(writes))
+	for index, write := range writes {
+		topics[index] = write.Topic
+	}
+	receipt := editOperationReceipt{
+		ID: operationID, Digest: fmt.Sprintf("%x", digest), Message: message,
+		Result: result, Topics: topics, Writes: cloneStateWrites(writes),
+	}
+	payload, err := json.Marshal(receipt)
+	if err != nil {
+		return err
+	}
+	batch = append(batch, StateRecord{
+		Topic: editOperationTopic(w.store.NodeID(), operationID), Payload: payload,
+	})
+	_, err = w.store.PublishBatch(batch)
+	return err
 }
 
 func cloneStateWrites(in []StateWrite) []StateWrite {
@@ -310,17 +547,22 @@ func (w *EditExec) durableReplay(operationID string) (editReplay, bool, error) {
 		if receipt.ID != operationID || receipt.Digest == "" {
 			return editReplay{}, false, fmt.Errorf("receipt identity or digest does not match its topic")
 		}
-		if record.Offset <= uint64(len(receipt.Topics)) {
-			return editReplay{}, false, fmt.Errorf("receipt offset cannot reconstruct its state writes")
-		}
 		digestBytes, err := parseHexDigest(receipt.Digest)
 		if err != nil {
 			return editReplay{}, false, err
 		}
-		first := record.Offset - uint64(len(receipt.Topics))
-		writes := make([]StateWrite, len(receipt.Topics))
-		for index, topic := range receipt.Topics {
-			writes[index] = StateWrite{Stream: "entities", Offset: first + uint64(index), Topic: topic}
+		writes := cloneStateWrites(receipt.Writes)
+		if len(writes) == 0 {
+			if record.Offset <= uint64(len(receipt.Topics)) {
+				return editReplay{}, false, fmt.Errorf("receipt offset cannot reconstruct its state writes")
+			}
+			first := record.Offset - uint64(len(receipt.Topics))
+			writes = make([]StateWrite, len(receipt.Topics))
+			for index, topic := range receipt.Topics {
+				writes[index] = StateWrite{
+					Stream: "entities", Offset: first + uint64(index), Topic: topic,
+				}
+			}
 		}
 		return editReplay{
 			digest: digestBytes, code: 200, message: receipt.Message, result: receipt.Result, writes: writes,
@@ -368,7 +610,8 @@ func (w *EditExec) withDurableReceipt(
 		topics[index] = record.Topic
 	}
 	receipt := editOperationReceipt{
-		ID: operationID, Digest: fmt.Sprintf("%x", digest), Message: message, Result: result, Topics: topics,
+		ID: operationID, Digest: fmt.Sprintf("%x", digest), Message: message,
+		Result: result, Topics: topics,
 	}
 	payload, err := json.Marshal(receipt)
 	if err != nil {
@@ -407,6 +650,7 @@ func parseExpectedVersions(raw map[string]json.RawMessage) (map[string]uint64, e
 
 func (w *EditExec) snapshot() (
 	map[string]editSnapshot,
+	map[string]editNodeAttachment,
 	map[string]editCatalogueSnapshot,
 	map[string]bool,
 	map[string]uint64,
@@ -418,29 +662,45 @@ func (w *EditExec) snapshot() (
 		for _, record := range w.store.KVScan(contract, w.store.NodeID()) {
 			var payload map[string]json.RawMessage
 			if err := json.Unmarshal(record.Payload, &payload); err != nil {
-				return nil, nil, nil, nil, fmt.Errorf("retained %s at %s is unreadable", contract, record.Path)
+				return nil, nil, nil, nil, nil, fmt.Errorf("retained %s at %s is unreadable", contract, record.Path)
 			}
 			id, err := rawString(payload["id"])
 			if err != nil || id == "" {
-				return nil, nil, nil, nil, fmt.Errorf("retained %s at %s has no identity", contract, record.Path)
+				return nil, nil, nil, nil, nil, fmt.Errorf("retained %s at %s has no identity", contract, record.Path)
 			}
 			key := entityVersionKey(kind, id)
 			if held, exists := entities[key]; exists && held.Record.Topic != record.Topic {
-				return nil, nil, nil, nil, fmt.Errorf("duplicate retained identity %s", key)
+				return nil, nil, nil, nil, nil, fmt.Errorf("duplicate retained identity %s", key)
 			}
 			entities[key] = editSnapshot{Key: key, Kind: kind, Record: record, Payload: payload}
 			versions[key] = editRecordVersion(record)
 		}
 	}
 
+	attachments := map[string]editNodeAttachment{}
+	for _, record := range w.store.KVScan("_EnrolledIdentity", w.store.NodeID()) {
+		var attachment editNodeAttachment
+		if err := json.Unmarshal(record.Payload, &attachment); err != nil || attachment.ULID == "" {
+			return nil, nil, nil, nil, nil, fmt.Errorf(
+				"retained _EnrolledIdentity at %s is unreadable", record.Path,
+			)
+		}
+		if attachment.Kind != "node" {
+			continue
+		}
+		attachment.Record = record
+		attachments[attachment.ULID] = attachment
+		versions["node-attachment:"+attachment.ULID] = editRecordVersion(record)
+	}
+
 	catalogues := map[string]editCatalogueSnapshot{}
 	for _, record := range w.store.KVScan("_DataTags", w.store.NodeID()) {
 		var catalogue editCatalogue
 		if err := json.Unmarshal(record.Payload, &catalogue); err != nil || catalogue.Connector == "" {
-			return nil, nil, nil, nil, fmt.Errorf("retained _DataTags at %s is unreadable", record.Path)
+			return nil, nil, nil, nil, nil, fmt.Errorf("retained _DataTags at %s is unreadable", record.Path)
 		}
 		if held, exists := catalogues[catalogue.Connector]; exists && held.Record.Topic != record.Topic {
-			return nil, nil, nil, nil, fmt.Errorf("duplicate retained catalogue %s", catalogue.Connector)
+			return nil, nil, nil, nil, nil, fmt.Errorf("duplicate retained catalogue %s", catalogue.Connector)
 		}
 		catalogues[catalogue.Connector] = editCatalogueSnapshot{Record: record, Catalogue: catalogue}
 		versions["catalogue:"+catalogue.Connector] = editRecordVersion(record)
@@ -449,15 +709,15 @@ func (w *EditExec) snapshot() (
 	for _, record := range w.store.KVScanAll("_ExternalSystem") {
 		var payload map[string]json.RawMessage
 		if err := json.Unmarshal(record.Payload, &payload); err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("retained _ExternalSystem at %s is unreadable", record.Path)
+			return nil, nil, nil, nil, nil, fmt.Errorf("retained _ExternalSystem at %s is unreadable", record.Path)
 		}
 		id, err := rawString(payload["id"])
 		if err != nil || id == "" {
-			return nil, nil, nil, nil, fmt.Errorf("retained _ExternalSystem at %s has no identity", record.Path)
+			return nil, nil, nil, nil, nil, fmt.Errorf("retained _ExternalSystem at %s has no identity", record.Path)
 		}
 		externalSystems[id] = true
 	}
-	return entities, catalogues, externalSystems, versions, nil
+	return entities, attachments, catalogues, externalSystems, versions, nil
 }
 
 func editRecordVersion(record KVRecord) uint64 {
@@ -1089,6 +1349,9 @@ func requireExpected(expected map[string]uint64, key string) string {
 func resultFor(code int) string {
 	if code == 409 {
 		return "conflict"
+	}
+	if code >= 500 {
+		return "error"
 	}
 	return "invalid"
 }

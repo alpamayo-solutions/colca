@@ -177,7 +177,9 @@ func Start(cfg *config.Config) (*Node, error) {
 	// model lives in the plugin, so the core never learns what a signal is
 	// (data-model binding design §7).
 	domain := uns.NewConfigExec(n.Engine.EntityStore(), reg, n.Engine.Elements(), registry.NewULID, cfg.Plugin)
-	edit := uns.NewEditExec(n.Engine.EntityStore())
+	edit := uns.NewEditExec(
+		n.Engine.EntityStore(), editAttachmentWriter{registry: reg},
+	)
 	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain, edit))
 	n.Engine.SetObserver(domain)
 	// The registry resolves placements through the engine's element index
