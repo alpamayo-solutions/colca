@@ -77,6 +77,44 @@ def test_builtin_only_contracts_absent():
         assert c not in body["contracts"], f"{c} is builtin-only (design §10.2)"
 
 
+def test_projected_contract_catalogue_has_the_approved_direction():
+    """Direction is one reviewed fact, not a per-consumer convention."""
+    body, _ = gb.build_bundle()
+    expected_entities = {
+        "_Node",
+        "_ServiceDetails",
+        "_SystemElement",
+        "_Signal",
+        "_ExternalReference",
+    }
+    expected_definitions = {
+        "_Group",
+        "_MetadataType",
+        "_AnnotationType",
+        "_Interface",
+        "_ExternalSystem",
+    }
+
+    assert {
+        contract
+        for contract in expected_entities
+        if body["contracts"].get(contract, {}).get("class") == "entity"
+    } == expected_entities
+    assert {
+        contract
+        for contract in expected_definitions
+        if body["contracts"].get(contract, {}).get("class") == "definition"
+    } == expected_definitions
+
+
+def test_enrollment_contract_is_builtin_and_edge_node_is_retired():
+    assert "_EnrolledIdentity" in gb.BUILTIN_ONLY
+    assert "_EdgeNode" not in gb.BUILTIN_ONLY
+    body, _ = gb.build_bundle()
+    assert "_EnrolledIdentity" not in body["contracts"]
+    assert "_EdgeNode" not in body["contracts"]
+
+
 def test_subset_lint_only_allowed_keywords():
     body, _ = gb.build_bundle()
     for ident, entry in body["contracts"].items():
@@ -185,7 +223,13 @@ def test_definitions_are_their_own_class_and_retractable():
     them.
     """
     body, _ = gb.build_bundle()
-    for ident in ("_Group", "_MetadataType", "_AnnotationType", "_Interface"):
+    for ident in (
+        "_Group",
+        "_MetadataType",
+        "_AnnotationType",
+        "_Interface",
+        "_ExternalSystem",
+    ):
         entry = body["contracts"][ident]
         assert entry["class"] == "definition", (ident, entry["class"])
         assert entry["tombstone"] is True, ident

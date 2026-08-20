@@ -45,7 +45,9 @@ CLASS_TABLE: dict[str, str] = {
     "_SystemElement": "entity",
     "_Signal": "entity",
     "_DataTags": "entity",
+    "_Node": "entity",
     "_ServiceDetails": "entity",
+    "_ExternalReference": "entity",
     # Definitions: authored once, needed everywhere below the author, and the
     # same thing at every node — so they descend and are applied as state
     # (definition-stream design §2). They were "entity" only because there was
@@ -55,6 +57,7 @@ CLASS_TABLE: dict[str, str] = {
     "_AnnotationType": "definition",
     "_MetadataType": "definition",
     "_Interface": "definition",
+    "_ExternalSystem": "definition",
     "_AlarmNotificationConfig": "entity",
 }
 
@@ -84,7 +87,7 @@ TOMBSTONE_OVERRIDES: dict[str, bool] = {}
 # Builtin-only contracts (design §7.1/§10.2): produced and validated by the
 # colca binary itself — they must never appear in a bundle, and the loader
 # refuses a bundle that declares them.
-BUILTIN_ONLY = {"_StreamGap", "_EdgeNode", "_TimeSync"}
+BUILTIN_ONLY = {"_StreamGap", "_EnrolledIdentity", "_TimeSync"}
 
 # Registered payload classes that are deliberately NOT offered to the broker,
 # with the reason each one is here. They stay Python types because something

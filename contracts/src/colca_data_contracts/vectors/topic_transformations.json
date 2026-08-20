@@ -6,7 +6,7 @@
     {"topic": "colca/v1/_Metric/m1/temp", "ok": true, "prefix": "colca", "version": "v1", "contract": "_Metric", "node_id": "m1", "path": "temp"},
     {"topic": "colca/v1/_CmdParam/m1/site1/edge1/m1/set-speed", "ok": true, "prefix": "colca", "version": "v1", "contract": "_CmdParam", "node_id": "m1", "path": "site1/edge1/m1/set-speed"},
     {"topic": "colca/v1/_Ack/n-edge1/enroll", "ok": true, "prefix": "colca", "version": "v1", "contract": "_Ack", "node_id": "n-edge1", "path": "enroll"},
-    {"topic": "colca/v1/_EdgeNode/n-site1/edge1", "ok": true, "prefix": "colca", "version": "v1", "contract": "_EdgeNode", "node_id": "n-site1", "path": "edge1"},
+    {"topic": "colca/v1/_EnrolledIdentity/n-site1/_colca/identities/edge1", "ok": true, "prefix": "colca", "version": "v1", "contract": "_EnrolledIdentity", "node_id": "n-site1", "path": "_colca/identities/edge1"},
     {"topic": "colca/v1/_TimeSync/n-edge1", "ok": true, "prefix": "colca", "version": "v1", "contract": "_TimeSync", "node_id": "n-edge1", "path": ""},
     {"topic": "colca/v1/_Metric/m1", "ok": false, "why": "4 segments and not _TimeSync — need >=5"},
     {"topic": "colca/v1/_Metric", "ok": false, "why": "3 segments"},

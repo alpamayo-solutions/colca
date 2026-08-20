@@ -8,7 +8,6 @@ from franzmq.data_contracts.base import (
     Payload,
     Cmd,
     Metric as BaseMetric,
-    ServiceDetails as BaseServiceDetails,
     StrEnum as BaseStrEnum,
     IndexType,
     DataType,
@@ -55,7 +54,7 @@ class CustomEncoder(json.JSONEncoder):
 class Metric(BaseMetric):
     signal_id: str = ""
     error: Optional[str] = None
-    edge_node_id: Optional[str] = None
+    colca_node_id: Optional[str] = None
 
     def encode(self):
         data = self.__dict__.copy()
@@ -63,8 +62,8 @@ class Metric(BaseMetric):
             data["timestamp"] = datetime.datetime.fromisoformat(data["timestamp"]).timestamp()
         if data["error"] is None:
             data.pop("error", None)
-        if data["edge_node_id"] is None:
-            data.pop("edge_node_id", None)
+        if data["colca_node_id"] is None:
+            data.pop("colca_node_id", None)
         return json.dumps(data, cls=CustomEncoder)
 
     @classmethod
@@ -78,7 +77,31 @@ class Metric(BaseMetric):
 
 
 @dataclass
-class ServiceDetails(BaseServiceDetails):
+class Node(Payload):
+    """A Colca node authored by the node it describes."""
+
+    id: str
+    name: str
+    root_system_element_id: str
+    display_name: str = ""
+    description: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ServiceDetails(Payload):
+    """Observed service registration authored by the service identity."""
+
+    id: str
+    name: str
+    service_type: ServiceType
+    colca_node_id: str
+    display_name: str = ""
+    description: str = ""
+    system_element_id: Optional[str] = None
+    hierarchy: List[str] = field(default_factory=list)
+    is_active: bool = True
+    metadata: Dict[str, Any] = field(default_factory=dict)
     architecture_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -335,7 +358,7 @@ class ApiWriteCmd(Cmd):
 @dataclass
 class DBEvent(Payload):
     """Real-time CDC event for a single model row (create/update/delete)."""
-    edge_node_id: str
+    colca_node_id: str
     model: str
     operation: str  # "upsert" or "delete"
     pk: str
@@ -350,7 +373,7 @@ class DBEvent(Payload):
 @dataclass
 class DBDump(Payload):
     """Periodic full-table dump for self-healing sync."""
-    edge_node_id: str
+    colca_node_id: str
     model: str
     rows: List[Dict[str, Any]]
     row_hash: str  # MD5 of sorted JSON for change detection
@@ -363,20 +386,13 @@ class DBDump(Payload):
 
 @dataclass
 class AnnotationType(Payload):
-    """Hub-owned AnnotationType published to edges via retained MQTT.
-
-    Topic: colca/v1/_AnnotationType/{type_id}
-    Published by the hub API on create/update/delete of hub-owned annotation types.
-    Consumed by mqtt-to-api on edges to upsert/delete locally.
-    """
+    """A global annotation definition projected at every descendant node."""
 
     id: str
     name: str
     data_type: str
-    operation: str  # "upsert" or "delete"
-    system_element: Optional[str] = None
-    i18n_name: Optional[str] = None
-    description: Optional[str] = None
+    i18n_name: str = ""
+    description: str = ""
     min_value: Optional[float] = None
     max_value: Optional[float] = None
     unit: Optional[str] = None
@@ -391,19 +407,13 @@ class AnnotationType(Payload):
 
 @dataclass
 class MetadataType(Payload):
-    """Hub-owned MetadataType published to edges via retained MQTT.
-
-    Topic: colca/v1/_MetadataType/{type_id}
-    Published by the hub API on create/update/delete of hub-owned metadata types.
-    Consumed by mqtt-to-api on edges to upsert/delete locally.
-    """
+    """A global metadata definition projected at every descendant node."""
 
     id: str
     name: str
     data_type: str
-    operation: str  # "upsert" or "delete"
-    i18n_name: Optional[str] = None
-    description: Optional[str] = None
+    i18n_name: str = ""
+    description: str = ""
     is_mandatory: bool = False
     allowed_content_type_keys: List[str] = field(default_factory=list)
 
@@ -472,6 +482,41 @@ class Interface(Payload):
 
 
 @dataclass
+class ExternalSystem(Payload):
+    """A non-secret global definition for an external integration system."""
+
+    id: str
+    key: str
+    name: str
+    system_type: str
+    description: str = ""
+    properties: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def decode(cls, json_str: str, timestamp: int) -> "ExternalSystem":
+        return cls(**json.loads(json_str))
+
+
+@dataclass
+class ExternalReference(Payload):
+    """An upward reference from a Colca object to an external-system row."""
+
+    id: str
+    source_entity: str
+    source_object_id: str
+    relationship_type: str
+    external_system_id: str
+    external_table: str
+    external_column: str
+    external_row_id: str
+    description: str = ""
+
+    @classmethod
+    def decode(cls, json_str: str, timestamp: int) -> "ExternalReference":
+        return cls(**json.loads(json_str))
+
+
+@dataclass
 class SystemElement(Payload):
     """A position in the plant — and therefore in the namespace.
 
@@ -498,8 +543,6 @@ class SystemElement(Payload):
     external_asset_id: Optional[str] = None
     external_asset_id_type: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
-    edge_node_id: Optional[str] = None
-    hub_node_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -556,8 +599,6 @@ class Signal(Payload):
     metadata: Dict[str, Any] = field(default_factory=dict)
     implements_contract: Optional[str] = None
     has_contract: bool = False
-    edge_node_id: Optional[str] = None
-    hub_node_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 

@@ -37,7 +37,7 @@ VECTORS = json.loads(VECTORS_PATH.read_text())
 
 
 @dataclass
-class EdgeNode(Payload):
+class EnrolledIdentity(Payload):
     """Stand-in for the enrollment contract, which the broker binary owns."""
     id: str = ""
 
@@ -50,7 +50,7 @@ class TimeSync(Payload):
 
 @pytest.fixture(autouse=True)
 def _register_broker_owned_contracts():
-    added = [EdgeNode, TimeSync]
+    added = [EnrolledIdentity, TimeSync]
     for cls in added:
         PAYLOAD_CLASSES[cls.get_identifier()] = cls
     yield

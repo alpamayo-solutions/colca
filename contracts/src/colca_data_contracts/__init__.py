@@ -45,6 +45,7 @@ from colca_data_contracts.payload import (
     ServiceType,
     CustomEncoder,
     Metric,
+    Node as NodePayload,
     ServiceDetails,
     AlarmNotificationConfigSnapshot,
     AlarmStateChange,
@@ -61,6 +62,9 @@ from colca_data_contracts.payload import (
     AnnotationType as AnnotationTypePayload,
     MetadataType as MetadataTypePayload,
     Group as GroupPayload,
+    Interface as InterfacePayload,
+    ExternalSystem as ExternalSystemPayload,
+    ExternalReference as ExternalReferencePayload,
     SystemElement as SystemElementPayload,
     Signal as SignalPayload,
 )
@@ -118,6 +122,7 @@ __all__ = [
     # Extended base types
     "ServiceType",
     "Metric",
+    "NodePayload",
     "ServiceDetails",
     "IndexType",
     "DataType",
@@ -140,6 +145,9 @@ __all__ = [
     "AnnotationTypePayload",
     "MetadataTypePayload",
     "GroupPayload",
+    "InterfacePayload",
+    "ExternalSystemPayload",
+    "ExternalReferencePayload",
     # Topology payloads (retained, edge-owned)
     "SystemElementPayload",
     "SignalPayload",

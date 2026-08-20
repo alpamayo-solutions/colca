@@ -77,8 +77,6 @@ def test_system_element_roundtrip_full():
         external_asset_id="WO-1234",
         external_asset_id_type="string",
         metadata={"location": "Halle A", "owner": "Production"},
-        edge_node_id="edge-01",
-        hub_node_id=None,
         created_at="2026-05-11T10:00:00+00:00",
         updated_at="2026-05-11T10:05:00+00:00",
     )
@@ -93,8 +91,6 @@ def test_system_element_roundtrip_full():
     assert decoded.external_asset_id == original.external_asset_id
     assert decoded.external_asset_id_type == original.external_asset_id_type
     assert decoded.metadata == original.metadata
-    assert decoded.edge_node_id == original.edge_node_id
-    assert decoded.hub_node_id is None
     assert decoded.created_at == original.created_at
     assert decoded.updated_at == original.updated_at
 
@@ -131,7 +127,6 @@ def test_signal_roundtrip_full():
         config={"enum_values": ["RUNNING", "IDLE", "FAULT"]},
         metadata={"contract": "MerzBenteliMachineState"},
         implements_contract="MerzBenteliMachineState",
-        edge_node_id="edge-01",
         created_at="2026-05-11T10:00:00+00:00",
         updated_at="2026-05-11T10:00:00+00:00",
     )
