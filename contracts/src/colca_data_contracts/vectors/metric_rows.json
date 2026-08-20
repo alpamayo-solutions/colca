@@ -1,0 +1,72 @@
+{
+  "_comment": "Golden metric-row vectors. ONE dataset judged by both sides of the historisation boundary: colca-historian (Go) decides which column a measurement lands in, and the api's MetricSerializer reads that column back out. They are separate implementations in separate languages, so the mapping between a _Metric value and its storage column is exactly the kind of fact that drifts silently — a value written to value_number and read from value_text simply disappears from a chart. The cases RESTATE shipped behaviour (colca/internal/historian/record.go, api/src/historian/models/metric.py); changing one is a storage-format change and needs both suites green.",
+  "table": "historian_metric",
+  "columns": ["value_number", "value_text", "value_bool", "value_json"],
+  "cases": [
+    {
+      "why": "a float measurement is numeric",
+      "payload": {"signal_id": "sig-1", "value": 21.5},
+      "column": "value_number",
+      "stored": 21.5,
+      "reads_back_as": "21.5"
+    },
+    {
+      "why": "an integer is still numeric",
+      "payload": {"signal_id": "sig-1", "value": 42},
+      "column": "value_number",
+      "stored": 42.0,
+      "reads_back_as": "42.0"
+    },
+    {
+      "why": "a string parameter keeps its text column",
+      "payload": {"signal_id": "sig-1", "value": "warm"},
+      "column": "value_text",
+      "stored": "warm",
+      "reads_back_as": "warm"
+    },
+    {
+      "why": "a status flag is boolean, never the number 1",
+      "payload": {"signal_id": "sig-1", "value": true},
+      "column": "value_bool",
+      "stored": true,
+      "reads_back_as": "True"
+    },
+    {
+      "why": "a structured reading stays structured",
+      "payload": {"signal_id": "sig-1", "value": {"x": 1, "y": 2}},
+      "column": "value_json",
+      "stored": {"x": 1, "y": 2},
+      "reads_back_as": {"x": 1, "y": 2}
+    },
+    {
+      "why": "an array is a structure too",
+      "payload": {"signal_id": "sig-1", "value": [1, 2, 3]},
+      "column": "value_json",
+      "stored": [1, 2, 3],
+      "reads_back_as": [1, 2, 3]
+    },
+    {
+      "why": "beyond float64 precision the digits are kept verbatim rather than rounded into value_number",
+      "payload": {"signal_id": "sig-1", "value": 9007199254740993},
+      "column": "value_json",
+      "stored": 9007199254740993,
+      "reads_back_as": 9007199254740993
+    }
+  ],
+  "not_measurements": [
+    {
+      "why": "a tombstone deletes the retained value; it is not a reading",
+      "payload": {"signal_id": "sig-1", "deleted": true}
+    },
+    {
+      "why": "a null value has no column to land in",
+      "payload": {"signal_id": "sig-1", "value": null}
+    }
+  ],
+  "refused": [
+    {
+      "why": "without a signal the row is unattributable and nothing downstream can repair it",
+      "payload": {"value": 1}
+    }
+  ]
+}
