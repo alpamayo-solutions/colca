@@ -2,7 +2,7 @@ import json
 import hashlib
 import datetime
 from typing import Any, Dict, List, Optional
-from dataclasses import dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 
 from franzmq.data_contracts.base import (
     Payload,
@@ -100,6 +100,8 @@ class CustomEncoder(json.JSONEncoder):
             return str(obj)
         if isinstance(obj, DataType):
             return str(obj)
+        if is_dataclass(obj):
+            return asdict(obj)
         raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
@@ -184,11 +186,41 @@ def _sorted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 @dataclass
+class SealedSecretEnvelope:
+    """Provider configuration encrypted for one notifications service key."""
+
+    version: int
+    algorithm: str
+    key_id: str
+    ciphertext: str
+
+
+@dataclass
+class NotificationChannelConfig:
+    """One channel in the node-scoped configuration snapshot.
+
+    ``public_config`` may contain presentation and rate-limit settings only.
+    Provider endpoints and credentials belong exclusively in ``sealed_secret``.
+    """
+
+    id: str
+    name: str
+    kind: str
+    public_config: Dict[str, Any]
+    sealed_secret: Optional[SealedSecretEnvelope]
+    rate_limit_per_minute: int = 60
+    enabled: bool = True
+
+
+@dataclass
 class AlarmNotificationConfigSnapshot(Payload):
+    id: str
     schema_version: int
-    generated_at: float
+    issued_at: float
+    target_node_id: str
+    revision_id: str
     alarms: List[Dict[str, Any]]
-    channels: List[Dict[str, Any]]
+    channels: List[NotificationChannelConfig]
     recipients: List[Dict[str, Any]]
     policies: List[Dict[str, Any]]
     policy_targets: List[Dict[str, Any]]
@@ -197,34 +229,47 @@ class AlarmNotificationConfigSnapshot(Payload):
     def __init__(
         self,
         schema_version: int,
-        generated_at: float,
+        generated_at: Optional[float] = None,
+        *,
+        issued_at: Optional[float] = None,
         alarms: List[Dict[str, Any]],
-        channels: List[Dict[str, Any]],
+        channels: List[NotificationChannelConfig],
         recipients: List[Dict[str, Any]],
         policies: List[Dict[str, Any]],
         policy_targets: List[Dict[str, Any]],
         active_silences: Optional[List[Dict[str, Any]]] = None,
+        id: str = "alarm-notification-config",
+        target_node_id: str = "",
         revision_id: Optional[str] = None,
     ):
+        if issued_at is None and generated_at is None:
+            raise TypeError("issued_at is required")
+        self.id = id
         self.schema_version = schema_version
-        self.generated_at = generated_at
+        self.issued_at = issued_at if issued_at is not None else generated_at
+        self.target_node_id = target_node_id
         self.alarms = alarms
         self.channels = channels
         self.recipients = recipients
         self.policies = policies
         self.policy_targets = policy_targets
         self.active_silences = active_silences or []
+        self.revision_id = revision_id or self.compute_revision_id()
 
     @classmethod
     def get_identifier(cls) -> str:
         return "_AlarmNotificationConfig"
 
-    @property
-    def revision_id(self) -> str:
+    def compute_revision_id(self) -> str:
         data = {
+            "id": self.id,
             "schema_version": self.schema_version,
+            "target_node_id": self.target_node_id,
             "alarms": _sorted_items(self.alarms),
-            "channels": _sorted_items(self.channels),
+            "channels": _sorted_items([
+                asdict(channel) if is_dataclass(channel) else channel
+                for channel in self.channels
+            ]),
             "recipients": _sorted_items(self.recipients),
             "policies": _sorted_items(self.policies),
             "policy_targets": _sorted_items(self.policy_targets),
@@ -235,10 +280,43 @@ class AlarmNotificationConfigSnapshot(Payload):
         ).hexdigest()
 
     @property
-    def __dict__(self):
-        d = super().__dict__.copy()
-        d["revision_id"] = self.revision_id
-        return d
+    def generated_at(self) -> float:
+        """Source compatibility for the schema-version-1 Python publisher."""
+
+        return self.issued_at
+
+
+@dataclass
+class NotificationConfigStatus(Payload):
+    id: str
+    config_id: str
+    revision_id: str
+    target_node_id: str
+    status: str
+    applied_at: float
+    reason_code: Optional[str] = None
+    message: Optional[str] = None
+
+
+@dataclass
+class NotificationChannelOutcome:
+    channel_id: str
+    channel_kind: str
+    status: str
+    sent: bool
+    attempt: int = 0
+    policy_id: Optional[str] = None
+    target_id: Optional[str] = None
+    recipient_id: Optional[str] = None
+    provider_message_id: Optional[str] = None
+    error_code: Optional[str] = None
+
+
+@dataclass
+class AlarmNotificationSummary:
+    status: str
+    requested: bool
+    channels: List[NotificationChannelOutcome] = field(default_factory=list)
 
 
 @dataclass
@@ -250,6 +328,13 @@ class AlarmStateChange(Payload):
     at: float
     signal_value: Optional[Any]
     metadata_json: Dict[str, Any] = field(default_factory=dict)
+    revision: int = 1
+    notification: AlarmNotificationSummary = field(
+        default_factory=lambda: AlarmNotificationSummary(
+            status="not_requested",
+            requested=False,
+        )
+    )
     # Sanitized notification settings resolved for this alarm at publish time
     # (severity, labels, covering policies → channels/recipients), so downstream
     # MQTT consumers are self-contained. Never carries channel secrets.
@@ -269,6 +354,11 @@ class NotificationDispatched(Payload):
     latency_ms: Optional[int]
     error: Optional[str] = None
     metadata_json: Dict[str, Any] = field(default_factory=dict)
+    channel_kind: Optional[str] = None
+    provider: Optional[str] = None
+    provider_message_id: Optional[str] = None
+    retryable: bool = False
+    terminal: bool = True
 
 
 @dataclass

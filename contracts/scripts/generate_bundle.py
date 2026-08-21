@@ -50,6 +50,8 @@ CLASS_TABLE: dict[str, str] = {
     "_Node": "entity",
     "_ServiceDetails": "entity",
     "_ExternalReference": "entity",
+    "_AlarmNotificationConfig": "entity",
+    "_NotificationConfigStatus": "entity",
     # Definitions: authored once, needed everywhere below the author, and the
     # same thing at every node — so they descend and are applied as state
     # (definition-stream design §2). They were "entity" only because there was
@@ -60,7 +62,6 @@ CLASS_TABLE: dict[str, str] = {
     "_MetadataType": "definition",
     "_Interface": "definition",
     "_ExternalSystem": "definition",
-    "_AlarmNotificationConfig": "entity",
     "_AuditEvent": "audit",
 }
 
@@ -71,6 +72,10 @@ REQUIRED_EXTRA: dict[str, list[str]] = {
     "_Metric": ["signal_id"],
     "_Ack": ["result_code"],
     "_CmdEdit": ["operation_id", "intent", "expected_versions"],
+    # Constructor defaults preserve source compatibility during the one-way
+    # Python-to-Go cutover; the wire contract is version 2 and requires them.
+    "_AlarmNotificationConfig": ["target_node_id", "revision_id"],
+    "_AlarmStateChange": ["revision", "notification"],
 }
 
 # Fields DROPPED from required although the dataclass has no default:
@@ -118,6 +123,16 @@ NOT_ON_THE_WIRE: dict[str, str] = {
 ALLOWED_KEYWORDS = {
     "type", "properties", "required", "enum", "items",
     "minLength", "minimum", "maximum", "minItems", "additionalProperties",
+}
+
+# These nested value objects are security/interpretation boundaries rather
+# than extensible top-level records. Unknown keys must not provide a side door
+# for a cleartext password or an outcome that consumers interpret differently.
+STRICT_NESTED_DATACLASSES = {
+    "SealedSecretEnvelope",
+    "NotificationChannelConfig",
+    "NotificationChannelOutcome",
+    "AlarmNotificationSummary",
 }
 
 
@@ -183,6 +198,8 @@ def _schema_for_dataclass(cls: type, *, required_extra: list[str], required_drop
         if is_req:
             required.append(f.name)
     schema: dict = {"type": "object", "properties": props}
+    if cls.__name__ in STRICT_NESTED_DATACLASSES:
+        schema["additionalProperties"] = False
     if required:
         schema["required"] = sorted(required)
     return schema

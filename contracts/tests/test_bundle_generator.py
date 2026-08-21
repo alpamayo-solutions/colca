@@ -252,6 +252,53 @@ def test_metric_real_shape():
     assert m["schema"]["properties"]["signal_id"]["minLength"] == 1
 
 
+def test_alarm_notification_contracts_have_revised_direction_and_shape():
+    body, _ = gb.build_bundle()
+    config = body["contracts"]["_AlarmNotificationConfig"]
+    status = body["contracts"]["_NotificationConfigStatus"]
+    event = body["contracts"]["_AlarmStateChange"]
+    dispatch = body["contracts"]["_NotificationDispatched"]
+
+    assert config["class"] == "entity"
+    assert status["class"] == "entity"
+    assert event["class"] == "data"
+    assert dispatch["class"] == "data"
+    assert {"target_node_id", "revision_id"} <= set(config["schema"]["required"])
+    assert "id" in status["schema"]["required"]
+    assert {"revision", "notification"} <= set(event["schema"]["required"])
+
+
+def test_alarm_channel_schema_requires_sealed_secret_and_rejects_cleartext_fields():
+    body, _ = gb.build_bundle()
+    channel = body["contracts"]["_AlarmNotificationConfig"]["schema"]["properties"][
+        "channels"
+    ]["items"]
+    envelope = channel["properties"]["sealed_secret"]
+
+    assert channel["additionalProperties"] is False
+    assert envelope["additionalProperties"] is False
+    assert set(envelope["required"]) == {"version", "algorithm", "key_id", "ciphertext"}
+
+    validator = jsonschema.Draft202012Validator(channel)
+    valid = {
+        "id": "channel-1",
+        "name": "Operations",
+        "kind": "smtp",
+        "public_config": {},
+        "sealed_secret": {
+            "version": 1,
+            "algorithm": "nacl-box-seal-x25519-xsalsa20-poly1305",
+            "key_id": "sha256:key-1",
+            "ciphertext": "ciphertext",
+        },
+        "rate_limit_per_minute": 60,
+        "enabled": True,
+    }
+    assert validator.is_valid(valid)
+    assert not validator.is_valid({**valid, "password": "cleartext"})
+    assert not validator.is_valid({**valid, "webhook_url": "https://secret.invalid"})
+
+
 def test_audit_event_is_append_only_and_has_stable_required_fields():
     body, _ = gb.build_bundle()
     event = body["contracts"]["_AuditEvent"]
