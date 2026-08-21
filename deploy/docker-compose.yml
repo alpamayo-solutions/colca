@@ -80,6 +80,7 @@ services:
     networks:
       link3-hub:     # keep upstream's primary pick: host ports bind here
         priority: 100
+      svc-global: {}  # global ↔ notifications sidecar only
       kc-global: {}  # global ↔ keycloak only (JWKS fetch), pairwise by design
       gs-global: {}  # global ↔ grantsync only, pairwise for the same reason
 
@@ -100,6 +101,7 @@ services:
         priority: 100
       link2-edges: {}
       link3-hub: {}
+      svc-site1: {}
 
   edge1:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -119,6 +121,7 @@ services:
       kc-edge1: {}   # edge1 ↔ keycloak only (JWKS fetch), pairwise by design
       link1-m1: {}
       link2-edges: {}
+      svc-edge1: {}
 
   edge2:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -137,6 +140,79 @@ services:
         priority: 100
       link1-m2: {}
       link2-edges: {}
+      svc-edge2: {}
+
+  global-notifications:
+    image: ${NOTIFICATIONS_IMAGE:-notifications:dev}
+    restart: unless-stopped
+    depends_on: [global]
+    environment:
+      COLCA_URL: http://global
+      STATE_PATH: /var/lib/notifications/state.db
+      HTTP_ADDR: :8080
+      POLL_INTERVAL: 100ms
+    volumes:
+      - global-notifications-data:/var/lib/notifications
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/notifications", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [svc-global]
+
+  site1-notifications:
+    image: ${NOTIFICATIONS_IMAGE:-notifications:dev}
+    restart: unless-stopped
+    depends_on: [site1]
+    environment:
+      COLCA_URL: http://site1
+      STATE_PATH: /var/lib/notifications/state.db
+      HTTP_ADDR: :8080
+      POLL_INTERVAL: 100ms
+    volumes:
+      - site1-notifications-data:/var/lib/notifications
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/notifications", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [svc-site1]
+
+  edge1-notifications:
+    image: ${NOTIFICATIONS_IMAGE:-notifications:dev}
+    restart: unless-stopped
+    depends_on: [edge1]
+    environment:
+      COLCA_URL: http://edge1
+      STATE_PATH: /var/lib/notifications/state.db
+      HTTP_ADDR: :8080
+      POLL_INTERVAL: 100ms
+    volumes:
+      - edge1-notifications-data:/var/lib/notifications
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/notifications", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [svc-edge1]
+
+  edge2-notifications:
+    image: ${NOTIFICATIONS_IMAGE:-notifications:dev}
+    restart: unless-stopped
+    depends_on: [edge2]
+    environment:
+      COLCA_URL: http://edge2
+      STATE_PATH: /var/lib/notifications/state.db
+      HTTP_ADDR: :8080
+      POLL_INTERVAL: 100ms
+    volumes:
+      - edge2-notifications-data:/var/lib/notifications
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/notifications", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [svc-edge2]
 
   m1:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -245,6 +321,10 @@ volumes:
   site1-data: {}
   edge1-data: {}
   edge2-data: {}
+  global-notifications-data: {}
+  site1-notifications-data: {}
+  edge1-notifications-data: {}
+  edge2-notifications-data: {}
 
 networks:
   host-edge1: {}
@@ -258,3 +338,7 @@ networks:
   link1-m2: {}
   link2-edges: {}
   link3-hub: {}
+  svc-global: {}
+  svc-site1: {}
+  svc-edge1: {}
+  svc-edge2: {}

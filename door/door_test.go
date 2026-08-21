@@ -40,6 +40,72 @@ func TestFetchAsksForTheStreamAndCursorItWasGiven(t *testing.T) {
 	}
 }
 
+func TestFilteredFetchEncodesRepeatedSignalIDsAndDecodesGapAttribution(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"records":[{"offset":7,"origin_offset":4,"topic":"colca/v1/_Metric/n/s","payload":{"signal_id":"s-1","value":1},"ts":9,"written_by":"connector","actor_id":"svc-1","actor_label":"OPC UA","actor_kind":"service"}],"next":12,"gap":{"stream":"metrics","from_offset":2,"to_offset":6,"first_ts":1,"last_ts":8,"approx":false}}`))
+	}))
+	defer srv.Close()
+
+	page, err := (&Client{BaseURL: srv.URL}).FetchWithOptions(context.Background(), FetchOptions{
+		Stream: "metrics", Cursor: "c/notifications/alarm-metrics-v1", Max: 100,
+		Prefix: "line1", SignalIDs: []string{"s-1", "s-2"},
+	})
+	if err != nil {
+		t.Fatalf("FetchWithOptions: %v", err)
+	}
+
+	wantQuery := "cursor=c%2Fnotifications%2Falarm-metrics-v1&max=100&prefix=line1&signal_id=s-1&signal_id=s-2&stream=metrics"
+	if gotQuery != wantQuery {
+		t.Fatalf("query = %q, want %q", gotQuery, wantQuery)
+	}
+	if page.Gap == nil || page.Gap.ToOffset != 6 || page.Gap.Stream != "metrics" {
+		t.Fatalf("gap = %+v", page.Gap)
+	}
+	if len(page.Records) != 1 || page.Records[0].WrittenBy != "connector" || page.Records[0].ActorID != "svc-1" {
+		t.Fatalf("records = %+v", page.Records)
+	}
+}
+
+func TestKVReturnsRetainedPayloadsVerbatim(t *testing.T) {
+	var gotQuery, gotService string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery, gotService = r.URL.RawQuery, r.Header.Get("X-Colca-Service")
+		_, _ = w.Write([]byte(`{"entries":[{"path":"_colca/config/c1","node_id":"n1","topic":"colca/v1/_AlarmNotificationConfig/n1/_colca/config/c1","payload":{"integer":9007199254740993},"ts":7,"offset":3}]}`))
+	}))
+	defer srv.Close()
+
+	entries, err := (&Client{BaseURL: srv.URL, Service: "notifications"}).KV(context.Background(), "_colca/config")
+	if err != nil {
+		t.Fatalf("KV: %v", err)
+	}
+	if gotQuery != "prefix=_colca%2Fconfig" || gotService != "notifications" {
+		t.Fatalf("query/service = %q/%q", gotQuery, gotService)
+	}
+	if len(entries) != 1 || string(entries[0].Payload) != `{"integer":9007199254740993}` {
+		t.Fatalf("entries = %+v", entries)
+	}
+}
+
+func TestSelfReturnsTheResolvedLocalIdentity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/self" || r.Header.Get("X-Colca-Service") != "notifications" {
+			t.Fatalf("request = %s service=%q", r.URL.Path, r.Header.Get("X-Colca-Service"))
+		}
+		_, _ = w.Write([]byte(`{"ulid":"svc-1","name":"notifications","node":"node-1","element":"element-1","mount":"line1"}`))
+	}))
+	defer srv.Close()
+
+	self, err := (&Client{BaseURL: srv.URL, Service: "notifications"}).Self(context.Background())
+	if err != nil {
+		t.Fatalf("Self: %v", err)
+	}
+	if self.ULID != "svc-1" || self.Node != "node-1" || self.Mount != "line1" {
+		t.Fatalf("self = %+v", self)
+	}
+}
+
 func TestPayloadsArriveVerbatim(t *testing.T) {
 	// The door hands payloads through without re-encoding so a large integer
 	// survives bit-for-bit; a client that decoded into a map would undo that.

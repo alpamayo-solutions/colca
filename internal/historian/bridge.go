@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alpamayo-solutions/colca/internal/door"
+	"github.com/alpamayo-solutions/colca/door"
 )
 
 // Consumer is this service's name in the marker table and in its cursor. Both

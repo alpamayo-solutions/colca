@@ -18,7 +18,11 @@ func TestParseAndClass(t *testing.T) {
 		stream string
 	}{
 		"_Metric": {ClassData, "metrics"}, "_EnrolledIdentity": {ClassEntity, "entities"},
-		"_Node": {ClassEntity, "entities"}, "_ServiceDetails": {ClassEntity, "entities"},
+		"_AlarmStateChange":         {ClassData, "metrics"},
+		"_NotificationDispatched":   {ClassData, "metrics"},
+		"_AlarmNotificationConfig":  {ClassEntity, "entities"},
+		"_NotificationConfigStatus": {ClassEntity, "entities"},
+		"_Node":               {ClassEntity, "entities"}, "_ServiceDetails": {ClassEntity, "entities"},
 		"_ExternalReference": {ClassEntity, "entities"},
 		"_SystemElement":     {ClassEntity, "entities"}, "_CmdParam": {ClassCmd, "commands"},
 		"_CmdAdmin": {ClassCmd, "commands"}, "_Ack": {ClassAck, "commands"},

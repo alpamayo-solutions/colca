@@ -53,6 +53,37 @@ func TestAppendReadOffsets(t *testing.T) {
 	}
 }
 
+func TestReadRecordsFiltersOnPayloadAndAdvancesAcrossSkippedRecords(t *testing.T) {
+	s := mustOpen(t)
+	_, _, err := s.Append("metrics", []Record{
+		{Topic: "colca/v1/_Metric/n/s1", Payload: []byte(`{"signal_id":"s1","value":1}`), TS: 1},
+		{Topic: "colca/v1/_Metric/n/s2", Payload: []byte(`{"signal_id":"s2","value":2}`), TS: 2},
+		{Topic: "colca/v1/_Metric/n/s1", Payload: []byte(`{"signal_id":"s1","value":3}`), TS: 3},
+		{Topic: "colca/v1/_Metric/n/s3", Payload: []byte(`{"signal_id":"s3","value":4}`), TS: 4},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, next, err := s.ReadRecords("metrics", 1, 1, func(record StoredRecord) bool {
+		return string(record.Payload) == `{"signal_id":"s1","value":3}`
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Offset != 3 || next != 4 {
+		t.Fatalf("records=%+v next=%d, want offset 3 and next 4", got, next)
+	}
+
+	got, next, err = s.ReadRecords("metrics", next, 10, func(StoredRecord) bool { return false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 || next != 5 {
+		t.Fatalf("all-filtered records=%+v next=%d, want empty and next 5", got, next)
+	}
+}
+
 func TestAtomicBatchAppendsConsecutiveOffsetsAndProjectsEveryKVRow(t *testing.T) {
 	s := mustOpen(t)
 	originalApply := s.appendApply

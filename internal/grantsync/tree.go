@@ -20,7 +20,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/alpamayo-solutions/colca/internal/door"
+	"github.com/alpamayo-solutions/colca/door"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/plugins/uns"

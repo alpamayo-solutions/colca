@@ -256,6 +256,85 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 	r2.Body.Close()
 }
 
+func TestFetchFiltersMetricsByRepeatedSignalIDAndAdvancesPastSkippedRecords(t *testing.T) {
+	a := newAPI(t)
+	_, _, err := a.st.Append("metrics", []store.Record{
+		{Topic: "colca/v1/_Metric/n-test/line1/s1", Payload: []byte(`{"signal_id":"s1","value":1}`), TS: 1},
+		{Topic: "colca/v1/_Metric/n-test/line1/s2", Payload: []byte(`{"signal_id":"s2","value":2}`), TS: 2},
+		{Topic: "colca/v1/_AlarmStateChange/n-test/alarms/a1", Payload: []byte(`{"event_id":"e1"}`), TS: 3},
+		{Topic: "colca/v1/_Metric/n-test/line2/s3", Payload: []byte(`{"signal_id":"s3","value":3}`), TS: 4},
+		{Topic: "colca/v1/_Metric/n-test/line1/bad", Payload: []byte(`{"signal_id":`), TS: 5},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, out := req(t, client(nil), "GET",
+		a.url+"/fetch?stream=metrics&cursor=filtered&max=10&prefix=line1&signal_id=s1&signal_id=s3",
+		"tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fetch = %d: %v", resp.StatusCode, out)
+	}
+	records := out["records"].([]any)
+	if len(records) != 1 || records[0].(map[string]any)["offset"] != float64(1) {
+		t.Fatalf("filtered records = %v, want only line1/s1", records)
+	}
+	if out["next"] != float64(6) {
+		t.Fatalf("next = %v, want 6 after scanning every skipped record", out["next"])
+	}
+
+	resp, out = req(t, client(nil), "GET",
+		a.url+"/fetch?stream=metrics&cursor=empty-filter&max=10&signal_id=absent",
+		"tok", nil)
+	if resp.StatusCode != http.StatusOK || len(out["records"].([]any)) != 0 || out["next"] != float64(6) {
+		t.Fatalf("all-filtered fetch = %d %v", resp.StatusCode, out)
+	}
+}
+
+func TestFetchRejectsInvalidSignalFilters(t *testing.T) {
+	a := newAPI(t)
+	tests := []string{
+		"/fetch?stream=entities&cursor=c&signal_id=s1",
+		"/fetch?stream=metrics&cursor=c&signal_id=",
+	}
+	for _, path := range tests {
+		resp, _ := req(t, client(nil), "GET", a.url+path, "tok", nil)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("GET %s = %d, want 400", path, resp.StatusCode)
+		}
+	}
+
+	path := "/fetch?stream=metrics&cursor=c"
+	for i := 0; i <= 1000; i++ {
+		path += fmt.Sprintf("&signal_id=s%d", i)
+	}
+	resp, _ := req(t, client(nil), "GET", a.url+path, "tok", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("fetch with 1001 signal ids = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestSignalFilterDoesNotBypassMachineReadScope(t *testing.T) {
+	a := newAPI(t)
+	_, _, err := a.st.Append("metrics", []store.Record{
+		{Topic: "colca/v1/_Metric/n-test/m1/temperature", Payload: []byte(`{"signal_id":"shared-id","value":1}`), TS: 1},
+		{Topic: "colca/v1/_Metric/n-test/other/temperature", Payload: []byte(`{"signal_id":"shared-id","value":2}`), TS: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, out := req(t, client(a.m1), "GET",
+		a.url+"/fetch?stream=metrics&cursor=m1%2Ffiltered&signal_id=shared-id", "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("machine fetch = %d: %v", resp.StatusCode, out)
+	}
+	records := out["records"].([]any)
+	if len(records) != 1 || records[0].(map[string]any)["topic"] != "colca/v1/_Metric/n-test/m1/temperature" {
+		t.Fatalf("scoped filtered records = %v", records)
+	}
+}
+
 func TestAdminConfigureResponseNamesProducedStateOffset(t *testing.T) {
 	a := newAPI(t)
 	a.eng.SetExecutor(engine.Executors(uns.NewConfigExec(a.eng.EntityStore(), a.reg, nil, nil, nil)))

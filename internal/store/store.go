@@ -334,8 +334,21 @@ func (s *Store) NextOffset(stream string) uint64 {
 }
 
 // Read returns up to max records with Offset >= from, optionally topic-filtered.
-// next is the offset to continue from (scanned position + 1, including filtered-out records).
+// It is the compatibility wrapper for callers whose view depends only on the
+// topic. New payload-aware views use ReadRecords.
 func (s *Store) Read(stream string, from uint64, max int, filter func(string) bool) (out []StoredRecord, next uint64, err error) {
+	var recordFilter func(StoredRecord) bool
+	if filter != nil {
+		recordFilter = func(record StoredRecord) bool { return filter(record.Topic) }
+	}
+	return s.ReadRecords(stream, from, max, recordFilter)
+}
+
+// ReadRecords returns up to max matching records with Offset >= from.
+// next is the scanned position + 1, including filtered-out records. A consumer
+// can therefore advance through a sparse server-side view without rereading
+// unrelated records forever.
+func (s *Store) ReadRecords(stream string, from uint64, max int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: streamKey(stream, from),
 		UpperBound: streamKey(stream, ^uint64(0)),
@@ -353,15 +366,16 @@ func (s *Store) Read(stream string, from uint64, max int, filter func(string) bo
 			return nil, next, err
 		}
 		next = off + 1
-		if filter != nil && !filter(e.Topic) {
-			continue
-		}
-		out = append(out, StoredRecord{
+		record := StoredRecord{
 			Offset: off, OriginOffset: originOffset(e.OriginOffset, off),
 			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
 			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind,
-		})
+		}
+		if filter != nil && !filter(record) {
+			continue
+		}
+		out = append(out, record)
 	}
 	return out, next, nil
 }

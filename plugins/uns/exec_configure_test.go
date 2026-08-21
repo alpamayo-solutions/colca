@@ -1164,6 +1164,96 @@ func TestPlatformEntityCommandRefusesObservedServiceState(t *testing.T) {
 	}
 }
 
+func TestAlarmNotificationConfigCommandWritesOneNodeScopedSnapshot(t *testing.T) {
+	f := newStore("n-leaf")
+	c := NewConfigExec(f, nil, nil, nil, nil)
+	entity := map[string]any{
+		"id": "alarm-notification-config", "schema_version": 2,
+		"target_node_id": "n-leaf", "revision_id": "revision-1", "issued_at": 1,
+		"alarms": []any{}, "channels": []any{}, "recipients": []any{},
+		"policies": []any{}, "policy_targets": []any{}, "active_silences": []any{},
+	}
+	payload := body(t, map[string]any{"entities": []map[string]any{{
+		"contract": "_AlarmNotificationConfig", "entity": entity,
+	}}})
+
+	code, msg, _, writes := c.ExecuteWithWrites("_CmdConfigure", "entity/upsert", payload)
+	if code != 200 {
+		t.Fatalf("entity/upsert = %d (%s), want 200", code, msg)
+	}
+	wantTopic := "colca/v1/_AlarmNotificationConfig/n-leaf/_colca/alarm-notification-config/alarm-notification-config"
+	if f.records[wantTopic] == nil {
+		t.Fatalf("alarm config not written at reserved node path: %v", keysOf(f))
+	}
+	if len(writes) != 1 || writes[0].Stream != "entities" || writes[0].Topic != wantTopic {
+		t.Fatalf("state writes = %+v", writes)
+	}
+}
+
+func TestAlarmNotificationConfigCommandRejectsWrongTargetOrIdentity(t *testing.T) {
+	tests := []struct {
+		name   string
+		id     string
+		target string
+	}{
+		{name: "wrong target", id: "alarm-notification-config", target: "n-other"},
+		{name: "missing target", id: "alarm-notification-config", target: ""},
+		{name: "wrong id", id: "another-config", target: "n-leaf"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newStore("n-leaf")
+			c := NewConfigExec(f, nil, nil, nil, nil)
+			payload := body(t, map[string]any{"entities": []map[string]any{{
+				"contract": "_AlarmNotificationConfig",
+				"entity":   map[string]any{"id": test.id, "target_node_id": test.target},
+			}}})
+			code, _, _, writes := c.ExecuteWithWrites("_CmdConfigure", "entity/upsert", payload)
+			if code != 422 || len(writes) != 0 || len(keysOf(f)) != 0 {
+				t.Fatalf("upsert = %d writes=%+v records=%v, want atomic refusal", code, writes, keysOf(f))
+			}
+		})
+	}
+}
+
+func TestAlarmNotificationConfigDeleteTombstonesTheReservedSnapshot(t *testing.T) {
+	f := newStore("n-leaf")
+	c := NewConfigExec(f, nil, nil, nil, nil)
+	upsert := body(t, map[string]any{"entities": []map[string]any{{
+		"contract": "_AlarmNotificationConfig",
+		"entity": map[string]any{
+			"id": "alarm-notification-config", "target_node_id": "n-leaf",
+		},
+	}}})
+	if code, msg, _ := c.Execute("_CmdConfigure", "entity/upsert", upsert); code != 200 {
+		t.Fatalf("seed config = %d (%s)", code, msg)
+	}
+	remove := body(t, map[string]any{"entities": []map[string]any{{
+		"contract": "_AlarmNotificationConfig", "id": "alarm-notification-config",
+	}}})
+	if code, msg, _ := c.Execute("_CmdConfigure", "entity/delete", remove); code != 200 {
+		t.Fatalf("delete config = %d (%s)", code, msg)
+	}
+	topic := "colca/v1/_AlarmNotificationConfig/n-leaf/_colca/alarm-notification-config/alarm-notification-config"
+	if f.records[topic] != nil {
+		t.Fatalf("config survived tombstone: %s", f.records[topic])
+	}
+}
+
+func TestPlatformEntityCommandRefusesNotificationConfigStatus(t *testing.T) {
+	f := newStore("n-local")
+	c := NewConfigExec(f, nil, nil, nil, nil)
+	payload := body(t, map[string]any{"entities": []map[string]any{{
+		"contract": "_NotificationConfigStatus",
+		"entity":   map[string]any{"id": "status-1", "status": "applied"},
+	}}})
+
+	code, msg, _, writes := c.ExecuteWithWrites("_CmdConfigure", "entity/upsert", payload)
+	if code != 422 || !strings.Contains(msg, "observed state") || len(writes) != 0 {
+		t.Fatalf("notification status = %d %q writes=%+v, want refused", code, msg, writes)
+	}
+}
+
 func TestDefinitionUpsertRefusesWhatItCannotAddress(t *testing.T) {
 	cases := []struct {
 		name string

@@ -87,12 +87,14 @@ func Parse(topic string) (Parsed, error) {
 // ClassNone.
 func ClassOf(contract string) Class {
 	switch {
-	case contract == "_Metric":
+	case contract == "_Metric" || contract == "_AlarmStateChange" ||
+		contract == "_NotificationDispatched":
 		return ClassData
 	case contract == "_EnrolledIdentity" || contract == "_Node" ||
 		contract == "_ServiceDetails" || contract == "_SystemElement" ||
 		contract == "_Signal" || contract == "_Constant" || contract == "_ExternalReference" ||
-		contract == "_EditOperation":
+		contract == "_EditOperation" || contract == "_AlarmNotificationConfig" ||
+		contract == "_NotificationConfigStatus":
 		return ClassEntity
 	case contract == "_Group" || contract == "_MetadataType" ||
 		contract == "_AnnotationType" || contract == "_Interface" ||

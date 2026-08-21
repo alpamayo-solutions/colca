@@ -422,6 +422,9 @@ func (c *ConfigExec) entityUpsert(payload []byte) (int, string, string) {
 		if err := json.Unmarshal(ref.Entity, &incoming); err != nil || incoming.ID == "" {
 			return 422, fmt.Sprintf("entity/upsert: entry %d has no id", i), "invalid"
 		}
+		if err := c.checkCommandEntityIdentity(ref.Contract, incoming.ID, ref.Entity); err != nil {
+			return 422, fmt.Sprintf("entity/upsert: entry %d: %v", i, err), "invalid"
+		}
 		topic := c.commandEntityTopic(ref.Contract, incoming.ID)
 		if err := c.publish(topic, ref.Entity); err != nil {
 			return 422, fmt.Sprintf("entity/upsert: %s %s rejected: %v",
@@ -447,6 +450,9 @@ func (c *ConfigExec) entityDelete(payload []byte) (int, string, string) {
 		if ref.ID == "" {
 			return 422, fmt.Sprintf("entity/delete: entry %d has no id", i), "invalid"
 		}
+		if err := c.checkCommandEntityIdentity(ref.Contract, ref.ID, nil); err != nil {
+			return 422, fmt.Sprintf("entity/delete: entry %d: %v", i, err), "invalid"
+		}
 		topic := c.commandEntityTopic(ref.Contract, ref.ID)
 		if _, ok := c.store.KVGet(topic); !ok {
 			missing = append(missing, ref.Contract+" "+ref.ID)
@@ -465,19 +471,46 @@ func (c *ConfigExec) entityDelete(payload []byte) (int, string, string) {
 
 func (c *ConfigExec) checkCommandEntity(contract string) error {
 	switch contract {
-	case "_Node", "_ExternalReference":
+	case "_Node", "_ExternalReference", "_AlarmNotificationConfig":
 		return nil
-	case "_ServiceDetails", "_EnrolledIdentity":
+	case "_ServiceDetails", "_EnrolledIdentity", "_NotificationConfigStatus":
 		return fmt.Errorf("%s is observed state and has its own writer", contract)
 	default:
 		return fmt.Errorf("%s is not a platform-inventory entity authored by this command", contract)
 	}
 }
 
+func (c *ConfigExec) checkCommandEntityIdentity(contract, id string, raw []byte) error {
+	if contract != "_AlarmNotificationConfig" {
+		return nil
+	}
+	if id != "alarm-notification-config" {
+		return fmt.Errorf("_AlarmNotificationConfig id must be alarm-notification-config")
+	}
+	if raw == nil { // delete is already addressed to this executing node
+		return nil
+	}
+	var config struct {
+		TargetNodeID string `json:"target_node_id"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return fmt.Errorf("_AlarmNotificationConfig is unreadable: %v", err)
+	}
+	if config.TargetNodeID == "" {
+		return fmt.Errorf("_AlarmNotificationConfig target_node_id is required")
+	}
+	if config.TargetNodeID != c.store.NodeID() {
+		return fmt.Errorf("_AlarmNotificationConfig target_node_id %q must equal local node %q",
+			config.TargetNodeID, c.store.NodeID())
+	}
+	return nil
+}
+
 func (c *ConfigExec) commandEntityTopic(contract, id string) string {
 	leaf := map[string]string{
-		"_Node":        "nodes",
-		"_ExternalReference": "external-references",
+		"_Node":              "nodes",
+		"_ExternalReference":       "external-references",
+		"_AlarmNotificationConfig": "alarm-notification-config",
 	}[contract]
 	return "colca/v1/" + contract + "/" + c.store.NodeID() + "/_colca/" + leaf + "/" + id
 }

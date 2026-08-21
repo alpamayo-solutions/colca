@@ -36,6 +36,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/registry"
+	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/internal/tokenauth"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -372,15 +373,56 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			limit = defaultMax
 		}
 		prefix := q.Get("prefix")
-		filter := func(topic string) bool {
+		signalIDs, hasSignalFilter := q["signal_id"]
+		signalSet := make(map[string]struct{}, len(signalIDs))
+		if hasSignalFilter {
+			if stream != "metrics" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "signal_id is valid only for the metrics stream"})
+				return
+			}
+			for _, signalID := range signalIDs {
+				if signalID == "" {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": "signal_id must not be empty"})
+					return
+				}
+				signalSet[signalID] = struct{}{}
+			}
+			if len(signalSet) > 1000 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "at most 1000 unique signal_id filters are allowed"})
+				return
+			}
+		}
+		filter := func(record store.StoredRecord) bool {
+			topic := record.Topic
+			var parsed uns.Parsed
+			var parseErr error
 			if prefix != "" {
 				// prefix filters on the uns hierarchy path, not on the raw topic.
-				p, err := uns.Parse(topic)
-				if err != nil || !strings.HasPrefix(p.Path, prefix) {
+				parsed, parseErr = uns.Parse(topic)
+				if parseErr != nil || !strings.HasPrefix(parsed.Path, prefix) {
 					return false
 				}
 			}
-			return c.admin || uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic)
+			if !c.admin && !uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic) {
+				return false
+			}
+			if !hasSignalFilter {
+				return true
+			}
+			if parseErr != nil || parsed.Contract == "" {
+				parsed, parseErr = uns.Parse(topic)
+			}
+			if parseErr != nil || parsed.Contract != "_Metric" {
+				return false
+			}
+			var metric struct {
+				SignalID string `json:"signal_id"`
+			}
+			if json.Unmarshal(record.Payload, &metric) != nil {
+				return false
+			}
+			_, wanted := signalSet[metric.SignalID]
+			return wanted
 		}
 		if c.entry != nil && !ownsCursor(c.entry, cursor) {
 			_ = e.RecordDenial(engine.AuditDenial{Operation: "read", ReasonCode: "cursor_denied",
@@ -390,7 +432,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		from := e.Store().CursorGet(cursor, stream)
-		recs, next, err := e.Store().Read(stream, from, limit, filter)
+		recs, next, err := e.Store().ReadRecords(stream, from, limit, filter)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return

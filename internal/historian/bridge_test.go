@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/alpamayo-solutions/colca/internal/door"
+	"github.com/alpamayo-solutions/colca/door"
 )
 
 type fakeDoor struct {

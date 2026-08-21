@@ -55,22 +55,77 @@ type Record struct {
 	Topic        string          `json:"topic"`
 	Payload      json.RawMessage `json:"payload"`
 	TS           int64           `json:"ts"`
+	WrittenBy    string          `json:"written_by"`
+	ActorID      string          `json:"actor_id"`
+	ActorLabel   string          `json:"actor_label"`
+	ActorKind    string          `json:"actor_kind"`
+}
+
+// Gap is the contiguous pruned stream prefix a cursor can no longer read.
+type Gap struct {
+	Stream     string `json:"stream"`
+	FromOffset int64  `json:"from_offset"`
+	ToOffset   int64  `json:"to_offset"`
+	FirstTS    int64  `json:"first_ts"`
+	LastTS     int64  `json:"last_ts"`
+	Approx     bool   `json:"approx"`
 }
 
 // Page is one /fetch response.
 type Page struct {
 	Records []Record `json:"records"`
 	Next    int64    `json:"next"`
+	Gap     *Gap     `json:"gap,omitempty"`
+}
+
+// FetchOptions are the server-side view applied to one side-effect-free read.
+type FetchOptions struct {
+	Stream    string
+	Cursor    string
+	Max       int
+	Prefix    string
+	SignalIDs []string
+}
+
+// KVEntry is one retained record returned by /kv.
+type KVEntry struct {
+	Path    string          `json:"path"`
+	NodeID  string          `json:"node_id"`
+	Topic   string          `json:"topic"`
+	Payload json.RawMessage `json:"payload"`
+	TS      int64           `json:"ts"`
+	Offset  int64           `json:"offset"`
+}
+
+// Self describes the registry identity resolved for a local service request.
+type Self struct {
+	ULID    string `json:"ulid"`
+	Name    string `json:"name"`
+	Node    string `json:"node"`
+	Element string `json:"element"`
+	Mount   string `json:"mount"`
 }
 
 // Fetch reads one page. It does NOT move the cursor: reading is side-effect
 // free, which is what lets a consumer that dies mid-batch re-read exactly what
 // it had not acked.
 func (c *Client) Fetch(ctx context.Context, stream, cursor string, max int) (Page, error) {
+	return c.FetchWithOptions(ctx, FetchOptions{Stream: stream, Cursor: cursor, Max: max})
+}
+
+// FetchWithOptions reads one page using optional hierarchy and metric signal
+// filters. It does NOT move the cursor; /ack remains the only cursor mutation.
+func (c *Client) FetchWithOptions(ctx context.Context, options FetchOptions) (Page, error) {
 	q := url.Values{
-		"stream": {stream},
-		"cursor": {cursor},
-		"max":    {strconv.Itoa(max)},
+		"stream": {options.Stream},
+		"cursor": {options.Cursor},
+		"max":    {strconv.Itoa(options.Max)},
+	}
+	if options.Prefix != "" {
+		q.Set("prefix", options.Prefix)
+	}
+	for _, signalID := range options.SignalIDs {
+		q.Add("signal_id", signalID)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/fetch?"+q.Encode(), nil)
 	if err != nil {
@@ -78,18 +133,75 @@ func (c *Client) Fetch(ctx context.Context, stream, cursor string, max int) (Pag
 	}
 	resp, err := c.do(req)
 	if err != nil {
-		return Page{}, fmt.Errorf("fetching %s: %w", stream, err)
+		return Page{}, fmt.Errorf("fetching %s: %w", options.Stream, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		reason, _ := io.ReadAll(resp.Body)
-		return Page{}, fmt.Errorf("fetching %s: HTTP %d: %s", stream, resp.StatusCode, truncate(reason, 300))
+		return Page{}, fmt.Errorf("fetching %s: HTTP %d: %s", options.Stream, resp.StatusCode, truncate(reason, 300))
 	}
 	var page Page
 	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
-		return Page{}, fmt.Errorf("fetching %s: %w", stream, err)
+		return Page{}, fmt.Errorf("fetching %s: %w", options.Stream, err)
 	}
 	return page, nil
+}
+
+// KV returns retained entries visible below prefix.
+func (c *Client) KV(ctx context.Context, prefix string) ([]KVEntry, error) {
+	q := url.Values{}
+	if prefix != "" {
+		q.Set("prefix", prefix)
+	}
+	endpoint := c.BaseURL + "/kv"
+	if encoded := q.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("reading retained state: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		reason, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("reading retained state: HTTP %d: %s", resp.StatusCode, truncate(reason, 300))
+	}
+	var out struct {
+		Entries []KVEntry `json:"entries"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("reading retained state: %w", err)
+	}
+	return out.Entries, nil
+}
+
+// Self reads the authoritative registry identity for a local service.
+func (c *Client) Self(ctx context.Context) (Self, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/self", nil)
+	if err != nil {
+		return Self{}, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return Self{}, fmt.Errorf("reading local identity: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		reason, _ := io.ReadAll(resp.Body)
+		return Self{}, fmt.Errorf("reading local identity: HTTP %d: %s", resp.StatusCode, truncate(reason, 300))
+	}
+	var self Self
+	if err := json.NewDecoder(resp.Body).Decode(&self); err != nil {
+		return Self{}, fmt.Errorf("reading local identity: %w", err)
+	}
+	if self.ULID == "" || self.Node == "" {
+		return Self{}, fmt.Errorf("reading local identity: response has no service or node identity")
+	}
+	return self, nil
 }
 
 // Ack moves a cursor to offset. Monotonic: acking backwards reports false and
