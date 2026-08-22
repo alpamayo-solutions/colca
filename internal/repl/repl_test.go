@@ -354,6 +354,11 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	defer srv.Stop()
+	// Two commands: the child is attached at offset 2 below, so the first one
+	// only exists to make that position seedable (see attachAt). The second is
+	// the one this test follows.
+	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/filler", `{"correlation_id":"c0","expires_at":99999999999}`)
+	at := ps.NextOffset("commands")
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
@@ -366,6 +371,7 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 		delivered <- topic
 	}, nil, nil)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
+	attachAt(t, cs, cl, at)
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -383,7 +389,7 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 		t.Fatal("command was never delivered locally")
 	}
 	waitFor(t, "the downlink cursor to advance", 5*time.Second, func() bool {
-		return cs.CursorGet(uns.DownlinkCursor(cl.ParentPub()), "commands-parent") == 2
+		return cs.CursorGet(uns.DownlinkCursor(cl.ParentPub()), "commands-parent") == at+1
 	})
 	if got := cs.NextOffset("commands"); got != 2 {
 		t.Fatalf("child commands next offset %d, want 2", got)
@@ -704,6 +710,51 @@ func mustClient(t *testing.T, addr, parentPubHex string, id *identity.Identity) 
 		t.Fatalf("NewClient: %v", err)
 	}
 	return c
+}
+
+// attachAt makes st look like a node that is ALREADY attached to c's parent and
+// positioned at off on that parent's commands stream.
+//
+// Since parent-scoped cursors, a child with no cursor for a parent adopts that
+// parent's head on first contact and never hears what predates it
+// (parent-scoped-cursors design §3.2) — so a test that wants a command seeded
+// BEFORE the loop starts to be delivered has to place the child in front of it
+// instead of relying on a fresh child reading from 1.
+//
+// off must be above 1: 1 is the default position and CursorAck is forward-only,
+// so "seeding" it there would be a silent no-op and the test would pass for the
+// wrong reason. Both that and a refused ack fail loudly here.
+func attachAt(t *testing.T, st *store.Store, c *Client, off uint64) {
+	t.Helper()
+	if off <= 1 {
+		t.Fatalf("attachAt(%d): position 1 is the default and cannot be seeded — "+
+			"give the parent's stream a record to sit in front of first", off)
+	}
+	if !st.CursorAck(uns.DownlinkCursor(c.ParentPub()), downlinkStream, off) {
+		t.Fatalf("attachAt(%d): the commands cursor did not move — the precondition is a no-op", off)
+	}
+}
+
+// waitForAttached blocks until c's downlink loop has completed first contact
+// with its parent, which since parent-scoped cursors is the moment it becomes
+// safe to issue a command to it: whatever is already in the parent's commands
+// stream when that handshake runs is pre-attachment and deliberately not
+// delivered (design §3.2). A test that seeds a command after starting the loop
+// without this races the handshake and passes or fails on scheduling.
+//
+// The observable is the cursor KEY, not its position: first contact against a
+// parent whose commands stream is empty records position 1, which CursorGet
+// cannot tell apart from no cursor at all.
+func waitForAttached(t *testing.T, st *store.Store, c *Client) {
+	t.Helper()
+	waitFor(t, "the downlink loop to complete first contact with its parent", 20*time.Second, func() bool {
+		for _, cur := range st.Cursors() {
+			if cur.Name == uns.DownlinkCursor(c.ParentPub()) && cur.Stream == downlinkStream {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {

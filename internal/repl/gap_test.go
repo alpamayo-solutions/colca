@@ -292,6 +292,10 @@ func TestRunDownlinkContinuesPastGap(t *testing.T) {
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	cm := metrics.New(cs, config.Retention{}, nil)
 	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
+	// The claim is about a child whose POSITION lies inside the hole, which is
+	// a child that was already attached here — a first-contact child adopts the
+	// parent's head instead and never meets the hole at all (§3.2).
+	attachAt(t, cs, f.cl, 2)
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -386,6 +390,14 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
 	for i := 1; i <= 3; i++ {
 		mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", fmt.Sprintf(`{"v":%d}`, i))
+	}
+	// The override this pins is the pruner passing a cursor that EXISTS: a node
+	// that had already offered {v:1} to this parent. First contact is the other
+	// case entirely — it is seeded at the LWM and has nothing to be overridden
+	// (§3.2), which is why the position is planted here rather than left at the
+	// default.
+	if !cs.CursorAck(uns.UplinkCursor(parentID.PublicHex()), "metrics", 2) {
+		t.Fatal("seeding the uplink cursor did not move it — the precondition is a no-op")
 	}
 	if n, err := cs.Prune("metrics", 4, []string{uns.UplinkCursor(parentID.PublicHex())}, nil); err != nil || n != 3 {
 		t.Fatalf("prune: %d %v", n, err)

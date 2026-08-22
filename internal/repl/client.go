@@ -27,6 +27,21 @@ const (
 	// on definitions (definition-stream design §5).
 	downlinkDefStream = "definitions-parent"
 
+	// metricsStream is the uplink floor — the one stream RunUplink pushes
+	// outside the priority lanes. Named rather than written out at each use so
+	// that priorityLanes plus this constant are the whole answer to "what
+	// rises", and uplinkStreams can derive its set from them instead of
+	// restating it.
+	metricsStream = "metrics"
+
+	// The pre-scoping cursor names (parent-scoped-cursors design §3.5). They
+	// exist for exactly one purpose: to be adopted once under the parent-scoped
+	// names on the first start after this change, and then deleted. Nothing
+	// writes them any more.
+	legacyUplinkCursor      = "uplink"
+	legacyDownlinkCursor    = "downlink"
+	legacyDownlinkDefCursor = "downlink-def"
+
 	replBatch    = 200
 	uplinkIdle   = 150 * time.Millisecond
 	downlinkWait = 20 * time.Second
@@ -292,6 +307,149 @@ var priorityLanes = []struct {
 	{"audit", nil},
 }
 
+// uplinkStreams is exactly the set RunUplink pushes: every priority lane plus
+// the metrics floor. Derived from the lane list rather than restated, because a
+// second hand-written copy of the stream set is a copy someone eventually
+// forgets to extend — and the one that silently stops seeding a cursor here
+// would be invisible until a reparented node came up deaf on that stream.
+func uplinkStreams() []string {
+	streams := make([]string, 0, len(priorityLanes)+1)
+	for _, lane := range priorityLanes {
+		streams = append(streams, lane.name)
+	}
+	return append(streams, metricsStream)
+}
+
+// adoptLegacy moves a pre-scoping cursor's VALUE to its parent-scoped name and
+// removes the old key (design §3.5). It reports whether there was anything to
+// adopt, so the caller can tell "migrated" from "genuinely first contact".
+//
+// One shot by construction: the legacy key is gone afterwards, so a second
+// start finds nothing here and the scoped cursor — which by then is the only
+// one — carries the position on alone. A delete that fails is logged rather
+// than retried; the adoption itself already landed, so the worst case is that
+// the next start adopts the same value again, which is a no-op against a
+// forward-only cursor.
+func adoptLegacy(c *Client, st *store.Store, legacyName, scopedName, stream string) bool {
+	pos := st.CursorGet(legacyName, stream)
+	if pos <= 1 {
+		return false // never advanced (or never existed): nothing to carry over
+	}
+	st.CursorAck(scopedName, stream, pos)
+	if err := st.CursorDelete(legacyName, stream); err != nil {
+		c.log.Warn("legacy cursor not deleted after adoption — its value is already carried under the scoped name",
+			"cursor", legacyName, "stream", stream, "err", err)
+	}
+	return true
+}
+
+// initCursors settles this child's position against the CONFIGURED parent
+// before either loop reads a cursor (parent-scoped-cursors design §3.2/§3.5).
+//
+// Three cases, evaluated per cursor in this order:
+//
+//  1. A scoped cursor already exists — leave it alone. This is every
+//     steady-state start, and every return to a FORMER parent, which resumes
+//     exactly where it left off because its cursors were never touched while
+//     the node was attached elsewhere.
+//  2. A legacy un-scoped cursor exists and a scoped one does not — adopt the
+//     legacy VALUE under the scoped name and delete the legacy key (§3.5).
+//     Correct for every node that is not mid-reparent, which is every running
+//     node, since a reparent already requires a restart.
+//  3. Neither exists — first contact with THIS parent, so initialize rather
+//     than assume:
+//     - Uplink starts at each stream's LWM: offer everything still retained
+//     and let the parent's per-child HWM dedup whatever it already has. This
+//     is the state transfer reparenting was missing. Seeding it here rather
+//     than letting pushOnce's §6.3 clamp arrive at the same offset also keeps
+//     first contact from REPORTING a gap: a gap means records were lost
+//     against a position this parent held, and it never held one.
+//     - Definitions start at 1, which is simply the default — not special
+//     handling, but exactly what a freshly enrolled child does. The stream is
+//     compacted rather than pruned, so "from 1" is the current definition set.
+//     - Commands start at the parent's head. Instructions issued before this
+//     child attached were addressed to whatever occupied the mount then;
+//     delivering them to a newcomer would run a command its author never
+//     meant for it.
+//
+// The uplink and definitions halves test case 1 with "position above 1", which
+// is imprecise but harmless there: re-running case 3 on a cursor sitting at 1
+// re-seeds the LWM, and a forward-only ack makes that a no-op whenever it would
+// not already have happened. The commands half cannot afford the imprecision
+// and probes for the key itself — see there.
+//
+// head is the parent's commands NextOffset from a hello response. 0 means no
+// hello has answered — RunUplink always passes 0, because the uplink half needs
+// no head and a metric it can never emit is worse than none.
+//
+// Idempotent, and safe under the race the two loops create by both calling it.
+// Every write here either moves a cursor forward (CursorAck) or claims one that
+// does not exist (CursorSetIfAbsent), and every delete is a no-op on an absent
+// key — so concurrent calls converge on the same set no matter which order they
+// interleave in, and none of them can move a cursor backwards.
+//
+// m may be nil (every Metrics method is nil-safe).
+func initCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64) {
+	st := eng.Store()
+
+	up := uns.UplinkCursor(c.parentPub)
+	for _, stream := range uplinkStreams() {
+		if st.CursorGet(up, stream) > 1 {
+			continue // case 1
+		}
+		if adoptLegacy(c, st, legacyUplinkCursor, up, stream) { // case 2
+			continue
+		}
+		if lwm := st.LWM(stream); lwm > 1 { // case 3
+			st.CursorAck(up, stream, lwm)
+		}
+	}
+
+	// Definitions: case 3 IS the default position, so there is nothing to write
+	// unless a legacy cursor has a position to hand over.
+	def := uns.DownlinkDefCursor(c.parentPub)
+	if st.CursorGet(def, downlinkDefStream) <= 1 {
+		adoptLegacy(c, st, legacyDownlinkDefCursor, def, downlinkDefStream)
+	}
+
+	// Commands are the one cursor where the three cases must be told apart
+	// EXACTLY, so this branch probes for the key rather than for a position
+	// above 1. CursorGet answers 1 both for "never met this parent" and for "met
+	// it, and its stream was empty at the time" — and those two demand opposite
+	// behaviour: the first adopts the head, the second must deliver everything
+	// from offset 1, which is exactly the offline-catch-up contract (cmdadmin
+	// design §10: a command issued while its target is down waits durably and
+	// executes on restart). Adopting a head there would drop it.
+	cmd := uns.DownlinkCursor(c.parentPub)
+	if !adoptLegacy(c, st, legacyDownlinkCursor, cmd, downlinkStream) { // case 2
+		// Case 3, and only on genuine first contact: SetIfAbsent leaves a cursor
+		// that already exists untouched (case 1) and records the position even
+		// when it is 1, so the next start knows this parent has been met. head 0
+		// means no hello has answered — claim nothing and let the caller that
+		// has a head settle it.
+		if head > 0 {
+			st.CursorSetIfAbsent(cmd, downlinkStream, head)
+		}
+	}
+	// The one diagnostic head buys (§7), evaluated after the cases above so a
+	// cursor this call just created (pos == head) can never trip it. A position
+	// past the parent's head means the parent pruned past it or was rebuilt from
+	// empty: Read(after > head) returns nothing, next == after, and the node
+	// stays command-deaf without ever failing at anything — and being
+	// command-deaf, it cannot be repaired remotely either.
+	//
+	// Detection only — never reset it here. A parent whose stream is shorter
+	// than this cursor is also exactly what a legitimately pruned parent looks
+	// like, and rewinding would re-deliver commands that already ran.
+	if pos := st.CursorGet(cmd, downlinkStream); head > 0 && pos > head {
+		c.log.Warn("downlink commands cursor is past the parent's head — the parent pruned past "+
+			"this position or was rebuilt; this node will receive no commands until the parent's "+
+			"stream grows past it",
+			"position", pos, "parent_head", head, "parent_key", short(c.parentPub))
+		m.DownlinkCursorBeyondHead()
+	}
+}
+
 // RunUplink pushes this node's streams to its parent forever (until stop is
 // closed), draining the priority lanes to empty before each metrics batch.
 //
@@ -308,6 +466,12 @@ var priorityLanes = []struct {
 func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
+	// Settle this node's position against the configured parent before the
+	// first cursor read below. head is 0: the uplink half needs none, and
+	// RunDownlink's hello supplies it for the commands cursor. m is nil for the
+	// same reason — the only metric this can emit belongs to the commands
+	// cursor, which a head of 0 never reaches.
+	initCursors(c, eng, nil, 0)
 
 	stopped := func() bool {
 		select {
@@ -410,7 +574,7 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 		}
 		// The floor: exactly one metrics batch per pass, whatever the lanes
 		// above are doing.
-		scanned, aborted := pushOnce("metrics", nil)
+		scanned, aborted := pushOnce(metricsStream, nil)
 		if aborted {
 			return
 		}
@@ -436,13 +600,43 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 	defer cancel()
 	// First contact: learn the node's position, and whatever definitions are
 	// already waiting, in one RTT (id-grants design §4) instead of after the
-	// first long-poll drains. Failure is fine — the regular polls below carry
-	// both on every response.
-	if res, err := c.hello(ctx, eng.Store().CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream)); err == nil {
-		if res.Ancestry != nil {
-			eng.SetAncestry(*res.Ancestry)
+	// first long-poll drains.
+	//
+	// Retried until it answers. A failed hello used to be harmless — position
+	// and definitions ride every poll anyway — but since parent-scoped cursors
+	// the head it carries is a PRECONDITION of the first poll: a child with no
+	// cursor for this parent must adopt that head before it reads anything
+	// (§3.2), and polling first would hand it every instruction issued before it
+	// was attached. One transient failure would otherwise defeat the rule
+	// outright. Waiting costs nothing — while hello is failing the parent is
+	// unreachable, so the poll below would be failing too, and it counts as the
+	// fetch failure it is.
+	for {
+		res, err := c.hello(ctx, eng.Store().CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream))
+		if err == nil {
+			// Before anything is applied: a first-contact definitions cursor must
+			// be settled at 1 when this batch lands, and a first-contact commands
+			// cursor must have adopted the head this response carries before the
+			// poll below reads it (§3.2).
+			initCursors(c, eng, m, res.Head)
+			if res.Ancestry != nil {
+				eng.SetAncestry(*res.Ancestry)
+			}
+			applyDefinitions(c, eng, m, res)
+			break
 		}
-		applyDefinitions(c, eng, m, res)
+		select {
+		case <-stop:
+			return // the request was aborted by our own shutdown
+		default:
+		}
+		c.log.Warn("first-contact hello failed (will retry) — the parent's command head must be known before the first poll", "err", err)
+		m.DownlinkFetchFailed()
+		select {
+		case <-stop:
+			return
+		case <-time.After(retryAfter):
+		}
 	}
 	for {
 		select {

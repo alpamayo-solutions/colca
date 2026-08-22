@@ -715,3 +715,50 @@ func TestCursorDeleteRemovesPositionAndTimestamp(t *testing.T) {
 		t.Fatalf("deleting an absent cursor: %v", err)
 	}
 }
+
+// CursorSetIfAbsent exists for the one thing CursorGet cannot express:
+// "absent" and "at 1" read identically through it, and the replication cursors
+// need them told apart. So the claims are that position 1 — the value
+// CursorAck refuses because it is the default — becomes a REAL key, that a
+// second call changes nothing, and that an existing cursor is never moved,
+// forwards or backwards.
+func TestCursorSetIfAbsentRecordsThePositionOnlyOnce(t *testing.T) {
+	s := mustOpen(t)
+
+	if !s.CursorSetIfAbsent("c-new", "metrics", 1) {
+		t.Fatal("the first call must create the cursor")
+	}
+	present := func(name string) bool {
+		for _, c := range s.Cursors() {
+			if c.Name == name && c.Stream == "metrics" {
+				if c.LastAdvanceMS == 0 {
+					t.Fatalf("%s has no ct/ timestamp — the staleness input of §5.2 must never be "+
+						"missing for a cursor that exists", name)
+				}
+				return true
+			}
+		}
+		return false
+	}
+	if !present("c-new") {
+		t.Fatal("a cursor set to 1 must be a real key — otherwise it still reads as never met")
+	}
+
+	if s.CursorSetIfAbsent("c-new", "metrics", 9) {
+		t.Fatal("the second call must report that the cursor already existed")
+	}
+	if got := s.CursorGet("c-new", "metrics"); got != 1 {
+		t.Fatalf("cursor = %d, want the original 1 — an existing cursor must never be moved", got)
+	}
+
+	// Nor backwards over a cursor that has since advanced.
+	if !s.CursorAck("c-new", "metrics", 5) {
+		t.Fatal("ack did not move the cursor")
+	}
+	if s.CursorSetIfAbsent("c-new", "metrics", 2) {
+		t.Fatal("an advanced cursor must still report as existing")
+	}
+	if got := s.CursorGet("c-new", "metrics"); got != 5 {
+		t.Fatalf("cursor = %d, want 5 — SetIfAbsent must never rewind", got)
+	}
+}

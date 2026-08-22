@@ -93,8 +93,13 @@ func TestDownlinkMetricsProgressAndFailure(t *testing.T) {
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
-	// Seed one command so the first /downlink returns immediately instead of
-	// riding the 20s empty long-poll.
+	// Seed commands so the first /downlink returns immediately instead of
+	// riding the 20s empty long-poll. Two of them, because the child is
+	// attached in front of the second one: a child with no cursor for this
+	// parent adopts its head and hears nothing that predates it (§3.2), so the
+	// first command only exists to make position 2 seedable (see attachAt).
+	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/filler", `{"correlation_id":"c0","expires_at":99999999999}`)
+	at := ps.NextOffset("commands")
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
@@ -102,6 +107,7 @@ func TestDownlinkMetricsProgressAndFailure(t *testing.T) {
 	cm := metrics.New(cs, config.Retention{}, nil)
 	_, ceng := nodeParts(t, cs, ccfg, nil, cm, nil)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
+	attachAt(t, cs, cl, at)
 
 	const gauge = `colca_downlink_last_success_timestamp_seconds`
 	const fails = `colca_downlink_fetch_failures_total`

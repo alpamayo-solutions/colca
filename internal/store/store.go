@@ -435,6 +435,40 @@ func (s *Store) CursorAck(name, stream string, off uint64) bool {
 	return true
 }
 
+// CursorSetIfAbsent creates a cursor at off when the key does not exist yet and
+// reports whether it created it. An existing cursor is left exactly as it is,
+// whatever its position.
+//
+// This is the one cursor write that is not forward-only, and it exists because
+// CursorGet cannot tell "absent" from "at 1": it returns 1 for both. That
+// distinction is invisible on a stream a consumer merely reads from the start,
+// and load-bearing for the parent-scoped replication cursors, where "I have
+// never met this parent" (adopt its head) and "I have met it and am still at
+// its first offset" (deliver everything from there) demand opposite behaviour.
+// Recording the position — even position 1, which CursorAck refuses because it
+// is the default — is what makes the difference durable across a restart.
+//
+// The cursor and its ct/ timestamp go in one synced batch, exactly as in
+// CursorAck: the staleness input of spec §5.2 must never be missing for a
+// cursor that exists.
+func (s *Store) CursorSetIfAbsent(name, stream string, off uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, closer, err := s.db.Get(cursorKey(name, stream)); err == nil {
+		closer.Close()
+		return false
+	}
+	b := s.db.NewBatch()
+	defer b.Close()
+	if err := b.Set(cursorKey(name, stream), be64(off), nil); err != nil {
+		return false
+	}
+	if err := b.Set(ctKey(name, stream), be64(uint64(time.Now().UnixMilli())), nil); err != nil {
+		return false
+	}
+	return s.db.Apply(b, pebble.Sync) == nil
+}
+
 // CursorDelete removes a cursor and its last-advance timestamp in one synced
 // batch, so retention can never see a position without its staleness input or
 // vice versa. Deleting an absent cursor is a no-op: Pebble's Delete on a

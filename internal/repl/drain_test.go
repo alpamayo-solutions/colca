@@ -293,6 +293,11 @@ func TestDownlinkRelayRejectsCommandForDrainingGrandchildMount(t *testing.T) {
 	mStop, mDone := make(chan struct{}), make(chan struct{})
 	go func() { defer close(mDone); RunDownlink(mcl, meng, nil, mStop) }()
 	t.Cleanup(func() { close(mStop); waitForClosed(t, "mid RunDownlink to stop", mDone, 5*time.Second) })
+	// B must be attached before A is given the command: a command already
+	// sitting in A's stream when B first contacts it is pre-attachment and
+	// never relayed (parent-scoped-cursors design §3.2), which would leave this
+	// test racing the handshake.
+	waitForAttached(t, ms, mcl)
 
 	if _, err := mreg.Drain("n-leaf"); err != nil {
 		t.Fatalf("Drain C at B: %v", err)

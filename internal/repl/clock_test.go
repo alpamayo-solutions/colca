@@ -84,7 +84,12 @@ func TestThreeLevelChainTelescopesToRootClock(t *testing.T) {
 	rsrv, raddr := startServer(t, rcfg, reng, rootID, rreg)
 	defer rsrv.Stop()
 	// A command addressed under M's mount so M's first downlink poll returns
-	// immediately instead of riding out the 20s long poll.
+	// immediately instead of riding out the 20s long poll. M is attached in
+	// front of it below rather than arriving fresh: a child with no cursor for
+	// this parent adopts its head and hears nothing that predates it (§3.2), so
+	// the filler exists only to make M's attach position seedable.
+	mustIngestAdmin(t, reng, "colca/v1/_CmdParam/m1/mid1/m1/filler", `{"correlation_id":"c0","expires_at":99999999999}`)
+	midAt := rs.NextOffset("commands")
 	mustIngestAdmin(t, reng, "colca/v1/_CmdParam/m1/mid1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
 
 	// --- Mid: 5s behind the authority ----------------------------------
@@ -97,6 +102,7 @@ func TestThreeLevelChainTelescopesToRootClock(t *testing.T) {
 	defer msrv.Stop()
 
 	mcl := mustClient(t, raddr, rootID.PublicHex(), midID)
+	attachAt(t, ms, mcl, midAt)
 	mStop, mDone := make(chan struct{}), make(chan struct{})
 	go func() { defer close(mDone); RunDownlink(mcl, meng, nil, mStop) }()
 	t.Cleanup(func() { close(mStop); waitForClosed(t, "mid RunDownlink to stop", mDone, 5*time.Second) })
@@ -111,6 +117,16 @@ func TestThreeLevelChainTelescopesToRootClock(t *testing.T) {
 	// M now itself queues a command addressed under L's mount — M's server
 	// stamps now_ms from meng.AuthoritativeNow(), which is now the corrected
 	// (T) value, not M's raw (T-5s) clock.
+	//
+	// L attaches in front of that record, so its offset has to be captured
+	// after M's own downlinked command has landed: the clock assertion above
+	// is applied BEFORE the ingest in the same poll, so without this wait the
+	// two records could take either order and L would be attached past the one
+	// it is waiting for.
+	waitFor(t, "mid to have ingested the root's command", 5*time.Second, func() bool {
+		return ms.NextOffset("commands") > 1
+	})
+	leafAt := ms.NextOffset("commands")
 	mustIngestAdmin(t, meng, "colca/v1/_CmdParam/m1/leaf1/m1/go", `{"correlation_id":"c2","expires_at":99999999999}`)
 
 	// --- Leaf: 20s behind the authority (never talks to root directly) --
@@ -121,6 +137,7 @@ func TestThreeLevelChainTelescopesToRootClock(t *testing.T) {
 	_, leng := nodeParts(t, ls, lcfg, nil, nil, lclk)
 
 	lcl := mustClient(t, maddr, midID.PublicHex(), leafID)
+	attachAt(t, ls, lcl, leafAt)
 	lStop, lDone := make(chan struct{}), make(chan struct{})
 	go func() { defer close(lDone); RunDownlink(lcl, leng, nil, lStop) }()
 	t.Cleanup(func() { close(lStop); waitForClosed(t, "leaf RunDownlink to stop", lDone, 5*time.Second) })

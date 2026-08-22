@@ -384,6 +384,7 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_uplink_push_failures_total":              len(uplinkStreams),
 		"colca_downlink_last_success_timestamp_seconds": 1,
 		"colca_downlink_fetch_failures_total":           1,
+		"colca_downlink_cursor_beyond_head_total":       1,
 		"colca_retained_reseed_records":                 1,
 		// Retention (design §8): collector-derived gauges, always one child per
 		// known stream regardless of activity.

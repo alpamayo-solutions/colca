@@ -147,10 +147,14 @@ type Metrics struct {
 	uplinkFail   *prometheus.CounterVec
 	downlinkOK   prometheus.Gauge
 	downlinkFail prometheus.Counter
-	reseed       prometheus.Gauge
-	authReject   *prometheus.CounterVec
-	aclDeny      *prometheus.CounterVec
-	kicks        prometheus.Counter
+	// colca_downlink_cursor_beyond_head_total (parent-scoped-cursors design
+	// §7): this node's command position is past its parent's stream head, so
+	// it will hear nothing until that stream grows past it.
+	downlinkBeyondHead prometheus.Counter
+	reseed             prometheus.Gauge
+	authReject         *prometheus.CounterVec
+	aclDeny            *prometheus.CounterVec
+	kicks              prometheus.Counter
 	// Human world (human-authz design §7).
 	humanSessions prometheus.Gauge   // colca_human_sessions
 	jwksKeys      prometheus.Gauge   // colca_jwks_keys
@@ -245,6 +249,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		downlinkFail: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_downlink_fetch_failures_total",
 			Help: "Failed downlink fetches. Resets on restart.",
+		}),
+		downlinkBeyondHead: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_downlink_cursor_beyond_head_total",
+			Help: "Starts at which this node's command cursor was already past its parent's stream head (parent pruned past it, or was rebuilt). Resets on restart.",
 		}),
 		reseed: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_retained_reseed_records",
@@ -432,7 +440,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	})
 
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
-		m.downlinkOK, m.downlinkFail, m.reseed,
+		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.reseed,
 		m.authReject, m.aclDeny, m.kicks, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.nodePrefix, m.bundleInfo, m.bundleContracts,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
@@ -615,6 +623,20 @@ func (m *Metrics) DownlinkFetchFailed() {
 		return
 	}
 	m.downlinkFail.Inc()
+}
+
+// DownlinkCursorBeyondHead counts one start that found this node's command
+// cursor already past its parent's stream head (parent-scoped-cursors design
+// §7) — the parent pruned past that position, or was rebuilt from empty.
+//
+// Worth alerting on for the same reason a rejected definition is: the node is
+// not failing, it is silent. Read(after > head) returns nothing forever, so it
+// executes no commands and cannot be repaired remotely either.
+func (m *Metrics) DownlinkCursorBeyondHead() {
+	if m == nil {
+		return
+	}
+	m.downlinkBeyondHead.Inc()
 }
 
 // SetReseedCount records how many KV entries the startup reseed replayed.
