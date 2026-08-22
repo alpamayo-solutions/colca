@@ -676,3 +676,42 @@ func TestStreamsIsTheSingleSourceAndCopies(t *testing.T) {
 		t.Fatal("Streams() handed out the package slice — a caller can corrupt the stream set")
 	}
 }
+
+// CursorDelete is how a revoked identity's parent-side downlink cursors stop
+// accumulating forever (registry.Revoke calls it directly). It must remove
+// both halves CursorAck writes atomically — the position and its ct/
+// timestamp — and be a no-op on a cursor that was never there, which is what
+// makes a repeated revoke idempotent.
+func TestCursorDeleteRemovesPositionAndTimestamp(t *testing.T) {
+	s := mustOpen(t)
+	recs := []Record{{Topic: "colca/v1/_Metric/m1/m1/t", Payload: []byte(`{"v":1}`), TS: 1}}
+	if _, _, err := s.Append("metrics", recs); err != nil {
+		t.Fatal(err)
+	}
+	// off=2: the offset AFTER the record consumed at offset 1. Acking to 1
+	// (the never-acked default itself) is a no-op by CursorAck's own
+	// monotonic guard — the cursor must actually move to exist as a key.
+	if !s.CursorAck("c-gone", "metrics", 2) {
+		t.Fatal("seed ack did not move the cursor")
+	}
+	if got := s.CursorGet("c-gone", "metrics"); got != 2 {
+		t.Fatalf("seeded cursor = %d, want 2", got)
+	}
+	if err := s.CursorDelete("c-gone", "metrics"); err != nil {
+		t.Fatal(err)
+	}
+	// Back to the never-acked default, and the cursor no longer appears in
+	// the scan retention reads to find its floor.
+	if got := s.CursorGet("c-gone", "metrics"); got != 1 {
+		t.Fatalf("deleted cursor reads %d, want the never-acked default 1", got)
+	}
+	for _, c := range s.Cursors() {
+		if c.Name == "c-gone" {
+			t.Fatalf("deleted cursor still enumerated: %+v", c)
+		}
+	}
+	// Idempotent: deleting an absent cursor is not an error.
+	if err := s.CursorDelete("c-never-existed", "metrics"); err != nil {
+		t.Fatalf("deleting an absent cursor: %v", err)
+	}
+}

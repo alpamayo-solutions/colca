@@ -599,3 +599,51 @@ func TestByNameForgetsARevokedEntry(t *testing.T) {
 		t.Fatalf("re-enrolling the freed name: %v; want success — byName must not still point at the revoked ulid", err)
 	}
 }
+
+// Design §3.4: the parent-side downlink cursors exist for retention
+// protection only — delivery position rides the child's `after` parameter on
+// every poll — so a revoked child's cursors are dead weight that otherwise
+// accumulates per device forever. The replication HWM is NOT deleted: a
+// re-enrolled child re-offering from its LWM is deduped by it, which is the
+// difference between a cheap reconciliation and duplicate application.
+func TestRevokeDeletesDownlinkCursorsAndKeepsTheHWM(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "z/a")
+	ulid := "01NCHILD"
+	if _, _, err := m.Enroll(entryJSON(t, machine(ulid, "z/a", pub("cd")))); err != nil {
+		t.Fatal(err)
+	}
+
+	// off=2: CursorAck's monotonic guard treats 1 (the never-acked default)
+	// as no movement, so it never persists a key — the cursor must actually
+	// advance to exist for this test to prove anything.
+	if !st.CursorAck(uns.DownlinkCursorPrefix+ulid, "commands", 2) {
+		t.Fatal("seed ack of the downlink cursor did not move it")
+	}
+	if !st.CursorAck(uns.DownlinkDefCursorPrefix+ulid, "definitions", 2) {
+		t.Fatal("seed ack of the downlink-def cursor did not move it")
+	}
+	if _, _, err := st.ApplyReplicated(ulid, "metrics", []store.ReplRecord{
+		{ChildOffset: 7, Topic: "colca/v1/_Metric/m1/m1/t", Payload: []byte(`{"v":1}`), TS: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hwmBefore := st.HWMGet(ulid, "metrics")
+	if hwmBefore != 7 {
+		t.Fatalf("seeded HWM = %d, want 7", hwmBefore)
+	}
+
+	if _, _, err := m.Revoke(ulid); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range st.Cursors() {
+		if c.Name == uns.DownlinkCursorPrefix+ulid || c.Name == uns.DownlinkDefCursorPrefix+ulid {
+			t.Fatalf("revoke left cursor %q behind — it accumulates per revoked device forever", c.Name)
+		}
+	}
+	if got := st.HWMGet(ulid, "metrics"); got != hwmBefore {
+		t.Fatalf("revoke changed the replication HWM to %d, want %d preserved — a "+
+			"re-enrolled child re-offering from LWM would re-apply records", got, hwmBefore)
+	}
+}

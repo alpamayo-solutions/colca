@@ -319,6 +319,21 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 	if e.Name != "" {
 		delete(m.byName, e.Name)
 	}
+	// Design §3.4: the child's parent-side downlink cursors die with its
+	// identity. They protect retention only — delivery position rides the
+	// child's own `after` parameter — so nothing a re-enrolling child needs is
+	// lost, and leaving them accumulates one pair per revoked device forever.
+	// Failure is logged, never fatal: a surviving cursor is a retention floor,
+	// not a security hole, and the revoke itself has already committed.
+	for name, stream := range map[string]string{
+		uns.DownlinkCursorPrefix + ulid:    "commands",
+		uns.DownlinkDefCursorPrefix + ulid: "definitions",
+	} {
+		if err := m.st.CursorDelete(name, stream); err != nil {
+			m.log.Warn("revoke: downlink cursor not deleted — it will hold a retention floor until the staleness window overrides it",
+				"ulid", ulid, "cursor", name, "err", err)
+		}
+	}
 	kick, deliver := m.kick, m.deliver
 	m.mu.Unlock() // callbacks outside the lock — see Enroll
 	if kick != nil {

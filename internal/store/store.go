@@ -435,6 +435,25 @@ func (s *Store) CursorAck(name, stream string, off uint64) bool {
 	return true
 }
 
+// CursorDelete removes a cursor and its last-advance timestamp in one synced
+// batch, so retention can never see a position without its staleness input or
+// vice versa. Deleting an absent cursor is a no-op: Pebble's Delete on a
+// missing key succeeds, which makes revoke idempotent by construction — a
+// second revoke of the same identity can call this again without erroring.
+func (s *Store) CursorDelete(name, stream string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.db.NewBatch()
+	defer b.Close()
+	if err := b.Delete(cursorKey(name, stream), nil); err != nil {
+		return err
+	}
+	if err := b.Delete(ctKey(name, stream), nil); err != nil {
+		return err
+	}
+	return s.db.Apply(b, pebble.Sync)
+}
+
 // CursorMarkSeen records ts (unix ms) as the last-advance time of a cursor
 // that has no recorded timestamp yet; a no-op when one exists. This is the
 // spec §5.2 upgrade case: a cursor key that predates the ct/ timestamps is
