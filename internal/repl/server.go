@@ -338,7 +338,15 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	// one RTT instead of one long-poll cycle — a fresh node must not stay
 	// fail-closed for humans until the first idle poll drains.
 	if r.URL.Query().Get("hello") == "1" {
-		resp := map[string]any{"records": []wireRec{}, "next": after}
+		resp := map[string]any{
+			"records": []wireRec{}, "next": after,
+			// The child's start position when it has no cursor for THIS
+			// parent (parent-scoped-cursors design §3.2/§3.3): commands
+			// issued before this child was attached were addressed to
+			// whatever occupied the mount then, and are not delivered to a
+			// newcomer.
+			"head": s.eng.Store().NextOffset("commands"),
+		}
 		if a, ok := s.ancestryFor(mount); ok {
 			resp["ancestry"] = a
 		}
@@ -422,7 +430,15 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			// the poll duration (up to longPollFor). It is the parent's own
 			// authoritative-now estimate (time-sync design §2.1), not raw
 			// local time; the root has no offset, so this is its raw clock.
-			resp := map[string]any{"records": out, "next": next, "now_ms": s.eng.AuthoritativeNow().UnixMilli()}
+			resp := map[string]any{
+				"records": out, "next": next,
+				"now_ms": s.eng.AuthoritativeNow().UnixMilli(),
+				// Same head as the hello response (parent-scoped-cursors
+				// design §3.2/§3.3): a child that reconnects mid-stream must
+				// see the same "what if I had no cursor" answer on every
+				// response, not just the first one.
+				"head": s.eng.Store().NextOffset("commands"),
+			}
 			// Position hand-down (id-grants design §4): the parent knows its own
 			// chain and where the child sits inside it, so every downlink
 			// response teaches the child its position. Omitted while this

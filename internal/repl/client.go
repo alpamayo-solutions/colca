@@ -140,6 +140,12 @@ type downResult struct {
 	Ancestry    *uns.Ancestry
 	Definitions []DownRec
 	DefNext     uint64
+	// Head is the parent's own commands stream head (NextOffset("commands"))
+	// at response time — the position a child with no cursor for THIS parent
+	// must start from (parent-scoped-cursors design §3.2/§3.3). Present on
+	// both the hello response and the ordinary long-poll response; consumed
+	// starting with the parent-scoped cursor-seeding work.
+	Head uint64
 }
 
 // Downlink polls the parent once. gap is non-nil when the poll position lies
@@ -216,6 +222,7 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 		Ancestry    *uns.Ancestry  `json:"ancestry"`
 		Definitions []wireRec      `json:"definitions"`
 		DefNext     uint64         `json:"def_next"`
+		Head        uint64         `json:"head"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return downResult{}, err
@@ -228,6 +235,7 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 		Ancestry:    out.Ancestry,
 		Definitions: toDownRecs(out.Definitions),
 		DefNext:     out.DefNext,
+		Head:        out.Head,
 	}, nil
 }
 

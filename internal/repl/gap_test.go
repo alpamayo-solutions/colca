@@ -114,7 +114,7 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	// design §5) — empty here, and its own cursor, independent of the command
 	// one.
 	want := `{"def_next":1,"definitions":[],"gap":{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":10,"last_ts":20,"approx":false},` +
-		`"next":5,"records":[` +
+		`"head":5,"next":5,"records":[` +
 		`{"o":3,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(3) + `","ts":30},` +
 		`{"o":4,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(4) + `","ts":40}]}`
 	if rest != want {
@@ -129,7 +129,7 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	rest, _ = stripNowMS(t, body)
-	want = `{"def_next":1,"definitions":[],"next":5,"records":[` +
+	want = `{"def_next":1,"definitions":[],"head":5,"next":5,"records":[` +
 		`{"o":3,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(3) + `","ts":30},` +
 		`{"o":4,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(4) + `","ts":40}]}`
 	if rest != want {

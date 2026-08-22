@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -594,6 +595,37 @@ func TestMetricsAdvancesWhileAPriorityLaneStaysHot(t *testing.T) {
 	waitFor(t, "metrics to advance while the alarms lane stays hot", 20*time.Second, func() bool {
 		return ps.NextOffset("metrics") > 1
 	})
+}
+
+// Design §3.3: hello exists to teach a (re)connecting child its position in
+// one RTT, and the parent's stream head is part of that position — it is what
+// a child with no cursor for THIS parent must start from.
+func TestHelloCarriesTheParentsCommandHead(t *testing.T) {
+	dir := t.TempDir()
+	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
+	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
+
+	ps := mustStore(t, filepath.Join(dir, "pdata"))
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil,
+		childSpec{"n-child", childID.PublicHex(), "child1"})
+	_, addr := startServer(t, pcfg, peng, parentID, preg)
+
+	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/n-parent/child1/go",
+		`{"correlation_id":"c1","expires_at":99999999999}`)
+	want := ps.NextOffset("commands")
+	if want < 2 {
+		t.Fatalf("parent commands head = %d, want >= 2 after seeding a command", want)
+	}
+
+	cl := mustClient(t, addr, parentID.PublicHex(), childID)
+	res, err := cl.hello(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Head != want {
+		t.Fatalf("hello head = %d, want %d (the parent's own commands NextOffset)", res.Head, want)
+	}
 }
 
 func mustIdentity(t *testing.T, path string) *identity.Identity {
