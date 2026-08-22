@@ -35,6 +35,7 @@ func TestParseAndClass(t *testing.T) {
 		"_AnnotationType":     {ClassDefinition, "definitions"},
 		"_Interface":          {ClassDefinition, "definitions"},
 		"_ExternalSystem":     {ClassDefinition, "definitions"},
+		"_SemanticTag":        {ClassDefinition, "definitions"},
 		"_AuditEvent":         {ClassAudit, "audit"},
 		// _StreamGap (design §6.4) is its own class. StreamFor deliberately
 		// answers "" for it — unlike every other class it has no single fixed
@@ -364,5 +365,19 @@ func TestAlarmManifestName(t *testing.T) {
 	class, ok := ClassFromManifest("alarm")
 	if !ok || class != ClassAlarm {
 		t.Fatalf("ClassFromManifest(\"alarm\") = (%v, %v), want (ClassAlarm, true)", class, ok)
+	}
+}
+
+// A semantic type answers what an entity IS. It rides the same rails as
+// _MetadataType and _Interface: ClassDefinition, addressed by id.
+func TestSemanticTagIsADefinition(t *testing.T) {
+	if got := ClassOf("_SemanticTag"); got != ClassDefinition {
+		t.Fatalf("ClassOf(_SemanticTag) = %v, want ClassDefinition", got)
+	}
+	if err := Validate("_SemanticTag", []byte(`{"name":"temperature"}`)); err == nil {
+		t.Fatal("Validate accepted a _SemanticTag with no id; definitions are addressed by id")
+	}
+	if err := Validate("_SemanticTag", []byte(`{"id":"01JSEMTAG","name":"temperature"}`)); err != nil {
+		t.Fatalf("Validate rejected a well-formed _SemanticTag: %v", err)
 	}
 }
