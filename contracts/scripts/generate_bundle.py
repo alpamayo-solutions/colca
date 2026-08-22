@@ -38,8 +38,6 @@ from franzmq.data_contracts.base import Ack, Cmd
 CLASS_TABLE: dict[str, str] = {
     "_Metric": "data",
     "_Log": "data",
-    "_AlarmStateChange": "data",
-    "_NotificationDispatched": "data",
     "_DBEvent": "data",
     "_DBDump": "data",
     "_SystemElement": "entity",
@@ -52,6 +50,12 @@ CLASS_TABLE: dict[str, str] = {
     "_ExternalReference": "entity",
     "_AlarmNotificationConfig": "entity",
     "_NotificationConfigStatus": "entity",
+    # Alarm EVENTS: append-only, no KV, not retained, on their own stream so
+    # they never queue behind a metrics backlog. The config pair above stays
+    # on entities — only the two event contracts moved
+    # (the alarm stream and uplink lanes design §3).
+    "_AlarmStateChange": "alarm",
+    "_NotificationDispatched": "alarm",
     # Definitions: authored once, needed everywhere below the author, and the
     # same thing at every node — so they descend and are applied as state
     # (definition-stream design §2). They were "entity" only because there was

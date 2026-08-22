@@ -142,7 +142,9 @@ def test_subset_lint_only_allowed_keywords():
     body, _ = gb.build_bundle()
     for ident, entry in body["contracts"].items():
         assert gb._lint_subset(entry["schema"], ident) == []
-        assert entry["class"] in ("data", "entity", "definition", "cmd", "ack", "audit"), ident
+        assert entry["class"] in (
+            "data", "entity", "definition", "cmd", "ack", "audit", "alarm",
+        ), ident
         assert isinstance(entry["tombstone"], bool), ident
 
 
@@ -259,10 +261,17 @@ def test_alarm_notification_contracts_have_revised_direction_and_shape():
     event = body["contracts"]["_AlarmStateChange"]
     dispatch = body["contracts"]["_NotificationDispatched"]
 
+    # The config pair stays on entities — the silence rail is unchanged. The
+    # two EVENT contracts ride the alarms stream instead, so an alarm never
+    # queues behind a metrics backlog (alarm-stream design §3.1).
     assert config["class"] == "entity"
     assert status["class"] == "entity"
-    assert event["class"] == "data"
-    assert dispatch["class"] == "data"
+    assert event["class"] == "alarm"
+    assert dispatch["class"] == "alarm"
+    # Tombstone is derived from class. An event cannot be retracted, so this
+    # is what goes red if either contract drifts back to a state class.
+    assert event["tombstone"] is False
+    assert dispatch["tombstone"] is False
     assert {"target_node_id", "revision_id"} <= set(config["schema"]["required"])
     assert "id" in status["schema"]["required"]
     assert {"revision", "notification"} <= set(event["schema"]["required"])
