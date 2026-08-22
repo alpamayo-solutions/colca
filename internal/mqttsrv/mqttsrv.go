@@ -8,8 +8,10 @@ package mqttsrv
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"strings"
@@ -600,6 +602,37 @@ func (s *Server) HumanWSAddr() string {
 }
 
 func (s *Server) Serve() error { return s.S.Serve() }
+
+// Ready blocks until every configured door is accepting connections.
+//
+// The TCP doors bind in AddListener, so they accept the moment New returns.
+// The websocket door does not: mochi builds its http.Server in Init and binds
+// inside Serve, so HumanWSAddr reports a port that nothing is listening on
+// until the Serve goroutine gets there. A caller that reports or dials that
+// address in between sees a refused connection from a door it was just told
+// about — which is what made the human-door test fail about one run in four,
+// and what a node advertising MQTTHumanWSAddr races on startup.
+//
+// Readiness is established by connecting, because that is the only thing that
+// distinguishes "bound" from "about to be bound"; the probe closes the
+// connection without speaking MQTT.
+func (s *Server) Ready(ctx context.Context) error {
+	addr := s.HumanWSAddr()
+	if addr == "" {
+		return nil
+	}
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			return conn.Close()
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("human websocket door %s not accepting: %w", addr, ctx.Err())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
 
 // Close shuts the broker down without ever letting mochi walk the client map
 // while a client is unwinding.
