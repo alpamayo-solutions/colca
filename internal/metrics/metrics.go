@@ -110,24 +110,24 @@ const (
 
 var aclActions = []string{ACLSub, ACLRead}
 
-// streams mirrors the store's fixed stream set (store.streams; the same list
-// the /debug/state route enumerates).
 // streams is every persistent stream — what has an offset, live bytes and an
-// ingest count.
-var streams = []string{"metrics", "entities", "commands", "definitions", "audit"}
+// ingest count. DERIVED from the store, never mirrored: a copy here could not
+// tell that the store's set grew, and the families below would then silently
+// cover one stream fewer than they claim to.
+var streams = store.Streams()
 
 // uplinkStreams is the subset that RISES. `definitions` is absent because they
 // descend and never rise (definition-stream design §4): a "last uplink success"
 // gauge for a stream the uplink never touches would sit at zero forever and read
 // exactly like a broken uplink.
-var uplinkStreams = []string{"metrics", "entities", "commands", "audit"}
+var uplinkStreams = []string{"metrics", "entities", "commands", "audit", "alarms"}
 
 // retentionStreams is the subset the retention POLICY applies to. `definitions`
 // is absent for the same reason it is absent from the pruner's own list
 // (definition-stream design §6): it is never pruned by age or size, so a
 // pressure or blocked-by-cursor gauge for it would report progress toward a
 // policy that does not exist.
-var retentionStreams = []string{"metrics", "entities", "commands", "audit"}
+var retentionStreams = []string{"metrics", "entities", "commands", "audit", "alarms"}
 
 // gapSurfaces — the allowed `surface` label values of colca_gap_served_total
 // (design §8): `fetch` is GET /fetch (any stream), `downlink` is GET

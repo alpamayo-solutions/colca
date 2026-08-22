@@ -2,6 +2,7 @@ package repl
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"path/filepath"
 	"runtime"
@@ -475,6 +476,124 @@ func placeElement(t *testing.T, eng *engine.Engine, path string) string {
 		t.Fatalf("place element at %s: %v", path, err)
 	}
 	return id
+}
+
+// uplinkPair brings up a live parent and a child engine wired to it, and
+// returns the two stores plus a started RunUplink whose stop is registered as
+// cleanup. Seeding goes straight to the child store: these tests are about
+// the ORDER lanes drain in, not about contract validation at a door.
+func uplinkPair(t *testing.T) (child, parent *store.Store, start func()) {
+	t.Helper()
+	dir := t.TempDir()
+	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
+	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
+
+	ps := mustStore(t, filepath.Join(dir, "pdata"))
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
+	_, addr := startServer(t, pcfg, peng, parentID, preg)
+
+	cs := mustStore(t, filepath.Join(dir, "cdata"))
+	ccfg := &config.Config{ULID: "n-child"}
+	_, ceng := nodeParts(t, cs, ccfg, nil, nil, nil)
+	cl := mustClient(t, addr, parentID.PublicHex(), childID)
+
+	return cs, ps, func() {
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			RunUplink(cl, ceng, nil, stop)
+		}()
+		t.Cleanup(func() {
+			close(stop)
+			waitForClosed(t, "RunUplink to return after stop", done, 5*time.Second)
+		})
+	}
+}
+
+func seed(t *testing.T, s *store.Store, stream, topic string, n int) {
+	t.Helper()
+	recs := make([]store.Record, n)
+	for i := range recs {
+		recs[i] = store.Record{
+			Topic:   fmt.Sprintf(topic, i),
+			Payload: []byte(`{"v":1}`),
+			TS:      int64(1000 + i),
+		}
+	}
+	if _, _, err := s.Append(stream, recs); err != nil {
+		t.Fatalf("seed %s: %v", stream, err)
+	}
+}
+
+// Design §4. After an outage the small lanes drain BEFORE the metrics
+// backlog. Order inside a stream never changes, so this — not a place in the
+// metrics queue — is the only thing that lets an alarm arrive promptly.
+func TestUplinkDrainsSmallLanesBeforeTheMetricsBacklog(t *testing.T) {
+	cs, ps, start := uplinkPair(t)
+	// The alarm lane is deliberately several batches deep. With a single
+	// record any ordering that merely puts metrics last would pass, and this
+	// test would not distinguish lanes from a reshuffled slice. At three
+	// batches the claim bites: the lane must drain ACROSS passes before
+	// metrics moves at all.
+	const alarmBacklog = 3 * replBatch
+	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 5*replBatch)
+	seed(t, cs, "alarms", "colca/v1/_AlarmStateChange/m1/m1/alarm-events/a1/e%d", alarmBacklog)
+
+	start()
+	waitFor(t, "the alarm backlog to reach the parent", 20*time.Second, func() bool {
+		return ps.NextOffset("alarms") == uint64(alarmBacklog)+1
+	})
+
+	// Flat round-robin would have pushed one metrics batch per pass alongside
+	// each alarm batch, so metrics would sit at ~alarmBacklog by now. Lanes
+	// mean at most the single floor batch has gone.
+	if got := ps.NextOffset("metrics") - 1; got > uint64(replBatch) {
+		t.Fatalf("%d metric records reached the parent before the %d-record alarm "+
+			"backlog finished, want at most one %d-record floor batch — the alarm "+
+			"lane is not draining ahead of metrics", got, alarmBacklog, replBatch)
+	}
+}
+
+// Design §4, the floor. A lane that never empties must not hold the metrics
+// cursor still: once the local pruner passes it the backlog is gone and only
+// a gap marker remains, so lane pressure would become silent data loss.
+func TestMetricsAdvancesWhileAPriorityLaneStaysHot(t *testing.T) {
+	cs, ps, start := uplinkPair(t)
+	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 3*replBatch)
+
+	hot, hotDone := make(chan struct{}), make(chan struct{})
+	go func() { // keep the alarms lane permanently non-empty
+		defer close(hotDone)
+		for i := 0; ; i++ {
+			select {
+			case <-hot:
+				return
+			default:
+			}
+			// Append directly, errors ignored: this goroutine outlives nothing
+			// and must not call t.Fatalf, which is illegal off the test
+			// goroutine and races the store's own cleanup.
+			_, _, _ = cs.Append("alarms", []store.Record{{
+				Topic:   fmt.Sprintf("colca/v1/_AlarmStateChange/m1/m1/alarm-events/a1/e%d", i),
+				Payload: []byte(`{"v":1}`),
+				TS:      int64(1000 + i),
+			}})
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	// Registered BEFORE start(), so cleanup (LIFO) stops the uplink first and
+	// this producer second — neither touches a closed store.
+	t.Cleanup(func() {
+		close(hot)
+		<-hotDone
+	})
+
+	start()
+	waitFor(t, "metrics to advance while the alarms lane stays hot", 20*time.Second, func() bool {
+		return ps.NextOffset("metrics") > 1
+	})
 }
 
 func mustIdentity(t *testing.T, path string) *identity.Identity {

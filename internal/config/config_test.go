@@ -688,3 +688,24 @@ key_file: /keys/n.key
 		t.Fatalf("a config with no tls block got %+v", bare.TLS)
 	}
 }
+
+// Design §3.2: alarm history is transition-rate, not sample-rate, and it is
+// the record of what fired and who was told — the same reasoning that puts
+// entities and audit at a year. Inheriting the 14-day metrics window was a
+// consequence of alarms living on that stream, not a decision about them.
+func TestAlarmsRetentionDefaultsTo365Days(t *testing.T) {
+	var r Retention
+	got := time.Duration(r.EffectiveStream("alarms").MaxAge)
+	if want := 8760 * time.Hour; got != want {
+		t.Fatalf("alarms default max_age = %s, want %s", got, want)
+	}
+}
+
+func TestAlarmsIsAConfigurableStream(t *testing.T) {
+	r := Retention{Streams: map[string]StreamRetention{
+		"alarms": {MaxAge: Duration(time.Hour)},
+	}}
+	if err := r.validate(); err != nil {
+		t.Fatalf("retention.streams.alarms rejected: %v", err)
+	}
+}

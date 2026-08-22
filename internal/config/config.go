@@ -278,6 +278,10 @@ var defaultStreamMaxAge = map[string]time.Duration{
 	"entities": 8760 * time.Hour, // 365 days
 	"commands": 2160 * time.Hour, // 90 days
 	"audit":    8760 * time.Hour, // 365 days
+	// Alarm history is transition-rate, not sample-rate, so a year is cheap —
+	// and it is the record of what fired and who was told, which is why it
+	// sits with audit rather than with the samples it used to ride on.
+	"alarms": 8760 * time.Hour, // 365 days
 }
 
 // knownStreams are the only stream names the system ever produces
@@ -285,7 +289,9 @@ var defaultStreamMaxAge = map[string]time.Duration{
 // set can never match a real stream, so it is rejected as a config error
 // rather than silently doing nothing (design §3.2: per-stream, not per-path,
 // retention over a closed set of streams).
-var knownStreams = map[string]bool{"metrics": true, "entities": true, "commands": true, "audit": true}
+var knownStreams = map[string]bool{
+	"metrics": true, "entities": true, "commands": true, "audit": true, "alarms": true,
+}
 
 // EffectiveInterval returns the pruner cadence: the §3.1 default (5m) when
 // Interval is absent (nil), or the configured value — including an explicit
@@ -453,7 +459,7 @@ func (r Retention) validate() error {
 	}
 	for name, s := range r.Streams {
 		if !knownStreams[name] {
-			return fmt.Errorf("config: retention.streams: unknown stream %q, want one of metrics, entities, commands, audit", name)
+			return fmt.Errorf("config: retention.streams: unknown stream %q, want one of metrics, entities, commands, audit, alarms", name)
 		}
 		if time.Duration(s.MaxAge) < 0 {
 			return fmt.Errorf("config: retention.streams.%s.max_age must not be negative, got %s", name, time.Duration(s.MaxAge))

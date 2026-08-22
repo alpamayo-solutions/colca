@@ -69,6 +69,30 @@ func appendAt(t *testing.T, st *store.Store, stream string, n int, ts, step int6
 	}
 }
 
+// Design §3.2: `alarms` is subject to the retention POLICY, which means it
+// must be in the pruner's own stream list. A stream the pruner never visits
+// grows forever regardless of what the config says about it.
+//
+// The gap-marker machinery is deliberately not re-asserted here: a marker is
+// emitted on cursor override, not on a plain policy prune, and it is
+// stream-generic (topic is built from the stream name). Re-testing it per
+// stream would restate a constant rather than pin a claim.
+func TestAlarmsIsSubjectToTheRetentionPolicy(t *testing.T) {
+	st, eng := mustParts(t)
+	base := time.Now().UnixMilli()
+	appendAt(t, st, "alarms", 10, base, 1000)
+
+	ret := retFor("alarms", config.StreamRetention{MaxAge: config.Duration(time.Hour)})
+	p := newPruner(t, st, eng, ret)
+	p.now = func() time.Time { return time.UnixMilli(base + 5000).Add(time.Hour) }
+	p.runOnce()
+
+	if got := st.LWM("alarms"); got != 6 {
+		t.Fatalf("LWM(alarms) = %d, want 6 — 1 means the pruner never visited "+
+			"the stream, so it is missing from the pruner's list", got)
+	}
+}
+
 func readAll(t *testing.T, st *store.Store, stream string, from uint64) []store.StoredRecord {
 	t.Helper()
 	recs, _, err := st.Read(stream, from, 1000, nil)

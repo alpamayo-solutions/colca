@@ -644,3 +644,35 @@ func TestApplyReplicatedTombstone(t *testing.T) {
 		t.Fatalf("StreamBytes = %d, want %d after tombstone applies", got, want)
 	}
 }
+
+// Design §3: `alarms` is a stream the store maintains offsets for. A stream
+// absent from the set has NextOffset 0, which is also how /fetch tells an
+// unknown stream from an empty one — so 0 here would make every alarm write
+// fail at the door rather than land.
+func TestAlarmsStreamExists(t *testing.T) {
+	s := mustOpen(t)
+	if got := s.NextOffset("alarms"); got != 1 {
+		t.Fatalf("NextOffset(alarms) = %d on a fresh store, want 1 "+
+			"(0 means the store maintains no offsets for it)", got)
+	}
+}
+
+// Streams is the stream set every other package asks for rather than
+// restates. The copy matters: a caller that mutated the returned slice would
+// silently reshape what every derived check covers, and a check that covers
+// less is still green.
+func TestStreamsIsTheSingleSourceAndCopies(t *testing.T) {
+	got := Streams()
+	if len(got) != len(streams) {
+		t.Fatalf("Streams() returned %d names, package has %d", len(got), len(streams))
+	}
+	for i := range got {
+		if got[i] != streams[i] {
+			t.Fatalf("Streams()[%d] = %q, package has %q", i, got[i], streams[i])
+		}
+	}
+	got[0] = "mutated"
+	if streams[0] == "mutated" {
+		t.Fatal("Streams() handed out the package slice — a caller can corrupt the stream set")
+	}
+}

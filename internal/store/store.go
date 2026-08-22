@@ -17,7 +17,18 @@ import (
 )
 
 // streams is the fixed set of streams a store maintains offsets for.
-var streams = []string{"metrics", "entities", "commands", "definitions", "audit"}
+var streams = []string{"metrics", "entities", "commands", "definitions", "audit", "alarms"}
+
+// Streams is the stream set every other package must ASK for rather than
+// restate. A hand-written copy elsewhere cannot detect that this list grew,
+// which is how a stream ends up outside a check that looks like it covers
+// everything — and a check that covers less is still green. The returned
+// slice is a copy: callers iterate it, they do not own it.
+func Streams() []string {
+	out := make([]string, len(streams))
+	copy(out, streams)
+	return out
+}
 
 type Record struct {
 	Topic        string `json:"t"`

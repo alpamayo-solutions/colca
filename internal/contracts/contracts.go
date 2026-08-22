@@ -125,7 +125,7 @@ func Load(path, wantSHA string) (*Table, error) {
 		}
 		class, ok := uns.ClassFromManifest(e.Class)
 		if !ok {
-			return nil, fmt.Errorf("contracts bundle %s: contract %s has unknown class %q (want data|entity|definition|cmd|ack|audit)", path, name, e.Class)
+			return nil, fmt.Errorf("contracts bundle %s: contract %s has unknown class %q (want data|entity|definition|cmd|ack|audit|alarm)", path, name, e.Class)
 		}
 		if err := lintSubset(e.Schema, name); err != nil {
 			return nil, fmt.Errorf("contracts bundle %s: %w", path, err)

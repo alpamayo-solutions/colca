@@ -243,91 +243,160 @@ func toDownRecs(in []wireRec) []DownRec {
 	return out
 }
 
-// RunUplink pushes metrics+entities+audit fully and only _Ack and _StreamGap from
-// commands, forever (until stop is closed). Commands flow down, acks flow up —
-// a command is never mirrored back to the node it came from; _StreamGap
-// markers must pass so a pruned commands stream stays honest upstream (spec
-// §6.4: the marker replicates like any other record). m may be nil (every
-// Metrics method is nil-safe).
+// ackOnly passes exactly the two command-stream records that may rise. A
+// command is never mirrored back to the node it came from; _StreamGap markers
+// must pass so a pruned commands stream stays honest upstream (spec §6.4: the
+// marker replicates like any other record).
+func ackOnly(topic string) bool {
+	p, err := uns.Parse(topic)
+	return err == nil && (p.Contract == "_Ack" || p.Contract == "_StreamGap")
+}
+
+// priorityLanes are drained to empty, in this order, before `metrics` is
+// touched at all (alarm-stream design §4).
+//
+// Acks first: a parent's move-drain cannot complete until they rise, so an
+// undelivered ack blocks a node move, and their volume is the smallest of all.
+// Then alarms and entities — small in volume, high in value, and the two the
+// operator is waiting for after an outage. Then audit, low-volume and
+// long-retention.
+//
+// `definitions` is deliberately absent and must stay absent (definition-stream
+// design §4): definitions descend. A child pushing them upward would let a
+// leaf author policy for the whole tree.
+var priorityLanes = []struct {
+	name   string
+	filter func(string) bool
+}{
+	{"commands", ackOnly},
+	{"alarms", nil},
+	{"entities", nil},
+	{"audit", nil},
+}
+
+// RunUplink pushes this node's streams to its parent forever (until stop is
+// closed), draining the priority lanes to empty before each metrics batch.
+//
+// Order within a stream is never changed, so a lane is the ONLY way a record
+// can overtake a backlog — which is why alarms have their own stream rather
+// than a place in the metrics queue.
+//
+// The single metrics batch per pass is a floor, not a courtesy. Without it a
+// lane that never empties holds the metrics cursor still; once the local
+// pruner passes that cursor the backlog is gone and only a §6.4 marker
+// remains, so lane pressure would quietly become data loss.
+//
+// m may be nil (every Metrics method is nil-safe).
 func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
-	streams := []struct {
-		name   string
-		filter func(string) bool
-	}{
-		{"metrics", nil},
-		{"entities", nil},
-		{"audit", nil},
-		// `definitions` is deliberately absent and must stay absent
-		// (definition-stream design §4): definitions descend. A child pushing
-		// them upward would let a leaf author policy for the whole tree.
-		{"commands", func(topic string) bool {
-			p, err := uns.Parse(topic)
-			return err == nil && (p.Contract == "_Ack" || p.Contract == "_StreamGap")
-		}},
-	}
-	for {
+
+	stopped := func() bool {
 		select {
 		case <-stop:
-			return
+			return true
 		default:
+			return false
+		}
+	}
+
+	// pushOnce moves at most one batch of stream and reports whether it
+	// scanned anything — which is what "drained to empty" is measured by.
+	// aborted distinguishes our own shutdown from a real failure.
+	pushOnce := func(stream string, filter func(string) bool) (scanned, aborted bool) {
+		from := eng.Store().CursorGet(uplinkCursor, stream)
+		// Spec §6.3, uplink half: a cursor below the local LWM means the
+		// local pruner overrode it (only possible after the explicit §5.2
+		// staleness opt-in — the parent was gone longer than the window).
+		// The data is gone and the durable §6.4 marker already carries the
+		// fact upstream, so never stall: jump to the LWM and keep going.
+		if lwm := eng.Store().LWM(stream); from < lwm {
+			c.log.Error("uplink cursor below the stream LWM — local retention pruned past it (spec §6.3): jumping to the LWM",
+				"stream", stream, "position", from, "lwm", lwm)
+			m.GapReceived(stream)
+			eng.Store().CursorAck(uplinkCursor, stream, lwm)
+			from = lwm
+		}
+		recs, next, err := eng.Store().Read(stream, from, replBatch, filter)
+		if err != nil {
+			c.log.Error("uplink read", "stream", stream, "err", err)
+			return false, false
+		}
+		if next == from {
+			return false, false // nothing scanned: this lane is empty
+		}
+		pushed := false
+		if len(recs) > 0 {
+			batch := make([]store.ReplRecord, len(recs))
+			for i, r := range recs {
+				batch[i] = store.ReplRecord{
+					ChildOffset: r.Offset, OriginOffset: r.OriginOffset,
+					Topic: r.Topic, Payload: r.Payload, TS: r.TS,
+					WrittenBy: r.WrittenBy, ActorID: r.ActorID,
+					ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
+				}
+			}
+			_, nowMS, err := c.replicate(ctx, stream, batch)
+			if err != nil {
+				if stopped() {
+					return false, true // aborted by our own shutdown, not a failure
+				}
+				c.log.Warn("uplink push failed (will retry)", "stream", stream, "err", err)
+				m.UplinkPushFailed(stream)
+				// Parent down → cursor stays, offline buffering in action. Report
+				// "not scanned" so a dead parent ends the drain loop instead of
+				// spinning on a lane that cannot advance.
+				return false, false
+			}
+			// Every /replicate response carries the parent's now_ms
+			// (time-sync design §2.1) — keep the offset fresh regardless
+			// of which stream happened to trigger this push.
+			eng.ApplyClockSample(nowMS)
+			pushed = true
+		}
+		eng.Store().CursorAck(uplinkCursor, stream, next)
+		if pushed {
+			m.UplinkPushed(stream, time.Now())
+		}
+		return true, false
+	}
+
+	for {
+		if stopped() {
+			return
 		}
 		idle := true
-		for _, st := range streams {
-			from := eng.Store().CursorGet(uplinkCursor, st.name)
-			// Spec §6.3, uplink half: a cursor below the local LWM means the
-			// local pruner overrode it (only possible after the explicit §5.2
-			// staleness opt-in — the parent was gone longer than the window).
-			// The data is gone and the durable §6.4 marker already carries the
-			// fact upstream, so never stall: jump to the LWM and keep going.
-			if lwm := eng.Store().LWM(st.name); from < lwm {
-				c.log.Error("uplink cursor below the stream LWM — local retention pruned past it (spec §6.3): jumping to the LWM",
-					"stream", st.name, "position", from, "lwm", lwm)
-				m.GapReceived(st.name)
-				eng.Store().CursorAck(uplinkCursor, st.name, lwm)
-				from = lwm
-			}
-			recs, next, err := eng.Store().Read(st.name, from, replBatch, st.filter)
-			if err != nil {
-				c.log.Error("uplink read", "stream", st.name, "err", err)
-				continue
-			}
-			if next == from {
-				continue // nothing scanned
-			}
-			pushed := false
-			if len(recs) > 0 {
-				batch := make([]store.ReplRecord, len(recs))
-				for i, r := range recs {
-					batch[i] = store.ReplRecord{
-						ChildOffset: r.Offset, OriginOffset: r.OriginOffset,
-						Topic: r.Topic, Payload: r.Payload, TS: r.TS,
-						WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-						ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
-					}
+		for _, lane := range priorityLanes {
+			// Snapshot the lane's end at pass start and drain only to there.
+			// Everything already queued goes before metrics is touched; records
+			// written DURING the pass wait for the next one.
+			//
+			// Draining to "empty" instead would be unbounded: a lane written
+			// faster than it drains never empties, the loop never reaches the
+			// metrics floor below, and the floor stops holding in exactly the
+			// case it exists for.
+			target := eng.Store().NextOffset(lane.name)
+			for eng.Store().CursorGet(uplinkCursor, lane.name) < target {
+				scanned, aborted := pushOnce(lane.name, lane.filter)
+				if aborted {
+					return
 				}
-				_, nowMS, err := c.replicate(ctx, st.name, batch)
-				if err != nil {
-					select {
-					case <-stop:
-						return // the request was aborted by our own shutdown, not a real failure
-					default:
-					}
-					c.log.Warn("uplink push failed (will retry)", "stream", st.name, "err", err)
-					m.UplinkPushFailed(st.name)
-					continue // parent down → cursor stays, offline buffering in action
+				if !scanned {
+					break // nothing scanned (empty, or the parent is unreachable)
 				}
-				// Every /replicate response carries the parent's now_ms
-				// (time-sync design §2.1) — keep the offset fresh regardless
-				// of which stream happened to trigger this push.
-				eng.ApplyClockSample(nowMS)
-				pushed = true
+				idle = false
+				if stopped() {
+					return
+				}
 			}
-			eng.Store().CursorAck(uplinkCursor, st.name, next)
-			if pushed {
-				m.UplinkPushed(st.name, time.Now())
-			}
+		}
+		// The floor: exactly one metrics batch per pass, whatever the lanes
+		// above are doing.
+		scanned, aborted := pushOnce("metrics", nil)
+		if aborted {
+			return
+		}
+		if scanned {
 			idle = false
 		}
 		if idle {

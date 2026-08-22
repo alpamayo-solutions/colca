@@ -114,6 +114,7 @@ colca_cursor_position{cursor="hub",stream="metrics"} 3
 colca_cursor_lag_records{cursor="hub",stream="metrics"} 1
 # HELP colca_stream_next_offset Next offset the stream will assign (derived from the store at scrape time).
 # TYPE colca_stream_next_offset gauge
+colca_stream_next_offset{stream="alarms"} 1
 colca_stream_next_offset{stream="audit"} 1
 colca_stream_next_offset{stream="commands"} 1
 colca_stream_next_offset{stream="definitions"} 1
@@ -135,6 +136,7 @@ colca_stream_next_offset{stream="metrics"} 4
 colca_cursor_lag_records{cursor="hub",stream="metrics"} 3
 # HELP colca_stream_next_offset Next offset the stream will assign (derived from the store at scrape time).
 # TYPE colca_stream_next_offset gauge
+colca_stream_next_offset{stream="alarms"} 1
 colca_stream_next_offset{stream="audit"} 1
 colca_stream_next_offset{stream="commands"} 1
 colca_stream_next_offset{stream="definitions"} 1
@@ -361,9 +363,16 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 	for _, mf := range got {
 		families[mf.GetName()] = len(mf.GetMetric())
 	}
+	// Stream-labelled families are sized from the lists that BUILD them, not
+	// from a literal. A hand-written count here cannot tell "a stream was
+	// added and its child is correctly present" from "a stream was added and
+	// this test is now wrong", so it would fail every time the set grows and
+	// teach the next reader to bump the number rather than check the claim.
+	// What is being pinned is which LIST each family follows — that is the
+	// real claim, and it still fails if a family follows the wrong one.
 	want := map[string]int{
-		"colca_stream_next_offset":       5, // one per stream
-		"colca_ingest_records_total":     5,
+		"colca_stream_next_offset":       len(streams), // one per stream
+		"colca_ingest_records_total":     len(streams),
 		"colca_rejected_publishes_total": 10, // one per reason
 		"colca_auth_rejections_total":    24, // door × reason
 		"colca_acl_denials_total":        2,  // one per action
@@ -371,29 +380,29 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		// The uplink families cover only the streams that RISE: definitions
 		// descend, so a gauge for them would sit at zero forever and read like
 		// a broken uplink (definition-stream design §4).
-		"colca_uplink_last_success_timestamp_seconds":   4,
-		"colca_uplink_push_failures_total":              4,
+		"colca_uplink_last_success_timestamp_seconds":   len(uplinkStreams),
+		"colca_uplink_push_failures_total":              len(uplinkStreams),
 		"colca_downlink_last_success_timestamp_seconds": 1,
 		"colca_downlink_fetch_failures_total":           1,
 		"colca_retained_reseed_records":                 1,
 		// Retention (design §8): collector-derived gauges, always one child per
 		// known stream regardless of activity.
-		"colca_stream_low_water_mark": 5,
-		"colca_stream_live_bytes":     5,
+		"colca_stream_low_water_mark": len(streams),
+		"colca_stream_live_bytes":     len(streams),
 		// The retention families cover only the streams the POLICY prunes.
 		// Definitions are compacted instead, so a pressure gauge for them would
 		// report progress toward a policy that does not exist (design §6).
-		"colca_retention_pressure":                     4,
-		"colca_retention_blocked_by_cursor":            4,
-		"colca_retention_pruned_records_total":         4,
-		"colca_retention_pruned_bytes_total":           4,
-		"colca_retention_prune_runs_total":             4,
-		"colca_retention_gap_records_total":            4,
+		"colca_retention_pressure":                     len(retentionStreams),
+		"colca_retention_blocked_by_cursor":            len(retentionStreams),
+		"colca_retention_pruned_records_total":         len(retentionStreams),
+		"colca_retention_pruned_bytes_total":           len(retentionStreams),
+		"colca_retention_prune_runs_total":             len(retentionStreams),
+		"colca_retention_gap_records_total":            len(retentionStreams),
 		"colca_retention_state_refresh_records_total":  1, // unlabeled
 		"colca_retention_state_refresh_skipped_total":  1,
 		"colca_retention_state_refresh_failures_total": 1,
-		"colca_gap_served_total":                       10, // 5 streams × 2 surfaces
-		"colca_gap_received_total":                     5,
+		"colca_gap_served_total":                       len(streams) * len(gapSurfaces),
+		"colca_gap_received_total":                     len(streams),
 		// The definition channel (design §5). Applied is the happy path;
 		// rejected is worth alerting on, because a refused definition parks the
 		// node's cursor and nothing behind it arrives either.

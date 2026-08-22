@@ -627,7 +627,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 
 		mux.HandleFunc("GET /debug/state", adminOnly(func(w http.ResponseWriter, r *http.Request) {
 			streams := map[string]any{}
-			for _, st := range []string{"metrics", "entities", "commands", "definitions", "audit"} {
+			// Derived, not listed: this route is what the test harnesses read
+			// to learn a node's stream set, so a copy here would let their
+			// coverage drift from what the store actually holds.
+			for _, st := range store.Streams() {
 				streams[st] = map[string]any{"next_offset": e.Store().NextOffset(st)}
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"ulid": cfg.ULID, "streams": streams})

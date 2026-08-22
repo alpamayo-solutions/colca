@@ -18,8 +18,8 @@ func TestParseAndClass(t *testing.T) {
 		stream string
 	}{
 		"_Metric": {ClassData, "metrics"}, "_EnrolledIdentity": {ClassEntity, "entities"},
-		"_AlarmStateChange":         {ClassData, "metrics"},
-		"_NotificationDispatched":   {ClassData, "metrics"},
+		"_AlarmStateChange":         {ClassAlarm, "alarms"},
+		"_NotificationDispatched":   {ClassAlarm, "alarms"},
 		"_AlarmNotificationConfig":  {ClassEntity, "entities"},
 		"_NotificationConfigStatus": {ClassEntity, "entities"},
 		"_Node":               {ClassEntity, "entities"}, "_ServiceDetails": {ClassEntity, "entities"},
@@ -289,5 +289,80 @@ func TestDefinitionsAreStateInTheirOwnStream(t *testing.T) {
 	}
 	if err := Validate("_Group", []byte(`{"name":"Ops"}`)); err == nil {
 		t.Fatal("a definition with no id is unreachable and must be rejected")
+	}
+}
+
+// Design §3.1. Both alarm-subject contracts leave the sample lane. Order
+// inside a stream never changes, so this is the only thing that lets an alarm
+// overtake a metrics backlog.
+func TestAlarmContractsRouteToTheAlarmsStream(t *testing.T) {
+	for _, contract := range []string{"_AlarmStateChange", "_NotificationDispatched"} {
+		class := ClassOf(contract)
+		if class != ClassAlarm {
+			t.Fatalf("ClassOf(%s) = %v, want ClassAlarm", contract, class)
+		}
+		if got := StreamFor(class); got != "alarms" {
+			t.Fatalf("StreamFor(ClassOf(%s)) = %q, want %q", contract, got, "alarms")
+		}
+	}
+	// The config contracts stay put: only the two event contracts move.
+	for _, contract := range []string{"_AlarmNotificationConfig", "_NotificationConfigStatus"} {
+		if got := ClassOf(contract); got != ClassEntity {
+			t.Fatalf("ClassOf(%s) = %v, want ClassEntity — the silence rail rides entities", contract, got)
+		}
+	}
+}
+
+// Design §3. An alarm is an EVENT. Getting this wrong is what made every alarm
+// transition leak a KV entry at a path nothing ever overwrites and Prune never
+// deletes — on the authoring node and on every ancestor.
+func TestAlarmIsAnEventNotState(t *testing.T) {
+	if IsState(ClassAlarm) {
+		t.Fatal("IsState(ClassAlarm): alarm events would KV-project at a never-reused path and be retained forever")
+	}
+	if IsOwnedState(ClassAlarm) {
+		t.Fatal("IsOwnedState(ClassAlarm): every ancestor would KV-project them too")
+	}
+	if IsAudit(ClassAlarm) {
+		t.Fatal("IsAudit(ClassAlarm): audit means security event, not alarm event")
+	}
+	for name, got := range map[string]bool{
+		"IsCommand":         IsCommand(ClassAlarm),
+		"IsDefinition":      IsDefinition(ClassAlarm),
+		"IsEntityState":     IsEntityState(ClassAlarm),
+		"IsNodeLocal":       IsNodeLocal(ClassAlarm),
+		"NeedsStateRefresh": NeedsStateRefresh(ClassAlarm),
+	} {
+		if got {
+			t.Fatalf("%s(ClassAlarm) = true, want false", name)
+		}
+	}
+	if !IsKnown(ClassAlarm) {
+		t.Fatal("IsKnown(ClassAlarm) = false: the validated namespace would reject every alarm")
+	}
+}
+
+// Design §3. Alarms rise, and only on their own stream — a child offering one
+// on `metrics` is refused at the parent's door.
+func TestAlarmRisesOnItsOwnStreamOnly(t *testing.T) {
+	if !FlowsUp(ClassAlarm) {
+		t.Fatal("FlowsUp(ClassAlarm) = false: an alarm would never reach a parent")
+	}
+	p, err := Parse("colca/v1/_AlarmStateChange/n-edge1/_colca/alarm-events/a1/e1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !MatchesUplinkStream(ClassAlarm, p, "alarms") {
+		t.Fatal("an alarm was refused on its own stream")
+	}
+	if MatchesUplinkStream(ClassAlarm, p, "metrics") {
+		t.Fatal("an alarm replicated upward on metrics was accepted")
+	}
+}
+
+func TestAlarmManifestName(t *testing.T) {
+	class, ok := ClassFromManifest("alarm")
+	if !ok || class != ClassAlarm {
+		t.Fatalf("ClassFromManifest(\"alarm\") = (%v, %v), want (ClassAlarm, true)", class, ok)
 	}
 }

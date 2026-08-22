@@ -40,6 +40,7 @@ const (
 	ClassGap              // _StreamGap   write: pruner only. Event, no KV, not retained (design §6.4).
 	ClassTimeSync         // _TimeSync    write: node-local-publish-only. Ephemeral: no stream, never persisted, never retained (time-sync design §2.2).
 	ClassAudit            // _AuditEvent  append-only security event, local/internal write, flows up
+	ClassAlarm            // _AlarmStateChange, _NotificationDispatched — append-only alarm event. Event: no KV, not retained. Its own stream so it never queues behind a metrics backlog.
 )
 
 // Parsed is a decomposed UNS topic: colca/v1/_Contract/{node-id}/{path…}
@@ -87,9 +88,13 @@ func Parse(topic string) (Parsed, error) {
 // ClassNone.
 func ClassOf(contract string) Class {
 	switch {
-	case contract == "_Metric" || contract == "_AlarmStateChange" ||
-		contract == "_NotificationDispatched":
+	case contract == "_Metric":
 		return ClassData
+	// An alarm is an event with a lifecycle; a metric is a sample. That is the
+	// whole difference, and it is why these two ride their own stream rather
+	// than a place in the sample lane's queue.
+	case contract == "_AlarmStateChange" || contract == "_NotificationDispatched":
+		return ClassAlarm
 	case contract == "_EnrolledIdentity" || contract == "_Node" ||
 		contract == "_ServiceDetails" || contract == "_SystemElement" ||
 		contract == "_Signal" || contract == "_Constant" || contract == "_ExternalReference" ||
@@ -187,7 +192,8 @@ func ValidActorKind(kind string) bool {
 // FlowsUp reports whether a child may offer the class to its parent. Commands
 // and definitions travel down; time sync never leaves the local bus.
 func FlowsUp(c Class) bool {
-	return c == ClassData || c == ClassEntity || c == ClassAck || c == ClassGap || c == ClassAudit
+	return c == ClassData || c == ClassEntity || c == ClassAck || c == ClassGap ||
+		c == ClassAudit || c == ClassAlarm
 }
 
 // MatchesUplinkStream binds an upward record's domain class to the physical
@@ -256,6 +262,8 @@ func ClassFromManifest(name string) (Class, bool) {
 		return ClassAck, true
 	case "audit":
 		return ClassAudit, true
+	case "alarm":
+		return ClassAlarm, true
 	}
 	return ClassNone, false
 }
@@ -280,6 +288,8 @@ func StreamFor(c Class) string {
 		return "commands"
 	case ClassAudit:
 		return "audit"
+	case ClassAlarm:
+		return "alarms"
 	case ClassGap:
 		return ""
 	case ClassTimeSync:

@@ -247,3 +247,52 @@ func TestRejectErrorsCarryReasons(t *testing.T) {
 		}
 	}
 }
+
+// Alarm-stream design §3, the behaviour the class change exists for: a
+// bundle-declared "alarm" contract routes to `alarms` and projects NO KV.
+//
+// The KV half is the load-bearing assertion. An alarm topic carries the event
+// id, so its KV key is never reused, and Prune deletes only stream keys
+// (`b/…`), never KV keys (`k\x00…`) — as ClassData every transition left one
+// permanent entry behind, on the authoring node and on every ancestor after
+// replication.
+func TestAlarmClassRoutesToAlarmsAndProjectsNoKV(t *testing.T) {
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	e := New(s, &config.Config{ULID: "n-edge1"}, testIDs(), nil, nil, nil)
+	placeTestElements(t, e)
+	str := map[string]any{"type": "string", "minLength": 1}
+	e.SetContracts(writeBundle(t, map[string]any{
+		"_AlarmStateChange": obj("alarm", false,
+			[]string{"event_id", "alarm_id", "to_status"},
+			map[string]any{"event_id": str, "alarm_id": str, "to_status": str}),
+		"_Metric": obj("data", true, []string{"v"}, map[string]any{"v": map[string]any{"type": "number"}}),
+	}))
+
+	res, err := e.IngestClient("m1",
+		"colca/v1/_AlarmStateChange/n-edge1/m1/alarm-events/a1/e1",
+		[]byte(`{"event_id":"e1","alarm_id":"a1","to_status":"firing"}`))
+	if err != nil {
+		t.Fatalf("a bundle-declared alarm contract must ingest: %v", err)
+	}
+	if res.Stream != "alarms" {
+		t.Fatalf("alarm ingest landed on %q, want \"alarms\"", res.Stream)
+	}
+	// Scoped to the alarm: placeTestElements leaves _SystemElement entries,
+	// which are entity state and belong in the KV.
+	for _, entry := range s.KVScan("") {
+		if strings.Contains(entry.Topic, "_AlarmStateChange") {
+			t.Fatalf("alarm ingest projected a KV entry at %q — its path carries "+
+				"the event id, so nothing ever overwrites it and Prune never "+
+				"deletes KV keys: it would live forever, here and at every ancestor",
+				entry.Topic)
+		}
+	}
+	if n := s.NextOffset("metrics"); n != 1 {
+		t.Fatalf("the metrics stream advanced to %d — the alarm went to the "+
+			"sample lane, where it would queue behind every buffered metric", n)
+	}
+}
