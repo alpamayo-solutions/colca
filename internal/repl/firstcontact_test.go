@@ -1,13 +1,19 @@
 package repl
 
 import (
+	"crypto/tls"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -324,6 +330,233 @@ func TestLegacyCursorsAreAdoptedOnceThenGone(t *testing.T) {
 				"may stay behind", c.Name, c.Stream, c.Position)
 		}
 	}
+}
+
+// Design §3.5, the commands half of adoption — the path EVERY existing
+// deployment traverses exactly once, on its first start after this change.
+//
+// Control flow is what makes this one different from the uplink half: the
+// commands branch reads `if !adoptLegacy(...) { SetIfAbsent(head) }`, so the
+// two outcomes are not "adopted" and "adopted a bit later" but "resume where
+// this node was" and "jump to the parent's head". The second silently drops
+// every command that queued while the node was down for the upgrade, which is
+// the ordinary shape of an upgrade: stop the node, replace the binary, start
+// it. So the position is asserted, not just the name — reaching cmd2 at all is
+// the claim, and it is unreachable from the head.
+func TestALegacyCommandsCursorIsAdoptedInsteadOfTheParentsHead(t *testing.T) {
+	dir := t.TempDir()
+	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
+	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
+
+	ps := mustStore(t, filepath.Join(dir, "pdata"))
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
+	srv, addr := startServer(t, pcfg, peng, parentID, preg)
+	defer srv.Stop()
+
+	// Three commands, all issued before this loop ever runs. cmd1 was already
+	// delivered under the pre-scoping cursor; cmd2 and cmd3 queued while the
+	// node was down being upgraded.
+	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/cmd1",
+		`{"correlation_id":"c1","expires_at":99999999999}`)
+	afterCmd1 := ps.NextOffset("commands")
+	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/cmd2",
+		`{"correlation_id":"c2","expires_at":99999999999}`)
+	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/cmd3",
+		`{"correlation_id":"c3","expires_at":99999999999}`)
+	head := ps.NextOffset("commands")
+	if afterCmd1 <= 1 || head <= afterCmd1 {
+		t.Fatalf("parent commands stream: position after cmd1 = %d, head = %d — the legacy position "+
+			"must sit strictly between the default and the head or this test proves nothing",
+			afterCmd1, head)
+	}
+
+	cs := mustStore(t, filepath.Join(dir, "cdata"))
+	delivered := make(chan string, 8)
+	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"},
+		func(topic string, _ []byte, _ bool) { delivered <- topic }, nil, nil)
+	cl := mustClient(t, addr, parentID.PublicHex(), childID)
+
+	// The position this node held under the pre-scoping name: past cmd1, in
+	// front of cmd2. CursorAck is forward-only and answers false without moving,
+	// so the seed is asserted rather than assumed.
+	if !cs.CursorAck(legacyDownlinkCursor, downlinkStream, afterCmd1) {
+		t.Fatal("seeding the legacy commands cursor did not move it — the precondition is a no-op " +
+			"and everything below would pass for the wrong reason")
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { defer close(done); RunDownlink(cl, ceng, nil, stop) }()
+	t.Cleanup(func() {
+		close(stop)
+		waitForClosed(t, "RunDownlink to return after stop", done, 5*time.Second)
+	})
+
+	for _, want := range []string{"colca/v1/_CmdParam/m1/m1/cmd2", "colca/v1/_CmdParam/m1/m1/cmd3"} {
+		select {
+		case topic := <-delivered:
+			if topic != want {
+				t.Fatalf("delivered %q, want %q — the legacy position was not adopted, so this start "+
+					"took the parent's head (%d) instead and dropped every command that queued while "+
+					"the node was down for its upgrade", topic, want, head)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("%s was never delivered — the legacy position was not adopted, so this start took "+
+				"the parent's head (%d) instead and dropped every command that queued while the node "+
+				"was down for its upgrade", want, head)
+		}
+	}
+
+	waitFor(t, "the scoped commands cursor to carry the adopted position forward", 20*time.Second, func() bool {
+		return cs.CursorGet(uns.DownlinkCursor(cl.ParentPub()), downlinkStream) == head
+	})
+	waitFor(t, "the legacy commands cursor to be gone — no compatibility path may stay behind",
+		20*time.Second, func() bool { return !cursorPresent(cs, legacyDownlinkCursor, downlinkStream) })
+}
+
+// Design §3.5, the definitions half — the third cursor, and the one neither of
+// its siblings speaks for: definitions ride their own name under a first-contact
+// rule of their own (start at 1, never at a head), so an adoption that works for
+// commands says nothing about it.
+//
+// The parent's definitions stream is deliberately EMPTY, which is what makes the
+// adopted position mean something: nothing this child could consume can explain
+// a cursor at 4, so the value can only have come from the legacy key.
+func TestALegacyDefinitionsCursorIsAdoptedOnceThenGone(t *testing.T) {
+	dir := t.TempDir()
+	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
+	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
+
+	ps := mustStore(t, filepath.Join(dir, "pdata"))
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
+	srv, addr := startServer(t, pcfg, peng, parentID, preg)
+	defer srv.Stop()
+	if got := ps.NextOffset("definitions"); got != 1 {
+		t.Fatalf("parent definitions head = %d, want the empty-stream 1 — with definitions waiting, a "+
+			"cursor above 1 could be explained by consumption instead of by adoption", got)
+	}
+
+	cs := mustStore(t, filepath.Join(dir, "cdata"))
+	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
+	cl := mustClient(t, addr, parentID.PublicHex(), childID)
+
+	const legacyPos = 4
+	if !cs.CursorAck(legacyDownlinkDefCursor, downlinkDefStream, legacyPos) {
+		t.Fatal("seeding the legacy definitions cursor did not move it — the precondition is a no-op")
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { defer close(done); RunDownlink(cl, ceng, nil, stop) }()
+	t.Cleanup(func() {
+		close(stop)
+		waitForClosed(t, "RunDownlink to return after stop", done, 5*time.Second)
+	})
+
+	waitFor(t, "the legacy definitions position to appear under the scoped name", 20*time.Second, func() bool {
+		return cs.CursorGet(uns.DownlinkDefCursor(cl.ParentPub()), downlinkDefStream) == legacyPos
+	})
+	// Waited for, not asserted once: adoption writes the scoped position and
+	// deletes the legacy key as two store calls, so the value arriving under
+	// the new name says nothing yet about the old one being gone.
+	waitFor(t, "the legacy definitions cursor to be gone — no compatibility path may stay behind",
+		20*time.Second, func() bool { return !cursorPresent(cs, legacyDownlinkDefCursor, downlinkDefStream) })
+}
+
+// cursorPresent reports whether a cursor KEY exists, which CursorGet cannot
+// answer: it returns 1 both for a cursor at the first offset and for no cursor
+// at all.
+func cursorPresent(st *store.Store, name, stream string) bool {
+	for _, c := range st.Cursors() {
+		if c.Name == name && c.Stream == stream {
+			return true
+		}
+	}
+	return false
+}
+
+// Design §3.3, the mixed-version case: a parent that predates the `head` field
+// answers hello without one. That is what a leaf-first rolling upgrade produces,
+// and the child cannot repair it — with no head there is nothing to adopt, so
+// its command cursor stays at the default 1 and the first poll hands it the
+// pre-attachment commands §3.2 refuses.
+//
+// Behaviour is deliberately unchanged; what is pinned here is that the
+// degradation is VISIBLE. The §7 diagnostic cannot speak for this case (it needs
+// a head of its own to compare against) and hello runs once per process, so
+// without this report the node is silently wrong forever.
+func TestAParentThatAnswersHelloWithoutAHeadIsReported(t *testing.T) {
+	dir := t.TempDir()
+	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
+	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
+	addr := preScopedParent(t, parentID)
+
+	cs := mustStore(t, filepath.Join(dir, "cdata"))
+	cm := metrics.New(cs, config.Retention{}, nil)
+	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
+	cl := mustClient(t, addr, parentID.PublicHex(), childID)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { defer close(done); RunDownlink(cl, ceng, cm, stop) }()
+	t.Cleanup(func() {
+		close(stop)
+		waitForClosed(t, "RunDownlink to return after stop", done, 5*time.Second)
+	})
+
+	const absent = `colca_downlink_head_absent_total`
+	waitFor(t, "the missing head to be reported", 20*time.Second, func() bool {
+		return scrapeMetric(t, cm, absent) == 1
+	})
+
+	// And the cursor is left exactly as it was found. Both halves matter: the
+	// POSITION is the default 1 (so the poll reads from the start, which is the
+	// unchanged behaviour), and no KEY exists (so nothing was claimed from a head
+	// this parent never sent, and a later parent that does send one still counts
+	// as first contact).
+	if got := cs.CursorGet(uns.DownlinkCursor(cl.ParentPub()), downlinkStream); got != 1 {
+		t.Fatalf("commands cursor = %d, want the default 1 — a parent that sent no head cannot have "+
+			"taught this node a position", got)
+	}
+	for _, c := range cs.Cursors() {
+		if c.Name == uns.DownlinkCursor(cl.ParentPub()) && c.Stream == downlinkStream {
+			t.Fatalf("a commands cursor was recorded (%s × %s = %d) against a parent that sent no head",
+				c.Name, c.Stream, c.Position)
+		}
+	}
+}
+
+// preScopedParent is a parent from BEFORE this design: it speaks the downlink
+// wire protocol exactly as it did then, which is to say without `head`. A real
+// server cannot stand in for it — NextOffset never answers 0, so the field is
+// always present — and the point of the test is the field's ABSENCE.
+//
+// Nothing but TLS identity is borrowed from the real thing: the client pins the
+// parent's public key and verifies no CA, so presenting that identity's own
+// self-signed certificate is the whole handshake.
+func preScopedParent(t *testing.T, id *identity.Identity) string {
+	t.Helper()
+	cert, err := id.SelfSignedCert("colca-parent")
+	if err != nil {
+		t.Fatalf("parent cert: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// An ordinary poll answers nothing, at a long poll's pace: without the
+		// delay the loop under test would spin on an empty answer for the whole
+		// test.
+		if r.URL.Query().Get("hello") != "1" {
+			time.Sleep(200 * time.Millisecond)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"records":[],"next":1,"now_ms":` +
+			strconv.FormatInt(time.Now().UnixMilli(), 10) + `}`))
+	}))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "https://")
 }
 
 // Design §7, the one diagnostic head buys on an EXISTING cursor. A scoped

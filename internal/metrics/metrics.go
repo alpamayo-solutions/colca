@@ -151,6 +151,10 @@ type Metrics struct {
 	// §7): this node's command position is past its parent's stream head, so
 	// it will hear nothing until that stream grows past it.
 	downlinkBeyondHead prometheus.Counter
+	// colca_downlink_head_absent_total (parent-scoped-cursors design §3.3):
+	// the parent answered hello without a head, so it predates that field and
+	// this node cannot adopt a start position from it.
+	downlinkHeadAbsent prometheus.Counter
 	reseed             prometheus.Gauge
 	authReject         *prometheus.CounterVec
 	aclDeny            *prometheus.CounterVec
@@ -253,6 +257,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		downlinkBeyondHead: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_downlink_cursor_beyond_head_total",
 			Help: "Starts at which this node's command cursor was already past its parent's stream head (parent pruned past it, or was rebuilt). Resets on restart.",
+		}),
+		downlinkHeadAbsent: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_downlink_head_absent_total",
+			Help: "First contacts whose parent answered hello without a command head (a parent predating parent-scoped cursors): this node started its command cursor at 1. Resets on restart.",
 		}),
 		reseed: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_retained_reseed_records",
@@ -440,7 +448,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	})
 
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
-		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.reseed,
+		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.authReject, m.aclDeny, m.kicks, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.nodePrefix, m.bundleInfo, m.bundleContracts,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
@@ -637,6 +645,22 @@ func (m *Metrics) DownlinkCursorBeyondHead() {
 		return
 	}
 	m.downlinkBeyondHead.Inc()
+}
+
+// DownlinkHeadAbsent counts one first contact whose parent answered hello
+// without a command head (parent-scoped-cursors design §3.3) — a parent that
+// predates the field, which is what a leaf-first rolling upgrade produces.
+//
+// Worth alerting on because the degradation is otherwise invisible: with no
+// head to adopt, this node's command cursor stays at its default of 1, so the
+// first poll hands it every retained command issued under its mount before it
+// attached (§3.2 is exactly what that rule exists to prevent). Nothing fails,
+// nothing logs again — hello runs once per process.
+func (m *Metrics) DownlinkHeadAbsent() {
+	if m == nil {
+		return
+	}
+	m.downlinkHeadAbsent.Inc()
 }
 
 // SetReseedCount records how many KV entries the startup reseed replayed.

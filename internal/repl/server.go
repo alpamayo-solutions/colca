@@ -430,14 +430,15 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			// the poll duration (up to longPollFor). It is the parent's own
 			// authoritative-now estimate (time-sync design §2.1), not raw
 			// local time; the root has no offset, so this is its raw clock.
+			// No head here: it belongs to the hello response alone
+			// (parent-scoped-cursors design §3.3). A child consumes it in
+			// exactly one situation — initializing a command cursor for a
+			// parent it has no cursor for — and that happens before the first
+			// poll, so carrying it on every poll would be an integer nothing
+			// reads.
 			resp := map[string]any{
 				"records": out, "next": next,
 				"now_ms": s.eng.AuthoritativeNow().UnixMilli(),
-				// Same head as the hello response (parent-scoped-cursors
-				// design §3.2/§3.3): a child that reconnects mid-stream must
-				// see the same "what if I had no cursor" answer on every
-				// response, not just the first one.
-				"head": s.eng.Store().NextOffset("commands"),
 			}
 			// Position hand-down (id-grants design §4): the parent knows its own
 			// chain and where the child sits inside it, so every downlink

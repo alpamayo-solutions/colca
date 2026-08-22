@@ -280,8 +280,20 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 	// downlink door pins the same rule from its own side ("a poll at position
 	// 1 must not create a cursor"). At head 1 there is nothing older to
 	// decline, so there is nothing to record.
+	//
+	// A failed write is logged for the same reason Revoke logs a failed delete:
+	// it is the half of "did not create" that is not the ordinary case. An
+	// existing cursor (created false, err nil) is exactly what an Enroll-as-edit
+	// is supposed to produce and says nothing; a write error means this child's
+	// floor was never recorded, so its next drain re-scans from 1 — the very
+	// regression this seed exists to prevent. Never fatal: the enrollment itself
+	// is what the caller asked for, and the next Enroll re-attempts the seed.
 	if head := m.st.NextOffset("commands"); head > 1 && e.MayUseDoor(uns.DoorRepl) {
-		m.st.CursorSetIfAbsent(uns.DownlinkCursorPrefix+e.ULID, "commands", head)
+		if _, err := m.st.CursorSetIfAbsent(uns.DownlinkCursorPrefix+e.ULID, "commands", head); err != nil {
+			m.log.Warn("enroll: downlink floor not seated — this child's next move-drain will count "+
+				"already-delivered commands as pending until a later enroll seats it",
+				"ulid", e.ULID, "head", head, "err", err)
+		}
 	}
 
 	prev, existed := m.byID[e.ULID]
@@ -358,9 +370,18 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 		delete(m.byName, e.Name)
 	}
 	// Design §3.4: the child's parent-side downlink cursors die with its
-	// identity. They protect retention only — delivery position rides the
-	// child's own `after` parameter — so nothing a re-enrolling child needs is
-	// lost, and leaving them accumulates one pair per revoked device forever.
+	// identity, because leaving them accumulates one pair per revoked device
+	// forever.
+	//
+	// Safe because Enroll re-seats the commands one — NOT because these cursors
+	// are retention protection only. That was the original premise and it is
+	// false: the commands cursor is also the move-drain delivery floor
+	// (repl.drainPendingCommands), so deleting it with nothing to replace it
+	// leaves a re-enrolled child's floor at the default 1 and every command
+	// already delivered under that mount counted as pending again. See the
+	// re-seat in Enroll above, which is the other half of this: neither half is
+	// correct alone.
+	//
 	// Failure is logged, never fatal: a surviving cursor is a retention floor,
 	// not a security hole, and the revoke itself has already committed.
 	for name, stream := range map[string]string{

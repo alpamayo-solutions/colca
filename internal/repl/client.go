@@ -166,10 +166,12 @@ type downResult struct {
 	Definitions []DownRec
 	DefNext     uint64
 	// Head is the parent's own commands stream head (NextOffset("commands"))
-	// at response time — the position a child with no cursor for THIS parent
-	// must start from (parent-scoped-cursors design §3.2/§3.3). Present on
-	// both the hello response and the ordinary long-poll response; consumed
-	// starting with the parent-scoped cursor-seeding work.
+	// at hello time — the position a child with no cursor for THIS parent must
+	// start from (parent-scoped-cursors design §3.2/§3.3). The HELLO response
+	// carries it and nothing else does: it is consumed once, before the first
+	// poll, so a copy on every poll would be an integer no one reads. 0 means
+	// the parent did not send one, which on the hello path means a parent that
+	// predates the field — RunDownlink reports that.
 	Head uint64
 }
 
@@ -428,7 +430,14 @@ func initCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64)
 		// means no hello has answered — claim nothing and let the caller that
 		// has a head settle it.
 		if head > 0 {
-			st.CursorSetIfAbsent(cmd, downlinkStream, head)
+			if _, err := st.CursorSetIfAbsent(cmd, downlinkStream, head); err != nil {
+				// Same consequence as a parent with no head at all: with nothing
+				// recorded, CursorGet answers 1 and the first poll reads the
+				// pre-attachment commands §3.2 declines.
+				c.log.Warn("first-contact commands cursor not recorded — this node polls from 1 and may "+
+					"execute commands issued under its mount before it attached",
+					"cursor", cmd, "head", head, "err", err)
+			}
 		}
 	}
 	// The one diagnostic head buys (§7), evaluated after the cases above so a
@@ -614,6 +623,22 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 	for {
 		res, err := c.hello(ctx, eng.Store().CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream))
 		if err == nil {
+			// A parent that answers without a head predates the field (§3.3) —
+			// a mixed-version tree during a leaf-first rolling upgrade. Nothing
+			// here can repair that: with no head there is no position to adopt,
+			// so a first-contact commands cursor stays at its default of 1 and
+			// the poll below hands this node every retained command issued under
+			// its mount before it attached, which is exactly what §3.2 exists to
+			// refuse. Say so once, loudly, and count it — hello runs once per
+			// process, and the §7 diagnostic below cannot speak for this case
+			// because it needs a head of its own to compare against.
+			if res.Head == 0 {
+				c.log.Warn("parent answered the first-contact hello without a command head — it predates "+
+					"parent-scoped cursors; this node starts its command cursor at 1 and may execute "+
+					"commands issued under its mount before it attached (design §3.2/§3.3)",
+					"parent", c.base, "parent_key", short(c.parentPub))
+				m.DownlinkHeadAbsent()
+			}
 			// Before anything is applied: a first-contact definitions cursor must
 			// be settled at 1 when this batch lands, and a first-contact commands
 			// cursor must have adopted the head this response carries before the

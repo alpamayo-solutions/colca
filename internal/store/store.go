@@ -451,22 +451,32 @@ func (s *Store) CursorAck(name, stream string, off uint64) bool {
 // The cursor and its ct/ timestamp go in one synced batch, exactly as in
 // CursorAck: the staleness input of spec §5.2 must never be missing for a
 // cursor that exists.
-func (s *Store) CursorSetIfAbsent(name, stream string, off uint64) bool {
+//
+// The error is returned separately from created, unlike CursorAck's bare bool,
+// because here the two outcomes behind "did not create" are not equivalent: an
+// existing cursor is the ordinary case (an idempotent re-enroll, a second
+// start), while a failed write means the caller's floor was never recorded and
+// its next start will re-decide from scratch. A caller that cannot tell them
+// apart has no honest way to log either.
+func (s *Store) CursorSetIfAbsent(name, stream string, off uint64) (created bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, closer, err := s.db.Get(cursorKey(name, stream)); err == nil {
 		closer.Close()
-		return false
+		return false, nil
 	}
 	b := s.db.NewBatch()
 	defer b.Close()
 	if err := b.Set(cursorKey(name, stream), be64(off), nil); err != nil {
-		return false
+		return false, err
 	}
 	if err := b.Set(ctKey(name, stream), be64(uint64(time.Now().UnixMilli())), nil); err != nil {
-		return false
+		return false, err
 	}
-	return s.db.Apply(b, pebble.Sync) == nil
+	if err := s.db.Apply(b, pebble.Sync); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // CursorDelete removes a cursor and its last-advance timestamp in one synced

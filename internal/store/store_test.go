@@ -725,8 +725,8 @@ func TestCursorDeleteRemovesPositionAndTimestamp(t *testing.T) {
 func TestCursorSetIfAbsentRecordsThePositionOnlyOnce(t *testing.T) {
 	s := mustOpen(t)
 
-	if !s.CursorSetIfAbsent("c-new", "metrics", 1) {
-		t.Fatal("the first call must create the cursor")
+	if created, err := s.CursorSetIfAbsent("c-new", "metrics", 1); !created || err != nil {
+		t.Fatalf("the first call must create the cursor (created %v, err %v)", created, err)
 	}
 	present := func(name string) bool {
 		for _, c := range s.Cursors() {
@@ -744,8 +744,10 @@ func TestCursorSetIfAbsentRecordsThePositionOnlyOnce(t *testing.T) {
 		t.Fatal("a cursor set to 1 must be a real key — otherwise it still reads as never met")
 	}
 
-	if s.CursorSetIfAbsent("c-new", "metrics", 9) {
-		t.Fatal("the second call must report that the cursor already existed")
+	// An existing cursor is not an error: created false, err nil — the one
+	// outcome a caller must be able to tell apart from a failed write.
+	if created, err := s.CursorSetIfAbsent("c-new", "metrics", 9); created || err != nil {
+		t.Fatalf("the second call must report that the cursor already existed (created %v, err %v)", created, err)
 	}
 	if got := s.CursorGet("c-new", "metrics"); got != 1 {
 		t.Fatalf("cursor = %d, want the original 1 — an existing cursor must never be moved", got)
@@ -755,8 +757,8 @@ func TestCursorSetIfAbsentRecordsThePositionOnlyOnce(t *testing.T) {
 	if !s.CursorAck("c-new", "metrics", 5) {
 		t.Fatal("ack did not move the cursor")
 	}
-	if s.CursorSetIfAbsent("c-new", "metrics", 2) {
-		t.Fatal("an advanced cursor must still report as existing")
+	if created, err := s.CursorSetIfAbsent("c-new", "metrics", 2); created || err != nil {
+		t.Fatalf("an advanced cursor must still report as existing (created %v, err %v)", created, err)
 	}
 	if got := s.CursorGet("c-new", "metrics"); got != 5 {
 		t.Fatalf("cursor = %d, want 5 — SetIfAbsent must never rewind", got)
