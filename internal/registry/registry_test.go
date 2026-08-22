@@ -600,10 +600,18 @@ func TestByNameForgetsARevokedEntry(t *testing.T) {
 	}
 }
 
-// Design §3.4: the parent-side downlink cursors exist for retention
-// protection only — delivery position rides the child's `after` parameter on
-// every poll — so a revoked child's cursors are dead weight that otherwise
-// accumulates per device forever. The replication HWM is NOT deleted: a
+// Design §3.4: a revoked child's parent-side downlink cursors die with its
+// identity, because they otherwise accumulate one pair per revoked device
+// forever.
+//
+// §3.4's stated REASON for why this is safe — "they protect retention only,
+// delivery position rides the child's `after` parameter" — turned out to be
+// false: the commands cursor is also the move-drain completion predicate's
+// floor. Deleting it is still right, but only because Enroll now re-seats
+// that floor at the current head
+// (TestEnrollSeatsTheDownlinkFloorAtTheCommandsHead). The two tests are one
+// claim in two halves; neither is safe alone. The replication HWM is NOT
+// deleted either way: a
 // re-enrolled child re-offering from its LWM is deduped by it, which is the
 // difference between a cheap reconciliation and duplicate application.
 func TestRevokeDeletesDownlinkCursorsAndKeepsTheHWM(t *testing.T) {
@@ -645,5 +653,169 @@ func TestRevokeDeletesDownlinkCursorsAndKeepsTheHWM(t *testing.T) {
 	if got := st.HWMGet(ulid, "metrics"); got != hwmBefore {
 		t.Fatalf("revoke changed the replication HWM to %d, want %d preserved — a "+
 			"re-enrolled child re-offering from LWM would re-apply records", got, hwmBefore)
+	}
+}
+
+// appendCommands puts n records on the commands stream so NextOffset moves —
+// the head this test's claim is about. Contents are irrelevant: the delivery
+// floor is a position, not a payload.
+func appendCommands(t *testing.T, st *store.Store, n int) uint64 {
+	t.Helper()
+	recs := make([]store.Record, n)
+	for i := range recs {
+		recs[i] = store.Record{
+			Topic:   "colca/v1/_CmdParam/m1/z/child/m1/c",
+			Payload: []byte(`{"correlation_id":"c","expires_at":1}`),
+			TS:      1,
+		}
+	}
+	if _, _, err := st.Append("commands", recs); err != nil {
+		t.Fatal(err)
+	}
+	return st.NextOffset("commands")
+}
+
+// Parent-scoped-cursors design §3.2, the parent-side mirror: a freshly
+// enrolled repl child starts at the parent's CURRENT commands head, never at
+// the stream's beginning. Commands issued before it was enrolled were
+// addressed to whatever occupied its mount then.
+//
+// This is also the regression §3.4 shipped, and the seat is its repair. That
+// section deletes the child's parent-side cursors on Revoke, justified by
+// "they protect retention only — delivery position rides the child's own
+// `after`". The cursor is ALSO the move-drain completion predicate's floor
+// (repl.drainPendingCommands), so without the seat a re-enrolled ULID gets
+// CursorGet's default of 1 back, every command already delivered under its
+// mount is scanned as pending again, and the next drain of that child cannot
+// complete until the OLDEST of them expires — effectively never, for the
+// generous TTLs a delivery test uses. Found at level 4, by a reparent
+// scenario whose second test then timed out waiting for a drain outcome it
+// could never get.
+func TestEnrollSeatsTheDownlinkFloorAtTheCommandsHead(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "z/child")
+	ulid := "01NCHILD"
+	cursor := uns.DownlinkCursorPrefix + ulid
+
+	// Commands that predate the child. Head > 1 is what makes every
+	// assertion below distinguishable from CursorGet's never-acked default.
+	head := appendCommands(t, st, 3)
+	if head <= 1 {
+		t.Fatalf("seeded commands head = %d, want > 1 — the test could not tell a seat from the default", head)
+	}
+
+	if _, _, err := m.Enroll(entryJSON(t, node(ulid, "z/child", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.CursorGet(cursor, "commands"); got != head {
+		t.Fatalf("first enroll seated the delivery floor at %d, want the head %d — a new "+
+			"child must not be charged with commands issued before it existed", got, head)
+	}
+
+	// It polls, and the floor follows: this is the position the drain
+	// predicate treats as "everything below is delivered".
+	delivered := appendCommands(t, st, 2)
+	if !st.CursorAck(cursor, "commands", delivered) {
+		t.Fatalf("ack to %d did not move the floor — the rest of this test would prove nothing", delivered)
+	}
+
+	if _, _, err := m.Revoke(ulid); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.CursorGet(cursor, "commands"); got != 1 {
+		t.Fatalf("revoke left the floor at %d, want it deleted (CursorGet's default 1) — §3.4's own claim", got)
+	}
+
+	// The repair. Without the seat this answers 1, and every command in
+	// [1, headAfter) — including the ones acked above — is pending again.
+	headAfter := appendCommands(t, st, 4)
+	if _, _, err := m.Enroll(entryJSON(t, node(ulid, "z/child", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.CursorGet(cursor, "commands"); got != headAfter {
+		t.Fatalf("re-enroll left the delivery floor at %d, want the current head %d — at 1 the "+
+			"move-drain predicate re-counts every already-delivered command as pending and the "+
+			"next drain of this child can only resolve by expiry", got, headAfter)
+	}
+}
+
+// The seat is gated on the replication DOOR, not on kind: a machine and a
+// local service have no downlink at all, so seating one would put back the
+// per-device key accumulation §3.4 removed — one dead cursor per enrolled
+// identity, forever.
+func TestEnrollSeatsNoDownlinkFloorForIdentitiesWithoutAReplDoor(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "z/a")
+	if head := appendCommands(t, st, 3); head <= 1 {
+		t.Fatalf("seeded commands head = %d, want > 1", head)
+	}
+
+	if _, _, err := m.Enroll(entryJSON(t, machine("01NMACHINE", "z/a", pub("cd")))); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.Enroll([]byte(`{"ulid":"01NLOCAL","kind":"local","name":"conn"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range st.Cursors() {
+		if strings.HasPrefix(c.Name, uns.DownlinkCursorPrefix) {
+			t.Fatalf("enroll seated a delivery floor %q for an identity that has no replication "+
+				"door — these accumulate one per device forever", c.Name)
+		}
+	}
+}
+
+// The seat is also skipped when the commands stream is EMPTY. CursorGet
+// already answers 1 for an absent key, so a cursor written at 1 decides
+// nothing — but it is a live retention floor pinning the stream at its first
+// record on behalf of a child that may never connect, which is exactly the
+// accumulation §3.4 set out to remove. The downlink door pins the same rule
+// from its own side (repl: "a poll at position 1 must not create a cursor");
+// this is that claim at the enrollment end.
+func TestEnrollSeatsNoDeliveryFloorWhenThereIsNothingOlderToDecline(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "z/child")
+	if head := st.NextOffset("commands"); head != 1 {
+		t.Fatalf("fresh commands head = %d, want 1 — this test needs an empty stream", head)
+	}
+
+	if _, _, err := m.Enroll(entryJSON(t, node("01NCHILD", "z/child", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range st.Cursors() {
+		if strings.HasPrefix(c.Name, uns.DownlinkCursorPrefix) {
+			t.Fatalf("enroll wrote cursor %q against an empty commands stream — it decides no "+
+				"delivery (CursorGet defaults to 1 anyway) and holds retention at offset 1", c.Name)
+		}
+	}
+}
+
+// An Enroll against a LIVE child is an edit (the manager is idempotent and
+// doubles as update), and must never move a floor that child is using: the
+// seat claims the position only when there is none, so an edit mid-flight
+// cannot skip commands the child has not fetched yet.
+func TestReEnrollingALiveChildDoesNotMoveItsDeliveryFloor(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "z/child")
+	ulid := "01NCHILD"
+	cursor := uns.DownlinkCursorPrefix + ulid
+
+	appendCommands(t, st, 2)
+	if _, _, err := m.Enroll(entryJSON(t, node(ulid, "z/child", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	floor := st.CursorGet(cursor, "commands")
+
+	// Commands arrive that this child has NOT fetched, then its entry is
+	// edited. Its floor must still point at them.
+	appendCommands(t, st, 5)
+	if _, _, err := m.Enroll(entryJSON(t, node(ulid, "z/child", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.CursorGet(cursor, "commands"); got != floor {
+		t.Fatalf("re-enrolling a live child moved its delivery floor from %d to %d — the "+
+			"commands in between would be treated as delivered without ever being fetched",
+			floor, got)
 	}
 }

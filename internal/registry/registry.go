@@ -246,6 +246,44 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 		return "", 0, err
 	}
 
+	// Seat this child's delivery floor at the CURRENT commands head, if it has
+	// none yet. The parent-side mirror of the child-side command rule
+	// (parent-scoped-cursors design §3.2): a freshly enrolled child is not
+	// charged with commands that predate its enrollment, because those were
+	// addressed to whatever occupied its mount before it. Same reasoning, the
+	// other end of the wire.
+	//
+	// Load-bearing, not tidiness. §3.4 deleted these cursors on Revoke on the
+	// premise that they are "retention protection only — delivery position
+	// rides the child's own `after` parameter". That premise is false: this
+	// cursor is ALSO the move-drain completion predicate's floor
+	// (repl.drainPendingCommands). Without this seed, re-enrolling a ULID at
+	// the same parent leaves CursorGet answering its default 1, so every
+	// command already delivered under that mount is re-counted as pending and
+	// the next drain of that child can only ever resolve by expiry — a
+	// long-TTL command parked below the old floor blocks it for its full TTL.
+	//
+	// SetIfAbsent, so a re-enroll that is really an UPDATE of a live child
+	// (Enroll is idempotent and doubles as edit) never rewinds or advances a
+	// position that child is actively using.
+	//
+	// Gated on the door, never on the kind: only repl children have downlink
+	// cursors, and a machine or local service must not get one or the per-
+	// device key leak §3.4 removed comes back. Asking the predicate is also
+	// what plugins/uns's core-vocabulary check requires.
+	//
+	// And gated on head > 1, because a cursor AT 1 is not free. CursorGet
+	// already answers 1 for an absent key, so writing the key there changes
+	// no delivery decision — but it does create a retention floor pinning the
+	// commands stream at its very first record, for a child that may never
+	// connect. That is the opposite of what §3.4 was cleaning up, and the
+	// downlink door pins the same rule from its own side ("a poll at position
+	// 1 must not create a cursor"). At head 1 there is nothing older to
+	// decline, so there is nothing to record.
+	if head := m.st.NextOffset("commands"); head > 1 && e.MayUseDoor(uns.DoorRepl) {
+		m.st.CursorSetIfAbsent(uns.DownlinkCursorPrefix+e.ULID, "commands", head)
+	}
+
 	prev, existed := m.byID[e.ULID]
 	if existed {
 		if prev.Pubkey != "" {
