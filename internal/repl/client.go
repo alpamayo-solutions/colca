@@ -19,15 +19,12 @@ import (
 )
 
 const (
-	uplinkCursor   = "uplink"
-	downlinkCursor = "downlink"
 	// downlinkStream is a pseudo-stream name: the cursor tracks PARENT offsets,
 	// which are unrelated to the local commands stream — never mix the two.
 	downlinkStream = "commands-parent"
 	// The definitions half of the same idea: a separate cursor over a separate
 	// pseudo-stream, because a node caught up on commands may still be behind
 	// on definitions (definition-stream design §5).
-	downlinkDefCursor = "downlink-def"
 	downlinkDefStream = "definitions-parent"
 
 	replBatch    = 200
@@ -38,8 +35,16 @@ const (
 
 type Client struct {
 	base string
-	http *http.Client
-	log  *slog.Logger
+	// parentPub is the parent's PINNED public key — the identity every
+	// connection verifies, and the scope key for this child's replication
+	// cursors (parent-scoped-cursors design §3.1). Cursor NAMES are built from
+	// it via uns.UplinkCursor/DownlinkCursor/DownlinkDefCursor at every call
+	// site, so a reparent (a different parentPub) never resumes against the
+	// old parent's offsets, and returning to a former parent finds its old
+	// position intact.
+	parentPub string
+	http      *http.Client
+	log       *slog.Logger
 }
 
 // NewClient: TLS client presenting the child's cert, pinning the parent's pubkey.
@@ -67,11 +72,16 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity) (*Client, er
 		},
 	}
 	return &Client{
-		base: baseURL,
-		http: &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: 30 * time.Second},
-		log:  slog.Default().With("comp", "repl-client"),
+		base:      baseURL,
+		parentPub: parentPubHex,
+		http:      &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: 30 * time.Second},
+		log:       slog.Default().With("comp", "repl-client"),
 	}, nil
 }
+
+// ParentPub is the pinned parent key this client is bound to — the scope of
+// every cursor the repl loops maintain against it.
+func (c *Client) ParentPub() string { return c.parentPub }
 
 func (c *Client) Replicate(stream string, recs []store.ReplRecord) (hwm uint64, err error) {
 	hwm, _, err = c.replicate(context.Background(), stream, recs)
@@ -312,7 +322,7 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 	// scanned anything — which is what "drained to empty" is measured by.
 	// aborted distinguishes our own shutdown from a real failure.
 	pushOnce := func(stream string, filter func(string) bool) (scanned, aborted bool) {
-		from := eng.Store().CursorGet(uplinkCursor, stream)
+		from := eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), stream)
 		// Spec §6.3, uplink half: a cursor below the local LWM means the
 		// local pruner overrode it (only possible after the explicit §5.2
 		// staleness opt-in — the parent was gone longer than the window).
@@ -322,7 +332,7 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 			c.log.Error("uplink cursor below the stream LWM — local retention pruned past it (spec §6.3): jumping to the LWM",
 				"stream", stream, "position", from, "lwm", lwm)
 			m.GapReceived(stream)
-			eng.Store().CursorAck(uplinkCursor, stream, lwm)
+			eng.Store().CursorAck(uns.UplinkCursor(c.parentPub), stream, lwm)
 			from = lwm
 		}
 		recs, next, err := eng.Store().Read(stream, from, replBatch, filter)
@@ -362,7 +372,7 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 			eng.ApplyClockSample(nowMS)
 			pushed = true
 		}
-		eng.Store().CursorAck(uplinkCursor, stream, next)
+		eng.Store().CursorAck(uns.UplinkCursor(c.parentPub), stream, next)
 		if pushed {
 			m.UplinkPushed(stream, time.Now())
 		}
@@ -384,7 +394,7 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 			// metrics floor below, and the floor stops holding in exactly the
 			// case it exists for.
 			target := eng.Store().NextOffset(lane.name)
-			for eng.Store().CursorGet(uplinkCursor, lane.name) < target {
+			for eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), lane.name) < target {
 				scanned, aborted := pushOnce(lane.name, lane.filter)
 				if aborted {
 					return
@@ -428,7 +438,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 	// already waiting, in one RTT (id-grants design §4) instead of after the
 	// first long-poll drains. Failure is fine — the regular polls below carry
 	// both on every response.
-	if res, err := c.hello(ctx, eng.Store().CursorGet(downlinkDefCursor, downlinkDefStream)); err == nil {
+	if res, err := c.hello(ctx, eng.Store().CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream)); err == nil {
 		if res.Ancestry != nil {
 			eng.SetAncestry(*res.Ancestry)
 		}
@@ -440,8 +450,8 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			return
 		default:
 		}
-		after := eng.Store().CursorGet(downlinkCursor, downlinkStream)
-		defAfter := eng.Store().CursorGet(downlinkDefCursor, downlinkDefStream)
+		after := eng.Store().CursorGet(uns.DownlinkCursor(c.parentPub), downlinkStream)
+		defAfter := eng.Store().CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream)
 		res, err := c.downlink(ctx, after, defAfter, replBatch, downlinkWait)
 		recs, next, gap, nowMS, ancestry := res.Records, res.Next, res.Gap, res.NowMS, res.Ancestry
 		if err != nil {
@@ -488,7 +498,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		}
 		applyDefinitions(c, eng, m, res)
 		if next > after {
-			eng.Store().CursorAck(downlinkCursor, downlinkStream, next)
+			eng.Store().CursorAck(uns.DownlinkCursor(c.parentPub), downlinkStream, next)
 		}
 	}
 }
@@ -514,8 +524,8 @@ func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res dow
 		}
 		m.DefinitionApplied()
 	}
-	if res.DefNext > eng.Store().CursorGet(downlinkDefCursor, downlinkDefStream) {
-		eng.Store().CursorAck(downlinkDefCursor, downlinkDefStream, res.DefNext)
+	if res.DefNext > eng.Store().CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream) {
+		eng.Store().CursorAck(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream, res.DefNext)
 	}
 }
 

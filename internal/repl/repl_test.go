@@ -272,10 +272,10 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	close(stop)
 	waitForClosed(t, "RunUplink to return after stop (offline)", done, 5*time.Second)
 
-	if got := cs.CursorGet("uplink", "metrics"); got != 1 {
+	if got := cs.CursorGet(uns.UplinkCursor(cl.ParentPub()), "metrics"); got != 1 {
 		t.Fatalf("uplink metrics cursor moved to %d while the parent was down — offline buffering broken", got)
 	}
-	if got := cs.CursorGet("uplink", "commands"); got != 1 {
+	if got := cs.CursorGet(uns.UplinkCursor(cl.ParentPub()), "commands"); got != 1 {
 		t.Fatalf("uplink commands cursor moved to %d while the parent was down", got)
 	}
 	if got := ps.NextOffset("metrics"); got != 1 {
@@ -332,10 +332,10 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	if len(cmds) != 1 || cmds[0].Topic != "colca/v1/_Ack/m1/child1/m1/go" {
 		t.Fatalf("commands stream at parent: %+v — commands must never be mirrored back up", cmds)
 	}
-	if got := cs.CursorGet("uplink", "metrics"); got != 3 {
+	if got := cs.CursorGet(uns.UplinkCursor(cl.ParentPub()), "metrics"); got != 3 {
 		t.Fatalf("uplink metrics cursor %d, want 3", got)
 	}
-	if got := cs.CursorGet("uplink", "commands"); got != 3 {
+	if got := cs.CursorGet(uns.UplinkCursor(cl.ParentPub()), "commands"); got != 3 {
 		t.Fatalf("uplink commands cursor %d, want 3 (it must skip the filtered command)", got)
 	}
 }
@@ -383,12 +383,12 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 		t.Fatal("command was never delivered locally")
 	}
 	waitFor(t, "the downlink cursor to advance", 5*time.Second, func() bool {
-		return cs.CursorGet("downlink", "commands-parent") == 2
+		return cs.CursorGet(uns.DownlinkCursor(cl.ParentPub()), "commands-parent") == 2
 	})
 	if got := cs.NextOffset("commands"); got != 2 {
 		t.Fatalf("child commands next offset %d, want 2", got)
 	}
-	if got := cs.CursorGet("downlink", "commands"); got != 1 {
+	if got := cs.CursorGet(uns.DownlinkCursor(cl.ParentPub()), "commands"); got != 1 {
 		t.Fatal("the downlink cursor must live under \"commands-parent\", not the local commands stream")
 	}
 
@@ -480,10 +480,12 @@ func placeElement(t *testing.T, eng *engine.Engine, path string) string {
 }
 
 // uplinkPair brings up a live parent and a child engine wired to it, and
-// returns the two stores plus a started RunUplink whose stop is registered as
-// cleanup. Seeding goes straight to the child store: these tests are about
-// the ORDER lanes drain in, not about contract validation at a door.
-func uplinkPair(t *testing.T) (child, parent *store.Store, start func()) {
+// returns the two stores, the parent's pinned pubkey hex (the scope key for
+// this child's cursors — parent-scoped-cursors design §3.1), plus a started
+// RunUplink whose stop is registered as cleanup. Seeding goes straight to the
+// child store: these tests are about the ORDER lanes drain in, not about
+// contract validation at a door.
+func uplinkPair(t *testing.T) (child, parent *store.Store, parentPub string, start func()) {
 	t.Helper()
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -499,7 +501,7 @@ func uplinkPair(t *testing.T) (child, parent *store.Store, start func()) {
 	_, ceng := nodeParts(t, cs, ccfg, nil, nil, nil)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 
-	return cs, ps, func() {
+	return cs, ps, parentID.PublicHex(), func() {
 		stop := make(chan struct{})
 		done := make(chan struct{})
 		go func() {
@@ -532,7 +534,7 @@ func seed(t *testing.T, s *store.Store, stream, topic string, n int) {
 // backlog. Order inside a stream never changes, so this — not a place in the
 // metrics queue — is the only thing that lets an alarm arrive promptly.
 func TestUplinkDrainsSmallLanesBeforeTheMetricsBacklog(t *testing.T) {
-	cs, ps, start := uplinkPair(t)
+	cs, ps, _, start := uplinkPair(t)
 	// The alarm lane is deliberately several batches deep. With a single
 	// record any ordering that merely puts metrics last would pass, and this
 	// test would not distinguish lanes from a reshuffled slice. At three
@@ -561,7 +563,7 @@ func TestUplinkDrainsSmallLanesBeforeTheMetricsBacklog(t *testing.T) {
 // cursor still: once the local pruner passes it the backlog is gone and only
 // a gap marker remains, so lane pressure would become silent data loss.
 func TestMetricsAdvancesWhileAPriorityLaneStaysHot(t *testing.T) {
-	cs, ps, start := uplinkPair(t)
+	cs, ps, _, start := uplinkPair(t)
 	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 3*replBatch)
 
 	hot, hotDone := make(chan struct{}), make(chan struct{})
@@ -595,6 +597,27 @@ func TestMetricsAdvancesWhileAPriorityLaneStaysHot(t *testing.T) {
 	waitFor(t, "metrics to advance while the alarms lane stays hot", 20*time.Second, func() bool {
 		return ps.NextOffset("metrics") > 1
 	})
+}
+
+// Design §3.1: two parents, two sets of cursors. A child that changes parents
+// must not resume against the new one at the old one's offsets — and a child
+// that RETURNS to a former parent finds its old position intact.
+func TestCursorsAreScopedPerParent(t *testing.T) {
+	cs, _, parentPub, start := uplinkPair(t)
+	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 3)
+	start()
+
+	// The cursor that moved is the one named for THIS parent.
+	waitFor(t, "the uplink cursor for this parent to advance", 20*time.Second, func() bool {
+		return cs.CursorGet(uns.UplinkCursor(parentPub), "metrics") > 1
+	})
+	if got := cs.CursorGet(uns.UplinkCursor("ffff"), "metrics"); got != 1 {
+		t.Fatalf("a DIFFERENT parent's uplink cursor = %d, want the untouched default 1 — "+
+			"cursors are not scoped and a reparent would resume at the wrong offsets", got)
+	}
+	if got := cs.CursorGet("uplink", "metrics"); got != 1 {
+		t.Fatalf("the legacy un-scoped cursor advanced to %d — the loops still write it", got)
+	}
 }
 
 // Design §3.3: hello exists to teach a (re)connecting child its position in

@@ -233,7 +233,7 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 
 	// Retention overrides the uplink cursor (the §5.2 opt-in already decided):
 	// offsets 1..3 are gone, LWM 4.
-	if n, err := cs.Prune("metrics", 4, []string{uplinkCursor}, nil); err != nil || n != 3 {
+	if n, err := cs.Prune("metrics", 4, []string{uns.UplinkCursor(parentID.PublicHex())}, nil); err != nil || n != 3 {
 		t.Fatalf("prune: %d %v", n, err)
 	}
 
@@ -260,7 +260,7 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 		return ps.NextOffset("metrics") == 3 // exactly offsets 4 and 5 arrived
 	})
 	waitFor(t, "the uplink cursor to converge past the head", 5*time.Second, func() bool {
-		return cs.CursorGet(uplinkCursor, "metrics") == 6
+		return cs.CursorGet(uns.UplinkCursor(cl.ParentPub()), "metrics") == 6
 	})
 	recs, _, err := ps.Read("metrics", 1, 10, nil)
 	if err != nil {
@@ -300,7 +300,7 @@ func TestRunDownlinkContinuesPastGap(t *testing.T) {
 		RunDownlink(f.cl, ceng, cm, stop)
 	}()
 	waitFor(t, "the downlink cursor to advance past the hole", 10*time.Second, func() bool {
-		return cs.CursorGet(downlinkCursor, downlinkStream) == 4
+		return cs.CursorGet(uns.DownlinkCursor(f.cl.ParentPub()), downlinkStream) == 4
 	})
 	close(stop)
 	waitForClosed(t, "RunDownlink to return after stop", done, 5*time.Second)
@@ -387,7 +387,7 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", fmt.Sprintf(`{"v":%d}`, i))
 	}
-	if n, err := cs.Prune("metrics", 4, []string{uplinkCursor}, nil); err != nil || n != 3 {
+	if n, err := cs.Prune("metrics", 4, []string{uns.UplinkCursor(parentID.PublicHex())}, nil); err != nil || n != 3 {
 		t.Fatalf("prune: %d %v", n, err)
 	}
 
@@ -400,7 +400,7 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 		RunUplink(cl, ceng, nil, stop)
 	}()
 	waitFor(t, "the uplink cursor to jump to the LWM", 5*time.Second, func() bool {
-		return cs.CursorGet(uplinkCursor, "metrics") == 4
+		return cs.CursorGet(uns.UplinkCursor(cl.ParentPub()), "metrics") == 4
 	})
 	close(stop)
 	waitForClosed(t, "RunUplink to return after stop", done, 5*time.Second)
