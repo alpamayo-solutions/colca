@@ -324,6 +324,26 @@ const DownlinkCursorPrefix = "downlink:"
 // once every child has read past it.
 const DownlinkDefCursorPrefix = "downlink-def:"
 
+// The CHILD-side replication cursors. Each names a position in one specific
+// parent's stream, so the parent's pinned pubkey is part of the name: a node
+// that changes parents must not resume against the new one at the old one's
+// offsets (parent-scoped-cursors design §3.1). Scoping by pubkey rather than
+// by the parent's ULID is deliberate — the pubkey is the config pin, known
+// before first contact and verified on every connection, while the ULID is
+// only learned after connecting.
+//
+// These use their own "up:"/"down:"/"down-def:" prefixes, deliberately
+// distinct from DownlinkCursorPrefix/DownlinkDefCursorPrefix above, which are
+// the PARENT-side cursors keyed by CHILD ulid. A child pubkey and a parent
+// ulid are different-length strings today, but the name must not depend on
+// that arithmetic to stay collision-free — different node, different fact,
+// so the prefix itself carries the distinction.
+func UplinkCursor(parentPubkey string) string { return "up:" + parentPubkey }
+
+func DownlinkCursor(parentPubkey string) string { return "down:" + parentPubkey }
+
+func DownlinkDefCursor(parentPubkey string) string { return "down-def:" + parentPubkey }
+
 // MountInsert inserts the mount name directly after segment 4 (node-id), i.e.
 // at the head of the hierarchy path — the uplink rewrite done on every hop.
 func MountInsert(topic, mount string) string {

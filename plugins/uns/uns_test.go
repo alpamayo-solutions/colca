@@ -381,3 +381,38 @@ func TestSemanticTagIsADefinition(t *testing.T) {
 		t.Fatalf("Validate rejected a well-formed _SemanticTag: %v", err)
 	}
 }
+
+// Design §3.1: a cursor names a position in one identified peer's stream, so
+// the peer's identity is part of its key. Two parents must never share a
+// cursor — that is the whole defect this fixes.
+func TestParentScopedCursorNames(t *testing.T) {
+	const a = "aa11"
+	const b = "bb22"
+	for _, tc := range []struct {
+		name string
+		fn   func(string) string
+		want string
+	}{
+		{"uplink", UplinkCursor, "up:" + a},
+		{"downlink", DownlinkCursor, "down:" + a},
+		{"downlink-def", DownlinkDefCursor, "down-def:" + a},
+	} {
+		if got := tc.fn(a); got != tc.want {
+			t.Fatalf("%s(%q) = %q, want %q", tc.name, a, got, tc.want)
+		}
+		if tc.fn(a) == tc.fn(b) {
+			t.Fatalf("%s collides across parents: %q", tc.name, tc.fn(a))
+		}
+	}
+}
+
+// The child-side uplink cursor and the PARENT-side downlink cursor are
+// different facts about different nodes. They must not be able to collide:
+// the parent-side name is keyed by child ULID, the child-side by parent
+// pubkey, and a value that happened to be both would otherwise alias.
+func TestChildAndParentSideCursorNamesDoNotAlias(t *testing.T) {
+	const shared = "01JSVC"
+	if DownlinkCursor(shared) == DownlinkCursorPrefix+shared {
+		t.Fatal("child-side downlink cursor aliases the parent-side cursor for the same string")
+	}
+}
