@@ -15,9 +15,9 @@ Why this lives in colca-data-contracts (not dataops): the contract YAML's
 contract. ``dataops`` depends on ``colca-data-contracts``, never the reverse —
 so the MachineState producer base imports these from here.
 
-These are NOT a ``value_json`` semantic contract (see ``semantic/``); they are
-the value vocabulary for ordinal-int signals, so they are intentionally not
-registered in ``SEMANTIC_CONTRACTS``.
+These are NOT a ``value_json`` semantic contract; they are the value
+vocabulary for ordinal-int signals, classified (if at all) through
+``Signal.semantic_type``, not through this module.
 """
 
 from enum import IntEnum

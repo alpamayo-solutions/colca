@@ -71,6 +71,7 @@ from colca_data_contracts.payload import (
     DBDump,
     AnnotationType as AnnotationTypePayload,
     MetadataType as MetadataTypePayload,
+    SemanticTag as SemanticTagPayload,
     Group as GroupPayload,
     Interface as InterfacePayload,
     ExternalSystem as ExternalSystemPayload,
@@ -112,8 +113,6 @@ from colca_data_contracts.local_service import (
     resolve_local_identity,
     service_details_topic,
 )
-
-from colca_data_contracts.semantic import SEMANTIC_CONTRACTS
 
 # Register all Colca payload classes into franzmq's PAYLOAD_CLASSES
 # so that Topic.from_str() can resolve Colca topic strings.
@@ -176,6 +175,7 @@ __all__ = [
     # Hub-owned type payloads
     "AnnotationTypePayload",
     "MetadataTypePayload",
+    "SemanticTagPayload",
     "GroupPayload",
     "InterfacePayload",
     "ExternalSystemPayload",
@@ -211,6 +211,4 @@ __all__ = [
     "publish_local_service_details",
     "resolve_local_identity",
     "service_details_topic",
-    # Semantic contracts
-    "SEMANTIC_CONTRACTS",
 ]

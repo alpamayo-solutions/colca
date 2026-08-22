@@ -144,7 +144,6 @@ def test_signal_roundtrip_full():
         max_value=None,
         config={"enum_values": ["RUNNING", "IDLE", "FAULT"]},
         metadata={"contract": "MerzBenteliMachineState"},
-        implements_contract="MerzBenteliMachineState",
         created_at="2026-05-11T10:00:00+00:00",
         updated_at="2026-05-11T10:00:00+00:00",
     )
@@ -160,7 +159,6 @@ def test_signal_roundtrip_full():
     assert decoded.index_type == IndexType.TIME
     assert decoded.config == original.config
     assert decoded.metadata == original.metadata
-    assert decoded.implements_contract == original.implements_contract
 
 
 def test_signal_enums_serialised_as_strings():

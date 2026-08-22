@@ -588,6 +588,25 @@ class MetadataType(Payload):
 
 
 @dataclass
+class SemanticTag(Payload):
+    """A global semantic-type definition projected at every descendant node."""
+
+    id: str
+    name: str
+    i18n_name: str = ""
+    description: str = ""
+    applies_to: List[str] = field(default_factory=list)
+    icon: str = ""
+    quantity_kind: Optional[str] = None
+    data_type: Optional[str] = None
+
+    @classmethod
+    def decode(cls, json_str: str, timestamp: int) -> "SemanticTag":
+        data = json.loads(json_str)
+        return cls(**data)
+
+
+@dataclass
 class Group(Payload):
     """A group of humans and the grants its members hold.
 
@@ -707,6 +726,9 @@ class SystemElement(Payload):
     external_asset_id: Optional[str] = None
     external_asset_id_type: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    #: ULID of the `_SemanticTag` definition that says what this entity IS.
+    #: None means unclassified, which is a valid state.
+    semantic_type_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -761,8 +783,10 @@ class Signal(Payload):
     max_value: Optional[float] = None
     config: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
-    implements_contract: Optional[str] = None
     has_contract: bool = False
+    #: ULID of the `_SemanticTag` definition that says what this entity IS.
+    #: None means unclassified, which is a valid state.
+    semantic_type_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -803,6 +827,9 @@ class Constant(Payload):
     unit: Optional[str] = None
     precision: Optional[int] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    #: ULID of the `_SemanticTag` definition that says what this entity IS.
+    #: None means unclassified, which is a valid state.
+    semantic_type_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 

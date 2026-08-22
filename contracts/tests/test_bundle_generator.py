@@ -94,6 +94,7 @@ def test_projected_contract_catalogue_has_the_approved_direction():
         "_AnnotationType",
         "_Interface",
         "_ExternalSystem",
+        "_SemanticTag",
     }
 
     assert {
@@ -346,6 +347,7 @@ def test_definitions_are_their_own_class_and_retractable():
         "_AnnotationType",
         "_Interface",
         "_ExternalSystem",
+        "_SemanticTag",
     ):
         entry = body["contracts"][ident]
         assert entry["class"] == "definition", (ident, entry["class"])

@@ -1,0 +1,77 @@
+# Platform semantic types. Customer additions go in the node YAML under
+# seed.semantic_types; these ship with the package, like the interfaces do.
+tags:
+  # -- System elements (spec 11.1) --
+  - name: enterprise
+    i18n_name: Enterprise
+    applies_to: [system_element]
+    icon: domain
+  - name: site
+    i18n_name: Site
+    applies_to: [system_element]
+    icon: location_on
+  - name: area
+    i18n_name: Area
+    applies_to: [system_element]
+    icon: grid_view
+  - name: production-line
+    i18n_name: Production line
+    applies_to: [system_element]
+    icon: linear_scale
+  - name: work-cell
+    i18n_name: Work cell
+    applies_to: [system_element]
+    icon: widgets
+  - name: machine
+    i18n_name: Machine
+    applies_to: [system_element]
+    icon: precision_manufacturing
+  - name: subsystem
+    i18n_name: Subsystem
+    applies_to: [system_element]
+    icon: account_tree
+
+  # -- Signals and constants (spec 11.2). Every measurement row is
+  #    data_type: number; the quantity_kind is what constrains its unit.
+  - {name: temperature,        i18n_name: Temperature,        applies_to: [signal, constant], icon: thermostat,           quantity_kind: temperature,       data_type: number}
+  - {name: pressure,           i18n_name: Pressure,           applies_to: [signal, constant], icon: compress,             quantity_kind: pressure,          data_type: number}
+  - {name: flow-rate,          i18n_name: Flow rate,          applies_to: [signal, constant], icon: water_drop,           quantity_kind: volume-flow,       data_type: number}
+  - {name: mass-flow-rate,     i18n_name: Mass flow rate,     applies_to: [signal, constant], icon: waves,                quantity_kind: mass-flow,         data_type: number}
+  - {name: fill-level,         i18n_name: Fill level,         applies_to: [signal, constant], icon: opacity,              quantity_kind: ratio,             data_type: number}
+  - {name: humidity,           i18n_name: Humidity,           applies_to: [signal, constant], icon: humidity_percentage,  quantity_kind: ratio,             data_type: number}
+  - {name: electric-current,   i18n_name: Electric current,   applies_to: [signal, constant], icon: bolt,                 quantity_kind: electric-current,  data_type: number}
+  - {name: voltage,            i18n_name: Voltage,            applies_to: [signal, constant], icon: electrical_services,  quantity_kind: voltage,           data_type: number}
+  - {name: active-power,       i18n_name: Active power,       applies_to: [signal, constant], icon: power,                quantity_kind: power,             data_type: number}
+  - {name: energy-consumption, i18n_name: Energy consumption, applies_to: [signal, constant], icon: electric_meter,       quantity_kind: energy,            data_type: number}
+  - {name: rotational-speed,   i18n_name: Rotational speed,   applies_to: [signal, constant], icon: rotate_right,         quantity_kind: rotational-speed,  data_type: number}
+  - {name: line-speed,         i18n_name: Line speed,         applies_to: [signal, constant], icon: speed,                quantity_kind: speed,             data_type: number}
+  - {name: torque,             i18n_name: Torque,             applies_to: [signal, constant], icon: build,                quantity_kind: torque,            data_type: number}
+  - {name: force,              i18n_name: Force,              applies_to: [signal, constant], icon: fitness_center,       quantity_kind: force,             data_type: number}
+  - {name: vibration,          i18n_name: Vibration,          applies_to: [signal, constant], icon: vibration,            quantity_kind: acceleration,      data_type: number}
+  - {name: position,           i18n_name: Position,           applies_to: [signal, constant], icon: straighten,           quantity_kind: length,            data_type: number}
+  - {name: weight,             i18n_name: Weight,             applies_to: [signal, constant], icon: scale,                quantity_kind: mass,              data_type: number}
+  - {name: volume,             i18n_name: Volume,             applies_to: [signal, constant], icon: inventory_2,          quantity_kind: volume,            data_type: number}
+  - {name: frequency,          i18n_name: Frequency,          applies_to: [signal, constant], icon: graphic_eq,           quantity_kind: frequency,         data_type: number}
+
+  # -- Signals only (spec 11.3) --
+  - {name: part-count,                i18n_name: Part count,                applies_to: [signal], icon: numbers,                 quantity_kind: count, data_type: integer}
+  - {name: cycle-time,                i18n_name: Cycle time,                applies_to: [signal], icon: timer,                   quantity_kind: time,  data_type: number}
+  - {name: runtime,                   i18n_name: Runtime,                   applies_to: [signal], icon: schedule,                quantity_kind: time,  data_type: number}
+  - {name: machine-state,             i18n_name: Machine state,             applies_to: [signal], icon: list_alt,                data_type: integer}
+  - {name: status,                    i18n_name: Status,                    applies_to: [signal], icon: info,                    data_type: string}
+  - {name: heartbeat,                 i18n_name: Heartbeat,                 applies_to: [signal], icon: monitor_heart,           data_type: boolean}
+  - {name: alarm-active,              i18n_name: Alarm active,              applies_to: [signal], icon: notification_important,  data_type: boolean}
+  - {name: platform-alarm,            i18n_name: Platform alarm,            applies_to: [signal], icon: crisis_alert,            data_type: boolean}
+  - {name: edge-execution-context,    i18n_name: Edge execution context,    applies_to: [signal], icon: data_object,             data_type: json}
+  - {name: execution-event-correction, i18n_name: Execution event correction, applies_to: [signal], icon: edit_note,             data_type: json}
+
+  # -- Constants only (spec 11.4). Nameplate facts: a unit and a quantity,
+  #    no acquisition binding. This is what Constant exists for.
+  - {name: rated-power,       i18n_name: Rated power,       applies_to: [constant], icon: offline_bolt,       quantity_kind: power,            data_type: number}
+  - {name: rated-current,     i18n_name: Rated current,     applies_to: [constant], icon: electric_bolt,      quantity_kind: electric-current, data_type: number}
+  - {name: nominal-speed,     i18n_name: Nominal speed,     applies_to: [constant], icon: slow_motion_video,  quantity_kind: rotational-speed, data_type: number}
+  - {name: max-pressure,      i18n_name: Maximum pressure,  applies_to: [constant], icon: arrow_upward,       quantity_kind: pressure,         data_type: number}
+  - {name: capacity,          i18n_name: Capacity,          applies_to: [constant], icon: inventory,          quantity_kind: volume,           data_type: number}
+  - {name: serial-number,     i18n_name: Serial number,     applies_to: [constant], icon: tag,                data_type: string}
+  - {name: manufacturer,      i18n_name: Manufacturer,      applies_to: [constant], icon: factory,            data_type: string}
+  - {name: installation-date, i18n_name: Installation date, applies_to: [constant], icon: event,              data_type: datetime}
