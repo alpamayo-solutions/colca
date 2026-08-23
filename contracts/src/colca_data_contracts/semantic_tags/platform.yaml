@@ -9,7 +9,7 @@ tags:
   - name: site
     i18n_name: Site
     applies_to: [system_element]
-    icon: location_on
+    icon: location_city
   - name: area
     i18n_name: Area
     applies_to: [system_element]

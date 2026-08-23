@@ -12,7 +12,7 @@ invalid entries are caught at build time rather than by a user.
 
 # Entity-kind defaults and system-element tags.
 _STRUCTURE = {
-    "domain", "location_on", "grid_view", "linear_scale", "widgets",
+    "domain", "location_city", "grid_view", "linear_scale", "widgets",
     "precision_manufacturing", "account_tree", "factory", "warehouse",
     "conveyor_belt", "settings_input_component", "hub", "lan",
 }
