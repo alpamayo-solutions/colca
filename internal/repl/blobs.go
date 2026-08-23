@@ -40,26 +40,50 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 	max := int64(s.cfg.Limits.EffectiveMaxBlobBytes())
 	r.Body = http.MaxBytesReader(w, r.Body, max)
 
-	if _, _, err := s.blobs.Put(r.Body, sha); err != nil {
-		switch {
-		case errors.Is(err, blobstore.ErrTooLarge):
-			http.Error(w, fmt.Sprintf("blob exceeds %d bytes", max), http.StatusRequestEntityTooLarge)
-		case errors.Is(err, blobstore.ErrDigestMismatch), errors.Is(err, blobstore.ErrBadDigest):
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		default:
-			var tooLarge *http.MaxBytesError
-			if errors.As(err, &tooLarge) {
-				http.Error(w, fmt.Sprintf("blob exceeds %d bytes", max), http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+	if _, _, putErr := s.blobs.Put(r.Body, sha); putErr != nil {
+		// One classification, one counting site, one response write: a new
+		// error case added later cannot land counted on one branch and silent
+		// on another, which is exactly how the 413 path went uncounted before.
+		status, reason, message := blobPutOutcome(putErr, max)
+		if reason != "" {
+			s.metrics.BlobRejected(reason)
 		}
 		s.metrics.BlobTransfer("receive", "error")
+		http.Error(w, message, status)
 		return
 	}
 	s.log.Debug("stored a blob from a child", "child", child.ULID, "sha", sha[:12])
 	s.metrics.BlobTransfer("receive", "ok")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// blobPutOutcome maps a blobstore.Put error to the HTTP status, the
+// BlobRejected reason to record (resources design §5), and the response
+// body. reason is "" for an error that is not one of the three known
+// ingress-rejection reasons (a genuine internal failure) — BlobRejected only
+// ever records those three, never a fourth label.
+//
+// blobstore.ErrTooLarge is deliberately not one of the cases here. r.Body is
+// wrapped in http.MaxBytesReader with the SAME cap
+// (cfg.Limits.EffectiveMaxBlobBytes(), the same config the store itself was
+// opened with in node.Start) before Put ever sees the stream, so
+// MaxBytesReader always trips first and Put's own size check can never fire
+// on this door — a case for it here would be dead code. blobstore.Put keeps
+// its own check regardless: that is the store's unconditional guarantee, not
+// this door's, and it still holds for any other caller of Put that does not
+// wrap its reader the same way.
+func blobPutOutcome(err error, max int64) (status int, reason, message string) {
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.As(err, &tooLarge):
+		return http.StatusRequestEntityTooLarge, "too_large", fmt.Sprintf("blob exceeds %d bytes", max)
+	case errors.Is(err, blobstore.ErrDigestMismatch):
+		return http.StatusBadRequest, "digest_mismatch", err.Error()
+	case errors.Is(err, blobstore.ErrBadDigest):
+		return http.StatusBadRequest, "bad_digest", err.Error()
+	default:
+		return http.StatusInternalServerError, "", err.Error()
+	}
 }
 
 // BlobHas asks the parent whether it already holds sha. A cheap question that
