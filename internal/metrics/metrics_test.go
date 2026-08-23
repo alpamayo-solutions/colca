@@ -72,6 +72,36 @@ func gaugeValue(t *testing.T, m *Metrics, family string, labels map[string]strin
 	return 0
 }
 
+// counterValue is gaugeValue's Counter-backed equivalent, for families whose
+// children are plain prometheus.Counter (not derived by storeCollector).
+//
+// internal/metrics/metricstest.Value does the same job for every OTHER
+// package (repl, engine, httpapi, mqttsrv, retention) and should stay the
+// first choice there. It cannot be used HERE: this file is `package metrics`
+// (package-internal, so it can reach m.reg directly), and metricstest imports
+// metrics — importing metricstest from this file would be metrics →
+// metricstest → metrics, an import cycle. Do not "fix" this by adding that
+// import.
+func counterValue(t *testing.T, m *Metrics, family string, labels map[string]string) float64 {
+	t.Helper()
+	mfs, err := m.reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != family {
+			continue
+		}
+		for _, mm := range mf.GetMetric() {
+			if labelsMatch(mm, labels) {
+				return mm.GetCounter().GetValue()
+			}
+		}
+	}
+	t.Fatalf("family %s with labels %v not found in scrape", family, labels)
+	return 0
+}
+
 func labelsMatch(mm *dto.Metric, want map[string]string) bool {
 	if len(mm.GetLabel()) != len(want) {
 		return false
@@ -416,6 +446,12 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		// (delivered, expired, forced, gapped [delta]).
 		"colca_drains_active":          1,
 		"colca_drains_completed_total": 4,
+		// Blob transfer and ingress-rejection counters (resources design
+		// §5/§7): pre-created so every label combination scrapes at zero
+		// before it first fires.
+		"colca_blob_transfers_total": len(blobDirections) * len(blobResults),
+		"colca_blob_rejects_total":   len(blobRejectReasons),
+		"colca_record_rejects_total": len(recordRejectReasons),
 		// colca_cursor_position/lag/last_advance_age, colca_child_hwm,
 		// colca_repl_gap_applied_total and colca_drain_pending_commands are
 		// dynamic (no series until a cursor, child or draining child exists)
@@ -551,4 +587,63 @@ func TestNilReceiverIsNoOp(t *testing.T) {
 	m.GapServed("metrics", "fetch")
 	m.GapReceived("metrics")
 	m.GapApplied("n-child", "metrics")
+	m.BlobTransfer("push", "ok")
+	m.BlobRejected("too_large")
+	m.RecordRejected("too_large")
+}
+
+// Every blob-transfer and ingress-rejection label combination must scrape
+// before it first fires — the same "pre-created children" guarantee
+// TestAllFamiliesPresentZeroValuedBeforeAnyEvent pins by cardinality, checked
+// here by explicit label value instead.
+func TestBlobMetricFamiliesScrapeAtZero(t *testing.T) {
+	m := New(mustStore(t), config.Retention{}, nil)
+	for _, tc := range []struct {
+		family string
+		labels map[string]string
+	}{
+		{"colca_blob_transfers_total", map[string]string{"direction": "push", "result": "ok"}},
+		{"colca_blob_transfers_total", map[string]string{"direction": "pull", "result": "error"}},
+		{"colca_blob_rejects_total", map[string]string{"reason": "too_large"}},
+		{"colca_record_rejects_total", map[string]string{"reason": "too_large"}},
+	} {
+		if got := counterValue(t, m, tc.family, tc.labels); got != 0 {
+			t.Fatalf("%s%v = %v, want 0 — every label combination must scrape before it first fires", tc.family, tc.labels, got)
+		}
+	}
+}
+
+func TestBlobTransferCounts(t *testing.T) {
+	m := New(mustStore(t), config.Retention{}, nil)
+	m.BlobTransfer("push", "ok")
+	m.BlobTransfer("push", "ok")
+	if got := testutil.ToFloat64(m.blobTransfersBy["push|ok"]); got != 2 {
+		t.Fatalf("blob transfers push/ok = %v, want 2", got)
+	}
+	// Denominator: an untouched label combination stays at 0, so the count
+	// above is not just every child rising together.
+	if got := testutil.ToFloat64(m.blobTransfersBy["pull|error"]); got != 0 {
+		t.Fatalf("blob transfers pull/error = %v, want 0", got)
+	}
+}
+
+func TestBlobAndRecordRejectCounts(t *testing.T) {
+	m := New(mustStore(t), config.Retention{}, nil)
+	m.BlobRejected("too_large")
+	m.BlobRejected("too_large")
+	m.BlobRejected("digest_mismatch")
+	if got := testutil.ToFloat64(m.blobRejectsBy["too_large"]); got != 2 {
+		t.Fatalf("blob rejects too_large = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(m.blobRejectsBy["digest_mismatch"]); got != 1 {
+		t.Fatalf("blob rejects digest_mismatch = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.blobRejectsBy["bad_digest"]); got != 0 {
+		t.Fatalf("blob rejects bad_digest = %v, want 0", got)
+	}
+
+	m.RecordRejected("too_large")
+	if got := testutil.ToFloat64(m.recordRejectsBy["too_large"]); got != 1 {
+		t.Fatalf("record rejects too_large = %v, want 1", got)
+	}
 }

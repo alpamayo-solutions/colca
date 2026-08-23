@@ -129,6 +129,12 @@ var uplinkStreams = []string{"metrics", "entities", "commands", "audit", "alarms
 // policy that does not exist.
 var retentionStreams = []string{"metrics", "entities", "commands", "audit", "alarms"}
 
+// Blob transfer and ingress-rejection label values (resources design §5/§7).
+var blobDirections = []string{"push", "pull", "receive"}
+var blobResults = []string{"ok", "error"}
+var blobRejectReasons = []string{"too_large", "digest_mismatch", "bad_digest"}
+var recordRejectReasons = []string{"too_large"}
+
 // gapSurfaces — the allowed `surface` label values of colca_gap_served_total
 // (design §8): `fetch` is GET /fetch (any stream), `downlink` is GET
 // /downlink (commands only, in practice — pre-created for every stream
@@ -245,6 +251,14 @@ type Metrics struct {
 	definitionsRejected  prometheus.Counter     // colca_definitions_rejected_total
 	auditWriteFailures   prometheus.Counter     // colca_audit_write_failures_total
 	drainsCompletedBy    map[string]prometheus.Counter
+
+	// Blob transfer and ingress rejections (resources design §5/§7).
+	blobTransfers   *prometheus.CounterVec // colca_blob_transfers_total{direction,result}
+	blobTransfersBy map[string]prometheus.Counter
+	blobRejects     *prometheus.CounterVec // colca_blob_rejects_total{reason}
+	blobRejectsBy   map[string]prometheus.Counter
+	recordRejects   *prometheus.CounterVec // colca_record_rejects_total{reason}
+	recordRejectsBy map[string]prometheus.Counter
 
 	ingestBy        map[string]prometheus.Counter
 	rejectedBy      map[string]prometheus.Counter
@@ -424,6 +438,18 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_audit_write_failures_total",
 			Help: "Security audit events that could not be durably appended. The protected operation remains denied. Resets on restart.",
 		}),
+		blobTransfers: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_blob_transfers_total",
+			Help: "Blob transfers by direction (push to parent, pull from parent, receive from child) and outcome. Resets on restart.",
+		}, []string{"direction", "result"}),
+		blobRejects: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_blob_rejects_total",
+			Help: "Blobs refused at ingress, by reason. Resets on restart.",
+		}, []string{"reason"}),
+		recordRejects: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_record_rejects_total",
+			Help: "Records refused at ingress for exceeding the configured size cap. Resets on restart.",
+		}, []string{"reason"}),
 	}
 	m.ingestBy = counterChildren(m.ingest, streams)
 	m.rejectedBy = counterChildren(m.rejected, reasons)
@@ -453,6 +479,15 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}
 	}
 	m.drainsCompletedBy = counterChildren(m.drainsCompleted, drainOutcomes)
+
+	m.blobTransfersBy = map[string]prometheus.Counter{}
+	for _, d := range blobDirections {
+		for _, res := range blobResults {
+			m.blobTransfersBy[d+"|"+res] = m.blobTransfers.WithLabelValues(d, res)
+		}
+	}
+	m.blobRejectsBy = counterChildren(m.blobRejects, blobRejectReasons)
+	m.recordRejectsBy = counterChildren(m.recordRejects, recordRejectReasons)
 
 	// colca_drains_active starts at the count of entries persisted with
 	// status=draining (move-drain design §3.2: "status survives restart") —
@@ -511,6 +546,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.gapServed, m.gapReceived, m.replGapApplied,
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
 		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
+		m.blobTransfers, m.blobRejects, m.recordRejects,
 		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
 	return m
@@ -938,6 +974,42 @@ func (m *Metrics) DefinitionRejected() {
 		return
 	}
 	m.definitionsRejected.Inc()
+}
+
+// BlobTransfer counts one completed blob transfer (resources design §7).
+func (m *Metrics) BlobTransfer(direction, result string) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.blobTransfersBy[direction+"|"+result]; ok {
+		c.Inc()
+		return
+	}
+	m.blobTransfers.WithLabelValues(direction, result).Inc()
+}
+
+// BlobRejected counts one blob refused at ingress (resources design §5).
+func (m *Metrics) BlobRejected(reason string) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.blobRejectsBy[reason]; ok {
+		c.Inc()
+		return
+	}
+	m.blobRejects.WithLabelValues(reason).Inc()
+}
+
+// RecordRejected counts one record refused for exceeding the size cap.
+func (m *Metrics) RecordRejected(reason string) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.recordRejectsBy[reason]; ok {
+		c.Inc()
+		return
+	}
+	m.recordRejects.WithLabelValues(reason).Inc()
 }
 
 // storeCollector derives the gauge families from the store (and, for the

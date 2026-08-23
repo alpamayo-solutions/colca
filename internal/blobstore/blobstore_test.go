@@ -112,6 +112,27 @@ func TestPutRefusesAnOversizeBlob(t *testing.T) {
 
 func TestPutLeavesNoTempFileBehind(t *testing.T) {
 	s := open(t, 64)
+
+	// Denominator: prove the walk can actually see a temp file that genuinely
+	// exists before trusting it to report none. Without this, a walk pointed
+	// at the wrong root or matching the wrong pattern would pass silently.
+	canary := s.root() + "/.canary-check.tmp"
+	if err := os.WriteFile(canary, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var seeded []string
+	_ = filepathWalk(s.root(), func(path string, isDir bool) {
+		if !isDir && strings.Contains(path, ".tmp") {
+			seeded = append(seeded, path)
+		}
+	})
+	if len(seeded) != 1 {
+		t.Fatalf("walk found %d temp files with the canary present, want 1 — the walk cannot see a temp file that genuinely exists", len(seeded))
+	}
+	if err := os.Remove(canary); err != nil {
+		t.Fatal(err)
+	}
+
 	_, _, _ = s.Put(bytes.NewReader(make([]byte, 128)), "")
 	var leftovers []string
 	_ = filepathWalk(s.root(), func(path string, isDir bool) {
@@ -132,6 +153,25 @@ func TestGetAndDeleteOnAMissingBlob(t *testing.T) {
 	if err := s.Delete(digest([]byte("absent"))); err != nil {
 		t.Fatalf("Delete of a missing blob must be a no-op, got %v", err)
 	}
+
+	// Denominator: the same Get/Delete pair against a blob that IS present,
+	// so the ErrNotFound and no-op-delete above are measured against calls
+	// that demonstrably work.
+	sha, _, err := s.Put(bytes.NewReader([]byte("present")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, _, err := s.Get(sha)
+	if err != nil {
+		t.Fatalf("Get of a present blob failed: %v — the ErrNotFound above proves nothing", err)
+	}
+	rc.Close()
+	if err := s.Delete(sha); err != nil {
+		t.Fatalf("Delete of a present blob failed: %v", err)
+	}
+	if _, ok := s.Has(sha); ok {
+		t.Fatal("blob still present after Delete")
+	}
 }
 
 func TestRejectsANonDigestKey(t *testing.T) {
@@ -144,6 +184,21 @@ func TestRejectsANonDigestKey(t *testing.T) {
 			t.Fatalf("Get(%q) err = %v, want ErrBadDigest", bad, err)
 		}
 	}
+	// Denominator: the same Has/Get pair against a real digest that IS
+	// present, so the rejections above are measured against a lookup that
+	// demonstrably works.
+	good, _, err := s.Put(bytes.NewReader([]byte("valid content")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.Has(good); !ok {
+		t.Fatal("Has() cannot see a stored blob — the rejections above prove nothing")
+	}
+	rc, _, err := s.Get(good)
+	if err != nil {
+		t.Fatalf("Get() of a stored blob failed: %v", err)
+	}
+	rc.Close()
 }
 
 func TestSurvivesReopen(t *testing.T) {
