@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
+	"github.com/alpamayo-solutions/colca/internal/metrics"
 )
 
 // handleBlobHead answers whether this node holds a blob. It is what lets a
@@ -129,4 +130,57 @@ func (c *Client) BlobPut(sha string, r io.Reader, size int64) error {
 		return fmt.Errorf("blob put %s: %s: %s", sha[:12], resp.Status, body)
 	}
 	return nil
+}
+
+// syncBlobs pushes every local blob the parent does not hold, one whole file
+// at a time (resources design §7). It runs AFTER the record lanes drain, so a
+// large file can never queue ahead of an alarm or an entity batch — blobs do
+// not ride the streams at all.
+//
+// confirmed is caller-owned and scoped to one pinned parent key: a reparent
+// builds a new Client and a new map, which is what re-offers everything to the
+// new parent. Nothing is persisted; a restart re-verifies with a HEAD per
+// blob, which is cheap and idempotent.
+func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed map[string]bool) int {
+	if c == nil || blobs == nil {
+		return 0
+	}
+	list, err := blobs.List()
+	if err != nil {
+		c.log.Warn("cannot enumerate blobs", "err", err)
+		return 0
+	}
+	pushed := 0
+	for _, info := range list {
+		if confirmed[info.SHA256] {
+			continue
+		}
+		has, err := c.BlobHas(info.SHA256)
+		if err != nil {
+			// The parent is unreachable or unhappy; the next pass retries.
+			// Nothing is marked confirmed, so no blob is lost by giving up here.
+			c.log.Debug("blob head failed", "sha", info.SHA256[:12], "err", err)
+			return pushed
+		}
+		if has {
+			confirmed[info.SHA256] = true
+			continue
+		}
+		rc, size, err := blobs.Get(info.SHA256)
+		if err != nil {
+			// Swept between List and Get — normal, not a fault.
+			continue
+		}
+		err = c.BlobPut(info.SHA256, rc, size)
+		rc.Close()
+		if err != nil {
+			c.log.Warn("blob push failed", "sha", info.SHA256[:12], "err", err)
+			m.BlobTransfer("push", "error")
+			return pushed
+		}
+		confirmed[info.SHA256] = true
+		pushed++
+		m.BlobTransfer("push", "ok")
+	}
+	return pushed
 }

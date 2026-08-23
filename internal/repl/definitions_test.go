@@ -142,7 +142,7 @@ func TestTheUplinkNeverCarriesDefinitions(t *testing.T) {
 
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 	stop, done := make(chan struct{}), make(chan struct{})
-	go func() { defer close(done); RunUplink(cl, ceng, nil, stop) }()
+	go func() { defer close(done); RunUplink(cl, ceng, nil, nil, stop) }()
 	waitFor(t, "the child's metric to reach the parent", 5*time.Second, func() bool {
 		return ps.NextOffset("metrics") > 1
 	})

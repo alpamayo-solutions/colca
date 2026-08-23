@@ -127,7 +127,90 @@ func TestParentRefusesAnOversizeBlobAndCountsIt(t *testing.T) {
 	}
 }
 
+func TestSyncPushesOnlyWhatTheParentLacks(t *testing.T) {
+	parent, child := newReplPair(t)
+	childBlobs := newBlobStore(t)
+
+	first, _, err := childBlobs.Put(bytes.NewReader([]byte("one")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := childBlobs.Put(bytes.NewReader([]byte("two")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	confirmed := map[string]bool{}
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed); pushed != 2 {
+		t.Fatalf("first pass pushed %d, want 2", pushed)
+	}
+	if _, ok := parent.blobs.Has(first); !ok {
+		t.Fatal("parent is missing the first blob")
+	}
+	if _, ok := parent.blobs.Has(second); !ok {
+		t.Fatal("parent is missing the second blob")
+	}
+
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed); pushed != 0 {
+		t.Fatalf("second pass pushed %d, want 0 — confirmed blobs must not be re-sent", pushed)
+	}
+
+	third, _, err := childBlobs.Put(bytes.NewReader([]byte("three")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed); pushed != 1 {
+		t.Fatalf("third pass pushed %d, want 1 — a new blob must be sent", pushed)
+	}
+	if _, ok := parent.blobs.Has(third); !ok {
+		t.Fatal("parent is missing the third blob")
+	}
+}
+
+func TestSyncSkipsWhatTheParentAlreadyHas(t *testing.T) {
+	parent, child := newReplPair(t)
+	childBlobs := newBlobStore(t)
+	content := []byte("a sibling already sent this")
+	sha, _, err := childBlobs.Put(bytes.NewReader(content), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The parent got it from elsewhere — content addressing makes it the same blob.
+	if _, _, err := parent.blobs.Put(bytes.NewReader(content), ""); err != nil {
+		t.Fatal(err)
+	}
+	if pushed := syncBlobs(child, childBlobs, nil, map[string]bool{}); pushed != 0 {
+		t.Fatalf("pushed %d, want 0", pushed)
+	}
+	if _, ok := parent.blobs.Has(sha); !ok {
+		t.Fatal("the parent lost the blob it already had")
+	}
+}
+
+func TestSyncSurvivesAnUnreachableParent(t *testing.T) {
+	parent, child := newReplPair(t)
+	childBlobs := newBlobStore(t)
+	if _, _, err := childBlobs.Put(bytes.NewReader([]byte("pending")), ""); err != nil {
+		t.Fatal(err)
+	}
+	parent.Stop() // close the parent listener: the child now has a dead parent
+	confirmed := map[string]bool{}
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed); pushed != 0 {
+		t.Fatalf("pushed %d against a dead parent, want 0", pushed)
+	}
+	if len(confirmed) != 0 {
+		t.Fatal("a failed push must not be recorded as confirmed")
+	}
+}
+
 // --- helpers -----------------------------------------------------------
+
+// newBlobStore opens a fresh, empty blob store in a temp dir with a 1 MiB cap
+// — for tests that need a child-side store distinct from the parent's.
+func newBlobStore(t *testing.T) *blobstore.Store {
+	t.Helper()
+	return mustBlobStore(t, t.TempDir(), 1<<20)
+}
 
 // mustBlobStore opens a blob store under dir with the given cap.
 func mustBlobStore(t *testing.T, dir string, maxBytes uint64) *blobstore.Store {

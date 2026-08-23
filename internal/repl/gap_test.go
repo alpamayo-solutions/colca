@@ -225,7 +225,7 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunUplink(cl, ceng, cm, stop)
+		RunUplink(cl, ceng, nil, cm, stop)
 	}()
 	defer func() {
 		close(stop)
@@ -353,7 +353,7 @@ func TestUplinkPassesStreamGapMarkerButNotCommands(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunUplink(f.cl, ceng, nil, stop)
+		RunUplink(f.cl, ceng, nil, nil, stop)
 	}()
 	waitFor(t, "the marker and the ack to reach the parent", 10*time.Second, func() bool {
 		return f.ps.NextOffset("commands") == 3
@@ -411,7 +411,7 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunUplink(cl, ceng, nil, stop)
+		RunUplink(cl, ceng, nil, nil, stop)
 	}()
 	waitFor(t, "the uplink cursor to jump to the LWM", 5*time.Second, func() bool {
 		return cs.CursorGet(uns.UplinkCursor(cl.ParentPub()), "metrics") == 4

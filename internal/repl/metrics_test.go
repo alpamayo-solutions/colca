@@ -48,7 +48,7 @@ func TestUplinkMetricsProgressAndFailure(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunUplink(cl, ceng, cm, stop)
+		RunUplink(cl, ceng, nil, cm, stop)
 	}()
 
 	waitFor(t, "the first uplink push to succeed", 5*time.Second, func() bool {

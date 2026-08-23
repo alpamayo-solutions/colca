@@ -34,7 +34,7 @@ func TestAuditStreamRisesWithMountAndNeverCarriesDefinitions(t *testing.T) {
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 	stop := make(chan struct{})
 	done := make(chan struct{})
-	go func() { defer close(done); RunUplink(cl, ceng, nil, stop) }()
+	go func() { defer close(done); RunUplink(cl, ceng, nil, nil, stop) }()
 	waitFor(t, "audit record to reach parent", 5*time.Second, func() bool {
 		return ps.NextOffset("audit") == 2
 	})

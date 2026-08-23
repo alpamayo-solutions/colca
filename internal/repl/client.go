@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -471,8 +472,10 @@ func initCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64)
 // pruner passes that cursor the backlog is gone and only a §6.4 marker
 // remains, so lane pressure would quietly become data loss.
 //
-// m may be nil (every Metrics method is nil-safe).
-func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan struct{}) {
+// blobs is the local blob store this node offers to its parent; nil-safe:
+// syncBlobs no-ops when it is nil. m may be nil (every Metrics method is
+// nil-safe).
+func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
 	// Settle this node's position against the configured parent before the
@@ -481,6 +484,9 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 	// same reason — the only metric this can emit belongs to the commands
 	// cursor, which a head of 0 never reaches.
 	initCursors(c, eng, nil, 0)
+
+	// Scoped to this client, and therefore to this pinned parent key.
+	confirmedBlobs := map[string]bool{}
 
 	stopped := func() bool {
 		select {
@@ -590,6 +596,10 @@ func RunUplink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan st
 		if scanned {
 			idle = false
 		}
+		// Blobs last: they are not in any stream, and a file must never delay
+		// a record. A pass that pushed nothing costs one HEAD per unconfirmed
+		// blob, which is why confirmations are remembered.
+		syncBlobs(c, blobs, m, confirmedBlobs)
 		if idle {
 			select {
 			case <-stop:

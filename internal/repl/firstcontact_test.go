@@ -59,7 +59,7 @@ func TestFirstContactUplinkStartsAtTheLWMWithoutReportingAGap(t *testing.T) {
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
-	go func() { defer close(done); RunUplink(cl, ceng, cm, stop) }()
+	go func() { defer close(done); RunUplink(cl, ceng, nil, cm, stop) }()
 	t.Cleanup(func() {
 		close(stop)
 		waitForClosed(t, "RunUplink to return after stop", done, 5*time.Second)

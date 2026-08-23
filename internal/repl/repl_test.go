@@ -266,7 +266,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunUplink(cl, ceng, nil, stop)
+		RunUplink(cl, ceng, nil, nil, stop)
 	}()
 	time.Sleep(400 * time.Millisecond)
 	close(stop)
@@ -300,7 +300,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	done2 := make(chan struct{})
 	go func() {
 		defer close(done2)
-		RunUplink(cl, ceng, nil, stop2)
+		RunUplink(cl, ceng, nil, nil, stop2)
 	}()
 	waitFor(t, "the buffered records to reach the parent", 10*time.Second, func() bool {
 		return ps.NextOffset("metrics") == 3 && ps.NextOffset("commands") == 2
@@ -512,7 +512,7 @@ func uplinkPair(t *testing.T) (child, parent *store.Store, parentPub string, sta
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			RunUplink(cl, ceng, nil, stop)
+			RunUplink(cl, ceng, nil, nil, stop)
 		}()
 		t.Cleanup(func() {
 			close(stop)

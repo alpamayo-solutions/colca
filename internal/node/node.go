@@ -397,7 +397,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.wg.Add(2)
 		go func() {
 			defer n.wg.Done()
-			repl.RunUplink(cl, n.Engine, n.Metrics, n.stop)
+			repl.RunUplink(cl, n.Engine, n.Blobs, n.Metrics, n.stop)
 		}()
 		go func() {
 			defer n.wg.Done()
