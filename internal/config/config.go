@@ -113,6 +113,12 @@ type Config struct {
 	// = every default in the §3.1 table applies (pruning ON by default).
 	Retention Retention `yaml:"retention"`
 
+	// Limits caps what a single record or blob may be (resources design §5).
+	// Colca had no size guard at all before this: an oversized publish was
+	// stored, replicated and retained forever. Absent entirely means the
+	// defaults below.
+	Limits Limits `yaml:"limits"`
+
 	// TimeSync configures the authoritative-time protocol (time-sync design
 	// §2.5). Absent entirely = every default below applies (default-on).
 	TimeSync TimeSync `yaml:"time_sync"`
@@ -256,6 +262,48 @@ type StreamRetention struct {
 type Retention struct {
 	Interval *Duration                  `yaml:"interval"`
 	Streams  map[string]StreamRetention `yaml:"streams"`
+}
+
+// Limits is the limits: block (resources design §5). A zero value means
+// "apply the defaults", read lazily like Retention's — never at load.
+type Limits struct {
+	MaxRecordBytes ByteSize `yaml:"max_record_bytes"`
+	MaxBlobBytes   ByteSize `yaml:"max_blob_bytes"`
+}
+
+// defaultMaxRecordBytes leaves headroom for the fattest known record (a
+// connector's full _DataTags catalogue) while making a file smuggled into a
+// record impossible by an order of magnitude.
+const defaultMaxRecordBytes = 4 << 20
+
+// defaultMaxBlobBytes is the conservative resource-file ceiling; whole-file
+// transfer with retry is enough at this size, which is why no chunking
+// protocol exists.
+const defaultMaxBlobBytes = 32 << 20
+
+func (l Limits) EffectiveMaxRecordBytes() uint64 {
+	if l.MaxRecordBytes == 0 {
+		return defaultMaxRecordBytes
+	}
+	return uint64(l.MaxRecordBytes)
+}
+
+func (l Limits) EffectiveMaxBlobBytes() uint64 {
+	if l.MaxBlobBytes == 0 {
+		return defaultMaxBlobBytes
+	}
+	return uint64(l.MaxBlobBytes)
+}
+
+// validate refuses a blob cap below the record cap: a blob is always at least
+// as large a thing as a record, and the inversion is far more likely to be a
+// typo than an intent.
+func (l Limits) validate() error {
+	if l.EffectiveMaxBlobBytes() < l.EffectiveMaxRecordBytes() {
+		return fmt.Errorf("limits: max_blob_bytes (%d) is below max_record_bytes (%d)",
+			l.EffectiveMaxBlobBytes(), l.EffectiveMaxRecordBytes())
+	}
+	return nil
 }
 
 // defaultRetentionInterval is the pruner cadence when retention.interval is
@@ -446,6 +494,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	if err := c.Retention.validate(); err != nil {
+		return err
+	}
+	if err := c.Limits.validate(); err != nil {
 		return err
 	}
 	return c.TimeSync.validate()

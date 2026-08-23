@@ -100,6 +100,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("node %s: open store %s: %w", cfg.ULID, cfg.DataDir, err)
 	}
+	st.SetMaxRecordBytes(cfg.Limits.EffectiveMaxRecordBytes())
 
 	// clk is this node's authoritative-time state (time-sync design §2.1): a
 	// node with no configured parent is the root/authority. Built once and

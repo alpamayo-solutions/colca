@@ -764,3 +764,37 @@ func TestCursorSetIfAbsentRecordsThePositionOnlyOnce(t *testing.T) {
 		t.Fatalf("cursor = %d, want 5 — SetIfAbsent must never rewind", got)
 	}
 }
+
+func TestAppendRefusesAnOversizeRecord(t *testing.T) {
+	s := mustOpen(t)
+	s.SetMaxRecordBytes(1024)
+
+	// Presence first: the denominator. A record under the cap must land, or
+	// the refusal below would prove nothing about the cap.
+	if _, _, err := s.Append("entities", []Record{{Topic: "colca/v1/_X/n1/a", Payload: make([]byte, 512)}}); err != nil {
+		t.Fatalf("under-cap append failed: %v", err)
+	}
+
+	_, _, err := s.Append("entities", []Record{{Topic: "colca/v1/_X/n1/b", Payload: make([]byte, 2048)}})
+	if !errors.Is(err, ErrRecordTooLarge) {
+		t.Fatalf("err = %v, want ErrRecordTooLarge", err)
+	}
+	if got := s.NextOffset("entities"); got != 2 {
+		t.Fatalf("next offset = %d, want 2 (unchanged from after the presence append) — the refused record must not be stored", got)
+	}
+}
+
+func TestAppendAcceptsExactlyTheCap(t *testing.T) {
+	s := mustOpen(t)
+	s.SetMaxRecordBytes(1024)
+	if _, _, err := s.Append("entities", []Record{{Topic: "colca/v1/_X/n1/a", Payload: make([]byte, 1024)}}); err != nil {
+		t.Fatalf("a payload of exactly the cap must be accepted: %v", err)
+	}
+}
+
+func TestAppendIsUncappedUntilSet(t *testing.T) {
+	s := mustOpen(t)
+	if _, _, err := s.Append("entities", []Record{{Topic: "colca/v1/_X/n1/a", Payload: make([]byte, 1<<20)}}); err != nil {
+		t.Fatalf("an unset cap must not refuse: %v", err)
+	}
+}

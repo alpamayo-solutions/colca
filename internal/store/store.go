@@ -30,6 +30,12 @@ func Streams() []string {
 	return out
 }
 
+// ErrRecordTooLarge is returned by Append when a record's payload exceeds the
+// configured cap (resources design §5). It is an INGRESS guard: replication
+// never checks it, because refusing a record a child already stored would
+// wedge that child's uplink on it forever.
+var ErrRecordTooLarge = errors.New("record payload exceeds the configured limit")
+
 type Record struct {
 	Topic        string `json:"t"`
 	Payload      []byte `json:"p"`
@@ -80,7 +86,15 @@ type Store struct {
 	// appendApply is Pebble's atomic apply boundary. Keeping the bound method
 	// injectable lets tests prove an apply failure changes neither stream nor KV.
 	appendApply func(*pebble.Batch, *pebble.WriteOptions) error
+	// maxRecordBytes is 0 until SetMaxRecordBytes is called, and 0 means no cap.
+	// Set once at startup before any append; not guarded by s.mu because nothing
+	// writes it after the node is running.
+	maxRecordBytes uint64
 }
+
+// SetMaxRecordBytes installs the ingress record cap. Call once at startup,
+// before the doors are listening; 0 leaves the store uncapped.
+func (s *Store) SetMaxRecordBytes(limit uint64) { s.maxRecordBytes = limit }
 
 // Open opens (or creates) the store at dir and restores the next offset,
 // low-water mark and byte counter of every stream from persisted meta, so
@@ -255,6 +269,14 @@ func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, 
 	off := s.next[stream]
 	if off == 0 {
 		return 0, 0, fmt.Errorf("unknown stream %q", stream)
+	}
+	if s.maxRecordBytes > 0 {
+		for i, rec := range recs {
+			if uint64(len(rec.Payload)) > s.maxRecordBytes {
+				return 0, 0, fmt.Errorf("stream %q record %d (%s): %d bytes > %d: %w",
+					stream, i, rec.Topic, len(rec.Payload), s.maxRecordBytes, ErrRecordTooLarge)
+			}
+		}
 	}
 	first = off
 	b := s.db.NewBatch()

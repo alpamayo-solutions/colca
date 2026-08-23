@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const sample = `
@@ -707,5 +709,36 @@ func TestAlarmsIsAConfigurableStream(t *testing.T) {
 	}}
 	if err := r.validate(); err != nil {
 		t.Fatalf("retention.streams.alarms rejected: %v", err)
+	}
+}
+
+func TestLimitsDefaultWhenAbsent(t *testing.T) {
+	var l Limits
+	if got := l.EffectiveMaxRecordBytes(); got != 4<<20 {
+		t.Fatalf("record default = %d, want %d", got, 4<<20)
+	}
+	if got := l.EffectiveMaxBlobBytes(); got != 32<<20 {
+		t.Fatalf("blob default = %d, want %d", got, 32<<20)
+	}
+}
+
+func TestLimitsParseHumanSizes(t *testing.T) {
+	var c Config
+	if err := yaml.Unmarshal([]byte("limits:\n  max_record_bytes: 8MiB\n  max_blob_bytes: 1GiB\n"), &c); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Limits.EffectiveMaxRecordBytes(); got != 8<<20 {
+		t.Fatalf("record = %d, want %d", got, 8<<20)
+	}
+	if got := c.Limits.EffectiveMaxBlobBytes(); got != 1<<30 {
+		t.Fatalf("blob = %d, want %d", got, 1<<30)
+	}
+}
+
+func TestLimitsRejectABlobCapBelowTheRecordCap(t *testing.T) {
+	c := Config{ULID: "n1", DataDir: "/tmp/x", KeyFile: "/tmp/x.key"}
+	c.Limits = Limits{MaxRecordBytes: ByteSize(8 << 20), MaxBlobBytes: ByteSize(1 << 20)}
+	if err := c.Validate(); err == nil {
+		t.Fatal("want an error when the blob cap is below the record cap")
 	}
 }
