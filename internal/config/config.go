@@ -281,6 +281,17 @@ const defaultMaxRecordBytes = 4 << 20
 // protocol exists.
 const defaultMaxBlobBytes = 32 << 20
 
+// maxMaxRecordBytes bounds an operator-configured max_record_bytes. The MQTT
+// door adds 64KiB of protocol headroom to this value and narrows the result
+// to a uint32 (mqttsrv.New's MaximumPacketSize) — a record cap above roughly
+// 2^32-64KiB would overflow that cast and silently come out BELOW the record
+// cap it was meant to sit above, so the broker would start refusing
+// legitimate publishes with no diagnostic. 1GiB is far above any legitimate
+// record and far below where that cast starts lying, so rejecting past it
+// here — loudly, at startup — is strictly a safety margin, not a realistic
+// ceiling anyone should ever hit.
+const maxMaxRecordBytes = 1 << 30
+
 func (l Limits) EffectiveMaxRecordBytes() uint64 {
 	if l.MaxRecordBytes == 0 {
 		return defaultMaxRecordBytes
@@ -297,8 +308,16 @@ func (l Limits) EffectiveMaxBlobBytes() uint64 {
 
 // validate refuses a blob cap below the record cap: a blob is always at least
 // as large a thing as a record, and the inversion is far more likely to be a
-// typo than an intent.
+// typo than an intent. It also refuses a record cap above maxMaxRecordBytes,
+// which exists purely to keep mqttsrv's uint32 packet-size cast from silently
+// overflowing (see maxMaxRecordBytes). max_blob_bytes carries no equivalent
+// bound: nothing downstream narrows it into a smaller integer type, so there
+// is no cast for a large value to overflow.
 func (l Limits) validate() error {
+	if l.EffectiveMaxRecordBytes() > maxMaxRecordBytes {
+		return fmt.Errorf("limits: max_record_bytes (%d) exceeds the maximum of %d",
+			l.EffectiveMaxRecordBytes(), uint64(maxMaxRecordBytes))
+	}
 	if l.EffectiveMaxBlobBytes() < l.EffectiveMaxRecordBytes() {
 		return fmt.Errorf("limits: max_blob_bytes (%d) is below max_record_bytes (%d)",
 			l.EffectiveMaxBlobBytes(), l.EffectiveMaxRecordBytes())

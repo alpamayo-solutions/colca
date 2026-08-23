@@ -742,3 +742,25 @@ func TestLimitsRejectABlobCapBelowTheRecordCap(t *testing.T) {
 		t.Fatal("want an error when the blob cap is below the record cap")
 	}
 }
+
+// mqttsrv.New adds 64KiB of headroom to max_record_bytes and narrows the
+// result into a uint32 (MaximumPacketSize). A record cap above the
+// maxMaxRecordBytes bound would overflow that cast and come out BELOW the
+// record cap it must sit above, so Validate must refuse it at startup rather
+// than let it silently invert at runtime.
+func TestLimitsRejectsARecordCapAboveTheUint32SafetyBound(t *testing.T) {
+	// Presence first: a record cap AT the bound is accepted, with a blob cap
+	// that stays at or above it so this isn't rejected by the inversion check
+	// instead.
+	at := Config{ULID: "n1", DataDir: "/tmp/x", KeyFile: "/tmp/x.key"}
+	at.Limits = Limits{MaxRecordBytes: ByteSize(maxMaxRecordBytes), MaxBlobBytes: ByteSize(maxMaxRecordBytes)}
+	if err := at.Validate(); err != nil {
+		t.Fatalf("record cap at the bound (%d) rejected: %v", maxMaxRecordBytes, err)
+	}
+
+	over := Config{ULID: "n1", DataDir: "/tmp/x", KeyFile: "/tmp/x.key"}
+	over.Limits = Limits{MaxRecordBytes: ByteSize(maxMaxRecordBytes + 1), MaxBlobBytes: ByteSize(maxMaxRecordBytes + 1)}
+	if err := over.Validate(); err == nil {
+		t.Fatal("want an error when max_record_bytes exceeds the uint32 safety bound")
+	}
+}
