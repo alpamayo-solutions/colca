@@ -626,16 +626,26 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			// A parent that answers without a head predates the field (§3.3) —
 			// a mixed-version tree during a leaf-first rolling upgrade. Nothing
 			// here can repair that: with no head there is no position to adopt,
-			// so a first-contact commands cursor stays at its default of 1 and
-			// the poll below hands this node every retained command issued under
-			// its mount before it attached, which is exactly what §3.2 exists to
-			// refuse. Say so once, loudly, and count it — hello runs once per
-			// process, and the §7 diagnostic below cannot speak for this case
-			// because it needs a head of its own to compare against.
+			// so a commands cursor this node does not have yet stays at its
+			// default of 1 and the poll below hands it every retained command
+			// issued under its mount before it attached, which is exactly what
+			// §3.2 exists to refuse.
+			//
+			// Said on every start against such a parent, not only on genuine
+			// first contact — hello runs once per process and this branch reads
+			// the response alone, before initCursors has asked whether a cursor
+			// for this parent exists. A node that already holds one adopts
+			// nothing, risks nothing, and still logs: the line names a
+			// mixed-version parent, and only the first-contact case behind it is
+			// a hazard. Leaving the distinction to the reader rather than
+			// probing the store here keeps one meaning per branch — the §7
+			// diagnostic below cannot speak for this case either, since it needs
+			// a head of its own to compare against.
 			if res.Head == 0 {
-				c.log.Warn("parent answered the first-contact hello without a command head — it predates "+
-					"parent-scoped cursors; this node starts its command cursor at 1 and may execute "+
-					"commands issued under its mount before it attached (design §3.2/§3.3)",
+				c.log.Warn("parent answered hello without a command head — it predates parent-scoped "+
+					"cursors; if this node has no commands cursor for it yet, that cursor starts at 1 "+
+					"and it may execute commands issued under its mount before it attached "+
+					"(design §3.2/§3.3)",
 					"parent", c.base, "parent_key", short(c.parentPub))
 				m.DownlinkHeadAbsent()
 			}

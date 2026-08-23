@@ -153,6 +153,25 @@ func TestOnlyNodesCanDrain(t *testing.T) {
 	}
 }
 
+// A nil entry is "no identity" and gets the same truthful null answer from
+// every boolean predicate on *Entry: not draining, not drainable, not admin
+// — the same rule TestANilEntryHoldsNoDoor pins for MayUseDoor. Without this
+// test the nil guards added alongside MayUseDoor's would be unfalsifiable:
+// removing any one of them would still compile and still pass every other
+// test in this file.
+func TestANilEntryAnswersFalseToEveryBooleanPredicate(t *testing.T) {
+	var e *Entry
+	if e.IsDraining() {
+		t.Error("a nil entry must not read as draining")
+	}
+	if e.CanDrain() {
+		t.Error("a nil entry must not be drainable")
+	}
+	if e.IsAdmin() {
+		t.Error("a nil entry must not read as admin")
+	}
+}
+
 // Doors are answered per kind so no listener re-derives the rule. Humans are
 // the case worth pinning: they arrive as tokens and are authorized per publish,
 // so they hold no door of their own and must be refused at all three.
@@ -174,6 +193,20 @@ func TestEachKindHoldsOnlyItsOwnDoors(t *testing.T) {
 			if got != allowed[d] {
 				t.Errorf("kind %q at door %v: got %v, want %v", tc.kind, d, got, allowed[d])
 			}
+		}
+	}
+}
+
+// A nil entry is "no identity", and no identity holds a door. The predicate
+// answers that instead of panicking because every caller reaches it through
+// `entry, ok := ids.Get(id); if !ok || !entry.MayUseDoor(…)`, where the right
+// half runs on any registry that hands back (nil, true) — a pair the Mounts
+// contract forbids and a test fake can still produce.
+func TestANilEntryHoldsNoDoor(t *testing.T) {
+	var e *Entry
+	for _, d := range []Door{DoorMQTT, DoorHTTP, DoorRepl, DoorLocal} {
+		if e.MayUseDoor(d) {
+			t.Errorf("a nil entry must hold no door, but it claimed door %v", d)
 		}
 	}
 }

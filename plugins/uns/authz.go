@@ -75,7 +75,14 @@ const (
 // parent (move-drain design §3.2). The core asks this instead of comparing
 // Status so the encoding of "draining" — including the absent-means-active
 // rule — stays one fact in one place.
-func (e *Entry) IsDraining() bool { return e.Status == StatusDraining }
+//
+// Nil-safe, like MayUseDoor: "no identity" reads as "not draining" for the
+// same reason "no identity" reads as "no door" — a caller that has already
+// reduced a lookup to `entry, ok := m.byID[ulid]; if !ok { … }` and then
+// still asks the entry a question should get the truthful null answer
+// instead of a panic that only fires when the registry's own invariant
+// (never pairing ok=true with a nil entry) is violated.
+func (e *Entry) IsDraining() bool { return e != nil && e.Status == StatusDraining }
 
 // MarkDraining moves the entry into the draining state. The transition belongs
 // here rather than at the caller for the same reason IsDraining does: the
@@ -86,7 +93,10 @@ func (e *Entry) MarkDraining() { e.Status = StatusDraining }
 // are: a machine's delivery rides broker QoS-1 session state rather than a
 // cursor, so there is nothing for a parent to drain against (move-drain design
 // §3.2 [delta]).
-func (e *Entry) CanDrain() bool { return e.Kind == KindNode }
+//
+// Nil-safe for the same reason IsDraining is: no identity is not a node, so
+// it cannot drain.
+func (e *Entry) CanDrain() bool { return e != nil && e.Kind == KindNode }
 
 // LocalCursorPrefix namespaces a KindLocal entry's cursors by the NAME it
 // presented rather than its minted ULID (local-service-trust design §4): a
@@ -105,6 +115,22 @@ const LocalCursorPrefix = "c/"
 // subject IS its ULID via TokenEntry). KindLocal is the one identity that
 // does not: it knows only the name it presented, so it owns cursors under
 // LocalCursorPrefix+name instead.
+//
+// Deliberately NOT nil-safe, unlike IsDraining/CanDrain/IsAdmin/MayUseDoor.
+// Those are booleans, where "no identity" has a truthful null answer (not
+// draining, cannot drain, not admin, no door). CursorPrefix has none: the
+// only string a nil entry could return is "", and strings.HasPrefix(cursor,
+// "") is true for every cursor — a caller that forwarded a nil entry's
+// prefix straight into HasPrefix would treat a missing identity as owning
+// every cursor in the store, the widest possible grant instead of the
+// narrowest. Rather than push that fail-closed nil check out to every
+// caller of THIS method, it lives once in httpapi's ownsCursor (the sole
+// caller that can receive a nil entry), which returns "owns nothing" for a
+// nil entry before ever reaching here. So CursorPrefix itself still panics
+// on a nil receiver — Go gives that for free — but nothing production reaches
+// it with one: every caller nil-checks first (`c.entry != nil && ...`), and
+// ownsCursor's own nil guard means even a future caller that forgets the
+// check gets the safe answer instead of a crash.
 func (e *Entry) CursorPrefix() string {
 	if e.Kind == KindLocal {
 		return LocalCursorPrefix + e.Name + "/"
@@ -132,7 +158,21 @@ const (
 // replication door, local services to the local door; humans arrive as tokens
 // and are authorized per publish rather than per door, so they hold no door of
 // their own.
+//
+// Nil-safe, like every other boolean predicate on *Entry (MayPublishAudit,
+// ActorKind, MayImplicitlyConfigure, IsDraining, CanDrain, IsAdmin) — the one
+// exception is CursorPrefix, which returns a string and cannot answer "no
+// identity" truthfully (see its doc comment). Every caller reaches this
+// through a registry lookup written as
+// `entry, ok := ids.Get(id); if !ok || !entry.MayUseDoor(…)`, and Go evaluates
+// the right half whenever ok is true. Production's Mounts (registry.Manager)
+// never pairs a nil entry with ok — and the interface now says so — but a
+// predicate that answers "no door" for "no identity" is the truthful answer
+// anyway, and it is cheaper than repeating a nil check at five call sites.
 func (e *Entry) MayUseDoor(d Door) bool {
+	if e == nil {
+		return false
+	}
 	switch d {
 	case DoorMQTT, DoorHTTP:
 		return e.Kind == KindMachine
@@ -458,7 +498,13 @@ func TokenEntryWithGroups(sub string, grants, groupIDs []string, idx *GroupIndex
 
 // IsAdmin reports whether the entry carries the admin:# grant — it unlocks
 // the ADMIN ROUTES only and never widens read or cmd (§3).
+//
+// Nil-safe, same rule as IsDraining and CanDrain: no identity holds no grant,
+// so it is not admin.
 func (e *Entry) IsAdmin() bool {
+	if e == nil {
+		return false
+	}
 	for _, g := range e.Grants {
 		if pg, err := ParseGrant(g); err == nil && pg.Verb == "admin" {
 			return true

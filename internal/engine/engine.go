@@ -77,6 +77,16 @@ func attributionForEntry(entry *uns.Entry) Attribution {
 // *registry.Manager. The engine consults it for every identity question and
 // holds no identity state of its own (auth design §8).
 type Mounts interface {
+	// Get resolves a ULID to its entry. An implementation must answer
+	// (nil, false) for an unknown identity and never (nil, true): every
+	// caller here reads as `entry, ok := ids.Get(id); if !ok || !entry.X()`,
+	// so a nil paired with true would be dereferenced. *registry.Manager
+	// cannot produce that pair; the requirement is stated because the
+	// interface would otherwise permit a fake that does, and because it is
+	// the contract new implementations are held to. uns.Entry's predicates
+	// are nil-safe as the belt behind it — a nil identity holds no door and
+	// publishes no audit — so a fake that breaks the rule gets a refusal
+	// rather than a panic.
 	Get(ulid string) (*uns.Entry, bool)
 	// DrainingMount reports whether path falls under a currently draining
 	// kind=node child's mount (move-drain design §3.2 item 2) — consulted

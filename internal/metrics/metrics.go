@@ -153,7 +153,9 @@ type Metrics struct {
 	downlinkBeyondHead prometheus.Counter
 	// colca_downlink_head_absent_total (parent-scoped-cursors design §3.3):
 	// the parent answered hello without a head, so it predates that field and
-	// this node cannot adopt a start position from it.
+	// this node cannot adopt a start position from it. Counted once per
+	// process start against such a parent, whether or not this node already
+	// holds a commands cursor for it.
 	downlinkHeadAbsent prometheus.Counter
 	reseed             prometheus.Gauge
 	authReject         *prometheus.CounterVec
@@ -290,7 +292,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}),
 		downlinkHeadAbsent: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_downlink_head_absent_total",
-			Help: "First contacts whose parent answered hello without a command head (a parent predating parent-scoped cursors): this node started its command cursor at 1. Resets on restart.",
+			Help: "Process starts whose parent answered hello without a command head (a parent predating parent-scoped cursors). A node with no commands cursor for that parent yet starts at 1 and may be handed commands issued under its mount before it attached; one that already has a cursor keeps it and loses nothing. Resets on restart.",
 		}),
 		reseed: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_retained_reseed_records",
@@ -691,15 +693,24 @@ func (m *Metrics) DownlinkCursorBeyondHead() {
 	m.downlinkBeyondHead.Inc()
 }
 
-// DownlinkHeadAbsent counts one first contact whose parent answered hello
+// DownlinkHeadAbsent counts one process start whose parent answered hello
 // without a command head (parent-scoped-cursors design §3.3) — a parent that
 // predates the field, which is what a leaf-first rolling upgrade produces.
 //
-// Worth alerting on because the degradation is otherwise invisible: with no
-// head to adopt, this node's command cursor stays at its default of 1, so the
-// first poll hands it every retained command issued under its mount before it
-// attached (§3.2 is exactly what that rule exists to prevent). Nothing fails,
-// nothing logs again — hello runs once per process.
+// Read it as "this node is talking to a pre-head parent", not as "commands
+// were mishandled". Hello runs once per process, and the check does not know
+// whether this node already holds a commands cursor for that parent, so the
+// counter rises on EVERY start against such a parent — including the common
+// one where a cursor exists, no position has to be adopted and nothing is at
+// risk.
+//
+// The case it exists to surface is the other one: a node with no cursor for
+// this parent yet has no head to adopt, so its cursor stays at the default of
+// 1 and the first poll hands it every retained command issued under its mount
+// before it attached, which §3.2 exists to refuse. That degradation is
+// otherwise invisible — nothing fails and nothing logs again — which is why
+// the counter is worth alerting on even at the cost of counting the harmless
+// starts alongside it.
 func (m *Metrics) DownlinkHeadAbsent() {
 	if m == nil {
 		return

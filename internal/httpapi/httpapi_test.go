@@ -1748,3 +1748,20 @@ func TestTheLocalHandlerRefusesToAckAnotherServicesCursor(t *testing.T) {
 		t.Fatalf("connector-b acking connector-a's cursor = %d, want 403", rec.Code)
 	}
 }
+
+// TestOwnsCursorIsFailClosedOnANilEntry pins ownsCursor's own nil guard
+// directly, rather than relying only on the "c.entry != nil && !ownsCursor"
+// pattern at its call sites. uns.Entry.CursorPrefix is documented as unsafe
+// to call on a nil receiver — HasPrefix(cursor, "") would be true for every
+// cursor, turning "no identity" into "owns everything" — so ownsCursor must
+// short-circuit before ever reaching CursorPrefix. Without this test, that
+// guard could be deleted and nothing would go red until some future caller
+// forgot the "c.entry != nil" check and hit the panic in production.
+func TestOwnsCursorIsFailClosedOnANilEntry(t *testing.T) {
+	if ownsCursor(nil, "") {
+		t.Fatal("a nil entry must own no cursor, including the empty one")
+	}
+	if ownsCursor(nil, "anything-at-all") {
+		t.Fatal("a nil entry must own no cursor")
+	}
+}

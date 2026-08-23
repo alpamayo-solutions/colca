@@ -207,3 +207,28 @@ func TestCommandUndeliveredLogsTopicAndCorrelationID(t *testing.T) {
 		t.Fatalf("expected a WARN-level log line:\n%s", out)
 	}
 }
+
+// TestNilRegistryEntryIsNotDeliverable reaches the guard the Mounts contract
+// forbids anyone from tripping (engine.go: Get must answer (nil, false), never
+// (nil, true)) — through the only thing that can trip it, a fake. The
+// interface permits the pair, so `!ok || !target.MayUseDoor(…)` dereferences
+// nil unless the predicate is nil-safe, and a panic on this path takes the
+// whole ingest down rather than just the metric.
+//
+// The claim is two things at once: no panic, and no count — "no identity"
+// answers "not deliverable over this bus" the same way an unknown identity
+// does.
+func TestNilRegistryEntryIsNotDeliverable(t *testing.T) {
+	ids := testIDs()
+	ids.entries["m1"] = nil // (nil, true): the pair the contract forbids
+	e, m, _ := newUndeliveredTestEngineWithIDs(t, false /* no subscriber */, ids)
+
+	topic := "colca/v1/_CmdParam/m1/temp/set"
+	if _, err := e.IngestAdmin(topic, cmdPayload("corr-nil")); err != nil {
+		t.Fatalf("IngestAdmin: %v", err)
+	}
+	if got := metricstest.Value(t, m, undeliveredCounter); got != 0 {
+		t.Fatalf("%s = %v, want 0 (a nil entry is no identity, so nothing here is deliverable)",
+			undeliveredCounter, got)
+	}
+}
