@@ -12,10 +12,10 @@ unprotected while the copy stayed green -- a check that cannot go red.
 PyYAML is imported here rather than added to this package's dependencies. The
 shipped `interfaces/*.yaml` and `semantic_tags/*.yaml` have always been parsed
 by whoever reads them (every container installs this package `--no-deps`, so a
-declaration would install nothing anyway), and both consumers of this module
-already have the parser -- the API through drf-spectacular, node-manager
-directly. `__init__` does not import this module, so a service that never asks
-about platform tags never pays for it.
+declaration would install nothing anyway), so each consumer declares the parser
+itself -- `api` and `node-manager` both list `pyyaml` outright. `__init__` does
+not import this module, so a service that never asks about platform tags never
+pays for it.
 """
 
 from pathlib import Path
