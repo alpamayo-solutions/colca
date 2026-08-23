@@ -87,6 +87,106 @@ func blobPutOutcome(err error, max int64) (status int, reason, message string) {
 	}
 }
 
+// blobHopsHeader bounds pull-through recursion. Depth, not cycles, is the
+// real risk — the tree has no cycles — but an unbounded rootward walk on a
+// misconfigured parent chain would hang a request instead of failing it.
+const blobHopsHeader = "X-Colca-Blob-Hops"
+
+const defaultBlobHops = 8
+
+// handleBlobGet serves a blob to a child, fetching it from this node's own
+// parent on a miss and caching what it relays (resources design §7.1).
+//
+// This is the direction provisioning needs: a file staged at the root reaches
+// a headless leaf. Every request in the chain is still a child dialing its
+// parent — no parent ever dials down.
+func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
+	if _, _, err := s.childFromReq(r); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	sha := r.PathValue("sha")
+
+	if rc, size, err := s.blobs.Get(sha); err == nil {
+		defer rc.Close()
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.Copy(w, rc)
+		return
+	} else if errors.Is(err, blobstore.ErrBadDigest) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	hops := defaultBlobHops
+	if raw := r.Header.Get(blobHopsHeader); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			hops = n
+		}
+	}
+	// The hop that just delivered this request already spent one unit of the
+	// budget — TTL-style: decrement on arrival, not only when forwarding.
+	// Without this, a local hit at the node we ask next answers before it
+	// ever reads the header, so the budget would never actually bound
+	// anything: only the LAST node's local store matters, not how many of
+	// them a request may cross to get there.
+	hops--
+	up := s.upstream()
+	if up == nil || hops <= 0 {
+		http.Error(w, "no such blob", http.StatusNotFound)
+		return
+	}
+
+	rc, size, err := up.BlobGet(sha, hops)
+	if err != nil {
+		s.metrics.BlobTransfer("pull", "error")
+		http.Error(w, "no such blob", http.StatusNotFound)
+		return
+	}
+	defer rc.Close()
+
+	// Cache what we relay: a blob provisioned to many siblings then crosses
+	// each upper link once. Put verifies the digest, so a corrupt upstream
+	// answer is refused here rather than passed on.
+	if _, _, err := s.blobs.Put(rc, sha); err != nil {
+		s.metrics.BlobTransfer("pull", "error")
+		http.Error(w, "no such blob", http.StatusNotFound)
+		return
+	}
+	s.metrics.BlobTransfer("pull", "ok")
+
+	cached, cachedSize, err := s.blobs.Get(sha)
+	if err != nil {
+		http.Error(w, "no such blob", http.StatusNotFound)
+		return
+	}
+	defer cached.Close()
+	_ = size
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, cached)
+}
+
+// BlobGet asks the parent for a blob, letting it recurse rootward on a miss.
+func (c *Client) BlobGet(sha string, hops int) (io.ReadCloser, int64, error) {
+	req, err := http.NewRequest(http.MethodGet, c.base+"/blobs/"+sha, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set(blobHopsHeader, strconv.Itoa(hops))
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, 0, fmt.Errorf("blob get %s: %s", sha[:12], resp.Status)
+	}
+	return resp.Body, resp.ContentLength, nil
+}
+
 // BlobHas asks the parent whether it already holds sha. A cheap question that
 // keeps a push from re-sending what the parent has — including everything it
 // received from a sibling, since content addressing makes those the same blob.

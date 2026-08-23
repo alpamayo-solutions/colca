@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -289,6 +290,64 @@ func TestSyncSkipsAPersistentlyRejectedBlobAndContinues(t *testing.T) {
 	}
 }
 
+func TestPullThroughFetchesFromTheGrandparent(t *testing.T) {
+	root, mid, leaf := newReplChain(t) // helper: three servers, leaf→mid→root, each pinned
+
+	content := []byte("recipe staged at the root")
+	sha, _, err := root.blobs.Put(bytes.NewReader(content), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mid.blobs.Has(sha); ok {
+		t.Fatal("precondition: mid must not hold the blob yet")
+	}
+
+	rc, size, err := leaf.client.BlobGet(sha, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, _ := io.ReadAll(rc)
+	if !bytes.Equal(got, content) {
+		t.Fatal("pulled content differs")
+	}
+	if size != int64(len(content)) {
+		t.Fatalf("size = %d, want %d", size, len(content))
+	}
+	if _, ok := mid.blobs.Has(sha); !ok {
+		t.Fatal("the intermediate node did not cache what it relayed")
+	}
+}
+
+func TestPullThroughReportsAnAbsentBlob(t *testing.T) {
+	root, _, leaf := newReplChain(t)
+	absent := strings.Repeat("b", 64)
+	if _, _, err := leaf.client.BlobGet(absent, 4); err == nil {
+		t.Fatal("want an error when no ancestor holds the blob")
+	}
+	// Denominator: the same call succeeds for a blob the root does hold.
+	sha, _, err := root.blobs.Put(bytes.NewReader([]byte("present")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, _, err := leaf.client.BlobGet(sha, 4)
+	if err != nil {
+		t.Fatalf("BlobGet on a present blob failed: %v — the error above proves nothing", err)
+	}
+	rc.Close()
+}
+
+func TestPullThroughStopsAtTheHopLimit(t *testing.T) {
+	root, _, leaf := newReplChain(t)
+	sha, _, err := root.blobs.Put(bytes.NewReader([]byte("two hops away")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := leaf.client.BlobGet(sha, 1); err == nil {
+		t.Fatal("a one-hop budget must not reach the grandparent")
+	}
+}
+
 // --- helpers -----------------------------------------------------------
 
 // newBlobStore opens a fresh, empty blob store in a temp dir with a 1 MiB cap
@@ -406,4 +465,81 @@ func newUnenrolledClient(t *testing.T, parent *Server, addr string) *Client {
 	dir := t.TempDir()
 	strangerID := mustIdentity(t, filepath.Join(dir, "stranger.key"))
 	return mustClient(t, addr, parent.id.PublicHex(), strangerID)
+}
+
+// chainNode pairs a running repl server with the client this node uses to
+// reach ITS OWN parent (nil at the root). Embedding *Server promotes fields
+// such as .blobs directly, matching how the single-hop tests above already
+// read parent.blobs / child... through the plain *Server they hold.
+type chainNode struct {
+	*Server
+	client *Client
+}
+
+// newReplChain brings up three repl servers wired leaf→mid→root, exactly the
+// way real enrollment does it one hop at a time: root enrolls mid as its
+// child, mid enrolls leaf as its child, and each non-root node is pinned to
+// its parent AND has SetUpstream called on its own server — the same two
+// steps node.Start performs for a real parent link. root gets no upstream,
+// which is what lets an absent blob or an exhausted hop budget terminate
+// instead of walking off the top of the tree.
+func newReplChain(t *testing.T) (root, mid, leaf *chainNode) {
+	t.Helper()
+	dir := t.TempDir()
+
+	rootID := mustIdentity(t, filepath.Join(dir, "root.key"))
+	midID := mustIdentity(t, filepath.Join(dir, "mid.key"))
+	leafID := mustIdentity(t, filepath.Join(dir, "leaf.key"))
+
+	// root: enrolls mid as its child, no upstream of its own.
+	rs := mustStore(t, filepath.Join(dir, "rootdata"))
+	rcfg := &config.Config{ULID: "n-root", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	rreg, reng := nodeParts(t, rs, rcfg, nil, nil, nil, childSpec{"n-mid", midID.PublicHex(), "mid1"})
+	rblobs := mustBlobStore(t, filepath.Join(dir, "rootblobs"), rcfg.Limits.EffectiveMaxBlobBytes())
+	rootSrv, err := NewServer(rcfg, reng, rootID, rreg, rblobs, nil)
+	if err != nil {
+		t.Fatalf("NewServer(root): %v", err)
+	}
+	raddr, err := rootSrv.Start()
+	if err != nil {
+		t.Fatalf("Start(root): %v", err)
+	}
+	t.Cleanup(rootSrv.Stop)
+
+	// mid: enrolls leaf as its child, pinned to root as its parent.
+	ms := mustStore(t, filepath.Join(dir, "middata"))
+	mcfg := &config.Config{ULID: "n-mid", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	mreg, meng := nodeParts(t, ms, mcfg, nil, nil, nil, childSpec{"n-leaf", leafID.PublicHex(), "leaf1"})
+	mblobs := mustBlobStore(t, filepath.Join(dir, "midblobs"), mcfg.Limits.EffectiveMaxBlobBytes())
+	midSrv, err := NewServer(mcfg, meng, midID, mreg, mblobs, nil)
+	if err != nil {
+		t.Fatalf("NewServer(mid): %v", err)
+	}
+	maddr, err := midSrv.Start()
+	if err != nil {
+		t.Fatalf("Start(mid): %v", err)
+	}
+	t.Cleanup(midSrv.Stop)
+	midToRoot := mustClient(t, raddr, rootID.PublicHex(), midID)
+	midSrv.SetUpstream(midToRoot)
+
+	// leaf: no children of its own, pinned to mid as its parent.
+	ls := mustStore(t, filepath.Join(dir, "leafdata"))
+	lcfg := &config.Config{ULID: "n-leaf", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	lreg, leng := nodeParts(t, ls, lcfg, nil, nil, nil)
+	lblobs := mustBlobStore(t, filepath.Join(dir, "leafblobs"), lcfg.Limits.EffectiveMaxBlobBytes())
+	leafSrv, err := NewServer(lcfg, leng, leafID, lreg, lblobs, nil)
+	if err != nil {
+		t.Fatalf("NewServer(leaf): %v", err)
+	}
+	if _, err := leafSrv.Start(); err != nil {
+		t.Fatalf("Start(leaf): %v", err)
+	}
+	t.Cleanup(leafSrv.Stop)
+	leafToMid := mustClient(t, maddr, midID.PublicHex(), leafID)
+	leafSrv.SetUpstream(leafToMid)
+
+	return &chainNode{Server: rootSrv, client: nil},
+		&chainNode{Server: midSrv, client: midToRoot},
+		&chainNode{Server: leafSrv, client: leafToMid}
 }

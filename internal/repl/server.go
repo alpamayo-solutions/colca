@@ -61,6 +61,24 @@ type Server struct {
 	mu   sync.Mutex
 	http *http.Server
 	ln   net.Listener
+
+	// upstreamClient is this node's own parent link, used to satisfy a child's
+	// pull on a local miss. Set once at startup; nil at the root.
+	upstreamClient *Client
+}
+
+// SetUpstream installs the parent link used for pull-through. Called once at
+// startup, after the repl client exists.
+func (s *Server) SetUpstream(c *Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upstreamClient = c
+}
+
+func (s *Server) upstream() *Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.upstreamClient
 }
 
 func (s *Server) auditDenied(operation, reason string, entry *uns.Entry, metadata map[string]any) {
@@ -194,6 +212,7 @@ func (s *Server) Start() (addr string, err error) {
 	mux.HandleFunc("GET /downlink", s.handleDownlink)
 	mux.HandleFunc("HEAD /blobs/{sha}", s.handleBlobHead)
 	mux.HandleFunc("PUT /blobs/{sha}", s.handleBlobPut)
+	mux.HandleFunc("GET /blobs/{sha}", s.handleBlobGet)
 
 	ln, err := net.Listen("tcp", s.cfg.Repl.Addr)
 	if err != nil {

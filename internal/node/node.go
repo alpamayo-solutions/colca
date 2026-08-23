@@ -394,6 +394,10 @@ func Start(cfg *config.Config) (*Node, error) {
 		if err != nil {
 			return fail(fmt.Errorf("node %s: repl client for %s: %w", cfg.ULID, cfg.Parent.URL, err))
 		}
+		// A child's pull can now recurse through this node to its own parent.
+		if n.ReplSrv != nil {
+			n.ReplSrv.SetUpstream(cl)
+		}
 		n.wg.Add(2)
 		go func() {
 			defer n.wg.Done()
