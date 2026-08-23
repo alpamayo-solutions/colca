@@ -8,7 +8,6 @@
 package repl
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -186,7 +185,7 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped 
 		}
 		for _, r := range recs {
 			total++
-			if commandStillLive(r.Payload, nowMS) {
+			if uns.CommandStillLive(r.Payload, nowMS) {
 				pending++
 			}
 		}
@@ -196,21 +195,4 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped 
 		from = nxt
 	}
 	return total, pending, gapped
-}
-
-// commandStillLive reports whether a ClassCmd record's expires_at has not
-// yet passed authoritativeNowMS. uns.Validate already guarantees every
-// persisted _Cmd* payload carries a numeric expires_at (move-drain design
-// §3.2: "Validate already requires a numeric expires_at on every _Cmd*, so
-// the drain deadline is bounded"), so a decode failure here cannot happen
-// for real data — treated as still-live defensively rather than silently
-// completing a drain on malformed input.
-func commandStillLive(payload []byte, authoritativeNowMS int64) bool {
-	var body struct {
-		ExpiresAt float64 `json:"expires_at"`
-	}
-	if err := json.Unmarshal(payload, &body); err != nil {
-		return true
-	}
-	return int64(body.ExpiresAt) >= authoritativeNowMS
 }

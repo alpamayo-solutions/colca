@@ -21,13 +21,16 @@ type EntityStore interface {
 	// this: a child's elements arrive here mount-inserted, already in this
 	// node's frame, and they are as much a position here as the node's own.
 	KVScanAll(contract string) []KVRecord
-	// Publish writes a record as this node, in the node's own frame, and returns
-	// the durable stream position produced by the write. Command acknowledgements
-	// carry that position so an API can wait for its exact projected state.
-	Publish(topic string, payload []byte) (StateWrite, error)
 	// PublishBatch validates and commits a complete command result as one
-	// atomic state transition. Either every record receives a durable stream
-	// position and becomes current KV state, or none of them do.
+	// atomic state transition, in the node's own frame. Either every record
+	// receives a durable stream position and becomes current KV state, or none
+	// of them do, and the returned positions are what a command acknowledgement
+	// carries so an API can wait for its exact projected state.
+	//
+	// This is the ONLY way an executor writes. There is deliberately no
+	// per-record door beside it: one existed, and a command that failed at its
+	// thirtieth record left twenty-nine committed and told the caller only that
+	// something had gone wrong.
 	PublishBatch(records []StateRecord) ([]StateWrite, error)
 	// NodeID is the identity this node publishes under.
 	NodeID() string

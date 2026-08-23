@@ -57,7 +57,14 @@ func TestPluginDependsOnStdlibOnly(t *testing.T) {
 // emitting uns.StatusDraining in an HTTP response, carries a domain value
 // without duplicating a domain rule. Only comparisons and switch cases fail.
 func TestCoreAsksQuestionsRatherThanSwitchingOnVocabulary(t *testing.T) {
-	const coreRoot = "../../internal"
+	// The core is everything in the module except plugins/uns itself — the
+	// domain package legitimately owns the vocabulary it defines. Walking the
+	// module root rather than an enumerated list of core directories is the
+	// point: internal/, cmd/, and door/ were once named explicitly here, and
+	// that list is exactly what let bench/ (which also imports plugins/uns)
+	// go unwalked. A directory list drifts the moment a new one is added;
+	// "everything but the domain package" cannot.
+	const moduleRoot = "../.."
 	vocabulary := regexp.MustCompile(`^(Class|Kind|Status)[A-Z]`)
 
 	isVocab := func(n ast.Expr) (string, bool) {
@@ -72,10 +79,35 @@ func TestCoreAsksQuestionsRatherThanSwitchingOnVocabulary(t *testing.T) {
 		return "uns." + sel.Sel.Name, true
 	}
 
+	// domainDir is plugins/uns exactly — the one package that legitimately
+	// owns this vocabulary. Excluding all of plugins/ instead would read the
+	// same today (uns is its only occupant) and quietly stop reading a second
+	// plugin the day one is added: that plugin would be core-side code with
+	// respect to the domain, and letting it switch on uns.Class* unwalked is
+	// the drift this gate exists to catch. Excluded by path rather than by
+	// name, so a "plugins/uns" appearing elsewhere in the tree would still be
+	// walked. vendor/ and testdata/ are excluded by name wherever they appear
+	// — the standard Go convention for code this test has no business parsing
+	// (third-party sources, fixture data).
+	domainDir := filepath.Clean(filepath.Join(moduleRoot, "plugins", "uns"))
+
 	var offences []string
-	err := filepath.WalkDir(coreRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+	err := filepath.WalkDir(moduleRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
 			return err
+		}
+		if d.IsDir() {
+			if filepath.Clean(path) == domainDir {
+				return fs.SkipDir
+			}
+			switch d.Name() {
+			case "vendor", "testdata":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
 		}
 		fset := token.NewFileSet()
 		f, perr := parser.ParseFile(fset, path, nil, 0)
@@ -109,7 +141,7 @@ func TestCoreAsksQuestionsRatherThanSwitchingOnVocabulary(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walking %s: %v", coreRoot, err)
+		t.Fatalf("walking %s: %v", moduleRoot, err)
 	}
 	if len(offences) > 0 {
 		t.Fatalf("the core decides by comparing against domain vocabulary in %d place(s):\n  %s",

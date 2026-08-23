@@ -688,3 +688,43 @@ func (s *Server) DeliverLocal(topic string, payload []byte, retain bool) {
 		slog.Default().Warn("local delivery failed", "topic", topic, "retain", retain, "err", err)
 	}
 }
+
+// HasLocalSubscriber reports whether topic had at least one live SUBSCRIPTION
+// on this node's local MQTT bus — an ordinary subscription, a
+// shared-subscription group member, or an inline subscription — at the
+// moment this was called. It answers the exact same lookup mochi's own
+// publishToSubscribers (server.go) performs right before fan-out; the engine
+// calls it immediately AFTER the matching DeliverLocal, on the same
+// goroutine with nothing else in between (engine.persistTSAttributed), so
+// the two lookups differ only by the width of one function call.
+//
+// Read the name literally: this reports whether a SUBSCRIPTION existed, not
+// whether bytes reached a client. Two gaps, both worth knowing about before
+// trusting the counter this feeds (colca_command_undelivered_total):
+//
+//   - Snapshot race: a client that subscribes or disconnects in the narrow
+//     window between the Publish and this call is not observed either way.
+//     Both calls happen back-to-back with no I/O between them, so the
+//     window is about as tight as it can be made — but it is not zero.
+//   - Per-client write failures are invisible here by construction: mochi's
+//     publishToSubscribers logs a failed publishToClient call (ACL
+//     rejection, inflight-quota exceeded, a socket write error) at Debug
+//     and swallows it — the error never reaches Publish's return value, so
+//     it cannot reach this method either. A subscription that existed but
+//     whose write failed reads identically to one that received the bytes
+//     cleanly: this method — and therefore the counter — cannot tell them
+//     apart, and will not count that case as undelivered.
+//
+// Net effect: colca_command_undelivered_total undercounts, never
+// overcounts, real delivery failures (modulo the snapshot race above, which
+// cuts both ways but is negligible at its width). It answers "did a live
+// subscription exist for this topic", which is exactly the signal the
+// audit finding needs (a target machine's MQTT session not currently
+// connected) — it does not answer, and was never meant to answer, "did the
+// bytes reach that client's socket". Building the latter is explicitly out
+// of scope (cmdadmin design §5/§11) — it would need QoS-level delivery
+// confirmation, which commands (retain=false, fire-and-forget) do not carry.
+func (s *Server) HasLocalSubscriber(topic string) bool {
+	subs := s.S.Topics.Subscribers(topic)
+	return len(subs.Subscriptions) > 0 || len(subs.Shared) > 0 || len(subs.InlineSubscriptions) > 0
+}

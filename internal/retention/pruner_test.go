@@ -614,7 +614,7 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/a", `{"id":"A1"}`) // offset 1
 	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/b", `{"id":"B1"}`) // offset 2
 	seed("colca/v1/_Signal/"+nodeULID+"/line1/c", `{"id":"C1"}`)        // offset 3
-	if !st.CursorAck("uplink", "entities", 2) {                         // offsets 2..3 unread
+	if !st.CursorAck("uplink", "entities", 2) {                       // offsets 2..3 unread
 		t.Fatal("ack must move")
 	}
 	ret := retFor("entities", config.StreamRetention{
@@ -839,7 +839,6 @@ func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
 		t.Fatalf("sibling path damaged: %+v", kv)
 	}
 }
-
 
 // The pruner's cycle reclaims the definitions stream too — by compaction, not
 // by policy (definition-stream design §6). Without this the stream would grow

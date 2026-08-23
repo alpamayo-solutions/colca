@@ -961,6 +961,48 @@ func TestDebugStateFieldCorrectness(t *testing.T) {
 	}
 }
 
+// The admin token check compares with crypto/subtle.ConstantTimeCompare
+// instead of == so the unscoped admin credential (the highest-value secret
+// this door accepts) cannot be recovered a byte at a time via timing on a
+// short-circuiting string compare. This pins the three cases that fix must
+// keep true: a correct token authorizes, a wrong token of the SAME LENGTH is
+// rejected exactly like any other wrong token — the case a short-circuit
+// would leak timing on — and a missing (empty) configured token is never an
+// invitation: it authorizes neither an empty nor a non-empty header.
+func TestAdminTokenComparisonRejectsSameLengthMismatch(t *testing.T) {
+	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	srv := plainHandler(t, cfg, metrics.New(st, config.Retention{}, nil))
+
+	resp, _ := req(t, srv.Client(), "GET", srv.URL+"/kv", "tok", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("correct token: want 200, got %d", resp.StatusCode)
+	}
+
+	resp, _ = req(t, srv.Client(), "GET", srv.URL+"/kv", "tik", nil) // same length as "tok", one byte off
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong same-length token: want 401, got %d", resp.StatusCode)
+	}
+
+	emptyCfg := &config.Config{ULID: "n-notoken"}
+	emptySt, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { emptySt.Close() })
+	emptySrv := plainHandler(t, emptyCfg, metrics.New(emptySt, config.Retention{}, nil))
+	for _, header := range []string{"", "tok"} {
+		resp, _ = req(t, emptySrv.Client(), "GET", emptySrv.URL+"/kv", header, nil)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("empty configured token with header %q: want 401, got %d", header, resp.StatusCode)
+		}
+	}
+}
+
 // plainHandler builds a Handler over a plain httptest server (no TLS): the
 // two defensive-construction tests below pin Handler-level contracts that do
 // not depend on the listener's TLS wrapping.

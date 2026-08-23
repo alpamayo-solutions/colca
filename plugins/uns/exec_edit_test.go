@@ -25,7 +25,7 @@ func editBody(t *testing.T, operationID string, expected map[string]uint64, inte
 
 func seedEditEntity(t *testing.T, f *fakeStore, contract, path string, payload map[string]any) uint64 {
 	t.Helper()
-	write, err := f.Publish("colca/v1/"+contract+"/"+f.NodeID()+"/"+path, body(t, payload))
+	write, err := f.seed("colca/v1/"+contract+"/"+f.NodeID()+"/"+path, body(t, payload))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +409,7 @@ func TestEditDurableReplayReceiptsStayBounded(t *testing.T) {
 	})
 	for index := range editReplayLimit {
 		operationID := fmt.Sprintf("old-%04d", index)
-		_, err := f.Publish(editOperationTopic(f.NodeID(), operationID), body(t, editOperationReceipt{
+		_, err := f.seed(editOperationTopic(f.NodeID(), operationID), body(t, editOperationReceipt{
 			ID: operationID, Digest: strings.Repeat("a", sha256.Size*2), Message: "old", Result: "ok",
 			Topics: []string{"colca/v1/_Constant/n-edge1/line1/old"},
 		}))
@@ -474,7 +474,7 @@ func (f *fakeNodeAttachmentWriter) RemountNode(entryJSON []byte) (uint64, int, s
 		return 0, 422, err.Error()
 	}
 	topic := "colca/v1/_EnrolledIdentity/" + f.store.NodeID() + "/_colca/identities/" + attachment.ULID
-	write, err := f.store.Publish(topic, entryJSON)
+	write, err := f.store.seed(topic, entryJSON)
 	if err != nil {
 		return 0, 500, err.Error()
 	}
@@ -493,7 +493,7 @@ func (f *fakeNodeAttachmentWriter) DrainNode(ulid string) (uint64, int, string) 
 		return 0, 500, err.Error()
 	}
 	attachment.Status = StatusDraining
-	write, err := f.store.Publish(topic, bodyJSON(attachment))
+	write, err := f.store.seed(topic, bodyJSON(attachment))
 	if err != nil {
 		return 0, 500, err.Error()
 	}

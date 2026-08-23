@@ -328,11 +328,11 @@ func TestAlarmIsAnEventNotState(t *testing.T) {
 		t.Fatal("IsAudit(ClassAlarm): audit means security event, not alarm event")
 	}
 	for name, got := range map[string]bool{
-		"IsCommand":         IsCommand(ClassAlarm),
-		"IsDefinition":      IsDefinition(ClassAlarm),
-		"IsEntityState":     IsEntityState(ClassAlarm),
-		"IsNodeLocal":       IsNodeLocal(ClassAlarm),
-		"NeedsStateRefresh": NeedsStateRefresh(ClassAlarm),
+		"IsCommand":              IsCommand(ClassAlarm),
+		"IsDefinition":           IsDefinition(ClassAlarm),
+		"IsCommandAuthoredState": IsCommandAuthoredState(ClassAlarm),
+		"IsNodeLocal":            IsNodeLocal(ClassAlarm),
+		"NeedsStateRefresh":      NeedsStateRefresh(ClassAlarm),
 	} {
 		if got {
 			t.Fatalf("%s(ClassAlarm) = true, want false", name)

@@ -1169,7 +1169,10 @@ func (w *EditExec) composeBinding(
 		tags[tag.ID] = bindingTag{dataType: tag.DataType, stale: tag.IsStale}
 	}
 	signals := map[string]editSnapshot{}
-	boundTags := map[string]string{}
+	// The binding invariant's one owner (see signalBindings). Autobind consults
+	// the same rule and skips what it may not bind; curating one edit refuses
+	// it instead, so the person is told which binding is in the way.
+	bindings := newSignalBindings()
 	takenPaths := map[string]bool{}
 	for key, entity := range entities {
 		if entity.Kind != "signal" {
@@ -1179,7 +1182,7 @@ func (w *EditExec) composeBinding(
 		signals[id] = entity
 		takenPaths[entity.Record.Path] = true
 		if tagID, _ := rawString(entity.Payload["data_tag"]); tagID != "" {
-			boundTags[tagID] = id
+			bindings.bind(tagID, id)
 		}
 	}
 
@@ -1220,12 +1223,17 @@ func (w *EditExec) composeBinding(
 			if message := requireExpected(expected, entityVersionKey("signal", operation.SignalID)); message != "" {
 				return 422, "binding: " + message, "invalid", nil
 			}
-			if held := boundTags[operation.TagID]; held != "" && held != operation.SignalID {
-				return 409, fmt.Sprintf("binding: tag %s is already bound to %s", operation.TagID, held), "conflict", nil
+			switch bindings.propose(operation.TagID, operation.SignalID) {
+			case bindTagHeld:
+				return 409, fmt.Sprintf("binding: tag %s is already bound to %s",
+					operation.TagID, bindings.signalHolding(operation.TagID)), "conflict", nil
+			case bindSignalHeld:
+				return 409, fmt.Sprintf("binding: signal %s is already bound to %s",
+					operation.SignalID, bindings.tagHeldBy(operation.SignalID)), "conflict", nil
 			}
-			if held, _ := rawString(signal.Payload["data_tag"]); held != "" && held != operation.TagID {
-				return 409, fmt.Sprintf("binding: signal %s is already bound to %s", operation.SignalID, held), "conflict", nil
-			}
+			// Datatype compatibility and staleness are this operation's own
+			// concerns, not the binding invariant: curating one edit checks
+			// them, provisioning a catalogue does not.
 			signalType, _ := rawString(signal.Payload["data_type"])
 			if signalType != "" && tag.dataType != "" && !compatibleDataTypes(signalType, tag.dataType) {
 				return 409, fmt.Sprintf("binding: datatype mismatch for operation %s", operation.ID), "conflict", nil
@@ -1235,7 +1243,7 @@ func (w *EditExec) composeBinding(
 			if err := queue(signal.Record.Topic, payload); err != nil {
 				return 422, "binding: payload is not encodable", "invalid", nil
 			}
-			boundTags[operation.TagID] = operation.SignalID
+			bindings.bind(operation.TagID, operation.SignalID)
 			signal.Payload = payload
 			signals[operation.SignalID] = signal
 
@@ -1247,8 +1255,7 @@ func (w *EditExec) composeBinding(
 			if message := requireExpected(expected, entityVersionKey("signal", operation.SignalID)); message != "" {
 				return 422, "binding: " + message, "invalid", nil
 			}
-			held, _ := rawString(signal.Payload["data_tag"])
-			if held != operation.TagID {
+			if bindings.tagHeldBy(operation.SignalID) != operation.TagID {
 				return 409, fmt.Sprintf("binding: signal %s is not bound to tag %s", operation.SignalID, operation.TagID), "conflict", nil
 			}
 			payload := cloneRawMap(signal.Payload)
@@ -1256,7 +1263,7 @@ func (w *EditExec) composeBinding(
 			if err := queue(signal.Record.Topic, payload); err != nil {
 				return 422, "binding: payload is not encodable", "invalid", nil
 			}
-			delete(boundTags, operation.TagID)
+			bindings.unbind(operation.TagID)
 			signal.Payload = payload
 			signals[operation.SignalID] = signal
 
@@ -1267,8 +1274,11 @@ func (w *EditExec) composeBinding(
 			if _, exists := signals[operation.SignalID]; exists {
 				return 409, fmt.Sprintf("binding: signal %s already exists", operation.SignalID), "conflict", nil
 			}
-			if held := boundTags[operation.TagID]; held != "" {
-				return 409, fmt.Sprintf("binding: tag %s is already bound to %s", operation.TagID, held), "conflict", nil
+			// The signal is new — the guard above refused an id that already
+			// exists — so it holds nothing and only the tag side can refuse.
+			if bindings.propose(operation.TagID, operation.SignalID) != bindFree {
+				return 409, fmt.Sprintf("binding: tag %s is already bound to %s",
+					operation.TagID, bindings.signalHolding(operation.TagID)), "conflict", nil
 			}
 			parent, code, message := requireEntity(expected, entities, "system-element", operation.ParentID)
 			if code != 0 {
@@ -1290,7 +1300,7 @@ func (w *EditExec) composeBinding(
 			if err := queue(topic, payload); err != nil {
 				return 422, "binding: payload is not encodable", "invalid", nil
 			}
-			boundTags[operation.TagID] = operation.SignalID
+			bindings.bind(operation.TagID, operation.SignalID)
 			takenPaths[path] = true
 			signals[operation.SignalID] = editSnapshot{
 				Key: entityVersionKey("signal", operation.SignalID), Kind: "signal",

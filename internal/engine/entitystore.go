@@ -66,20 +66,10 @@ func (s *entityStore) scan(contract string, keep func(store.KVEntry) bool) []uns
 	return out
 }
 
-// Publish writes as the node through the local admin path: node-local
-// coordinates, no mount rewrite, still validated against the loaded bundle. A
-// record the node itself authors goes through the same door as everything else
-// — there is no privileged write that skips validation.
-func (s *entityStore) Publish(topic string, payload []byte) (uns.StateWrite, error) {
-	result, err := s.e.IngestAdmin(topic, payload)
-	return uns.StateWrite{
-		Stream: result.Stream,
-		Offset: result.Offset,
-		Topic:  result.Topic,
-	}, err
-}
-
-// PublishBatch is the domain command commit boundary. The engine validates the
+// PublishBatch is the domain command commit boundary, and the plugin's only
+// write door. It writes as the node in node-local coordinates, no mount
+// rewrite, still validated against the loaded bundle — a record the node itself
+// authors passes the same checks as everything else. The engine validates the
 // complete result set before it opens one Pebble batch; the adapter merely
 // translates the engine's durable coordinates back into plugin-owned types.
 func (s *entityStore) PublishBatch(records []uns.StateRecord) ([]uns.StateWrite, error) {

@@ -23,6 +23,7 @@
 package httpapi
 
 import (
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -209,7 +210,14 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				}
 				return caller{entry: v.Entry, human: v}, true
 			}
-			if cfg.API.Token != "" && r.Header.Get("X-Colca-Token") == cfg.API.Token {
+			// Constant-time compare: this is the unscoped admin credential, so a
+			// byte-at-a-time short-circuit on == would let a network attacker
+			// recover it one byte at a time via timing. ConstantTimeCompare
+			// still returns 0 immediately on a length mismatch — that leaks
+			// length, not content, and is accepted (design note above the
+			// guard: an empty configured token must never authorize anyone,
+			// which the != "" check ahead of the compare still guarantees).
+			if cfg.API.Token != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Colca-Token")), []byte(cfg.API.Token)) == 1 {
 				return caller{admin: true}, true
 			}
 			m.AuthReject(metrics.DoorHTTP, metrics.AuthToken)

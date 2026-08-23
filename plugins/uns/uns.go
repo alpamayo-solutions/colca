@@ -149,6 +149,28 @@ func IsKnown(c Class) bool { return c != ClassNone }
 // while its destination drains, and travels DOWN the tree.
 func IsCommand(c Class) bool { return c == ClassCmd }
 
+// CommandStillLive reports whether a ClassCmd record's expires_at has not yet
+// passed authoritativeNowMS. Validate already guarantees every persisted
+// _Cmd* payload carries a numeric expires_at (move-drain design §3.2:
+// "Validate already requires a numeric expires_at on every _Cmd*, so the
+// drain deadline is bounded"), so a decode failure here cannot happen for
+// real data — treated as still-live defensively rather than silently
+// completing a drain, or silently swallowing an undelivered-command signal,
+// on malformed input.
+//
+// One definition of "still live" so the two places that ask it — move-drain
+// completion and the undelivered-command observability signal — can never
+// disagree about the same expires_at field.
+func CommandStillLive(payload []byte, authoritativeNowMS int64) bool {
+	var body struct {
+		ExpiresAt float64 `json:"expires_at"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return true
+	}
+	return int64(body.ExpiresAt) >= authoritativeNowMS
+}
+
 // IsNodeLocal reports whether a class may only ever be produced by the node
 // itself. No door accepts one from a client, a human or an admin — the beacon
 // loop publishes it straight to the local bus, and it is ephemeral: no stream,
@@ -162,11 +184,20 @@ func IsNodeLocal(c Class) bool { return c == ClassTimeSync }
 // them, so they are deliberately not in this set.
 func IsOwnedState(c Class) bool { return c == ClassData || c == ClassEntity }
 
-// IsEntityState reports whether a class belongs to the retained entity graph.
-// Command executors use this narrower answer when they atomically materialize
-// an Edit intent: metrics and definitions are state too, but neither may
-// be smuggled into an entity mutation batch.
-func IsEntityState(c Class) bool { return c == ClassEntity }
+// IsCommandAuthoredState reports whether a class is state a command executor
+// may author. Every domain command commits its complete result as one atomic
+// batch, and this is the admission rule for what may sit in one: the entity
+// graph an Edit intent or a `_CmdConfigure` verb edits, and the definitions
+// that same door files under their own ids.
+//
+// Metrics are state too and are deliberately excluded: a sample is a machine's
+// to publish at its own door, and letting one ride an entity mutation would put
+// the metric lane behind a command's commit. Commands, acks, gap markers, audit
+// events and the ephemeral beacon are not state at all.
+//
+// A batch still has to land on ONE stream — entities and definitions have their
+// own — so the door that admits records also refuses a batch that mixes them.
+func IsCommandAuthoredState(c Class) bool { return c == ClassEntity || c == ClassDefinition }
 
 // IsDefinition reports whether a class travels DOWN the tree and is applied
 // unconditionally as state wherever it lands. A definition's path is its own

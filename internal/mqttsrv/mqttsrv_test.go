@@ -481,6 +481,20 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 		}
 	})
 
+	// OnPublish trusts that no session which reached it can carry an empty
+	// identity (mqttsrv.go: `if ident == ""` lets the packet through
+	// UNVALIDATED, straight to mochi's own fanout). That trust rests entirely
+	// on OnConnectAuthenticate refusing every path that could produce one — on
+	// the machine door, "" can never equal an enrolled entry's (non-empty)
+	// ULID, so this must fail exactly like any other username mismatch.
+	t.Run("empty username is rejected", func(t *testing.T) {
+		c, err := tryConnect(addr, "m1-empty-user", w.m1, "")
+		defer c.Disconnect(100)
+		if err == nil {
+			t.Fatal("connect with an empty username succeeded, want rejection — this is the identity OnPublish's ident==\"\" branch would trust")
+		}
+	})
+
 	t.Run("client publish is ingested with no rewrite", func(t *testing.T) {
 		c := connect(t, addr, "m1-pub", w.m1)
 

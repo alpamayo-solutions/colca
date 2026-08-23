@@ -229,6 +229,112 @@ func TestEntityStorePublishBatchRejectsLateInvalidRecordWithoutWrites(t *testing
 	}
 }
 
+// Definitions are authored through the same commit boundary as entities and
+// land on their own stream. They have to: `definition/upsert` files several
+// definitions in one command, and a command is one transition whatever it
+// files.
+func TestEntityStorePublishBatchCommitsDefinitionsOnTheirOwnStream(t *testing.T) {
+	e, _ := newRecordingEngine(t)
+	entitiesBefore := e.Store().NextOffset("entities")
+	before := e.Store().NextOffset("definitions")
+
+	writes, err := e.EntityStore().PublishBatch([]uns.StateRecord{
+		{Topic: "colca/v1/_Group/n-edge1/operators", Payload: []byte(`{"id":"operators"}`)},
+		{Topic: "colca/v1/_Group/n-edge1/maintainers", Payload: []byte(`{"id":"maintainers"}`)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, write := range writes {
+		if write.Stream != "definitions" || write.Offset != before+uint64(i) {
+			t.Fatalf("write %d = %+v, want definitions/%d", i, write, before+uint64(i))
+		}
+	}
+	if got := e.Store().NextOffset("entities"); got != entitiesBefore {
+		t.Fatalf("a definition batch advanced the entities stream to %d, want %d", got, entitiesBefore)
+	}
+}
+
+// One batch is one Pebble batch on one stream, so records for two streams could
+// only be committed as two — which is the half-applied outcome this path exists
+// to prevent. No verb mixes them; this refusal is what keeps that true.
+func TestEntityStorePublishBatchRefusesRecordsFromTwoStreams(t *testing.T) {
+	e, delivered := newRecordingEngine(t)
+	entitiesBefore := e.Store().NextOffset("entities")
+	definitionsBefore := e.Store().NextOffset("definitions")
+
+	_, err := e.EntityStore().PublishBatch([]uns.StateRecord{
+		{Topic: "colca/v1/_Signal/n-edge1/line1/temp", Payload: []byte(`{"id":"sig-temp","name":"Temperature"}`)},
+		{Topic: "colca/v1/_Group/n-edge1/operators", Payload: []byte(`{"id":"operators"}`)},
+	})
+
+	if err == nil {
+		t.Fatal("PublishBatch accepted a batch spanning the entities and definitions streams")
+	}
+	// Pin the two-stream refusal by name, not merely that SOME error came
+	// back: the stream check runs before validateContract today, so a
+	// reordering that let a different rule refuse first (or a validation
+	// bug on the _Group payload) would still make err != nil while no
+	// longer testing the two-stream rule this test claims to pin.
+	if !strings.Contains(err.Error(), `belongs to stream "definitions", not "entities"`) {
+		t.Fatalf("PublishBatch error = %q, want it to name the two-stream refusal", err)
+	}
+	if got := e.Store().NextOffset("entities"); got != entitiesBefore {
+		t.Fatalf("entities advanced to %d, want %d", got, entitiesBefore)
+	}
+	if got := e.Store().NextOffset("definitions"); got != definitionsBefore {
+		t.Fatalf("definitions advanced to %d, want %d", got, definitionsBefore)
+	}
+	if got := delivered.got(); len(got) != 0 {
+		t.Fatalf("refused batch reached local bus: %+v", got)
+	}
+}
+
+// The whole point of routing ConfigExec through the atomic port, proven against
+// the real store and the real contract floor rather than a fake: a configure
+// command whose late record fails validation leaves the node exactly as it was.
+func TestAConfigureCommandCommitsNothingWhenALateRecordFailsValidation(t *testing.T) {
+	e, delivered := newRecordingEngine(t)
+	domain := uns.NewConfigExec(e.EntityStore(), nil, nil, nil, nil)
+
+	// Precondition, asserted rather than assumed: this command shape is
+	// accepted, so the refusal below is the late payload's doing and not the
+	// fixture quietly rejecting everything.
+	if code, msg, _ := domain.Execute("_CmdConfigure", "signal/upsert", []byte(`{"signals":[
+		{"path":"line1/temp","signal":{"id":"sig-temp","name":"Temperature"}},
+		{"path":"line1/speed","signal":{"id":"sig-speed","name":"Speed"}}]}`)); code != 200 {
+		t.Fatalf("valid signal/upsert = %d %q, want 200", code, msg)
+	}
+	offsetBefore := e.Store().NextOffset("entities")
+	delivered.reset()
+
+	// Second record has no id, which the floor requires of every data-model
+	// record. The first is valid and, before the executor committed as one
+	// transition, would already have been written by the time it was refused.
+	code, msg, result := domain.Execute("_CmdConfigure", "signal/upsert", []byte(`{"signals":[
+		{"path":"line1/press","signal":{"id":"sig-press","name":"Press"}},
+		{"path":"line1/broken","signal":{"name":"no id"}}]}`))
+
+	if code != 422 || result != "invalid" {
+		t.Fatalf("code %d result %q msg %q — want 422/invalid", code, result, msg)
+	}
+	if !strings.Contains(msg, "line1/broken") {
+		t.Errorf("msg %q — want the refused record named", msg)
+	}
+	if got := e.Store().NextOffset("entities"); got != offsetBefore {
+		t.Fatalf("the refused command took stream positions (%d → %d)", offsetBefore, got)
+	}
+	for _, path := range []string{"line1/press", "line1/broken"} {
+		if got := e.Store().KVScan(path); len(got) != 0 {
+			t.Fatalf("the refused command left %s in KV: %+v — the valid first record "+
+				"must not survive the refusal of the second", path, got)
+		}
+	}
+	if got := delivered.got(); len(got) != 0 {
+		t.Fatalf("the refused command reached the local bus: %+v", got)
+	}
+}
+
 // Level 4 must be THIS node's own ULID for every publisher — not the
 // client's identity, which no longer appears in the topic at all (auth §2).
 func TestClientLevel4MustBeThisNode(t *testing.T) {

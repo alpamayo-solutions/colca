@@ -168,6 +168,36 @@ type Metrics struct {
 	nodeCmds   *prometheus.CounterVec // colca_node_cmds_total{contract,verb,result}
 	nodePrefix *prometheus.GaugeVec   // colca_node_prefix_info{prefix}
 
+	// colca_command_undelivered_total: a live command was published to the
+	// local MQTT bus and had zero live SUBSCRIPTIONS at that moment (audit
+	// finding, no redelivery built per
+	// the cmdadmin design §5/§11 — see
+	// engine.observeCommandDelivery). It counts only commands addressed to a
+	// machine enrolled AT THIS NODE — the one target this node's own bus can
+	// reach. A command relaying down toward a descendant, or one addressed to
+	// a child node, reaches zero subscribers at every node it passes through
+	// and is not counted anywhere: those are delivered over the replication
+	// door. Three things this is NOT:
+	//
+	//   - NOT "a command went nowhere": in the tree, most commands are
+	//     delivered by replication, and this counter is deliberately silent
+	//     about all of them.
+	//   - NOT "the command was lost forever": the record is durable in the
+	//     commands stream regardless, and the issuer's own ack-timeout
+	//     handling is what actually recovers from this.
+	//   - NOT byte-level delivery confirmation: it reports subscription
+	//     existence (mqttsrv.HasLocalSubscriber), which cannot see a
+	//     per-client write that mochi attempted and failed — that failure is
+	//     logged at Debug and swallowed inside mochi, never surfaced to the
+	//     caller. So this counter can UNDERcount real delivery failures
+	//     (a subscription existed but the write to it failed) but cannot
+	//     OVERcount them (barring a sub-millisecond snapshot race — see
+	//     HasLocalSubscriber's doc comment).
+	//
+	// It is an honest, narrower signal than "delivered": "nobody was even
+	// listening", not "the bytes arrived".
+	commandUndelivered prometheus.Counter
+
 	// Schema bundle (schema-bundle design §11).
 	bundleInfo      *prometheus.GaugeVec // colca_contracts_bundle_info{version,digest,source}
 	bundleContracts prometheus.Gauge     // colca_contracts_bundle_contracts
@@ -298,6 +328,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_node_prefix_info",
 			Help: "The node's root-frame prefix as taught by its parent (info gauge, value 1; absent until learned).",
 		}, []string{"prefix"}),
+		commandUndelivered: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_command_undelivered_total",
+			Help: "Live commands addressed to a machine enrolled at THIS node, published to its local MQTT bus with zero live subscriptions at that moment (that machine was not connected). Commands transiting toward a descendant, or addressed to a child node, are excluded — those are delivered over replication and reach no local subscriber by design. Subscription existence, not byte-level delivery confirmation — can undercount a delivery that failed after a write to a live subscriber, never overcounts. The record is still durable in the commands stream — this counts a delivery attempt reaching nobody, not data loss. Resets on restart.",
+		}),
 		bundleInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "colca_contracts_bundle_info",
 			Help: "Identity of the loaded contracts bundle (info gauge, value 1). source=builtin means the floor rules apply — the one-glance answer to which rules this node enforces.",
@@ -450,7 +484,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.authReject, m.aclDeny, m.kicks, m.humanSessions, m.jwksKeys, m.jwksFailures,
-		m.nodeCmds, m.nodePrefix, m.bundleInfo, m.bundleContracts,
+		m.nodeCmds, m.nodePrefix, m.commandUndelivered, m.bundleInfo, m.bundleContracts,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied,
@@ -514,6 +548,16 @@ func (m *Metrics) NodeCmd(contract, verb, result string) {
 		return
 	}
 	m.nodeCmds.WithLabelValues(contract, verb, result).Inc()
+}
+
+// CommandUndelivered counts one live command published to the local MQTT bus
+// that reached zero subscribers — see the field comment above and
+// engine.observeCommandDelivery for exactly what is and is not counted here.
+func (m *Metrics) CommandUndelivered() {
+	if m == nil {
+		return
+	}
+	m.commandUndelivered.Inc()
 }
 
 // SetBundleInfo reports the active contract authority (schema-bundle design

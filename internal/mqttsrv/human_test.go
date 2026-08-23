@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	pahov5 "github.com/eclipse/paho.golang/paho"
 	paho "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/alpamayo-solutions/colca/internal/authtest"
@@ -209,6 +210,16 @@ func TestHumanDoorRejections(t *testing.T) {
 		{"expired token", "anna", w.iss.Mint("anna", nil, time.Now().Add(-3*time.Minute))},
 		{"wrong audience", "anna", w.iss.MintOpt(tokentest.MintOpts{Sub: "anna", Exp: future, Aud: "other"})},
 		{"username != sub", "not-anna", w.iss.Mint("anna", nil, future)},
+		// OnPublish trusts that no session which reached it can carry an empty
+		// identity (mqttsrv.go: `if ident == ""` lets the packet through
+		// UNVALIDATED). Half of that trust, for the human door, is that a
+		// token whose own "sub" claim is empty is refused at the source
+		// (plugins/uns.TokenEntry: "token entry: empty sub") before
+		// user == v.Sub is ever reached — so v.Sub can never itself be "". A
+		// non-empty username here isolates that: it proves the empty-sub
+		// token is rejected on its own terms, not merely because it also
+		// happens to mismatch the username.
+		{"empty sub claim", "someone", w.iss.MintOpt(tokentest.MintOpts{Sub: "", Exp: future})},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -226,6 +237,47 @@ func TestHumanDoorRejections(t *testing.T) {
 	defer cl.Disconnect(50)
 	if err == nil {
 		t.Fatal("machine door accepted a token")
+	}
+}
+
+// A CONNECT with an empty username but a well-formed, correctly signed token
+// (real, non-empty sub) is the other half of the OnPublish trust that
+// TestHumanDoorRejections' "empty sub claim" case does not reach: it proves
+// user == v.Sub itself refuses "" against a real sub, not merely that a
+// malformed/empty-sub token gets rejected first.
+//
+// This needs the MQTT 5 client (paho.golang), not humanConnect's MQTT 3.1.1
+// one: paho.mqtt.golang's CONNECT builder refuses to set PasswordFlag unless
+// Username is non-empty ("mustn't have password without user as well" —
+// message.go), so it cannot even construct the packet this test needs to
+// send — the adversarial CONNECT (empty username, password present) would
+// silently degrade into an empty-token CONNECT and prove nothing. paho.golang
+// exposes UsernameFlag/PasswordFlag independently of the string values, so it
+// can send exactly that packet.
+func TestHumanDoorRejectsEmptyUsernameAgainstARealToken(t *testing.T) {
+	w := newHumanWorld(t)
+	tok := w.iss.Mint("anna", nil, time.Now().Add(5*time.Minute))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := tls.Dial("tcp", w.srv.HumanTCPAddr(), insecureTLS())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	c := pahov5.NewClient(pahov5.ClientConfig{Conn: conn})
+	_, err = c.Connect(ctx, &pahov5.Connect{
+		ClientID:     fmt.Sprintf("h-empty-user-%d", time.Now().UnixNano()),
+		UsernameFlag: true,
+		Username:     "",
+		PasswordFlag: true,
+		Password:     []byte(tok),
+		KeepAlive:    30,
+		CleanStart:   true,
+		Properties:   &pahov5.ConnectProperties{},
+	})
+	if err == nil {
+		t.Fatal("connect with an empty username against a valid, non-empty-sub token succeeded, want rejection")
 	}
 }
 

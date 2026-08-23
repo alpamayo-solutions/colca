@@ -67,6 +67,11 @@ type RecordObserver interface {
 // SetObserver wires the record observer in (node startup).
 func (e *Engine) SetObserver(o RecordObserver) { e.observer = o }
 
+// SetSubscriberCheck wires the local-bus subscriber lookup in (node startup,
+// once the broker exists). See HasLocalSubscriber and
+// observeCommandDelivery in undelivered.go.
+func (e *Engine) SetSubscriberCheck(fn HasLocalSubscriber) { e.hasSubscriber = fn }
+
 func (e *Engine) observe(p uns.Parsed, topic string, payload []byte) {
 	if e.observer != nil {
 		e.observer.Observe(p.Contract, topic, payload)

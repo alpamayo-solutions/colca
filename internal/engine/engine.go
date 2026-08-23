@@ -28,6 +28,14 @@ import (
 // from two sides.
 type LocalDeliver func(topic string, payload []byte, retain bool)
 
+// HasLocalSubscriber reports whether topic currently has at least one live
+// subscriber on this node's local MQTT bus (nil when there is no broker, and
+// in unit tests that do not wire one). It exists solely to power the
+// undelivered-command observability signal in persistTSAttributed — nothing
+// else asks this question, and callers that never wire it simply never learn
+// the answer (observeCommandDelivery treats "unknown" as "do not count it").
+type HasLocalSubscriber func(topic string) bool
+
 // Result describes what an ingest did. Topic is exactly what was persisted —
 // a client's own publish stores its topic unchanged (local-service-trust
 // design §2/§5: no client-path rewrite any more), but a replicated record
@@ -85,6 +93,13 @@ type Engine struct {
 	log     *slog.Logger
 	metrics *metrics.Metrics // nil-safe: every method on a nil receiver is a no-op
 	clk     *clock.Clock
+
+	// hasSubscriber answers observeCommandDelivery's one question (nil until
+	// SetSubscriberCheck — a node with no broker, or a unit test, never
+	// counts a false undelivered command for want of an answer it cannot
+	// give). Wired late, like exec and observer below, for the same reason:
+	// node assembly needs the broker built before it can offer this.
+	hasSubscriber HasLocalSubscriber
 
 	// The node's position in the tree (id-grants design §4): the chain of
 	// elements from the root down to the one this node binds to, taught by the
@@ -620,14 +635,23 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 	return res, err
 }
 
-// ingestAdminStateBatch commits the complete retained-entity result of one
-// domain command. Validation is intentionally front-loaded: every topic,
-// schema, author and tombstone rule is checked before Store.Append sees a
-// record, then one synced Pebble batch appends the stream history and updates
-// every KV projection. A late invalid record therefore cannot leave an early
-// record applied.
+// ingestAdminStateBatch commits the complete state result of one domain
+// command. Validation is intentionally front-loaded: every topic, schema,
+// author and tombstone rule is checked before Store.Append sees a record, then
+// one synced Pebble batch appends the stream history and updates every KV
+// projection. A late invalid record therefore cannot leave an early record
+// applied.
+//
+// One batch is one stream. Append writes a single stream's history and its
+// offset meta key in that Pebble batch, so records for two streams could only
+// be committed as two batches — which is exactly the half-applied outcome this
+// path exists to prevent. No command mixes them (a verb edits the entity graph
+// or files definitions, never both), so the rule costs nothing and the refusal
+// below is what keeps it true.
 func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution Attribution) ([]Result, error) {
 	if len(records) == 0 {
+		// A command that decided on nothing — every path already present, every
+		// entry already bound — is a successful no-op, not a failed write.
 		return []Result{}, nil
 	}
 
@@ -638,6 +662,7 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 	}
 	prepared := make([]preparedRecord, 0, len(records))
 	ts := time.Now().UnixMilli()
+	stream := ""
 	for i, input := range records {
 		if !uns.IsUns(input.Topic) {
 			e.metrics.RejectPublish(metrics.ReasonGrammar)
@@ -650,7 +675,7 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 		}
 		if parsed.Contract == "_EnrolledIdentity" {
 			e.metrics.RejectPublish(metrics.ReasonRegistryContract)
-			return nil, fmt.Errorf("admin state batch record %d: _EnrolledIdentity is enrollment-door only — use POST /enroll", i)
+			return nil, fmt.Errorf("admin state batch record %d (%s): _EnrolledIdentity is enrollment-door only — use POST /enroll", i, input.Topic)
 		}
 		class := e.ClassOf(parsed.Contract)
 		if uns.IsNodeLocal(class) {
@@ -661,9 +686,17 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 			e.metrics.RejectPublish(metrics.ReasonGrammar)
 			return nil, fmt.Errorf("admin state batch record %d: unknown contract %s", i, parsed.Contract)
 		}
-		if !uns.IsEntityState(class) {
+		if !uns.IsCommandAuthoredState(class) {
 			e.metrics.RejectPublish(metrics.ReasonValidation)
-			return nil, fmt.Errorf("admin state batch record %d: %s is not retained entity state", i, parsed.Contract)
+			return nil, fmt.Errorf("admin state batch record %d (%s): %s is not state a command may author",
+				i, input.Topic, parsed.Contract)
+		}
+		if recordStream := uns.StreamFor(class); stream == "" {
+			stream = recordStream
+		} else if recordStream != stream {
+			e.metrics.RejectPublish(metrics.ReasonValidation)
+			return nil, fmt.Errorf("admin state batch record %d (%s) belongs to stream %q, not %q — "+
+				"one command's records commit as one batch on one stream", i, input.Topic, recordStream, stream)
 		}
 		if parsed.NodeID != e.cfg.ULID {
 			e.metrics.RejectPublish(metrics.ReasonIdentity)
@@ -671,11 +704,11 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 		}
 		if err := e.validateContract(parsed.Contract, input.Payload); err != nil {
 			e.metrics.RejectPublish(metrics.ReasonValidation)
-			return nil, fmt.Errorf("admin state batch record %d: %w", i, err)
+			return nil, fmt.Errorf("admin state batch record %d (%s): %w", i, input.Topic, err)
 		}
 		if err := e.validateAdminStateAuthor(parsed, input.Payload); err != nil {
 			e.metrics.RejectPublish(metrics.ReasonIdentity)
-			return nil, fmt.Errorf("admin state batch record %d: %w", i, err)
+			return nil, fmt.Errorf("admin state batch record %d (%s): %w", i, input.Topic, err)
 		}
 
 		prepared = append(prepared, preparedRecord{
@@ -694,7 +727,7 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 	for i := range prepared {
 		storeRecords[i] = prepared[i].record
 	}
-	first, _, err := e.store.Append("entities", storeRecords)
+	first, _, err := e.store.Append(stream, storeRecords)
 	if err != nil {
 		return nil, err
 	}
@@ -702,13 +735,13 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 	results := make([]Result, len(prepared))
 	for i, item := range prepared {
 		offset := first + uint64(i)
-		e.metrics.IngestRecord("entities")
-		e.log.Debug("atomic entity ingest", "stream", "entities", "offset", offset, "topic", item.record.Topic)
+		e.metrics.IngestRecord(stream)
+		e.log.Debug("atomic state ingest", "stream", stream, "offset", offset, "topic", item.record.Topic)
 		e.elements.Observe(item.parsed.Contract, item.record.Topic, item.record.Payload)
 		if e.deliver != nil {
 			e.deliver(item.record.Topic, item.record.Payload, retainFor(item.class))
 		}
-		results[i] = Result{Persisted: true, Stream: "entities", Offset: offset, Topic: item.record.Topic}
+		results[i] = Result{Persisted: true, Stream: stream, Offset: offset, Topic: item.record.Topic}
 	}
 	return results, nil
 }
@@ -1032,6 +1065,10 @@ func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string
 	e.elements.Observe(p.Contract, topic, payload)
 	if e.deliver != nil {
 		e.deliver(topic, payload, retainFor(class))
+		// Ordered after delivery on purpose: this asks whether the publish
+		// that just happened reached anyone, so it must run after the
+		// publish, and only when one actually happened (see undelivered.go).
+		e.observeCommandDelivery(class, p, topic, payload)
 	}
 	return Result{Persisted: true, Stream: streamName, Offset: first, Topic: topic}, nil
 }

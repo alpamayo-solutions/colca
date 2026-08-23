@@ -65,7 +65,10 @@ func (f *fakeStore) KVScanAll(contract string) []KVRecord {
 	return out
 }
 
-func (f *fakeStore) Publish(topic string, payload []byte) (StateWrite, error) {
+// put applies one record the way the store would once the batch it belongs to
+// has been accepted. It is not part of EntityStore: the plugin has exactly one
+// write door, and it is atomic. Tests seed through seed() below.
+func (f *fakeStore) put(topic string, payload []byte) (StateWrite, error) {
 	if msg, bad := f.fail[topic]; bad {
 		return StateWrite{}, errString(msg)
 	}
@@ -86,22 +89,34 @@ func (f *fakeStore) Publish(topic string, payload []byte) (StateWrite, error) {
 	return write, nil
 }
 
+// PublishBatch mirrors the engine's commit boundary: every record is validated
+// before any of them is applied, and a refusal names the record it refused (the
+// engine's message carries the index and the topic, which is how a caller still
+// learns WHICH entry it was once the executor stopped writing one at a time).
 func (f *fakeStore) PublishBatch(records []StateRecord) ([]StateWrite, error) {
-	for _, record := range records {
+	for i, record := range records {
 		if msg, bad := f.fail[record.Topic]; bad {
-			return nil, errString(msg)
+			return nil, errString(fmt.Sprintf("state batch record %d (%s): %s", i, record.Topic, msg))
 		}
 	}
 	f.batchCalls++
 	writes := make([]StateWrite, 0, len(records))
 	for _, record := range records {
-		write, err := f.Publish(record.Topic, record.Payload)
+		write, err := f.put(record.Topic, record.Payload)
 		if err != nil {
 			return nil, err
 		}
 		writes = append(writes, write)
 	}
 	return writes, nil
+}
+
+// seed puts one record in place as setup and returns its coordinates. It goes
+// straight to put rather than through PublishBatch: a fixture's own records are
+// setup, not traffic under test, and the tests that count commits would read
+// every seeded row as one.
+func (f *fakeStore) seed(topic string, payload []byte) (StateWrite, error) {
+	return f.put(topic, payload)
 }
 
 type errString string
@@ -189,6 +204,110 @@ func TestUpsertSurfacesADoorRejection(t *testing.T) {
 
 	if code != 422 || !strings.Contains(msg, "line1/bad") || !strings.Contains(msg, "missing required field") {
 		t.Fatalf("code %d msg %q — want 422 naming the entry and the cause", code, msg)
+	}
+}
+
+// A command is ONE state transition. This is the claim the executor was
+// rebuilt around: it used to write each record as it went, so a fortieth signal
+// the door refused left the first thirty-nine committed and returned an error
+// to a caller with no way to learn which half had taken. Idempotency covered
+// for it — a re-run skipped what existed — but "run it again" is not the same
+// guarantee as "nothing happened".
+func TestARefusedRecordLeavesTheWholeCommandUncommitted(t *testing.T) {
+	f := newStore("n-edge1")
+	// The third signal is the one the door will refuse. The 422 asserted below
+	// is what proves this seed bit: without it the command answers 200.
+	f.fail["colca/v1/_Signal/n-edge1/line1/third"] = "validation: missing required field name"
+	c := NewConfigExec(f, nil, nil, nil, nil)
+	command := body(t, map[string]any{
+		"signals": []any{
+			map[string]any{"path": "line1/first", "signal": map[string]any{"id": "s1", "name": "first"}},
+			map[string]any{"path": "line1/second", "signal": map[string]any{"id": "s2", "name": "second"}},
+			map[string]any{"path": "line1/third", "signal": map[string]any{"id": "s3", "name": "third"}},
+		},
+	})
+
+	code, msg, result, writes := c.ExecuteWithWrites("_CmdConfigure", "signal/upsert", command)
+
+	if code != 422 || result != "invalid" {
+		t.Fatalf("code %d result %q msg %q — want 422/invalid; the seeded refusal did not bite", code, result, msg)
+	}
+	if !strings.Contains(msg, "line1/third") || !strings.Contains(msg, "missing required field") {
+		t.Errorf("msg %q — want the refused entry and the cause named", msg)
+	}
+	if len(writes) != 0 {
+		t.Errorf("reported writes = %+v, want none: nothing was committed", writes)
+	}
+	if got := signalsUnder(f, "n-edge1"); len(got) != 0 {
+		t.Fatalf("the refused command left %d signal(s) in KV: %+v — the two records "+
+			"before the refused one must not survive it", len(got), got)
+	}
+	if f.offset != 0 {
+		t.Fatalf("the refused command took %d stream position(s); want 0", f.offset)
+	}
+}
+
+// The other half of the same claim: the accepted command commits as ONE batch,
+// not as one batch per record. A per-record loop over the atomic port would
+// satisfy the test above and still leave the partial-commit hole open.
+func TestAnAcceptedCommandCommitsEveryRecordInOneTransition(t *testing.T) {
+	f := newStore("n-edge1")
+	c := NewConfigExec(f, nil, nil, nil, nil)
+
+	code, msg, _, writes := c.ExecuteWithWrites("_CmdConfigure", "signal/upsert", body(t, map[string]any{
+		"signals": []any{
+			map[string]any{"path": "line1/first", "signal": map[string]any{"id": "s1", "name": "first"}},
+			map[string]any{"path": "line1/second", "signal": map[string]any{"id": "s2", "name": "second"}},
+			map[string]any{"path": "line1/third", "signal": map[string]any{"id": "s3", "name": "third"}},
+		},
+	}))
+
+	if code != 200 {
+		t.Fatalf("upsert = %d %q, want 200", code, msg)
+	}
+	if f.batchCalls != 1 {
+		t.Fatalf("the command committed in %d transitions, want 1", f.batchCalls)
+	}
+	if len(writes) != 3 {
+		t.Fatalf("reported writes = %+v, want one per record", writes)
+	}
+	if got := signalsUnder(f, "n-edge1"); len(got) != 3 {
+		t.Fatalf("stored signals = %+v, want all three", got)
+	}
+}
+
+// Autobind is the verb the partial-commit hole actually bit: one command
+// creating a signal per unbound tag. A refusal part-way through must leave the
+// connector entirely unbound, not half bound.
+func TestARefusedAutobindBindsNothing(t *testing.T) {
+	c := newConfigExec(t)
+	f, ok := c.store.(*fakeStore)
+	if !ok {
+		t.Fatalf("store is %T", c.store)
+	}
+	place(t, c, "el-press3", "line1/press3")
+	bindEntry(t, c, "01JCONN", "opcua-press", "el-press3")
+	// The catalogue's third tag is the one whose signal the door refuses.
+	f.fail["colca/v1/_Signal/n1/line1/press3/opcua-press/tag-01JTAG3"] = "validation: unknown data_type"
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/press3/opcua-press",
+		tags("01JTAG1", "01JTAG2", "01JTAG3"))
+
+	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+
+	if code != 422 {
+		t.Fatalf("autobind = %d %q, want 422 — the seeded refusal did not bite", code, msg)
+	}
+	// Pin the specific refusal, not merely a 422: an unrelated failure (a
+	// bad catalogue, a malformed payload) would also satisfy a bare 422
+	// check without ever exercising the seeded per-record rejection this
+	// test claims to pin.
+	if !strings.Contains(msg, "unknown data_type") || !strings.Contains(msg, "tag-01JTAG3") {
+		t.Fatalf("autobind refusal = %q, want it to name the seeded refusal (unknown data_type) "+
+			"on tag-01JTAG3", msg)
+	}
+	if got := signalsAt(c); len(got) != 0 {
+		t.Fatalf("the refused autobind bound %d tag(s): %+v — a half-bound connector "+
+			"is exactly what committing per record produced", len(got), got)
 	}
 }
 
@@ -323,7 +442,7 @@ func publishCatalogue(t *testing.T, c *ConfigExec, topic string, tags []map[stri
 	if !ok {
 		t.Fatalf("publishCatalogue: %T is not a fakeStore", c.store)
 	}
-	if _, err := f.Publish(topic, mustJSON(map[string]any{"data_tags": tags})); err != nil {
+	if _, err := f.seed(topic, mustJSON(map[string]any{"data_tags": tags})); err != nil {
 		t.Fatal(err)
 	}
 }

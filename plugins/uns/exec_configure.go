@@ -16,9 +16,13 @@ import (
 // command and produces the same records. That is what makes "define it once"
 // true by construction rather than by discipline.
 type ConfigExec struct {
-	store  EntityStore
-	mu     sync.Mutex
-	writes []StateWrite
+	store EntityStore
+	// mu serializes commands. Every verb reads the node's current state, decides
+	// on a complete set of records, and commits them in one transition; the lock
+	// is what keeps that read-decide-commit sequence whole against another
+	// command — and against the lifecycle trigger, which runs the same binding
+	// logic from a record's arrival rather than from a verb.
+	mu sync.Mutex
 	// bound answers which identities bind to an element, so retiring a position
 	// cannot strand the things standing on it, and who an identity is — the
 	// name and element autobind needs to COMPUTE a connector's catalogue
@@ -75,6 +79,11 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	if err != nil {
 		return
 	}
+	// The trigger authors state exactly as the verb does, so it takes the same
+	// lock: its read of what is already bound and its commit of what is not must
+	// not interleave with a command doing the same work.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.entryOwns(topic) {
 		return // no enrolled entry's computed catalogue topic matches: ignore it
 	}
@@ -82,9 +91,9 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	if err := json.Unmarshal(payload, &cat); err != nil {
 		return
 	}
-	bound := c.boundTags()
+	bindings := c.bindings()
 	for _, tag := range cat.DataTags {
-		if bound[tag.ID] {
+		if bindings.propose(tag.ID, "") != bindFree {
 			return // already bound: this is a republish, not a new connector
 		}
 	}
@@ -251,22 +260,25 @@ func (c *ConfigExec) Execute(contract, verb string, payload []byte) (int, string
 	return code, message, result
 }
 
-// ExecuteWithWrites is the read-your-writes extension consumed by the engine.
-// The ordinary Execute method remains the stable executor interface for
-// command handlers that do not produce state.
+// ExecuteWithWrites is the atomic-batch extension consumed by the engine.
+// Every verb commits its whole record set through a single PublishBatch call
+// before returning, so the writes here are commit coordinates (stream,
+// offset, topic) already durable in the store — not records the executor
+// reads back to learn what it just did. The engine folds them into the
+// command's ack (CommandOutcome.StateWrites) so a caller learns exactly what
+// landed without re-reading the store itself. The ordinary Execute method
+// remains the stable executor interface for command handlers that do not
+// produce state.
 func (c *ConfigExec) ExecuteWithWrites(
 	contract, verb string,
 	payload []byte,
 ) (int, string, string, []StateWrite) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.writes = nil
-	code, message, result := c.execute(contract, verb, payload)
-	writes := append([]StateWrite(nil), c.writes...)
-	return code, message, result, writes
+	return c.execute(contract, verb, payload)
 }
 
-func (c *ConfigExec) execute(contract, verb string, payload []byte) (int, string, string) {
+func (c *ConfigExec) execute(contract, verb string, payload []byte) (int, string, string, []StateWrite) {
 	switch verb {
 	case "signal/upsert":
 		return c.upsert(payload)
@@ -291,39 +303,55 @@ func (c *ConfigExec) execute(contract, verb string, payload []byte) (int, string
 	case "definition/delete":
 		return c.definitionDelete(payload)
 	default:
-		return 422, fmt.Sprintf("unknown configure verb %q", verb), "invalid"
+		return 422, fmt.Sprintf("unknown configure verb %q", verb), "invalid", nil
 	}
 }
 
-func (c *ConfigExec) constantUpsert(payload []byte) (int, string, string) {
+// commit writes a verb's complete record set as ONE state transition.
+//
+// This is the only way this executor writes. Every verb reads the node's state,
+// decides on the whole set, and arrives here once: either every record takes a
+// durable stream position and becomes current KV state, or none of them do. The
+// alternative — a write per record — is what left a node half-configured when
+// the fortieth signal of an autobind was refused, with the first thirty-nine
+// already committed and an error returned to a caller who had no way to know
+// which half took.
+//
+// A set that turned out empty is a successful no-op: an autobind whose tags are
+// all bound already, or a delete of nothing. That is not a failed write and must
+// not reach the store as one.
+func (c *ConfigExec) commit(records []StateRecord) ([]StateWrite, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	return c.store.PublishBatch(records)
+}
+
+func (c *ConfigExec) constantUpsert(payload []byte) (int, string, string, []StateWrite) {
 	var body constantUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return 422, "constant/upsert: unreadable payload: " + err.Error(), "invalid"
+		return 422, "constant/upsert: unreadable payload: " + err.Error(), "invalid", nil
 	}
 	if len(body.Constants) == 0 {
-		return 422, "constant/upsert: no constants given", "invalid"
+		return 422, "constant/upsert: no constants given", "invalid", nil
 	}
 
-	type pending struct {
-		path, topic string
-		payload     []byte
-	}
-	writes := make([]pending, 0, len(body.Constants))
+	records := make([]StateRecord, 0, len(body.Constants))
 	seen := make(map[string]bool, len(body.Constants))
 	for i, ref := range body.Constants {
 		if err := validatePositionPath(ref.Path); err != nil {
-			return 422, fmt.Sprintf("constant/upsert: entry %d: %v", i, err), "invalid"
+			return 422, fmt.Sprintf("constant/upsert: entry %d: %v", i, err), "invalid", nil
 		}
 		if len(ref.Constant) == 0 {
-			return 422, fmt.Sprintf("constant/upsert: entry %d has no constant", i), "invalid"
+			return 422, fmt.Sprintf("constant/upsert: entry %d has no constant", i), "invalid", nil
 		}
 		incoming, err := validateConstantPayload(ref.Constant)
 		if err != nil {
-			return 422, fmt.Sprintf("constant/upsert: entry %d: %v", i, err), "invalid"
+			return 422, fmt.Sprintf("constant/upsert: entry %d: %v", i, err), "invalid", nil
 		}
 		topic := c.constantTopic(ref.Path)
 		if seen[topic] {
-			return 422, fmt.Sprintf("constant/upsert: entry %d repeats path %s", i, ref.Path), "invalid"
+			return 422, fmt.Sprintf("constant/upsert: entry %d repeats path %s", i, ref.Path), "invalid", nil
 		}
 		seen[topic] = true
 		if existing, ok := c.store.KVGet(topic); ok {
@@ -334,56 +362,52 @@ func (c *ConfigExec) constantUpsert(payload []byte) (int, string, string) {
 					heldID = "an unreadable retained record"
 				}
 				return 409, fmt.Sprintf("constant/upsert: %s is already constant %s — two constants "+
-					"cannot share one position", ref.Path, heldID), "conflict"
+					"cannot share one position", ref.Path, heldID), "conflict", nil
 			}
 		}
-		writes = append(writes, pending{path: ref.Path, topic: topic, payload: ref.Constant})
+		records = append(records, StateRecord{Topic: topic, Payload: ref.Constant})
 	}
 
-	// Everything above is read-only. Publishing starts only after every entry
-	// has passed shape, type, duplicate-path and retained-identity validation.
-	for _, write := range writes {
-		if err := c.publish(write.topic, write.payload); err != nil {
-			return 422, fmt.Sprintf("constant/upsert: %s rejected: %v", write.path, err), "invalid"
-		}
+	writes, err := c.commit(records)
+	if err != nil {
+		return 422, "constant/upsert: rejected: " + err.Error(), "invalid", nil
 	}
-	return 200, fmt.Sprintf("upserted %d", len(writes)), "ok"
+	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
 }
 
-func (c *ConfigExec) constantDelete(payload []byte) (int, string, string) {
+func (c *ConfigExec) constantDelete(payload []byte) (int, string, string, []StateWrite) {
 	var body deleteBody
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return 422, "constant/delete: unreadable payload: " + err.Error(), "invalid"
+		return 422, "constant/delete: unreadable payload: " + err.Error(), "invalid", nil
 	}
 	if len(body.Paths) == 0 {
-		return 422, "constant/delete: no paths given", "invalid"
+		return 422, "constant/delete: no paths given", "invalid", nil
 	}
-	topics := make([]string, 0, len(body.Paths))
+	records := make([]StateRecord, 0, len(body.Paths))
 	missing := make([]string, 0)
 	seen := make(map[string]bool, len(body.Paths))
 	for i, path := range body.Paths {
 		if err := validatePositionPath(path); err != nil {
-			return 422, fmt.Sprintf("constant/delete: entry %d: %v", i, err), "invalid"
+			return 422, fmt.Sprintf("constant/delete: entry %d: %v", i, err), "invalid", nil
 		}
 		topic := c.constantTopic(path)
 		if seen[topic] {
-			return 422, fmt.Sprintf("constant/delete: entry %d repeats path %s", i, path), "invalid"
+			return 422, fmt.Sprintf("constant/delete: entry %d repeats path %s", i, path), "invalid", nil
 		}
 		seen[topic] = true
 		if _, ok := c.store.KVGet(topic); !ok {
 			missing = append(missing, path)
 		}
-		topics = append(topics, topic)
+		records = append(records, StateRecord{Topic: topic})
 	}
 	if len(missing) > 0 {
-		return 404, "constant/delete: no constant at " + strings.Join(missing, ", "), "invalid"
+		return 404, "constant/delete: no constant at " + strings.Join(missing, ", "), "invalid", nil
 	}
-	for i, topic := range topics {
-		if err := c.publish(topic, nil); err != nil {
-			return 500, fmt.Sprintf("constant/delete: %s failed: %v", body.Paths[i], err), "error"
-		}
+	writes, err := c.commit(records)
+	if err != nil {
+		return 500, "constant/delete: failed: " + err.Error(), "error", nil
 	}
-	return 200, fmt.Sprintf("deleted %d", len(topics)), "ok"
+	return 200, fmt.Sprintf("deleted %d", len(records)), "ok", writes
 }
 
 func validatePositionPath(path string) error {
@@ -406,67 +430,83 @@ func validatePositionPath(path string) error {
 	return nil
 }
 
-func (c *ConfigExec) entityUpsert(payload []byte) (int, string, string) {
+func (c *ConfigExec) entityUpsert(payload []byte) (int, string, string, []StateWrite) {
 	var body entityUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return 422, "entity/upsert: unreadable payload: " + err.Error(), "invalid"
+		return 422, "entity/upsert: unreadable payload: " + err.Error(), "invalid", nil
 	}
 	if len(body.Entities) == 0 {
-		return 422, "entity/upsert: no entities given", "invalid"
+		return 422, "entity/upsert: no entities given", "invalid", nil
 	}
+	records := make([]StateRecord, 0, len(body.Entities))
 	for i, ref := range body.Entities {
 		if err := c.checkCommandEntity(ref.Contract); err != nil {
-			return 422, fmt.Sprintf("entity/upsert: entry %d: %v", i, err), "invalid"
+			return 422, fmt.Sprintf("entity/upsert: entry %d: %v", i, err), "invalid", nil
 		}
 		var incoming identified
 		if err := json.Unmarshal(ref.Entity, &incoming); err != nil || incoming.ID == "" {
-			return 422, fmt.Sprintf("entity/upsert: entry %d has no id", i), "invalid"
+			return 422, fmt.Sprintf("entity/upsert: entry %d has no id", i), "invalid", nil
 		}
 		if err := c.checkCommandEntityIdentity(ref.Contract, incoming.ID, ref.Entity); err != nil {
-			return 422, fmt.Sprintf("entity/upsert: entry %d: %v", i, err), "invalid"
+			return 422, fmt.Sprintf("entity/upsert: entry %d: %v", i, err), "invalid", nil
 		}
-		topic := c.commandEntityTopic(ref.Contract, incoming.ID)
-		if err := c.publish(topic, ref.Entity); err != nil {
-			return 422, fmt.Sprintf("entity/upsert: %s %s rejected: %v",
-				ref.Contract, incoming.ID, err), "invalid"
-		}
+		records = append(records, StateRecord{
+			Topic:   c.commandEntityTopic(ref.Contract, incoming.ID),
+			Payload: ref.Entity,
+		})
 	}
-	return 200, fmt.Sprintf("upserted %d", len(body.Entities)), "ok"
+	writes, err := c.commit(records)
+	if err != nil {
+		return 422, "entity/upsert: rejected: " + err.Error(), "invalid", nil
+	}
+	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
 }
 
-func (c *ConfigExec) entityDelete(payload []byte) (int, string, string) {
+func (c *ConfigExec) entityDelete(payload []byte) (int, string, string, []StateWrite) {
 	var body entityDeleteBody
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return 422, "entity/delete: unreadable payload: " + err.Error(), "invalid"
+		return 422, "entity/delete: unreadable payload: " + err.Error(), "invalid", nil
 	}
 	if len(body.Entities) == 0 {
-		return 422, "entity/delete: no entities given", "invalid"
+		return 422, "entity/delete: no entities given", "invalid", nil
 	}
 	var missing []string
+	records := make([]StateRecord, 0, len(body.Entities))
+	seen := make(map[string]bool, len(body.Entities))
 	for i, ref := range body.Entities {
 		if err := c.checkCommandEntity(ref.Contract); err != nil {
-			return 422, fmt.Sprintf("entity/delete: entry %d: %v", i, err), "invalid"
+			return 422, fmt.Sprintf("entity/delete: entry %d: %v", i, err), "invalid", nil
 		}
 		if ref.ID == "" {
-			return 422, fmt.Sprintf("entity/delete: entry %d has no id", i), "invalid"
+			return 422, fmt.Sprintf("entity/delete: entry %d has no id", i), "invalid", nil
 		}
 		if err := c.checkCommandEntityIdentity(ref.Contract, ref.ID, nil); err != nil {
-			return 422, fmt.Sprintf("entity/delete: entry %d: %v", i, err), "invalid"
+			return 422, fmt.Sprintf("entity/delete: entry %d: %v", i, err), "invalid", nil
 		}
 		topic := c.commandEntityTopic(ref.Contract, ref.ID)
+		// A repeat is refused rather than tombstoned twice: the set is decided
+		// before anything is written, so the second mention cannot discover that
+		// the first already retired it (constant/delete refuses repeats for the
+		// same reason).
+		if seen[topic] {
+			return 422, fmt.Sprintf("entity/delete: entry %d repeats %s %s",
+				i, ref.Contract, ref.ID), "invalid", nil
+		}
+		seen[topic] = true
 		if _, ok := c.store.KVGet(topic); !ok {
 			missing = append(missing, ref.Contract+" "+ref.ID)
 			continue
 		}
-		if err := c.publish(topic, nil); err != nil {
-			return 500, fmt.Sprintf("entity/delete: %s %s failed: %v",
-				ref.Contract, ref.ID, err), "error"
-		}
+		records = append(records, StateRecord{Topic: topic})
 	}
 	if len(missing) > 0 {
-		return 404, "entity/delete: no entity at " + strings.Join(missing, ", "), "invalid"
+		return 404, "entity/delete: no entity at " + strings.Join(missing, ", "), "invalid", nil
 	}
-	return 200, fmt.Sprintf("deleted %d", len(body.Entities)), "ok"
+	writes, err := c.commit(records)
+	if err != nil {
+		return 500, "entity/delete: failed: " + err.Error(), "error", nil
+	}
+	return 200, fmt.Sprintf("deleted %d", len(records)), "ok", writes
 }
 
 func (c *ConfigExec) checkCommandEntity(contract string) error {
@@ -515,62 +555,66 @@ func (c *ConfigExec) commandEntityTopic(contract, id string) string {
 	return "colca/v1/" + contract + "/" + c.store.NodeID() + "/_colca/" + leaf + "/" + id
 }
 
-func (c *ConfigExec) publish(topic string, payload []byte) error {
-	write, err := c.store.Publish(topic, payload)
-	if err == nil {
-		c.writes = append(c.writes, write)
-	}
-	return err
-}
-
-func (c *ConfigExec) upsert(payload []byte) (int, string, string) {
+func (c *ConfigExec) upsert(payload []byte) (int, string, string, []StateWrite) {
 	var body upsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return 422, "signal/upsert: unreadable payload: " + err.Error(), "invalid"
+		return 422, "signal/upsert: unreadable payload: " + err.Error(), "invalid", nil
 	}
 	if len(body.Signals) == 0 {
-		return 422, "signal/upsert: no signals given", "invalid"
+		return 422, "signal/upsert: no signals given", "invalid", nil
 	}
+	records := make([]StateRecord, 0, len(body.Signals))
 	for i, ref := range body.Signals {
 		if ref.Path == "" {
-			return 422, fmt.Sprintf("signal/upsert: entry %d has no path", i), "invalid"
+			return 422, fmt.Sprintf("signal/upsert: entry %d has no path", i), "invalid", nil
 		}
 		if len(ref.Signal) == 0 {
-			return 422, fmt.Sprintf("signal/upsert: entry %d has no signal", i), "invalid"
+			return 422, fmt.Sprintf("signal/upsert: entry %d has no signal", i), "invalid", nil
 		}
-		if err := c.publish(c.signalTopic(ref.Path), ref.Signal); err != nil {
-			// The bundle rejected it, or the store did. Either way the caller
-			// learns which entry and why rather than a bare failure.
-			return 422, fmt.Sprintf("signal/upsert: %s rejected: %v", ref.Path, err), "invalid"
-		}
+		records = append(records, StateRecord{Topic: c.signalTopic(ref.Path), Payload: ref.Signal})
 	}
-	return 200, fmt.Sprintf("upserted %d", len(body.Signals)), "ok"
+	writes, err := c.commit(records)
+	if err != nil {
+		// The bundle rejected a record, or the store did, and NOTHING was
+		// written. The commit names the record it refused, so the caller still
+		// learns which entry and why rather than a bare failure.
+		return 422, "signal/upsert: rejected: " + err.Error(), "invalid", nil
+	}
+	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
 }
 
-func (c *ConfigExec) delete(payload []byte) (int, string, string) {
+func (c *ConfigExec) delete(payload []byte) (int, string, string, []StateWrite) {
 	var body deleteBody
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return 422, "signal/delete: unreadable payload: " + err.Error(), "invalid"
+		return 422, "signal/delete: unreadable payload: " + err.Error(), "invalid", nil
 	}
 	if len(body.Paths) == 0 {
-		return 422, "signal/delete: no paths given", "invalid"
+		return 422, "signal/delete: no paths given", "invalid", nil
 	}
 	var missing []string
-	for _, path := range body.Paths {
+	records := make([]StateRecord, 0, len(body.Paths))
+	seen := make(map[string]bool, len(body.Paths))
+	for i, path := range body.Paths {
 		topic := c.signalTopic(path)
+		if seen[topic] {
+			return 422, fmt.Sprintf("signal/delete: entry %d repeats path %s", i, path), "invalid", nil
+		}
+		seen[topic] = true
 		if _, ok := c.store.KVGet(topic); !ok {
 			missing = append(missing, path)
 			continue
 		}
 		// An empty payload is the tombstone: the path is retired, not blanked.
-		if err := c.publish(topic, nil); err != nil {
-			return 500, fmt.Sprintf("signal/delete: %s failed: %v", path, err), "error"
-		}
+		records = append(records, StateRecord{Topic: topic})
 	}
 	if len(missing) > 0 {
-		return 404, "signal/delete: no signal at " + strings.Join(missing, ", "), "invalid"
+		return 404, "signal/delete: no signal at " + strings.Join(missing, ", "), "invalid", nil
 	}
-	return 200, fmt.Sprintf("deleted %d", len(body.Paths)), "ok"
+	writes, err := c.commit(records)
+	if err != nil {
+		return 500, "signal/delete: failed: " + err.Error(), "error", nil
+	}
+	return 200, fmt.Sprintf("deleted %d", len(records)), "ok", writes
 }
 
 // autobind creates one signal per unbound tag of a connector's catalogue.
@@ -580,13 +624,13 @@ func (c *ConfigExec) delete(payload []byte) (int, string, string) {
 // what lets the same verb be issued by a person, replayed from the commands
 // stream after an offline period, or fired by a node lifecycle trigger, without
 // any of those paths needing to know about the others.
-func (c *ConfigExec) autobind(payload []byte) (int, string, string) {
+func (c *ConfigExec) autobind(payload []byte) (int, string, string, []StateWrite) {
 	var body autobindBody
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return 422, "signal/autobind: unreadable payload: " + err.Error(), "invalid"
+		return 422, "signal/autobind: unreadable payload: " + err.Error(), "invalid", nil
 	}
 	if body.Connector == "" {
-		return 422, "signal/autobind: no connector given", "invalid"
+		return 422, "signal/autobind: no connector given", "invalid", nil
 	}
 
 	name, element, ok := c.bound.EntryOf(body.Connector)
@@ -594,7 +638,7 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string) {
 		// Not enrolled here. A parent asked to bind a connector only its child
 		// holds must refuse, not guess — the command travels down and executes
 		// at the node that owns the identity.
-		return 404, "signal/autobind: " + body.Connector + " is not enrolled at this node", "invalid"
+		return 404, "signal/autobind: " + body.Connector + " is not enrolled at this node", "invalid", nil
 	}
 	mount, ok := c.mountFor(element)
 	if !ok {
@@ -602,7 +646,7 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string) {
 		// where — fail closed rather than treat it as unplaced, or a
 		// connector this node genuinely cannot locate would read as bound to
 		// the node itself and its catalogue topic would be computed wrong.
-		return 409, "signal/autobind: " + name + " is bound to an element this node cannot resolve", "conflict"
+		return 409, "signal/autobind: " + name + " is bound to an element this node cannot resolve", "conflict", nil
 	}
 	catTopic := "colca/v1/_DataTags/" + c.store.NodeID() + "/" + joinPath(mount, name)
 	raw, found := c.store.KVGet(catTopic)
@@ -610,7 +654,7 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string) {
 		// Nothing to bind against yet — the connector has not published its
 		// catalogue. A retry after it does will succeed, so this is a conflict
 		// with the current state, not a bad request.
-		return 409, "signal/autobind: " + name + " has published no catalogue", "conflict"
+		return 409, "signal/autobind: " + name + " has published no catalogue", "conflict", nil
 	}
 
 	under := body.Under
@@ -631,29 +675,41 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string) {
 // what lets the same verb be issued by a person, replayed from the commands
 // stream after an offline period, or fired by a node lifecycle trigger, without
 // any of those paths needing to know about the others.
-func (c *ConfigExec) bindCatalogue(under string, raw []byte) (int, string, string) {
+//
+// The two things this reads about itself as it goes — which tags are already
+// bound, and which paths are already taken — it tracks locally rather than by
+// re-reading the store, so composing the whole set before committing it reads
+// exactly as writing one at a time did. A catalogue whose tags sanitize to the
+// same segment still gets one path each.
+func (c *ConfigExec) bindCatalogue(under string, raw []byte) (int, string, string, []StateWrite) {
 	var cat catalogue
 	if err := json.Unmarshal(raw, &cat); err != nil {
-		return 422, "signal/autobind: unreadable catalogue: " + err.Error(), "invalid"
+		return 422, "signal/autobind: unreadable catalogue: " + err.Error(), "invalid", nil
 	}
 
-	bound := c.boundTags()
+	bindings := c.bindings()
 	taken := c.takenPaths()
 
-	created, skipped := 0, 0
+	records := make([]StateRecord, 0, len(cat.DataTags))
+	skipped := 0
 	for _, tag := range cat.DataTags {
-		if bound[tag.ID] {
+		// The invariant is asked of its one owner; skipping is this operation's
+		// own answer to it. The edit asks the same question and refuses
+		// instead — see signalBindings. An empty signal id says the signal does
+		// not exist yet, which is exactly what provisioning proposes.
+		if bindings.propose(tag.ID, "") != bindFree {
 			skipped++
 			continue
 		}
 		leaf := uniquePath(sanitize(tag.Name), under, taken)
 		path := under + "/" + leaf
+		// The signal's own identity: never composed from what it is bound to.
+		// Every Metric carries signal_id, so rebinding this signal to a
+		// different tag later must leave it — and the whole metric history
+		// under it — untouched (design §6).
+		id := c.newID()
 		signal := map[string]any{
-			// The signal's own identity: never composed from what it is bound
-			// to. Every Metric carries signal_id, so rebinding this signal to
-			// a different tag later must leave it — and the whole metric
-			// history under it — untouched (design §6).
-			"id":           c.newID(),
+			"id":           id,
 			"name":         leaf,
 			"data_tag":     tag.ID,
 			"is_published": true,
@@ -664,15 +720,17 @@ func (c *ConfigExec) bindCatalogue(under string, raw []byte) (int, string, strin
 		}
 		encoded, err := json.Marshal(signal)
 		if err != nil {
-			return 500, "signal/autobind: encode failed: " + err.Error(), "error"
+			return 500, "signal/autobind: encode failed: " + err.Error(), "error", nil
 		}
-		if err := c.publish(c.signalTopic(path), encoded); err != nil {
-			return 422, fmt.Sprintf("signal/autobind: %s rejected: %v", path, err), "invalid"
-		}
+		records = append(records, StateRecord{Topic: c.signalTopic(path), Payload: encoded})
+		bindings.bind(tag.ID, id)
 		taken[path] = true
-		created++
 	}
-	return 200, fmt.Sprintf(`{"created":%d,"skipped":%d}`, created, skipped), "ok"
+	writes, err := c.commit(records)
+	if err != nil {
+		return 422, "signal/autobind: rejected: " + err.Error(), "invalid", nil
+	}
+	return 200, fmt.Sprintf(`{"created":%d,"skipped":%d}`, len(records), skipped), "ok", writes
 }
 
 // joinPath composes a mount and a leaf into one path. An unplaced identity's
@@ -693,23 +751,29 @@ func (c *ConfigExec) constantTopic(path string) string {
 	return "colca/v1/_Constant/" + c.store.NodeID() + "/" + path
 }
 
-// boundTags is the set of tag ids that already have a signal — the answer to
-// "which of this catalogue's tags need no work". A tag's id is its own ULID,
-// minted by the connector that discovered it, so this set is exact without
-// scoping it to a connector: nothing about a connector appears on a signal any
-// more (design §6) — the tag id alone is what a signal points at.
-func (c *ConfigExec) boundTags() map[string]bool {
-	bound := map[string]bool{}
+// bindings is the tag↔signal state this node already holds — what autobind
+// consults to learn which of a catalogue's tags need no work. A tag's id is its
+// own ULID, minted by the connector that discovered it, so this is exact
+// without scoping it to a connector: nothing about a connector appears on a
+// signal any more (design §6) — the tag id alone is what a signal points at.
+//
+// A retained signal carrying a binding but no id of its own still holds its
+// tag; its path stands in as the identity, so a curated record missing a field
+// can never read as unbound and be overwritten.
+func (c *ConfigExec) bindings() *signalBindings {
+	bindings := newSignalBindings()
 	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
 		var s boundSignal
 		if json.Unmarshal(rec.Payload, &s) != nil {
 			continue
 		}
-		if s.DataTag != "" {
-			bound[s.DataTag] = true
+		identity := s.ID
+		if identity == "" {
+			identity = rec.Path
 		}
+		bindings.bind(s.DataTag, identity)
 	}
-	return bound
+	return bindings
 }
 
 func (c *ConfigExec) takenPaths() map[string]bool {
@@ -762,39 +826,53 @@ func uniquePath(leaf, under string, taken map[string]bool) string {
 // and every grant naming it would resolve to the first. That check lives here,
 // at the owning node's door, because siblings share a parent and a parent has
 // exactly one owning node (id-grants design §15.3).
-func (c *ConfigExec) elementUpsert(payload []byte) (int, string, string) {
+func (c *ConfigExec) elementUpsert(payload []byte) (int, string, string, []StateWrite) {
 	var body elementUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return 422, "element/upsert: unreadable payload: " + err.Error(), "invalid"
+		return 422, "element/upsert: unreadable payload: " + err.Error(), "invalid", nil
 	}
 	if len(body.Elements) == 0 {
-		return 422, "element/upsert: no elements given", "invalid"
+		return 422, "element/upsert: no elements given", "invalid", nil
 	}
+	records := make([]StateRecord, 0, len(body.Elements))
+	// claimed is the same guard as the retained one below, applied to the
+	// positions THIS command is taking. Nothing is written until the whole set
+	// is decided, so a later entry cannot discover an earlier one in the store;
+	// without this, two elements naming one path in a single command would both
+	// commit and the second would silently unaddress the first.
+	claimed := make(map[string]string, len(body.Elements))
 	for i, ref := range body.Elements {
 		if ref.Path == "" {
-			return 422, fmt.Sprintf("element/upsert: entry %d has no path", i), "invalid"
+			return 422, fmt.Sprintf("element/upsert: entry %d has no path", i), "invalid", nil
 		}
 		if len(ref.Element) == 0 {
-			return 422, fmt.Sprintf("element/upsert: entry %d has no element", i), "invalid"
+			return 422, fmt.Sprintf("element/upsert: entry %d has no element", i), "invalid", nil
 		}
 		var incoming placedElement
 		if err := json.Unmarshal(ref.Element, &incoming); err != nil || incoming.ID == "" {
 			return 422, fmt.Sprintf("element/upsert: entry %d has no element id — a position "+
-				"nothing can name is not addressable", i), "invalid"
+				"nothing can name is not addressable", i), "invalid", nil
 		}
 		topic := c.elementTopic(ref.Path)
+		if held, ok := claimed[topic]; ok && held != incoming.ID {
+			return 409, fmt.Sprintf("element/upsert: %s is already element %s — two elements "+
+				"cannot share one position", ref.Path, held), "conflict", nil
+		}
 		if existing, ok := c.store.KVGet(topic); ok {
 			var held placedElement
 			if json.Unmarshal(existing, &held) == nil && held.ID != incoming.ID {
 				return 409, fmt.Sprintf("element/upsert: %s is already element %s — two elements "+
-					"cannot share one position", ref.Path, held.ID), "conflict"
+					"cannot share one position", ref.Path, held.ID), "conflict", nil
 			}
 		}
-		if err := c.publish(topic, ref.Element); err != nil {
-			return 422, fmt.Sprintf("element/upsert: %s rejected: %v", ref.Path, err), "invalid"
-		}
+		claimed[topic] = incoming.ID
+		records = append(records, StateRecord{Topic: topic, Payload: ref.Element})
 	}
-	return 200, fmt.Sprintf("upserted %d", len(body.Elements)), "ok"
+	writes, err := c.commit(records)
+	if err != nil {
+		return 422, "element/upsert: rejected: " + err.Error(), "invalid", nil
+	}
+	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
 }
 
 // elementDelete retires positions, refusing while anything still stands on one.
@@ -806,38 +884,73 @@ func (c *ConfigExec) elementUpsert(payload []byte) (int, string, string) {
 // write nowhere. Both are conflicts with the current state, answerable by
 // removing what is in the way first — and both are named in the refusal, because
 // "no" without the reason costs a round of guessing.
-func (c *ConfigExec) elementDelete(payload []byte) (int, string, string) {
+func (c *ConfigExec) elementDelete(payload []byte) (int, string, string, []StateWrite) {
 	var body deleteBody
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return 422, "element/delete: unreadable payload: " + err.Error(), "invalid"
+		return 422, "element/delete: unreadable payload: " + err.Error(), "invalid", nil
 	}
 	if len(body.Paths) == 0 {
-		return 422, "element/delete: no paths given", "invalid"
+		return 422, "element/delete: no paths given", "invalid", nil
+	}
+
+	// Two passes, because the command retires its positions together. A caller
+	// retiring a subtree names the parent and its children in one command; the
+	// occupancy check below must therefore know the whole set before it judges
+	// any of it, or naming the parent first would read its own children as
+	// stranded bystanders. Writing one at a time hid this behind list order.
+	type pending struct {
+		path, topic string
+		element     []byte
 	}
 	var missing []string
-	for _, path := range body.Paths {
+	pendings := make([]pending, 0, len(body.Paths))
+	retiring := make(map[string]bool, len(body.Paths))
+	for i, path := range body.Paths {
+		if retiring[path] {
+			return 422, fmt.Sprintf("element/delete: entry %d repeats path %s", i, path), "invalid", nil
+		}
+		retiring[path] = true
 		topic := c.elementTopic(path)
 		raw, ok := c.store.KVGet(topic)
 		if !ok {
 			missing = append(missing, path)
 			continue
 		}
-		if held := c.occupantsBelow(path); len(held) > 0 {
-			return 409, fmt.Sprintf("element/delete: %s still holds %s", path,
-				strings.Join(held, ", ")), "conflict"
-		}
-		if bound := c.boundIdentities(raw); len(bound) > 0 {
-			return 409, fmt.Sprintf("element/delete: %s is still bound by %s", path,
-				strings.Join(bound, ", ")), "conflict"
-		}
-		if err := c.publish(topic, nil); err != nil {
-			return 500, fmt.Sprintf("element/delete: %s failed: %v", path, err), "error"
-		}
+		pendings = append(pendings, pending{path: path, topic: topic, element: raw})
 	}
+	// Precedence, deliberate: a path that does not exist answers 404 for the
+	// WHOLE command, ahead of any occupancy conflict. So ["gone", "occupied"]
+	// is 404, not 409. Two reasons. The set is the unit — this command retires
+	// its positions together or not at all — and a request naming something
+	// that is not there is wrong about the state it is describing, before any
+	// question of what stands on the rest of it arises. And the occupancy pass
+	// below judges against `retiring`, which is only trustworthy once every
+	// named path resolved: judging a subtree while one of its members turned
+	// out not to exist reads that member's children as stranded bystanders.
+	// The answer is also the same for either ordering of the list, which the
+	// per-path refusal this replaced was not — it returned whichever conflict
+	// the caller happened to list first.
 	if len(missing) > 0 {
-		return 404, "element/delete: no element at " + strings.Join(missing, ", "), "invalid"
+		return 404, "element/delete: no element at " + strings.Join(missing, ", "), "invalid", nil
 	}
-	return 200, fmt.Sprintf("deleted %d", len(body.Paths)), "ok"
+
+	records := make([]StateRecord, 0, len(pendings))
+	for _, p := range pendings {
+		if held := c.occupantsBelow(p.path, retiring); len(held) > 0 {
+			return 409, fmt.Sprintf("element/delete: %s still holds %s", p.path,
+				strings.Join(held, ", ")), "conflict", nil
+		}
+		if bound := c.boundIdentities(p.element); len(bound) > 0 {
+			return 409, fmt.Sprintf("element/delete: %s is still bound by %s", p.path,
+				strings.Join(bound, ", ")), "conflict", nil
+		}
+		records = append(records, StateRecord{Topic: p.topic})
+	}
+	writes, err := c.commit(records)
+	if err != nil {
+		return 500, "element/delete: failed: " + err.Error(), "error", nil
+	}
+	return 200, fmt.Sprintf("deleted %d", len(records)), "ok", writes
 }
 
 // boundIdentities lists the identities bound to the element held in raw.
@@ -858,73 +971,86 @@ func (c *ConfigExec) boundIdentities(raw []byte) []string {
 // §5), so this door is where policy and type enter the tree. The record's own id
 // is its address: nothing about a definition says where it is, because it is
 // not anywhere — it is the same thing at the root and at every edge.
-func (c *ConfigExec) definitionUpsert(payload []byte) (int, string, string) {
+func (c *ConfigExec) definitionUpsert(payload []byte) (int, string, string, []StateWrite) {
 	var body definitionUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return 422, "definition/upsert: unreadable payload: " + err.Error(), "invalid"
+		return 422, "definition/upsert: unreadable payload: " + err.Error(), "invalid", nil
 	}
 	if len(body.Definitions) == 0 {
-		return 422, "definition/upsert: no definitions given", "invalid"
+		return 422, "definition/upsert: no definitions given", "invalid", nil
 	}
+	records := make([]StateRecord, 0, len(body.Definitions))
 	for i, ref := range body.Definitions {
 		if code, msg, result := c.checkDefinitionContract(i, ref.Contract); code != 0 {
-			return code, msg, result
+			return code, msg, result, nil
 		}
 		if len(ref.Definition) == 0 {
-			return 422, fmt.Sprintf("definition/upsert: entry %d has no definition", i), "invalid"
+			return 422, fmt.Sprintf("definition/upsert: entry %d has no definition", i), "invalid", nil
 		}
 		var incoming identified
 		if err := json.Unmarshal(ref.Definition, &incoming); err != nil || incoming.ID == "" {
 			return 422, fmt.Sprintf("definition/upsert: entry %d has no id — a definition's id "+
-				"is its address, and one without an id cannot be reached", i), "invalid"
+				"is its address, and one without an id cannot be reached", i), "invalid", nil
 		}
 		if err := validDefinitionID(incoming.ID); err != nil {
-			return 422, fmt.Sprintf("definition/upsert: entry %d: %v", i, err), "invalid"
+			return 422, fmt.Sprintf("definition/upsert: entry %d: %v", i, err), "invalid", nil
 		}
 		if err := checkDefinitionContents(ref.Contract, ref.Definition); err != nil {
 			return 422, fmt.Sprintf("definition/upsert: %s %s: %v",
-				ref.Contract, incoming.ID, err), "invalid"
+				ref.Contract, incoming.ID, err), "invalid", nil
 		}
-		if err := c.publish(c.definitionTopic(ref.Contract, incoming.ID), ref.Definition); err != nil {
-			return 422, fmt.Sprintf("definition/upsert: %s %s rejected: %v",
-				ref.Contract, incoming.ID, err), "invalid"
-		}
+		records = append(records, StateRecord{
+			Topic:   c.definitionTopic(ref.Contract, incoming.ID),
+			Payload: ref.Definition,
+		})
 	}
-	return 200, fmt.Sprintf("upserted %d", len(body.Definitions)), "ok"
+	writes, err := c.commit(records)
+	if err != nil {
+		return 422, "definition/upsert: rejected: " + err.Error(), "invalid", nil
+	}
+	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
 }
 
 // definitionDelete retracts definitions with a tombstone, which propagates down
 // the same way the definition itself did.
-func (c *ConfigExec) definitionDelete(payload []byte) (int, string, string) {
+func (c *ConfigExec) definitionDelete(payload []byte) (int, string, string, []StateWrite) {
 	var body definitionDeleteBody
 	if err := json.Unmarshal(payload, &body); err != nil {
-		return 422, "definition/delete: unreadable payload: " + err.Error(), "invalid"
+		return 422, "definition/delete: unreadable payload: " + err.Error(), "invalid", nil
 	}
 	if len(body.Definitions) == 0 {
-		return 422, "definition/delete: no definitions given", "invalid"
+		return 422, "definition/delete: no definitions given", "invalid", nil
 	}
 	var missing []string
+	records := make([]StateRecord, 0, len(body.Definitions))
+	seen := make(map[string]bool, len(body.Definitions))
 	for i, ref := range body.Definitions {
 		if code, msg, result := c.checkDefinitionContract(i, ref.Contract); code != 0 {
-			return code, msg, result
+			return code, msg, result, nil
 		}
 		if ref.ID == "" {
-			return 422, fmt.Sprintf("definition/delete: entry %d has no id", i), "invalid"
+			return 422, fmt.Sprintf("definition/delete: entry %d has no id", i), "invalid", nil
 		}
 		topic := c.definitionTopic(ref.Contract, ref.ID)
+		if seen[topic] {
+			return 422, fmt.Sprintf("definition/delete: entry %d repeats %s %s",
+				i, ref.Contract, ref.ID), "invalid", nil
+		}
+		seen[topic] = true
 		if _, ok := c.store.KVGet(topic); !ok {
 			missing = append(missing, ref.Contract+" "+ref.ID)
 			continue
 		}
-		if err := c.publish(topic, nil); err != nil {
-			return 500, fmt.Sprintf("definition/delete: %s %s failed: %v",
-				ref.Contract, ref.ID, err), "error"
-		}
+		records = append(records, StateRecord{Topic: topic})
 	}
 	if len(missing) > 0 {
-		return 404, "definition/delete: no definition at " + strings.Join(missing, ", "), "invalid"
+		return 404, "definition/delete: no definition at " + strings.Join(missing, ", "), "invalid", nil
 	}
-	return 200, fmt.Sprintf("deleted %d", len(body.Definitions)), "ok"
+	writes, err := c.commit(records)
+	if err != nil {
+		return 500, "definition/delete: failed: " + err.Error(), "error", nil
+	}
+	return 200, fmt.Sprintf("deleted %d", len(records)), "ok", writes
 }
 
 // checkDefinitionContract refuses anything this door does not author. code 0
@@ -987,10 +1113,15 @@ func (c *ConfigExec) elementTopic(path string) string {
 }
 
 // occupantsBelow lists the element paths sitting under one, so a refusal can
-// name what is in the way instead of just saying no.
-func (c *ConfigExec) occupantsBelow(path string) []string {
+// name what is in the way instead of just saying no. A path the same command is
+// retiring is not in the way: it leaves in the same transition, so nothing is
+// ever stranded by it.
+func (c *ConfigExec) occupantsBelow(path string, retiring map[string]bool) []string {
 	var out []string
 	for _, rec := range c.store.KVScan("_SystemElement", c.store.NodeID()) {
+		if retiring[rec.Path] {
+			continue
+		}
 		if strings.HasPrefix(rec.Path, path+"/") {
 			out = append(out, rec.Path)
 		}

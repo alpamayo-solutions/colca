@@ -51,13 +51,19 @@ func TestOnlyEntitiesNeedStateRefresh(t *testing.T) {
 	}
 }
 
-func TestOnlyEntityClassIsEntityState(t *testing.T) {
-	if !IsEntityState(ClassEntity) {
-		t.Error("entity records must be accepted by the atomic entity-state port")
+// A command authors the entity graph and files definitions; both commit as one
+// atomic batch. Nothing else may ride one: a metric is a machine's to publish at
+// its own door, and commands, acks, gap markers, audit events and the beacon are
+// not state at all.
+func TestOnlyEntitiesAndDefinitionsMayBeCommandAuthored(t *testing.T) {
+	for _, c := range []Class{ClassEntity, ClassDefinition} {
+		if !IsCommandAuthoredState(c) {
+			t.Errorf("class %v is authored by a command and must be accepted by the atomic commit port", c)
+		}
 	}
-	for _, c := range []Class{ClassData, ClassDefinition, ClassCmd, ClassAck, ClassGap, ClassTimeSync, ClassNone} {
-		if IsEntityState(c) {
-			t.Errorf("class %v must not enter an atomic entity-state batch", c)
+	for _, c := range []Class{ClassData, ClassCmd, ClassAck, ClassGap, ClassTimeSync, ClassAudit, ClassAlarm, ClassNone} {
+		if IsCommandAuthoredState(c) {
+			t.Errorf("class %v must not enter a command's atomic state batch", c)
 		}
 	}
 }
