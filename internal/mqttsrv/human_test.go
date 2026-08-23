@@ -70,7 +70,7 @@ func newHumanWorldWith(t *testing.T, serve bool) *humanWorld {
 		MQTTHuman: config.MQTTHuman{TCPAddr: "127.0.0.1:0", WSAddr: "127.0.0.1:0"},
 		Auth:      &config.Auth{Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL()},
 	}
-	s, err := New(cfg, nodeID, reg, ver, nil, m)
+	s, err := New(cfg, nodeID, reg, ver, nil, m, config.Limits{}.EffectiveMaxRecordBytes())
 	if err != nil {
 		st.Close()
 		t.Fatal(err)

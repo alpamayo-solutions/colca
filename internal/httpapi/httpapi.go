@@ -27,6 +27,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -92,6 +93,13 @@ type caller struct {
 // refused, is what keeps a scanner from learning the route exists.
 func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, pubkey string, local bool) http.Handler {
 	mux := http.NewServeMux()
+
+	// The body carries the payload base64-encoded inside a JSON envelope, so
+	// it is legitimately larger than the record itself: 2x covers base64's
+	// 4/3 inflation with room for the envelope's fields. Store.Append remains
+	// the authority on the record; this only stops a huge body being read
+	// into memory before that check can run.
+	maxPublishBody := int64(cfg.Limits.EffectiveMaxRecordBytes())*2 + 4096
 
 	writeJSON := func(w http.ResponseWriter, code int, v any) {
 		w.Header().Set("Content-Type", "application/json")
@@ -270,6 +278,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	}
 
 	mux.HandleFunc("POST /publish", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxPublishBody)
 		var in struct {
 			Topic      string          `json:"topic"`
 			Payload    json.RawMessage `json:"payload"`
@@ -279,6 +288,12 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			ActorKind  string          `json:"actor_kind"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+					"error": fmt.Sprintf("request body exceeds %d bytes", maxPublishBody)})
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}

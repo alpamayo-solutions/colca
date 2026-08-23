@@ -72,7 +72,7 @@ func newWorld(t *testing.T) *world {
 		MQTT: config.Endpoint{Addr: "127.0.0.1:0"}}
 	m := metrics.New(st, config.Retention{}, nil)
 	w.m = m
-	s, err := New(cfg, nodeID, reg, nil, nil, m)
+	s, err := New(cfg, nodeID, reg, nil, nil, m, config.Limits{}.EffectiveMaxRecordBytes())
 	if err != nil {
 		st.Close()
 		t.Fatalf("New: %v", err)
@@ -93,6 +93,39 @@ func newWorld(t *testing.T) *world {
 	})
 	w.srv = s
 	return w
+}
+
+// TestBrokerCapsPacketSize pins that New derives mochi's packet-size ceiling
+// from the configured record cap instead of leaving it at mochi's default of
+// 0 (unlimited) — the gap that let an oversize publish reach Pebble at all.
+func TestBrokerCapsPacketSize(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	nodeID, err := identity.Generate(filepath.Join(t.TempDir(), "n1.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := registry.New(st, "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
+		MQTT: config.Endpoint{Addr: "127.0.0.1:0"}}
+	s, err := New(cfg, nodeID, reg, nil, nil, nil, 1024)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	if got := s.S.Options.Capabilities.MaximumPacketSize; got == 0 {
+		t.Fatal("MaximumPacketSize is 0 (unlimited) — the cap was not applied")
+	}
+	if got := s.S.Options.Capabilities.MaximumPacketSize; got < 1024 {
+		t.Fatalf("MaximumPacketSize = %d, must not be below the record cap", got)
+	}
 }
 
 // connect dials the TLS listener with the machine's client cert.
@@ -181,7 +214,7 @@ func startServerWithLocalDoor(t *testing.T) *world {
 	}
 	m := metrics.New(st, config.Retention{}, nil)
 	w.m = m
-	s, err := New(cfg, nodeID, reg, nil, nil, m)
+	s, err := New(cfg, nodeID, reg, nil, nil, m, config.Limits{}.EffectiveMaxRecordBytes())
 	if err != nil {
 		st.Close()
 		t.Fatalf("New: %v", err)
@@ -1243,7 +1276,7 @@ func TestASuppliedCertificateServesTheHumanDoorAndNotTheMachineDoor(t *testing.T
 		Auth:      &config.Auth{Issuer: "http://issuer.test", Audience: "colca", JWKSURL: "http://issuer.test/jwks"},
 		TLS:       config.TLS{CertFile: certFile, KeyFile: keyFile},
 	}
-	s, err := New(cfg, nodeID, reg, nil, nil, nil)
+	s, err := New(cfg, nodeID, reg, nil, nil, nil, config.Limits{}.EffectiveMaxRecordBytes())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -1024,6 +1024,80 @@ func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptes
 	return srv
 }
 
+// newTestHandler builds a Handler directly (no listener), with the caller's
+// cfg — including cfg.Limits — applied BEFORE construction, since Handler
+// bakes its request-size ceiling in at build time. plainHandler above wraps
+// this same shape in a live httptest.Server for tests that need a real
+// client; this one is for tests that only need to drive the mux.
+func newTestHandler(t *testing.T, cfg *config.Config) http.Handler {
+	t.Helper()
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	reg, err := registry.New(s, cfg.ULID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := metrics.New(s, config.Retention{}, nil)
+	eng := engine.New(s, cfg, reg, nil, m, nil)
+	reg.SetNamespace(eng.Elements())
+	return Handler(eng, cfg, reg, nil, m, "deadbeef", false)
+}
+
+// doAdmin performs a request straight against a Handler's mux (no listener,
+// no TLS), authenticated as admin via X-Colca-Token — for tests built on
+// newTestHandler rather than newAPI's full TLS/registration harness.
+func doAdmin(t *testing.T, h http.Handler, method, path string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	r, err := http.NewRequest(method, path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("X-Colca-Token", "tok")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	return rr
+}
+
+// publishBody builds a POST /publish body for _Metric whose JSON encoding is
+// roughly padBytes bytes larger than a bare {"v":...} payload — big enough to
+// drive the size-cap test without depending on the payload's actual content.
+// json.Marshal base64-encodes a []byte value automatically, which is exactly
+// what a real oversized payload looks like on the wire.
+func publishBody(t *testing.T, topic string, padBytes int) []byte {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{
+		"topic":   topic,
+		"payload": map[string]any{"v": 1.0, "pad": make([]byte, padBytes)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestPublishRefusesAnOversizeBody pins the door-level cap: Store.Append
+// enforces the record cap once a publish reaches the engine, but before this
+// change nothing stopped an oversize body from being read into memory first.
+func TestPublishRefusesAnOversizeBody(t *testing.T) {
+	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"},
+		Limits: config.Limits{MaxRecordBytes: config.ByteSize(1024)}}
+	h := newTestHandler(t, cfg)
+
+	// Presence first: a small publish must succeed through this same path.
+	small := publishBody(t, "colca/v1/_Metric/n-test/a", 64)
+	if rr := doAdmin(t, h, "POST", "/publish", small); rr.Code != http.StatusOK {
+		t.Fatalf("small publish = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+
+	big := publishBody(t, "colca/v1/_Metric/n-test/b", 64*1024)
+	if rr := doAdmin(t, h, "POST", "/publish", big); rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize publish = %d, want 413: %s", rr.Code, rr.Body.String())
+	}
+}
+
 // A node built without a metrics registry has no /metrics route at all.
 func TestNoMetricsRegistryMeansNoRoute(t *testing.T) {
 	srv := plainHandler(t, &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}, nil)

@@ -154,7 +154,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	//    with ONLY human listeners is legal (§4), and so is one with only a
 	//    local door.
 	if cfg.MQTT.Addr != "" || cfg.MQTTLocal.Addr != "" || cfg.MQTTHuman.TCPAddr != "" || cfg.MQTTHuman.WSAddr != "" {
-		mq, err := mqttsrv.New(cfg, id, reg, ver, nil, n.Metrics)
+		mq, err := mqttsrv.New(cfg, id, reg, ver, nil, n.Metrics, cfg.Limits.EffectiveMaxRecordBytes())
 		if err != nil {
 			return fail(fmt.Errorf("node %s: mqtt listen: %w", cfg.ULID, err))
 		}

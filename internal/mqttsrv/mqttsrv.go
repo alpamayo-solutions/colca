@@ -422,8 +422,10 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 // calls Init → net.Listen), so Addr reports the resolved address before Serve
 // runs. The server cert wraps the node's own key (cert = key container, trust
 // = pinning — repl's exact posture). eng may be nil and be supplied later via
-// SetEngine. m may be nil (every Metrics method is nil-safe).
-func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *tokenauth.Verifier, eng *engine.Engine, m *metrics.Metrics) (*Server, error) {
+// SetEngine. m may be nil (every Metrics method is nil-safe). maxRecordBytes
+// is the configured record cap (config.Limits.EffectiveMaxRecordBytes()) —
+// New derives the broker's packet-size ceiling from it.
+func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *tokenauth.Verifier, eng *engine.Engine, m *metrics.Metrics, maxRecordBytes uint64) (*Server, error) {
 	// The MACHINE door keeps the key container, always. Trust there is pinning:
 	// the node pins the client's key, and swapping the server certificate for a
 	// CA-issued one would buy nothing (colca-machine never verifies it) while
@@ -471,6 +473,12 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	// namespace. If that cardinality becomes realistic, the real fix is
 	// chunked/paginated retained replay, not a further bump of this field.
 	s.Options.Capabilities.MaximumInflight = 65535
+	// A publish carries the payload plus its topic and MQTT headers, so the
+	// packet ceiling sits above the record cap Store.Append enforces; the
+	// store stays the authority on the record itself. Left at mochi's default
+	// this is 0 — unlimited — which is how a 100 MiB publish could reach
+	// Pebble at all.
+	s.Options.Capabilities.MaximumPacketSize = uint32(maxRecordBytes + 64*1024)
 	hook := &colcaHook{eng: eng, reg: reg, ver: ver, humans: newHumanSessions(),
 		cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s}
 	if err := s.AddHook(hook, nil); err != nil {
