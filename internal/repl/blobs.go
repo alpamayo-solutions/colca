@@ -110,6 +110,33 @@ func (c *Client) BlobHas(sha string) (bool, error) {
 	}
 }
 
+// BlobPutError reports a PUT the parent actually answered, as opposed to a
+// transport failure (dial error, timeout, connection reset), which never
+// becomes one of these. Carrying the status code as a typed field — rather
+// than folding it into a formatted string — lets a caller decide what the
+// failure means without parsing prose: a 4xx says the parent will never
+// accept this exact blob (bad digest, over its cap), a 5xx says the parent
+// itself is unhealthy right now.
+type BlobPutError struct {
+	SHA    string
+	Status int
+	Body   string
+}
+
+func (e *BlobPutError) Error() string {
+	return fmt.Sprintf("blob put %s: %d: %s", e.SHA[:12], e.Status, e.Body)
+}
+
+// blobRejected reports whether err is a BlobPutError with a 4xx status — the
+// parent answered, and it will never accept this specific blob as it stands.
+// Any other failure (a transport error, or a BlobPutError with a 5xx) says
+// nothing about this particular blob: it means the parent is not currently
+// accepting pushes at all.
+func blobRejected(err error) bool {
+	var pe *BlobPutError
+	return errors.As(err, &pe) && pe.Status >= 400 && pe.Status < 500
+}
+
 // BlobPut sends one blob to the parent whole. There is no chunking or
 // resumption: the configured cap is what makes whole-file transfer with retry
 // sufficient, which is why no such protocol exists here.
@@ -127,7 +154,7 @@ func (c *Client) BlobPut(sha string, r io.Reader, size int64) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("blob put %s: %s: %s", sha[:12], resp.Status, body)
+		return &BlobPutError{SHA: sha, Status: resp.StatusCode, Body: string(body)}
 	}
 	return nil
 }
@@ -174,8 +201,20 @@ func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed 
 		err = c.BlobPut(info.SHA256, rc, size)
 		rc.Close()
 		if err != nil {
-			c.log.Warn("blob push failed", "sha", info.SHA256[:12], "err", err)
 			m.BlobTransfer("push", "error")
+			if blobRejected(err) {
+				// The parent answered and refused this exact blob (bad
+				// digest, over its cap) — re-offering it unchanged can
+				// never succeed. Skip it, but keep going: one
+				// permanently-rejected blob must not starve every blob
+				// behind it in List() order, forever.
+				c.log.Warn("blob rejected by parent, skipping", "sha", info.SHA256[:12], "err", err)
+				continue
+			}
+			// Transport failure or a 5xx: the parent is not currently
+			// accepting pushes at all. Nothing later in this pass will
+			// do better; the next pass retries from the top.
+			c.log.Warn("blob push failed", "sha", info.SHA256[:12], "err", err)
 			return pushed
 		}
 		confirmed[info.SHA256] = true

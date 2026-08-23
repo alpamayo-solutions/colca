@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -190,16 +191,101 @@ func TestSyncSkipsWhatTheParentAlreadyHas(t *testing.T) {
 func TestSyncSurvivesAnUnreachableParent(t *testing.T) {
 	parent, child := newReplPair(t)
 	childBlobs := newBlobStore(t)
-	if _, _, err := childBlobs.Put(bytes.NewReader([]byte("pending")), ""); err != nil {
+	first, _, err := childBlobs.Put(bytes.NewReader([]byte("pending")), "")
+	if err != nil {
 		t.Fatal(err)
 	}
-	parent.Stop() // close the parent listener: the child now has a dead parent
+
+	// Denominator, in this same test: prove the parent is reachable and
+	// syncBlobs actually pushes over this wiring BEFORE it goes away. Without
+	// this, a zero-pushed / zero-confirmed result below is equally consistent
+	// with a parent that was never reachable in the first place, or with
+	// syncBlobs silently never running at all.
 	confirmed := map[string]bool{}
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed); pushed != 1 {
+		t.Fatalf("first pass (parent up) pushed %d, want 1", pushed)
+	}
+	if !confirmed[first] {
+		t.Fatal("first pass (parent up) did not confirm the blob it pushed")
+	}
+	if _, ok := parent.blobs.Has(first); !ok {
+		t.Fatal("parent is missing the blob from the first pass")
+	}
+
+	parent.Stop() // close the parent listener: the child now has a dead parent
+	second, _, err := childBlobs.Put(bytes.NewReader([]byte("added after the parent died")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if pushed := syncBlobs(child, childBlobs, nil, confirmed); pushed != 0 {
 		t.Fatalf("pushed %d against a dead parent, want 0", pushed)
 	}
-	if len(confirmed) != 0 {
+	if confirmed[second] {
 		t.Fatal("a failed push must not be recorded as confirmed")
+	}
+	if len(confirmed) != 1 {
+		t.Fatalf("confirmed = %v, want only the pre-outage blob still confirmed", confirmed)
+	}
+}
+
+// A blob the parent will NEVER accept as-is (here: permanently over its
+// cap) must not block every blob behind it in blobstore.List()'s order,
+// forever. This is a regression test for exactly that bug: the earlier
+// implementation returned on the first BlobPut failure of any kind, so a
+// persistently-rejected blob listed before a good one starved the good one
+// on every single pass.
+//
+// blobstore.List() is sorted by hex digest (blobstore.go: shard = sha[:2],
+// then filename = the full sha, both walked via sorted os.ReadDir). The
+// over-cap content is searched until its digest sorts before the valid
+// blob's, so this test actually exercises "rejected first, valid second" —
+// not an order the old code happened to get lucky on.
+func TestSyncSkipsAPersistentlyRejectedBlobAndContinues(t *testing.T) {
+	const cap = 16 // bytes — deliberately tiny so an over-cap push is realistic
+	parent, child, pm := newReplPairWithCap(t, cap)
+	childBlobs := newBlobStore(t)
+
+	valid := []byte("small enough") // 12 bytes, under cap
+	validSHA, _, err := childBlobs.Put(bytes.NewReader(valid), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var rejectedSHA string
+	for i := 0; rejectedSHA == ""; i++ {
+		candidate := []byte(fmt.Sprintf("way too big for the sixteen byte cap #%d", i))
+		sum := sha256.Sum256(candidate)
+		sha := hex.EncodeToString(sum[:])
+		if sha >= validSHA {
+			continue // keep searching for a digest that lists before validSHA
+		}
+		if _, _, err := childBlobs.Put(bytes.NewReader(candidate), ""); err != nil {
+			t.Fatal(err)
+		}
+		rejectedSHA = sha
+	}
+
+	confirmed := map[string]bool{}
+	pushed := syncBlobs(child, childBlobs, pm, confirmed)
+
+	// Denominator: the valid blob actually landed and was confirmed in this
+	// SAME pass — proves the loop did not stop dead at the rejected entry
+	// ahead of it. Under the old return-on-first-failure code this would be 0.
+	if pushed != 1 {
+		t.Fatalf("pushed %d, want 1 (only the valid blob)", pushed)
+	}
+	if !confirmed[validSHA] {
+		t.Fatal("the valid blob was not confirmed")
+	}
+	if _, ok := parent.blobs.Has(validSHA); !ok {
+		t.Fatal("parent is missing the valid blob")
+	}
+
+	if confirmed[rejectedSHA] {
+		t.Fatal("a rejected blob must not be marked confirmed")
+	}
+	if _, ok := parent.blobs.Has(rejectedSHA); ok {
+		t.Fatal("the parent stored an over-cap blob")
 	}
 }
 
