@@ -249,7 +249,7 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 
 	// Parent returns on the same address; the loop must jump 1 → 4 and push
 	// the survivors — never stall on the pruned range.
-	srv2, err := NewServer(pcfg, peng, parentID, preg, nil)
+	srv2, err := NewServer(pcfg, peng, parentID, preg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

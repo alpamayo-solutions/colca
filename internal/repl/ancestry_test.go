@@ -24,7 +24,7 @@ func TestDownlinkHandsDownAncestry(t *testing.T) {
 	defer ps.Close()
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
-	srv, err := NewServer(pcfg, peng, parentID, preg, nil)
+	srv, err := NewServer(pcfg, peng, parentID, preg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestRunDownlinkTeachesTheChildItsPosition(t *testing.T) {
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
 	peng.SetAncestry(uns.Ancestry{})
-	srv, err := NewServer(pcfg, peng, parentID, preg, nil)
+	srv, err := NewServer(pcfg, peng, parentID, preg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

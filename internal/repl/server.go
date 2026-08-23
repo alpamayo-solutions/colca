@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -53,6 +54,7 @@ type Server struct {
 	eng     *engine.Engine
 	id      *identity.Identity
 	reg     *registry.Manager
+	blobs   *blobstore.Store
 	metrics *metrics.Metrics // nil-safe: every Metrics method is a no-op on a nil receiver
 	log     *slog.Logger
 
@@ -74,9 +76,11 @@ func (s *Server) auditDenied(operation, reason string, entry *uns.Entry, metadat
 }
 
 // NewServer builds a replication server. m may be nil (unit tests and any
-// caller that does not care about metrics).
-func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, reg *registry.Manager, m *metrics.Metrics) (*Server, error) {
-	return &Server{cfg: cfg, eng: eng, id: id, reg: reg, metrics: m,
+// caller that does not care about metrics). blobs may be nil in tests that
+// never exercise the blob routes; a node built by node.Start always passes
+// its opened store.
+func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, reg *registry.Manager, blobs *blobstore.Store, m *metrics.Metrics) (*Server, error) {
+	return &Server{cfg: cfg, eng: eng, id: id, reg: reg, blobs: blobs, metrics: m,
 		log: slog.Default().With("node", cfg.ULID, "comp", "repl-server")}, nil
 }
 
@@ -188,6 +192,8 @@ func (s *Server) Start() (addr string, err error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /replicate", s.handleReplicate)
 	mux.HandleFunc("GET /downlink", s.handleDownlink)
+	mux.HandleFunc("HEAD /blobs/{sha}", s.handleBlobHead)
+	mux.HandleFunc("PUT /blobs/{sha}", s.handleBlobPut)
 
 	ln, err := net.Listen("tcp", s.cfg.Repl.Addr)
 	if err != nil {

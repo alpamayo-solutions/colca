@@ -363,7 +363,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	// 5. Replication server — children are enrolled at runtime (kind "node"),
 	//    so the listener exists whenever a repl address is configured.
 	if cfg.Repl.Addr != "" {
-		rs, err := repl.NewServer(cfg, n.Engine, id, reg, n.Metrics)
+		rs, err := repl.NewServer(cfg, n.Engine, id, reg, n.Blobs, n.Metrics)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: repl server: %w", cfg.ULID, err))
 		}

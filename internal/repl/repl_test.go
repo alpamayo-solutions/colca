@@ -30,7 +30,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	defer ps.Close()
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
-	srv, err := NewServer(pcfg, peng, parentID, preg, nil)
+	srv, err := NewServer(pcfg, peng, parentID, preg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestStopReleasesPortAndKillsLongPoll(t *testing.T) {
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
 
 	// Stop before Start must not panic.
-	unstarted, err := NewServer(pcfg, peng, parentID, preg, nil)
+	unstarted, err := NewServer(pcfg, peng, parentID, preg, nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	}
 
 	// Phase 2: parent comes back on the same address (proves the port was released).
-	srv2, err := NewServer(pcfg, peng, parentID, preg, nil)
+	srv2, err := NewServer(pcfg, peng, parentID, preg, nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -692,7 +692,7 @@ func startServer(t *testing.T, cfg *config.Config, eng *engine.Engine, id *ident
 // server's own counters (design §8, colca_gap_served_total{surface="downlink"}).
 func startServerWithMetrics(t *testing.T, cfg *config.Config, eng *engine.Engine, id *identity.Identity, reg *registry.Manager, m *metrics.Metrics) (*Server, string) {
 	t.Helper()
-	srv, err := NewServer(cfg, eng, id, reg, m)
+	srv, err := NewServer(cfg, eng, id, reg, nil, m)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

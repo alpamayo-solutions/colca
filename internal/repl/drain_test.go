@@ -195,7 +195,7 @@ func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 	if v := metricstest.Value(t, pm2, `colca_drains_active`); v != 1 {
 		t.Fatalf("colca_drains_active on the fresh Metrics instance = %v, want 1 (re-derived from the persisted status)", v)
 	}
-	srv2, err := NewServer(pcfg2, peng2, parentID, preg2, pm2)
+	srv2, err := NewServer(pcfg2, peng2, parentID, preg2, nil, pm2)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

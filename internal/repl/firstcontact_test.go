@@ -198,7 +198,7 @@ func TestFirstContactSurvivesAParentThatIsNotUpYet(t *testing.T) {
 		`{"correlation_id":"pre","expires_at":99999999999}`)
 	head := ps.NextOffset("commands")
 
-	srv2, err := NewServer(pcfg, peng, parentID, preg, nil)
+	srv2, err := NewServer(pcfg, peng, parentID, preg, nil, nil)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
