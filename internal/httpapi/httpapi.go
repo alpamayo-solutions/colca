@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -91,7 +92,7 @@ type caller struct {
 // identities is not), so it never registers them at all — an admin route
 // that 404s because it was never mounted, rather than 403s because it
 // refused, is what keeps a scanner from learning the route exists.
-func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, pubkey string, local bool) http.Handler {
+func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, blobs *blobstore.Store, pubkey string, local bool) http.Handler {
 	mux := http.NewServeMux()
 
 	// The body carries the payload base64-encoded inside a JSON envelope, so
@@ -540,6 +541,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// reparent is reflected immediately and a stale X-Colca-Mount declaration
 	// never moves it back.
 	if local {
+		mountBlobRoutes(mux, blobs, m, cfg.Limits.EffectiveMaxBlobBytes(), writeJSON, auth)
+
 		mux.HandleFunc("GET /self", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 			mount := ""
 			if c.entry.Element != "" {

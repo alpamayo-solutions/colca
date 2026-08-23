@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/authtest"
+	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -26,6 +27,18 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/tokenauth/tokentest"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
+
+// testBlobs opens a blob store for a test, capped exactly like the node
+// would cap it from cfg.Limits — every Handler fixture in this file needs
+// one now that blob routes live behind it.
+func testBlobs(t *testing.T, cfg *config.Config) *blobstore.Store {
+	t.Helper()
+	blobs, err := blobstore.Open(t.TempDir(), cfg.Limits.EffectiveMaxBlobBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return blobs
+}
 
 // bearerReq performs a request authenticated with a Bearer token.
 func bearerReq(t *testing.T, hc *http.Client, method, url, token string, body any) (*http.Response, map[string]any) {
@@ -121,7 +134,7 @@ func newAPI(t *testing.T) *api {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: Handler(e, cfg, reg, ver, m, nodeID.PublicHex(), false)}
+	srv := &http.Server{Handler: Handler(e, cfg, reg, ver, m, testBlobs(t, cfg), nodeID.PublicHex(), false)}
 	go func() { _ = srv.Serve(tls.NewListener(ln, tlsCfg)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
@@ -1019,7 +1032,7 @@ func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptes
 	}
 	eng := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, "deadbeef", false))
+	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -1043,7 +1056,7 @@ func newTestHandler(t *testing.T, cfg *config.Config) http.Handler {
 	m := metrics.New(s, config.Retention{}, nil)
 	eng := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	return Handler(eng, cfg, reg, nil, m, "deadbeef", false)
+	return Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false)
 }
 
 // doAdmin performs a request straight against a Handler's mux (no listener,
@@ -1384,7 +1397,7 @@ func newLocalHandler(t *testing.T) *localAPI {
 		}
 		return nil
 	})
-	h := Handler(eng, cfg, reg, nil, m, "deadbeef", true)
+	h := Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", true)
 	return &localAPI{Handler: h, reg: reg, eng: eng, m: m}
 }
 

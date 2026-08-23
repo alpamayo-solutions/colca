@@ -16,10 +16,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/contracts"
@@ -42,6 +44,7 @@ import (
 type Node struct {
 	Cfg      *config.Config
 	Store    *store.Store
+	Blobs    *blobstore.Store
 	Engine   *engine.Engine
 	MQTT     *mqttsrv.Server
 	ReplSrv  *repl.Server
@@ -115,6 +118,14 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.Stop()
 		return nil, err
 	}
+
+	// The blob store lives beside Pebble under the same data directory, so a
+	// node's whole durable state is one directory to back up or wipe.
+	blobs, err := blobstore.Open(filepath.Join(cfg.DataDir, "blobs"), cfg.Limits.EffectiveMaxBlobBytes())
+	if err != nil {
+		return fail(fmt.Errorf("node %s: open blob store: %w", cfg.ULID, err))
+	}
+	n.Blobs = blobs
 
 	// 1. Registry: the identity source every door consults. Loads the r/
 	//    family; a corrupt persisted entry is fatal (fail-loud, like the
@@ -320,7 +331,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.apiLn = ln
 		n.APIAddr = ln.Addr().String()
-		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, id.PublicHex(), false))}
+		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), false))}
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server stopped", "err", err)
@@ -341,7 +352,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.localAPILn = ln
 		n.LocalAPIAddr = ln.Addr().String()
-		n.localAPISrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, id.PublicHex(), true))}
+		n.localAPISrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), true))}
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("local api server stopped", "err", err)
