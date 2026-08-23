@@ -296,6 +296,28 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 		}
 	}
 
+	// The same seed, for the same reason, on the machine side
+	// (command-redelivery design §3): a machine's delivery cursor is where
+	// ReplayOwedCommands starts, and an absent cursor answers 1. Without this,
+	// enrolling a machine at a node that has been running for a while makes
+	// its first subscribe replay every still-live command in the stream —
+	// including ones addressed to it before it existed here. A machine is owed
+	// what was issued to it since it was enrolled, not since the node was
+	// born.
+	//
+	// Gated on the MQTT door, never on the kind, for the same reason the
+	// downlink seed is gated on the repl door: only an identity that can be
+	// handed a command over this bus has a delivery cursor. Gated on head > 1
+	// so an empty stream creates no retention floor, and SetIfAbsent so an
+	// Enroll-as-edit of a live machine never rewinds or skips its position.
+	if head := m.st.NextOffset("commands"); head > 1 && e.MayUseDoor(uns.DoorMQTT) {
+		if _, err := m.st.CursorSetIfAbsent(e.CommandCursor(), "commands", head); err != nil {
+			m.log.Warn("enroll: command delivery floor not seated — this machine's first subscribe "+
+				"may replay commands issued before it was enrolled here",
+				"ulid", e.ULID, "head", head, "err", err)
+		}
+	}
+
 	prev, existed := m.byID[e.ULID]
 	if existed {
 		if prev.Pubkey != "" {
@@ -384,12 +406,22 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 	//
 	// Failure is logged, never fatal: a surviving cursor is a retention floor,
 	// not a security hole, and the revoke itself has already committed.
-	for name, stream := range map[string]string{
+	//
+	// A machine's command delivery cursor (command-redelivery design §3) dies
+	// here for the same reason and is re-seated by the same Enroll: it
+	// accumulates one per revoked device forever, and it holds a retention
+	// floor on the commands stream on behalf of an identity that no longer
+	// exists. Asking the door rather than the kind, as everywhere else.
+	dead := map[string]string{
 		uns.DownlinkCursorPrefix + ulid:    "commands",
 		uns.DownlinkDefCursorPrefix + ulid: "definitions",
-	} {
+	}
+	if e.MayUseDoor(uns.DoorMQTT) {
+		dead[e.CommandCursor()] = "commands"
+	}
+	for name, stream := range dead {
 		if err := m.st.CursorDelete(name, stream); err != nil {
-			m.log.Warn("revoke: downlink cursor not deleted — it will hold a retention floor until the staleness window overrides it",
+			m.log.Warn("revoke: cursor not deleted — it will hold a retention floor until the staleness window overrides it",
 				"ulid", ulid, "cursor", name, "err", err)
 		}
 	}

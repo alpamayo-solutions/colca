@@ -308,9 +308,20 @@ func run() int {
 			MinVersion:         tls.VersionTLS13,
 		}).
 		SetClientID(ulid).SetUsername(ulid).
-		// The broker keeps the session, so QoS-1 commands issued while this
-		// machine was away are delivered after a reconnect.
-		SetCleanSession(false).
+		// Clean session, deliberately (command-redelivery design §3). Asking
+		// the broker to KEEP the session is asking mochi's in-memory queue to
+		// hold commands issued while this machine is away — and that queue
+		// dies with the broker process, which is precisely the case that used
+		// to lose commands. A clean session drops this machine's subscription
+		// from the topic index the moment it disconnects, which is what makes
+		// the node record those commands as undelivered and replay them from
+		// the durable commands stream on the next subscribe.
+		//
+		// So this is not a downgrade from "persistent" to "clean": it swaps a
+		// volatile redelivery mechanism for a durable one, and having BOTH
+		// would mean two mechanisms with different guarantees delivering the
+		// same command twice.
+		SetCleanSession(true).
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
 		SetConnectRetryInterval(connectRetryInterval).
@@ -393,37 +404,39 @@ func run() int {
 		// reconnect attempt even begins — not only in SetOnConnectHandler
 		// below. SetOrderMatters(false) (this client's own config) means
 		// inbound messages are dispatched on their own goroutines with no
-		// ordering guarantee relative to the onConnect callback, and a
-		// persistent (CleanSession=false) session can have queued commands
-		// REDELIVERED by the broker as soon as the connection re-
-		// establishes — potentially before onConnect's own ts.Connect()
-		// call has run. If that redelivered command's handler reaches
+		// ordering guarantee relative to the onConnect callback.
+		//
+		// The specific race this was written for is gone: it was a persistent
+		// session's queued commands being flushed the instant the connection
+		// re-established, before onConnect's own ts.Connect() had run. With a
+		// clean session (command-redelivery design §3) nothing is queued, and
+		// the replay is triggered BY the SUBSCRIBE that onConnect issues after
+		// ts.Connect(). The hold is kept anyway, because the ordering
+		// guarantee it provides is what makes that safe rather than merely
+		// likely: SetOrderMatters(false) still admits any inbound message on
+		// its own goroutine. If a command's handler reaches
 		// ts.Await() first, it sees the zero-value syncState{} (holding
 		// false, offset 0) left over from before this reconnect even
 		// started, and decides on the raw, unsynced clock immediately —
 		// found in CI: a reconnect-hold decision
 		// landed in well under a second, not anywhere near hold_ms, which
 		// only a lost race with an ALREADY-OPEN hold (not a slow beacon)
-		// explains. Calling Connect() here closes the window: the hold is
-		// open before the TCP connection that could deliver anything even
+		// explained at the time. Calling Connect() here closes the window: the
+		// hold is open before the TCP connection that could deliver anything even
 		// exists.
 		ts.Connect()
 	})
-	// With a persistent session the broker may push queued commands before the
-	// SUBSCRIBE of a fresh connection has been registered as a route; such a
-	// message would otherwise be dropped, so route it by hand.
-	opts.SetDefaultPublishHandler(func(c pahomqtt.Client, msg pahomqtt.Message) {
-		if isOwnCommand(msg.Topic(), ulid) {
-			log.Debug("command arrived before the subscription route", "topic", msg.Topic())
-			onCommand(c, msg)
-			return
-		}
-		if isTimeSyncTopic(msg.Topic()) {
-			log.Debug("beacon arrived before the subscription route", "topic", msg.Topic())
-			onBeacon(c, msg)
-			return
-		}
-		log.Debug("message with no matching route", "topic", msg.Topic())
+	// This used to re-route commands and beacons by hand, because a persistent
+	// session let the broker flush its queue before the SUBSCRIBE of a fresh
+	// connection had been registered as a route. With a clean session there is
+	// no queue to flush: both the replay (command-redelivery design §3) and
+	// the beacon (time-sync design §2.2) are triggered BY the subscribe, so
+	// nothing this client cares about can arrive before its own route exists.
+	// What is left is diagnosis — an unrouted message now means a real
+	// mismatch between what this machine subscribed to and what the node sent
+	// it, which is worth a log line rather than a silent drop.
+	opts.SetDefaultPublishHandler(func(_ pahomqtt.Client, msg pahomqtt.Message) {
+		log.Warn("message with no matching route", "topic", msg.Topic())
 	})
 
 	client := pahomqtt.NewClient(opts)
@@ -628,22 +641,6 @@ func expiresAt(cmd map[string]any) (int64, bool) {
 		}
 	}
 	return 0, false
-}
-
-// isOwnCommand reports whether topic is a _CmdParam addressed into this
-// machine's zone (local coordinates: colca/v1/_CmdParam/{target}/{mount}/...,
-// where the mount equals the machine's ulid in the demo topology).
-func isOwnCommand(topic, ulid string) bool {
-	parts := strings.Split(topic, "/")
-	return len(parts) >= 5 && parts[2] == "_CmdParam" && parts[4] == ulid
-}
-
-// isTimeSyncTopic reports whether topic is the node's time-sync beacon
-// (design §2.2: colca/v1/_TimeSync/{node-ulid}, no hierarchy path — exactly 4
-// segments, unlike every other uns contract).
-func isTimeSyncTopic(topic string) bool {
-	parts := strings.Split(topic, "/")
-	return len(parts) == 4 && parts[2] == "_TimeSync"
 }
 
 // handleBeacon parses a _TimeSync beacon (design §2.2: {"now_ms": <int64>})

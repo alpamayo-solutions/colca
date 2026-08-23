@@ -648,23 +648,18 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	return mux
 }
 
-// ownsCursor: a cursor belongs to the caller when it carries the caller's
-// cursor prefix. That boundary is a domain question (uns.Entry.CursorPrefix):
-// ULID-prefixed for every keyed identity, name-prefixed for a local service,
-// which never learns the ULID Register minted for it (local-service-trust
-// design §4).
+// ownsCursor: whether the caller may move this cursor itself. The whole rule
+// is a domain question, so it is answered in one place (uns.Entry.OwnsCursor):
+// the caller's own prefix — ULID-prefixed for every keyed identity,
+// name-prefixed for a local service, which never learns the ULID Register
+// minted for it (local-service-trust design §4) — minus the cursors the node
+// alone may write, which today means the command delivery floor.
 //
-// Fail-closed on a nil entry rather than relying on CursorPrefix's documented
-// "never call this on a nil entry" precondition: CursorPrefix itself cannot
-// answer "no identity" truthfully (there is no safe empty-string prefix — see
-// its doc comment), so the nil check has to live at the one caller that would
-// otherwise reach it with a nil entry. Both call sites already guard with
-// `c.entry != nil && !ownsCursor(...)` today, so this is defense in depth:
-// it turns a documented-precondition panic into a plain "owns nothing"
-// answer for whichever future caller forgets the guard, which is the correct
-// answer anyway — a missing identity owns no cursor.
+// The predicate is nil-safe, so a future caller that forgets today's
+// `c.entry != nil && !ownsCursor(...)` guard gets "owns nothing" rather than a
+// panic, which is the correct answer anyway.
 func ownsCursor(e *uns.Entry, cursor string) bool {
-	return e != nil && strings.HasPrefix(cursor, e.CursorPrefix())
+	return e.OwnsCursor(cursor)
 }
 
 func readBody(r *http.Request) ([]byte, error) {

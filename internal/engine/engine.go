@@ -28,13 +28,25 @@ import (
 // from two sides.
 type LocalDeliver func(topic string, payload []byte, retain bool)
 
-// HasLocalSubscriber reports whether topic currently has at least one live
-// subscriber on this node's local MQTT bus (nil when there is no broker, and
-// in unit tests that do not wire one). It exists solely to power the
-// undelivered-command observability signal in persistTSAttributed — nothing
-// else asks this question, and callers that never wire it simply never learn
-// the answer (observeCommandDelivery treats "unknown" as "do not count it").
-type HasLocalSubscriber func(topic string) bool
+// HasSubscriberFor reports whether the identity `ulid` currently has a live
+// subscription matching topic on this node's local MQTT bus (nil when there is
+// no broker, and in unit tests that do not wire one; callers treat "unknown"
+// as "make no claim" — see deliverCommand).
+//
+// The identity argument is not a refinement, it is the whole question. This
+// answer is the command delivery floor: a true answer advances a machine's
+// cursor and forfeits the replay. An identity-blind "does ANYONE subscribe to
+// this topic" would let a passive reader — an observer holding read:# and
+// subscribed to colca/v1/_CmdParam/# for diagnostics — mark another machine's
+// commands delivered while that machine is offline, silently reopening the
+// exact gap redelivery exists to close.
+//
+// Read the rest literally, not as "the bytes arrived": it answers subscription
+// existence, not byte-level delivery confirmation. A per-client write mochi
+// attempts and fails is invisible here (swallowed inside mochi at Debug), so
+// the undelivered counter can undercount real failures and cannot overcount
+// them.
+type HasSubscriberFor func(topic, ulid string) bool
 
 // Result describes what an ingest did. Topic is exactly what was persisted —
 // a client's own publish stores its topic unchanged (local-service-trust
@@ -104,12 +116,20 @@ type Engine struct {
 	metrics *metrics.Metrics // nil-safe: every method on a nil receiver is a no-op
 	clk     *clock.Clock
 
-	// hasSubscriber answers observeCommandDelivery's one question (nil until
-	// SetSubscriberCheck — a node with no broker, or a unit test, never
-	// counts a false undelivered command for want of an answer it cannot
-	// give). Wired late, like exec and observer below, for the same reason:
-	// node assembly needs the broker built before it can offer this.
-	hasSubscriber HasLocalSubscriber
+	// hasSubscriber answers deliverCommand's and ReplayOwedCommands'
+	// one question (nil until SetSubscriberCheck — a node with no broker, or
+	// a unit test, never counts a false undelivered command, and never
+	// replays, for want of an answer it cannot give). Wired late, like exec
+	// and observer below, for the same reason: node assembly needs the broker
+	// built before it can offer this.
+	hasSubscriber HasSubscriberFor
+
+	// replayLocks serializes ReplayOwedCommands per identity (redelivery.go
+	// explains which overlaps are real). replayMu guards the map itself, not
+	// the replays — a replay holds only its own identity's mutex, so two
+	// machines reconnecting together never wait on each other.
+	replayMu    sync.Mutex
+	replayLocks map[string]*sync.Mutex
 
 	// The node's position in the tree (id-grants design §4): the chain of
 	// elements from the root down to the one this node binds to, taught by the
@@ -1074,11 +1094,17 @@ func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string
 	// published.
 	e.elements.Observe(p.Contract, topic, payload)
 	if e.deliver != nil {
-		e.deliver(topic, payload, retainFor(class))
-		// Ordered after delivery on purpose: this asks whether the publish
-		// that just happened reached anyone, so it must run after the
-		// publish, and only when one actually happened (see undelivered.go).
-		e.observeCommandDelivery(class, p, topic, payload)
+		// A command addressed to a machine enrolled here is delivered through
+		// its own path, because for that one case "publish it" and "record
+		// that it was delivered" are a single decision that has to be made
+		// together — see deliverCommand in redelivery.go. Everything else
+		// (state, samples, and commands merely relaying through this node)
+		// goes straight to the bus.
+		if uns.IsCommand(class) {
+			e.deliverCommand(class, p, topic, payload, first)
+		} else {
+			e.deliver(topic, payload, retainFor(class))
+		}
 	}
 	return Result{Persisted: true, Stream: streamName, Offset: first, Topic: topic}, nil
 }

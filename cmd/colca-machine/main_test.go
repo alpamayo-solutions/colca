@@ -330,21 +330,6 @@ func TestSimClockConstantSkewCancelsInSubtraction(t *testing.T) {
 	}
 }
 
-func TestIsTimeSyncTopic(t *testing.T) {
-	cases := map[string]bool{
-		"colca/v1/_TimeSync/n-edge1":       true,
-		"colca/v1/_TimeSync/n-edge1/extra": false, // beacon topics never have a 5th segment
-		"colca/v1/_Metric/n-edge1":         false,
-		"colca/v1/_CmdParam/m1/m1/set":     false,
-		"other/topic":                    false,
-	}
-	for topic, want := range cases {
-		if got := isTimeSyncTopic(topic); got != want {
-			t.Errorf("isTimeSyncTopic(%q) = %v, want %v", topic, got, want)
-		}
-	}
-}
-
 // A broker-flagged duplicate/resent beacon — the
 // exact shape of a stale beacon a persistent MQTT session could otherwise
 // redeliver after an outage spanning >= 1 beacon_interval — must be dropped

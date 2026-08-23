@@ -167,15 +167,15 @@ func Start(cfg *config.Config) (*Node, error) {
 	// 3. Engine: delivers downlinked commands into the local broker when there
 	//    is one (a node without MQTT simply persists them).
 	var deliver engine.LocalDeliver
-	var hasSubscriber engine.HasLocalSubscriber
+	var hasSubscriber engine.HasSubscriberFor
 	if n.MQTT != nil {
 		deliver = n.MQTT.DeliverLocal
-		hasSubscriber = n.MQTT.HasLocalSubscriber
+		hasSubscriber = n.MQTT.HasSubscriberFor
 	}
 	n.Engine = engine.New(st, cfg, reg, deliver, n.Metrics, clk)
 	// Wired separately from New (like SetExecutor/SetObserver below) so a
-	// node with no broker leaves it nil and observeCommandDelivery never
-	// counts a false undelivered command for want of an answer it cannot give.
+	// node with no broker leaves it nil and deliverCommand never counts
+	// a false undelivered command for want of an answer it cannot give.
 	n.Engine.SetSubscriberCheck(hasSubscriber)
 	// Command execution: the engine dispatches by contract, each executor owns
 	// its own verbs. _CmdAdmin drives the SAME registry writes as the

@@ -229,12 +229,48 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 // fire once even if more than one happens to match (never possible in
 // practice today — colca-machine always subscribes _TimeSync alone — but
 // correct regardless).
+// A second trigger shares this hook (command-redelivery design §3): any
+// subscribe by a machine identity attempts a replay of the commands it is
+// owed. The two are independent and both run — a SUBSCRIBE carrying the beacon
+// filter beacons, and the same packet from a machine also replays. Which
+// records a replay actually publishes is decided per record by whether its
+// topic has a live subscription at that instant, so triggering on every
+// subscribe costs nothing when there is nothing owed and needs no filter
+// parsing here to decide whether the command subscription is the one that just
+// landed. See Engine.ReplayOwedCommands.
 func (h *colcaHook) OnSubscribed(cl *mqtt.Client, pk packets.Packet, reasonCodes []byte) {
 	for _, sub := range pk.Filters {
 		if h.matchesOwnBeacon(sub.Filter) {
 			h.publishTimeSync()
-			return
+			break
 		}
+	}
+	h.replayOwedCommands(cl)
+}
+
+// replayOwedCommands hands the subscribing identity to the engine's replay.
+// Local and human clients are skipped before the registry is even consulted:
+// commands are addressed to a machine at level 4, and neither of those kinds
+// can appear there (a local service never learns the ULID minted for it; a
+// human commands rather than being commanded).
+//
+// Nothing here decides WHICH records are owed — that is uns.OwedCommand, one
+// package away, and this door only supplies the identity that just subscribed.
+func (h *colcaHook) replayOwedCommands(cl *mqtt.Client) {
+	if isLocalListener(cl) || isHumanListener(cl) {
+		return
+	}
+	eng := h.engine()
+	if eng == nil {
+		return
+	}
+	entry, ok := h.reg.Get(string(cl.Properties.Username))
+	if !ok {
+		return
+	}
+	if n := eng.ReplayOwedCommands(entry); n > 0 {
+		h.log.Info("replayed commands owed to a reconnecting machine",
+			"ulid", entry.ULID, "count", n)
 	}
 }
 
@@ -689,16 +725,32 @@ func (s *Server) DeliverLocal(topic string, payload []byte, retain bool) {
 	}
 }
 
-// HasLocalSubscriber reports whether topic had at least one live SUBSCRIPTION
-// on this node's local MQTT bus — an ordinary subscription, a
-// shared-subscription group member, or an inline subscription — at the
-// moment this was called. It answers the exact same lookup mochi's own
-// publishToSubscribers (server.go) performs right before fan-out; the engine
-// calls it immediately AFTER the matching DeliverLocal, on the same
-// goroutine with nothing else in between (engine.persistTSAttributed), so
-// the two lookups differ only by the width of one function call.
+// HasSubscriberFor reports whether the identity `ulid` had a live SUBSCRIPTION
+// matching topic on this node's local MQTT bus at the moment this was called.
+// It answers the same lookup mochi's own publishToSubscribers (server.go)
+// performs right before fan-out, then keeps only the subscriptions belonging
+// to that identity; the engine calls it immediately AFTER the matching
+// DeliverLocal, on the same goroutine with nothing else in between
+// (engine.persistTSAttributed), so the two lookups differ only by the width of
+// one function call.
 //
-// Read the name literally: this reports whether a SUBSCRIPTION existed, not
+// The identity filter is load-bearing, not a refinement. This answer is the
+// command delivery floor (engine.deliverCommand): true advances a
+// machine's cursor and forfeits its replay. mochi's Subscribers() returns
+// every matching subscription keyed by CLIENT ID, so without resolving those
+// back to identities, an observer holding read:# and subscribed to
+// colca/v1/_CmdParam/# for diagnostics would mark another machine's commands
+// delivered while that machine is offline — reopening the exact gap
+// redelivery exists to close, and silently, since no counter would rise
+// either.
+//
+// Shared and inline subscriptions are deliberately NOT consulted. A shared
+// subscription delivers to one arbitrary group member, which is no statement
+// about whether THIS identity received anything, and colca creates no inline
+// subscriptions at all (the InlineClient exists only to publish). Counting
+// either would be the same identity-blindness in a narrower disguise.
+//
+// Read the rest literally: this reports whether a SUBSCRIPTION existed, not
 // whether bytes reached a client. Two gaps, both worth knowing about before
 // trusting the counter this feeds (colca_command_undelivered_total):
 //
@@ -724,7 +776,17 @@ func (s *Server) DeliverLocal(topic string, payload []byte, retain bool) {
 // bytes reach that client's socket". Building the latter is explicitly out
 // of scope (cmdadmin design §5/§11) — it would need QoS-level delivery
 // confirmation, which commands (retain=false, fire-and-forget) do not carry.
-func (s *Server) HasLocalSubscriber(topic string) bool {
-	subs := s.S.Topics.Subscribers(topic)
-	return len(subs.Subscriptions) > 0 || len(subs.Shared) > 0 || len(subs.InlineSubscriptions) > 0
+func (s *Server) HasSubscriberFor(topic, ulid string) bool {
+	if ulid == "" {
+		// Fail closed, the same rule uns.OwedCommand and Ancestry.Covers
+		// apply: "no identity" must never read as "any identity will do".
+		return false
+	}
+	for clientID := range s.S.Topics.Subscribers(topic).Subscriptions {
+		cl, ok := s.S.Clients.Get(clientID)
+		if ok && !cl.Closed() && string(cl.Properties.Username) == ulid {
+			return true
+		}
+	}
+	return false
 }

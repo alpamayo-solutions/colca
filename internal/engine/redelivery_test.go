@@ -17,11 +17,11 @@ const undeliveredCounter = "colca_command_undelivered_total"
 
 // newUndeliveredTestEngine builds an engine wired with real metrics (so
 // metricstest can read the counter back through the served exposition
-// format, same as production) and a HasLocalSubscriber stub the test fully
+// format, same as production) and a HasSubscriberFor stub the test fully
 // controls, plus a captured log buffer (must start before New — *Engine
 // binds e.log to slog.Default() at construction, per engine_test.go's
 // captureLogs/newCapturedEngine convention). subscribed is what every call
-// to HasLocalSubscriber answers — the one variable the delivery-outcome
+// to HasSubscriberFor answers — the one variable the delivery-outcome
 // tests below flip.
 func newUndeliveredTestEngine(t *testing.T, subscribed bool) (*Engine, *metrics.Metrics, *bytes.Buffer) {
 	t.Helper()
@@ -44,7 +44,7 @@ func newUndeliveredTestEngineWithIDs(
 	cfg := &config.Config{ULID: "n-edge1"}
 	m := metrics.New(s, config.Retention{}, nil)
 	e := New(s, cfg, ids, func(string, []byte, bool) {}, m, nil)
-	e.SetSubscriberCheck(func(string) bool { return subscribed })
+	e.SetSubscriberCheck(func(string, string) bool { return subscribed })
 	placeTestElements(t, e)
 	return e, m, logBuf
 }
@@ -79,7 +79,7 @@ func TestCommandUndeliveredWhenNoSubscriber(t *testing.T) {
 }
 
 // TestCommandDeliveredNotCountedWhenSubscribed is the denominator half: the
-// exact same live, externally-addressed command, but HasLocalSubscriber now
+// exact same live, externally-addressed command, but HasSubscriberFor now
 // answers true (a subscriber IS connected and would receive it) — the
 // counter must stay at 0. Without this half, TestCommandUndeliveredWhenNoSubscriber
 // alone cannot prove the counter is CONDITIONAL on the absence of a
