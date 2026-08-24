@@ -92,7 +92,7 @@ def test_projected_contract_catalogue_has_the_approved_direction():
         "_Group",
         "_MetadataType",
         "_AnnotationType",
-        "_Interface",
+        "_DataModel",
         "_ExternalSystem",
         "_SemanticTag",
     }
@@ -345,7 +345,7 @@ def test_definitions_are_their_own_class_and_retractable():
         "_Group",
         "_MetadataType",
         "_AnnotationType",
-        "_Interface",
+        "_DataModel",
         "_ExternalSystem",
         "_SemanticTag",
     ):

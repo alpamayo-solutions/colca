@@ -639,27 +639,29 @@ class Group(Payload):
 
 
 @dataclass
-class Interface(Payload):
-    """An interface definition: what a system element must offer to claim it.
+class DataModel(Payload):
+    """A data-model definition: the compiled, flattened shape a system element
+    can claim to implement.
 
-    Topic: ``colca/v1/_Interface/{authoring-node}/{id}``. A definition, so it
+    Topic: ``colca/v1/_DataModel/{authoring-node}/{id}``. A definition, so it
     descends the tree and is applied as state at every node below its author
-    (definition-stream design §2). ``signals`` carries the *resolved* list
-    (parents already merged), so consumers don't need to walk ``extends``.
+    (definition-stream design §2). ``slots`` carries the loader's manifest
+    flattened slot list (``extends`` already resolved), so consumers don't
+    need to walk ``extends`` themselves.
     """
 
     #: The definition's identity — its path on the wire, and what a system
-    #: element references when it claims to implement this interface. A
+    #: element references when it claims to implement this data model. A
     #: definition without one could not be addressed at all.
     id: str
     name: str
     version: str = "1.0"
     description: str = ""
     extends: List[str] = field(default_factory=list)
-    signals: List[Dict[str, Any]] = field(default_factory=list)
+    slots: List[Dict[str, Any]] = field(default_factory=list)
 
     @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "Interface":
+    def decode(cls, json_str: str, timestamp: int) -> "DataModel":
         data = json.loads(json_str)
         return cls(**data)
 
@@ -721,8 +723,7 @@ class SystemElement(Payload):
     description: str = ""
     #: ULID of the enclosing element; None for a root.
     parent_id: Optional[str] = None
-    implements: List[str] = field(default_factory=list)  # Interface names this SE fulfils (Phase 2)
-    interface_coverage: Dict[str, Dict[str, str]] = field(default_factory=dict)  # Per-interface signal coverage
+    implements: List[str] = field(default_factory=list)  # DataModel names this SE fulfils
     external_asset_id: Optional[str] = None
     external_asset_id_type: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)

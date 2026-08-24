@@ -1,35 +1,22 @@
-# Customer interface for the Merz-Benteli factory. Extends the platform
-# Machine contract (heartbeat + is_connected) with a discrete machine_status
-# bitfield that downstream OEE/dashboard consumers can read uniformly.
-#
-# Adapter services per concrete machine (KartuschenabfuellerK5 for
-# a customer line, packer-b, …) implement this contract
-# by deriving machine_status from the raw machine signals.
-
 name: MBMachine
-version: "2.0"
-extends:
-  - Machine
-
-description: |
+version: '2.0'
+description: |-
   Merz-Benteli production machine: inherits Machine's heartbeat and
   is_connected, adds a unified machine_status published by an adapter
   service. The status is an int with bitfield-compatible values, but in
   this iteration each row carries exactly one of the defined values
   (mutually exclusive). Future iterations may OR them (e.g. Produktiv +
   Fehler) without schema change.
-
+extends:
+  - Machine
 signals:
   - name: machine_status
-    type: int
-    required: true
-    source: dataops
-    description: |
+    data_type: integer
+    description: |-
       Aggregated operating state. Adapter services first-match-wins:
         0  AUS               — Connector cannot reach the PLC (is_connected=false)
         1  Betriebsbereit     — Reserved (not yet emitted)
         2  Produktionsbereit  — Connected, no error, not currently producing
         4  Produktiv          — A new part counted within the microstop window
         8  Fehler             — An unplanned error signal is active
-      Values 1/2/4/8 are powers of two so future logic can combine bits
-      (e.g. 12 = Produktiv + Fehler) without altering the type.
+      Values 1/2/4/8 are powers of two so future logic can combine bits (e.g. 12 = Produktiv + Fehler) without altering the type.

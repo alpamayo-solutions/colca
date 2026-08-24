@@ -1,5 +1,6 @@
 # Platform semantic types. Customer additions go in the node YAML under
-# seed.semantic_types; these ship with the package, like the interfaces do.
+# seed.semantic_types; these ship with the package, like the built-in data
+# models do.
 tags:
   # -- System elements (spec 11.1) --
   - name: enterprise

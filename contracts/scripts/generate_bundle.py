@@ -65,7 +65,7 @@ CLASS_TABLE: dict[str, str] = {
     "_Group": "definition",
     "_AnnotationType": "definition",
     "_MetadataType": "definition",
-    "_Interface": "definition",
+    "_DataModel": "definition",
     "_ExternalSystem": "definition",
     "_SemanticTag": "definition",
     "_AuditEvent": "audit",

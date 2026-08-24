@@ -85,7 +85,6 @@ def test_system_element_roundtrip_minimal():
     assert decoded.description == ""
     assert decoded.parent_id is None
     assert decoded.implements == []
-    assert decoded.interface_coverage == {}
     assert decoded.metadata == {}
 
 
@@ -96,7 +95,6 @@ def test_system_element_roundtrip_full():
         description="Main mixer on line 1",
         parent_id="01HPARENT",
         implements=["MBMachine"],
-        interface_coverage={"MBMachine": {"machine_state": "ok"}},
         external_asset_id="WO-1234",
         external_asset_id_type="string",
         metadata={"location": "Halle A", "owner": "Production"},
@@ -110,7 +108,6 @@ def test_system_element_roundtrip_full():
     assert decoded.description == original.description
     assert decoded.parent_id == original.parent_id
     assert decoded.implements == original.implements
-    assert decoded.interface_coverage == original.interface_coverage
     assert decoded.external_asset_id == original.external_asset_id
     assert decoded.external_asset_id_type == original.external_asset_id_type
     assert decoded.metadata == original.metadata

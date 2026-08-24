@@ -1,0 +1,24 @@
+name: OEEProducer
+version: '1.0'
+description: |-
+  Discrete-parts producer that supplies the input signals an OEE compute
+  service needs: a part counter, optionally a reject counter, and an
+  optional active-error flag. Output signals (oee, availability, quality,
+  productivity) belong to a future OEEResult data model, not here.
+signals:
+  - name: error_active
+    data_type: boolean
+    required: false
+    description: True while the machine is in an unplanned error state. Drives the 'downtime
+      reason' classification in the OEE pipeline. When absent, the OEE service falls back to
+      inferring downtimes from gaps in part_counter.
+  - name: part_counter
+    data_type: integer
+    semantic_type: part-counter
+    description: Cumulative count of parts produced since boot/reset. Strictly monotonic except
+      on counter resets; the OEE pipeline computes rates from the delta over a rolling window.
+  - name: reject_counter
+    data_type: integer
+    required: false
+    description: Cumulative count of rejected parts. May be a single counter or the sum of multiple
+      per-reason counters maintained by the connector. If absent, every part counts as good.

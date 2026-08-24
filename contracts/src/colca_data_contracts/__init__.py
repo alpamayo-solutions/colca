@@ -73,7 +73,7 @@ from colca_data_contracts.payload import (
     MetadataType as MetadataTypePayload,
     SemanticTag as SemanticTagPayload,
     Group as GroupPayload,
-    Interface as InterfacePayload,
+    DataModel as DataModelPayload,
     ExternalSystem as ExternalSystemPayload,
     ExternalReference as ExternalReferencePayload,
     SystemElement as SystemElementPayload,
@@ -178,7 +178,7 @@ __all__ = [
     "MetadataTypePayload",
     "SemanticTagPayload",
     "GroupPayload",
-    "InterfacePayload",
+    "DataModelPayload",
     "ExternalSystemPayload",
     "ExternalReferencePayload",
     # Topology payloads (retained, edge-owned)

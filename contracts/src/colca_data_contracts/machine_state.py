@@ -1,8 +1,8 @@
 """MachineState — ordinal enums for the platform machine-state contract.
 
-Single source of truth for the integers behind the ``MachineState`` interface
-(``interfaces/machinestate.yaml``). The YAML ``enum_values`` lists MUST match
-these ``IntEnum``s name-for-name and index-for-index; ``test_machine_state.py``
+Single source of truth for the integers behind the ``MachineState`` data model
+(``data_models/machinestate.yaml``). Its ``enum`` slot values MUST match these
+``IntEnum``s name-for-name and index-for-index; ``test_machine_state.py``
 asserts that, so the contract and the code can never drift.
 
 Why ordinal ints (not a StrEnum): ``machine_state`` is stored in

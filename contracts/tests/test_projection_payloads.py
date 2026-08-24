@@ -4,10 +4,10 @@ import json
 
 from colca_data_contracts import (
     AnnotationTypePayload,
+    DataModelPayload,
     ExternalReferencePayload,
     ExternalSystemPayload,
     GroupPayload,
-    InterfacePayload,
     MetadataTypePayload,
     NodePayload,
     ServiceDetails,
@@ -70,7 +70,7 @@ def test_global_definition_payloads_have_state_not_operations():
     definitions = [
         MetadataTypePayload(id="m", name="work_order", data_type="string"),
         AnnotationTypePayload(id="a", name="maintenance", data_type="string"),
-        InterfacePayload(id="i", name="MBMachine"),
+        DataModelPayload(id="i", name="MBMachine"),
         ExternalSystemPayload(
             id="e",
             key="tcdb",
