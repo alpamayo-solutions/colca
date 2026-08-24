@@ -86,7 +86,11 @@ type API struct {
 // child nodes are NOT config: they are runtime registry state, enrolled
 // through the admin API (auth design §2, §4).
 type Config struct {
-	ULID     string   `yaml:"ulid"`
+	ULID string `yaml:"ulid"`
+	// Name is what the node calls itself in its own `_Node` record — a
+	// deployment's name, never its position. Optional: a node with no name
+	// describes itself by its ULID.
+	Name     string   `yaml:"name"`
 	DataDir  string   `yaml:"data_dir"`
 	LogLevel string   `yaml:"log_level"`
 	KeyFile  string   `yaml:"key_file"`
@@ -580,6 +584,15 @@ func Load(path string) (*Config, error) {
 // Validate checks required fields. Identity and mount rules moved to
 // enrollment validation (registry manager + uns.Entry.Validate) — machines
 // and children are runtime registry state, not config.
+// NodeName is how this node names itself: its configured name, or its ULID
+// when the deployment gave it none.
+func (c *Config) NodeName() string {
+	if c.Name != "" {
+		return c.Name
+	}
+	return c.ULID
+}
+
 func (c *Config) Validate() error {
 	if c.ULID == "" || c.DataDir == "" || c.KeyFile == "" {
 		return fmt.Errorf("config: ulid, data_dir, key_file are required")

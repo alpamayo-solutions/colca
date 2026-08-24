@@ -203,6 +203,43 @@ func Start(cfg *config.Config) (*Node, error) {
 	)
 	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain, edit))
 	n.Engine.SetObserver(domain)
+	// A node describes itself: `_Node` is "authored by the node it
+	// describes" (the contract's own words), and the one fact about itself a
+	// node cannot read from config is where it sits — the element its parent
+	// bound it to, learned from the ancestry the downlink hands down. So the
+	// record is written from the moment a position is learned, through the
+	// ONE authoring path, merging into whatever an operator has since put on
+	// it (a display name, a description): only the position is this hook's
+	// to set, and it writes only when that changed. At the root the ancestry
+	// is empty and the node is bound to nothing above itself.
+	n.Engine.SetOnPosition(func(a uns.Ancestry) {
+		root := ""
+		if len(a) > 0 {
+			root = a[len(a)-1].Element
+		}
+		topic := "colca/v1/_Node/" + cfg.ULID + "/_colca/nodes/" + cfg.ULID
+		entity := map[string]any{}
+		if raw, ok := n.Engine.EntityStore().KVGet(topic); ok && json.Unmarshal(raw, &entity) == nil {
+			if held, _ := entity["root_system_element_id"].(string); held == root {
+				return
+			}
+		}
+		entity["id"] = cfg.ULID
+		if name, _ := entity["name"].(string); name == "" {
+			entity["name"] = cfg.NodeName()
+		}
+		entity["root_system_element_id"] = root
+		payload, err := json.Marshal(map[string]any{
+			"entities": []map[string]any{{"contract": "_Node", "entity": entity}},
+		})
+		if err != nil {
+			log.Error("node record encode failed", "err", err)
+			return
+		}
+		if code, msg, _ := domain.Execute("_CmdConfigure", "entity/upsert", payload); code != 200 {
+			log.Error("node record not authored", "code", code, "msg", msg)
+		}
+	})
 	// The registry resolves placements through the engine's element index
 	// (id-grants design §4). Wired here rather than at construction because the
 	// namespace is a projection of records the engine holds, and the registry

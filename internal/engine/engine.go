@@ -151,6 +151,11 @@ type Engine struct {
 	// so the domain plugin can react to state the core does not interpret.
 	observer RecordObserver
 
+	// onPosition is told when this node learns or changes where it sits. The
+	// node describes itself from that moment (its `_Node` record), and
+	// its position is the one fact about itself it cannot read from config.
+	onPosition func(uns.Ancestry)
+
 	// contracts is the loaded schema-bundle table (nil = builtin floor).
 	// Static per process: set once at startup, before any door serves.
 	contracts *contracts.Table
@@ -250,7 +255,15 @@ func (e *Engine) SetAncestry(a uns.Ancestry) {
 	} else {
 		e.log.Info("node position learned", "prefix", a.Prefix())
 	}
+	if fn := e.onPosition; fn != nil {
+		fn(a)
+	}
 }
+
+// SetOnPosition registers what to do when this node learns or changes its
+// position. Called once at assembly, before the root's known-empty ancestry
+// is set, so the very first position is reported too.
+func (e *Engine) SetOnPosition(fn func(uns.Ancestry)) { e.onPosition = fn }
 
 func (e *Engine) Store() *store.Store { return e.store }
 

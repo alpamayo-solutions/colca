@@ -289,7 +289,7 @@ func TestARefusedAutobindBindsNothing(t *testing.T) {
 	place(t, c, "el-press3", "line1/press3")
 	bindEntry(t, c, "01JCONN", "opcua-press", "el-press3")
 	// The catalogue's third tag is the one whose signal the door refuses.
-	f.fail["colca/v1/_Signal/n1/line1/press3/opcua-press/tag-01JTAG3"] = "validation: unknown data_type"
+	f.fail["colca/v1/_Signal/n1/line1/press3/tag-01JTAG3"] = "validation: unknown data_type"
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/press3/opcua-press",
 		tags("01JTAG1", "01JTAG2", "01JTAG3"))
 
@@ -705,14 +705,89 @@ func TestAutobindWithoutACatalogueIsAConflict(t *testing.T) {
 func TestAutobindPlacesSignalsUnderTheGivenPath(t *testing.T) {
 	c := newConfigExec(t)
 	bindEntry(t, c, "01JCONN", "opcua-1", "")
+	placeElement(t, c, "line1/m6", "01HM6")
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/opcua-1", tags("t1"))
 
 	c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{
 		"connector": "01JCONN", "under": "line1/m6",
 	}))
 
-	if _, ok := signalsAt(c)["line1/m6/tag-t1"]; !ok {
+	got, ok := signalsAt(c)["line1/m6/tag-t1"]
+	if !ok {
 		t.Fatalf("signals = %+v, want one under line1/m6", signalsAt(c))
+	}
+	// The path says where; the binding says to WHAT. Both, or the tree and
+	// the namespace disagree about the same signal.
+	if got.Element != "01HM6" {
+		t.Fatalf("signal at line1/m6 is bound to %q, want the element at that path (01HM6)", got.Element)
+	}
+}
+
+// A signal binds to a system element, so a path with no element on it is
+// not a place a signal can be put. Refused as a conflict with the current
+// state — author the element and the same command succeeds — never silently
+// bound to nothing.
+func TestAutobindRefusesAPathNoElementOccupies(t *testing.T) {
+	c := newConfigExec(t)
+	bindEntry(t, c, "01JCONN", "opcua-1", "")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/opcua-1", tags("t1"))
+
+	code, msg, result := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{
+		"connector": "01JCONN", "under": "line1/nowhere",
+	}))
+
+	if code != 409 || result != "conflict" || !strings.Contains(msg, "line1/nowhere") {
+		t.Fatalf("code %d result %q msg %q — want 409/conflict naming the path", code, result, msg)
+	}
+	if got := signalsAt(c); len(got) != 0 {
+		t.Fatalf("signals = %+v, want none — a refused autobind bound something anyway", got)
+	}
+}
+
+// The default placement: a connector's signals stand on the element the
+// connector itself is bound to, directly under it. The connector's NAME is
+// not a path segment — the element tree is the namespace, so every segment
+// of a signal's path must be an element, and a connector is a participant,
+// not a position. (Its own records, the catalogue, DO carry the name as a
+// final segment, because those are service-owned; a signal is not.)
+func TestAutobindBindsSignalsToTheConnectorsElement(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JCONN", "opcua-1", "01HLINE1")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", tags("t1", "t2"))
+
+	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	if code != 200 {
+		t.Fatalf("autobind = %d %q", code, msg)
+	}
+
+	got := signalsAt(c)
+	for _, path := range []string{"line1/tag-t1", "line1/tag-t2"} {
+		s, ok := got[path]
+		if !ok {
+			t.Fatalf("signals = %+v, want one at %s — directly under the mount, no connector segment", got, path)
+		}
+		if s.Element != "01HLINE1" {
+			t.Fatalf("%s is bound to %q, want the connector's element 01HLINE1", path, s.Element)
+		}
+	}
+	if _, stray := got["line1/opcua-1/tag-t1"]; stray {
+		t.Fatalf("a signal landed under the connector's name, which is not an element: %+v", got)
+	}
+}
+
+// The lifecycle trigger binds exactly as the verb does: to the owning
+// connector's element, under its mount.
+func TestNewConnectorIsBoundToItsElementOnArrival(t *testing.T) {
+	c := newTriggerConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JCONN", "opcua-1", "01HLINE1")
+
+	c.Observe("_DataTags", "colca/v1/_DataTags/n1/line1/opcua-1", mustJSON(map[string]any{"data_tags": tags("t1")}))
+
+	got, ok := signalsAt(c)["line1/tag-t1"]
+	if !ok || got.Element != "01HLINE1" {
+		t.Fatalf("signals = %+v, want line1/tag-t1 bound to 01HLINE1", signalsAt(c))
 	}
 }
 

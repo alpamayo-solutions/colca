@@ -679,12 +679,13 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 	m1.Publish("colca/v1/_Ack/n-edge1/m1/set-speed", 1, false, `{"correlation_id":"kv-eq-1","result_code":200}`).WaitTimeout(5 * time.Second)
 
 	// settle: all three state paths in KV (plus the two _EnrolledIdentity registry
-	// entities enrollment wrote and the two _SystemElement records m1 and the
+	// entities enrollment wrote, the two _SystemElement records m1 and the
 	// observer each bind to — a machine must be placed now, so the observer's
-	// own enrollment authors one too — all state like any other entity), the
-	// ack in the commands stream
+	// own enrollment authors one too — and the node's own _Node, which
+	// it authored on learning its position: all state like any other entity),
+	// the ack in the commands stream
 	waitFor(t, "state and ack persisted at edge1", 10*time.Second, func() bool {
-		if len(kvAt(t, tp.edge1, "")) != 7 {
+		if len(kvAt(t, tp.edge1, "")) != 8 {
 			return false
 		}
 		for _, r := range fetchRecords(t, tp.edge1, "commands", "kv-eq-settle", "", 100) {
@@ -872,5 +873,52 @@ func TestResourceUpsertAtAChildPullsTheBlobFromItsParent(t *testing.T) {
 
 	if _, ok := tp.edge1.Blobs.Has(sha); !ok {
 		t.Fatalf("edge1 must hold %s after resource/upsert pulled it from its parent", sha)
+	}
+}
+
+// TestANodeDescribesItselfWhereItsParentMountedIt pins the wiring of
+// node.go's SetOnPosition hook. `_Node` is "authored by the node it
+// describes" (the contract's words), and the one fact about itself a node
+// cannot read from config is where it sits: the element its parent bound it
+// to, which it learns from the ancestry the downlink hands down. So the
+// record must appear at the ROOT, mount-inserted like any other entity, naming
+// exactly the element the parent's enrollment created — without any operator
+// running a bootstrap against the child. The root itself is bound to nothing
+// above it and says so.
+func TestANodeDescribesItselfWhereItsParentMountedIt(t *testing.T) {
+	tp := startTopo(t)
+
+	record := func(n *node.Node, prefix string) map[string]any {
+		for _, e := range kvAt(t, n, prefix) {
+			entry := e.(map[string]any)
+			if strings.Contains(entry["topic"].(string), "/_Node/") {
+				return entry["payload"].(map[string]any)
+			}
+		}
+		return nil
+	}
+
+	// edge1 was enrolled at site1 with mount "edge1"; site1 at global with
+	// "site1". Each describes itself bound to the element at its own mount.
+	for _, tc := range []struct{ ulid, prefix, element string }{
+		{"n-edge1", "site1/edge1/_colca/nodes/n-edge1", authtest.ElementID("edge1")},
+		{"n-site1", "site1/_colca/nodes/n-site1", authtest.ElementID("site1")},
+	} {
+		waitFor(t, tc.ulid+"'s own record to reach the root", 20*time.Second, func() bool {
+			p := record(tp.global, tc.prefix)
+			return p != nil && p["root_system_element_id"] == tc.element
+		})
+		p := record(tp.global, tc.prefix)
+		if p["id"] != tc.ulid || p["name"] != tc.ulid {
+			t.Fatalf("%s's record = %v, want id and name %s (no configured name: the ulid)", tc.ulid, p, tc.ulid)
+		}
+	}
+
+	p := record(tp.global, "_colca/nodes/n-global")
+	if p == nil {
+		t.Fatal("the root never described itself")
+	}
+	if root, _ := p["root_system_element_id"].(string); root != "" {
+		t.Fatalf("the root is bound to %q, want nothing above itself", root)
 	}
 }

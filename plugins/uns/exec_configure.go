@@ -79,8 +79,7 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	if !c.autobindNew || contract != "_DataTags" || len(payload) == 0 {
 		return // not the trigger's contract, or the catalogue was retired
 	}
-	p, err := Parse(topic)
-	if err != nil {
+	if _, err := Parse(topic); err != nil {
 		return
 	}
 	// The trigger authors state exactly as the verb does, so it takes the same
@@ -88,7 +87,8 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	// not interleave with a command doing the same work.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.entryOwns(topic) {
+	element, mount, ok := c.owningEntry(topic)
+	if !ok {
 		return // no enrolled entry's computed catalogue topic matches: ignore it
 	}
 	var cat catalogue
@@ -101,29 +101,30 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 			return // already bound: this is a republish, not a new connector
 		}
 	}
-	c.bindCatalogue(p.Path, payload)
+	c.bindCatalogue(mount, element, payload)
 }
 
-// entryOwns reports whether some identity this node has enrolled computes
-// topic as its own catalogue topic — the read-side mirror of what autobind
-// computes forward (node + mount + name), run over the local registry rather
-// than over records. The comparison is the FULL topic, node id included, not
-// just the path: two records that agree on path but not on which node
-// published them are not the same catalogue, and comparing paths alone would
-// let one stand in for the other. The registry is a handful of identities, so
-// this scan costs nothing; it is a scan over IDENTITIES, which is what the
-// reverted design's scan over RECORDS was not.
-func (c *ConfigExec) entryOwns(topic string) bool {
+// owningEntry finds the identity this node has enrolled whose computed
+// catalogue topic is topic — the read-side mirror of what autobind computes
+// forward (node + mount + name), run over the local registry rather than over
+// records — and answers with where that identity is bound, which is where its
+// signals go. The comparison is the FULL topic, node id included, not just the
+// path: two records that agree on path but not on which node published them
+// are not the same catalogue, and comparing paths alone would let one stand
+// in for the other. The registry is a handful of identities, so this scan
+// costs nothing; it is a scan over IDENTITIES, which is what the reverted
+// design's scan over RECORDS was not.
+func (c *ConfigExec) owningEntry(topic string) (element, mount string, ok bool) {
 	for _, e := range c.bound.Entries() {
-		mount, ok := c.mountFor(e.Element)
+		m, ok := c.mountFor(e.Element)
 		if !ok {
 			continue // cannot place this entry here: it owns nothing
 		}
-		if "colca/v1/_DataTags/"+c.store.NodeID()+"/"+joinPath(mount, e.Name) == topic {
-			return true
+		if "colca/v1/_DataTags/"+c.store.NodeID()+"/"+joinPath(m, e.Name) == topic {
+			return e.Element, m, true
 		}
 	}
-	return false
+	return "", "", false
 }
 
 // mountFor resolves an identity's element to this node's local path,
@@ -257,6 +258,9 @@ type boundSignal struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	DataTag string `json:"data_tag"`
+	// Element is the system element the signal is bound to — the position
+	// it stands on. Empty for a signal bound to the node itself.
+	Element string `json:"system_element_id"`
 }
 
 func (c *ConfigExec) Execute(contract, verb string, payload []byte) (int, string, string) {
@@ -790,18 +794,46 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string, []StateWrite
 		return 409, "signal/autobind: " + name + " has published no catalogue", "conflict", nil
 	}
 
-	under := body.Under
-	if under == "" {
-		under = joinPath(mount, name)
+	// A signal binds to a system element and sits directly under it: the
+	// element tree IS the namespace, so every segment of a signal's path is
+	// an element. By default that element is the one the connector itself is
+	// bound to — its mount. The connector's NAME is not a segment: it is a
+	// participant, not a position, and its own records (the catalogue) carry
+	// it as a human-readable final segment precisely because they are
+	// service-owned, which a signal is not.
+	under, at := mount, element
+	if body.Under != "" {
+		id, ok := c.elementAt(body.Under)
+		if !ok {
+			return 409, "signal/autobind: no element at " + body.Under +
+					" — a signal binds to the element at its path, so one must be authored there first",
+				"conflict", nil
+		}
+		under, at = body.Under, id
 	}
-	return c.bindCatalogue(under, raw)
+	return c.bindCatalogue(under, at, raw)
+}
+
+// elementAt answers which element this node holds at a local path, if any —
+// read off the record at that position, the same place elementUpsert refuses
+// a colliding sibling from.
+func (c *ConfigExec) elementAt(path string) (string, bool) {
+	raw, ok := c.store.KVGet(c.elementTopic(path))
+	if !ok {
+		return "", false
+	}
+	var e identified
+	if json.Unmarshal(raw, &e) != nil || e.ID == "" {
+		return "", false
+	}
+	return e.ID, true
 }
 
 // bindCatalogue creates one signal per unbound tag in a catalogue, placed
-// under one path. Shared by the explicit `signal/autobind` verb (which
-// computes the catalogue and the default placement from the registry) and the
-// lifecycle trigger (which already has both, straight from the record it just
-// observed).
+// under one path and bound to the element there. Shared by the explicit
+// `signal/autobind` verb (which computes the catalogue and the default
+// placement from the registry) and the lifecycle trigger (which already has
+// both, straight from the record it just observed).
 //
 // Idempotent by invariant: a tag that already has a signal is skipped and an
 // existing binding is never overwritten, so re-running changes nothing. That is
@@ -814,7 +846,7 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string, []StateWrite
 // re-reading the store, so composing the whole set before committing it reads
 // exactly as writing one at a time did. A catalogue whose tags sanitize to the
 // same segment still gets one path each.
-func (c *ConfigExec) bindCatalogue(under string, raw []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, string, string, []StateWrite) {
 	var cat catalogue
 	if err := json.Unmarshal(raw, &cat); err != nil {
 		return 422, "signal/autobind: unreadable catalogue: " + err.Error(), "invalid", nil
@@ -835,7 +867,7 @@ func (c *ConfigExec) bindCatalogue(under string, raw []byte) (int, string, strin
 			continue
 		}
 		leaf := uniquePath(sanitize(tag.Name), under, taken)
-		path := under + "/" + leaf
+		path := joinPath(under, leaf)
 		// The signal's own identity: never composed from what it is bound to.
 		// Every Metric carries signal_id, so rebinding this signal to a
 		// different tag later must leave it — and the whole metric history
@@ -853,6 +885,11 @@ func (c *ConfigExec) bindCatalogue(under string, raw []byte) (int, string, strin
 			"name":         leaf,
 			"data_tag":     tag.ID,
 			"is_published": true,
+		}
+		// The binding to the tree. Absent only for an unplaced connector,
+		// whose signals are bound to the node itself the way it is.
+		if element != "" {
+			signal["system_element_id"] = element
 		}
 		if tag.DataType != "" {
 			signal["data_type"] = tag.DataType
@@ -947,12 +984,12 @@ func sanitize(name string) string {
 // segment (or repeat across branches), and silently dropping one would lose data
 // no one asked to lose.
 func uniquePath(leaf, under string, taken map[string]bool) string {
-	if !taken[under+"/"+leaf] {
+	if !taken[joinPath(under, leaf)] {
 		return leaf
 	}
 	for n := 2; ; n++ {
 		candidate := fmt.Sprintf("%s-%d", leaf, n)
-		if !taken[under+"/"+candidate] {
+		if !taken[joinPath(under, candidate)] {
 			return candidate
 		}
 	}

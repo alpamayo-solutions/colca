@@ -457,7 +457,10 @@ func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 	}
 
 	// The reseed count is exported on /metrics (tokenless), as a startup-cost
-	// witness: it must equal the number of seeded KV paths.
+	// witness: it must equal the number of seeded KV paths, plus the one
+	// record every node retains from its first start — its own `_Node`,
+	// which it authors the moment it learns its position (at the root, that
+	// is startup itself).
 	resp, err := httpsClient.Get("https://" + n.APIAddr + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
@@ -470,7 +473,7 @@ func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /metrics without token: want 200, got %d", resp.StatusCode)
 	}
-	if want := fmt.Sprintf("colca_retained_reseed_records %d", paths); !strings.Contains(string(body), want) {
+	if want := fmt.Sprintf("colca_retained_reseed_records %d", paths+1); !strings.Contains(string(body), want) {
 		t.Fatalf("/metrics must report %q after the seed, got:\n%s", want, body)
 	}
 
