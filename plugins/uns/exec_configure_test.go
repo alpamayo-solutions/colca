@@ -742,13 +742,31 @@ func TestAutobindMakesTagNamesAddressable(t *testing.T) {
 			t.Fatalf("path %q is not one addressable segment", path)
 		}
 	}
-	// The original name is not lost, only the addressing form changed.
+	// The original name is not lost, only the addressing form changed: every
+	// signal names the catalogue entry it was bound to, and that entry carries
+	// the raw name. Asserting the binding rather than a copy of the name on the
+	// signal is the point — a copy would be a second owner of one fact.
+	bound := map[string]bool{}
 	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
 		var s struct {
+			DataTag  string         `json:"data_tag"`
 			Metadata map[string]any `json:"metadata"`
 		}
-		if json.Unmarshal(rec.Payload, &s) == nil && s.Metadata["tag_name"] == nil {
-			t.Fatalf("%s lost its raw tag name", rec.Path)
+		if json.Unmarshal(rec.Payload, &s) != nil {
+			t.Fatalf("%s is not a signal record", rec.Path)
+		}
+		if s.DataTag == "" {
+			t.Fatalf("%s reaches no catalogue entry, so its raw name is unreachable", rec.Path)
+		}
+		if _, carried := s.Metadata["tag_name"]; carried {
+			t.Fatalf("%s copies the raw tag name into metadata — the binding already reaches it, "+
+				"and a metadata key names a metadata TYPE, which `tag_name` is not", rec.Path)
+		}
+		bound[s.DataTag] = true
+	}
+	for _, id := range []string{"t1", "t2", "t3"} {
+		if !bound[id] {
+			t.Fatalf("tag %s was left unbound, so its name is reachable from no signal", id)
 		}
 	}
 }

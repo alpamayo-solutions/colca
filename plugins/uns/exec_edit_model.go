@@ -79,6 +79,27 @@ type modelPlanState struct {
 	// tree must not collide with a foreign entity OR a sibling create.
 	signalPaths  map[string]bool
 	elementPaths map[string]bool
+	// takenIDs is the same kind of occupancy set for IDENTITY rather than
+	// position: every entityVersionKey the store already holds, grown as
+	// this batch queues new creates. A create's id comes from the caller's
+	// intent.Creates map, and nothing else here checks it is free — so
+	// without this an id naming an existing entity is written verbatim at a
+	// NEW path, leaving two retained records under one identity. That state
+	// is unreachable by any other route and wedges the whole node: snapshot()
+	// answers "duplicate retained identity" and every subsequent edit
+	// command at that node 409s until an operator removes a record by hand.
+	// The projector applies it as a rename+reparent of the victim into the
+	// caller's subtree, which no grant anywhere authorized.
+	//
+	// This is a BACKSTOP, not the primary guard, and it is per-node by
+	// construction: `entities` (see below) comes from snapshot(), which scans
+	// `w.store.KVScan(contract, w.store.NodeID())` -- this node's own records
+	// only. A create id that names an entity at ANOTHER node is invisible to
+	// this map and reaches compose unrefused; only the Django preflight's
+	// node-agnostic `EditEntityIndex` query (`_require_free_create_ids`)
+	// covers that case, which is why preflight is what actually closes this
+	// hole rather than this map alone.
+	takenIDs map[string]bool
 	// visiting is the cycle guard shared by resolveModelSlots and
 	// releaseModelSlots: keyed by elementID+"\x00"+modelName, an entry is
 	// present only while that (element, model) pair is on the CURRENT
@@ -96,6 +117,31 @@ type modelPlanState struct {
 	// child via the very same child_model, and removing only one of them
 	// must not release what the other still requires.
 	stillMandated map[string]bool
+}
+
+// claimID takes the identity a create slot asked for, or refuses the whole
+// command. An id is free only if the store does not already hold an entity of
+// that kind under it AND no earlier create in this same batch claimed it —
+// exactly the two halves signalPaths/elementPaths cover for position, and for
+// the same reason: a batch that half-checks either one can still queue two
+// records under one identity.
+//
+// Refusing is a 409 like every other conflict here, and — because compose
+// never writes — it costs zero StateRecords: the command is answered before
+// anything is committed, so the node is left exactly as it was.
+//
+// This is deliberately the same shape composeCreate and composeBinding's
+// create_signal_and_bind already use for their own caller-supplied ids. The
+// model intent was the one create path that did not check.
+func (state *modelPlanState) claimID(kind, id, slotPath string) (int, string) {
+	key := entityVersionKey(kind, id)
+	if state.takenIDs[key] {
+		return 409, fmt.Sprintf(
+			"model: slot %q names id %s, which already identifies an entity", slotPath, id,
+		)
+	}
+	state.takenIDs[key] = true
+	return 0, ""
 }
 
 func (w *EditExec) resolveSemanticTag(state *modelPlanState, name string) (string, bool) {
@@ -350,9 +396,11 @@ func (w *EditExec) composeModel(
 		entities: entities, manifests: manifests, expected: expected,
 		creates: intent.Creates, queue: queue, tagsByName: map[string]string{},
 		signalPaths: map[string]bool{}, elementPaths: map[string]bool{},
+		takenIDs: map[string]bool{},
 		visiting: map[string]bool{},
 	}
-	for _, entity := range entities {
+	for key, entity := range entities {
+		state.takenIDs[key] = true
 		switch entity.Kind {
 		case "signal", "constant":
 			state.signalPaths[entity.Record.Path] = true
@@ -655,6 +703,9 @@ func (w *EditExec) resolveModelSlots(
 		if signalID == "" {
 			return 422, fmt.Sprintf("model: slot %q requires a new signal but no id was supplied", combinedKey)
 		}
+		if code, message := state.claimID("signal", signalID, combinedKey); code != 0 {
+			return code, message
+		}
 		signalPath := joinPath(element.Record.Path, sanitize(key))
 		if state.signalPaths[signalPath] {
 			return 409, fmt.Sprintf("model: slot %q collides with an existing signal path", combinedKey)
@@ -733,6 +784,9 @@ func (w *EditExec) resolveModelSlots(
 		if childID == "" {
 			return 422, fmt.Sprintf("model: slot %q requires a new child element but no id was supplied", combinedKey)
 		}
+		if code, message := state.claimID("system-element", childID, combinedKey); code != 0 {
+			return code, message
+		}
 		childPath := joinPath(element.Record.Path, sanitize(entityName))
 		if state.elementPaths[childPath] {
 			return 409, fmt.Sprintf("model: slot %q collides with an existing system element path", combinedKey)
@@ -797,7 +851,28 @@ func (w *EditExec) releaseModelSlots(
 		}
 	}()
 
-	childrenByName := directChildrenByName(state.entities, elementID)
+	// Aggregate every child_model to release per slot KEY before ever
+	// touching childrenByName — the same childNameOwner-style pass
+	// resolveModelSlots runs before its own childrenByName loop (see its
+	// comment above requiredChildren). Without this, childrenByName is read
+	// once per REMOVED model's slot straight from a map built once at the
+	// top of this call: a second slot key that resolves to the same
+	// entity_name as an earlier one reads a snapshot the earlier key's
+	// queued write never touched, so its own write recomputes "implements"
+	// from that stale, ORIGINAL list and overwrites the first's queued
+	// record at the same topic — silently reverting the first model's
+	// release while still returning 200 (the exact last-write-wins bug the
+	// assign side's childNameOwner guard already prevents). Two DIFFERENT
+	// keys resolving to the same entity_name is an authoring error here too,
+	// not a merge; two models sharing the SAME key still merge onto one
+	// child, released together in one pass below.
+	type releaseTarget struct {
+		entityName  string
+		childModels []string
+	}
+	releaseTargets := map[string]*releaseTarget{}
+	releaseOrder := []string{}
+	childNameOwner := map[string]string{}
 
 	for _, name := range models {
 		manifest, ok := state.manifests[name]
@@ -815,34 +890,71 @@ func (w *EditExec) releaseModelSlots(
 			if entityName == "" {
 				entityName = slot.Key
 			}
-			child, found := childrenByName[entityName]
-			if !found {
-				continue
+			rt, exists := releaseTargets[slot.Key]
+			if !exists {
+				if owner, taken := childNameOwner[entityName]; taken && owner != slot.Key {
+					return 409, fmt.Sprintf(
+						"model: child slots %q and %q both resolve to entity name %q",
+						owner, slot.Key, entityName,
+					)
+				}
+				childNameOwner[entityName] = slot.Key
+				rt = &releaseTarget{entityName: entityName}
+				releaseTargets[slot.Key] = rt
+				releaseOrder = append(releaseOrder, slot.Key)
 			}
-			childID, _ := rawString(child.Payload["id"])
-			if state.stillMandated[childID+"\x00"+slot.ChildModel] {
+			if !containsString(rt.childModels, slot.ChildModel) {
+				rt.childModels = append(rt.childModels, slot.ChildModel)
+			}
+		}
+	}
+
+	childrenByName := directChildrenByName(state.entities, elementID)
+	for _, key := range releaseOrder {
+		rt := releaseTargets[key]
+		child, found := childrenByName[rt.entityName]
+		if !found {
+			continue
+		}
+		childID, _ := rawString(child.Payload["id"])
+
+		toRelease := make([]string, 0, len(rt.childModels))
+		for _, childModel := range rt.childModels {
+			if state.stillMandated[childID+"\x00"+childModel] {
 				// A model that stays desired independently mandates this
 				// exact child_model on this exact child — leave it, and everything below it, exactly
 				// as it is. Nothing about it is read or written, so it
 				// needs no expected version either.
 				continue
 			}
-			if message := requireExpected(state.expected, entityVersionKey("system-element", childID)); message != "" {
-				return 422, "model: " + message
+			toRelease = append(toRelease, childModel)
+		}
+		if len(toRelease) == 0 {
+			continue
+		}
+
+		if message := requireExpected(state.expected, entityVersionKey("system-element", childID)); message != "" {
+			return 422, "model: " + message
+		}
+		implements := stringListFromRaw(child.Payload["implements"])
+		changed := false
+		for _, childModel := range toRelease {
+			if containsString(implements, childModel) {
+				implements = removeString(implements, childModel)
+				changed = true
 			}
-			implements := stringListFromRaw(child.Payload["implements"])
-			if containsString(implements, slot.ChildModel) {
-				payload := cloneRawMap(child.Payload)
-				payload["implements"] = rawJSON(removeString(implements, slot.ChildModel))
-				if err := state.queue(child.Record.Topic, payload); err != nil {
-					return 422, "model: attributes are not encodable"
-				}
-				child.Payload = payload
+		}
+		if changed {
+			payload := cloneRawMap(child.Payload)
+			payload["implements"] = rawJSON(implements)
+			if err := state.queue(child.Record.Topic, payload); err != nil {
+				return 422, "model: attributes are not encodable"
 			}
-			combinedKey := modelSlotPath(path, slot.Key)
-			if code, message := w.releaseModelSlots(state, child, []string{slot.ChildModel}, combinedKey); code != 0 {
-				return code, message
-			}
+			child.Payload = payload
+		}
+		combinedKey := modelSlotPath(path, key)
+		if code, message := w.releaseModelSlots(state, child, toRelease, combinedKey); code != 0 {
+			return code, message
 		}
 	}
 	return 0, ""

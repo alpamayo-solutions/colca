@@ -841,12 +841,18 @@ func (c *ConfigExec) bindCatalogue(under string, raw []byte) (int, string, strin
 		// different tag later must leave it — and the whole metric history
 		// under it — untouched (design §6).
 		id := c.newID()
+		// The raw name is NOT copied onto the signal. The binding already
+		// reaches it: `data_tag` names the catalogue entry, and that entry
+		// carries `name`. A second copy here would be a second owner of the
+		// same fact, drifting the moment a connector renames a tag — and it
+		// travelled as a `metadata` key, which is keyed by metadata-type
+		// identity, so it also asked every consumer to resolve a definition
+		// nothing ships.
 		signal := map[string]any{
 			"id":           id,
 			"name":         leaf,
 			"data_tag":     tag.ID,
 			"is_published": true,
-			"metadata":     map[string]any{"tag_name": tag.Name},
 		}
 		if tag.DataType != "" {
 			signal["data_type"] = tag.DataType

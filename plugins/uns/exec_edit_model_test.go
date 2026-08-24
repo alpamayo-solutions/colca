@@ -1696,3 +1696,189 @@ func TestModelUnassignPreservesStillMandatedChild(t *testing.T) {
 		t.Fatalf("BearingModel must now be released: %+v", childPayload["implements"])
 	}
 }
+
+// Task-5 parked item 1: the release-side stale-copy. releaseModelSlots built
+// childrenByName ONCE and never refreshed it, so two REMOVED models whose
+// child slots resolve to the SAME entity_name (via different slot keys —
+// ModelP's "primary_bearing" and ModelQ's "secondary_bearing" both name
+// "Bearing") hit the exact last-write-wins pattern childNameOwner already
+// guards against on the assign side (TestModelAssignChildSlotsCollideOnEntityName):
+// the second key's childrenByName lookup returns a snapshot the first key's
+// queued write never touched, so the second write recomputes "implements"
+// from the ORIGINAL list and overwrites the first's queued record at the
+// same topic — silently reverting the first model's release while still
+// returning 200. Before the fix, this test's own assertions caught it
+// directly: code came back 200 (not 409), and the survivor's implements was
+// ["BearingModelA"] (BearingModelA's removal reverted) rather than the
+// collision this must now report.
+func TestModelUnassignChildSlotsCollideOnEntityName(t *testing.T) {
+	f := newStore("n-edge1")
+	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
+		"id": "el-motor", "name": "Motor1", "implements": []string{"ModelP", "ModelQ"},
+	})
+	bearingVersion := seedEditEntity(t, f, "_SystemElement", "motor/bearing", map[string]any{
+		"id": "el-bearing", "name": "Bearing", "parent_id": "el-motor",
+		"implements": []string{"BearingModelA", "BearingModelB"},
+	})
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/bearing-a", map[string]any{
+		"id": "dm-bearing-a", "name": "BearingModelA", "version": "1.0",
+		"slots": []map[string]any{},
+	})
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/bearing-b", map[string]any{
+		"id": "dm-bearing-b", "name": "BearingModelB", "version": "1.0",
+		"slots": []map[string]any{},
+	})
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/model-p", map[string]any{
+		"id": "dm-model-p", "name": "ModelP", "version": "1.0",
+		"slots": []map[string]any{
+			{
+				"key": "primary_bearing", "kind": "child", "data_type": "", "required": true,
+				"declared_by": "ModelP", "child_model": "BearingModelA", "entity_name": "Bearing",
+			},
+		},
+	})
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/model-q", map[string]any{
+		"id": "dm-model-q", "name": "ModelQ", "version": "1.0",
+		"slots": []map[string]any{
+			{
+				"key": "secondary_bearing", "kind": "child", "data_type": "", "required": true,
+				"declared_by": "ModelQ", "child_model": "BearingModelB", "entity_name": "Bearing",
+			},
+		},
+	})
+	exec := NewEditExec(f)
+
+	before := f.offset
+	payload := editBody(t, "op-model-unassign-name-collision", map[string]uint64{
+		"system-element:el-motor":   motorVersion,
+		"system-element:el-bearing": bearingVersion,
+	}, map[string]any{
+		"type": "model", "action": "unassign",
+		"entity": map[string]any{"kind": "system-element", "id": "el-motor"},
+		"models": []string{},
+	})
+	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
+		t.Fatalf("colliding child entity names on unassign = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
+	}
+	for _, want := range []string{"primary_bearing", "secondary_bearing", "Bearing"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("message must name both keys and the colliding entity name: %q (missing %q)", msg, want)
+		}
+	}
+}
+
+// A create slot's id comes from the caller's own intent.Creates map, and it
+// is the one create path in this package that never checked the id was FREE.
+// Naming an existing entity's id wrote a second retained record under one
+// identity, which no other route can produce: the projector then applies it
+// as a rename+reparent of the victim into the caller's subtree (no grant
+// anywhere authorized that), and snapshot() answers "duplicate retained
+// identity" for every LATER edit command at the node until an operator
+// removes a record by hand.
+//
+// So the refusal is checked from both ends here: the hijack is a 409 that
+// writes nothing, and the node still answers the next command normally — the
+// node-wide wedge is unreachable, not merely unlikely. The same command with
+// a free id then succeeds, which is what stops this test from passing on a
+// setup that never reaches the create site at all.
+func TestModelAssignRefusesACreateIDThatAlreadyIdentifiesAnEntity(t *testing.T) {
+	f := newStore("n-edge1")
+	pressVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
+		"id": "el-press", "name": "Press",
+	})
+	// The victim: an element the caller's command has no business touching.
+	seedEditEntity(t, f, "_SystemElement", "vault", map[string]any{
+		"id": "el-vault", "name": "Vault",
+	})
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/bearing", map[string]any{
+		"id": "dm-bearing", "name": "BearingModel", "version": "1.0",
+		"slots": []map[string]any{},
+	})
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/motor", map[string]any{
+		"id": "dm-motor", "name": "Motor", "version": "1.0",
+		"slots": []map[string]any{
+			{
+				"key": "gearbox", "kind": "child", "data_type": "", "required": true,
+				"declared_by": "Motor", "child_model": "BearingModel", "entity_name": "Gearbox",
+			},
+		},
+	})
+	exec := NewEditExec(f)
+
+	before := f.offset
+	hijack := editBody(t, "op-model-create-id-hijack", map[string]uint64{
+		"system-element:el-press": pressVersion,
+	}, map[string]any{
+		"type": "model", "action": "assign",
+		"entity":  map[string]any{"kind": "system-element", "id": "el-press"},
+		"models":  []string{"Motor"},
+		"creates": map[string]string{"gearbox": "el-vault"},
+	})
+	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", hijack)
+	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
+		t.Fatalf("create-id hijack = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
+	}
+	if !strings.Contains(msg, "el-vault") || !strings.Contains(msg, "gearbox") {
+		t.Fatalf("conflict message must name the slot and the id: %q", msg)
+	}
+	if held, ok := f.KVGet("colca/v1/_SystemElement/n-edge1/vault"); !ok {
+		t.Fatal("the victim's own record must be untouched")
+	} else if !strings.Contains(string(held), "Vault") {
+		t.Fatalf("victim record = %s", held)
+	}
+
+	// The node is not wedged: it still composes a snapshot and answers.
+	free := editBody(t, "op-model-create-id-free", map[string]uint64{
+		"system-element:el-press": pressVersion,
+	}, map[string]any{
+		"type": "model", "action": "assign",
+		"entity":  map[string]any{"kind": "system-element", "id": "el-press"},
+		"models":  []string{"Motor"},
+		"creates": map[string]string{"gearbox": "el-gearbox"},
+	})
+	code, msg, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", free)
+	if code != 200 || len(writes) != 2 {
+		t.Fatalf("free create id = %d %q writes=%+v", code, msg, writes)
+	}
+	if _, ok := f.KVGet("colca/v1/_SystemElement/n-edge1/press/Gearbox"); !ok {
+		t.Fatal("a free create id must still create the mandated child")
+	}
+}
+
+// The other half of "free": an id nothing holds YET, claimed twice inside one
+// batch. Both slots would be written at different paths under one identity —
+// the same duplicate-identity state as the hijack above, reached without any
+// existing entity being named. The occupancy set therefore grows as the batch
+// queues creates, exactly as signalPaths/elementPaths do for position.
+func TestModelAssignRefusesTheSameCreateIDTwiceInOneBatch(t *testing.T) {
+	f := newStore("n-edge1")
+	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
+		"id": "el-motor", "name": "Motor1",
+	})
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/machine", map[string]any{
+		"id": "dm-machine", "name": "Machine", "version": "1.0",
+		"slots": []map[string]any{
+			{"key": "heartbeat", "kind": "measured", "data_type": "boolean", "required": true, "declared_by": "Machine"},
+			{"key": "part_counter", "kind": "measured", "data_type": "integer", "required": true, "declared_by": "Machine"},
+		},
+	})
+	exec := NewEditExec(f)
+
+	before := f.offset
+	payload := editBody(t, "op-model-create-id-reused", map[string]uint64{
+		"system-element:el-motor": motorVersion,
+	}, map[string]any{
+		"type": "model", "action": "assign",
+		"entity":  map[string]any{"kind": "system-element", "id": "el-motor"},
+		"models":  []string{"Machine"},
+		"creates": map[string]string{"heartbeat": "sig-shared", "part_counter": "sig-shared"},
+	})
+	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
+		t.Fatalf("reused create id = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
+	}
+	if !strings.Contains(msg, "sig-shared") {
+		t.Fatalf("conflict message must name the id: %q", msg)
+	}
+}

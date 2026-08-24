@@ -81,8 +81,6 @@ func (w *EditExec) composeCreate(
 		} else {
 			attributes["system_element_id"] = rawJSON(intent.ParentID)
 		}
-	case "colca-node":
-		path = "_colca/nodes/" + intent.Entity.ID
 	case "external-reference":
 		path = "_colca/external-references/" + intent.Entity.ID
 	default:
