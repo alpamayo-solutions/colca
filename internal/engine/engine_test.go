@@ -295,7 +295,7 @@ func TestEntityStorePublishBatchRefusesRecordsFromTwoStreams(t *testing.T) {
 // command whose late record fails validation leaves the node exactly as it was.
 func TestAConfigureCommandCommitsNothingWhenALateRecordFailsValidation(t *testing.T) {
 	e, delivered := newRecordingEngine(t)
-	domain := uns.NewConfigExec(e.EntityStore(), nil, nil, nil, nil)
+	domain := uns.NewConfigExec(e.EntityStore(), nil, nil, nil, nil, nil)
 
 	// Precondition, asserted rather than assumed: this command shape is
 	// accepted, so the refusal below is the late payload's doing and not the

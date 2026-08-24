@@ -36,6 +36,24 @@ type EntityStore interface {
 	NodeID() string
 }
 
+// Blobs is the domain's view of this node's file store (resources design §3).
+//
+// The executor holds one invariant that needs both halves of this interface:
+// a _Resource is never authored pointing at bytes the node does not hold. Has
+// answers whether it holds them; Pull fetches them from the parent, which is
+// what lets the same verb arrive as a provisioning command from above (§9.1).
+//
+// Declared here in stdlib types and satisfied by a core-side adapter, for the
+// same reason as EntityStore: this package must stay stdlib-only.
+type Blobs interface {
+	// Has reports whether this node already holds the blob with this digest.
+	Has(sha string) bool
+	// Pull fetches the blob from this node's parent and stores it, verifying
+	// the digest before it lands. It errors when this node has no parent, when
+	// no ancestor holds the blob, or when the transfer fails.
+	Pull(sha string) error
+}
+
 // StateRecord is one desired state mutation produced by a domain command.
 // An empty payload is the contract's tombstone when that contract permits it.
 // It deliberately carries no stream, offset or owner choice: the engine

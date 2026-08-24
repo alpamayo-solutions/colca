@@ -32,6 +32,10 @@ type ConfigExec struct {
 	// needs it for the same computation: an entry names an element, not a
 	// path, and the path is what the catalogue topic is built from.
 	elements Namespace
+	// blobs is this node's view of its file store. resource/upsert needs it
+	// for the one invariant it holds: never author a record pointing at bytes
+	// this node does not have (resources design §3, §8).
+	blobs Blobs
 	// newID mints a fresh identity for a newly autobound signal — a ULID, per
 	// this system's convention (node ids, registry entries, elements, and
 	// Signal.id in the data model). plugins/uns is stdlib-only (arch_test.go),
@@ -50,9 +54,9 @@ type ConfigExec struct {
 // NewConfigExec builds the executor. settings is the node's opaque plugin bag;
 // unknown keys are ignored, so an operator's typo disables a feature rather
 // than stopping a node.
-func NewConfigExec(s EntityStore, bound Bindings, elements Namespace, newID func() string, settings map[string]string) *ConfigExec {
+func NewConfigExec(s EntityStore, bound Bindings, elements Namespace, blobs Blobs, newID func() string, settings map[string]string) *ConfigExec {
 	return &ConfigExec{
-		store: s, bound: bound, elements: elements, newID: newID,
+		store: s, bound: bound, elements: elements, blobs: blobs, newID: newID,
 		autobindNew: settings["autobind"] == "on_new_connector",
 	}
 }
@@ -302,6 +306,10 @@ func (c *ConfigExec) execute(contract, verb string, payload []byte) (int, string
 		return c.definitionUpsert(payload)
 	case "definition/delete":
 		return c.definitionDelete(payload)
+	case "resource/upsert":
+		return c.resourceUpsert(payload)
+	case "resource/delete":
+		return c.resourceDelete(payload)
 	default:
 		return 422, fmt.Sprintf("unknown configure verb %q", verb), "invalid", nil
 	}
@@ -406,6 +414,131 @@ func (c *ConfigExec) constantDelete(payload []byte) (int, string, string, []Stat
 	writes, err := c.commit(records)
 	if err != nil {
 		return 500, "constant/delete: failed: " + err.Error(), "error", nil
+	}
+	return 200, fmt.Sprintf("deleted %d", len(records)), "ok", writes
+}
+
+type resourceRef struct {
+	Path     string          `json:"path"`
+	Resource json.RawMessage `json:"resource"`
+}
+
+type resourceUpsertBody struct {
+	Resources []resourceRef `json:"resources"`
+}
+
+// resourceTopic places a resource exactly as every other positioned entity:
+// the node's own ULID at level 4, the element path and the resource id below.
+func (c *ConfigExec) resourceTopic(path string) string {
+	return "colca/v1/_Resource/" + c.store.NodeID() + "/" + path
+}
+
+func (c *ConfigExec) resourceUpsert(payload []byte) (int, string, string, []StateWrite) {
+	var body resourceUpsertBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return 422, "resource/upsert: unreadable payload: " + err.Error(), "invalid", nil
+	}
+	if len(body.Resources) == 0 {
+		return 422, "resource/upsert: no resources given", "invalid", nil
+	}
+
+	records := make([]StateRecord, 0, len(body.Resources))
+	seen := make(map[string]bool, len(body.Resources))
+	for i, ref := range body.Resources {
+		if err := validatePositionPath(ref.Path); err != nil {
+			return 422, fmt.Sprintf("resource/upsert: entry %d: %v", i, err), "invalid", nil
+		}
+		if len(ref.Resource) == 0 {
+			return 422, fmt.Sprintf("resource/upsert: entry %d has no resource", i), "invalid", nil
+		}
+		incoming, err := validateResourcePayload(ref.Resource)
+		if err != nil {
+			return 422, fmt.Sprintf("resource/upsert: entry %d: %v", i, err), "invalid", nil
+		}
+		topic := c.resourceTopic(ref.Path)
+		if seen[topic] {
+			return 422, fmt.Sprintf("resource/upsert: entry %d repeats path %s", i, ref.Path), "invalid", nil
+		}
+		seen[topic] = true
+		if existing, ok := c.store.KVGet(topic); ok {
+			held, err := validateResourcePayload(existing)
+			if err != nil || held.ID != incoming.ID {
+				heldID := held.ID
+				if heldID == "" {
+					heldID = "an unreadable retained record"
+				}
+				return 409, fmt.Sprintf("resource/upsert: %s is already resource %s — two resources "+
+					"cannot share one position", ref.Path, heldID), "conflict", nil
+			}
+		}
+		// The invariant: never author a record pointing at bytes we do not
+		// hold. A provisioning command from above names a digest staged at an
+		// ancestor, so one pull is attempted before giving up.
+		if err := c.ensureBlob(incoming.SHA256); err != nil {
+			return 422, fmt.Sprintf("resource/upsert: entry %d: blob %s is not held by this node "+
+				"and could not be fetched: %v", i, incoming.SHA256, err), "invalid", nil
+		}
+		records = append(records, StateRecord{Topic: topic, Payload: ref.Resource})
+	}
+
+	writes, err := c.commit(records)
+	if err != nil {
+		return 422, "resource/upsert: rejected: " + err.Error(), "invalid", nil
+	}
+	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
+}
+
+// ensureBlob is the one place the upsert invariant lives.
+func (c *ConfigExec) ensureBlob(sha string) error {
+	if c.blobs == nil {
+		return fmt.Errorf("this node has no blob store")
+	}
+	if c.blobs.Has(sha) {
+		return nil
+	}
+	if err := c.blobs.Pull(sha); err != nil {
+		return err
+	}
+	if !c.blobs.Has(sha) {
+		return fmt.Errorf("the fetch reported success but the blob is still absent")
+	}
+	return nil
+}
+
+func (c *ConfigExec) resourceDelete(payload []byte) (int, string, string, []StateWrite) {
+	var body deleteBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return 422, "resource/delete: unreadable payload: " + err.Error(), "invalid", nil
+	}
+	if len(body.Paths) == 0 {
+		return 422, "resource/delete: no paths given", "invalid", nil
+	}
+	records := make([]StateRecord, 0, len(body.Paths))
+	missing := make([]string, 0)
+	seen := make(map[string]bool, len(body.Paths))
+	for i, path := range body.Paths {
+		if err := validatePositionPath(path); err != nil {
+			return 422, fmt.Sprintf("resource/delete: entry %d: %v", i, err), "invalid", nil
+		}
+		topic := c.resourceTopic(path)
+		if seen[topic] {
+			return 422, fmt.Sprintf("resource/delete: entry %d repeats path %s", i, path), "invalid", nil
+		}
+		seen[topic] = true
+		if _, ok := c.store.KVGet(topic); !ok {
+			missing = append(missing, path)
+		}
+		records = append(records, StateRecord{Topic: topic})
+	}
+	if len(missing) > 0 {
+		return 404, "resource/delete: no resource at " + strings.Join(missing, ", "), "invalid", nil
+	}
+	// The blob is deliberately NOT touched here. The sweep removes it once
+	// nothing references it (§8), which is also what makes a shared blob safe:
+	// two resources with identical content are one file.
+	writes, err := c.commit(records)
+	if err != nil {
+		return 500, "resource/delete: failed: " + err.Error(), "error", nil
 	}
 	return 200, fmt.Sprintf("deleted %d", len(records)), "ok", writes
 }
@@ -940,6 +1073,10 @@ func (c *ConfigExec) elementDelete(payload []byte) (int, string, string, []State
 			return 409, fmt.Sprintf("element/delete: %s still holds %s", p.path,
 				strings.Join(held, ", ")), "conflict", nil
 		}
+		if held := c.resourcesBelow(p.path); len(held) > 0 {
+			return 409, fmt.Sprintf("element/delete: %s still holds %s", p.path,
+				strings.Join(held, ", ")), "conflict", nil
+		}
 		if bound := c.boundIdentities(p.element); len(bound) > 0 {
 			return 409, fmt.Sprintf("element/delete: %s is still bound by %s", p.path,
 				strings.Join(bound, ", ")), "conflict", nil
@@ -1123,6 +1260,25 @@ func (c *ConfigExec) occupantsBelow(path string, retiring map[string]bool) []str
 			continue
 		}
 		if strings.HasPrefix(rec.Path, path+"/") {
+			out = append(out, rec.Path)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// resourcesBelow lists the resources standing on this position or under it.
+// A resource pins its blob alive (§8 marks from live _Resource records), so an
+// element deleted out from under one would leave a file retained forever with
+// no element in any tree to reach it from.
+//
+// Deliberately narrower than a general occupancy rule: signals and constants
+// do NOT block a delete today, and making them do so is a change to existing
+// behaviour that belongs in its own decision, not in this one.
+func (c *ConfigExec) resourcesBelow(path string) []string {
+	var out []string
+	for _, rec := range c.store.KVScan("_Resource", c.store.NodeID()) {
+		if rec.Path == path || strings.HasPrefix(rec.Path, path+"/") {
 			out = append(out, rec.Path)
 		}
 	}

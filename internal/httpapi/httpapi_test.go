@@ -350,7 +350,7 @@ func TestSignalFilterDoesNotBypassMachineReadScope(t *testing.T) {
 
 func TestAdminConfigureResponseNamesProducedStateOffset(t *testing.T) {
 	a := newAPI(t)
-	a.eng.SetExecutor(engine.Executors(uns.NewConfigExec(a.eng.EntityStore(), a.reg, nil, nil, nil)))
+	a.eng.SetExecutor(engine.Executors(uns.NewConfigExec(a.eng.EntityStore(), a.reg, nil, nil, nil, nil)))
 
 	resp, out := req(t, client(nil), "POST", a.url+"/publish", "tok", map[string]any{
 		"topic": "colca/v1/_CmdConfigure/n-test/definition/upsert",
@@ -1428,7 +1428,7 @@ func newLocalHandler(t *testing.T) *localAPI {
 	m := metrics.New(s, config.Retention{}, nil)
 	reg.SetMetrics(m)
 	eng := engine.New(s, cfg, reg, nil, m, nil)
-	domain := uns.NewConfigExec(eng.EntityStore(), reg, eng.Elements(), registry.NewULID, cfg.Plugin)
+	domain := uns.NewConfigExec(eng.EntityStore(), reg, eng.Elements(), nil, registry.NewULID, cfg.Plugin)
 	eng.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain))
 	eng.SetObserver(domain)
 	reg.SetNamespace(eng.Elements())
