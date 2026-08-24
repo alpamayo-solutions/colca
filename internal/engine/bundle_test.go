@@ -283,7 +283,7 @@ func TestAlarmClassRoutesToAlarmsAndProjectsNoKV(t *testing.T) {
 	}
 	// Scoped to the alarm: placeTestElements leaves _SystemElement entries,
 	// which are entity state and belong in the KV.
-	for _, entry := range s.KVScan("") {
+	for _, entry := range mustKVScan(t, s, "") {
 		if strings.Contains(entry.Topic, "_AlarmStateChange") {
 			t.Fatalf("alarm ingest projected a KV entry at %q — its path carries "+
 				"the event id, so nothing ever overwrites it and Prune never "+

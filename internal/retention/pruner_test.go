@@ -23,6 +23,17 @@ const nodeULID = "n-edge1"
 // than a Collector/Gatherer accessor.
 var scrapeMetric = metricstest.Value
 
+// mustKVScan is KVScan with the error handled the only way a test fixture
+// can: fail loud (resources design §8).
+func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
+	t.Helper()
+	entries, err := st.KVScan(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
 func mustParts(t *testing.T) (*store.Store, *engine.Engine) {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
@@ -392,7 +403,7 @@ func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 
 	// KV converged onto the refresh offsets; the untouched path keeps its
 	// (pruned-below-LWM, provenance-only) offset.
-	for _, e := range st.KVScan("") {
+	for _, e := range mustKVScan(t, st, "") {
 		switch e.Path {
 		case "line1/a", "line1/c":
 			if e.Offset < 6 {
@@ -447,7 +458,7 @@ func TestMetricsOverrideRefreshesNothing(t *testing.T) {
 	}
 	// The metric KV entries stay untouched, offsets pointing below the LWM
 	// (provenance, not a dangling reference — spec §2).
-	for _, e := range st.KVScan("line1/") {
+	for _, e := range mustKVScan(t, st, "line1/") {
 		if e.Offset > 2 {
 			t.Fatalf("metric KV %s was re-appended (Offset %d) — §6.5 refreshes entities only", e.Path, e.Offset)
 		}
@@ -803,7 +814,7 @@ func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
 	p.runOnce()
 
 	// The retired path stays GONE — no resurrection.
-	if kv := st.KVScan("line1/b"); len(kv) != 0 {
+	if kv := mustKVScan(t, st, "line1/b"); len(kv) != 0 {
 		t.Fatalf("tombstoned path resurrected by the refresh: %+v", kv)
 	}
 	// design §8: the guard skip is a completion, not a failure — it counts
@@ -835,7 +846,7 @@ func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
 		t.Fatalf("obligation %+v not cleared — a guard skip must count as completion", r)
 	}
 	// The untouched sibling keeps its state.
-	if kv := st.KVScan("line1/a"); len(kv) != 1 || string(kv[0].Payload) != `{"id":"A1"}` {
+	if kv := mustKVScan(t, st, "line1/a"); len(kv) != 1 || string(kv[0].Payload) != `{"id":"A1"}` {
 		t.Fatalf("sibling path damaged: %+v", kv)
 	}
 }

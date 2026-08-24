@@ -78,6 +78,17 @@ func apiCall(t *testing.T, n *Node, method, path string, body any) (int, map[str
 	return resp.StatusCode, out
 }
 
+// mustKVScan is KVScan with the error handled the only way a test fixture
+// can: fail loud (resources design §8).
+func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
+	t.Helper()
+	entries, err := st.KVScan(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
 func nextOffset(t *testing.T, n *Node, stream string) float64 {
 	t.Helper()
 	code, out := apiCall(t, n, http.MethodGet, "/debug/state", nil)
@@ -671,7 +682,7 @@ func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
 	publishMQTT(t, m1, "colca/v1/_Metric/n1/m1/temp", `{"v":1}`)
 	// The tombstone: empty payload on the pressure path. PUBACK ⇒ persisted.
 	publishMQTT(t, m1, "colca/v1/_Metric/n1/m1/pressure", "")
-	if got := first.Store.KVScan("m1/pressure"); len(got) != 0 {
+	if got := mustKVScan(t, first.Store, "m1/pressure"); len(got) != 0 {
 		t.Fatalf("KV key survived the tombstone before restart: %+v", got)
 	}
 	m1.Disconnect(100)
@@ -688,7 +699,7 @@ func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
 		t.Errorf("metrics next_offset after restart = %v, want 4 (tombstone is history)", got)
 	}
 	// …but the KV view has retired the path, and so must the retained set.
-	if got := second.Store.KVScan("m1/pressure"); len(got) != 0 {
+	if got := mustKVScan(t, second.Store, "m1/pressure"); len(got) != 0 {
 		t.Fatalf("tombstoned KV key resurrected across restart: %+v", got)
 	}
 

@@ -416,7 +416,15 @@ func (p *Pruner) completePendingRefresh() {
 // silent.
 func (p *Pruner) refreshEntities(from, to uint64) bool {
 	refreshed, skipped, failed := 0, 0, 0
-	for _, e := range p.st.KVScan("") {
+	entries, err := p.st.KVScan("")
+	if err != nil {
+		// Same treatment as an individual append failure below: the
+		// obligation stays pending and is retried next cycle rather than
+		// silently completing on a scan the store could not actually finish.
+		p.log.Error("entities state refresh KV scan failed (range stays pending, retried next cycle)", "err", err)
+		return false
+	}
+	for _, e := range entries {
 		if e.Offset < from || e.Offset >= to {
 			continue
 		}

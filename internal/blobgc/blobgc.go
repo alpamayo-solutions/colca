@@ -34,6 +34,13 @@ type Sweeper struct {
 
 	// now is a seam: tests age a blob past the grace without sleeping.
 	now func() time.Time
+
+	// records is a seam: tests inject a failing read to prove the sweeper
+	// never computes liveness from it. Defaults to Engine.ScanContractAll,
+	// the one _Resource read that surfaces a storage failure instead of
+	// silently answering "nothing found" — uns.EntityStore.KVScanAll cannot
+	// be used here for exactly that reason (resources design §8).
+	records func() ([]uns.KVRecord, error)
 }
 
 // NewSweeper builds a sweeper. ulid is the node's own ULID, used only for
@@ -44,6 +51,9 @@ func NewSweeper(blobs *blobstore.Store, eng *engine.Engine, cfg config.BlobGC, m
 		blobs: blobs, eng: eng, cfg: cfg, m: m, ulid: ulid,
 		log: slog.Default().With("node", ulid, "comp", "blobgc"),
 		now: time.Now,
+		records: func() ([]uns.KVRecord, error) {
+			return eng.ScanContractAll(uns.ResourceContract)
+		},
 	}
 }
 
@@ -74,12 +84,22 @@ func (s *Sweeper) Run(stop <-chan struct{}) {
 // runOnce marks the digests every live _Resource references, then deletes
 // every stored blob that is neither live nor still inside its grace window.
 //
+// A failed mark phase must never be read as "nothing is referenced": that
+// would delete every unreferenced-looking blob past the grace, including
+// ones a working scan would have shown as live. So a records() error skips
+// the whole pass, exactly like a blobs.List() failure already does — this
+// sweeper deletes nothing on a cycle where it cannot establish liveness.
+//
 // Known cost, stated rather than hidden: the mark phase scans the whole KV
 // each sweep. At this scale that is cheaper than maintaining an index; if
 // resource counts grow, this is the first thing to change.
 func (s *Sweeper) runOnce() {
-	var es uns.EntityStore = s.eng.EntityStore()
-	live := uns.LiveBlobDigests(es.KVScanAll(uns.ResourceContract))
+	records, err := s.records()
+	if err != nil {
+		s.log.Error("resource scan failed — sweep skipped this cycle", "err", err)
+		return
+	}
+	live := uns.LiveBlobDigests(records)
 
 	blobs, err := s.blobs.List()
 	if err != nil {

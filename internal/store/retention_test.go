@@ -103,7 +103,7 @@ func TestPruneDeletesExactlyThePrefix(t *testing.T) {
 	// (offset 1) is pruned: the entry is current state, its Offset field is
 	// provenance and may point below the LWM.
 	kv := map[string]KVEntry{}
-	for _, e := range s.KVScan("") {
+	for _, e := range mustKVScan(t, s, "") {
 		kv[e.Path] = e
 	}
 	if len(kv) != 2 {
@@ -336,7 +336,7 @@ func TestPruneAppendsGapRecords(t *testing.T) {
 		t.Fatal("gap record must sit at/after the LWM so it survives its own prune run")
 	}
 	// KV semantics apply.
-	kv := s.KVScan("gap/")
+	kv := mustKVScan(t, s, "gap/")
 	if len(kv) != 1 || kv[0].Offset != 5 {
 		t.Fatalf("gap record KV projection: %+v", kv)
 	}
@@ -757,7 +757,7 @@ func TestAppendIfKVUnchangedGuards(t *testing.T) {
 	if err != nil || !applied || off != 2 {
 		t.Fatalf("guarded append = (%d, %v, %v), want (2, true, nil)", off, applied, err)
 	}
-	if kv := s.KVScan("m1/a"); len(kv) != 1 || kv[0].Offset != 2 {
+	if kv := mustKVScan(t, s, "m1/a"); len(kv) != 1 || kv[0].Offset != 2 {
 		t.Fatalf("KV after guarded append = %+v, want Offset 2", kv)
 	}
 
@@ -769,7 +769,7 @@ func TestAppendIfKVUnchangedGuards(t *testing.T) {
 	if s.NextOffset("metrics") != nextBefore || s.StreamBytes("metrics") != bytesBefore {
 		t.Fatal("a skipped record must append NOTHING — no stream record, no byte accounting")
 	}
-	if kv := s.KVScan("m1/a"); string(kv[0].Payload) != `{"v":2}` {
+	if kv := mustKVScan(t, s, "m1/a"); string(kv[0].Payload) != `{"v":2}` {
 		t.Fatalf("skipped record clobbered KV: %s", kv[0].Payload)
 	}
 
@@ -782,7 +782,7 @@ func TestAppendIfKVUnchangedGuards(t *testing.T) {
 	if _, applied, err := s.AppendIfKVUnchanged("metrics", rec(`{"v":2}`), 2); err != nil || applied {
 		t.Fatalf("retired guard = (%v, %v), want (false, nil): a refresh must not resurrect a tombstoned path", applied, err)
 	}
-	if kv := s.KVScan("m1/a"); len(kv) != 0 {
+	if kv := mustKVScan(t, s, "m1/a"); len(kv) != 0 {
 		t.Fatalf("tombstoned path resurrected: %+v", kv)
 	}
 

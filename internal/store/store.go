@@ -1267,15 +1267,25 @@ func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time
 	return target, clampedAtCap, hitScanCap, err
 }
 
-// KVScan returns the current KV projection for every path starting with prefix.
-// An empty prefix scans the whole projection. Multiple contracts at the same
-// node/path are returned as separate entries.
-func (s *Store) KVScan(prefix string) []KVEntry {
+// KVScan returns the current KV projection for every path starting with
+// prefix. An empty prefix scans the whole projection. Multiple contracts at
+// the same node/path are returned as separate entries.
+//
+// A non-nil error means the scan could not be trusted to be complete — either
+// the iterator could not be opened, or it stopped early on a storage fault
+// (Pebble surfaces both through the same *pebble.Iterator, the second only
+// visible via Error() once Valid() goes false). Both used to be swallowed to
+// a silent empty result, which is indistinguishable from "this prefix
+// genuinely holds nothing" at every caller — and at least one caller (the
+// blob sweeper, resources design §8) treats "nothing found" as license to
+// delete files. Every caller must now decide explicitly what an error means
+// for it; none may call this and assume `nil, nil` is the only outcome.
+func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 	lb := kvPrefix(prefix)
 	ub := append(append([]byte{}, lb...), 0xFF)
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("store: kv scan %q: open iterator: %w", prefix, err)
 	}
 	defer iter.Close()
 	var out []KVEntry
@@ -1307,7 +1317,10 @@ func (s *Store) KVScan(prefix string) []KVEntry {
 			OriginOffset: originOffset(e.OriginOffset, e.Offset),
 		})
 	}
-	return out
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("store: kv scan %q: %w", prefix, err)
+	}
+	return out, nil
 }
 
 func originOffset(origin, local uint64) uint64 {

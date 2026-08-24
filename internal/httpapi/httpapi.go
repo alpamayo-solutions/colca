@@ -526,7 +526,14 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	}))
 
 	mux.HandleFunc("GET /kv", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
-		entries := e.Store().KVScan(r.URL.Query().Get("prefix"))
+		entries, err := e.Store().KVScan(r.URL.Query().Get("prefix"))
+		if err != nil {
+			// A storage-layer failure, not "no entries" — answering 200 with
+			// an empty list here would tell a caller a prefix holds nothing
+			// when the truth is the scan itself never completed.
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
 		out := make([]map[string]any, 0, len(entries))
 		denied := 0
 		for _, en := range entries {

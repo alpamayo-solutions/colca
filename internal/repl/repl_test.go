@@ -70,7 +70,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	if stored[0].OriginOffset != 41 || stored[1].OriginOffset != 42 {
 		t.Fatalf("uplink lost owner offsets: %+v", stored)
 	}
-	if kv := ps.KVScan("child1/m1/temp"); len(kv) != 1 ||
+	if kv := mustKVScan(t, ps, "child1/m1/temp"); len(kv) != 1 ||
 		string(kv[0].Payload) != `{"v":2}` || kv[0].OriginOffset != 42 {
 		t.Fatalf("kv on replicate: %+v", kv)
 	}
@@ -442,6 +442,17 @@ func TestMachineKindRejectedAtReplDoor(t *testing.T) {
 // registry (entry-before-connect by construction), at the element sitting at
 // Mount.
 type childSpec struct{ ULID, Pubkey, Mount string }
+
+// mustKVScan is KVScan with the error handled the only way a test fixture
+// can: fail loud (resources design §8).
+func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
+	t.Helper()
+	entries, err := st.KVScan(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
 
 // nodeParts builds a registry and an engine wired to each other exactly the way
 // node.Start does — the registry resolving placements through the engine's

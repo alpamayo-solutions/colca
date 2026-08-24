@@ -187,7 +187,7 @@ func TestAnArrivingDefinitionIsAppliedAsRetainedState(t *testing.T) {
 	t.Cleanup(func() { close(stop); waitForClosed(t, "RunDownlink to stop", done, 5*time.Second) })
 
 	waitFor(t, "the definition to be applied at the child", 5*time.Second, func() bool {
-		return len(cs.KVScan("01HGRP-OPS")) == 1
+		return len(mustKVScan(t, cs, "01HGRP-OPS")) == 1
 	})
 	// Retained on the bus: a consumer subscribing later still learns of it.
 	deadline := time.After(2 * time.Second)

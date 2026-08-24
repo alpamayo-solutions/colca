@@ -18,6 +18,20 @@ func mustOpen(t *testing.T) *Store {
 	return s
 }
 
+// mustKVScan is KVScan with the error handled the only way a test can: fail
+// loud. KVScan now returns an error (resources
+// design §8) so every caller decides explicitly what a storage fault means;
+// for these tests it means the fixture is broken, not the assertion under
+// test, so it belongs in t.Fatal rather than in the assertion being pinned.
+func mustKVScan(t *testing.T, s *Store, prefix string) []KVEntry {
+	t.Helper()
+	entries, err := s.KVScan(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
 func TestAppendReadOffsets(t *testing.T) {
 	s := mustOpen(t)
 	var recs []Record
@@ -118,7 +132,7 @@ func TestAtomicBatchAppendsConsecutiveOffsetsAndProjectsEveryKVRow(t *testing.T)
 	if got := s.NextOffset("entities"); got != 3 {
 		t.Fatalf("next entities offset = %d, want 3", got)
 	}
-	if got := s.KVScan("line1/"); len(got) != 2 {
+	if got := mustKVScan(t, s, "line1/"); len(got) != 2 {
 		t.Fatalf("projected KV rows = %+v, want both batch records", got)
 	}
 }
@@ -152,7 +166,7 @@ func TestAtomicBatchStorageFailureLeavesNoStreamOrKVState(t *testing.T) {
 	if len(records) != 0 || next != 1 {
 		t.Fatalf("failed batch left stream state: records=%+v next=%d", records, next)
 	}
-	if got := s.KVScan("line1/"); len(got) != 0 {
+	if got := mustKVScan(t, s, "line1/"); len(got) != 0 {
 		t.Fatalf("failed batch left KV state: %+v", got)
 	}
 }
@@ -220,7 +234,7 @@ func TestKVProjectionSeparatesContractsAtTheSameNodeAndPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries := s.KVScan(path)
+	entries := mustKVScan(t, s, path)
 	if len(entries) != 2 {
 		t.Fatalf("same-path KV entries = %d, want 2 contracts: %+v", len(entries), entries)
 	}
@@ -239,7 +253,7 @@ func TestKVProjectionSeparatesContractsAtTheSameNodeAndPath(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	entries = s.KVScan(path)
+	entries = mustKVScan(t, s, path)
 	if len(entries) != 2 {
 		t.Fatalf("metric update replaced the signal: %+v", entries)
 	}
@@ -267,7 +281,7 @@ func TestKVProjectionSeparatesContractsAtTheSameNodeAndPath(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	entries = s.KVScan(path)
+	entries = mustKVScan(t, s, path)
 	if len(entries) != 1 || entries[0].Topic != signalTopic {
 		t.Fatalf("metric tombstone removed another contract: %+v", entries)
 	}
@@ -283,7 +297,7 @@ func TestKVProjectionSeparatesContractsAtTheSameNodeAndPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	entries = s.KVScan(path)
+	entries = mustKVScan(t, s, path)
 	if len(entries) != 1 || entries[0].Topic != signalTopic {
 		t.Fatalf("contract-aware KV state changed across reopen: %+v", entries)
 	}
@@ -378,7 +392,7 @@ func TestOriginOffsetSurvivesMultipleReplicationHops(t *testing.T) {
 	if parentRecords[0].Offset != 2 || parentRecords[0].OriginOffset != 1 {
 		t.Fatalf("parent coordinates = local %d origin %d, want 2/1", parentRecords[0].Offset, parentRecords[0].OriginOffset)
 	}
-	entries := parent.KVScan("edge1/line1")
+	entries := mustKVScan(t, parent, "edge1/line1")
 	if len(entries) != 1 || entries[0].Offset != 2 || entries[0].OriginOffset != 1 {
 		t.Fatalf("parent KV did not preserve owner coordinate: %+v", entries)
 	}
@@ -404,14 +418,14 @@ func TestKVScan(t *testing.T) {
 		{Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":2}`), TS: 2, KVPath: "m1/temp", KVNode: "m1"}, // overwrites
 		{Topic: "colca/v1/_Metric/m2/m2/temp", Payload: []byte(`{"v":9}`), TS: 3, KVPath: "m2/temp", KVNode: "m2"},
 	})
-	entries := s.KVScan("m1/")
+	entries := mustKVScan(t, s, "m1/")
 	if len(entries) != 1 {
 		t.Fatalf("want 1 entry, got %d", len(entries))
 	}
 	if string(entries[0].Payload) != `{"v":2}` {
 		t.Fatalf("last value wrong: %s", entries[0].Payload)
 	}
-	if len(s.KVScan("")) != 2 {
+	if len(mustKVScan(t, s, "")) != 2 {
 		t.Fatal("full scan should see 2 keys")
 	}
 }
@@ -535,7 +549,7 @@ func TestAppendTombstoneDeletesKVInBatch(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(s.KVScan("")); got != 2 {
+	if got := len(mustKVScan(t, s, "")); got != 2 {
 		t.Fatalf("pre-tombstone KV entries = %d, want 2", got)
 	}
 
@@ -545,10 +559,10 @@ func TestAppendTombstoneDeletesKVInBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := s.KVScan("m1/temp"); len(got) != 0 {
+	if got := mustKVScan(t, s, "m1/temp"); len(got) != 0 {
 		t.Fatalf("tombstoned KV key survived the batch: %+v", got)
 	}
-	if got := s.KVScan("m1/keep"); len(got) != 1 {
+	if got := mustKVScan(t, s, "m1/keep"); len(got) != 1 {
 		t.Fatalf("untouched sibling key must survive, got %d entries", len(got))
 	}
 	// The tombstone IS history: the stream keeps all three records.
@@ -577,10 +591,10 @@ func TestAppendTombstoneDeletesKVInBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	if got := s2.KVScan("m1/temp"); len(got) != 0 {
+	if got := mustKVScan(t, s2, "m1/temp"); len(got) != 0 {
 		t.Fatalf("tombstoned KV key resurrected across reopen: %+v", got)
 	}
-	if got := len(s2.KVScan("")); got != 1 {
+	if got := len(mustKVScan(t, s2, "")); got != 1 {
 		t.Fatalf("KV entries after reopen = %d, want 1 (only m1/keep)", got)
 	}
 	if s2.NextOffset("metrics") != 4 {
@@ -599,7 +613,7 @@ func TestApplyReplicatedTombstone(t *testing.T) {
 	if _, _, err := s.ApplyReplicated("n-edge1", "metrics", []ReplRecord{set}); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.KVScan("edge1/m1/a")) != 1 {
+	if len(mustKVScan(t, s, "edge1/m1/a")) != 1 {
 		t.Fatal("setup: replicated KV entry missing")
 	}
 
@@ -611,7 +625,7 @@ func TestApplyReplicatedTombstone(t *testing.T) {
 	if len(applied) != 1 || hwm != 2 {
 		t.Fatalf("tombstone apply: applied %d hwm %d, want 1/2", len(applied), hwm)
 	}
-	if got := s.KVScan("edge1/m1/a"); len(got) != 0 {
+	if got := mustKVScan(t, s, "edge1/m1/a"); len(got) != 0 {
 		t.Fatalf("replicated tombstone did not retire the KV key: %+v", got)
 	}
 
@@ -623,7 +637,7 @@ func TestApplyReplicatedTombstone(t *testing.T) {
 	if len(applied) != 0 || hwm != 2 {
 		t.Fatalf("replayed tombstone: applied %d hwm %d, want 0/2", len(applied), hwm)
 	}
-	if got := s.KVScan("edge1/m1/a"); len(got) != 0 {
+	if got := mustKVScan(t, s, "edge1/m1/a"); len(got) != 0 {
 		t.Fatalf("replay resurrected the KV key: %+v", got)
 	}
 

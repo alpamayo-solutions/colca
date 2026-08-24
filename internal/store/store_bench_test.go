@@ -76,7 +76,11 @@ func BenchmarkKVScan(b *testing.B) {
 			}
 			b.ResetTimer()
 			for n := 0; n < b.N; n++ {
-				if got := len(s.KVScan("")); got != paths {
+				entries, err := s.KVScan("")
+				if err != nil {
+					b.Fatal(err)
+				}
+				if got := len(entries); got != paths {
 					b.Fatalf("scan returned %d entries, want %d", got, paths)
 				}
 			}

@@ -53,7 +53,7 @@ func TestRegistryPutScanAndReopen(t *testing.T) {
 	if err != nil || len(recs) != 1 || recs[0].Topic != entityRec("01M1").Topic {
 		t.Fatalf("entity record not in stream: recs=%v err=%v", recs, err)
 	}
-	kv := s.KVScan("_colca/identities/01M1")
+	kv := mustKVScan(t, s, "_colca/identities/01M1")
 	if len(kv) != 1 || kv[0].NodeID != "01NODE" {
 		t.Fatalf("KV projection missing: %v", kv)
 	}
@@ -117,7 +117,7 @@ func TestRegistryDelete(t *testing.T) {
 	}
 	// The identity's KV projection is retired in the same batch — a restart's
 	// retained-set reseed must not resurrect a revoked identity.
-	if kv := s.KVScan("_colca/identities/01M1"); len(kv) != 0 {
+	if kv := mustKVScan(t, s, "_colca/identities/01M1"); len(kv) != 0 {
 		t.Fatalf("KV entry survived revocation: %v", kv)
 	}
 	// The tombstone record is in the stream (history keeps the retirement).

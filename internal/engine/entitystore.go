@@ -22,7 +22,18 @@ func (s *entityStore) KVGet(topic string) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	for _, kv := range s.e.store.KVScan(p.Path) {
+	kvs, err := s.e.store.KVScan(p.Path)
+	if err != nil {
+		// uns.EntityStore's KVGet signature carries no error (a narrow, stable
+		// port the domain package depends on) — a caller through this port
+		// sees a false "not found", which is wrong but not destructive
+		// (resources design §8). Logged at ERROR
+		// so the failure is never silent, only unpropagated.
+		s.e.log.Error("kv scan failed — entity read answered not-found rather than the true state",
+			"path", p.Path, "err", err)
+		return nil, false
+	}
+	for _, kv := range kvs {
 		if kv.Topic == topic {
 			return kv.Payload, true
 		}
@@ -44,9 +55,36 @@ func (s *entityStore) KVScanAll(contract string) []uns.KVRecord {
 	return s.scan(contract, func(store.KVEntry) bool { return true })
 }
 
+// scan is the uns.EntityStore port's swallow-and-log adapter over
+// Engine.scanContract: KVScan/KVScanAll carry no error in their signature (a
+// narrow, stable port the domain package depends on), so a storage failure
+// here is logged at ERROR and answered as "nothing found" — wrong, but not
+// destructive, for every consumer this port currently has. A consumer whose
+// decision on an empty answer WOULD be destructive (the blob sweeper marking
+// every blob unreferenced) must not go through this port; it uses
+// Engine.ScanContractAll instead, which surfaces the error (resources design §8).
 func (s *entityStore) scan(contract string, keep func(store.KVEntry) bool) []uns.KVRecord {
+	out, err := s.e.scanContract(contract, keep)
+	if err != nil {
+		s.e.log.Error("kv scan failed — entity records answered as absent rather than the true state",
+			"contract", contract, "err", err)
+		return nil
+	}
+	return out
+}
+
+// scanContract walks the whole KV projection once and returns the records of
+// one contract that keep accepts, converted to the plugin-facing
+// uns.KVRecord. Shared by entityStore.scan's swallow-and-log adapter and
+// ScanContractAll's error-surfacing one below — same walk, two different
+// answers to "what do I do when the store itself failed".
+func (e *Engine) scanContract(contract string, keep func(store.KVEntry) bool) ([]uns.KVRecord, error) {
+	kvs, err := e.store.KVScan("")
+	if err != nil {
+		return nil, err
+	}
 	var out []uns.KVRecord
-	for _, kv := range s.e.store.KVScan("") {
+	for _, kv := range kvs {
 		if !keep(kv) {
 			continue
 		}
@@ -63,7 +101,20 @@ func (s *entityStore) scan(contract string, keep func(store.KVEntry) bool) []uns
 			OriginOffset: kv.OriginOffset,
 		})
 	}
-	return out
+	return out, nil
+}
+
+// ScanContractAll is EntityStore().KVScanAll(contract) with a storage failure
+// surfaced instead of swallowed to an empty result (critical-finding fix
+// round, resources design §8). A caller whose decision on an empty answer is
+// destructive — the blob sweeper marking every blob unreferenced because it
+// read zero live resources — must be able to tell "nothing referenced this"
+// apart from "the scan itself failed": the two demand opposite actions, and
+// uns.EntityStore's own KVScanAll cannot make that distinction (its signature
+// is a stable, narrow port other, non-destructive consumers already depend
+// on).
+func (e *Engine) ScanContractAll(contract string) ([]uns.KVRecord, error) {
+	return e.scanContract(contract, func(store.KVEntry) bool { return true })
 }
 
 // PublishBatch is the domain command commit boundary, and the plugin's only

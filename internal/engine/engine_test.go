@@ -158,7 +158,7 @@ func TestClientPublishNoRewriteAndKV(t *testing.T) {
 	if recs[0].Topic != "colca/v1/_Metric/n-edge1/m1/temp" {
 		t.Fatalf("stored topic %q, want the published path unchanged — there is no mount rewrite any more", recs[0].Topic)
 	}
-	kv := e.Store().KVScan("m1/temp")
+	kv := mustKVScan(t, e.Store(), "m1/temp")
 	if len(kv) != 1 || kv[0].NodeID != "n-edge1" {
 		t.Fatalf("kv: %+v, want NodeID n-edge1 (the node, not the publishing client)", kv)
 	}
@@ -193,7 +193,7 @@ func TestEntityStorePublishBatchCommitsValidatedEntityStateAtomically(t *testing
 	if got := e.Store().NextOffset("entities"); got != before+2 {
 		t.Fatalf("next entities offset = %d, want %d", got, before+2)
 	}
-	if got := e.Store().KVScan("line1/"); len(got) != 2 {
+	if got := mustKVScan(t, e.Store(), "line1/"); len(got) != 2 {
 		t.Fatalf("KV rows = %+v, want both records", got)
 	}
 	if got := delivered.got(); len(got) != 2 || !got[0].Retain || !got[1].Retain {
@@ -221,7 +221,7 @@ func TestEntityStorePublishBatchRejectsLateInvalidRecordWithoutWrites(t *testing
 	if got := e.Store().NextOffset("entities"); got != before {
 		t.Fatalf("rejected batch advanced next offset to %d, want %d", got, before)
 	}
-	if got := e.Store().KVScan("line1/"); len(got) != 0 {
+	if got := mustKVScan(t, e.Store(), "line1/"); len(got) != 0 {
 		t.Fatalf("rejected batch left KV state: %+v", got)
 	}
 	if got := delivered.got(); len(got) != 0 {
@@ -325,7 +325,7 @@ func TestAConfigureCommandCommitsNothingWhenALateRecordFailsValidation(t *testin
 		t.Fatalf("the refused command took stream positions (%d → %d)", offsetBefore, got)
 	}
 	for _, path := range []string{"line1/press", "line1/broken"} {
-		if got := e.Store().KVScan(path); len(got) != 0 {
+		if got := mustKVScan(t, e.Store(), path); len(got) != 0 {
 			t.Fatalf("the refused command left %s in KV: %+v — the valid first record "+
 				"must not survive the refusal of the second", path, got)
 		}
@@ -353,6 +353,17 @@ func TestClientLevel4MustBeThisNode(t *testing.T) {
 // (task-7/8, local-service-trust design §2/§5) — none of them care about the
 // payload's content, only about whether the publish is admitted.
 var metricPayload = []byte(`{"v":1}`)
+
+// mustKVScan is KVScan with the error handled the only way a test fixture
+// can: fail loud (resources design §8).
+func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
+	t.Helper()
+	entries, err := st.KVScan(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
 
 // newTestEngine builds a fresh engine identified by nodeULID, whose OWN
 // element is "el-root" (a one-step ancestry: this node IS el-root), and
@@ -454,7 +465,7 @@ func TestOnlyLocalServicePublishesCanonicalAuditEvent(t *testing.T) {
 	if !res.Persisted || res.Stream != "audit" {
 		t.Fatalf("audit result = %+v", res)
 	}
-	if kv := e.Store().KVScan(""); len(kv) != 0 {
+	if kv := mustKVScan(t, e.Store(), ""); len(kv) != 0 {
 		t.Fatalf("audit event reached KV: %+v", kv)
 	}
 
@@ -612,7 +623,7 @@ func TestEnrolledIdentityRejectedAtOrdinaryDoors(t *testing.T) {
 	if _, _, err := e.IngestReplicated("child1", "entities", recs); err != nil {
 		t.Fatalf("replicated _EnrolledIdentity must be accepted: %v", err)
 	}
-	if kv := e.Store().KVScan("edge1/_colca/identities/m9"); len(kv) != 1 {
+	if kv := mustKVScan(t, e.Store(), "edge1/_colca/identities/m9"); len(kv) != 1 {
 		t.Fatalf("replicated _EnrolledIdentity must project into KV: %v", kv)
 	}
 }
@@ -1256,7 +1267,7 @@ func TestEmptyPayloadTombstonesKVAndDeliversRetainedClear(t *testing.T) {
 	if !res.Persisted || res.Stream != "metrics" || res.Offset != 2 {
 		t.Fatalf("tombstone result = %+v, want persisted metrics offset 2", res)
 	}
-	if got := e.Store().KVScan("m1/temp"); len(got) != 0 {
+	if got := mustKVScan(t, e.Store(), "m1/temp"); len(got) != 0 {
 		t.Fatalf("tombstone did not retire the KV key: %+v", got)
 	}
 	recs, _, _ := e.Store().Read("metrics", 1, 10, nil)
@@ -1275,7 +1286,7 @@ func TestEmptyPayloadTombstonesKVAndDeliversRetainedClear(t *testing.T) {
 	if res.Stream != "entities" {
 		t.Fatalf("entity tombstone stream = %q, want entities", res.Stream)
 	}
-	if got := e.Store().KVScan("m1/sig-a"); len(got) != 0 {
+	if got := mustKVScan(t, e.Store(), "m1/sig-a"); len(got) != 0 {
 		t.Fatalf("entity tombstone did not retire the KV key: %+v", got)
 	}
 
@@ -1326,7 +1337,7 @@ func TestClientCannotTombstoneForeignPath(t *testing.T) {
 	if err == nil || ReasonOf(err) != metrics.ReasonNodeID {
 		t.Fatalf("foreign tombstone must fail the level-4 rule, got: %v (reason %q)", err, ReasonOf(err))
 	}
-	if got := e.Store().KVScan("x/temp"); len(got) != 1 {
+	if got := mustKVScan(t, e.Store(), "x/temp"); len(got) != 1 {
 		t.Fatalf("foreign KV entry must survive the rejected tombstone: %+v", got)
 	}
 	if e.Store().NextOffset("metrics") != 2 {
@@ -1346,7 +1357,7 @@ func TestIngestReplicatedTombstoneRetiresKVAndClearsRetained(t *testing.T) {
 	if _, _, err := e.IngestReplicated("n-edge1", "metrics", set); err != nil {
 		t.Fatal(err)
 	}
-	if len(e.Store().KVScan("edge1/m1/a")) != 1 {
+	if len(mustKVScan(t, e.Store(), "edge1/m1/a")) != 1 {
 		t.Fatal("setup: replicated KV entry missing")
 	}
 
@@ -1358,7 +1369,7 @@ func TestIngestReplicatedTombstoneRetiresKVAndClearsRetained(t *testing.T) {
 	if applied != 1 || hwm != 2 {
 		t.Fatalf("tombstone apply: %d/%d, want 1/2", applied, hwm)
 	}
-	if got := e.Store().KVScan("edge1/m1/a"); len(got) != 0 {
+	if got := mustKVScan(t, e.Store(), "edge1/m1/a"); len(got) != 0 {
 		t.Fatalf("replicated tombstone did not retire the parent KV: %+v", got)
 	}
 	got := rec.got()
@@ -1412,7 +1423,7 @@ func TestIngestRefreshGuardAndSkipSemantics(t *testing.T) {
 	if len(rec.got()) != deliveries {
 		t.Fatal("skipped refresh delivered to the bus")
 	}
-	if kv := e.Store().KVScan("line1/press"); len(kv) != 0 {
+	if kv := mustKVScan(t, e.Store(), "line1/press"); len(kv) != 0 {
 		t.Fatalf("skipped refresh resurrected the tombstoned path: %+v", kv)
 	}
 

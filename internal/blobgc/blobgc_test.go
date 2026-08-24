@@ -3,6 +3,7 @@ package blobgc
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // newBody returns fresh content for blobs.Put — distinct literal text per
@@ -184,4 +186,33 @@ func TestSweepReclaimsAfterATombstone(t *testing.T) {
 	// No longer referenced, and already past the grace: reclaimed.
 	sweeper.runOnce()
 	mustHave(t, blobs, sha, false)
+}
+
+// TestSweepNeverDeletesOnAFailedScan is the core
+// guard (resources design §8): a records() failure must never be read as
+// "nothing is referenced". If it were, the sweeper would delete every
+// unreferenced-looking blob past the grace, including ones a working scan
+// would have shown as live — the exact "an iterator failure silently reads
+// as an empty store" bug this seam exists to close.
+//
+// Denominator, in the same test: swap in a working read and the same
+// orphan — unreferenced and already past the grace throughout — IS deleted,
+// so "nothing was deleted" above cannot be "the sweeper is simply broken".
+func TestSweepNeverDeletesOnAFailedScan(t *testing.T) {
+	_, blobs, sweeper := sweepParts(t, time.Hour)
+	sha, _, err := blobs.Put(newBody(t, "orphan, well past the grace"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sweeper.now = func() time.Time { return time.Now().Add(2 * time.Hour) } // past the 1h grace throughout
+
+	sweeper.records = func() ([]uns.KVRecord, error) {
+		return nil, errors.New("simulated KV scan failure")
+	}
+	sweeper.runOnce()
+	mustHave(t, blobs, sha, true) // a failed scan must never be read as "nothing referenced this"
+
+	sweeper.records = func() ([]uns.KVRecord, error) { return nil, nil } // working read: genuinely nothing live
+	sweeper.runOnce()
+	mustHave(t, blobs, sha, false) // denominator: the same orphan IS deleted once the scan actually works
 }

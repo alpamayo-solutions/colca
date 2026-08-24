@@ -20,6 +20,17 @@ func openStore(t *testing.T, dir string) *store.Store {
 	return st
 }
 
+// mustKVScan is KVScan with the error handled the only way a test fixture
+// can: fail loud (resources design §8).
+func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
+	t.Helper()
+	entries, err := st.KVScan(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
 func entryJSON(t *testing.T, e uns.Entry) []byte {
 	t.Helper()
 	b, err := json.Marshal(e)
@@ -215,7 +226,7 @@ func TestRevoke(t *testing.T) {
 		t.Fatalf("tombstone: %v err=%v", recs, err)
 	}
 	// KV projection retired.
-	if kv := st.KVScan("z/a"); len(kv) != 0 {
+	if kv := mustKVScan(t, st, "z/a"); len(kv) != 0 {
 		t.Fatalf("KV survived revoke: %v", kv)
 	}
 	if _, _, err := m.Revoke("01M1"); !errors.Is(err, ErrNotEnrolled) {

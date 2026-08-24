@@ -34,6 +34,17 @@ import (
 // through Handler() rather than a Collector/Gatherer accessor.
 var scrapeMetric = metricstest.Value
 
+// mustKVScan is KVScan with the error handled the only way a test fixture
+// can: fail loud (resources design §8).
+func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
+	t.Helper()
+	entries, err := st.KVScan(prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
 // world is the broker fixture: TLS listener, registry with two enrolled
 // machines (m1 mounted at "m1" with an explicit write:el-m1/# grant — a
 // machine gets no implicit write, auth §5; obs mounted at "obs" with read:#
@@ -1145,10 +1156,10 @@ func TestTombstoneClearsRetainedOnBroker(t *testing.T) {
 	pub("colca/v1/_Metric/n1/m1/temp", "")
 
 	// PUBACK means the engine persisted it — the KV key must be gone.
-	if got := st.KVScan("m1/temp"); len(got) != 0 {
+	if got := mustKVScan(t, st, "m1/temp"); len(got) != 0 {
 		t.Fatalf("KV key survived the tombstone: %+v", got)
 	}
-	if got := st.KVScan("m1/keep"); len(got) != 1 {
+	if got := mustKVScan(t, st, "m1/keep"); len(got) != 1 {
 		t.Fatalf("sibling KV key must survive, got %d", len(got))
 	}
 

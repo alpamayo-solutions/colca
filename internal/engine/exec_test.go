@@ -137,7 +137,7 @@ func TestEditCommandCommitsStateAndDurableReplayReceiptTogether(t *testing.T) {
 	if got := result.Command.StateWrites[0]; got.Offset != parent.Offset+1 || got.Topic != "colca/v1/_Constant/n-edge1/line1/Target" {
 		t.Fatalf("edit state write = %+v", got)
 	}
-	if got := e.Store().KVScan("_colca/edit/operations/"); len(got) != 1 {
+	if got := mustKVScan(t, e.Store(), "_colca/edit/operations/"); len(got) != 1 {
 		t.Fatalf("durable replay receipts = %+v, want 1", got)
 	}
 	entitiesNext := e.Store().NextOffset("entities")

@@ -296,7 +296,15 @@ func Start(cfg *config.Config) (*Node, error) {
 		// (TestRetainedSeedStartupCostTenThousandPaths) — so it does not
 		// meaningfully delay /healthz, which opens after it.
 		seeded := 0
-		for _, en := range st.KVScan("") {
+		entries, err := st.KVScan("")
+		if err != nil {
+			// This IS the "fresh subscriber gets current state" guarantee the
+			// comment above describes; a scan that could not complete must
+			// fail startup rather than come up silently claiming an empty
+			// retained set is correct.
+			return fail(fmt.Errorf("node %s: reseed retained set: %w", cfg.ULID, err))
+		}
+		for _, en := range entries {
 			n.MQTT.DeliverLocal(en.Topic, en.Payload, true)
 			seeded++
 		}
