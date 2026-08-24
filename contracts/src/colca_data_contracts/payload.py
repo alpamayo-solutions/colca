@@ -133,11 +133,18 @@ class Metric(BaseMetric):
 
 @dataclass
 class Node(Payload):
-    """A Colca node authored by the node it describes."""
+    """A Colca node authored by the node it describes.
+
+    ``root_system_element_id`` is the element the node is bound to — the one
+    its parent mounted it at, the root of its subtree in the namespace. The
+    root node is bound to nothing above itself and carries none. colcad
+    writes it the moment the node learns its position; everything else here
+    is what a deployment or an operator says about the node.
+    """
 
     id: str
     name: str
-    root_system_element_id: str
+    root_system_element_id: Optional[str] = None
     display_name: str = ""
     description: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
