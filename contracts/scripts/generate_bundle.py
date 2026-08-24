@@ -43,6 +43,7 @@ CLASS_TABLE: dict[str, str] = {
     "_SystemElement": "entity",
     "_Signal": "entity",
     "_Constant": "entity",
+    "_Resource": "entity",
     "_EditOperation": "entity",
     "_DataTags": "entity",
     "_Node": "entity",

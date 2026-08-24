@@ -9,6 +9,7 @@ from franzmq.topic import Topic
 from colca_data_contracts import (
     ConstantDataType,
     ConstantPayload,
+    ResourcePayload,
     SignalPayload,
     SystemElementPayload,
 )
@@ -24,6 +25,10 @@ def test_signal_registered():
 
 def test_constant_registered():
     assert PAYLOAD_CLASSES.get("_Constant") is ConstantPayload
+
+
+def test_resource_is_registered_under_its_contract_name():
+    assert PAYLOAD_CLASSES["_Resource"] is ResourcePayload
 
 
 def test_system_element_topic_format():
@@ -196,6 +201,24 @@ def test_constant_roundtrip_preserves_typed_value_and_metadata():
     encoded = json.loads(original.encode())
     assert encoded["data_type"] == "int64"
     assert encoded["value"] == 18_000
+
+
+def test_resource_payload_round_trips():
+    payload = ResourcePayload(
+        id="r1",
+        system_element_id="el1",
+        display_name="Press 3 manual",
+        filename="manual.pdf",
+        content_type="application/pdf",
+        resource_type="maintenance_and_operator_documentation",
+        size_bytes=1834722,
+        sha256="a" * 64,
+    )
+    encoded = json.dumps(payload.__dict__)
+    decoded = ResourcePayload.decode(encoded, timestamp=0)
+    assert decoded.id == "r1"
+    assert decoded.sha256 == "a" * 64
+    assert decoded.size_bytes == 1834722
 
 
 def test_system_element_with_only_id_name_is_valid():

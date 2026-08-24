@@ -847,6 +847,38 @@ class Constant(Payload):
 
 
 @dataclass
+class Resource(Payload):
+    """A file-backed entity attached to a system element.
+
+    Topic: ``colca/v1/_Resource/{node-id}/{element-path…}/{resource-id}``.
+    Written by the node in response to a ``_CmdConfigure``; a retracted
+    resource is a retained empty payload (tombstone).
+
+    ``sha256`` and ``size_bytes`` are the file pointer. The bytes never travel
+    in this payload — they move through the blob store — so a node holding this
+    record can be certain which blob it needs and can verify it on arrival.
+    """
+
+    id: str
+    system_element_id: str
+    filename: str
+    content_type: str
+    sha256: str
+    display_name: str = ""
+    description: str = ""
+    resource_type: str = "other"
+    size_bytes: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    @classmethod
+    def decode(cls, json_str: str, timestamp: int) -> "Resource":
+        data = json.loads(json_str)
+        return cls(**data)
+
+
+@dataclass
 class EditOperation(Payload):
     """Bounded, node-local success receipt for atomic Edit replay.
 

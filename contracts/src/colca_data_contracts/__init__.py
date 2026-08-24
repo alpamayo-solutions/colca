@@ -80,6 +80,7 @@ from colca_data_contracts.payload import (
     Signal as SignalPayload,
     ConstantDataType,
     Constant as ConstantPayload,
+    Resource as ResourcePayload,
     CmdEdit,
     EditOperation as EditOperationPayload,
 )
@@ -185,6 +186,7 @@ __all__ = [
     "SignalPayload",
     "ConstantDataType",
     "ConstantPayload",
+    "ResourcePayload",
     "CmdEdit",
     "EditOperationPayload",
     # MachineState contract enums

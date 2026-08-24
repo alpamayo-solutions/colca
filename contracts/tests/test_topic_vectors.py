@@ -98,8 +98,10 @@ def test_mount_insert_keeps_the_identity_and_the_grammar(case):
     before, after = Topic.from_str(case["topic"]), Topic.from_str(case["out"])
     assert after.node_id == before.node_id
     assert after.payload_type is before.payload_type
-    # The mount lands at the head of the path, never at the identity level.
-    assert after.context == (case["mount"],) + before.context
+    # The mount lands at the head of the path, never at the identity level. A
+    # mount is itself a path (colca's MountInsert splices it in as a raw
+    # string, e.g. "site1/edge1"), so it can carry more than one segment.
+    assert after.context == tuple(case["mount"].split("/")) + before.context
 
 
 @pytest.mark.parametrize(
@@ -111,7 +113,7 @@ def test_mount_strip_keeps_the_identity_and_the_grammar(case):
     before, after = Topic.from_str(case["topic"]), Topic.from_str(case["out"])
     assert after.node_id == before.node_id
     assert after.payload_type is before.payload_type
-    assert (case["mount"],) + after.context == before.context
+    assert tuple(case["mount"].split("/")) + after.context == before.context
 
 
 @pytest.mark.parametrize(
