@@ -33,7 +33,7 @@ type Class int
 const (
 	ClassNone       Class = iota
 	ClassData             // _Metric …    node-owned state, authorized by write scope
-	ClassEntity           // _Node, _EnrolledIdentity, _SystemElement, _Signal, _Constant
+	ClassEntity           // _Node, _EnrolledIdentity, _SystemElement, _Signal, _Constant, _Resource
 	ClassDefinition       // _Group, _MetadataType …  write: any node, flows DOWN, applied as state
 	ClassCmd              // _Cmd*        write: ancestors/admin, flows down
 	ClassAck              // _Ack         write: owner, flows up
@@ -98,6 +98,7 @@ func ClassOf(contract string) Class {
 	case contract == "_EnrolledIdentity" || contract == "_Node" ||
 		contract == "_ServiceDetails" || contract == "_SystemElement" ||
 		contract == "_Signal" || contract == "_Constant" || contract == "_ExternalReference" ||
+		contract == "_Resource" ||
 		contract == "_EditOperation" || contract == "_AlarmNotificationConfig" ||
 		contract == "_NotificationConfigStatus":
 		return ClassEntity
@@ -500,6 +501,9 @@ func Validate(contract string, payload []byte) error {
 	case contract == "_Constant":
 		_, err := validateConstantPayload(payload)
 		return err
+	case contract == "_Resource":
+		_, err := validateResourcePayload(payload)
+		return err
 	case contract == "_EditOperation":
 		if err := reqStr("id"); err != nil {
 			return err
@@ -644,4 +648,58 @@ func validateConstantPayload(payload []byte) (placedConstant, error) {
 		return placedConstant{}, fmt.Errorf("_Constant: unsupported data_type %q", constant.DataType)
 	}
 	return constant, nil
+}
+
+// placedResource is a file-backed entity attached to one system element
+// (resources design §2). The sha256/size_bytes pair is the file pointer: any
+// node holding this record knows exactly which blob it needs and can verify it
+// byte-for-byte, which is what lets metadata and bytes travel separately.
+type placedResource struct {
+	ID              string `json:"id"`
+	SystemElementID string `json:"system_element_id"`
+	Filename        string `json:"filename"`
+	ContentType     string `json:"content_type"`
+	SizeBytes       int64  `json:"size_bytes"`
+	SHA256          string `json:"sha256"`
+}
+
+// isSHA256Hex is the same shape the blob store enforces on a path element:
+// 64 lowercase hex characters. Rejecting anything else here means a record can
+// never name a digest the store would refuse to look up.
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateResourcePayload(payload []byte) (placedResource, error) {
+	var resource placedResource
+	if err := json.Unmarshal(payload, &resource); err != nil {
+		return placedResource{}, fmt.Errorf("_Resource: payload is not valid JSON: %w", err)
+	}
+	for field, value := range map[string]string{
+		"id":                resource.ID,
+		"system_element_id": resource.SystemElementID,
+		"filename":          resource.Filename,
+		"content_type":      resource.ContentType,
+	} {
+		if value == "" {
+			return placedResource{}, fmt.Errorf("_Resource: field %q must be a non-empty string", field)
+		}
+	}
+	if !isSHA256Hex(resource.SHA256) {
+		return placedResource{}, fmt.Errorf(
+			"_Resource: field %q must be 64 lowercase hex characters", "sha256")
+	}
+	if resource.SizeBytes < 0 {
+		return placedResource{}, fmt.Errorf("_Resource: field %q must not be negative", "size_bytes")
+	}
+	return resource, nil
 }

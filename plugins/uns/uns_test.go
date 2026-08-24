@@ -1,6 +1,9 @@
 package uns
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseAndClass(t *testing.T) {
 	p, err := Parse("colca/v1/_Metric/m1/site1/edge1/m1/temp")
@@ -414,5 +417,47 @@ func TestChildAndParentSideCursorNamesDoNotAlias(t *testing.T) {
 	const shared = "01JSVC"
 	if DownlinkCursor(shared) == DownlinkCursorPrefix+shared {
 		t.Fatal("child-side downlink cursor aliases the parent-side cursor for the same string")
+	}
+}
+
+func TestResourceIsEntityClass(t *testing.T) {
+	if got := ClassOf("_Resource"); got != ClassEntity {
+		t.Fatalf("ClassOf(_Resource) = %v, want ClassEntity", got)
+	}
+	if got := StreamFor(ClassOf("_Resource")); got != "entities" {
+		t.Fatalf("stream = %q, want entities", got)
+	}
+	if !IsState(ClassOf("_Resource")) {
+		t.Fatal("_Resource must be state: KV-projected, retained, tombstonable")
+	}
+}
+
+func TestResourceValidation(t *testing.T) {
+	good := []byte(`{"id":"r1","system_element_id":"el1","filename":"manual.pdf",
+		"content_type":"application/pdf","size_bytes":1834722,
+		"sha256":"` + strings.Repeat("a", 64) + `"}`)
+	if err := Validate("_Resource", good); err != nil {
+		t.Fatalf("a complete resource must validate: %v", err)
+	}
+	// The denominator above makes each rejection below meaningful.
+	for name, payload := range map[string]string{
+		"no id":          `{"system_element_id":"el1","sha256":"` + strings.Repeat("a", 64) + `","filename":"m.pdf","content_type":"application/pdf","size_bytes":1}`,
+		"no element":     `{"id":"r1","sha256":"` + strings.Repeat("a", 64) + `","filename":"m.pdf","content_type":"application/pdf","size_bytes":1}`,
+		"no sha":         `{"id":"r1","system_element_id":"el1","filename":"m.pdf","content_type":"application/pdf","size_bytes":1}`,
+		"short sha":      `{"id":"r1","system_element_id":"el1","sha256":"abc","filename":"m.pdf","content_type":"application/pdf","size_bytes":1}`,
+		"upper-case sha": `{"id":"r1","system_element_id":"el1","sha256":"` + strings.Repeat("A", 64) + `","filename":"m.pdf","content_type":"application/pdf","size_bytes":1}`,
+		"non-hex sha":    `{"id":"r1","system_element_id":"el1","sha256":"` + strings.Repeat("z", 64) + `","filename":"m.pdf","content_type":"application/pdf","size_bytes":1}`,
+		"no filename":    `{"id":"r1","system_element_id":"el1","sha256":"` + strings.Repeat("a", 64) + `","content_type":"application/pdf","size_bytes":1}`,
+		"negative size":  `{"id":"r1","system_element_id":"el1","sha256":"` + strings.Repeat("a", 64) + `","filename":"m.pdf","content_type":"application/pdf","size_bytes":-1}`,
+	} {
+		if err := Validate("_Resource", []byte(payload)); err == nil {
+			t.Fatalf("%s: want a validation error", name)
+		}
+	}
+}
+
+func TestResourceTombstoneValidates(t *testing.T) {
+	if err := Validate("_Resource", nil); err != nil {
+		t.Fatalf("an empty payload is a tombstone and must validate: %v", err)
 	}
 }
