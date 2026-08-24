@@ -136,8 +136,12 @@ var blobRejectReasons = []string{"too_large", "digest_mismatch", "bad_digest"}
 var recordRejectReasons = []string{"too_large"}
 
 // resourceReadResults — the allowed `result` label values of
-// colca_resource_reads_total (resources design §6).
-var resourceReadResults = []string{"ok", "pending", "denied", "not_found"}
+// colca_resource_reads_total (resources design §6). "pending" is reserved for
+// a genuinely in-flight blob (blobstore.ErrNotFound) — any other blob-store
+// failure (a malformed stored digest, a disk or permission fault on this
+// node) is "error", never "pending": that label is a promise the file will
+// still arrive, which a fault can't keep.
+var resourceReadResults = []string{"ok", "pending", "denied", "not_found", "error"}
 
 // gapSurfaces — the allowed `surface` label values of colca_gap_served_total
 // (design §8): `fetch` is GET /fetch (any stream), `downlink` is GET
@@ -460,7 +464,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}, []string{"reason"}),
 		resourceReads: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_resource_reads_total",
-			Help: "Resource file reads on the published door's GET /resources/{id}/file, by result: ok (bytes served), pending (blob_pending — the record exists but its bytes have not replicated here), denied (no read grant on the resource's element), not_found (unknown resource id). Resets on restart.",
+			Help: "Resource file reads on the published door's GET /resources/{id}/file, by result: ok (bytes served), pending (blob_pending — the record exists but its bytes have not replicated here, the only retryable case), denied (no read grant on the resource's element), not_found (unknown resource id), error (an internal fault reading the blob — a malformed stored digest or a disk/permission fault on this node; never retryable the way pending is). Resets on restart.",
 		}, []string{"result"}),
 	}
 	m.ingestBy = counterChildren(m.ingest, streams)

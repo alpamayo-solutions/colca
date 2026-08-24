@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -67,15 +68,7 @@ func mountResourceRoutes(
 
 		rc, size, err := blobs.Get(sha)
 		if err != nil {
-			// The resource exists; its bytes have not arrived yet. An ancestor
-			// cannot fetch them rootward — only the child's push brings them —
-			// so this is a retry-later, not a dead end.
-			m.ResourceRead("pending")
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":  "blob_pending",
-				"sha256": sha,
-				"detail": "the resource's file has not replicated to this node yet",
-			})
+			resourceBlobError(w, m, err, sha, writeJSON)
 			return
 		}
 		defer rc.Close()
@@ -85,4 +78,37 @@ func mountResourceRoutes(
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.Copy(w, rc)
 	}))
+}
+
+// resourceBlobError maps a blobstore read error to this route's response.
+// Same discriminator shape as blobReadError (blobs.go), but a different
+// mapping — this route's caller has already been told the resource EXISTS
+// (the 404 above owns "no such resource"), so a blob-store error here can
+// only mean one of two things, and only one of them is retryable:
+//
+//   - ErrNotFound: the bytes genuinely have not arrived. This is the only
+//     case that answers 409 blob_pending — a promise that the file is in
+//     flight and an ancestor can only wait for the child's push, never pull
+//     it rootward.
+//   - anything else (ErrBadDigest included): an internal fault, not a
+//     "not yet" — validateResourcePayload enforces isSHA256Hex before a
+//     _Resource is ever written, so a stored record can never legitimately
+//     carry a malformed digest; reaching ErrBadDigest here means this node's
+//     own state is inconsistent. A generic I/O error means the same thing
+//     one level down (disk or permission fault on this node). Neither is
+//     the caller's problem to retry, so both are 500 — collapsing them into
+//     blob_pending would have an operator or the editor's retry loop
+//     polling forever on something that will never clear.
+func resourceBlobError(w http.ResponseWriter, m *metrics.Metrics, err error, sha string, writeJSON func(http.ResponseWriter, int, any)) {
+	if errors.Is(err, blobstore.ErrNotFound) {
+		m.ResourceRead("pending")
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":  "blob_pending",
+			"sha256": sha,
+			"detail": "the resource's file has not replicated to this node yet",
+		})
+		return
+	}
+	m.ResourceRead("error")
+	writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 }

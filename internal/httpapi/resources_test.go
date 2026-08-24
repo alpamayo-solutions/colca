@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,13 +26,16 @@ import (
 // resourceAPI is a published-door test fixture — the same shape as newAPI in
 // httpapi_test.go — that also keeps the blob store reachable, because these
 // tests seed a resource's bytes directly (the door under test has no route
-// that accepts an upload; only /resources/{id}/file, which reads).
+// that accepts an upload; only /resources/{id}/file, which reads). blobsDir
+// is kept (rather than opening via the package's testBlobs helper) so a test
+// can reach into the store's on-disk layout to simulate a genuine I/O fault.
 type resourceAPI struct {
-	url   string
-	eng   *engine.Engine
-	reg   *registry.Manager
-	blobs *blobstore.Store
-	m     *metrics.Metrics
+	url      string
+	eng      *engine.Engine
+	reg      *registry.Manager
+	blobs    *blobstore.Store
+	blobsDir string
+	m        *metrics.Metrics
 }
 
 func newResourceAPI(t *testing.T) *resourceAPI {
@@ -53,7 +57,11 @@ func newResourceAPI(t *testing.T) *resourceAPI {
 	m := metrics.New(s, config.Retention{}, nil)
 	e := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(e.Elements())
-	blobs := testBlobs(t, cfg)
+	blobsDir := t.TempDir()
+	blobs, err := blobstore.Open(blobsDir, cfg.Limits.EffectiveMaxBlobBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	tlsCfg, err := TLSConfig(nodeID, "n-test", "", "")
 	if err != nil {
@@ -67,7 +75,29 @@ func newResourceAPI(t *testing.T) *resourceAPI {
 	go func() { _ = srv.Serve(tls.NewListener(ln, tlsCfg)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
-	return &resourceAPI{url: "https://" + ln.Addr().String(), eng: e, reg: reg, blobs: blobs, m: m}
+	return &resourceAPI{url: "https://" + ln.Addr().String(), eng: e, reg: reg, blobs: blobs, blobsDir: blobsDir, m: m}
+}
+
+// breakBlobPermissions makes an already-stored blob's file unreadable — a
+// stand-in for a disk or permission fault on this node. blobs.Get(sha) then
+// returns a generic wrapped I/O error: neither ErrNotFound (the file is
+// still there, just unreadable) nor ErrBadDigest (sha is well-formed). This
+// is the only one of blobstore's three read-error kinds a test can trigger
+// without corrupting the store's validated write path — a malformed digest
+// can never reach here in the first place, because uns.ResourceID and
+// uns.ResourceBlob both gate on the record's full validity (the same
+// isSHA256Hex check blobstore itself applies), so a record naming a bad
+// digest is never even found by id.
+func (a *resourceAPI) breakBlobPermissions(t *testing.T, sha string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a permission-denied file would still be readable")
+	}
+	path := filepath.Join(a.blobsDir, sha[:2], sha)
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 }
 
 // putBlob stores body in the fixture's blob store directly (bypassing HTTP —
@@ -197,5 +227,44 @@ func TestResourceFileReportsAnUnknownId(t *testing.T) {
 	resp, got = raw(t, client(m1), "GET", a.url+"/resources/r1/file", "", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("known id: got %d, want 200 (%s)", resp.StatusCode, got)
+	}
+}
+
+// TestResourceFileNeverReportsPendingForANonRetryableBlobError pins the
+// 409 blob_pending is a promise the file is still in
+// flight, and only blobstore.ErrNotFound (the blob genuinely has not
+// replicated here yet) may make that promise. Anything else — a malformed
+// stored digest, a disk or permission fault on this node — is an internal
+// fault that will never clear on its own, so it must never collapse into
+// pending.
+func TestResourceFileNeverReportsPendingForANonRetryableBlobError(t *testing.T) {
+	a := newResourceAPI(t)
+	body := []byte("mixing instructions")
+	sha, size := a.putBlob(t, body)
+	a.authorResource(t, "press3", "r1", sha, size)
+	a.breakBlobPermissions(t, sha)
+
+	m1 := authtest.NewMachine(t, "m1")
+	authtest.EnrollAt(t, a.reg, a.eng, m1, "press3")
+
+	resp, got := raw(t, client(m1), "GET", a.url+"/resources/r1/file", "", "")
+	if resp.StatusCode == http.StatusConflict {
+		t.Fatalf("an unreadable blob must not answer 409 blob_pending — that promises the file will still arrive: %s", got)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("unreadable blob: got %d, want 500 (%s)", resp.StatusCode, got)
+	}
+
+	// Denominator: a genuinely absent digest still answers 409 in the same
+	// test — otherwise "not 409" above could pass just as well because the
+	// route broke for everyone, not because the discrimination works.
+	absent := strings.Repeat("c", 64)
+	a.authorResource(t, "press3", "r2", absent, 5)
+	resp, got = raw(t, client(m1), "GET", a.url+"/resources/r2/file", "", "")
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("genuinely absent blob: got %d, want 409 (%s)", resp.StatusCode, got)
+	}
+	if !strings.Contains(got, "blob_pending") {
+		t.Fatalf("409 body must name blob_pending: %s", got)
 	}
 }
