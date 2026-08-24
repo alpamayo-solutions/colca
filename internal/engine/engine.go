@@ -7,6 +7,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -759,6 +760,9 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 	}
 	first, _, err := e.store.Append(stream, storeRecords)
 	if err != nil {
+		if errors.Is(err, store.ErrRecordTooLarge) {
+			e.metrics.RecordRejected("too_large")
+		}
 		return nil, err
 	}
 
@@ -1082,6 +1086,9 @@ func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string
 	}
 	first, _, err := e.store.Append(streamName, []store.Record{rec})
 	if err != nil {
+		if errors.Is(err, store.ErrRecordTooLarge) {
+			e.metrics.RecordRejected("too_large")
+		}
 		return Result{}, err
 	}
 	e.metrics.IngestRecord(streamName)

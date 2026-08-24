@@ -1111,6 +1111,60 @@ func TestPublishRefusesAnOversizeBody(t *testing.T) {
 	}
 }
 
+// TestPublishOversizeRecordCountsRecordRejectedOnce pins that the two
+// "too_large" arms on POST /publish are mutually exclusive: the raw-body
+// MaxBytesReader (tripped by TestPublishRefusesAnOversizeBody's much bigger
+// pad, before JSON decode ever completes) and Store.Append's decoded-record
+// cap (this test: a body that fits inside the wire cap but decodes to a
+// payload over MaxRecordBytes) can never BOTH fire for the same request — a
+// `return` inside the decode-error branch makes the second arm unreachable
+// once the first has fired. So the metric can never be double-counted across
+// them, which is why only Store.Append's call sites (engine.go) increment it.
+func TestPublishOversizeRecordCountsRecordRejectedOnce(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"},
+		Limits: config.Limits{MaxRecordBytes: config.ByteSize(1024)}}
+	// Unlike plainHandler/newTestHandler above, this test needs Store.Append's
+	// OWN cap live (not just the door's raw-body MaxBytesReader), so it wires
+	// the store exactly as node.go's Start() does in production — every other
+	// test in this file only exercises the wire-level cap and never calls this.
+	st.SetMaxRecordBytes(cfg.Limits.EffectiveMaxRecordBytes())
+	reg, err := registry.New(st, cfg.ULID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := metrics.New(st, config.Retention{}, nil)
+	eng := engine.New(st, cfg, reg, nil, m, nil)
+	reg.SetNamespace(eng.Elements())
+	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false))
+	t.Cleanup(srv.Close)
+	line := `colca_record_rejects_total{reason="too_large"}`
+	before := metricstest.Value(t, m, line)
+
+	// maxPublishBody = 2*MaxRecordBytes + 4096 = 6144: this pad clears
+	// MaxRecordBytes (1024) once decoded but keeps the WIRE body well under
+	// 6144, so the MaxBytesReader arm cannot be what trips here — only
+	// Store.Append's own check can produce the 413 below.
+	body := publishBody(t, "colca/v1/_Metric/n-test/oversize", 1200)
+	if len(body) >= 6144 {
+		t.Fatalf("test body is %d bytes, already at/over maxPublishBody (6144) — "+
+			"shrink padBytes so only Store.Append's cap, not MaxBytesReader, can fire", len(body))
+	}
+	resp, body2 := req(t, srv.Client(), "POST", srv.URL+"/publish", "tok", body)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize record = %d, want 413: %v", resp.StatusCode, body2)
+	}
+
+	if got := metricstest.Value(t, m, line) - before; got != 1 {
+		t.Fatalf("%s moved by %v, want exactly 1 (no double count between the "+
+			"MaxBytesReader arm and Store.Append's ErrRecordTooLarge arm)", line, got)
+	}
+}
+
 // A node built without a metrics registry has no /metrics route at all.
 func TestNoMetricsRegistryMeansNoRoute(t *testing.T) {
 	srv := plainHandler(t, &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}, nil)

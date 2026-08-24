@@ -291,6 +291,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			var tooLarge *http.MaxBytesError
 			if errors.As(err, &tooLarge) {
+				m.RecordRejected("too_large")
 				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
 					"error": fmt.Sprintf("request body exceeds %d bytes", maxPublishBody)})
 				return
@@ -344,6 +345,22 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 		}
 		if err != nil {
+			if errors.Is(err, store.ErrRecordTooLarge) {
+				// A DIFFERENT case from the MaxBytesReader arm above: that one
+				// trips on the raw HTTP body before JSON decode ever
+				// completes (a `return` inside the decode-error branch, so
+				// this code is unreachable for it — no double count), and
+				// counts m.RecordRejected itself since only this door sees
+				// that failure. This one is a record whose payload still fit
+				// inside the JSON envelope (§5 caps the record, not just the
+				// wire request) but is too large once decoded — Store.Append
+				// is what discovers that, so persistTSAttributed/
+				// ingestAdminStateBatch (engine.go) are where it is counted:
+				// the same call sites MQTT ingest goes through, so counting
+				// there covers both doors from one place.
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": err.Error()})
+				return
+			}
 			// Grammar, unknown contract and payload validation are all
 			// "well-formed request, unacceptable content" → 422.
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error()})
