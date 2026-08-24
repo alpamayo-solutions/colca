@@ -194,7 +194,9 @@ func Start(cfg *config.Config) (*Node, error) {
 	// enrollment door — one write path inside (cmdadmin design §5). The data
 	// model lives in the plugin, so the core never learns what a signal is
 	// (data-model binding design §7).
-	domain := uns.NewConfigExec(n.Engine.EntityStore(), reg, n.Engine.Elements(), nil, registry.NewULID, cfg.Plugin)
+	blobPort := engine.NewBlobPort(blobs)
+	domain := uns.NewConfigExec(n.Engine.EntityStore(), reg, n.Engine.Elements(), blobPort,
+		registry.NewULID, cfg.Plugin)
 	edit := uns.NewEditExec(
 		n.Engine.EntityStore(), editAttachmentWriter{registry: reg},
 	)
@@ -398,6 +400,9 @@ func Start(cfg *config.Config) (*Node, error) {
 		if n.ReplSrv != nil {
 			n.ReplSrv.SetUpstream(cl)
 		}
+		// The executor can now fetch a blob a provisioning command names but
+		// this node does not hold yet (resources design §3, §7.1).
+		blobPort.SetFetcher(cl)
 		n.wg.Add(2)
 		go func() {
 			defer n.wg.Done()

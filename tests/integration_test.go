@@ -834,3 +834,43 @@ func TestDefinitionAuthoredAtTheRootReachesEveryLevel(t *testing.T) {
 		t.Fatalf("edge1's definitions stream = %v, want exactly %q unchanged", seen, topic)
 	}
 }
+
+// TestResourceUpsertAtAChildPullsTheBlobFromItsParent is the wiring guard
+// for node.go's SetFetcher call (resources design §3, §7.1): a blob staged
+// only at the parent (n-site1), never at the child, must reach the child
+// (n-edge1) as a side effect of resource/upsert executing there. This
+// exercises the real path — node.Start's blobPort injection, ConfigExec's
+// ensureBlob, BlobPort.Pull, the repl client's BlobGet — not just the
+// BlobPort unit in isolation. A getter would only prove the getter works;
+// this proves the wiring the getter would have been for.
+func TestResourceUpsertAtAChildPullsTheBlobFromItsParent(t *testing.T) {
+	tp := startTopo(t)
+
+	content := "press 3 manual, staged only at the parent"
+	sha, _, err := tp.site1.Blobs.Put(strings.NewReader(content), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Denominator: the child must not already hold it — otherwise a
+	// successful upsert below would prove nothing about the pull.
+	if _, ok := tp.edge1.Blobs.Has(sha); ok {
+		t.Fatalf("precondition: edge1 must not hold %s yet", sha)
+	}
+
+	corr := cmdAdmin(t, tp.edge1, "colca/v1/_CmdConfigure/n-edge1/resource/upsert", map[string]any{
+		"resources": []any{map[string]any{
+			"path": "m1/manual",
+			"resource": map[string]any{
+				"id": "01HRESOURCE1", "system_element_id": "el-m1",
+				"filename": "manual.pdf", "content_type": "application/pdf",
+				"size_bytes": len(content), "sha256": sha,
+			},
+		}},
+	})
+	awaitAdminAck(t, tp.edge1, "colca/v1/_Ack/n-edge1/resource/upsert", corr, 200)
+
+	if _, ok := tp.edge1.Blobs.Has(sha); !ok {
+		t.Fatalf("edge1 must hold %s after resource/upsert pulled it from its parent", sha)
+	}
+}
