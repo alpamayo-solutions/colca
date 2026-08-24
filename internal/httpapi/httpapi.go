@@ -530,8 +530,12 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if err != nil {
 			// A storage-layer failure, not "no entries" — answering 200 with
 			// an empty list here would tell a caller a prefix holds nothing
-			// when the truth is the scan itself never completed.
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			// when the truth is the scan itself never completed. The response
+			// body stays static (no err.Error()) so a storage-layer detail
+			// such as a filesystem path never reaches the caller; the real
+			// error still reaches operators through the log.
+			slog.Default().Error("kv scan failed", "prefix", r.URL.Query().Get("prefix"), "err", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "scan failed"})
 			return
 		}
 		out := make([]map[string]any, 0, len(entries))

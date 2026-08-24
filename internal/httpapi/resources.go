@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -110,5 +111,9 @@ func resourceBlobError(w http.ResponseWriter, m *metrics.Metrics, err error, sha
 		return
 	}
 	m.ResourceRead("error")
-	writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+	// The raw error can carry a filesystem path (blobstore wraps os errors
+	// with %w); a static body keeps that off the wire, and the real error
+	// still reaches operators through the log.
+	slog.Default().Error("resource file read failed", "sha256", sha, "err", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "blob read failed"})
 }
