@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/blobgc"
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
@@ -423,6 +424,17 @@ func Start(cfg *config.Config) (*Node, error) {
 	go func() {
 		defer n.wg.Done()
 		pruner.Run(n.stop)
+	}()
+
+	// 8. Blob sweeper (resources design §8). Joins the same WaitGroup as the
+	//    pruner: a sweep in flight must finish before Stop closes the blob
+	//    store. With blob_gc.interval: 0 (explicit disable) Run returns
+	//    immediately; the default (absent) config sweeps on the §8 defaults.
+	sweeper := blobgc.NewSweeper(blobs, n.Engine, cfg.BlobGC, n.Metrics, cfg.ULID)
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		sweeper.Run(n.stop)
 	}()
 
 	log.Info("colca node started", "ulid", cfg.ULID, "api", n.APIAddr, "repl", n.ReplAddr, "mqtt", n.MQTTAddr)

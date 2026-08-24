@@ -485,3 +485,27 @@ func TestResourceIDReadsTheID(t *testing.T) {
 		t.Fatal("an incomplete record has no usable id")
 	}
 }
+
+func TestLiveBlobDigestsReadsOnlyResources(t *testing.T) {
+	sha := strings.Repeat("a", 64)
+	records := []KVRecord{
+		{Topic: "colca/v1/_Resource/n1/press3/r1", Payload: []byte(`{"id":"r1","system_element_id":"el1",
+			"filename":"m.pdf","content_type":"application/pdf","size_bytes":1,"sha256":"` + sha + `"}`)},
+		// A record whose payload does not parse as a resource — whatever
+		// contract it actually carries, LiveBlobDigests contributes nothing
+		// for it. Scoping the scan to _Resource is the caller's job
+		// (EntityStore.KVScanAll(ResourceContract)); this function only ever
+		// asks "does this payload name a digest", not "what contract is this".
+		{Topic: "colca/v1/_Signal/n1/press3/temp", Payload: []byte(`{"id":"s1"}`)},
+		// A _Resource record whose payload fails validation (missing fields):
+		// unreadable, so it cannot be shown to reference anything either.
+		{Topic: "colca/v1/_Resource/n1/press3/broken", Payload: []byte(`{"id":"r2"}`)},
+	}
+	live := LiveBlobDigests(records)
+	if _, ok := live[sha]; !ok {
+		t.Fatal("a live resource's digest must be reported")
+	}
+	if len(live) != 1 {
+		t.Fatalf("live = %v, want exactly the one readable resource digest", live)
+	}
+}

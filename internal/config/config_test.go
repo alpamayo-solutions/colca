@@ -764,3 +764,91 @@ func TestLimitsRejectsARecordCapAboveTheUint32SafetyBound(t *testing.T) {
 		t.Fatal("want an error when max_record_bytes exceeds the uint32 safety bound")
 	}
 }
+
+func TestBlobGCDefaultsWhenAbsent(t *testing.T) {
+	var b BlobGC
+	if got, want := b.EffectiveInterval(), 15*time.Minute; got != want {
+		t.Fatalf("interval default: got %s want %s", got, want)
+	}
+	if got, want := b.EffectiveGrace(), time.Hour; got != want {
+		t.Fatalf("grace default: got %s want %s", got, want)
+	}
+}
+
+// TestBlobGCIntervalThreeStatesThroughLoad pins interval's absent-vs-0
+// distinction, matching Retention.Interval's precedent: absent means "apply
+// the default", an explicit 0 means "sweeper disabled".
+func TestBlobGCIntervalThreeStatesThroughLoad(t *testing.T) {
+	t.Run("absent defaults to 15m", func(t *testing.T) {
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\n")
+		if c.BlobGC.Interval != nil {
+			t.Fatalf("interval must be nil (absent), got %v", *c.BlobGC.Interval)
+		}
+		if got, want := c.BlobGC.EffectiveInterval(), 15*time.Minute; got != want {
+			t.Fatalf("got %s want %s", got, want)
+		}
+	})
+
+	t.Run("explicit interval: 0 disables the sweeper, not the default", func(t *testing.T) {
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\nblob_gc:\n  interval: 0\n")
+		if c.BlobGC.Interval == nil {
+			t.Fatal("interval must be non-nil — the key was explicitly written")
+		}
+		if got := c.BlobGC.EffectiveInterval(); got != 0 {
+			t.Fatalf("explicit interval:0 must mean disabled (EffectiveInterval()==0), got %s", got)
+		}
+	})
+
+	t.Run("explicit interval: 30m", func(t *testing.T) {
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\nblob_gc:\n  interval: 30m\n")
+		if got, want := c.BlobGC.EffectiveInterval(), 30*time.Minute; got != want {
+			t.Fatalf("got %s want %s", got, want)
+		}
+	})
+}
+
+// TestBlobGCGraceThreeStatesThroughLoad is the decision this task turns on:
+// grace's zero does NOT mean "disabled" (there is no such state for a grace
+// period) — it means "no grace, sweep immediately". Absent still means
+// "apply the 1h default". A test that only checked presence-of-default would
+// not catch a regression that collapsed these two readings into one.
+func TestBlobGCGraceThreeStatesThroughLoad(t *testing.T) {
+	t.Run("absent defaults to 1h", func(t *testing.T) {
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\n")
+		if c.BlobGC.Grace != nil {
+			t.Fatalf("grace must be nil (absent), got %v", *c.BlobGC.Grace)
+		}
+		if got, want := c.BlobGC.EffectiveGrace(), time.Hour; got != want {
+			t.Fatalf("got %s want %s", got, want)
+		}
+	})
+
+	t.Run("explicit grace: 0 means no grace, not the default", func(t *testing.T) {
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\nblob_gc:\n  grace: 0\n")
+		if c.BlobGC.Grace == nil {
+			t.Fatal("grace must be non-nil — the key was explicitly written")
+		}
+		if got := c.BlobGC.EffectiveGrace(); got != 0 {
+			t.Fatalf("explicit grace:0 must mean no grace (EffectiveGrace()==0), got %s", got)
+		}
+	})
+
+	t.Run("explicit grace: 10m", func(t *testing.T) {
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\nblob_gc:\n  grace: 10m\n")
+		if got, want := c.BlobGC.EffectiveGrace(), 10*time.Minute; got != want {
+			t.Fatalf("got %s want %s", got, want)
+		}
+	})
+}
+
+func TestBlobGCValidationRejectsNegativeDurations(t *testing.T) {
+	for name, b := range map[string]BlobGC{
+		"negative interval": {Interval: durPtr(-time.Minute)},
+		"negative grace":    {Grace: durPtr(-time.Minute)},
+	} {
+		c := Config{ULID: "n1", DataDir: "/tmp/x", KeyFile: "/tmp/x.key", BlobGC: b}
+		if err := c.Validate(); err == nil {
+			t.Fatalf("%s: want an error", name)
+		}
+	}
+}

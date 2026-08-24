@@ -720,6 +720,29 @@ func ResourceBlob(payload []byte) (string, bool) {
 	return resource.SHA256, true
 }
 
+// LiveBlobDigests reports the digests referenced by the resources among
+// these records (resources design §8).
+//
+// The caller is expected to have already scoped records to _Resource — via
+// EntityStore.KVScanAll(ResourceContract), which filters by contract in one
+// place — so this function does not re-check the topic's contract itself.
+// It is exactly "map ResourceBlob over these records": payload parsing stays
+// domain knowledge and stays here, but which records to look at is the
+// caller's job, not this function's.
+//
+// An unreadable _Resource record contributes nothing: it cannot be shown to
+// reference anything, and a blob is only kept because something demonstrably
+// points at it.
+func LiveBlobDigests(records []KVRecord) map[string]struct{} {
+	live := make(map[string]struct{})
+	for _, rec := range records {
+		if sha, ok := ResourceBlob(rec.Payload); ok {
+			live[sha] = struct{}{}
+		}
+	}
+	return live
+}
+
 // ResourceID reports the id a _Resource record carries.
 func ResourceID(payload []byte) (string, bool) {
 	resource, err := validateResourcePayload(payload)

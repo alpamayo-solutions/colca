@@ -272,6 +272,10 @@ type Metrics struct {
 	resourceReads   *prometheus.CounterVec // colca_resource_reads_total{result}
 	resourceReadsBy map[string]prometheus.Counter
 
+	// Blob sweeper (resources design §8): unreferenced blobs reclaimed past
+	// their grace period. Unlabeled — every deletion is the same event.
+	blobsSwept prometheus.Counter // colca_blobs_swept_total
+
 	ingestBy        map[string]prometheus.Counter
 	rejectedBy      map[string]prometheus.Counter
 	uplinkOKBy      map[string]prometheus.Gauge
@@ -466,6 +470,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_resource_reads_total",
 			Help: "Resource file reads on the published door's GET /resources/{id}/file, by result: ok (bytes served), pending (blob_pending — the record exists but its bytes have not replicated here, the only retryable case), denied (no read grant on the resource's element), not_found (unknown resource id), error (an internal fault reading the blob — a malformed stored digest or a disk/permission fault on this node; never retryable the way pending is). Resets on restart.",
 		}, []string{"result"}),
+		blobsSwept: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_blobs_swept_total",
+			Help: "Blobs deleted by the background sweeper because no live _Resource referenced them and they were older than the configured grace period (resources design §8). Resets on restart.",
+		}),
 	}
 	m.ingestBy = counterChildren(m.ingest, streams)
 	m.rejectedBy = counterChildren(m.rejected, reasons)
@@ -563,7 +571,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.gapServed, m.gapReceived, m.replGapApplied,
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
 		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
-		m.blobTransfers, m.blobRejects, m.recordRejects, m.resourceReads,
+		m.blobTransfers, m.blobRejects, m.recordRejects, m.resourceReads, m.blobsSwept,
 		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
 	return m
@@ -1040,6 +1048,16 @@ func (m *Metrics) ResourceRead(result string) {
 		return
 	}
 	m.resourceReads.WithLabelValues(result).Inc()
+}
+
+// BlobSwept counts one blob the sweeper deleted (resources design §8): no
+// live _Resource referenced it and it was older than the configured grace
+// period.
+func (m *Metrics) BlobSwept() {
+	if m == nil {
+		return
+	}
+	m.blobsSwept.Inc()
 }
 
 // storeCollector derives the gauge families from the store (and, for the

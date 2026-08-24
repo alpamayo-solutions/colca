@@ -119,6 +119,11 @@ type Config struct {
 	// defaults below.
 	Limits Limits `yaml:"limits"`
 
+	// BlobGC configures the background blob sweeper (resources design §8).
+	// Absent entirely = every default below applies (sweeping ON, 15m
+	// interval, 1h grace).
+	BlobGC BlobGC `yaml:"blob_gc"`
+
 	// TimeSync configures the authoritative-time protocol (time-sync design
 	// §2.5). Absent entirely = every default below applies (default-on).
 	TimeSync TimeSync `yaml:"time_sync"`
@@ -325,6 +330,86 @@ func (l Limits) validate() error {
 	return nil
 }
 
+// BlobGC is the blob_gc: block (resources design §8): the background sweeper
+// that reclaims blobs no live _Resource references any more.
+//
+// Both fields are pointers, and deliberately for two DIFFERENT reasons — read
+// each doc comment, the two zeros do not mean the same thing:
+//
+//   - Interval distinguishes absent from explicit-0 the same way
+//     Retention.Interval does: absent means "apply the §8 default (15m)";
+//     an operator who writes `interval: 0` is turning the sweeper off
+//     entirely (this node's blob store then only ever grows).
+//   - Grace ALSO distinguishes absent from explicit-0, but for a different
+//     reason: there is no "disabled" state for a grace period — "disabled
+//     grace" is meaningless, since the sweeper always either finds a blob
+//     live or checks its age. Absent means "apply the §8 default (1h)",
+//     the safe setting that covers the three legitimate windows a blob sits
+//     unreferenced (upload-before-upsert, blob-before-entity,
+//     pull-before-execute — design §8). An operator who writes `grace: 0`
+//     is asking for NO grace at all: sweep every unreferenced blob
+//     immediately, regardless of age. That is a real, useful setting for a
+//     test or a tight-storage deployment, not a request for the default.
+//
+// A reader who assumes `grace: 0` behaves like `interval: 0` (i.e. "off")
+// and further assumes a bare zero always means "use the default" will
+// misconfigure a node into deleting blobs mid-upload, or believe grace is
+// disabled when it is actually the tightest possible setting. Both fields
+// need the pointer specifically to keep those two readings apart.
+type BlobGC struct {
+	Interval *Duration `yaml:"interval"`
+	Grace    *Duration `yaml:"grace"`
+}
+
+// defaultBlobGCInterval is the sweeper cadence when blob_gc.interval is
+// absent (design §8), matching the retention pruner's own cadence family.
+const defaultBlobGCInterval = 15 * time.Minute
+
+// defaultBlobGCGrace covers the three windows in which a blob legitimately
+// exists on disk before the record that references it: upload-before-upsert
+// at the author, blob-before-entity arrival at an ancestor, and
+// pull-before-execute at a provisioning target (design §8). In all three the
+// referencing entity lands well inside the hour.
+const defaultBlobGCGrace = time.Hour
+
+// EffectiveInterval returns the sweeper cadence: the §8 default (15m) when
+// Interval is absent (nil), or the configured value — including an explicit
+// 0, which is the operator's "sweeper disabled" (same precedent as
+// Retention.EffectiveInterval). Callers MUST treat a returned 0 as "never
+// run", not as "use the default" — that translation already happened here.
+func (b BlobGC) EffectiveInterval() time.Duration {
+	if b.Interval == nil {
+		return defaultBlobGCInterval
+	}
+	return time.Duration(*b.Interval)
+}
+
+// EffectiveGrace returns the sweeper's grace period: the §8 default (1h)
+// when Grace is absent (nil), or the configured value — including an
+// explicit 0, which is the operator's "no grace, sweep immediately" (see the
+// BlobGC doc comment). Callers MUST treat a returned 0 as that literal
+// threshold, not as "use the default" — that translation already happened
+// here.
+func (b BlobGC) EffectiveGrace() time.Duration {
+	if b.Grace == nil {
+		return defaultBlobGCGrace
+	}
+	return time.Duration(*b.Grace)
+}
+
+// validate checks the blob_gc: block (design §8): non-negative durations
+// only — an absent field or an explicit 0 (either field) are both meaningful,
+// documented settings, not errors; only negative is rejected.
+func (b BlobGC) validate() error {
+	if b.Interval != nil && time.Duration(*b.Interval) < 0 {
+		return fmt.Errorf("config: blob_gc.interval must not be negative, got %s", time.Duration(*b.Interval))
+	}
+	if b.Grace != nil && time.Duration(*b.Grace) < 0 {
+		return fmt.Errorf("config: blob_gc.grace must not be negative, got %s", time.Duration(*b.Grace))
+	}
+	return nil
+}
+
 // defaultRetentionInterval is the pruner cadence when retention.interval is
 // absent (design §3.1).
 const defaultRetentionInterval = 5 * time.Minute
@@ -516,6 +601,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.Limits.validate(); err != nil {
+		return err
+	}
+	if err := c.BlobGC.validate(); err != nil {
 		return err
 	}
 	return c.TimeSync.validate()
