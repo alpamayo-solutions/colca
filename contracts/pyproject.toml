@@ -33,7 +33,13 @@ where = ["src"]
 "" = "src"
 
 [tool.setuptools.package-data]
-colca_data_contracts = ["semantic_tags/*.yaml", "vectors/*.json", "data_models/*.yaml"]
+colca_data_contracts = [
+    "semantic_tags/*.yaml",
+    "metadata_types/*.yaml",
+    "annotation_types/*.yaml",
+    "vectors/*.json",
+    "data_models/*.yaml",
+]
 
 [tool.ruff]
 target-version = "py310"

@@ -1,0 +1,12 @@
+# Platform annotation types. The kinds of time-based entry Colca itself
+# expects to exist on every node, so a UI can offer them and an integration can
+# rely on them without a deployment having declared anything.
+#
+# Customer types go in the node YAML under seed.annotation_types. A seed may
+# not reuse a name from this file: a definition's id is derived from its name,
+# so the seed would not add a second type — it would overwrite this one.
+types:
+  - name: comment
+    i18n_name: Comment
+    description: Free-text note an operator leaves against a moment in time.
+    data_type: str

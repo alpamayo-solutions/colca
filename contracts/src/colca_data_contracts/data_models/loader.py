@@ -65,6 +65,15 @@ Resolution rules:
 - Two child slots of one (flattened) model resolving to the same
   ``entity_name`` is a load error -- one physical child cannot satisfy two
   slots.
+- A ``children:`` entry's explicit ``entity_name: ""`` is a load error -- an
+  empty override is never intentional. Omitting the key entirely still
+  defaults to the slot key, as before.
+- Two signals -- in the same model or across different models -- referencing
+  the same ``semantic_type`` name with a different ``data_type`` is a load
+  error naming every model involved and the ``data_type`` each one declared.
+  A semantic tag name seeds exactly one stub (``_semantic_tag_stub``); a
+  divergent second declaration would otherwise seed a conflicting one, which
+  the seeder's existing-wins rule then resolves by silent first-write-wins.
 - Every problem found during a single ``compile_models()`` call is
   accumulated and raised together as one ``CompileError``.
 """
@@ -143,6 +152,15 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
         }
     for item in raw.get("children") or []:
         key = item["name"]
+        entity_name = item.get("entity_name")
+        if entity_name is not None and not entity_name.strip():
+            problems.append(
+                f"{name}.{key}: entity_name is explicitly empty; omit the key entirely "
+                f"to default to the slot key"
+            )
+            entity_name = key
+        else:
+            entity_name = entity_name or key
         slots[key] = {
             "key": key,
             "kind": "child",
@@ -154,7 +172,7 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "description": _clean(item.get("description")),
             "declared_by": name,
             "child_model": item.get("child_model"),
-            "entity_name": item.get("entity_name") or key,
+            "entity_name": entity_name,
         }
     return slots, problems
 
@@ -228,6 +246,35 @@ def _semantic_tag_stub(tag_name: str, slot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tag_stub_conflicts(own_slots: dict[str, dict[str, dict[str, Any]]]) -> list[str]:
+    """Two signals -- in the same model or across different models -- that
+    reference the same `semantic_type` name with different `data_type` would
+    each seed a different tag stub (`_semantic_tag_stub`). The seeder's
+    existing-wins rule then makes whichever happens to seed first silently
+    win, so the loser's data_type is never enforced. One tag name is one fact
+    (architecture principle 2: one owner per fact); reject the divergence at
+    load time instead, naming every model that declared it and the data_type
+    each one chose.
+    """
+    problems: list[str] = []
+    first_seen: dict[str, tuple[str, str]] = {}  # tag_name -> (data_type, model_name)
+    for model_name in sorted(own_slots):
+        for key in sorted(own_slots[model_name]):
+            slot = own_slots[model_name][key]
+            tag_name = slot["semantic_type"]
+            if not tag_name:
+                continue
+            data_type = slot["data_type"]
+            seen = first_seen.setdefault(tag_name, (data_type, model_name))
+            seen_data_type, seen_model = seen
+            if seen_data_type != data_type:
+                problems.append(
+                    f"semantic_type {tag_name!r} is declared with data_type {seen_data_type!r} "
+                    f"by {seen_model!r} and with data_type {data_type!r} by {model_name!r}"
+                )
+    return problems
+
+
 def _child_edges(slots: list[dict[str, Any]]) -> list[tuple[str, str]]:
     """(slot_key, child_model_name) pairs for a manifest's child slots."""
     return [(s["key"], s["child_model"]) for s in slots if s["kind"] == "child" and s["child_model"]]
@@ -266,6 +313,8 @@ def compile_models(source_dir: Path | None = None) -> list[dict[str, Any]]:
         slots, slot_problems = _own_slots(name, raw)
         own_slots[name] = slots
         problems.extend(slot_problems)
+
+    problems.extend(_tag_stub_conflicts(own_slots))
 
     parents: dict[str, list[str]] = {}
     for name, raw in documents.items():

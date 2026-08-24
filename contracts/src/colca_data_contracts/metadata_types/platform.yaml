@@ -1,0 +1,31 @@
+# Platform metadata types. These are the keys the PLATFORM's own services
+# publish about themselves — a connector says which protocol it speaks, a Go
+# service says which runtime and version it is built from. They ship with the
+# package, like the platform semantic tags and the built-in data models do,
+# because a deployment cannot be asked to declare definitions for facts its
+# own generated services produce.
+#
+# Customer keys go in the node YAML under seed.metadata_types.
+#
+# A record's `metadata` map is keyed by metadata-type IDENTITY: the definition
+# id, or the name of a definition like these. A key that resolves to no
+# definition is still stored (Metadata.declared_metadata_type_id keeps it) so
+# the gap is visible rather than silently dropped.
+types:
+  - name: protocol
+    i18n_name: Protocol
+    description: Industrial protocol a connector speaks to its source.
+    data_type: str
+    allowed_content_type_keys: [service]
+
+  - name: runtime
+    i18n_name: Runtime
+    description: Language runtime a service is built on.
+    data_type: str
+    allowed_content_type_keys: [service]
+
+  - name: version
+    i18n_name: Version
+    description: Version of the service build that registered.
+    data_type: str
+    allowed_content_type_keys: [service]

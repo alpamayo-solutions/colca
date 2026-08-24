@@ -86,6 +86,50 @@ def test_semantic_tags_collects_referenced_names(tmp_path):
     assert [t["name"] for t in manifest["semantic_tags"]] == ["flow", "power"]
 
 
+def test_divergent_semantic_type_data_type_across_models_is_a_compile_error(tmp_path):
+    """Two models referencing the same semantic_type name with different
+    data_type would each seed a different tag stub; the seeder's
+    existing-wins rule then makes whichever seeds first silently win. Reject
+    the divergence at load time instead, naming both models and the tag."""
+    _write(tmp_path, "pump.yaml", {
+        "name": "Pump",
+        "version": "1.0",
+        "signals": [{"name": "reading", "data_type": "number", "semantic_type": "temperature"}],
+    })
+    _write(tmp_path, "sensor.yaml", {
+        "name": "Sensor",
+        "version": "1.0",
+        "signals": [{"name": "reading", "data_type": "string", "semantic_type": "temperature"}],
+    })
+    with pytest.raises(CompileError) as exc_info:
+        compile_models(tmp_path)
+    message = str(exc_info.value)
+    assert "'temperature'" in message
+    assert "'Pump'" in message and "'Sensor'" in message
+    assert "'number'" in message and "'string'" in message
+
+
+def test_same_semantic_type_data_type_across_models_stays_legal(tmp_path):
+    """The denominator: the same tag name declared with the SAME data_type by
+    multiple models is legal and produces exactly one stub -- the check above
+    is refusing the divergence, not shared tag references in general."""
+    _write(tmp_path, "pump.yaml", {
+        "name": "Pump",
+        "version": "1.0",
+        "signals": [{"name": "reading", "data_type": "number", "semantic_type": "temperature"}],
+    })
+    _write(tmp_path, "sensor.yaml", {
+        "name": "Sensor",
+        "version": "1.0",
+        "signals": [{"name": "reading", "data_type": "number", "semantic_type": "temperature"}],
+    })
+    manifests = {m["name"]: m for m in compile_models(tmp_path)}
+    for model_name in ("Pump", "Sensor"):
+        (tag,) = manifests[model_name]["semantic_tags"]
+        assert tag["name"] == "temperature"
+        assert tag["data_type"] == "number"
+
+
 def test_unknown_data_type_is_a_compile_error(tmp_path):
     _write(tmp_path, "broken.yaml", {
         "name": "Broken",
@@ -281,6 +325,30 @@ def test_two_child_slots_naming_the_same_entity_is_a_compile_error(tmp_path):
     assert "DualBearing" in message
     assert "'left_bearing'" in message and "'right_bearing'" in message
     assert "'Bearing'" in message
+
+
+def test_empty_explicit_child_entity_name_is_a_compile_error(tmp_path):
+    """`entity_name: ""` is an explicit override that says nothing -- never
+    intentional, so it is rejected rather than silently falling back."""
+    _write(tmp_path, "bearing.yaml", BEARING)
+    _write(tmp_path, "motor.yaml", _motor([
+        {"name": "drive_end_bearing", "child_model": "Bearing", "entity_name": ""},
+    ]))
+    with pytest.raises(CompileError, match=r"Motor\.drive_end_bearing.*entity_name is explicitly empty"):
+        compile_models(tmp_path)
+
+
+def test_omitted_child_entity_name_still_defaults_to_the_slot_key(tmp_path):
+    """The denominator for the check above: omitting `entity_name` entirely
+    (as opposed to declaring it empty) is legal and keeps defaulting to the
+    slot key."""
+    _write(tmp_path, "bearing.yaml", BEARING)
+    _write(tmp_path, "motor.yaml", _motor([
+        {"name": "drive_end_bearing", "child_model": "Bearing"},
+    ]))
+    manifests = {m["name"]: m for m in compile_models(tmp_path)}
+    slot = {s["key"]: s for s in manifests["Motor"]["slots"]}["drive_end_bearing"]
+    assert slot["entity_name"] == "drive_end_bearing"
 
 
 def test_distinct_child_entity_names_still_compile(tmp_path):
