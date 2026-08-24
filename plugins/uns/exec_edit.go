@@ -1,5 +1,5 @@
 // The `_CmdEdit` executor: what a edit command IS, and how one is
-// dispatched. The work itself lives in five sibling files, split along the
+// dispatched. The work itself lives in six sibling files, split along the
 // seams ExecuteWithWrites below calls through in order:
 //
 //	exec_edit_receipt.go     idempotency — the replay cache and the
@@ -10,6 +10,9 @@
 //	                              external references hanging off them
 //	exec_edit_placement.go   composing the two POSITION intents: moving an
 //	                              entity, and binding a signal to a tag
+//	exec_edit_model.go       composing the one intent that spans a
+//	                              SUBTREE: assigning a data model to an
+//	                              element, its child elements and their models
 //	exec_edit_attachment.go  the one intent that writes the REGISTRY
 //	                              rather than the entity store
 //
@@ -81,6 +84,8 @@ type editIntent struct {
 	Operations         []editBindingOperation   `json:"operations"`
 	Action             string                        `json:"action"`
 	MountSystemElement string                        `json:"mount_system_element_id"`
+	Models             []string                      `json:"models"`
+	Creates            map[string]string             `json:"creates"`
 }
 
 type editNodeAttachment struct {

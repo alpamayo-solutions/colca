@@ -36,7 +36,7 @@ func TestParseAndClass(t *testing.T) {
 		"_EditOperation": {ClassEntity, "entities"},
 		"_MetadataType":       {ClassDefinition, "definitions"},
 		"_AnnotationType":     {ClassDefinition, "definitions"},
-		"_Interface":          {ClassDefinition, "definitions"},
+		"_DataModel":          {ClassDefinition, "definitions"},
 		"_ExternalSystem":     {ClassDefinition, "definitions"},
 		"_SemanticTag":        {ClassDefinition, "definitions"},
 		"_AuditEvent":         {ClassAudit, "audit"},
@@ -372,7 +372,7 @@ func TestAlarmManifestName(t *testing.T) {
 }
 
 // A semantic type answers what an entity IS. It rides the same rails as
-// _MetadataType and _Interface: ClassDefinition, addressed by id.
+// _MetadataType and _DataModel: ClassDefinition, addressed by id.
 func TestSemanticTagIsADefinition(t *testing.T) {
 	if got := ClassOf("_SemanticTag"); got != ClassDefinition {
 		t.Fatalf("ClassOf(_SemanticTag) = %v, want ClassDefinition", got)

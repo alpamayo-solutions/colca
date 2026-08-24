@@ -103,7 +103,7 @@ func ClassOf(contract string) Class {
 		contract == "_NotificationConfigStatus":
 		return ClassEntity
 	case contract == "_Group" || contract == "_MetadataType" ||
-		contract == "_AnnotationType" || contract == "_Interface" ||
+		contract == "_AnnotationType" || contract == "_DataModel" ||
 		contract == "_ExternalSystem" || contract == "_SemanticTag":
 		return ClassDefinition
 	case contract == "_Ack":
@@ -531,7 +531,7 @@ func Validate(contract string, payload []byte) error {
 		contract == "_SystemElement" || contract == "_Signal" ||
 		contract == "_ExternalReference" || contract == "_Group" ||
 		contract == "_MetadataType" || contract == "_AnnotationType" ||
-		contract == "_Interface" || contract == "_ExternalSystem" ||
+		contract == "_DataModel" || contract == "_ExternalSystem" ||
 		contract == "_SemanticTag":
 		// Data-model records name themselves by "id" — the field grants and
 		// bindings reference them through. They shared the registry's "ulid" rule

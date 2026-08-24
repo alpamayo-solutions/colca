@@ -35,6 +35,8 @@ func (w *EditExec) compose(
 		return w.composePlacement(intent, expected, entities)
 	case "binding":
 		return w.composeBinding(intent, expected, entities, catalogues)
+	case "model":
+		return w.composeModel(intent, expected, entities)
 	default:
 		return 422, fmt.Sprintf("unknown edit intent %q", intent.Type), "invalid", nil
 	}
