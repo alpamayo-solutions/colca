@@ -143,7 +143,8 @@ func TestSyncPushesOnlyWhatTheParentLacks(t *testing.T) {
 	}
 
 	confirmed := map[string]bool{}
-	if pushed := syncBlobs(child, childBlobs, nil, confirmed); pushed != 2 {
+	rejected := map[string]bool{}
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed, rejected); pushed != 2 {
 		t.Fatalf("first pass pushed %d, want 2", pushed)
 	}
 	if _, ok := parent.blobs.Has(first); !ok {
@@ -153,7 +154,7 @@ func TestSyncPushesOnlyWhatTheParentLacks(t *testing.T) {
 		t.Fatal("parent is missing the second blob")
 	}
 
-	if pushed := syncBlobs(child, childBlobs, nil, confirmed); pushed != 0 {
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed, rejected); pushed != 0 {
 		t.Fatalf("second pass pushed %d, want 0 — confirmed blobs must not be re-sent", pushed)
 	}
 
@@ -161,7 +162,7 @@ func TestSyncPushesOnlyWhatTheParentLacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pushed := syncBlobs(child, childBlobs, nil, confirmed); pushed != 1 {
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed, rejected); pushed != 1 {
 		t.Fatalf("third pass pushed %d, want 1 — a new blob must be sent", pushed)
 	}
 	if _, ok := parent.blobs.Has(third); !ok {
@@ -181,7 +182,7 @@ func TestSyncSkipsWhatTheParentAlreadyHas(t *testing.T) {
 	if _, _, err := parent.blobs.Put(bytes.NewReader(content), ""); err != nil {
 		t.Fatal(err)
 	}
-	if pushed := syncBlobs(child, childBlobs, nil, map[string]bool{}); pushed != 0 {
+	if pushed := syncBlobs(child, childBlobs, nil, map[string]bool{}, map[string]bool{}); pushed != 0 {
 		t.Fatalf("pushed %d, want 0", pushed)
 	}
 	if _, ok := parent.blobs.Has(sha); !ok {
@@ -203,7 +204,8 @@ func TestSyncSurvivesAnUnreachableParent(t *testing.T) {
 	// with a parent that was never reachable in the first place, or with
 	// syncBlobs silently never running at all.
 	confirmed := map[string]bool{}
-	if pushed := syncBlobs(child, childBlobs, nil, confirmed); pushed != 1 {
+	rejected := map[string]bool{}
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed, rejected); pushed != 1 {
 		t.Fatalf("first pass (parent up) pushed %d, want 1", pushed)
 	}
 	if !confirmed[first] {
@@ -218,7 +220,7 @@ func TestSyncSurvivesAnUnreachableParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pushed := syncBlobs(child, childBlobs, nil, confirmed); pushed != 0 {
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed, rejected); pushed != 0 {
 		t.Fatalf("pushed %d against a dead parent, want 0", pushed)
 	}
 	if confirmed[second] {
@@ -267,7 +269,8 @@ func TestSyncSkipsAPersistentlyRejectedBlobAndContinues(t *testing.T) {
 	}
 
 	confirmed := map[string]bool{}
-	pushed := syncBlobs(child, childBlobs, pm, confirmed)
+	rejected := map[string]bool{}
+	pushed := syncBlobs(child, childBlobs, pm, confirmed, rejected)
 
 	// Denominator: the valid blob actually landed and was confirmed in this
 	// SAME pass — proves the loop did not stop dead at the rejected entry
@@ -287,6 +290,28 @@ func TestSyncSkipsAPersistentlyRejectedBlobAndContinues(t *testing.T) {
 	}
 	if _, ok := parent.blobs.Has(rejectedSHA); ok {
 		t.Fatal("the parent stored an over-cap blob")
+	}
+	if !rejected[rejectedSHA] {
+		t.Fatal("the rejected blob was not recorded so a later pass can skip it")
+	}
+
+	// Denominator for what follows: the first pass actually attempted the PUT
+	// and the parent actually counted the rejection — proves this counter can
+	// move at all, so an unchanged reading after the second pass means the
+	// PUT was skipped rather than the counter being dead.
+	errAfterFirstPass := metricstest.Value(t, pm, `colca_blob_transfers_total{direction="receive",result="error"}`)
+	if errAfterFirstPass != 1 {
+		t.Fatalf(`colca_blob_transfers_total{direction="receive",result="error"} = %v after the first pass, want 1`, errAfterFirstPass)
+	}
+
+	// Without the rejected set, this second pass would HEAD, GET, and
+	// full-body PUT the same over-cap blob all over again — forever. With it,
+	// the rejected sha is skipped before any of that reaches the parent.
+	if pushed := syncBlobs(child, childBlobs, pm, confirmed, rejected); pushed != 0 {
+		t.Fatalf("second pass pushed %d, want 0", pushed)
+	}
+	if got := metricstest.Value(t, pm, `colca_blob_transfers_total{direction="receive",result="error"}`); got != errAfterFirstPass {
+		t.Fatalf(`colca_blob_transfers_total{direction="receive",result="error"} = %v after a second pass, want unchanged at %v — a permanently rejected blob must not be re-uploaded`, got, errAfterFirstPass)
 	}
 }
 

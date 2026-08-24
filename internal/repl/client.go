@@ -487,6 +487,11 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 
 	// Scoped to this client, and therefore to this pinned parent key.
 	confirmedBlobs := map[string]bool{}
+	// A blob this parent has permanently refused (a 4xx: bad digest, or over
+	// its cap). Session-scoped like confirmedBlobs, for the same reason: a
+	// reparent re-offers everything, because a new parent may accept what
+	// this one wouldn't.
+	rejectedBlobs := map[string]bool{}
 
 	stopped := func() bool {
 		select {
@@ -599,7 +604,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		// Blobs last: they are not in any stream, and a file must never delay
 		// a record. A pass that pushed nothing costs one HEAD per unconfirmed
 		// blob, which is why confirmations are remembered.
-		syncBlobs(c, blobs, m, confirmedBlobs)
+		syncBlobs(c, blobs, m, confirmedBlobs, rejectedBlobs)
 		if idle {
 			select {
 			case <-stop:

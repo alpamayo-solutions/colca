@@ -77,11 +77,19 @@ func mountBlobRoutes(
 		if !ok {
 			// Has() cannot tell a malformed digest from an absent one, so ask
 			// Get() which error it would have been — HEAD must agree with GET.
-			if _, _, err := blobs.Get(sha); err != nil {
+			// The blob may have landed between the Has() miss above and this
+			// Get() call: on that success path the read must still be closed
+			// (nothing else will) and its real size used, not the 0 Has()
+			// reported for a blob it never found.
+			rc, gotSize, err := blobs.Get(sha)
+			if err != nil {
 				blobReadError(w, err, writeJSON)
 				return
 			}
+			rc.Close()
+			size = gotSize
 		}
+		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		w.WriteHeader(http.StatusOK)
 	}

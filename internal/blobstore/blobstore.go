@@ -118,7 +118,14 @@ func (s *Store) Put(r io.Reader, expect string) (string, int64, error) {
 		return "", 0, fmt.Errorf("blobstore: %w", err)
 	}
 	target := s.path(sha)
-	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+	shardDir := filepath.Dir(target)
+	if err := os.MkdirAll(shardDir, 0o700); err != nil {
+		return "", 0, fmt.Errorf("blobstore: %w", err)
+	}
+	// The shard directory may have just been created above (a new fan-out
+	// bucket): fsync its parent so that dirent survives a crash too, or a
+	// later List() on a fresh mount could walk right past it.
+	if err := syncDir(s.dir); err != nil {
 		return "", 0, fmt.Errorf("blobstore: %w", err)
 	}
 	// Content addressing makes this rename idempotent: if the target already
@@ -126,7 +133,34 @@ func (s *Store) Put(r io.Reader, expect string) (string, int64, error) {
 	if err := os.Rename(tmpName, target); err != nil {
 		return "", 0, fmt.Errorf("blobstore: %w", err)
 	}
+	// fsync the temp file (above) makes the CONTENT durable; fsync the shard
+	// directory makes the RENAME durable. Without this, a crash between the
+	// rename and the directory's next background flush can lose the dirent
+	// while the data blocks it points at are already on disk — the blob
+	// silently vanishes, and because the child's confirmation map is
+	// in-memory and does not survive a PARENT restart either, nothing ever
+	// re-offers it: eager push degrades to "blob absent at the parent"
+	// forever, with no error anywhere to say so.
+	if err := syncDir(shardDir); err != nil {
+		return "", 0, fmt.Errorf("blobstore: %w", err)
+	}
 	return sha, size, nil
+}
+
+// syncDir fsyncs a directory so that changes to its entries — a create, a
+// rename, a delete — survive a crash. A file's own fsync only makes its
+// CONTENT durable; the directory entry that makes the file findable again is
+// a separate write that needs its own fsync.
+func syncDir(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("blobstore: %w", err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("blobstore: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Get(sha string) (io.ReadCloser, int64, error) {

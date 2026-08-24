@@ -264,11 +264,13 @@ func (c *Client) BlobPut(sha string, r io.Reader, size int64) error {
 // large file can never queue ahead of an alarm or an entity batch — blobs do
 // not ride the streams at all.
 //
-// confirmed is caller-owned and scoped to one pinned parent key: a reparent
-// builds a new Client and a new map, which is what re-offers everything to the
-// new parent. Nothing is persisted; a restart re-verifies with a HEAD per
-// blob, which is cheap and idempotent.
-func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed map[string]bool) int {
+// confirmed and rejected are caller-owned and scoped to one pinned parent
+// key: a reparent builds a new Client and new maps, which is what re-offers
+// everything to the new parent — the new parent may hold what the old one
+// didn't, and may accept what the old one capped out on. Nothing is
+// persisted; a restart re-verifies with a HEAD per blob, which is cheap and
+// idempotent.
+func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed, rejected map[string]bool) int {
 	if c == nil || blobs == nil {
 		return 0
 	}
@@ -279,7 +281,7 @@ func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed 
 	}
 	pushed := 0
 	for _, info := range list {
-		if confirmed[info.SHA256] {
+		if confirmed[info.SHA256] || rejected[info.SHA256] {
 			continue
 		}
 		has, err := c.BlobHas(info.SHA256)
@@ -309,6 +311,7 @@ func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed 
 				// permanently-rejected blob must not starve every blob
 				// behind it in List() order, forever.
 				c.log.Warn("blob rejected by parent, skipping", "sha", info.SHA256[:12], "err", err)
+				rejected[info.SHA256] = true
 				continue
 			}
 			// Transport failure or a 5xx: the parent is not currently
