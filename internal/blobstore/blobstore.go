@@ -193,6 +193,30 @@ func (s *Store) Has(sha string) (int64, bool) {
 	return info.Size(), true
 }
 
+// Touch bumps a blob's Modified time to now, without touching its content.
+// This is what lets a claim on a blob (an in-flight resource upsert reading
+// Has) restart the sweeper's grace clock: the sweeper only deletes a blob
+// that is both unreferenced AND past grace, so a fresh Modified means a sweep
+// racing the claim sees the blob as newly touched and leaves it alone for
+// another full grace period (resources design §8, §9.1 TOCTOU fix).
+//
+// A digest that is not present, or not a valid digest, is not an error here —
+// the caller (BlobPort.Has) treats a touch failure as advisory, never as a
+// reason to fail the check it is answering.
+func (s *Store) Touch(sha string) error {
+	if !validDigest(sha) {
+		return ErrBadDigest
+	}
+	now := time.Now()
+	if err := os.Chtimes(s.path(sha), now, now); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("blobstore: %w", err)
+	}
+	return nil
+}
+
 // Delete removes a blob. A blob that is already absent is not an error —
 // the sweep and a concurrent delete must be able to race harmlessly.
 func (s *Store) Delete(sha string) error {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
@@ -51,11 +52,23 @@ func (p *BlobPort) upstream() BlobFetcher {
 	return p.fetcher
 }
 
+// Has reports whether this node's store already holds sha. A hit also
+// touches the blob (resources design §9.1 TOCTOU), restarting its
+// grace clock at the moment a caller claims it — this is what stops the
+// sweeper from deleting a blob out from under an in-flight resource/upsert
+// that already checked Has and is about to commit a record naming it. A
+// touch failure is logged and otherwise ignored: the worst case it leaves is
+// the pre-existing race, never a refused check.
 func (p *BlobPort) Has(sha string) bool {
 	if p == nil || p.store == nil {
 		return false
 	}
 	_, ok := p.store.Has(sha)
+	if ok {
+		if err := p.store.Touch(sha); err != nil {
+			slog.Default().Warn("blob touch-on-claim failed", "sha", sha, "err", err)
+		}
+	}
 	return ok
 }
 

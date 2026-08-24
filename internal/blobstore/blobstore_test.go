@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func open(t *testing.T, max uint64) *Store {
@@ -171,6 +172,47 @@ func TestGetAndDeleteOnAMissingBlob(t *testing.T) {
 	}
 	if _, ok := s.Has(sha); ok {
 		t.Fatal("blob still present after Delete")
+	}
+}
+
+// TestTouchMovesModifiedForwardAndErrorsOnAnAbsentDigest pins the fix that
+// closes the resource/upsert-vs-sweeper TOCTOU (resources design §9.1): a
+// claim on a blob (BlobPort.Has) must be able to restart the sweeper's grace
+// clock, and must not pretend to succeed on a digest this store never held.
+func TestTouchMovesModifiedForwardAndErrorsOnAnAbsentDigest(t *testing.T) {
+	s := open(t, 1<<20)
+	sha, _, err := s.Put(bytes.NewReader([]byte("touch me")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Push the stored mtime into the past so Touch moving it forward is
+	// unambiguous regardless of the filesystem's timestamp resolution.
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(s.path(sha), past, past); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(s.path(sha))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Touch(sha); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(s.path(sha))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().After(before.ModTime()) {
+		t.Fatalf("Touch did not move Modified forward: before=%v after=%v", before.ModTime(), after.ModTime())
+	}
+
+	// Denominator: an absent digest is not a silent no-op — the caller (which
+	// only calls Touch after Has already returned true) must be able to tell
+	// "genuinely touched" from "nothing was there to touch".
+	if err := s.Touch(digest([]byte("never stored"))); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Touch(absent) err = %v, want ErrNotFound", err)
 	}
 }
 
