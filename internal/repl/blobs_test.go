@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
@@ -142,7 +143,7 @@ func TestSyncPushesOnlyWhatTheParentLacks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	confirmed := map[string]bool{}
+	confirmed := map[string]time.Time{}
 	rejected := map[string]bool{}
 	if pushed := syncBlobs(child, childBlobs, nil, confirmed, rejected); pushed != 2 {
 		t.Fatalf("first pass pushed %d, want 2", pushed)
@@ -182,11 +183,82 @@ func TestSyncSkipsWhatTheParentAlreadyHas(t *testing.T) {
 	if _, _, err := parent.blobs.Put(bytes.NewReader(content), ""); err != nil {
 		t.Fatal(err)
 	}
-	if pushed := syncBlobs(child, childBlobs, nil, map[string]bool{}, map[string]bool{}); pushed != 0 {
+	if pushed := syncBlobs(child, childBlobs, nil, map[string]time.Time{}, map[string]bool{}); pushed != 0 {
 		t.Fatalf("pushed %d, want 0", pushed)
 	}
 	if _, ok := parent.blobs.Has(sha); !ok {
 		t.Fatal("the parent lost the blob it already had")
+	}
+}
+
+// TestSyncReoffersABlobSweptThenRecreatedAtTheParent pins the critical fix:
+// a digest that was confirmed, then swept away at the parent (blobgc reclaims
+// anything no live _Resource references, once nothing does and the grace has
+// passed), then re-staged at the child under the SAME still-running Client —
+// an ordinary sequence for an edge node (delete a resource, wait out the
+// grace, re-attach the identical file) — must be re-offered. A permanent
+// confirmed[sha]=true would skip it forever, leaving the parent holding a
+// record with no way to ever receive its bytes (409 blob_pending, unrecoverable
+// short of a child restart).
+func TestSyncReoffersABlobSweptThenRecreatedAtTheParent(t *testing.T) {
+	parent, child := newReplPair(t)
+	childBlobs := newBlobStore(t)
+	content := []byte("press 3 operator manual, revision 2")
+
+	sha, _, err := childBlobs.Put(bytes.NewReader(content), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	confirmed := map[string]time.Time{}
+	rejected := map[string]bool{}
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed, rejected); pushed != 1 {
+		t.Fatalf("first pass pushed %d, want 1", pushed)
+	}
+	if _, ok := confirmed[sha]; !ok {
+		t.Fatal("first pass did not confirm the blob it pushed")
+	}
+	if _, ok := parent.blobs.Has(sha); !ok {
+		t.Fatal("parent is missing the blob from the first pass")
+	}
+
+	// Simulate the parent's own sweeper reclaiming it once nothing referenced
+	// it any more and the grace elapsed. confirmed[sha] is untouched — this
+	// client has no way to learn the parent no longer holds it.
+	if err := parent.blobs.Delete(sha); err != nil {
+		t.Fatal(err)
+	}
+
+	// Denominator: WITHOUT the re-Put below, a pass against the still-stale
+	// confirmed entry pushes 0 — proving the parent-side delete alone is not
+	// what makes the next pass push. If this assertion started failing, it
+	// would mean this test no longer measures what it claims to.
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed, rejected); pushed != 0 {
+		t.Fatalf("pass against a stale confirmed entry pushed %d, want 0 (this is the denominator, not the fix)", pushed)
+	}
+	if _, ok := parent.blobs.Has(sha); ok {
+		t.Fatal("precondition broken: the parent must not hold the blob at this point")
+	}
+
+	// The operator re-attaches the identical file. Put always renames a fresh
+	// temp file onto the target, so this bumps the stored blob's mtime even
+	// though the content — and therefore the digest — is unchanged. A short
+	// sleep guarantees the new mtime is observably later regardless of the
+	// filesystem's timestamp resolution.
+	time.Sleep(5 * time.Millisecond)
+	reSHA, _, err := childBlobs.Put(bytes.NewReader(content), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reSHA != sha {
+		t.Fatalf("re-Put of identical content produced a different digest: %s vs %s", reSHA, sha)
+	}
+
+	if pushed := syncBlobs(child, childBlobs, nil, confirmed, rejected); pushed != 1 {
+		t.Fatalf("pass after the re-Put pushed %d, want 1 — a swept-then-recreated blob must be re-offered", pushed)
+	}
+	if _, ok := parent.blobs.Has(sha); !ok {
+		t.Fatal("parent still missing the blob after it was recreated and re-synced")
 	}
 }
 
@@ -203,12 +275,12 @@ func TestSyncSurvivesAnUnreachableParent(t *testing.T) {
 	// this, a zero-pushed / zero-confirmed result below is equally consistent
 	// with a parent that was never reachable in the first place, or with
 	// syncBlobs silently never running at all.
-	confirmed := map[string]bool{}
+	confirmed := map[string]time.Time{}
 	rejected := map[string]bool{}
 	if pushed := syncBlobs(child, childBlobs, nil, confirmed, rejected); pushed != 1 {
 		t.Fatalf("first pass (parent up) pushed %d, want 1", pushed)
 	}
-	if !confirmed[first] {
+	if _, ok := confirmed[first]; !ok {
 		t.Fatal("first pass (parent up) did not confirm the blob it pushed")
 	}
 	if _, ok := parent.blobs.Has(first); !ok {
@@ -223,7 +295,7 @@ func TestSyncSurvivesAnUnreachableParent(t *testing.T) {
 	if pushed := syncBlobs(child, childBlobs, nil, confirmed, rejected); pushed != 0 {
 		t.Fatalf("pushed %d against a dead parent, want 0", pushed)
 	}
-	if confirmed[second] {
+	if _, ok := confirmed[second]; ok {
 		t.Fatal("a failed push must not be recorded as confirmed")
 	}
 	if len(confirmed) != 1 {
@@ -268,7 +340,7 @@ func TestSyncSkipsAPersistentlyRejectedBlobAndContinues(t *testing.T) {
 		rejectedSHA = sha
 	}
 
-	confirmed := map[string]bool{}
+	confirmed := map[string]time.Time{}
 	rejected := map[string]bool{}
 	pushed := syncBlobs(child, childBlobs, pm, confirmed, rejected)
 
@@ -278,14 +350,14 @@ func TestSyncSkipsAPersistentlyRejectedBlobAndContinues(t *testing.T) {
 	if pushed != 1 {
 		t.Fatalf("pushed %d, want 1 (only the valid blob)", pushed)
 	}
-	if !confirmed[validSHA] {
+	if _, ok := confirmed[validSHA]; !ok {
 		t.Fatal("the valid blob was not confirmed")
 	}
 	if _, ok := parent.blobs.Has(validSHA); !ok {
 		t.Fatal("parent is missing the valid blob")
 	}
 
-	if confirmed[rejectedSHA] {
+	if _, ok := confirmed[rejectedSHA]; ok {
 		t.Fatal("a rejected blob must not be marked confirmed")
 	}
 	if _, ok := parent.blobs.Has(rejectedSHA); ok {

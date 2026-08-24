@@ -485,8 +485,11 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 	// cursor, which a head of 0 never reaches.
 	initCursors(c, eng, nil, 0)
 
-	// Scoped to this client, and therefore to this pinned parent key.
-	confirmedBlobs := map[string]bool{}
+	// Scoped to this client, and therefore to this pinned parent key. Keyed
+	// by digest, valued by the local blob's Modified time at confirmation
+	// (blobs.go's syncBlobs doc comment) so a swept-then-recreated blob is
+	// recognized as needing a re-push rather than skipped forever.
+	confirmedBlobs := map[string]time.Time{}
 	// A blob this parent has permanently refused (a 4xx: bad digest, or over
 	// its cap). Session-scoped like confirmedBlobs, for the same reason: a
 	// reparent re-offers everything, because a new parent may accept what

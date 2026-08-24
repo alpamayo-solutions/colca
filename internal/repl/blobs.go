@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -284,7 +285,19 @@ func (c *Client) BlobPut(sha string, r io.Reader, size int64) error {
 // didn't, and may accept what the old one capped out on. Nothing is
 // persisted; a restart re-verifies with a HEAD per blob, which is cheap and
 // idempotent.
-func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed, rejected map[string]bool) int {
+//
+// confirmed is keyed by digest and holds the local blob's Modified time AS
+// OBSERVED at the moment it was confirmed — not a bare bool. A digest is
+// content-addressed, so the same sha can legitimately be confirmed, swept
+// (by blobgc, once nothing references it), and then re-staged later in the
+// SAME client's lifetime (delete a resource, wait out the grace, re-attach
+// the identical file). blobstore.Put always renames a fresh temp file onto
+// the target, so a re-Put always bumps mtime — that is what lets the skip
+// below tell "still the blob I confirmed" from "swept and recreated" without
+// tracking deletes explicitly. A permanent bool would treat both the same
+// and never re-offer the recreated blob, leaving an ancestor's record
+// pointing at bytes that will never arrive (409 blob_pending forever).
+func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed map[string]time.Time, rejected map[string]bool) int {
 	if c == nil || blobs == nil {
 		return 0
 	}
@@ -295,7 +308,10 @@ func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed,
 	}
 	pushed := 0
 	for _, info := range list {
-		if confirmed[info.SHA256] || rejected[info.SHA256] {
+		if rejected[info.SHA256] {
+			continue
+		}
+		if at, ok := confirmed[info.SHA256]; ok && !info.Modified.After(at) {
 			continue
 		}
 		has, err := c.BlobHas(info.SHA256)
@@ -306,7 +322,7 @@ func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed,
 			return pushed
 		}
 		if has {
-			confirmed[info.SHA256] = true
+			confirmed[info.SHA256] = info.Modified
 			continue
 		}
 		rc, size, err := blobs.Get(info.SHA256)
@@ -334,7 +350,7 @@ func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed,
 			c.log.Warn("blob push failed", "sha", info.SHA256[:12], "err", err)
 			return pushed
 		}
-		confirmed[info.SHA256] = true
+		confirmed[info.SHA256] = info.Modified
 		pushed++
 		m.BlobTransfer("push", "ok")
 	}
