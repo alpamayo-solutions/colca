@@ -72,6 +72,11 @@ func (e *Engine) RecordDenial(d AuditDenial) error {
 		return e.auditFailure(d, fmt.Errorf("encode audit event: %w", err))
 	}
 	topic := "colca/v1/_AuditEvent/" + e.cfg.ULID + "/_colca/audit/" + eventID
+	// store.ErrRecordTooLarge here is deliberately NOT counted as
+	// RecordRejected: that metric means an INGRESS refusal, one with an
+	// external author for the door to answer 4xx to. An audit record is
+	// engine-authored, not ingress, and its write failure is already
+	// counted below by auditFailure's AuditWriteFailure.
 	first, _, err := e.store.Append("audit", []store.Record{{
 		Topic: topic, Payload: raw, TS: now, WrittenBy: e.cfg.ULID,
 		ActorID: d.ActorID, ActorLabel: d.ActorLabel, ActorKind: d.ActorKind,

@@ -33,10 +33,25 @@ func mountBlobRoutes(
 	mux.HandleFunc("POST /blobs", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 		r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes))
 		sha, size, err := blobs.Put(r.Body, r.Header.Get("X-Colca-Blob-SHA256"))
+		// BlobTransfer is deliberately NOT counted on this door, unlike the
+		// repl door's handleBlobPut/handleBlobGet. That metric family means
+		// node-to-node transfers (push/pull/receive); a local staging upload
+		// is not one, and counting it here would poison the counter.
+		//
+		// blobstore.ErrTooLarge is deliberately not one of the cases below.
+		// r.Body is wrapped in http.MaxBytesReader with the SAME cap
+		// (maxBytes, the same config value the store itself was opened with)
+		// before Put ever sees the stream, so MaxBytesReader always trips
+		// first and Put's own size check can never fire on this door — a
+		// case for it here would be dead code. blobstore.Put keeps its own
+		// check regardless: that is the store's unconditional guarantee, not
+		// this door's, and it still holds for any other caller of Put that
+		// does not wrap its reader the same way.
+		var tooLarge *http.MaxBytesError
 		switch {
 		case err == nil:
 			writeJSON(w, http.StatusCreated, map[string]any{"sha256": sha, "size": size})
-		case errors.Is(err, blobstore.ErrTooLarge):
+		case errors.As(err, &tooLarge):
 			m.BlobRejected("too_large")
 			writeJSON(w, http.StatusRequestEntityTooLarge,
 				map[string]any{"error": fmt.Sprintf("blob exceeds %d bytes", maxBytes)})
@@ -47,13 +62,6 @@ func mountBlobRoutes(
 			m.BlobRejected("bad_digest")
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		default:
-			var tooLarge *http.MaxBytesError
-			if errors.As(err, &tooLarge) {
-				m.BlobRejected("too_large")
-				writeJSON(w, http.StatusRequestEntityTooLarge,
-					map[string]any{"error": fmt.Sprintf("blob exceeds %d bytes", maxBytes)})
-				return
-			}
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		}
 	}))

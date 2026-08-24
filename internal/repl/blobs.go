@@ -141,6 +141,7 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 	rc, size, err := up.BlobGet(sha, hops)
 	if err != nil {
 		s.metrics.BlobTransfer("pull", "error")
+		s.log.Warn("blob pull-through miss: no ancestor holds it", "sha", sha[:12], "err", err)
 		http.Error(w, "no such blob", http.StatusNotFound)
 		return
 	}
@@ -151,6 +152,7 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 	// answer is refused here rather than passed on.
 	if _, _, err := s.blobs.Put(rc, sha); err != nil {
 		s.metrics.BlobTransfer("pull", "error")
+		s.log.Warn("blob pull-through relay refused: upstream answer failed local verification", "sha", sha[:12], "err", err)
 		http.Error(w, "no such blob", http.StatusNotFound)
 		return
 	}
@@ -162,6 +164,11 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cached.Close()
+	// The upstream response carried its own Content-Length (size), but the
+	// freshly-Stat'd cachedSize from our own store is what we actually
+	// relay: it is what the bytes we are about to copy really measure to,
+	// immune to a transport that lied about length, and consistent with
+	// every other read off this store.
 	_ = size
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
@@ -232,6 +239,13 @@ func (e *BlobPutError) Error() string {
 // Any other failure (a transport error, or a BlobPutError with a 5xx) says
 // nothing about this particular blob: it means the parent is not currently
 // accepting pushes at all.
+//
+// 403 sits in this range but can never actually reach here as a PUT status:
+// syncBlobs calls BlobHas (a HEAD, hitting the exact same childFromReq check
+// handleBlobPut does) before it ever calls BlobPut, so an unenrolled-child
+// 403 always ends the pass at the HEAD step first. Treating 403 as per-blob
+// here is inert, not wrong — a dead branch this function's own caller
+// happens to make unreachable, kept simple rather than carved out.
 func blobRejected(err error) bool {
 	var pe *BlobPutError
 	return errors.As(err, &pe) && pe.Status >= 400 && pe.Status < 500

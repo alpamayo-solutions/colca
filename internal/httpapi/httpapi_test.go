@@ -1512,6 +1512,10 @@ func TestLocalSelfReturnsTheMintedIdentityAndAuthoritativeMount(t *testing.T) {
 		Node    string `json:"node"`
 		Element string `json:"element"`
 		Mount   string `json:"mount"`
+		Limits  struct {
+			MaxRecordBytes uint64 `json:"max_record_bytes"`
+			MaxBlobBytes   uint64 `json:"max_blob_bytes"`
+		} `json:"limits"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatal(err)
@@ -1525,6 +1529,14 @@ func TestLocalSelfReturnsTheMintedIdentityAndAuthoritativeMount(t *testing.T) {
 	entry, ok := h.reg.Get(got.ULID)
 	if !ok || entry.Name != got.Name || entry.Element != got.Element {
 		t.Fatalf("GET /self does not describe the registry entry: response=%+v entry=%+v", got, entry)
+	}
+	// resources design §5: /self is how a caller reads the node's upload
+	// caps instead of holding its own copy of the limits config.
+	wantMaxRecord := config.Limits{}.EffectiveMaxRecordBytes()
+	wantMaxBlob := config.Limits{}.EffectiveMaxBlobBytes()
+	if got.Limits.MaxRecordBytes != wantMaxRecord || got.Limits.MaxBlobBytes != wantMaxBlob {
+		t.Fatalf("GET /self limits = %+v; want max_record_bytes=%d max_blob_bytes=%d",
+			got.Limits, wantMaxRecord, wantMaxBlob)
 	}
 }
 

@@ -581,6 +581,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				"node":    e.NodeID(),
 				"element": c.entry.Element,
 				"mount":   mount,
+				// The upload caps a local service must respect. One owner
+				// for the number: a caller reads it here instead of holding
+				// its own copy of cfg.Limits (resources design §5).
+				"limits": map[string]any{
+					"max_record_bytes": cfg.Limits.EffectiveMaxRecordBytes(),
+					"max_blob_bytes":   cfg.Limits.EffectiveMaxBlobBytes(),
+				},
 			})
 		}))
 	}
