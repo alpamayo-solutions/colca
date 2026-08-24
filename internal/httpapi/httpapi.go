@@ -598,6 +598,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// Provisioning identities is not a local service's job; reading and
 	// writing the node's own data is.
 	if !local {
+		// The published door's resource read (resources design §6): the ONLY
+		// way a file is read on an authenticated door. Every read passes
+		// through a resource id so the element-scoped grant check always
+		// runs — raw digest access stays on the local and replication doors,
+		// where the door itself is the authorization.
+		mountResourceRoutes(mux, e, blobs, m, writeJSON, auth)
+
 		// The enrollment door (auth §4): the ONLY write path for registry
 		// entries, admin-guarded. Local-only — downward provisioning
 		// via a _CmdAdmin flow is the intended direction.

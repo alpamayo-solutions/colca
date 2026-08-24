@@ -461,3 +461,27 @@ func TestResourceTombstoneValidates(t *testing.T) {
 		t.Fatalf("an empty payload is a tombstone and must validate: %v", err)
 	}
 }
+
+func TestResourceBlobReadsTheDigest(t *testing.T) {
+	payload := []byte(`{"id":"r1","system_element_id":"el1","filename":"m.pdf",
+		"content_type":"application/pdf","size_bytes":1,"sha256":"` + strings.Repeat("a", 64) + `"}`)
+	sha, ok := ResourceBlob(payload)
+	if !ok || sha != strings.Repeat("a", 64) {
+		t.Fatalf("ResourceBlob = %q, %v", sha, ok)
+	}
+	if _, ok := ResourceBlob([]byte(`{"id":"r1"}`)); ok {
+		t.Fatal("an incomplete record has no usable digest")
+	}
+}
+
+func TestResourceIDReadsTheID(t *testing.T) {
+	payload := []byte(`{"id":"r1","system_element_id":"el1","filename":"m.pdf",
+		"content_type":"application/pdf","size_bytes":1,"sha256":"` + strings.Repeat("a", 64) + `"}`)
+	id, ok := ResourceID(payload)
+	if !ok || id != "r1" {
+		t.Fatalf("ResourceID = %q, %v", id, ok)
+	}
+	if _, ok := ResourceID([]byte(`{"id":"r1"}`)); ok {
+		t.Fatal("an incomplete record has no usable id")
+	}
+}

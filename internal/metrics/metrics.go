@@ -135,6 +135,10 @@ var blobResults = []string{"ok", "error"}
 var blobRejectReasons = []string{"too_large", "digest_mismatch", "bad_digest"}
 var recordRejectReasons = []string{"too_large"}
 
+// resourceReadResults — the allowed `result` label values of
+// colca_resource_reads_total (resources design §6).
+var resourceReadResults = []string{"ok", "pending", "denied", "not_found"}
+
 // gapSurfaces — the allowed `surface` label values of colca_gap_served_total
 // (design §8): `fetch` is GET /fetch (any stream), `downlink` is GET
 // /downlink (commands only, in practice — pre-created for every stream
@@ -259,6 +263,10 @@ type Metrics struct {
 	blobRejectsBy   map[string]prometheus.Counter
 	recordRejects   *prometheus.CounterVec // colca_record_rejects_total{reason}
 	recordRejectsBy map[string]prometheus.Counter
+
+	// Resource file reads on the published door (resources design §6).
+	resourceReads   *prometheus.CounterVec // colca_resource_reads_total{result}
+	resourceReadsBy map[string]prometheus.Counter
 
 	ingestBy        map[string]prometheus.Counter
 	rejectedBy      map[string]prometheus.Counter
@@ -450,6 +458,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_record_rejects_total",
 			Help: "Records refused at ingress for exceeding the configured size cap. Resets on restart.",
 		}, []string{"reason"}),
+		resourceReads: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_resource_reads_total",
+			Help: "Resource file reads on the published door's GET /resources/{id}/file, by result: ok (bytes served), pending (blob_pending — the record exists but its bytes have not replicated here), denied (no read grant on the resource's element), not_found (unknown resource id). Resets on restart.",
+		}, []string{"result"}),
 	}
 	m.ingestBy = counterChildren(m.ingest, streams)
 	m.rejectedBy = counterChildren(m.rejected, reasons)
@@ -488,6 +500,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	}
 	m.blobRejectsBy = counterChildren(m.blobRejects, blobRejectReasons)
 	m.recordRejectsBy = counterChildren(m.recordRejects, recordRejectReasons)
+	m.resourceReadsBy = counterChildren(m.resourceReads, resourceReadResults)
 
 	// colca_drains_active starts at the count of entries persisted with
 	// status=draining (move-drain design §3.2: "status survives restart") —
@@ -546,7 +559,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.gapServed, m.gapReceived, m.replGapApplied,
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
 		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
-		m.blobTransfers, m.blobRejects, m.recordRejects,
+		m.blobTransfers, m.blobRejects, m.recordRejects, m.resourceReads,
 		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
 	return m
@@ -1010,6 +1023,19 @@ func (m *Metrics) RecordRejected(reason string) {
 		return
 	}
 	m.recordRejects.WithLabelValues(reason).Inc()
+}
+
+// ResourceRead counts one resource file read attempt on the published door's
+// GET /resources/{id}/file, by result (resources design §6).
+func (m *Metrics) ResourceRead(result string) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.resourceReadsBy[result]; ok {
+		c.Inc()
+		return
+	}
+	m.resourceReads.WithLabelValues(result).Inc()
 }
 
 // storeCollector derives the gauge families from the store (and, for the

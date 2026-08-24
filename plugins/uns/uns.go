@@ -703,3 +703,28 @@ func validateResourcePayload(payload []byte) (placedResource, error) {
 	}
 	return resource, nil
 }
+
+// ResourceContract is the contract name a resource record carries. It is
+// exported so the core can filter a KV scan without writing the literal — the
+// vocabulary stays here.
+const ResourceContract = "_Resource"
+
+// ResourceBlob reports the digest a _Resource record references. It is how the
+// core learns which blob a resource needs without parsing a payload it does
+// not own — the same reason LiveBlobDigests exists for the sweeper.
+func ResourceBlob(payload []byte) (string, bool) {
+	resource, err := validateResourcePayload(payload)
+	if err != nil {
+		return "", false
+	}
+	return resource.SHA256, true
+}
+
+// ResourceID reports the id a _Resource record carries.
+func ResourceID(payload []byte) (string, bool) {
+	resource, err := validateResourcePayload(payload)
+	if err != nil {
+		return "", false
+	}
+	return resource.ID, true
+}
