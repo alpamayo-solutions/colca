@@ -144,7 +144,7 @@ def test_subset_lint_only_allowed_keywords():
     for ident, entry in body["contracts"].items():
         assert gb._lint_subset(entry["schema"], ident) == []
         assert entry["class"] in (
-            "data", "entity", "definition", "cmd", "ack", "audit", "alarm",
+            "data", "entity", "definition", "cmd", "ack", "audit", "alarm", "annotation",
         ), ident
         assert isinstance(entry["tombstone"], bool), ident
 
@@ -352,6 +352,23 @@ def test_definitions_are_their_own_class_and_retractable():
         entry = body["contracts"][ident]
         assert entry["class"] == "definition", (ident, entry["class"])
         assert entry["tombstone"] is True, ident
+
+
+def test_annotation_contract_is_its_own_class_and_never_tombstoned():
+    """Instances ride their own stream, same shape as `alarm` and for the
+    same reason (dataops-evaluator design §8): append-only, no KV, no
+    retention. A delete is a record carrying `deleted=True`, not a
+    tombstone, so `tombstone` must stay False."""
+    body, _ = gb.build_bundle()
+    annotation = body["contracts"]["_Annotation"]
+
+    assert annotation["class"] == "annotation"
+    assert annotation["tombstone"] is False
+    assert set(annotation["schema"]["required"]) == {
+        "annotation_id",
+        "annotation_type_id",
+        "time_start",
+    }
 
 
 def test_every_definition_is_addressable_by_id():

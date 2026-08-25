@@ -68,5 +68,21 @@
       "why": "without a signal the row is unattributable and nothing downstream can repair it",
       "payload": {"value": 1}
     }
-  ]
+  ],
+  "timestamps": {
+    "_comment": "Pins the wire unit for Metric.timestamp: unix seconds, float, fractional part allowed (franzmq's default `datetime.now(UTC).timestamp()`; connector/src/reader.py and dataops/src/dataops/outputs.py agree). Only colca-historian (Go) decodes this field from the wire, so these vectors are judged by vectors_test.go alone -- the Python suite reads timestamps back out of Postgres, already decoded, and never re-parses the wire value.",
+    "store_ts_ms": 1755600000000,
+    "cases": [
+      {
+        "why": "the wire timestamp is unix seconds; the fractional part is sub-second precision, not milliseconds",
+        "payload": {"signal_id": "sig-1", "value": 1, "timestamp": 1756000000.25},
+        "stored": "2025-08-24T01:46:40.250Z"
+      },
+      {
+        "why": "without a payload timestamp the row falls back to the store's own ingest clock, which stays epoch-MILLISECONDS -- that value comes from colca's store (store_ts_ms above), never from the wire, so it keeps its own unit",
+        "payload": {"signal_id": "sig-1", "value": 1},
+        "stored": "2025-08-19T10:40:00Z"
+      }
+    ]
+  }
 }

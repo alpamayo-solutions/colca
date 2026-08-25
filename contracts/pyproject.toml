@@ -24,6 +24,10 @@ dependencies = [
     # the skew readable.
     "franzmq>=0.4.1,<0.7",
     "python-decouple>=3.8",
+    # derive_annotation_id (dataops-evaluator design §8) ULID-encodes a
+    # content hash; the same library every other service already uses to
+    # mint ids (connector, dataops, node-manager).
+    "ulid-py>=1.1",
 ]
 
 [tool.setuptools.packages.find]

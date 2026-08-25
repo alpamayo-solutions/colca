@@ -60,6 +60,8 @@ from colca_data_contracts.payload import (
     AlarmNotificationSummary,
     AlarmStateChange,
     NotificationDispatched,
+    Annotation as AnnotationPayload,
+    derive_annotation_id,
     DataTag,
     DataTags,
     DataTagContext,
@@ -161,6 +163,9 @@ __all__ = [
     "AlarmNotificationSummary",
     "AlarmStateChange",
     "NotificationDispatched",
+    # Annotation instances (own stream, mirrors alarm — design §8)
+    "AnnotationPayload",
+    "derive_annotation_id",
     # Domain payloads
     "DataTag",
     "DataTags",

@@ -57,6 +57,13 @@ CLASS_TABLE: dict[str, str] = {
     # (the alarm stream and uplink lanes design §3).
     "_AlarmStateChange": "alarm",
     "_NotificationDispatched": "alarm",
+    # Annotation instances: append-only on their own stream, for the same
+    # reason as alarms — a part-cycle producer emits ~1M/year/machine, so
+    # id-keyed retained/KV entries would grow without bound
+    # (dataops-evaluator design §8). Deletes are appends carrying a
+    # `deleted` marker rather than a tombstone; the class default already
+    # excludes "annotation" from the tombstonable classes below.
+    "_Annotation": "annotation",
     # Definitions: authored once, needed everywhere below the author, and the
     # same thing at every node — so they descend and are applied as state
     # (definition-stream design §2). They were "entity" only because there was

@@ -1,6 +1,7 @@
 import json
 import hashlib
 import datetime
+import ulid
 from typing import Any, Dict, List, Optional
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 
@@ -366,6 +367,51 @@ class NotificationDispatched(Payload):
     provider_message_id: Optional[str] = None
     retryable: bool = False
     terminal: bool = True
+
+
+def derive_annotation_id(annotation_type_id: str, source: str, time_start: float) -> str:
+    """Deterministic ``Annotation.annotation_id`` (design §8).
+
+    ULID-encodes the first 16 bytes of
+    ``SHA-256(f"{annotation_type_id}|{source}|{time_start:.6f}")``. Folding
+    the ``ensure_annotation`` idempotency into the identity itself is what
+    lets create, update (e.g. setting ``time_end``), and delete of the same
+    logical annotation all be appends carrying the SAME id on the append-only
+    ``annotations`` stream — a re-run producer naturally overwrites its own
+    prior record instead of duplicating it, and consumers apply last-write-
+    wins per id in stream order.
+    """
+    digest = hashlib.sha256(
+        f"{annotation_type_id}|{source}|{time_start:.6f}".encode("utf-8")
+    ).digest()
+    return str(ulid.from_bytes(digest[:16]))
+
+
+@dataclass
+class Annotation(Payload):
+    """A time-based annotation instance (design §8).
+
+    Its own contract (class ``annotation``) on the append-only
+    ``annotations`` stream — never KV-projected, never retained, the same
+    shape as ``alarm`` and for the same reason: a part-cycle producer at
+    1 part/30 s is ~1M annotations/year/machine, so id-keyed retained/KV
+    entries would grow without bound.
+
+    ``annotation_id`` is deterministic — see ``derive_annotation_id``. A
+    delete is a record with ``deleted=True``, not an absence: deletes are
+    appends too, so "was this annotation ever deleted" survives replication
+    and replay the same way every other state change on the stream does.
+    """
+    annotation_id: str
+    annotation_type_id: str
+    time_start: float
+    time_end: Optional[float] = None
+    value: Optional[Any] = None
+    signal_ids: List[str] = field(default_factory=list)
+    #: Producing identity for audit, e.g. ``"dataops/<producer-name>"``.
+    source: str = ""
+    deleted: bool = False
+    revision: int = 1
 
 
 @dataclass
