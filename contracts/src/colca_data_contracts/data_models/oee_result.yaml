@@ -1,0 +1,36 @@
+name: OEEResult
+version: '1.0'
+description: |-
+  The output side of OEE: what an OEE compute service publishes for a machine
+  that implements OEEProducer and MachineState. Every signal is a computed
+  percentage over the service's window. OEEProducer names the inputs; this
+  model names the results, so a machine implementing both says "my counters
+  are readable AND my effectiveness is being computed".
+signals:
+  - name: availability
+    data_type: number
+    unit: '%'
+    semantic_type: availability
+    computed: true
+    description: Share of the window the machine was EXECUTING (machine_state 4). Planned
+      stops are not subtracted here; the service that owns the shift calendar does that.
+  - name: performance
+    data_type: number
+    unit: '%'
+    semantic_type: performance
+    computed: true
+    description: Parts made while EXECUTING against what the nominal cycle time would have
+      made in that time, capped at 100.
+  - name: quality
+    data_type: number
+    unit: '%'
+    semantic_type: quality-rate
+    computed: true
+    description: Good parts as a share of all parts made in the window. 100 when no
+      reject_counter is supplied.
+  - name: oee
+    data_type: number
+    unit: '%'
+    semantic_type: oee
+    computed: true
+    description: availability × performance × quality, as a percentage.
