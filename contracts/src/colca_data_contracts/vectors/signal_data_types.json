@@ -1,0 +1,12 @@
+{
+  "_comment": "Golden vocabulary vector for a Signal's data_type. One checked-in dataset judged by BOTH the Python suite (colca-data-contracts/tests/test_signal_data_types.py, against utils.enums.signal.DataType) and the editor UI's suite (ui/tests/signal-data-type-vocabulary.spec.ts, against SIGNAL_DATA_TYPES). The two native copies drifted once already: the browser modelled a Signal with the CONSTANT vocabulary ('Float64', 'Int64'), the read path translated the difference away, and the write path sent 'float64' -- which a Signal cannot hold, so saving one with a semantic type that declares a data type was refused outright.",
+  "scalar_data_types": [
+    "boolean",
+    "datetime",
+    "float",
+    "int",
+    "json",
+    "string"
+  ],
+  "_arrays_comment": "Array variants exist on the server (int_array, float_array, …) and are deliberately NOT offered by the entity editor. They are excluded here so this vector says what a picker may present, not everything the column accepts."
+}

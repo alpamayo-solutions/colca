@@ -38,6 +38,29 @@ class ServiceType(BaseStrEnum):
     UNKNOWN = "unknown"
 
 
+#: Value types a Colca ``_Signal`` can carry: franzmq's ``DataType`` plus
+#: ``json``.
+#:
+#: The API's Signal column derives from this (``SIGNAL_DATA_TYPE_CHOICES``),
+#: colca's domain maps a model slot's ``json`` straight through
+#: (``slotDataTypes`` in ``exec_edit_model.go``), and the semantic-type
+#: table maps canonical ``json`` to it -- but the WIRE contract did not, so
+#: ``Signal.decode`` raised ``ValueError: 'json' is not a valid DataType`` on a
+#: signal every other layer considers legal. Encoding succeeded (a dataclass
+#: annotation validates nothing), which is what kept it hidden: a json signal
+#: could be written and then never read back by the projector, the connector or
+#: dataops.
+#:
+#: Members are DERIVED from franzmq's enum rather than retyped, so the day
+#: franzmq gains or loses one this cannot silently disagree with it. Pinned
+#: against a golden vector the API suite and the editor suite both read
+#: (``vectors/signal_data_types.json``).
+SignalDataType = BaseStrEnum(  # type: ignore[misc]
+    "SignalDataType",
+    {member.name: member.value for member in DataType} | {"JSON": "json"},
+)
+
+
 class ConstantDataType(BaseStrEnum):
     """Value types supported by first-class Colca configuration constants.
 
@@ -857,7 +880,10 @@ class Signal(Payload):
     def decode(cls, json_str: str, timestamp: int) -> "Signal":
         data = json.loads(json_str)
         if data.get("data_type") is not None:
-            data["data_type"] = DataType(data["data_type"])
+            # `SignalDataType`, not franzmq's `DataType`: a `_Signal` may be
+            # `json`, which the narrower enum refuses -- and refusing it here
+            # meant a json signal could be written and never read back.
+            data["data_type"] = SignalDataType(data["data_type"])
         if data.get("index_type") is not None:
             data["index_type"] = IndexType(data["index_type"])
         return cls(**data)
