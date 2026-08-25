@@ -49,6 +49,10 @@ type ConfigExec struct {
 	// one, without waiting for anyone to ask (settings key
 	// "autobind" = "on_new_connector").
 	autobindNew bool
+	// observed is, per catalogue topic, the tag ids the last publish this
+	// process saw carried — what lets a republish tell a NEW tag (a catalogue
+	// that grew) from one whose signal an operator deleted on purpose.
+	observed map[string]map[string]bool
 }
 
 // NewConfigExec builds the executor. settings is the node's opaque plugin bag;
@@ -58,6 +62,7 @@ func NewConfigExec(s EntityStore, bound Bindings, elements Namespace, blobs Blob
 	return &ConfigExec{
 		store: s, bound: bound, elements: elements, blobs: blobs, newID: newID,
 		autobindNew: settings["autobind"] == "on_new_connector",
+		observed:    map[string]map[string]bool{},
 	}
 }
 
@@ -95,13 +100,49 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	if err := json.Unmarshal(payload, &cat); err != nil {
 		return
 	}
-	bindings := c.bindings()
+	ids := make(map[string]bool, len(cat.DataTags))
 	for _, tag := range cat.DataTags {
-		if bindings.propose(tag.ID, "") != bindFree {
-			return // already bound: this is a republish, not a new connector
+		ids[tag.ID] = true
+	}
+	previous, seen := c.observed[topic]
+	c.observed[topic] = ids
+
+	// A catalogue can GROW after its first publish: an OPC UA connector
+	// announces its synthetic heartbeat and connectivity tags before its
+	// browse of the server has finished (or while the PLC is unreachable),
+	// and the full catalogue follows. The tags that publish adds are bound
+	// like a new connector's; the ones it carried before are left alone, so a
+	// republish never revives a binding an operator deleted on purpose.
+	//
+	// The first publish this process sees for a topic has no "before" to
+	// compare against, so it keeps the older, narrower rule: bind only when
+	// nothing in it is bound yet — never revive, at the price of not binding
+	// a catalogue that grew across a restart of this node (an explicit
+	// `signal/autobind` still does).
+	bindings := c.bindings()
+	if !seen {
+		for _, tag := range cat.DataTags {
+			if bindings.propose(tag.ID, "") != bindFree {
+				return // already bound: a republish, not a new connector
+			}
+		}
+		c.bindCatalogue(mount, element, payload)
+		return
+	}
+	var grown catalogue
+	for _, tag := range cat.DataTags {
+		if !previous[tag.ID] {
+			grown.DataTags = append(grown.DataTags, tag)
 		}
 	}
-	c.bindCatalogue(mount, element, payload)
+	if len(grown.DataTags) == 0 {
+		return // the same catalogue again
+	}
+	encoded, err := json.Marshal(grown)
+	if err != nil {
+		return
+	}
+	c.bindCatalogue(mount, element, encoded)
 }
 
 // owningEntry finds the identity this node has enrolled whose computed
@@ -248,6 +289,14 @@ type catalogue struct {
 		ID       string `json:"id"`
 		Name     string `json:"name"`
 		DataType string `json:"data_type"`
+		// Meta.Element, when set, is the node-local path of the element this
+		// tag's signal belongs under, instead of the connector's own mount.
+		// One unplaced participant computing for several machines (a dataops
+		// service) says per output which machine it is about; without this
+		// every output would land at the node root under one name.
+		Meta struct {
+			Element string `json:"element"`
+		} `json:"meta"`
 	} `json:"data_tags"`
 }
 
@@ -858,6 +907,17 @@ func (c *ConfigExec) elementAt(path string) (string, bool) {
 // re-reading the store, so composing the whole set before committing it reads
 // exactly as writing one at a time did. A catalogue whose tags sanitize to the
 // same segment still gets one path each.
+//
+// A declared signal is bound, not shadowed. A bootstrap manifest authors the
+// signals a node's tree is supposed to hold before any connector has
+// published — with `data_tag: null`, because the tag's ULID is minted at
+// discovery and cannot be known in advance. When the catalogue then arrives,
+// a tag whose path already holds an unbound signal binds THAT record instead
+// of minting `<name>-2` beside it: the declaration said what the signal is
+// (unit, precision, description, semantic tag), the catalogue says where its
+// value comes from, and the two meet at the path. A signal that already
+// holds another tag is a different case and stays untouched — the collision
+// gets a sibling exactly as before.
 func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, string, string, []StateWrite) {
 	var cat catalogue
 	if err := json.Unmarshal(raw, &cat); err != nil {
@@ -868,7 +928,7 @@ func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, stri
 	taken := c.takenPaths()
 
 	records := make([]StateRecord, 0, len(cat.DataTags))
-	skipped := 0
+	skipped, unplaced := 0, 0
 	for _, tag := range cat.DataTags {
 		// The invariant is asked of its one owner; skipping is this operation's
 		// own answer to it. The edit asks the same question and refuses
@@ -878,8 +938,40 @@ func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, stri
 			skipped++
 			continue
 		}
-		leaf := uniquePath(sanitize(tag.Name), under, taken)
+		under, element := under, element
+		if tag.Meta.Element != "" {
+			// The tag names its own element. One that this node does not hold
+			// (yet) is left unbound rather than misplaced at the mount: the
+			// next autobind, after the element is authored, binds it.
+			id, ok := c.elementAt(tag.Meta.Element)
+			if !ok {
+				unplaced++
+				continue
+			}
+			under, element = tag.Meta.Element, id
+		}
+		leaf := sanitize(tag.Name)
 		path := joinPath(under, leaf)
+		if taken[path] {
+			if existing, existingID, ok := c.unboundSignalAt(path); ok {
+				existing["data_tag"] = tag.ID
+				if _, typed := existing["data_type"]; !typed && tag.DataType != "" {
+					existing["data_type"] = tag.DataType
+				}
+				if _, published := existing["is_published"]; !published {
+					existing["is_published"] = true
+				}
+				encoded, err := json.Marshal(existing)
+				if err != nil {
+					return 500, "signal/autobind: encode failed: " + err.Error(), "error", nil
+				}
+				records = append(records, StateRecord{Topic: c.signalTopic(path), Payload: encoded})
+				bindings.bind(tag.ID, existingID)
+				continue
+			}
+			leaf = uniquePath(leaf, under, taken)
+			path = joinPath(under, leaf)
+		}
 		// The signal's own identity: never composed from what it is bound to.
 		// Every Metric carries signal_id, so rebinding this signal to a
 		// different tag later must leave it — and the whole metric history
@@ -918,7 +1010,33 @@ func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, stri
 	if err != nil {
 		return 422, "signal/autobind: rejected: " + err.Error(), "invalid", nil
 	}
+	if unplaced > 0 {
+		return 200, fmt.Sprintf(`{"created":%d,"skipped":%d,"unplaced":%d}`, len(records), skipped, unplaced), "ok", writes
+	}
 	return 200, fmt.Sprintf(`{"created":%d,"skipped":%d}`, len(records), skipped), "ok", writes
+}
+
+// unboundSignalAt reads the signal record at a local path, if one is there
+// and holds no tag yet. It hands the record back as the map it was written
+// as, so binding it rewrites exactly the fields the declaration authored plus
+// the binding — nothing this executor knows about a signal is re-stated.
+func (c *ConfigExec) unboundSignalAt(path string) (map[string]any, string, bool) {
+	raw, ok := c.store.KVGet(c.signalTopic(path))
+	if !ok {
+		return nil, "", false
+	}
+	var record map[string]any
+	if json.Unmarshal(raw, &record) != nil {
+		return nil, "", false
+	}
+	if tag, _ := record["data_tag"].(string); tag != "" {
+		return nil, "", false
+	}
+	id, _ := record["id"].(string)
+	if id == "" {
+		return nil, "", false
+	}
+	return record, id, true
 }
 
 // joinPath composes a mount and a leaf into one path. An unplaced identity's
