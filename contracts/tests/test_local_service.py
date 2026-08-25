@@ -95,20 +95,81 @@ def test_mqtt_uses_v5_name_and_mount_without_tls_or_password():
     assert client.tls_calls == []
 
 
-def test_service_details_are_published_under_node_and_assigned_mount():
-    client = _Client()
-    details = ServiceDetails(
-        id="svc-1",
-        name="notifications",
+def _details(name="notifications", service_id="svc-1"):
+    return ServiceDetails(
+        id=service_id,
+        name=name,
         service_type=ServiceType.NOTIFICATIONS,
         colca_node_id="node-1",
         system_element_id="el-1",
     )
 
+
+def test_service_details_are_published_under_node_mount_and_service_name():
+    client = _Client()
+    details = _details()
+
     publish_local_service_details(client, _identity(), details)
 
     assert client.published[0][0] == (
-        "colca/v1/_ServiceDetails/node-1/line-1/press-1/_service"
+        "colca/v1/_ServiceDetails/node-1/line-1/press-1/notifications/_service"
     )
     assert client.published[0][1] is details
     assert client.published[0][2] == {"qos": 1, "retain": True}
+
+
+def test_two_unplaced_services_do_not_share_one_record():
+    """The failure this exists to prevent, and it is not a near miss.
+
+    An unplaced service has no mount, so without its name in the address every
+    unplaced service on a node writes its RETAINED registration to the same
+    topic. The last to start is then the only service the node appears to
+    have; every other one loses its projected row, and any catalogue naming
+    one (`_DataTags.connector`) parks forever waiting for a service that never
+    comes back. On the demo node that silently cost dataops its entire tag
+    catalogue.
+    """
+    projector = LocalServiceIdentity(
+        service_id="svc-p", service_name="projector",
+        node_id="node-1", system_element_id="", mount="",
+    )
+    dataops = LocalServiceIdentity(
+        service_id="svc-d", service_name="dataops",
+        node_id="node-1", system_element_id="", mount="",
+    )
+
+    client = _Client()
+    publish_local_service_details(client, projector, _details("projector", "svc-p"))
+    publish_local_service_details(client, dataops, _details("dataops", "svc-d"))
+
+    topics = [entry[0] for entry in client.published]
+    assert topics == [
+        "colca/v1/_ServiceDetails/node-1/projector/_service",
+        "colca/v1/_ServiceDetails/node-1/dataops/_service",
+    ]
+    assert len(set(topics)) == 2, "one service erased the other's registration"
+
+
+def test_service_context_matches_the_shared_vectors():
+    """One rule, two languages, one file.
+
+    `colca-service` publishes this registration for every service that cannot
+    publish its own, and it needs the rule natively in Go (`uns.ServiceContext`,
+    which reads these same vectors). A change to either implementation that
+    this file does not also describe fails on both sides.
+    """
+    import json as _json
+    from pathlib import Path
+
+    from colca_data_contracts.local_service import service_context
+
+    vectors_path = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "colca_data_contracts" / "vectors" / "service_context.json"
+    )
+    vectors = _json.loads(vectors_path.read_text())["vectors"]
+    assert vectors, "empty vectors would make this test pass proving nothing"
+    for vector in vectors:
+        assert list(service_context(vector["mount"], vector["service"])) == vector["context"], (
+            f"service_context({vector['mount']!r}, {vector['service']!r})"
+        )

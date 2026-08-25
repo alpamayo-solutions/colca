@@ -109,6 +109,7 @@ from colca_data_contracts.machine_state import (
     StateReason,
 )
 
+from colca_data_contracts.service_topics import service_context
 from colca_data_contracts.local_service import (
     LocalServiceIdentity,
     connect_local_mqtt,
@@ -216,6 +217,7 @@ __all__ = [
     "LocalServiceIdentity",
     "connect_local_mqtt",
     "publish_local_service_details",
+    "service_context",
     "resolve_local_identity",
     "service_details_topic",
 ]

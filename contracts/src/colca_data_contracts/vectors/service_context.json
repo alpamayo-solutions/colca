@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "Where a service's own records live: its mount, then its NAME.",
+    "Two languages need this natively — Python services publish their own",
+    "ServiceDetails (colca_data_contracts.local_service.service_context) and",
+    "colca-service publishes it for those that cannot (plugins/uns.ServiceContext).",
+    "The name segment is what keeps two services apart. Without it every",
+    "UNPLACED service on a node writes its retained registration to one topic",
+    "and erases the others — the last to start becomes the only service the",
+    "node appears to have, and any catalogue naming one of the rest parks",
+    "forever waiting for a service that never comes back."
+  ],
+  "vectors": [
+    {"mount": "", "service": "dataops", "context": ["dataops"]},
+    {"mount": "", "service": "projector", "context": ["projector"]},
+    {"mount": "line1", "service": "mock-opcua-reader", "context": ["line1", "mock-opcua-reader"]},
+    {"mount": "line-1/press-1", "service": "notifications", "context": ["line-1", "press-1", "notifications"]},
+    {"mount": "/leading/and/trailing/", "service": "svc", "context": ["leading", "and", "trailing", "svc"]},
+    {"mount": "a//b", "service": "svc", "context": ["a", "b", "svc"]}
+  ]
+}

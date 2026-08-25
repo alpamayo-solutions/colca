@@ -19,6 +19,8 @@ from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 
 from colca_data_contracts.payload import ServiceDetails
+from colca_data_contracts.service_topics import service_context
+
 
 
 @dataclass(frozen=True)
@@ -31,7 +33,7 @@ class LocalServiceIdentity:
 
     @property
     def hierarchy(self) -> tuple[str, ...]:
-        return tuple(segment for segment in self.mount.split("/") if segment)
+        return service_context(self.mount, self.service_name)
 
 
 def resolve_local_identity(
