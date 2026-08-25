@@ -418,12 +418,22 @@ func MountInsert(topic, mount string) string {
 // UnderMount reports whether a node-local path lies strictly below mount.
 //
 // This is the single rule that decides which child a downward record belongs
-// to, and it has three callers that must never disagree about it: the downlink
-// filter (which commands a child is handed), the draining-mount admission gate
-// (which commands are refused while a child is being moved), and the
-// routability check (whether a command addressed downward can reach anyone at
-// all). It lived as three copies of the same string comparison; a rule spelled
-// three times is a rule that can be wrong in two places (principle 2).
+// to, and it has four production callers that must never disagree about it:
+//
+//   - the downlink filter — which commands a child is handed;
+//   - the move-drain completion scan — which commands still hold a drain open;
+//   - the draining-mount admission gate — which commands are refused while a
+//     child is being moved;
+//   - the routability check — whether a command addressed downward can reach
+//     anyone at all.
+//
+// The first two are the pair that must not drift: they read the SAME stream for
+// opposite purposes, so a completion scan whose boundary were narrower than the
+// filter's would declare a drain finished while commands under that mount were
+// still deliverable. It lived as four copies of the same string comparison (a
+// fifth in a test fake, whose own comment admitted it was mirroring one of
+// them); a rule spelled five times is a rule that can be wrong in four places
+// (principle 2).
 //
 // The boundary is the path separator, so "werk10/x" is NOT under "werk1" — the
 // case a bare HasPrefix gets wrong. An empty mount reaches nothing rather than

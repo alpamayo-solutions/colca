@@ -371,6 +371,18 @@ func correlationIDOf(payload []byte) string {
 //   - a registry that cannot answer the routing question (routableMounts not
 //     implemented — every unit fake in this package): no claim is made either
 //     way, exactly as deliverCommand makes none without a subscriber lookup.
+//
+// The Warn is one line per unroutable command, deliberately not rate-limited
+// or deduplicated. The counter carries the RATE; the log is the only place the
+// offending topic and route ever appear, and without it an operator watching
+// the counter rise has no way to learn which address is wrong. Dropping it to
+// Debug would put it behind a level nobody runs in production, which is the
+// same silence this whole function exists to end. The volume worry is real but
+// self-limiting: every one of these lines corresponds to a record this node
+// just persisted to the commands stream, so an issuer looping fast enough to
+// flood the log is filling the stream at the same rate — the bigger problem,
+// and the one retention already bounds. Same unbounded-per-command shape as
+// deliverCommand's own undelivered Warn, one function above.
 func (e *Engine) countIfUnroutable(p uns.Parsed, topic string, payload []byte) {
 	if p.NodeID == e.cfg.ULID {
 		return

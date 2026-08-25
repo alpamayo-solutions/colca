@@ -9,7 +9,6 @@ package repl
 
 import (
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -172,9 +171,12 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped 
 		if err != nil || !uns.IsCommand(s.eng.ClassOf(p.Contract)) {
 			return false
 		}
-		// Same mount boundary check as the /downlink filter (server.go): the
-		// path separator is the boundary, "mount10" is not under "mount1".
-		return strings.HasPrefix(p.Path, mount+"/")
+		// The same rule the /downlink filter applies, from the same place
+		// (uns.UnderMount) rather than spelled again here. It has to be the
+		// same one: this scan decides when a drain is COMPLETE, so a boundary
+		// that disagreed with the filter's would complete a drain while
+		// commands under that mount were still deliverable.
+		return uns.UnderMount(p.Path, mount)
 	}
 	for from < next {
 		recs, nxt, err := st.Read("commands", from, drainScanBatch, filter)
