@@ -225,10 +225,20 @@ func TestRetentionDefaultsWhenAbsent(t *testing.T) {
 		t.Fatalf("interval default: got %s want %s", got, want)
 	}
 	cases := map[string]time.Duration{
-		"metrics":  336 * time.Hour,
-		"entities": 8760 * time.Hour,
-		"commands": 2160 * time.Hour,
-		"audit":    8760 * time.Hour,
+		"metrics":     336 * time.Hour,
+		"entities":    8760 * time.Hour,
+		"commands":    2160 * time.Hour,
+		"audit":       8760 * time.Hour,
+		"alarms":      8760 * time.Hour,
+		"annotations": 8760 * time.Hour,
+	}
+	// A hand-written expectation table cannot see its source grow: adding a
+	// stream to defaultStreamMaxAge without adding it here would leave the new
+	// default unpinned while this test stayed green. Fail instead.
+	for stream := range defaultStreamMaxAge {
+		if _, ok := cases[stream]; !ok {
+			t.Fatalf("defaultStreamMaxAge has %q but this test does not pin its default; add it to cases", stream)
+		}
 	}
 	for stream, wantAge := range cases {
 		eff := c.Retention.EffectiveStream(stream)

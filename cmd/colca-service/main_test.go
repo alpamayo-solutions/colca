@@ -48,11 +48,3 @@ func TestLocalDoorUsesServiceAndMountWithoutCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-
-func TestSplitMountDropsEmptySegments(t *testing.T) {
-	t.Parallel()
-	got := splitMount("/plant//line/")
-	if len(got) != 2 || got[0] != "plant" || got[1] != "line" {
-		t.Fatalf("splitMount = %#v", got)
-	}
-}

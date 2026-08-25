@@ -13,8 +13,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 type serviceDetails struct {
@@ -79,12 +82,14 @@ func run() error {
 	details.ID = identity.ULID
 	details.ColcaNodeID = identity.Node
 	details.SystemElementID = identity.Element
-	details.Hierarchy = splitMount(identity.Mount)
-	topicMount := identity.Mount
-	if topicMount != "" {
-		topicMount += "/"
-	}
-	topic := "colca/v1/_ServiceDetails/" + identity.Node + "/" + topicMount + "_service"
+	// Mount plus this service's NAME — the rule lives in the domain package
+	// because two languages need it and they must not each keep a version.
+	// Without the name every unplaced service publishes to one topic and
+	// erases the others (uns.ServiceContext).
+	recordContext := uns.ServiceContext(identity.Mount, details.Name)
+	details.Hierarchy = recordContext
+	topic := "colca/v1/_ServiceDetails/" + identity.Node + "/" +
+		strings.Join(recordContext, "/") + "/_service"
 	publish := func(payload any) error {
 		body := map[string]any{"topic": topic}
 		if payload != nil {
@@ -146,19 +151,6 @@ func self(client *http.Client, baseURL, name, mount string) (localIdentity, erro
 		return localIdentity{}, fmt.Errorf("invalid /self response for %q", name)
 	}
 	return identity, nil
-}
-
-func splitMount(mount string) []string {
-	if mount == "" {
-		return []string{}
-	}
-	var parts []string
-	for _, part := range bytes.Split([]byte(mount), []byte("/")) {
-		if len(part) > 0 {
-			parts = append(parts, string(part))
-		}
-	}
-	return parts
 }
 
 func localHeaders(req *http.Request, name, mount string) {

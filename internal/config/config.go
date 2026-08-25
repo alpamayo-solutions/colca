@@ -438,10 +438,16 @@ var defaultStreamMaxAge = map[string]time.Duration{
 	// and it is the record of what fired and who was told, which is why it
 	// sits with audit rather than with the samples it used to ride on.
 	"alarms": 8760 * time.Hour, // 365 days
-	// Annotations follow the metrics default (dataops-evaluator design §8):
-	// the annotation sink is expected to consume well within it, so there is
-	// no reason to retain longer than the samples the annotations describe.
-	"annotations": 336 * time.Hour, // 14 days
+	// An annotation is a record of what was observed, not a sample of it, so
+	// it sits with alarms and audit rather than with the metrics it describes.
+	// This is no longer only a sink-lag budget: `rebuild_projection` REPLAYS
+	// this stream, so the window is how far back a rebuild stays authoritative.
+	// A year is the deliberate bound — the projected table is the durable home
+	// of an annotation and is never pruned, and the historian holds the
+	// unlimited-retention role for sample data. The cost of the bound, stated
+	// so it is chosen rather than discovered: rebuilding a projection more than
+	// a year after an annotation was written will not restore that annotation.
+	"annotations": 8760 * time.Hour, // 365 days
 }
 
 // knownStreams are the only stream names the system ever produces
