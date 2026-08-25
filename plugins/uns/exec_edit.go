@@ -15,6 +15,12 @@
 //	                              element, its child elements and their models
 //	exec_edit_attachment.go  the one intent that writes the REGISTRY
 //	                              rather than the entity store
+//	exec_edit_annotation.go  the one intent whose class is an EVENT, not
+//	                              entity/definition state: it derives its own
+//	                              id and commits through PublishEvent, a
+//	                              separate write door, because
+//	                              IsCommandAuthoredState refuses it in
+//	                              PublishBatch's batch
 //
 // What stays here is what all of them share: the envelope and intent types,
 // the executor struct, and the small helpers more than one composer needs.
@@ -86,6 +92,19 @@ type editIntent struct {
 	MountSystemElement string                        `json:"mount_system_element_id"`
 	Models             []string                      `json:"models"`
 	Creates            map[string]string             `json:"creates"`
+	// The fields below are the `annotation` intent's own — see
+	// exec_edit_annotation.go. Action is shared (create/update/delete,
+	// the same vocabulary "model" uses for assign/unassign): an annotation
+	// intent is the only one whose composer never reads `entities`/`expected`
+	// at all, because its record is never KV-projected and there is nothing
+	// to compare a version against.
+	AnnotationID     string          `json:"annotation_id"`
+	AnnotationTypeID string          `json:"annotation_type_id"`
+	TimeStart        *float64        `json:"time_start"`
+	TimeEnd          *float64        `json:"time_end"`
+	Value            json.RawMessage `json:"value"`
+	SignalIDs        []string        `json:"signal_ids"`
+	Source           string          `json:"source"`
 }
 
 type editNodeAttachment struct {
@@ -247,6 +266,9 @@ func (w *EditExec) ExecuteWithWrites(
 	)
 	if code != 200 {
 		return w.remember(envelope.OperationID, digest, code, message, result, nil)
+	}
+	if intent.Type == "annotation" {
+		return w.executeAnnotationWrite(envelope.OperationID, digest, message, records)
 	}
 	batch, stateStart, err := w.withDurableReceipt(
 		envelope.OperationID, digest, message, "ok", records,

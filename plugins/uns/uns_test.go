@@ -23,6 +23,7 @@ func TestParseAndClass(t *testing.T) {
 		"_Metric": {ClassData, "metrics"}, "_EnrolledIdentity": {ClassEntity, "entities"},
 		"_AlarmStateChange":         {ClassAlarm, "alarms"},
 		"_NotificationDispatched":   {ClassAlarm, "alarms"},
+		"_Annotation":               {ClassAnnotation, "annotations"},
 		"_AlarmNotificationConfig":  {ClassEntity, "entities"},
 		"_NotificationConfigStatus": {ClassEntity, "entities"},
 		"_Node":               {ClassEntity, "entities"}, "_ServiceDetails": {ClassEntity, "entities"},
@@ -368,6 +369,74 @@ func TestAlarmManifestName(t *testing.T) {
 	class, ok := ClassFromManifest("alarm")
 	if !ok || class != ClassAlarm {
 		t.Fatalf("ClassFromManifest(\"alarm\") = (%v, %v), want (ClassAlarm, true)", class, ok)
+	}
+}
+
+// Dataops-evaluator design §8. An annotation instance leaves KV-projected
+// state entirely, mirroring the alarm precedent for the same volume reason: a
+// part-cycle producer at 1 part/30 s is ~1M annotations/year/machine.
+func TestAnnotationContractRoutesToTheAnnotationsStream(t *testing.T) {
+	class := ClassOf("_Annotation")
+	if class != ClassAnnotation {
+		t.Fatalf("ClassOf(_Annotation) = %v, want ClassAnnotation", class)
+	}
+	if got := StreamFor(class); got != "annotations" {
+		t.Fatalf("StreamFor(ClassOf(_Annotation)) = %q, want %q", got, "annotations")
+	}
+}
+
+// Design §8. An annotation is an EVENT, not state: create, update (setting
+// time_end) and delete are all appends carrying the same deterministic id,
+// applied last-write-wins in stream order — never KV-projected, never
+// retained.
+func TestAnnotationIsAnEventNotState(t *testing.T) {
+	if IsState(ClassAnnotation) {
+		t.Fatal("IsState(ClassAnnotation): an annotation would KV-project at a never-reused path and be retained forever")
+	}
+	if IsOwnedState(ClassAnnotation) {
+		t.Fatal("IsOwnedState(ClassAnnotation): every ancestor would KV-project them too")
+	}
+	if IsAudit(ClassAnnotation) {
+		t.Fatal("IsAudit(ClassAnnotation): audit means security event, not an annotation instance")
+	}
+	for name, got := range map[string]bool{
+		"IsCommand":              IsCommand(ClassAnnotation),
+		"IsDefinition":           IsDefinition(ClassAnnotation),
+		"IsCommandAuthoredState": IsCommandAuthoredState(ClassAnnotation),
+		"IsNodeLocal":            IsNodeLocal(ClassAnnotation),
+		"NeedsStateRefresh":      NeedsStateRefresh(ClassAnnotation),
+	} {
+		if got {
+			t.Fatalf("%s(ClassAnnotation) = true, want false", name)
+		}
+	}
+	if !IsKnown(ClassAnnotation) {
+		t.Fatal("IsKnown(ClassAnnotation) = false: the validated namespace would reject every annotation")
+	}
+}
+
+// Design §8. Annotations rise, and only on their own stream — a child
+// offering one on `metrics` is refused at the parent's door.
+func TestAnnotationRisesOnItsOwnStreamOnly(t *testing.T) {
+	if !FlowsUp(ClassAnnotation) {
+		t.Fatal("FlowsUp(ClassAnnotation) = false: an annotation would never reach a parent")
+	}
+	p, err := Parse("colca/v1/_Annotation/n-edge1/m1/press1/01JANNOTATIONULID")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !MatchesUplinkStream(ClassAnnotation, p, "annotations") {
+		t.Fatal("an annotation was refused on its own stream")
+	}
+	if MatchesUplinkStream(ClassAnnotation, p, "metrics") {
+		t.Fatal("an annotation replicated upward on metrics was accepted")
+	}
+}
+
+func TestAnnotationManifestName(t *testing.T) {
+	class, ok := ClassFromManifest("annotation")
+	if !ok || class != ClassAnnotation {
+		t.Fatalf("ClassFromManifest(\"annotation\") = (%v, %v), want (ClassAnnotation, true)", class, ok)
 	}
 }
 

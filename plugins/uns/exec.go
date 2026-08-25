@@ -27,11 +27,24 @@ type EntityStore interface {
 	// of them do, and the returned positions are what a command acknowledgement
 	// carries so an API can wait for its exact projected state.
 	//
-	// This is the ONLY way an executor writes. There is deliberately no
-	// per-record door beside it: one existed, and a command that failed at its
-	// thirtieth record left twenty-nine committed and told the caller only that
-	// something had gone wrong.
+	// This is the ONLY way an executor authors STATE. There is deliberately no
+	// per-record door beside it for that: one existed, and a command that
+	// failed at its thirtieth record left twenty-nine committed and told the
+	// caller only that something had gone wrong.
+	//
+	// PublishBatch refuses anything that is not command-authored STATE
+	// (uns.IsCommandAuthoredState) — an annotation is never state
+	// (IsState(ClassAnnotation) is false, dataops-evaluator design §8), so it
+	// cannot ride this door. PublishEvent below is the separate one it does
+	// ride.
 	PublishBatch(records []StateRecord) ([]StateWrite, error)
+	// PublishEvent commits ONE append-only event record a command executor
+	// authored directly — the door for a class that is never KV-projected and
+	// never retained (uns.IsCommandAuthoredEvent; ClassAnnotation today). There
+	// is no batch here because there is nothing to make atomic WITH: an event
+	// carries no current value anything downstream compares against, so one
+	// event is one commit, unlike PublishBatch's whole-command transition.
+	PublishEvent(record StateRecord) (StateWrite, error)
 	// NodeID is the identity this node publishes under.
 	NodeID() string
 }

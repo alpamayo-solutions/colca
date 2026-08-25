@@ -17,6 +17,9 @@ type fakeStore struct {
 	fail          map[string]string // topic → error to return from Publish
 	offset        uint64
 	batchCalls    int
+	// eventCalls counts PublishEvent invocations — the door annotation
+	// records take instead of PublishBatch (see PublishEvent below).
+	eventCalls int
 }
 
 func newStore(node string) *fakeStore {
@@ -110,6 +113,26 @@ func (f *fakeStore) PublishBatch(records []StateRecord) ([]StateWrite, error) {
 		writes = append(writes, write)
 	}
 	return writes, nil
+}
+
+// PublishEvent mirrors the engine's event door (ingestAdminEvent): exactly
+// one record, and — unlike put(), which the fake's PublishBatch uses and
+// which always KV-projects, correctly for the entity/definition classes that
+// door exists for — this NEVER writes f.records, because the whole point of
+// this door is a class ingestAdminEvent never KV-projects either. A test that
+// calls PublishEvent and then asserts KVGet finds nothing is exercising the
+// real distinction, not a fake artifact of this helper.
+func (f *fakeStore) PublishEvent(record StateRecord) (StateWrite, error) {
+	if msg, bad := f.fail[record.Topic]; bad {
+		return StateWrite{}, errString(msg)
+	}
+	parsed, err := Parse(record.Topic)
+	if err != nil {
+		return StateWrite{}, err
+	}
+	f.offset++
+	f.eventCalls++
+	return StateWrite{Stream: StreamFor(ClassOf(parsed.Contract)), Offset: f.offset, Topic: record.Topic}, nil
 }
 
 // seed puts one record in place as setup and returns its coordinates. It goes

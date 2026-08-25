@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 )
 
 // The Go half of the shared metric-row vectors (the Python half is
@@ -28,6 +29,14 @@ type metricVectors struct {
 		Why     string          `json:"why"`
 		Payload json.RawMessage `json:"payload"`
 	} `json:"refused"`
+	Timestamps struct {
+		StoreTsMs int64 `json:"store_ts_ms"`
+		Cases     []struct {
+			Why     string          `json:"why"`
+			Payload json.RawMessage `json:"payload"`
+			Stored  string          `json:"stored"`
+		} `json:"cases"`
+	} `json:"timestamps"`
 }
 
 func loadVectors(t *testing.T) metricVectors {
@@ -42,6 +51,9 @@ func loadVectors(t *testing.T) metricVectors {
 	}
 	if len(vectors.Cases) == 0 {
 		t.Fatalf("%s carries no cases — the vectors would pass vacuously", vectorPath)
+	}
+	if len(vectors.Timestamps.Cases) == 0 {
+		t.Fatalf("%s carries no timestamps.cases — the wire timestamp unit would go unpinned", vectorPath)
 	}
 	return vectors
 }
@@ -85,6 +97,30 @@ func TestGoldenVectorsThatAreNotMeasurements(t *testing.T) {
 		t.Run(tc.Why, func(t *testing.T) {
 			if _, err := RowFrom("colca/v1/_Metric/m1/t", tc.Payload, 1); err != ErrNotAMeasurement {
 				t.Fatalf("err = %v, want ErrNotAMeasurement", err)
+			}
+		})
+	}
+}
+
+// TestGoldenVectorsPinTheWireTimestampUnit is the Go half of the
+// Metric.timestamp wire contract: unix seconds, float, fractional part
+// allowed. Nothing on the Python side re-decodes this value (the API reads
+// timestamps back out of Postgres, already a datetime), so this is the only
+// suite that can catch a unit mismatch here.
+func TestGoldenVectorsPinTheWireTimestampUnit(t *testing.T) {
+	vectors := loadVectors(t)
+	for _, tc := range vectors.Timestamps.Cases {
+		t.Run(tc.Why, func(t *testing.T) {
+			row, err := RowFrom("colca/v1/_Metric/m1/press3/temp", tc.Payload, vectors.Timestamps.StoreTsMs)
+			if err != nil {
+				t.Fatalf("RowFrom: %v", err)
+			}
+			want, err := time.Parse(time.RFC3339Nano, tc.Stored)
+			if err != nil {
+				t.Fatalf("vector timestamp %q: %v", tc.Stored, err)
+			}
+			if !row.Timestamp.Equal(want) {
+				t.Fatalf("Timestamp = %s, want %s (payload %s)", row.Timestamp.Format(time.RFC3339Nano), tc.Stored, tc.Payload)
 			}
 		})
 	}

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -94,13 +95,18 @@ func nodeFromTopic(topic string) string {
 	return parts[3]
 }
 
+// timestampOf decodes the payload's own timestamp, which is the wire unit
+// every publisher uses: unix seconds, float, fractional part allowed
+// (franzmq's default `datetime.now(UTC).timestamp()`; connector and dataops
+// both encode this way too). The store-TS fallback is a different clock
+// entirely — colca's own ingest time, in epoch-MILLISECONDS — and keeps its
+// own unit rather than being coerced to match.
 func timestampOf(payload *json.Number, storeTS int64) time.Time {
 	if payload != nil {
-		if ms, err := payload.Int64(); err == nil {
-			return time.UnixMilli(ms).UTC()
-		}
 		if f, err := payload.Float64(); err == nil {
-			return time.UnixMilli(int64(f)).UTC()
+			sec := math.Floor(f)
+			nsec := int64(math.Round((f - sec) * float64(time.Second)))
+			return time.Unix(int64(sec), nsec).UTC()
 		}
 	}
 	return time.UnixMilli(storeTS).UTC()

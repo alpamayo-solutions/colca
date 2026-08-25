@@ -12,14 +12,45 @@ import (
 // The sink's contract is fixed by a table that already exists and that Grafana
 // and the API's history endpoints already read. `historian_metric` carries the
 // value columns and a unique index on (signal_id, timestamp); the deleted Kafka
-// writer used ON CONFLICT DO NOTHING against exactly that index, and so does
-// this. That is the second net behind the marker: a redelivered batch cannot
-// double-write even if the marker were somehow lost.
+// writer used ON CONFLICT DO NOTHING against exactly that index. This uses
+// ON CONFLICT DO UPDATE instead: metrics are idempotent by (signal_id,
+// timestamp), not by revision (design §6), so the evaluator can recompute a
+// window and safely re-publish the same points — the historian must end up
+// with the NEW value, not the first one it ever saw. This is still the second
+// net behind the marker: a redelivered batch cannot double-write even if the
+// marker were somehow lost, it just now overwrites in place rather than
+// silently dropping.
+//
+// Every value column is written unconditionally from EXCLUDED, not just the
+// one the new row set. A Row carries at most one of Number/Text/Bool/JSON;
+// the others arrive as NULL parameters (see nullable/nullableJSON below). If
+// the SET list only touched the incoming row's own column, a value-type
+// change at the same (signal_id, timestamp) — e.g. a signal that used to be a
+// number now publishing text — would leave the stale value_number in place
+// alongside the new value_text, corrupting the "exactly one column is set"
+// invariant the API's reader depends on. Setting all four every time keeps
+// that invariant no matter which column, if any, changes.
+//
+// The WHERE clause is the guard against churn: an identical redelivery must
+// not write a new row version (no update, no replication, no cost) — only a
+// genuine value change may. IS DISTINCT FROM treats NULL <> NULL as "not
+// distinct", so a redelivery that still carries three NULL value columns and
+// one unchanged value correctly matches as identical.
 const insertMetric = `
 INSERT INTO historian_metric
     (timestamp, value_json, value_number, value_text, value_bool, colca_node_id, signal_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (signal_id, timestamp) DO NOTHING`
+ON CONFLICT (signal_id, timestamp) DO UPDATE SET
+    value_json = EXCLUDED.value_json,
+    value_number = EXCLUDED.value_number,
+    value_text = EXCLUDED.value_text,
+    value_bool = EXCLUDED.value_bool,
+    colca_node_id = EXCLUDED.colca_node_id
+WHERE (historian_metric.value_json, historian_metric.value_number, historian_metric.value_text,
+       historian_metric.value_bool, historian_metric.colca_node_id)
+      IS DISTINCT FROM
+      (EXCLUDED.value_json, EXCLUDED.value_number, EXCLUDED.value_text,
+       EXCLUDED.value_bool, EXCLUDED.colca_node_id)`
 
 // The marker lives beside the rows it describes, in the same database and the
 // same transaction — the guarantee, not a convenience (projector design §4).

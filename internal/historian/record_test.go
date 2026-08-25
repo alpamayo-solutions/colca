@@ -76,13 +76,30 @@ func TestTheRecordsOwnTimestampWins(t *testing.T) {
 	// A metric carries when it was MEASURED; the store's ts is when it was
 	// ingested. Historising the latter would silently re-date everything that
 	// arrives after an outage.
+	//
+	// The payload timestamp is unix SECONDS (the wire unit every publisher
+	// uses — franzmq's default, connector, dataops), not milliseconds.
 	row, err := RowFrom("colca/v1/_Metric/m1/t",
-		[]byte(`{"signal_id":"s","value":1,"timestamp":1700000000000}`), 1755600000000)
+		[]byte(`{"signal_id":"s","value":1,"timestamp":1700000000}`), 1755600000000)
 	if err != nil {
 		t.Fatalf("RowFrom: %v", err)
 	}
 	if got := row.Timestamp.UnixMilli(); got != 1700000000000 {
-		t.Fatalf("Timestamp = %d, want the payload's 1700000000000", got)
+		t.Fatalf("Timestamp = %d, want the payload's 1700000000 (seconds) as 1700000000000ms", got)
+	}
+}
+
+// TestARecordsFractionalSecondTimestampSurvives is the direct regression test
+// for the wire unit: sub-second precision must round-trip, which a decoder
+// that (mis)treated the value as milliseconds would silently truncate away.
+func TestARecordsFractionalSecondTimestampSurvives(t *testing.T) {
+	row, err := RowFrom("colca/v1/_Metric/m1/t",
+		[]byte(`{"signal_id":"s","value":1,"timestamp":1700000000.25}`), 1)
+	if err != nil {
+		t.Fatalf("RowFrom: %v", err)
+	}
+	if got := row.Timestamp.UnixNano(); got != 1700000000250000000 {
+		t.Fatalf("Timestamp = %d ns, want 1700000000250000000 (1700000000.25s)", got)
 	}
 }
 

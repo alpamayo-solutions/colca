@@ -1902,6 +1902,168 @@ func TestTheLocalHandlerRefusesToAckAnotherServicesCursor(t *testing.T) {
 	}
 }
 
+// TestTheLocalHandlerDeletesItsOwnCursor pins the whole point of cursor
+// delete: the dataops evaluator mints a fresh "generation" cursor whenever it
+// rebuilds (colca cursors only move forward, so re-reading a stream means a
+// new cursor name), and without a way to retire the one it is replacing that
+// old cursor lingers forever and holds back retention pruning. This proves
+// deleting a cursor actually erases its recorded position — CursorGet reports
+// the pre-ack default again — not merely that the request returns 200.
+func TestTheLocalHandlerDeletesItsOwnCursor(t *testing.T) {
+	h := newLocalHandler(t)
+	registerLocal(t, h, "connector-opcua", "")
+	cursor := uns.LocalCursorPrefix + "connector-opcua/gen1"
+
+	// Presence assertion pinning the same query the absence check below
+	// relies on: ack the cursor forward first, so CursorGet is NOT already
+	// sitting at the default — proving the later "back to default" read
+	// really observed the delete, not a cursor that was never touched.
+	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":5}`, cursor)
+	ackReq := httptest.NewRequest("POST", "/ack", strings.NewReader(ackBody))
+	ackReq.Header.Set("X-Colca-Service", "connector-opcua")
+	ackRec := httptest.NewRecorder()
+	h.ServeHTTP(ackRec, ackReq)
+	if ackRec.Code != http.StatusOK {
+		t.Fatalf("seeding the cursor via /ack = %d: %s", ackRec.Code, ackRec.Body.String())
+	}
+	if got := h.eng.Store().CursorGet(cursor, "metrics"); got != 6 {
+		t.Fatalf("cursor after seed ack = %d, want 6 (offset+1) — the presence this test's delete assertion depends on", got)
+	}
+
+	delBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","delete":true}`, cursor)
+	delReq := httptest.NewRequest("POST", "/ack", strings.NewReader(delBody))
+	delReq.Header.Set("X-Colca-Service", "connector-opcua")
+	delRec := httptest.NewRecorder()
+	h.ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("POST /ack delete=true = %d: %s", delRec.Code, delRec.Body.String())
+	}
+	var out struct {
+		Deleted bool `json:"deleted"`
+	}
+	if err := json.NewDecoder(delRec.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Deleted {
+		t.Fatal(`POST /ack delete=true reported deleted=false`)
+	}
+
+	if got := h.eng.Store().CursorGet(cursor, "metrics"); got != 1 {
+		t.Fatalf("cursor after delete = %d, want 1 (the never-acked default) — delete did not erase the position", got)
+	}
+}
+
+// TestTheLocalHandlerRefusesToDeleteAnotherServicesCursor mirrors the ack
+// ownership guard: one local service must never be able to erase another's
+// cursor. This also pins that the refusal is recorded on the audit stream,
+// which the plain ack-denial test above does not check.
+func TestTheLocalHandlerRefusesToDeleteAnotherServicesCursor(t *testing.T) {
+	h := newLocalHandler(t)
+	registerLocal(t, h, "connector-a", "")
+	registerLocal(t, h, "connector-b", "")
+	cursor := uns.LocalCursorPrefix + "connector-a/gen1"
+
+	// Give connector-a's cursor a real position first, so a would-be delete
+	// that silently succeeded would be observable — the presence this test's
+	// "still there" assertion depends on.
+	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":2}`, cursor)
+	ackReq := httptest.NewRequest("POST", "/ack", strings.NewReader(ackBody))
+	ackReq.Header.Set("X-Colca-Service", "connector-a")
+	ackRec := httptest.NewRecorder()
+	h.ServeHTTP(ackRec, ackReq)
+	if ackRec.Code != http.StatusOK {
+		t.Fatalf("seeding connector-a's cursor = %d: %s", ackRec.Code, ackRec.Body.String())
+	}
+
+	before, _, err := h.eng.Store().Read("audit", 1, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","delete":true}`, cursor)
+	req := httptest.NewRequest("POST", "/ack", strings.NewReader(body))
+	req.Header.Set("X-Colca-Service", "connector-b")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("connector-b deleting connector-a's cursor = %d, want 403", rec.Code)
+	}
+	if got := h.eng.Store().CursorGet(cursor, "metrics"); got != 3 {
+		t.Fatalf("connector-a's cursor after the refused delete = %d, want 3 (untouched) — the refusal must be a no-op", got)
+	}
+
+	after, _, err := h.eng.Store().Read("audit", 1, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before)+1 {
+		t.Fatalf("audit records = %d, want %d (one denial appended)", len(after), len(before)+1)
+	}
+	var payload map[string]any
+	last := after[len(after)-1]
+	if err := json.Unmarshal(last.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["outcome"] != "denied" || payload["operation"] != "cursor_delete" || payload["reason_code"] != "cursor_denied" {
+		t.Fatalf("audit payload = %#v, want outcome=denied operation=cursor_delete reason_code=cursor_denied", payload)
+	}
+}
+
+// TestTheLocalHandlerAcksFreshAfterDeletingACursor proves the actual use
+// case: after a delete, re-acking the SAME cursor name starts a brand-new
+// cursor rather than resuming wherever the retired one left off.
+func TestTheLocalHandlerAcksFreshAfterDeletingACursor(t *testing.T) {
+	h := newLocalHandler(t)
+	registerLocal(t, h, "connector-opcua", "")
+	cursor := uns.LocalCursorPrefix + "connector-opcua/gen1"
+
+	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":9}`, cursor)
+	ackReq := httptest.NewRequest("POST", "/ack", strings.NewReader(ackBody))
+	ackReq.Header.Set("X-Colca-Service", "connector-opcua")
+	ackRec := httptest.NewRecorder()
+	h.ServeHTTP(ackRec, ackReq)
+	if ackRec.Code != http.StatusOK {
+		t.Fatalf("seeding the cursor via /ack = %d: %s", ackRec.Code, ackRec.Body.String())
+	}
+	if got := h.eng.Store().CursorGet(cursor, "metrics"); got != 10 {
+		t.Fatalf("cursor after seed ack = %d, want 10", got)
+	}
+
+	delBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","delete":true}`, cursor)
+	delReq := httptest.NewRequest("POST", "/ack", strings.NewReader(delBody))
+	delReq.Header.Set("X-Colca-Service", "connector-opcua")
+	delRec := httptest.NewRecorder()
+	h.ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("POST /ack delete=true = %d: %s", delRec.Code, delRec.Body.String())
+	}
+
+	// A fresh ack under the exact same cursor name must behave as though the
+	// name had never been used: it moves (CursorAck's monotonic guard compares
+	// against the default of 1, not against the erased position of 10).
+	reAckBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":1}`, cursor)
+	reAckReq := httptest.NewRequest("POST", "/ack", strings.NewReader(reAckBody))
+	reAckReq.Header.Set("X-Colca-Service", "connector-opcua")
+	reAckRec := httptest.NewRecorder()
+	h.ServeHTTP(reAckRec, reAckReq)
+	if reAckRec.Code != http.StatusOK {
+		t.Fatalf("re-ack after delete = %d: %s", reAckRec.Code, reAckRec.Body.String())
+	}
+	var out struct {
+		Moved bool `json:"moved"`
+	}
+	if err := json.NewDecoder(reAckRec.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Moved {
+		t.Fatal("re-ack after delete reported moved=false — the deleted cursor's old position is still being compared against")
+	}
+	if got := h.eng.Store().CursorGet(cursor, "metrics"); got != 2 {
+		t.Fatalf("cursor after re-ack = %d, want 2 (offset 1 + 1) — a stale position survived the delete", got)
+	}
+}
+
 // TestOwnsCursorIsFailClosedOnANilEntry pins ownsCursor's own nil guard
 // directly, rather than relying only on the "c.entry != nil && !ownsCursor"
 // pattern at its call sites. uns.Entry.CursorPrefix is documented as unsafe

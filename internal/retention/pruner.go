@@ -29,7 +29,7 @@ import (
 // so a pruned one is a node that no longer knows what a type or a group is,
 // with nowhere to ask. It is compacted instead — latest per path — which is a
 // different algorithm and lives outside this policy loop.
-var streams = []string{"metrics", "entities", "commands", "audit", "alarms"}
+var streams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations"}
 
 // definitionsStream is reclaimed by compaction instead (compactDefinitions).
 const definitionsStream = "definitions"

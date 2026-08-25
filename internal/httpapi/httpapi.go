@@ -504,21 +504,43 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// next offset to read — hence offset+1. Cursors are namespaced by
 	// uns.Entry.CursorPrefix ({ulid}/... for a machine or human, c/{name}/...
 	// for a local service) so one identity can never move another's cursor.
+	//
+	// "delete": true retires the cursor instead of moving it (mutually
+	// exclusive with "offset" — when set, offset is ignored and no ack
+	// happens). This is what lets a consumer that mints a fresh cursor name
+	// on every rebuild (the dataops evaluator's "generation" cursors: colca
+	// cursors only move forward, so re-reading a stream needs a new name)
+	// retire the one it is replacing, instead of leaving it to linger forever
+	// and hold back retention pruning. Same ownership guard as the ack path:
+	// an identity may only delete cursors under its own prefix.
 	mux.HandleFunc("POST /ack", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 		var in struct {
 			Cursor string `json:"cursor"`
 			Stream string `json:"stream"`
 			Offset uint64 `json:"offset"`
+			Delete bool   `json:"delete"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
+		op := "ack"
+		if in.Delete {
+			op = "cursor_delete"
+		}
 		if c.entry != nil && !ownsCursor(c.entry, in.Cursor) {
-			_ = e.RecordDenial(engine.AuditDenial{Operation: "ack", ReasonCode: "cursor_denied",
+			_ = e.RecordDenial(engine.AuditDenial{Operation: op, ReasonCode: "cursor_denied",
 				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
 				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream, "cursor": in.Cursor}})
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: this identity's cursors are named " + c.entry.CursorPrefix() + "..."})
+			return
+		}
+		if in.Delete {
+			if err := e.Store().CursorDelete(in.Cursor, in.Stream); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 			return
 		}
 		moved := e.Store().CursorAck(in.Cursor, in.Stream, in.Offset+1)

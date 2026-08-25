@@ -671,6 +671,16 @@ func TestAlarmsStreamExists(t *testing.T) {
 	}
 }
 
+// Design §8 (dataops-evaluator). `annotations` is a stream the store
+// maintains offsets for, same precedent as `alarms` above.
+func TestAnnotationsStreamExists(t *testing.T) {
+	s := mustOpen(t)
+	if got := s.NextOffset("annotations"); got != 1 {
+		t.Fatalf("NextOffset(annotations) = %d on a fresh store, want 1 "+
+			"(0 means the store maintains no offsets for it)", got)
+	}
+}
+
 // Streams is the stream set every other package asks for rather than
 // restates. The copy matters: a caller that mutated the returned slice would
 // silently reshape what every derived check covers, and a check that covers

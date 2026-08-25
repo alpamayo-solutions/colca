@@ -793,6 +793,75 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 	return results, nil
 }
 
+// ingestAdminEvent commits ONE append-only event a command executor authored
+// directly (EditExec's annotation intent today, via PublishEvent) — the
+// sibling of ingestAdminStateBatch above for uns.IsCommandAuthoredEvent
+// classes rather than uns.IsCommandAuthoredState ones.
+//
+// It cannot reuse ingestAdminStateBatch: that path unconditionally treats
+// every record as KV-projecting state (it always sets KVPath/KVNode), which
+// is exactly right for the entity/definition classes it admits and exactly
+// wrong for an event class — ClassAnnotation is deliberately excluded from
+// IsState (dataops-evaluator design §8) precisely so a part-cycle producer's
+// ~1M annotations/year/machine never grows a KV entry. So this path never
+// sets KVPath at all, and it commits exactly one record: an event carries no
+// current value for anything else to be atomic WITH, unlike a command's
+// whole entity-graph transition.
+func (e *Engine) ingestAdminEvent(record uns.StateRecord, attribution Attribution) (Result, error) {
+	if !uns.IsUns(record.Topic) {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
+		return Result{}, fmt.Errorf("admin event record must be colca/#")
+	}
+	parsed, err := uns.Parse(record.Topic)
+	if err != nil {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
+		return Result{}, fmt.Errorf("admin event record: %w", err)
+	}
+	class := e.ClassOf(parsed.Contract)
+	if !uns.IsKnown(class) {
+		e.metrics.RejectPublish(metrics.ReasonGrammar)
+		return Result{}, fmt.Errorf("admin event record: unknown contract %s", parsed.Contract)
+	}
+	if !uns.IsCommandAuthoredEvent(class) {
+		e.metrics.RejectPublish(metrics.ReasonValidation)
+		return Result{}, fmt.Errorf("admin event record (%s): %s is not an event a command may author",
+			record.Topic, parsed.Contract)
+	}
+	if parsed.NodeID != e.cfg.ULID {
+		e.metrics.RejectPublish(metrics.ReasonIdentity)
+		return Result{}, fmt.Errorf("admin event record: author %q must equal local node %q", parsed.NodeID, e.cfg.ULID)
+	}
+	if len(record.Payload) == 0 {
+		e.metrics.RejectPublish(metrics.ReasonValidation)
+		return Result{}, fmt.Errorf("admin event record (%s): an event cannot tombstone", record.Topic)
+	}
+	if err := e.validateContract(parsed.Contract, record.Payload); err != nil {
+		e.metrics.RejectPublish(metrics.ReasonValidation)
+		return Result{}, fmt.Errorf("admin event record (%s): %w", record.Topic, err)
+	}
+
+	stream := uns.StreamFor(class)
+	ts := time.Now().UnixMilli()
+	storeRecord := store.Record{
+		Topic: record.Topic, Payload: record.Payload, TS: ts,
+		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
+		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
+		// Deliberately no KVPath/KVNode: this class is never state (IsState is
+		// false), so there is nothing to project and nothing to retract.
+	}
+	first, _, err := e.store.Append(stream, []store.Record{storeRecord})
+	if err != nil {
+		return Result{}, err
+	}
+	e.metrics.IngestRecord(stream)
+	e.log.Debug("atomic event ingest", "stream", stream, "offset", first, "topic", record.Topic)
+	e.elements.Observe(parsed.Contract, record.Topic, record.Payload)
+	if e.deliver != nil {
+		e.deliver(record.Topic, record.Payload, retainFor(class))
+	}
+	return Result{Persisted: true, Stream: stream, Offset: first, Topic: record.Topic}, nil
+}
+
 // IngestRefresh is the retention pruner's §6.5 state-refresh entry (spec §6.5
 // [delta]) — an admin-grade publish that applies ONLY IF the KV entry for the
 // topic's (contract, path, node) still sits at ifKVOffset, evaluated as a true

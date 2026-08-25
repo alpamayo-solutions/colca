@@ -295,7 +295,9 @@ func ackOnly(topic string) bool {
 // undelivered ack blocks a node move, and their volume is the smallest of all.
 // Then alarms and entities — small in volume, high in value, and the two the
 // operator is waiting for after an outage. Then audit, low-volume and
-// long-retention.
+// long-retention. Then annotations — dataops-evaluator design §8: still ahead
+// of the metrics backlog, so a producer's output reaches the root promptly,
+// but behind audit because a security event outranks it.
 //
 // `definitions` is deliberately absent and must stay absent (definition-stream
 // design §4): definitions descend. A child pushing them upward would let a
@@ -308,6 +310,7 @@ var priorityLanes = []struct {
 	{"alarms", nil},
 	{"entities", nil},
 	{"audit", nil},
+	{"annotations", nil},
 }
 
 // uplinkStreams is exactly the set RunUplink pushes: every priority lane plus

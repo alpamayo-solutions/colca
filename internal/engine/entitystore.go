@@ -138,3 +138,16 @@ func (s *entityStore) PublishBatch(records []uns.StateRecord) ([]uns.StateWrite,
 	}
 	return writes, nil
 }
+
+// PublishEvent is PublishBatch's sibling for a class a command executor may
+// append but never author as state (uns.IsCommandAuthoredEvent) — an
+// annotation today. See ingestAdminEvent for why this cannot reuse
+// ingestAdminStateBatch: it never KV-projects and it is exactly one record,
+// never a multi-record transition.
+func (s *entityStore) PublishEvent(record uns.StateRecord) (uns.StateWrite, error) {
+	result, err := s.e.ingestAdminEvent(record, Attribution{WrittenBy: "admin"})
+	if err != nil {
+		return uns.StateWrite{}, err
+	}
+	return uns.StateWrite{Stream: result.Stream, Offset: result.Offset, Topic: result.Topic}, nil
+}

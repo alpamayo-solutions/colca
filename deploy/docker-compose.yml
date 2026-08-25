@@ -214,6 +214,57 @@ services:
       retries: 30
     networks: [svc-edge2]
 
+  # The dataops evaluator, running on edge1 (dataops-evaluator design §3/§11).
+  #
+  # Its OWN profile, like keycloak and grantsync, for the same reason: the
+  # default world — and every chaos/soak run — stays exactly the topology it
+  # was, and only a suite (or an operator) that asks for it by name pays for
+  # the image:
+  #   docker compose --profile dataops up -d edge1-dataops
+  # `dev.py test system` resolves ${DATAOPS_IMAGE} the way it already resolves
+  # ${COLCA_IMAGE}; `dev.py world up --dataops` starts it by hand.
+  #
+  # It is a LOCAL SERVICE of edge1 and reaches it ONLY through the local doors
+  # — plaintext HTTP :80 and MQTT :1883, neither of which is published to the
+  # host ("Node doors"): reachability from inside the deployment's
+  # own network IS the credential. Unplaced (no MOUNT), so it is bound to the
+  # NODE — a position like any other (architecture principle 6).
+  #
+  # The shape mirrors what `colca generate` emits for a `modules.dataops:
+  # true` node (node-manager/.../templates/compose/dataops.yaml.j2): depends_on
+  # the broker only, no historian DB_* vars (the historian is optional and
+  # read-only — design §7), customer producers bind-mounted read-only, and the
+  # SQLite input buffer on its own named volume so a restart replays from the
+  # buffer instead of re-reading the whole retained window.
+  #
+  # svc-edge1 is edge1's sidecar network (edge1 ↔ its own local services); it
+  # carries no node↔node traffic, so the chaos suites' "nothing leaks around a
+  # severed link" invariant is untouched.
+  edge1-dataops:
+    image: ${DATAOPS_IMAGE:-dataops:dev}
+    profiles: ["dataops"]
+    restart: unless-stopped
+    depends_on: [edge1]
+    environment:
+      NAME: dataops
+      COLCA_HTTP: http://edge1:80
+      MQTT_IP: edge1
+      MQTT_PORT: "1883"
+      HTTP_PORT: "80"
+      DATAOPS_BUFFER_PATH: /var/lib/dataops/buffer.sqlite3
+      DATAOPS_POLL_INTERVAL_S: "0.5"
+      LOG_LEVEL: INFO
+    volumes:
+      - "../../tests/system/fixtures/dataops:/opt/dataops/customer-modules:ro"
+      - edge1-dataops-data:/var/lib/dataops
+    healthcheck:
+      test: ["CMD", "python", "-c", "import dataops.service"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks: [svc-edge1]
+
   m1:
     image: ${COLCA_IMAGE:-colca:dev}
     entrypoint: ["/usr/local/bin/colca-machine"]
@@ -325,6 +376,7 @@ volumes:
   site1-notifications-data: {}
   edge1-notifications-data: {}
   edge2-notifications-data: {}
+  edge1-dataops-data: {}
 
 networks:
   host-edge1: {}

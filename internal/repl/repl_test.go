@@ -576,6 +576,27 @@ func TestUplinkDrainsSmallLanesBeforeTheMetricsBacklog(t *testing.T) {
 	}
 }
 
+// Dataops-evaluator design §8. Annotations get the same promptness guarantee
+// as alarms: the lane drains ahead of the metrics backlog, so a producer's
+// output reaches the root without waiting behind a large sample catch-up.
+func TestUplinkDrainsAnnotationsBeforeTheMetricsBacklog(t *testing.T) {
+	cs, ps, _, start := uplinkPair(t)
+	const annotationBacklog = 3 * replBatch
+	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 5*replBatch)
+	seed(t, cs, "annotations", "colca/v1/_Annotation/m1/m1/press1/a%d", annotationBacklog)
+
+	start()
+	waitFor(t, "the annotation backlog to reach the parent", 20*time.Second, func() bool {
+		return ps.NextOffset("annotations") == uint64(annotationBacklog)+1
+	})
+
+	if got := ps.NextOffset("metrics") - 1; got > uint64(replBatch) {
+		t.Fatalf("%d metric records reached the parent before the %d-record annotation "+
+			"backlog finished, want at most one %d-record floor batch — the annotation "+
+			"lane is not draining ahead of metrics", got, annotationBacklog, replBatch)
+	}
+}
+
 // Design §4, the floor. A lane that never empties must not hold the metrics
 // cursor still: once the local pruner passes it the backlog is gone and only
 // a gap marker remains, so lane pressure would become silent data loss.

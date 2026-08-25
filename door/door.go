@@ -235,6 +235,37 @@ func (c *Client) Ack(ctx context.Context, stream, cursor string, offset int64) (
 	return out.Moved, nil
 }
 
+// CursorDelete retires a cursor instead of moving it. It is what a consumer
+// that mints a fresh cursor name whenever it rebuilds (colca cursors only
+// move forward, so re-reading a stream needs a new name) uses to retire the
+// generation it is replacing — otherwise the old cursor lingers forever and
+// holds back retention pruning for every node that ever read it. Deleting an
+// absent or already-deleted cursor is a no-op, so a caller may call this
+// unconditionally during cleanup without first checking whether the cursor
+// still exists.
+func (c *Client) CursorDelete(ctx context.Context, stream, cursor string) error {
+	body, err := json.Marshal(map[string]any{"cursor": cursor, "stream": stream, "delete": true})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/ack", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.do(req)
+	if err != nil {
+		return fmt.Errorf("deleting cursor %s@%s: %w", cursor, stream, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		reason, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("deleting cursor %s@%s: HTTP %d: %s", cursor, stream, resp.StatusCode,
+			truncate(reason, 300))
+	}
+	return nil
+}
+
 // Publish posts one record through the node's publish door.
 func (c *Client) Publish(ctx context.Context, topic string, payload any) error {
 	body, err := json.Marshal(map[string]any{"topic": topic, "payload": payload})

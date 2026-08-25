@@ -145,6 +145,7 @@ colca_cursor_lag_records{cursor="hub",stream="metrics"} 1
 # HELP colca_stream_next_offset Next offset the stream will assign (derived from the store at scrape time).
 # TYPE colca_stream_next_offset gauge
 colca_stream_next_offset{stream="alarms"} 1
+colca_stream_next_offset{stream="annotations"} 1
 colca_stream_next_offset{stream="audit"} 1
 colca_stream_next_offset{stream="commands"} 1
 colca_stream_next_offset{stream="definitions"} 1
@@ -167,6 +168,7 @@ colca_cursor_lag_records{cursor="hub",stream="metrics"} 3
 # HELP colca_stream_next_offset Next offset the stream will assign (derived from the store at scrape time).
 # TYPE colca_stream_next_offset gauge
 colca_stream_next_offset{stream="alarms"} 1
+colca_stream_next_offset{stream="annotations"} 1
 colca_stream_next_offset{stream="audit"} 1
 colca_stream_next_offset{stream="commands"} 1
 colca_stream_next_offset{stream="definitions"} 1

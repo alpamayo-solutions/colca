@@ -41,6 +41,7 @@ const (
 	ClassTimeSync         // _TimeSync    write: node-local-publish-only. Ephemeral: no stream, never persisted, never retained (time-sync design §2.2).
 	ClassAudit            // _AuditEvent  append-only security event, local/internal write, flows up
 	ClassAlarm            // _AlarmStateChange, _NotificationDispatched — append-only alarm event. Event: no KV, not retained. Its own stream so it never queues behind a metrics backlog.
+	ClassAnnotation       // _Annotation — append-only annotation instance. Event: no KV, not retained. Same shape as ClassAlarm and for the same reason (dataops-evaluator design §8): a part-cycle producer emits ~1M/year/machine, so id-keyed retained/KV entries would grow without bound.
 )
 
 // Parsed is a decomposed UNS topic: colca/v1/_Contract/{node-id}/{path…}
@@ -95,6 +96,10 @@ func ClassOf(contract string) Class {
 	// than a place in the sample lane's queue.
 	case contract == "_AlarmStateChange" || contract == "_NotificationDispatched":
 		return ClassAlarm
+	// An annotation is a time-based instance producers append, mirroring
+	// alarm for the same volume reason (design §8) — see ClassAnnotation.
+	case contract == "_Annotation":
+		return ClassAnnotation
 	case contract == "_EnrolledIdentity" || contract == "_Node" ||
 		contract == "_ServiceDetails" || contract == "_SystemElement" ||
 		contract == "_Signal" || contract == "_Constant" || contract == "_ExternalReference" ||
@@ -200,6 +205,26 @@ func IsOwnedState(c Class) bool { return c == ClassData || c == ClassEntity }
 // own — so the door that admits records also refuses a batch that mixes them.
 func IsCommandAuthoredState(c Class) bool { return c == ClassEntity || c == ClassDefinition }
 
+// IsCommandAuthoredEvent reports whether a class is an EVENT a command
+// executor may append directly — one record, no batch, no KV projection —
+// through EntityStore.PublishEvent, exactly as IsCommandAuthoredState is the
+// admission rule for PublishBatch. Deliberately a SEPARATE predicate rather
+// than folded into IsCommandAuthoredState: an annotation is never state
+// (IsState(ClassAnnotation) is false, dataops-evaluator design §8, pinned by
+// TestAnnotationIsAnEventNotState), so PublishBatch's batch — which commits
+// entity/definition state alongside the `_EditOperation` receipt on the
+// SAME stream — is the wrong door for it: an annotation record and that
+// receipt never share a stream (StreamFor differs), and admitting
+// ClassAnnotation into IsCommandAuthoredState would either break that
+// existing invariant or silently let an annotation get batched (and thus
+// KV-projected the way ingestAdminStateBatch projects every record in its
+// batch) if the batch-stream check were ever relaxed. One append is one
+// commit instead (annotation-cutover design D1); the durable replay receipt
+// still gets recorded, just via its own PublishBatch call afterward, the same
+// two-writes shape node_attachment already uses for its own non-entity-store
+// door (exec_edit_attachment.go).
+func IsCommandAuthoredEvent(c Class) bool { return c == ClassAnnotation }
+
 // IsDefinition reports whether a class travels DOWN the tree and is applied
 // unconditionally as state wherever it lands. A definition's path is its own
 // identity, so no hop rewrites it — which is what lets the same definition mean
@@ -225,7 +250,7 @@ func ValidActorKind(kind string) bool {
 // and definitions travel down; time sync never leaves the local bus.
 func FlowsUp(c Class) bool {
 	return c == ClassData || c == ClassEntity || c == ClassAck || c == ClassGap ||
-		c == ClassAudit || c == ClassAlarm
+		c == ClassAudit || c == ClassAlarm || c == ClassAnnotation
 }
 
 // MatchesUplinkStream binds an upward record's domain class to the physical
@@ -296,6 +321,8 @@ func ClassFromManifest(name string) (Class, bool) {
 		return ClassAudit, true
 	case "alarm":
 		return ClassAlarm, true
+	case "annotation":
+		return ClassAnnotation, true
 	}
 	return ClassNone, false
 }
@@ -322,6 +349,8 @@ func StreamFor(c Class) string {
 		return "audit"
 	case ClassAlarm:
 		return "alarms"
+	case ClassAnnotation:
+		return "annotations"
 	case ClassGap:
 		return ""
 	case ClassTimeSync:
@@ -569,6 +598,21 @@ func Validate(contract string, payload []byte) error {
 			return err
 		}
 		return reqNum("expires_at")
+	case contract == "_Annotation":
+		// A deployed node always validates this contract against the
+		// generated schema bundle (contracts design §7; the level-3 annotation
+		// contract test's docstring says so explicitly), so this floor case is
+		// defense in depth for a bare/bundle-less engine — required-field
+		// parity with colca_data_contracts.Annotation's no-default fields
+		// (annotation_id, annotation_type_id, time_start), not the full
+		// schema.
+		if err := reqStr("annotation_id"); err != nil {
+			return err
+		}
+		if err := reqStr("annotation_type_id"); err != nil {
+			return err
+		}
+		return reqNum("time_start")
 	}
 	return fmt.Errorf("unknown contract %q — validated namespace rejects unknown contracts", contract)
 }
