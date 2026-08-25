@@ -9,6 +9,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
+	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
@@ -384,6 +385,23 @@ func newRoutedMetricsEngine(t *testing.T) (*Engine, *metrics.Metrics) {
 	placeTestElements(t, e)
 	return e, m
 }
+
+// The production Mounts must satisfy the optional half, or the counter below
+// is dead: countIfUnroutable's `e.ids.(routableMounts)` would answer !ok, take
+// the "no claim either way" path, and colca_command_unroutable_total would sit
+// at zero forever while every test in this package stayed green — its fakes
+// implement RoutesUnder themselves and would never notice. Renaming either
+// side, or dropping the method from the registry, is silent at compile time
+// today and only level 3 would find it, expensively. This makes it a build
+// failure instead.
+//
+// It does not cover a decorator wrapped around the registry on the way into
+// engine.New (internal/node/node.go): *registry.Manager would still satisfy
+// the interface while the value the engine holds no longer did.
+//
+// registry does not import engine, so naming it from a test here is not a
+// cycle.
+var _ routableMounts = (*registry.Manager)(nil)
 
 // A command addressed downward that no child's mount covers is the one outcome
 // with no signal of its own: never delivered, never executed, never acked, and
