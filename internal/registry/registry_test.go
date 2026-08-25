@@ -830,3 +830,52 @@ func TestReEnrollingALiveChildDoesNotMoveItsDeliveryFloor(t *testing.T) {
 			floor, got)
 	}
 }
+
+// RoutesUnder answers whether a command at a path could reach any child node
+// at all — the routability signal engine.countIfUnroutable counts on. It
+// deliberately differs from DrainingMount above in exactly two ways: it looks
+// at every child rather than the draining ones, and a draining child still
+// counts as routable, because a drain exists to deliver what is already queued.
+func TestRoutesUnderCoversEveryChildNodeAndOnlyChildNodes(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, n := newManager(t, st, "site1/edge1", "site1/edge10", "hall/press3")
+	if _, _, err := m.Enroll(entryJSON(t, node("01N1", "site1/edge1", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	// A MACHINE at its own mount: enrolled, placed, and never fed by a
+	// downlink — so its mount must not make a command look routable.
+	if _, _, err := m.Enroll(entryJSON(t, machine("01M1", "hall/press3", pub("cd")))); err != nil {
+		t.Fatal(err)
+	}
+
+	if !m.RoutesUnder("site1/edge1/press3/resource/upsert") {
+		t.Fatal("a path under an enrolled child node's mount must be routable")
+	}
+	if m.RoutesUnder("site1/edge10/x") {
+		t.Fatal("a sibling mount sharing only a string prefix must not match (path-separator boundary)")
+	}
+	if m.RoutesUnder("hall/press3/set-speed") {
+		t.Fatal("a machine's mount must not make a command routable — machines are fed over the bus, not the downlink")
+	}
+	if m.RoutesUnder("elsewhere/x") {
+		t.Fatal("a path under no enrolled mount at all must not be routable")
+	}
+
+	// A drain does not make a child unreachable: its queue is exactly what the
+	// drain is waiting to deliver.
+	if _, err := m.Drain("01N1"); err != nil {
+		t.Fatal(err)
+	}
+	if !m.RoutesUnder("site1/edge1/press3/resource/upsert") {
+		t.Fatal("a draining child is still routable — reporting otherwise would call the mechanism a fault")
+	}
+
+	// The mount is read live, so a rename moves routability with the element
+	// rather than needing a re-enrollment — the same property DrainingMount has.
+	delete(n, elementAt("site1/edge1"))
+	n["el-site1-edge1"] = "site2/edge1"
+	m.SetNamespace(n)
+	if m.RoutesUnder("site1/edge1/press3/resource/upsert") {
+		t.Fatal("the old path must stop being routable once the element moved")
+	}
+}

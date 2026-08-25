@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -527,7 +526,33 @@ func (m *Manager) DrainingMount(path string) bool {
 		if !e.IsDraining() {
 			continue
 		}
-		if mount, ok := m.mountOf(e); ok && strings.HasPrefix(path, mount+"/") {
+		if mount, ok := m.mountOf(e); ok && uns.UnderMount(path, mount) {
+			return true
+		}
+	}
+	return false
+}
+
+// RoutesUnder reports whether some enrolled child NODE's mount covers path —
+// i.e. whether a command at that path can be handed to anyone at all.
+//
+// The same question the downlink filter answers when it decides what to give a
+// child, asked at admission instead of at delivery, and asked of every child
+// rather than one. It is observability only: nothing is refused on the answer
+// (see engine.countIfUnroutable for why refusing would break
+// publish-before-enroll and every reparent window).
+//
+// Draining children count as routable. A drain exists precisely to deliver
+// what is already queued for them, so calling their commands unroutable would
+// report the mechanism working as a fault.
+func (m *Manager) RoutesUnder(path string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, e := range m.byID {
+		if !e.MayUseDoor(uns.DoorRepl) {
+			continue // only a child node is fed over the downlink
+		}
+		if mount, ok := m.mountOf(e); ok && uns.UnderMount(path, mount) {
 			return true
 		}
 	}

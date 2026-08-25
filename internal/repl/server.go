@@ -24,7 +24,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -406,13 +405,22 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		s.evaluateDrain(child.ULID)
 	}
 
-	// A child only ever sees commands for its own subtree.
+	// A child only ever sees commands for its own subtree — enforced TWICE,
+	// here and again by the MountStrip below, which returns ok=false for a
+	// topic outside the mount and skips the record. Neither is redundant: this
+	// one decides what is READ (and so what `next` counts, which is what lets
+	// the child's cursor skip past a sibling's commands instead of rescanning
+	// them forever), while MountStrip decides what can be REWRITTEN into the
+	// child's own coordinates — a record it cannot rewrite must not be sent
+	// whatever this filter said. Worth stating because a reader who changes
+	// only this line will find the guarantee still holds and conclude the
+	// filter is decorative; a mutation of exactly that shape did.
 	filter := func(topic string) bool {
 		p, err := uns.Parse(topic)
 		if err != nil || !uns.IsCommand(s.eng.ClassOf(p.Contract)) {
 			return false
 		}
-		return strings.HasPrefix(p.Path, mount+"/")
+		return uns.UnderMount(p.Path, mount)
 	}
 
 	ctx := r.Context()

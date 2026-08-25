@@ -219,6 +219,37 @@ type Metrics struct {
 	// listening", not "the bytes arrived".
 	commandUndelivered prometheus.Counter
 
+	// colca_command_unroutable_total: a command addressed to a node other than
+	// this one was persisted at admission while NO enrolled child node's mount
+	// covered its path — so no child's downlink will ever hand it over, and it
+	// can never be executed or acked anywhere.
+	//
+	// The counter exists because that failure is otherwise completely silent.
+	// Expiry is evaluated at the TARGET, inside maybeExec, so a command that
+	// never reaches a target never expires visibly either: it simply sits in
+	// the commands stream and nothing ever happens. "Nothing happened, ever"
+	// is the one outcome an operator cannot distinguish from "still in
+	// flight".
+	//
+	// It counts, it never refuses. Refusing at admission would break
+	// publish-before-enroll and every re-enrollment / reparent window, in
+	// which a legitimate command is issued while the child that will execute
+	// it is briefly absent from the registry — a design decision, not a counter's
+	// decision. So a non-zero rate here is a question ("is that route
+	// right?"), not a verdict.
+	//
+	// Deliberately NOT counted, each for its own reason:
+	//
+	//   - a command addressed to THIS node: it executes in-process via
+	//     maybeExec, and there is nothing to route.
+	//   - a command addressed to a machine enrolled HERE: it is delivered over
+	//     the local bus, and colca_command_undelivered_total above is the
+	//     counter that owns that case.
+	//   - a command addressed to a DRAINING child: a drain exists precisely to
+	//     deliver what is already queued, so calling those unroutable would
+	//     report the mechanism working as a fault (registry.RoutesUnder).
+	commandUnroutable prometheus.Counter
+
 	// colca_command_redelivered_total: a durable command was replayed from
 	// the commands stream onto the local bus because the machine it is
 	// addressed to subscribed and its delivery cursor still stood before that
@@ -377,6 +408,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		commandUndelivered: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_command_undelivered_total",
 			Help: "Live commands addressed to a machine enrolled at THIS node, published to its local MQTT bus with zero live subscriptions at that moment (that machine was not connected). Commands transiting toward a descendant, or addressed to a child node, are excluded — those are delivered over replication and reach no local subscriber by design. Subscription existence, not byte-level delivery confirmation — can undercount a delivery that failed after a write to a live subscriber, never overcounts. The record is still durable in the commands stream — this counts a delivery attempt reaching nobody, not data loss. Resets on restart.",
+		}),
+		commandUnroutable: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_command_unroutable_total",
+			Help: "Commands addressed to another node and persisted at admission while no enrolled child node's mount covered their path — nothing will ever hand them down, execute them or ack them, and they never expire visibly because expiry is evaluated at the target. Excludes commands for this node (executed in-process), for a machine enrolled here (see colca_command_undelivered_total) and for a draining child (a drain delivers what is queued). Observability only: nothing is refused on this, because refusing would break publish-before-enroll and every reparent window. Resets on restart.",
 		}),
 		commandRedelivered: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_command_redelivered_total",
@@ -564,7 +599,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.authReject, m.aclDeny, m.kicks, m.humanSessions, m.jwksKeys, m.jwksFailures,
-		m.nodeCmds, m.nodePrefix, m.commandUndelivered, m.commandRedelivered,
+		m.nodeCmds, m.nodePrefix, m.commandUndelivered, m.commandUnroutable, m.commandRedelivered,
 		m.bundleInfo, m.bundleContracts,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
@@ -651,6 +686,16 @@ func (m *Metrics) CommandUndelivered() {
 		return
 	}
 	m.commandUndelivered.Inc()
+}
+
+// CommandUnroutable counts one command addressed downward that no enrolled
+// child's mount covers — see the field comment above and
+// engine.countIfUnroutable for exactly what is and is not counted here.
+func (m *Metrics) CommandUnroutable() {
+	if m == nil {
+		return
+	}
+	m.commandUnroutable.Inc()
 }
 
 // CommandRedelivered counts one command replayed from the commands stream onto

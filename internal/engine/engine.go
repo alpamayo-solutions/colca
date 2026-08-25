@@ -108,6 +108,18 @@ type Mounts interface {
 	DrainingMount(path string) bool
 }
 
+// routableMounts is the OPTIONAL half of Mounts: "could a command at this path
+// reach any child at all?" (registry.Manager.RoutesUnder).
+//
+// Optional rather than part of Mounts on purpose. It feeds a counter and
+// nothing else — no admission decision, no delivery decision — so an
+// implementation that cannot answer it should lose the observability, not fail
+// to build. Every unit fake in this package therefore stays valid unchanged,
+// and the real registry supplies it.
+type routableMounts interface {
+	RoutesUnder(path string) bool
+}
+
 type Engine struct {
 	store   *store.Store
 	cfg     *config.Config
@@ -1182,6 +1194,13 @@ func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string
 	// the plugin observer, which is deliberately only offered what a machine
 	// published.
 	e.elements.Observe(p.Contract, topic, payload)
+	// Asked here rather than beside the delivery below, because routability is
+	// a question about the TREE and has nothing to do with whether this node
+	// has a local bus: a command that can reach nobody is just as invisible on
+	// a node whose broker is not wired.
+	if uns.IsCommand(class) {
+		e.countIfUnroutable(p, topic, payload)
+	}
 	if e.deliver != nil {
 		// A command addressed to a machine enrolled here is delivered through
 		// its own path, because for that one case "publish it" and "record

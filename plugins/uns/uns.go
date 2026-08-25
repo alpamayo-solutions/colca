@@ -415,6 +415,24 @@ func MountInsert(topic, mount string) string {
 	return strings.Join([]string{seg[0], seg[1], seg[2], seg[3], mount + "/" + seg[4]}, "/")
 }
 
+// UnderMount reports whether a node-local path lies strictly below mount.
+//
+// This is the single rule that decides which child a downward record belongs
+// to, and it has three callers that must never disagree about it: the downlink
+// filter (which commands a child is handed), the draining-mount admission gate
+// (which commands are refused while a child is being moved), and the
+// routability check (whether a command addressed downward can reach anyone at
+// all). It lived as three copies of the same string comparison; a rule spelled
+// three times is a rule that can be wrong in two places (principle 2).
+//
+// The boundary is the path separator, so "werk10/x" is NOT under "werk1" — the
+// case a bare HasPrefix gets wrong. An empty mount reaches nothing rather than
+// everything: absence must not read as universal scope, the same fail-closed
+// choice Ancestry.Covers makes for an empty element id.
+func UnderMount(path, mount string) bool {
+	return mount != "" && strings.HasPrefix(path, mount+"/")
+}
+
 // MountStrip removes the mount prefix from the hierarchy part — the exact
 // inverse of MountInsert, done on every downlink hop. ok=false when the path
 // does not start with the mount, in which case the record belongs to a foreign

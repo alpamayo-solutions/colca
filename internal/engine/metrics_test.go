@@ -366,3 +366,67 @@ func TestNilMetricsIsSafe(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// newRoutedMetricsEngine is newMetricsEngine plus a registry that knows one
+// enrolled child node mounted at "site1/edge1" — the minimum needed to ask the
+// routability question at all.
+func newRoutedMetricsEngine(t *testing.T) (*Engine, *metrics.Metrics) {
+	t.Helper()
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	m := metrics.New(s, config.Retention{}, nil)
+	ids := testIDs()
+	ids.routes = []string{"site1/edge1"}
+	e := New(s, &config.Config{ULID: "n-edge1"}, ids, nil, m, nil)
+	placeTestElements(t, e)
+	return e, m
+}
+
+// A command addressed downward that no child's mount covers is the one outcome
+// with no signal of its own: never delivered, never executed, never acked, and
+// never visibly expired (expiry runs at the target). The counter is that
+// signal — and it must stay silent for the three cases other mechanisms own,
+// or it becomes noise nobody reads.
+func TestCommandUnroutableCountsOnlyTheCommandsNothingCanReach(t *testing.T) {
+	const line = "colca_command_unroutable_total"
+	e, m := newRoutedMetricsEngine(t)
+
+	publish := func(topic string) {
+		t.Helper()
+		if _, err := e.IngestAdmin(topic, cmdPayload("c-"+topic)); err != nil {
+			t.Fatalf("publish %s: %v", topic, err)
+		}
+	}
+
+	// Presence first, so every "did not count" below has a denominator: a
+	// route no child covers DOES count.
+	before := scrapeMetric(t, m, line)
+	publish("colca/v1/_CmdConfigure/n-elsewhere/nowhere/resource/upsert")
+	if got := scrapeMetric(t, m, line); got != before+1 {
+		t.Fatalf("%s = %v, want %v — an unroutable command must be counted", line, got, before+1)
+	}
+
+	// The three exclusions, each owned by a different mechanism.
+	for _, c := range []struct{ why, topic string }{
+		{"a command for a child's subtree is routable", "colca/v1/_CmdConfigure/n-child/site1/edge1/resource/upsert"},
+		{"a command for THIS node executes in-process", "colca/v1/_CmdConfigure/n-edge1/resource/upsert"},
+		{"a command for a machine enrolled here rides the local bus", "colca/v1/_CmdParam/m1/m1/set-speed"},
+	} {
+		at := scrapeMetric(t, m, line)
+		publish(c.topic)
+		if got := scrapeMetric(t, m, line); got != at {
+			t.Errorf("%s: %s rose from %v to %v, but %s", line, c.topic, at, got, c.why)
+		}
+	}
+
+	// And the boundary the shared predicate owns: a sibling mount that merely
+	// shares a string prefix is NOT covered, so it counts.
+	at := scrapeMetric(t, m, line)
+	publish("colca/v1/_CmdConfigure/n-other/site1/edge10/resource/upsert")
+	if got := scrapeMetric(t, m, line); got != at+1 {
+		t.Fatalf("%s = %v, want %v — site1/edge10 is not under site1/edge1", line, got, at+1)
+	}
+}

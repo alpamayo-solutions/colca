@@ -344,3 +344,47 @@ func correlationIDOf(payload []byte) string {
 	_ = json.Unmarshal(payload, &env)
 	return env.CorrelationID
 }
+
+// countIfUnroutable observes, at admission, a command addressed downward that
+// no enrolled child's mount covers — the one command outcome that produces no
+// signal of any kind on its own.
+//
+// A command for a descendant is persisted here and handed to a child by its
+// downlink poll, which selects by mount prefix (repl.Server.handleDownlink).
+// When no child's mount covers the path, no poll ever selects it: it is never
+// delivered, never executed, never acked. It does not even expire visibly,
+// because expiry is evaluated at the TARGET inside maybeExec — so from the
+// issuer's side "the route was wrong" and "the target is slow" look identical,
+// forever.
+//
+// It counts and warns; it never refuses. Refusing at admission would reject a
+// legitimate command issued during the window in which its target is briefly
+// absent from the registry — publish-before-enroll, re-enrollment, reparent —
+// and whether that window should be closed is a design decision, not something a
+// counter decides.
+//
+// Three cases are excluded, each because a different mechanism owns it:
+//
+//   - addressed to THIS node: maybeExec runs it in-process; nothing routes.
+//   - addressed to a machine enrolled HERE: the local bus delivers it, and
+//     deliverCommand's colca_command_undelivered_total owns that outcome.
+//   - a registry that cannot answer the routing question (routableMounts not
+//     implemented — every unit fake in this package): no claim is made either
+//     way, exactly as deliverCommand makes none without a subscriber lookup.
+func (e *Engine) countIfUnroutable(p uns.Parsed, topic string, payload []byte) {
+	if p.NodeID == e.cfg.ULID {
+		return
+	}
+	if target, ok := e.ids.Get(p.NodeID); ok && target.MayUseDoor(uns.DoorMQTT) {
+		return // a machine on this node's own bus, not a routing question
+	}
+	router, ok := e.ids.(routableMounts)
+	if !ok || router.RoutesUnder(p.Path) {
+		return
+	}
+	e.metrics.CommandUnroutable()
+	e.log.Warn("command addressed downward falls under no enrolled child's mount — "+
+		"no downlink will hand it over, so it can never execute or ack",
+		"topic", topic, "target", p.NodeID, "path", p.Path,
+		"correlation_id", correlationIDOf(payload))
+}

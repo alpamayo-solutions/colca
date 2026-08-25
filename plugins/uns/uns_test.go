@@ -578,3 +578,31 @@ func TestLiveBlobDigestsReadsOnlyResources(t *testing.T) {
 		t.Fatalf("live = %v, want exactly the one readable resource digest", live)
 	}
 }
+
+// UnderMount is one rule with three callers (the downlink filter, the
+// draining-mount admission gate, the routability counter), so its edges are
+// pinned here once rather than in each of them.
+func TestUnderMount(t *testing.T) {
+	cases := []struct {
+		path, mount string
+		want        bool
+	}{
+		{"site1/edge1/press3/set-speed", "site1/edge1", true},
+		{"site1/edge1/x", "site1", true},
+		// The separator boundary — the case a bare HasPrefix gets wrong, and
+		// the reason this is a named rule instead of an inline comparison.
+		{"werk10/x", "werk1", false},
+		// The mount itself is not below itself: a command topic always carries
+		// a verb after the mount, so an exact match is a malformed address.
+		{"site1/edge1", "site1/edge1", false},
+		{"other/x", "site1", false},
+		// Absence reaches NOTHING rather than everything: an entry whose mount
+		// did not resolve must not silently acquire universal scope.
+		{"anything/at/all", "", false},
+	}
+	for _, c := range cases {
+		if got := UnderMount(c.path, c.mount); got != c.want {
+			t.Errorf("UnderMount(%q, %q) = %v, want %v", c.path, c.mount, got, c.want)
+		}
+	}
+}

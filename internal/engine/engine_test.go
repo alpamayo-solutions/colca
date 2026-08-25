@@ -20,16 +20,21 @@ import (
 type fakeIDs struct {
 	entries  map[string]*uns.Entry
 	draining []string // mounts DrainingMount treats as under an active drain
+	routes   []string // mounts RoutesUnder treats as an enrolled child node's
 }
 
 func (f fakeIDs) Get(ulid string) (*uns.Entry, bool) { e, ok := f.entries[ulid]; return e, ok }
 
-// DrainingMount mirrors registry.Manager.DrainingMount's own boundary rule
-// (path-separator, not string-prefix) against the test-configured set of
-// draining mounts.
-func (f fakeIDs) DrainingMount(path string) bool {
-	for _, mount := range f.draining {
-		if strings.HasPrefix(path, mount+"/") {
+// DrainingMount and RoutesUnder both defer to uns.UnderMount, the same
+// predicate registry.Manager uses — the boundary rule is the domain's, and a
+// fake that spelled it out again could drift from the thing it stands in for.
+func (f fakeIDs) DrainingMount(path string) bool { return coversAny(f.draining, path) }
+
+func (f fakeIDs) RoutesUnder(path string) bool { return coversAny(f.routes, path) }
+
+func coversAny(mounts []string, path string) bool {
+	for _, mount := range mounts {
+		if uns.UnderMount(path, mount) {
 			return true
 		}
 	}
