@@ -14,6 +14,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // ErrNotAMeasurement means the record is well-formed but carries no value to
@@ -43,6 +45,13 @@ type Row struct {
 // of its own: a metric records when it was MEASURED, and historising the ingest
 // time would silently re-date everything that arrives after an outage.
 func RowFrom(topic string, payload []byte, ts int64) (Row, error) {
+	// The metrics stream carries more than measurements -- `_Log` records
+	// ride the same lane -- and only a `_Metric` is one. Anything else is
+	// not a decoding failure worth a warning per record; it is simply not
+	// this bridge's to historise.
+	if parsed, err := uns.Parse(topic); err == nil && parsed.Contract != "_Metric" {
+		return Row{}, ErrNotAMeasurement
+	}
 	// json.Number keeps the digits as written, so a value beyond float64
 	// precision survives — the door hands payloads through verbatim for
 	// exactly this reason, and this is the last place it could be lost.

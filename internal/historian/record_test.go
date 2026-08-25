@@ -2,6 +2,7 @@ package historian
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -146,5 +147,16 @@ func TestRowJSONStaysValidJSON(t *testing.T) {
 	var back any
 	if err := json.Unmarshal(row.JSON, &back); err != nil {
 		t.Fatalf("stored JSON does not round-trip: %v", err)
+	}
+}
+
+// The metrics stream also carries `_Log` records. They are not measurements
+// and not a decoding failure: the bridge passes them by without a word, so a
+// service that logs a lot does not turn the historian's log into noise.
+func TestANonMetricRecordIsPassedBySilently(t *testing.T) {
+	_, err := RowFrom("colca/v1/_Log/n1/line1/dataops/INFO",
+		[]byte(`{"timestamp":"2026-08-25T19:38:09+00:00","level":"INFO","message":"hello"}`), 1)
+	if !errors.Is(err, ErrNotAMeasurement) {
+		t.Fatalf("err = %v, want ErrNotAMeasurement — a _Log record is not undecodable, it is not a metric", err)
 	}
 }
