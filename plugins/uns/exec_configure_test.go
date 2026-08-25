@@ -1313,8 +1313,13 @@ func TestResourceUpsertRefusesWhenTheBlobCannotBePulled(t *testing.T) {
 	if code != 422 {
 		t.Fatalf("code = %d, want 422", code)
 	}
-	if result != "invalid" {
-		t.Fatalf("result = %q, want invalid", result)
+	if result != "blob_unreachable" {
+		t.Fatalf("result = %q, want blob_unreachable — a failed pull is its own outcome, "+
+			"not a malformed command (resources design §9.1)", result)
+	}
+	if !strings.HasPrefix(msg, "blob_unreachable: ") {
+		t.Fatalf("the message must lead with its machine-readable code, the way every other "+
+			"coded refusal here does, so a caller can act on it without matching prose: %q", msg)
 	}
 	if !strings.Contains(msg, testSHA) {
 		t.Fatalf("the message must name the digest so an operator can act on it: %q", msg)
@@ -1322,10 +1327,25 @@ func TestResourceUpsertRefusesWhenTheBlobCannotBePulled(t *testing.T) {
 	if len(writes) != 0 {
 		t.Fatalf("an entity must never be authored pointing at bytes the node lacks; wrote %d", len(writes))
 	}
+
+	// The contrast that makes "its own outcome" mean something: a genuinely
+	// malformed command answers the same 422 but must NOT claim a pull
+	// failure — otherwise "blob_unreachable" would just be this verb's name
+	// for every refusal, and an operator reading it would stage bytes to fix
+	// a typo.
+	badCode, badMsg, badResult, badWrites := exec.ExecuteWithWrites("_CmdConfigure", "resource/upsert",
+		[]byte(`{"resources":[]}`))
+	if badCode != 422 || len(badWrites) != 0 {
+		t.Fatalf("a malformed command must still be refused: code = %d, writes = %d", badCode, len(badWrites))
+	}
+	if badResult == "blob_unreachable" || strings.Contains(badMsg, "blob_unreachable") {
+		t.Fatalf("a malformed command must not be reported as a pull failure: %q / %q", badResult, badMsg)
+	}
+
 	// Denominator: the same executor DOES write once the blob is reachable.
 	blobs.pullErr = nil
-	if code, _, _, writes := exec.ExecuteWithWrites("_CmdConfigure", "resource/upsert",
-		resourceBody("press3/r1", "r1", testSHA)); code != 200 || len(writes) != 1 {
+	if code, _, result, writes := exec.ExecuteWithWrites("_CmdConfigure", "resource/upsert",
+		resourceBody("press3/r1", "r1", testSHA)); code != 200 || len(writes) != 1 || result != "ok" {
 		t.Fatal("the refusal above proves nothing if this path cannot write at all")
 	}
 }

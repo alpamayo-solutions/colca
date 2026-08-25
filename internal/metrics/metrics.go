@@ -624,7 +624,18 @@ func (m *Metrics) SetJWKSKeys(n int) {
 }
 
 // NodeCmd counts one command executed by this node, by contract, verb and
-// outcome (ok | conflict | invalid | expired | error).
+// outcome (ok | conflict | invalid | expired | error | blob_unreachable).
+//
+// blob_unreachable is the resource path's own outcome: a well-formed
+// `resource/upsert` whose blob this node neither holds nor could pull from its
+// parent (resources design §7.1/§9.1). It is separated from `invalid` because
+// it is the one refusal here that says nothing about the command — an
+// operator watching a provisioning run needs to see failed pulls apart from
+// bad commands, since only one of the two is fixed by staging bytes.
+//
+// A command addressed to ANOTHER node is deliberately not counted at all: this
+// node did not execute it. It is persisted, relayed down, and executed at its
+// target, which counts it there.
 func (m *Metrics) NodeCmd(contract, verb, result string) {
 	if m == nil {
 		return

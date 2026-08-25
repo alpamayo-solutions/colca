@@ -478,9 +478,21 @@ func (c *ConfigExec) resourceUpsert(payload []byte) (int, string, string, []Stat
 		// The invariant: never author a record pointing at bytes we do not
 		// hold. A provisioning command from above names a digest staged at an
 		// ancestor, so one pull is attempted before giving up.
+		//
+		// A failed pull is its OWN outcome, not a malformed command
+		// (resources design §9.1: "the ack reports success or the pull
+		// failure"). The command was well-formed, the operator did nothing
+		// wrong, and the remedy — stage the bytes where this node can reach
+		// them, then reissue — is different from every other refusal here. So
+		// it carries the machine-readable code first, the way every other
+		// coded refusal in this executor family does
+		// (entity_already_exists:, stale_version:, duplicate_name:), and it
+		// classifies as blob_unreachable rather than folding into `invalid`,
+		// which is what lets an operator count pull failures apart from bad
+		// commands on colca_node_cmds_total{result=…}.
 		if err := c.ensureBlob(incoming.SHA256); err != nil {
-			return 422, fmt.Sprintf("resource/upsert: entry %d: blob %s is not held by this node "+
-				"and could not be fetched: %v", i, incoming.SHA256, err), "invalid", nil
+			return 422, fmt.Sprintf("blob_unreachable: resource/upsert entry %d: blob %s is not held "+
+				"by this node and could not be fetched: %v", i, incoming.SHA256, err), "blob_unreachable", nil
 		}
 		records = append(records, StateRecord{Topic: topic, Payload: ref.Resource})
 	}

@@ -227,3 +227,78 @@ func TestForeignTargetsNeverExecute(t *testing.T) {
 		t.Fatalf("foreign target executed here: %v", rec.calls)
 	}
 }
+
+// A command an ancestor addresses to a DESCENDANT is accepted and persisted,
+// and answers with no execution outcome at all — that absence IS how "queued"
+// is carried (resources design §9.1: the command rides the commands downlink
+// and the target executes it). The API's transport reads exactly this: an
+// outcome of None becomes HTTP 202 `status: "queued"`
+// (api/src/edge/edit/command_transport.py `_queued`).
+//
+// The node must also stay silent: acking here would tell the operator a
+// command succeeded that has not run yet, and would put a second ack on the
+// wire beside the target's own.
+func TestACommandForAnotherNodeIsAcceptedWithNoOutcomeAndNoAck(t *testing.T) {
+	rec := &recordingExec{contract: "_CmdConfigure"}
+	e := execEngine(t, Executors(rec))
+
+	queued, err := e.IngestAdmin("colca/v1/_CmdConfigure/n-child/site1/edge1/resource/upsert", cmdPayload("c-queued"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !queued.Persisted {
+		t.Fatal("a command for a descendant must be persisted — it reaches its target by riding this stream")
+	}
+	if queued.Command != nil {
+		t.Fatalf("a descendant's command must carry no synchronous outcome (that absence is 'queued'), got %+v",
+			queued.Command)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("a descendant's command must not execute here: %v", rec.calls)
+	}
+	if acks := acksOnCommands(t, e); len(acks) != 0 {
+		t.Fatalf("nothing may ack a command it did not execute; found %v", acks)
+	}
+
+	// Denominator: the same verb, addressed to THIS node, DOES answer with an
+	// outcome and DOES ack. Without it, every assertion above would pass just
+	// as well against an engine that had stopped executing commands entirely.
+	applied, err := e.IngestAdmin("colca/v1/_CmdConfigure/n-edge1/resource/upsert", cmdPayload("c-applied"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Command == nil || applied.Command.CorrelationID != "c-applied" {
+		t.Fatalf("a command for this node must answer with its outcome, got %+v", applied.Command)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("executor calls = %v, want exactly the self-addressed one", rec.calls)
+	}
+	if acks := acksOnCommands(t, e); len(acks) != 1 || acks[0] != "c-applied" {
+		t.Fatalf("acks = %v, want exactly [c-applied]", acks)
+	}
+}
+
+// acksOnCommands lists the correlation_ids of every _Ack on the commands
+// stream, whatever frame it was written in — a scan wide enough to catch an
+// ack this node should never have authored.
+func acksOnCommands(t *testing.T, e *Engine) []string {
+	t.Helper()
+	recs, _, err := e.Store().Read("commands", 1, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, r := range recs {
+		p, err := uns.Parse(r.Topic)
+		if err != nil || p.Contract != "_Ack" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(r.Payload, &m); err != nil {
+			t.Fatalf("ack payload: %v", err)
+		}
+		corr, _ := m["correlation_id"].(string)
+		out = append(out, corr)
+	}
+	return out
+}
