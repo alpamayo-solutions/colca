@@ -93,7 +93,7 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 		return false
 	}
 	user := string(pk.Connect.Username)
-	v, reason, err := h.ver.Verify(string(pk.Connect.Password))
+	v, reason, err := h.ver.VerifyForScope(string(pk.Connect.Password), "broker-mqtt")
 	if err != nil {
 		h.log.Warn("human auth rejected", "user", user, "reason", reason, "err", err)
 		h.metrics.AuthReject(metrics.DoorMQTT, reason)

@@ -1,0 +1,84 @@
+package uns
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
+	"testing"
+	"time"
+)
+
+func putPersonalAccessToken(f *fakeStore, token string, scopes []string, expiresAt string) string {
+	id, ok := personalAccessTokenID(token)
+	if !ok {
+		panic("bad test token")
+	}
+	digest := sha256.Sum256([]byte(token))
+	topic := "colca/v1/" + PersonalAccessTokenContract + "/n-root/" + id
+	f.records[topic] = mustJSON(PersonalAccessToken{
+		ID: id, HashedSecret: hex.EncodeToString(digest[:]), OwnerSub: "person-1",
+		OwnerEmail: "person@example.com", Scopes: scopes,
+		Grants: []string{"read:01HLINE/#"}, ExpiresAt: expiresAt,
+	})
+	return topic
+}
+
+func TestPersonalAccessTokenAuthenticatesFromLocalDefinition(t *testing.T) {
+	f := newStore("n-edge")
+	token := "pk_pat_01M0ZPAT000000000000000001_secret"
+	putPersonalAccessToken(f, token, []string{"broker-http"}, "")
+	idx := NewPersonalAccessTokenIndex(f)
+
+	record, entry, err := idx.Authenticate(token, "broker-http", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.OwnerSub != "person-1" || entry.ULID != "person-1" || entry.Kind != KindHuman {
+		t.Fatalf("record/entry = %#v / %#v", record, entry)
+	}
+	if len(entry.Grants) != 1 || entry.Grants[0] != "read:01HLINE/#" {
+		t.Fatalf("grants = %v", entry.Grants)
+	}
+}
+
+func TestPersonalAccessTokenScopeExpirySecretAndTombstoneFailClosed(t *testing.T) {
+	f := newStore("n-edge")
+	token := "pk_pat_01M0ZPAT000000000000000002_secret"
+	topic := putPersonalAccessToken(f, token, []string{"broker-mqtt"}, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	idx := NewPersonalAccessTokenIndex(f)
+
+	if _, _, err := idx.Authenticate(token, "broker-http", time.Now()); err == nil || !strings.Contains(err.Error(), "scope") {
+		t.Fatalf("wrong scope error = %v", err)
+	}
+	if _, _, err := idx.Authenticate(token+"wrong", "broker-mqtt", time.Now()); err == nil {
+		t.Fatal("wrong secret authenticated")
+	}
+	if _, _, err := idx.Authenticate(token, "broker-mqtt", time.Now().Add(2*time.Hour)); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expiry error = %v", err)
+	}
+	f.records[topic] = nil
+	if _, _, err := idx.Authenticate(token, "broker-mqtt", time.Now()); err == nil {
+		t.Fatal("tombstoned token authenticated")
+	}
+}
+
+func TestPersonalAccessTokenDefinitionValidation(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	good := mustJSON(PersonalAccessToken{
+		ID: "01M0ZPAT000000000000000003", HashedSecret: digest,
+		OwnerSub: "person-1", Scopes: []string{"api", "mcp"},
+	})
+	if ClassOf(PersonalAccessTokenContract) != ClassDefinition {
+		t.Fatal("personal access token must ride the definitions stream")
+	}
+	if err := checkDefinitionContents(PersonalAccessTokenContract, good); err != nil {
+		t.Fatal(err)
+	}
+	bad := mustJSON(PersonalAccessToken{
+		ID: "01M0ZPAT000000000000000003", HashedSecret: digest,
+		OwnerSub: "person-1", Scopes: []string{"all"},
+	})
+	if err := checkDefinitionContents(PersonalAccessTokenContract, bad); err == nil {
+		t.Fatal("unknown integration scope accepted")
+	}
+}

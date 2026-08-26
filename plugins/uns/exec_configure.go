@@ -1,11 +1,13 @@
 package uns
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ConfigExec answers `_CmdConfigure`: editing the node's data model.
@@ -1446,6 +1448,41 @@ func (c *ConfigExec) checkDefinitionContract(i int, contract string) (int, strin
 // grant and log it, over and over, for as long as the definition exists. One
 // refusal at the door beats an error at every node forever.
 func checkDefinitionContents(contract string, raw []byte) error {
+	if contract == PersonalAccessTokenContract {
+		var token PersonalAccessToken
+		if err := json.Unmarshal(raw, &token); err != nil {
+			return fmt.Errorf("unreadable personal access token: %w", err)
+		}
+		if len(token.HashedSecret) != 64 {
+			return fmt.Errorf("hashed_secret must be a SHA-256 hex digest")
+		}
+		if _, err := hex.DecodeString(token.HashedSecret); err != nil {
+			return fmt.Errorf("hashed_secret must be a SHA-256 hex digest")
+		}
+		if token.OwnerSub == "" {
+			return fmt.Errorf("owner_sub is required")
+		}
+		allowedScopes := map[string]bool{"api": true, "i3x": true, "mcp": true, "broker-http": true, "broker-mqtt": true}
+		if len(token.Scopes) == 0 {
+			return fmt.Errorf("scopes must not be empty")
+		}
+		for _, scope := range token.Scopes {
+			if !allowedScopes[scope] {
+				return fmt.Errorf("unknown scope %q", scope)
+			}
+		}
+		if token.ExpiresAt != "" {
+			if _, err := time.Parse(time.RFC3339, token.ExpiresAt); err != nil {
+				return fmt.Errorf("expires_at must be RFC3339")
+			}
+		}
+		for _, grant := range token.Grants {
+			if _, err := ParseGrant(grant); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if contract != "_Group" {
 		return nil
 	}

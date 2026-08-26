@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,7 @@ const (
 	ReasonBadToken = "bad_token" // malformed, bad signature, wrong alg, unknown kid after re-fetch
 	ReasonExpired  = "expired"   // exp passed or nbf in the future (±60s skew)
 	ReasonIssuer   = "issuer"    // iss or aud mismatch
+	ReasonScope    = "scope"     // valid PAT, but not for this integration door
 )
 
 const (
@@ -49,10 +51,12 @@ type Config struct {
 
 // Verified is a successfully verified token.
 type Verified struct {
-	Entry    *uns.Entry // KindHuman, grants from colca_grants
-	Sub      string
-	Username string // preferred_username, "" if absent
-	Exp      time.Time
+	Entry      *uns.Entry // KindHuman, grants from colca_grants
+	Sub        string
+	Username   string // preferred_username, "" if absent
+	Exp        time.Time
+	Scopes     []string // empty for OIDC JWTs, explicit for personal access tokens
+	Credential string   // "oidc" or "pat"
 }
 
 // Metrics is the nil-safe observer surface (implemented by *metrics.Metrics
@@ -79,6 +83,7 @@ type Verifier struct {
 	// — the fail-closed direction.
 	groupsMu  sync.RWMutex
 	groupsIdx *uns.GroupIndex
+	patIdx    *uns.PersonalAccessTokenIndex
 }
 
 // SetGroupIndex wires the group resolver (node startup).
@@ -88,10 +93,24 @@ func (v *Verifier) SetGroupIndex(idx *uns.GroupIndex) {
 	v.groupsMu.Unlock()
 }
 
+// SetPersonalAccessTokenIndex wires the hash-only credential definitions held
+// by the engine after it has been constructed.
+func (v *Verifier) SetPersonalAccessTokenIndex(idx *uns.PersonalAccessTokenIndex) {
+	v.groupsMu.Lock()
+	v.patIdx = idx
+	v.groupsMu.Unlock()
+}
+
 func (v *Verifier) groups() *uns.GroupIndex {
 	v.groupsMu.RLock()
 	defer v.groupsMu.RUnlock()
 	return v.groupsIdx
+}
+
+func (v *Verifier) personalAccessTokens() *uns.PersonalAccessTokenIndex {
+	v.groupsMu.RLock()
+	defer v.groupsMu.RUnlock()
+	return v.patIdx
 }
 
 // New builds a verifier and loads the persisted JWKS if one exists. NO
@@ -208,6 +227,36 @@ func (v *Verifier) keyFor(kid string) (crypto.PublicKey, bool) {
 // Verify checks the token per §2.2 order and returns the Verified identity,
 // or a reject reason from the Reason* vocabulary.
 func (v *Verifier) Verify(token string) (*Verified, string, error) {
+	return v.VerifyForScope(token, "")
+}
+
+// VerifyForScope verifies OIDC JWTs as before and additionally accepts a
+// replicated personal access token when it explicitly grants requiredScope.
+func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, string, error) {
+	if strings.HasPrefix(token, "pk_pat_") {
+		idx := v.personalAccessTokens()
+		if idx == nil {
+			return nil, ReasonBadToken, fmt.Errorf("personal access token verification is not wired")
+		}
+		record, entry, err := idx.Authenticate(token, requiredScope, time.Now())
+		if err != nil {
+			reason := ReasonBadToken
+			if strings.Contains(err.Error(), "expired") {
+				reason = ReasonExpired
+			} else if strings.Contains(err.Error(), "scope ") {
+				reason = ReasonScope
+			}
+			return nil, reason, fmt.Errorf("token rejected: %w", err)
+		}
+		expires := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+		if record.ExpiresAt != "" {
+			expires, _ = time.Parse(time.RFC3339, record.ExpiresAt)
+		}
+		return &Verified{
+			Entry: entry, Sub: record.OwnerSub, Username: record.OwnerEmail,
+			Exp: expires, Scopes: append([]string(nil), record.Scopes...), Credential: "pat",
+		}, "", nil
+	}
 	parser := jwt.NewParser(
 		jwt.WithValidMethods([]string{"RS256", "ES256"}), // allowlist; none/HS* die here
 		jwt.WithLeeway(clockSkew),
@@ -252,7 +301,7 @@ func (v *Verifier) Verify(token string) (*Verified, string, error) {
 		v.log.Warn("token: a group contributed no grants", "sub", sub, "err", problem)
 	}
 	username, _ := claims["preferred_username"].(string)
-	return &Verified{Entry: entry, Sub: sub, Username: username, Exp: exp.Time}, "", nil
+	return &Verified{Entry: entry, Sub: sub, Username: username, Exp: exp.Time, Credential: "oidc"}, "", nil
 }
 
 // reasonFor maps golang-jwt validation errors onto the metric vocabulary.

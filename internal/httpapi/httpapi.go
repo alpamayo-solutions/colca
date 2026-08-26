@@ -211,7 +211,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 					auditDenied(r, metrics.DoorHTTP, tokenauth.ReasonBadToken, nil)
 					return caller{}, false // no auth: block → the human world does not exist here
 				}
-				v, reason, err := ver.Verify(strings.TrimPrefix(h, "Bearer "))
+				v, reason, err := ver.VerifyForScope(strings.TrimPrefix(h, "Bearer "), "broker-http")
 				if err != nil {
 					m.AuthReject(metrics.DoorHTTP, reason)
 					auditDenied(r, metrics.DoorHTTP, reason, nil)

@@ -278,6 +278,9 @@ func Start(cfg *config.Config) (*Node, error) {
 		// A human's grants come from the groups their token names, resolved
 		// against the definitions this node holds (definition-stream design §8).
 		ver.SetGroupIndex(n.Engine.Groups())
+		ver.SetPersonalAccessTokenIndex(uns.NewPersonalAccessTokenIndex(
+			n.Engine.EntityStore(),
+		))
 	}
 	// Schema bundle (schema-bundle design §6/§7): explicit path, or the
 	// baked default when present, or the builtin floor. Any configured-but-

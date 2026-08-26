@@ -109,7 +109,8 @@ func ClassOf(contract string) Class {
 		return ClassEntity
 	case contract == "_Group" || contract == "_MetadataType" ||
 		contract == "_AnnotationType" || contract == "_DataModel" ||
-		contract == "_ExternalSystem" || contract == "_SemanticTag":
+		contract == "_ExternalSystem" || contract == "_SemanticTag" ||
+		contract == PersonalAccessTokenContract:
 		return ClassDefinition
 	case contract == "_Ack":
 		return ClassAck
@@ -589,7 +590,7 @@ func Validate(contract string, payload []byte) error {
 		contract == "_ExternalReference" || contract == "_Group" ||
 		contract == "_MetadataType" || contract == "_AnnotationType" ||
 		contract == "_DataModel" || contract == "_ExternalSystem" ||
-		contract == "_SemanticTag":
+		contract == "_SemanticTag" || contract == PersonalAccessTokenContract:
 		// Data-model records name themselves by "id" — the field grants and
 		// bindings reference them through. They shared the registry's "ulid" rule
 		// until the binding cutover renamed it; a floor that still asked for
