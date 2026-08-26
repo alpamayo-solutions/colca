@@ -648,9 +648,13 @@ func (c *ConfigExec) entityUpsert(payload []byte) (int, string, string, []StateW
 		if err := c.checkCommandEntityIdentity(ref.Contract, incoming.ID, ref.Entity); err != nil {
 			return 422, fmt.Sprintf("entity/upsert: entry %d: %v", i, err), "invalid", nil
 		}
+		entity := ref.Entity
+		if ref.Contract == "_Node" && incoming.ID == c.store.NodeID() {
+			entity = c.keepOwnPosition(entity)
+		}
 		records = append(records, StateRecord{
 			Topic:   c.commandEntityTopic(ref.Contract, incoming.ID),
-			Payload: ref.Entity,
+			Payload: entity,
 		})
 	}
 	writes, err := c.commit(records)
@@ -658,6 +662,58 @@ func (c *ConfigExec) entityUpsert(payload []byte) (int, string, string, []StateW
 		return 422, "entity/upsert: rejected: " + err.Error(), "invalid", nil
 	}
 	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
+}
+
+// keepOwnPosition carries this node's learned position across an upsert of
+// its OWN `_Node` record that does not carry one.
+//
+// A node is the author of where it sits: it learns that from the ancestry its
+// parent teaches on the downlink and writes it into its own record (node.go's
+// position hook). Everything else about the record — a display name, a
+// description — is an operator's to set, and an upsert replaces the record
+// wholesale. So a generated bootstrap re-applied after enrollment, which
+// states `root_system_element_id: null` because a deployment file cannot know
+// a position, silently unplaced the node: the hook does not fire again
+// (the ancestry did not change), and from then on the node projects as bound
+// to nothing — its signals resolve to the root node as their owner, and
+// anything addressed to the node that owns them goes to the wrong node.
+//
+// Only an ABSENT or empty incoming position is filled in. A writer that
+// states one still wins, which is what lets the position hook itself set it,
+// and what lets a re-taught position replace an older one.
+func (c *ConfigExec) keepOwnPosition(entity []byte) []byte {
+	var incoming map[string]json.RawMessage
+	if json.Unmarshal(entity, &incoming) != nil {
+		return entity
+	}
+	if raw, ok := incoming["root_system_element_id"]; ok {
+		var held string
+		if json.Unmarshal(raw, &held) == nil && held != "" {
+			return entity
+		}
+	}
+	stored, ok := c.store.KVGet(c.commandEntityTopic("_Node", c.store.NodeID()))
+	if !ok {
+		return entity
+	}
+	var current map[string]json.RawMessage
+	if json.Unmarshal(stored, &current) != nil {
+		return entity
+	}
+	position, ok := current["root_system_element_id"]
+	if !ok {
+		return entity
+	}
+	var learned string
+	if json.Unmarshal(position, &learned) != nil || learned == "" {
+		return entity
+	}
+	incoming["root_system_element_id"] = position
+	merged, err := json.Marshal(incoming)
+	if err != nil {
+		return entity
+	}
+	return merged
 }
 
 func (c *ConfigExec) entityDelete(payload []byte) (int, string, string, []StateWrite) {

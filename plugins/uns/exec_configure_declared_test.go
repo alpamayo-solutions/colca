@@ -231,3 +231,82 @@ func TestACatalogueThatGrowsBindsItsNewTagsOnArrival(t *testing.T) {
 		t.Fatalf("the tag the second publish added was not bound to its declared signal: %+v", got["line1/tag-t2"])
 	}
 }
+
+// A node authors where it sits, learned from the ancestry its parent teaches.
+// Re-applying a generated bootstrap — which states no position, because a
+// deployment file cannot know one — must not take that away: the position
+// hook does not fire again (the ancestry did not change), so a cleared
+// position stays cleared, and every signal on the node then resolves to the
+// wrong owner.
+func TestAnUpsertOfANodesOwnRecordKeepsTheLearnedPosition(t *testing.T) {
+	c := newConfigExec(t)
+	learn := func(element string) {
+		body := mustJSON(map[string]any{"entities": []map[string]any{{
+			"contract": "_Node",
+			"entity":   map[string]any{"id": "n1", "name": "edge1", "root_system_element_id": element},
+		}}})
+		if code, msg, _ := c.Execute("_CmdConfigure", "entity/upsert", body); code != 200 {
+			t.Fatalf("entity/upsert = %d %q", code, msg)
+		}
+	}
+	position := func() string {
+		raw, ok := c.store.KVGet("colca/v1/_Node/n1/_colca/nodes/n1")
+		if !ok {
+			t.Fatal("the node has no record of itself")
+		}
+		var held struct {
+			Root string `json:"root_system_element_id"`
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(raw, &held) != nil {
+			t.Fatalf("unreadable node record: %s", raw)
+		}
+		if held.Name == "" {
+			t.Fatalf("the upsert lost the record's other fields: %s", raw)
+		}
+		return held.Root
+	}
+
+	learn("01HAREA")
+	// A bootstrap re-applied after enrollment: everything the deployment
+	// knows, and null where the position is.
+	if code, msg, _ := c.Execute("_CmdConfigure", "entity/upsert", mustJSON(map[string]any{
+		"entities": []map[string]any{{
+			"contract": "_Node",
+			"entity":   map[string]any{"id": "n1", "name": "edge1", "root_system_element_id": nil},
+		}},
+	})); code != 200 {
+		t.Fatalf("entity/upsert = %d %q", code, msg)
+	}
+	if got := position(); got != "01HAREA" {
+		t.Fatalf("position = %q after a bootstrap that states none, want the learned 01HAREA", got)
+	}
+
+	// A writer that DOES state one still wins — this is how the node's own
+	// position hook re-places it after a move.
+	learn("01HOTHER")
+	if got := position(); got != "01HOTHER" {
+		t.Fatalf("position = %q, want the re-taught 01HOTHER", got)
+	}
+}
+
+// Another node's record is not this node's position to defend: only the
+// record whose id IS this node's carries the rule.
+func TestAnUpsertOfAnotherNodesRecordIsUntouched(t *testing.T) {
+	c := newConfigExec(t)
+	body := mustJSON(map[string]any{"entities": []map[string]any{{
+		"contract": "_Node",
+		"entity":   map[string]any{"id": "n-other", "name": "edge2", "root_system_element_id": nil},
+	}}})
+	if code, msg, _ := c.Execute("_CmdConfigure", "entity/upsert", body); code != 200 {
+		t.Fatalf("entity/upsert = %d %q", code, msg)
+	}
+	raw, ok := c.store.KVGet("colca/v1/_Node/n1/_colca/nodes/n-other")
+	if !ok {
+		t.Fatalf("no record written; have %v", c.store.KVScan("_Node", "n1"))
+	}
+	var held map[string]any
+	if json.Unmarshal(raw, &held) != nil || held["root_system_element_id"] != nil {
+		t.Fatalf("another node's record was rewritten: %s", raw)
+	}
+}
