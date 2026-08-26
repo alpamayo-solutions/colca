@@ -70,6 +70,7 @@ CLASS_TABLE: dict[str, str] = {
     # no downward flow to put them on, which meant they replicated the wrong
     # way, away from the nodes that need them.
     "_Group": "definition",
+    "_PersonalAccessToken": "definition",
     "_AnnotationType": "definition",
     "_MetadataType": "definition",
     "_DataModel": "definition",

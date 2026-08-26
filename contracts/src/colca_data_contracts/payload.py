@@ -715,6 +715,31 @@ class Group(Payload):
 
 
 @dataclass
+class PersonalAccessToken(Payload):
+    """Hash-only personal access token record replicated to child nodes.
+
+    The plaintext credential is never written to COLCA.  Nodes compare the
+    SHA-256 digest locally, then reconstruct the immutable identity and
+    privilege ceiling captured when the owner created the token.
+    """
+
+    id: str
+    hashed_secret: str
+    owner_sub: str
+    owner_email: str
+    scopes: List[str] = field(default_factory=list)
+    roles: List[str] = field(default_factory=list)
+    grants: List[str] = field(default_factory=list)
+    namespace_read_permissions: List[str] = field(default_factory=list)
+    namespace_write_permissions: List[str] = field(default_factory=list)
+    expires_at: Optional[str] = None
+
+    @classmethod
+    def decode(cls, json_str: str, timestamp: int) -> "PersonalAccessToken":
+        return cls(**json.loads(json_str))
+
+
+@dataclass
 class DataModel(Payload):
     """A data-model definition: the compiled, flattened shape a system element
     can claim to implement.
