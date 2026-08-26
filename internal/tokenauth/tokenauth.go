@@ -51,12 +51,14 @@ type Config struct {
 
 // Verified is a successfully verified token.
 type Verified struct {
-	Entry      *uns.Entry // KindHuman, grants from colca_grants
-	Sub        string
-	Username   string // preferred_username, "" if absent
-	Exp        time.Time
-	Scopes     []string // empty for OIDC JWTs, explicit for personal access tokens
-	Credential string   // "oidc" or "pat"
+	Entry            *uns.Entry // KindHuman, grants from colca_grants
+	Sub              string
+	Username         string // preferred_username, "" if absent
+	Exp              time.Time
+	Scopes           []string // empty for OIDC JWTs, explicit for personal access tokens
+	Credential       string   // "oidc" or "pat"
+	CredentialID     string   // PAT lookup id; empty for OIDC JWTs
+	CredentialDigest string   // hash-only PAT verifier at CONNECT; empty for OIDC JWTs
 }
 
 // Metrics is the nil-safe observer surface (implemented by *metrics.Metrics
@@ -230,6 +232,33 @@ func (v *Verifier) Verify(token string) (*Verified, string, error) {
 	return v.VerifyForScope(token, "")
 }
 
+func personalAccessTokenReason(err error) string {
+	reason := ReasonBadToken
+	if strings.Contains(err.Error(), "expired") {
+		reason = ReasonExpired
+	} else if strings.Contains(err.Error(), "scope ") {
+		reason = ReasonScope
+	}
+	return reason
+}
+
+// VerifyPersonalAccessTokenSession rechecks an established PAT session using
+// only its non-secret lookup id. The local definition is authoritative, so a
+// replicated tombstone or scope update takes effect without contacting the
+// parent node.
+func (v *Verifier) VerifyPersonalAccessTokenSession(
+	id, authenticatedDigest, requiredScope string, now time.Time,
+) (string, error) {
+	idx := v.personalAccessTokens()
+	if idx == nil {
+		return ReasonBadToken, fmt.Errorf("personal access token verification is not wired")
+	}
+	if err := idx.AuthorizeSession(id, authenticatedDigest, requiredScope, now); err != nil {
+		return personalAccessTokenReason(err), err
+	}
+	return "", nil
+}
+
 // VerifyForScope verifies OIDC JWTs as before and additionally accepts a
 // replicated personal access token when it explicitly grants requiredScope.
 func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, string, error) {
@@ -240,13 +269,7 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		}
 		record, entry, err := idx.Authenticate(token, requiredScope, time.Now())
 		if err != nil {
-			reason := ReasonBadToken
-			if strings.Contains(err.Error(), "expired") {
-				reason = ReasonExpired
-			} else if strings.Contains(err.Error(), "scope ") {
-				reason = ReasonScope
-			}
-			return nil, reason, fmt.Errorf("token rejected: %w", err)
+			return nil, personalAccessTokenReason(err), fmt.Errorf("token rejected: %w", err)
 		}
 		expires := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 		if record.ExpiresAt != "" {
@@ -254,7 +277,8 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		}
 		return &Verified{
 			Entry: entry, Sub: record.OwnerSub, Username: record.OwnerEmail,
-			Exp: expires, Scopes: append([]string(nil), record.Scopes...), Credential: "pat",
+			Exp: expires, Scopes: append([]string(nil), record.Scopes...),
+			Credential: "pat", CredentialID: record.ID, CredentialDigest: record.HashedSecret,
 		}, "", nil
 	}
 	parser := jwt.NewParser(

@@ -46,6 +46,23 @@ func TestPersonalAccessTokenScopeExpirySecretAndTombstoneFailClosed(t *testing.T
 	token := "pk_pat_01M0ZPAT000000000000000002_secret"
 	topic := putPersonalAccessToken(f, token, []string{"broker-mqtt"}, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 	idx := NewPersonalAccessTokenIndex(f)
+	digest := sha256.Sum256([]byte(token))
+	authenticatedDigest := hex.EncodeToString(digest[:])
+	if err := idx.AuthorizeSession("01M0ZPAT000000000000000002", authenticatedDigest, "broker-mqtt", time.Now()); err != nil {
+		t.Fatalf("live session recheck: %v", err)
+	}
+	if err := idx.AuthorizeSession("01M0ZPAT000000000000000002", authenticatedDigest, "broker-http", time.Now()); err == nil || !strings.Contains(err.Error(), "scope") {
+		t.Fatalf("live session wrong-scope error = %v", err)
+	}
+	replacementDigest := sha256.Sum256([]byte("replacement credential"))
+	f.records[topic] = mustJSON(PersonalAccessToken{
+		ID: "01M0ZPAT000000000000000002", HashedSecret: hex.EncodeToString(replacementDigest[:]),
+		OwnerSub: "person-1", Scopes: []string{"broker-mqtt"},
+	})
+	if err := idx.AuthorizeSession("01M0ZPAT000000000000000002", authenticatedDigest, "broker-mqtt", time.Now()); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("replaced credential session error = %v", err)
+	}
+	putPersonalAccessToken(f, token, []string{"broker-mqtt"}, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 
 	if _, _, err := idx.Authenticate(token, "broker-http", time.Now()); err == nil || !strings.Contains(err.Error(), "scope") {
 		t.Fatalf("wrong scope error = %v", err)
@@ -59,6 +76,9 @@ func TestPersonalAccessTokenScopeExpirySecretAndTombstoneFailClosed(t *testing.T
 	f.records[topic] = nil
 	if _, _, err := idx.Authenticate(token, "broker-mqtt", time.Now()); err == nil {
 		t.Fatal("tombstoned token authenticated")
+	}
+	if err := idx.AuthorizeSession("01M0ZPAT000000000000000002", authenticatedDigest, "broker-mqtt", time.Now()); err == nil {
+		t.Fatal("tombstoned token retained an established session")
 	}
 }
 

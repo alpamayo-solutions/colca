@@ -1,6 +1,6 @@
 // Human MQTT doors (human-authz design §5.1): two optional TLS listeners —
 // raw MQTT ("human-tcp") and MQTT over WebSocket ("human-ws") — with NO
-// client-certificate requirement. The CONNECT password carries a JWT, the
+// client-certificate requirement. The CONNECT password carries a JWT or PAT, the
 // username must equal the token's sub, and the session lives exactly as long
 // as the token: per-delivery ACL checks evaluate grants AND exp, and a 10s
 // sweeper kicks expired sessions with the same mechanism revocation uses.
@@ -26,10 +26,13 @@ const (
 
 // humanSession is one live token-authenticated session.
 type humanSession struct {
-	entry    *uns.Entry
-	sub      string
-	username string
-	exp      time.Time
+	entry            *uns.Entry
+	sub              string
+	username         string
+	exp              time.Time
+	credential       string
+	credentialID     string
+	credentialDigest string
 }
 
 // humanSessions is the session table keyed by MQTT client id. Client ids are
@@ -63,15 +66,14 @@ func (h *humanSessions) drop(clientID string) int {
 	return len(h.m)
 }
 
-// expired returns the client ids of sessions past exp at now.
-func (h *humanSessions) expired(now time.Time) []string {
+// snapshot returns a stable copy for the sweeper. It must not hold the table
+// lock while the broker disconnect path calls OnDisconnect and drops entries.
+func (h *humanSessions) snapshot() map[string]humanSession {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	var out []string
-	for id, s := range h.m {
-		if now.After(s.exp) {
-			out = append(out, id)
-		}
+	out := make(map[string]humanSession, len(h.m))
+	for id, session := range h.m {
+		out[id] = session
 	}
 	return out
 }
@@ -82,7 +84,7 @@ func isHumanListener(cl *mqtt.Client) bool {
 }
 
 // authenticateHuman is the human branch of OnConnectAuthenticate: verify the
-// JWT in the CONNECT password, require username == sub, store the session.
+// credential in the CONNECT password, require username == sub, store the session.
 func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 	if h.ver == nil {
 		// Config validation forbids human listeners without an auth block, so
@@ -108,6 +110,8 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 	}
 	n := h.humans.put(cl.ID, humanSession{
 		entry: v.Entry, sub: v.Sub, username: v.Username, exp: v.Exp,
+		credential: v.Credential, credentialID: v.CredentialID,
+		credentialDigest: v.CredentialDigest,
 	})
 	h.metrics.SetHumanSessions(n)
 	h.log.Debug("human authenticated", "sub", v.Sub, "username", v.Username,
@@ -141,14 +145,29 @@ func (h *colcaHook) OnDisconnect(cl *mqtt.Client, _ error, _ bool) {
 	}
 }
 
-// sweepExpired kicks every session past exp — the §5.1 sweeper body, exposed
-// on Server for the ticker (and tests).
-func (s *Server) sweepExpired(now time.Time) {
-	for _, id := range s.hook.humans.expired(now) {
+// sweepInvalidHumanSessions kicks sessions past expiry and PAT sessions whose
+// local replicated credential was tombstoned, became ambiguous/corrupt, or no
+// longer grants broker-mqtt. Exposed on Server for the ticker and tests.
+func (s *Server) sweepInvalidHumanSessions(now time.Time) {
+	for id, session := range s.hook.humans.snapshot() {
+		reason := ""
+		if !now.Before(session.exp) {
+			reason = tokenauth.ReasonExpired
+		} else if session.credential == "pat" {
+			var err error
+			reason, err = s.hook.ver.VerifyPersonalAccessTokenSession(
+				session.credentialID, session.credentialDigest, "broker-mqtt", now,
+			)
+			if err == nil {
+				continue
+			}
+		} else {
+			continue
+		}
 		if cl, ok := s.S.Clients.Get(id); ok {
 			_ = s.S.DisconnectClient(cl, packets.ErrNotAuthorized)
 			s.metrics.SessionKick()
-			s.hook.log.Info("human session expired — kicked", "client", id)
+			s.hook.log.Info("human session invalid — kicked", "client", id, "reason", reason)
 		}
 		// The OnDisconnect hook removes the table entry; drop defensively in
 		// case the client vanished without a disconnect event.
@@ -165,7 +184,7 @@ func (s *Server) runSweeper(stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-t.C:
-			s.sweepExpired(time.Now())
+			s.sweepInvalidHumanSessions(time.Now())
 		}
 	}
 }

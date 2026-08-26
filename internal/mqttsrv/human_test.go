@@ -2,7 +2,10 @@ package mqttsrv
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -20,6 +23,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/internal/tokenauth"
 	"github.com/alpamayo-solutions/colca/internal/tokenauth/tokentest"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // humanWorld is the human-door fixture: machine listener + BOTH human doors,
@@ -148,6 +152,44 @@ func humanConnect(t *testing.T, addr, scheme, username, token string) (paho.Clie
 		return c, fmt.Errorf("connect timed out")
 	}
 	return c, tk.Error()
+}
+
+func installPersonalAccessToken(
+	t *testing.T, w *humanWorld, id string, scopes []string, expiresAt time.Time,
+) (string, string) {
+	t.Helper()
+	token := "pk_pat_" + id + "_secret"
+	digest := sha256.Sum256([]byte(token))
+	payload, err := json.Marshal(uns.PersonalAccessToken{
+		ID: id, HashedSecret: hex.EncodeToString(digest[:]), OwnerSub: "pat-user",
+		OwnerEmail: "pat@example.com", Scopes: scopes,
+		Grants:    []string{"read:" + authtest.ElementID("m1") + "/#"},
+		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	topic := "colca/v1/" + uns.PersonalAccessTokenContract + "/n1/" + id
+	if _, err := w.srv.hook.engine().EntityStore().PublishBatch([]uns.StateRecord{{
+		Topic: topic, Payload: payload,
+	}}); err != nil {
+		t.Fatalf("publish PAT definition: %v", err)
+	}
+	w.ver.SetPersonalAccessTokenIndex(uns.NewPersonalAccessTokenIndex(
+		w.srv.hook.engine().EntityStore(),
+	))
+	return token, topic
+}
+
+func waitHumanConnectionClosed(t *testing.T, client paho.Client) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for client.IsConnectionOpen() {
+		if time.Now().After(deadline) {
+			t.Fatal("human session was not kicked")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func TestHumanDoorsConnectAndScope(t *testing.T) {
@@ -281,6 +323,49 @@ func TestHumanDoorRejectsEmptyUsernameAgainstARealToken(t *testing.T) {
 	}
 }
 
+func TestHumanPATRevocationAndScopeRemovalKickLiveSessions(t *testing.T) {
+	w := newHumanWorld(t)
+	expires := time.Now().Add(time.Hour)
+
+	revokedToken, revokedTopic := installPersonalAccessToken(
+		t, w, "01M0ZPAT000000000000000101", []string{"broker-mqtt"}, expires,
+	)
+	revoked, err := humanConnect(t, w.srv.HumanTCPAddr(), "ssl", "pat-user", revokedToken)
+	if err != nil {
+		t.Fatalf("connect revoked candidate: %v", err)
+	}
+	defer revoked.Disconnect(100)
+
+	downscopedToken, _ := installPersonalAccessToken(
+		t, w, "01M0ZPAT000000000000000102", []string{"broker-mqtt"}, expires,
+	)
+	downscoped, err := humanConnect(t, w.srv.HumanTCPAddr(), "ssl", "pat-user", downscopedToken)
+	if err != nil {
+		t.Fatalf("connect downscope candidate: %v", err)
+	}
+	defer downscoped.Disconnect(100)
+
+	if _, err := w.srv.hook.engine().EntityStore().PublishBatch([]uns.StateRecord{{
+		Topic: revokedTopic,
+	}}); err != nil {
+		t.Fatalf("publish PAT tombstone: %v", err)
+	}
+	installPersonalAccessToken(
+		t, w, "01M0ZPAT000000000000000102", []string{"api"}, expires,
+	)
+
+	w.srv.sweepInvalidHumanSessions(time.Now())
+	waitHumanConnectionClosed(t, revoked)
+	waitHumanConnectionClosed(t, downscoped)
+
+	if _, err := humanConnect(t, w.srv.HumanTCPAddr(), "ssl", "pat-user", revokedToken); err == nil {
+		t.Fatal("revoked PAT reconnected")
+	}
+	if _, err := humanConnect(t, w.srv.HumanTCPAddr(), "ssl", "pat-user", downscopedToken); err == nil {
+		t.Fatal("PAT without broker-mqtt scope reconnected")
+	}
+}
+
 // The session lives exactly as long as the token: per-delivery denial after
 // exp, sweeper kick, fresh-token reconnect works (§5.1).
 func TestHumanExpiryKick(t *testing.T) {
@@ -316,14 +401,8 @@ func TestHumanExpiryKick(t *testing.T) {
 
 	// The sweeper kicks the session (drive it directly — the 10s ticker is
 	// wall-clock; the sweep body is the contract).
-	w.srv.sweepExpired(time.Now())
-	deadline := time.Now().Add(5 * time.Second)
-	for c.IsConnectionOpen() {
-		if time.Now().After(deadline) {
-			t.Fatal("expired session not kicked")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	w.srv.sweepInvalidHumanSessions(time.Now())
+	waitHumanConnectionClosed(t, c)
 
 	// A fresh token reconnects fine.
 	c2, err := humanConnect(t, w.srv.HumanTCPAddr(), "ssl", "anna",

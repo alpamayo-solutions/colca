@@ -46,14 +46,7 @@ func personalAccessTokenID(token string) (string, bool) {
 	return parts[2], true
 }
 
-// Authenticate verifies the token digest, expiry and requested integration
-// scope, then reconstructs its human entry. Duplicate definitions for one id
-// fail closed instead of allowing one authoring node to shadow another.
-func (p *PersonalAccessTokenIndex) Authenticate(token, requiredScope string, now time.Time) (*PersonalAccessToken, *Entry, error) {
-	id, ok := personalAccessTokenID(token)
-	if !ok {
-		return nil, nil, fmt.Errorf("personal access token: malformed token")
-	}
+func (p *PersonalAccessTokenIndex) lookup(id string) (*PersonalAccessToken, error) {
 	var matches []PersonalAccessToken
 	var authors []string
 	for _, rec := range p.store.KVScanAll(PersonalAccessTokenContract) {
@@ -70,36 +63,88 @@ func (p *PersonalAccessTokenIndex) Authenticate(token, requiredScope string, now
 	if len(matches) != 1 {
 		sort.Strings(authors)
 		if len(matches) == 0 {
-			return nil, nil, fmt.Errorf("personal access token %s: this node holds no such token", id)
+			return nil, fmt.Errorf("personal access token %s: this node holds no such token", id)
 		}
-		return nil, nil, fmt.Errorf("personal access token %s is claimed by %s", id, strings.Join(authors, " and "))
+		return nil, fmt.Errorf("personal access token %s is claimed by %s", id, strings.Join(authors, " and "))
 	}
-	record := matches[0]
+	return &matches[0], nil
+}
+
+func personalAccessTokenDigest(record *PersonalAccessToken) ([]byte, error) {
 	want, err := hex.DecodeString(record.HashedSecret)
 	if err != nil || len(want) != sha256.Size {
-		return nil, nil, fmt.Errorf("personal access token %s: invalid stored digest", id)
+		return nil, fmt.Errorf("personal access token %s: invalid stored digest", record.ID)
+	}
+	return want, nil
+}
+
+func authorizePersonalAccessToken(record *PersonalAccessToken, requiredScope string, now time.Time) error {
+	if record.ExpiresAt != "" {
+		expires, err := time.Parse(time.RFC3339, record.ExpiresAt)
+		if err != nil {
+			return fmt.Errorf("personal access token %s: invalid expiry", record.ID)
+		}
+		if !now.Before(expires) {
+			return fmt.Errorf("personal access token %s: expired", record.ID)
+		}
+	}
+	if requiredScope != "" && !patContainsString(record.Scopes, requiredScope) {
+		return fmt.Errorf("personal access token %s: scope %s denied", record.ID, requiredScope)
+	}
+	return nil
+}
+
+// AuthorizeSession rechecks an already authenticated PAT against this node's
+// current replicated definition. It needs only the lookup id, never the
+// plaintext secret: CONNECT already proved the secret, while this check makes
+// a tombstone, expiry, duplicate definition, corrupt digest, or removed scope
+// terminate the live session on the next broker sweep.
+func (p *PersonalAccessTokenIndex) AuthorizeSession(
+	id, authenticatedDigest, requiredScope string, now time.Time,
+) error {
+	record, err := p.lookup(id)
+	if err != nil {
+		return err
+	}
+	current, err := personalAccessTokenDigest(record)
+	if err != nil {
+		return err
+	}
+	authenticated, err := hex.DecodeString(authenticatedDigest)
+	if err != nil || len(authenticated) != sha256.Size || subtle.ConstantTimeCompare(current, authenticated) != 1 {
+		return fmt.Errorf("personal access token %s: credential definition changed", id)
+	}
+	return authorizePersonalAccessToken(record, requiredScope, now)
+}
+
+// Authenticate verifies the token digest, expiry and requested integration
+// scope, then reconstructs its human entry. Duplicate definitions for one id
+// fail closed instead of allowing one authoring node to shadow another.
+func (p *PersonalAccessTokenIndex) Authenticate(token, requiredScope string, now time.Time) (*PersonalAccessToken, *Entry, error) {
+	id, ok := personalAccessTokenID(token)
+	if !ok {
+		return nil, nil, fmt.Errorf("personal access token: malformed token")
+	}
+	record, err := p.lookup(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	want, err := personalAccessTokenDigest(record)
+	if err != nil {
+		return nil, nil, err
 	}
 	got := sha256.Sum256([]byte(token))
 	if subtle.ConstantTimeCompare(got[:], want) != 1 {
 		return nil, nil, fmt.Errorf("personal access token %s: secret mismatch", id)
 	}
-	if record.ExpiresAt != "" {
-		expires, err := time.Parse(time.RFC3339, record.ExpiresAt)
-		if err != nil {
-			return nil, nil, fmt.Errorf("personal access token %s: invalid expiry", id)
-		}
-		if !now.Before(expires) {
-			return nil, nil, fmt.Errorf("personal access token %s: expired", id)
-		}
-	}
-	if requiredScope != "" && !patContainsString(record.Scopes, requiredScope) {
-		return nil, nil, fmt.Errorf("personal access token %s: scope %s denied", id, requiredScope)
+	if err := authorizePersonalAccessToken(record, requiredScope, now); err != nil {
+		return nil, nil, err
 	}
 	entry, err := TokenEntry(record.OwnerSub, record.Grants)
 	if err != nil {
 		return nil, nil, err
 	}
-	return &record, entry, nil
+	return record, entry, nil
 }
 
 func patContainsString(values []string, want string) bool {

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -50,10 +51,21 @@ func TestVerifyForScopeAcceptsOnlyThePATsReplicatedScope(t *testing.T) {
 	if err != nil || reason != "" {
 		t.Fatalf("verify = %#v, %q, %v", verified, reason, err)
 	}
-	if verified.Credential != "pat" || verified.Sub != "person-1" {
+	if verified.Credential != "pat" || verified.CredentialID != "01M0ZPAT000000000000000004" || verified.Sub != "person-1" {
 		t.Fatalf("verified = %#v", verified)
+	}
+	if reason, err := verifier.VerifyPersonalAccessTokenSession(
+		verified.CredentialID, verified.CredentialDigest, "broker-http", time.Now(),
+	); err != nil || reason != "" {
+		t.Fatalf("session recheck = %q, %v", reason, err)
 	}
 	if _, reason, err := verifier.VerifyForScope(token, "broker-mqtt"); err == nil || reason != ReasonScope {
 		t.Fatalf("wrong-scope result = %q, %v", reason, err)
+	}
+	store.records = nil
+	if reason, err := verifier.VerifyPersonalAccessTokenSession(
+		verified.CredentialID, verified.CredentialDigest, "broker-http", time.Now(),
+	); err == nil || reason != ReasonBadToken {
+		t.Fatalf("revoked session recheck = %q, %v", reason, err)
 	}
 }
