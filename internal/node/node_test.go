@@ -14,10 +14,12 @@ import (
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 
+	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/authtest"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"github.com/alpamayo-solutions/colca/secrets"
 )
 
 const tok = "test-admin-token"
@@ -239,6 +241,120 @@ func TestRestartSameDataDirKeepsOffsets(t *testing.T) {
 
 	if got := nextOffset(t, second, "metrics"); got != 2 {
 		t.Errorf("metrics next_offset after restart = %v, want 2 (offsets must survive a restart)", got)
+	}
+}
+
+func TestNodeLocalSecretStoreSurvivesRestartAndDecryptsOnlyInService(t *testing.T) {
+	base := t.TempDir()
+	keyFile := filepath.Join(base, "n1.key")
+	genKey(t, keyFile)
+	cfg := &config.Config{
+		ULID:       "n1",
+		DataDir:    filepath.Join(base, "data"),
+		SecretsDir: filepath.Join(base, "secrets"),
+		KeyFile:    keyFile,
+		API:        config.API{LocalAddr: "127.0.0.1:0"},
+	}
+	keyring, err := secrets.OpenKeyring(filepath.Join(base, "assistant-keys"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := keyring.SealForActive([]byte("provider-api-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := mustStart(t, cfg)
+	client := &door.Client{BaseURL: "http://" + first.LocalAPIAddr, Service: "assistant"}
+	created, err := client.PutSecret(t.Context(), "model-providers/alpha", door.SecretWrite{Envelope: envelope})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Revision != 1 || created.KeyID != envelope.KeyID {
+		t.Fatalf("created metadata = %+v", created)
+	}
+	first.Stop()
+
+	second, err := Start(cfg)
+	if err != nil {
+		t.Fatalf("restart with same secret directory: %v", err)
+	}
+	t.Cleanup(second.Stop)
+	client = &door.Client{BaseURL: "http://" + second.LocalAPIAddr, Service: "assistant"}
+	record, err := client.GetSecret(t.Context(), "model-providers/alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := keyring.Open(record.Envelope)
+	if err != nil || string(plaintext) != "provider-api-key" {
+		t.Fatalf("service decrypt after restart = %q, %v", plaintext, err)
+	}
+}
+
+func TestSecretStoreNeverReplicatesToParent(t *testing.T) {
+	base := t.TempDir()
+	parentKey := filepath.Join(base, "parent.key")
+	childKey := filepath.Join(base, "child.key")
+	parentID := genKey(t, parentKey)
+	childID := genKey(t, childKey)
+
+	parent := mustStart(t, &config.Config{
+		ULID:       "n-parent",
+		DataDir:    filepath.Join(base, "parent-data"),
+		SecretsDir: filepath.Join(base, "parent-secrets"),
+		KeyFile:    parentKey,
+		API:        config.API{Addr: "127.0.0.1:0", Token: tok},
+		Repl:       config.Endpoint{Addr: "127.0.0.1:0"},
+	})
+	authtest.EnrollNodeAt(t, parent.Registry, parent.Engine, "n-child", childID.PublicHex(), "child1")
+
+	child := mustStart(t, &config.Config{
+		ULID:       "n-child",
+		DataDir:    filepath.Join(base, "child-data"),
+		SecretsDir: filepath.Join(base, "child-secrets"),
+		KeyFile:    childKey,
+		API:        config.API{Addr: "127.0.0.1:0", LocalAddr: "127.0.0.1:0", Token: tok},
+		Parent:     &config.Parent{URL: "https://" + parent.ReplAddr, Pubkey: parentID.PublicHex()},
+	})
+
+	keyring, err := secrets.OpenKeyring(filepath.Join(base, "assistant-keys"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := keyring.SealForActive([]byte("child-only"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := &door.Client{BaseURL: "http://" + child.LocalAPIAddr, Service: "assistant"}
+	if _, err := local.PutSecret(t.Context(), "primary", door.SecretWrite{Envelope: envelope}); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := apiCall(t, child, http.MethodPost, "/publish", map[string]any{
+		"topic": "colca/v1/_Metric/n-child/m1/temp", "payload": map[string]any{"v": 42},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("publish replication witness = %d: %v", code, out)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if entries := mustKVScan(t, parent.Store, "child1/m1/temp"); len(entries) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ordinary stream record did not replicate to parent")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	items, err := parent.Secrets.List("assistant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("child secret replicated into parent store: %+v", items)
+	}
+	if _, err := child.Secrets.Get("assistant", "primary"); err != nil {
+		t.Fatalf("child lost its local secret: %v", err)
 	}
 }
 

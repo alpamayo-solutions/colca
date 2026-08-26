@@ -34,6 +34,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/repl"
 	"github.com/alpamayo-solutions/colca/internal/retention"
+	"github.com/alpamayo-solutions/colca/internal/secretstore"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/internal/tokenauth"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -45,6 +46,7 @@ import (
 type Node struct {
 	Cfg      *config.Config
 	Store    *store.Store
+	Secrets  *secretstore.Store
 	Blobs    *blobstore.Store
 	Engine   *engine.Engine
 	MQTT     *mqttsrv.Server
@@ -105,6 +107,14 @@ func Start(cfg *config.Config) (*Node, error) {
 		return nil, fmt.Errorf("node %s: open store %s: %w", cfg.ULID, cfg.DataDir, err)
 	}
 	st.SetMaxRecordBytes(cfg.Limits.EffectiveMaxRecordBytes())
+	var secretDB *secretstore.Store
+	if cfg.SecretsDir != "" {
+		secretDB, err = secretstore.Open(cfg.SecretsDir)
+		if err != nil {
+			_ = st.Close()
+			return nil, fmt.Errorf("node %s: open secret store %s: %w", cfg.ULID, cfg.SecretsDir, err)
+		}
+	}
 
 	// clk is this node's authoritative-time state (time-sync design §2.1): a
 	// node with no configured parent is the root/authority. Built once and
@@ -112,7 +122,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	// read/write) — they must be the SAME instance (engine.New's doc
 	// comment).
 	clk := clock.New(cfg.Parent == nil, time.Now)
-	n := &Node{Cfg: cfg, Store: st, Metrics: metrics.New(st, cfg.Retention, clk), stop: make(chan struct{})}
+	n := &Node{Cfg: cfg, Store: st, Secrets: secretDB, Metrics: metrics.New(st, cfg.Retention, clk), stop: make(chan struct{})}
 	log := slog.Default().With("node", cfg.ULID, "comp", "node")
 	// From here on every error path unwinds through Stop.
 	fail := func(err error) (*Node, error) {
@@ -382,7 +392,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.apiLn = ln
 		n.APIAddr = ln.Addr().String()
-		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), false))}
+		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), false, n.Secrets))}
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server stopped", "err", err)
@@ -403,7 +413,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.localAPILn = ln
 		n.LocalAPIAddr = ln.Addr().String()
-		n.localAPISrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), true))}
+		n.localAPISrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), true, n.Secrets))}
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("local api server stopped", "err", err)
@@ -531,6 +541,9 @@ func (n *Node) Stop() {
 		}
 		if n.Store != nil {
 			_ = n.Store.Close()
+		}
+		if n.Secrets != nil {
+			_ = n.Secrets.Close()
 		}
 	})
 }

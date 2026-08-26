@@ -7,6 +7,7 @@
 # (no mount, so the engine refuses everything it publishes).
 ulid: n-global
 data_dir: /data
+secrets_dir: /secrets
 log_level: debug
 key_file: /keys/global.key
 api: { addr: ":443", local_addr: ":80", token: "demo-admin-token" }

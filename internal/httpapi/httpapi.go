@@ -39,6 +39,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/registry"
+	"github.com/alpamayo-solutions/colca/internal/secretstore"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/internal/tokenauth"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -92,8 +93,12 @@ type caller struct {
 // identities is not), so it never registers them at all — an admin route
 // that 404s because it was never mounted, rather than 403s because it
 // refused, is what keeps a scanner from learning the route exists.
-func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, blobs *blobstore.Store, pubkey string, local bool) http.Handler {
+func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, blobs *blobstore.Store, pubkey string, local bool, secretStores ...*secretstore.Store) http.Handler {
 	mux := http.NewServeMux()
+	var secretDB *secretstore.Store
+	if len(secretStores) > 0 {
+		secretDB = secretStores[0]
+	}
 
 	// The body carries the payload base64-encoded inside a JSON envelope, so
 	// it is legitimately larger than the record itself: 2x covers base64's
@@ -592,6 +597,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// never moves it back.
 	if local {
 		mountBlobRoutes(mux, blobs, m, cfg.Limits.EffectiveMaxBlobBytes(), writeJSON, auth)
+		if secretDB != nil {
+			mountLocalSecretRoutes(mux, secretDB, writeJSON, auth)
+		}
 
 		mux.HandleFunc("GET /self", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
 			mount := ""
@@ -631,6 +639,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// Provisioning identities is not a local service's job; reading and
 	// writing the node's own data is.
 	if !local {
+		if secretDB != nil {
+			mountAdminSecretRoutes(mux, secretDB, writeJSON, adminOnly)
+		}
 		// The published door's resource read (resources design §6): the ONLY
 		// way a file is read on an authenticated door. Every read passes
 		// through a resource id so the element-scoped grant check always

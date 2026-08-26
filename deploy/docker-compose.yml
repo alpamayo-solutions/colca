@@ -67,6 +67,7 @@ services:
       - "./config/global.yaml:/etc/colca/global.yaml:ro"
       - "./keys:/keys:ro"
       - "global-data:/data"
+      - "global-secrets:/secrets"
     # 11880 is the hub bus: every record replicated up from the whole tree is
     # mirrored there under its stored topic (subscribe with an enrolled read:# identity).
     # 11890/11891 are the HUMAN doors (JWT over TLS: raw MQTT / WebSocket) —
@@ -92,6 +93,7 @@ services:
       - "./config/site1.yaml:/etc/colca/site1.yaml:ro"
       - "./keys:/keys:ro"
       - "site1-data:/data"
+      - "site1-secrets:/secrets"
     ports:
       - "127.0.0.1:${COLCA_PORT_SITE1_API:-18081}:443"
       - "127.0.0.1:${COLCA_PORT_SITE1_MQTT:-11881}:8883"
@@ -111,6 +113,7 @@ services:
       - "./config/edge1.yaml:/etc/colca/edge1.yaml:ro"
       - "./keys:/keys:ro"
       - "edge1-data:/data"
+      - "edge1-secrets:/secrets"
     ports:
       - "127.0.0.1:${COLCA_PORT_EDGE1_API:-18082}:443"
       - "127.0.0.1:${COLCA_PORT_EDGE1_MQTT:-11883}:8883"
@@ -131,6 +134,7 @@ services:
       - "./config/edge2.yaml:/etc/colca/edge2.yaml:ro"
       - "./keys:/keys:ro"
       - "edge2-data:/data"
+      - "edge2-secrets:/secrets"
     ports:
       - "127.0.0.1:${COLCA_PORT_EDGE2_API:-18083}:443"
       - "127.0.0.1:${COLCA_PORT_EDGE2_MQTT:-11884}:8883"
@@ -369,9 +373,13 @@ services:
 
 volumes:
   global-data: {}
+  global-secrets: {}
   site1-data: {}
+  site1-secrets: {}
   edge1-data: {}
+  edge1-secrets: {}
   edge2-data: {}
+  edge2-secrets: {}
   global-notifications-data: {}
   site1-notifications-data: {}
   edge1-notifications-data: {}

@@ -20,7 +20,10 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/alpamayo-solutions/colca/secrets"
 )
 
 // Client talks to one node.
@@ -104,6 +107,36 @@ type Self struct {
 	Node    string `json:"node"`
 	Element string `json:"element"`
 	Mount   string `json:"mount"`
+}
+
+// SecretRecord is returned only to the owning service on the local door.
+type SecretRecord struct {
+	Owner     string           `json:"owner"`
+	Name      string           `json:"name"`
+	Envelope  secrets.Envelope `json:"envelope"`
+	Revision  uint64           `json:"revision"`
+	ExpiresAt *time.Time       `json:"expires_at,omitempty"`
+	UpdatedAt time.Time        `json:"updated_at"`
+}
+
+// SecretMetadata is safe for administration views and never carries ciphertext.
+type SecretMetadata struct {
+	Owner     string     `json:"owner"`
+	Name      string     `json:"name"`
+	Revision  uint64     `json:"revision"`
+	KeyID     string     `json:"key_id"`
+	Algorithm string     `json:"algorithm"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	Expired   bool       `json:"expired"`
+}
+
+// SecretWrite supplies an already-sealed envelope. ExpectedRevision nil is an
+// unconditional upsert, 0 is create-only, and a positive value is CAS.
+type SecretWrite struct {
+	Envelope         secrets.Envelope `json:"envelope"`
+	ExpiresAt        *time.Time       `json:"expires_at,omitempty"`
+	ExpectedRevision *uint64          `json:"expected_revision,omitempty"`
 }
 
 // Fetch reads one page. It does NOT move the cursor: reading is side-effect
@@ -202,6 +235,162 @@ func (c *Client) Self(ctx context.Context) (Self, error) {
 		return Self{}, fmt.Errorf("reading local identity: response has no service or node identity")
 	}
 	return self, nil
+}
+
+// PutSecret stores ciphertext under the calling local service's namespace.
+func (c *Client) PutSecret(ctx context.Context, name string, value SecretWrite) (SecretMetadata, error) {
+	return c.putSecret(ctx, "/secrets/"+escapeSecretPath(name), name, value)
+}
+
+// PutSecretFor provisions ciphertext for owner through the admin door.
+func (c *Client) PutSecretFor(ctx context.Context, owner, name string, value SecretWrite) (SecretMetadata, error) {
+	return c.putSecret(ctx, "/secrets/"+url.PathEscape(owner)+"/"+escapeSecretPath(name), owner+"/"+name, value)
+}
+
+func (c *Client) putSecret(ctx context.Context, endpoint, label string, value SecretWrite) (SecretMetadata, error) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return SecretMetadata{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.BaseURL+endpoint, bytes.NewReader(body))
+	if err != nil {
+		return SecretMetadata{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.do(req)
+	if err != nil {
+		return SecretMetadata{}, fmt.Errorf("storing secret %s: %w", label, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		reason, _ := io.ReadAll(resp.Body)
+		return SecretMetadata{}, fmt.Errorf("storing secret %s: HTTP %d: %s", label, resp.StatusCode, truncate(reason, 300))
+	}
+	var out struct {
+		Secret SecretMetadata `json:"secret"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return SecretMetadata{}, fmt.Errorf("storing secret %s: %w", label, err)
+	}
+	return out.Secret, nil
+}
+
+// GetSecret returns ciphertext to the owning service on the local door.
+func (c *Client) GetSecret(ctx context.Context, name string) (SecretRecord, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/secrets/"+escapeSecretPath(name), nil)
+	if err != nil {
+		return SecretRecord{}, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return SecretRecord{}, fmt.Errorf("reading secret %s: %w", name, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		reason, _ := io.ReadAll(resp.Body)
+		return SecretRecord{}, fmt.Errorf("reading secret %s: HTTP %d: %s", name, resp.StatusCode, truncate(reason, 300))
+	}
+	var out SecretRecord
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return SecretRecord{}, fmt.Errorf("reading secret %s: %w", name, err)
+	}
+	return out, nil
+}
+
+// SecretInfoFor reads metadata through the admin door without ciphertext.
+func (c *Client) SecretInfoFor(ctx context.Context, owner, name string) (SecretMetadata, error) {
+	endpoint := c.BaseURL + "/secrets/" + url.PathEscape(owner) + "/" + escapeSecretPath(name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return SecretMetadata{}, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return SecretMetadata{}, fmt.Errorf("reading secret metadata %s/%s: %w", owner, name, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		reason, _ := io.ReadAll(resp.Body)
+		return SecretMetadata{}, fmt.Errorf("reading secret metadata %s/%s: HTTP %d: %s", owner, name, resp.StatusCode, truncate(reason, 300))
+	}
+	var out struct {
+		Secret SecretMetadata `json:"secret"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return SecretMetadata{}, fmt.Errorf("reading secret metadata %s/%s: %w", owner, name, err)
+	}
+	return out.Secret, nil
+}
+
+// ListSecrets lists metadata under the calling local service's namespace.
+func (c *Client) ListSecrets(ctx context.Context) ([]SecretMetadata, error) {
+	return c.listSecrets(ctx, "/secrets", "local service")
+}
+
+// ListSecretsFor lists one service's metadata through the admin door.
+func (c *Client) ListSecretsFor(ctx context.Context, owner string) ([]SecretMetadata, error) {
+	return c.listSecrets(ctx, "/secrets/"+url.PathEscape(owner), owner)
+}
+
+func (c *Client) listSecrets(ctx context.Context, endpoint, label string) ([]SecretMetadata, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("listing secrets for %s: %w", label, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		reason, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("listing secrets for %s: HTTP %d: %s", label, resp.StatusCode, truncate(reason, 300))
+	}
+	var out struct {
+		Secrets []SecretMetadata `json:"secrets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("listing secrets for %s: %w", label, err)
+	}
+	return out.Secrets, nil
+}
+
+// DeleteSecret deletes one secret in the calling service's namespace.
+func (c *Client) DeleteSecret(ctx context.Context, name string, expectedRevision *uint64) error {
+	return c.deleteSecret(ctx, "/secrets/"+escapeSecretPath(name), name, expectedRevision)
+}
+
+// DeleteSecretFor deletes one service's secret through the admin door.
+func (c *Client) DeleteSecretFor(ctx context.Context, owner, name string, expectedRevision *uint64) error {
+	return c.deleteSecret(ctx, "/secrets/"+url.PathEscape(owner)+"/"+escapeSecretPath(name), owner+"/"+name, expectedRevision)
+}
+
+func (c *Client) deleteSecret(ctx context.Context, endpoint, label string, expectedRevision *uint64) error {
+	if expectedRevision != nil {
+		endpoint += "?expected_revision=" + strconv.FormatUint(*expectedRevision, 10)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.BaseURL+endpoint, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return fmt.Errorf("deleting secret %s: %w", label, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		reason, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("deleting secret %s: HTTP %d: %s", label, resp.StatusCode, truncate(reason, 300))
+	}
+	return nil
+}
+
+func escapeSecretPath(name string) string {
+	segments := strings.Split(name, "/")
+	for i := range segments {
+		segments[i] = url.PathEscape(segments[i])
+	}
+	return strings.Join(segments, "/")
 }
 
 // Ack moves a cursor to offset. Monotonic: acking backwards reports false and

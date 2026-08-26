@@ -142,6 +142,17 @@ func TestValidateRequiredFields(t *testing.T) {
 	}
 }
 
+func TestSecretStoreMustHaveASeparateLifecycleDirectory(t *testing.T) {
+	cfg := &Config{ULID: "n1", DataDir: "/var/lib/colca", SecretsDir: "/var/lib/colca", KeyFile: "/keys/node.key"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("secrets_dir equal to data_dir was accepted")
+	}
+	cfg.SecretsDir = "/var/lib/colca-secrets"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("separate secrets_dir rejected: %v", err)
+	}
+}
+
 // retentionSample is the full example block from design §3.1, appended to the
 // minimal base config.
 const retentionSample = `

@@ -1,6 +1,7 @@
 # deploy/config/edge2.yaml.tpl — level 3: parent site1, MQTT for machine m2.
 ulid: n-edge2
 data_dir: /data
+secrets_dir: /secrets
 log_level: debug
 key_file: /keys/edge2.key
 api: { addr: ":443", local_addr: ":80", token: "demo-admin-token" }

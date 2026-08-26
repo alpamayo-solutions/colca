@@ -9,6 +9,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -90,15 +91,20 @@ type Config struct {
 	// Name is what the node calls itself in its own `_Node` record — a
 	// deployment's name, never its position. Optional: a node with no name
 	// describes itself by its ULID.
-	Name     string   `yaml:"name"`
-	DataDir  string   `yaml:"data_dir"`
-	LogLevel string   `yaml:"log_level"`
-	KeyFile  string   `yaml:"key_file"`
-	TLS      TLS      `yaml:"tls"`
-	API      API      `yaml:"api"`
-	MQTT     Endpoint `yaml:"mqtt"`
-	Repl     Endpoint `yaml:"repl"`
-	Parent   *Parent  `yaml:"parent"`
+	Name    string `yaml:"name"`
+	DataDir string `yaml:"data_dir"`
+	// SecretsDir is a separate node-local Pebble database containing only
+	// service-sealed ciphertext. It is deliberately outside DataDir so stream
+	// reset/restore and replication lifecycle can never include it by accident.
+	// Empty disables the secret store for compositions that do not expose it.
+	SecretsDir string   `yaml:"secrets_dir"`
+	LogLevel   string   `yaml:"log_level"`
+	KeyFile    string   `yaml:"key_file"`
+	TLS        TLS      `yaml:"tls"`
+	API        API      `yaml:"api"`
+	MQTT       Endpoint `yaml:"mqtt"`
+	Repl       Endpoint `yaml:"repl"`
+	Parent     *Parent  `yaml:"parent"`
 
 	// MQTTLocal is the unpublished, plaintext local door (local-service-trust
 	// design §4): reachability from inside the deployment's own network IS
@@ -607,6 +613,9 @@ func (c *Config) NodeName() string {
 func (c *Config) Validate() error {
 	if c.ULID == "" || c.DataDir == "" || c.KeyFile == "" {
 		return fmt.Errorf("config: ulid, data_dir, key_file are required")
+	}
+	if c.SecretsDir != "" && filepath.Clean(c.SecretsDir) == filepath.Clean(c.DataDir) {
+		return fmt.Errorf("config: secrets_dir must be separate from data_dir")
 	}
 	if (c.MQTTHuman.TCPAddr != "" || c.MQTTHuman.WSAddr != "") && c.Auth == nil {
 		// Fail at startup, not at the first CONNECT: a token door with no
