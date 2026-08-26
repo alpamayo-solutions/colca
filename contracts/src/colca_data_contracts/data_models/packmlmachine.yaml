@@ -1,0 +1,31 @@
+name: PackMLMachine
+version: '2.0'
+description: |-
+  A machine that reports one aggregated operating state, in the spirit of
+  PackML (ISA-TR88.00.02): it inherits Machine's heartbeat and is_connected
+  and adds a single machine_status, published by an adapter service that
+  collapses whatever the PLC exposes into one value.
+
+  The point is that consumers — dashboards, OEE producers, alarm rules — read
+  one signal with one vocabulary, whatever the machine underneath is. An
+  adapter per machine family is what absorbs the difference.
+
+  The status is an integer with bitfield-compatible values. Today a row
+  carries exactly one of them (mutually exclusive), and the values are powers
+  of two so a future adapter can OR them without a schema change.
+extends:
+  - Machine
+signals:
+  - name: machine_status
+    data_type: integer
+    description: |-
+      Aggregated operating state. Adapter services resolve it first-match-wins:
+        0  OFF        — the connector cannot reach the PLC (is_connected=false)
+        1  READY      — reserved (not yet emitted)
+        2  IDLE       — connected, no fault, not currently producing
+        4  PRODUCING  — a part was counted within the microstop window
+        8  FAULTED    — an unplanned error signal is active
+      1/2/4/8 are powers of two so future logic can combine bits (e.g.
+      12 = PRODUCING + FAULTED) without altering the type. The numeric values
+      are unchanged from earlier revisions of this model — only the names they
+      are described by are no longer specific to one customer's plant.

@@ -94,7 +94,7 @@ def test_system_element_roundtrip_full():
         name="M6",
         description="Main mixer on line 1",
         parent_id="01HPARENT",
-        implements=["MBMachine"],
+        implements=["PackMLMachine"],
         external_asset_id="WO-1234",
         external_asset_id_type="string",
         metadata={"location": "Halle A", "owner": "Production"},

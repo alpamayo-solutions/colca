@@ -70,7 +70,7 @@ def test_global_definition_payloads_have_state_not_operations():
     definitions = [
         MetadataTypePayload(id="m", name="work_order", data_type="string"),
         AnnotationTypePayload(id="a", name="maintenance", data_type="string"),
-        DataModelPayload(id="i", name="MBMachine"),
+        DataModelPayload(id="i", name="PackMLMachine"),
         ExternalSystemPayload(
             id="e",
             key="tcdb",

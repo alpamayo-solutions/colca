@@ -1,4 +1,4 @@
-"""The four builtin platform YAMLs (machine, machinestate, mbmachine,
+"""The four builtin platform YAMLs (machine, machinestate, packmlmachine,
 oee_producer.yaml) compile and reproduce the semantic content
 authored before: same names, enums, required flags, and descriptions as before the
 Python-class era. `compile_models()` with no `source_dir` loads exactly
@@ -16,7 +16,7 @@ def _slots(manifest: dict) -> dict:
 
 def test_builtins_compile():
     manifests = _manifests()
-    for name in ("Machine", "MachineState", "MBMachine", "OEEProducer"):
+    for name in ("Machine", "MachineState", "PackMLMachine", "OEEProducer"):
         assert name in manifests, name
 
 
@@ -42,8 +42,8 @@ def test_machinestate_extends_machine_and_keeps_enums():
     assert slots["state_reason"]["enum"][:2] == ["UNCLASSIFIED", "LOCAL_FAULT"]
 
 
-def test_mbmachine_extends_machine():
-    manifest = _manifests()["MBMachine"]
+def test_packmlmachine_extends_machine():
+    manifest = _manifests()["PackMLMachine"]
     assert manifest["extends"] == ["Machine"]
     slots = _slots(manifest)
     assert {"heartbeat", "is_connected", "machine_status"} <= set(slots)
