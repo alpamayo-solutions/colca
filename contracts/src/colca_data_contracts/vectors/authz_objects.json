@@ -1,0 +1,19 @@
+{
+  "_comment": "Golden vectors for the Keycloak Authorization Services objects a colca grant is made of (grant-sync design §4). Three places implement this vocabulary natively and none can import the others: the API (api/src/authentication/authz_client.py, the editor's runtime writer), node-manager (src/node_manager/auth_apply.py, `colca auth apply`'s bundle writer) and colca (internal/grantsync/keycloak.go, the reader that compiles them into _Group definitions). This file is the one definition; each suite judges its own copy against it, so a scope added on one side cannot land without the other two moving (schema-bundle design §2, tier 2).",
+  "scopes": [
+    "read",
+    "param",
+    "operate",
+    "maintain",
+    "configure",
+    "admin"
+  ],
+  "element_resource_type": "colca:element",
+  "managed_attr": "colca.managed",
+  "managed_by_attr": "colca.managed-by",
+  "group_policy_name_pattern": "group:{name}",
+  "scope_permission_name_pattern": "grant:{group_id}:{element_id}",
+  "logic": "POSITIVE",
+  "decision_strategy": "UNANIMOUS",
+  "_permission_name_note": "`colca auth apply` names the permissions it authors `{group}@{element}`, from before the editor could author one. Both names are read by the same reader because OWNERSHIP is decided by what a permission BINDS (one single-group policy, one element resource), never by its name — a name match would let one pair carry two permissions with different scopes, which grantsync unions. So the pattern above is pinned on the authoring side that uses it and the legacy spelling is recorded here rather than made a second rule."
+}
