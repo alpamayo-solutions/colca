@@ -38,8 +38,6 @@ from franzmq.data_contracts.base import Ack, Cmd
 CLASS_TABLE: dict[str, str] = {
     "_Metric": "data",
     "_Log": "data",
-    "_DBEvent": "data",
-    "_DBDump": "data",
     "_SystemElement": "entity",
     "_Signal": "entity",
     "_Constant": "entity",
@@ -125,12 +123,6 @@ NOT_ON_THE_WIRE: dict[str, str] = {
         "discovery is atomic, so a single tag is not a valid state "
         "(data-model binding design §3.1)"
     ),
-    "_DataTagContext": (
-        "retired from the wire with the DataTagContext model; still serialized "
-        "by the un-migrated Django publisher until both are deleted "
-        "(data-model binding design §2, §11)"
-    ),
-    "_DataTagContexts": "as _DataTagContext — the list form of the same retired contract",
 }
 
 # The JSON-Schema keyword subset the loader enforces (design §4.1).

@@ -33,7 +33,6 @@ class ServiceType(BaseStrEnum):
     DATABASE_VIEWER = "database-viewer"
     CA = "ca"
     ADVERTISER = "advertiser"
-    TEST_RUNNER = "test-runner"
     OTHER = "other"
     UNKNOWN = "unknown"
 
@@ -502,126 +501,6 @@ class DataTags(Payload):
         d["data_tags"] = [tag.__dict__ for tag in self.data_tags]
         d["version"] = self.version
         return d
-
-
-@dataclass
-class SignalData:
-    id: str
-    name: str
-    source: str
-    data_type: DataType
-    index_type: IndexType
-    topic_name: str
-    system_element: Optional[str] = None
-    config: Dict[str, Any] = field(default_factory=dict)
-    unit: Optional[str] = None
-    precision: Optional[int] = None
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
-
-    @property
-    def hierarchy(self) -> List[str]:
-        if self.system_element:
-            return self.system_element.split(" - ")
-        return []
-
-    def encode(self):
-        return json.dumps(self.__dict__)
-
-
-@dataclass
-class DataTagContext(Payload):
-    id: str
-    tag_id: str
-    source: str
-    topic_name: str
-    is_logged: bool
-    is_published: bool
-    signal: SignalData
-
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> 'DataTagContext':
-        data = json.loads(json_str)
-        data["signal"] = SignalData(**data["signal"])
-        data.pop("version", None)
-        return cls(**data)
-
-    @property
-    def __dict__(self):
-        d = super().__dict__.copy()
-        d["signal"] = self.signal.__dict__
-        return d
-
-
-@dataclass
-class DataTagContexts(Payload):
-    data_tag_contexts: List[DataTagContext]
-
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> 'DataTagContexts':
-        data = json.loads(json_str)
-        data_tag_contexts = [
-            DataTagContext.decode(json.dumps(context), timestamp)
-            for context in data["data_tag_contexts"]
-        ]
-        return cls(data_tag_contexts=data_tag_contexts)
-
-    @property
-    def version(self) -> str:
-        sorted_contexts = sorted(self.data_tag_contexts, key=lambda x: x.tag_id)
-        contexts_dict = [context.__dict__ for context in sorted_contexts]
-        return hashlib.md5(
-            json.dumps(contexts_dict, cls=CustomEncoder, sort_keys=True).encode()
-        ).hexdigest()
-
-    @property
-    def __dict__(self):
-        d = super().__dict__.copy()
-        d["data_tag_contexts"] = [context.__dict__ for context in self.data_tag_contexts]
-        d["version"] = self.version
-        return d
-
-
-@dataclass
-class ApiWriteCmd(Cmd):
-    """Hub-to-edge API write forwarding command.
-
-    command dict contains:
-        method: HTTP method (POST, PATCH, DELETE)
-        path: API path (e.g. /api/v1/signals/{id}/)
-        data: Request body (None for DELETE)
-        query_params: URL query parameters
-    """
-    command: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class DBEvent(Payload):
-    """Real-time CDC event for a single model row (create/update/delete)."""
-    colca_node_id: str
-    model: str
-    operation: str  # "upsert" or "delete"
-    pk: str
-    data: Optional[Dict[str, Any]] = None  # Full serialized row; None for delete
-
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> 'DBEvent':
-        data = json.loads(json_str)
-        return cls(**data)
-
-
-@dataclass
-class DBDump(Payload):
-    """Periodic full-table dump for self-healing sync."""
-    colca_node_id: str
-    model: str
-    rows: List[Dict[str, Any]]
-    row_hash: str  # MD5 of sorted JSON for change detection
-
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> 'DBDump':
-        data = json.loads(json_str)
-        return cls(**data)
 
 
 @dataclass

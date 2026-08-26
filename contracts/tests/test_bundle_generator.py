@@ -48,13 +48,6 @@ def test_contracts_kept_off_the_wire_are_absent_and_say_why():
         assert len(reason) > 40, f"{contract}: give a reason, not a label"
 
 
-def test_the_retired_binding_contracts_are_off_the_wire():
-    """DataTagContext is retired; a door that does not know it rejects it."""
-    body, _ = gb.build_bundle()
-    assert "_DataTagContext" not in body["contracts"]
-    assert "_DataTagContexts" not in body["contracts"]
-
-
 def test_the_catalogue_is_one_record_carrying_its_own_revision():
     body, _ = gb.build_bundle()
     assert "_DataTags" in body["contracts"], "the catalogue is a wire contract"
@@ -223,7 +216,7 @@ def test_cmd_contracts_carry_the_door_contract():
     dropped from required (publishers do not stamp it)."""
     body, _ = gb.build_bundle()
     for ident in ("_CmdParam", "_CmdOperate", "_CmdMaintain", "_CmdConfigure",
-                  "_CmdEdit", "_CmdAdmin", "_Cmd", "_ApiWriteCmd"):
+                  "_CmdEdit", "_CmdAdmin", "_Cmd"):
         entry = body["contracts"][ident]
         assert entry["class"] == "cmd", ident
         req = entry["schema"].get("required", [])
