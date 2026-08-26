@@ -42,4 +42,16 @@ _GENERAL = {
     "query_stats", "calculate", "functions", "straight", "route",
 }
 
-ICON_SET: frozenset[str] = frozenset(_STRUCTURE | _MEASUREMENT | _GENERAL)
+# Recurring-property badges (`ui/app/domain/property-badges.ts`). The
+# Edit draws a data type, a source, a file type and so on through one
+# registry; every glyph it names has to survive the subset build, and being
+# in this set is what makes `test_icon_set_ships` check that. `draft` was in
+# that registry and is NOT in the font -- it rendered blank on every binary
+# resource until this list caught it.
+_PROPERTY_BADGES = {
+    "image", "table", "folder_zip", "memory",
+}
+
+ICON_SET: frozenset[str] = frozenset(
+    _STRUCTURE | _MEASUREMENT | _GENERAL | _PROPERTY_BADGES
+)
