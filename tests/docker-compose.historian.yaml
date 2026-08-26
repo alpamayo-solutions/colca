@@ -16,7 +16,8 @@ services:
       POSTGRES_USER: boundary
       POSTGRES_DB: boundary
     ports:
-      - "127.0.0.1:15433:5432"
+      # Per-checkout (dev.py world_port); the default is for a standalone `docker compose up`.
+      - "127.0.0.1:${COLCA_PORT_HISTORIAN_POSTGRES:-15433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U boundary -d boundary"]
       interval: 2s
