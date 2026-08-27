@@ -237,6 +237,18 @@ func TestHumanDoorsConnectAndScope(t *testing.T) {
 					t.Fatalf("out-of-scope filter must be denied, qos %v", qos)
 				}
 			}
+			audits, _, err := w.st.Read("audit", 1, 100, nil)
+			if err != nil || len(audits) == 0 {
+				t.Fatalf("read subscribe denial audit: records=%d err=%v", len(audits), err)
+			}
+			var denial map[string]any
+			if err := json.Unmarshal(audits[len(audits)-1].Payload, &denial); err != nil {
+				t.Fatalf("decode subscribe denial audit: %v", err)
+			}
+			if denial["entity_type"] != "mqtt-subscription" || denial["entity_id"] != "other" {
+				t.Fatalf("subscribe denial target = %v/%v, want mqtt-subscription/other",
+					denial["entity_type"], denial["entity_id"])
+			}
 		})
 	}
 }

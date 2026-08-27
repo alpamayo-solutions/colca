@@ -810,3 +810,8 @@ func fixedPathPrefix(filter string) (fixed string, isUns bool) {
 	}
 	return strings.Join(path, "/"), true
 }
+
+// SubscriptionPath returns the fixed hierarchy path named by an MQTT filter.
+// Door audit records use the same decomposition as subscription authorization,
+// so a denial can be filtered under the element where it happened.
+func SubscriptionPath(filter string) (string, bool) { return fixedPathPrefix(filter) }

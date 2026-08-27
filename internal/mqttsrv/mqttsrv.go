@@ -105,6 +105,11 @@ func (h *colcaHook) setEngine(e *engine.Engine) {
 }
 
 func (h *colcaHook) auditDenied(operation, reason, door string, entry *uns.Entry, metadata map[string]any) {
+	h.auditDeniedAt(operation, reason, door, entry, metadata, "", "")
+}
+
+func (h *colcaHook) auditDeniedAt(operation, reason, door string, entry *uns.Entry,
+	metadata map[string]any, entityType, entityID string) {
 	eng := h.engine()
 	if eng == nil {
 		return
@@ -113,7 +118,10 @@ func (h *colcaHook) auditDenied(operation, reason, door string, entry *uns.Entry
 		metadata = map[string]any{}
 	}
 	metadata["door"] = door
-	d := engine.AuditDenial{Operation: operation, ReasonCode: reason, Metadata: metadata}
+	d := engine.AuditDenial{
+		Operation: operation, ReasonCode: reason, Metadata: metadata,
+		EntityType: entityType, EntityID: entityID,
+	}
 	if entry != nil {
 		d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.Name, entry.ActorKind()
 	}

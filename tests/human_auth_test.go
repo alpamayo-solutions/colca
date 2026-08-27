@@ -5,6 +5,7 @@
 package tests
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	pahov5 "github.com/eclipse/paho.golang/paho"
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/alpamayo-solutions/colca/internal/authtest"
@@ -47,6 +49,52 @@ func human(t *testing.T, n *node.Node, scheme, sub, token string) pahomqtt.Clien
 	}
 	t.Cleanup(func() { c.Disconnect(100) })
 	return c
+}
+
+// humanPublisher uses the synchronous MQTT-5 client for PUBACK assertions.
+// The legacy client reports acknowledgements through a background token
+// dispatcher that can starve under the race detector after the broker has
+// already answered. MQTT-5 Publish binds the five-second deadline to the
+// protocol exchange itself and also exposes the denial reason code.
+func humanPublisher(t *testing.T, n *node.Node, sub, token string) *pahov5.Client {
+	t.Helper()
+	conn, err := tls.Dial("tcp", n.MQTTHumanTCPAddr,
+		&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}) // #nosec G402 -- test
+	if err != nil {
+		t.Fatalf("human publisher dial: %v", err)
+	}
+	c := pahov5.NewClient(pahov5.ClientConfig{Conn: conn})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ack, err := c.Connect(ctx, &pahov5.Connect{
+		ClientID: fmt.Sprintf("h5-%s-%d", sub, time.Now().UnixNano()),
+		Username: sub, UsernameFlag: true,
+		Password: []byte(token), PasswordFlag: true,
+		KeepAlive: 30, CleanStart: true,
+		Properties: &pahov5.ConnectProperties{},
+	})
+	if err != nil || ack.ReasonCode != 0 {
+		t.Fatalf("human publisher connect: ack=%v err=%v", ack, err)
+	}
+	t.Cleanup(func() { _ = c.Disconnect(&pahov5.Disconnect{ReasonCode: 0}) })
+	return c
+}
+
+func publishHuman5(t *testing.T, c *pahov5.Client, topic, payload string) byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ack, err := c.Publish(ctx, &pahov5.Publish{
+		Topic: topic, QoS: 1, Payload: []byte(payload),
+	})
+	// A refused publish comes back as an ack carrying the reason code AND a
+	// non-nil error, so the ack — not the error — decides whether there is an
+	// answer to assert on. No ack at all is the failure this helper exists to
+	// name, and it must say so rather than dereference nil.
+	if ack == nil {
+		t.Fatalf("human publish %s: no PUBACK within the deadline: %v", topic, err)
+	}
+	return ack.ReasonCode
 }
 
 // bearer performs an HTTPS request with a Bearer token and returns the status.
@@ -106,12 +154,13 @@ func TestHumanCommandsThroughTree(t *testing.T) {
 	awaitElement(t, tp.global, "site1/edge1/m1") // the grants' elements must have reached the hub
 	tok := tp.iss.Mint("operator-ole",
 		[]string{"cmd:" + authtest.ElementID("m1") + "/#:param", "read:" + authtest.ElementID("edge1") + "/#"}, time.Now().Add(5*time.Minute))
-	c := human(t, tp.global, "ssl", "operator-ole", tok)
+	c := humanPublisher(t, tp.global, "operator-ole", tok)
 
 	corr := unique("h-corr")
 	payload := fmt.Sprintf(`{"correlation_id":%q,"expires_at":%d}`, corr, time.Now().Add(time.Hour).UnixMilli())
-	if tk := c.Publish("colca/v1/_CmdParam/m1/site1/edge1/m1/set-speed", 1, false, payload); !tk.WaitTimeout(5 * time.Second) {
-		t.Fatal("human command publish: no PUBACK")
+	if reason := publishHuman5(t, c,
+		"colca/v1/_CmdParam/m1/site1/edge1/m1/set-speed", payload); reason != 0 {
+		t.Fatalf("human command PUBACK reason = %#x, want success", reason)
 	}
 
 	msg := awaitTopic(t, cmds, "colca/v1/_CmdParam/m1/m1/set-speed", 20*time.Second)
@@ -134,8 +183,10 @@ func TestHumanCommandsThroughTree(t *testing.T) {
 
 	// The same human may NOT command outside the granted zone.
 	before := tp.global.Store.NextOffset("commands")
-	c.Publish("colca/v1/_CmdParam/m2/site1/edge2/m2/set-speed", 1, false, payload).WaitTimeout(time.Second)
-	time.Sleep(500 * time.Millisecond)
+	if reason := publishHuman5(t, c,
+		"colca/v1/_CmdParam/m2/site1/edge2/m2/set-speed", payload); reason != 0x87 {
+		t.Fatalf("out-of-zone PUBACK reason = %#x, want not authorized", reason)
+	}
 	if got := tp.global.Store.NextOffset("commands"); got != before {
 		t.Fatalf("out-of-zone human command persisted: %d → %d", before, got)
 	}
