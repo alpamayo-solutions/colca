@@ -16,16 +16,14 @@ const PersonalAccessTokenContract = "_PersonalAccessToken"
 // PersonalAccessToken is the hash-only credential definition that descends
 // the node tree. It deliberately contains no plaintext secret.
 type PersonalAccessToken struct {
-	ID                        string   `json:"id"`
-	HashedSecret              string   `json:"hashed_secret"`
-	OwnerSub                  string   `json:"owner_sub"`
-	OwnerEmail                string   `json:"owner_email"`
-	Scopes                    []string `json:"scopes"`
-	Roles                     []string `json:"roles"`
-	Grants                    []string `json:"grants"`
-	NamespaceReadPermissions  []string `json:"namespace_read_permissions"`
-	NamespaceWritePermissions []string `json:"namespace_write_permissions"`
-	ExpiresAt                 string   `json:"expires_at,omitempty"`
+	ID           string   `json:"id"`
+	HashedSecret string   `json:"hashed_secret"`
+	OwnerSub     string   `json:"owner_sub"`
+	OwnerEmail   string   `json:"owner_email"`
+	Scopes       []string `json:"scopes"`
+	Roles        []string `json:"roles"`
+	Grants       []string `json:"grants"`
+	ExpiresAt    string   `json:"expires_at,omitempty"`
 }
 
 // PersonalAccessTokenIndex resolves a presented opaque token against the
