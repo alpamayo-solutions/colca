@@ -30,6 +30,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/httpserver"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/registry"
@@ -218,7 +219,8 @@ func (s *Server) Start() (addr string, err error) {
 		return "", err
 	}
 	s.ln = ln
-	s.http = &http.Server{Handler: mux, TLSConfig: tlsCfg}
+	s.http = httpserver.New(mux)
+	s.http.TLSConfig = tlsCfg
 	go func(h *http.Server) {
 		if err := h.ServeTLS(ln, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.log.Error("repl server stopped", "err", err)

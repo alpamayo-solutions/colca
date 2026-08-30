@@ -40,6 +40,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/historian"
+	"github.com/alpamayo-solutions/colca/internal/httpserver"
 )
 
 type config struct {
@@ -173,7 +174,7 @@ func serveObservability(addr string, bridge *historian.Bridge, log *slog.Logger)
 				"# TYPE colca_historian_stream_gaps_total counter\n"+
 				"colca_historian_stream_gaps_total %d\n", bridge.Gaps)
 	})
-	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	server := httpserver.NewAt(addr, mux)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("observability server", "addr", addr, "err", err)
 	}

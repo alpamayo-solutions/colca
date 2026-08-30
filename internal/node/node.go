@@ -28,6 +28,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/contracts"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/httpapi"
+	"github.com/alpamayo-solutions/colca/internal/httpserver"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/mqttsrv"
@@ -392,7 +393,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.apiLn = ln
 		n.APIAddr = ln.Addr().String()
-		n.httpSrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), false, n.Secrets))}
+		n.httpSrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), false, n.Secrets)))
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server stopped", "err", err)
@@ -413,7 +414,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.localAPILn = ln
 		n.LocalAPIAddr = ln.Addr().String()
-		n.localAPISrv = &http.Server{Handler: n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), true, n.Secrets))}
+		n.localAPISrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), true, n.Secrets)))
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("local api server stopped", "err", err)
