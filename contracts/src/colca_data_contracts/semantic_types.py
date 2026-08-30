@@ -28,3 +28,23 @@ SEMANTIC_DATA_TYPES: frozenset[str] = frozenset({
     "datetime",
     "json",
 })
+
+#: Topic groups: the words a person uses for a KIND of data, mapped to the
+#: semantic tags that carry it. This is operator vocabulary — "pull up the
+#: quality data" selects by tag, never by signal-name matching — and it lives
+#: here because the tags themselves do: one owner for the vocabulary and for
+#: how it is grouped. A plant that lacks a tag simply contributes nothing for
+#: it; consumers also lexically match the topic word against tag names, so a
+#: plant-authored tag like `quality-index` is found under "quality" even if
+#: this table never names it.
+SEMANTIC_TOPIC_GROUPS: dict[str, frozenset[str]] = {
+    "quality": frozenset({
+        "quality-index", "quality-rate", "moisture", "viscosity", "particle-size",
+    }),
+    "oee": frozenset({"oee", "availability", "performance", "quality-rate"}),
+    "throughput": frozenset({"throughput", "parts-per-minute", "cycle-time", "batch"}),
+    "state": frozenset({"machine-state", "state-reason", "connectivity", "heartbeat"}),
+    "process": frozenset({"temperature", "pressure", "speed", "level", "setpoint", "recipe"}),
+    "energy": frozenset({"power", "energy", "rated-power"}),
+    "downtime": frozenset({"downtime", "machine-state", "state-reason"}),
+}
