@@ -60,6 +60,10 @@ type world struct {
 }
 
 func newWorld(t *testing.T) *world {
+	return newWorldWithConfig(t, nil)
+}
+
+func newWorldWithConfig(t *testing.T, configure func(*config.Config)) *world {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
 	if err != nil {
@@ -81,6 +85,9 @@ func newWorld(t *testing.T) *world {
 	}
 	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
 		MQTT: config.Endpoint{Addr: "127.0.0.1:0"}}
+	if configure != nil {
+		configure(cfg)
+	}
 	m := metrics.New(st, config.Retention{}, nil)
 	w.m = m
 	s, err := New(cfg, nodeID, reg, nil, nil, m, config.Limits{}.EffectiveMaxRecordBytes())
@@ -136,6 +143,41 @@ func TestBrokerCapsPacketSize(t *testing.T) {
 	}
 	if got := s.S.Options.Capabilities.MaximumPacketSize; got < 1024 {
 		t.Fatalf("MaximumPacketSize = %d, must not be below the record cap", got)
+	}
+}
+
+func TestBrokerAppliesTheConfiguredResourceLimits(t *testing.T) {
+	w := newWorldWithConfig(t, func(cfg *config.Config) {
+		cfg.MQTTLimits = config.MQTTLimits{
+			MaxClients:                12,
+			MaxSubscriptionsPerClient: 34,
+			ReceiveMaximum:            56,
+			MaximumInflight:           78,
+			MaxPendingWritesPerClient: 90,
+			MaxTopicAliasesPerClient:  123,
+			MaxSessionExpiry:          config.Duration(48 * time.Hour),
+		}
+	})
+	caps := w.srv.S.Options.Capabilities
+	if caps.MaximumClients != 12 || caps.ReceiveMaximum != 56 || caps.MaximumInflight != 78 ||
+		caps.MaximumClientWritesPending != 90 || caps.TopicAliasMaximum != 123 ||
+		caps.MaximumSessionExpiryInterval != uint32((48*time.Hour)/time.Second) {
+		t.Fatalf("broker capabilities = %+v", caps)
+	}
+}
+
+func TestBrokerRefusesConnectionsAboveTheConfiguredLimit(t *testing.T) {
+	w := newWorldWithConfig(t, func(cfg *config.Config) {
+		cfg.MQTTLimits.MaxClients = 1
+	})
+	first := connect(t, w.srv.Addr(), "limit-first", w.m1)
+	if !first.IsConnected() {
+		t.Fatal("first client did not connect")
+	}
+	second, err := tryConnect(w.srv.Addr(), "limit-second", w.obs, w.obs.ULID)
+	if err == nil {
+		second.Disconnect(100)
+		t.Fatal("second client connected above max_clients=1")
 	}
 }
 
@@ -667,6 +709,51 @@ func TestSubscribeACLScopes(t *testing.T) {
 	tok := obs.Subscribe("colca/#", 1, func(paho.Client, paho.Message) {})
 	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
 		t.Fatalf("observer colca/# subscribe: %v", tok.Error())
+	}
+}
+
+func TestSubscriptionQuotaAllowsReplacementButRejectsGrowth(t *testing.T) {
+	w := newWorldWithConfig(t, func(cfg *config.Config) {
+		cfg.MQTTLimits.MaxSubscriptionsPerClient = 2
+	})
+	const clientID = "obs-subscription-quota"
+	c := connect(t, w.srv.Addr(), clientID, w.obs)
+
+	subscribe := func(filter string) byte {
+		t.Helper()
+		tok := c.Subscribe(filter, 1, func(paho.Client, paho.Message) {})
+		if !tok.WaitTimeout(5 * time.Second) {
+			t.Fatalf("subscribe %s timed out", filter)
+		}
+		if err := tok.Error(); err != nil {
+			t.Fatalf("subscribe %s: %v", filter, err)
+		}
+		st, ok := tok.(*paho.SubscribeToken)
+		if !ok {
+			t.Fatalf("subscribe %s returned %T, want *paho.SubscribeToken", filter, tok)
+		}
+		return st.Result()[filter]
+	}
+
+	if got := subscribe("other/one"); got == 0x80 {
+		t.Fatal("first subscription was rejected")
+	}
+	if got := subscribe("other/two"); got == 0x80 {
+		t.Fatal("second subscription was rejected")
+	}
+	if got := subscribe("other/one"); got == 0x80 {
+		t.Fatal("replacing an existing subscription consumed another quota slot")
+	}
+	if got := subscribe("other/three"); got != 0x80 {
+		t.Fatalf("third distinct subscription result = 0x%02x, want failed SUBACK 0x80", got)
+	}
+
+	client, ok := w.srv.S.Clients.Get(clientID)
+	if !ok {
+		t.Fatal("connected client is absent from broker state")
+	}
+	if got := client.State.Subscriptions.Len(); got != 2 {
+		t.Fatalf("stored subscriptions = %d, want 2", got)
 	}
 }
 

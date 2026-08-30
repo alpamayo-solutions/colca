@@ -52,6 +52,17 @@ func publish5(t *testing.T, c *paho.Client, topic string, payload []byte) byte {
 	return resp.ReasonCode
 }
 
+func publishRetained5(t *testing.T, c *paho.Client, topic string, payload []byte) byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := c.Publish(ctx, &paho.Publish{Topic: topic, QoS: 1, Retain: true, Payload: payload})
+	if err != nil && resp == nil {
+		t.Fatalf("retained publish %s: %v", topic, err)
+	}
+	return resp.ReasonCode
+}
+
 // The §8.1 table on the wire: an MQTT 5 client at QoS 1 sees the engine's
 // verdicts as PUBACK reason codes instead of silence.
 func TestPubackReasonCodesMQTT5(t *testing.T) {
@@ -83,5 +94,18 @@ func TestPubackReasonCodesMQTT5(t *testing.T) {
 	// no-matching-subscribers — both success-class).
 	if got := publish5(t, c, "factory/raw/x", []byte("y")); got != 0x00 && got != 0x10 {
 		t.Fatalf("non-UNS publish must succeed, got 0x%02x", got)
+	}
+}
+
+func TestExternalNonUnsRetainedMessagesAreRefused(t *testing.T) {
+	w := newWorld(t)
+	c := connect5(t, w.srv.Addr(), w.m1)
+	before := w.srv.S.Info.Retained
+
+	if got := publishRetained5(t, c, "factory/raw/retained", []byte("value")); got != 0x9A {
+		t.Fatalf("retained non-UNS PUBACK = 0x%02x, want retain-not-supported 0x9A", got)
+	}
+	if got := w.srv.S.Info.Retained; got != before {
+		t.Fatalf("retained set grew from %d to %d after rejected publish", before, got)
 	}
 }

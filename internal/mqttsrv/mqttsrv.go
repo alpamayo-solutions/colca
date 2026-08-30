@@ -136,8 +136,40 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnACLCheck,
 		mqtt.OnPublish,
 		mqtt.OnDisconnect,
+		mqtt.OnSubscribe,
 		mqtt.OnSubscribed,
 	}, []byte{b})
+}
+
+const quotaDeniedSubscription = "$COLCA/quota-exceeded"
+
+// OnSubscribe keeps one authenticated client from growing the broker's topic
+// index without bound. Mochi's hook API cannot return a per-filter quota code,
+// so excess filters are replaced with a reserved filter that OnACLCheck denies;
+// MQTT 5 receives Not Authorized and MQTT 3 receives the standard failed-SUBACK
+// value. The audit event retains the real filter and the precise quota reason.
+func (h *colcaHook) OnSubscribe(cl *mqtt.Client, pk packets.Packet) packets.Packet {
+	limit := h.cfg.MQTTLimits.EffectiveMaxSubscriptionsPerClient()
+	known := cl.State.Subscriptions.GetAll()
+	count := len(known)
+	for i := range pk.Filters {
+		filter := pk.Filters[i].Filter
+		if _, exists := known[filter]; exists {
+			continue
+		}
+		if count < limit {
+			known[filter] = pk.Filters[i]
+			count++
+			continue
+		}
+
+		h.log.Warn("mqtt subscription rejected: client quota reached",
+			"identity", string(cl.Properties.Username), "filter", filter, "limit", limit)
+		h.auditDenied("read", "subscription_quota", metrics.DoorMQTT, h.entryForClient(cl),
+			map[string]any{"filter": filter, "limit": limit})
+		pk.Filters[i].Filter = quotaDeniedSubscription
+	}
+	return pk
 }
 
 // OnConnectAuthenticate resolves the TLS peer key against the local registry
@@ -205,6 +237,9 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 	if write {
 		return true
 	}
+	if topic == quotaDeniedSubscription {
+		return false
+	}
 	if isHumanListener(cl) {
 		return h.humanACL(cl, topic)
 	}
@@ -217,6 +252,17 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 		return false
 	}
 	return true
+}
+
+func (h *colcaHook) entryForClient(cl *mqtt.Client) *uns.Entry {
+	if isHumanListener(cl) {
+		if session, ok := h.humans.get(cl.ID); ok {
+			return session.entry
+		}
+		return nil
+	}
+	entry, _ := h.reg.Get(string(cl.Properties.Username))
+	return entry
 }
 
 // OnSubscribed fires after mochi has registered a client's subscription(s)
@@ -386,6 +432,17 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 	if ident == "" {
 		return pk, nil
 	}
+	// Colca's retained set is the engine-owned UNS KV projection. Allowing an
+	// external client to retain arbitrary non-UNS topics would create a second,
+	// unauthoritative in-memory store with no cardinality bound. Transient
+	// non-UNS broker traffic remains available.
+	if pk.FixedHeader.Retain && !uns.IsUns(pk.TopicName) {
+		h.log.Warn("mqtt retained publish rejected outside UNS",
+			"identity", ident, "topic", pk.TopicName)
+		h.auditDenied("publish", "retained_non_uns_denied", metrics.DoorMQTT,
+			h.entryForClient(cl), map[string]any{"topic": pk.TopicName})
+		return pk, packets.ErrRetainNotSupported
+	}
 	eng := h.engine()
 	if eng == nil {
 		h.log.Warn("publish rejected: no engine bound", "identity", ident, "topic", pk.TopicName)
@@ -470,6 +527,12 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	// one listener today but is cloned too so "one Config per listener"
 	// stays an invariant, not something that happens to hold.
 	s := mqtt.New(&mqtt.Options{InlineClient: true})
+	mqttLimits := cfg.MQTTLimits
+	s.Options.Capabilities.MaximumClients = mqttLimits.EffectiveMaxClients()
+	s.Options.Capabilities.ReceiveMaximum = mqttLimits.EffectiveReceiveMaximum()
+	s.Options.Capabilities.MaximumClientWritesPending = mqttLimits.EffectiveMaxPendingWritesPerClient()
+	s.Options.Capabilities.MaximumSessionExpiryInterval = uint32(mqttLimits.EffectiveMaxSessionExpiry() / time.Second)
+	s.Options.Capabilities.TopicAliasMaximum = mqttLimits.EffectiveMaxTopicAliasesPerClient()
 	// A fresh subscriber replaying the retained set (the bus's "current state
 	// on connect" contract) can burst thousands of QoS-1 messages to one
 	// client. mochi's default MaximumInflight (8192) silently drops anything
@@ -480,7 +543,7 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	// it: silent drops now start above 65,535 retained paths in a single
 	// namespace. If that cardinality becomes realistic, the real fix is
 	// chunked/paginated retained replay, not a further bump of this field.
-	s.Options.Capabilities.MaximumInflight = 65535
+	s.Options.Capabilities.MaximumInflight = mqttLimits.EffectiveMaximumInflight()
 	// A publish carries the payload plus its topic and MQTT headers, so the
 	// packet ceiling sits above the record cap Store.Append enforces; the
 	// store stays the authority on the record itself. Left at mochi's default

@@ -119,6 +119,12 @@ type Config struct {
 	Auth      *Auth     `yaml:"auth"`
 	MQTTHuman MQTTHuman `yaml:"mqtt_human"`
 
+	// MQTTLimits bounds broker-owned memory and connection state. The defaults
+	// are deliberately generous for recovery bursts and large installations,
+	// but unlike mochi's defaults none of the long-lived dimensions is
+	// effectively unlimited.
+	MQTTLimits MQTTLimits `yaml:"mqtt_limits"`
+
 	// Retention configures the background pruner (design §3). Absent entirely
 	// = every default in the §3.1 table applies (pruning ON by default).
 	Retention Retention `yaml:"retention"`
@@ -284,6 +290,101 @@ type Retention struct {
 type Limits struct {
 	MaxRecordBytes ByteSize `yaml:"max_record_bytes"`
 	MaxBlobBytes   ByteSize `yaml:"max_blob_bytes"`
+}
+
+// MQTTLimits is the mqtt_limits: block. Zero values select the defaults below;
+// operators can lower or raise a ceiling without rebuilding Colca.
+type MQTTLimits struct {
+	MaxClients                int64    `yaml:"max_clients"`
+	MaxSubscriptionsPerClient int      `yaml:"max_subscriptions_per_client"`
+	ReceiveMaximum            uint16   `yaml:"receive_maximum"`
+	MaximumInflight           uint16   `yaml:"maximum_inflight"`
+	MaxPendingWritesPerClient int32    `yaml:"max_pending_writes_per_client"`
+	MaxTopicAliasesPerClient  uint16   `yaml:"max_topic_aliases_per_client"`
+	MaxSessionExpiry          Duration `yaml:"max_session_expiry"`
+}
+
+const (
+	defaultMQTTMaxClients                int64  = 4096
+	defaultMQTTMaxSubscriptionsPerClient int    = 1024
+	defaultMQTTReceiveMaximum            uint16 = 1024
+	defaultMQTTMaximumInflight           uint16 = 65535
+	defaultMQTTMaxPendingWritesPerClient int32  = 1024
+	defaultMQTTMaxTopicAliasesPerClient  uint16 = 256
+	defaultMQTTMaxSessionExpiry                 = 7 * 24 * time.Hour
+	maxMQTTSessionExpiry                        = time.Duration(^uint32(0)) * time.Second
+)
+
+func (l MQTTLimits) EffectiveMaxClients() int64 {
+	if l.MaxClients == 0 {
+		return defaultMQTTMaxClients
+	}
+	return l.MaxClients
+}
+
+func (l MQTTLimits) EffectiveMaxSubscriptionsPerClient() int {
+	if l.MaxSubscriptionsPerClient == 0 {
+		return defaultMQTTMaxSubscriptionsPerClient
+	}
+	return l.MaxSubscriptionsPerClient
+}
+
+func (l MQTTLimits) EffectiveReceiveMaximum() uint16 {
+	if l.ReceiveMaximum == 0 {
+		return defaultMQTTReceiveMaximum
+	}
+	return l.ReceiveMaximum
+}
+
+func (l MQTTLimits) EffectiveMaximumInflight() uint16 {
+	if l.MaximumInflight == 0 {
+		return defaultMQTTMaximumInflight
+	}
+	return l.MaximumInflight
+}
+
+func (l MQTTLimits) EffectiveMaxPendingWritesPerClient() int32 {
+	if l.MaxPendingWritesPerClient == 0 {
+		return defaultMQTTMaxPendingWritesPerClient
+	}
+	return l.MaxPendingWritesPerClient
+}
+
+func (l MQTTLimits) EffectiveMaxTopicAliasesPerClient() uint16 {
+	if l.MaxTopicAliasesPerClient == 0 {
+		return defaultMQTTMaxTopicAliasesPerClient
+	}
+	return l.MaxTopicAliasesPerClient
+}
+
+func (l MQTTLimits) EffectiveMaxSessionExpiry() time.Duration {
+	if l.MaxSessionExpiry == 0 {
+		return defaultMQTTMaxSessionExpiry
+	}
+	return time.Duration(l.MaxSessionExpiry)
+}
+
+func (l MQTTLimits) validate() error {
+	if l.MaxClients < 0 {
+		return fmt.Errorf("config: mqtt_limits.max_clients must not be negative, got %d", l.MaxClients)
+	}
+	if l.MaxSubscriptionsPerClient < 0 {
+		return fmt.Errorf("config: mqtt_limits.max_subscriptions_per_client must not be negative, got %d", l.MaxSubscriptionsPerClient)
+	}
+	if l.MaxPendingWritesPerClient < 0 {
+		return fmt.Errorf("config: mqtt_limits.max_pending_writes_per_client must not be negative, got %d", l.MaxPendingWritesPerClient)
+	}
+	if time.Duration(l.MaxSessionExpiry) < 0 {
+		return fmt.Errorf("config: mqtt_limits.max_session_expiry must not be negative, got %s", time.Duration(l.MaxSessionExpiry))
+	}
+	if l.MaxSessionExpiry != 0 && time.Duration(l.MaxSessionExpiry) < time.Second {
+		return fmt.Errorf("config: mqtt_limits.max_session_expiry must be at least 1s, got %s", time.Duration(l.MaxSessionExpiry))
+	}
+	if time.Duration(l.MaxSessionExpiry) > maxMQTTSessionExpiry {
+		return fmt.Errorf("config: mqtt_limits.max_session_expiry exceeds the MQTT maximum of %s, got %s",
+			maxMQTTSessionExpiry, time.Duration(l.MaxSessionExpiry))
+	}
+	return nil
 }
 
 // defaultMaxRecordBytes leaves headroom for the fattest known record (a
@@ -634,6 +735,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.Limits.validate(); err != nil {
+		return err
+	}
+	if err := c.MQTTLimits.validate(); err != nil {
 		return err
 	}
 	if err := c.BlobGC.validate(); err != nil {

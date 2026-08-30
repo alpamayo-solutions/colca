@@ -743,6 +743,71 @@ func TestLimitsDefaultWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestMQTTLimitsDefaultsAreGenerousAndFinite(t *testing.T) {
+	var l MQTTLimits
+	if got, want := l.EffectiveMaxClients(), int64(4096); got != want {
+		t.Fatalf("max clients = %d, want %d", got, want)
+	}
+	if got, want := l.EffectiveMaxSubscriptionsPerClient(), 1024; got != want {
+		t.Fatalf("subscriptions/client = %d, want %d", got, want)
+	}
+	if got, want := l.EffectiveReceiveMaximum(), uint16(1024); got != want {
+		t.Fatalf("receive maximum = %d, want %d", got, want)
+	}
+	if got, want := l.EffectiveMaximumInflight(), uint16(65535); got != want {
+		t.Fatalf("maximum inflight = %d, want %d", got, want)
+	}
+	if got, want := l.EffectiveMaxPendingWritesPerClient(), int32(1024); got != want {
+		t.Fatalf("pending writes/client = %d, want %d", got, want)
+	}
+	if got, want := l.EffectiveMaxTopicAliasesPerClient(), uint16(256); got != want {
+		t.Fatalf("topic aliases/client = %d, want %d", got, want)
+	}
+	if got, want := l.EffectiveMaxSessionExpiry(), 7*24*time.Hour; got != want {
+		t.Fatalf("session expiry = %s, want %s", got, want)
+	}
+}
+
+func TestMQTTLimitsParseOverrides(t *testing.T) {
+	var c Config
+	if err := yaml.Unmarshal([]byte(`mqtt_limits:
+  max_clients: 12
+  max_subscriptions_per_client: 34
+  receive_maximum: 56
+  maximum_inflight: 78
+  max_pending_writes_per_client: 90
+  max_topic_aliases_per_client: 123
+  max_session_expiry: 48h
+`), &c); err != nil {
+		t.Fatal(err)
+	}
+	l := c.MQTTLimits
+	if l.EffectiveMaxClients() != 12 || l.EffectiveMaxSubscriptionsPerClient() != 34 ||
+		l.EffectiveReceiveMaximum() != 56 || l.EffectiveMaximumInflight() != 78 ||
+		l.EffectiveMaxPendingWritesPerClient() != 90 || l.EffectiveMaxTopicAliasesPerClient() != 123 ||
+		l.EffectiveMaxSessionExpiry() != 48*time.Hour {
+		t.Fatalf("parsed MQTT limits = %+v", l)
+	}
+}
+
+func TestMQTTLimitsRejectInvalidSignedValues(t *testing.T) {
+	base := Config{ULID: "n1", DataDir: "/tmp/x", KeyFile: "/tmp/x.key"}
+	cases := []MQTTLimits{
+		{MaxClients: -1},
+		{MaxSubscriptionsPerClient: -1},
+		{MaxPendingWritesPerClient: -1},
+		{MaxSessionExpiry: Duration(-time.Second)},
+		{MaxSessionExpiry: Duration(time.Millisecond)},
+	}
+	for _, limits := range cases {
+		cfg := base
+		cfg.MQTTLimits = limits
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("invalid MQTT limits accepted: %+v", limits)
+		}
+	}
+}
+
 func TestLimitsParseHumanSizes(t *testing.T) {
 	var c Config
 	if err := yaml.Unmarshal([]byte("limits:\n  max_record_bytes: 8MiB\n  max_blob_bytes: 1GiB\n"), &c); err != nil {
