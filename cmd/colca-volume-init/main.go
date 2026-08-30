@@ -1,0 +1,171 @@
+// colca-volume-init performs the bounded ownership migration required before
+// Colca's long-running containers start as non-root users.
+package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+)
+
+const (
+	uidEnv       = "COLCA_VOLUME_UID"
+	gidEnv       = "COLCA_VOLUME_GID"
+	tlsCertEnv   = "COLCA_TLS_CERT_SOURCE"
+	tlsKeyEnv    = "COLCA_TLS_KEY_SOURCE"
+	tlsTargetEnv = "COLCA_TLS_TARGET_DIR"
+	copyTreeSrc  = "COLCA_COPY_TREE_SOURCE"
+	copyTreeDst  = "COLCA_COPY_TREE_TARGET"
+)
+
+func main() {
+	if err := run(os.Args[1:], os.Getenv); err != nil {
+		fmt.Fprintf(os.Stderr, "colca-volume-init: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(paths []string, getenv func(string) string) error {
+	uid, err := positiveID(uidEnv, getenv(uidEnv))
+	if err != nil {
+		return err
+	}
+	gid, err := positiveID(gidEnv, getenv(gidEnv))
+	if err != nil {
+		return err
+	}
+	if len(paths) == 0 {
+		return fmt.Errorf("at least one volume path is required")
+	}
+
+	for _, path := range paths {
+		if err := chownTree(path, uid, gid); err != nil {
+			return fmt.Errorf("migrate %s: %w", path, err)
+		}
+	}
+
+	treeSource := getenv(copyTreeSrc)
+	treeTarget := getenv(copyTreeDst)
+	if (treeSource == "") != (treeTarget == "") {
+		return fmt.Errorf("%s and %s must be set together", copyTreeSrc, copyTreeDst)
+	}
+	if treeSource != "" {
+		if err := copyTree(treeSource, treeTarget, uid, gid); err != nil {
+			return fmt.Errorf("copy tree: %w", err)
+		}
+	}
+
+	certSource := getenv(tlsCertEnv)
+	keySource := getenv(tlsKeyEnv)
+	targetDir := getenv(tlsTargetEnv)
+	configured := certSource != "" || keySource != "" || targetDir != ""
+	if configured && (certSource == "" || keySource == "" || targetDir == "") {
+		return fmt.Errorf("%s, %s, and %s must be set together", tlsCertEnv, tlsKeyEnv, tlsTargetEnv)
+	}
+	if configured {
+		if err := stageTLS(certSource, keySource, targetDir, uid, gid); err != nil {
+			return fmt.Errorf("stage TLS material: %w", err)
+		}
+	}
+	return nil
+}
+
+func copyTree(source, target string, uid, gid int) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		destination := filepath.Join(target, relative)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing symlink %s", path)
+		}
+		if entry.IsDir() {
+			if err := os.MkdirAll(destination, info.Mode().Perm()); err != nil {
+				return err
+			}
+			if err := os.Chmod(destination, info.Mode().Perm()); err != nil {
+				return err
+			}
+			return os.Chown(destination, uid, gid)
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("refusing non-regular file %s", path)
+		}
+		return copyAtomic(path, destination, info.Mode().Perm(), uid, gid)
+	})
+}
+
+func positiveID(name, raw string) (int, error) {
+	id, err := strconv.Atoi(raw)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("%s must be a positive numeric ID", name)
+	}
+	return id, nil
+}
+
+func chownTree(root string, uid, gid int) error {
+	return filepath.WalkDir(root, func(path string, _ os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		// Lchown never follows a symlink out of the named volume.
+		return os.Lchown(path, uid, gid)
+	})
+}
+
+func stageTLS(certSource, keySource, targetDir string, uid, gid int) error {
+	if err := os.MkdirAll(targetDir, 0o750); err != nil {
+		return err
+	}
+	if err := os.Chown(targetDir, uid, gid); err != nil {
+		return err
+	}
+	if err := copyAtomic(certSource, filepath.Join(targetDir, "node.crt"), 0o644, uid, gid); err != nil {
+		return err
+	}
+	return copyAtomic(keySource, filepath.Join(targetDir, "node.key"), 0o600, uid, gid)
+}
+
+func copyAtomic(source, target string, mode os.FileMode, uid, gid int) (returnErr error) {
+	src, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	tmp, err := os.CreateTemp(filepath.Dir(target), ".colca-volume-init-")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = os.Remove(tmpName)
+	}()
+
+	if _, err := io.Copy(tmp, src); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return err
+	}
+	if err := tmp.Chown(uid, gid); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, target)
+}

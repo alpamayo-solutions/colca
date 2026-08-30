@@ -59,13 +59,68 @@
 # Docker version changes the selection rule. Single-member networks carry no
 # node↔node connectivity, so they cannot leak around a severed link.
 services:
+  colca-volume-init:
+    image: ${COLCA_IMAGE:-colca:dev}
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/colca-volume-init"]
+    command:
+      - /volumes/global-data
+      - /volumes/global-secrets
+      - /volumes/site1-data
+      - /volumes/site1-secrets
+      - /volumes/edge1-data
+      - /volumes/edge1-secrets
+      - /volumes/edge2-data
+      - /volumes/edge2-secrets
+      - /volumes/keys
+    restart: "no"
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      COLCA_VOLUME_UID: "65532"
+      COLCA_VOLUME_GID: "65532"
+      COLCA_COPY_TREE_SOURCE: /inputs/keys
+      COLCA_COPY_TREE_TARGET: /volumes/keys
+    volumes:
+      - "./keys:/inputs/keys:ro"
+      - "world-keys:/volumes/keys"
+      - "global-data:/volumes/global-data"
+      - "global-secrets:/volumes/global-secrets"
+      - "site1-data:/volumes/site1-data"
+      - "site1-secrets:/volumes/site1-secrets"
+      - "edge1-data:/volumes/edge1-data"
+      - "edge1-secrets:/volumes/edge1-secrets"
+      - "edge2-data:/volumes/edge2-data"
+      - "edge2-secrets:/volumes/edge2-secrets"
+
+  application-volume-init:
+    image: ${COLCA_IMAGE:-colca:dev}
+    profiles: ["dataops"]
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/colca-volume-init"]
+    command: ["/volumes/dataops"]
+    restart: "no"
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      COLCA_VOLUME_UID: "16582"
+      COLCA_VOLUME_GID: "5000"
+    volumes:
+      - "edge1-dataops-data:/volumes/dataops"
+
   global:
     image: ${COLCA_IMAGE:-colca:dev}
     command: ["/etc/colca/global.yaml"]
     restart: unless-stopped
     volumes:
       - "./config/global.yaml:/etc/colca/global.yaml:ro"
-      - "./keys:/keys:ro"
+      - "world-keys:/keys:ro"
       - "global-data:/data"
       - "global-secrets:/secrets"
     # 11880 is the hub bus: every record replicated up from the whole tree is
@@ -84,6 +139,9 @@ services:
       svc-global: {}  # global ↔ notifications sidecar only
       kc-global: {}  # global ↔ keycloak only (JWKS fetch), pairwise by design
       gs-global: {}  # global ↔ grantsync only, pairwise for the same reason
+    depends_on:
+      colca-volume-init:
+        condition: service_completed_successfully
 
   site1:
     image: ${COLCA_IMAGE:-colca:dev}
@@ -91,7 +149,7 @@ services:
     restart: unless-stopped
     volumes:
       - "./config/site1.yaml:/etc/colca/site1.yaml:ro"
-      - "./keys:/keys:ro"
+      - "world-keys:/keys:ro"
       - "site1-data:/data"
       - "site1-secrets:/secrets"
     ports:
@@ -111,7 +169,7 @@ services:
     restart: unless-stopped
     volumes:
       - "./config/edge1.yaml:/etc/colca/edge1.yaml:ro"
-      - "./keys:/keys:ro"
+      - "world-keys:/keys:ro"
       - "edge1-data:/data"
       - "edge1-secrets:/secrets"
     ports:
@@ -133,7 +191,7 @@ services:
     restart: unless-stopped
     volumes:
       - "./config/edge2.yaml:/etc/colca/edge2.yaml:ro"
-      - "./keys:/keys:ro"
+      - "world-keys:/keys:ro"
       - "edge2-data:/data"
       - "edge2-secrets:/secrets"
     ports:
@@ -237,7 +295,7 @@ services:
   #
   # The shape mirrors what `colca generate` emits for a `modules.dataops:
   # true` node (node-manager/.../templates/compose/dataops.yaml.j2): depends_on
-  # the broker only, no historian DB_* vars (the historian is optional and
+  # the broker plus its one-shot volume initializer, no historian DB_* vars (the historian is optional and
   # read-only — design §7), customer producers bind-mounted read-only, and the
   # SQLite input buffer on its own named volume so a restart replays from the
   # buffer instead of re-reading the whole retained window.
@@ -249,7 +307,11 @@ services:
     image: ${DATAOPS_IMAGE:-dataops:dev}
     profiles: ["dataops"]
     restart: unless-stopped
-    depends_on: [edge1]
+    depends_on:
+      edge1:
+        condition: service_started
+      application-volume-init:
+        condition: service_completed_successfully
     environment:
       NAME: dataops
       COLCA_HTTP: http://edge1:80
@@ -288,7 +350,7 @@ services:
       # notion of wall time; unset (or 0) matches today's behaviour exactly.
       SIM_CLOCK_OFFSET_MS: "${SIM_CLOCK_OFFSET_MS_M1:-0}"
     volumes:
-      - "./keys:/keys:ro"
+      - "world-keys:/keys:ro"
     depends_on: [edge1]
     networks: [link1-m1]
 
@@ -305,7 +367,7 @@ services:
       # See m1's SIM_CLOCK_OFFSET_MS comment above.
       SIM_CLOCK_OFFSET_MS: "${SIM_CLOCK_OFFSET_MS_M2:-0}"
     volumes:
-      - "./keys:/keys:ro"
+      - "world-keys:/keys:ro"
     depends_on: [edge2]
     networks: [link1-m2]
 
@@ -373,6 +435,7 @@ services:
     networks: [gs-global, gs-keycloak]
 
 volumes:
+  world-keys: {}
   global-data: {}
   global-secrets: {}
   site1-data: {}
