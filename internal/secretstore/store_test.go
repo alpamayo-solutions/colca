@@ -72,6 +72,32 @@ func TestNamespacesAndListingsAreOwnerScoped(t *testing.T) {
 	}
 }
 
+func TestListPageIsBoundedAndTokensAreOwnerScoped(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	envelope := testEnvelope(t, "ciphertext")
+	for _, name := range []string{"a", "b", "c"} {
+		if _, err := store.Put("assistant", name, envelope, nil, nil, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, next, err := store.ListPage("assistant", "", 2)
+	if err != nil || len(first) != 2 || next == "" {
+		t.Fatalf("first page = %+v next=%q err=%v", first, next, err)
+	}
+	second, final, err := store.ListPage("assistant", next, 2)
+	if err != nil || len(second) != 1 || second[0].Name != "c" || final != "" {
+		t.Fatalf("second page = %+v next=%q err=%v", second, final, err)
+	}
+	if _, _, err := store.ListPage("notifications", next, 2); !errors.Is(err, ErrInvalidPageToken) {
+		t.Fatalf("cross-owner token error = %v, want ErrInvalidPageToken", err)
+	}
+}
+
 func TestCompareAndSwapProtectsConcurrentUpdatesAndDeletes(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

@@ -27,14 +27,14 @@ func mountResourceRoutes(
 	blobs *blobstore.Store,
 	m *metrics.Metrics,
 	writeJSON func(http.ResponseWriter, int, any),
-	auth func(func(http.ResponseWriter, *http.Request, caller)) http.HandlerFunc,
+	auth endpointAuth,
 ) {
 	if blobs == nil {
 		return
 	}
 	var es uns.EntityStore = e.EntityStore()
 
-	mux.HandleFunc("GET /resources/{id}/file", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+	mux.HandleFunc("GET /resources/{id}/file", auth(limitClassTransfer, transferPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		id := r.PathValue("id")
 
 		// No by-id index exists for entities, so the record is found by scan.

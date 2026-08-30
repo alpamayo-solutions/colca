@@ -4,6 +4,8 @@
 package secretstore
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,9 +18,10 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("secret not found")
-	ErrConflict = errors.New("secret revision conflict")
-	ErrInvalid  = errors.New("invalid secret record")
+	ErrNotFound         = errors.New("secret not found")
+	ErrConflict         = errors.New("secret revision conflict")
+	ErrInvalid          = errors.New("invalid secret record")
+	ErrInvalidPageToken = errors.New("invalid secret page token")
 )
 
 // Record is the complete durable value. Envelope contains ciphertext only.
@@ -161,6 +164,54 @@ func (s *Store) List(owner string) ([]Metadata, error) {
 		return nil, fmt.Errorf("secretstore: list: %w", err)
 	}
 	return out, nil
+}
+
+// ListPage returns a bounded, stable page of one owner's secret metadata.
+// The continuation token is opaque and scoped to that owner.
+func (s *Store) ListPage(owner, after string, max int) ([]Metadata, string, error) {
+	if err := validateOwner(owner); err != nil {
+		return nil, "", err
+	}
+	if max <= 0 {
+		return nil, "", fmt.Errorf("secretstore: page size must be positive")
+	}
+	prefix := secretPrefix(owner)
+	upper := append(append([]byte{}, prefix...), 0xff)
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: upper})
+	if err != nil {
+		return nil, "", fmt.Errorf("secretstore: list page: %w", err)
+	}
+	defer iter.Close()
+
+	valid := iter.First()
+	if after != "" {
+		raw, decodeErr := base64.RawURLEncoding.DecodeString(after)
+		if decodeErr != nil || bytes.Compare(raw, prefix) < 0 || bytes.Compare(raw, upper) >= 0 {
+			return nil, "", ErrInvalidPageToken
+		}
+		valid = iter.SeekGE(raw)
+		if valid && bytes.Equal(iter.Key(), raw) {
+			valid = iter.Next()
+		}
+	}
+
+	out := make([]Metadata, 0, max)
+	var lastKey []byte
+	for ; valid && len(out) < max; valid = iter.Next() {
+		lastKey = append(lastKey[:0], iter.Key()...)
+		var record Record
+		if err := json.Unmarshal(iter.Value(), &record); err != nil {
+			return nil, "", fmt.Errorf("secretstore: corrupt record in %s: %w", owner, err)
+		}
+		out = append(out, record.Metadata())
+	}
+	if err := iter.Error(); err != nil {
+		return nil, "", fmt.Errorf("secretstore: list page: %w", err)
+	}
+	if valid && len(lastKey) > 0 {
+		return out, base64.RawURLEncoding.EncodeToString(lastKey), nil
+	}
+	return out, "", nil
 }
 
 func (s *Store) Delete(owner, name string, expectedRevision *uint64) error {

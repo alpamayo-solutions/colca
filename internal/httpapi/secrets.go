@@ -22,20 +22,27 @@ type secretWrite struct {
 }
 
 type secretJSONWriter func(http.ResponseWriter, int, any)
-type secretAuth func(func(http.ResponseWriter, *http.Request, caller)) http.HandlerFunc
-type secretAdminAuth func(http.HandlerFunc) http.HandlerFunc
 
-func mountLocalSecretRoutes(mux *http.ServeMux, store *secretstore.Store, writeJSON secretJSONWriter, auth secretAuth) {
-	mux.HandleFunc("GET /secrets", auth(func(w http.ResponseWriter, _ *http.Request, c caller) {
-		items, err := store.List(c.entry.Name)
+func mountLocalSecretRoutes(mux *http.ServeMux, store *secretstore.Store, writeJSON secretJSONWriter, auth endpointAuth) {
+	mux.HandleFunc("GET /secrets", auth(limitClassScan, scanPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+		pageSize, after, err := pageRequest(r)
 		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "max must be between 1 and 10000"})
+			return
+		}
+		items, next, err := store.ListPage(c.entry.Name, after, pageSize)
+		if err != nil {
+			if errors.Is(err, secretstore.ErrInvalidPageToken) {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid page token"})
+				return
+			}
 			secretStoreError(w, writeJSON, "list", c.entry.Name, "", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"secrets": metadataWithExpiry(items, time.Now())})
+		writeJSON(w, http.StatusOK, map[string]any{"secrets": metadataWithExpiry(items, time.Now()), "next": next})
 	}))
 
-	mux.HandleFunc("GET /secrets/{name...}", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+	mux.HandleFunc("GET /secrets/{name...}", auth(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		name := r.PathValue("name")
 		record, err := store.Get(c.entry.Name, name)
 		if err != nil {
@@ -49,7 +56,7 @@ func mountLocalSecretRoutes(mux *http.ServeMux, store *secretstore.Store, writeJ
 		writeJSON(w, http.StatusOK, record)
 	}))
 
-	mux.HandleFunc("PUT /secrets/{name...}", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+	mux.HandleFunc("PUT /secrets/{name...}", auth(limitClassWrite, writePolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		in, ok := decodeSecretWrite(w, r, writeJSON)
 		if !ok {
 			return
@@ -65,7 +72,7 @@ func mountLocalSecretRoutes(mux *http.ServeMux, store *secretstore.Store, writeJ
 		writeJSON(w, http.StatusOK, map[string]any{"secret": metadataMap(record.Metadata(), time.Now())})
 	}))
 
-	mux.HandleFunc("DELETE /secrets/{name...}", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+	mux.HandleFunc("DELETE /secrets/{name...}", auth(limitClassWrite, writePolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		name := r.PathValue("name")
 		expected, ok := parseExpectedRevision(w, r, writeJSON)
 		if !ok {
@@ -82,18 +89,27 @@ func mountLocalSecretRoutes(mux *http.ServeMux, store *secretstore.Store, writeJ
 
 // Admin routes are intentionally metadata-only on read. The admin can supply
 // ciphertext for a service but cannot use this API to retrieve that ciphertext.
-func mountAdminSecretRoutes(mux *http.ServeMux, store *secretstore.Store, writeJSON secretJSONWriter, adminOnly secretAdminAuth) {
-	mux.HandleFunc("GET /secrets/{owner}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+func mountAdminSecretRoutes(mux *http.ServeMux, store *secretstore.Store, writeJSON secretJSONWriter, adminOnly endpointAdminAuth) {
+	mux.HandleFunc("GET /secrets/{owner}", adminOnly(limitClassScan, scanPolicy, func(w http.ResponseWriter, r *http.Request) {
 		owner := r.PathValue("owner")
-		items, err := store.List(owner)
+		pageSize, after, err := pageRequest(r)
 		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "max must be between 1 and 10000"})
+			return
+		}
+		items, next, err := store.ListPage(owner, after, pageSize)
+		if err != nil {
+			if errors.Is(err, secretstore.ErrInvalidPageToken) {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid page token"})
+				return
+			}
 			secretStoreError(w, writeJSON, "admin_list", owner, "", err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"secrets": metadataWithExpiry(items, time.Now())})
+		writeJSON(w, http.StatusOK, map[string]any{"secrets": metadataWithExpiry(items, time.Now()), "next": next})
 	}))
 
-	mux.HandleFunc("GET /secrets/{owner}/{name...}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /secrets/{owner}/{name...}", adminOnly(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request) {
 		owner, name := r.PathValue("owner"), r.PathValue("name")
 		record, err := store.Get(owner, name)
 		if err != nil {
@@ -103,7 +119,7 @@ func mountAdminSecretRoutes(mux *http.ServeMux, store *secretstore.Store, writeJ
 		writeJSON(w, http.StatusOK, map[string]any{"secret": metadataMap(record.Metadata(), time.Now())})
 	}))
 
-	mux.HandleFunc("PUT /secrets/{owner}/{name...}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("PUT /secrets/{owner}/{name...}", adminOnly(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
 		in, ok := decodeSecretWrite(w, r, writeJSON)
 		if !ok {
 			return
@@ -118,7 +134,7 @@ func mountAdminSecretRoutes(mux *http.ServeMux, store *secretstore.Store, writeJ
 		writeJSON(w, http.StatusOK, map[string]any{"secret": metadataMap(record.Metadata(), time.Now())})
 	}))
 
-	mux.HandleFunc("DELETE /secrets/{owner}/{name...}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("DELETE /secrets/{owner}/{name...}", adminOnly(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
 		owner, name := r.PathValue("owner"), r.PathValue("name")
 		expected, ok := parseExpectedRevision(w, r, writeJSON)
 		if !ok {

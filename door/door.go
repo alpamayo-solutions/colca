@@ -182,34 +182,47 @@ func (c *Client) FetchWithOptions(ctx context.Context, options FetchOptions) (Pa
 
 // KV returns retained entries visible below prefix.
 func (c *Client) KV(ctx context.Context, prefix string) ([]KVEntry, error) {
-	q := url.Values{}
-	if prefix != "" {
-		q.Set("prefix", prefix)
+	var entries []KVEntry
+	after := ""
+	for {
+		q := url.Values{"max": {"10000"}}
+		if prefix != "" {
+			q.Set("prefix", prefix)
+		}
+		if after != "" {
+			q.Set("after", after)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/kv?"+q.Encode(), nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.do(req)
+		if err != nil {
+			return nil, fmt.Errorf("reading retained state: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			reason, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("reading retained state: HTTP %d: %s", resp.StatusCode, truncate(reason, 300))
+		}
+		var page struct {
+			Entries []KVEntry `json:"entries"`
+			Next    string    `json:"next"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&page)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("reading retained state: %w", err)
+		}
+		entries = append(entries, page.Entries...)
+		if page.Next == "" {
+			return entries, nil
+		}
+		if page.Next == after {
+			return nil, fmt.Errorf("reading retained state: server repeated page token")
+		}
+		after = page.Next
 	}
-	endpoint := c.BaseURL + "/kv"
-	if encoded := q.Encode(); encoded != "" {
-		endpoint += "?" + encoded
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.do(req)
-	if err != nil {
-		return nil, fmt.Errorf("reading retained state: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		reason, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("reading retained state: HTTP %d: %s", resp.StatusCode, truncate(reason, 300))
-	}
-	var out struct {
-		Entries []KVEntry `json:"entries"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("reading retained state: %w", err)
-	}
-	return out.Entries, nil
 }
 
 // Self reads the authoritative registry identity for a local service.
@@ -333,26 +346,44 @@ func (c *Client) ListSecretsFor(ctx context.Context, owner string) ([]SecretMeta
 }
 
 func (c *Client) listSecrets(ctx context.Context, endpoint, label string) ([]SecretMetadata, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+endpoint, nil)
-	if err != nil {
-		return nil, err
+	var secrets []SecretMetadata
+	after := ""
+	for {
+		q := url.Values{"max": {"10000"}}
+		if after != "" {
+			q.Set("after", after)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+endpoint+"?"+q.Encode(), nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.do(req)
+		if err != nil {
+			return nil, fmt.Errorf("listing secrets for %s: %w", label, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			reason, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("listing secrets for %s: HTTP %d: %s", label, resp.StatusCode, truncate(reason, 300))
+		}
+		var page struct {
+			Secrets []SecretMetadata `json:"secrets"`
+			Next    string           `json:"next"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&page)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("listing secrets for %s: %w", label, err)
+		}
+		secrets = append(secrets, page.Secrets...)
+		if page.Next == "" {
+			return secrets, nil
+		}
+		if page.Next == after {
+			return nil, fmt.Errorf("listing secrets for %s: server repeated page token", label)
+		}
+		after = page.Next
 	}
-	resp, err := c.do(req)
-	if err != nil {
-		return nil, fmt.Errorf("listing secrets for %s: %w", label, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		reason, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("listing secrets for %s: HTTP %d: %s", label, resp.StatusCode, truncate(reason, 300))
-	}
-	var out struct {
-		Secrets []SecretMetadata `json:"secrets"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("listing secrets for %s: %w", label, err)
-	}
-	return out.Secrets, nil
 }
 
 // DeleteSecret deletes one secret in the calling service's namespace.

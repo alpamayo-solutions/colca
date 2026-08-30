@@ -30,6 +30,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/httplimit"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -58,9 +59,10 @@ type Server struct {
 	metrics *metrics.Metrics // nil-safe: every Metrics method is a no-op on a nil receiver
 	log     *slog.Logger
 
-	mu   sync.Mutex
-	http *http.Server
-	ln   net.Listener
+	mu      sync.Mutex
+	http    *http.Server
+	ln      net.Listener
+	limiter *httplimit.Limiter
 
 	// upstreamClient is this node's own parent link, used to satisfy a child's
 	// pull on a local miss. Set once at startup; nil at the root.
@@ -98,7 +100,7 @@ func (s *Server) auditDenied(operation, reason string, entry *uns.Entry, metadat
 // never exercise the blob routes; a node built by node.Start always passes
 // its opened store.
 func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, reg *registry.Manager, blobs *blobstore.Store, m *metrics.Metrics) (*Server, error) {
-	return &Server{cfg: cfg, eng: eng, id: id, reg: reg, blobs: blobs, metrics: m,
+	return &Server{cfg: cfg, eng: eng, id: id, reg: reg, blobs: blobs, metrics: m, limiter: httplimit.New(),
 		log: slog.Default().With("node", cfg.ULID, "comp", "repl-server")}, nil
 }
 
@@ -219,7 +221,7 @@ func (s *Server) Start() (addr string, err error) {
 		return "", err
 	}
 	s.ln = ln
-	s.http = httpserver.New(mux)
+	s.http = httpserver.New(s.limitBeforeAuth(mux))
 	s.http.TLSConfig = tlsCfg
 	go func(h *http.Server) {
 		if err := h.ServeTLS(ln, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -267,12 +269,27 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
+	release, ok := s.acquireRequest(w, limitClassReplication, child.ULID, replicationPolicy)
+	if !ok {
+		return
+	}
+	defer release()
+	r.Body = http.MaxBytesReader(w, r.Body, replicateBodyLimit(s.cfg))
 	var in struct {
 		Stream  string    `json:"stream"`
 		Records []wireRec `json:"records"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, "replication request too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(in.Records) > maxReplicateRecords {
+		http.Error(w, "replication batch exceeds 200 records", http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -344,6 +361,11 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
+	release, ok := s.acquireRequest(w, limitClassReplication, child.ULID, replicationPolicy)
+	if !ok {
+		return
+	}
+	defer release()
 	after, _ := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
 	if after == 0 {
 		after = 1

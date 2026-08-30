@@ -18,6 +18,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/httplimit"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
@@ -1111,6 +1112,56 @@ func TestPublishRefusesAnOversizeBody(t *testing.T) {
 	}
 }
 
+func TestAckAndEnrollRefuseOversizeBodies(t *testing.T) {
+	local := newLocalHandler(t)
+	ackBody := []byte(`{"cursor":"` + strings.Repeat("x", maxAckBodyBytes) + `","stream":"metrics","offset":1}`)
+	ack := httptest.NewRequest(http.MethodPost, "/ack", bytes.NewReader(ackBody))
+	ack.Header.Set("X-Colca-Service", "projector")
+	ackResult := httptest.NewRecorder()
+	local.ServeHTTP(ackResult, ack)
+	if ackResult.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize ack = %d, want 413: %s", ackResult.Code, ackResult.Body.String())
+	}
+
+	admin := newTestHandler(t, &config.Config{ULID: "n-test", API: config.API{Token: "tok"}})
+	enrollBody := []byte(`{"ulid":"` + strings.Repeat("x", maxEnrollBodyBytes) + `","kind":"machine"}`)
+	enrollResult := doAdmin(t, admin, http.MethodPost, "/enroll", enrollBody)
+	if enrollResult.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize enroll = %d, want 413: %s", enrollResult.Code, enrollResult.Body.String())
+	}
+}
+
+func TestRequestLimitReturns429RetryAfterAndMetric(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	m := metrics.New(st, config.Retention{}, nil)
+	limiter := httplimit.New()
+	policy := httplimit.Policy{RatePerSecond: 1, Burst: 1, PerCallerConcurrent: 1, GlobalConcurrent: 1}
+
+	release, ok := acquireRequest(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/kv", nil),
+		limiter, m, metrics.DoorHTTP, limitClassScan, "caller-1", policy)
+	if !ok {
+		t.Fatal("initial request was rejected")
+	}
+	release()
+
+	result := httptest.NewRecorder()
+	if _, ok := acquireRequest(result, httptest.NewRequest(http.MethodGet, "/kv", nil),
+		limiter, m, metrics.DoorHTTP, limitClassScan, "caller-1", policy); ok {
+		t.Fatal("request beyond burst was admitted")
+	}
+	if result.Code != http.StatusTooManyRequests || result.Header().Get("Retry-After") != "1" {
+		t.Fatalf("limited response = %d Retry-After=%q, want 429/1", result.Code, result.Header().Get("Retry-After"))
+	}
+	line := `colca_http_request_limited_total{class="scan",door="http"}`
+	if got := metricstest.Value(t, m, line); got != 1 {
+		t.Fatalf("%s = %v, want 1", line, got)
+	}
+}
+
 // TestPublishOversizeRecordCountsRecordRejectedOnce pins that the two
 // "too_large" arms on POST /publish are mutually exclusive: the raw-body
 // MaxBytesReader (tripped by TestPublishRefusesAnOversizeBody's much bigger
@@ -1487,6 +1538,57 @@ func TestTheLocalHandlerIdentifiesByHeaderAndRegisters(t *testing.T) {
 	}
 	if path != "line1/press3" {
 		t.Fatalf("registered at %q; want the declared mount line1/press3", path)
+	}
+}
+
+func TestTheLocalKVRoutePaginatesAndRejectsBadTokens(t *testing.T) {
+	h := newLocalHandler(t)
+	if _, _, err := h.eng.Store().Append("entities", []store.Record{
+		{Topic: "colca/v1/_SystemElement/n-test/line/a", Payload: []byte(`{"id":"a","name":"a"}`), TS: 1, KVPath: "line/a", KVNode: "n-test"},
+		{Topic: "colca/v1/_SystemElement/n-test/line/b", Payload: []byte(`{"id":"b","name":"b"}`), TS: 2, KVPath: "line/b", KVNode: "n-test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	request := func(path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set("X-Colca-Service", "projector")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, r)
+		return rr
+	}
+	firstResult := request("/kv?prefix=line%2F&max=1")
+	if firstResult.Code != http.StatusOK {
+		t.Fatalf("first page = %d: %s", firstResult.Code, firstResult.Body.String())
+	}
+	var first struct {
+		Entries []struct {
+			Path string `json:"path"`
+		} `json:"entries"`
+		Next string `json:"next"`
+	}
+	if err := json.Unmarshal(firstResult.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Entries) != 1 || first.Next == "" {
+		t.Fatalf("first page = %+v", first)
+	}
+
+	secondResult := request("/kv?prefix=line%2F&max=1&after=" + first.Next)
+	var second struct {
+		Entries []struct {
+			Path string `json:"path"`
+		} `json:"entries"`
+		Next string `json:"next"`
+	}
+	if err := json.Unmarshal(secondResult.Body.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	if secondResult.Code != http.StatusOK || len(second.Entries) != 1 || second.Next != "" {
+		t.Fatalf("second page = %d %+v", secondResult.Code, second)
+	}
+	if bad := request("/kv?prefix=line%2F&max=1&after=not-a-token!"); bad.Code != http.StatusBadRequest {
+		t.Fatalf("bad page token = %d, want 400: %s", bad.Code, bad.Body.String())
 	}
 }
 

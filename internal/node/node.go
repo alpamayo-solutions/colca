@@ -452,7 +452,7 @@ func Start(cfg *config.Config) (*Node, error) {
 
 	// 6. Uplink + downlink loops towards the parent.
 	if cfg.Parent != nil {
-		cl, err := repl.NewClient(cfg.Parent.URL, cfg.Parent.Pubkey, id)
+		cl, err := repl.NewClient(cfg.Parent.URL, cfg.Parent.Pubkey, id, cfg.Limits.EffectiveMaxRecordBytes())
 		if err != nil {
 			return fail(fmt.Errorf("node %s: repl client for %s: %w", cfg.ULID, cfg.Parent.URL, err))
 		}

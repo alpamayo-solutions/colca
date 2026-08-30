@@ -69,10 +69,16 @@ func TestFilteredFetchEncodesRepeatedSignalIDsAndDecodesGapAttribution(t *testin
 }
 
 func TestKVReturnsRetainedPayloadsVerbatim(t *testing.T) {
-	var gotQuery, gotService string
+	var gotQueries []string
+	var gotService string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery, gotService = r.URL.RawQuery, r.Header.Get("X-Colca-Service")
-		_, _ = w.Write([]byte(`{"entries":[{"path":"_colca/config/c1","node_id":"n1","topic":"colca/v1/_AlarmNotificationConfig/n1/_colca/config/c1","payload":{"integer":9007199254740993},"ts":7,"offset":3}]}`))
+		gotQueries = append(gotQueries, r.URL.RawQuery)
+		gotService = r.Header.Get("X-Colca-Service")
+		if r.URL.Query().Get("after") == "page-1" {
+			_, _ = w.Write([]byte(`{"entries":[{"path":"_colca/config/c2","node_id":"n1","topic":"colca/v1/_AlarmNotificationConfig/n1/_colca/config/c2","payload":{"integer":2},"ts":8,"offset":4}],"next":""}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"entries":[{"path":"_colca/config/c1","node_id":"n1","topic":"colca/v1/_AlarmNotificationConfig/n1/_colca/config/c1","payload":{"integer":9007199254740993},"ts":7,"offset":3}],"next":"page-1"}`))
 	}))
 	defer srv.Close()
 
@@ -80,10 +86,11 @@ func TestKVReturnsRetainedPayloadsVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("KV: %v", err)
 	}
-	if gotQuery != "prefix=_colca%2Fconfig" || gotService != "notifications" {
-		t.Fatalf("query/service = %q/%q", gotQuery, gotService)
+	if len(gotQueries) != 2 || gotQueries[0] != "max=10000&prefix=_colca%2Fconfig" ||
+		gotQueries[1] != "after=page-1&max=10000&prefix=_colca%2Fconfig" || gotService != "notifications" {
+		t.Fatalf("queries/service = %q/%q", gotQueries, gotService)
 	}
-	if len(entries) != 1 || string(entries[0].Payload) != `{"integer":9007199254740993}` {
+	if len(entries) != 2 || string(entries[0].Payload) != `{"integer":9007199254740993}` {
 		t.Fatalf("entries = %+v", entries)
 	}
 }

@@ -649,3 +649,22 @@ func (m *Manager) List() []*uns.Entry {
 	sort.Slice(out, func(i, j int) bool { return out[i].ULID < out[j].ULID })
 	return out
 }
+
+// ListPage returns a stable ULID-ordered page. after is the last ULID from the
+// preceding page; an empty next value means the registry is exhausted.
+func (m *Manager) ListPage(after string, max int) (entries []*uns.Entry, next string) {
+	if max <= 0 {
+		return nil, ""
+	}
+	all := m.List()
+	start := sort.Search(len(all), func(i int) bool { return all[i].ULID > after })
+	end := start + max
+	if end > len(all) {
+		end = len(all)
+	}
+	entries = all[start:end]
+	if end < len(all) && len(entries) > 0 {
+		next = entries[len(entries)-1].ULID
+	}
+	return entries, next
+}

@@ -4,6 +4,8 @@
 package store
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -35,6 +37,11 @@ func Streams() []string {
 // never checks it, because refusing a record a child already stored would
 // wedge that child's uplink on it forever.
 var ErrRecordTooLarge = errors.New("record payload exceeds the configured limit")
+
+// ErrInvalidPageToken marks a malformed or prefix-mismatched KV page token.
+// Tokens are opaque wire values; callers must return the token exactly as the
+// previous page supplied it.
+var ErrInvalidPageToken = errors.New("invalid KV page token")
 
 type Record struct {
 	Topic        string `json:"t"`
@@ -1321,6 +1328,63 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 		return nil, fmt.Errorf("store: kv scan %q: %w", prefix, err)
 	}
 	return out, nil
+}
+
+// KVScanPage returns at most max raw KV entries and an opaque continuation
+// token. The scan bound applies before HTTP authorization filtering, so one
+// request cannot turn a sparse grant into an unbounded database walk.
+func (s *Store) KVScanPage(prefix, after string, max int) ([]KVEntry, string, error) {
+	if max <= 0 {
+		return nil, "", fmt.Errorf("store: KV page size must be positive")
+	}
+	lb := kvPrefix(prefix)
+	ub := append(append([]byte{}, lb...), 0xFF)
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
+	if err != nil {
+		return nil, "", fmt.Errorf("store: kv page %q: open iterator: %w", prefix, err)
+	}
+	defer iter.Close()
+
+	valid := iter.First()
+	if after != "" {
+		raw, decodeErr := base64.RawURLEncoding.DecodeString(after)
+		if decodeErr != nil || bytes.Compare(raw, lb) < 0 || bytes.Compare(raw, ub) >= 0 {
+			return nil, "", ErrInvalidPageToken
+		}
+		valid = iter.SeekGE(raw)
+		if valid && bytes.Equal(iter.Key(), raw) {
+			valid = iter.Next()
+		}
+	}
+
+	out := make([]KVEntry, 0, max)
+	var lastKey []byte
+	for scanned := 0; valid && scanned < max; scanned++ {
+		lastKey = append(lastKey[:0], iter.Key()...)
+		key := string(iter.Key()[2:]) // strip "k\x00"
+		pathSep := strings.IndexByte(key, 0)
+		if pathSep >= 0 {
+			rest := key[pathSep+1:]
+			if nodeSep := strings.IndexByte(rest, 0); nodeSep >= 0 {
+				var e kvEnc
+				if json.Unmarshal(iter.Value(), &e) == nil {
+					out = append(out, KVEntry{
+						Path: key[:pathSep], NodeID: rest[:nodeSep], Topic: e.Topic,
+						Payload: e.Payload, TS: e.TS, Offset: e.Offset,
+						OriginOffset: originOffset(e.OriginOffset, e.Offset),
+					})
+				}
+			}
+		}
+		valid = iter.Next()
+	}
+	if err := iter.Error(); err != nil {
+		return nil, "", fmt.Errorf("store: kv page %q: %w", prefix, err)
+	}
+	if valid && len(lastKey) > 0 {
+		return out, base64.RawURLEncoding.EncodeToString(lastKey), nil
+	}
+	return out, "", nil
 }
 
 func originOffset(origin, local uint64) uint64 {

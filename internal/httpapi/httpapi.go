@@ -36,6 +36,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/httplimit"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/registry"
@@ -240,22 +241,45 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		}
 	}
 
-	// auth admits machines and the admin; adminOnly admits only the admin.
-	auth := func(next func(w http.ResponseWriter, r *http.Request, c caller)) http.HandlerFunc {
+	requestLimiter := httplimit.New()
+	door := metrics.DoorHTTP
+	if local {
+		door = metrics.DoorLocal
+	}
+
+	// authFor first bounds unauthenticated work by source address, then applies
+	// the endpoint policy to the resolved identity. On the deliberately trusted
+	// local door the source container address remains the enforcement key, so a
+	// caller cannot escape a bucket merely by changing X-Colca-Service.
+	authFor := func(class string, policy httplimit.Policy, next func(w http.ResponseWriter, r *http.Request, c caller)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
+			preauthRelease, ok := acquireRequest(w, r, requestLimiter, m, door, limitClassAuth, sourceLimitKey(r), authPolicy)
+			if !ok {
+				return
+			}
+			defer preauthRelease()
 			c, ok := resolve(r)
 			if !ok {
 				writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "no enrolled client key and no valid X-Colca-Token"})
 				return
 			}
+			key := callerLimitKey(c)
+			if local {
+				key = sourceLimitKey(r)
+			}
+			release, ok := acquireRequest(w, r, requestLimiter, m, door, class, key, policy)
+			if !ok {
+				return
+			}
+			defer release()
 			next(w, r, c)
 		}
 	}
-	// adminOnly admits the static token AND humans carrying admin:# (§3):
+	// adminFor admits the static token AND humans carrying admin:# (§3):
 	// same routes, two credentials — human admin actions are attributable
 	// (sub in the log), token actions are not.
-	adminOnly := func(next http.HandlerFunc) http.HandlerFunc {
-		return auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+	adminFor := func(class string, policy httplimit.Policy, next http.HandlerFunc) http.HandlerFunc {
+		return authFor(class, policy, func(w http.ResponseWriter, r *http.Request, c caller) {
 			if !c.admin && (c.human == nil || !c.human.Entry.IsAdmin()) {
 				auditDenied(r, metrics.DoorHTTP, "admin_denied", c.entry)
 				writeJSON(w, http.StatusForbidden, map[string]any{"error": "admin only (token or admin:# grant)"})
@@ -270,6 +294,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		release, ok := acquireRequest(w, r, requestLimiter, m, door, limitClassHealth, sourceLimitKey(r), healthPolicy)
+		if !ok {
+			return
+		}
+		defer release()
 		// The ULID and pubkey are what `colca node enroll` reads. Enrollment
 		// happens BEFORE this node is trusted by anything, so both have to be
 		// readable at the one unauthenticated door.
@@ -280,10 +309,18 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// /metrics is certless/tokenless like /healthz: Prometheus scrape targets
 	// carry no admin tokens (they must accept the self-signed server cert).
 	if m != nil {
-		mux.Handle("GET /metrics", m.Handler())
+		metricsHandler := m.Handler()
+		mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+			release, ok := acquireRequest(w, r, requestLimiter, m, door, limitClassMetrics, "global", metricsPolicy)
+			if !ok {
+				return
+			}
+			defer release()
+			metricsHandler.ServeHTTP(w, r)
+		})
 	}
 
-	mux.HandleFunc("POST /publish", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+	mux.HandleFunc("POST /publish", authFor(limitClassWrite, writePolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxPublishBody)
 		var in struct {
 			Topic      string          `json:"topic"`
@@ -405,7 +442,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// out of its view. The gap carries only stream offsets, which the same
 	// door already exposes to every authenticated caller via "next"; content
 	// stays grant-gated. Unauthenticated callers never reach the gap logic.
-	mux.HandleFunc("GET /fetch", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+	mux.HandleFunc("GET /fetch", authFor(limitClassFetch, fetchPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		q := r.URL.Query()
 		stream, cursor := q.Get("stream"), q.Get("cursor")
 		// An unknown stream is a malformed request, not an empty result — and
@@ -518,7 +555,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// retire the one it is replacing, instead of leaving it to linger forever
 	// and hold back retention pruning. Same ownership guard as the ack path:
 	// an identity may only delete cursors under its own prefix.
-	mux.HandleFunc("POST /ack", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+	mux.HandleFunc("POST /ack", authFor(limitClassWrite, writePolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxAckBodyBytes)
 		var in struct {
 			Cursor string `json:"cursor"`
 			Stream string `json:"stream"`
@@ -526,6 +564,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			Delete bool   `json:"delete"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "ack request exceeds 16 KiB"})
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
@@ -552,16 +595,26 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		writeJSON(w, http.StatusOK, map[string]any{"moved": moved})
 	}))
 
-	mux.HandleFunc("GET /kv", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
-		entries, err := e.Store().KVScan(r.URL.Query().Get("prefix"))
+	mux.HandleFunc("GET /kv", authFor(limitClassScan, scanPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+		pageSize, after, err := pageRequest(r)
 		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "max must be between 1 and 10000"})
+			return
+		}
+		prefix := r.URL.Query().Get("prefix")
+		entries, next, err := e.Store().KVScanPage(prefix, after, pageSize)
+		if err != nil {
+			if errors.Is(err, store.ErrInvalidPageToken) {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid page token"})
+				return
+			}
 			// A storage-layer failure, not "no entries" — answering 200 with
 			// an empty list here would tell a caller a prefix holds nothing
 			// when the truth is the scan itself never completed. The response
 			// body stays static (no err.Error()) so a storage-layer detail
 			// such as a filesystem path never reaches the caller; the real
 			// error still reaches operators through the log.
-			slog.Default().Error("kv scan failed", "prefix", r.URL.Query().Get("prefix"), "err", err)
+			slog.Default().Error("kv scan failed", "prefix", prefix, "err", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "scan failed"})
 			return
 		}
@@ -584,7 +637,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if denied > 0 {
 			m.ACLDeny(metrics.ACLRead)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"entries": out})
+		writeJSON(w, http.StatusOK, map[string]any{"entries": out, "next": next})
 	}))
 
 	// GET /self is the local service's bootstrap view of the registry entry
@@ -596,12 +649,12 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// reparent is reflected immediately and a stale X-Colca-Mount declaration
 	// never moves it back.
 	if local {
-		mountBlobRoutes(mux, blobs, m, cfg.Limits.EffectiveMaxBlobBytes(), writeJSON, auth)
+		mountBlobRoutes(mux, blobs, m, cfg.Limits.EffectiveMaxBlobBytes(), writeJSON, authFor)
 		if secretDB != nil {
-			mountLocalSecretRoutes(mux, secretDB, writeJSON, auth)
+			mountLocalSecretRoutes(mux, secretDB, writeJSON, authFor)
 		}
 
-		mux.HandleFunc("GET /self", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+		mux.HandleFunc("GET /self", authFor(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 			mount := ""
 			if c.entry.Element != "" {
 				var ok bool
@@ -640,21 +693,27 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// writing the node's own data is.
 	if !local {
 		if secretDB != nil {
-			mountAdminSecretRoutes(mux, secretDB, writeJSON, adminOnly)
+			mountAdminSecretRoutes(mux, secretDB, writeJSON, adminFor)
 		}
 		// The published door's resource read (resources design §6): the ONLY
 		// way a file is read on an authenticated door. Every read passes
 		// through a resource id so the element-scoped grant check always
 		// runs — raw digest access stays on the local and replication doors,
 		// where the door itself is the authorization.
-		mountResourceRoutes(mux, e, blobs, m, writeJSON, auth)
+		mountResourceRoutes(mux, e, blobs, m, writeJSON, authFor)
 
 		// The enrollment door (auth §4): the ONLY write path for registry
 		// entries, admin-guarded. Local-only — downward provisioning
 		// via a _CmdAdmin flow is the intended direction.
-		mux.HandleFunc("POST /enroll", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("POST /enroll", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
+			r.Body = http.MaxBytesReader(w, r.Body, maxEnrollBodyBytes)
 			body, err := readBody(r)
 			if err != nil {
+				var tooLarge *http.MaxBytesError
+				if errors.As(err, &tooLarge) {
+					writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "enrollment request exceeds 256 KiB"})
+					return
+				}
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 				return
 			}
@@ -670,7 +729,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusOK, map[string]any{"ulid": ulid, "offset": off})
 		}))
 
-		mux.HandleFunc("DELETE /enroll/{ulid}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("DELETE /enroll/{ulid}", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
 			ulid := r.PathValue("ulid")
 			// Move-drain design §3.1/§3.4: DELETE stays the immediate kill-switch
 			// — no drain precondition ever creeps into registry.Revoke itself
@@ -701,7 +760,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		// node auto-revokes through the same Revoke path once the completion
 		// predicate holds (repl.Server.evaluateDrain), or immediately via DELETE
 		// above (outcome "forced").
-		mux.HandleFunc("POST /enroll/{ulid}/drain", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("POST /enroll/{ulid}/drain", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
 			ulid := r.PathValue("ulid")
 			off, err := reg.Drain(ulid)
 			if err != nil {
@@ -722,11 +781,17 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusOK, map[string]any{"ulid": ulid, "offset": off, "status": uns.StatusDraining})
 		}))
 
-		mux.HandleFunc("GET /enroll", adminOnly(func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusOK, map[string]any{"entries": reg.List()})
+		mux.HandleFunc("GET /enroll", adminFor(limitClassScan, scanPolicy, func(w http.ResponseWriter, r *http.Request) {
+			pageSize, after, err := pageRequest(r)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "max must be between 1 and 10000"})
+				return
+			}
+			entries, next := reg.ListPage(after, pageSize)
+			writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "next": next})
 		}))
 
-		mux.HandleFunc("GET /debug/state", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("GET /debug/state", adminFor(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request) {
 			streams := map[string]any{}
 			// Derived, not listed: this route is what the test harnesses read
 			// to learn a node's stream set, so a copy here would let their

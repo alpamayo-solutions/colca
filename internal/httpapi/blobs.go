@@ -24,13 +24,13 @@ func mountBlobRoutes(
 	m *metrics.Metrics,
 	maxBytes uint64,
 	writeJSON func(http.ResponseWriter, int, any),
-	auth func(func(http.ResponseWriter, *http.Request, caller)) http.HandlerFunc,
+	auth endpointAuth,
 ) {
 	if blobs == nil {
 		return
 	}
 
-	mux.HandleFunc("POST /blobs", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+	mux.HandleFunc("POST /blobs", auth(limitClassTransfer, transferPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes))
 		sha, size, err := blobs.Put(r.Body, r.Header.Get("X-Colca-Blob-SHA256"))
 		// BlobTransfer is deliberately NOT counted on this door, unlike the
@@ -102,10 +102,10 @@ func mountBlobRoutes(
 		w.WriteHeader(http.StatusOK)
 	}
 
-	mux.HandleFunc("GET /blobs/{sha}", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+	mux.HandleFunc("GET /blobs/{sha}", auth(limitClassTransfer, transferPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		serve(w, r, true)
 	}))
-	mux.HandleFunc("HEAD /blobs/{sha}", auth(func(w http.ResponseWriter, r *http.Request, c caller) {
+	mux.HandleFunc("HEAD /blobs/{sha}", auth(limitClassTransfer, transferPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		serve(w, r, false)
 	}))
 }

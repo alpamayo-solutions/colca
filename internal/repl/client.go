@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
+	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -43,7 +44,7 @@ const (
 	legacyDownlinkCursor    = "downlink"
 	legacyDownlinkDefCursor = "downlink-def"
 
-	replBatch    = 200
+	replBatch    = maxReplicateRecords
 	uplinkIdle   = 150 * time.Millisecond
 	downlinkWait = 20 * time.Second
 	retryAfter   = 500 * time.Millisecond
@@ -58,13 +59,14 @@ type Client struct {
 	// site, so a reparent (a different parentPub) never resumes against the
 	// old parent's offsets, and returning to a former parent finds its old
 	// position intact.
-	parentPub string
-	http      *http.Client
-	log       *slog.Logger
+	parentPub        string
+	http             *http.Client
+	log              *slog.Logger
+	maxReplicateBody int64
 }
 
 // NewClient: TLS client presenting the child's cert, pinning the parent's pubkey.
-func NewClient(baseURL, parentPubHex string, id *identity.Identity) (*Client, error) {
+func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordBytes ...uint64) (*Client, error) {
 	cert, err := id.SelfSignedCert("colca-child")
 	if err != nil {
 		return nil, err
@@ -87,11 +89,16 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity) (*Client, er
 			return nil
 		},
 	}
+	limits := config.Limits{}
+	if len(maxRecordBytes) > 0 {
+		limits.MaxRecordBytes = config.ByteSize(maxRecordBytes[0])
+	}
 	return &Client{
-		base:      baseURL,
-		parentPub: parentPubHex,
-		http:      &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: 30 * time.Second},
-		log:       slog.Default().With("comp", "repl-client"),
+		base:             baseURL,
+		parentPub:        parentPubHex,
+		http:             &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: 30 * time.Second},
+		log:              slog.Default().With("comp", "repl-client"),
+		maxReplicateBody: replicateBodyLimit(&config.Config{Limits: limits}),
 	}, nil
 }
 
@@ -110,16 +117,15 @@ func (c *Client) Replicate(stream string, recs []store.ReplRecord) (hwm uint64, 
 // engine.ApplyClockSample; Replicate's exported wrapper drops it, since
 // direct callers (tests) do not need it.
 func (c *Client) replicate(ctx context.Context, stream string, recs []store.ReplRecord) (hwm uint64, nowMS int64, err error) {
-	wire := make([]wireRec, len(recs))
-	for i, r := range recs {
-		wire[i] = wireRec{
-			O: r.ChildOffset, OO: r.OriginOffset, T: r.Topic, P: r.Payload, TS: r.TS,
-			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind,
-		}
+	if len(recs) > maxReplicateRecords {
+		return 0, 0, fmt.Errorf("replicate: batch has %d records, maximum is %d", len(recs), maxReplicateRecords)
 	}
-	body, err := json.Marshal(map[string]any{"stream": stream, "records": wire})
+	body, err := marshalReplication(stream, recs)
 	if err != nil {
 		return 0, 0, err
+	}
+	if int64(len(body)) > c.maxReplicateBody {
+		return 0, 0, fmt.Errorf("replicate: request is %d bytes, maximum is %d", len(body), c.maxReplicateBody)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/replicate", bytes.NewReader(body))
 	if err != nil {
@@ -142,6 +148,46 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 		return 0, 0, err
 	}
 	return out.HWM, out.NowMS, nil
+}
+
+func marshalReplication(stream string, recs []store.ReplRecord) ([]byte, error) {
+	wire := make([]wireRec, len(recs))
+	for i, r := range recs {
+		wire[i] = wireRec{
+			O: r.ChildOffset, OO: r.OriginOffset, T: r.Topic, P: r.Payload, TS: r.TS,
+			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind,
+		}
+	}
+	return json.Marshal(map[string]any{"stream": stream, "records": wire})
+}
+
+// fitReplicationBatch returns the largest non-empty prefix whose exact JSON
+// envelope fits the server contract. The normal 200-record batch needs one
+// marshal; binary search is used only for unusually large records.
+func fitReplicationBatch(stream string, batch []store.ReplRecord, maxBytes int64) ([]store.ReplRecord, error) {
+	body, err := marshalReplication(stream, batch)
+	if err != nil || int64(len(body)) <= maxBytes {
+		return batch, err
+	}
+	low, high := 1, len(batch)-1
+	best := 0
+	for low <= high {
+		mid := low + (high-low)/2
+		body, err := marshalReplication(stream, batch[:mid])
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(body)) <= maxBytes {
+			best = mid
+			low = mid + 1
+		} else {
+			high = mid - 1
+		}
+	}
+	if best == 0 {
+		return nil, fmt.Errorf("replicate: one record exceeds the %d-byte request limit", maxBytes)
+	}
+	return batch[:best], nil
 }
 
 type DownRec struct {
@@ -543,6 +589,15 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 					WrittenBy: r.WrittenBy, ActorID: r.ActorID,
 					ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
 				}
+			}
+			batch, err = fitReplicationBatch(stream, batch, c.maxReplicateBody)
+			if err != nil {
+				c.log.Error("uplink batch cannot fit the replication request bound", "stream", stream, "err", err)
+				m.UplinkPushFailed(stream)
+				return false, false
+			}
+			if len(batch) < len(recs) {
+				next = batch[len(batch)-1].ChildOffset + 1
 			}
 			_, nowMS, err := c.replicate(ctx, stream, batch)
 			if err != nil {

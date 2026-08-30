@@ -15,10 +15,16 @@ import (
 // handleBlobHead answers whether this node holds a blob. It is what lets a
 // child ask "do you need this?" before spending bandwidth on a push.
 func (s *Server) handleBlobHead(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := s.childFromReq(r); err != nil {
+	child, _, err := s.childFromReq(r)
+	if err != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	release, ok := s.acquireRequest(w, limitClassReplTransfer, child.ULID, replTransferPolicy)
+	if !ok {
+		return
+	}
+	defer release()
 	sha := r.PathValue("sha")
 	size, ok := s.blobs.Has(sha)
 	if !ok {
@@ -38,6 +44,11 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	release, ok := s.acquireRequest(w, limitClassReplTransfer, child.ULID, replTransferPolicy)
+	if !ok {
+		return
+	}
+	defer release()
 	sha := r.PathValue("sha")
 	max := int64(s.cfg.Limits.EffectiveMaxBlobBytes())
 	r.Body = http.MaxBytesReader(w, r.Body, max)
@@ -102,10 +113,16 @@ const defaultBlobHops = 8
 // a headless leaf. Every request in the chain is still a child dialing its
 // parent — no parent ever dials down.
 func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := s.childFromReq(r); err != nil {
+	child, _, err := s.childFromReq(r)
+	if err != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	release, ok := s.acquireRequest(w, limitClassReplTransfer, child.ULID, replTransferPolicy)
+	if !ok {
+		return
+	}
+	defer release()
 	sha := r.PathValue("sha")
 
 	if rc, size, err := s.blobs.Get(sha); err == nil {

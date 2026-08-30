@@ -430,6 +430,32 @@ func TestKVScan(t *testing.T) {
 	}
 }
 
+func TestKVScanPageIsBoundedAndTokensArePrefixScoped(t *testing.T) {
+	s := mustOpen(t)
+	if _, _, err := s.Append("entities", []Record{
+		{Topic: "colca/v1/_Entity/n1/line/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "line/a", KVNode: "n1"},
+		{Topic: "colca/v1/_Entity/n1/line/b", Payload: []byte(`{"v":2}`), TS: 2, KVPath: "line/b", KVNode: "n1"},
+		{Topic: "colca/v1/_Entity/n1/line/c", Payload: []byte(`{"v":3}`), TS: 3, KVPath: "line/c", KVNode: "n1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, next, err := s.KVScanPage("line/", "", 2)
+	if err != nil || len(first) != 2 || next == "" {
+		t.Fatalf("first page = %+v next=%q err=%v", first, next, err)
+	}
+	second, final, err := s.KVScanPage("line/", next, 2)
+	if err != nil || len(second) != 1 || second[0].Path != "line/c" || final != "" {
+		t.Fatalf("second page = %+v next=%q err=%v", second, final, err)
+	}
+	if _, _, err := s.KVScanPage("other/", next, 2); !errors.Is(err, ErrInvalidPageToken) {
+		t.Fatalf("cross-prefix token error = %v, want ErrInvalidPageToken", err)
+	}
+	if _, _, err := s.KVScanPage("line/", "not-a-token!", 2); !errors.Is(err, ErrInvalidPageToken) {
+		t.Fatalf("malformed token error = %v, want ErrInvalidPageToken", err)
+	}
+}
+
 // Cursors()/HWMs() report exactly the persisted read-only state the metrics
 // collector derives gauges from, and tolerate malformed keys/values the same
 // way KVScan does (skip, never fail).

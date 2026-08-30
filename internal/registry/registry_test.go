@@ -137,6 +137,29 @@ func TestEnrollLookupAndPersistence(t *testing.T) {
 	}
 }
 
+func TestListPageUsesStableULIDOrdering(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "a", "b", "c")
+	for _, e := range []uns.Entry{
+		machine("01M3", "c", pub("cd")),
+		machine("01M1", "a", pub("ab")),
+		machine("01M2", "b", pub("bc")),
+	} {
+		if _, _, err := m.Enroll(entryJSON(t, e)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, next := m.ListPage("", 2)
+	if len(first) != 2 || first[0].ULID != "01M1" || first[1].ULID != "01M2" || next != "01M2" {
+		t.Fatalf("first page = %+v next=%q", first, next)
+	}
+	second, final := m.ListPage(next, 2)
+	if len(second) != 1 || second[0].ULID != "01M3" || final != "" {
+		t.Fatalf("second page = %+v next=%q", second, final)
+	}
+}
+
 func TestEnrollValidationAndUniqueness(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "z/a", "z/b", "z/c")

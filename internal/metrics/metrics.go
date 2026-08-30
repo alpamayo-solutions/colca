@@ -303,6 +303,10 @@ type Metrics struct {
 	resourceReads   *prometheus.CounterVec // colca_resource_reads_total{result}
 	resourceReadsBy map[string]prometheus.Counter
 
+	// Availability controls (IEC 62443-inspired SR 7.1/SR 7.2). Both labels
+	// are fixed route/door classes, never request paths or caller identities.
+	httpRequestLimited *prometheus.CounterVec // colca_http_request_limited_total{door,class}
+
 	// Blob sweeper (resources design §8): unreferenced blobs reclaimed past
 	// their grace period. Unlabeled — every deletion is the same event.
 	blobsSwept prometheus.Counter // colca_blobs_swept_total
@@ -505,6 +509,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_resource_reads_total",
 			Help: "Resource file reads on the published door's GET /resources/{id}/file, by result: ok (bytes served), pending (blob_pending — the record exists but its bytes have not replicated here, the only retryable case), denied (no read grant on the resource's element), not_found (unknown resource id), error (an internal fault reading the blob — a malformed stored digest or a disk/permission fault on this node; never retryable the way pending is). Resets on restart.",
 		}, []string{"result"}),
+		httpRequestLimited: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_http_request_limited_total",
+			Help: "HTTP requests refused by Colca's rate or concurrency controls, by bounded door and route class. Resets on restart.",
+		}, []string{"door", "class"}),
 		blobsSwept: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_blobs_swept_total",
 			Help: "Blobs deleted by the background sweeper because no live _Resource referenced them and they were older than the configured grace period (resources design §8). Resets on restart.",
@@ -606,7 +614,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.gapServed, m.gapReceived, m.replGapApplied,
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
 		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
-		m.blobTransfers, m.blobRejects, m.recordRejects, m.resourceReads, m.blobsSwept,
+		m.blobTransfers, m.blobRejects, m.recordRejects, m.resourceReads, m.httpRequestLimited, m.blobsSwept,
 		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
 	return m
@@ -1091,6 +1099,15 @@ func (m *Metrics) RecordRejected(reason string) {
 		return
 	}
 	m.recordRejects.WithLabelValues(reason).Inc()
+}
+
+// HTTPRequestLimited counts one 429 response. Callers supply only fixed door
+// and route-class constants, so the metric cannot acquire attacker-controlled
+// label cardinality.
+func (m *Metrics) HTTPRequestLimited(door, class string) {
+	if m != nil {
+		m.httpRequestLimited.WithLabelValues(door, class).Inc()
+	}
 }
 
 // ResourceRead counts one resource file read attempt on the published door's
