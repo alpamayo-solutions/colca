@@ -40,12 +40,6 @@ func run(paths []string, getenv func(string) string) error {
 		return fmt.Errorf("at least one volume path is required")
 	}
 
-	for _, path := range paths {
-		if err := chownTree(path, uid, gid); err != nil {
-			return fmt.Errorf("migrate %s: %w", path, err)
-		}
-	}
-
 	treeSource := getenv(copyTreeSrc)
 	treeTarget := getenv(copyTreeDst)
 	if (treeSource == "") != (treeTarget == "") {
@@ -69,6 +63,26 @@ func run(paths []string, getenv func(string) string) error {
 			return fmt.Errorf("stage TLS material: %w", err)
 		}
 	}
+
+	// Ownership LAST, and this order is load-bearing rather than tidy.
+	//
+	// This process runs as uid 0 with every capability dropped but CHOWN and
+	// DAC_OVERRIDE. Root's power to chmod a file it does not own is CAP_FOWNER
+	// specifically, so once a path belongs to `uid`, this process can no longer
+	// change its mode. Chowning first therefore disarmed the copy that follows:
+	// chownTree handed /volumes/keys to 65532, copyTree then chmod'd that same
+	// directory, and the whole initializer died with
+	// "chmod /volumes/keys: operation not permitted" — taking every service
+	// that waits on it down with it.
+	//
+	// Copying while the tree is still root-owned costs nothing and needs no
+	// extra capability. Widening to CAP_FOWNER would also have worked and is
+	// the wrong trade: the fix is to stop chmod'ing what we have given away.
+	for _, path := range paths {
+		if err := chownTree(path, uid, gid); err != nil {
+			return fmt.Errorf("migrate %s: %w", path, err)
+		}
+	}
 	return nil
 }
 
@@ -90,10 +104,16 @@ func copyTree(source, target string, uid, gid int) error {
 			return fmt.Errorf("refusing symlink %s", path)
 		}
 		if entry.IsDir() {
-			if err := os.MkdirAll(destination, info.Mode().Perm()); err != nil {
+			mode := info.Mode().Perm()
+			if err := os.MkdirAll(destination, mode); err != nil {
 				return err
 			}
-			if err := os.Chmod(destination, info.Mode().Perm()); err != nil {
+			// MkdirAll applies the umask, so a directory this call created may
+			// not have the mode asked for; chmod settles it. A directory that
+			// ALREADY has that mode is left alone — on the second run the tree
+			// is owned by `uid`, and a chmod there would fail for the same
+			// CAP_FOWNER reason described in run(), for no change at all.
+			if err := chmodIfDifferent(destination, mode); err != nil {
 				return err
 			}
 			return os.Chown(destination, uid, gid)
@@ -103,6 +123,18 @@ func copyTree(source, target string, uid, gid int) error {
 		}
 		return copyAtomic(path, destination, info.Mode().Perm(), uid, gid)
 	})
+}
+
+// chmodIfDifferent sets a path's mode only when it does not already have it.
+func chmodIfDifferent(path string, mode os.FileMode) error {
+	current, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if current.Mode().Perm() == mode {
+		return nil
+	}
+	return os.Chmod(path, mode)
 }
 
 func positiveID(name, raw string) (int, error) {
