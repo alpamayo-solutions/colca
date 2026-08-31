@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "The stream each bundle class name routes to. Shared by colca (Go) and by",
+    "every Python consumer that has to know where a contract's records land,",
+    "so the mapping is stated once instead of re-implemented per language.",
+    "",
+    "colca's StreamFor is the authority; plugins/uns/manifest_streams_test.go",
+    "pins this file against it in BOTH directions, so a class added to Go with",
+    "no entry here fails, and an entry here that Go does not route fails too.",
+    "",
+    "An empty string means the class has no stream at all: nothing persists it."
+  ],
+  "streams": {
+    "ack": "commands",
+    "alarm": "alarms",
+    "annotation": "annotations",
+    "audit": "audit",
+    "cmd": "commands",
+    "data": "metrics",
+    "definition": "definitions",
+    "entity": "entities",
+    "log": "logs"
+  }
+}

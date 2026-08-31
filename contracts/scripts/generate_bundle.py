@@ -27,59 +27,17 @@ from dataclasses import MISSING, fields, is_dataclass
 
 import colca_data_contracts  # noqa: F401  (import populates the registry)
 from franzmq.data_contracts import PAYLOAD_CLASSES
+
+from colca_data_contracts.routing import CLASS_TABLE
 from franzmq.data_contracts.base import Ack, Cmd
 
 # ---------------------------------------------------------------------------
 # Explicit tables (design §5.1: "an explicit small table in the generator")
 # ---------------------------------------------------------------------------
 
-# Routing class for everything not derivable from the class hierarchy
-# (Cmd subclasses → "cmd", Ack subclasses → "ack" — derived, not listed).
-CLASS_TABLE: dict[str, str] = {
-    "_Metric": "data",
-    # A log line is an EVENT: the thing happened, and a later line does not
-    # replace an earlier one. As "data" it was state — KV kept only the newest
-    # line per logger and level, and the history rode the metrics stream where
-    # a chatty service evicted the samples it shared the lane with.
-    "_Log": "log",
-    "_SystemElement": "entity",
-    "_Signal": "entity",
-    "_Constant": "entity",
-    "_Resource": "entity",
-    "_EditOperation": "entity",
-    "_DataTags": "entity",
-    "_Node": "entity",
-    "_ServiceDetails": "entity",
-    "_ExternalReference": "entity",
-    "_AlarmNotificationConfig": "entity",
-    "_NotificationConfigStatus": "entity",
-    # Alarm EVENTS: append-only, no KV, not retained, on their own stream so
-    # they never queue behind a metrics backlog. The config pair above stays
-    # on entities — only the two event contracts moved
-    # (the alarm stream and uplink lanes design §3).
-    "_AlarmStateChange": "alarm",
-    "_NotificationDispatched": "alarm",
-    # Annotation instances: append-only on their own stream, for the same
-    # reason as alarms — a part-cycle producer emits ~1M/year/machine, so
-    # id-keyed retained/KV entries would grow without bound
-    # (dataops-evaluator design §8). Deletes are appends carrying a
-    # `deleted` marker rather than a tombstone; the class default already
-    # excludes "annotation" from the tombstonable classes below.
-    "_Annotation": "annotation",
-    # Definitions: authored once, needed everywhere below the author, and the
-    # same thing at every node — so they descend and are applied as state
-    # (definition-stream design §2). They were "entity" only because there was
-    # no downward flow to put them on, which meant they replicated the wrong
-    # way, away from the nodes that need them.
-    "_Group": "definition",
-    "_PersonalAccessToken": "definition",
-    "_AnnotationType": "definition",
-    "_MetadataType": "definition",
-    "_DataModel": "definition",
-    "_ExternalSystem": "definition",
-    "_SemanticTag": "definition",
-    "_AuditEvent": "audit",
-}
+# Routing class per contract. Imported, not restated: the same table decides
+# where a record lands for every Python consumer, and a second copy here would
+# be a bundle that disagreed with the code reading it.
 
 # Fields required beyond the no-default rule: door contracts the dataclass
 # defaults hide (Metric.signal_id defaults to "" for constructor convenience,
