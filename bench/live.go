@@ -76,7 +76,7 @@ func RunLive(p Params) (*Report, error) {
 			for time.Now().Before(stopAt) {
 				<-tick.C
 				seq++
-				payload, _ := json.Marshal(map[string]any{"v": float64(seq), "value": float64(seq), "signal_id": "bench", "sent_ns": time.Now().UnixNano()})
+				payload, _ := json.Marshal(map[string]any{"v": float64(seq), "value": float64(seq), "signal_id": "bench", "timestamp": float64(time.Now().UnixNano()) / 1e9, "sent_ns": time.Now().UnixNano()})
 				m.Publish(topic, 1, false, payload) // fire; ticker paces, PUBACK not awaited
 			}
 		}(m, topic)

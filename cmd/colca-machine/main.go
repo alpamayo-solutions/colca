@@ -522,7 +522,7 @@ func publishSeqSerialized(ctx context.Context, log *slog.Logger, publish func(to
 	// the builtin floor's stand-in requires v (bare trees, in-process
 	// suites). Both present = valid at every door; additionalProperties
 	// stays open by the §4.1 subset, so seq rides along untouched.
-	payload := fmt.Sprintf(`{"v": %.2f, "value": %.2f, "signal_id": %q, "seq": %d}`, v, v, topic, seq)
+	payload := fmt.Sprintf(`{"v": %.2f, "value": %.2f, "signal_id": %q, "seq": %d, "timestamp": %.3f}`, v, v, topic, seq, float64(time.Now().UnixNano())/1e9)
 	log.Debug("publish metric", "topic", topic, "seq", seq, "v", v)
 	waitForConfirm(ctx, log, publish(topic, 1, false, payload), "metric publish", "topic", topic, "seq", seq)
 }

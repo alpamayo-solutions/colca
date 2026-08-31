@@ -61,7 +61,7 @@ func RunIngest(p Params) (*Report, error) {
 			seq := 0
 			for time.Now().Before(stopAt) {
 				seq++
-				payload, _ := json.Marshal(map[string]any{"v": float64(seq), "value": float64(seq), "signal_id": "bench", "ts": time.Now().UnixMilli()})
+				payload, _ := json.Marshal(map[string]any{"v": float64(seq), "value": float64(seq), "signal_id": "bench", "timestamp": float64(time.Now().UnixNano()) / 1e9, "ts": time.Now().UnixMilli()})
 				t0 := time.Now()
 				tk := m.Publish(topic, 1, false, payload)
 				if !tk.WaitTimeout(10*time.Second) || tk.Error() != nil {

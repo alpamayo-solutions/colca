@@ -34,7 +34,7 @@ func TestPairUplinkAndHubRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, _ := json.Marshal(map[string]any{"v": 1.5, "value": 1.5, "signal_id": "bench"})
+	payload, _ := json.Marshal(map[string]any{"v": 1.5, "value": 1.5, "signal_id": "bench", "timestamp": float64(time.Now().UnixNano()) / 1e9})
 	if tk := m.Publish("colca/v1/_Metric/n-edge/m1/temp", 1, false, payload); !tk.WaitTimeout(5*time.Second) || tk.Error() != nil {
 		t.Fatalf("publish: %v", tk.Error())
 	}

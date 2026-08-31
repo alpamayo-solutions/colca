@@ -35,7 +35,7 @@ func RunCardinality(p Params) (*Report, error) {
 	for i := 0; i < p.Paths; i++ {
 		body, _ := json.Marshal(map[string]any{
 			"topic":   fmt.Sprintf("colca/v1/_Metric/n-edge/line%d/sig%d", i/100, i%100),
-			"payload": map[string]any{"v": float64(i), "value": float64(i), "signal_id": "bench"},
+			"payload": map[string]any{"v": float64(i), "value": float64(i), "signal_id": "bench", "timestamp": float64(time.Now().UnixNano()) / 1e9},
 		})
 		if err := postAdmin(client, pair.Edge.APIAddr, "/publish", body); err != nil {
 			return nil, fmt.Errorf("seed %d: %w", i, err)
