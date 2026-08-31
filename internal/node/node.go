@@ -214,6 +214,11 @@ func Start(cfg *config.Config) (*Node, error) {
 	)
 	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain, edit))
 	n.Engine.SetObserver(domain)
+	// The observer only sees records from here on; the retained set persisted
+	// by earlier incarnations of this node is replayed to it once, so a
+	// catalogue that arrived while no observer was wired (a restart, or a
+	// binding a re-declaration once wiped) still gets its lifecycle pass.
+	n.Engine.ReplayRetained()
 	// A node describes itself: `_Node` is "authored by the node it
 	// describes" (the contract's own words), and the one fact about itself a
 	// node cannot read from config is where it sits — the element its parent

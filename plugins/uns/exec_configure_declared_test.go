@@ -310,3 +310,63 @@ func TestAnUpsertOfAnotherNodesRecordIsUntouched(t *testing.T) {
 		t.Fatalf("another node's record was rewritten: %s", raw)
 	}
 }
+
+// A bootstrap runs on every reconcile-up and re-declares what it already
+// declared. The declaration owns what a signal IS; the binding (`data_tag`,
+// `is_published`, the learned `data_type`) is runtime state the catalogue
+// lifecycle earned. A re-declaration that silently replaced the record whole
+// unbound every declared signal of a running node — the demo plant's OEE
+// outputs went dark on every `demo up`, with no republish left to rebind them.
+func TestReDeclaringABoundSignalKeepsItsBinding(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JCONN", "opcua-1", "01HLINE1")
+	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", map[string]any{
+		"unit": "°C", "description": "Drum temperature",
+	})
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", tags("t1"))
+	if code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
+		t.Fatalf("autobind = %d %q", code, msg)
+	}
+	bound := signalRecordAt(t, c, "line1/tag-t1")
+	if bound["data_tag"] != "t1" {
+		t.Fatalf("precondition: signal not bound after autobind: %+v", bound)
+	}
+
+	// The same declaration again — the exact record a bootstrap manifest
+	// carries, `data_tag` explicitly null (projection_bootstrap emits it so).
+	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", map[string]any{
+		"unit": "°C", "description": "Drum temperature",
+	})
+
+	after := signalRecordAt(t, c, "line1/tag-t1")
+	if after["data_tag"] != "t1" {
+		t.Fatalf("re-declaration unbound the signal: data_tag=%v (want t1): %+v", after["data_tag"], after)
+	}
+	if after["is_published"] != true {
+		t.Fatalf("re-declaration dropped is_published: %+v", after)
+	}
+	if after["unit"] != "°C" || after["id"] != "01SDECLARED" {
+		t.Fatalf("the declared facts must still be the declaration's: %+v", after)
+	}
+}
+
+// The preserve rule must not swallow a caller that MEANS to set the binding:
+// an upsert naming a non-empty data_tag still wins over the stored one.
+func TestAnUpsertNamingATagStillSetsIt(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", nil)
+	code, msg, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, map[string]any{
+		"signals": []map[string]any{{"path": "line1/tag-t1", "signal": map[string]any{
+			"id": "01SDECLARED", "name": "tag-t1", "data_tag": "t9", "is_published": false,
+		}}},
+	}))
+	if code != 200 {
+		t.Fatalf("upsert = %d %q", code, msg)
+	}
+	after := signalRecordAt(t, c, "line1/tag-t1")
+	if after["data_tag"] != "t9" || after["is_published"] != false {
+		t.Fatalf("an explicit binding in the upsert must win: %+v", after)
+	}
+}

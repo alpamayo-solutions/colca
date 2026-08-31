@@ -67,6 +67,34 @@ type RecordObserver interface {
 // SetObserver wires the record observer in (node startup).
 func (e *Engine) SetObserver(o RecordObserver) { e.observer = o }
 
+// ReplayRetained hands every currently retained record to the observer once,
+// in store order. An observer reacts to records AS THEY PERSIST; whatever was
+// already persisted when this process started otherwise never reaches it. The
+// lifecycle trigger's own comment priced that as "a catalogue that grew
+// across a restart is not bound" — and the price turned out to also cover a
+// binding wiped by a re-declaration, with no republish left to rebind it
+// (the demo plant's computed outputs went dark on every reconcile-up).
+// Observers are idempotent by contract (autobind's own invariant), so
+// replaying on every boot changes nothing when there is nothing to do. A
+// topic that does not parse is not a domain record and is skipped.
+func (e *Engine) ReplayRetained() {
+	if e.observer == nil {
+		return
+	}
+	entries, err := e.store.KVScan("")
+	if err != nil {
+		e.log.Warn("retained replay skipped: KV scan failed", "err", err)
+		return
+	}
+	for _, kv := range entries {
+		parsed, err := uns.Parse(kv.Topic)
+		if err != nil {
+			continue
+		}
+		e.observer.Observe(parsed.Contract, kv.Topic, kv.Payload)
+	}
+}
+
 // SetSubscriberCheck wires the local-bus subscriber lookup in (node startup,
 // once the broker exists). See HasSubscriberFor and deliverCommand in
 // redelivery.go.

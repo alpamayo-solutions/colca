@@ -827,7 +827,11 @@ func (c *ConfigExec) upsert(payload []byte) (int, string, string, []StateWrite) 
 		if len(ref.Signal) == 0 {
 			return 422, fmt.Sprintf("signal/upsert: entry %d has no signal", i), "invalid", nil
 		}
-		records = append(records, StateRecord{Topic: c.signalTopic(ref.Path), Payload: ref.Signal})
+		payload, err := c.preserveBinding(ref.Path, ref.Signal)
+		if err != nil {
+			return 422, fmt.Sprintf("signal/upsert: entry %d unreadable: %v", i, err), "invalid", nil
+		}
+		records = append(records, StateRecord{Topic: c.signalTopic(ref.Path), Payload: payload})
 	}
 	writes, err := c.commit(records)
 	if err != nil {
@@ -837,6 +841,45 @@ func (c *ConfigExec) upsert(payload []byte) (int, string, string, []StateWrite) 
 		return 422, "signal/upsert: rejected: " + err.Error(), "invalid", nil
 	}
 	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
+}
+
+// preserveBinding folds the stored record's binding state into an upsert that
+// does not speak to it. A declaration owns what a signal IS — name, unit,
+// element, precision — and cannot name a binding (the tag id is minted at
+// discovery), so the generated manifests carry `data_tag: null`. The binding
+// (`data_tag`, `is_published`) and the type autobind learned from the tag are
+// runtime state the catalogue lifecycle earned; a re-declaration replacing
+// the record whole silently unbound every declared signal of a running node
+// on every reconcile-up, with no republish left to rebind them. An upsert
+// that MEANS to change the binding still does: a non-empty `data_tag` or an
+// explicit `is_published`/`data_type` wins over the stored value.
+func (c *ConfigExec) preserveBinding(path string, incoming json.RawMessage) (json.RawMessage, error) {
+	existing, ok := c.store.KVGet(c.signalTopic(path))
+	if !ok {
+		return incoming, nil
+	}
+	var stored, next map[string]any
+	if err := json.Unmarshal(existing, &stored); err != nil {
+		return incoming, nil // an unreadable stored record cannot constrain the new one
+	}
+	if err := json.Unmarshal(incoming, &next); err != nil {
+		return nil, err
+	}
+	if tag, _ := next["data_tag"].(string); tag == "" {
+		if storedTag, _ := stored["data_tag"].(string); storedTag != "" {
+			next["data_tag"] = storedTag
+		} else {
+			delete(next, "data_tag") // never persist an explicit null
+		}
+	}
+	for _, field := range []string{"is_published", "data_type"} {
+		if _, spoken := next[field]; !spoken {
+			if value, has := stored[field]; has {
+				next[field] = value
+			}
+		}
+	}
+	return json.Marshal(next)
 }
 
 func (c *ConfigExec) delete(payload []byte) (int, string, string, []StateWrite) {
