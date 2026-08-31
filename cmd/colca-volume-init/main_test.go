@@ -181,3 +181,57 @@ func callOrderIn(t *testing.T, function string) []string {
 	t.Fatalf("no function %q in main.go", function)
 	return nil
 }
+
+// TestTheCopyRootKeepsItsOwnPermissions is the case a fresh temp dir hides.
+//
+// The real target is a named volume the image created 0750 and owned by the
+// runtime user; the real source is a directory on a developer's machine, 0755
+// by umask. Applying the source's mode to that mount point is a downgrade, and
+// it is a chmod on a path this process no longer owns — which without
+// CAP_FOWNER can only fail. Every world bring-up died there.
+//
+// Verifying this on a freshly created directory proves nothing: a fresh one
+// already matches, so the chmod is skipped for the wrong reason. The target
+// here deliberately starts with a DIFFERENT mode from the source.
+func TestTheCopyRootKeepsItsOwnPermissions(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "target")
+	if err := os.MkdirAll(filepath.Join(source, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "edge1.key"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The mount point, as the image leaves it.
+	if err := os.Mkdir(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyTree(source, target, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("copy tree: %v", err)
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o750 {
+		t.Errorf("the copy root's mode became %v; the source's 0755 was applied over "+
+			"the mount point the deployment created", info.Mode().Perm())
+	}
+
+	// The denominator: the copy still happened, and a directory BELOW the root
+	// does take the source's mode. Otherwise "unchanged" could mean "did
+	// nothing at all".
+	if _, err := os.Stat(filepath.Join(target, "edge1.key")); err != nil {
+		t.Fatalf("the copy did not land: %v", err)
+	}
+	nested, err := os.Stat(filepath.Join(target, "nested"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nested.Mode().Perm() != 0o755 {
+		t.Errorf("nested directory mode is %v, want 0755 from the source", nested.Mode().Perm())
+	}
+}

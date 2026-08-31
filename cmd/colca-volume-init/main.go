@@ -108,11 +108,26 @@ func copyTree(source, target string, uid, gid int) error {
 			if err := os.MkdirAll(destination, mode); err != nil {
 				return err
 			}
-			// MkdirAll applies the umask, so a directory this call created may
-			// not have the mode asked for; chmod settles it. A directory that
-			// ALREADY has that mode is left alone — on the second run the tree
-			// is owned by `uid`, and a chmod there would fail for the same
-			// CAP_FOWNER reason described in run(), for no change at all.
+			if relative == "." {
+				// The ROOT of the copy is a mount point that already exists,
+				// and its permissions belong to the deployment that declared
+				// it — not to the source. The source here is a directory on a
+				// developer's machine whose mode is whatever their umask gave
+				// it; the target is a named volume the image created 0750 and
+				// owned by the runtime user. Copying 0755 over that is not a
+				// correction, it is a downgrade, and it is the chmod that
+				// killed this process: the mount point is already owned by
+				// `uid`, and without CAP_FOWNER that call can only fail.
+				//
+				// Chowning it is chownTree's job — the mount point is one of
+				// the paths named on the command line.
+				return nil
+			}
+			// Below the root: MkdirAll applies the umask, so a directory this
+			// call created may not have the mode asked for, and chmod settles
+			// it. One that ALREADY has that mode is left alone, so a second
+			// run over a tree now owned by `uid` changes nothing rather than
+			// failing to change nothing.
 			if err := chmodIfDifferent(destination, mode); err != nil {
 				return err
 			}
