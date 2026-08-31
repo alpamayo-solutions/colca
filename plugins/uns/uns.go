@@ -41,6 +41,7 @@ const (
 	ClassTimeSync         // _TimeSync    write: node-local-publish-only. Ephemeral: no stream, never persisted, never retained (time-sync design §2.2).
 	ClassAudit            // _AuditEvent  append-only security event, local/internal write, flows up
 	ClassAlarm            // _AlarmStateChange, _NotificationDispatched — append-only alarm event. Event: no KV, not retained. Its own stream so it never queues behind a metrics backlog.
+	ClassLog              // _Log — append-only service log line. Event: no KV, not retained. Its own stream for the same reason alarms got one, and more so: log volume is the highest of any event class, and on the metrics lane it both queued behind the samples and evicted them.
 	ClassAnnotation       // _Annotation — append-only annotation instance. Event: no KV, not retained. Same shape as ClassAlarm and for the same reason (dataops-evaluator design §8): a part-cycle producer emits ~1M/year/machine, so id-keyed retained/KV entries would grow without bound.
 )
 
@@ -100,6 +101,12 @@ func ClassOf(contract string) Class {
 	// alarm for the same volume reason (design §8) — see ClassAnnotation.
 	case contract == "_Annotation":
 		return ClassAnnotation
+	// A log line is an EVENT — the thing happened, and a later line does not
+	// replace an earlier one. It was data-class, which made it state: KV kept
+	// only the newest line per logger and level, and the history rode the
+	// metrics stream where a chatty service evicted the samples.
+	case contract == "_Log":
+		return ClassLog
 	case contract == "_EnrolledIdentity" || contract == "_Node" ||
 		contract == "_ServiceDetails" || contract == "_SystemElement" ||
 		contract == "_Signal" || contract == "_Constant" || contract == "_ExternalReference" ||
@@ -251,7 +258,7 @@ func ValidActorKind(kind string) bool {
 // and definitions travel down; time sync never leaves the local bus.
 func FlowsUp(c Class) bool {
 	return c == ClassData || c == ClassEntity || c == ClassAck || c == ClassGap ||
-		c == ClassAudit || c == ClassAlarm || c == ClassAnnotation
+		c == ClassAudit || c == ClassAlarm || c == ClassAnnotation || c == ClassLog
 }
 
 // MatchesUplinkStream binds an upward record's domain class to the physical
@@ -324,6 +331,8 @@ func ClassFromManifest(name string) (Class, bool) {
 		return ClassAlarm, true
 	case "annotation":
 		return ClassAnnotation, true
+	case "log":
+		return ClassLog, true
 	}
 	return ClassNone, false
 }
@@ -352,6 +361,8 @@ func StreamFor(c Class) string {
 		return "alarms"
 	case ClassAnnotation:
 		return "annotations"
+	case ClassLog:
+		return "logs"
 	case ClassGap:
 		return ""
 	case ClassTimeSync:

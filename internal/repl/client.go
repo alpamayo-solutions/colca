@@ -357,6 +357,10 @@ var priorityLanes = []struct {
 	{"entities", nil},
 	{"audit", nil},
 	{"annotations", nil},
+	// Last of the priority lanes, ahead of the metrics floor: a log line is
+	// worth less than an alarm and more than a sample, and it must never
+	// starve the samples the way it did when it shared their lane.
+	{"logs", nil},
 }
 
 // uplinkStreams is exactly the set RunUplink pushes: every priority lane plus

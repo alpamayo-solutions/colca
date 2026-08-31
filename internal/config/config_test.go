@@ -242,6 +242,10 @@ func TestRetentionDefaultsWhenAbsent(t *testing.T) {
 		"audit":       8760 * time.Hour,
 		"alarms":      8760 * time.Hour,
 		"annotations": 8760 * time.Hour,
+		// Logs match the metrics window on purpose: "what was the machine
+		// doing when this was logged" has to be answerable from both streams
+		// at once, and a log line is the least valuable record after the fact.
+		"logs": 336 * time.Hour,
 	}
 	// A hand-written expectation table cannot see its source grow: adding a
 	// stream to defaultStreamMaxAge without adding it here would leave the new

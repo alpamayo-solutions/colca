@@ -555,6 +555,12 @@ var defaultStreamMaxAge = map[string]time.Duration{
 	// so it is chosen rather than discovered: rebuilding a projection more than
 	// a year after an annotation was written will not restore that annotation.
 	"annotations": 8760 * time.Hour, // 365 days
+	// Logs are the highest-volume event class and the least valuable per
+	// record after the fact: a fortnight is what a person actually reaches
+	// back through when something went wrong, and matching the metrics window
+	// keeps "what was the machine doing when this was logged" answerable from
+	// both streams at once.
+	"logs": 336 * time.Hour, // 14 days
 }
 
 // knownStreams are the only stream names the system ever produces
@@ -564,7 +570,7 @@ var defaultStreamMaxAge = map[string]time.Duration{
 // retention over a closed set of streams).
 var knownStreams = map[string]bool{
 	"metrics": true, "entities": true, "commands": true, "audit": true, "alarms": true,
-	"annotations": true,
+	"annotations": true, "logs": true,
 }
 
 // EffectiveInterval returns the pruner cadence: the §3.1 default (5m) when

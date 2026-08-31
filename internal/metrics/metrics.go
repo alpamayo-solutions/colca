@@ -120,14 +120,14 @@ var streams = store.Streams()
 // descend and never rise (definition-stream design §4): a "last uplink success"
 // gauge for a stream the uplink never touches would sit at zero forever and read
 // exactly like a broken uplink.
-var uplinkStreams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations"}
+var uplinkStreams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations", "logs"}
 
 // retentionStreams is the subset the retention POLICY applies to. `definitions`
 // is absent for the same reason it is absent from the pruner's own list
 // (definition-stream design §6): it is never pruned by age or size, so a
 // pressure or blocked-by-cursor gauge for it would report progress toward a
 // policy that does not exist.
-var retentionStreams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations"}
+var retentionStreams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations", "logs"}
 
 // Blob transfer and ingress-rejection label values (resources design §5/§7).
 var blobDirections = []string{"push", "pull", "receive"}

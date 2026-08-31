@@ -150,6 +150,7 @@ colca_stream_next_offset{stream="audit"} 1
 colca_stream_next_offset{stream="commands"} 1
 colca_stream_next_offset{stream="definitions"} 1
 colca_stream_next_offset{stream="entities"} 3
+colca_stream_next_offset{stream="logs"} 1
 colca_stream_next_offset{stream="metrics"} 4
 `
 	if err := testutil.GatherAndCompare(m.reg, strings.NewReader(expect),
@@ -173,6 +174,7 @@ colca_stream_next_offset{stream="audit"} 1
 colca_stream_next_offset{stream="commands"} 1
 colca_stream_next_offset{stream="definitions"} 1
 colca_stream_next_offset{stream="entities"} 3
+colca_stream_next_offset{stream="logs"} 1
 colca_stream_next_offset{stream="metrics"} 6
 `
 	if err := testutil.GatherAndCompare(m.reg, strings.NewReader(expect2),

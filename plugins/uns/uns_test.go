@@ -24,6 +24,7 @@ func TestParseAndClass(t *testing.T) {
 		"_AlarmStateChange":         {ClassAlarm, "alarms"},
 		"_NotificationDispatched":   {ClassAlarm, "alarms"},
 		"_Annotation":               {ClassAnnotation, "annotations"},
+		"_Log":                      {ClassLog, "logs"},
 		"_AlarmNotificationConfig":  {ClassEntity, "entities"},
 		"_NotificationConfigStatus": {ClassEntity, "entities"},
 		"_Node":               {ClassEntity, "entities"}, "_ServiceDetails": {ClassEntity, "entities"},
@@ -382,6 +383,37 @@ func TestAnnotationContractRoutesToTheAnnotationsStream(t *testing.T) {
 	}
 	if got := StreamFor(class); got != "annotations" {
 		t.Fatalf("StreamFor(ClassOf(_Annotation)) = %q, want %q", got, "annotations")
+	}
+}
+
+// A log line is an EVENT on its own stream.
+//
+// It used to be ClassData, which made it state: KV kept only the newest line
+// per (node, path, logger, level) — so a consolidated view could show one line
+// per logger and no history at all — and the history it did have rode the
+// metrics stream, where a chatty service both queued behind the samples and
+// evicted them. Its own stream is the alarm precedent applied to the class
+// that needed it most.
+func TestLogContractIsAnEventOnItsOwnStream(t *testing.T) {
+	class := ClassOf("_Log")
+	if class != ClassLog {
+		t.Fatalf("ClassOf(_Log) = %v, want ClassLog", class)
+	}
+	if got := StreamFor(class); got != "logs" {
+		t.Fatalf("StreamFor(ClassOf(_Log)) = %q, want %q", got, "logs")
+	}
+	if StreamFor(class) == StreamFor(ClassData) {
+		t.Fatal("logs share the metrics stream again: a chatty service evicts the samples")
+	}
+	if IsState(class) {
+		t.Fatal("IsState(ClassLog): a log line would be retained and KV-projected, keeping only the newest per logger")
+	}
+	// It must still reach the hub — a consolidated view is the whole point.
+	if !FlowsUp(class) {
+		t.Fatal("FlowsUp(ClassLog): logs would never leave the node that wrote them")
+	}
+	if !MatchesUplinkStream(class, Parsed{Contract: "_Log"}, "logs") {
+		t.Fatal("MatchesUplinkStream(ClassLog, \"logs\"): the uplink would refuse the lane it is pushed on")
 	}
 }
 
