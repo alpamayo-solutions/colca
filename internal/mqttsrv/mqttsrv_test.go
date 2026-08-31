@@ -537,7 +537,11 @@ func TestRetainedReplayDeliversAllMessages(t *testing.T) {
 		t.Fatalf("subscribe: %v", tok.Error())
 	}
 
-	deadline := time.Now().Add(15 * time.Second)
+	// The full core suite runs with the race detector. On a contended CI
+	// runner its instrumentation can make 9,000 sequential QoS-1 callbacks
+	// take longer than the broker replay itself, so allow enough time to
+	// distinguish slow callback processing from an actually truncated replay.
+	deadline := time.Now().Add(60 * time.Second)
 	for got.Load() < int64(retainedCount) {
 		if time.Now().After(deadline) {
 			t.Fatalf("retained replay delivered %d of %d (a per-client ceiling — MaximumInflight or "+
