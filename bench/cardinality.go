@@ -1,7 +1,6 @@
 package bench
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,15 +37,8 @@ func RunCardinality(p Params) (*Report, error) {
 			"topic":   fmt.Sprintf("colca/v1/_Metric/n-edge/line%d/sig%d", i/100, i%100),
 			"payload": map[string]any{"v": float64(i), "value": float64(i), "signal_id": "bench"},
 		})
-		req, _ := http.NewRequest("POST", "https://"+pair.Edge.APIAddr+"/publish", bytes.NewReader(body))
-		req.Header.Set("X-Colca-Token", BenchToken)
-		resp, err := client.Do(req)
-		if err != nil {
+		if err := postAdmin(client, pair.Edge.APIAddr, "/publish", body); err != nil {
 			return nil, fmt.Errorf("seed %d: %w", i, err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("seed %d: HTTP %d", i, resp.StatusCode)
 		}
 	}
 	r.Metrics["cardinality_seed_seconds"] = time.Since(seedStart).Seconds()

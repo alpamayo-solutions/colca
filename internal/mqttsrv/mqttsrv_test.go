@@ -504,7 +504,10 @@ func TestALocalNameThatResolvesToAKeyedIdentityByNameIsRefused(t *testing.T) {
 // Append) and DeliverLocal to stay fsync-cheap; see git history for the full
 // rationale.
 func TestRetainedReplayDeliversAllMessages(t *testing.T) {
-	const retainedCount = 9000 // just past mochi's 8192 default MaximumInflight
+	// Just past mochi's 8192 default for BOTH per-client ceilings — MaximumInflight
+	// and MaximumClientWritesPending. Either one, set below the burst, drops
+	// part of the replay silently; #370 proved that for the second.
+	const retainedCount = 9000
 	w := newWorld(t)
 
 	recs := make([]store.Record, retainedCount)
@@ -537,7 +540,9 @@ func TestRetainedReplayDeliversAllMessages(t *testing.T) {
 	deadline := time.Now().Add(15 * time.Second)
 	for got.Load() < int64(retainedCount) {
 		if time.Now().After(deadline) {
-			t.Fatalf("retained replay delivered %d of %d (mochi's MaximumInflight cap dropped the rest)", got.Load(), retainedCount)
+			t.Fatalf("retained replay delivered %d of %d (a per-client ceiling — MaximumInflight or "+
+				"MaximumClientWritesPending — dropped the rest; see colca_mqtt_publish_dropped_total)",
+				got.Load(), retainedCount)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

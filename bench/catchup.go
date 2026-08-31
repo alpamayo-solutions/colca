@@ -1,7 +1,6 @@
 package bench
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -36,18 +35,8 @@ func RunCatchup(p Params) (*Report, error) {
 			"payload": map[string]any{"v": float64(i), "value": float64(i), "signal_id": "bench"},
 		}
 		body, _ := json.Marshal(payload)
-		req, err := http.NewRequest("POST", "https://"+pair.Edge.APIAddr+"/publish", bytes.NewReader(body))
-		if err != nil {
+		if err := postAdmin(client, pair.Edge.APIAddr, "/publish", body); err != nil {
 			return nil, fmt.Errorf("prefill publish %d: %w", i, err)
-		}
-		req.Header.Set("X-Colca-Token", BenchToken)
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("prefill publish %d: %w", i, err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("prefill publish %d: HTTP %d", i, resp.StatusCode)
 		}
 	}
 

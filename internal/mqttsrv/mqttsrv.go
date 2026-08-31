@@ -138,7 +138,20 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnDisconnect,
 		mqtt.OnSubscribe,
 		mqtt.OnSubscribed,
+		mqtt.OnPublishDropped,
 	}, []byte{b})
+}
+
+// OnPublishDropped is mochi telling us it discarded a publish because the
+// client's outbound queue (MaximumClientWritesPending) was full. mochi logs
+// this at Debug and moves on; without this hook a retained replay that
+// overran the queue lost messages with no trace anywhere — which is how the
+// per-client bound in #370 silently truncated a 9,000-message replay. The
+// counter is the signal; the log line names the client so a slow consumer
+// can be found.
+func (h *colcaHook) OnPublishDropped(cl *mqtt.Client, pk packets.Packet) {
+	h.metrics.PublishDropped()
+	h.log.Warn("publish dropped: client outbound queue full", "client", cl.ID, "topic", pk.TopicName)
 }
 
 const quotaDeniedSubscription = "$COLCA/quota-exceeded"
@@ -530,6 +543,10 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	mqttLimits := cfg.MQTTLimits
 	s.Options.Capabilities.MaximumClients = mqttLimits.EffectiveMaxClients()
 	s.Options.Capabilities.ReceiveMaximum = mqttLimits.EffectiveReceiveMaximum()
+	// The per-client outbound queue. When it is full mochi DROPS the publish
+	// (OnPublishDropped below) — so this bound, like MaximumInflight, must
+	// clear the retained-replay burst a fresh subscriber receives, or state
+	// goes missing silently. See defaultMQTTMaxPendingWritesPerClient.
 	s.Options.Capabilities.MaximumClientWritesPending = mqttLimits.EffectiveMaxPendingWritesPerClient()
 	s.Options.Capabilities.MaximumSessionExpiryInterval = uint32(mqttLimits.EffectiveMaxSessionExpiry() / time.Second)
 	s.Options.Capabilities.TopicAliasMaximum = mqttLimits.EffectiveMaxTopicAliasesPerClient()

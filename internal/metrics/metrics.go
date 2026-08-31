@@ -175,6 +175,12 @@ type Metrics struct {
 	authReject         *prometheus.CounterVec
 	aclDeny            *prometheus.CounterVec
 	kicks              prometheus.Counter
+	// colca_mqtt_publish_dropped_total: mochi found a client's outbound
+	// queue (MaximumClientWritesPending) full and dropped the publish — no
+	// retry, no error to the publisher, and until this counter existed no
+	// trace anywhere. A retained replay on subscribe is the burst that fills
+	// that queue; a nonzero value here is delivered state going missing.
+	publishDropped prometheus.Counter
 	// Human world (human-authz design §7).
 	humanSessions prometheus.Gauge   // colca_human_sessions
 	jwksKeys      prometheus.Gauge   // colca_jwks_keys
@@ -388,6 +394,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		kicks: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_session_kicks_total",
 			Help: "Live MQTT sessions disconnected by a registry change or token expiry. Resets on restart.",
+		}),
+		publishDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_mqtt_publish_dropped_total",
+			Help: "Publishes the broker dropped because a client's outbound queue was full (MaximumClientWritesPending). Resets on restart.",
 		}),
 		humanSessions: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_human_sessions",
@@ -606,7 +616,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
-		m.authReject, m.aclDeny, m.kicks, m.humanSessions, m.jwksKeys, m.jwksFailures,
+		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.nodePrefix, m.commandUndelivered, m.commandUnroutable, m.commandRedelivered,
 		m.bundleInfo, m.bundleContracts,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
@@ -749,6 +759,15 @@ func (m *Metrics) SessionKick() {
 		return
 	}
 	m.kicks.Inc()
+}
+
+// PublishDropped counts one publish mochi discarded because the receiving
+// client's outbound queue was full — see the field comment.
+func (m *Metrics) PublishDropped() {
+	if m == nil {
+		return
+	}
+	m.publishDropped.Inc()
 }
 
 // counterChildren pre-resolves one child per known label value, so incrementing

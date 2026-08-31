@@ -761,7 +761,7 @@ func TestMQTTLimitsDefaultsAreGenerousAndFinite(t *testing.T) {
 	if got, want := l.EffectiveMaximumInflight(), uint16(65535); got != want {
 		t.Fatalf("maximum inflight = %d, want %d", got, want)
 	}
-	if got, want := l.EffectiveMaxPendingWritesPerClient(), int32(1024); got != want {
+	if got, want := l.EffectiveMaxPendingWritesPerClient(), int32(8192); got != want {
 		t.Fatalf("pending writes/client = %d, want %d", got, want)
 	}
 	if got, want := l.EffectiveMaxTopicAliasesPerClient(), uint16(256); got != want {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -16,23 +17,41 @@ import (
 // RunFootprint answers the "lightweight" claim with a number: RSS of the REAL
 // colcad binary (not the in-process harness) as a standalone edge node — idle,
 // then under one machine publishing flat out for Duration.
-// postAdmin POSTs an admin-token request to the running colcad and fails on any
-// non-2xx, so a scenario never proceeds on a silently rejected setup step.
+// postAdmin POSTs an admin-token request to the running colcad and fails on
+// any non-2xx, so a scenario never proceeds on a silently rejected setup
+// step. It is how every benchmark writes through the API door. The door
+// rate-limits writes (httpapi/limits.go: 100/s, burst 250, per client) and
+// answers 429 with Retry-After — that is the node working, and a production
+// publisher has to wait exactly like this, so the bench waits too rather
+// than asking for a limit nobody deploys. Bounded: a 429 that outlives the
+// budget is returned as the error it is.
 func postAdmin(hc *http.Client, apiAddr, path string, body []byte) error {
-	req, err := http.NewRequest("POST", "https://"+apiAddr+path, bytes.NewReader(body))
-	if err != nil {
-		return err
+	const retryBudget = 60 * time.Second
+	deadline := time.Now().Add(retryBudget)
+	for {
+		req, err := http.NewRequest("POST", "https://"+apiAddr+path, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("X-Colca-Token", BenchToken)
+		resp, err := hc.Do(req)
+		if err != nil {
+			return err
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests && time.Now().Before(deadline) {
+			wait := time.Second
+			if secs, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && secs > 0 {
+				wait = time.Duration(secs) * time.Second
+			}
+			time.Sleep(wait)
+			continue
+		}
+		if resp.StatusCode >= 300 {
+			return fmt.Errorf("POST %s: HTTP %d", path, resp.StatusCode)
+		}
+		return nil
 	}
-	req.Header.Set("X-Colca-Token", BenchToken)
-	resp, err := hc.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("POST %s: HTTP %d", path, resp.StatusCode)
-	}
-	return nil
 }
 
 func RunFootprint(p Params) (*Report, error) {

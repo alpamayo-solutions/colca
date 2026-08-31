@@ -309,7 +309,15 @@ const (
 	defaultMQTTMaxSubscriptionsPerClient int    = 1024
 	defaultMQTTReceiveMaximum            uint16 = 1024
 	defaultMQTTMaximumInflight           uint16 = 65535
-	defaultMQTTMaxPendingWritesPerClient int32  = 1024
+	// mochi's own default (8 × 1024). This queue is where a publish goes to
+	// DIE when full — mochi drops it, no retry — and a fresh subscriber's
+	// retained replay fills it in one burst. At 1024 the broker lost 6–17 %
+	// of a 9,000-message replay on every CI run after #370 bounded it
+	// (TestRetainedReplayDeliversAllMessages). 8192 is where the replay
+	// benchmark was tuned and where the loss stopped; the drop counter
+	// colca_mqtt_publish_dropped_total says whether a deployment ever hits
+	// it. Memory is bounded by MaximumPacketSize × this, per client.
+	defaultMQTTMaxPendingWritesPerClient int32  = 8192
 	defaultMQTTMaxTopicAliasesPerClient  uint16 = 256
 	defaultMQTTMaxSessionExpiry                 = 7 * 24 * time.Hour
 	maxMQTTSessionExpiry                        = time.Duration(^uint32(0)) * time.Second
