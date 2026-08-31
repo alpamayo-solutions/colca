@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -2181,4 +2182,69 @@ func TestOwnsCursorIsFailClosedOnANilEntry(t *testing.T) {
 	if ownsCursor(nil, "anything-at-all") {
 		t.Fatal("a nil entry must own no cursor")
 	}
+}
+
+// TestFetchTailReadsTheEndOfTheStream covers the question a viewer asks.
+//
+// A cursor answers "what have I not seen yet". That is right for a consumer
+// and wrong for a log or audit view, which asks "what happened most recently".
+// Without tail, a forward read from an unacked cursor returns the first N
+// records ever written — a log view on a node running for weeks showed its
+// boot messages and nothing else, forever.
+func TestFetchTailReadsTheEndOfTheStream(t *testing.T) {
+	a := newAPI(t)
+	records := make([]store.Record, 0, 12)
+	for i := 1; i <= 12; i++ {
+		records = append(records, store.Record{
+			Topic:   "colca/v1/_Metric/n-test/line1/s1",
+			Payload: []byte(fmt.Sprintf(`{"signal_id":"s1","value":%d}`, i)),
+			TS:      int64(i),
+		})
+	}
+	if _, _, err := a.st.Append("metrics", records); err != nil {
+		t.Fatal(err)
+	}
+
+	// The denominator: WITHOUT tail the same request returns the OLDEST three,
+	// so the assertion below is about where the read starts, not about the
+	// stream happening to hold three records.
+	_, out := req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=viewer&max=3", "tok", nil)
+	if got := offsetsOf(t, out); !reflect.DeepEqual(got, []float64{1, 2, 3}) {
+		t.Fatalf("without tail, want the oldest three, got %v", got)
+	}
+
+	_, out = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=viewer&max=3&tail=1", "tok", nil)
+	if got := offsetsOf(t, out); !reflect.DeepEqual(got, []float64{10, 11, 12}) {
+		t.Fatalf("with tail, want the newest three, got %v", got)
+	}
+
+	// A stream shorter than the window starts at the beginning rather than
+	// underflowing into an enormous offset.
+	_, out = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=viewer&max=100&tail=1", "tok", nil)
+	if got := offsetsOf(t, out); len(got) != 12 || got[0] != 1 {
+		t.Fatalf("a short stream should tail from its first record, got %v", got)
+	}
+
+	// And it leaves the cursor where it was: a viewer must not cost a consumer
+	// its position, which is why both can share one cursor name. Compared
+	// against what it was BEFORE rather than against a guessed value — an
+	// unacked cursor is not necessarily zero.
+	before := a.st.CursorGet("consumer", "metrics")
+	req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=consumer&max=3&tail=1", "tok", nil)
+	if after := a.st.CursorGet("consumer", "metrics"); after != before {
+		t.Fatalf("tail moved the cursor from %d to %d", before, after)
+	}
+}
+
+func offsetsOf(t *testing.T, out map[string]any) []float64 {
+	t.Helper()
+	records, ok := out["records"].([]any)
+	if !ok {
+		t.Fatalf("no records in %v", out)
+	}
+	offsets := make([]float64, 0, len(records))
+	for _, record := range records {
+		offsets = append(offsets, record.(map[string]any)["offset"].(float64))
+	}
+	return offsets
 }

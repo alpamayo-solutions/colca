@@ -515,6 +515,26 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		from := e.Store().CursorGet(cursor, stream)
+		// tail=1 reads the END of the stream instead of the cursor's position.
+		//
+		// A cursor answers "what have I not seen yet", which is what a consumer
+		// wants and the wrong question for a viewer. A log or audit view asks
+		// "what happened most recently", and with a forward-only read from an
+		// unacked cursor the honest answer it got was the first N records ever
+		// written — the same boot messages forever, on a node that had been
+		// running for weeks.
+		//
+		// It does not move the cursor, because /fetch never does. A consumer
+		// and a viewer can therefore share one cursor name without the viewer
+		// costing the consumer its position.
+		if q.Get("tail") != "" {
+			head := e.Store().NextOffset(stream)
+			if head > uint64(limit) {
+				from = head - uint64(limit)
+			} else {
+				from = 1
+			}
+		}
 		recs, next, err := e.Store().ReadRecords(stream, from, limit, filter)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
