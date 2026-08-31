@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -313,28 +314,38 @@ func NeedsStateRefresh(c Class) bool { return c == ClassEntity }
 // ClassGap and ClassTimeSync have no manifest name on purpose: both are
 // node-authored and builtin, so a bundle can never declare one (schema-bundle
 // design §10.2).
+// manifestClasses is the vocabulary itself, as data rather than as control
+// flow, so that it can be ENUMERATED. A switch cannot be walked, and a class
+// added to a switch is a class no test can notice is missing from anything
+// else — which is how a stream mapping stayed unpinned while the classes grew.
+var manifestClasses = map[string]Class{
+	"data":       ClassData,
+	"entity":     ClassEntity,
+	"definition": ClassDefinition,
+	"cmd":        ClassCmd,
+	"ack":        ClassAck,
+	"audit":      ClassAudit,
+	"alarm":      ClassAlarm,
+	"annotation": ClassAnnotation,
+	"log":        ClassLog,
+}
+
 func ClassFromManifest(name string) (Class, bool) {
-	switch name {
-	case "data":
-		return ClassData, true
-	case "entity":
-		return ClassEntity, true
-	case "definition":
-		return ClassDefinition, true
-	case "cmd":
-		return ClassCmd, true
-	case "ack":
-		return ClassAck, true
-	case "audit":
-		return ClassAudit, true
-	case "alarm":
-		return ClassAlarm, true
-	case "annotation":
-		return ClassAnnotation, true
-	case "log":
-		return ClassLog, true
+	c, ok := manifestClasses[name]
+	return c, ok
+}
+
+// ManifestClassNames lists every class name a bundle may declare, sorted.
+// It is the one enumeration of that vocabulary; anything that must stay in
+// step with it (the stream a class routes to, a peer implementation in
+// another language) can iterate this rather than repeat the list.
+func ManifestClassNames() []string {
+	names := make([]string, 0, len(manifestClasses))
+	for name := range manifestClasses {
+		names = append(names, name)
 	}
-	return ClassNone, false
+	sort.Strings(names)
+	return names
 }
 
 // StreamFor maps a class to the persistent stream that stores it.
