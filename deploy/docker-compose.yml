@@ -325,7 +325,12 @@ services:
       - "../../tests/system/fixtures/dataops:/opt/dataops/customer-modules:ro"
       - edge1-dataops-data:/var/lib/dataops
     healthcheck:
-      test: ["CMD", "python", "-c", "import dataops.service"]
+      # The RUNNING service's own health door (dataops.health, served from
+      # its event loop) — a wedged loop fails this probe honestly. The old
+      # `import dataops.service` spawned a fresh interpreter: it tested
+      # nothing about the running process and could time itself out.
+      test: ["CMD", "python", "-c",
+             "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8888/healthz', timeout=4).status == 200 else 1)"]
       interval: 5s
       timeout: 5s
       retries: 12
