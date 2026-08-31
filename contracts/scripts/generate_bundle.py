@@ -43,7 +43,13 @@ from franzmq.data_contracts.base import Ack, Cmd
 # defaults hide (Metric.signal_id defaults to "" for constructor convenience,
 # but the door demands it; Ack.result_code likewise).
 REQUIRED_EXTRA: dict[str, list[str]] = {
-    "_Metric": ["signal_id"],
+    # timestamp: the dataclass defaults it to "now" for constructor
+    # convenience, but a metric IS a value at a time — a record without one
+    # is unusable to every consumer (historian, dataops, the editor) and
+    # `Metric.decode` refuses it. The door refused nothing: the level-4 seeds
+    # published timestamp-less metrics for weeks, and one of them killed
+    # dataops' MQTT thread. Ruling 2026-08-31: required on the wire.
+    "_Metric": ["signal_id", "timestamp"],
     "_Ack": ["result_code"],
     "_CmdEdit": ["operation_id", "intent", "expected_versions"],
     # Constructor defaults preserve source compatibility during the one-way

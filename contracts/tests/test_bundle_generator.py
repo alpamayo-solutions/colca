@@ -246,7 +246,10 @@ def test_metric_real_shape():
     body, _ = gb.build_bundle()
     m = body["contracts"]["_Metric"]
     assert m["class"] == "data" and m["tombstone"] is True
-    assert sorted(m["schema"]["required"]) == ["signal_id", "value"]
+    # timestamp is required on the wire a metric is a
+    # value at a time, and the door refuses one without — the dataclass's
+    # "now" default is constructor convenience, not a wire default.
+    assert sorted(m["schema"]["required"]) == ["signal_id", "timestamp", "value"]
     assert m["schema"]["properties"]["signal_id"]["minLength"] == 1
 
 
