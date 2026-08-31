@@ -2,7 +2,7 @@
 #
 # Both base images are public and pullable anonymously; there is no registry
 # login anywhere in this repo's build path.
-FROM golang:1.25-alpine AS build
+FROM golang:1.25.13-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

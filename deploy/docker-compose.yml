@@ -373,11 +373,11 @@ services:
 
   # Real Keycloak for the human-auth world (level-4 suite; opt-in for demos):
   # upstream image in dev mode importing the minimal colca realm. The exact
-  # upstream base the Colca standard image builds on (quay 26.6.3) — the
+  # upstream base the Colca standard image builds on (quay 26.7.2) — the
   # full standard image needs Postgres + the Colca realm template and is
   # deliberately NOT dragged into the colca deploy.
   keycloak:
-    image: quay.io/keycloak/keycloak:26.6.3
+    image: quay.io/keycloak/keycloak:26.7.2
     profiles: ["human-auth"]
     command: ["start-dev", "--import-realm"]
     environment:
