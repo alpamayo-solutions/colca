@@ -138,6 +138,8 @@ def test_subset_lint_only_allowed_keywords():
         assert gb._lint_subset(entry["schema"], ident) == []
         assert entry["class"] in (
             "data", "entity", "definition", "cmd", "ack", "audit", "alarm", "annotation",
+            # A log line is an event on its own stream — see uns.ClassLog.
+            "log",
         ), ident
         assert isinstance(entry["tombstone"], bool), ident
 

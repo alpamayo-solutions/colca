@@ -37,7 +37,11 @@ from franzmq.data_contracts.base import Ack, Cmd
 # (Cmd subclasses → "cmd", Ack subclasses → "ack" — derived, not listed).
 CLASS_TABLE: dict[str, str] = {
     "_Metric": "data",
-    "_Log": "data",
+    # A log line is an EVENT: the thing happened, and a later line does not
+    # replace an earlier one. As "data" it was state — KV kept only the newest
+    # line per logger and level, and the history rode the metrics stream where
+    # a chatty service evicted the samples it shared the lane with.
+    "_Log": "log",
     "_SystemElement": "entity",
     "_Signal": "entity",
     "_Constant": "entity",
