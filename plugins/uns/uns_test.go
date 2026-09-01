@@ -124,6 +124,73 @@ func TestStreamGapTargetsDescribedStream(t *testing.T) {
 	}
 }
 
+// A gap marker keeps naming its own stream at every hop.
+//
+// The marker replicates like any other record, so each hop upward prepends
+// the child's mount to its path (retention design §9: "global's stream
+// contains the edges' _StreamGap records with mount-inserted provenance").
+// Binding it to its stream by the WHOLE path held only at the first hop: at
+// the grandparent the path reads `leaf1/metrics`, the marker was refused with
+// 403, and the middle node re-sent the same batch forever — every record
+// behind it on that lane, every _Ack of the whole subtree included, stuck.
+func TestGapMarkerNamesItsStreamAtEveryHop(t *testing.T) {
+	topic := "colca/v1/_StreamGap/n-leaf/metrics"
+	for _, mounts := range [][]string{nil, {"leaf1"}, {"leaf1", "site1"}} {
+		hopped := topic
+		for _, mount := range mounts {
+			hopped = MountInsert(hopped, mount)
+		}
+		p, err := Parse(hopped)
+		if err != nil {
+			t.Fatalf("%s: %v", hopped, err)
+		}
+		if got := GapStream(p); got != "metrics" {
+			t.Fatalf("GapStream(%q) = %q, want %q", p.Path, got, "metrics")
+		}
+		if !MatchesUplinkStream(ClassGap, p, "metrics") {
+			t.Fatalf("a marker at %q was refused on the stream it describes — the lane behind it wedges", hopped)
+		}
+		if MatchesUplinkStream(ClassGap, p, "alarms") {
+			t.Fatalf("a marker at %q was accepted on a stream it does not describe", hopped)
+		}
+	}
+}
+
+// A child may replicate onto the streams of the classes that flow up, and
+// onto nothing else. `definitions` is the one that matters: its class flows
+// DOWN, and a child that could write it would author policy for the whole
+// tree (definition-stream design §4).
+func TestUplinkStreamsAreTheStreamsOfTheClassesThatRise(t *testing.T) {
+	want := map[string]bool{}
+	for _, name := range ManifestClassNames() {
+		class, _ := ClassFromManifest(name)
+		if FlowsUp(class) {
+			if stream := StreamFor(class); stream != "" {
+				want[stream] = true
+			}
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("no class flows up: the check below would pass against an empty set")
+	}
+	for stream := range want {
+		if !IsUplinkStream(stream) {
+			t.Fatalf("IsUplinkStream(%q) = false: the parent would refuse a stream a class rises on", stream)
+		}
+	}
+	for _, stream := range UplinkStreams() {
+		if !want[stream] {
+			t.Fatalf("IsUplinkStream(%q) = true, but no class that flows up routes there", stream)
+		}
+	}
+	if IsUplinkStream(StreamFor(ClassDefinition)) {
+		t.Fatal("a child may replicate onto `definitions`: a leaf can author policy for the whole tree")
+	}
+	if IsUplinkStream("") || IsUplinkStream("not-a-stream") {
+		t.Fatal("an unnamed or invented stream is accepted for replication")
+	}
+}
+
 func TestAuditEventIsAnUpwardAppendOnlyEvent(t *testing.T) {
 	if !IsAudit(ClassOf("_AuditEvent")) {
 		t.Fatal("_AuditEvent must have the audit domain class")

@@ -378,6 +378,44 @@ func TestUplinkPassesStreamGapMarkerButNotCommands(t *testing.T) {
 	}
 }
 
+// A marker that already crossed one hop crosses the next one too.
+//
+// Retention design §9 expects the root's stream to hold the edges' markers
+// "with mount-inserted provenance", which means a middle node offers its
+// child's marker — stored under that child's mount — to its own parent. The
+// door used to bind a marker to its stream by the WHOLE path, which is the
+// stream name only at the authoring node: at the grandparent the path reads
+// `leaf1/metrics`, the record came back 403, and RunUplink kept re-sending
+// the same batch forever with every record behind it, the whole subtree's
+// _Acks included.
+func TestGapMarkerReplicatesPastTheFirstHop(t *testing.T) {
+	f := newParentFixture(t)
+	gap := []byte(`{"stream":"metrics","from_offset":1,"to_offset":9,"first_ts":1,"last_ts":9,"overridden_cursors":["uplink"]}`)
+	// The shape a middle node holds after storing the marker its own leaf
+	// pushed: authored at n-leaf, mounted under leaf1.
+	hopped := uns.MountInsert("colca/v1/_StreamGap/n-leaf/metrics", "leaf1")
+
+	if _, err := f.cl.Replicate("metrics", []store.ReplRecord{
+		{ChildOffset: 1, Topic: hopped, Payload: gap, TS: 1},
+	}); err != nil {
+		t.Fatalf("a marker that already crossed one hop was refused: %v", err)
+	}
+	recs, _, err := f.ps.Read("metrics", 1, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 || recs[0].Topic != "colca/v1/_StreamGap/n-leaf/child1/leaf1/metrics" {
+		t.Fatalf("parent metrics = %+v, want the marker mount-inserted once more", recs)
+	}
+	// Still bound to the stream it names: the same marker offered on another
+	// stream is refused, at every hop depth.
+	if _, err := f.cl.Replicate("alarms", []store.ReplRecord{
+		{ChildOffset: 2, Topic: hopped, Payload: gap, TS: 2},
+	}); err == nil {
+		t.Fatal("a metrics gap marker was accepted onto the alarms stream")
+	}
+}
+
 // The §6.3 jump is the loop's own act, not a side effect of pushing: even
 // with NOTHING left to push (everything pruned) and the parent unreachable,
 // the uplink cursor must move to the LWM and the ERROR surface must fire —

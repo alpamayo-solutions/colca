@@ -262,17 +262,70 @@ func FlowsUp(c Class) bool {
 		c == ClassAudit || c == ClassAlarm || c == ClassAnnotation || c == ClassLog
 }
 
+// GapStream names the stream a _StreamGap marker describes.
+//
+// At the node that authored it the path IS the stream name (retention design
+// §6.4). Every hop upward prepends the child's mount — the marker travels as
+// an ordinary record, so MountInsert rewrites it like any other — and at a
+// grandparent the same marker reads `leaf1/metrics`. Only the LAST segment
+// survives the journey, which is why it, and not the whole path, is what
+// binds a marker to its stream at every hop.
+func GapStream(p Parsed) string {
+	if i := strings.LastIndex(p.Path, "/"); i >= 0 {
+		return p.Path[i+1:]
+	}
+	return p.Path
+}
+
 // MatchesUplinkStream binds an upward record's domain class to the physical
 // stream named by the replication request. Gap markers live in the stream
-// named by their topic path; every other upward class has one fixed stream.
+// their topic names; every other upward class has one fixed stream.
 func MatchesUplinkStream(c Class, p Parsed, stream string) bool {
 	if !FlowsUp(c) {
 		return false
 	}
 	if c == ClassGap {
-		return p.Path == stream
+		return GapStream(p) == stream
 	}
 	return StreamFor(c) == stream
+}
+
+// uplinkStreamSet is every physical stream a child may replicate onto: the
+// stream of each class that flows up. DERIVED from the class vocabulary
+// rather than listed, so a class added to it cannot be forgotten here — and
+// so `definitions`, whose class flows DOWN, can never appear. A child that
+// could write that stream would author policy for the whole tree
+// (definition-stream design §4).
+//
+// _StreamGap needs no entry of its own: a marker rides the stream it
+// describes, and that stream is one of these.
+var uplinkStreamSet = func() map[string]bool {
+	set := map[string]bool{}
+	for _, c := range manifestClasses {
+		if !FlowsUp(c) {
+			continue
+		}
+		if stream := StreamFor(c); stream != "" {
+			set[stream] = true
+		}
+	}
+	return set
+}()
+
+// IsUplinkStream reports whether a child may replicate onto stream at all —
+// asked before any record in the request is looked at, so an unknown contract
+// cannot carry a record onto a stream its class would never have reached.
+func IsUplinkStream(stream string) bool { return uplinkStreamSet[stream] }
+
+// UplinkStreams lists those streams, sorted: the enumeration a pusher can
+// walk to seed a cursor per stream, and to check its own lane list against.
+func UplinkStreams() []string {
+	out := make([]string, 0, len(uplinkStreamSet))
+	for stream := range uplinkStreamSet {
+		out = append(out, stream)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ValidateAuditTopic pins the append-only event identity to the canonical
