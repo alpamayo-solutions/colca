@@ -15,7 +15,11 @@ import (
 //   - its associatedPolicies view carries policy ids and an EMPTY config;
 //   - membership lives in the group-policy list, as a real array.
 type realmFixture struct {
-	Groups      []fakeGroup
+	Groups []fakeGroup
+	// Children maps a parent group's ID to what GET /groups/{id}/children
+	// answers — Keycloak 23+'s ONLY source of a group's members; the top-level
+	// listing carries a subGroupCount instead of inlining them.
+	Children    map[string][]fakeGroup
 	Policies    []fakePolicy
 	Permissions []fakePerm
 	Resources   string // raw JSON for the resource list
@@ -24,8 +28,9 @@ type realmFixture struct {
 }
 
 type fakeGroup struct {
-	ID, Name string
-	Hatch    []string // colca_grants attribute
+	ID, Name      string
+	Hatch         []string // colca_grants attribute
+	SubGroupCount int      // triggers a GET .../children fetch when > 0
 }
 
 type fakePolicy struct {
@@ -65,14 +70,34 @@ func fakeRealm(t *testing.T, f realmFixture) *Keycloak {
 	mux.HandleFunc("/admin/realms/colca/clients", func(w http.ResponseWriter, r *http.Request) {
 		write(w, r, `[{"id":"u1","clientId":"colca-authz"}]`)
 	})
+	groupRow := func(g fakeGroup) map[string]any {
+		row := map[string]any{"id": g.ID, "name": g.Name, "subGroupCount": g.SubGroupCount}
+		if len(g.Hatch) > 0 {
+			row["attributes"] = map[string][]string{ColcaGrantsAttr: g.Hatch}
+		}
+		return row
+	}
 	mux.HandleFunc("/admin/realms/colca/groups", func(w http.ResponseWriter, r *http.Request) {
 		rows := make([]map[string]any, 0, len(f.Groups))
 		for _, g := range f.Groups {
-			row := map[string]any{"id": g.ID, "name": g.Name}
-			if len(g.Hatch) > 0 {
-				row["attributes"] = map[string][]string{ColcaGrantsAttr: g.Hatch}
-			}
-			rows = append(rows, row)
+			rows = append(rows, groupRow(g))
+		}
+		body, _ := json.Marshal(rows)
+		write(w, r, string(body))
+	})
+	mux.HandleFunc("/admin/realms/colca/groups/", func(w http.ResponseWriter, r *http.Request) {
+		// Only .../{id}/children is real Keycloak 23+ shape; nothing else in
+		// this package fetches under /groups/{id}.
+		rest := strings.TrimPrefix(r.URL.Path, "/admin/realms/colca/groups/")
+		id, part, _ := strings.Cut(rest, "/")
+		if part != "children" {
+			write(w, r, "[]")
+			return
+		}
+		children := f.Children[id]
+		rows := make([]map[string]any, 0, len(children))
+		for _, g := range children {
+			rows = append(rows, groupRow(g))
 		}
 		body, _ := json.Marshal(rows)
 		write(w, r, string(body))
@@ -197,6 +222,75 @@ func TestViewResolvesGroupUUIDsToTheNamesTheTokenCarries(t *testing.T) {
 	}
 	if got.Elements[0] != "01HM6" || got.Scopes[0] != "read" {
 		t.Fatalf("permission parsed as %+v", got)
+	}
+}
+
+func TestNestedGroupsAreResolvedThroughChildrenAndCompileIntoGrants(t *testing.T) {
+	// Keycloak 23+ never inlines a group's children in the /groups listing — it
+	// carries subGroupCount instead, and the members come only from
+	// GET /groups/{id}/children (measured against the realm image, 26.7.3). A
+	// permission bound to a subgroup must still resolve, and its grant must
+	// still make it all the way into a compiled _Group definition.
+	k := fakeRealm(t, realmFixture{
+		Groups: []fakeGroup{{ID: "g-site1", Name: "Site1", SubGroupCount: 1}},
+		Children: map[string][]fakeGroup{
+			"g-site1": {{ID: "g-werk1", Name: "Werk1"}},
+		},
+		Policies: []fakePolicy{{ID: "p-werk1", Name: "group:Werk1", GroupUUIDs: []string{"g-werk1"}}},
+		Permissions: []fakePerm{{
+			ID: "perm1", Name: "Werk1@01HM6",
+			PolicyIDs: []string{"p-werk1"}, Elements: []string{"01HM6"}, ScopeNames: []string{"read"},
+		}},
+	})
+
+	view, err := k.View(context.Background())
+	if err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	if len(view.Problems) != 0 {
+		t.Fatalf("unexpected problems: %v", view.Problems)
+	}
+	if len(view.Permissions) != 1 || len(view.Permissions[0].Groups) != 1 ||
+		view.Permissions[0].Groups[0] != "Werk1" {
+		t.Fatalf("permission did not resolve the nested group, got %+v", view.Permissions)
+	}
+
+	grants, problems := CompileGrants(view.Permissions, view.Attributes)
+	if len(problems) != 0 {
+		t.Fatalf("unexpected compile problems: %v", problems)
+	}
+	want := []string{"read:01HM6/#"}
+	got := grants["Werk1"]
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("compiled grants for the nested group = %v, want %v", got, want)
+	}
+}
+
+func TestAPolicyNamingAnUnknownGroupIsReportedAsAProblem(t *testing.T) {
+	// A group deleted in Keycloak without cleaning up the permission still
+	// bound to it must not silently vanish from the grant — it must be
+	// reported, the way an orphan grant or an unusable hand-typed grant is.
+	k := fakeRealm(t, realmFixture{
+		Groups:   []fakeGroup{{ID: "g1", Name: "ops"}},
+		Policies: []fakePolicy{{ID: "p1", Name: "group:mixed", GroupUUIDs: []string{"g1", "ghost-group-id"}}},
+		Permissions: []fakePerm{{
+			ID: "perm1", Name: "mixed@01HM6",
+			PolicyIDs: []string{"p1"}, Elements: []string{"01HM6"}, ScopeNames: []string{"read"},
+		}},
+	})
+
+	view, err := k.View(context.Background())
+	if err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	if len(view.Problems) != 1 || !strings.Contains(view.Problems[0].Error(), "ghost-group-id") {
+		t.Fatalf("problems = %v, want exactly one naming ghost-group-id", view.Problems)
+	}
+	// The known group in the same policy must still resolve — one unresolvable
+	// group id must not cost the rest of the policy its grant.
+	if len(view.Permissions) != 1 || len(view.Permissions[0].Groups) != 1 ||
+		view.Permissions[0].Groups[0] != "ops" {
+		t.Fatalf("the resolvable group did not survive alongside the problem, got %+v", view.Permissions)
 	}
 }
 

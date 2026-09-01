@@ -70,6 +70,9 @@ func (s *Syncer) Once(ctx context.Context) (Report, error) {
 	}
 
 	var report Report
+	for _, p := range view.Problems {
+		report.problem("%s", p)
+	}
 	grants, problems := CompileGrants(view.Permissions, view.Attributes)
 	for _, p := range problems {
 		report.problem("%s", p)

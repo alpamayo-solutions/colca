@@ -63,6 +63,12 @@ type KeycloakView struct {
 	// passed through verbatim. It is how admin:# is expressed — realm-wide, with
 	// no element to hang on.
 	Attributes map[string][]string
+	// Problems is data seen but not fixed: a group policy naming a group id
+	// this realm's groups no longer account for — almost always a group deleted
+	// without cleaning up the permission that still points at it. Reported
+	// rather than silently dropped, the same way CompileGrants reports an
+	// unusable hand-typed grant.
+	Problems []error
 }
 
 // Keycloak reads one realm's resource server over the admin API.
@@ -195,7 +201,12 @@ type kcGroup struct {
 	ID         string              `json:"id"`
 	Name       string              `json:"name"`
 	Attributes map[string][]string `json:"attributes"`
-	SubGroups  []kcGroup           `json:"subGroups"`
+	// SubGroupCount is Keycloak 23+'s replacement for inlining children in a
+	// group listing: the listing carries the count, never the members. A
+	// realm whose response omits the field (or an older Keycloak that still
+	// inlines subGroups directly) reads it as zero, which is the correct
+	// "nothing more to fetch" answer either way.
+	SubGroupCount int `json:"subGroupCount"`
 }
 
 type kcGroupPolicy struct {
@@ -223,17 +234,35 @@ func (k *Keycloak) View(ctx context.Context) (KeycloakView, error) {
 	}
 	groupNames := map[string]string{}
 	attributes := map[string][]string{}
-	var walk func([]kcGroup)
-	walk = func(gs []kcGroup) {
+	// Keycloak 23+ never inlines a group's children in a listing response — the
+	// listing carries only subGroupCount, and the members come exclusively from
+	// GET /groups/{id}/children. This is the one traversal for every realm: a
+	// group with subGroupCount 0 (set, or simply absent from an older response)
+	// has nothing more to fetch.
+	var walk func(context.Context, []kcGroup) error
+	walk = func(ctx context.Context, gs []kcGroup) error {
 		for _, g := range gs {
 			groupNames[g.ID] = g.Name
 			if hatch := g.Attributes[ColcaGrantsAttr]; len(hatch) > 0 {
 				attributes[g.Name] = append(attributes[g.Name], hatch...)
 			}
-			walk(g.SubGroups)
+			if g.SubGroupCount == 0 {
+				continue
+			}
+			var children []kcGroup
+			if err := k.get(ctx, "/groups/"+url.PathEscape(g.ID)+"/children?briefRepresentation=false&max=-1",
+				&children); err != nil {
+				return err
+			}
+			if err := walk(ctx, children); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
-	walk(groups)
+	if err := walk(ctx, groups); err != nil {
+		return KeycloakView{}, err
+	}
 
 	// deep=true is required: without it Keycloak omits `attributes`, and every
 	// resource would read as unmanaged.
@@ -274,10 +303,23 @@ func (k *Keycloak) View(ctx context.Context) (KeycloakView, error) {
 		}
 		var names []string
 		for _, a := range assoc {
-			for _, g := range policyByID[a.ID].Groups {
-				if name, ok := groupNames[g.ID]; ok {
-					names = append(names, name)
+			policy, isGroupPolicy := policyByID[a.ID]
+			if !isGroupPolicy {
+				continue // an associated policy of another type: not this service's concern
+			}
+			for _, g := range policy.Groups {
+				name, ok := groupNames[g.ID]
+				if !ok {
+					// The policy still names a group UUID our realm read does not
+					// account for — almost always a group deleted without cleaning
+					// up the permission bound to it. Report it: silently dropping it
+					// makes an intended grant vanish with nothing to explain why.
+					view.Problems = append(view.Problems, fmt.Errorf(
+						"permission %s: group policy %s names group %s, which this realm no longer has",
+						perm.Name, policy.Name, g.ID))
+					continue
 				}
+				names = append(names, name)
 			}
 		}
 		if len(names) == 0 {
