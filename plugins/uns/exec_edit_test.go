@@ -48,7 +48,7 @@ func TestEditCreateUpdateDeleteUsesTypedEntityIntent(t *testing.T) {
 	parentVersion := seedEditEntity(t, f, "_SystemElement", "line1", map[string]any{
 		"id": "el-line1", "name": "Line 1",
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	create := editBody(t, "op-create", map[string]uint64{
 		"system-element:el-line1": parentVersion,
@@ -130,7 +130,7 @@ func TestEditUpdateComposesEntityAndExternalReferencesInOneBatch(t *testing.T) {
 		"relationship_type": "maintenance:asset", "external_system_id": "ext-tcdb",
 		"external_table": "assets", "external_column": "id", "external_row_id": "old",
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 	payload := editBody(t, "op-reference-compose", map[string]uint64{
 		"system-element:el-line1":       entityVersion,
 		"external-reference:ref-keep":   keepVersion,
@@ -197,7 +197,7 @@ func TestEditDeleteTombstonesOwnedExternalReferencesInOneBatch(t *testing.T) {
 		"relationship_type": "maintenance:asset", "external_system_id": "ext-cmms",
 		"external_table": "assets", "external_row_id": "A-7",
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 	intent := map[string]any{
 		"type": "delete", "entity": map[string]any{"kind": "signal", "id": "sig-temp"},
 		"cascade": false,
@@ -240,7 +240,7 @@ func TestEditReferenceOnlyUpdateRejectsInvalidAndNoopWithoutWriting(t *testing.T
 	seedEditEntity(t, f, "_ExternalSystem", "tcdb", map[string]any{
 		"id": "ext-tcdb", "key": "tcdb", "name": "TCDB", "system_type": "database",
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 	baseIntent := map[string]any{
 		"type": "update", "entity": map[string]any{"kind": "signal", "id": "sig-temp"},
 	}
@@ -287,7 +287,7 @@ func TestEditPlacementMovesAWholeEntitySubtreeInOneBatch(t *testing.T) {
 	targetVersion := seedEditEntity(t, f, "_SystemElement", "line2", map[string]any{
 		"id": "el-line2", "name": "Line 2",
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
 		t, "op-move", map[string]uint64{
@@ -330,7 +330,7 @@ func TestEditBindingValidatesWholeMixedBatchBeforeWriting(t *testing.T) {
 	signalVersion := seedEditEntity(t, f, "_Signal", "line1/existing", map[string]any{
 		"id": "sig-existing", "name": "Existing", "system_element_id": "el-line1", "data_type": "float",
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	valid := editBody(t, "op-binding", map[string]uint64{
 		"catalogue:connector-1":   catalogVersion,
@@ -370,7 +370,7 @@ func TestEditOperationReplayIsExactAndConflictingReuseIsRejected(t *testing.T) {
 	parentVersion := seedEditEntity(t, f, "_SystemElement", "line1", map[string]any{
 		"id": "el-line1", "name": "Line 1",
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 	payload := editBody(t, "op-replay", map[string]uint64{
 		"system-element:el-line1": parentVersion,
 	}, map[string]any{
@@ -382,7 +382,7 @@ func TestEditOperationReplayIsExactAndConflictingReuseIsRejected(t *testing.T) {
 	firstCode, firstMsg, firstResult, firstWrites := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
 	firstBatchCalls := f.batchCalls
 	// Reconstruct through retained state, not the executor's process cache.
-	exec = NewEditExec(f)
+	exec = NewEditExec(f, nil)
 	code, msg, result, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
 	if code != firstCode || msg != firstMsg || result != firstResult || len(writes) != len(firstWrites) || f.batchCalls != firstBatchCalls {
 		t.Fatalf("exact replay changed outcome or wrote again: first=%d/%q/%q/%+v replay=%d/%q/%q/%+v batches=%d",
@@ -417,7 +417,7 @@ func TestEditDurableReplayReceiptsStayBounded(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 	payload := editBody(t, "new-operation", map[string]uint64{
 		"system-element:el-line1": parentVersion,
 	}, map[string]any{
@@ -452,7 +452,7 @@ func TestEditRejectsMalformedIntentKindsWithoutWriting(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newStore("n-edge1")
-			exec := NewEditExec(f)
+			exec := NewEditExec(f, nil)
 			code, _, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(t, "op-"+tc.name, nil, tc.intent))
 			if code != 422 || len(writes) != 0 || f.batchCalls != 0 || f.offset != 0 {
 				t.Fatalf("malformed %s = %d writes=%+v batches=%d offset=%d", tc.name, code, writes, f.batchCalls, f.offset)
@@ -533,7 +533,7 @@ func TestEditNodeAttachmentRemountPreservesIdentityAndReplaysDurably(t *testing.
 	})
 	attachmentVersion := seedNodeAttachment(t, store, "child-node", "mount-old")
 	writer := &fakeNodeAttachmentWriter{store: store}
-	exec := NewEditExec(store, writer)
+	exec := NewEditExec(store, nil, writer)
 	payload := editBody(t, "op-node-remount", map[string]uint64{
 		"node-attachment:child-node": attachmentVersion,
 		"system-element:mount-new":   newMountVersion,
@@ -560,7 +560,7 @@ func TestEditNodeAttachmentRemountPreservesIdentityAndReplaysDurably(t *testing.
 	}
 
 	batchCalls := store.batchCalls
-	exec = NewEditExec(store, writer)
+	exec = NewEditExec(store, nil, writer)
 	replayCode, replayMessage, replayResult, replayWrites := exec.ExecuteWithWrites(
 		"_CmdEdit", "apply", payload,
 	)
@@ -578,7 +578,7 @@ func TestEditNodeAttachmentRejectsStaleVersionAndStartsDrain(t *testing.T) {
 	store := newStore("parent-node")
 	attachmentVersion := seedNodeAttachment(t, store, "child-node", "mount-old")
 	writer := &fakeNodeAttachmentWriter{store: store}
-	exec := NewEditExec(store, writer)
+	exec := NewEditExec(store, nil, writer)
 
 	stale := editBody(t, "op-node-stale", map[string]uint64{
 		"node-attachment:child-node": attachmentVersion + 1,
@@ -610,5 +610,77 @@ func TestEditNodeAttachmentRejectsStaleVersionAndStartsDrain(t *testing.T) {
 	}
 	if attachment.Status != StatusDraining {
 		t.Fatalf("drain status = %q, want %q", attachment.Status, StatusDraining)
+	}
+}
+
+// An Edit delete retires positions, so it answers the same occupancy
+// question `_CmdConfigure element/delete` does: an element an identity binds to
+// may not be retired. It used to answer none — a cascading delete of a site a
+// child node was enrolled at cut that node off at the replication door, while
+// the configure verb refused the very same retirement with 409.
+//
+// Cascade does not license it. Cascade says the caller accepts taking the
+// element's CHILDREN with it; a bound participant is not a child and not the
+// caller's to strand.
+func TestEditDeleteRefusesWhileAnIdentityBindsToTheSubtree(t *testing.T) {
+	f := newStore("n-hub")
+	siteVersion := seedEditEntity(t, f, "_SystemElement", "site1", map[string]any{
+		"id": "el-site1", "name": "Site 1",
+	})
+	edgeVersion := seedEditEntity(t, f, "_SystemElement", "site1/edge1", map[string]any{
+		"id": "el-edge1", "name": "Edge 1", "parent_id": "el-site1",
+	})
+	// The node is enrolled at the element BELOW the one being deleted, so only
+	// a check over the whole selected subtree sees it.
+	exec := NewEditExec(f, bindings{"el-edge1": {"n-edge1"}}, nil)
+
+	deleteSite := func(operationID string, cascade bool) (int, string, []StateWrite) {
+		code, message, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+			t, operationID, map[string]uint64{
+				"system-element:el-site1": siteVersion,
+				"system-element:el-edge1": edgeVersion,
+			}, map[string]any{
+				"type":    "delete",
+				"entity":  map[string]any{"kind": "system-element", "id": "el-site1"},
+				"cascade": cascade,
+			},
+		))
+		return code, message, writes
+	}
+
+	code, message, writes := deleteSite("op-delete-bound-cascade", true)
+	if code != 409 || !strings.Contains(message, "n-edge1") || len(writes) != 0 {
+		t.Fatalf("cascading delete of an occupied subtree = %d %q writes=%+v — want 409 naming the node",
+			code, message, writes)
+	}
+	if !strings.Contains(message, "site1/edge1") {
+		t.Fatalf("refusal %q does not name the occupied position", message)
+	}
+	for _, topic := range []string{
+		"colca/v1/_SystemElement/n-hub/site1",
+		"colca/v1/_SystemElement/n-hub/site1/edge1",
+	} {
+		if _, ok := f.KVGet(topic); !ok {
+			t.Fatalf("the refused delete retired %s anyway", topic)
+		}
+	}
+
+	// The denominator: the identical command, with nothing standing on the
+	// subtree, retires both positions. Without this the 409 above would also
+	// pass if delete were broken outright.
+	free := NewEditExec(f, bindings{"el-elsewhere": {"n-other"}}, nil)
+	code, message, _, writes = free.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+		t, "op-delete-free-cascade", map[string]uint64{
+			"system-element:el-site1": siteVersion,
+			"system-element:el-edge1": edgeVersion,
+		}, map[string]any{
+			"type":    "delete",
+			"entity":  map[string]any{"kind": "system-element", "id": "el-site1"},
+			"cascade": true,
+		},
+	))
+	if code != 200 || len(writes) != 2 {
+		t.Fatalf("delete of an unoccupied subtree = %d %q writes=%+v, want 200 with two tombstones",
+			code, message, writes)
 	}
 }

@@ -1364,16 +1364,15 @@ func (c *ConfigExec) elementDelete(payload []byte) (int, string, string, []State
 	return 200, fmt.Sprintf("deleted %d", len(records)), "ok", writes
 }
 
-// boundIdentities lists the identities bound to the element held in raw.
+// boundIdentities lists the identities bound to the element held in raw. The
+// occupancy rule itself is occupantsOf; this only reads the id out of the
+// record this door happens to hold.
 func (c *ConfigExec) boundIdentities(raw []byte) []string {
-	if c.bound == nil {
-		return nil
-	}
 	var held placedElement
-	if json.Unmarshal(raw, &held) != nil || held.ID == "" {
+	if json.Unmarshal(raw, &held) != nil {
 		return nil
 	}
-	return c.bound.BoundTo(held.ID)
+	return occupantsOf(c.bound, held.ID)
 }
 
 // definitionUpsert writes definitions under this node's identity.

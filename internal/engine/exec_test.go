@@ -106,7 +106,7 @@ func TestEditCommandCommitsStateAndDurableReplayReceiptTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.SetExecutor(uns.NewEditExec(e.EntityStore()))
+	e.SetExecutor(uns.NewEditExec(e.EntityStore(), nil))
 	payload, err := json.Marshal(map[string]any{
 		"operation_id":   "operation-1",
 		"correlation_id": "correlation-1",
@@ -144,7 +144,7 @@ func TestEditCommandCommitsStateAndDurableReplayReceiptTogether(t *testing.T) {
 
 	// Replace the executor to prove replay comes from retained COLCA state,
 	// not an in-process map.
-	e.SetExecutor(uns.NewEditExec(e.EntityStore()))
+	e.SetExecutor(uns.NewEditExec(e.EntityStore(), nil))
 	replayed, err := e.IngestAdmin("colca/v1/_CmdEdit/n-edge1/apply", payload)
 	if err != nil {
 		t.Fatal(err)

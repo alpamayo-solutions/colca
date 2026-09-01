@@ -71,7 +71,7 @@ func TestModelAssignCreatesMissingSignals(t *testing.T) {
 			{"key": "is_connected", "kind": "computed", "data_type": "boolean", "semantic_type": "device-connectivity", "required": true},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	payload := editBody(t, "op-model-assign", map[string]uint64{
 		"system-element:el-press": elementVersion,
@@ -147,7 +147,7 @@ func TestModelAssignAdoptsCompatibleSignal(t *testing.T) {
 			{"key": "heartbeat", "kind": "measured", "data_type": "boolean", "semantic_type": "device-online", "required": true},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	payload := editBody(t, "op-model-adopt", map[string]uint64{
 		"system-element:el-press": elementVersion,
@@ -194,7 +194,7 @@ func TestModelAssignTypeConflictAborts(t *testing.T) {
 			{"key": "heartbeat", "kind": "measured", "data_type": "boolean", "required": true},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-type-conflict", map[string]uint64{
@@ -235,7 +235,7 @@ func TestModelAssignTwoComputersConflict(t *testing.T) {
 			{"key": "power", "kind": "computed", "data_type": "number", "required": true, "declared_by": "ModelB"},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-two-computers", map[string]uint64{
@@ -279,7 +279,7 @@ func TestModelAssignSharedRequirementIsOneSignal(t *testing.T) {
 			{"key": "heartbeat", "kind": "measured", "data_type": "boolean", "semantic_type": "device-online", "required": true},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	payload := editBody(t, "op-model-shared", map[string]uint64{
 		"system-element:el-press": elementVersion,
@@ -320,7 +320,7 @@ func TestModelAssignUnknownModel(t *testing.T) {
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
 		"id": "el-press", "name": "Press",
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-unknown", map[string]uint64{
@@ -353,7 +353,7 @@ func TestModelUnassignReleasesOnly(t *testing.T) {
 		"id": "dm-other", "name": "Other", "version": "1.0",
 		"slots": []map[string]any{},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	payload := editBody(t, "op-model-unassign", map[string]uint64{
 		"system-element:el-press": elementVersion,
@@ -400,7 +400,7 @@ func TestModelAssignRacedElement(t *testing.T) {
 			{"key": "heartbeat", "kind": "measured", "data_type": "boolean", "required": true},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-raced", map[string]uint64{
@@ -436,7 +436,7 @@ func TestModelAssignAdoptsCompatibleButDifferentlySpelledDataType(t *testing.T) 
 			{"key": "cycles", "kind": "measured", "data_type": "integer", "required": true, "declared_by": "Machine"},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	payload := editBody(t, "op-model-compatible-spelling", map[string]uint64{
 		"system-element:el-press": elementVersion,
@@ -474,7 +474,7 @@ func TestModelAssignUnknownSlotDataTypeIsRejected(t *testing.T) {
 			{"key": "precision", "kind": "measured", "data_type": "decimal", "required": true, "declared_by": "Machine"},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-bad-datatype", map[string]uint64{
@@ -517,7 +517,7 @@ func TestModelAssignCreateCarriesUnitAndDescription(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	payload := editBody(t, "op-model-unit-description", map[string]uint64{
 		"system-element:el-press": elementVersion,
@@ -570,7 +570,7 @@ func TestModelAssignUsesDefinitionsFromAForeignAuthoringNode(t *testing.T) {
 	if _, err := f.seed("colca/v1/_DataModel/n-authority/_colca/data-models/machine", foreignManifest); err != nil {
 		t.Fatal(err)
 	}
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	payload := editBody(t, "op-model-foreign-authority", map[string]uint64{
 		"system-element:el-press": elementVersion,
@@ -616,7 +616,7 @@ func TestModelAssignRejectsOverTheMutationLimit(t *testing.T) {
 	seedEditEntity(t, f, "_DataModel", "_colca/data-models/machine", map[string]any{
 		"id": "dm-machine", "name": "Machine", "version": "1.0", "slots": slots,
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-over-limit", map[string]uint64{
@@ -645,7 +645,7 @@ func TestModelAssignUnchangedIsANoOp(t *testing.T) {
 		"id": "dm-other", "name": "Other", "version": "1.0",
 		"slots": []map[string]any{},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	first := editBody(t, "op-model-first", map[string]uint64{
 		"system-element:el-press": elementVersion,
@@ -700,7 +700,7 @@ func TestModelAssignAdoptsLowestSignalIdOnDuplicateNames(t *testing.T) {
 			{"key": "heartbeat", "kind": "measured", "data_type": "boolean", "required": true, "declared_by": "Machine"},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	// Only sig-a-heartbeat's expected version is supplied. If adoption picked
 	// any other duplicate, requireExpected would reject it with 422 (missing
@@ -740,7 +740,7 @@ func TestModelAssignAdoptMissingExpectedVersionIsRejected(t *testing.T) {
 			{"key": "heartbeat", "kind": "measured", "data_type": "boolean", "required": true, "declared_by": "Machine"},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	// Note: no "signal:sig-heartbeat" entry in expected_versions.
@@ -781,7 +781,7 @@ func TestModelAssignCreatePathCollidesWithForeignElementSignal(t *testing.T) {
 			{"key": "heartbeat", "kind": "measured", "data_type": "boolean", "required": true, "declared_by": "Machine"},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-path-collision", map[string]uint64{
@@ -816,7 +816,7 @@ func TestModelAssignSlotNamesUnknownSemanticType(t *testing.T) {
 			{"key": "heartbeat", "kind": "measured", "data_type": "boolean", "semantic_type": "device-online", "required": true, "declared_by": "Machine"},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-unknown-semantic-type", map[string]uint64{
@@ -862,7 +862,7 @@ func TestModelAssignInheritedComputedSlotIsNotAConflict(t *testing.T) {
 			{"key": "state", "kind": "computed", "data_type": "string", "required": true, "declared_by": "Machine"},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	payload := editBody(t, "op-model-inherited-computed", map[string]uint64{
 		"system-element:el-press": elementVersion,
@@ -924,7 +924,7 @@ func TestModelAssignRecursesIntoChildModel(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	payload := editBody(t, "op-model-child-assign", map[string]uint64{
 		"system-element:el-motor": motorVersion,
@@ -1012,7 +1012,7 @@ func TestModelAssignAdoptsExistingChildByName(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	payload := editBody(t, "op-model-child-adopt", map[string]uint64{
 		"system-element:el-motor":   motorVersion,
@@ -1091,7 +1091,7 @@ func TestModelAssignChildSlotWrongKindNameConflict(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-child-wrong-kind", map[string]uint64{
@@ -1127,7 +1127,7 @@ func TestModelAssignChildSlotUnknownChildModel(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-child-unknown-model", map[string]uint64{
@@ -1167,7 +1167,7 @@ func TestModelAssignChildSlotMissingCreatesID(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-child-missing-creates-id", map[string]uint64{
@@ -1213,7 +1213,7 @@ func TestModelUnassignReleasesRecursively(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	assignPayload := editBody(t, "op-model-unassign-setup", map[string]uint64{
 		"system-element:el-motor": motorVersion,
@@ -1303,7 +1303,7 @@ func TestModelAssignChildTreeRejectsOverTheMutationLimit(t *testing.T) {
 	seedEditEntity(t, f, "_DataModel", "_colca/data-models/big", map[string]any{
 		"id": "dm-big", "name": "Big", "version": "1.0", "slots": slots,
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-child-over-limit", map[string]uint64{
@@ -1347,7 +1347,7 @@ func TestModelSlotKindExemptsOnlyChildFromCanonicalDataType(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	badPayload := editBody(t, "op-model-kind-pin-bad", map[string]uint64{
@@ -1443,7 +1443,7 @@ func TestModelAssignSameChildKeyAcrossModelsMerges(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	payload := editBody(t, "op-model-same-key-merge", map[string]uint64{
 		"system-element:el-motor": motorVersion,
@@ -1519,7 +1519,7 @@ func TestModelAssignChildSlotsCollideOnEntityName(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-child-name-collision", map[string]uint64{
@@ -1574,7 +1574,7 @@ func TestModelAssignChildModelCycleWithEntityParentCycleIsRejected(t *testing.T)
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-cycle", map[string]uint64{
@@ -1627,7 +1627,7 @@ func TestModelUnassignPreservesStillMandatedChild(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	// Unassign ModelA only (desired keeps ModelB) — Bearing must stay
 	// exactly as it is: no expected version for it is even supplied, so a
@@ -1746,7 +1746,7 @@ func TestModelUnassignChildSlotsCollideOnEntityName(t *testing.T) {
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-unassign-name-collision", map[string]uint64{
@@ -1804,7 +1804,7 @@ func TestModelAssignRefusesACreateIDThatAlreadyIdentifiesAnEntity(t *testing.T) 
 			},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	hijack := editBody(t, "op-model-create-id-hijack", map[string]uint64{
@@ -1863,7 +1863,7 @@ func TestModelAssignRefusesTheSameCreateIDTwiceInOneBatch(t *testing.T) {
 			{"key": "part_counter", "kind": "measured", "data_type": "integer", "required": true, "declared_by": "Machine"},
 		},
 	})
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 
 	before := f.offset
 	payload := editBody(t, "op-model-create-id-reused", map[string]uint64{

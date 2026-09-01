@@ -291,6 +291,37 @@ func (w *EditExec) composeDelete(
 		if len(selected) > 1 && !intent.Cascade {
 			return 409, fmt.Sprintf("delete_impact: %s still contains %d entities", key, len(selected)-1), "conflict", nil
 		}
+		// Occupancy, judged over the WHOLE selected subtree and independent of
+		// cascade. An identity — a child node, a connector — names an element
+		// to get its place, so retiring that element leaves it authenticating
+		// with nowhere to write: the child is refused at the replication door,
+		// the connector's autobind can no longer resolve a mount. Cascade says
+		// the caller accepts taking the children with it; it says nothing about
+		// participants, which are not entities in this snapshot and are not the
+		// caller's to strand. This is the same rule and the same port the
+		// `_CmdConfigure` element/delete verb applies (occupantsOf), because two
+		// doors retiring the same positions under two rules is how an Edit
+		// cascade cut off a node the configure verb refused to touch.
+		// Every occupied position is named, sorted, so the refusal reads the
+		// same however the snapshot map happened to iterate.
+		var occupied []string
+		for _, candidate := range selected {
+			if candidate.Kind != "system-element" {
+				continue
+			}
+			elementID, _ := rawString(candidate.Payload["id"])
+			held := occupantsOf(w.bound, elementID)
+			if len(held) == 0 {
+				continue
+			}
+			sort.Strings(held)
+			occupied = append(occupied,
+				fmt.Sprintf("%s by %s", candidate.Record.Path, strings.Join(held, ", ")))
+		}
+		if len(occupied) > 0 {
+			sort.Strings(occupied)
+			return 409, "delete_impact: still bound — " + strings.Join(occupied, "; "), "conflict", nil
+		}
 	}
 	ownedSources := map[string]bool{}
 	for _, candidate := range selected {

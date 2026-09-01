@@ -117,6 +117,26 @@ type Bindings interface {
 	Entries() []EntryRef
 }
 
+// occupantsOf lists the identities standing on an element — the one occupancy
+// question BOTH element-retiring doors ask before they retire anything.
+//
+// An entry names an element to get its place, so retiring that element leaves
+// an identity that authenticates and can write nowhere: a child node is refused
+// at the replication door, a connector can no longer autobind. That is true
+// whichever door composed the retirement, which is why the `_CmdConfigure`
+// element/delete verb and the Edit delete intent judge it here rather than
+// each carrying their own version of "is anything standing on this".
+//
+// An absent registry or an element with no id answers "nothing", never
+// "everything": both mean this decision has nothing to go on, and the only safe
+// reading of nothing-to-go-on at a LIST is an empty list.
+func occupantsOf(bound Bindings, elementID string) []string {
+	if bound == nil || elementID == "" {
+		return nil
+	}
+	return bound.BoundTo(elementID)
+}
+
 // KVRecord is one entity record as the store currently holds it.
 type KVRecord struct {
 	// Topic is the full stored topic, so Parse gives back contract, identity

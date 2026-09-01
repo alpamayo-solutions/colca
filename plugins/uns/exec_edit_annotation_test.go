@@ -89,7 +89,7 @@ func annotationCreateIntent() editIntent {
 }
 
 func TestComposeAnnotationCreateDerivesTheDocumentedID(t *testing.T) {
-	exec := NewEditExec(newStore("n-edge1"))
+	exec := NewEditExec(newStore("n-edge1"), nil)
 	code, msg, result, records := exec.composeAnnotation(annotationCreateIntent())
 	if code != 200 || result != "ok" {
 		t.Fatalf("create = %d %q %q, want 200 ok: %s", code, result, msg, msg)
@@ -131,7 +131,7 @@ func TestComposeAnnotationCreateDerivesTheDocumentedID(t *testing.T) {
 func TestComposeAnnotationRefusesACallerSuppliedIDOnCreate(t *testing.T) {
 	intent := annotationCreateIntent()
 	intent.AnnotationID = "attacker-chosen-id"
-	code, msg, result, records := NewEditExec(newStore("n-edge1")).composeAnnotation(intent)
+	code, msg, result, records := NewEditExec(newStore("n-edge1"), nil).composeAnnotation(intent)
 	if code != 409 || result != "conflict" {
 		t.Fatalf("create with a supplied id = %d %q %q, want 409 conflict", code, result, msg)
 	}
@@ -157,7 +157,7 @@ func TestComposeAnnotationRequiresItsFields(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			intent := base
 			c.mutate(&intent)
-			code, msg, result, records := NewEditExec(newStore("n-edge1")).composeAnnotation(intent)
+			code, msg, result, records := NewEditExec(newStore("n-edge1"), nil).composeAnnotation(intent)
 			if code != 422 || result != "invalid" {
 				t.Fatalf("missing %s = %d %q %q, want 422 invalid", c.name, code, result, msg)
 			}
@@ -171,7 +171,7 @@ func TestComposeAnnotationRequiresItsFields(t *testing.T) {
 func TestComposeAnnotationRejectsAnUnknownAction(t *testing.T) {
 	intent := annotationCreateIntent()
 	intent.Action = "upsert"
-	code, _, result, records := NewEditExec(newStore("n-edge1")).composeAnnotation(intent)
+	code, _, result, records := NewEditExec(newStore("n-edge1"), nil).composeAnnotation(intent)
 	if code != 422 || result != "invalid" || records != nil {
 		t.Fatalf("unknown action = %d %q, records=%d, want 422 invalid with zero records", code, result, len(records))
 	}
@@ -189,7 +189,7 @@ func TestComposeAnnotationUpdateAndDeleteUseTheSuppliedIDVerbatim(t *testing.T) 
 	t.Run("update requires an id", func(t *testing.T) {
 		intent := annotationCreateIntent()
 		intent.Action = "update"
-		code, _, result, records := NewEditExec(newStore("n-edge1")).composeAnnotation(intent)
+		code, _, result, records := NewEditExec(newStore("n-edge1"), nil).composeAnnotation(intent)
 		if code != 422 || result != "invalid" || records != nil {
 			t.Fatalf("update without an id = %d %q, records=%d, want 422 invalid with zero records", code, result, len(records))
 		}
@@ -200,7 +200,7 @@ func TestComposeAnnotationUpdateAndDeleteUseTheSuppliedIDVerbatim(t *testing.T) 
 		intent.Action = "update"
 		intent.AnnotationID = existingID
 		intent.TimeEnd = floatPtr(1710000030.0)
-		code, _, _, records := NewEditExec(newStore("n-edge1")).composeAnnotation(intent)
+		code, _, _, records := NewEditExec(newStore("n-edge1"), nil).composeAnnotation(intent)
 		if code != 200 || len(records) != 1 {
 			t.Fatalf("update = %d, records=%d, want 200 with 1 record", code, len(records))
 		}
@@ -222,7 +222,7 @@ func TestComposeAnnotationUpdateAndDeleteUseTheSuppliedIDVerbatim(t *testing.T) 
 	t.Run("delete requires an id", func(t *testing.T) {
 		intent := annotationCreateIntent()
 		intent.Action = "delete"
-		code, _, result, records := NewEditExec(newStore("n-edge1")).composeAnnotation(intent)
+		code, _, result, records := NewEditExec(newStore("n-edge1"), nil).composeAnnotation(intent)
 		if code != 422 || result != "invalid" || records != nil {
 			t.Fatalf("delete without an id = %d %q, records=%d, want 422 invalid with zero records", code, result, len(records))
 		}
@@ -232,7 +232,7 @@ func TestComposeAnnotationUpdateAndDeleteUseTheSuppliedIDVerbatim(t *testing.T) 
 		intent := annotationCreateIntent()
 		intent.Action = "delete"
 		intent.AnnotationID = existingID
-		code, _, _, records := NewEditExec(newStore("n-edge1")).composeAnnotation(intent)
+		code, _, _, records := NewEditExec(newStore("n-edge1"), nil).composeAnnotation(intent)
 		if code != 200 || len(records) != 1 {
 			t.Fatalf("delete = %d, records=%d, want 200 with 1 record", code, len(records))
 		}
@@ -286,7 +286,7 @@ func TestEditAnnotationCommitsThroughTheEventDoorNeverKV(t *testing.T) {
 		t.Fatalf("presence pin: KVGet(%s) found nothing before the annotation exists, so its later absence would prove nothing", presenceTopic)
 	}
 
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 	payload := editBody(t, "op-annotation-create", map[string]uint64{}, annotationWireIntent(nil))
 
 	code, msg, result, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
@@ -333,7 +333,7 @@ func TestEditAnnotationCommitsThroughTheEventDoorNeverKV(t *testing.T) {
 // create-id refusal: a 409 at compose time must reach neither write door.
 func TestEditAnnotationRefusalWritesNothing(t *testing.T) {
 	f := newStore("n-edge1")
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 	payload := editBody(t, "op-annotation-bad-create", map[string]uint64{},
 		annotationWireIntent(map[string]any{"annotation_id": "attacker-chosen-id"}),
 	)
@@ -356,7 +356,7 @@ func TestEditAnnotationRefusalWritesNothing(t *testing.T) {
 // event door, never KV.
 func TestEditAnnotationDeleteAppendsAtAnExistingIDThroughTheEventDoor(t *testing.T) {
 	f := newStore("n-edge1")
-	exec := NewEditExec(f)
+	exec := NewEditExec(f, nil)
 	createPayload := editBody(t, "op-annotation-create-2", map[string]uint64{}, annotationWireIntent(nil))
 	code, _, _, createWrites := exec.ExecuteWithWrites("_CmdEdit", "apply", createPayload)
 	if code != 200 || len(createWrites) != 1 {

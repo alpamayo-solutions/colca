@@ -40,7 +40,13 @@ const editMutationLimit = 200
 // transition. Paths, topics and state records are derived here, never supplied
 // by the browser or API transport.
 type EditExec struct {
-	store       EntityStore
+	store EntityStore
+	// bound answers which identities stand on an element. A delete intent
+	// retires positions exactly as the `_CmdConfigure` element/delete verb
+	// does, so it needs the same port to judge the same occupancy rule; two
+	// doors retiring elements under two rules is how an Edit cascade came
+	// to cut off a child node the configure verb would have refused to strand.
+	bound       Bindings
 	attachments NodeAttachmentWriter
 	mu          sync.Mutex
 
@@ -162,13 +168,15 @@ type editCatalogueSnapshot struct {
 	Catalogue editCatalogue
 }
 
-func NewEditExec(store EntityStore, attachmentWriters ...NodeAttachmentWriter) *EditExec {
+func NewEditExec(
+	store EntityStore, bound Bindings, attachmentWriters ...NodeAttachmentWriter,
+) *EditExec {
 	var attachments NodeAttachmentWriter
 	if len(attachmentWriters) > 0 {
 		attachments = attachmentWriters[0]
 	}
 	return &EditExec{
-		store: store, attachments: attachments, replays: map[string]editReplay{},
+		store: store, bound: bound, attachments: attachments, replays: map[string]editReplay{},
 	}
 }
 

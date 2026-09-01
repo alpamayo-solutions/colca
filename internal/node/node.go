@@ -210,7 +210,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	domain := uns.NewConfigExec(n.Engine.EntityStore(), reg, n.Engine.Elements(), blobPort,
 		registry.NewULID, cfg.Plugin)
 	edit := uns.NewEditExec(
-		n.Engine.EntityStore(), editAttachmentWriter{registry: reg},
+		n.Engine.EntityStore(), reg, editAttachmentWriter{registry: reg},
 	)
 	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain, edit))
 	n.Engine.SetObserver(domain)

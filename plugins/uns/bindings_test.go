@@ -72,7 +72,7 @@ func editBindOneTag(t *testing.T, heldBy string) (code int, message string) {
 			"signal_id": "sig-new", "parent_id": "el-line1", "name": "Temperature",
 		}},
 	})
-	code, message, _, _ = NewEditExec(f).ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, message, _, _ = NewEditExec(f, nil).ExecuteWithWrites("_CmdEdit", "apply", payload)
 	return code, message
 }
 
