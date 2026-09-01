@@ -161,3 +161,51 @@ func TestADownlinkCommandThatCannotBePersistedHoldsTheCursor(t *testing.T) {
 		t.Fatalf("child commands = %+v, want the one that fits", recs)
 	}
 }
+
+// The definitions half of the same rule: a definition that fails to PERSIST
+// holds its cursor, so it is offered again.
+//
+// Skipping a definition this node's contracts refuse (pinned in
+// definitions_test.go) must not become skipping every definition that fails
+// for any reason: a definition has no read side to recover it from later, so
+// one lost to a transient write error is lost for good.
+func TestADownlinkDefinitionThatCannotBePersistedHoldsTheCursor(t *testing.T) {
+	dir := t.TempDir()
+	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
+	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
+
+	small := `{"id":"01HGRP-OPS","name":"Ops"}`
+	oversized := fmt.Sprintf(`{"id":"01HGRP-OPS","name":%q}`, strings.Repeat("x", 400))
+	parent := newStubParent(t, parentID, func(int64) string {
+		return fmt.Sprintf(`{"records":[],"next":1,"head":1,"definitions":[`+
+			`{"o":1,"t":"colca/v1/_Group/n-parent/01HGRP-OPS","p":%q,"ts":10}`+
+			`],"def_next":2,"now_ms":%d}`, b64Payload(oversized), time.Now().UnixMilli())
+	})
+
+	cs := mustStore(t, filepath.Join(dir, "cdata"))
+	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
+	cs.SetMaxRecordBytes(uint64(len(small) + 100))
+	cl := mustClient(t, parent.addr, parentID.PublicHex(), childID)
+
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() { defer close(done); RunDownlink(cl, ceng, nil, stop) }()
+	waitFor(t, "the child to poll at least twice", 5*time.Second, func() bool {
+		return parent.polls.Load() >= 2
+	})
+	close(stop)
+	waitForClosed(t, "RunDownlink to stop", done, 5*time.Second)
+
+	if pos := cs.CursorGet(uns.DownlinkDefCursor(cl.ParentPub()), downlinkDefStream); pos > 1 {
+		t.Fatalf("definitions cursor = %d, want it held at 1 — the definition is gone and nothing re-sends it", pos)
+	}
+	if entries := mustKVScan(t, cs, "01HGRP-OPS"); len(entries) != 0 {
+		t.Fatalf("child KV = %+v, want nothing: the definition could not be written", entries)
+	}
+	// The denominator: the same child applies a definition that fits.
+	if _, err := ceng.IngestDownlinkDefinition("colca/v1/_Group/n-parent/01HGRP-OPS", []byte(small), 10); err != nil {
+		t.Fatalf("a definition within the limit was refused too: %v", err)
+	}
+	if entries := mustKVScan(t, cs, "01HGRP-OPS"); len(entries) != 1 {
+		t.Fatalf("child KV = %+v, want the group that fits", entries)
+	}
+}

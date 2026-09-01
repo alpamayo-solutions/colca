@@ -206,6 +206,55 @@ func TestAnArrivingDefinitionIsAppliedAsRetainedState(t *testing.T) {
 	}
 }
 
+// A definition this node's contracts cannot apply is skipped, and the ones
+// behind it still arrive.
+//
+// A hub upgraded before its edges authors a definition contract the older
+// bundle downstream does not know — this branch added _DataModel and PAT
+// records exactly that way. The child classifies it as unknown and refuses
+// it; re-offering it forever parked the channel there, so every later
+// definition (a new group, a type, a revoked group's tombstone) stopped
+// arriving at that node until someone upgraded it.
+func TestADefinitionThisNodeCannotApplyDoesNotBlockTheOnesBehindIt(t *testing.T) {
+	dir := t.TempDir()
+	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
+	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
+
+	ps := mustStore(t, filepath.Join(dir, "pdata"))
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
+	srv, addr := startServer(t, pcfg, peng, parentID, preg)
+	defer srv.Stop()
+
+	// The newer hub's definition, written straight into the stream: its
+	// contract is one this binary has no class for, so no door here would
+	// author it either.
+	if _, _, err := ps.Append("definitions", []store.Record{
+		{Topic: "colca/v1/_FutureThing/n-parent/01HFUT", Payload: []byte(`{"id":"01HFUT"}`), TS: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mustIngestAdmin(t, peng, groupTopic, `{"id":"01HGRP-OPS","name":"Ops"}`)
+
+	cs := mustStore(t, filepath.Join(dir, "cdata"))
+	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
+	cl := mustClient(t, addr, parentID.PublicHex(), childID)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() { defer close(done); RunDownlink(cl, ceng, nil, stop) }()
+	t.Cleanup(func() { close(stop); waitForClosed(t, "RunDownlink to stop", done, 5*time.Second) })
+
+	waitFor(t, "the group behind the unapplicable definition to arrive", 5*time.Second, func() bool {
+		return len(mustKVScan(t, cs, "01HGRP-OPS")) == 1
+	})
+	waitFor(t, "the definitions cursor to advance past both records", 5*time.Second, func() bool {
+		return cs.CursorGet(uns.DownlinkDefCursor(cl.ParentPub()), downlinkDefStream) == ps.NextOffset("definitions")
+	})
+	// The unknown one was skipped, not applied: nothing of it is stored here.
+	if recs, _, _ := cs.Read("definitions", 1, 10, nil); len(recs) != 1 || recs[0].Topic != groupTopic {
+		t.Fatalf("child definitions = %+v, want only the group it understands", recs)
+	}
+}
+
 // After compaction has emptied the tail of the definitions stream, the poll
 // reports the stream's HEAD — not the position the child already holds.
 //

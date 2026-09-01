@@ -876,26 +876,45 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 // applyDefinitions stores what the parent handed down and advances the
 // definitions cursor. It reports whether the cursor moved.
 //
-// The cursor moves only after every record in the batch was applied, and a
-// record that fails leaves it where it was: a definition the node failed to
-// store must be offered again, because unlike a command there is no read side
-// to recover it from later. That is the same reason the stream is compacted
-// rather than pruned (definition-stream design §6).
+// The same rule as the command half above, for the same reasons: a definition
+// this node could not STORE holds the cursor at its offset, because unlike a
+// command there is no read side to recover it from later (which is also why
+// the stream is compacted rather than pruned — definition-stream design §6).
+// A definition this node REFUSED is skipped.
+//
+// That second case is a rolling upgrade, not a fault. A hub upgraded before
+// its edges authors a definition contract the older bundle downstream does
+// not know (this branch added _DataModel and PAT records exactly that way);
+// every child classifies it as unknown and refuses it. Re-offering it forever
+// would park the channel there, so no LATER definition — new groups, new
+// types, a revoked group's tombstone — would reach that node until someone
+// upgraded it. One warning per skipped record, and the rest of policy keeps
+// flowing.
 func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res downResult) bool {
+	cursor := uns.DownlinkDefCursor(c.parentPub)
+	advanceTo := res.DefNext
 	for _, r := range res.Definitions {
 		if _, err := eng.IngestDownlinkDefinitionAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
 			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
 		}); err != nil {
-			c.log.Error("downlink definition not applied — leaving the cursor so it is offered again",
-				"topic", r.Topic, "err", err)
 			m.DefinitionRejected()
-			return false
+			var refused *engine.RejectError
+			if errors.As(err, &refused) {
+				c.log.Warn("downlink definition refused by this node's contracts — skipping past it; "+
+					"a parent running a newer bundle authors definitions this node cannot apply until it is upgraded",
+					"topic", r.Topic, "reason", refused.Reason, "err", err)
+				continue
+			}
+			c.log.Error("downlink definition not stored — holding the cursor so it is offered again",
+				"topic", r.Topic, "parent_offset", r.ParentOffset, "err", err)
+			advanceTo = r.ParentOffset
+			break
 		}
 		m.DefinitionApplied()
 	}
-	if res.DefNext > eng.Store().CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream) {
-		eng.Store().CursorAck(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream, res.DefNext)
+	if advanceTo > eng.Store().CursorGet(cursor, downlinkDefStream) {
+		eng.Store().CursorAck(cursor, downlinkDefStream, advanceTo)
 		return true
 	}
 	return false
