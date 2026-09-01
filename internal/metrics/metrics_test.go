@@ -411,6 +411,7 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_auth_rejections_total":    24, // door × reason
 		"colca_acl_denials_total":        2,  // one per action
 		"colca_session_kicks_total":      1,
+		"colca_security_changes_total":   len(securityChangeKinds),
 		// The uplink families cover only the streams that RISE: definitions
 		// descend, so a gauge for them would sit at zero forever and read like
 		// a broken uplink (definition-stream design §4).
@@ -442,8 +443,9 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		// The definition channel (design §5). Applied is the happy path;
 		// rejected is worth alerting on, because a refused definition parks the
 		// node's cursor and nothing behind it arrives either.
-		"colca_definitions_applied_total":  1,
-		"colca_definitions_rejected_total": 1,
+		"colca_definitions_applied_total":            1,
+		"colca_definitions_rejected_total":           1,
+		"colca_replication_integrity_failures_total": 1,
 		// Move-drain (design §3.2/§3.4): colca_drains_active is unlabeled
 		// (always one child, like the retention state-refresh counters) and
 		// colca_drains_completed_total pre-creates all four outcomes
@@ -565,6 +567,30 @@ func TestIncrementSurface(t *testing.T) {
 	m.GapApplied("n-child", "entities")
 	if got := testutil.ToFloat64(m.replGapApplied.WithLabelValues("n-child", "entities")); got != 2 {
 		t.Errorf("repl gap applied n-child/entities = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(m.replIntegrityFailures); got != 2 {
+		t.Errorf("replication integrity failures = %v, want 2", got)
+	}
+}
+
+func TestSecurityChangeSummaryCountsOnlySuccessfulRelevantCommands(t *testing.T) {
+	m := New(mustStore(t), config.Retention{}, nil)
+
+	m.NodeCmd("_CmdAdmin", "enroll", "ok")
+	m.NodeCmd("_CmdAdmin", "revoke", "ok")
+	m.NodeCmd("_CmdAdmin", "enroll", "conflict")
+	m.NodeCmd("_CmdConfigure", "entity/upsert", "ok")
+	m.NodeCmd("_CmdConfigure", "definition/upsert", "invalid")
+	m.NodeCmd("_CmdEdit", "alarm/upsert", "ok")
+
+	for kind, want := range map[string]float64{
+		SecurityChangeEnroll:    1,
+		SecurityChangeRevoke:    1,
+		SecurityChangeConfigure: 1,
+	} {
+		if got := testutil.ToFloat64(m.securityChangeBy[kind]); got != want {
+			t.Errorf("security change %s = %v, want %v", kind, got, want)
+		}
 	}
 }
 

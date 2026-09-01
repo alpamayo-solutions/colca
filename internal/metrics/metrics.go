@@ -110,6 +110,21 @@ const (
 
 var aclActions = []string{ACLSub, ACLRead}
 
+// Security-change kinds are a bounded summary of successful commands that
+// require an operator review. The children are pre-created so Prometheus sees
+// the zero baseline and `increase()` detects the first event after startup.
+const (
+	SecurityChangeEnroll    = "enroll"
+	SecurityChangeRevoke    = "revoke"
+	SecurityChangeConfigure = "configure"
+)
+
+var securityChangeKinds = []string{
+	SecurityChangeEnroll,
+	SecurityChangeRevoke,
+	SecurityChangeConfigure,
+}
+
 // streams is every persistent stream — what has an offset, live bytes and an
 // ingest count. DERIVED from the store, never mirrored: a copy here could not
 // tell that the store's set grew, and the families below would then silently
@@ -187,8 +202,10 @@ type Metrics struct {
 	jwksFailures  prometheus.Counter // colca_jwks_refresh_failures_total
 
 	// CmdAdmin world (cmdadmin design §9).
-	nodeCmds   *prometheus.CounterVec // colca_node_cmds_total{contract,verb,result}
-	nodePrefix *prometheus.GaugeVec   // colca_node_prefix_info{prefix}
+	nodeCmds         *prometheus.CounterVec // colca_node_cmds_total{contract,verb,result}
+	securityChanges  *prometheus.CounterVec // colca_security_changes_total{kind}
+	securityChangeBy map[string]prometheus.Counter
+	nodePrefix       *prometheus.GaugeVec // colca_node_prefix_info{prefix}
 
 	// colca_command_undelivered_total: a live command was published to the
 	// local MQTT bus and had zero live SUBSCRIPTIONS at that moment (see
@@ -287,6 +304,9 @@ type Metrics struct {
 	gapServed      *prometheus.CounterVec // colca_gap_served_total{stream,surface}
 	gapReceived    *prometheus.CounterVec // colca_gap_received_total{stream}
 	replGapApplied *prometheus.CounterVec // colca_repl_gap_applied_total{child,stream}
+	// Unlabelled and pre-created so an alert sees the first second-net gap;
+	// the detailed family above remains the source for child/stream diagnosis.
+	replIntegrityFailures prometheus.Counter // colca_replication_integrity_failures_total
 
 	// Move-drain (design §3.2/§3.4).
 	drainsActive         prometheus.Gauge       // colca_drains_active
@@ -415,6 +435,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_node_cmds_total",
 			Help: "Commands executed BY this node (as opposed to riding through to a machine), by contract, verb and outcome. Resets on restart.",
 		}, []string{"contract", "verb", "result"}),
+		securityChanges: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_security_changes_total",
+			Help: "Successful enrollment, revocation and node-configuration changes requiring operator review, by bounded kind. Resets on restart.",
+		}, []string{"kind"}),
 		nodePrefix: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "colca_node_prefix_info",
 			Help: "The node's root-frame prefix as taught by its parent (info gauge, value 1; absent until learned).",
@@ -479,6 +503,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_repl_gap_applied_total",
 			Help: "Child-offset jumps observed in ApplyReplicated (design §6.4 second net), by child and stream. Resets on restart.",
 		}, []string{"child", "stream"}),
+		replIntegrityFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_replication_integrity_failures_total",
+			Help: "Child-offset jumps observed in ApplyReplicated, summarized without dynamic labels so the first event is alertable. Resets on restart.",
+		}),
 		drainsActive: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_drains_active",
 			Help: "Enrolled kind=node children currently in a move-drain decommission (move-drain design §3.1/§3.4).",
@@ -532,6 +560,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.rejectedBy = counterChildren(m.rejected, reasons)
 	m.uplinkFailBy = counterChildren(m.uplinkFail, uplinkStreams)
 	m.aclDenyBy = counterChildren(m.aclDeny, aclActions)
+	m.securityChangeBy = counterChildren(m.securityChanges, securityChangeKinds)
 	m.uplinkOKBy = make(map[string]prometheus.Gauge, len(uplinkStreams))
 	for _, s := range uplinkStreams {
 		m.uplinkOKBy[s] = m.uplinkOK.WithLabelValues(s)
@@ -617,11 +646,12 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.humanSessions, m.jwksKeys, m.jwksFailures,
-		m.nodeCmds, m.nodePrefix, m.commandUndelivered, m.commandUnroutable, m.commandRedelivered,
+		m.nodeCmds, m.securityChanges, m.nodePrefix,
+		m.commandUndelivered, m.commandUnroutable, m.commandRedelivered,
 		m.bundleInfo, m.bundleContracts,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
-		m.gapServed, m.gapReceived, m.replGapApplied,
+		m.gapServed, m.gapReceived, m.replGapApplied, m.replIntegrityFailures,
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
 		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
 		m.blobTransfers, m.blobRejects, m.recordRejects, m.resourceReads, m.httpRequestLimited, m.blobsSwept,
@@ -694,6 +724,15 @@ func (m *Metrics) NodeCmd(contract, verb, result string) {
 		return
 	}
 	m.nodeCmds.WithLabelValues(contract, verb, result).Inc()
+	if result != "ok" {
+		return
+	}
+	if contract == "_CmdAdmin" && (verb == SecurityChangeEnroll || verb == SecurityChangeRevoke) {
+		m.securityChangeBy[verb].Inc()
+	}
+	if contract == "_CmdConfigure" {
+		m.securityChangeBy[SecurityChangeConfigure].Inc()
+	}
 }
 
 // CommandUndelivered counts one live command published to the local MQTT bus
@@ -1020,6 +1059,7 @@ func (m *Metrics) GapApplied(child, stream string) {
 		return
 	}
 	m.replGapApplied.WithLabelValues(child, stream).Inc()
+	m.replIntegrityFailures.Inc()
 }
 
 // DrainStarted increments colca_drains_active — one enrolled kind=node child
