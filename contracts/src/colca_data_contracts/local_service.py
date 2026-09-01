@@ -22,6 +22,28 @@ from colca_data_contracts.payload import ServiceDetails
 from colca_data_contracts.service_topics import service_context
 
 
+def _attach_mqtt_log_handler(client: Client) -> None:
+    """Publish this service's log records as ``_Log`` — without owning the log.
+
+    franzmq's ``configure_mqtt_logger`` CLEARS the root logger and reinstalls
+    its own stream handler: a dash format no Colca service uses, a hard INFO
+    level that undoes ``LOG_LEVEL``, and no secret sanitization — every
+    service that connected MQTT had its ``setup_logging`` silently replaced
+    the moment it connected. Only the MQTT half is wanted here: the handler
+    that turns records into ``_Log`` publications is ADDED to whatever
+    logging the service configured, formatted with the shared Colca format.
+    """
+    import logging
+
+    from franzmq.log_handlers import MQTTHandler
+
+    from colca_data_contracts.logging import COLCA_LOG_FORMAT
+
+    handler = MQTTHandler(client)
+    handler.setFormatter(logging.Formatter(COLCA_LOG_FORMAT))
+    logging.getLogger().addHandler(handler)
+
+
 
 @dataclass(frozen=True)
 class LocalServiceIdentity:
@@ -98,7 +120,7 @@ def connect_local_mqtt(
     client = Client(client_id=client_id or service_name, protocol=pahomqtt.MQTTv5)
     client.node_id = resolved.node_id
     client.username_pw_set(service_name)
-    client.configure_mqtt_logger()
+    _attach_mqtt_log_handler(client)
     client.reconnect_on_failure = True
     client.reconnect_on_offline = True
     client.reconnect_delay_set(min_delay=1, max_delay=120)

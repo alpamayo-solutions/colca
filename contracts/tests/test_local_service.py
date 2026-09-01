@@ -173,3 +173,40 @@ def test_service_context_matches_the_shared_vectors():
         assert list(service_context(vector["mount"], vector["service"])) == vector["context"], (
             f"service_context({vector['mount']!r}, {vector['service']!r})"
         )
+
+
+def test_connecting_mqtt_adds_the_log_publisher_without_owning_the_log():
+    """franzmq's configure_mqtt_logger cleared the root logger and reinstalled
+    its own handler — a dash format no Colca service uses, a hard INFO level
+    that undid LOG_LEVEL, and no secret sanitization. Connecting must ADD the
+    _Log publisher to whatever the service configured, and change nothing
+    else: the caller's handler, level and formatter all survive."""
+    import logging
+
+    from franzmq.log_handlers import MQTTHandler
+
+    from colca_data_contracts.local_service import _attach_mqtt_log_handler
+    from colca_data_contracts.logging import COLCA_LOG_FORMAT
+
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_level = root.level
+    sentinel = logging.NullHandler()
+    sentinel.setFormatter(logging.Formatter("%(message)s"))
+    root.addHandler(sentinel)
+    root.setLevel(logging.DEBUG)
+    before = [h for h in root.handlers if isinstance(h, MQTTHandler)]
+    try:
+        _attach_mqtt_log_handler(object())
+
+        assert sentinel in root.handlers, "the caller's handler was removed"
+        assert root.level == logging.DEBUG, "the caller's level was reset"
+        added = [
+            h for h in root.handlers if isinstance(h, MQTTHandler) and h not in before
+        ]
+        assert len(added) == 1, "exactly one _Log publisher must be added"
+        assert added[0].formatter._fmt == COLCA_LOG_FORMAT
+    finally:
+        root.handlers.clear()
+        root.handlers.extend(original_handlers)
+        root.setLevel(original_level)
