@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/door"
@@ -43,13 +44,23 @@ type Bridge struct {
 	Max       int
 	IdleSleep time.Duration
 
-	// Gaps counts pruned-record incidents. Unlike the cache projector, the
+	// gaps counts pruned-record incidents. Unlike the cache projector, the
 	// bridge does NOT stop on one: `metrics` retention is short, the records
 	// are gone, and there is nothing to rebuild from — halting historisation
 	// over data that no longer exists anywhere would trade a hole for a
 	// blackout. It is counted and logged so it is visible as the incident it is.
-	Gaps int64
+	//
+	// Atomic, and unexported so the atomic is the only way to touch it: the
+	// bridge goroutine writes it while /metrics reads it on every scrape
+	// (cmd/colca-historian). Two goroutines on a plain int64 is a data race
+	// regardless of how benign the resulting number looks.
+	gaps atomic.Int64
 }
+
+// Gaps is how many pruned ranges this bridge could not historise — safe to
+// read from any goroutine, which is the point: /metrics scrapes it while the
+// follow loop is running.
+func (b *Bridge) Gaps() int64 { return b.gaps.Load() }
 
 func (b *Bridge) logger() *slog.Logger {
 	if b.Log != nil {
@@ -91,7 +102,7 @@ func (b *Bridge) Once(ctx context.Context) (int, error) {
 			continue // already durable: a replay after a crash between commit and ack
 		}
 		if strings.Contains(record.Topic, gapContract) {
-			b.Gaps++
+			b.gaps.Add(1)
 			b.logger().Error("metrics were pruned before this bridge read them",
 				"offset", record.Offset,
 				"detail", "history has a hole that cannot be filled: the records are gone from "+

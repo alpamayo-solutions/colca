@@ -74,6 +74,30 @@ func (s *Store) path(sha string) string {
 	return filepath.Join(s.dir, sha[:2], sha)
 }
 
+// tempPrefix and tempSuffix bracket the name Put writes through before the
+// rename that publishes a blob. They live here because this package is the
+// only one that may know what an unfinished blob looks like on disk — the
+// sweeper asks for reclamation, it does not go looking for filenames.
+const (
+	tempPrefix = ".incoming-"
+	tempSuffix = ".tmp"
+)
+
+// abandonedTempAge is how long an unfinished blob must have sat untouched
+// before ReclaimAbandonedTemp treats it as debris rather than a transfer.
+//
+// It is a constant, not a knob, and deliberately NOT the sweeper's blob grace
+// even though both are an hour today. The grace answers a different question —
+// "might the record that references this blob still be on its way?" — and an
+// operator may legitimately set it to 0 ("no grace, sweep immediately"), which
+// would then delete the temp file of every upload in flight.
+//
+// An hour is safe with room to spare because a write bumps the file's mtime:
+// a transfer that is still making any progress at all is never a candidate,
+// however slow the link or however large the blob. Only a transfer whose
+// process died, or that has been stalled for an hour, qualifies.
+const abandonedTempAge = time.Hour
+
 // Put streams r into the store, hashing as it goes. When expect is non-empty
 // the computed digest must equal it. The content lands through a temp file
 // and a rename, so a reader never observes a partial blob and a failed write
@@ -82,13 +106,15 @@ func (s *Store) Put(r io.Reader, expect string) (string, int64, error) {
 	if expect != "" && !validDigest(expect) {
 		return "", 0, ErrBadDigest
 	}
-	tmp, err := os.CreateTemp(s.dir, ".incoming-*.tmp")
+	tmp, err := os.CreateTemp(s.dir, tempPrefix+"*"+tempSuffix)
 	if err != nil {
 		return "", 0, fmt.Errorf("blobstore: %w", err)
 	}
 	tmpName := tmp.Name()
-	// Every failure path below must remove the temp file; a leaked one would
-	// be swept by nothing, since the sweep only knows about digests.
+	// Every failure path below must remove the temp file: no other path here
+	// can see it, since it has no digest and List only reports digests. A
+	// process that dies before this defer runs is what ReclaimAbandonedTemp
+	// exists for.
 	defer func() {
 		tmp.Close()
 		os.Remove(tmpName)
@@ -227,6 +253,44 @@ func (s *Store) Delete(sha string) error {
 		return fmt.Errorf("blobstore: %w", err)
 	}
 	return nil
+}
+
+// ReclaimAbandonedTemp removes unfinished blobs left behind by a process that
+// died mid-Put, and reports how many it removed.
+//
+// Put's own deferred cleanup covers every failure THAT process lives through;
+// it cannot cover a SIGKILL, an OOM, or a power cut, and the file it leaves is
+// invisible to every other path here: it has no digest, so List skips it and
+// the sweeper can never see it. Without this the debris is permanent, bounded
+// only by crash count times blob size — up to 32 MiB a time on an edge with
+// small flash.
+//
+// A temp file is reclaimed only once it is older than abandonedTempAge; see
+// there for why that is a constant and not the sweeper's grace. now is passed
+// in rather than read here so a caller (and its tests) has one clock.
+func (s *Store) ReclaimAbandonedTemp(now time.Time) (removed int, err error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return 0, fmt.Errorf("blobstore: %w", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, tempPrefix) || !strings.HasSuffix(name, tempSuffix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // vanished under the scan — someone else already reclaimed it
+		}
+		if now.Sub(info.ModTime()) < abandonedTempAge {
+			continue // written to recently: a transfer, not debris
+		}
+		if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return removed, fmt.Errorf("blobstore: %w", err)
+		}
+		removed++
+	}
+	return removed, nil
 }
 
 // List enumerates every stored blob. Entries that are not valid digests are

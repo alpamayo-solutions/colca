@@ -136,8 +136,8 @@ func TestAGapIsCountedAndTheBridgeKeepsGoing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a gap stopped the bridge: %v", err)
 	}
-	if bridge.Gaps != 1 {
-		t.Fatalf("Gaps = %d, want 1 — a pruned range is an incident and must be visible", bridge.Gaps)
+	if bridge.Gaps() != 1 {
+		t.Fatalf("Gaps = %d, want 1 — a pruned range is an incident and must be visible", bridge.Gaps())
 	}
 	if written != 1 {
 		t.Fatalf("wrote %d rows, want 1: the records after the gap still historise", written)

@@ -177,7 +177,7 @@ func serveObservability(addr string, bridge *historian.Bridge, log *slog.Logger)
 		fmt.Fprintf(w,
 			"# HELP colca_historian_stream_gaps_total Pruned ranges this bridge could not historise.\n"+
 				"# TYPE colca_historian_stream_gaps_total counter\n"+
-				"colca_historian_stream_gaps_total %d\n", bridge.Gaps)
+				"colca_historian_stream_gaps_total %d\n", bridge.Gaps())
 	})
 	server := httpserver.NewAt(addr, mux)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

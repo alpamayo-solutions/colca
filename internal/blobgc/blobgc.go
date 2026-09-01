@@ -94,6 +94,18 @@ func (s *Sweeper) Run(stop <-chan struct{}) {
 // each sweep. At this scale that is cheaper than maintaining an index; if
 // resource counts grow, this is the first thing to change.
 func (s *Sweeper) runOnce() {
+	// Debris from a process that died mid-Put, reclaimed first and
+	// independently: an unfinished blob has no digest, so no _Resource can
+	// reference it and its liveness needs no mark phase. That is why a failed
+	// scan below skips the sweep but not this — the two answer different
+	// questions, and this one is always answerable.
+	if removed, err := s.blobs.ReclaimAbandonedTemp(s.now()); err != nil {
+		s.log.Error("reclaiming abandoned uploads failed", "err", err)
+	} else if removed > 0 {
+		s.log.Info("abandoned uploads reclaimed: unfinished blobs left by a process that died mid-transfer",
+			"files", removed)
+	}
+
 	records, err := s.records()
 	if err != nil {
 		s.log.Error("resource scan failed — sweep skipped this cycle", "err", err)

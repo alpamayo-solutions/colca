@@ -478,6 +478,12 @@ func Start(cfg *config.Config) (*Node, error) {
 			return fail(fmt.Errorf("node %s: repl server: %w", cfg.ULID, err))
 		}
 		n.ReplSrv = rs
+		// The repl door joins the same in-flight tracking as the API doors.
+		// Stop closes its connections instead of draining them, so without
+		// this a handler can still be inside ApplyReplicated when Store.Close
+		// runs — Pebble panics on use after close, and a hub applies child
+		// batches continuously.
+		rs.SetInflightTracker(n.trackInflight)
 		addr, err := rs.Start()
 		if err != nil {
 			return fail(fmt.Errorf("node %s: repl listen %s: %w", cfg.ULID, cfg.Repl.Addr, err))
@@ -548,8 +554,9 @@ func Start(cfg *config.Config) (*Node, error) {
 	return n, nil
 }
 
-// trackInflight makes every API request visible to Stop, so the store is never
-// closed underneath a running handler.
+// trackInflight makes every request at every door — API, local API, and
+// replication — visible to Stop, so the store is never closed underneath a
+// running handler.
 func (n *Node) trackInflight(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n.wg.Add(1)

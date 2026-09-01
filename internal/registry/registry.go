@@ -390,11 +390,11 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 	if e.Name != "" {
 		delete(m.byName, e.Name)
 	}
-	// Design §3.4: the child's parent-side downlink cursors die with its
-	// identity, because leaving them accumulates one pair per revoked device
+	// Design §3.4: the child's parent-side COMMAND cursors die with its
+	// identity, because leaving them accumulates one per revoked device
 	// forever.
 	//
-	// Safe because Enroll re-seats the commands one — NOT because these cursors
+	// Safe because Enroll re-seats the downlink one — NOT because these cursors
 	// are retention protection only. That was the original premise and it is
 	// false: the commands cursor is also the move-drain delivery floor
 	// (repl.drainPendingCommands), so deleting it with nothing to replace it
@@ -411,9 +411,40 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 	// accumulates one per revoked device forever, and it holds a retention
 	// floor on the commands stream on behalf of an identity that no longer
 	// exists. Asking the door rather than the kind, as everywhere else.
+	//
+	// The DEFINITIONS cursor (uns.DownlinkDefCursorPrefix) is deliberately NOT
+	// in this set, and that asymmetry is the whole point. A command is
+	// EXECUTED: once delivered, nothing at the child depends on the parent
+	// remembering where it was, so re-seating at the head is a complete answer.
+	// A definition is APPLIED AS STATE (definition-stream design §2): the child
+	// still HOLDS every group and type it read, and its own read position is
+	// keyed by the PARENT's pubkey, so it survives the revoke untouched and
+	// resumes exactly where it stopped when the same node is enrolled again
+	// (repl.initCursors case 1).
+	//
+	// Deleting the parent's copy therefore removed the retention floor while
+	// the consumer it protects was still alive and still holding the state.
+	// Compaction's tombstone rule is the minimum over the cursors that EXIST
+	// (store/compact.go), so the very next pass dropped the retraction of a
+	// group this child had not read — and the re-enrolled child then resumed
+	// past the hole and kept the withdrawn group, with its grants, forever.
+	// That is the one failure compact.go's floor exists to prevent: "a live
+	// authorization the operator believes they revoked".
+	//
+	// Re-seating it at 1 on re-enroll does not substitute for keeping it. The
+	// tombstone is already gone by then, and a child applies definitions
+	// record by record rather than diffing a snapshot — reading the compacted
+	// set from offset 1 re-affirms what still exists and says nothing about
+	// what stopped existing.
+	//
+	// The cost is a definitions floor held by a child that never returns. It is
+	// bounded (child NODES only — a machine holds no downlink-def cursor at
+	// all, and superseded records still compact regardless of any floor) and it
+	// has an explicit operator exit: POST /ack {"cursor":"downlink-def:<ulid>",
+	// "stream":"definitions","delete":true} at the admin door, for a node being
+	// decommissioned rather than moved.
 	dead := map[string]string{
-		uns.DownlinkCursorPrefix + ulid:    "commands",
-		uns.DownlinkDefCursorPrefix + ulid: "definitions",
+		uns.DownlinkCursorPrefix + ulid: "commands",
 	}
 	if e.MayUseDoor(uns.DoorMQTT) {
 		dead[e.CommandCursor()] = "commands"

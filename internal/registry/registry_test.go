@@ -634,9 +634,8 @@ func TestByNameForgetsARevokedEntry(t *testing.T) {
 	}
 }
 
-// Design §3.4: a revoked child's parent-side downlink cursors die with its
-// identity, because they otherwise accumulate one pair per revoked device
-// forever.
+// Design §3.4: a revoked child's parent-side COMMAND cursor dies with its
+// identity, because it otherwise accumulates one per revoked device forever.
 //
 // §3.4's stated REASON for why this is safe — "they protect retention only,
 // delivery position rides the child's `after` parameter" — turned out to be
@@ -648,7 +647,11 @@ func TestByNameForgetsARevokedEntry(t *testing.T) {
 // deleted either way: a
 // re-enrolled child re-offering from its LWM is deduped by it, which is the
 // difference between a cheap reconciliation and duplicate application.
-func TestRevokeDeletesDownlinkCursorsAndKeepsTheHWM(t *testing.T) {
+//
+// The definitions cursor is the deliberate exception and is asserted to
+// SURVIVE here — see TestRevokeKeepsTheDefinitionsFloorSoARetractionSurvives
+// for why.
+func TestRevokeDeletesTheCommandFloorAndKeepsTheHWM(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "z/a")
 	ulid := "01NCHILD"
@@ -680,13 +683,101 @@ func TestRevokeDeletesDownlinkCursorsAndKeepsTheHWM(t *testing.T) {
 	}
 
 	for _, c := range st.Cursors() {
-		if c.Name == uns.DownlinkCursorPrefix+ulid || c.Name == uns.DownlinkDefCursorPrefix+ulid {
+		if c.Name == uns.DownlinkCursorPrefix+ulid {
 			t.Fatalf("revoke left cursor %q behind — it accumulates per revoked device forever", c.Name)
 		}
+	}
+	if got := st.CursorGet(uns.DownlinkDefCursorPrefix+ulid, "definitions"); got != 2 {
+		t.Fatalf("revoke moved the definitions floor to %d, want the seeded 2 preserved — the "+
+			"child still holds every definition it applied", got)
 	}
 	if got := st.HWMGet(ulid, "metrics"); got != hwmBefore {
 		t.Fatalf("revoke changed the replication HWM to %d, want %d preserved — a "+
 			"re-enrolled child re-offering from LWM would re-apply records", got, hwmBefore)
+	}
+}
+
+// A retraction must reach a child that was revoked and enrolled again.
+//
+// This is the authorization half of Revoke's cursor rule, and it is the one
+// case where deleting a parent-side cursor is not merely untidy but wrong. A
+// definition is APPLIED AS STATE (definition-stream design §2), so a revoked
+// child still HOLDS the groups it read; its own read position is keyed by the
+// PARENT's pubkey and survives the revoke untouched, so a re-enrolled child
+// resumes exactly where it stopped. Deleting the parent's copy therefore
+// lowers the tombstone floor to "nobody is behind this" while a consumer that
+// IS behind it is alive and coming back — compaction drops the retraction, the
+// child resumes past the hole, and the withdrawn group keeps authorizing.
+//
+// The positive control at the end is load-bearing, not decoration: every
+// assertion above is "the tombstone is still there", which a broken Read or a
+// mis-typed cursor name would satisfy just as happily. Acking the same cursor
+// past the tombstone and watching compaction finally remove it proves the
+// floor is what held it.
+func TestRevokeKeepsTheDefinitionsFloorSoARetractionSurvives(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "z/child")
+	ulid := "01NCHILD"
+	cursor := uns.DownlinkDefCursorPrefix + ulid
+	group := "colca/v1/_Group/01NODE/01HGRP-OPS"
+
+	if _, _, err := m.Enroll(entryJSON(t, node(ulid, "z/child", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	// Offset 1: the group. The child reads it and acks to 2 (next unread).
+	if _, _, err := st.Append("definitions", []store.Record{
+		{Topic: group, Payload: []byte(`{"id":"01HGRP-OPS","grants":["read:el-z-child/#"]}`),
+			TS: 1, KVPath: "01HGRP-OPS", KVNode: "01NODE"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !st.CursorAck(cursor, "definitions", 2) {
+		t.Fatal("seed ack of the definitions cursor did not move it")
+	}
+	// Offset 2: the retraction the child has NOT read.
+	if _, _, err := st.Append("definitions", []store.Record{
+		{Topic: group, Payload: nil, TS: 2, KVPath: "01HGRP-OPS", KVNode: "01NODE", Delete: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := m.Revoke(ulid); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := st.Compact("definitions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Tombstones != 0 {
+		t.Fatalf("compaction dropped %d tombstone(s) after the revoke — the child still holds "+
+			"group 01HGRP-OPS and nothing will ever tell it the grant was withdrawn", stats.Tombstones)
+	}
+
+	// The child comes back at the same parent (a mount move, a key re-pin) and
+	// resumes its own surviving position.
+	if _, _, err := m.Enroll(entryJSON(t, node(ulid, "z/child", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	recs, _, err := st.Read("definitions", 2, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 || recs[0].Topic != group || len(recs[0].Payload) != 0 {
+		t.Fatalf("re-enrolled child reading from 2 got %+v, want the retraction of %s", recs, group)
+	}
+
+	// Positive control: once the floor itself has passed the tombstone, the
+	// tombstone goes — which is what makes the assertions above mean anything.
+	if !st.CursorAck(cursor, "definitions", st.NextOffset("definitions")) {
+		t.Fatal("ack past the tombstone did not move the cursor")
+	}
+	stats, err = st.Compact("definitions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Tombstones != 1 {
+		t.Fatalf("compaction removed %d tombstone(s) once every cursor had passed it, want 1 — "+
+			"the earlier assertion proved nothing about the floor", stats.Tombstones)
 	}
 }
 

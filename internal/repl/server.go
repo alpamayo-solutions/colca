@@ -67,6 +67,31 @@ type Server struct {
 	// upstreamClient is this node's own parent link, used to satisfy a child's
 	// pull on a local miss. Set once at startup; nil at the root.
 	upstreamClient *Client
+
+	// inflight makes a running handler visible to whoever owns shutdown. Set
+	// once, before Start; nil in tests that never shut a store down under a
+	// request. See SetInflightTracker.
+	inflight func(http.Handler) http.Handler
+}
+
+// SetInflightTracker installs the middleware every repl route runs inside, so
+// the owner of the store can wait for handlers that are still touching it.
+//
+// This door needs it for the same reason the API doors do, and it cannot
+// provide it for itself: Stop closes connections rather than draining them
+// (see Stop), on purpose, so the port is free the instant it returns. That
+// leaves a handler inside ApplyReplicated while the caller goes on to close
+// Pebble — a use-after-close panic instead of a clean exit. The WaitGroup that
+// answers "is anything still in the store" belongs to the node, not to this
+// server, so the node hands its tracker down here (node.trackInflight),
+// exactly as it does for the API and local-API doors.
+//
+// Called once at startup, before Start, in the same late-binding style as
+// SetUpstream. nil is allowed and means untracked.
+func (s *Server) SetInflightTracker(mw func(http.Handler) http.Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inflight = mw
 }
 
 // SetUpstream installs the parent link used for pull-through. Called once at
@@ -221,7 +246,14 @@ func (s *Server) Start() (addr string, err error) {
 		return "", err
 	}
 	s.ln = ln
-	s.http = httpserver.New(s.limitBeforeAuth(mux))
+	// Outermost, so a request is counted for the whole time it exists at this
+	// door — including the rate limiter's own accounting and the TLS/registry
+	// lookups before it, all of which read node state.
+	var h http.Handler = s.limitBeforeAuth(mux)
+	if s.inflight != nil {
+		h = s.inflight(h)
+	}
+	s.http = httpserver.New(h)
 	s.http.TLSConfig = tlsCfg
 	go func(h *http.Server) {
 		if err := h.ServeTLS(ln, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
