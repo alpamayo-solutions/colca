@@ -407,6 +407,29 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 	}
 }
 
+// The lanes RunUplink pushes are exactly the streams the domain says rise,
+// and the parent's door accepts exactly those. A class that gains a stream
+// must gain a lane here, or its records never leave the node that wrote
+// them — silently, because nothing else would notice.
+func TestEveryRisingStreamHasAnUplinkLane(t *testing.T) {
+	pushed := map[string]bool{}
+	for _, stream := range uplinkStreams() {
+		pushed[stream] = true
+		if !uns.IsUplinkStream(stream) {
+			t.Fatalf("the uplink pushes %q, which the parent's door refuses", stream)
+		}
+	}
+	rising := uns.UplinkStreams()
+	if len(rising) == 0 {
+		t.Fatal("no stream rises: the check above would pass against an empty lane list")
+	}
+	for _, stream := range rising {
+		if !pushed[stream] {
+			t.Fatalf("no uplink lane pushes %q — records written there never leave this node", stream)
+		}
+	}
+}
+
 // --- helpers ---------------------------------------------------------------
 
 // A machine-kind key at the repl door is rejected like an unknown one: the

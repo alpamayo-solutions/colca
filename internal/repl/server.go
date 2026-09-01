@@ -324,6 +324,21 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "replication batch exceeds 200 records", http.StatusRequestEntityTooLarge)
 		return
 	}
+	// The stream a child names is checked BEFORE any record is looked at, and
+	// regardless of what this node knows about the contracts inside it. The
+	// per-record check below can only speak for a class this node's bundle
+	// declares, so an unknown contract used to ride onto whatever stream the
+	// request named — `definitions` included, the one stream a child must
+	// never write (definition-stream design §4). Every child of this node then
+	// received that record as a definition, rejected it, and stopped advancing
+	// its definitions cursor: one malformed request froze policy distribution
+	// for the whole subtree.
+	if !uns.IsUplinkStream(in.Stream) {
+		s.auditDenied("replicate", "direction_denied", child,
+			map[string]any{"route": r.URL.Path, "stream": in.Stream})
+		http.Error(w, fmt.Sprintf("stream %s does not accept replicated records", in.Stream), http.StatusForbidden)
+		return
+	}
 
 	repl := make([]store.ReplRecord, 0, len(in.Records))
 	for _, rec := range in.Records {
@@ -352,7 +367,9 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		// During a rolling bundle update the parent may not know a new contract
 		// the child already routes. Preserve that record on the named stream;
 		// enforce direction and stream binding whenever this node does know the
-		// class. The bundle-skew test pins this forward-compatible handoff.
+		// class. The bundle-skew test pins this forward-compatible handoff. The
+		// named stream is one that rises (checked above), so the handoff can
+		// only ever place an unknown contract on a data/entity/event stream.
 		rr := store.ReplRecord{
 			ChildOffset: rec.O, OriginOffset: rec.OO,
 			Topic: topic, Payload: rec.P, TS: rec.TS,

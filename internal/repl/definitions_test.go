@@ -205,3 +205,44 @@ func TestAnArrivingDefinitionIsAppliedAsRetainedState(t *testing.T) {
 		}
 	}
 }
+
+// A child may not push onto the definitions stream, whatever contract it puts
+// in the records. TestTheUplinkNeverCarriesDefinitions pins the pusher's half
+// of that rule; this pins the door's, which is the half that has to hold
+// against a child that is buggy or hostile rather than merely well-behaved.
+//
+// The direction check used to run only for a contract this node's bundle
+// declares, so an unknown one landed on whichever stream the request named.
+// One such record on `definitions` was then broadcast to every child of this
+// node, each of which rejected it as "not a definition" and stopped advancing
+// its definitions cursor — no group, PAT or type reached any of them again.
+func TestChildCannotReplicateOntoTheDefinitionsStream(t *testing.T) {
+	f := newParentFixture(t)
+	before := f.ps.NextOffset("definitions")
+
+	// The denominator: this child CAN replicate, on a stream that rises.
+	if _, err := f.cl.Replicate("metrics", []store.ReplRecord{
+		{ChildOffset: 1, Topic: "colca/v1/_Metric/n-child/t", Payload: []byte(`{"v":1}`), TS: 1},
+	}); err != nil {
+		t.Fatalf("the fixture cannot replicate at all: %v", err)
+	}
+
+	for _, topic := range []string{
+		"colca/v1/_Bogus/n-child/whatever", // unknown here: used to bypass the check
+		groupTopic,                       // known, and a definition: flows down, never up
+	} {
+		if _, err := f.cl.Replicate("definitions", []store.ReplRecord{
+			{ChildOffset: 2, Topic: topic, Payload: []byte(`{"x":1}`), TS: 2},
+		}); err == nil {
+			t.Fatalf("%s was accepted onto the definitions stream", topic)
+		}
+	}
+	if _, err := f.cl.Replicate("not-a-stream", []store.ReplRecord{
+		{ChildOffset: 3, Topic: "colca/v1/_Metric/n-child/t", Payload: []byte(`{"v":1}`), TS: 3},
+	}); err == nil {
+		t.Fatal("a record was accepted onto a stream no class ever routes to")
+	}
+	if got := f.ps.NextOffset("definitions"); got != before {
+		t.Fatalf("definitions stream grew from %d to %d — a child wrote policy for the subtree", before, got)
+	}
+}
