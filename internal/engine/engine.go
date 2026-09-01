@@ -944,11 +944,14 @@ func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result,
 
 // IngestDownlinkAttributed preserves the authorship stamped at the command's
 // origin while keeping the original timestamp.
+// Its errors are typed the way every door types them: a deliberate refusal
+// (grammar, draining) is a *RejectError, anything else is the store failing.
+// The downlink loop tells them apart to decide whether the record may be
+// acked past — see repl.RunDownlink.
 func (e *Engine) IngestDownlinkAttributed(topic string, payload []byte, ts int64, attribution Attribution) (Result, error) {
 	p, err := uns.Parse(topic)
 	if err != nil {
-		e.metrics.RejectPublish(metrics.ReasonGrammar)
-		return Result{}, err
+		return e.reject(metrics.ReasonGrammar, "%w", err)
 	}
 	class := e.ClassOf(p.Contract)
 	if uns.IsCommand(class) && e.ids.DrainingMount(p.Path) {
@@ -960,13 +963,14 @@ func (e *Engine) IngestDownlinkAttributed(topic string, payload []byte, ts int64
 		// mount this node is actively draining: the "chasing a moving tail"
 		// failure the admission gate exists to prevent, reachable in a
 		// multi-hop tree even though the direct doors (client/admin) are
-		// covered. The caller (repl.RunDownlink) already treats a per-record
-		// ingest error as "log and drop, cursor still advances" — the same
-		// handling every other IngestDownlink error gets today — so no retry
-		// loop, no stuck cursor, no gap-jump side effect: this is a single
-		// record rejected at persistence time, not a batch operation.
-		e.metrics.RejectPublish(metrics.ReasonDraining)
-		return Result{}, fmt.Errorf("downlink: %s is draining — no new commands admitted (move-drain design §3.2)", p.Path)
+		// covered. The caller (repl.RunDownlink) skips past a record refused
+		// this way — a *RejectError, like every deliberate refusal at every
+		// door — because offering it again can only produce the same refusal.
+		// No retry loop, no stuck cursor, no gap-jump side effect: this is a
+		// single record rejected at persistence time, not a batch operation.
+		// Only a record the STORE could not take holds its cursor.
+		return e.reject(metrics.ReasonDraining,
+			"downlink: %s is draining — no new commands admitted (move-drain design §3.2)", p.Path)
 	}
 	res, err := e.persistTSAttributed(class, p, topic, payload, ts, attribution)
 	if err == nil {

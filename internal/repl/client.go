@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -818,17 +819,41 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 				"first_ts", gap.FirstTS, "last_ts", gap.LastTS, "approx", gap.Approx)
 			m.GapReceived("commands")
 		}
+		// A record this node REFUSED is skipped; a record it could not STORE
+		// holds the cursor at its offset, so the parent offers it again next
+		// poll.
+		//
+		// The two are the same error return and opposite obligations. A
+		// refusal (draining, grammar — every one an engine.RejectError) is
+		// this node's own decision and will be made identically forever, so
+		// re-reading it would stall the lane for nothing. A store failure —
+		// a full disk, an I/O error, a record larger than this node's
+		// max_record_bytes — says nothing about the record: acking past it
+		// drops a command that survived a whole parent outage durably, with
+		// one log line, and leaves its issuer watching a target that will
+		// never answer. Definitions on the same response always had this
+		// treatment; commands did not.
+		ackTo := next
 		for _, r := range recs {
 			if _, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
 				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
 			}); err != nil {
-				c.log.Error("downlink ingest", "topic", r.Topic, "err", err)
+				var refused *engine.RejectError
+				if errors.As(err, &refused) {
+					c.log.Error("downlink command refused by this node — skipping past it",
+						"topic", r.Topic, "reason", refused.Reason, "err", err)
+					continue
+				}
+				c.log.Error("downlink command not stored — holding the cursor so the parent offers it again",
+					"topic", r.Topic, "parent_offset", r.ParentOffset, "err", err)
+				ackTo = r.ParentOffset
+				break
 			}
 		}
 		progressed := applyDefinitions(c, eng, m, res)
-		if next > after {
-			eng.Store().CursorAck(uns.DownlinkCursor(c.parentPub), downlinkStream, next)
+		if ackTo > after {
+			eng.Store().CursorAck(uns.DownlinkCursor(c.parentPub), downlinkStream, ackTo)
 			progressed = true
 		}
 		if !progressed {
