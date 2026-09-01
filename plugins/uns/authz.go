@@ -711,6 +711,9 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		return false
 
 	case ActSub:
+		if isReservedFilter(topic) {
+			return false
+		}
 		if isTimeSyncFilter(topic) {
 			// Time-sync design §2.2/§4: every authenticated machine session
 			// may subscribe colca/v1/_TimeSync/+, independent of its zone
@@ -770,6 +773,27 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 	}
 	return false
 }
+
+// isReservedFilter reports whether a subscribe filter reaches into MQTT's
+// reserved "$" space. Every such filter is refused at the door, whatever the
+// subscriber's grants.
+//
+// "$share/<group>/<filter>" is not a topic — it is an ALIAS for <filter>, and
+// the broker hands this decision the raw string before it strips the prefix.
+// Classifying that string reads "$share" as the first segment, which is not
+// "colca", which used to mean "plain-broker traffic, outside grant checking":
+// "$share/g/colca/#" therefore granted every record on the node to a subscriber
+// scoped to one element. Teaching the classifier to strip the alias would fix
+// that one spelling and leave the shape — a second way to spell a filter,
+// judged by a second code path — which is what let it happen.
+//
+// So the rule is one rule: colca publishes nothing under "$", and nothing may
+// subscribe there. That also refuses "$SYS/#" (broker internals, never
+// authorized by any grant) and shared subscriptions themselves, which a node
+// could not honour anyway: mochi never replays retained messages to a shared
+// subscription, and "current state arrives on SUBSCRIBE" is the contract live
+// values stand on.
+func isReservedFilter(filter string) bool { return strings.HasPrefix(filter, "$") }
 
 // isTimeSyncFilter reports whether a subscribe filter names the _TimeSync
 // contract exactly at segment 2 (time-sync design §2.2): "colca/v1/_TimeSync",

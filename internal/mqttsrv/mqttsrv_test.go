@@ -721,6 +721,82 @@ func TestSubscribeACLScopes(t *testing.T) {
 	}
 }
 
+// A shared subscription is an ALIAS the broker resolves after the ACL hook
+// has already judged the raw filter, so "$share/<group>/colca/#" used to be
+// read as non-UNS traffic, granted unconditionally, and then registered as
+// "colca/#" — every record on the node, delivered to a machine scoped to its
+// own zone. This pins the whole path through the real broker: the SUBACK
+// refuses it, and nothing published outside the machine's zone arrives.
+//
+// The unaliased subscription is the denominator: the same client, the same
+// broker, a filter it IS allowed, receiving a record. Without it "nothing
+// arrived" would also pass with delivery broken entirely.
+func TestSharedSubscriptionCannotSmuggleAFilterPastTheACL(t *testing.T) {
+	w := newWorld(t)
+	// Two clients for one machine: the smuggler's callbacks must not also see
+	// the traffic the legitimate subscription earns, or "nothing smuggled"
+	// would be indistinguishable from paho fanning one delivery out to every
+	// matching local route.
+	smuggler := connect(t, w.srv.Addr(), "m1-share", w.m1)
+	zoned := connect(t, w.srv.Addr(), "m1-zone", w.m1)
+
+	// paho rewrites a "$share/<group>/" filter to the aliased one before it
+	// records the SUBACK result, so the result map is keyed by whatever it
+	// ended up asking for. Each Subscribe here carries exactly one filter, so
+	// read the single entry rather than guessing the key.
+	suback := func(c paho.Client, filter string, sink func(paho.Client, paho.Message)) byte {
+		t.Helper()
+		tok := c.Subscribe(filter, 1, sink)
+		if !tok.WaitTimeout(5 * time.Second) {
+			t.Fatalf("subscribe %q timed out", filter)
+		}
+		if err := tok.Error(); err != nil {
+			t.Fatalf("subscribe %q: %v", filter, err)
+		}
+		st, ok := tok.(*paho.SubscribeToken)
+		if !ok {
+			t.Fatalf("subscribe %q returned %T, want *paho.SubscribeToken", filter, tok)
+		}
+		result := st.Result()
+		if len(result) != 1 {
+			t.Fatalf("subscribe %q returned %d results, want 1: %v", filter, len(result), result)
+		}
+		for _, qos := range result {
+			return qos
+		}
+		return 0
+	}
+
+	var smuggled, own atomic.Int64
+	countSmuggled := func(_ paho.Client, m paho.Message) {
+		t.Errorf("a refused subscription delivered %q", m.Topic())
+		smuggled.Add(1)
+	}
+	if got := suback(smuggler, "$share/g/colca/#", countSmuggled); got != 0x80 {
+		t.Fatalf("$share/g/colca/# granted QoS 0x%x, want 0x80 — the share alias reached the topic index", got)
+	}
+	if got := suback(smuggler, "$SYS/#", countSmuggled); got != 0x80 {
+		t.Fatalf("$SYS/# granted QoS 0x%x, want 0x80", got)
+	}
+	if got := suback(zoned, "colca/v1/+/+/m1/#", func(paho.Client, paho.Message) { own.Add(1) }); got == 0x80 {
+		t.Fatal("the machine's own zone was refused — the denominator is broken, not the share rule")
+	}
+
+	w.srv.DeliverLocal("colca/v1/_Metric/n1/sibling/temp", []byte(`{"v":1}`), true)
+	w.srv.DeliverLocal("colca/v1/_Metric/n1/m1/temp", []byte(`{"v":2}`), true)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for own.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the in-zone record never arrived; nothing about the share rule is proven")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := smuggled.Load(); got != 0 {
+		t.Fatalf("a refused subscription delivered %d messages", got)
+	}
+}
+
 func TestSubscriptionQuotaAllowsReplacementButRejectsGrowth(t *testing.T) {
 	w := newWorldWithConfig(t, func(cfg *config.Config) {
 		cfg.MQTTLimits.MaxSubscriptionsPerClient = 2

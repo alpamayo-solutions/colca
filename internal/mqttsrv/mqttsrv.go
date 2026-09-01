@@ -569,6 +569,13 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	// this is 0 — unlimited — which is how a 100 MiB publish could reach
 	// Pebble at all.
 	s.Options.Capabilities.MaximumPacketSize = uint32(maxRecordBytes + 64*1024)
+	// Shared subscriptions are refused at the ACL door (uns.Authorize's
+	// reserved-"$" rule), so CONNACK must say so: a client told they are
+	// available would otherwise learn the truth only from a SUBACK failure.
+	// This field is advertisement ONLY — mochi v2.7.9 never consults it in
+	// processSubscribe — so it documents the door's decision rather than
+	// making it. The door stays the enforcement point.
+	s.Options.Capabilities.SharedSubAvailable = 0
 	hook := &colcaHook{eng: eng, reg: reg, ver: ver, humans: newHumanSessions(),
 		cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s}
 	if err := s.AddHook(hook, nil); err != nil {

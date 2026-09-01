@@ -771,3 +771,48 @@ func TestAGrantNamingAnUnheldElementIsInert(t *testing.T) {
 		t.Fatal("a grant naming an element this node has never heard of granted something")
 	}
 }
+
+// A subscription filter reaching into MQTT's reserved "$" space is refused at
+// the door, for machines and humans alike and whatever their grants.
+//
+// "$share/<group>/<filter>" is an ALIAS the broker resolves AFTER this
+// decision runs, so the filter this sees is the raw string: "$share" as a
+// first segment used to read as plain-broker traffic and grant the aliased
+// filter unconditionally, handing every record on the node to a subscriber
+// scoped to one element. The unaliased rows are the denominator — the same
+// entries and the same filters without the prefix, judged normally — so a
+// refusal above is the "$" rule and not a grant these entries never had.
+func TestAuthorizeSubRefusesTheReservedDollarSpace(t *testing.T) {
+	zoned := entry("werk1/linie3")
+	readAll := entry("", "read:#")
+	human, err := TokenEntry("anna", []string{readAt("werk1/linie3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		e      *Entry
+		filter string
+		want   bool
+	}{
+		{"machine: shared sub over everything", zoned, "$share/g/colca/#", false},
+		{"machine: shared sub, uppercase alias", zoned, "$SHARE/g/colca/v1/_Metric/+/#", false},
+		{"machine: shared sub over its OWN zone", zoned, "$share/g/colca/v1/+/+/werk1/linie3/#", false},
+		{"machine: broker internals", zoned, "$SYS/#", false},
+		{"machine: shared sub with read:# is still refused", readAll, "$share/g/colca/#", false},
+		{"machine: shared sub naming the time-sync beacon", zoned, "$share/g/colca/v1/_TimeSync/+", false},
+		{"human: shared sub over everything", human, "$share/g/colca/#", false},
+		{"human: shared sub over its own zone", human, "$share/g/colca/v1/+/+/werk1/linie3/#", false},
+
+		{"machine: everything, unaliased, is denied by zone", zoned, "colca/#", false},
+		{"machine: own zone, unaliased, is granted", zoned, "colca/v1/+/+/werk1/linie3/#", true},
+		{"machine: everything, unaliased, with read:#", readAll, "colca/#", true},
+		{"machine: the beacon itself, unaliased, is granted", zoned, "colca/v1/_TimeSync/+", true},
+		{"human: own zone, unaliased, is granted", human, "colca/v1/+/+/werk1/linie3/#", true},
+	}
+	for _, c := range cases {
+		if got := Authorize(ns, c.e, ActSub, c.filter); got != c.want {
+			t.Errorf("%s: Authorize(Sub, %q) = %v, want %v", c.name, c.filter, got, c.want)
+		}
+	}
+}
