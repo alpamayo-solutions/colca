@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -194,29 +195,67 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, cached)
 }
 
+// deadlineBody bounds a streamed response body that the caller, not this
+// function, reads. The deadline cannot be set on the request: it depends on
+// how many bytes the answer carries, which is only known once the parent's
+// headers arrive. Closing the body stops the clock and releases the request.
+type deadlineBody struct {
+	io.ReadCloser
+	timer  *time.Timer
+	cancel context.CancelFunc
+}
+
+func (b *deadlineBody) Close() error {
+	b.timer.Stop()
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
+
 // BlobGet asks the parent for a blob, letting it recurse rootward on a miss.
+//
+// The returned body carries its own deadline, derived from the size the
+// parent announced (see transferDeadline): a 32 MiB blob on an edge uplink
+// takes minutes, and a fixed cap either aborts it forever or leaves a stalled
+// pull hanging inside a request handler forever. The caller MUST Close it,
+// which every caller does through a defer.
 func (c *Client) BlobGet(sha string, hops int) (io.ReadCloser, int64, error) {
-	req, err := http.NewRequest(http.MethodGet, c.base+"/blobs/"+sha, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/blobs/"+sha, nil)
 	if err != nil {
+		cancel()
 		return nil, 0, err
 	}
 	req.Header.Set(blobHopsHeader, strconv.Itoa(hops))
+	// Until the headers are in, the exchange is bounded by time alone: a
+	// parent that never answers must not hold this open.
+	headers := time.AfterFunc(transferGrace, cancel)
 	resp, err := c.http.Do(req)
 	if err != nil {
+		headers.Stop()
+		cancel()
 		return nil, 0, err
 	}
+	headers.Stop()
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
+		cancel()
 		return nil, 0, fmt.Errorf("blob get %s: %s", sha[:12], resp.Status)
 	}
-	return resp.Body, resp.ContentLength, nil
+	return &deadlineBody{
+		ReadCloser: resp.Body,
+		timer:      time.AfterFunc(transferDeadline(resp.ContentLength), cancel),
+		cancel:     cancel,
+	}, resp.ContentLength, nil
 }
 
 // BlobHas asks the parent whether it already holds sha. A cheap question that
 // keeps a push from re-sending what the parent has — including everything it
 // received from a sibling, since content addressing makes those the same blob.
 func (c *Client) BlobHas(sha string) (bool, error) {
-	req, err := http.NewRequest(http.MethodHead, c.base+"/blobs/"+sha, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), transferGrace)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, c.base+"/blobs/"+sha, nil)
 	if err != nil {
 		return false, err
 	}
@@ -273,7 +312,9 @@ func blobRejected(err error) bool {
 // resumption: the configured cap is what makes whole-file transfer with retry
 // sufficient, which is why no such protocol exists here.
 func (c *Client) BlobPut(sha string, r io.Reader, size int64) error {
-	req, err := http.NewRequest(http.MethodPut, c.base+"/blobs/"+sha, r)
+	ctx, cancel := context.WithTimeout(context.Background(), transferDeadline(size))
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+"/blobs/"+sha, r)
 	if err != nil {
 		return err
 	}

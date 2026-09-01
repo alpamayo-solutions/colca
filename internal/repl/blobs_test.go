@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -442,6 +443,50 @@ func TestPullThroughStopsAtTheHopLimit(t *testing.T) {
 	}
 	if _, _, err := leaf.client.BlobGet(sha, 1); err == nil {
 		t.Fatal("a one-hop budget must not reach the grandparent")
+	}
+}
+
+// A transfer is bounded by what it CARRIES, not by one fixed cap.
+//
+// The shared 30s http.Client.Timeout covered the whole exchange, body
+// included, so a blob needed size/30s bytes per second to finish at all: at
+// the default 32 MiB cap, better than ~9 Mbit/s sustained. On a real edge
+// uplink every PUT aborted mid-body, was not marked rejected (a transport
+// failure says nothing about the blob), and was retried on the next uplink
+// pass — a 30s upload burst every 30s forever, while every ancestor answered
+// 409 blob_pending and the resource never resolved.
+func TestBlobTransfersAreBoundedBySizeNotByAFixedCap(t *testing.T) {
+	_, child := newReplPair(t)
+
+	if child.http.Timeout != 0 {
+		t.Fatalf("the repl client caps the whole exchange at %s — a blob bigger than that cap times the "+
+			"link speed can never be transferred, at any retry count", child.http.Timeout)
+	}
+	// The largest blob the default config accepts, on a link this product
+	// runs on. Nothing makes those two numbers meet unless the deadline is
+	// derived from the size.
+	const maxBlob = 32 << 20    // the default max_blob_bytes
+	const slowLinkBPS = 1 << 17 // 1 Mbit/s
+	need := time.Duration(maxBlob/slowLinkBPS) * time.Second
+	if got := transferDeadline(maxBlob); got < need {
+		t.Fatalf("a %d-byte blob gets %s but needs %s at %d bit/s — it can never finish on that link",
+			maxBlob, got, need, slowLinkBPS*8)
+	}
+	// The other direction: a small request must not be allowed to hang for
+	// minutes just because a large one may.
+	if got := transferDeadline(2048); got > 2*transferGrace {
+		t.Fatalf("a 2KiB request gets %s — a stalled poll would hold its lane far past the point of usefulness", got)
+	}
+	// Getting a CONNECTION stays bounded by time: that cost does not depend
+	// on how many bytes follow it, and a parent that accepts a connection and
+	// then says nothing must not hold a transfer open forever.
+	tr, ok := child.http.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport is %T, so the connection bounds below cannot be checked", child.http.Transport)
+	}
+	if tr.TLSHandshakeTimeout == 0 || tr.DialContext == nil {
+		t.Fatal("dial and TLS handshake are unbounded: with no whole-exchange timeout either, " +
+			"a parent that never answers holds every transfer to it open forever")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -49,7 +50,32 @@ const (
 	uplinkIdle   = 150 * time.Millisecond
 	downlinkWait = 20 * time.Second
 	retryAfter   = 500 * time.Millisecond
+
+	// A request is bounded by what it CARRIES. transferGrace covers the round
+	// trip itself — connect, serve, answer — and minTransferBPS is the
+	// slowest link this still has to work on, so a request's deadline grows
+	// with its bytes.
+	//
+	// One fixed cap could not do this. The shared 30s http.Client.Timeout
+	// covered the whole exchange including the body, so a blob needed more
+	// than size/30s bytes per second to finish: at the default 32 MiB cap,
+	// better than ~9 Mbit/s sustained, which no edge uplink is. Every PUT
+	// aborted mid-body, was not marked rejected (a transport failure says
+	// nothing about the blob), and was retried on the next uplink pass — a
+	// 30s upload burst every 30s forever, while every ancestor answered 409
+	// blob_pending. Pull-through failed the same way, with a digest mismatch
+	// on the truncated body.
+	transferGrace  = 30 * time.Second
+	minTransferBPS = 32 * 1024 // 256 kbit/s
 )
+
+// transferDeadline is how long a request carrying size bytes may take.
+func transferDeadline(size int64) time.Duration {
+	if size <= 0 {
+		return transferGrace
+	}
+	return transferGrace + time.Duration(size/minTransferBPS)*time.Second
+}
 
 type Client struct {
 	base string
@@ -97,10 +123,22 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 	if len(maxRecordBytes) > 0 {
 		limits.MaxRecordBytes = config.ByteSize(maxRecordBytes[0])
 	}
+	// No client-wide Timeout: it covers the whole exchange, body included, so
+	// one number would have to bound both a 200-byte poll and a 32 MiB blob.
+	// The 30s it used to be made any blob larger than roughly link_bps×30/8
+	// impossible to transfer at all — see transferDeadline. What IS fixed is
+	// getting a connection, which does not depend on how much crosses it.
+	transport := &http.Transport{
+		TLSClientConfig:       tlsCfg,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
 	return &Client{
 		base:             baseURL,
 		parentPub:        parentPubHex,
-		http:             &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: 30 * time.Second},
+		http:             &http.Client{Transport: transport},
 		log:              slog.Default().With("comp", "repl-client"),
 		maxReplicateBody: replicateBodyLimit(&config.Config{Limits: limits}),
 		links:            newLinkState(),
@@ -132,6 +170,8 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 	if int64(len(body)) > c.maxReplicateBody {
 		return 0, 0, fmt.Errorf("replicate: request is %d bytes, maximum is %d", len(body), c.maxReplicateBody)
 	}
+	ctx, cancel := context.WithTimeout(ctx, transferDeadline(int64(len(body))))
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/replicate", bytes.NewReader(body))
 	if err != nil {
 		return 0, 0, err
@@ -279,13 +319,15 @@ func (c *Client) downlink(ctx context.Context, after, defAfter uint64, max int, 
 }
 
 func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Duration) (downResult, error) {
-	hc := *c.http
-	hc.Timeout = timeout + 10*time.Second
+	// The long poll's own wait plus a round trip: this request carries almost
+	// nothing, so its bound is time, not size.
+	ctx, cancel := context.WithTimeout(ctx, timeout+transferGrace)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return downResult{}, err
 	}
-	resp, err := hc.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return downResult{}, err
 	}
