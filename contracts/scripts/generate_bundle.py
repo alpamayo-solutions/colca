@@ -103,6 +103,8 @@ ALLOWED_KEYWORDS = {
 # than extensible top-level records. Unknown keys must not provide a side door
 # for a cleartext password or an outcome that consumers interpret differently.
 STRICT_NESTED_DATACLASSES = {
+    "HealthMetricDeclaration",
+    "NetworkInterface",
     "SealedSecretEnvelope",
     "NotificationChannelConfig",
     "NotificationChannelOutcome",

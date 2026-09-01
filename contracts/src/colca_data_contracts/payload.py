@@ -37,6 +37,28 @@ class ServiceType(BaseStrEnum):
     UNKNOWN = "unknown"
 
 
+class HealthMetricVisualization(BaseStrEnum):
+    """Compact presentation a service prefers for one health metric."""
+
+    GAUGE = "gauge"
+    TIMELINE = "timeline"
+    VALUE = "value"
+
+
+class NetworkInterfaceType(BaseStrEnum):
+    """Portable interface categories; names remain the node's own names."""
+
+    ETHERNET = "ethernet"
+    WIFI = "wifi"
+    CELLULAR = "cellular"
+    LOOPBACK = "loopback"
+    BRIDGE = "bridge"
+    VPN = "vpn"
+    OVERLAY = "overlay"
+    VIRTUAL = "virtual"
+    OTHER = "other"
+
+
 #: Value types a Colca ``_Signal`` can carry: franzmq's ``DataType`` plus
 #: ``json``.
 #:
@@ -114,7 +136,8 @@ class ActorKind(BaseStrEnum):
 class CustomEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, (
-            ServiceType, ConstantDataType, AuditSource, AuditAction, AuditOutcome, ActorKind,
+            ServiceType, HealthMetricVisualization, NetworkInterfaceType,
+            ConstantDataType, AuditSource, AuditAction, AuditOutcome, ActorKind,
         )):
             return str(obj)
         if isinstance(obj, datetime.datetime):
@@ -155,6 +178,40 @@ class Metric(BaseMetric):
 
 
 @dataclass
+class HealthMetricDeclaration:
+    """One bounded, self-described Prometheus health signal.
+
+    ``metric`` names the family. ``query`` may refine it with aggregation or a
+    rate expression and may use only ``{service_name}`` and ``{node_id}``
+    placeholders. The API renders those values and executes the query; raw
+    PromQL never crosses into the browser.
+    """
+
+    key: str
+    name: str
+    metric: str
+    description: str = ""
+    query: str = ""
+    visualization: HealthMetricVisualization = HealthMetricVisualization.TIMELINE
+    unit: str = ""
+    precision: Optional[int] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    thresholds: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class NetworkInterface:
+    """Read-only network inventory observed and authored by one Colca node."""
+
+    name: str
+    interface_type: NetworkInterfaceType
+    addresses: List[str] = field(default_factory=list)
+    mac_address: str = ""
+    observed_at: int = 0
+
+
+@dataclass
 class Node(Payload):
     """A Colca node authored by the node it describes.
 
@@ -171,6 +228,8 @@ class Node(Payload):
     display_name: str = ""
     description: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
+    health_metrics: List[HealthMetricDeclaration] = field(default_factory=list)
+    network_interfaces: List[NetworkInterface] = field(default_factory=list)
 
 
 @dataclass
@@ -188,6 +247,7 @@ class ServiceDetails(Payload):
     is_active: bool = True
     metadata: Dict[str, Any] = field(default_factory=dict)
     architecture_metadata: Dict[str, Any] = field(default_factory=dict)
+    health_metrics: List[HealthMetricDeclaration] = field(default_factory=list)
 
 
 @dataclass
