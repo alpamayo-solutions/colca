@@ -540,6 +540,8 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	// one listener today but is cloned too so "one Config per listener"
 	// stays an invariant, not something that happens to hold.
 	s := mqtt.New(&mqtt.Options{InlineClient: true})
+	// The library's own logging, bounded and named — see mochiLogHandler.
+	s.Log = slog.New(newMochiLogHandler(slog.Default().Handler()))
 	mqttLimits := cfg.MQTTLimits
 	s.Options.Capabilities.MaximumClients = mqttLimits.EffectiveMaxClients()
 	s.Options.Capabilities.ReceiveMaximum = mqttLimits.EffectiveReceiveMaximum()
