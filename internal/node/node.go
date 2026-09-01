@@ -228,18 +228,31 @@ func Start(cfg *config.Config) (*Node, error) {
 	// it (a display name, a description): only the position is this hook's
 	// to set, and it writes only when that changed. At the root the ancestry
 	// is empty and the node is bound to nothing above itself.
-	n.Engine.SetOnPosition(func(a uns.Ancestry) {
+	var nodeRecordMu sync.Mutex
+	var positionMu sync.RWMutex
+	var lastPosition uns.Ancestry
+	positionKnown := false
+	authorNodeRecord := func(a uns.Ancestry) {
+		nodeRecordMu.Lock()
+		defer nodeRecordMu.Unlock()
 		root := ""
 		if len(a) > 0 {
 			root = a[len(a)-1].Element
 		}
 		topic := "colca/v1/_Node/" + cfg.ULID + "/_colca/nodes/" + cfg.ULID
 		entity := map[string]any{}
+		interfaces := networkInventory(time.Now())
+		metrics := nodeHealthMetrics()
 		if raw, ok := n.Engine.EntityStore().KVGet(topic); ok && json.Unmarshal(raw, &entity) == nil {
-			if held, _ := entity["root_system_element_id"].(string); held == root {
-				return
+			if held, _ := entity["root_system_element_id"].(string); held == root &&
+				sameNetworkInventory(entity["network_interfaces"], interfaces) {
+				if heldMetrics, ok := entity["health_metrics"].([]any); ok && len(heldMetrics) > 0 {
+					return
+				}
 			}
 		}
+		entity["health_metrics"] = metrics
+		entity["network_interfaces"] = interfaces
 		entity["id"] = cfg.ULID
 		if name, _ := entity["name"].(string); name == "" {
 			entity["name"] = cfg.NodeName()
@@ -255,7 +268,37 @@ func Start(cfg *config.Config) (*Node, error) {
 		if code, msg, _ := domain.Execute("_CmdConfigure", "entity/upsert", payload); code != 200 {
 			log.Error("node record not authored", "code", code, "msg", msg)
 		}
+	}
+	n.Engine.SetOnPosition(func(a uns.Ancestry) {
+		positionMu.Lock()
+		lastPosition = append(uns.Ancestry(nil), a...)
+		positionKnown = true
+		positionMu.Unlock()
+		authorNodeRecord(a)
 	})
+	// Interfaces can change without the node moving. Refresh periodically, but
+	// author only when the structural inventory changed; observed_at alone
+	// never creates stream traffic.
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-n.stop:
+				return
+			case <-ticker.C:
+				positionMu.RLock()
+				known := positionKnown
+				position := append(uns.Ancestry(nil), lastPosition...)
+				positionMu.RUnlock()
+				if known {
+					authorNodeRecord(position)
+				}
+			}
+		}
+	}()
 	// The registry resolves placements through the engine's element index
 	// (id-grants design §4). Wired here rather than at construction because the
 	// namespace is a projection of records the engine holds, and the registry

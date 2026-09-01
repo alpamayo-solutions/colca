@@ -28,17 +28,18 @@ import (
 )
 
 type serviceDetails struct {
-	ID                   string         `json:"id"`
-	Name                 string         `json:"name"`
-	DisplayName          string         `json:"display_name"`
-	Description          string         `json:"description"`
-	ServiceType          string         `json:"service_type"`
-	ColcaNodeID         string         `json:"colca_node_id"`
-	SystemElementID      string         `json:"system_element_id,omitempty"`
-	Hierarchy            []string       `json:"hierarchy"`
-	IsActive             bool           `json:"is_active"`
-	Metadata             map[string]any `json:"metadata"`
-	ArchitectureMetadata map[string]any `json:"architecture_metadata"`
+	ID                   string           `json:"id"`
+	Name                 string           `json:"name"`
+	DisplayName          string           `json:"display_name"`
+	Description          string           `json:"description"`
+	ServiceType          string           `json:"service_type"`
+	ColcaNodeID         string           `json:"colca_node_id"`
+	SystemElementID      string           `json:"system_element_id,omitempty"`
+	Hierarchy            []string         `json:"hierarchy"`
+	IsActive             bool             `json:"is_active"`
+	Metadata             map[string]any   `json:"metadata"`
+	ArchitectureMetadata map[string]any   `json:"architecture_metadata"`
+	HealthMetrics        []map[string]any `json:"health_metrics"`
 }
 
 // registration is one service this process speaks for: where it declares it is
