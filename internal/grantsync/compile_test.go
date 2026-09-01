@@ -148,3 +148,48 @@ func TestAGrantThatWouldNotParseIsNeverReturned(t *testing.T) {
 		t.Fatalf("problems: %v", problems)
 	}
 }
+
+// A resource name that is a wildcard rather than an identity WIDENS instead of
+// failing: FormatGrant reads "#" (and "") as the whole namespace, so a
+// permission on such a resource renders as "read:#" — the entire tree — and
+// the downstream ParseGrant re-check accepts it, because by then the two are
+// the same string. The name is therefore judged as an element id while it is
+// still one.
+//
+// The last row is the denominator: an ordinary id through the identical call
+// still compiles, so a refusal above is this rule and not compilation failing
+// outright.
+func TestAResourceNameThatWidensTheGrantIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		element string
+		want    []string
+	}{
+		{"the whole-namespace wildcard", "#", nil},
+		{"a single-level wildcard", "+", nil},
+		{"no name at all", "", nil},
+		{"an ordinary element id", "01HM6", []string{"cmd:01HM6/#:configure", "read:01HM6/#"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, problems := CompileGrants([]Permission{{
+				Name: "ops@" + tc.element, Groups: []string{"ops"},
+				Elements: []string{tc.element}, Scopes: []string{"read", "configure"},
+			}}, nil)
+			if tc.want == nil {
+				if len(got) != 0 {
+					t.Fatalf("resource %q compiled to %v", tc.element, got)
+				}
+				if len(problems) != 1 {
+					t.Fatalf("resource %q reported %v, want exactly one problem", tc.element, problems)
+				}
+				return
+			}
+			if len(problems) != 0 {
+				t.Fatalf("unexpected problems: %v", problems)
+			}
+			if !reflect.DeepEqual(got["ops"], tc.want) {
+				t.Fatalf("compiled %v, want %v", got["ops"], tc.want)
+			}
+		})
+	}
+}

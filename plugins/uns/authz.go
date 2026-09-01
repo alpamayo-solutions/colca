@@ -226,7 +226,7 @@ func (e *Entry) Validate() error {
 		return fmt.Errorf("entry %s: a %s must be placed at a system element", e.ULID, e.Kind)
 	}
 	if e.Element != "" {
-		if err := validElementID(e.Element); err != nil {
+		if err := ValidElementID(e.Element); err != nil {
 			return fmt.Errorf("entry %s: %w", e.ULID, err)
 		}
 	}
@@ -252,7 +252,7 @@ func (e *Entry) Validate() error {
 	return nil
 }
 
-// validElementID rejects anything that is not an identity. An element id names
+// ValidElementID rejects anything that is not an identity. An element id names
 // a thing, never a place: a value carrying "/" is somebody writing a path here,
 // which is exactly the mistake this design removes, and wildcards would make an
 // identity match more than one element.
@@ -260,7 +260,14 @@ func (e *Entry) Validate() error {
 // ":" is out too, because a grant is "verb:element:classes" — an id carrying a
 // colon would split into a different grant than the one that was authored, and
 // silently.
-func validElementID(id string) error {
+//
+// Exported because the rule has to hold at every door that AUTHORS an element
+// id, not only at the ones that read one back: an element written with id "#"
+// is registered by grantsync as an authz resource named "#", and granting a
+// group anything on it renders as "read:#" — the whole tree, not the element.
+// Everything that mints or carries an element id checks here rather than
+// restating the character rule.
+func ValidElementID(id string) error {
 	if strings.ContainsAny(id, "/+#:") {
 		return fmt.Errorf("element %q: an element is named by identity, not by path", id)
 	}
@@ -562,7 +569,7 @@ func parseZone(grant, z string) (string, error) {
 	if z == "" {
 		return "", fmt.Errorf("grant %q: empty zone", grant)
 	}
-	if err := validElementID(z); err != nil {
+	if err := ValidElementID(z); err != nil {
 		return "", fmt.Errorf("grant %q: a grant names one system element, not a path (%w)", grant, err)
 	}
 	return z, nil

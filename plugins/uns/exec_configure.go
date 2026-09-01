@@ -1328,6 +1328,12 @@ func (c *ConfigExec) elementUpsert(payload []byte) (int, string, string, []State
 			return 422, fmt.Sprintf("element/upsert: entry %d has no element id — a position "+
 				"nothing can name is not addressable", i), "invalid", nil
 		}
+		// The id becomes a grant zone the moment grantsync sees this element,
+		// so an id that is not an identity is not a naming quibble: "#" renders
+		// as "read:#", the whole tree, on any grant given against this element.
+		if err := ValidElementID(incoming.ID); err != nil {
+			return 422, fmt.Sprintf("element/upsert: entry %d: %v", i, err), "invalid", nil
+		}
 		topic := c.elementTopic(ref.Path)
 		if held, ok := claimed[topic]; ok && held != incoming.ID {
 			return 409, fmt.Sprintf("element/upsert: %s is already element %s — two elements "+

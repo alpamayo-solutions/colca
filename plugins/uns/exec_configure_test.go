@@ -1494,6 +1494,45 @@ func TestConstantUpsertRefusesAPathOwnedByAnotherConstant(t *testing.T) {
 	}
 }
 
+// An element id becomes a grant zone the moment grantsync registers the
+// element as an authz resource, and FormatGrant reads "#" as the whole
+// namespace — so an element authored with id "#" turns any grant given against
+// it into "read:#" / "cmd:#:configure", the entire tree. element/upsert only
+// checked the id was non-empty.
+//
+// The last row is the denominator: an ordinary id through the identical call
+// still writes, so a refusal above is this rule and not upsert refusing
+// everything.
+func TestElementUpsertRefusesAnIdThatIsNotAnIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		id       string
+		wantCode int
+	}{
+		{"the whole-namespace wildcard", "#", 422},
+		{"a single-level wildcard", "+", 422},
+		{"a path", "site1/spare", 422},
+		{"a grant separator", "site1:spare", 422},
+		{"an ordinary ulid", "01HSPARE", 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStore("n-edge1")
+			c := NewConfigExec(f, nil, nil, nil, nil, nil)
+
+			code, msg, _ := c.Execute("_CmdConfigure", "element/upsert",
+				elementBody(t, element("site1/spare", tc.id, "Spare")))
+
+			if code != tc.wantCode {
+				t.Fatalf("element id %q = %d %q, want %d", tc.id, code, msg, tc.wantCode)
+			}
+			_, written := f.KVGet("colca/v1/_SystemElement/n-edge1/site1/spare")
+			if written != (tc.wantCode == 200) {
+				t.Fatalf("element id %q: written = %v, want %v", tc.id, written, tc.wantCode == 200)
+			}
+		})
+	}
+}
+
 // A position may hold one entity, and an entity may sit at one position. The
 // upsert verbs checked only the first: element/upsert, signal/upsert and
 // constant/upsert all accepted the same id at a second path, and that state is

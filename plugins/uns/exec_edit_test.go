@@ -613,6 +613,55 @@ func TestEditNodeAttachmentRejectsStaleVersionAndStartsDrain(t *testing.T) {
 	}
 }
 
+// The same rule the `_CmdConfigure` element/upsert door applies, at the
+// Edit create door: an element id becomes a grant zone once grantsync
+// registers it, and FormatGrant reads "#" as the whole namespace, so an
+// element created with that id turns every grant given against it into the
+// entire tree. The Django preflight requires a ULID, but the node must not
+// depend on a caller it does not control for this.
+//
+// The last row is the denominator: an ordinary id through the identical
+// command still creates the element.
+func TestEditCreateRefusesAnElementIdThatIsNotAnIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		id       string
+		wantCode int
+	}{
+		{"the whole-namespace wildcard", "#", 422},
+		{"a single-level wildcard", "+", 422},
+		{"a path", "site1/spare", 422},
+		{"a grant separator", "el:spare", 422},
+		{"an ordinary id", "el-spare", 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStore("n-edge1")
+			parentVersion := seedEditEntity(t, f, "_SystemElement", "line1", map[string]any{
+				"id": "el-line1", "name": "Line 1",
+			})
+			exec := NewEditExec(f, nil)
+
+			code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+				t, "op-create-"+tc.name, map[string]uint64{"system-element:el-line1": parentVersion},
+				map[string]any{
+					"type":       "create",
+					"entity":     map[string]any{"kind": "system-element", "id": tc.id},
+					"parent_id":  "el-line1",
+					"segment":    "spare",
+					"attributes": map[string]any{"name": "Spare"},
+				},
+			))
+			if code != tc.wantCode {
+				t.Fatalf("element id %q = %d %q, want %d", tc.id, code, msg, tc.wantCode)
+			}
+			_, written := f.KVGet("colca/v1/_SystemElement/n-edge1/line1/spare")
+			if written != (tc.wantCode == 200) || len(writes) != map[bool]int{true: 1, false: 0}[tc.wantCode == 200] {
+				t.Fatalf("element id %q: written = %v writes = %+v", tc.id, written, writes)
+			}
+		})
+	}
+}
+
 // An Edit delete retires positions, so it answers the same occupancy
 // question `_CmdConfigure element/delete` does: an element an identity binds to
 // may not be retired. It used to answer none — a cascading delete of a site a

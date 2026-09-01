@@ -79,6 +79,11 @@ func (w *EditExec) composeCreate(
 		}
 		path = joinPath(parent.Record.Path, segment)
 		if intent.Entity.Kind == "system-element" {
+			// An element id becomes a grant zone once grantsync registers it,
+			// so it must be an identity and not a wildcard — see ValidElementID.
+			if err := ValidElementID(intent.Entity.ID); err != nil {
+				return 422, "create: " + err.Error(), "invalid", nil
+			}
 			attributes["parent_id"] = rawJSON(intent.ParentID)
 		} else {
 			attributes["system_element_id"] = rawJSON(intent.ParentID)

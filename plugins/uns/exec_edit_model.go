@@ -134,6 +134,14 @@ type modelPlanState struct {
 // create_signal_and_bind already use for their own caller-supplied ids. The
 // model intent was the one create path that did not check.
 func (state *modelPlanState) claimID(kind, id, slotPath string) (int, string) {
+	// An element id becomes a grant zone once grantsync registers it, so a
+	// slot may not mint one that is a wildcard rather than an identity — see
+	// ValidElementID. Signal ids never reach the grant grammar.
+	if kind == "system-element" {
+		if err := ValidElementID(id); err != nil {
+			return 422, fmt.Sprintf("model: slot %q: %v", slotPath, err)
+		}
+	}
 	key := entityVersionKey(kind, id)
 	if state.takenIDs[key] {
 		return 409, fmt.Sprintf(

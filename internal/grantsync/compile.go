@@ -59,6 +59,26 @@ func CompileGrants(perms []Permission, attrs map[string][]string) (map[string][]
 		}
 
 		for _, element := range perm.Elements {
+			// A resource name is an element ID, and FormatGrant deliberately
+			// reads "#" as the whole namespace: a permission on a resource
+			// named "#" would render as "read:#" / "cmd:#:configure" and hand
+			// its groups the entire tree instead of one element. ParseGrant
+			// cannot catch that downstream — by then the two are the same
+			// string. So the name is judged as an element id, here, where it
+			// is still one.
+			// An EMPTY name widens the same way and must fail closed here too:
+			// FormatGrant reads "" as the whole namespace as well, and a
+			// resource this service could not name is not one it may grant on.
+			if element == "" {
+				problems = append(problems, fmt.Errorf(
+					"permission %s: refusing a resource with no name", perm.Name))
+				continue
+			}
+			if err := uns.ValidElementID(element); err != nil {
+				problems = append(problems, fmt.Errorf(
+					"permission %s: refusing resource %q: %w", perm.Name, element, err))
+				continue
+			}
 			var built []uns.Grant
 			if read {
 				built = append(built, uns.Grant{Verb: "read", Element: element})
