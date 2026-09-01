@@ -65,7 +65,8 @@ type recordingDoor struct {
 	server    *httptest.Server
 	mu        sync.Mutex
 	published map[string]string // service name -> topic
-	refuse    map[string]bool   // service names the node rejects on their merits
+	health    map[string][]map[string]any
+	refuse    map[string]bool // service names the node rejects on their merits
 	selfCalls []string
 }
 
@@ -73,6 +74,7 @@ func newRecordingDoor(t *testing.T, refuse ...string) *recordingDoor {
 	t.Helper()
 	door := &recordingDoor{
 		published: map[string]string{},
+		health:    map[string][]map[string]any{},
 		refuse:    map[string]bool{},
 	}
 	for _, name := range refuse {
@@ -101,12 +103,14 @@ func newRecordingDoor(t *testing.T, refuse ...string) *recordingDoor {
 			var body struct {
 				Topic   string `json:"topic"`
 				Payload *struct {
-					Name string `json:"name"`
+					Name          string           `json:"name"`
+					HealthMetrics []map[string]any `json:"health_metrics"`
 				} `json:"payload"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			if body.Payload != nil {
 				door.published[body.Payload.Name] = body.Topic
+				door.health[body.Payload.Name] = body.Payload.HealthMetrics
 			}
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -173,6 +177,9 @@ func TestEveryServiceGetsItsOwnIdentityAndItsOwnTopic(t *testing.T) {
 	}
 	if len(door.selfCalls) != 3 {
 		t.Errorf("each service resolves its OWN identity; /self calls = %v", door.selfCalls)
+	}
+	if door.health["projector"] == nil || len(door.health["projector"]) != 0 {
+		t.Errorf("an undeclared health metric list must publish as [], got %#v", door.health["projector"])
 	}
 }
 

@@ -171,6 +171,9 @@ func start(
 	if details.ArchitectureMetadata == nil {
 		details.ArchitectureMetadata = map[string]any{}
 	}
+	if details.HealthMetrics == nil {
+		details.HealthMetrics = []map[string]any{}
+	}
 
 	identity, err := self(client, baseURL, details.Name, reg.Mount, deadline)
 	if err != nil {
