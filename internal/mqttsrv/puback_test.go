@@ -3,13 +3,44 @@ package mqttsrv
 import (
 	"context"
 	"crypto/tls"
+	"net"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/eclipse/paho.golang/packets"
 	"github.com/eclipse/paho.golang/paho"
 
 	"github.com/alpamayo-solutions/colca/internal/authtest"
 )
+
+// mqtt5Conn dials the machine door and hands back a connection whose packet
+// writes are SERIALISED.
+//
+// paho.golang writes a control packet as several Write calls (fixed header,
+// then each buffer of the body) and only holds a lock around them when the
+// connection implements sync.Locker — `ClientConfig.Conn`'s own doc says so:
+// "BEWARE that most wrapped net.Conn implementations like tls.Conn are not
+// thread safe for writing." A *tls.Conn is not, and its pinger writes the
+// first PINGREQ from a separate goroutine the instant the client connects
+// (paho/pinger.go: `time.NewTimer(0) // Immediately send first pingreq`).
+//
+// Handing the raw tls.Conn over therefore let that PINGREQ land BETWEEN a
+// PUBLISH's fixed header and its body. The broker framed `33 1e` (PUBLISH,
+// remaining 30) and then read `c0 00 …` as the body, so the topic length came
+// out as 0xc000 and it answered "malformed packet: topic", dropped the
+// connection, and sent no PUBACK — the test then waited out its whole context
+// and failed with a deadline. Rare when idle (the ping goroutine usually
+// finishes first) and reproducible under load: 3 of 12 concurrent -race
+// batches before this wrapper, 0 of 14 after.
+func mqtt5Conn(t *testing.T, addr string, m *authtest.Machine) net.Conn {
+	t.Helper()
+	conn, err := tls.Dial("tcp", addr, m.TLSConfig())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	return packets.NewThreadSafeConn(conn)
+}
 
 // connect5 dials the machine door as an MQTT 5 client (paho.golang) — the
 // PUBACK reason-code surface only exists for MQTT 5 sessions at QoS >= 1
@@ -18,11 +49,7 @@ func connect5(t *testing.T, addr string, m *authtest.Machine) *paho.Client {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := tls.Dial("tcp", addr, m.TLSConfig())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	c := paho.NewClient(paho.ClientConfig{Conn: conn})
+	c := paho.NewClient(paho.ClientConfig{Conn: mqtt5Conn(t, addr, m)})
 	ca, err := c.Connect(ctx, &paho.Connect{
 		ClientID:     m.ULID + "-mqtt5",
 		Username:     m.ULID,
@@ -94,6 +121,29 @@ func TestPubackReasonCodesMQTT5(t *testing.T) {
 	// no-matching-subscribers — both success-class).
 	if got := publish5(t, c, "factory/raw/x", []byte("y")); got != 0x00 && got != 0x10 {
 		t.Fatalf("non-UNS publish must succeed, got 0x%02x", got)
+	}
+}
+
+// The predicate paho actually branches on, pinned so the wrapper cannot be
+// dropped again: packets.ControlPacket.WriteTo serialises a multi-Write packet
+// if and only if the writer is a sync.Locker, and every MQTT 5 test here
+// shares one connection with a pinger goroutine that writes on its own. Assert
+// it the same way the library asks the question — a check on the type name, or
+// on the wrapper being called, would go green against a wrapper that had
+// stopped satisfying it.
+//
+// It is deliberately not a repetition test. The corruption is a genuine race:
+// hammering it would prove the wrapper works only on the runs where the race
+// happened to be lost, which is the flaky shape this replaces.
+func TestTheMQTT5ClientConnectionSerialisesPacketWrites(t *testing.T) {
+	w := newWorld(t)
+	conn := mqtt5Conn(t, w.srv.Addr(), w.m1)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	if _, ok := conn.(sync.Locker); !ok {
+		t.Fatalf("the MQTT 5 test connection (%T) is not a sync.Locker, so paho writes a packet's "+
+			"header and body without a lock — its pinger's immediate PINGREQ then lands inside a "+
+			"PUBLISH and the broker rightly refuses a malformed packet, with no PUBACK to answer", conn)
 	}
 }
 

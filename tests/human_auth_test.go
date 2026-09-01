@@ -8,11 +8,14 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/eclipse/paho.golang/packets"
 	pahov5 "github.com/eclipse/paho.golang/paho"
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 
@@ -51,6 +54,43 @@ func human(t *testing.T, n *node.Node, scheme, sub, token string) pahomqtt.Clien
 	return c
 }
 
+// humanMQTT5Conn dials a node's human MQTT door and hands back a connection
+// whose packet writes are SERIALISED.
+//
+// paho.golang writes one control packet with several Write calls (fixed
+// header, then each buffer of the body) and holds a lock across them only when
+// the connection implements sync.Locker — `ClientConfig.Conn`'s own doc says
+// "BEWARE that most wrapped net.Conn implementations like tls.Conn are not
+// thread safe for writing". A *tls.Conn is not, and paho's pinger writes the
+// first PINGREQ from its own goroutine the instant the client connects
+// (paho/pinger.go: `time.NewTimer(0) // Immediately send first pingreq`).
+//
+// Handing the raw tls.Conn over therefore let those two bytes (0xc0 0x00) land
+// INSIDE a PUBLISH, in whichever gap the scheduler chose — one root cause with
+// two faces, both seen:
+//
+//   - between the fixed header and the body, so the topic length decoded as
+//     0xc000: the broker answered "malformed packet: topic", dropped the
+//     connection, and sent no PUBACK at all. The publish then waited out its
+//     whole context ("no PUBACK within the deadline"). This is how CI failed.
+//   - between the topic and the payload, so the payload began 0xc0: the topic
+//     was fine, the contract check reported `_CmdParam: payload is not valid
+//     JSON: invalid character 'À'` (U+00C0 — the PINGREQ opcode read as a
+//     rune) and the human got PUBACK 0x99. This is how it failed locally.
+//
+// Rare when idle — the ping goroutine usually finishes before the publish
+// starts — and reproducible under load: 2 of 12 concurrent -race batches
+// before this wrapper, 0 of 12 after.
+func humanMQTT5Conn(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	conn, err := tls.Dial("tcp", addr,
+		&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}) // #nosec G402 -- test
+	if err != nil {
+		t.Fatalf("human publisher dial: %v", err)
+	}
+	return packets.NewThreadSafeConn(conn)
+}
+
 // humanPublisher uses the synchronous MQTT-5 client for PUBACK assertions.
 // The legacy client reports acknowledgements through a background token
 // dispatcher that can starve under the race detector after the broker has
@@ -58,12 +98,7 @@ func human(t *testing.T, n *node.Node, scheme, sub, token string) pahomqtt.Clien
 // protocol exchange itself and also exposes the denial reason code.
 func humanPublisher(t *testing.T, n *node.Node, sub, token string) *pahov5.Client {
 	t.Helper()
-	conn, err := tls.Dial("tcp", n.MQTTHumanTCPAddr,
-		&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}) // #nosec G402 -- test
-	if err != nil {
-		t.Fatalf("human publisher dial: %v", err)
-	}
-	c := pahov5.NewClient(pahov5.ClientConfig{Conn: conn})
+	c := pahov5.NewClient(pahov5.ClientConfig{Conn: humanMQTT5Conn(t, n.MQTTHumanTCPAddr)})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ack, err := c.Connect(ctx, &pahov5.Connect{
@@ -141,6 +176,29 @@ func TestHumanScopedReadOnTree(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The predicate paho actually branches on, pinned so the wrapper cannot be
+// dropped again: packets.ControlPacket.WriteTo serialises a multi-Write packet
+// if and only if the writer is a sync.Locker, and every MQTT-5 human client
+// here shares its connection with a pinger goroutine that writes on its own.
+// Asked the same way the library asks it — a check on the type name, or on
+// humanMQTT5Conn having been called, would go green against a wrapper that had
+// stopped satisfying it.
+//
+// Deliberately not a repetition test. The corruption is a genuine race:
+// hammering it would prove the wrapper works only on the runs where the race
+// happened to be lost, which is the flaky shape this replaces.
+func TestTheHumanMQTT5ConnectionSerialisesPacketWrites(t *testing.T) {
+	tp := startTopo(t)
+	conn := humanMQTT5Conn(t, tp.global.MQTTHumanTCPAddr)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	if _, ok := conn.(sync.Locker); !ok {
+		t.Fatalf("the human MQTT-5 connection (%T) is not a sync.Locker, so paho writes a packet's "+
+			"header, topic and payload without a lock — its pinger's immediate PINGREQ then lands "+
+			"inside a PUBLISH, and the command is either refused as malformed or never acked", conn)
 	}
 }
 
