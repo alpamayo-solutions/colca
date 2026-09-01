@@ -206,6 +206,59 @@ func TestAnArrivingDefinitionIsAppliedAsRetainedState(t *testing.T) {
 	}
 }
 
+// After compaction has emptied the tail of the definitions stream, the poll
+// reports the stream's HEAD — not the position the child already holds.
+//
+// The stream is compacted, not pruned, so a hole in it is not a gap: what
+// remains IS the current definition set and a child reading from below the
+// hole is caught up. Answering with its own position back left it nothing to
+// ack while the poll's wake condition still said a definition was waiting, so
+// the poll returned instantly and the child re-polled at once — both nodes
+// spinning at the rate limit until someone authored a new definition.
+func TestDefinitionsPollReportsTheHeadAfterCompaction(t *testing.T) {
+	f := newParentFixture(t)
+	// A group and its retraction, both read by another child — which is what
+	// lets compaction remove the tombstone too.
+	if _, _, err := f.ps.Append("definitions", []store.Record{
+		{Topic: groupTopic, Payload: []byte(`{"id":"01HGRP-OPS","name":"Ops"}`), TS: 1,
+			KVPath: "01HGRP-OPS", KVNode: "n-parent"},
+		{Topic: groupTopic, Payload: nil, TS: 2, KVPath: "01HGRP-OPS", KVNode: "n-parent", Delete: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.ps.CursorAck(uns.DownlinkDefCursorPrefix+"n-other", "definitions", 3)
+	if _, err := f.ps.Compact("definitions"); err != nil {
+		t.Fatal(err)
+	}
+	head := f.ps.NextOffset("definitions")
+
+	defs, next, err := f.cl.DownlinkDefinitions(1, 10, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defs) != 0 {
+		t.Fatalf("definitions = %+v, want none: compaction removed the group and its tombstone", defs)
+	}
+	if next != head {
+		t.Fatalf("def_next = %d, want the head %d — with no progress to ack the child re-polls immediately, forever", next, head)
+	}
+
+	// The denominator: from that same position a definition authored AFTER
+	// the hole is still delivered, so the answer above means "caught up",
+	// not "this poll is broken".
+	mustIngestAdmin(t, f.peng, groupTopic, `{"id":"01HGRP-OPS","name":"Ops again"}`)
+	defs, next, err = f.cl.DownlinkDefinitions(head, 10, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defs) != 1 || defs[0].Topic != groupTopic {
+		t.Fatalf("definitions = %+v, want the newly authored group", defs)
+	}
+	if next != f.ps.NextOffset("definitions") {
+		t.Fatalf("def_next = %d, want the head %d", next, f.ps.NextOffset("definitions"))
+	}
+}
+
 // A child may not push onto the definitions stream, whatever contract it puts
 // in the records. TestTheUplinkNeverCarriesDefinitions pins the pusher's half
 // of that rule; this pins the door's, which is the half that has to hold

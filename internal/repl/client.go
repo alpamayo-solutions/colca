@@ -750,7 +750,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			if res.Ancestry != nil {
 				eng.SetAncestry(*res.Ancestry)
 			}
-			applyDefinitions(c, eng, m, res)
+			_ = applyDefinitions(c, eng, m, res)
 			if wasFailing, attempts, waited := c.links.Recovered("hello", time.Now()); wasFailing {
 				c.log.Info("first contact with the parent succeeded",
 					"parent", c.base, "attempts", attempts, "waited", waited.Round(time.Second))
@@ -826,22 +826,37 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 				c.log.Error("downlink ingest", "topic", r.Topic, "err", err)
 			}
 		}
-		applyDefinitions(c, eng, m, res)
+		progressed := applyDefinitions(c, eng, m, res)
 		if next > after {
 			eng.Store().CursorAck(uns.DownlinkCursor(c.parentPub), downlinkStream, next)
+			progressed = true
+		}
+		if !progressed {
+			// Neither cursor moved. Usually that is an idle long poll, which
+			// already waited out its 20s and loses nothing by waiting a little
+			// longer. The case that matters is a poll that answered
+			// IMMEDIATELY and left this node exactly where it was — a parent
+			// answering with a position we already hold, or a record this node
+			// could not apply — where polling straight back would spin at the
+			// rate limit for as long as the condition lasts.
+			select {
+			case <-stop:
+				return
+			case <-time.After(retryAfter):
+			}
 		}
 	}
 }
 
 // applyDefinitions stores what the parent handed down and advances the
-// definitions cursor.
+// definitions cursor. It reports whether the cursor moved.
 //
 // The cursor moves only after every record in the batch was applied, and a
 // record that fails leaves it where it was: a definition the node failed to
 // store must be offered again, because unlike a command there is no read side
 // to recover it from later. That is the same reason the stream is compacted
 // rather than pruned (definition-stream design §6).
-func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res downResult) {
+func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res downResult) bool {
 	for _, r := range res.Definitions {
 		if _, err := eng.IngestDownlinkDefinitionAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
@@ -850,13 +865,15 @@ func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res dow
 			c.log.Error("downlink definition not applied — leaving the cursor so it is offered again",
 				"topic", r.Topic, "err", err)
 			m.DefinitionRejected()
-			return
+			return false
 		}
 		m.DefinitionApplied()
 	}
 	if res.DefNext > eng.Store().CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream) {
 		eng.Store().CursorAck(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream, res.DefNext)
+		return true
 	}
+	return false
 }
 
 // contextFromStop derives a context that is cancelled when stop is closed, so a

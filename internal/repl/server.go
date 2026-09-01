@@ -190,6 +190,24 @@ func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter 
 			"child", childULID, "err", err)
 		return
 	}
+	if next == defAfter {
+		// Nothing survives at or after the child's position. The stream is
+		// compacted rather than pruned, so this means compaction removed
+		// every record in between — a superseded definition, or a tombstone
+		// every cursor had already passed. A compacted hole is not a gap:
+		// what remains IS the current definition set, and the honest answer
+		// is "caught up, at the head".
+		//
+		// Handing `def_after` back unchanged was not. The child had no
+		// progress to ack while the poll's own wake condition (the stream's
+		// head is past the child) still said a definition was waiting, so
+		// every poll answered instantly and the child re-polled at once —
+		// both nodes spinning at the rate limit until someone authored a new
+		// definition.
+		if head := s.eng.Store().NextOffset("definitions"); head > next {
+			next = head
+		}
+	}
 	out := make([]wireRec, 0, len(recs))
 	for _, rec := range recs {
 		out = append(out, wireRec{
