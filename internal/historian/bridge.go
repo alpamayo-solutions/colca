@@ -95,6 +95,48 @@ func (b *Bridge) Once(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
+
+	// Trust the marker only where it CAN be a position in the stream this page
+	// came from. The marker lives in Timescale and the offsets it counts live
+	// in colca, so the two can be separated: recreate colcad's data volume and
+	// offsets restart at 1 while `colca_applied_offset` still says 100000.
+	// Every record on the first page then reads as "already durable" and is
+	// dropped — up to a full page of metrics, silently — and Apply lowers the
+	// marker afterwards so later pages flow and nothing ever looks wrong again.
+	//
+	// Two things falsify "this marker is a position in this stream", and both
+	// are the same claim:
+	//
+	//   - The page starts at offset 1. A consumer holding progress N > 0 has,
+	//     by construction, already been served the stream's first record; being
+	//     served it again means this is not that stream.
+	//   - The marker is past the page's last offset. The door serves forward
+	//     from a cursor that is acked to the marker, so in every legitimate
+	//     state — fresh page, or a page re-served after a failed ack — the
+	//     page ends at or after the marker. Ending before it is impossible
+	//     within one stream.
+	//
+	// Where it is falsified the marker is not merely stale, it is about
+	// something else: drop it and apply the page. The Apply at the end of this
+	// pass rewrites it to this stream's position, so there is nothing separate
+	// to reset.
+	//
+	// The first clause is deliberately conservative: a crash between commit and
+	// ack on the stream's VERY FIRST page looks identical from offsets alone,
+	// and this reads it as a reset. That costs one redundant re-apply of that
+	// page, which the sink's ON CONFLICT DO UPDATE absorbs without so much as a
+	// row version — the marker filter has only ever been an optimisation over
+	// that idempotency (see sink.go). Resolving the ambiguity the other way
+	// costs silently lost metrics, so it is not a close call.
+	if applied > 0 && (first == 1 || applied > last) {
+		b.logger().Warn("the applied-offset marker is not a position in this stream — ignoring it",
+			"marker", applied, "page_first", first, "page_last", last,
+			"detail", "colca's data volume was recreated while Timescale kept the marker "+
+				"(or the marker outran the stream). Applying this page in full rather than "+
+				"reading it as already durable; the marker is rewritten to this stream's position.")
+		applied = 0
+	}
 
 	rows := make([]Row, 0, len(page.Records))
 	for _, record := range page.Records {
@@ -123,7 +165,6 @@ func (b *Bridge) Once(ctx context.Context) (int, error) {
 		rows = append(rows, row)
 	}
 
-	last := page.Records[len(page.Records)-1].Offset
 	if err := b.Store.Apply(ctx, rows, Consumer, last); err != nil {
 		return 0, err
 	}

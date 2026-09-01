@@ -105,12 +105,20 @@ func TestRecordsAtOrBelowTheMarkerAreNotRewritten(t *testing.T) {
 	// The replay a crash between commit and ack produces. The rows are already
 	// durable; writing them again would be harmless in the database (the unique
 	// index) but would hide a broken marker.
-	d := &fakeDoor{pages: []door.Page{page(4,
-		record(1, `{"signal_id":"s1","value":1}`),
-		record(2, `{"signal_id":"s1","value":2}`),
-		record(3, `{"signal_id":"s1","value":3}`),
+	//
+	// The page starts at offset 2, not 1, and that is the point: a page that
+	// starts at the stream's FIRST record cannot be told apart from a
+	// recreated colca volume by offsets alone, and Once resolves that
+	// ambiguity toward re-applying rather than dropping (see
+	// TestAMarkerFromABeforeTheVolumeWasRecreatedNeverDropsAPage). Every
+	// replay after the first page of a stream's life — which is every replay
+	// a running deployment sees — is this one.
+	d := &fakeDoor{pages: []door.Page{page(5,
+		record(2, `{"signal_id":"s1","value":1}`),
+		record(3, `{"signal_id":"s1","value":2}`),
+		record(4, `{"signal_id":"s1","value":3}`),
 	)}}
-	store := &fakeStore{applied: 2}
+	store := &fakeStore{applied: 3}
 	bridge := &Bridge{Door: d, Store: store}
 
 	written, err := bridge.Once(context.Background())
@@ -118,8 +126,90 @@ func TestRecordsAtOrBelowTheMarkerAreNotRewritten(t *testing.T) {
 		t.Fatalf("Once: %v", err)
 	}
 	if written != 1 {
-		t.Fatalf("wrote %d rows, want 1 (only offset 3 was new)", written)
+		t.Fatalf("wrote %d rows, want 1 (only offset 4 was new)", written)
 	}
+}
+
+// Recreating colcad's data volume restarts stream offsets at 1. Timescale
+// keeps `colca_applied_offset`, so the marker now counts a stream that no
+// longer exists — and the filter above read every record on the first page as
+// "already durable" and dropped it, up to FETCH_MAX (500) metrics, silently.
+// Apply then lowered the marker to that page's last offset, so later pages
+// flowed and nothing ever looked wrong again.
+//
+// Both halves of the rule are exercised, because a wipe can leave the marker
+// on either side of the new page's end and only one of them is obviously
+// wrong:
+//
+//   - a large marker (the audit's case: 100000 vs. a page ending at 3), and
+//   - a small marker that happens to fall INSIDE the new page's range, which
+//     no comparison against the page's end can catch.
+//
+// The last subtest is the denominator: the same shape with the marker where a
+// running stream would legitimately put it must still skip, or this test would
+// pass just as happily against a bridge that had no filter at all.
+func TestAMarkerFromABeforeTheVolumeWasRecreatedNeverDropsAPage(t *testing.T) {
+	newPage := func() door.Page {
+		return page(4,
+			record(1, `{"signal_id":"s1","value":1}`),
+			record(2, `{"signal_id":"s1","value":2}`),
+			record(3, `{"signal_id":"s1","value":3}`),
+		)
+	}
+
+	// The recreated stream after retention already pruned its first records:
+	// the page no longer starts at 1, so only the marker-past-the-page half of
+	// the rule can see it.
+	prunedPage := func() door.Page {
+		return page(10,
+			record(7, `{"signal_id":"s1","value":1}`),
+			record(8, `{"signal_id":"s1","value":2}`),
+			record(9, `{"signal_id":"s1","value":3}`),
+		)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		page   func() door.Page
+		marker int64
+		last   int64
+	}{
+		{"a marker far beyond the recreated stream", newPage, 100000, 3},
+		{"a marker that lands inside the recreated page", newPage, 2, 3},
+		{"a recreated stream whose first offsets were already pruned", prunedPage, 100000, 9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &fakeDoor{pages: []door.Page{tc.page()}}
+			store := &fakeStore{applied: tc.marker}
+			bridge := &Bridge{Door: d, Store: store}
+
+			written, err := bridge.Once(context.Background())
+			if err != nil {
+				t.Fatalf("Once: %v", err)
+			}
+			if written != 3 {
+				t.Fatalf("wrote %d rows, want 3 — a marker counting a stream that no longer "+
+					"exists dropped live metrics as already durable", written)
+			}
+			if store.applied != tc.last {
+				t.Fatalf("marker = %d, want %d (this stream's position)", store.applied, tc.last)
+			}
+		})
+	}
+
+	// Denominator: nothing about a page starting at 1 is special on its own.
+	// With the marker at 0 — a consumer that has recorded no progress — the
+	// same page writes the same three rows, so the subtests above only mean
+	// something because of what they prove about a NON-zero marker.
+	t.Run("a stream nobody has followed yet writes the same page", func(t *testing.T) {
+		d := &fakeDoor{pages: []door.Page{newPage()}}
+		store := &fakeStore{}
+		bridge := &Bridge{Door: d, Store: store}
+		written, err := bridge.Once(context.Background())
+		if err != nil || written != 3 {
+			t.Fatalf("wrote %d rows (err %v), want 3", written, err)
+		}
+	})
 }
 
 // The behaviour that differs from the cache projector, and the reason it does.
