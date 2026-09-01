@@ -131,11 +131,13 @@ var securityChangeKinds = []string{
 // cover one stream fewer than they claim to.
 var streams = store.Streams()
 
-// uplinkStreams is the subset that RISES. `definitions` is absent because they
-// descend and never rise (definition-stream design §4): a "last uplink success"
-// gauge for a stream the uplink never touches would sit at zero forever and read
-// exactly like a broken uplink.
-var uplinkStreams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations", "logs"}
+// uplinkStreams is the subset that RISES. DERIVED from the domain, for the
+// same reason `streams` is derived from the store: a copy here could not tell
+// that the set grew. `definitions` is absent because they descend and never
+// rise (definition-stream design §4): a "last uplink success" gauge for a
+// stream the uplink never touches would sit at zero forever and read exactly
+// like a broken uplink.
+var uplinkStreams = uns.UplinkStreams()
 
 // retentionStreams is the subset the retention POLICY applies to. `definitions`
 // is absent for the same reason it is absent from the pruner's own list
@@ -170,12 +172,17 @@ var gapSurfaces = []string{"fetch", "downlink"}
 type Metrics struct {
 	reg *prometheus.Registry
 
-	ingest       *prometheus.CounterVec
-	rejected     *prometheus.CounterVec
-	uplinkOK     *prometheus.GaugeVec
-	uplinkFail   *prometheus.CounterVec
-	downlinkOK   prometheus.Gauge
-	downlinkFail prometheus.Counter
+	ingest     *prometheus.CounterVec
+	rejected   *prometheus.CounterVec
+	uplinkOK   *prometheus.GaugeVec
+	uplinkFail *prometheus.CounterVec
+	// colca_uplink_refused_total: the parent ANSWERED and refused the batch
+	// (4xx), as opposed to being unreachable. A rising count here is a
+	// misconfiguration or a bug between two nodes, never a network problem,
+	// and the lane behind it is not moving.
+	uplinkRefused *prometheus.CounterVec
+	downlinkOK    prometheus.Gauge
+	downlinkFail  prometheus.Counter
 	// colca_downlink_cursor_beyond_head_total (parent-scoped-cursors design
 	// §7): this node's command position is past its parent's stream head, so
 	// it will hear nothing until that stream grows past it.
@@ -341,6 +348,7 @@ type Metrics struct {
 	rejectedBy      map[string]prometheus.Counter
 	uplinkOKBy      map[string]prometheus.Gauge
 	uplinkFailBy    map[string]prometheus.Counter
+	uplinkRefusedBy map[string]prometheus.Counter
 	aclDenyBy       map[string]prometheus.Counter
 	prunedRecordsBy map[string]prometheus.Counter
 	prunedBytesBy   map[string]prometheus.Counter
@@ -382,6 +390,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		uplinkFail: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_uplink_push_failures_total",
 			Help: "Failed uplink pushes, by stream. Resets on restart.",
+		}, []string{"stream"}),
+		uplinkRefused: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_uplink_refused_total",
+			Help: "Uplink pushes the parent ANSWERED and refused (4xx), by stream — a misconfiguration or a bug between the two nodes, not an outage. Nothing is dropped: the batch is held and retried, so this counter rising is a lane that is not moving. Resets on restart.",
 		}, []string{"stream"}),
 		downlinkOK: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_downlink_last_success_timestamp_seconds",
@@ -559,6 +571,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.ingestBy = counterChildren(m.ingest, streams)
 	m.rejectedBy = counterChildren(m.rejected, reasons)
 	m.uplinkFailBy = counterChildren(m.uplinkFail, uplinkStreams)
+	m.uplinkRefusedBy = counterChildren(m.uplinkRefused, uplinkStreams)
 	m.aclDenyBy = counterChildren(m.aclDeny, aclActions)
 	m.securityChangeBy = counterChildren(m.securityChanges, securityChangeKinds)
 	m.uplinkOKBy = make(map[string]prometheus.Gauge, len(uplinkStreams))
@@ -643,7 +656,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		return clk.SyncAgeSeconds(clk.Now())
 	})
 
-	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail,
+	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.securityChanges, m.nodePrefix,
@@ -871,6 +884,22 @@ func (m *Metrics) UplinkPushFailed(stream string) {
 		return
 	}
 	m.uplinkFail.WithLabelValues(stream).Inc()
+}
+
+// UplinkRefused counts one uplink push the parent answered and refused.
+//
+// Counted IN ADDITION to UplinkPushFailed — the push did fail, and every
+// existing view of failed pushes keeps its meaning; this family is the
+// discriminator that says the parent was reachable and said no.
+func (m *Metrics) UplinkRefused(stream string) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.uplinkRefusedBy[stream]; ok {
+		c.Inc()
+		return
+	}
+	m.uplinkRefused.WithLabelValues(stream).Inc()
 }
 
 // DownlinkFetched records a successful downlink fetch — empty fetches count:

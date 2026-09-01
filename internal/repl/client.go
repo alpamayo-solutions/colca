@@ -143,7 +143,7 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, fmt.Errorf("replicate to %s: %s", c.base, replicationStatusMeaning(resp.StatusCode))
+		return 0, 0, &replError{Route: "replicate to " + c.base, Status: resp.StatusCode, Body: readReason(resp)}
 	}
 	var out struct {
 		HWM   uint64 `json:"hwm"`
@@ -291,7 +291,7 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return downResult{}, fmt.Errorf("downlink from %s: %s", c.base, replicationStatusMeaning(resp.StatusCode))
+		return downResult{}, &replError{Route: "downlink from " + c.base, Status: resp.StatusCode, Body: readReason(resp)}
 	}
 	var out struct {
 		Records     []wireRec      `json:"records"`
@@ -613,15 +613,47 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				if stopped() {
 					return false, true // aborted by our own shutdown, not a failure
 				}
+				// A parent that ANSWERED and refused (4xx) is a different
+				// state from a parent that is unreachable, and the line has
+				// to say which — reporting a refused batch as "the parent is
+				// down" sent operators looking at the network for a
+				// misconfiguration between two nodes.
+				//
+				// THE RULE, and it is deliberate: a refused batch is HELD and
+				// retried, never skipped and never quarantined. The uplink
+				// does not decide to lose a record. Retention is the one
+				// place in this system where dropping data is decided, it is
+				// opt-in (§5.2 staleness), and it leaves a durable _StreamGap
+				// marker saying what went missing. A child that skipped
+				// ahead here would delete records with no such trace, on its
+				// own judgement, over what is usually a config difference
+				// (two nodes' max_record_bytes) that an operator can fix.
+				// The cost of holding is that the lane does not move, and
+				// that is what colca_uplink_refused_total and this ERROR line
+				// exist to make impossible to miss.
+				var refusal *replError
+				refused := errors.As(err, &refusal) && refusal.Refused()
 				if report, attempts, down := c.links.Failed("uplink:"+stream, time.Now()); report {
-					c.log.Warn("uplink is down (retrying)",
-						"stream", stream, "parent", c.base,
-						"attempts", attempts, "down_for", down.Round(time.Second), "err", err)
+					if refused {
+						c.log.Error("uplink refused by the parent — the batch is held and retried, nothing is dropped",
+							"stream", stream, "parent", c.base, "status", refusal.Status,
+							"meaning", replicationStatusMeaning(refusal.Status),
+							"parent_said", refusal.Body,
+							"attempts", attempts, "held_for", down.Round(time.Second))
+					} else {
+						c.log.Warn("uplink is down (retrying)",
+							"stream", stream, "parent", c.base,
+							"attempts", attempts, "down_for", down.Round(time.Second), "err", err)
+					}
 				}
 				m.UplinkPushFailed(stream)
-				// Parent down → cursor stays, offline buffering in action. Report
-				// "not scanned" so a dead parent ends the drain loop instead of
-				// spinning on a lane that cannot advance.
+				if refused {
+					m.UplinkRefused(stream)
+				}
+				// Cursor stays, offline buffering in action. Report "not
+				// scanned" so a parent that cannot take this batch ends the
+				// drain loop instead of spinning on a lane that cannot
+				// advance.
 				return false, false
 			}
 			if wasFailing, attempts, down := c.links.Recovered("uplink:"+stream, time.Now()); wasFailing {
