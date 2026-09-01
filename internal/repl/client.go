@@ -63,6 +63,9 @@ type Client struct {
 	http             *http.Client
 	log              *slog.Logger
 	maxReplicateBody int64
+	// Whether each replication lane is currently failing, so an outage logs
+	// as a state change rather than once per retry (see linkstate.go).
+	links *linkState
 }
 
 // NewClient: TLS client presenting the child's cert, pinning the parent's pubkey.
@@ -99,6 +102,7 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 		http:             &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: 30 * time.Second},
 		log:              slog.Default().With("comp", "repl-client"),
 		maxReplicateBody: replicateBodyLimit(&config.Config{Limits: limits}),
+		links:            newLinkState(),
 	}, nil
 }
 
@@ -138,7 +142,7 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, fmt.Errorf("replicate: http %d", resp.StatusCode)
+		return 0, 0, fmt.Errorf("replicate to %s: %s", c.base, replicationStatusMeaning(resp.StatusCode))
 	}
 	var out struct {
 		HWM   uint64 `json:"hwm"`
@@ -286,7 +290,7 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return downResult{}, fmt.Errorf("downlink: http %d", resp.StatusCode)
+		return downResult{}, fmt.Errorf("downlink from %s: %s", c.base, replicationStatusMeaning(resp.StatusCode))
 	}
 	var out struct {
 		Records     []wireRec      `json:"records"`
@@ -608,12 +612,21 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				if stopped() {
 					return false, true // aborted by our own shutdown, not a failure
 				}
-				c.log.Warn("uplink push failed (will retry)", "stream", stream, "err", err)
+				if report, attempts, down := c.links.Failed("uplink:"+stream, time.Now()); report {
+					c.log.Warn("uplink is down (retrying)",
+						"stream", stream, "parent", c.base,
+						"attempts", attempts, "down_for", down.Round(time.Second), "err", err)
+				}
 				m.UplinkPushFailed(stream)
 				// Parent down → cursor stays, offline buffering in action. Report
 				// "not scanned" so a dead parent ends the drain loop instead of
 				// spinning on a lane that cannot advance.
 				return false, false
+			}
+			if wasFailing, attempts, down := c.links.Recovered("uplink:"+stream, time.Now()); wasFailing {
+				c.log.Info("uplink recovered",
+					"stream", stream, "parent", c.base,
+					"attempts", attempts, "down_for", down.Round(time.Second))
 			}
 			// Every /replicate response carries the parent's now_ms
 			// (time-sync design §2.1) — keep the offset fresh regardless
@@ -738,6 +751,10 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 				eng.SetAncestry(*res.Ancestry)
 			}
 			applyDefinitions(c, eng, m, res)
+			if wasFailing, attempts, waited := c.links.Recovered("hello", time.Now()); wasFailing {
+				c.log.Info("first contact with the parent succeeded",
+					"parent", c.base, "attempts", attempts, "waited", waited.Round(time.Second))
+			}
 			break
 		}
 		select {
@@ -745,7 +762,11 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			return // the request was aborted by our own shutdown
 		default:
 		}
-		c.log.Warn("first-contact hello failed (will retry) — the parent's command head must be known before the first poll", "err", err)
+		if report, attempts, down := c.links.Failed("hello", time.Now()); report {
+			c.log.Warn("first contact with the parent has not succeeded yet (retrying) — "+
+				"its command head must be known before the first poll",
+				"parent", c.base, "attempts", attempts, "down_for", down.Round(time.Second), "err", err)
+		}
 		m.DownlinkFetchFailed()
 		select {
 		case <-stop:
