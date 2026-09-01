@@ -266,6 +266,7 @@ type StreamRetention struct {
 	MaxAge             Duration `yaml:"max_age"`
 	MaxBytes           ByteSize `yaml:"max_bytes"`
 	IgnoreCursorsAfter Duration `yaml:"ignore_cursors_after"`
+	KeepForever        bool     `yaml:"keep_forever"`
 }
 
 // Retention is the retention: block (design §3.1). Streams is keyed by
@@ -601,7 +602,7 @@ func (r Retention) EffectiveInterval() time.Duration {
 // is their documented default (unset / never).
 func (r Retention) EffectiveStream(stream string) StreamRetention {
 	s := r.Streams[stream]
-	if time.Duration(s.MaxAge) <= 0 {
+	if !s.KeepForever && time.Duration(s.MaxAge) <= 0 {
 		if d, ok := defaultStreamMaxAge[stream]; ok {
 			s.MaxAge = Duration(d)
 		}
@@ -768,10 +769,15 @@ func (r Retention) validate() error {
 	}
 	for name, s := range r.Streams {
 		if !knownStreams[name] {
-			return fmt.Errorf("config: retention.streams: unknown stream %q, want one of metrics, entities, commands, audit, alarms, annotations", name)
+			return fmt.Errorf("config: retention.streams: unknown stream %q, want one of metrics, entities, commands, audit, alarms, annotations, logs", name)
 		}
 		if time.Duration(s.MaxAge) < 0 {
 			return fmt.Errorf("config: retention.streams.%s.max_age must not be negative, got %s", name, time.Duration(s.MaxAge))
+		}
+		if s.KeepForever && time.Duration(s.MaxAge) > 0 {
+			return fmt.Errorf(
+				"config: retention.streams.%s cannot set both keep_forever and max_age", name,
+			)
 		}
 		if time.Duration(s.IgnoreCursorsAfter) < 0 {
 			return fmt.Errorf("config: retention.streams.%s.ignore_cursors_after must not be negative, got %s", name, time.Duration(s.IgnoreCursorsAfter))

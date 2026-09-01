@@ -76,9 +76,41 @@ type Sink struct {
 // It creates ONLY the offset table. `historian_metric` belongs to the api's
 // migrations: a service that created another service's table would give that
 // table two definitions, and the one that ran first would win.
-func (s *Sink) EnsureSchema(ctx context.Context) error {
+func (s *Sink) EnsureSchema(ctx context.Context, retentionDays int) error {
 	if _, err := s.Pool.Exec(ctx, createOffsetTable); err != nil {
 		return fmt.Errorf("historian: creating the offset table: %w", err)
+	}
+	var isHypertable bool
+	if err := s.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM timescaledb_information.hypertables
+			WHERE hypertable_schema = current_schema()
+			  AND hypertable_name = 'historian_metric'
+		)`).Scan(&isHypertable); err != nil {
+		return fmt.Errorf("historian: checking the metric hypertable: %w", err)
+	}
+	if !isHypertable {
+		if retentionDays == 0 {
+			return nil
+		}
+		return fmt.Errorf("historian: cannot enforce %d-day metric retention: historian_metric is not a TimescaleDB hypertable", retentionDays)
+	}
+	if retentionDays == 0 {
+		if _, err := s.Pool.Exec(ctx,
+			`SELECT remove_retention_policy('historian_metric', if_exists => true)`); err != nil {
+			return fmt.Errorf("historian: removing metric retention policy: %w", err)
+		}
+		return nil
+	}
+	if _, err := s.Pool.Exec(ctx,
+		`SELECT remove_retention_policy('historian_metric', if_exists => true)`); err != nil {
+		return fmt.Errorf("historian: replacing metric retention policy: %w", err)
+	}
+	if _, err := s.Pool.Exec(ctx,
+		`SELECT add_retention_policy('historian_metric', make_interval(days => $1))`,
+		retentionDays); err != nil {
+		return fmt.Errorf("historian: applying %d-day metric retention policy: %w", retentionDays, err)
 	}
 	return nil
 }

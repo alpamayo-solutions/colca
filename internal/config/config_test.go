@@ -269,6 +269,24 @@ func TestRetentionDefaultsWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestRetentionCanExplicitlyKeepAStreamForever(t *testing.T) {
+	c, err := loadRetention(t, "  streams:\n    logs:\n      keep_forever: true\n")
+	if err != nil {
+		t.Fatalf("loading keep-forever policy: %v", err)
+	}
+	logs := c.Retention.EffectiveStream("logs")
+	if !logs.KeepForever || time.Duration(logs.MaxAge) != 0 {
+		t.Fatalf("logs policy = %#v, want keep_forever with no age bound", logs)
+	}
+}
+
+func TestRetentionRejectsKeepForeverWithAnAgeBound(t *testing.T) {
+	_, err := loadRetention(t, "  streams:\n    logs:\n      keep_forever: true\n      max_age: 24h\n")
+	if err == nil || !strings.Contains(err.Error(), "both keep_forever and max_age") {
+		t.Fatalf("error = %v, want conflicting-policy error", err)
+	}
+}
+
 // A stream entry that sets only max_bytes leaves max_age at its Go zero
 // value; EffectiveStream must still apply that stream's default max_age
 // (spec-silent decision: "zero-value = defaults" applies per field, not only

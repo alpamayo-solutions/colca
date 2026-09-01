@@ -47,10 +47,6 @@ func testPool(t *testing.T) *Sink {
 	}
 	t.Cleanup(pool.Close)
 
-	sink := &Sink{Pool: pool}
-	if err := sink.EnsureSchema(ctx); err != nil {
-		t.Fatalf("ensuring the offset table: %v", err)
-	}
 	// The metric table belongs to the api's migrations; the boundary world
 	// creates it from the same DDL so this suite writes what production writes.
 	if _, err := pool.Exec(ctx, `
@@ -67,6 +63,10 @@ func testPool(t *testing.T) *Sink {
         CREATE UNIQUE INDEX IF NOT EXISTS historian_metric_signal_id_timestamp_uniq
             ON historian_metric (signal_id, timestamp);`); err != nil {
 		t.Fatalf("creating the metric table: %v", err)
+	}
+	sink := &Sink{Pool: pool}
+	if err := sink.EnsureSchema(ctx, 0); err != nil {
+		t.Fatalf("ensuring the offset table and unlimited retention: %v", err)
 	}
 	return sink
 }

@@ -44,13 +44,14 @@ import (
 )
 
 type config struct {
-	colcaURL     string
-	colcaService string
-	dsn          string
-	maxConns     int32
-	fetchMax     int
-	idleSleep    time.Duration
-	httpAddr     string
+	colcaURL      string
+	colcaService  string
+	dsn           string
+	maxConns      int32
+	fetchMax      int
+	idleSleep     time.Duration
+	httpAddr      string
+	retentionDays int
 }
 
 func main() {
@@ -78,7 +79,7 @@ func main() {
 	// connections during initdb while TCP is not listening yet, so "is it up"
 	// has no single moment. Retry for a bounded window instead of dying and
 	// relying on a restart policy that a test harness may not have.
-	if err := ensureSchema(ctx, sink, log, 90*time.Second); err != nil {
+	if err := ensureSchema(ctx, sink, cfg.retentionDays, log, 90*time.Second); err != nil {
 		log.Error("schema", "err", err)
 		os.Exit(2)
 	}
@@ -105,11 +106,11 @@ func main() {
 }
 
 // ensureSchema retries until the database answers or the window closes.
-func ensureSchema(ctx context.Context, sink *historian.Sink, log *slog.Logger,
+func ensureSchema(ctx context.Context, sink *historian.Sink, retentionDays int, log *slog.Logger,
 	within time.Duration) error {
 	deadline := time.Now().Add(within)
 	for attempt := 1; ; attempt++ {
-		err := sink.EnsureSchema(ctx)
+		err := sink.EnsureSchema(ctx, retentionDays)
 		if err == nil {
 			return nil
 		}
@@ -138,6 +139,10 @@ func load() (config, error) {
 	cfg.maxConns = int32(intEnv("DB_MAX_CONNS", 4))
 	cfg.fetchMax = intEnv("FETCH_MAX", 500)
 	cfg.idleSleep = time.Duration(intEnv("IDLE_SLEEP_MS", 500)) * time.Millisecond
+	cfg.retentionDays = intEnv("HISTORIAN_RETENTION_DAYS", 0)
+	if cfg.retentionDays < 0 {
+		return cfg, errors.New("HISTORIAN_RETENTION_DAYS must be zero (unlimited) or positive")
+	}
 	return cfg, nil
 }
 
