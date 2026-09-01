@@ -390,6 +390,55 @@ func (c *ConfigExec) commit(records []StateRecord) ([]StateWrite, error) {
 	return c.store.PublishBatch(records)
 }
 
+// positionsByID is the identity half of the position guard the upsert verbs
+// already apply: which path currently holds each id of one contract at this
+// node.
+//
+// A path may hold only one entity — the verbs check that — but nothing checked
+// the other direction, so one id could be written at two paths. The state that
+// leaves is not merely untidy, it is unrecoverable from the outside: snapshot()
+// answers "duplicate retained identity" and every `_CmdEdit` command at
+// that node 409s until an operator removes a record by hand, and a later
+// tombstone of either copy drops the id from the element index although the
+// element still sits at the other path — every grant naming it evaporates and
+// every entry bound to it fails to resolve a position.
+//
+// Scoped to this node's own records (KVScan by NodeID), because this door only
+// ever authors those: a child's records arrive mount-inserted under the child's
+// identity and are not this node's to claim.
+func (c *ConfigExec) positionsByID(contract string) *idClaims {
+	claims := &idClaims{at: map[string]string{}}
+	for _, rec := range c.store.KVScan(contract, c.store.NodeID()) {
+		var held identified
+		if json.Unmarshal(rec.Payload, &held) == nil && held.ID != "" {
+			claims.at[held.ID] = rec.Path
+		}
+	}
+	return claims
+}
+
+// idClaims tracks where each id sits, growing as a command claims positions.
+type idClaims struct{ at map[string]string }
+
+// claim takes path for id, or names the path already holding it. Both halves
+// matter: the retained set covers a second command, and the growing map covers
+// two entries of the SAME command — a batch that checks only the store would
+// still commit two records under one identity in one transition.
+//
+// An empty id claims nothing. That is not a loophole here: every verb that
+// calls this requires an id of its own before it gets this far, or has none to
+// require.
+func (claims *idClaims) claim(id, path string) (held string, ok bool) {
+	if id == "" {
+		return "", true
+	}
+	if at, taken := claims.at[id]; taken && at != path {
+		return at, false
+	}
+	claims.at[id] = path
+	return "", true
+}
+
 func (c *ConfigExec) constantUpsert(payload []byte) (int, string, string, []StateWrite) {
 	var body constantUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
@@ -401,6 +450,7 @@ func (c *ConfigExec) constantUpsert(payload []byte) (int, string, string, []Stat
 
 	records := make([]StateRecord, 0, len(body.Constants))
 	seen := make(map[string]bool, len(body.Constants))
+	claims := c.positionsByID("_Constant")
 	for i, ref := range body.Constants {
 		if err := validatePositionPath(ref.Path); err != nil {
 			return 422, fmt.Sprintf("constant/upsert: entry %d: %v", i, err), "invalid", nil
@@ -427,6 +477,10 @@ func (c *ConfigExec) constantUpsert(payload []byte) (int, string, string, []Stat
 				return 409, fmt.Sprintf("constant/upsert: %s is already constant %s — two constants "+
 					"cannot share one position", ref.Path, heldID), "conflict", nil
 			}
+		}
+		if at, free := claims.claim(incoming.ID, ref.Path); !free {
+			return 409, fmt.Sprintf("constant/upsert: constant %s is already at %s — one identity "+
+				"cannot sit at two positions", incoming.ID, at), "conflict", nil
 		}
 		records = append(records, StateRecord{Topic: topic, Payload: ref.Constant})
 	}
@@ -820,12 +874,21 @@ func (c *ConfigExec) upsert(payload []byte) (int, string, string, []StateWrite) 
 		return 422, "signal/upsert: no signals given", "invalid", nil
 	}
 	records := make([]StateRecord, 0, len(body.Signals))
+	claims := c.positionsByID("_Signal")
 	for i, ref := range body.Signals {
 		if ref.Path == "" {
 			return 422, fmt.Sprintf("signal/upsert: entry %d has no path", i), "invalid", nil
 		}
 		if len(ref.Signal) == 0 {
 			return 422, fmt.Sprintf("signal/upsert: entry %d has no signal", i), "invalid", nil
+		}
+		var incoming identified
+		if err := json.Unmarshal(ref.Signal, &incoming); err != nil {
+			return 422, fmt.Sprintf("signal/upsert: entry %d unreadable: %v", i, err), "invalid", nil
+		}
+		if at, free := claims.claim(incoming.ID, ref.Path); !free {
+			return 409, fmt.Sprintf("signal/upsert: signal %s is already at %s — one identity "+
+				"cannot sit at two positions", incoming.ID, at), "conflict", nil
 		}
 		payload, err := c.preserveBinding(ref.Path, ref.Signal)
 		if err != nil {
@@ -1248,6 +1311,11 @@ func (c *ConfigExec) elementUpsert(payload []byte) (int, string, string, []State
 	// without this, two elements naming one path in a single command would both
 	// commit and the second would silently unaddress the first.
 	claimed := make(map[string]string, len(body.Elements))
+	// The same guard read the other way round: claimed answers "what sits at
+	// this path", claims answers "where does this id already sit". A path
+	// holding two elements and an element at two paths are both unaddressable
+	// states, and each needs its own check.
+	claims := c.positionsByID("_SystemElement")
 	for i, ref := range body.Elements {
 		if ref.Path == "" {
 			return 422, fmt.Sprintf("element/upsert: entry %d has no path", i), "invalid", nil
@@ -1271,6 +1339,10 @@ func (c *ConfigExec) elementUpsert(payload []byte) (int, string, string, []State
 				return 409, fmt.Sprintf("element/upsert: %s is already element %s — two elements "+
 					"cannot share one position", ref.Path, held.ID), "conflict", nil
 			}
+		}
+		if at, free := claims.claim(incoming.ID, ref.Path); !free {
+			return 409, fmt.Sprintf("element/upsert: element %s is already at %s — one identity "+
+				"cannot sit at two positions", incoming.ID, at), "conflict", nil
 		}
 		claimed[topic] = incoming.ID
 		records = append(records, StateRecord{Topic: topic, Payload: ref.Element})

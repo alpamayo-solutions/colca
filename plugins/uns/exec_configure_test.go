@@ -1494,6 +1494,134 @@ func TestConstantUpsertRefusesAPathOwnedByAnotherConstant(t *testing.T) {
 	}
 }
 
+// A position may hold one entity, and an entity may sit at one position. The
+// upsert verbs checked only the first: element/upsert, signal/upsert and
+// constant/upsert all accepted the same id at a second path, and that state is
+// unrecoverable from the outside — snapshot() answers "duplicate retained
+// identity" and every Edit command at the node 409s, while a later
+// tombstone of either copy drops the id from the element index although the
+// entity still sits at the other path.
+//
+// Each case re-upserts at the SAME path first: that is the denominator, and it
+// must stay a 200, or the guard would be refusing ordinary updates rather than
+// duplicate identities.
+func TestUpsertRefusesOneIdentityAtTwoPositions(t *testing.T) {
+	cases := []struct {
+		name         string
+		verb         string
+		first        func(t *testing.T) []byte
+		sameID       func(t *testing.T) []byte // same id, same path: an update
+		secondPath   func(t *testing.T) []byte // same id, different path
+		oneCommand   func(t *testing.T) []byte // both positions in ONE command
+		heldAt       string
+		strandedPath string
+		contract     string
+	}{
+		{
+			name: "element",
+			verb: "element/upsert",
+			first: func(t *testing.T) []byte {
+				return elementBody(t, element("a/x", "01HDUP", "X"))
+			},
+			sameID: func(t *testing.T) []byte {
+				return elementBody(t, element("a/x", "01HDUP", "X renamed"))
+			},
+			secondPath: func(t *testing.T) []byte {
+				return elementBody(t, element("b/x", "01HDUP", "X"))
+			},
+			oneCommand: func(t *testing.T) []byte {
+				return elementBody(t, element("c/x", "01HFRESH", "X"), element("d/x", "01HFRESH", "X"))
+			},
+			heldAt:       "a/x",
+			strandedPath: "b/x",
+			contract:     "_SystemElement",
+		},
+		{
+			name: "signal",
+			verb: "signal/upsert",
+			first: func(t *testing.T) []byte {
+				return body(t, map[string]any{"signals": []any{
+					map[string]any{"path": "a/temp", "signal": map[string]any{"id": "01HDUP", "name": "temp"}},
+				}})
+			},
+			sameID: func(t *testing.T) []byte {
+				return body(t, map[string]any{"signals": []any{
+					map[string]any{"path": "a/temp", "signal": map[string]any{"id": "01HDUP", "name": "temperature"}},
+				}})
+			},
+			secondPath: func(t *testing.T) []byte {
+				return body(t, map[string]any{"signals": []any{
+					map[string]any{"path": "b/temp", "signal": map[string]any{"id": "01HDUP", "name": "temp"}},
+				}})
+			},
+			oneCommand: func(t *testing.T) []byte {
+				return body(t, map[string]any{"signals": []any{
+					map[string]any{"path": "c/temp", "signal": map[string]any{"id": "01HFRESH", "name": "temp"}},
+					map[string]any{"path": "d/temp", "signal": map[string]any{"id": "01HFRESH", "name": "temp"}},
+				}})
+			},
+			heldAt:       "a/temp",
+			strandedPath: "b/temp",
+			contract:     "_Signal",
+		},
+		{
+			name: "constant",
+			verb: "constant/upsert",
+			first: func(t *testing.T) []byte {
+				return constantBody(t, constant("a/speed", "01HDUP", "int64", 1))
+			},
+			sameID: func(t *testing.T) []byte {
+				return constantBody(t, constant("a/speed", "01HDUP", "int64", 2))
+			},
+			secondPath: func(t *testing.T) []byte {
+				return constantBody(t, constant("b/speed", "01HDUP", "int64", 1))
+			},
+			oneCommand: func(t *testing.T) []byte {
+				return constantBody(t,
+					constant("c/speed", "01HFRESH", "int64", 1),
+					constant("d/speed", "01HFRESH", "int64", 1),
+				)
+			},
+			heldAt:       "a/speed",
+			strandedPath: "b/speed",
+			contract:     "_Constant",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStore("n-edge1")
+			c := NewConfigExec(f, nil, nil, nil, nil, nil)
+
+			if code, msg, _ := c.Execute("_CmdConfigure", tc.verb, tc.first(t)); code != 200 {
+				t.Fatalf("first upsert = %d %q, want 200", code, msg)
+			}
+			if code, msg, _ := c.Execute("_CmdConfigure", tc.verb, tc.sameID(t)); code != 200 {
+				t.Fatalf("re-upsert at the same path = %d %q, want 200 — the guard refuses updates", code, msg)
+			}
+
+			code, msg, result := c.Execute("_CmdConfigure", tc.verb, tc.secondPath(t))
+			if code != 409 || result != "conflict" || !strings.Contains(msg, tc.heldAt) {
+				t.Fatalf("second position = %d %q result %q, want 409 naming %s", code, msg, result, tc.heldAt)
+			}
+			if _, ok := f.KVGet("colca/v1/" + tc.contract + "/n-edge1/" + tc.strandedPath); ok {
+				t.Fatalf("the refused upsert wrote %s anyway", tc.strandedPath)
+			}
+
+			// Two positions for one id inside ONE command: the store shows
+			// neither yet, so only the growing claim map can catch it.
+			before := f.offset
+			code, msg, result = c.Execute("_CmdConfigure", tc.verb, tc.oneCommand(t))
+			if code != 409 || result != "conflict" {
+				t.Fatalf("one command, two positions = %d %q result %q, want 409", code, msg, result)
+			}
+			if f.offset != before {
+				t.Fatalf("the refused batch wrote %d records", f.offset-before)
+			}
+		})
+	}
+}
+
 func TestConstantDeleteValidatesAllPathsThenWritesTombstones(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
