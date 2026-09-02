@@ -67,6 +67,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// The same records, published to the tree's `logs` stream so this service
+	// appears in the editor's log view alongside every other. Installed
+	// after the config is loaded, because it needs the node's address, and
+	// before the work starts, so the first line about that work is carried.
+	logDoor := &door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService}
+	publisher := door.NewLogPublisher(log.Handler(), logDoor, door.LogPublisherOptions{
+		MinLevel: slog.LevelInfo,
+	})
+	publisher.Start(ctx)
+	log = slog.New(publisher).With("service", "colca-historian")
+	slog.SetDefault(log)
+
 	pool, err := historian.Open(ctx, cfg.dsn, cfg.maxConns)
 	if err != nil {
 		log.Error("database", "err", err)

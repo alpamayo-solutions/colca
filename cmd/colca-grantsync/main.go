@@ -52,6 +52,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/grantsync"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
 )
@@ -153,6 +154,19 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// The same records, published to the tree's `logs` stream so grant
+	// convergence is visible in the editor's log view. Whether a group's
+	// grants reached a node is exactly the kind of question that view exists
+	// to answer, and until now it could not: no Go service published at all.
+	publisher := door.NewLogPublisher(
+		log.Handler(),
+		&door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService},
+		door.LogPublisherOptions{MinLevel: slog.LevelInfo},
+	)
+	publisher.Start(ctx)
+	log = slog.New(publisher).With("service", "colca-grantsync")
+	slog.SetDefault(log)
 
 	node := &grantsync.NodeClient{
 		BaseURL: cfg.colcaURL,
