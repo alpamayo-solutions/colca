@@ -30,7 +30,9 @@ func newFakeNode() (*fakeNode, *httptest.Server) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/self":
-			_ = json.NewEncoder(w).Encode(Self{ULID: "01SVC", Name: "svc", Node: "01NODE"})
+			_ = json.NewEncoder(w).Encode(Self{
+				ULID: "01SVC", Name: "colca-historian", Node: "01NODE", Mount: "line1",
+			})
 		case "/publish":
 			var record publishedRecord
 			_ = json.NewDecoder(r.Body).Decode(&record)
@@ -102,8 +104,9 @@ func TestPublishedRecordMatchesTheTopicGrammar(t *testing.T) {
 
 	records := node.waitFor(t, 1)
 	parts := strings.Split(records[0].Topic, "/")
-	if len(parts) != 6 {
-		t.Fatalf("topic %q must be colca/v1/_Log/{node}/{logger}/{LEVEL}", records[0].Topic)
+	if len(parts) != 7 {
+		t.Fatalf("topic %q must be colca/v1/_Log/{node}/{mount…}/{service}/{LEVEL}",
+			records[0].Topic)
 	}
 	if parts[0] != "colca" || parts[1] != "v1" || parts[2] != "_Log" {
 		t.Errorf("topic prefix is wrong: %q", records[0].Topic)
@@ -111,14 +114,18 @@ func TestPublishedRecordMatchesTheTopicGrammar(t *testing.T) {
 	if parts[3] != "01NODE" {
 		t.Errorf("topic level 4 must be the node the door reported, got %q", parts[3])
 	}
-	if parts[4] != "colca-historian" {
-		t.Errorf("the logger segment must name the service, got %q", parts[4])
+	// A service may write its own subtree and nothing above it, so a record
+	// addressed at the node root is refused outright -- `no write scope
+	// covers colca/v1/_Log/...` is what silenced every placed service.
+	if parts[4] != "line1" || parts[5] != "colca-historian" {
+		t.Errorf("the record must sit at the service's own position "+
+			"(mount then name), got %q", records[0].Topic)
 	}
 	// The API drops any record whose last segment is not one of
 	// colca_data_contracts.logging.LOG_LEVELS, so an unmapped slog level
 	// would vanish from the view rather than show up wrong.
-	if parts[5] != "WARNING" {
-		t.Errorf("slog.LevelWarn must publish as WARNING, got %q", parts[5])
+	if parts[6] != "WARNING" {
+		t.Errorf("slog.LevelWarn must publish as WARNING, got %q", parts[6])
 	}
 	if records[0].Payload["message"] != "catch-up stalled" {
 		t.Errorf("payload lost the message: %#v", records[0].Payload)

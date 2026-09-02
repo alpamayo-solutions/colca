@@ -44,6 +44,7 @@ type LogPublisher struct {
 	records  chan logRecord
 	name     string // the service name, from a With("service", ...) attr
 	node     string
+	position []string
 	failures *failureNotice
 	nodeOnce sync.Once
 	started  sync.Once
@@ -139,6 +140,7 @@ func (p *LogPublisher) derive(inner slog.Handler) *LogPublisher {
 		records:  p.records,
 		name:     p.name,
 		node:     p.node,
+		position: p.position,
 		failures: p.failures,
 		// nodeOnce/started are per-clone but guard shared state that is
 		// idempotent to set; the worker is started from the ROOT publisher
@@ -205,7 +207,14 @@ func (p *LogPublisher) publish(ctx context.Context, item logRecord) {
 	if node == "" {
 		return
 	}
-	topic := fmt.Sprintf("colca/v1/_Log/%s/%s/%s", node, item.logger, item.level)
+	// The record is addressed at THIS SERVICE'S position -- its mount, then
+	// its name -- because a service may write its own subtree and nothing
+	// above it. Addressed at the node root instead, colcad refuses it with
+	// `no write scope covers colca/v1/_Log/...`, which is what silenced every
+	// placed service. The slog logger's own name stays in the payload.
+	segments := append([]string{"colca", "v1", "_Log", node}, p.position...)
+	segments = append(segments, item.level)
+	topic := strings.Join(segments, "/")
 	if err := p.client.Publish(ctx, topic, item.payload); err != nil {
 		p.failures.note(err)
 	}
@@ -233,14 +242,27 @@ func (f *failureNotice) note(err error) {
 		f.dropped, err)
 }
 
-// resolveNode asks the door which node this is -- topic level 4, and the same
-// for every record. It cannot change without the process restarting.
+// resolveNode asks the door which node this is (topic level 4) and where this
+// service sits (its mount, then its name -- the rule
+// colca_data_contracts.service_topics.service_context states). Both come from
+// one /self call, and neither can change without the process restarting.
 func (p *LogPublisher) resolveNode(ctx context.Context) string {
 	p.nodeOnce.Do(func() {
 		self, err := p.client.Self(ctx)
-		if err == nil {
-			p.node = self.Node
+		if err != nil {
+			return
 		}
+		p.node = self.Node
+		for _, segment := range strings.Split(self.Mount, "/") {
+			if segment != "" {
+				p.position = append(p.position, segment)
+			}
+		}
+		name := self.Name
+		if name == "" {
+			name = p.name
+		}
+		p.position = append(p.position, topicSegment(name))
 	})
 	return p.node
 }
