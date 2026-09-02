@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -252,5 +254,83 @@ func TestTheBuiltinDefaultHandlerIsRefused(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("logging through the publisher never returned -- the default-handler loop is back")
+	}
+}
+
+// logPayloadVector is the shared statement of what a `_Log` payload must
+// carry. Python generates it from the contract dataclass it builds payloads
+// from; Go builds its payload by hand, so this file is the only thing that
+// keeps the two equal.
+type logPayloadVector struct {
+	Contract string   `json:"contract"`
+	Required []string `json:"required"`
+	Optional []string `json:"optional"`
+}
+
+func TestThePayloadCarriesEveryFieldTheContractRequires(t *testing.T) {
+	// Go was missing module, function and line_no. The node refused every
+	// record with `jsonschema validation failed with bundle:///_Log.json#`
+	// and nothing said so: a log publisher that reports its own failure
+	// through the log is a loop, so four Go services published nothing at
+	// all and looked healthy doing it.
+	//
+	// A hand-written list here would have been just as wrong as the payload.
+	// The vector is generated from the contract and pinned to it by
+	// colca-data-contracts/tests/test_log_payload_vector.py.
+	path := filepath.Join("..", "contracts", "src",
+		"colca_data_contracts", "vectors", "log_payload.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the shared _Log vector is unreadable (%v). It is what keeps this "+
+			"payload equal to the contract; without it this test proves nothing.", err)
+	}
+	var vector logPayloadVector
+	if err := json.Unmarshal(raw, &vector); err != nil {
+		t.Fatal(err)
+	}
+	if vector.Contract != "_Log" || len(vector.Required) == 0 {
+		t.Fatalf("the vector does not describe _Log's required fields: %+v", vector)
+	}
+
+	node, server := newFakeNode()
+	defer server.Close()
+	publisher := NewLogPublisher(&countingHandler{},
+		&Client{BaseURL: server.URL, Service: "colca-historian"},
+		LogPublisherOptions{MinLevel: slog.LevelInfo})
+	publisher.Start(context.Background())
+	slog.New(publisher).With("service", "colca-historian").Warn("catch-up stalled")
+
+	payload := node.waitFor(t, 1)[0].Payload
+	for _, field := range vector.Required {
+		value, present := payload[field]
+		if !present {
+			t.Errorf("payload omits %q, which _Log requires — the node refuses the "+
+				"whole record for a missing field, and says so only on stderr", field)
+			continue
+		}
+		if value == nil {
+			t.Errorf("payload sends %q as null; _Log requires a value", field)
+		}
+	}
+}
+
+func TestTheLevelInThePayloadIsTheOneInTheTopic(t *testing.T) {
+	// slog spells it WARN and the topic grammar spells it WARNING. Sending
+	// one in the payload and the other in the topic would have the view
+	// showing a level the record itself contradicts.
+	node, server := newFakeNode()
+	defer server.Close()
+	publisher := NewLogPublisher(&countingHandler{}, &Client{BaseURL: server.URL},
+		LogPublisherOptions{MinLevel: slog.LevelInfo})
+	publisher.Start(context.Background())
+	slog.New(publisher).Warn("careful")
+
+	record := node.waitFor(t, 1)[0]
+	parts := strings.Split(record.Topic, "/")
+	if got := record.Payload["level"]; got != parts[len(parts)-1] {
+		t.Errorf("payload level %v disagrees with the topic's %q", got, parts[len(parts)-1])
+	}
+	if record.Payload["level"] != "WARNING" {
+		t.Errorf("slog's WARN must be published as WARNING, got %v", record.Payload["level"])
 	}
 }

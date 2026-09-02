@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -226,11 +228,21 @@ func (p *LogPublisher) derive(inner slog.Handler) *LogPublisher {
 }
 
 func (p *LogPublisher) offer(record slog.Record) {
+	module, function, line := source(record)
+	// Every field here is REQUIRED by the `_Log` contract, and a payload
+	// missing one is refused by the node with `jsonschema validation failed
+	// with bundle:///_Log.json#` -- which is what happened to every Go
+	// service's records until this carried module/function/line_no. The list
+	// is pinned against the contract by
+	// colca-data-contracts/vectors/log_payload.json, which both sides read.
 	payload := map[string]any{
 		"timestamp":   record.Time.UTC().Format(time.RFC3339Nano),
-		"level":       record.Level.String(),
+		"level":       levelSegment(record.Level),
 		"message":     record.Message,
 		"logger_name": p.loggerName(record),
+		"module":      module,
+		"function":    function,
+		"line_no":     line,
 	}
 	attrs := map[string]any{}
 	record.Attrs(func(attr slog.Attr) bool {
@@ -358,6 +370,27 @@ func (p *LogPublisher) loggerName(record slog.Record) string {
 		return p.name
 	}
 	return "colca"
+}
+
+// source answers where a record was written: the file (as Python names a
+// module), the function, and the line.
+//
+// The `_Log` contract requires all three, because the Python publisher gets
+// them free from logging.LogRecord. slog carries the same information as a
+// program counter, so it costs one lookup rather than a second convention.
+// A record with no PC (one built by hand, as tests do) reports zeroes rather
+// than failing: an unattributed line is still worth publishing.
+func source(record slog.Record) (module, function string, line int) {
+	if record.PC == 0 {
+		return "colca", "", 0
+	}
+	frame, _ := runtime.CallersFrames([]uintptr{record.PC}).Next()
+	module = strings.TrimSuffix(filepath.Base(frame.File), ".go")
+	function = frame.Function
+	if index := strings.LastIndex(function, "."); index >= 0 {
+		function = function[index+1:]
+	}
+	return module, function, frame.Line
 }
 
 // topicSegment keeps a name to ONE topic segment: the reader takes the
