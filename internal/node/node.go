@@ -97,10 +97,27 @@ func Start(cfg *config.Config) (*Node, error) {
 	// starting up. The sink has no engine yet; the publisher's queue holds
 	// what it cannot deliver, and Attach below drains it.
 	logSink := &nodelog.Sink{}
+	// The tree carries INFO and above even when the console is at debug.
+	//
+	// LOG_LEVEL=debug is a local, temporary instrument: it turns on a line
+	// per append, per delivery, per replication batch. Those belong in the
+	// container's log, which is cheap and thrown away, not on a durable
+	// stream that is retained for 14 days and replicated to every ancestor.
+	// One level-3 run with debug published 982 records from a single node.
+	//
+	// It also removes the feedback cycle by construction rather than by
+	// guard: the engine's per-append line is debug, so it is no longer a
+	// candidate for publishing at all. `SkipsItsOwnPublishing` stays as the
+	// belt to this braces -- a future INFO line naming a `_Log` topic would
+	// close the cycle again.
+	publishLevel := lvl
+	if publishLevel < slog.LevelInfo {
+		publishLevel = slog.LevelInfo
+	}
 	logPublisher := door.NewLogPublisher(
 		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}),
 		logSink,
-		door.LogPublisherOptions{MinLevel: lvl, Skip: nodelog.SkipsItsOwnPublishing},
+		door.LogPublisherOptions{MinLevel: publishLevel, Skip: nodelog.SkipsItsOwnPublishing},
 	)
 	slog.SetDefault(slog.New(logPublisher).With("service", nodelog.ServiceName))
 
