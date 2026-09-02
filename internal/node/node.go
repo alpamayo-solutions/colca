@@ -8,6 +8,7 @@
 package node
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/blobgc"
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/clock"
@@ -32,6 +34,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/mqttsrv"
+	"github.com/alpamayo-solutions/colca/internal/nodelog"
 	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/repl"
 	"github.com/alpamayo-solutions/colca/internal/retention"
@@ -88,7 +91,18 @@ func Start(cfg *config.Config) (*Node, error) {
 	if cfg.LogLevel == "debug" {
 		lvl = slog.LevelDebug
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
+	// The node publishes its own log into the tree it owns, the same as every
+	// other service -- and it is installed HERE, before anything is built,
+	// because a node's most valuable lines are the ones it writes while
+	// starting up. The sink has no engine yet; the publisher's queue holds
+	// what it cannot deliver, and Attach below drains it.
+	logSink := &nodelog.Sink{}
+	logPublisher := door.NewLogPublisher(
+		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}),
+		logSink,
+		door.LogPublisherOptions{MinLevel: lvl, Skip: nodelog.SkipsItsOwnPublishing},
+	)
+	slog.SetDefault(slog.New(logPublisher).With("service", nodelog.ServiceName))
 
 	// First boot mints this node's identity; every later boot loads it. The key
 	// must not come from the generated deployment directory — that directory is
@@ -549,6 +563,22 @@ func Start(cfg *config.Config) (*Node, error) {
 		defer n.wg.Done()
 		sweeper.Run(n.stop)
 	}()
+
+	// The node's own log can be delivered only NOW, and the two reasons are
+	// both things `-race` and the contract validator said out loud:
+	//
+	//   * everything above still CONFIGURES the engine (SetContracts,
+	//     SetExecutor, SetObserver). A publisher goroutine appending through
+	//     it while those run is a data race on the engine's own fields.
+	//   * `_Log` is a contract, and until the bundle is loaded the validated
+	//     namespace rejects it as unknown -- the first records were refused
+	//     with `unknown contract "_Log"`.
+	//
+	// Startup is not lost by waiting: every line since the handler was
+	// installed is in the publisher's queue, and draining it now delivers
+	// them in order.
+	logSink.Attach(n.Engine, cfg.ULID)
+	logPublisher.Start(context.Background())
 
 	log.Info("colca node started", "ulid", cfg.ULID, "api", n.APIAddr, "repl", n.ReplAddr, "mqtt", n.MQTTAddr)
 	return n, nil

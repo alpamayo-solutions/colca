@@ -38,11 +38,51 @@ import (
 //     serving path logs at (see colcad's note in the design), and the
 //     publisher never logs through slog itself -- a publish that fails is
 //     dropped, silently, on purpose.
+//
+// LogSink is where a finished record is handed over. There are two: a door
+// Client, for a service that reaches its node over HTTP, and colcad's own
+// in-process sink -- the node cannot post to its own door, because the door
+// authenticates callers by service name and colcad is not one of its own
+// services. Same record, same publisher, different last step.
+type LogSink interface {
+	// LogPosition answers the node's ULID and where this publisher sits --
+	// its mount, then its name. Asked once.
+	LogPosition(ctx context.Context) (node string, position []string, err error)
+	// PublishLog writes one record.
+	PublishLog(ctx context.Context, topic string, payload map[string]any) error
+}
+
+// LogPosition satisfies LogSink for a service that reaches its node over the
+// door: /self already answers both halves, and it is a call the publisher was
+// making anyway for the node id.
+func (c *Client) LogPosition(ctx context.Context) (string, []string, error) {
+	self, err := c.Self(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	position := []string{}
+	for _, segment := range strings.Split(self.Mount, "/") {
+		if segment != "" {
+			position = append(position, segment)
+		}
+	}
+	if self.Name != "" {
+		position = append(position, topicSegment(self.Name))
+	}
+	return self.Node, position, nil
+}
+
+// PublishLog satisfies LogSink over the node's publish door.
+func (c *Client) PublishLog(ctx context.Context, topic string, payload map[string]any) error {
+	return c.Publish(ctx, topic, payload)
+}
+
 type LogPublisher struct {
 	inner    slog.Handler
-	client   *Client
+	sink     LogSink
 	minLevel slog.Level
 	records  chan logRecord
+	skip     func(slog.Record) bool
 	name     string // the service name, from a With("service", ...) attr
 	node     string
 	position []string
@@ -66,6 +106,12 @@ type LogPublisherOptions struct {
 	// Capacity is how many records may wait to be published. A buffer for a
 	// hiccup, not a store -- the stream is the store.
 	Capacity int
+	// Skip refuses individual records. A publisher that writes THROUGH the
+	// thing it is logging about needs this: colcad appends into its own
+	// store, and the store logs every append, so without a way to refuse
+	// that one record the two would feed each other. Nil accepts everything,
+	// which is right for a publisher whose node is a different process.
+	Skip func(slog.Record) bool
 }
 
 // DefaultLogCapacity mirrors the api's publisher, for the same reason.
@@ -81,17 +127,18 @@ const DefaultLogCapacity = 512
 const failureNoticeInterval = 5 * time.Minute
 
 // NewLogPublisher wraps inner so that records at or above MinLevel are also
-// published to client's node as `_Log`.
-func NewLogPublisher(inner slog.Handler, client *Client, options LogPublisherOptions) *LogPublisher {
+// published to the sink's node as `_Log`.
+func NewLogPublisher(inner slog.Handler, sink LogSink, options LogPublisherOptions) *LogPublisher {
 	capacity := options.Capacity
 	if capacity <= 0 {
 		capacity = DefaultLogCapacity
 	}
 	return &LogPublisher{
 		inner:    usableBase(inner),
-		client:   client,
+		sink:     sink,
 		minLevel: options.MinLevel,
 		records:  make(chan logRecord, capacity),
+		skip:     options.Skip,
 		failures: &failureNotice{},
 	}
 }
@@ -132,7 +179,7 @@ func (p *LogPublisher) Enabled(ctx context.Context, level slog.Level) bool {
 
 func (p *LogPublisher) Handle(ctx context.Context, record slog.Record) error {
 	err := p.inner.Handle(ctx, record)
-	if record.Level >= p.minLevel {
+	if record.Level >= p.minLevel && (p.skip == nil || !p.skip(record)) {
 		p.offer(record)
 	}
 	return err
@@ -164,9 +211,10 @@ func (p *LogPublisher) WithGroup(name string) slog.Handler {
 func (p *LogPublisher) derive(inner slog.Handler) *LogPublisher {
 	return &LogPublisher{
 		inner:    inner,
-		client:   p.client,
+		sink:     p.sink,
 		minLevel: p.minLevel,
 		records:  p.records,
+		skip:     p.skip,
 		name:     p.name,
 		node:     p.node,
 		position: p.position,
@@ -244,7 +292,7 @@ func (p *LogPublisher) publish(ctx context.Context, item logRecord) {
 	segments := append([]string{"colca", "v1", "_Log", node}, p.position...)
 	segments = append(segments, item.level)
 	topic := strings.Join(segments, "/")
-	if err := p.client.Publish(ctx, topic, item.payload); err != nil {
+	if err := p.sink.PublishLog(ctx, topic, item.payload); err != nil {
 		p.failures.note(err)
 	}
 }
@@ -277,21 +325,15 @@ func (f *failureNotice) note(err error) {
 // one /self call, and neither can change without the process restarting.
 func (p *LogPublisher) resolveNode(ctx context.Context) string {
 	p.nodeOnce.Do(func() {
-		self, err := p.client.Self(ctx)
+		node, position, err := p.sink.LogPosition(ctx)
 		if err != nil {
 			return
 		}
-		p.node = self.Node
-		for _, segment := range strings.Split(self.Mount, "/") {
-			if segment != "" {
-				p.position = append(p.position, segment)
-			}
+		p.node = node
+		p.position = position
+		if len(p.position) == 0 && p.name != "" {
+			p.position = []string{p.name}
 		}
-		name := self.Name
-		if name == "" {
-			name = p.name
-		}
-		p.position = append(p.position, topicSegment(name))
 	})
 	return p.node
 }
