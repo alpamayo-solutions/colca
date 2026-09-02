@@ -8,7 +8,9 @@ local publishers: resolve ``GET /self`` and connect MQTT v5.
 
 from __future__ import annotations
 
+import datetime
 import json
+import logging
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -22,7 +24,63 @@ from colca_data_contracts.payload import ServiceDetails
 from colca_data_contracts.service_topics import service_context
 
 
-def attach_log_publisher(client: Client) -> None:
+class _LogPublishingHandler(logging.Handler):
+    """Turn a log record into a `_Log` at THIS SERVICE'S position in the tree.
+
+    franzmq's own MQTTHandler addresses a record as
+    ``_Log/{node}/{logger}/{LEVEL}`` -- flat at the node root, with no
+    position in it. A service is authorized to write its own subtree, so that
+    topic is outside the scope of every PLACED service: colcad refused each
+    one with `no write scope covers colca/v1/_Log/...`, and the only publisher
+    that got through was dataops, which is unplaced and therefore scoped to
+    the whole node. Eleven connectors published nothing and said nothing
+    about it, because a logging handler that reports its own failure through
+    logging is a loop.
+
+    So the record goes where the service's other records go -- its mount, then
+    its name, which is the rule `service_context` states and what `_DataTags`
+    and `_ServiceDetails` already do. Being authorized is the point; carrying
+    the service's position is the bonus, and the reader shows it as the path.
+
+    The Python logger's own name (`dataops.ingest`) stays in the PAYLOAD,
+    where it is not competing with the address for the same segment.
+    """
+
+    def __init__(self, client: Client, context: tuple[str, ...]):
+        super().__init__()
+        self.client = client
+        self.context = tuple(context)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            from franzmq.data_contracts.base import Log
+            from franzmq import Topic
+
+            payload = Log(
+                timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                level=record.levelname,
+                message=self.format(record),
+                logger_name=record.name,
+                module=record.module,
+                function=record.funcName,
+                line_no=record.lineno,
+                exc_info=(
+                    self.formatter.formatException(record.exc_info)
+                    if record.exc_info and self.formatter else None
+                ),
+                extra=getattr(record, "extra", None),
+            )
+            topic = Topic(
+                payload_type=Log,
+                node_id=self.client.require_node_id(),
+                context=self.context + (record.levelname,),
+            )
+            self.client.publish(topic, payload)
+        except Exception:
+            self.handleError(record)
+
+
+def attach_log_publisher(client: Client, context: tuple[str, ...]) -> None:
     """Publish this service's log records as ``_Log`` — without owning the log.
 
     This is the ONE way a service on the local MQTT door reaches the tree's
@@ -33,21 +91,21 @@ def attach_log_publisher(client: Client) -> None:
     the tree -- eleven of them in the demo, publishing nothing while an
     identically-shaped dataops line right beside them was visible.
 
-    franzmq's ``configure_mqtt_logger`` CLEARS the root logger and reinstalls
-    its own stream handler: a dash format no Colca service uses, a hard INFO
-    level that undoes ``LOG_LEVEL``, and no secret sanitization — every
-    service that connected MQTT had its ``setup_logging`` silently replaced
-    the moment it connected. Only the MQTT half is wanted here: the handler
-    that turns records into ``_Log`` publications is ADDED to whatever
-    logging the service configured, formatted with the shared Colca format.
+    `context` is the service's own position, from `service_context(mount,
+    name)`. It is a required argument rather than something derived here
+    because only the caller knows its mount, and a publisher that guessed
+    would be a second implementation of the rule `service_context` owns.
+
+    franzmq's ``configure_mqtt_logger`` is not used for a second reason: it
+    CLEARS the root logger and reinstalls its own stream handler — a dash
+    format no Colca service uses, a hard INFO level that undoes
+    ``LOG_LEVEL``, and no secret sanitization. Publishing is ADDED to
+    whatever logging the service configured, formatted with the shared Colca
+    format.
     """
-    import logging
-
-    from franzmq.log_handlers import MQTTHandler
-
     from colca_data_contracts.logging import COLCA_LOG_FORMAT
 
-    handler = MQTTHandler(client)
+    handler = _LogPublishingHandler(client, context)
     handler.setFormatter(logging.Formatter(COLCA_LOG_FORMAT))
     logging.getLogger().addHandler(handler)
 
@@ -128,7 +186,7 @@ def connect_local_mqtt(
     client = Client(client_id=client_id or service_name, protocol=pahomqtt.MQTTv5)
     client.node_id = resolved.node_id
     client.username_pw_set(service_name)
-    attach_log_publisher(client)
+    attach_log_publisher(client, resolved.hierarchy)
     client.reconnect_on_failure = True
     client.reconnect_on_offline = True
     client.reconnect_delay_set(min_delay=1, max_delay=120)
