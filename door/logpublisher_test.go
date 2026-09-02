@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -213,5 +214,43 @@ func TestHandleDoesNotWaitOnTheNode(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Handle blocked on the node; a log statement must never wait on the network")
+	}
+}
+
+func TestTheBuiltinDefaultHandlerIsRefused(t *testing.T) {
+	// Wrapping slog's built-in default and then calling slog.SetDefault is an
+	// infinite loop: that handler writes through the `log` package, and
+	// SetDefault redirects `log` back into slog. It does not crash -- the
+	// first log call simply never returns, so the service prints nothing and
+	// never reaches its HTTP listener. That is what took the level-4 suite
+	// red: a healthcheck that never passed and an empty container log.
+	//
+	// This also pins the name the guard matches on. slog does not export the
+	// type, so if a future Go renames it the guard stops matching and the
+	// hang returns -- this test is what says so.
+	builtin := slog.Default().Handler()
+	if got := reflect.TypeOf(builtin).String(); got != builtinDefaultHandler {
+		t.Fatalf("slog's built-in default handler is now %q, not %q -- the guard "+
+			"in usableBase no longer matches it and the hang is back", got, builtinDefaultHandler)
+	}
+
+	publisher := NewLogPublisher(builtin, &Client{BaseURL: "http://127.0.0.1:1"},
+		LogPublisherOptions{MinLevel: slog.LevelInfo})
+	if publisher.inner == builtin {
+		t.Fatal("the built-in default handler must be replaced, not wrapped")
+	}
+
+	// The claim is that logging through it RETURNS. Nothing else in this file
+	// would notice a hang: a deadlocked Handle fails the suite by timeout,
+	// minutes later, with no indication of which test it was.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		slog.New(publisher).Info("this must not hang")
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("logging through the publisher never returned -- the default-handler loop is back")
 	}
 }

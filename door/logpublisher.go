@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -87,13 +88,41 @@ func NewLogPublisher(inner slog.Handler, client *Client, options LogPublisherOpt
 		capacity = DefaultLogCapacity
 	}
 	return &LogPublisher{
-		inner:    inner,
+		inner:    usableBase(inner),
 		client:   client,
 		minLevel: options.MinLevel,
 		records:  make(chan logRecord, capacity),
 		failures: &failureNotice{},
 	}
 }
+
+// usableBase refuses one handler: slog's built-in default.
+//
+// That handler writes through the `log` package, and `slog.SetDefault`
+// redirects `log` back into slog -- so wrapping it and then installing the
+// wrapper (which is the whole point of this type) is an infinite loop. It
+// does not panic or crash: the first log call never returns. A service that
+// did this printed nothing at all and never reached its HTTP listener, and
+// the only symptom anyone saw was a healthcheck that never passed and a
+// container log that was completely empty.
+//
+// A caller who passes it means "whatever logging I already had", and the
+// honest answer for a caller that had none of its own is a real handler on
+// stderr. Substituting one is friendlier than panicking and strictly better
+// than the hang, and it silences nothing: the built-in default writes to
+// stderr too.
+func usableBase(inner slog.Handler) slog.Handler {
+	if inner == nil || reflect.TypeOf(inner).String() == builtinDefaultHandler {
+		return slog.NewTextHandler(os.Stderr, nil)
+	}
+	return inner
+}
+
+// builtinDefaultHandler is the type slog.Default() carries before anything
+// calls SetDefault. slog does not export it, so its name is the only handle
+// on it -- and if a future Go renames it this guard stops matching and the
+// hang comes back, which is what the test on it exists to catch.
+const builtinDefaultHandler = "*slog.defaultHandler"
 
 // Enabled defers to the wrapped handler: publishing must never SILENCE a line
 // the service would otherwise have printed.
