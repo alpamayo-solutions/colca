@@ -182,9 +182,9 @@ class HealthMetricDeclaration:
     """One bounded, self-described Prometheus health signal.
 
     ``metric`` names the family. ``query`` may refine it with aggregation or a
-    rate expression and may use only ``{service_name}`` and ``{node_id}``
-    placeholders. The API renders those values and executes the query; raw
-    PromQL never crosses into the browser.
+    rate expression and may use the server-rendered ``{service_name}``,
+    ``{service_name_pattern}``, ``{node_id}``, and ``{node_id_pattern}``
+    placeholders. Raw PromQL never crosses into the browser.
     """
 
     key: str

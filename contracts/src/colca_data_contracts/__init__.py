@@ -118,6 +118,7 @@ from colca_data_contracts.local_service import (
     resolve_local_identity,
     service_details_topic,
 )
+from colca_data_contracts.observability import container_resource_health_metrics
 
 # Register all Colca payload classes into franzmq's PAYLOAD_CLASSES
 # so that Topic.from_str() can resolve Colca topic strings.
@@ -157,6 +158,7 @@ __all__ = [
     "ServiceDetails",
     "HealthMetricDeclaration",
     "HealthMetricVisualization",
+    "container_resource_health_metrics",
     "NetworkInterface",
     "NetworkInterfaceType",
     "IndexType",
