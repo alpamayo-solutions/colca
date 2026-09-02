@@ -1,0 +1,17 @@
+{
+  "contract": "_Log",
+  "comment": "The fields a `_Log` payload must carry, and the ones it may. Derived from franzmq.data_contracts.base.Log, which is what the generated contracts bundle validates against. Python builds this payload from the dataclass itself; Go builds it by hand, and had no way to know it was missing three required fields -- every Go service's log record was refused by the node with `jsonschema validation failed with bundle:///_Log.json#`, silently, because a log publisher that reports its own failure through the log is a loop. This vector is how the two sides stay equal.",
+  "required": [
+    "timestamp",
+    "level",
+    "message",
+    "logger_name",
+    "module",
+    "function",
+    "line_no"
+  ],
+  "optional": [
+    "exc_info",
+    "extra"
+  ]
+}
