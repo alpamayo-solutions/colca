@@ -1475,3 +1475,42 @@ func TestASuppliedCertificateServesTheHumanDoorAndNotTheMachineDoor(t *testing.T
 			"pinning this node can no longer verify it", got)
 	}
 }
+
+// A retained DeliverLocal racing a wildcard SUBSCRIBE's retained scan is the
+// data race the level-1 suite hit on CI (TestPairUplinkAndHubRestart, run
+// 33677835965): mochi v2.7.9 wrote particle.retainPath under the particle
+// lock in RetainMessage and read it with no lock in scanMessages
+// (mochi-mqtt/server#200, closed upstream as not reproducible). colca pins a
+// fork with the read locked; this test is what fails, under -race, the day
+// that pin is dropped.
+func TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace(t *testing.T) {
+	w := newWorld(t)
+	obs := connect(t, w.srv.Addr(), "obs", w.obs)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			topic := fmt.Sprintf("colca/v1/_Metric/n1/m1/race%d", i%32)
+			w.srv.DeliverLocal(topic, []byte(`{"v":1}`), true)
+			w.srv.DeliverLocal(topic, nil, true) // tombstone: the "" write path
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		tok := obs.Subscribe("colca/v1/_Metric/n1/#", 1, func(paho.Client, paho.Message) {})
+		if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+			t.Fatalf("subscribe %d: %v", i, tok.Error())
+		}
+		if tok := obs.Unsubscribe("colca/v1/_Metric/n1/#"); !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+			t.Fatalf("unsubscribe %d: %v", i, tok.Error())
+		}
+	}
+	close(stop)
+	<-done
+}

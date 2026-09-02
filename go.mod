@@ -55,3 +55,10 @@ require (
 	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 )
+
+// Pinned to the org fork until upstream ships the retained-scan race fix:
+// https://github.com/mochi-mqtt/server/pull/539 (mochi-mqtt/server#200).
+// Drop this replace once a released mochi version contains that PR;
+// internal/mqttsrv's TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace
+// goes red under -race if it is dropped early.
+replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260902234224-8b986f055c96
