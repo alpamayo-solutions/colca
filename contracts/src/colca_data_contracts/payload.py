@@ -732,8 +732,8 @@ class ExternalReference(Payload):
     relationship_type: str
     external_system_id: str
     external_table: str
-    external_column: str
     external_row_id: str
+    external_column: str = ""
     description: str = ""
 
     @classmethod
@@ -865,7 +865,15 @@ class Constant(Payload):
     id: str
     name: str
     data_type: ConstantDataType
-    value: Any
+    #: The Django model's ``value`` column is ``JSONField(null=True)`` — a
+    #: JSON constant may explicitly be ``null`` (resource.py's own comment on
+    #: the model field says so). No default here meant an omitted ``value``
+    #: on create left it out of ``validated_data`` (DRF: a nullable field with
+    #: no explicit default is ``required=False``) and the bundle schema then
+    #: rejected the published record for missing a required property — same
+    #: shape as the ``ExternalReference.external_column`` bug this default
+    #: fixes alongside it.
+    value: Any = None
     description: str = ""
     system_element_id: Optional[str] = None
     unit: Optional[str] = None
@@ -906,8 +914,15 @@ class Resource(Payload):
     id: str
     system_element_id: str
     filename: str
-    content_type: str
-    sha256: str
+    #: Both ``blank=True, default=""`` on the Django model
+    #: (``edge/models/resource.py``): the only current writer
+    #: (``edge/edit/resource_files.py``) always supplies both, but a
+    #: payload field with no default was stricter than the model it carries
+    #: — the same drift class as ``ExternalReference.external_column``, which
+    #: this default (and the enforcement test in
+    #: ``projector/tests/test_model_payload_field_optionality.py``) closes.
+    content_type: str = ""
+    sha256: str = ""
     display_name: str = ""
     description: str = ""
     resource_type: str = "other"
