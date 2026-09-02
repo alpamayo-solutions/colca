@@ -8,3 +8,5 @@ def test_container_health_declarations_are_queryable_locally_and_upstream():
     assert all("{service_name_pattern}" in metric.query for metric in metrics)
     assert all("{node_id_pattern}" in metric.query for metric in metrics)
     assert all("{{" in metric.query and "}}" in metric.query for metric in metrics)
+    assert all('(edge|hub):service_' in metric.query for metric in metrics)
+    assert all("container_cpu_usage_seconds_total" not in metric.query for metric in metrics)

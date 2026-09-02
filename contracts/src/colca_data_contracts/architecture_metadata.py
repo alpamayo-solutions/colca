@@ -215,16 +215,15 @@ CADVISOR_KPIS = [
     KpiDefinition(
         key="container_cpu",
         label="CPU",
-        query='rate(container_cpu_usage_seconds_total{{container_label_com_docker_compose_service="{service_name}"}}[5m]) * 100',
+        query='sum({{__name__=~"(edge|hub):service_cpu_pct",container_label_com_docker_compose_service=~"(^|.*-){service_name_pattern}$",node_id=~"{node_id_pattern}"}})',
         format="percent",
         thresholds=KpiThresholds(mode="below", success=70, warning=90),
     ),
     KpiDefinition(
         key="container_memory",
         label="Memory",
-        query='container_memory_working_set_bytes{{container_label_com_docker_compose_service="{service_name}"}}',
+        query='sum({{__name__=~"(edge|hub):service_memory_working_set_bytes",container_label_com_docker_compose_service=~"(^|.*-){service_name_pattern}$",node_id=~"{node_id_pattern}"}})',
         format="bytes",
         thresholds=KpiThresholds(mode="below", success=536870912, warning=1073741824),
     ),
 ]
-

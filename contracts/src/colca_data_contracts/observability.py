@@ -21,9 +21,13 @@ def container_resource_health_metrics() -> list[HealthMetricDeclaration]:
         HealthMetricDeclaration(
             key="container_cpu",
             name="CPU",
-            metric="container_cpu_usage_seconds_total",
+            metric="service_cpu_pct",
             description="CPU used by this service container.",
-            query=f"sum(rate(container_cpu_usage_seconds_total{{{{{selector}}}}}[5m])) * 100",
+            query=(
+                'sum({{__name__=~"(edge|hub):service_cpu_pct",'
+                + selector
+                + '}})'
+            ),
             visualization=HealthMetricVisualization.TIMELINE,
             unit="%",
             precision=1,
@@ -32,9 +36,13 @@ def container_resource_health_metrics() -> list[HealthMetricDeclaration]:
         HealthMetricDeclaration(
             key="container_memory",
             name="Memory",
-            metric="container_memory_working_set_bytes",
+            metric="service_memory_working_set_bytes",
             description="Working-set memory used by this service container.",
-            query=f"sum(container_memory_working_set_bytes{{{{{selector}}}}})",
+            query=(
+                'sum({{__name__=~"(edge|hub):service_memory_working_set_bytes",'
+                + selector
+                + '}})'
+            ),
             visualization=HealthMetricVisualization.TIMELINE,
             unit="bytes",
             precision=0,
