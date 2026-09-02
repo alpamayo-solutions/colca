@@ -112,6 +112,7 @@ from colca_data_contracts.machine_state import (
 from colca_data_contracts.service_topics import service_context
 from colca_data_contracts.local_service import (
     LocalServiceIdentity,
+    attach_log_publisher,
     connect_local_mqtt,
     publish_local_service_details,
     resolve_local_identity,
@@ -213,6 +214,7 @@ __all__ = [
     "COLCA_LOG_FORMAT",
     # Local Colca service trust
     "LocalServiceIdentity",
+    "attach_log_publisher",
     "connect_local_mqtt",
     "publish_local_service_details",
     "service_context",

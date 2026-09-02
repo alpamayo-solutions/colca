@@ -185,7 +185,7 @@ def test_connecting_mqtt_adds_the_log_publisher_without_owning_the_log():
 
     from franzmq.log_handlers import MQTTHandler
 
-    from colca_data_contracts.local_service import _attach_mqtt_log_handler
+    from colca_data_contracts.local_service import attach_log_publisher
     from colca_data_contracts.logging import COLCA_LOG_FORMAT
 
     root = logging.getLogger()
@@ -197,7 +197,7 @@ def test_connecting_mqtt_adds_the_log_publisher_without_owning_the_log():
     root.setLevel(logging.DEBUG)
     before = [h for h in root.handlers if isinstance(h, MQTTHandler)]
     try:
-        _attach_mqtt_log_handler(object())
+        attach_log_publisher(object())
 
         assert sentinel in root.handlers, "the caller's handler was removed"
         assert root.level == logging.DEBUG, "the caller's level was reset"

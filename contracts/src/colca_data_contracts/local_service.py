@@ -22,8 +22,16 @@ from colca_data_contracts.payload import ServiceDetails
 from colca_data_contracts.service_topics import service_context
 
 
-def _attach_mqtt_log_handler(client: Client) -> None:
+def attach_log_publisher(client: Client) -> None:
     """Publish this service's log records as ``_Log`` — without owning the log.
+
+    This is the ONE way a service on the local MQTT door reaches the tree's
+    `logs` stream, and it is public because it has two callers: services that
+    connect through `connect_local_mqtt` (which calls it for them), and the
+    connector, which builds its own client for reasons of its own. It was
+    private, so the connector could not call it and simply never logged into
+    the tree -- eleven of them in the demo, publishing nothing while an
+    identically-shaped dataops line right beside them was visible.
 
     franzmq's ``configure_mqtt_logger`` CLEARS the root logger and reinstalls
     its own stream handler: a dash format no Colca service uses, a hard INFO
@@ -120,7 +128,7 @@ def connect_local_mqtt(
     client = Client(client_id=client_id or service_name, protocol=pahomqtt.MQTTv5)
     client.node_id = resolved.node_id
     client.username_pw_set(service_name)
-    _attach_mqtt_log_handler(client)
+    attach_log_publisher(client)
     client.reconnect_on_failure = True
     client.reconnect_on_offline = True
     client.reconnect_delay_set(min_delay=1, max_delay=120)
