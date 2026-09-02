@@ -98,7 +98,7 @@ const replayCap = 4096
 //     _CmdAdmin execute in-process via maybeExec, which runs right after this
 //     same persist call returns, and no machine is meant to listen on its own
 //     node's command topic. That case needs no branch of its own — a node
-//     holds no kind=machine entry for itself, so it falls out of the same
+//     holds no kind=external entry for itself, so it falls out of the same
 //     question. A kind=local service is a no too, and for a reason worth
 //     writing down since it DOES share this bus: a local service is found by
 //     the name it presents and never learns the ULID the node mints for it

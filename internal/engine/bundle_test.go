@@ -115,8 +115,8 @@ func bundleEngine(t *testing.T) *Engine {
 	// to "admin" (conservative by construction) — a bundle-declared new
 	// command contract therefore demands the highest grant class until the
 	// plugin names its hazard class. Pinned below.
-	ids.entries["writer"] = &uns.Entry{ULID: "writer", Kind: uns.KindMachine, Element: "el-writer", Grants: []string{"cmd:#:admin"}}
-	ids.entries["paramonly"] = &uns.Entry{ULID: "paramonly", Kind: uns.KindMachine, Element: "el-paramonly", Grants: []string{"cmd:#:param"}}
+	ids.entries["writer"] = &uns.Entry{ULID: "writer", Kind: uns.KindExternal, Element: "el-writer", Grants: []string{"cmd:#:admin"}}
+	ids.entries["paramonly"] = &uns.Entry{ULID: "paramonly", Kind: uns.KindExternal, Element: "el-paramonly", Grants: []string{"cmd:#:param"}}
 	e := New(s, &config.Config{ULID: "n-edge1"}, ids, nil, nil, nil)
 	placeTestElements(t, e)
 	numeric := map[string]any{"type": "number"}

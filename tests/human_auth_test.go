@@ -256,7 +256,7 @@ func TestHumanAdminEnrollsOverBearer(t *testing.T) {
 	adminTok := tp.iss.Mint("boss", []string{"admin:#"}, time.Now().Add(5*time.Minute))
 
 	m3 := authtest.NewMachine(t, "m3")
-	entry := string(m3.EntryJSON(t, "machine", authtest.Place(t, tp.edge1.Engine, "m3")))
+	entry := string(m3.EntryJSON(t, "external", authtest.Place(t, tp.edge1.Engine, "m3")))
 	code, body := bearer(t, tp.edge1, "POST", "/enroll", adminTok, entry)
 	if code != 200 {
 		t.Fatalf("human admin enroll: %d %s", code, body)

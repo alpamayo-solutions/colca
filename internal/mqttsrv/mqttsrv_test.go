@@ -464,7 +464,7 @@ func TestALocalNameThatResolvesToAKeyedIdentityByNameIsRefused(t *testing.T) {
 	s := startServerWithLocalDoor(t)
 	element := authtest.Place(t, s.eng, "press3")
 	m := authtest.NewMachine(t, "01JNAMEDMACHINE")
-	entry := uns.Entry{ULID: m.ULID, Pubkey: m.Pubkey, Kind: uns.KindMachine, Name: "friendly-name", Element: element}
+	entry := uns.Entry{ULID: m.ULID, Pubkey: m.Pubkey, Kind: uns.KindExternal, Name: "friendly-name", Element: element}
 	raw, err := json.Marshal(&entry)
 	if err != nil {
 		t.Fatal(err)

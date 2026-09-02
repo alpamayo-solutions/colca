@@ -49,8 +49,8 @@ func coversAny(mounts []string, path string) bool {
 func testIDs() fakeIDs {
 	return fakeIDs{
 		entries: map[string]*uns.Entry{
-			"m1":  {ULID: "m1", Kind: uns.KindMachine, Element: "el-m1", Grants: []string{"write:el-m1/#"}},
-			"hmi": {ULID: "hmi", Kind: uns.KindMachine, Element: "el-hmi", Grants: []string{"cmd:el-m1/#:param"}},
+			"m1":  {ULID: "m1", Kind: uns.KindExternal, Element: "el-m1", Grants: []string{"write:el-m1/#"}},
+			"hmi": {ULID: "hmi", Kind: uns.KindExternal, Element: "el-hmi", Grants: []string{"cmd:el-m1/#:param"}},
 		},
 	}
 }

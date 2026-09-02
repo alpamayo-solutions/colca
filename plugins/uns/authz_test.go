@@ -63,7 +63,7 @@ func entry(mount string, grants ...string) *Entry {
 	return &Entry{
 		ULID:    "01MACHINE0000000000000000A",
 		Pubkey:  strings.Repeat("ab", 32),
-		Kind:    KindMachine,
+		Kind:    KindExternal,
 		Element: elementAt(mount),
 		Grants:  grants,
 	}
@@ -188,7 +188,7 @@ func TestALocalServiceMayBeUnplaced(t *testing.T) {
 
 func TestAMachineOrNodeMustBePlaced(t *testing.T) {
 	for _, e := range []*Entry{
-		{ULID: "01J", Pubkey: hex64, Kind: KindMachine},
+		{ULID: "01J", Pubkey: hex64, Kind: KindExternal},
 		{ULID: "01J", Pubkey: hex64, Kind: KindNode},
 	} {
 		if err := e.Validate(); err == nil {
@@ -207,7 +207,7 @@ func TestLocalIdentitiesUseOnlyTheLocalDoor(t *testing.T) {
 			t.Fatalf("a local identity was admitted at door %v; it holds no key to present there", d)
 		}
 	}
-	if (&Entry{Kind: KindMachine}).MayUseDoor(DoorLocal) {
+	if (&Entry{Kind: KindExternal}).MayUseDoor(DoorLocal) {
 		t.Fatal("a machine was admitted at the local door; that door proves nothing about it")
 	}
 }
@@ -271,12 +271,12 @@ func TestConfigureIsAGrantableClass(t *testing.T) {
 func TestOnlyUnplacedLocalServiceGetsImplicitConfigure(t *testing.T) {
 	unplaced := &Entry{ULID: "svc-api", Kind: KindLocal}
 	placed := &Entry{ULID: "svc-ui", Kind: KindLocal, Element: "01HLINE1"}
-	machine := &Entry{ULID: "m1", Kind: KindMachine, Element: "01HLINE1"}
+	machine := &Entry{ULID: "m1", Kind: KindExternal, Element: "01HLINE1"}
 
 	if !unplaced.MayImplicitlyConfigure("_CmdConfigure") {
 		t.Fatal("an unplaced local service must be able to configure its node")
 	}
-	for name, entry := range map[string]*Entry{"placed local": placed, "machine": machine} {
+	for name, entry := range map[string]*Entry{"placed local": placed, "external": machine} {
 		if entry.MayImplicitlyConfigure("_CmdConfigure") {
 			t.Errorf("%s gained implicit configure", name)
 		}
@@ -320,7 +320,7 @@ func TestUnplacedLocalServiceReadsAndSubscribesAcrossItsNode(t *testing.T) {
 		t.Fatal("an unplaced local subscriber was denied the node-wide bus")
 	}
 
-	machine := &Entry{ULID: "m1", Kind: KindMachine, Element: ""}
+	machine := &Entry{ULID: "m1", Kind: KindExternal, Element: ""}
 	if Authorize(ns, machine, ActReadRecord, topic) || Authorize(ns, machine, ActSub, "colca/#") {
 		t.Fatal("the local-service rule widened an unplaced external identity")
 	}
@@ -751,7 +751,7 @@ func TestAnUnplacedLocalServiceWritesAnywhereOnTheNode(t *testing.T) {
 
 func TestAMachineNeedsAnExplicitWriteGrant(t *testing.T) {
 	sc := testScope(map[string]string{"el-press3": "line1/press3"})
-	m := &Entry{ULID: "01J", Pubkey: hex64, Kind: KindMachine, Element: "el-press3"}
+	m := &Entry{ULID: "01J", Pubkey: hex64, Kind: KindExternal, Element: "el-press3"}
 
 	if Authorize(sc, m, ActPub, "colca/v1/_Metric/n1/line1/press3/temp") {
 		t.Fatal("a machine wrote with no write grant; outside the deployment, position is not permission")
@@ -764,7 +764,7 @@ func TestAMachineNeedsAnExplicitWriteGrant(t *testing.T) {
 
 func TestAGrantNamingAnUnheldElementIsInert(t *testing.T) {
 	sc := testScope(map[string]string{"el-press3": "line1/press3"})
-	m := &Entry{ULID: "01J", Pubkey: hex64, Kind: KindMachine, Element: "el-press3",
+	m := &Entry{ULID: "01J", Pubkey: hex64, Kind: KindExternal, Element: "el-press3",
 		Grants: []string{"write:el-elsewhere/#"}}
 
 	if Authorize(sc, m, ActPub, "colca/v1/_Metric/n1/other/place") {

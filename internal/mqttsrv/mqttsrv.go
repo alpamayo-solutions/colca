@@ -186,7 +186,7 @@ func (h *colcaHook) OnSubscribe(cl *mqtt.Client, pk packets.Packet) packets.Pack
 }
 
 // OnConnectAuthenticate resolves the TLS peer key against the local registry
-// (auth §6.1): the entry must exist, be kind machine, and the CONNECT
+// (auth §6.1): the entry must exist, be kind external, and the CONNECT
 // username must equal the enrolled ULID — the username is how mochi carries
 // the identity to OnPublish/OnACLCheck, so the equality check pins it to the
 // key.

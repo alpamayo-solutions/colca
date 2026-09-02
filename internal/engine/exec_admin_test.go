@@ -46,7 +46,7 @@ func adminEngine(t *testing.T) (*Engine, *fakeAdmin) {
 	cfg := &config.Config{ULID: "n-edge1"}
 	ids := testIDs()
 	ids.entries["n-child"] = &uns.Entry{ULID: "n-child", Kind: uns.KindNode, Element: "el-child1"}
-	ids.entries["provisioner"] = &uns.Entry{ULID: "provisioner", Kind: uns.KindMachine, Element: "el-provisioner", Grants: []string{"cmd:#:admin"}}
+	ids.entries["provisioner"] = &uns.Entry{ULID: "provisioner", Kind: uns.KindExternal, Element: "el-provisioner", Grants: []string{"cmd:#:admin"}}
 	e := New(s, cfg, ids, nil, nil, nil)
 	fa := &fakeAdmin{}
 	e.SetExecutor(Executors(NewAdminExecutor(fa)))
@@ -56,7 +56,7 @@ func adminEngine(t *testing.T) (*Engine, *fakeAdmin) {
 func futureMS() int64 { return time.Now().Add(time.Hour).UnixMilli() }
 
 func enrollPayload(corr string, exp int64) []byte {
-	entry := map[string]any{"ulid": "m9", "pubkey": strings.Repeat("ab", 32), "kind": "machine", "mount": "m9"}
+	entry := map[string]any{"ulid": "m9", "pubkey": strings.Repeat("ab", 32), "kind": "external", "mount": "m9"}
 	b, _ := json.Marshal(map[string]any{"correlation_id": corr, "expires_at": exp, "entry": entry})
 	return b
 }

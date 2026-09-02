@@ -85,7 +85,7 @@ func TestOwedCommandRefusesAnUngrammaticalTopic(t *testing.T) {
 // and /ack use to refuse one identity moving another's cursor. If it did not,
 // a machine could ack away the delivery floor of another.
 func TestCommandCursorLivesInTheIdentitysOwnNamespace(t *testing.T) {
-	e := &Entry{ULID: "m1", Kind: KindMachine}
+	e := &Entry{ULID: "m1", Kind: KindExternal}
 	got := e.CommandCursor()
 	if want := "m1/cmd"; got != want {
 		t.Fatalf("CommandCursor() = %q, want %q", got, want)
@@ -102,7 +102,7 @@ func TestCommandCursorLivesInTheIdentitysOwnNamespace(t *testing.T) {
 // replay. It is also a plain collision: a machine using /fetch and /ack with a
 // cursor it happens to call "cmd" would otherwise share the broker's floor.
 func TestOwnsCursorRefusesTheIdentitysOwnDeliveryFloor(t *testing.T) {
-	e := &Entry{ULID: "m1", Kind: KindMachine}
+	e := &Entry{ULID: "m1", Kind: KindExternal}
 	if e.OwnsCursor(e.CommandCursor()) {
 		t.Fatal("a machine was allowed to move its own command delivery floor")
 	}

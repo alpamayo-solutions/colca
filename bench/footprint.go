@@ -121,7 +121,7 @@ mqtt:
 	if err := postAdmin(hc, apiAddr, "/publish", element); err != nil {
 		return nil, fmt.Errorf("place element for m1: %w", err)
 	}
-	entry, _ := json.Marshal(map[string]any{"ulid": "m1", "pubkey": m1id.PublicHex(), "kind": "machine", "element": "el-m1",
+	entry, _ := json.Marshal(map[string]any{"ulid": "m1", "pubkey": m1id.PublicHex(), "kind": "external", "element": "el-m1",
 		"grants": []string{"write:el-m1/#"}})
 	if err := postAdmin(hc, apiAddr, "/enroll", entry); err != nil {
 		return nil, fmt.Errorf("enroll m1: %w", err)

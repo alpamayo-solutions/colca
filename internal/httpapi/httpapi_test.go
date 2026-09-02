@@ -450,7 +450,7 @@ func TestMachineRouteMatrix(t *testing.T) {
 			t.Fatalf("%s %s as machine: want 403, got %d", probe.method, probe.path, resp.StatusCode)
 		}
 	}
-	resp, _ = req(t, mc, "POST", a.url+"/enroll", "", a.m1.EntryJSON(t, "machine", "m1"))
+	resp, _ = req(t, mc, "POST", a.url+"/enroll", "", a.m1.EntryJSON(t, "external", "m1"))
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("machine enroll: want 403, got %d", resp.StatusCode)
 	}
@@ -461,7 +461,7 @@ func TestEnrollmentRoutes(t *testing.T) {
 	admin := client(nil)
 
 	m2 := authtest.NewMachine(t, "m2")
-	resp, out := req(t, admin, "POST", a.url+"/enroll", "tok", m2.EntryJSON(t, "machine", a.place(t, "m2")))
+	resp, out := req(t, admin, "POST", a.url+"/enroll", "tok", m2.EntryJSON(t, "external", a.place(t, "m2")))
 	if resp.StatusCode != 200 || out["ulid"] != "m2" {
 		t.Fatalf("enroll: %d %v", resp.StatusCode, out)
 	}
@@ -473,12 +473,12 @@ func TestEnrollmentRoutes(t *testing.T) {
 
 	// duplicate pubkey → 409
 	dup := &authtest.Machine{ULID: "m3", Pubkey: m2.Pubkey}
-	resp, _ = req(t, admin, "POST", a.url+"/enroll", "tok", dup.EntryJSON(t, "machine", a.place(t, "m3")))
+	resp, _ = req(t, admin, "POST", a.url+"/enroll", "tok", dup.EntryJSON(t, "external", a.place(t, "m3")))
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("dup pubkey: want 409, got %d", resp.StatusCode)
 	}
 	// invalid entry → 422
-	resp, _ = req(t, admin, "POST", a.url+"/enroll", "tok", []byte(`{"ulid":"","pubkey":"x","kind":"machine"}`))
+	resp, _ = req(t, admin, "POST", a.url+"/enroll", "tok", []byte(`{"ulid":"","pubkey":"x","kind":"external"}`))
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("invalid entry: want 422, got %d", resp.StatusCode)
 	}
@@ -1125,7 +1125,7 @@ func TestAckAndEnrollRefuseOversizeBodies(t *testing.T) {
 	}
 
 	admin := newTestHandler(t, &config.Config{ULID: "n-test", API: config.API{Token: "tok"}})
-	enrollBody := []byte(`{"ulid":"` + strings.Repeat("x", maxEnrollBodyBytes) + `","kind":"machine"}`)
+	enrollBody := []byte(`{"ulid":"` + strings.Repeat("x", maxEnrollBodyBytes) + `","kind":"external"}`)
 	enrollResult := doAdmin(t, admin, http.MethodPost, "/enroll", enrollBody)
 	if enrollResult.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversize enroll = %d, want 413: %s", enrollResult.Code, enrollResult.Body.String())
@@ -1366,7 +1366,7 @@ func TestHumanAdminGrant(t *testing.T) {
 	adminTok := a.mint("boss", []string{"admin:#"})
 
 	m2 := authtest.NewMachine(t, "m2")
-	resp, out := bearerReq(t, hc, "POST", a.url+"/enroll", adminTok, m2.EntryJSON(t, "machine", a.place(t, "m2")))
+	resp, out := bearerReq(t, hc, "POST", a.url+"/enroll", adminTok, m2.EntryJSON(t, "external", a.place(t, "m2")))
 	if resp.StatusCode != 200 || out["ulid"] != "m2" {
 		t.Fatalf("human admin enroll: %d %v", resp.StatusCode, out)
 	}
@@ -1814,7 +1814,7 @@ func TestTheLocalHandlerRefusesAKeyedIdentityFoundByName(t *testing.T) {
 	reg := testRegistry(t, h)
 	element := authtest.Place(t, h.eng, "press3")
 	m := authtest.NewMachine(t, "01JNAMEDMACHINE")
-	entry := uns.Entry{ULID: m.ULID, Pubkey: m.Pubkey, Kind: uns.KindMachine, Name: "friendly-name", Element: element}
+	entry := uns.Entry{ULID: m.ULID, Pubkey: m.Pubkey, Kind: uns.KindExternal, Name: "friendly-name", Element: element}
 	raw, err := json.Marshal(&entry)
 	if err != nil {
 		t.Fatal(err)
@@ -1852,7 +1852,7 @@ func TestTheLocalHandlerRefusesAKeyedIdentityFoundByName(t *testing.T) {
 	// local identity either — the machine's own entry is what must stay
 	// untouched, not just "some name got refused".
 	got, ok := reg.Get(m.ULID)
-	if !ok || got.Kind != uns.KindMachine {
+	if !ok || got.Kind != uns.KindExternal {
 		t.Fatal("the machine entry itself must be untouched by the refused request")
 	}
 }

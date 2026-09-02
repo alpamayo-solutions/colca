@@ -45,7 +45,7 @@ func mountDeclaration(pk packets.Packet) string {
 //     otherwise fall straight through to self-registration and silently mint
 //     an unrelated kind=local entry.
 //   - entry.MayUseDoor(uns.DoorLocal), checked AFTER Register returns:
-//     uns.Entry.Validate permits a `name` field on KindMachine and KindNode
+//     uns.Entry.Validate permits a `name` field on KindExternal and KindNode
 //     too, and Manager.Enroll indexes ANY non-empty Name into byName
 //     regardless of kind (registry.go). So an operator who gives a machine or
 //     child node a friendly `name` makes it resolvable by ByName — and

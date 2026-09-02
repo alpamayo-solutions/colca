@@ -443,7 +443,7 @@ func TestMachineKindRejectedAtReplDoor(t *testing.T) {
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil)
 	entry, _ := json.Marshal(uns.Entry{ULID: "m-x", Pubkey: machineID.PublicHex(),
-		Kind: uns.KindMachine, Element: placeElement(t, peng, "mx")})
+		Kind: uns.KindExternal, Element: placeElement(t, peng, "mx")})
 	if _, _, err := preg.Enroll(entry); err != nil {
 		t.Fatal(err)
 	}

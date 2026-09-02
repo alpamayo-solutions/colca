@@ -13,7 +13,7 @@ import (
 // tests plus review of the implementation.
 
 func testEntryJSON(ulid string) []byte {
-	return []byte(`{"ulid":"` + ulid + `","pubkey":"abab","kind":"machine","mount":"z/` + ulid + `"}`)
+	return []byte(`{"ulid":"` + ulid + `","pubkey":"abab","kind":"external","mount":"z/` + ulid + `"}`)
 }
 
 func entityRec(ulid string) Record {

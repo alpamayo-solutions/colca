@@ -41,7 +41,7 @@ func entryJSON(t *testing.T, e uns.Entry) []byte {
 }
 
 func machine(ulid, mount, pub string) uns.Entry {
-	return uns.Entry{ULID: ulid, Pubkey: pub, Kind: uns.KindMachine, Element: elementAt(mount)}
+	return uns.Entry{ULID: ulid, Pubkey: pub, Kind: uns.KindExternal, Element: elementAt(mount)}
 }
 
 func pub(seed string) string { return strings.Repeat(seed, 64/len(seed)) }
@@ -173,8 +173,8 @@ func TestEnrollValidationAndUniqueness(t *testing.T) {
 		{"duplicate pubkey", machine("01M2", "z/b", pub("ab"))},
 		{"element already bound", machine("01M3", "z/a", pub("cd"))},
 		{"invalid entry", machine("", "z/c", pub("ef"))},
-		{"element named by a path", uns.Entry{ULID: "01M4", Pubkey: pub("12"), Kind: uns.KindMachine, Element: "z/c"}},
-		{"element not placed at this node", uns.Entry{ULID: "01M5", Pubkey: pub("34"), Kind: uns.KindMachine, Element: "el-nowhere"}},
+		{"element named by a path", uns.Entry{ULID: "01M4", Pubkey: pub("12"), Kind: uns.KindExternal, Element: "z/c"}},
+		{"element not placed at this node", uns.Entry{ULID: "01M5", Pubkey: pub("34"), Kind: uns.KindExternal, Element: "el-nowhere"}},
 		// The element-less read-only observer is gone (design §7): a machine
 		// must be placed, same as a node — nothing proved an unplaced identity
 		// belongs to this deployment.

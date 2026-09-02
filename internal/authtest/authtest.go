@@ -79,11 +79,11 @@ func (m *Machine) EntryJSON(t *testing.T, kind uns.Kind, element string, grants 
 	return b
 }
 
-// Enroll enrolls the machine (kind machine) at the given registry, bound to
+// Enroll enrolls the machine (kind external) at the given registry, bound to
 // element.
 func Enroll(t *testing.T, reg *registry.Manager, m *Machine, element string, grants ...string) {
 	t.Helper()
-	if _, _, err := reg.Enroll(m.EntryJSON(t, uns.KindMachine, element, grants...)); err != nil {
+	if _, _, err := reg.Enroll(m.EntryJSON(t, uns.KindExternal, element, grants...)); err != nil {
 		t.Fatalf("authtest: enroll %s: %v", m.ULID, err)
 	}
 }

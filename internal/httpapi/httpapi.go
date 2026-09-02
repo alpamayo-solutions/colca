@@ -147,7 +147,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		//     entry.
 		//   - entry.MayUseDoor(uns.DoorLocal), checked AFTER Register
 		//     returns: uns.Entry.Validate permits a `name` field on
-		//     KindMachine and KindNode too, and Manager.Enroll indexes ANY
+		//     KindExternal and KindNode too, and Manager.Enroll indexes ANY
 		//     non-empty Name into byName regardless of kind. So an operator
 		//     who gives a machine or child node a friendly `name` makes it
 		//     resolvable by ByName — and Register's own idempotent-reconnect

@@ -52,7 +52,7 @@ func TestCmdAdminRemoteEnrollAndRevokeThroughTree(t *testing.T) {
 
 	element9 := authtest.Place(t, tp.edge1.Engine, "m9")
 	corr := cmdAdmin(t, tp.global, "colca/v1/_CmdAdmin/n-edge1/site1/edge1/enroll", map[string]any{
-		"entry": map[string]any{"ulid": "m9", "pubkey": m9.Pubkey, "kind": "machine",
+		"entry": map[string]any{"ulid": "m9", "pubkey": m9.Pubkey, "kind": "external",
 			"element": element9, "grants": []any{"write:" + element9 + "/#"}},
 	})
 	awaitAdminAck(t, tp.global, "colca/v1/_Ack/n-edge1/site1/edge1/enroll", corr, 200)
@@ -90,7 +90,7 @@ func TestCmdAdminExecutesAfterOfflineCatchup(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	corr := cmdAdmin(t, tp.global, "colca/v1/_CmdAdmin/n-edge1/site1/edge1/enroll", map[string]any{
-		"entry": map[string]any{"ulid": "m9", "pubkey": m9.Pubkey, "kind": "machine",
+		"entry": map[string]any{"ulid": "m9", "pubkey": m9.Pubkey, "kind": "external",
 			"element": element, "grants": []any{"write:" + element + "/#"}},
 	})
 
@@ -132,7 +132,7 @@ func TestCmdAdminExpiredNeverExecutes(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	corr := cmdAdmin(t, tp.global, "colca/v1/_CmdAdmin/n-edge1/site1/edge1/enroll", map[string]any{
-		"entry":      map[string]any{"ulid": "m9", "pubkey": m9.Pubkey, "kind": "machine", "element": element},
+		"entry":      map[string]any{"ulid": "m9", "pubkey": m9.Pubkey, "kind": "external", "element": element},
 		"expires_at": time.Now().Add(500 * time.Millisecond).UnixMilli(),
 	})
 	time.Sleep(700 * time.Millisecond) // now it is expired — and still undelivered
@@ -159,7 +159,7 @@ func TestCmdAdminHumanIssuerZoneScoped(t *testing.T) {
 	c := human(t, tp.global, "ssl", "site-admin", tok)
 
 	corr := unique("h-adm")
-	payload := fmt.Sprintf(`{"correlation_id":%q,"expires_at":%d,"entry":{"ulid":"m9","pubkey":%q,"kind":"machine","element":%q}}`,
+	payload := fmt.Sprintf(`{"correlation_id":%q,"expires_at":%d,"entry":{"ulid":"m9","pubkey":%q,"kind":"external","element":%q}}`,
 		corr, time.Now().Add(time.Hour).UnixMilli(), m9.Pubkey, authtest.Place(t, tp.edge1.Engine, "m9"))
 	if tk := c.Publish("colca/v1/_CmdAdmin/n-edge1/site1/edge1/enroll", 1, false, payload); !tk.WaitTimeout(5 * time.Second) {
 		t.Fatal("in-zone human admin command: no PUBACK")

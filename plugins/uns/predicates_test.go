@@ -146,7 +146,7 @@ func TestOnlyNodesCanDrain(t *testing.T) {
 	if !(&Entry{Kind: KindNode}).CanDrain() {
 		t.Error("a node must be drainable")
 	}
-	for _, k := range []Kind{KindMachine, KindHuman} {
+	for _, k := range []Kind{KindExternal, KindHuman} {
 		if (&Entry{Kind: k}).CanDrain() {
 			t.Errorf("kind %q must not be drainable — there is no cursor to drain against", k)
 		}
@@ -180,7 +180,7 @@ func TestEachKindHoldsOnlyItsOwnDoors(t *testing.T) {
 		kind  Kind
 		allow []Door
 	}{
-		{KindMachine, []Door{DoorMQTT, DoorHTTP}},
+		{KindExternal, []Door{DoorMQTT, DoorHTTP}},
 		{KindNode, []Door{DoorRepl}},
 		{KindHuman, nil},
 	} {

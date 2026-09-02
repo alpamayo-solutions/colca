@@ -11,13 +11,18 @@ import (
 	"strings"
 )
 
-// Kind gates which door an identity may use: machines connect to the MQTT and
-// HTTP doors, nodes to the replication door (§2.1, §6).
+// Kind gates which door an identity may use: external services connect to the
+// MQTT and HTTP doors, nodes to the replication door (§2.1, §6).
 type Kind string
 
 const (
-	KindMachine Kind = "machine"
-	KindNode    Kind = "node"
+	// KindExternal is any service outside the node's deployment — a machine,
+	// a gateway, a customer's own integration — that publishes or subscribes
+	// through the published doors with a registry-pinned key. Its placement
+	// gives it a read zone only; every write it may perform is an explicit
+	// grant (local-service-trust design §3.1).
+	KindExternal Kind = "external"
+	KindNode     Kind = "node"
 	// KindLocal is a service inside the node's own deployment. It is the one
 	// kind with no pubkey: it presents itself at a door that is unreachable
 	// from outside the deployment, and reaching that door is the proof
@@ -45,7 +50,7 @@ type Entry struct {
 	// named by identity rather than by path (id-grants design §4). "" means
 	// bound to THE NODE ITSELF: a complete position, not a missing value.
 	// Only KindLocal may be unplaced — the local door already proved it
-	// belongs to this deployment. A machine or a node must be placed
+	// belongs to this deployment. An external service or a node must be placed
 	// explicitly at enrollment: nothing proved that about an identity arriving
 	// from outside the deployment. The path it mounts at is resolved through
 	// the Namespace every time one is needed, so renaming or reparenting the
@@ -56,8 +61,8 @@ type Entry struct {
 	// Status is the entry's lifecycle state (move-drain design §3.2):
 	// StatusActive or "" (absent ⇒ active, so entries persisted before this
 	// field existed need no migration) or StatusDraining. Only a kind=node
-	// entry may be StatusDraining — machines are out of scope for move-drain
-	// (design §3.2 [delta]: machine delivery rides broker QoS-1 session
+	// entry may be StatusDraining — external services are out of scope for
+	// move-drain (design §3.2 [delta]: their delivery rides broker QoS-1 session
 	// state, not a cursor, so there is nothing for a parent to drain
 	// against).
 	Status string `json:"status,omitempty"`
@@ -175,7 +180,7 @@ func (e *Entry) MayUseDoor(d Door) bool {
 	}
 	switch d {
 	case DoorMQTT, DoorHTTP:
-		return e.Kind == KindMachine
+		return e.Kind == KindExternal
 	case DoorRepl:
 		return e.Kind == KindNode
 	case DoorLocal:
@@ -196,7 +201,7 @@ func (e *Entry) Validate() error {
 		return fmt.Errorf("entry: ulid is required")
 	}
 	switch e.Kind {
-	case KindMachine, KindNode:
+	case KindExternal, KindNode:
 		if len(e.Pubkey) != 64 {
 			return fmt.Errorf("entry %s: pubkey must be 64 hex chars (ed25519), got %d", e.ULID, len(e.Pubkey))
 		}
@@ -216,7 +221,7 @@ func (e *Entry) Validate() error {
 	case KindHuman:
 		return fmt.Errorf("entry %s: humans are tokens, not registry entries — KindHuman cannot be enrolled", e.ULID)
 	default:
-		return fmt.Errorf("entry %s: kind must be %q, %q or %q, got %q", e.ULID, KindMachine, KindNode, KindLocal, e.Kind)
+		return fmt.Errorf("entry %s: kind must be %q, %q or %q, got %q", e.ULID, KindExternal, KindNode, KindLocal, e.Kind)
 	}
 	// An element is optional, and absent means bound to the NODE — a complete
 	// answer, not a missing value. Required for the kinds whose belonging to
@@ -236,7 +241,7 @@ func (e *Entry) Validate() error {
 		return fmt.Errorf("entry %s: status must be %q or %q, got %q", e.ULID, StatusActive, StatusDraining, e.Status)
 	}
 	if e.Status == StatusDraining && e.Kind != KindNode {
-		return fmt.Errorf("entry %s: only kind=%q entries may drain — machines are out of scope (move-drain design §3.2)", e.ULID, KindNode)
+		return fmt.Errorf("entry %s: only kind=%q entries may drain — external services are out of scope (move-drain design §3.2)", e.ULID, KindNode)
 	}
 	for _, g := range e.Grants {
 		pg, err := ParseGrant(g)
@@ -244,9 +249,9 @@ func (e *Entry) Validate() error {
 			return fmt.Errorf("entry %s: %w", e.ULID, err)
 		}
 		if pg.Verb == "admin" {
-			// Registry identities may not hold admin: machine provisioning is
+			// Registry identities may not hold admin: external provisioning is
 			// the (deferred) _CmdAdmin flow, human admin rides in tokens.
-			return fmt.Errorf("entry %s: %q — machines and nodes may not hold admin grants", e.ULID, g)
+			return fmt.Errorf("entry %s: %q — external services and nodes may not hold admin grants", e.ULID, g)
 		}
 	}
 	return nil
@@ -538,7 +543,7 @@ func (e *Entry) ActorKind() string {
 		return "human"
 	case KindNode:
 		return "node"
-	case KindMachine, KindLocal:
+	case KindExternal, KindLocal:
 		return "service"
 	default:
 		return ""

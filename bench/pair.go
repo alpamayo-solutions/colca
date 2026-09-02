@@ -41,7 +41,7 @@ type Pair struct {
 	observerID      *benchIdentity
 }
 
-// enroll generates a key for ulid, enrolls it (kind machine) at reg and
+// enroll generates a key for ulid, enrolls it (kind external) at reg and
 // returns the identity.
 // place authors a system element at path in n's own namespace and returns its
 // id. An identity binds to an element, not to a path (id-grants design §4), so
@@ -68,7 +68,7 @@ func enroll(dir string, reg *registry.Manager, ulid, element string, grants ...s
 	if err != nil {
 		return nil, err
 	}
-	entry, err := json.Marshal(uns.Entry{ULID: ulid, Pubkey: id.PublicHex(), Kind: uns.KindMachine, Element: element, Grants: grants})
+	entry, err := json.Marshal(uns.Entry{ULID: ulid, Pubkey: id.PublicHex(), Kind: uns.KindExternal, Element: element, Grants: grants})
 	if err != nil {
 		return nil, err
 	}

@@ -62,7 +62,7 @@ func bindingBundle(t *testing.T) string {
 func enrollMachineAt(t *testing.T, n *node.Node, ulid, pubkey, mount string) {
 	t.Helper()
 	element := authtest.Place(t, n.Engine, mount)
-	b, err := json.Marshal(map[string]any{"ulid": ulid, "pubkey": pubkey, "kind": "machine",
+	b, err := json.Marshal(map[string]any{"ulid": ulid, "pubkey": pubkey, "kind": "external",
 		"name": ulid, "element": element, "grants": []string{"write:" + element + "/#"}})
 	if err != nil {
 		t.Fatal(err)
