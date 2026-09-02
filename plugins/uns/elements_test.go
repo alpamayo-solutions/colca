@@ -47,6 +47,50 @@ func TestARenamedElementMovesInTheLoadedIndex(t *testing.T) {
 	}
 }
 
+// Once loaded, the index is maintained by ANNOUNCEMENT and never re-reads the
+// store. A record that is durable but not yet announced therefore does not
+// resolve — and that is why "the record is in the KV" is not a proxy for "this
+// node can resolve the element".
+//
+// The consequence is not theoretical. Engine.IngestReplicated commits a
+// replicated batch to the store and only then loops over the applied records
+// calling Observe, so a reader polling /kv sees the element while a grant
+// naming it still resolves to nothing. A level-1 test waited on the KV and
+// published a command in that window; the hub answered "no cmd grant covers
+// …" with PUBACK 0x87, once in about 300 runs under load. `awaitElement`
+// (colca/tests/integration_test.go) now waits on this index instead.
+//
+// If this ever goes red because the index learned to re-scan on a miss, that
+// is a design change, not a broken test — but `awaitElement`'s reasoning has
+// to be revisited with it.
+func TestALoadedIndexDoesNotSeeAStoreWriteItWasNotToldAbout(t *testing.T) {
+	f := newStore("n-edge1")
+	placed(f, "line1", "01HLINE1", "Linie 1")
+	x := NewElementIndex(f)
+	if _, ok := x.PathOf("01HLINE1"); !ok {
+		t.Fatal("the seeded element does not resolve, so nothing below means anything")
+	}
+
+	// Durable, unannounced — the window between ApplyReplicated and Observe.
+	placed(f, "line1/m6", "01HM6", "Maschine 6")
+	if _, ok := x.PathOf("01HM6"); ok {
+		t.Fatal("a store write the index was never told about resolved anyway — then a KV read " +
+			"would be a safe proxy for resolvability, and awaitElement's whole reason is gone")
+	}
+	if _, ok := x.IDAt("line1/m6"); ok {
+		t.Fatal("the reverse lookup saw an unannounced store write")
+	}
+
+	// The announcement is what makes it resolvable — the denominator: without
+	// this the assertions above would also pass against an index that never
+	// resolved anything at all.
+	x.Observe("_SystemElement", "colca/v1/_SystemElement/n-edge1/line1/m6",
+		f.records["colca/v1/_SystemElement/n-edge1/line1/m6"])
+	if got, ok := x.PathOf("01HM6"); !ok || got != "line1/m6" {
+		t.Fatalf("after Observe PathOf(01HM6) = %q %v, want line1/m6", got, ok)
+	}
+}
+
 // A position that changes hands must not leave the previous occupant mapped:
 // resolving a retired element to a live path would grant access to whatever
 // moved in.

@@ -201,23 +201,33 @@ func api(t *testing.T, n *node.Node, method, path string, body any) map[string]a
 	return out
 }
 
-// awaitElement waits until n holds the system element sitting at path.
+// awaitElement waits until n can RESOLVE the system element sitting at path —
+// the fact a grant check consults, not merely the record being in its KV.
 //
 // A grant naming an element deep in the tree is inert at an ancestor until that
 // element's record has replicated up to it (id-grants design §4): the ancestor
 // places elements from its own subtree at their mount-inserted paths, and it
 // cannot place one it has not received yet. Provisioning propagates; the wait
 // is what makes a test observe that rather than race it.
+//
+// Resolvable and durable are two different moments, and the gap between them
+// is real work: Engine.IngestReplicated commits the replicated batch to the
+// store (KV included) and only THEN loops over the applied records calling
+// ElementIndex.Observe. Polling /kv therefore returns as soon as the record is
+// durable, while a grant naming that element still resolves to nothing —
+// "no cmd grant covers …", PUBACK 0x87 — until Observe reaches it. Invisible
+// on an idle machine, and 1 of 12 concurrent -race batches under load.
+//
+// That ordering is right: durable first, projection second. It is the waiting
+// that was wrong. The index is strictly downstream of the durable write, so
+// waiting on it implies the KV holds the record too — the reverse is what was
+// never true. IDAt and PathOf read the same pair of maps, written together by
+// one apply, so this is the same fact authorization asks for.
 func awaitElement(t *testing.T, n *node.Node, path string) {
 	t.Helper()
-	waitFor(t, "the element at "+path+" to reach "+n.Cfg.ULID, 20*time.Second, func() bool {
-		for _, e := range kvAt(t, n, path) {
-			topic, _ := e.(map[string]any)["topic"].(string)
-			if strings.HasPrefix(topic, "colca/v1/_SystemElement/") {
-				return true
-			}
-		}
-		return false
+	waitFor(t, "the element at "+path+" to be resolvable at "+n.Cfg.ULID, 20*time.Second, func() bool {
+		_, ok := n.Engine.Elements().IDAt(path)
+		return ok
 	})
 }
 
