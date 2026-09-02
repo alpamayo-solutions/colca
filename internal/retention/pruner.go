@@ -12,6 +12,7 @@ package retention
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
@@ -414,8 +415,18 @@ func (p *Pruner) completePendingRefresh() {
 // toward completion. A payload that fails re-validation (contract drift) logs
 // ERROR each cycle and keeps the range pending: bounded noise, honest, never
 // silent.
+// refreshNamesLogged bounds how many refreshed topics one line may carry. A
+// refresh after a long outage can touch every entity the node holds, and a log
+// line is not the place to enumerate them all.
+const refreshNamesLogged = 32
+
 func (p *Pruner) refreshEntities(from, to uint64) bool {
 	refreshed, skipped, failed := 0, 0, 0
+	// The topics re-appended, for the log line below. The count alone says a
+	// path was refreshed without saying which, and the affected set is the
+	// whole point of §6.5 -- an unexpected count is then a hunt rather than a
+	// read. Bounded so a large refresh cannot write an unbounded line.
+	var names []string
 	entries, err := p.st.KVScan("")
 	if err != nil {
 		// Same treatment as an individual append failure below: the
@@ -447,11 +458,16 @@ func (p *Pruner) refreshEntities(from, to uint64) bool {
 			continue
 		}
 		refreshed++
+		if len(names) < refreshNamesLogged {
+			names = append(names, e.Topic)
+		}
 		p.m.StateRefreshApplied()
 	}
 	if refreshed > 0 || skipped > 0 || failed > 0 {
 		p.log.Info("entities state refresh", "paths", refreshed, "skipped", skipped, "failed", failed,
-			"offset_range_from", from, "offset_range_to", to-1)
+			"offset_range_from", from, "offset_range_to", to-1,
+			"topics", strings.Join(names, " "),
+			"topics_truncated", refreshed > len(names))
 	}
 	return failed == 0
 }
