@@ -2,6 +2,7 @@ package node
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net"
 	"sort"
 	"strings"
@@ -33,7 +34,17 @@ func interfaceType(iface net.Interface) string {
 func networkInventory(now time.Time) []map[string]any {
 	interfaces, err := net.Interfaces()
 	if err != nil {
+		// Silently returning nothing here is how a node came to publish an
+		// empty network inventory with no explanation anywhere: the Edit
+		// showed an empty panel, the record held `[]`, and the reason existed
+		// only in an error nobody kept. An empty list and a failed enumeration
+		// are different facts and must not look the same.
+		slog.Default().Warn("network inventory unavailable — the node will report no interfaces",
+			"err", err)
 		return []map[string]any{}
+	}
+	if len(interfaces) == 0 {
+		slog.Default().Warn("network inventory is empty — the host reported no interfaces at all")
 	}
 	sort.Slice(interfaces, func(i, j int) bool { return interfaces[i].Name < interfaces[j].Name })
 	out := make([]map[string]any, 0, len(interfaces))
