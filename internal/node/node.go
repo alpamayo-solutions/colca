@@ -307,6 +307,35 @@ func Start(cfg *config.Config) (*Node, error) {
 		positionMu.Unlock()
 		authorNodeRecord(a)
 	})
+	// Author once at startup, from the position the engine already holds.
+	//
+	// `SetOnPosition` fires when a position is LEARNED, and the engine loads a
+	// persisted ancestry while it is constructed -- before this callback is
+	// registered. So a node that comes up already knowing where it sits never
+	// calls back, and the root has nothing to learn in the first place: in the
+	// deployed tree `node position learned` appears exactly zero times, on the
+	// hub and on every edge. The hook never ran, `positionKnown` stayed false,
+	// the refresh ticker below is gated on it and never ran either, and every
+	// `_Node` record carried an empty `network_interfaces` -- the one
+	// field the bootstrap manifest does not write, which is why only the
+	// editor's network card looked broken.
+	//
+	// An empty ancestry IS a position -- the root's -- so this does not wait
+	// to be taught one.
+	//
+	// NOT covered by a test: neither the in-process suite nor the level-3
+	// world reproduces the condition, because both enroll or restart in a way
+	// that still fires the callback. Two tests written for it passed with and
+	// without this change and were deleted rather than kept as decoration.
+	// The oracle is the deployed tree: the records carry interfaces or they
+	// do not.
+	if ancestry, known := n.Engine.Ancestry(); known || len(ancestry) == 0 {
+		positionMu.Lock()
+		lastPosition = append(uns.Ancestry(nil), ancestry...)
+		positionKnown = true
+		positionMu.Unlock()
+		authorNodeRecord(ancestry)
+	}
 	// Interfaces can change without the node moving. Refresh periodically, but
 	// author only when the structural inventory changed; observed_at alone
 	// never creates stream traffic.
