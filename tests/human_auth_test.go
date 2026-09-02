@@ -135,15 +135,14 @@ func publishHuman5(t *testing.T, c *pahov5.Client, topic, payload string) byte {
 // bearer performs an HTTPS request with a Bearer token and returns the status.
 func bearer(t *testing.T, n *node.Node, method, path, token, body string) (int, string) {
 	t.Helper()
-	req, err := newRequest(method, "https://"+n.APIAddr+path, "", body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := httpsClient.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
+	resp := doRequest(t, httpsClient, method+" "+path, func() (*http.Request, error) {
+		req, err := newRequest(method, "https://"+n.APIAddr+path, "", body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		return req, nil
+	})
 	defer resp.Body.Close()
 	buf := make([]byte, 4096)
 	nread, _ := resp.Body.Read(buf)

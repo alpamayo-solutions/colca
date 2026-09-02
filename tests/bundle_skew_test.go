@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -139,14 +140,9 @@ func TestBundleRolloutSkewAcrossTheTree(t *testing.T) {
 	// does not know the contract.
 	body, _ := json.Marshal(map[string]any{
 		"topic": "colca/v1/_Telemetry/n-parent/skew/reading", "payload": map[string]any{"reading": 1.0}})
-	req, err := newRequest("POST", "https://"+parent.APIAddr+"/publish", tok, string(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := httpsClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := doRequest(t, httpsClient, "POST /publish at the parent", func() (*http.Request, error) {
+		return newRequest("POST", "https://"+parent.APIAddr+"/publish", tok, string(body))
+	})
 	defer resp.Body.Close()
 	if resp.StatusCode != 422 {
 		t.Fatalf("the N-pinned parent must reject the unknown contract, got %d", resp.StatusCode)

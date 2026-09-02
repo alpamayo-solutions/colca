@@ -70,14 +70,12 @@ func (*timeoutErr) Error() string { return "connect timed out" }
 // non-2xx like api() does).
 func apiStatus(t *testing.T, url, method, path, token string, body string) int {
 	t.Helper()
-	req, err := newRequest(method, url+path, token, body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := httpsClient.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
+	// Through doRequest like every other helper: a 429 is not an answer to
+	// the question these callers ask ("does this door say 401/403/200?"), so
+	// it must be waited out rather than returned as the verdict.
+	resp := doRequest(t, httpsClient, method+" "+path, func() (*http.Request, error) {
+		return newRequest(method, url+path, token, body)
+	})
 	resp.Body.Close()
 	return resp.StatusCode
 }
@@ -99,14 +97,9 @@ func TestAuthRejectionsAtEveryDoor(t *testing.T) {
 	}
 	// HTTP: a presented unknown cert never falls through to anything.
 	strangerClient := newTLSClient(stranger)
-	req, err := newRequest("GET", "https://"+tp.edge1.APIAddr+"/fetch?stream=metrics&cursor=stranger/c&max=1", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := strangerClient.Do(req)
-	if err != nil {
-		t.Fatalf("stranger fetch: %v", err)
-	}
+	resp := doRequest(t, strangerClient, "stranger fetch", func() (*http.Request, error) {
+		return newRequest("GET", "https://"+tp.edge1.APIAddr+"/fetch?stream=metrics&cursor=stranger/c&max=1", "", "")
+	})
 	resp.Body.Close()
 	if resp.StatusCode != 401 {
 		t.Fatalf("stranger fetch: want 401, got %d", resp.StatusCode)

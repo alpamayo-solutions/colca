@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -167,25 +168,89 @@ func startTopo(t *testing.T) *topo {
 
 // ---- helpers ----
 
+// rateLimitBudget bounds how long doRequest will keep re-sending one request
+// that the door is answering 429 to. Generous enough to absorb several
+// Retry-After rounds (the door advertises whole seconds, minimum 1), short
+// enough that a genuinely wedged limiter fails the test rather than hanging.
+const rateLimitBudget = 15 * time.Second
+
+// doRequest sends a request and retries for as long as the door answers 429.
+//
+// A 429 is the door saying "not now", not "no". Every helper here used to
+// treat it as a final answer — api() called t.Fatalf on any status >= 300,
+// apiStatus() and bearer() returned 429 where the caller was asserting a
+// specific code — so a rate-limited poll failed the test instead of waiting.
+//
+// It is reachable from an ordinary poll: waitFor ticks every 50 ms, which is
+// 20 requests/second, while scanPolicy (internal/httpapi/limits.go) allows 5/s
+// with a burst of 10. Any condition that takes longer than the burst — a
+// metric crossing three replication hops on a loaded runner — exhausts it and
+// starts collecting 429s. TestUplinkMountChainAndKV died exactly there:
+// "GET /kv?prefix=site1/edge1/m1/temp → 429: request limit exceeded".
+//
+// The door tells us how long to wait (acquireRequest sets Retry-After), so
+// honour it: that throttles the poll to the pace the door allows instead of
+// guessing a slower tick, and it needs no per-caller quota raised for tests.
+// build is a factory, not a request, because a retry has to re-read the body.
+func doRequest(t *testing.T, client *http.Client, what string, build func() (*http.Request, error)) *http.Response {
+	t.Helper()
+	deadline := time.Now().Add(rateLimitBudget)
+	for attempt := 1; ; attempt++ {
+		req, err := build()
+		if err != nil {
+			t.Fatalf("build request %s: %v", what, err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		if resp.StatusCode != http.StatusTooManyRequests {
+			return resp
+		}
+		retry := retryAfter(resp)
+		resp.Body.Close()
+		if time.Now().Add(retry).After(deadline) {
+			t.Fatalf("%s: still rate-limited after %s and %d attempts — the door kept answering 429",
+				what, rateLimitBudget, attempt)
+		}
+		time.Sleep(retry)
+	}
+}
+
+// retryAfter reads the door's own Retry-After (whole seconds), defaulting to
+// one second when the header is missing or unparseable — the smallest value
+// the door itself ever advertises.
+func retryAfter(resp *http.Response) time.Duration {
+	if v := resp.Header.Get("Retry-After"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return time.Second
+}
+
 func api(t *testing.T, n *node.Node, method, path string, body any) map[string]any {
 	t.Helper()
-	var rd io.Reader
+	var encoded string
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			t.Fatalf("marshal request body: %v", err)
 		}
-		rd = strings.NewReader(string(b))
+		encoded = string(b)
 	}
-	req, err := http.NewRequest(method, "https://"+n.APIAddr+path, rd)
-	if err != nil {
-		t.Fatalf("build request %s %s: %v", method, path, err)
-	}
-	req.Header.Set("X-Colca-Token", tok)
-	resp, err := httpsClient.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
+	resp := doRequest(t, httpsClient, method+" "+path, func() (*http.Request, error) {
+		var rd io.Reader
+		if body != nil {
+			rd = strings.NewReader(encoded)
+		}
+		req, err := http.NewRequest(method, "https://"+n.APIAddr+path, rd)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-Colca-Token", tok)
+		return req, nil
+	})
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {

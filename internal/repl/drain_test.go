@@ -71,20 +71,38 @@ func TestDrainLifecycleDeliveredThenAutoRevoke(t *testing.T) {
 	// auto-revokes. The response itself has nothing left to deliver, so it
 	// legitimately rides out the server's full 20s long poll — fired in the
 	// background and left for srv.Stop's cleanup to kill, same pattern as
-	// TestDownlinkPollPersistsChildCursorAndClampsPrune; only the registry
-	// state (which converges in milliseconds) is asserted.
+	// TestDownlinkPollPersistsChildCursorAndClampsPrune.
 	go func() {
 		_, _, _, _ = cl.Downlink(next, 10, 25*time.Second) //nolint:errcheck // fire-and-forget, killed by srv.Stop
 	}()
-	waitFor(t, "the child to be auto-revoked once the queue caught up", 5*time.Second, func() bool {
-		_, ok := preg.Get("n-child")
-		return !ok
+
+	// Wait on the LAST thing completion does, not the first. evaluateDrain
+	// revokes and only then calls Metrics.DrainCompleted, which decrements
+	// colca_drains_active, drops the pending series, and increments the
+	// outcome counter — in that order, on the handler's goroutine. That
+	// ordering is deliberate and documented on DrainCompleted itself ("by
+	// the time a caller reaches this method, the registry has already
+	// revoked child"): the revoke is the authoritative kill switch and must
+	// not be made to wait on telemetry, exactly as registry.Revoke fires its
+	// kick/deliver callbacks outside its own lock.
+	//
+	// So waiting on the registry entry disappearing — the first effect —
+	// and then asserting the gauge — the second — is a wait on one
+	// observable and an assertion on another that lags it. It failed in CI
+	// as `colca_drains_active after completion = 1, want 0`.
+	//
+	// The outcome counter is the final statement of DrainCompleted, so
+	// observing it means every earlier effect (the gauge, the pending
+	// series, and the revoke that preceded the whole call) has already
+	// landed. One wait, downstream of everything this test asserts.
+	waitFor(t, "the drain to be recorded complete once the queue caught up", 5*time.Second, func() bool {
+		return metricstest.Value(t, pm, `colca_drains_completed_total{outcome="delivered"}`) == 1
 	})
+	if _, ok := preg.Get("n-child"); ok {
+		t.Fatal("child must be auto-revoked by the time its drain is recorded complete")
+	}
 	if v := metricstest.Value(t, pm, `colca_drains_active`); v != 0 {
 		t.Fatalf("colca_drains_active after completion = %v, want 0", v)
-	}
-	if v := metricstest.Value(t, pm, `colca_drains_completed_total{outcome="delivered"}`); v != 1 {
-		t.Fatalf(`colca_drains_completed_total{outcome="delivered"} = %v, want 1`, v)
 	}
 	if v := metricstest.Value(t, pm, `colca_drains_completed_total{outcome="expired"}`); v != 0 {
 		t.Fatalf(`colca_drains_completed_total{outcome="expired"} = %v, want 0 (this was delivered, not expired)`, v)
