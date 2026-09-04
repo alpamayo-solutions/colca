@@ -23,6 +23,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
@@ -45,6 +46,28 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/tokenauth"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
+
+// rawPayload wraps a stored record's payload bytes for the wire.
+//
+// An empty payload is not a special case to guard against — it is the
+// tombstone (retention design §7.1): a KV-projecting state contract's
+// deliberate, valid way of saying "this path was retired". Every projector
+// consumer already expects to see it as JSON null (`_apply_entity`'s
+// `_is_tombstone` treats `payload in (None, {})` as a delete). Passing the
+// zero-length bytes through as json.RawMessage is what breaks that contract:
+// `json.RawMessage.MarshalJSON` returns them unchanged, encoding/json's
+// compact() then rejects zero bytes as "unexpected end of JSON input", and
+// the whole top-level Encode fails — after writeJSON already sent
+// WriteHeader(200), so nothing is left to send but an empty body. A consumer
+// whose cursor lands on ANY tombstone anywhere in the deployment then sees a
+// silent 200 with no records, forever, since /fetch never moves a cursor
+// itself and every retry re-reads the same poisoned page.
+func rawPayload(payload []byte) json.RawMessage {
+	if len(payload) == 0 {
+		return json.RawMessage("null")
+	}
+	return json.RawMessage(payload)
+}
 
 // defaultMax / maxMax bound how many records one /fetch may return.
 const (
@@ -108,10 +131,29 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// into memory before that check can run.
 	maxPublishBody := int64(cfg.Limits.EffectiveMaxRecordBytes())*2 + 4096
 
+	// writeJSON encodes to a buffer FIRST and only then touches the
+	// ResponseWriter. The alternative — encode straight to w after
+	// WriteHeader(code) — is what let the tombstone bug (rawPayload's doc
+	// comment above) reach a caller as a clean 200 with a totally empty
+	// body: the encode failed partway, the status line had already gone
+	// out, and there was nothing left to do but discard the error and send
+	// nothing. Every other 2xx/4xx/5xx path in this file builds its own `v`
+	// from data this handler already validated, so this is defense in
+	// depth against the NEXT value that turns out not to encode, not a fix
+	// for one contract — a caller gets a 500 it can act on instead of a 200
+	// it cannot tell apart from "nothing to report".
 	writeJSON := func(w http.ResponseWriter, code int, v any) {
+		var buf bytes.Buffer
+		if err := json.NewEncoder(&buf).Encode(v); err != nil {
+			slog.Default().Error("response failed to encode as JSON — refusing to send a 200 with no body", "err", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"response encoding failed"}` + "\n"))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(code)
-		_ = json.NewEncoder(w).Encode(v)
+		_, _ = w.Write(buf.Bytes())
 	}
 	auditDenied := func(r *http.Request, door, reason string, entry *uns.Entry) {
 		d := engine.AuditDenial{
@@ -557,7 +599,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				"offset":        rec.Offset,
 				"origin_offset": rec.OriginOffset,
 				"topic":         rec.Topic,
-				"payload":       json.RawMessage(rec.Payload),
+				"payload":       rawPayload(rec.Payload),
 				"ts":            rec.TS,
 				"written_by":    rec.WrittenBy,
 				"actor_id":      rec.ActorID,
@@ -660,7 +702,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				"path":    en.Path,
 				"node_id": en.NodeID,
 				"topic":   en.Topic,
-				"payload": json.RawMessage(en.Payload),
+				"payload": rawPayload(en.Payload),
 				"ts":      en.TS,
 				"offset":  en.Offset,
 			})

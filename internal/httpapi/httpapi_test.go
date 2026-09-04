@@ -944,6 +944,84 @@ func TestFetchPrefixAndMax(t *testing.T) {
 	}
 }
 
+// TestFetchServesATombstoneAsJSONNull pins the empty-payload tombstone
+// (retention design §7.1) through GET /fetch. A KV-projecting state contract
+// accepts an empty payload as a deliberate delete (plugins/uns.Validate), and
+// every projector consumer already expects to see that as JSON `payload:
+// null` (api/src/projector/cache.py's `_is_tombstone` treats `payload in
+// (None, {})` as one). Before this test existed, /fetch instead answered a
+// clean HTTP 200 with a completely empty body the moment ANY page it served
+// contained a tombstone — json.RawMessage passed the zero-length payload
+// bytes straight through, encoding/json's compact() rejected them as
+// "unexpected end of JSON input", and the whole top-level Encode failed
+// after writeJSON had already sent WriteHeader(200), so nothing was left to
+// send. A cursor that reached that offset was stuck retrying the identical
+// broken page forever, since /fetch never moves a cursor itself.
+//
+// Mirrors the production sequence exactly: a local service registers itself
+// with _ServiceDetails (state, entities stream), then tombstones it — the
+// same pair of records (_ServiceDetails then a state tombstone) that broke
+// the demo hub's projector on 2026-09-04.
+func TestFetchServesATombstoneAsJSONNull(t *testing.T) {
+	h := newLocalHandler(t)
+	registerLocal(t, h, "svc1", "")
+	entry, ok := testRegistry(t, h).ByName("svc1")
+	if !ok {
+		t.Fatal("svc1 did not register")
+	}
+
+	publish := func(body string) {
+		t.Helper()
+		r := httptest.NewRequest("POST", "/publish", strings.NewReader(body))
+		r.Header.Set("X-Colca-Service", "svc1")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code != 200 {
+			t.Fatalf("publish %s: %d %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	publish(fmt.Sprintf(`{"topic":"colca/v1/_ServiceDetails/n-test/_service","payload":{"id":%q}}`, entry.ULID))
+	// The tombstone itself goes straight through Engine.IngestClient with a
+	// non-nil zero-length []byte{} — exactly what mqttsrv.OnPublish hands the
+	// engine for an MQTT PUBLISH carrying an empty (0-byte) payload
+	// (mqttsrv.go: `eng.IngestClient(ident, pk.TopicName, pk.Payload)`), and
+	// what the demo hub actually received. Going through POST /publish's JSON
+	// envelope with the "payload" key omitted would instead leave
+	// in.Payload at its Go zero value — a genuinely nil json.RawMessage, which
+	// round-trips to JSON null with no bug at all, so it would not reproduce
+	// what production hit.
+	if _, err := h.eng.IngestClient(entry.ULID, "colca/v1/_ServiceDetails/n-test/_service", []byte{}); err != nil {
+		t.Fatalf("tombstone ingest: %v", err)
+	}
+
+	fetchReq := httptest.NewRequest("GET", "/fetch?stream=entities&cursor="+uns.LocalCursorPrefix+"svc1/tomb1&max=10", nil)
+	fetchReq.Header.Set("X-Colca-Service", "svc1")
+	fetchRec := httptest.NewRecorder()
+	h.ServeHTTP(fetchRec, fetchReq)
+	if fetchRec.Code != 200 {
+		t.Fatalf("GET /fetch = %d: %s", fetchRec.Code, fetchRec.Body.String())
+	}
+	var out struct {
+		Records []map[string]any `json:"records"`
+	}
+	if err := json.Unmarshal(fetchRec.Body.Bytes(), &out); err != nil {
+		// The exact regression: a 200 whose body decodes to nothing at all,
+		// because the top-level Encode failed after WriteHeader(200) and
+		// nothing was left to send.
+		t.Fatalf("response body did not decode as JSON (the tombstone bug): %v; body=%q", err, fetchRec.Body.String())
+	}
+	if len(out.Records) != 3 {
+		t.Fatalf("records = %v, want the fixture's own _EnrolledIdentity plus the _ServiceDetails record and its tombstone", out.Records)
+	}
+	tomb := out.Records[2]
+	if tomb["topic"] != "colca/v1/_ServiceDetails/n-test/_service" {
+		t.Fatalf("wrong record at index 1: %v", tomb)
+	}
+	if payload, has := tomb["payload"]; !has || payload != nil {
+		t.Fatalf("tombstone record must carry payload:null, got %#v", tomb)
+	}
+}
+
 // /debug/state reports the node's ulid and correct per-stream next offsets —
 // field correctness, not just a 200. Offsets are relative to the fixture's
 // own baseline (enrollment appends an _EnrolledIdentity record to entities), so the
