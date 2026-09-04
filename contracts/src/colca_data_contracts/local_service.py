@@ -17,6 +17,7 @@ from typing import Callable, Optional
 
 import paho.mqtt.client as pahomqtt
 from franzmq import Client, Topic
+from franzmq.data_contracts.base import Payload
 from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 
@@ -174,8 +175,21 @@ def connect_local_mqtt(
     on_connect: Optional[Callable] = None,
     on_disconnect: Optional[Callable] = None,
     identity: Optional[LocalServiceIdentity] = None,
+    publish_logs: bool = True,
+    will: Optional[tuple[Topic, Payload]] = None,
 ) -> tuple[Client, LocalServiceIdentity]:
-    """Connect to local Colca MQTT without credentials or client TLS."""
+    """Connect to local Colca MQTT without credentials or client TLS.
+
+    ``publish_logs`` defaults True (every existing caller wants its log
+    attached — "Every service publishes its log") but lets a caller
+    that manages this itself (``chaski.Service(..., logs=False)``) opt out
+    instead of the handler being force-installed underneath it.
+
+    ``will`` is set on the client BEFORE ``connect()`` is called, as MQTT
+    requires: a ``(topic, payload)`` pair published retained if this
+    connection drops without a clean DISCONNECT — the crash-detection half of
+    a service's lifecycle (``chaski.Service``'s last will).
+    """
 
     resolved = identity or resolve_local_identity(
         service_name,
@@ -186,7 +200,8 @@ def connect_local_mqtt(
     client = Client(client_id=client_id or service_name, protocol=pahomqtt.MQTTv5)
     client.node_id = resolved.node_id
     client.username_pw_set(service_name)
-    attach_log_publisher(client, resolved.hierarchy)
+    if publish_logs:
+        attach_log_publisher(client, resolved.hierarchy)
     client.reconnect_on_failure = True
     client.reconnect_on_offline = True
     client.reconnect_delay_set(min_delay=1, max_delay=120)
@@ -194,6 +209,9 @@ def connect_local_mqtt(
         client.on_connect = on_connect
     if on_disconnect is not None:
         client.on_disconnect = on_disconnect
+    if will is not None:
+        will_topic, will_payload = will
+        client.will_set(str(will_topic), will_payload.encode(), qos=1, retain=True)
 
     properties = Properties(PacketTypes.CONNECT)
     properties.SessionExpiryInterval = 0xFFFFFFFF
