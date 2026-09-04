@@ -50,10 +50,30 @@
       "id": "43ZAA8S2XMJCWYCEJG0TEPQY96"
     },
     {
-      "annotation_type_id": "annotation-type-unicode-üé",
+      "annotation_type_id": "annotation-type-unicode-\u00fc\u00e9",
       "source": "dataops/producer",
       "time_start": 123456.789,
       "id": "4KQT36W8PM35C46Q46NPJC6J1F"
+    }
+  ],
+  "_sources_comment": "Golden `source` vectors per identity KIND (node-side command authorization design): the `source` half of a derived annotation id names the kind of identity that authored it. The rule has two native owners \u2014 the API's annotation_source (stamps it on every intent) and plugins/uns AnnotationSource (re-derives it at the executor to prove authorship under an operate grant) \u2014 and both must answer these cases: a person (JWT or an API key on that person) -> user/<sub>; a Keycloak service account (preferred_username starts with service-account-) -> service/<client-id>; an mTLS edge.Service -> service/<service-name> (api only: a service is never the Edit executor's actor).",
+  "sources": [
+    {
+      "kind": "person",
+      "sub": "72faa6a9-5a72-4f55-8d7f-7ad09e379524",
+      "preferred_username": "anna",
+      "source": "user/72faa6a9-5a72-4f55-8d7f-7ad09e379524"
+    },
+    {
+      "kind": "service_account",
+      "sub": "0c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f",
+      "preferred_username": "service-account-erp-bridge",
+      "source": "service/erp-bridge"
+    },
+    {
+      "kind": "service",
+      "service_name": "erp-bridge",
+      "source": "service/erp-bridge"
     }
   ]
 }
