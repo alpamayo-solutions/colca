@@ -39,7 +39,7 @@ func secretTestHandler(t *testing.T, local bool) http.Handler {
 	reg.SetMetrics(m)
 	eng := engine.New(state, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	return Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", local, secretDB)
+	return Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", local, nil, secretDB)
 }
 
 func sealedWriteBody(t *testing.T, plaintext string, expires *time.Time, expected *uint64) []byte {

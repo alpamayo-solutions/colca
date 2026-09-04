@@ -24,6 +24,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 	"github.com/alpamayo-solutions/colca/internal/registry"
+	"github.com/alpamayo-solutions/colca/internal/repl"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/internal/tokenauth"
 	"github.com/alpamayo-solutions/colca/internal/tokenauth/tokentest"
@@ -136,7 +137,7 @@ func newAPI(t *testing.T) *api {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: Handler(e, cfg, reg, ver, m, testBlobs(t, cfg), nodeID.PublicHex(), false)}
+	srv := &http.Server{Handler: Handler(e, cfg, reg, ver, m, testBlobs(t, cfg), nodeID.PublicHex(), false, nil)}
 	go func() { _ = srv.Serve(tls.NewListener(ln, tlsCfg)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
@@ -1121,7 +1122,7 @@ func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptes
 	}
 	eng := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false))
+	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false, nil))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -1145,7 +1146,7 @@ func newTestHandler(t *testing.T, cfg *config.Config) http.Handler {
 	m := metrics.New(s, config.Retention{}, nil)
 	eng := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	return Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false)
+	return Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false, nil)
 }
 
 // doAdmin performs a request straight against a Handler's mux (no listener,
@@ -1279,7 +1280,7 @@ func TestPublishOversizeRecordCountsRecordRejectedOnce(t *testing.T) {
 	m := metrics.New(st, config.Retention{}, nil)
 	eng := engine.New(st, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false))
+	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false, nil))
 	t.Cleanup(srv.Close)
 	line := `colca_record_rejects_total{reason="too_large"}`
 	before := metricstest.Value(t, m, line)
@@ -1549,6 +1550,88 @@ func TestHealthzCarriesThePubkeySoAParentCanEnrollIt(t *testing.T) {
 	}
 }
 
+// healthzUplink is the shape chaski.Node.status() (and any other caller)
+// reads off /healthz's "uplink" field.
+type healthzUplink struct {
+	State string `json:"state"`
+}
+
+type healthzBody struct {
+	Uplink *healthzUplink `json:"uplink"`
+}
+
+// A node with no configured parent is a root (or not yet given one): it
+// genuinely has no uplink to report, and "none" says so explicitly rather
+// than omitting the field — the field's presence is what tells a caller this
+// build actually understands the question (colca-node design §3.1/§7 gap 4).
+func TestHealthzUplinkStateIsNoneWithoutAParent(t *testing.T) {
+	// newTestHandler's cfg carries no Parent block.
+	h := newTestHandler(t, &config.Config{ULID: "n-root"})
+
+	rr := httptest.NewRecorder()
+	req, err := http.NewRequest(http.MethodGet, "/healthz", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.ServeHTTP(rr, req)
+
+	var body healthzBody
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Uplink == nil || body.Uplink.State != "none" {
+		t.Fatalf("uplink = %+v, want state \"none\" — a parentless node has nothing to report", body.Uplink)
+	}
+}
+
+// A node WITH a parent reports its repl client's live Status() — here, freshly
+// built and never having reached that parent, which is "connecting": the
+// state a Python chaski.Node.status() must read as "awaiting_enrollment"
+// (or, on a node that had connected before, "offline") rather than silently
+// omitting the field the way a parentless node correctly does.
+func TestHealthzReportsTheUplinkClientsStatus(t *testing.T) {
+	nodeID, err := identity.Generate(filepath.Join(t.TempDir(), "n.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl, err := repl.NewClient("https://parent.invalid:443", "deadparentpub", nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	cfg := &config.Config{ULID: "n-child", Parent: &config.Parent{URL: "https://parent.invalid:443", Pubkey: "deadparentpub"}}
+	reg, err := registry.New(s, cfg.ULID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := metrics.New(s, config.Retention{}, nil)
+	eng := engine.New(s, cfg, reg, nil, m, nil)
+	reg.SetNamespace(eng.Elements())
+	h := Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false, cl)
+
+	rr := httptest.NewRecorder()
+	req, err := http.NewRequest(http.MethodGet, "/healthz", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.ServeHTTP(rr, req)
+
+	var body healthzBody
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Uplink == nil || body.Uplink.State != "connecting" {
+		t.Fatalf("uplink = %+v, want state \"connecting\" — a freshly built client that has never "+
+			"reached its parent must report that, not be silently omitted like a parentless node",
+			body.Uplink)
+	}
+}
+
 // localAPI is the fixture for the local HTTP door (local-service-trust design
 // §4): no TLS, no admin routes, and self-registration's mount-authoring wired
 // EXACTLY as node.Start wires it — domain.Execute(uns.CommandContext{}, "_CmdConfigure",
@@ -1593,7 +1676,7 @@ func newLocalHandler(t *testing.T) *localAPI {
 		}
 		return msg, nil
 	})
-	h := Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", true)
+	h := Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", true, nil)
 	return &localAPI{Handler: h, reg: reg, eng: eng, m: m}
 }
 
@@ -2353,7 +2436,7 @@ func newLocalHandlerWithVerifier(t *testing.T) (*localAPI, *tokentest.Issuer) {
 		t.Fatal(err)
 	}
 	primeVerifier(t, ver)
-	h.Handler = Handler(h.eng, &config.Config{ULID: "n-test"}, h.reg, ver, h.m, testBlobs(t, &config.Config{ULID: "n-test"}), "deadbeef", true)
+	h.Handler = Handler(h.eng, &config.Config{ULID: "n-test"}, h.reg, ver, h.m, testBlobs(t, &config.Config{ULID: "n-test"}), "deadbeef", true, nil)
 	return h, iss
 }
 

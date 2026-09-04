@@ -485,6 +485,20 @@ func Start(cfg *config.Config) (*Node, error) {
 		}(n.MQTT)
 	}
 
+	// This node's own uplink client towards ITS parent, built here (before the
+	// HTTP doors) rather than at step 6 below, purely so /healthz — which the
+	// doors open a few lines down — can report its Status() from the moment
+	// this node starts answering requests. The uplink loops themselves still
+	// start at step 6, once the replication server (step 5) exists for
+	// SetUpstream to wire recursive pulls through.
+	var replClient *repl.Client
+	if cfg.Parent != nil {
+		replClient, err = repl.NewClient(cfg.Parent.URL, cfg.Parent.Pubkey, id, cfg.Limits.EffectiveMaxRecordBytes())
+		if err != nil {
+			return fail(fmt.Errorf("node %s: repl client for %s: %w", cfg.ULID, cfg.Parent.URL, err))
+		}
+	}
+
 	// 4. Local HTTPS control API: TLS with the node's own key; machine callers
 	//    present their pinned client key, admin tooling uses the token (§6.3).
 	if cfg.API.Addr != "" {
@@ -498,7 +512,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.apiLn = ln
 		n.APIAddr = ln.Addr().String()
-		n.httpSrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), false, n.Secrets)))
+		n.httpSrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), false, replClient, n.Secrets)))
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server stopped", "err", err)
@@ -519,7 +533,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.localAPILn = ln
 		n.LocalAPIAddr = ln.Addr().String()
-		n.localAPISrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), true, n.Secrets)))
+		n.localAPISrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), true, replClient, n.Secrets)))
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("local api server stopped", "err", err)
@@ -561,12 +575,11 @@ func Start(cfg *config.Config) (*Node, error) {
 		}()
 	}
 
-	// 6. Uplink + downlink loops towards the parent.
+	// 6. Uplink + downlink loops towards the parent. replClient was already
+	//    built above (before the HTTP doors) so /healthz can report it from
+	//    the moment this node starts answering requests.
 	if cfg.Parent != nil {
-		cl, err := repl.NewClient(cfg.Parent.URL, cfg.Parent.Pubkey, id, cfg.Limits.EffectiveMaxRecordBytes())
-		if err != nil {
-			return fail(fmt.Errorf("node %s: repl client for %s: %w", cfg.ULID, cfg.Parent.URL, err))
-		}
+		cl := replClient
 		// A child's pull can now recurse through this node to its own parent.
 		if n.ReplSrv != nil {
 			n.ReplSrv.SetUpstream(cl)

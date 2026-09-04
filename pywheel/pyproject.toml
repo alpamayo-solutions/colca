@@ -1,0 +1,25 @@
+[project]
+name = "colcad"
+# Stamped by scripts/build_colcad_wheels.py at build time (matches every
+# other artifact in this repo — "Versioning Strategy"). The 0.0.0
+# placeholder here is never itself published.
+version = "0.0.0"
+description = "The colcad binary, packaged for chaski.Node (chaski[node]) — colca-node design §6/§7 gap 5"
+readme = "README.md"
+requires-python = ">=3.9"
+
+[build-system]
+# wheel>=0.42 is pinned for its executable-permission-preserving package_data
+# handling — this wheel's entire payload is one +x binary, so a regression
+# here would silently ship a colcad nothing can execute.
+requires = ["setuptools>=77", "wheel>=0.42"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["colcad"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+# Whichever binary name the build actually staged (colcad on every platform
+# this package ships for today — see build_colcad_wheels.py's TARGETS).
+colcad = ["bin/*", "contracts-bundle.json"]

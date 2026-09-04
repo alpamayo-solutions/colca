@@ -71,7 +71,7 @@ func newResourceAPI(t *testing.T) *resourceAPI {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: Handler(e, cfg, reg, nil, m, blobs, nodeID.PublicHex(), false)}
+	srv := &http.Server{Handler: Handler(e, cfg, reg, nil, m, blobs, nodeID.PublicHex(), false, nil)}
 	go func() { _ = srv.Serve(tls.NewListener(ln, tlsCfg)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
@@ -93,6 +94,11 @@ type Client struct {
 	// Whether each replication lane is currently failing, so an outage logs
 	// as a state change rather than once per retry (see linkstate.go).
 	links *linkState
+	// status is this client's current uplink condition (status.go), read by
+	// httpapi's /healthz. An atomic.Value rather than a mutex: RunUplink and
+	// RunDownlink write it from their own goroutines on every attempt, and a
+	// concurrent /healthz read must never contend with the hot loop.
+	status atomic.Value
 }
 
 // NewClient: TLS client presenting the child's cert, pinning the parent's pubkey.
@@ -135,14 +141,16 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 		ExpectContinueTimeout: time.Second,
 		IdleConnTimeout:       90 * time.Second,
 	}
-	return &Client{
+	cl := &Client{
 		base:             baseURL,
 		parentPub:        parentPubHex,
 		http:             &http.Client{Transport: transport},
 		log:              slog.Default().With("comp", "repl-client"),
 		maxReplicateBody: replicateBodyLimit(&config.Config{Limits: limits}),
 		links:            newLinkState(),
-	}, nil
+	}
+	cl.status.Store(Status{State: UplinkConnecting, Since: time.Now().UTC()})
+	return cl, nil
 }
 
 // ParentPub is the pinned parent key this client is bound to — the scope of
@@ -831,8 +839,10 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 				c.log.Info("first contact with the parent succeeded",
 					"parent", c.base, "attempts", attempts, "waited", waited.Round(time.Second))
 			}
+			c.setStatus(UplinkConnected)
 			break
 		}
+		c.setStatus(classifyUplinkErr(err))
 		select {
 		case <-stop:
 			return // the request was aborted by our own shutdown
@@ -861,6 +871,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		res, err := c.downlink(ctx, after, defAfter, replBatch, downlinkWait)
 		recs, next, gap, nowMS, ancestry := res.Records, res.Next, res.Gap, res.NowMS, res.Ancestry
 		if err != nil {
+			c.setStatus(classifyUplinkErr(err))
 			select {
 			case <-stop:
 				return // the request was aborted by our own shutdown
@@ -875,6 +886,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			}
 			continue
 		}
+		c.setStatus(UplinkConnected)
 		m.DownlinkFetched(time.Now())
 		// Time-sync design §2.3 rule 4: the offset learned from this
 		// response is applied BEFORE its records are ingested, so the first

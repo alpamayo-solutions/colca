@@ -46,7 +46,7 @@ func newLocalTestHandlerWithBlobCap(t *testing.T, max uint64) http.Handler {
 	eng := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
 	blobs := testBlobs(t, cfg)
-	return Handler(eng, cfg, reg, nil, m, blobs, "deadbeef", true)
+	return Handler(eng, cfg, reg, nil, m, blobs, "deadbeef", true, nil)
 }
 
 // doLocal performs a request against a local-door Handler's mux (no

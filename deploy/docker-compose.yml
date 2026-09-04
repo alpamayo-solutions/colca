@@ -128,11 +128,18 @@ services:
     # 11890/11891 are the HUMAN doors (JWT over TLS: raw MQTT / WebSocket) —
     # usable only when the human-auth profile (keycloak) is up; without it the
     # hub keeps retrying its JWKS fetch and the doors reject every token.
+    # 19443 is the replication door, published ONLY on global: a chaski.Node
+    # embedded in a HOST process (colca-node design §3.1) is not on this
+    # compose network, so it dials its parent by host port like everything
+    # else it reaches — the same reason 18080 exists beside link3-hub's
+    # in-network :443. site1/edge1/edge2 keep theirs unpublished; only a
+    # child enrolled at the root needs this from outside Docker.
     ports:
       - "127.0.0.1:${COLCA_PORT_GLOBAL_API:-18080}:443"
       - "127.0.0.1:${COLCA_PORT_GLOBAL_MQTT:-11880}:8883"
       - "127.0.0.1:${COLCA_PORT_GLOBAL_HUMAN_MQTT:-11890}:8884"
       - "127.0.0.1:${COLCA_PORT_GLOBAL_HUMAN_WS:-11891}:8885"
+      - "127.0.0.1:${COLCA_PORT_GLOBAL_REPL:-19443}:9443"
     networks:
       link3-hub:     # keep upstream's primary pick: host ports bind here
         priority: 100

@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
@@ -41,6 +42,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/registry"
+	"github.com/alpamayo-solutions/colca/internal/repl"
 	"github.com/alpamayo-solutions/colca/internal/secretstore"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/internal/tokenauth"
@@ -117,7 +119,13 @@ type caller struct {
 // identities is not), so it never registers them at all — an admin route
 // that 404s because it was never mounted, rather than 403s because it
 // refused, is what keeps a scanner from learning the route exists.
-func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, blobs *blobstore.Store, pubkey string, local bool, secretStores ...*secretstore.Store) http.Handler {
+//
+// uplink is this node's repl client towards ITS OWN parent, nil when this
+// node has none (a root, or one not yet given a parent block) -- /healthz
+// reads its Status() so a Python chaski.Node (or an operator) can tell
+// "not yet enrolled" apart from "reachable and current" without shelling in
+// or scraping logs (colca-node design section 3.1 / gap 4).
+func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, blobs *blobstore.Store, pubkey string, local bool, uplink *repl.Client, secretStores ...*secretstore.Store) http.Handler {
 	mux := http.NewServeMux()
 	var secretDB *secretstore.Store
 	if len(secretStores) > 0 {
@@ -364,8 +372,22 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		// The ULID and pubkey are what `colca node enroll` reads. Enrollment
 		// happens BEFORE this node is trusted by anything, so both have to be
 		// readable at the one unauthenticated door.
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "ulid": cfg.ULID, "pubkey": pubkey})
+		payload := map[string]any{"ok": true, "ulid": cfg.ULID, "pubkey": pubkey}
+		// uplink: what a Python chaski.Node.status() (or an operator) needs to
+		// tell "not yet enrolled" apart from "reachable and current" without a
+		// shell or a log tail. "none" is itself an answer, not an omission: a
+		// root (or a not-yet-parented) node genuinely has no uplink to report.
+		switch {
+		case cfg.Parent == nil:
+			payload["uplink"] = map[string]any{"state": "none"}
+		case uplink != nil:
+			st := uplink.Status()
+			payload["uplink"] = map[string]any{
+				"state": string(st.State),
+				"since": st.Since.Format(time.RFC3339),
+			}
+		}
+		writeJSON(w, http.StatusOK, payload)
 	})
 
 	// /metrics is certless/tokenless like /healthz: Prometheus scrape targets
