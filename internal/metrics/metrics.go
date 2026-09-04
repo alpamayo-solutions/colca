@@ -344,6 +344,13 @@ type Metrics struct {
 	// their grace period. Unlabeled — every deletion is the same event.
 	blobsSwept prometheus.Counter // colca_blobs_swept_total
 
+	// colca_metrics_unbound_total (SDK design §7 gap 6): a _Metric accepted
+	// on a path with no _Signal at that path — today a silent, invisible,
+	// replicated write. Unlabeled: the path itself is attacker/integrator
+	// controlled and unbounded, so it can never be a label; the accompanying
+	// rate-limited log line (engine.go) carries the path instead.
+	metricsUnbound prometheus.Counter // colca_metrics_unbound_total
+
 	ingestBy        map[string]prometheus.Counter
 	rejectedBy      map[string]prometheus.Counter
 	uplinkOKBy      map[string]prometheus.Gauge
@@ -567,6 +574,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_blobs_swept_total",
 			Help: "Blobs deleted by the background sweeper because no live _Resource referenced them and they were older than the configured grace period (resources design §8). Resets on restart.",
 		}),
+		metricsUnbound: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_metrics_unbound_total",
+			Help: "_Metric records accepted on a path with no _Signal at that path (SDK design §7 gap 6) — a valid, authorized write that will never appear as a signal in the Edit because nothing has bound that path yet. Accompanied by a rate-limited log line naming the path. Resets on restart.",
+		}),
 	}
 	m.ingestBy = counterChildren(m.ingest, streams)
 	m.rejectedBy = counterChildren(m.rejected, reasons)
@@ -668,6 +679,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
 		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
 		m.blobTransfers, m.blobRejects, m.recordRejects, m.resourceReads, m.httpRequestLimited, m.blobsSwept,
+		m.metricsUnbound,
 		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
 	return m
@@ -1219,6 +1231,15 @@ func (m *Metrics) BlobSwept() {
 		return
 	}
 	m.blobsSwept.Inc()
+}
+
+// MetricUnbound counts one _Metric accepted on a path with no _Signal there
+// (SDK design §7 gap 6). Unlabeled by design — see the field comment.
+func (m *Metrics) MetricUnbound() {
+	if m == nil {
+		return
+	}
+	m.metricsUnbound.Inc()
 }
 
 // storeCollector derives the gauge families from the store (and, for the

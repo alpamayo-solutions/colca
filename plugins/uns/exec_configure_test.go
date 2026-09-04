@@ -635,6 +635,56 @@ func TestASignalPointsAtTheTagsIdentityAndKeepsItsOwn(t *testing.T) {
 	}
 }
 
+// A catalogue tag's meta.element names a path this node does not hold: it is
+// AUTHORED along the way, one missing segment at a time, reusing whichever
+// segments already exist — the identical algorithm a local service's own
+// declared mount uses to seed its position (registry.Manager.elementFor),
+// factored so bindCatalogue authors through it too (architecture principle
+// 1). "m" is the connector's own mount, already placed — it must be reused,
+// not re-minted; "m/a" and "m/a/b" do not exist yet and must be authored.
+func TestATagsMetaElementAuthorsMissingSegmentsAndReusesExisting(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HMOUNT", "m")
+	placeElement(t, c, "m", "01HMOUNT")
+	bindEntry(t, c, "01JCONN", "svc", "01HMOUNT")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/m/svc", []map[string]any{
+		{"id": "t1", "name": "temperature", "data_type": "float", "meta": map[string]any{"element": "m/a/b"}},
+	})
+
+	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+	if code != 200 {
+		t.Fatalf("autobind = %d %q", code, msg)
+	}
+
+	s, ok := signalsAt(c)["m/a/b/temperature"]
+	if !ok {
+		t.Fatalf("signals = %+v, want one bound at m/a/b/temperature", signalsAt(c))
+	}
+	if s.DataTag != "t1" {
+		t.Fatalf("signal at m/a/b/temperature bound to tag %q, want t1", s.DataTag)
+	}
+
+	elements := elementsUnder(c.store.(*fakeStore), "n1")
+	if elements["m"] != "01HMOUNT" {
+		t.Fatalf(`elements["m"] = %q, want the pre-existing 01HMOUNT reused, not duplicated`, elements["m"])
+	}
+	aID, ok := elements["m/a"]
+	if !ok {
+		t.Fatalf("elements = %+v, want m/a authored along the way", elements)
+	}
+	bID, ok := elements["m/a/b"]
+	if !ok {
+		t.Fatalf("elements = %+v, want m/a/b authored as the tag's own element", elements)
+	}
+	if aID == bID || aID == "01HMOUNT" || bID == "01HMOUNT" {
+		t.Fatalf("authored elements must each have their own identity: m=%q m/a=%q m/a/b=%q",
+			elements["m"], aID, bID)
+	}
+	if s.Element != bID {
+		t.Fatalf("signal.system_element_id = %q, want the authored m/a/b element %q", s.Element, bID)
+	}
+}
+
 // Rebinding — the only mechanism for it is signal/upsert with the same id and
 // a different data_tag — must leave the id untouched. Every Metric carries
 // signal_id, so an id that moved on rebind would orphan that measurement

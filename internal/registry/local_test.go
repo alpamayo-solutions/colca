@@ -22,9 +22,12 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// authoredPlacements is the test uns.Placements: a plain path→id map, mutated
-// by the upsert closure below exactly as the real element/upsert executor
-// would grow the namespace when Register authors a missing branch.
+// authoredPlacements is the test double for the path→id side of authoring: a
+// plain map, grown by the fake author closure below exactly as the real
+// ConfigExec.authorElementAt (reached in production through the
+// "element/author" verb) grows the namespace when Register authors a missing
+// mount. Exposed with the same IDAt orientation the real thing answers, so a
+// test can check what got authored without a second resolver of its own.
 type authoredPlacements map[string]string
 
 func (p authoredPlacements) IDAt(path string) (string, bool) { id, ok := p[path]; return id, ok }
@@ -34,6 +37,16 @@ func (p authoredPlacements) IDAt(path string) (string, bool) { id, ok := p[path]
 // an element this node cannot resolve), and SetAuthoring so Register can
 // resolve or author declared mounts. elements maps path -> element id, the
 // same orientation Placements.IDAt answers.
+//
+// The fake author here does NOT walk missing intermediate segments the way
+// ConfigExec.authorElementAt does — that walk is domain knowledge and lives
+// in exactly one place (architecture principle 1), pinned where it actually
+// runs: exec_configure_test.go's
+// TestATagsMetaElementAuthorsMissingSegmentsAndReusesExisting, and
+// TestALocalServiceAndACatalogueTagAuthorTheSameElementsThroughOneWalk below,
+// which exercises the REAL walk through both callers against one store. This
+// fake only has to prove Register calls its authoring dependency and binds to
+// whatever it returns — Register's own behavior, not the walk's.
 func newTestManagerWithElements(t *testing.T, elements map[string]string) *Manager {
 	t.Helper()
 	m, err := New(openStore(t, t.TempDir()), "01NODE")
@@ -47,10 +60,14 @@ func newTestManagerWithElements(t *testing.T, elements map[string]string) *Manag
 		resolver[id] = path
 	}
 	m.SetNamespace(resolver)
-	m.SetAuthoring(place, func(path, elementID string) error {
-		place[path] = elementID
-		resolver[elementID] = path
-		return nil
+	m.SetAuthoring(func(path string) (string, error) {
+		if id, ok := place[path]; ok {
+			return id, nil
+		}
+		id := "el-" + strings.ReplaceAll(path, "/", "-")
+		place[path] = id
+		resolver[id] = path
+		return id, nil
 	})
 	return m
 }
@@ -83,6 +100,13 @@ func TestRegisterBindsToAnExistingDeclaredMount(t *testing.T) {
 	}
 }
 
+// A missing declared mount is authored through m.author (SetAuthoring),
+// and the entry binds to whatever it returns. The walk that authors every
+// missing intermediate segment along the way is domain knowledge, pinned
+// once where it actually lives — exec_configure_test.go's
+// TestATagsMetaElementAuthorsMissingSegmentsAndReusesExisting — and again,
+// through this exact door, by
+// TestALocalServiceAndACatalogueTagAuthorTheSameElementsThroughOneWalk below.
 func TestRegisterAuthorsAMissingDeclaredMount(t *testing.T) {
 	m := newTestManagerWithElements(t, map[string]string{})
 
@@ -90,17 +114,8 @@ func TestRegisterAuthorsAMissingDeclaredMount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if id, ok := m.Placements().IDAt("line1/press3"); !ok || id != e.Element {
-		t.Fatalf("line1/press3 holds %q, entry bound to %q; the branch was not authored", id, e.Element)
-	}
-	branchID, ok := m.Placements().IDAt("line1")
-	if !ok {
-		t.Fatal("the intermediate segment line1 was not authored; the path has a hole in it")
-	}
-	for path, id := range map[string]string{"line1": branchID, "line1/press3": e.Element} {
-		if len(id) != 26 {
-			t.Fatalf("authored element %s has id %q (%d characters); SystemElement requires a 26-character ULID", path, id, len(id))
-		}
+	if e.Element == "" {
+		t.Fatal("bound to no element; a declared mount with nothing at it must be authored, not left unplaced")
 	}
 }
 

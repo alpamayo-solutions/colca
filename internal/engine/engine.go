@@ -182,6 +182,10 @@ type Engine struct {
 	// auditID is injectable for deterministic event tests. Audit writes bypass
 	// the public ingest doors; see audit.go.
 	auditID func(time.Time) string
+
+	// unboundLog rate-limits the "_Metric with no _Signal" log line per path
+	// (SDK design §7 gap 6, unbound.go).
+	unboundLog *unboundMetricLog
 }
 
 // New builds an engine. ids is the identity registry: IngestClient admits a
@@ -203,7 +207,7 @@ func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m
 	if clk == nil {
 		clk = clock.New(cfg.Parent == nil, time.Now)
 	}
-	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk, auditID: newAuditID}
+	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk, auditID: newAuditID, unboundLog: newUnboundMetricLog()}
 	e.elements = uns.NewElementIndex(e.EntityStore())
 	if raw, ok := s.AncestryGet(); ok {
 		var a uns.Ancestry
@@ -554,6 +558,9 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		// State a machine published here, offered to the domain plugin — the
 		// core does not interpret it (data-model binding design §7).
 		e.observe(p, topic, payload)
+		// SDK design §7 gap 6: a _Metric with no _Signal is a silent,
+		// invisible write otherwise — count and (rate-limited) log it.
+		e.checkMetricBinding(p)
 	}
 	return res, err
 }

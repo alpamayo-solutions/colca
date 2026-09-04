@@ -210,3 +210,14 @@ func TestANilEntryHoldsNoDoor(t *testing.T) {
 		}
 	}
 }
+
+func TestCatalogueNameIsTheNameALocalEntryPresentedAndTheULIDOfAKeyedOne(t *testing.T) {
+	local := &Entry{ULID: "01LOCAL", Kind: KindLocal, Name: "opcua-1"}
+	if got := local.CatalogueName(); got != "opcua-1" {
+		t.Fatalf("local entry: CatalogueName() = %q, want the presented name %q", got, "opcua-1")
+	}
+	external := &Entry{ULID: "01EXT", Kind: KindExternal, Pubkey: "ab", Element: "el"}
+	if got := external.CatalogueName(); got != "01EXT" {
+		t.Fatalf("external entry with no name: CatalogueName() = %q, want its ULID", got)
+	}
+}

@@ -135,11 +135,38 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnConnectAuthenticate,
 		mqtt.OnACLCheck,
 		mqtt.OnPublish,
+		mqtt.OnWillSent,
 		mqtt.OnDisconnect,
 		mqtt.OnSubscribe,
 		mqtt.OnSubscribed,
 		mqtt.OnPublishDropped,
 	}, []byte{b})
+}
+
+// OnWillSent is mochi telling us it already broadcast a disconnecting
+// client's last will to live subscribers and its own in-memory retained
+// cache (server.go sendLWT). That path never calls OnPublish — the one hook
+// that feeds engine.IngestClient — so on its own a will never reaches
+// colca's own engine (KV/streams): a crash-detected `_ServiceDetails` would
+// update what a live subscriber sees but never what `/kv` or a later
+// reconnect observes, silently breaking the "last will marks a service
+// inactive" guarantee the local/external door contract makes ("Node doors", colca SDK design §3.2). Route it through the identical
+// ingest path OnPublish uses, so a will is exactly as durable as any other
+// publish this identity could have made. No return value here (mochi has
+// already retained/broadcast by the time this fires, so there is nothing to
+// reject) — only whether the engine gets a copy too.
+func (h *colcaHook) OnWillSent(cl *mqtt.Client, pk packets.Packet) {
+	ident := string(cl.Properties.Username)
+	if ident == "" || !uns.IsUns(pk.TopicName) {
+		return
+	}
+	eng := h.engine()
+	if eng == nil {
+		return
+	}
+	if _, err := eng.IngestClient(ident, pk.TopicName, pk.Payload); err != nil {
+		h.log.Warn("will publish rejected", "identity", ident, "topic", pk.TopicName, "err", err)
+	}
 }
 
 // OnPublishDropped is mochi telling us it discarded a publish because the

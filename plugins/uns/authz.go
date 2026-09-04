@@ -143,6 +143,23 @@ func (e *Entry) CursorPrefix() string {
 	return e.ULID + "/"
 }
 
+// CatalogueName is the final segment of this entry's `_DataTags` catalogue
+// topic — `colca/v1/_DataTags/{node}/{mount}/{CatalogueName}` — the one place
+// a publisher's identity appears in a topic, and only as a human-readable
+// tail on a record the publisher owns (local-service-trust design §2). A
+// local entry presented a name and is known by it; every keyed entry is
+// known by its ULID and has no name to give, so the ULID is the segment.
+// Answered here rather than by reading Name at the call sites so that
+// "what does an external service call its catalogue" is one rule, matched
+// by the SDK's Service.external, and not a field an operator has to fill
+// in at enrollment to make autobind find the record.
+func (e *Entry) CatalogueName() string {
+	if e.Name != "" {
+		return e.Name
+	}
+	return e.ULID
+}
+
 // Door is one of the ways an identity can present itself to a node. Which kinds
 // may use which door is a domain rule (auth §2.1, §6), so it is answered here
 // rather than re-derived from Kind at each listener.

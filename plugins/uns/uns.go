@@ -443,6 +443,22 @@ func TimeSyncTopic(nodeULID string) string {
 	return "colca/v1/_TimeSync/" + nodeULID
 }
 
+// IsMetric answers whether contract is _Metric — the core asks this rather
+// than comparing the literal string itself (architecture principle 4: domain
+// vocabulary lives in exactly one package).
+func IsMetric(contract string) bool {
+	return contract == "_Metric"
+}
+
+// SignalTopicForMetric returns the _Signal topic sharing p's node and path —
+// the binding a _Metric record at p would need for that path to be a signal
+// (SDK design §7 gap 6). p is expected to describe a _Metric topic; the
+// contract itself is not consulted because a _Signal and its _Metric always
+// share node and path ("Events Catalog").
+func SignalTopicForMetric(p Parsed) string {
+	return "colca/v1/_Signal/" + p.NodeID + "/" + p.Path
+}
+
 // DownlinkCursorPrefix names the PARENT-side cursor a repl server persists
 // per child on its own commands stream (move-drain design §3.2/§3.4,
 // carried over from spec §5.1 [delta]): DownlinkCursorPrefix+{child-ulid} on

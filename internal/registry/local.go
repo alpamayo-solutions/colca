@@ -59,56 +59,34 @@ func (m *Manager) Register(name, declaredMount string) (*uns.Entry, error) {
 	return &entry, nil
 }
 
-// elementFor resolves a declared mount to the element a new entry binds to,
-// authoring the branch when it is absent (§3.2: "path exists? bind to the
-// element sitting there. path missing? author the elements along it, bind to
-// the leaf."). No declaration means unplaced — bound to the node itself —
-// so there is nothing to resolve and nothing to author: elementFor("")
-// returns "", and Enroll already treats an empty element as a complete,
-// valid placement (KindLocal, id-grants design §4).
+// elementFor resolves a declared mount to the element a new entry binds to.
+// No declaration means unplaced — bound to the node itself — so there is
+// nothing to resolve: elementFor("") returns "", and Enroll already treats
+// an empty element as a complete, valid placement (KindLocal, id-grants
+// design §4).
+//
+// Authoring the branch when it is absent (§3.2: "path exists? bind to the
+// element sitting there. path missing? author the elements along it, bind
+// to the leaf.") is domain knowledge this package does not keep a copy of: a
+// catalogue tag's own meta.element needs the identical walk
+// (exec_configure.go bindCatalogue), so it lives in exactly one place —
+// ConfigExec.authorElementAt — and this just calls it, through whatever
+// SetAuthoring wired (architecture principle 1: one walk, not two).
 func (m *Manager) elementFor(mount string) (string, error) {
 	if mount == "" {
 		return "", nil
 	}
 	m.mu.RLock()
-	place, upsert := m.place, m.upsert
+	author := m.author
 	m.mu.RUnlock()
-	if place == nil || upsert == nil {
+	if author == nil {
 		return "", fmt.Errorf("register: mount authoring is not wired at this node")
 	}
-
-	var local, leaf string
-	for _, seg := range strings.Split(mount, "/") {
-		if seg == "" {
-			continue
-		}
-		if local == "" {
-			local = seg
-		} else {
-			local += "/" + seg
-		}
-		id, ok := place.IDAt(local)
-		if !ok {
-			// Minted, never derived from the path. SystemElement.id is a
-			// 26-character ULID throughout the API contract, so the canonical
-			// ULID is used directly rather than adding a prefix that the
-			// projection cannot store. A path-derived id is a real defect, not
-			// a style choice: rename this element (its id stays, its path
-			// moves), then let any service later declare the OLD path.
-			// IDAt would miss, so a deterministic id would be re-minted
-			// identically and ElementIndex.apply (elements.go) would re-point
-			// that SAME id back to the old path on collision — silently
-			// undoing the rename through the id instead of through the entry,
-			// exactly what the seed-not-maintain rule exists to prevent.
-			// Reuses NewULID rather than adding a second randomness source.
-			id = NewULID()
-			if err := upsert(local, id); err != nil {
-				return "", fmt.Errorf("register: could not author %s: %w", local, err)
-			}
-		}
-		leaf = id
+	id, err := author(mount)
+	if err != nil {
+		return "", fmt.Errorf("register: could not author %s: %w", mount, err)
 	}
-	return leaf, nil
+	return id, nil
 }
 
 // normalizeMount strips empty segments (a leading/trailing/doubled "/") so

@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -365,33 +364,25 @@ func Start(cfg *config.Config) (*Node, error) {
 	// is built first — every door consults it, so it has to exist earliest.
 	reg.SetNamespace(n.Engine.Elements())
 	// A local service's self-registration (local-service-trust design §3.2)
-	// authors the elements along a declared mount that does not exist yet, the
-	// same way `colca node enroll --mount` does for a child node: through the
-	// ONE authoring path in this system, domain.Execute("_CmdConfigure",
-	// "element/upsert", ...) — never a second, direct write to the element
-	// index. Wired here because this is the first point both dependencies
-	// exist: n.Engine.Elements() (uns.Placements, via IDAt) and domain (built
-	// just above). Without this, Register's declared-mount branch fails closed
-	// with "mount authoring is not wired at this node" and every local CONNECT
+	// authors the elements along a declared mount that does not exist yet —
+	// the identical walk a catalogue tag's own meta.element uses
+	// (exec_configure.go bindCatalogue), reached through the ONE authoring
+	// path in this system, domain.Execute("_CmdConfigure", "element/author",
+	// ...) — never a second, direct write to the element index. Wired here
+	// because this is the first point domain exists (built just above).
+	// Without this, Register's declared-mount branch fails closed with
+	// "mount authoring is not wired at this node" and every local CONNECT
 	// carrying a mount is refused.
-	reg.SetAuthoring(n.Engine.Elements(), func(path, elementID string) error {
-		name := path
-		if i := strings.LastIndexByte(path, '/'); i >= 0 {
-			name = path[i+1:]
-		}
-		payload, err := json.Marshal(map[string]any{
-			"elements": []map[string]any{
-				{"path": path, "element": map[string]any{"id": elementID, "name": name}},
-			},
-		})
+	reg.SetAuthoring(func(path string) (string, error) {
+		payload, err := json.Marshal(map[string]string{"path": path})
 		if err != nil {
-			return err
+			return "", err
 		}
-		code, msg, _ := domain.Execute("_CmdConfigure", "element/upsert", payload)
+		code, msg, _ := domain.Execute("_CmdConfigure", "element/author", payload)
 		if code != 200 {
-			return fmt.Errorf("author element at %s: %s", path, msg)
+			return "", fmt.Errorf("author element at %s: %s", path, msg)
 		}
-		return nil
+		return msg, nil
 	})
 	if ver != nil {
 		// A human's grants come from the groups their token names, resolved

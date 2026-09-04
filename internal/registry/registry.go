@@ -59,14 +59,17 @@ type Manager struct {
 	// engine is built after the registry. Until it is wired nothing resolves,
 	// which is the fail-closed answer — an unplaced identity has no place.
 	ns uns.Namespace
-	// place and upsert are self-registration's mount-authoring dependencies
-	// (local-service-trust design §3.2), late-bound like ns: place answers
-	// which element already sits at a path, upsert authors one there when
-	// Register's declared mount is missing. Both nil until SetAuthoring wires
-	// them, which is fine — Register is not reachable before the doors that
-	// call it are wired either.
-	place  uns.Placements
-	upsert func(path, elementID string) error
+	// author is self-registration's mount-authoring dependency
+	// (local-service-trust design §3.2): it resolves a declared mount to its
+	// element, authoring any segment along it that is missing and reusing
+	// every one that already exists. That walk is domain knowledge shared with
+	// a catalogue tag's own meta.element (exec_configure.go bindCatalogue), so
+	// it lives in exactly one place — ConfigExec.authorElementAt — reached
+	// here through the "element/author" _CmdConfigure verb rather than kept as
+	// a second copy (architecture principle 1). Late-bound like ns: nil until
+	// SetAuthoring wires it, which is fine — Register is not reachable before
+	// the doors that call it are wired either.
+	author func(path string) (string, error)
 }
 
 // New loads every locally enrolled entry from the store. A corrupt persisted
@@ -137,26 +140,14 @@ func (m *Manager) SetNamespace(ns uns.Namespace) {
 	m.mu.Unlock()
 }
 
-// SetAuthoring late-binds the mount-declaration dependencies self-registration
-// needs (local-service-trust design §3.2): place answers which element already
-// sits at a path — the same uns.Placements port a parent's Ancestry.Extend
-// consults — and upsert authors one there when a declared mount is missing.
-// Late-bound in the same style as SetNamespace: both are projections of
-// records the engine holds, built after the registry.
-func (m *Manager) SetAuthoring(place uns.Placements, upsert func(path, elementID string) error) {
+// SetAuthoring late-binds self-registration's mount-authoring dependency
+// (local-service-trust design §3.2): resolve or author the element at a
+// declared mount. Late-bound in the same style as SetNamespace: a projection
+// of records the engine holds, built after the registry.
+func (m *Manager) SetAuthoring(author func(path string) (string, error)) {
 	m.mu.Lock()
-	m.place = place
-	m.upsert = upsert
+	m.author = author
 	m.mu.Unlock()
-}
-
-// Placements exposes the authoring dependency SetAuthoring wired, so a caller
-// (a door, or a test) can ask what this node has placed without a second
-// resolver of its own.
-func (m *Manager) Placements() uns.Placements {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.place
 }
 
 // mountOf resolves an entry's placement at this moment. The caller holds at
@@ -620,7 +611,7 @@ func (m *Manager) EntryOf(ulid string) (name, element string, ok bool) {
 	if !ok {
 		return "", "", false
 	}
-	return e.Name, e.Element, true
+	return e.CatalogueName(), e.Element, true
 }
 
 // Entries lists the identities this node has enrolled (uns.Bindings port):
@@ -632,7 +623,7 @@ func (m *Manager) Entries() []uns.EntryRef {
 	defer m.mu.RUnlock()
 	out := make([]uns.EntryRef, 0, len(m.byID))
 	for _, e := range m.byID {
-		out = append(out, uns.EntryRef{ULID: e.ULID, Name: e.Name, Element: e.Element})
+		out = append(out, uns.EntryRef{ULID: e.ULID, Name: e.CatalogueName(), Element: e.Element})
 	}
 	return out
 }

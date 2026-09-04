@@ -295,9 +295,17 @@ type catalogue struct {
 		// tag's signal belongs under, instead of the connector's own mount.
 		// One unplaced participant computing for several machines (a dataops
 		// service) says per output which machine it is about; without this
-		// every output would land at the node root under one name.
+		// every output would land at the node root under one name. A path
+		// naming an element this node does not hold yet is AUTHORED along the
+		// way (bindCatalogue), not left unbound: the publisher's path becomes
+		// tree structure (SDK design §3 rule 2).
 		Meta struct {
 			Element string `json:"element"`
+			// Unit, when set, becomes the minted Signal's unit — or fills one
+			// in on a pre-declared signal that has none yet, but never
+			// overwrites an operator's own declared unit (SDK design §3 rule
+			// 2, gap 2).
+			Unit string `json:"unit"`
 		} `json:"meta"`
 	} `json:"data_tags"`
 }
@@ -351,6 +359,8 @@ func (c *ConfigExec) execute(contract, verb string, payload []byte) (int, string
 		return c.constantDelete(payload)
 	case "element/upsert":
 		return c.elementUpsert(payload)
+	case "element/author":
+		return c.elementAuthor(payload)
 	case "element/delete":
 		return c.elementDelete(payload)
 	case "entity/upsert":
@@ -1054,6 +1064,86 @@ func (c *ConfigExec) elementAt(path string) (string, bool) {
 	return e.ID, true
 }
 
+// authorElementAt resolves a node-local path to its element, authoring any
+// segment along it that this node does not hold yet and reusing every one it
+// does (local-service-trust design §3.2: "path exists? bind to the element
+// sitting there. path missing? author the elements along it, bind to the
+// leaf."). This is the ONE walk in the tree (architecture principle 1) —
+// domain knowledge, so it lives here in plugins/uns and nowhere else. It has
+// two callers: bindCatalogue, for a catalogue tag's own meta.element, calls
+// it directly (already inside c.mu); registry.Manager.Register, seeding a
+// local service's declared mount, reaches it from the core through the
+// "element/author" verb below (elementAuthor) — the same boundary every
+// other authoring caller outside this executor's lock already crosses
+// (domain.Execute("_CmdConfigure", ...)).
+//
+// It calls elementUpsert directly rather than through Execute/
+// ExecuteWithWrites: bindCatalogue's call runs already under c.mu (held by
+// ExecuteWithWrites or by Observe), and that mutex is not reentrant — going
+// through the command-dispatch entry point here would deadlock. (elementAuthor
+// itself is already inside execute(), for the same reason.) Each missing
+// segment is its own committed write, so the walk can look up what it just
+// authored on the very next segment.
+func (c *ConfigExec) authorElementAt(path string) (string, error) {
+	var local, leaf string
+	for _, seg := range strings.Split(path, "/") {
+		if seg == "" {
+			continue
+		}
+		if local == "" {
+			local = seg
+		} else {
+			local += "/" + seg
+		}
+		id, ok := c.elementAt(local)
+		if !ok {
+			// Minted, never derived from the path — the same reasoning
+			// elementFor documents: a path-derived id would silently re-point
+			// at the old path on a rename instead of following the entry.
+			id = c.newID()
+			elem, err := json.Marshal(placedElement{ID: id, Name: seg})
+			if err != nil {
+				return "", fmt.Errorf("author element at %s: %w", local, err)
+			}
+			payload, err := json.Marshal(elementUpsertBody{Elements: []elementRef{{Path: local, Element: elem}}})
+			if err != nil {
+				return "", fmt.Errorf("author element at %s: %w", local, err)
+			}
+			code, msg, _, _ := c.elementUpsert(payload)
+			if code != 200 {
+				return "", fmt.Errorf("author element at %s: %s", local, msg)
+			}
+		}
+		leaf = id
+	}
+	return leaf, nil
+}
+
+// elementAuthorBody names the one path element/author resolves or authors.
+type elementAuthorBody struct {
+	Path string `json:"path"`
+}
+
+// elementAuthor exposes authorElementAt as a _CmdConfigure verb — the door
+// registry.Manager.Register (self-registration, local-service-trust design
+// §3.2) uses to seed a local service's declared mount, so that walk has
+// exactly one implementation regardless of which caller needs it (architecture
+// principle 1). The message carries the resolved leaf element's id on success.
+func (c *ConfigExec) elementAuthor(payload []byte) (int, string, string, []StateWrite) {
+	var body elementAuthorBody
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return 422, "element/author: unreadable payload: " + err.Error(), "invalid", nil
+	}
+	if body.Path == "" {
+		return 422, "element/author: no path given", "invalid", nil
+	}
+	id, err := c.authorElementAt(body.Path)
+	if err != nil {
+		return 500, "element/author: " + err.Error(), "error", nil
+	}
+	return 200, id, "ok", nil
+}
+
 // bindCatalogue creates one signal per unbound tag in a catalogue, placed
 // under one path and bound to the element there. Shared by the explicit
 // `signal/autobind` verb (which computes the catalogue and the default
@@ -1092,7 +1182,7 @@ func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, stri
 	taken := c.takenPaths()
 
 	records := make([]StateRecord, 0, len(cat.DataTags))
-	skipped, unplaced := 0, 0
+	skipped := 0
 	for _, tag := range cat.DataTags {
 		// The invariant is asked of its one owner; skipping is this operation's
 		// own answer to it. The edit asks the same question and refuses
@@ -1104,13 +1194,18 @@ func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, stri
 		}
 		under, element := under, element
 		if tag.Meta.Element != "" {
-			// The tag names its own element. One that this node does not hold
-			// (yet) is left unbound rather than misplaced at the mount: the
-			// next autobind, after the element is authored, binds it.
+			// The tag names its own element. One this node already holds is
+			// reused; one it does not is AUTHORED along the way — authorElementAt
+			// directly, since this executor's lock is already held here (a local
+			// service's declared mount reaches the identical walk through the
+			// "element/author" verb instead, registry.Manager.Register).
 			id, ok := c.elementAt(tag.Meta.Element)
 			if !ok {
-				unplaced++
-				continue
+				authored, err := c.authorElementAt(tag.Meta.Element)
+				if err != nil {
+					return 500, "signal/autobind: " + err.Error(), "error", nil
+				}
+				id = authored
 			}
 			under, element = tag.Meta.Element, id
 		}
@@ -1121,6 +1216,9 @@ func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, stri
 				existing["data_tag"] = tag.ID
 				if _, typed := existing["data_type"]; !typed && tag.DataType != "" {
 					existing["data_type"] = tag.DataType
+				}
+				if _, hasUnit := existing["unit"]; !hasUnit && tag.Meta.Unit != "" {
+					existing["unit"] = tag.Meta.Unit
 				}
 				if _, published := existing["is_published"]; !published {
 					existing["is_published"] = true
@@ -1162,6 +1260,9 @@ func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, stri
 		if tag.DataType != "" {
 			signal["data_type"] = tag.DataType
 		}
+		if tag.Meta.Unit != "" {
+			signal["unit"] = tag.Meta.Unit
+		}
 		encoded, err := json.Marshal(signal)
 		if err != nil {
 			return 500, "signal/autobind: encode failed: " + err.Error(), "error", nil
@@ -1173,9 +1274,6 @@ func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, stri
 	writes, err := c.commit(records)
 	if err != nil {
 		return 422, "signal/autobind: rejected: " + err.Error(), "invalid", nil
-	}
-	if unplaced > 0 {
-		return 200, fmt.Sprintf(`{"created":%d,"skipped":%d,"unplaced":%d}`, len(records), skipped, unplaced), "ok", writes
 	}
 	return 200, fmt.Sprintf(`{"created":%d,"skipped":%d}`, len(records), skipped), "ok", writes
 }

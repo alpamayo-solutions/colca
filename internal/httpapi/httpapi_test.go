@@ -1454,7 +1454,7 @@ func TestHealthzCarriesThePubkeySoAParentCanEnrollIt(t *testing.T) {
 // localAPI is the fixture for the local HTTP door (local-service-trust design
 // §4): no TLS, no admin routes, and self-registration's mount-authoring wired
 // EXACTLY as node.Start wires it — domain.Execute("_CmdConfigure",
-// "element/upsert", ...) is the one authoring path in this system. Mirrors
+// "element/author", ...) is the one authoring path in this system. Mirrors
 // mqttsrv_test.go's startServerWithLocalDoor so both local doors are proven
 // against the same wiring, not a test-only shortcut that could pass while
 // node.go's own wiring stayed broken.
@@ -1484,24 +1484,16 @@ func newLocalHandler(t *testing.T) *localAPI {
 	eng.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain))
 	eng.SetObserver(domain)
 	reg.SetNamespace(eng.Elements())
-	reg.SetAuthoring(eng.Elements(), func(path, elementID string) error {
-		name := path
-		if i := strings.LastIndexByte(path, '/'); i >= 0 {
-			name = path[i+1:]
-		}
-		payload, err := json.Marshal(map[string]any{
-			"elements": []map[string]any{
-				{"path": path, "element": map[string]any{"id": elementID, "name": name}},
-			},
-		})
+	reg.SetAuthoring(func(path string) (string, error) {
+		payload, err := json.Marshal(map[string]string{"path": path})
 		if err != nil {
-			return err
+			return "", err
 		}
-		code, msg, _ := domain.Execute("_CmdConfigure", "element/upsert", payload)
+		code, msg, _ := domain.Execute("_CmdConfigure", "element/author", payload)
 		if code != 200 {
-			return fmt.Errorf("author element at %s: %s", path, msg)
+			return "", fmt.Errorf("author element at %s: %s", path, msg)
 		}
-		return nil
+		return msg, nil
 	})
 	h := Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", true)
 	return &localAPI{Handler: h, reg: reg, eng: eng, m: m}

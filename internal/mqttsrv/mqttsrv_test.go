@@ -242,7 +242,7 @@ func waitRecords(t *testing.T, st *store.Store, stream string, want int, d time.
 // startServerWithLocalDoor builds a world with the local MQTT door enabled and
 // self-registration's mount-authoring wired EXACTLY as node.New wires it
 // (node.go, right after reg.SetNamespace): domain.Execute("_CmdConfigure",
-// "element/upsert", ...) is the one authoring path in this system. A declared
+// "element/author", ...) is the one authoring path in this system. A declared
 // mount must go through it here too — a test that wired a shortcut instead
 // could pass while node.go's own wiring stayed missing, which is precisely the
 // gap found earlier (nothing called Manager.SetAuthoring anywhere).
@@ -279,24 +279,16 @@ func startServerWithLocalDoor(t *testing.T) *world {
 	eng.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain))
 	eng.SetObserver(domain)
 	reg.SetNamespace(eng.Elements())
-	reg.SetAuthoring(eng.Elements(), func(path, elementID string) error {
-		name := path
-		if i := strings.LastIndexByte(path, '/'); i >= 0 {
-			name = path[i+1:]
-		}
-		payload, err := json.Marshal(map[string]any{
-			"elements": []map[string]any{
-				{"path": path, "element": map[string]any{"id": elementID, "name": name}},
-			},
-		})
+	reg.SetAuthoring(func(path string) (string, error) {
+		payload, err := json.Marshal(map[string]string{"path": path})
 		if err != nil {
-			return err
+			return "", err
 		}
-		code, msg, _ := domain.Execute("_CmdConfigure", "element/upsert", payload)
+		code, msg, _ := domain.Execute("_CmdConfigure", "element/author", payload)
 		if code != 200 {
-			return fmt.Errorf("author element at %s: %s", path, msg)
+			return "", fmt.Errorf("author element at %s: %s", path, msg)
 		}
-		return nil
+		return msg, nil
 	})
 	reg.SetKick(s.Kick)
 	go func() { _ = s.Serve() }()
@@ -1231,6 +1223,64 @@ drain:
 	}
 	if w.st.NextOffset("metrics") != 2 {
 		t.Fatalf("metrics next offset = %d, want 2", w.st.NextOffset("metrics"))
+	}
+}
+
+// TestWillDeliveryReachesTheEngineTooNotJustLiveSubscribers pins the
+// OnWillSent hook: mochi's own sendLWT (server.go) broadcasts a
+// disconnecting client's last will to live subscribers and its own
+// in-memory retained cache, but never calls OnPublish — the one hook that
+// feeds engine.IngestClient. Discovered via the colca SDK's level-3
+// contract test (design §3.2, "crash: MQTT last will ... set on the client
+// before CONNECT"): without this, a will-delivered `_ServiceDetails`
+// update never reached /kv or the engine's retained state at all, no
+// matter how long a caller waited — this is a correctness gap, not a
+// timing one, so it belongs at level 1 where it can be pinned in
+// milliseconds instead of guessed at with a Docker-crossing timeout.
+func TestWillDeliveryReachesTheEngineTooNotJustLiveSubscribers(t *testing.T) {
+	w := newWorld(t)
+
+	conn, err := tls.Dial("tcp", w.srv.Addr(), w.m1.TLSConfig())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	pc := pahov5.NewClient(pahov5.ClientConfig{Conn: conn})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	willTopic := "colca/v1/_Metric/n1/m1/will-test"
+	willPayload := []byte(`{"v":42}`)
+	ca, err := pc.Connect(ctx, &pahov5.Connect{
+		ClientID:     "m1-will",
+		Username:     w.m1.ULID,
+		UsernameFlag: true,
+		KeepAlive:    30,
+		CleanStart:   true,
+		WillMessage: &pahov5.WillMessage{
+			Topic:   willTopic,
+			Payload: willPayload,
+			QoS:     1,
+			Retain:  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if ca.ReasonCode != 0 {
+		t.Fatalf("CONNACK refused: reason %d", ca.ReasonCode)
+	}
+
+	// Kill the raw connection WITHOUT sending a DISCONNECT packet — an abrupt
+	// drop, the exact condition a last will exists for.
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	recs := waitRecords(t, w.st, "metrics", 1, 5*time.Second)
+	if len(recs) != 1 {
+		t.Fatalf("metrics stream has %d record(s), want 1 — the will never reached the engine", len(recs))
+	}
+	if recs[0].Topic != willTopic {
+		t.Fatalf("stored topic = %q, want %q", recs[0].Topic, willTopic)
 	}
 }
 

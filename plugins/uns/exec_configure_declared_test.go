@@ -96,6 +96,64 @@ func TestADeclaredTypeOutranksTheTagsType(t *testing.T) {
 	}
 }
 
+// A tag's meta.unit becomes the minted signal's unit — the SDK's own
+// publish(path, value, unit=...) reaches the tree (SDK design §3, gap 2).
+func TestATagsUnitIsCopiedOntoTheMintedSignal(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JCONN", "opcua-1", "01HLINE1")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", []map[string]any{
+		{"id": "t1", "name": "temp", "data_type": "float", "meta": map[string]any{"unit": "°C"}},
+	})
+
+	if code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
+		t.Fatalf("autobind = %d %q", code, msg)
+	}
+	if got := signalRecordAt(t, c, "line1/temp")["unit"]; got != "°C" {
+		t.Fatalf("unit = %v, want the tag's °C", got)
+	}
+}
+
+// A predeclared signal with no unit of its own takes the tag's — the same
+// "the declaration owns what it states, the tag fills the rest" rule
+// TestAutobindBindsADeclaredSignalInsteadOfShadowingIt already pins for
+// data_type.
+func TestATagsUnitFillsAPredeclaredSignalWithNoUnit(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JCONN", "opcua-1", "01HLINE1")
+	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", nil)
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", []map[string]any{
+		{"id": "t1", "name": "tag-t1", "data_type": "float", "meta": map[string]any{"unit": "bar"}},
+	})
+
+	if code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
+		t.Fatalf("autobind = %d %q", code, msg)
+	}
+	if got := signalRecordAt(t, c, "line1/tag-t1")["unit"]; got != "bar" {
+		t.Fatalf("unit = %v, want the tag's bar filled onto the undeclared signal", got)
+	}
+}
+
+// A declared unit outranks the tag's — an operator's own declaration must
+// never be overwritten by a republish, the same rule the type already gets.
+func TestADeclaredUnitOutranksTheTagsUnit(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JCONN", "opcua-1", "01HLINE1")
+	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", map[string]any{"unit": "bar"})
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", []map[string]any{
+		{"id": "t1", "name": "tag-t1", "data_type": "float", "meta": map[string]any{"unit": "psi"}},
+	})
+
+	if code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
+		t.Fatalf("autobind = %d %q", code, msg)
+	}
+	if got := signalRecordAt(t, c, "line1/tag-t1")["unit"]; got != "bar" {
+		t.Fatalf("unit = %v, want the operator's declared bar to outrank the tag's psi", got)
+	}
+}
+
 // A signal that already holds a DIFFERENT tag is not "declared and waiting";
 // it is a collision, and gets the sibling it always got.
 func TestAutobindStillSidestepsASignalBoundToAnotherTag(t *testing.T) {
@@ -190,7 +248,12 @@ func TestATagNamingItsElementIsPlacedThere(t *testing.T) {
 // Naming an element the node does not hold leaves the tag unbound — reported,
 // never misplaced at the mount, where it would be a second `oee` for the
 // wrong machine.
-func TestATagNamingAMissingElementStaysUnbound(t *testing.T) {
+// A tag naming an element this node does not hold yet used to leave the tag
+// unbound forever (nothing re-triggers autobind once the catalogue stops
+// growing). It now AUTHORS the missing path and binds — the publisher's own
+// path becomes tree structure (SDK design §3 rule 2), through the identical
+// element-authoring code a local service's declared mount uses.
+func TestATagNamingAMissingElementAuthorsItAndBinds(t *testing.T) {
 	c := newConfigExec(t)
 	bindEntry(t, c, "01JDATAOPS", "dataops", "")
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/dataops", []map[string]any{
@@ -198,11 +261,26 @@ func TestATagNamingAMissingElementStaysUnbound(t *testing.T) {
 	})
 
 	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JDATAOPS"}))
-	if code != 200 || !strings.Contains(msg, `"unplaced":1`) {
-		t.Fatalf("autobind = %d %q, want 0 created and 1 unplaced", code, msg)
+	if code != 200 || !strings.Contains(msg, `"created":1`) {
+		t.Fatalf("autobind = %d %q, want 1 created", code, msg)
 	}
-	if got := signalsAt(c); len(got) != 0 {
-		t.Fatalf("signals = %+v, want none", got)
+	s, ok := signalsAt(c)["line1/nowhere/oee"]
+	if !ok {
+		t.Fatalf("signals = %+v, want one bound at line1/nowhere/oee", signalsAt(c))
+	}
+	if s.DataTag != "t-m6" {
+		t.Fatalf("signal at line1/nowhere/oee bound to tag %q, want t-m6", s.DataTag)
+	}
+	elements := elementsUnder(c.store.(*fakeStore), "n1")
+	if _, ok := elements["line1"]; !ok {
+		t.Fatalf("elements = %+v, want line1 authored along the way", elements)
+	}
+	if _, ok := elements["line1/nowhere"]; !ok {
+		t.Fatalf("elements = %+v, want line1/nowhere authored as the tag's own element", elements)
+	}
+	if s.Element != elements["line1/nowhere"] {
+		t.Fatalf("signal.system_element_id = %q, want the authored line1/nowhere element %q",
+			s.Element, elements["line1/nowhere"])
 	}
 }
 
