@@ -334,3 +334,145 @@ func TestTheLevelInThePayloadIsTheOneInTheTopic(t *testing.T) {
 		t.Errorf("slog's WARN must be published as WARNING, got %v", record.Payload["level"])
 	}
 }
+
+// blockingSink lets a test hold one publish in flight and see what the
+// publisher does around it.
+type blockingSink struct {
+	entered  chan struct{}
+	release  chan struct{}
+	mu       sync.Mutex
+	finished int
+	after    int // publishes that STARTED after Stop returned
+	stopped  bool
+}
+
+func (s *blockingSink) LogPosition(context.Context) (string, []string, error) {
+	return "01NODE", []string{"colca"}, nil
+}
+
+func (s *blockingSink) PublishLog(context.Context, string, map[string]any) error {
+	s.mu.Lock()
+	if s.stopped {
+		s.after++
+	}
+	s.mu.Unlock()
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	<-s.release
+	s.mu.Lock()
+	s.finished++
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *blockingSink) counts() (finished, after int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finished, s.after
+}
+
+func (s *blockingSink) markStopped() {
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
+}
+
+// TestStopWaitsForAnInFlightPublish pins the half of Stop that matters to an
+// owner with a store: not that the drain is asked to end, but that it HAS
+// ended by the time Stop returns.
+//
+// A node closes its store right after stopping its logging. A publish still
+// in flight then writes into a closed Pebble and takes the process down —
+// `panic: pebble: closed` out of a goroutine nothing was joining, which is
+// what a host-supervised node (the SDK's embedded colcad) hit on every stop.
+// Cancelling without waiting would leave exactly that window open.
+func TestStopWaitsForAnInFlightPublish(t *testing.T) {
+	sink := &blockingSink{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	publisher := NewLogPublisher(&countingHandler{level: slog.LevelInfo}, sink,
+		LogPublisherOptions{MinLevel: slog.LevelInfo})
+	log := slog.New(publisher)
+	publisher.Start(context.Background())
+
+	log.Info("in flight")
+	select {
+	case <-sink.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drain never reached the sink")
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		publisher.Stop()
+	}()
+
+	select {
+	case <-returned:
+		t.Fatal("Stop returned while a publish was still in flight — the store's owner " +
+			"would now close it underneath that publish")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(sink.release)
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the in-flight publish finished")
+	}
+	if finished, _ := sink.counts(); finished == 0 {
+		t.Fatal("no publish ever finished, so this test proved nothing about waiting")
+	}
+}
+
+// TestNothingPublishesAfterStop is the other half: once Stop returns, records
+// keep reaching the console but never the sink.
+func TestNothingPublishesAfterStop(t *testing.T) {
+	sink := &blockingSink{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	close(sink.release) // nothing blocks here; we only care what arrives
+	console := &countingHandler{level: slog.LevelInfo}
+	publisher := NewLogPublisher(console, sink, LogPublisherOptions{MinLevel: slog.LevelInfo})
+	log := slog.New(publisher)
+	publisher.Start(context.Background())
+
+	log.Info("before")
+	select {
+	case <-sink.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drain never reached the sink")
+	}
+
+	publisher.Stop()
+	sink.markStopped()
+
+	before := console.handled
+	for i := 0; i < 200; i++ {
+		log.Info("after stop", "i", i)
+	}
+	time.Sleep(100 * time.Millisecond) // a drain still alive would have published by now
+
+	if _, after := sink.counts(); after != 0 {
+		t.Errorf("%d records reached the sink after Stop returned, want 0", after)
+	}
+	if console.handled <= before {
+		t.Errorf("console handled %d records, was %d before Stop — logging must keep working",
+			console.handled, before)
+	}
+}
+
+// TestStopWithoutStartReturns — a service that never started its publisher
+// (or failed before Start) must still be able to shut down.
+func TestStopWithoutStartReturns(t *testing.T) {
+	publisher := NewLogPublisher(&countingHandler{level: slog.LevelInfo},
+		&blockingSink{entered: make(chan struct{}, 1), release: make(chan struct{})},
+		LogPublisherOptions{MinLevel: slog.LevelInfo})
+
+	done := make(chan struct{})
+	go func() { defer close(done); publisher.Stop(); publisher.Stop() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop hung on a publisher that was never started")
+	}
+}

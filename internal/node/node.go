@@ -80,6 +80,11 @@ type Node struct {
 	apiLn       net.Listener
 	localAPISrv *http.Server
 	localAPILn  net.Listener
+	// logPublisher drains this node's own log records into its store, on a
+	// goroutine of its own that wg never tracked. Stop must end and join it
+	// before closing the store, or a line logged during shutdown lands on a
+	// closed Pebble — see Stop.
+	logPublisher *door.LogPublisher
 }
 
 // Start builds and starts a node from cfg. On any failure after the store is
@@ -615,6 +620,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	// installed is in the publisher's queue, and draining it now delivers
 	// them in order.
 	logSink.Attach(n.Engine, cfg.ULID)
+	n.logPublisher = logPublisher
 	logPublisher.Start(context.Background())
 
 	log.Info("colca node started", "ulid", cfg.ULID, "api", n.APIAddr, "repl", n.ReplAddr, "mqtt", n.MQTTAddr)
@@ -659,6 +665,17 @@ func (n *Node) Stop() {
 		// Everything that reads or writes the store must be finished before the
 		// store goes away.
 		n.wg.Wait()
+		// The node's own log drain is one of those writers, and it is not in
+		// wg: it runs on a goroutine LogPublisher owns. Every line logged from
+		// here on still reaches stderr, it is simply no longer appended — which
+		// is the only correct answer once the store is about to close. Left
+		// running, a single shutdown line reached `store.Append` after Close
+		// and took the process down with `panic: pebble: closed`; under Docker
+		// the process was exiting anyway, so only a host-supervised node
+		// (`chaski.Node`) ever showed it.
+		if n.logPublisher != nil {
+			n.logPublisher.Stop()
+		}
 		if n.MQTT != nil {
 			_ = n.MQTT.Close()
 		}

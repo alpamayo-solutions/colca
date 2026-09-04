@@ -91,6 +91,13 @@ type LogPublisher struct {
 	failures *failureNotice
 	nodeOnce sync.Once
 	started  sync.Once
+
+	// drain is how Stop reaches the goroutine Start launched: cancel it, then
+	// wait for done. Both are written once inside started.Do and read only
+	// under mu, so Stop can never see a half-initialized pair.
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 type logRecord struct {
@@ -278,7 +285,13 @@ func (p *LogPublisher) offer(record slog.Record) {
 // so a test can drive Drain deterministically instead.
 func (p *LogPublisher) Start(ctx context.Context) {
 	p.started.Do(func() {
+		ctx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		p.mu.Lock()
+		p.cancel, p.done = cancel, done
+		p.mu.Unlock()
 		go func() {
+			defer close(done)
 			for {
 				select {
 				case <-ctx.Done():
@@ -289,6 +302,33 @@ func (p *LogPublisher) Start(ctx context.Context) {
 			}
 		}()
 	})
+}
+
+// Stop ends the drain and waits for it, so that after Stop returns nothing
+// will publish again.
+//
+// The waiting half is the point. This goroutine writes THROUGH the sink into
+// whatever store the sink is attached to, so an owner that closes its store
+// while the drain is still in flight gets a write on a closed store — for a
+// node that is `panic: pebble: closed` on every shutdown, from a goroutine
+// nothing was joining (`internal/nodelog` → `engine.IngestAdminAttributed` →
+// `store.Append`). Under Docker nobody saw it: the process was exiting
+// anyway. A host-supervised node (`chaski.Node`) crashes on every stop.
+//
+// Cancelling alone would not fix it: the drain can be inside publish() when
+// the context is cancelled, and the store would still be closed underneath
+// it. So Stop returns only once that goroutine is gone. Idempotent, and safe
+// on a publisher that was never started — logging keeps working either way,
+// since the wrapped handler is what writes the console.
+func (p *LogPublisher) Stop() {
+	p.mu.Lock()
+	cancel, done := p.cancel, p.done
+	p.mu.Unlock()
+	if cancel == nil {
+		return // never started: there is no drain to wait for
+	}
+	cancel()
+	<-done
 }
 
 func (p *LogPublisher) publish(ctx context.Context, item logRecord) {
