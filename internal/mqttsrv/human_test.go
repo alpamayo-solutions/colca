@@ -40,11 +40,6 @@ type humanWorld struct {
 
 func newHumanWorld(t *testing.T) *humanWorld {
 	t.Helper()
-	return newHumanWorldWith(t, true)
-}
-
-func newHumanWorldWith(t *testing.T, serve bool) *humanWorld {
-	t.Helper()
 	st, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -91,25 +86,8 @@ func newHumanWorldWith(t *testing.T, serve bool) *humanWorld {
 		st.Close()
 	})
 	w.srv = s
-	if !serve {
-		return w
-	}
 	go func() { _ = s.Serve() }()
-	// The websocket door binds inside mochi's Serve, not Init, so its address
-	// is reported before anything listens on it. Dialling straight from here
-	// raced the Serve goroutine and refused roughly one run in four.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := s.Ready(ctx); err != nil {
-		t.Fatalf("human doors never began accepting: %v", err)
-	}
 	return w
-}
-
-// newUnservedHumanWorld builds the same world without serving it.
-func newUnservedHumanWorld(t *testing.T) *humanWorld {
-	t.Helper()
-	return newHumanWorldWith(t, false)
 }
 
 // verifierPrime forces one JWKS fetch (Run's first tick without the loop).

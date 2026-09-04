@@ -8,12 +8,9 @@ package mqttsrv
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"encoding/json"
-	"fmt"
 	"log/slog"
-	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -635,16 +632,11 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 		srv.humanTCP = h
 	}
 	if cfg.MQTTHuman.WSAddr != "" {
-		// mochi's Websocket listener binds inside Serve and its Address()
-		// echoes the CONFIG string, so a ":0" port would be unreportable.
-		// Pre-resolve it: bind, read the kernel-assigned port, release, and
-		// hand the concrete address to the listener. The reuse window is
-		// microseconds and only ":0" configs (tests) take this path.
-		wsAddr, err := resolveAddr(cfg.MQTTHuman.WSAddr)
-		if err != nil {
-			return nil, err
-		}
-		w := listeners.NewWebsocket(listeners.Config{ID: listenerHumanWS, Address: wsAddr, TLSConfig: humanTLS.Clone()})
+		// The listener binds at Init (our mochi fork; upstream binds inside
+		// Serve) and reports the bound address, so a ":0" door is held from
+		// the moment AddListener returns and reported correctly — no
+		// pre-resolve, no window in which another door can take the port.
+		w := listeners.NewWebsocket(listeners.Config{ID: listenerHumanWS, Address: cfg.MQTTHuman.WSAddr, TLSConfig: humanTLS.Clone()})
 		if err := s.AddListener(w); err != nil {
 			return nil, err
 		}
@@ -654,29 +646,6 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 		go srv.runSweeper(srv.sweepStop)
 	}
 	return srv, nil
-}
-
-// resolveAddr turns a ":0" listen address into a concrete one by briefly
-// binding it. Addresses with fixed ports pass through untouched.
-func resolveAddr(addr string) (string, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil || port != "0" {
-		return addr, err
-	}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return "", err
-	}
-	resolved := ln.Addr().String()
-	_ = ln.Close()
-	if host == "" {
-		return resolved, nil
-	}
-	_, p, err := net.SplitHostPort(resolved)
-	if err != nil {
-		return "", err
-	}
-	return net.JoinHostPort(host, p), nil
 }
 
 // SetEngine late-binds the engine the publish hook ingests into.
@@ -770,37 +739,6 @@ func (s *Server) HumanWSAddr() string {
 }
 
 func (s *Server) Serve() error { return s.S.Serve() }
-
-// Ready blocks until every configured door is accepting connections.
-//
-// The TCP doors bind in AddListener, so they accept the moment New returns.
-// The websocket door does not: mochi builds its http.Server in Init and binds
-// inside Serve, so HumanWSAddr reports a port that nothing is listening on
-// until the Serve goroutine gets there. A caller that reports or dials that
-// address in between sees a refused connection from a door it was just told
-// about — which is what made the human-door test fail about one run in four,
-// and what a node advertising MQTTHumanWSAddr races on startup.
-//
-// Readiness is established by connecting, because that is the only thing that
-// distinguishes "bound" from "about to be bound"; the probe closes the
-// connection without speaking MQTT.
-func (s *Server) Ready(ctx context.Context) error {
-	addr := s.HumanWSAddr()
-	if addr == "" {
-		return nil
-	}
-	for {
-		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err == nil {
-			return conn.Close()
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("human websocket door %s not accepting: %w", addr, ctx.Err())
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
-}
 
 // Close shuts the broker down without ever letting mochi walk the client map
 // while a client is unwinding.

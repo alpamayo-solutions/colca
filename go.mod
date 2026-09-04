@@ -58,7 +58,11 @@ require (
 
 // Pinned to the org fork until upstream ships the retained-scan race fix:
 // https://github.com/mochi-mqtt/server/pull/539 (mochi-mqtt/server#200).
-// Drop this replace once a released mochi version contains that PR;
+// The same fork branch (fix/websocket-binds-at-init, 919d8eb9e65e) also makes
+// the Websocket listener bind at Init and report its bound address, so a
+// ":0" door is held from the moment it is reported — offered upstream as its
+// own PR beside #539.
+// Drop this replace once a released mochi version contains both PRs;
 // internal/mqttsrv's TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace
 // goes red under -race if it is dropped early.
-replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260902234224-8b986f055c96
+replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260904132341-919d8eb9e65e

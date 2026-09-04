@@ -6,8 +6,8 @@ github.com/RaduBerinde/btreemap v0.0.0-20250419174037-3d62b7205d54 h1:bsU8Tzxr/P
 github.com/RaduBerinde/btreemap v0.0.0-20250419174037-3d62b7205d54/go.mod h1:0tr7FllbE9gJkHq7CVeeDDFAFKQVy5RnCSSNBOvdqbc=
 github.com/aclements/go-perfevent v0.0.0-20240301234650-f7843625020f h1:JjxwchlOepwsUWcQwD2mLUAGE9aCp0/ehy6yCHFBOvo=
 github.com/aclements/go-perfevent v0.0.0-20240301234650-f7843625020f/go.mod h1:tMDTce/yLLN/SK8gMOxQfnyeMeCg8KGzp0D1cbECEeo=
-github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260902234224-8b986f055c96 h1:MA6Z6nzN/J3EA/rBOfB3W7U8rE+ypiuhoMmrYojz5RI=
-github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260902234224-8b986f055c96/go.mod h1:lZD3j35AVNqJL5cezlnSkuG05c0FCHSsfAKSPBOSbqc=
+github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260904132341-919d8eb9e65e h1:+H+c2FnV3AeZkwrje4i+1neKtTWIN4QTQj7qs+QSmzk=
+github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260904132341-919d8eb9e65e/go.mod h1:lZD3j35AVNqJL5cezlnSkuG05c0FCHSsfAKSPBOSbqc=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/cespare/xxhash/v2 v2.2.0 h1:DC2CZ1Ep5Y4k3ZQ899DldepgrayRUGE6BBZ/cd9Cj44=
