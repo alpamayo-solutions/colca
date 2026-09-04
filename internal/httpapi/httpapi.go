@@ -403,8 +403,19 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": err.Error()})
 				return
 			}
-			// Grammar, unknown contract and payload validation are all
-			// "well-formed request, unacceptable content" → 422.
+			// An authorization denial (rejectDenied: a machine outside its
+			// write zone, a human outside a cmd grant, a human publishing
+			// state, …) is "well-formed request, refused" → 403, the same
+			// status the admin-only and cursor-ownership checks in this door
+			// already use. Everything else that reaches here — grammar,
+			// unknown contract, payload validation — is "well-formed
+			// request, unacceptable content" → 422.
+			var re *engine.RejectError
+			if errors.Is(err, engine.ErrDenied) {
+				errors.As(err, &re)
+				writeJSON(w, http.StatusForbidden, map[string]any{"error": err.Error(), "reason": re.Reason})
+				return
+			}
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error()})
 			return
 		}

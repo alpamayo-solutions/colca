@@ -398,10 +398,19 @@ func TestMachineRouteMatrix(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("machine publish: %d", resp.StatusCode)
 	}
-	// machine publish with the wrong level-4 → 422 (engine level-4 rule)
+	// machine publish with the wrong level-4 → 422 (engine level-4 rule, not
+	// an authorization denial: the topic never even reaches the write-scope
+	// check).
 	resp, _ = req(t, mc, "POST", a.url+"/publish", "", map[string]any{"topic": "colca/v1/_Metric/other/x", "payload": map[string]any{"v": 2.0}})
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("machine spoof publish: want 422, got %d", resp.StatusCode)
+	}
+	// machine publish with the RIGHT level-4 but OUTSIDE its write zone →
+	// 403 write_denied: a well-formed request the machine is not authorized
+	// to make, not a malformed one.
+	resp, out := req(t, mc, "POST", a.url+"/publish", "", map[string]any{"topic": "colca/v1/_Metric/n-test/outside-m1/x", "payload": map[string]any{"v": 2.0}})
+	if resp.StatusCode != http.StatusForbidden || out["reason"] != "write_denied" {
+		t.Fatalf("machine publish outside its write zone: want 403 reason write_denied, got %d %v", resp.StatusCode, out)
 	}
 
 	// machine fetch: cursor must be namespaced, records scope-filtered
@@ -409,7 +418,7 @@ func TestMachineRouteMatrix(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("un-namespaced machine cursor: want 403, got %d", resp.StatusCode)
 	}
-	_, out := req(t, mc, "GET", a.url+"/fetch?stream=metrics&cursor=m1/c&max=10", "", nil)
+	_, out = req(t, mc, "GET", a.url+"/fetch?stream=metrics&cursor=m1/c&max=10", "", nil)
 	recs := out["records"].([]any)
 	for _, r := range recs {
 		topic := r.(map[string]any)["topic"].(string)
@@ -1336,17 +1345,28 @@ func TestHumanRouteMatrix(t *testing.T) {
 		}
 	}
 
-	// publish: command with grant OK; data → 422 human_write.
+	// publish: command with grant OK; data → 403 human_write (an
+	// authorization denial — humans command, machines write state — not a
+	// malformed request).
 	if resp, out := bearerReq(t, hc, "POST", a.url+"/publish", tok, map[string]any{
 		"topic":   "colca/v1/_CmdParam/m1/m1/set-speed",
 		"payload": map[string]any{"correlation_id": "h1", "expires_at": float64(99999999999999)},
 	}); resp.StatusCode != 200 || out["stream"] != "commands" {
 		t.Fatalf("human command publish: %d %v", resp.StatusCode, out)
 	}
-	if resp, _ := bearerReq(t, hc, "POST", a.url+"/publish", tok, map[string]any{
+	if resp, out := bearerReq(t, hc, "POST", a.url+"/publish", tok, map[string]any{
 		"topic": "colca/v1/_Metric/m1/m1/temp", "payload": map[string]any{"v": 666.0},
-	}); resp.StatusCode != http.StatusUnprocessableEntity {
-		t.Fatalf("human data publish: want 422, got %d", resp.StatusCode)
+	}); resp.StatusCode != http.StatusForbidden || out["reason"] != "human_write" {
+		t.Fatalf("human data publish: want 403 reason human_write, got %d %v", resp.StatusCode, out)
+	}
+
+	// command outside the grant → 403 cmd_denied (a different denial reason
+	// than human_write above, both mapped to the same status).
+	if resp, out := bearerReq(t, hc, "POST", a.url+"/publish", tok, map[string]any{
+		"topic":   "colca/v1/_CmdParam/other/elsewhere/set-speed",
+		"payload": map[string]any{"correlation_id": "h2", "expires_at": float64(99999999999999)},
+	}); resp.StatusCode != http.StatusForbidden || out["reason"] != "cmd_denied" {
+		t.Fatalf("human command outside grant: want 403 reason cmd_denied, got %d %v", resp.StatusCode, out)
 	}
 
 	// admin routes: 403 without admin:#.

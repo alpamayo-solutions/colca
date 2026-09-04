@@ -18,13 +18,26 @@ import (
 // RejectError carries the metrics reason with a door rejection so the broker
 // hook can answer MQTT-5 PUBACK reason codes (design §8) without parsing
 // error strings. Reason values are exactly the metrics label vocabulary.
+// Denied is set only for an authorization denial (rejectDenied) — a
+// well-formed request refused because the actor lacks the grant for it, as
+// opposed to a malformed one (bad grammar, unknown contract, schema
+// violation). Callers distinguish the two with errors.Is(err, ErrDenied)
+// rather than inspecting Reason's string vocabulary.
 type RejectError struct {
 	Reason string
+	Denied bool
 	Err    error
 }
 
 func (r *RejectError) Error() string { return r.Err.Error() }
 func (r *RejectError) Unwrap() error { return r.Err }
+
+// Is reports whether this rejection is an authorization denial, so callers
+// can write errors.Is(err, engine.ErrDenied) instead of parsing Reason.
+func (r *RejectError) Is(target error) bool { return target == ErrDenied && r.Denied }
+
+// ErrDenied is the sentinel authorization denials match via errors.Is.
+var ErrDenied = errors.New("denied")
 
 // reject counts the reason and returns the typed error — the single exit for
 // every door rejection that can surface on the MQTT wire.
@@ -34,8 +47,10 @@ func (e *Engine) reject(reason, format string, args ...any) (Result, error) {
 }
 
 // rejectDenied preserves an authorization denial before returning the same
-// typed error as reject. Audit persistence is best-effort only in the sense
-// that its failure cannot turn the protected operation into an allow.
+// typed error as reject, marked so callers can distinguish it from a
+// malformed request via errors.Is(err, ErrDenied). Audit persistence is
+// best-effort only in the sense that its failure cannot turn the protected
+// operation into an allow.
 func (e *Engine) rejectDenied(reason string, actor Attribution, operation string, p *uns.Parsed, format string, args ...any) (Result, error) {
 	d := AuditDenial{
 		Operation: operation, ReasonCode: reason,
@@ -46,7 +61,8 @@ func (e *Engine) rejectDenied(reason string, actor Attribution, operation string
 		d.Metadata = map[string]any{"contract": p.Contract}
 	}
 	e.recordDenial(d)
-	return e.reject(reason, format, args...)
+	e.metrics.RejectPublish(reason)
+	return Result{}, &RejectError{Reason: reason, Denied: true, Err: fmt.Errorf(format, args...)}
 }
 
 var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true, "_TimeSync": true}

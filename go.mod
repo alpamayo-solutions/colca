@@ -60,8 +60,8 @@ require (
 // https://github.com/mochi-mqtt/server/pull/539 (mochi-mqtt/server#200).
 // The same fork branch (fix/websocket-binds-at-init, 919d8eb9e65e) also makes
 // the Websocket listener bind at Init and report its bound address, so a
-// ":0" door is held from the moment it is reported — offered upstream as its
-// own PR beside #539.
+// ":0" door is held from the moment it is reported — upstream as
+// https://github.com/mochi-mqtt/server/pull/542, beside #539.
 // Drop this replace once a released mochi version contains both PRs;
 // internal/mqttsrv's TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace
 // goes red under -race if it is dropped early.
