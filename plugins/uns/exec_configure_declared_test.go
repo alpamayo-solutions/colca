@@ -18,7 +18,7 @@ func declareSignal(t *testing.T, c *ConfigExec, path, id, element string, extra 
 	for k, v := range extra {
 		signal[k] = v
 	}
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, map[string]any{
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/upsert", body(t, map[string]any{
 		"signals": []map[string]any{{"path": path, "signal": signal}},
 	}))
 	if code != 200 {
@@ -54,7 +54,7 @@ func TestAutobindBindsADeclaredSignalInsteadOfShadowingIt(t *testing.T) {
 	})
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", tags("t1", "t2"))
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
 	if code != 200 || !strings.Contains(msg, `"created":2`) {
 		t.Fatalf("autobind = %d %q, want 2 created (one bound in place, one minted)", code, msg)
 	}
@@ -88,7 +88,7 @@ func TestADeclaredTypeOutranksTheTagsType(t *testing.T) {
 	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", map[string]any{"data_type": "int"})
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", tags("t1"))
 
-	if code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
 		t.Fatalf("autobind = %d %q", code, msg)
 	}
 	if got := signalRecordAt(t, c, "line1/tag-t1")["data_type"]; got != "int" {
@@ -106,7 +106,7 @@ func TestATagsUnitIsCopiedOntoTheMintedSignal(t *testing.T) {
 		{"id": "t1", "name": "temp", "data_type": "float", "meta": map[string]any{"unit": "°C"}},
 	})
 
-	if code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
 		t.Fatalf("autobind = %d %q", code, msg)
 	}
 	if got := signalRecordAt(t, c, "line1/temp")["unit"]; got != "°C" {
@@ -127,7 +127,7 @@ func TestATagsUnitFillsAPredeclaredSignalWithNoUnit(t *testing.T) {
 		{"id": "t1", "name": "tag-t1", "data_type": "float", "meta": map[string]any{"unit": "bar"}},
 	})
 
-	if code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
 		t.Fatalf("autobind = %d %q", code, msg)
 	}
 	if got := signalRecordAt(t, c, "line1/tag-t1")["unit"]; got != "bar" {
@@ -146,7 +146,7 @@ func TestADeclaredUnitOutranksTheTagsUnit(t *testing.T) {
 		{"id": "t1", "name": "tag-t1", "data_type": "float", "meta": map[string]any{"unit": "psi"}},
 	})
 
-	if code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
 		t.Fatalf("autobind = %d %q", code, msg)
 	}
 	if got := signalRecordAt(t, c, "line1/tag-t1")["unit"]; got != "bar" {
@@ -163,7 +163,7 @@ func TestAutobindStillSidestepsASignalBoundToAnotherTag(t *testing.T) {
 	declareSignal(t, c, "line1/tag-t1", "01SOTHER", "01HLINE1", map[string]any{"data_tag": "t-elsewhere"})
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", tags("t1"))
 
-	if code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
 		t.Fatalf("autobind = %d %q", code, msg)
 	}
 	got := signalsAt(c)
@@ -184,8 +184,8 @@ func TestBindingADeclaredSignalIsIdempotent(t *testing.T) {
 	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", nil)
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", tags("t1"))
 
-	c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
 	if code != 200 || !strings.Contains(msg, `"created":0,"skipped":1`) {
 		t.Fatalf("second autobind = %d %q, want nothing created", code, msg)
 	}
@@ -226,7 +226,7 @@ func TestATagNamingItsElementIsPlacedThere(t *testing.T) {
 		{"id": "t-root", "name": "site_oee", "data_type": "float"},
 	})
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JDATAOPS"}))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JDATAOPS"}))
 	if code != 200 || !strings.Contains(msg, `"created":3`) {
 		t.Fatalf("autobind = %d %q, want 3 created", code, msg)
 	}
@@ -260,7 +260,7 @@ func TestATagNamingAMissingElementAuthorsItAndBinds(t *testing.T) {
 		{"id": "t-m6", "name": "oee", "data_type": "float", "meta": map[string]any{"element": "line1/nowhere"}},
 	})
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JDATAOPS"}))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JDATAOPS"}))
 	if code != 200 || !strings.Contains(msg, `"created":1`) {
 		t.Fatalf("autobind = %d %q, want 1 created", code, msg)
 	}
@@ -323,7 +323,7 @@ func TestAnUpsertOfANodesOwnRecordKeepsTheLearnedPosition(t *testing.T) {
 			"contract": "_Node",
 			"entity":   map[string]any{"id": "n1", "name": "edge1", "root_system_element_id": element},
 		}}})
-		if code, msg, _ := c.Execute("_CmdConfigure", "entity/upsert", body); code != 200 {
+		if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "entity/upsert", body); code != 200 {
 			t.Fatalf("entity/upsert = %d %q", code, msg)
 		}
 	}
@@ -348,7 +348,7 @@ func TestAnUpsertOfANodesOwnRecordKeepsTheLearnedPosition(t *testing.T) {
 	learn("01HAREA")
 	// A bootstrap re-applied after enrollment: everything the deployment
 	// knows, and null where the position is.
-	if code, msg, _ := c.Execute("_CmdConfigure", "entity/upsert", mustJSON(map[string]any{
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "entity/upsert", mustJSON(map[string]any{
 		"entities": []map[string]any{{
 			"contract": "_Node",
 			"entity":   map[string]any{"id": "n1", "name": "edge1", "root_system_element_id": nil},
@@ -376,7 +376,7 @@ func TestAnUpsertOfAnotherNodesRecordIsUntouched(t *testing.T) {
 		"contract": "_Node",
 		"entity":   map[string]any{"id": "n-other", "name": "edge2", "root_system_element_id": nil},
 	}}})
-	if code, msg, _ := c.Execute("_CmdConfigure", "entity/upsert", body); code != 200 {
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "entity/upsert", body); code != 200 {
 		t.Fatalf("entity/upsert = %d %q", code, msg)
 	}
 	raw, ok := c.store.KVGet("colca/v1/_Node/n1/_colca/nodes/n-other")
@@ -403,7 +403,7 @@ func TestReDeclaringABoundSignalKeepsItsBinding(t *testing.T) {
 		"unit": "°C", "description": "Drum temperature",
 	})
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", tags("t1"))
-	if code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
 		t.Fatalf("autobind = %d %q", code, msg)
 	}
 	bound := signalRecordAt(t, c, "line1/tag-t1")
@@ -435,7 +435,7 @@ func TestAnUpsertNamingATagStillSetsIt(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "01HLINE1", "line1")
 	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", nil)
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, map[string]any{
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/upsert", body(t, map[string]any{
 		"signals": []map[string]any{{"path": "line1/tag-t1", "signal": map[string]any{
 			"id": "01SDECLARED", "name": "tag-t1", "data_tag": "t9", "is_published": false,
 		}}},

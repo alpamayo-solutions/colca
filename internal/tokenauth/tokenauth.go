@@ -325,6 +325,7 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		v.log.Warn("token: a group contributed no grants", "sub", sub, "err", problem)
 	}
 	username, _ := claims["preferred_username"].(string)
+	entry.Username = username
 	return &Verified{Entry: entry, Sub: sub, Username: username, Exp: exp.Time, Credential: "oidc"}, "", nil
 }
 

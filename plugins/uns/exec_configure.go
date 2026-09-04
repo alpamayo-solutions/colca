@@ -322,8 +322,8 @@ type boundSignal struct {
 	Element string `json:"system_element_id"`
 }
 
-func (c *ConfigExec) Execute(contract, verb string, payload []byte) (int, string, string) {
-	code, message, result, _ := c.ExecuteWithWrites(contract, verb, payload)
+func (c *ConfigExec) Execute(ctx CommandContext, contract, verb string, payload []byte) (int, string, string) {
+	code, message, result, _ := c.ExecuteWithWrites(ctx, contract, verb, payload)
 	return code, message, result
 }
 
@@ -337,6 +337,7 @@ func (c *ConfigExec) Execute(contract, verb string, payload []byte) (int, string
 // remains the stable executor interface for command handlers that do not
 // produce state.
 func (c *ConfigExec) ExecuteWithWrites(
+	_ CommandContext,
 	contract, verb string,
 	payload []byte,
 ) (int, string, string, []StateWrite) {

@@ -76,6 +76,7 @@ func (w *EditExec) rememberAttachmentReplay(
 }
 
 func (w *EditExec) executeNodeAttachment(
+	ctx CommandContext,
 	operationID string,
 	digest [sha256.Size]byte,
 	intent editIntent,
@@ -104,6 +105,16 @@ func (w *EditExec) executeNodeAttachment(
 		return w.remember(
 			operationID, digest, 500, "node attachment writer is not configured", "error", nil,
 		)
+	}
+
+	// The plan: the node's current element (where it stands) and, for a
+	// remount, the element it moves to. Both must be covered (design §3C).
+	touched := []editTouched{touchedEntity(entities, "system-element", attachment.Element)}
+	if intent.MountSystemElement != "" {
+		touched = append(touched, touchedEntity(entities, "system-element", intent.MountSystemElement))
+	}
+	if code, message, result := w.authorizeTouched(ctx, touched); code != 0 {
+		return w.remember(operationID, digest, code, message, result, nil)
 	}
 
 	var (

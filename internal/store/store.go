@@ -52,6 +52,10 @@ type Record struct {
 	ActorID      string `json:"aid,omitempty"`
 	ActorLabel   string `json:"al,omitempty"`
 	ActorKind    string `json:"ak,omitempty"`
+	// ActorGroups are the group ids a human actor's grants came from,
+	// persisted so a replicated command can be re-authorized where it
+	// executes (engine.Attribution.ActorGroups).
+	ActorGroups []string `json:"ag,omitempty"`
 	// optional KV projection written in the same atomic batch:
 	KVPath string `json:"-"` // hierarchy path (segments after contract, post-mount)
 	KVNode string `json:"-"` // node-id (level 4)
@@ -74,6 +78,7 @@ type StoredRecord struct {
 	ActorID      string
 	ActorLabel   string
 	ActorKind    string
+	ActorGroups  []string
 }
 
 type KVEntry struct {
@@ -194,14 +199,15 @@ func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (u
 func (s *Store) Close() error { return s.db.Close() }
 
 type recEnc struct {
-	Topic        string `json:"t"`
-	Payload      []byte `json:"p"`
-	TS           int64  `json:"ts"`
-	WrittenBy    string `json:"wb,omitempty"`
-	OriginOffset uint64 `json:"oo,omitempty"`
-	ActorID      string `json:"aid,omitempty"`
-	ActorLabel   string `json:"al,omitempty"`
-	ActorKind    string `json:"ak,omitempty"`
+	Topic        string   `json:"t"`
+	Payload      []byte   `json:"p"`
+	TS           int64    `json:"ts"`
+	WrittenBy    string   `json:"wb,omitempty"`
+	OriginOffset uint64   `json:"oo,omitempty"`
+	ActorID      string   `json:"aid,omitempty"`
+	ActorLabel   string   `json:"al,omitempty"`
+	ActorKind    string   `json:"ak,omitempty"`
+	ActorGroups  []string `json:"ag,omitempty"`
 	// size is the encoded length of THIS record as stored, filled in by
 	// scanRecords. Never serialized — it is what the byte accounting needs and
 	// only the reader can know it.
@@ -230,7 +236,7 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 	val, err := json.Marshal(recEnc{
 		Topic: rec.Topic, Payload: rec.Payload, TS: rec.TS,
 		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
-		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, OriginOffset: originOffset,
+		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, OriginOffset: originOffset,
 	})
 	if err != nil {
 		return 0, err
@@ -410,7 +416,7 @@ func (s *Store) ReadRecords(stream string, from uint64, max int, filter func(Sto
 			Offset: off, OriginOffset: originOffset(e.OriginOffset, off),
 			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
-			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind,
+			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
 		}
 		if filter != nil && !filter(record) {
 			continue
@@ -664,17 +670,18 @@ func (s *Store) HWMs() []HWMInfo {
 // ReplRecord is a record as it travels from a child node to its parent. The
 // json tags are the wire format — do not rename them.
 type ReplRecord struct {
-	ChildOffset  uint64 `json:"o"`
-	OriginOffset uint64 `json:"oo,omitempty"`
-	Topic        string `json:"t"`
-	Payload      []byte `json:"p"`
-	TS           int64  `json:"ts"`
-	WrittenBy    string `json:"wb,omitempty"`
-	ActorID      string `json:"aid,omitempty"`
-	ActorLabel   string `json:"al,omitempty"`
-	ActorKind    string `json:"ak,omitempty"`
-	KVPath       string `json:"kp,omitempty"`
-	KVNode       string `json:"kn,omitempty"`
+	ChildOffset  uint64   `json:"o"`
+	OriginOffset uint64   `json:"oo,omitempty"`
+	Topic        string   `json:"t"`
+	Payload      []byte   `json:"p"`
+	TS           int64    `json:"ts"`
+	WrittenBy    string   `json:"wb,omitempty"`
+	ActorID      string   `json:"aid,omitempty"`
+	ActorLabel   string   `json:"al,omitempty"`
+	ActorKind    string   `json:"ak,omitempty"`
+	ActorGroups  []string `json:"ag,omitempty"`
+	KVPath       string   `json:"kp,omitempty"`
+	KVNode       string   `json:"kn,omitempty"`
 	// Delete mirrors Record.Delete (retention design §7.1): ApplyReplicated
 	// deletes the KV key in its batch instead of setting it. The parent's
 	// replication server derives it the same way the engine does — empty
@@ -716,7 +723,7 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 		n, err := addRecord(b, stream, off, Record{
 			Topic: r.Topic, Payload: r.Payload, TS: r.TS,
 			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
 			OriginOffset: r.OriginOffset,
 			KVPath:       r.KVPath, KVNode: r.KVNode, Delete: r.Delete,
 		})

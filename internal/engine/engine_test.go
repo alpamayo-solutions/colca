@@ -305,7 +305,7 @@ func TestAConfigureCommandCommitsNothingWhenALateRecordFailsValidation(t *testin
 	// Precondition, asserted rather than assumed: this command shape is
 	// accepted, so the refusal below is the late payload's doing and not the
 	// fixture quietly rejecting everything.
-	if code, msg, _ := domain.Execute("_CmdConfigure", "signal/upsert", []byte(`{"signals":[
+	if code, msg, _ := domain.Execute(uns.CommandContext{}, "_CmdConfigure", "signal/upsert", []byte(`{"signals":[
 		{"path":"line1/temp","signal":{"id":"sig-temp","name":"Temperature"}},
 		{"path":"line1/speed","signal":{"id":"sig-speed","name":"Speed"}}]}`)); code != 200 {
 		t.Fatalf("valid signal/upsert = %d %q, want 200", code, msg)
@@ -316,7 +316,7 @@ func TestAConfigureCommandCommitsNothingWhenALateRecordFailsValidation(t *testin
 	// Second record has no id, which the floor requires of every data-model
 	// record. The first is valid and, before the executor committed as one
 	// transition, would already have been written by the time it was refused.
-	code, msg, result := domain.Execute("_CmdConfigure", "signal/upsert", []byte(`{"signals":[
+	code, msg, result := domain.Execute(uns.CommandContext{}, "_CmdConfigure", "signal/upsert", []byte(`{"signals":[
 		{"path":"line1/press","signal":{"id":"sig-press","name":"Press"}},
 		{"path":"line1/broken","signal":{"name":"no id"}}]}`))
 

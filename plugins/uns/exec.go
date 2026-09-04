@@ -85,6 +85,20 @@ type StateWrite struct {
 	Topic  string `json:"topic"`
 }
 
+// CommandContext is who is acting when a command executes (node-side command
+// authorization design §3A). The engine fills it from the entry it already
+// authorized at the door — a human's verified token, a local or external
+// service's registry entry — or, for a command replicated down from an
+// ancestor, from the group ids the ancestor's door verified and persisted with
+// the record (§3B fallback), reconstituted against the _Group definitions this
+// node holds. Actor is nil only for the admin door, which presents a token and
+// no identity. Executors authorize against Actor; they never learn it any other
+// way, so a command cannot be laundered through the identity of whoever
+// carried it.
+type CommandContext struct {
+	Actor *Entry
+}
+
 // EntryRef is the part of a registry entry the domain needs to compute where
 // it publishes: its identity, its name, and its element. Returned by
 // Bindings.Entries rather than *uns.Entry to keep the port narrow, the same

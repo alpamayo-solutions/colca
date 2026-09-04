@@ -55,7 +55,7 @@ func TestALocalServiceAndACatalogueTagAuthorTheSameElementsThroughOneWalk(t *tes
 		if err != nil {
 			return "", err
 		}
-		code, msg, _ := domain.Execute("_CmdConfigure", "element/author", payload)
+		code, msg, _ := domain.Execute(uns.CommandContext{}, "_CmdConfigure", "element/author", payload)
 		if code != 200 {
 			return "", fmt.Errorf("author element at %s: %s", path, msg)
 		}
@@ -67,7 +67,7 @@ func TestALocalServiceAndACatalogueTagAuthorTheSameElementsThroughOneWalk(t *tes
 		if err != nil {
 			t.Fatal(err)
 		}
-		code, msg, _ := domain.Execute("_CmdConfigure", "element/author", payload)
+		code, msg, _ := domain.Execute(uns.CommandContext{}, "_CmdConfigure", "element/author", payload)
 		if code != 200 {
 			t.Fatalf("element/author %s: %d %s", path, code, msg)
 		}

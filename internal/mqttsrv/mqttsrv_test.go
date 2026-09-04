@@ -241,7 +241,7 @@ func waitRecords(t *testing.T, st *store.Store, stream string, want int, d time.
 
 // startServerWithLocalDoor builds a world with the local MQTT door enabled and
 // self-registration's mount-authoring wired EXACTLY as node.New wires it
-// (node.go, right after reg.SetNamespace): domain.Execute("_CmdConfigure",
+// (node.go, right after reg.SetNamespace): domain.Execute(uns.CommandContext{}, "_CmdConfigure",
 // "element/author", ...) is the one authoring path in this system. A declared
 // mount must go through it here too — a test that wired a shortcut instead
 // could pass while node.go's own wiring stayed missing, which is precisely the
@@ -284,7 +284,7 @@ func startServerWithLocalDoor(t *testing.T) *world {
 		if err != nil {
 			return "", err
 		}
-		code, msg, _ := domain.Execute("_CmdConfigure", "element/author", payload)
+		code, msg, _ := domain.Execute(uns.CommandContext{}, "_CmdConfigure", "element/author", payload)
 		if code != 200 {
 			return "", fmt.Errorf("author element at %s: %s", path, msg)
 		}

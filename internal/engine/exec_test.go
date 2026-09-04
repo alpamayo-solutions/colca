@@ -13,10 +13,11 @@ import (
 type stateWritingExec struct{ recordingExec }
 
 func (r *stateWritingExec) ExecuteWithWrites(
+	ctx uns.CommandContext,
 	contract, verb string,
 	payload []byte,
 ) (int, string, string, []uns.StateWrite) {
-	code, message, result := r.Execute(contract, verb, payload)
+	code, message, result := r.Execute(ctx, contract, verb, payload)
 	return code, message, result, []uns.StateWrite{{
 		Stream: "entities", Offset: 7, Topic: "colca/v1/_Node/n-edge1/_colca/nodes/n-edge1",
 	}}
@@ -25,14 +26,16 @@ func (r *stateWritingExec) ExecuteWithWrites(
 // recordingExec claims one contract and records what it was asked to do.
 type recordingExec struct {
 	contract string
-	calls    []string // "contract verb"
+	calls    []string     // "contract verb"
+	actors   []*uns.Entry // the acting entry each call carried, nil for the admin door
 	code     int
 }
 
 func (r *recordingExec) Handles(contract string) bool { return contract == r.contract }
 
-func (r *recordingExec) Execute(contract, verb string, _ []byte) (int, string, string) {
+func (r *recordingExec) Execute(ctx uns.CommandContext, contract, verb string, _ []byte) (int, string, string) {
 	r.calls = append(r.calls, contract+" "+verb)
+	r.actors = append(r.actors, ctx.Actor)
 	code := r.code
 	if code == 0 {
 		code = 200
@@ -127,7 +130,7 @@ func TestEditCommandCommitsStateAndDurableReplayReceiptTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := e.IngestAdmin("colca/v1/_CmdEdit/n-edge1/apply", payload)
+	result, err := e.IngestHuman(humanEntry(t, "cmd:#:configure"), "colca/v1/_CmdEdit/n-edge1/apply", payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +148,7 @@ func TestEditCommandCommitsStateAndDurableReplayReceiptTogether(t *testing.T) {
 	// Replace the executor to prove replay comes from retained COLCA state,
 	// not an in-process map.
 	e.SetExecutor(uns.NewEditExec(e.EntityStore(), nil))
-	replayed, err := e.IngestAdmin("colca/v1/_CmdEdit/n-edge1/apply", payload)
+	replayed, err := e.IngestHuman(humanEntry(t, "cmd:#:configure"), "colca/v1/_CmdEdit/n-edge1/apply", payload)
 	if err != nil {
 		t.Fatal(err)
 	}

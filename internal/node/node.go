@@ -247,6 +247,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	edit := uns.NewEditExec(
 		n.Engine.EntityStore(), reg, editAttachmentWriter{registry: reg},
 	)
+	edit.SetScope(n.Engine.Scope()) // a person's grants resolve against this node's elements (authz design §3C)
 	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain, edit))
 	n.Engine.SetObserver(domain)
 	// The observer only sees records from here on; the retained set persisted
@@ -300,7 +301,7 @@ func Start(cfg *config.Config) (*Node, error) {
 			log.Error("node record encode failed", "err", err)
 			return
 		}
-		if code, msg, _ := domain.Execute("_CmdConfigure", "entity/upsert", payload); code != 200 {
+		if code, msg, _ := domain.Execute(uns.CommandContext{}, "_CmdConfigure", "entity/upsert", payload); code != 200 {
 			log.Error("node record not authored", "code", code, "msg", msg)
 		}
 	}
@@ -383,7 +384,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		if err != nil {
 			return "", err
 		}
-		code, msg, _ := domain.Execute("_CmdConfigure", "element/author", payload)
+		code, msg, _ := domain.Execute(uns.CommandContext{}, "_CmdConfigure", "element/author", payload)
 		if code != 200 {
 			return "", fmt.Errorf("author element at %s: %s", path, msg)
 		}

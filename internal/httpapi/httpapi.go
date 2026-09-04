@@ -200,6 +200,26 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		//     might resolve to something keyed, so it also subsumes the
 		//     Get(name) case above and any future kind.
 		resolve = func(r *http.Request) (caller, bool) {
+			// Bearer = a person, forwarded by a local service acting AS them
+			// (node-side command authorization design §3B): the api hands
+			// the editor user's own token through instead of its service
+			// name, so the executor authorizes the person. Verified with the
+			// verifier the human doors use; a PRESENTED token that fails is
+			// 401 and never falls through to the service identity beside it.
+			if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+				if ver == nil {
+					m.AuthReject(metrics.DoorLocal, tokenauth.ReasonBadToken)
+					auditDenied(r, metrics.DoorLocal, tokenauth.ReasonBadToken, nil)
+					return caller{}, false // no verifier: the human world does not exist here
+				}
+				v, reason, err := ver.VerifyForScope(strings.TrimPrefix(h, "Bearer "), "broker-http")
+				if err != nil {
+					m.AuthReject(metrics.DoorLocal, reason)
+					auditDenied(r, metrics.DoorLocal, reason, nil)
+					return caller{}, false
+				}
+				return caller{entry: v.Entry, human: v}, true
+			}
 			name := r.Header.Get("X-Colca-Service")
 			if name == "" {
 				m.AuthReject(metrics.DoorLocal, metrics.AuthNoName)
@@ -371,6 +391,15 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			ActorID    string          `json:"actor_id"`
 			ActorLabel string          `json:"actor_label"`
 			ActorKind  string          `json:"actor_kind"`
+			// ActorGroups + FallbackReason: a local service attesting the
+			// group ids of a person it acts for when it cannot forward their
+			// token (node-side command authorization design §3B fallback —
+			// a background job after the request ended). The node resolves
+			// the ids against its own _Group definitions, so this narrows
+			// the service to the person's grants and never widens it; every
+			// use is logged here with the stated reason.
+			ActorGroups    []string `json:"actor_groups"`
+			FallbackReason string   `json:"fallback_reason"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			var tooLarge *http.MaxBytesError
@@ -421,8 +450,19 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			// A machine publishing over HTTP is judged exactly like its MQTT
 			// publish: own zone, identity rule, cmd grants.
 			if local && in.ActorID != "" {
+				if len(in.ActorGroups) > 0 {
+					if in.FallbackReason == "" {
+						writeJSON(w, http.StatusBadRequest, map[string]any{
+							"error": "actor_groups attests a person without their token: state fallback_reason, or forward their Bearer instead"})
+						return
+					}
+					slog.Default().Warn("publish: local service attests a person's groups instead of forwarding their token",
+						"service", c.entry.Name, "actor", in.ActorID, "groups", len(in.ActorGroups),
+						"fallback_reason", in.FallbackReason, "topic", in.Topic)
+				}
 				res, err = e.IngestLocalAttributed(c.entry.ULID, in.Topic, in.Payload, engine.Attribution{
 					ActorID: in.ActorID, ActorLabel: in.ActorLabel, ActorKind: in.ActorKind,
+					ActorGroups: in.ActorGroups,
 				})
 			} else {
 				res, err = e.IngestClient(c.entry.ULID, in.Topic, in.Payload)

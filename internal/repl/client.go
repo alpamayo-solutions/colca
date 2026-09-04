@@ -200,7 +200,7 @@ func marshalReplication(stream string, recs []store.ReplRecord) ([]byte, error) 
 	for i, r := range recs {
 		wire[i] = wireRec{
 			O: r.ChildOffset, OO: r.OriginOffset, T: r.Topic, P: r.Payload, TS: r.TS,
-			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind,
+			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups,
 		}
 	}
 	return json.Marshal(map[string]any{"stream": stream, "records": wire})
@@ -244,6 +244,7 @@ type DownRec struct {
 	ActorID      string
 	ActorLabel   string
 	ActorKind    string
+	ActorGroups  []string
 }
 
 // downResult is one decoded downlink response. Definitions ride the same
@@ -366,7 +367,7 @@ func toDownRecs(in []wireRec) []DownRec {
 		out[i] = DownRec{
 			ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS,
 			WrittenBy: r.WB, ActorID: r.AID,
-			ActorLabel: r.AL, ActorKind: r.AK,
+			ActorLabel: r.AL, ActorKind: r.AK, ActorGroups: r.AG,
 		}
 	}
 	return out
@@ -638,7 +639,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 					ChildOffset: r.Offset, OriginOffset: r.OriginOffset,
 					Topic: r.Topic, Payload: r.Payload, TS: r.TS,
 					WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-					ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
+					ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
 				}
 			}
 			batch, err = fitReplicationBatch(stream, batch, c.maxReplicateBody)
@@ -911,7 +912,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		for _, r := range recs {
 			if _, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
+				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
 			}); err != nil {
 				var refused *engine.RejectError
 				if errors.As(err, &refused) {
@@ -970,7 +971,7 @@ func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res dow
 	for _, r := range res.Definitions {
 		if _, err := eng.IngestDownlinkDefinitionAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
 		}); err != nil {
 			m.DefinitionRejected()
 			var refused *engine.RejectError

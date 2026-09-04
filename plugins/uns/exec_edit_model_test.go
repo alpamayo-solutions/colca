@@ -83,7 +83,7 @@ func TestModelAssignCreatesMissingSignals(t *testing.T) {
 			"heartbeat": "sig-heartbeat", "is_connected": "sig-isconnected",
 		},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 3 || f.batchCalls != 1 {
 		t.Fatalf("assign create = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -157,7 +157,7 @@ func TestModelAssignAdoptsCompatibleSignal(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-press"},
 		"models": []string{"Machine"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 2 || f.batchCalls != 1 {
 		t.Fatalf("assign adopt = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -205,7 +205,7 @@ func TestModelAssignTypeConflictAborts(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-press"},
 		"models": []string{"Machine"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("type conflict = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -245,7 +245,7 @@ func TestModelAssignTwoComputersConflict(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-press"},
 		"models": []string{"ModelA", "ModelB"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("two computers conflict = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -289,7 +289,7 @@ func TestModelAssignSharedRequirementIsOneSignal(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-press"},
 		"models": []string{"ModelA", "ModelB"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 2 || f.batchCalls != 1 {
 		t.Fatalf("shared requirement = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -330,7 +330,7 @@ func TestModelAssignUnknownModel(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-press"},
 		"models": []string{"Nonexistent"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 422 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("unknown model = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -362,7 +362,7 @@ func TestModelUnassignReleasesOnly(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-press"},
 		"models": []string{"Other"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 1 || f.batchCalls != 1 {
 		t.Fatalf("unassign = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -411,7 +411,7 @@ func TestModelAssignRacedElement(t *testing.T) {
 		"models":  []string{"Machine"},
 		"creates": map[string]string{"heartbeat": "sig-heartbeat"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || !strings.Contains(msg, "stale_version") || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("raced element = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -446,7 +446,7 @@ func TestModelAssignAdoptsCompatibleButDifferentlySpelledDataType(t *testing.T) 
 		"entity": map[string]any{"kind": "system-element", "id": "el-press"},
 		"models": []string{"Machine"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 1 || f.batchCalls != 1 {
 		t.Fatalf("compatible spelling adopt = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -485,7 +485,7 @@ func TestModelAssignUnknownSlotDataTypeIsRejected(t *testing.T) {
 		"models":  []string{"Machine"},
 		"creates": map[string]string{"precision": "sig-precision"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 422 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("unknown data_type = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -527,7 +527,7 @@ func TestModelAssignCreateCarriesUnitAndDescription(t *testing.T) {
 		"models":  []string{"Machine"},
 		"creates": map[string]string{"temperature": "sig-temperature"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 2 || f.batchCalls != 1 {
 		t.Fatalf("unit/description create = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -580,7 +580,7 @@ func TestModelAssignUsesDefinitionsFromAForeignAuthoringNode(t *testing.T) {
 		"models":  []string{"Machine"},
 		"creates": map[string]string{"heartbeat": "sig-heartbeat"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 2 || f.batchCalls != 1 {
 		t.Fatalf("foreign-authored definitions = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -627,7 +627,7 @@ func TestModelAssignRejectsOverTheMutationLimit(t *testing.T) {
 		"models":  []string{"Machine"},
 		"creates": creates,
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 422 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("over the mutation limit = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -654,7 +654,7 @@ func TestModelAssignUnchangedIsANoOp(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-press"},
 		"models": []string{"Other"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", first)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", first)
 	if code != 200 || len(writes) != 1 || f.batchCalls != 1 {
 		t.Fatalf("first assign = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -666,7 +666,7 @@ func TestModelAssignUnchangedIsANoOp(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-press"},
 		"models": []string{"Other"},
 	})
-	code, msg, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", second)
+	code, msg, _, writes = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", second)
 	if code != 409 || len(writes) != 0 || f.batchCalls != 1 {
 		t.Fatalf("unchanged re-assign = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -714,7 +714,7 @@ func TestModelAssignAdoptsLowestSignalIdOnDuplicateNames(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-press"},
 		"models": []string{"Machine"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 1 || f.batchCalls != 1 {
 		t.Fatalf("duplicate-name adopt = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -751,7 +751,7 @@ func TestModelAssignAdoptMissingExpectedVersionIsRejected(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-press"},
 		"models": []string{"Machine"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 422 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("adopt missing expected version = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -792,7 +792,7 @@ func TestModelAssignCreatePathCollidesWithForeignElementSignal(t *testing.T) {
 		"models":  []string{"Machine"},
 		"creates": map[string]string{"heartbeat": "sig-heartbeat"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("path collision = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -827,7 +827,7 @@ func TestModelAssignSlotNamesUnknownSemanticType(t *testing.T) {
 		"models":  []string{"Machine"},
 		"creates": map[string]string{"heartbeat": "sig-heartbeat"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("unknown semantic type = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -872,7 +872,7 @@ func TestModelAssignInheritedComputedSlotIsNotAConflict(t *testing.T) {
 		"models":  []string{"Machine", "MachineState"},
 		"creates": map[string]string{"state": "sig-state"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 2 || f.batchCalls != 1 {
 		t.Fatalf("inherited computed slot = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -937,7 +937,7 @@ func TestModelAssignRecursesIntoChildModel(t *testing.T) {
 			"drive_end_bearing/vibration": "sig-vibration",
 		},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 3 || f.batchCalls != 1 {
 		t.Fatalf("recursive child assign = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -1023,7 +1023,7 @@ func TestModelAssignAdoptsExistingChildByName(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-motor"},
 		"models": []string{"Motor"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 2 || f.batchCalls != 1 {
 		t.Fatalf("child adopt = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -1102,7 +1102,7 @@ func TestModelAssignChildSlotWrongKindNameConflict(t *testing.T) {
 		"models":  []string{"Motor"},
 		"creates": map[string]string{"drive_end_bearing": "el-bearing"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("child wrong-kind conflict = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -1138,7 +1138,7 @@ func TestModelAssignChildSlotUnknownChildModel(t *testing.T) {
 		"models":  []string{"Motor"},
 		"creates": map[string]string{"drive_end_bearing": "el-bearing"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("unknown child model = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -1177,7 +1177,7 @@ func TestModelAssignChildSlotMissingCreatesID(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-motor"},
 		"models": []string{"Motor"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 422 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("missing creates id = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -1226,7 +1226,7 @@ func TestModelUnassignReleasesRecursively(t *testing.T) {
 			"drive_end_bearing/vibration": "sig-vibration",
 		},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", assignPayload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", assignPayload)
 	if code != 200 || len(writes) != 3 || f.batchCalls != 1 {
 		t.Fatalf("assign setup = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -1251,7 +1251,7 @@ func TestModelUnassignReleasesRecursively(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-motor"},
 		"models": []string{},
 	})
-	code, msg, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", unassignPayload)
+	code, msg, _, writes = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", unassignPayload)
 	if code != 200 || len(writes) != 2 || f.batchCalls != 2 {
 		t.Fatalf("recursive unassign = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -1314,7 +1314,7 @@ func TestModelAssignChildTreeRejectsOverTheMutationLimit(t *testing.T) {
 		"models":  []string{"Big"},
 		"creates": creates,
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 422 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("child tree over the mutation limit = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -1358,7 +1358,7 @@ func TestModelSlotKindExemptsOnlyChildFromCanonicalDataType(t *testing.T) {
 		"models":  []string{"BadMotor"},
 		"creates": map[string]string{"precision": "sig-precision"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", badPayload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", badPayload)
 	if code != 422 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("non-child unknown data_type = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -1394,7 +1394,7 @@ func TestModelSlotKindExemptsOnlyChildFromCanonicalDataType(t *testing.T) {
 		"models":  []string{"GoodMotor"},
 		"creates": map[string]string{"drive_end_bearing": "el-bearing"},
 	})
-	code, msg, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", goodPayload)
+	code, msg, _, writes = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", goodPayload)
 	if code != 200 || len(writes) != 2 || f.batchCalls != 1 {
 		t.Fatalf("child-only assign with empty data_type = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -1453,7 +1453,7 @@ func TestModelAssignSameChildKeyAcrossModelsMerges(t *testing.T) {
 		"models":  []string{"MotorA", "MotorB"},
 		"creates": map[string]string{"bearing": "el-bearing"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 2 || f.batchCalls != 1 {
 		t.Fatalf("same-key merge = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -1530,7 +1530,7 @@ func TestModelAssignChildSlotsCollideOnEntityName(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-motor"},
 		"models": []string{"Motor"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("colliding child entity names = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -1585,7 +1585,7 @@ func TestModelAssignChildModelCycleWithEntityParentCycleIsRejected(t *testing.T)
 		"entity": map[string]any{"kind": "system-element", "id": "el-a"},
 		"models": []string{"ModelX"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("cyclic child model = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -1639,7 +1639,7 @@ func TestModelUnassignPreservesStillMandatedChild(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-motor"},
 		"models": []string{"ModelB"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", firstPayload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", firstPayload)
 	if code != 200 || len(writes) != 1 || f.batchCalls != 1 {
 		t.Fatalf("unassign ModelA (ModelB stays) = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -1680,7 +1680,7 @@ func TestModelUnassignPreservesStillMandatedChild(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-motor"},
 		"models": []string{},
 	})
-	code, msg, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", secondPayload)
+	code, msg, _, writes = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", secondPayload)
 	if code != 200 || len(writes) != 2 || f.batchCalls != 2 {
 		t.Fatalf("unassign ModelB too = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
@@ -1757,7 +1757,7 @@ func TestModelUnassignChildSlotsCollideOnEntityName(t *testing.T) {
 		"entity": map[string]any{"kind": "system-element", "id": "el-motor"},
 		"models": []string{},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("colliding child entity names on unassign = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -1815,7 +1815,7 @@ func TestModelAssignRefusesACreateIDThatAlreadyIdentifiesAnEntity(t *testing.T) 
 		"models":  []string{"Motor"},
 		"creates": map[string]string{"gearbox": "el-vault"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", hijack)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", hijack)
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("create-id hijack = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}
@@ -1837,7 +1837,7 @@ func TestModelAssignRefusesACreateIDThatAlreadyIdentifiesAnEntity(t *testing.T) 
 		"models":  []string{"Motor"},
 		"creates": map[string]string{"gearbox": "el-gearbox"},
 	})
-	code, msg, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", free)
+	code, msg, _, writes = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", free)
 	if code != 200 || len(writes) != 2 {
 		t.Fatalf("free create id = %d %q writes=%+v", code, msg, writes)
 	}
@@ -1874,7 +1874,7 @@ func TestModelAssignRefusesTheSameCreateIDTwiceInOneBatch(t *testing.T) {
 		"models":  []string{"Machine"},
 		"creates": map[string]string{"heartbeat": "sig-shared", "part_counter": "sig-shared"},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
 		t.Fatalf("reused create id = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
 	}

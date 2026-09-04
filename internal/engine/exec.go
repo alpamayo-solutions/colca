@@ -31,11 +31,12 @@ import (
 // even when the node cannot carry it out.
 type CommandExecutor interface {
 	Handles(contract string) bool
-	Execute(contract, verb string, payload []byte) (code int, message, result string)
+	Execute(ctx uns.CommandContext, contract, verb string, payload []byte) (code int, message, result string)
 }
 
 type stateWritingCommandExecutor interface {
 	ExecuteWithWrites(
+		ctx uns.CommandContext,
 		contract, verb string,
 		payload []byte,
 	) (code int, message, result string, writes []uns.StateWrite)
@@ -122,16 +123,17 @@ func (m multiExec) Handles(contract string) bool {
 	return false
 }
 
-func (m multiExec) Execute(contract, verb string, payload []byte) (int, string, string) {
+func (m multiExec) Execute(ctx uns.CommandContext, contract, verb string, payload []byte) (int, string, string) {
 	for _, x := range m {
 		if x.Handles(contract) {
-			return x.Execute(contract, verb, payload)
+			return x.Execute(ctx, contract, verb, payload)
 		}
 	}
 	return 500, "no executor claims " + contract, "error"
 }
 
 func (m multiExec) ExecuteWithWrites(
+	ctx uns.CommandContext,
 	contract, verb string,
 	payload []byte,
 ) (int, string, string, []uns.StateWrite) {
@@ -140,9 +142,9 @@ func (m multiExec) ExecuteWithWrites(
 			continue
 		}
 		if writer, ok := x.(stateWritingCommandExecutor); ok {
-			return writer.ExecuteWithWrites(contract, verb, payload)
+			return writer.ExecuteWithWrites(ctx, contract, verb, payload)
 		}
-		code, message, result := x.Execute(contract, verb, payload)
+		code, message, result := x.Execute(ctx, contract, verb, payload)
 		return code, message, result, nil
 	}
 	return 500, "no executor claims " + contract, "error", nil
@@ -157,10 +159,15 @@ type cmdEnvelope struct {
 }
 
 // maybeExec runs after a _Cmd* record was persisted by a trusted-down path.
+// actor is the identity the door authorized (nil at the admin door); a
+// downlinked record has none here, so the human who issued it is
+// reconstituted from the attested groups its attribution carries — see
+// actorForDownlink.
 func (e *Engine) maybeExec(
 	p uns.Parsed,
 	payload []byte,
 	attribution Attribution,
+	actor *uns.Entry,
 ) *CommandOutcome {
 	if p.NodeID != e.cfg.ULID || e.exec == nil || !e.exec.Handles(p.Contract) {
 		return nil
@@ -192,10 +199,11 @@ func (e *Engine) maybeExec(
 	var code int
 	var msg, result string
 	var writes []uns.StateWrite
+	ctx := uns.CommandContext{Actor: actor}
 	if writer, ok := e.exec.(stateWritingCommandExecutor); ok {
-		code, msg, result, writes = writer.ExecuteWithWrites(p.Contract, verb, payload)
+		code, msg, result, writes = writer.ExecuteWithWrites(ctx, p.Contract, verb, payload)
 	} else {
-		code, msg, result = e.exec.Execute(p.Contract, verb, payload)
+		code, msg, result = e.exec.Execute(ctx, p.Contract, verb, payload)
 	}
 	outcome := &CommandOutcome{
 		CorrelationID: env.CorrelationID,

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 
 	"github.com/alpamayo-solutions/colca/internal/registry"
 )
@@ -37,7 +38,7 @@ type adminCmdBody struct {
 	ULID  string          `json:"ulid"`
 }
 
-func (a *AdminExecutor) Execute(contract, verb string, payload []byte) (int, string, string) {
+func (a *AdminExecutor) Execute(_ uns.CommandContext, contract, verb string, payload []byte) (int, string, string) {
 	if a.registry == nil {
 		return 500, "no admin executor wired", "error"
 	}

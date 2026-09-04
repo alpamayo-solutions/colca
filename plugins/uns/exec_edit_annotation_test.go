@@ -289,7 +289,7 @@ func TestEditAnnotationCommitsThroughTheEventDoorNeverKV(t *testing.T) {
 	exec := NewEditExec(f, nil)
 	payload := editBody(t, "op-annotation-create", map[string]uint64{}, annotationWireIntent(nil))
 
-	code, msg, result, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, result, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || result != "ok" || len(writes) != 1 {
 		t.Fatalf("create = %d %q %q writes=%+v", code, result, msg, writes)
 	}
@@ -319,7 +319,7 @@ func TestEditAnnotationCommitsThroughTheEventDoorNeverKV(t *testing.T) {
 	// exactly-once guarantee every other intent gets, even though this intent
 	// commits its event and its receipt as two separate writes rather than
 	// one atomic batch.
-	code, _, _, replayWrites := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, _, _, replayWrites := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(replayWrites) != 1 || replayWrites[0].Topic != writes[0].Topic {
 		t.Fatalf("replay = %d writes=%+v, want the identical cached write", code, replayWrites)
 	}
@@ -338,7 +338,7 @@ func TestEditAnnotationRefusalWritesNothing(t *testing.T) {
 		annotationWireIntent(map[string]any{"annotation_id": "attacker-chosen-id"}),
 	)
 
-	code, msg, result, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, result, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 409 || result != "conflict" || len(writes) != 0 {
 		t.Fatalf("refused create = %d %q %q writes=%+v, want 409 conflict with zero writes", code, result, msg, writes)
 	}
@@ -358,7 +358,7 @@ func TestEditAnnotationDeleteAppendsAtAnExistingIDThroughTheEventDoor(t *testing
 	f := newStore("n-edge1")
 	exec := NewEditExec(f, nil)
 	createPayload := editBody(t, "op-annotation-create-2", map[string]uint64{}, annotationWireIntent(nil))
-	code, _, _, createWrites := exec.ExecuteWithWrites("_CmdEdit", "apply", createPayload)
+	code, _, _, createWrites := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", createPayload)
 	if code != 200 || len(createWrites) != 1 {
 		t.Fatalf("setup create = %d writes=%+v", code, createWrites)
 	}
@@ -371,7 +371,7 @@ func TestEditAnnotationDeleteAppendsAtAnExistingIDThroughTheEventDoor(t *testing
 	deletePayload := editBody(t, "op-annotation-delete", map[string]uint64{}, annotationWireIntent(map[string]any{
 		"action": "delete", "annotation_id": id,
 	}))
-	code, msg, result, deleteWrites := exec.ExecuteWithWrites("_CmdEdit", "apply", deletePayload)
+	code, msg, result, deleteWrites := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", deletePayload)
 	if code != 200 || result != "ok" || len(deleteWrites) != 1 {
 		t.Fatalf("delete = %d %q %q writes=%+v", code, result, msg, deleteWrites)
 	}

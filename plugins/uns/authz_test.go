@@ -281,6 +281,13 @@ func TestOnlyUnplacedLocalServiceGetsImplicitConfigure(t *testing.T) {
 			t.Errorf("%s gained implicit configure", name)
 		}
 	}
+	// _CmdEdit is configure-class but carries a PERSON's intent, so an
+	// unplaced local service (the api) may not issue it under its own
+	// identity — the executor authorizes the person (node-side command
+	// authorization design §3A).
+	if unplaced.MayImplicitlyConfigure("_CmdEdit") {
+		t.Fatal("an unplaced local service may not implicitly issue _CmdEdit")
+	}
 	if unplaced.MayImplicitlyConfigure("_CmdAdmin") || unplaced.MayImplicitlyConfigure("_CmdParam") {
 		t.Fatal("implicit local authority must not widen beyond _CmdConfigure")
 	}

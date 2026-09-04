@@ -212,7 +212,7 @@ func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter 
 	for _, rec := range recs {
 		out = append(out, wireRec{
 			O: rec.Offset, T: rec.Topic, P: rec.Payload, TS: rec.TS,
-			WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind,
+			WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups,
 		})
 	}
 	resp["definitions"], resp["def_next"] = out, next
@@ -302,15 +302,16 @@ func (s *Server) Stop() {
 }
 
 type wireRec struct {
-	O   uint64 `json:"o"`
-	OO  uint64 `json:"oo,omitempty"`
-	T   string `json:"t"`
-	P   []byte `json:"p"`
-	TS  int64  `json:"ts"`
-	WB  string `json:"wb,omitempty"`
-	AID string `json:"aid,omitempty"`
-	AL  string `json:"al,omitempty"`
-	AK  string `json:"ak,omitempty"`
+	O   uint64   `json:"o"`
+	OO  uint64   `json:"oo,omitempty"`
+	T   string   `json:"t"`
+	P   []byte   `json:"p"`
+	TS  int64    `json:"ts"`
+	WB  string   `json:"wb,omitempty"`
+	AID string   `json:"aid,omitempty"`
+	AL  string   `json:"al,omitempty"`
+	AK  string   `json:"ak,omitempty"`
+	AG  []string `json:"ag,omitempty"`
 }
 
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
@@ -392,7 +393,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 			ChildOffset: rec.O, OriginOffset: rec.OO,
 			Topic: topic, Payload: rec.P, TS: rec.TS,
 			WrittenBy: rec.WB, ActorID: rec.AID,
-			ActorLabel: rec.AL, ActorKind: rec.AK,
+			ActorLabel: rec.AL, ActorKind: rec.AK, ActorGroups: rec.AG,
 		}
 		// Route by the ENGINE authority (bundle-aware): a bundle-declared
 		// data/entity contract must KV-project here like at any door.
@@ -546,7 +547,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 				}
 				out = append(out, wireRec{
 					O: rec.Offset, T: stripped, P: rec.Payload, TS: rec.TS,
-					WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind,
+					WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups,
 				})
 			}
 			// now_ms is stamped HERE, at response-write time — after the long

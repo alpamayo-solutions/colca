@@ -60,7 +60,7 @@ func TestEditCreateUpdateDeleteUsesTypedEntityIntent(t *testing.T) {
 			"name": "Target speed", "data_type": "int64", "value": 18000,
 		},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", create)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", create)
 	if code != 200 || len(writes) != 1 {
 		t.Fatalf("create = %d %q writes=%+v", code, msg, writes)
 	}
@@ -86,7 +86,7 @@ func TestEditCreateUpdateDeleteUsesTypedEntityIntent(t *testing.T) {
 			"name": "Target speed", "description": "Nominal line speed",
 		},
 	})
-	code, msg, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", update)
+	code, msg, _, writes = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", update)
 	if code != 200 || len(writes) != 1 {
 		t.Fatalf("update = %d %q writes=%+v", code, msg, writes)
 	}
@@ -103,7 +103,7 @@ func TestEditCreateUpdateDeleteUsesTypedEntityIntent(t *testing.T) {
 	}, map[string]any{
 		"type": "delete", "entity": map[string]any{"kind": "constant", "id": "const-speed"},
 	})
-	code, msg, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", remove)
+	code, msg, _, writes = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", remove)
 	if code != 200 || len(writes) != 1 {
 		t.Fatalf("delete = %d %q writes=%+v", code, msg, writes)
 	}
@@ -155,7 +155,7 @@ func TestEditUpdateComposesEntityAndExternalReferencesInOneBatch(t *testing.T) {
 		},
 	})
 
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 
 	if code != 200 || len(writes) != 4 || f.batchCalls != 1 {
 		t.Fatalf("reference composition = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
@@ -181,7 +181,7 @@ func TestEditUpdateComposesEntityAndExternalReferencesInOneBatch(t *testing.T) {
 	}
 
 	batchCalls := f.batchCalls
-	code, _, _, replayWrites := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, _, _, replayWrites := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(replayWrites) != len(writes) || f.batchCalls != batchCalls {
 		t.Fatalf("reference replay wrote again: code=%d writes=%+v batches=%d", code, replayWrites, f.batchCalls)
 	}
@@ -204,7 +204,7 @@ func TestEditDeleteTombstonesOwnedExternalReferencesInOneBatch(t *testing.T) {
 	}
 
 	before := f.offset
-	code, _, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+	code, _, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(
 		t, "op-delete-missing-reference-version", map[string]uint64{
 			"signal:sig-temp": signalVersion,
 		}, intent,
@@ -213,7 +213,7 @@ func TestEditDeleteTombstonesOwnedExternalReferencesInOneBatch(t *testing.T) {
 		t.Fatalf("missing reference version = %d writes=%+v offset=%d batches=%d", code, writes, f.offset, f.batchCalls)
 	}
 
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(
 		t, "op-delete-with-reference", map[string]uint64{
 			"signal:sig-temp":             signalVersion,
 			"external-reference:ref-temp": referenceVersion,
@@ -255,7 +255,7 @@ func TestEditReferenceOnlyUpdateRejectsInvalidAndNoopWithoutWriting(t *testing.T
 		"external_table": "equipment", "external_row_id": "7",
 	}}
 	before := f.offset
-	code, _, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+	code, _, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(
 		t, "op-invalid-reference", map[string]uint64{"signal:sig-temp": entityVersion}, invalid,
 	))
 	if code != 422 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
@@ -267,7 +267,7 @@ func TestEditReferenceOnlyUpdateRejectsInvalidAndNoopWithoutWriting(t *testing.T
 		noop[key] = value
 	}
 	noop["external_references"] = []map[string]any{}
-	code, _, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+	code, _, _, writes = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(
 		t, "op-reference-noop", map[string]uint64{"signal:sig-temp": entityVersion}, noop,
 	))
 	if code != 409 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
@@ -289,7 +289,7 @@ func TestEditPlacementMovesAWholeEntitySubtreeInOneBatch(t *testing.T) {
 	})
 	exec := NewEditExec(f, nil)
 
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(
 		t, "op-move", map[string]uint64{
 			"system-element:el-machine": machineVersion,
 			"system-element:el-line2":   targetVersion,
@@ -343,7 +343,7 @@ func TestEditBindingValidatesWholeMixedBatchBeforeWriting(t *testing.T) {
 			{"id": "create-speed", "kind": "create_signal_and_bind", "tag_id": "tag-2", "signal_id": "sig-speed", "parent_id": "el-line1", "name": "Speed"},
 		},
 	})
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", valid)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", valid)
 	if code != 200 || len(writes) != 2 || f.batchCalls != 1 {
 		t.Fatalf("binding = %d %q writes=%+v batch_calls=%d", code, msg, writes, f.batchCalls)
 	}
@@ -359,7 +359,7 @@ func TestEditBindingValidatesWholeMixedBatchBeforeWriting(t *testing.T) {
 			{"id": "late-invalid", "kind": "bind", "tag_id": "missing", "signal_id": "sig-existing"},
 		},
 	})
-	code, _, _, _ = exec.ExecuteWithWrites("_CmdEdit", "apply", invalid)
+	code, _, _, _ = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", invalid)
 	if code != 422 || f.offset != before || f.batchCalls != 1 {
 		t.Fatalf("late invalid binding = %d offset=%d batch_calls=%d, want no write", code, f.offset, f.batchCalls)
 	}
@@ -379,11 +379,11 @@ func TestEditOperationReplayIsExactAndConflictingReuseIsRejected(t *testing.T) {
 		"attributes": map[string]any{"name": "Target", "data_type": "int64", "value": 1},
 	})
 
-	firstCode, firstMsg, firstResult, firstWrites := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	firstCode, firstMsg, firstResult, firstWrites := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	firstBatchCalls := f.batchCalls
 	// Reconstruct through retained state, not the executor's process cache.
 	exec = NewEditExec(f, nil)
-	code, msg, result, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, result, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != firstCode || msg != firstMsg || result != firstResult || len(writes) != len(firstWrites) || f.batchCalls != firstBatchCalls {
 		t.Fatalf("exact replay changed outcome or wrote again: first=%d/%q/%q/%+v replay=%d/%q/%q/%+v batches=%d",
 			firstCode, firstMsg, firstResult, firstWrites, code, msg, result, writes, f.batchCalls)
@@ -396,7 +396,7 @@ func TestEditOperationReplayIsExactAndConflictingReuseIsRejected(t *testing.T) {
 		"parent_id":  "el-line1",
 		"attributes": map[string]any{"name": "Other", "data_type": "int64", "value": 2},
 	})
-	code, msg, result, _ = exec.ExecuteWithWrites("_CmdEdit", "apply", conflict)
+	code, msg, result, _ = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", conflict)
 	if code != 409 || msg != "idempotency_conflict" || result != "conflict" || f.batchCalls != firstBatchCalls {
 		t.Fatalf("operation reuse = %d %q %q batches=%d", code, msg, result, f.batchCalls)
 	}
@@ -426,7 +426,7 @@ func TestEditDurableReplayReceiptsStayBounded(t *testing.T) {
 		"attributes": map[string]any{"name": "New", "data_type": "int64", "value": 1},
 	})
 
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(writes) != 1 {
 		t.Fatalf("bounded receipt command = %d %q writes=%+v", code, msg, writes)
 	}
@@ -453,7 +453,7 @@ func TestEditRejectsMalformedIntentKindsWithoutWriting(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newStore("n-edge1")
 			exec := NewEditExec(f, nil)
-			code, _, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(t, "op-"+tc.name, nil, tc.intent))
+			code, _, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(t, "op-"+tc.name, nil, tc.intent))
 			if code != 422 || len(writes) != 0 || f.batchCalls != 0 || f.offset != 0 {
 				t.Fatalf("malformed %s = %d writes=%+v batches=%d offset=%d", tc.name, code, writes, f.batchCalls, f.offset)
 			}
@@ -543,7 +543,7 @@ func TestEditNodeAttachmentRemountPreservesIdentityAndReplaysDurably(t *testing.
 		"action": "remount", "mount_system_element_id": "mount-new",
 	})
 
-	code, message, result, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, message, result, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || result != "ok" || len(writes) != 1 || writer.remountCalls != 1 {
 		t.Fatalf("remount = %d %q %q writes=%+v calls=%d", code, message, result, writes, writer.remountCalls)
 	}
@@ -561,7 +561,7 @@ func TestEditNodeAttachmentRemountPreservesIdentityAndReplaysDurably(t *testing.
 
 	batchCalls := store.batchCalls
 	exec = NewEditExec(store, nil, writer)
-	replayCode, replayMessage, replayResult, replayWrites := exec.ExecuteWithWrites(
+	replayCode, replayMessage, replayResult, replayWrites := exec.ExecuteWithWrites(asHuman,
 		"_CmdEdit", "apply", payload,
 	)
 	if replayCode != code || replayMessage != message || replayResult != result ||
@@ -587,7 +587,7 @@ func TestEditNodeAttachmentRejectsStaleVersionAndStartsDrain(t *testing.T) {
 		"entity": map[string]any{"kind": "colca-node", "id": "child-node"},
 		"action": "drain",
 	})
-	code, message, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", stale)
+	code, message, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", stale)
 	if code != 409 || !strings.Contains(message, "stale_version") || len(writes) != 0 || writer.drainCalls != 0 {
 		t.Fatalf("stale drain = %d %q writes=%+v calls=%d", code, message, writes, writer.drainCalls)
 	}
@@ -599,7 +599,7 @@ func TestEditNodeAttachmentRejectsStaleVersionAndStartsDrain(t *testing.T) {
 		"entity": map[string]any{"kind": "colca-node", "id": "child-node"},
 		"action": "drain",
 	})
-	code, message, _, writes = exec.ExecuteWithWrites("_CmdEdit", "apply", drain)
+	code, message, _, writes = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", drain)
 	if code != 200 || len(writes) != 1 || writer.drainCalls != 1 {
 		t.Fatalf("drain = %d %q writes=%+v calls=%d", code, message, writes, writer.drainCalls)
 	}
@@ -641,7 +641,7 @@ func TestEditCreateRefusesAnElementIdThatIsNotAnIdentity(t *testing.T) {
 			})
 			exec := NewEditExec(f, nil)
 
-			code, msg, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+			code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(
 				t, "op-create-"+tc.name, map[string]uint64{"system-element:el-line1": parentVersion},
 				map[string]any{
 					"type":       "create",
@@ -684,7 +684,7 @@ func TestEditDeleteRefusesWhileAnIdentityBindsToTheSubtree(t *testing.T) {
 	exec := NewEditExec(f, bindings{"el-edge1": {"n-edge1"}}, nil)
 
 	deleteSite := func(operationID string, cascade bool) (int, string, []StateWrite) {
-		code, message, _, writes := exec.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+		code, message, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(
 			t, operationID, map[string]uint64{
 				"system-element:el-site1": siteVersion,
 				"system-element:el-edge1": edgeVersion,
@@ -718,7 +718,7 @@ func TestEditDeleteRefusesWhileAnIdentityBindsToTheSubtree(t *testing.T) {
 	// subtree, retires both positions. Without this the 409 above would also
 	// pass if delete were broken outright.
 	free := NewEditExec(f, bindings{"el-elsewhere": {"n-other"}}, nil)
-	code, message, _, writes = free.ExecuteWithWrites("_CmdEdit", "apply", editBody(
+	code, message, _, writes = free.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(
 		t, "op-delete-free-cascade", map[string]uint64{
 			"system-element:el-site1": siteVersion,
 			"system-element:el-edge1": edgeVersion,

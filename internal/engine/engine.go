@@ -70,6 +70,12 @@ type Attribution struct {
 	ActorID    string
 	ActorLabel string
 	ActorKind  string
+	// ActorGroups are the group ids a human actor's grants were resolved
+	// from at the door that verified them (uns.Entry.Groups). Persisted with
+	// the record and replicated with it, so the node that finally executes a
+	// downlinked command can reconstitute the same person against its own
+	// _Group definitions (node-side command authorization design §3B).
+	ActorGroups []string
 }
 
 func attributionForEntry(entry *uns.Entry) Attribution {
@@ -83,7 +89,36 @@ func attributionForEntry(entry *uns.Entry) Attribution {
 	return Attribution{
 		WrittenBy: entry.ULID, ActorID: entry.ULID,
 		ActorLabel: label, ActorKind: entry.ActorKind(),
+		ActorGroups: append([]string(nil), entry.Groups...),
 	}
+}
+
+// actorForAttested reconstitutes a human whose token this node never saw:
+// the record's attribution carries the group ids a door verified — an
+// ancestor's, for a command replicated down; a local service's stated
+// fallback, for a job acting after the request ended — and this node
+// resolves them against the _Group definitions it holds, the same
+// resolution a token gets at its own human doors. A group this node does not hold contributes nothing (logged),
+// so the person may arrive holding no grant at all — and is then refused by
+// the plan authorization, never widened. A record with no human attribution
+// or no attested groups yields no actor: the executor then refuses a
+// _CmdEdit rather than guessing.
+func (e *Engine) actorForAttested(attribution Attribution) *uns.Entry {
+	if attribution.ActorKind != "human" || attribution.ActorID == "" || len(attribution.ActorGroups) == 0 {
+		return nil
+	}
+	entry, problems, err := uns.TokenEntryWithGroups(attribution.ActorID, nil, attribution.ActorGroups, e.Groups())
+	if err != nil {
+		e.log.Warn("attested actor: cannot reconstitute the acting human", "actor", attribution.ActorID, "err", err)
+		return nil
+	}
+	for _, problem := range problems {
+		e.log.Warn("attested actor: group unresolved for the acting human", "actor", attribution.ActorID, "err", problem)
+	}
+	if attribution.ActorLabel != "" && attribution.ActorLabel != attribution.ActorID {
+		entry.Username = attribution.ActorLabel // the verifying door's preferred_username, kept as the label
+	}
+	return entry
 }
 
 // Mounts resolves identities to their registry entries — implemented by
@@ -488,21 +523,32 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		// target ABSOLUTE node-local paths: no mount rewrite, no level-4
 		// identity requirement — the author is not the target's owner.
 		entry, ok := e.ids.Get(identity)
-		implicitLocalConfigure := ok && p.NodeID == e.cfg.ULID && entry.MayImplicitlyConfigure(p.Contract)
-		if !ok || (!implicitLocalConfigure && !uns.Authorize(e.Scope(), entry, uns.ActCmd, topic)) {
-			actor := Attribution{ActorID: identity, ActorLabel: identity, ActorKind: "service"}
-			if ok {
-				actor = actorFor(entry)
-			}
-			return e.rejectDenied(metrics.ReasonCmdDenied, actor, "execute", &p, "client %s: no cmd grant covers %s", identity, topic)
+		if !ok {
+			return e.rejectDenied(metrics.ReasonCmdDenied,
+				Attribution{ActorID: identity, ActorLabel: identity, ActorKind: "service"},
+				"execute", &p, "client %s: no cmd grant covers %s", identity, topic)
+		}
+		attribution := actorFor(entry)
+		// The command is judged AS the person a local service attested for
+		// (node-side command authorization design §3B fallback): the person
+		// reconstituted from their group ids against this node's own _Group
+		// definitions, holding exactly their grants — never the service's
+		// implicit configure, never wider than the person. A service
+		// publishing as itself is judged as itself.
+		actor := entry
+		if attested := e.actorForAttested(attribution); attested != nil {
+			actor = attested
+		}
+		implicitLocalConfigure := actor == entry && p.NodeID == e.cfg.ULID && entry.MayImplicitlyConfigure(p.Contract)
+		if !implicitLocalConfigure && !uns.Authorize(e.Scope(), actor, uns.ActCmd, topic) {
+			return e.rejectDenied(metrics.ReasonCmdDenied, attribution, "execute", &p, "client %s: no cmd grant covers %s", identity, topic)
 		}
 		if err := e.validateContract(p.Contract, payload); err != nil {
 			return e.reject(metrics.ReasonValidation, "%w", err)
 		}
-		attribution := actorFor(entry)
 		res, err := e.persistAttributed(class, p, topic, payload, attribution)
 		if err == nil {
-			res.Command = e.maybeExec(p, payload, attribution) // return the synchronous outcome to local API callers
+			res.Command = e.maybeExec(p, payload, attribution, actor) // return the synchronous outcome to local API callers
 		}
 		return res, err
 	}
@@ -609,6 +655,10 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 		return e.rejectDenied(metrics.ReasonHumanWrite, attributionForEntry(entry), "publish", &p,
 			"human %s may not publish %s — humans command, machines write state", entry.ULID, p.Contract)
 	}
+	if !entry.MayPublishContract(p.Contract) {
+		return e.rejectDenied(metrics.ReasonHumanWrite, attributionForEntry(entry), "publish", &p,
+			"human %s may not publish %s — a person configures through _CmdEdit, where each write is authorized as them (node-side command authorization design §3F)", entry.ULID, p.Contract)
+	}
 	if e.ids.DrainingMount(p.Path) {
 		// Move-drain design §3.2 item 2 — "at every door": a human's cmd
 		// grant does not exempt them from the draining admission gate.
@@ -627,10 +677,11 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 	attribution := Attribution{
 		WrittenBy: entry.ULID, ActorID: entry.ULID,
 		ActorLabel: actorLabel, ActorKind: "human",
+		ActorGroups: append([]string(nil), entry.Groups...),
 	}
 	res, err := e.persistAttributed(class, p, topic, payload, attribution)
 	if err == nil {
-		res.Command = e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
+		res.Command = e.maybeExec(p, payload, attribution, entry) // commands addressed to this node execute here (cmdadmin design §5)
 	}
 	return res, err
 }
@@ -693,7 +744,7 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 	}
 	res, err := e.persistAttributed(class, p, topic, payload, attribution)
 	if err == nil {
-		res.Command = e.maybeExec(p, payload, attribution) // commands addressed to this node execute here (cmdadmin design §5)
+		res.Command = e.maybeExec(p, payload, attribution, nil) // the admin door presents a token, not an identity
 	}
 	return res, err
 }
@@ -781,7 +832,8 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 				Topic: input.Topic, Payload: input.Payload, TS: ts,
 				WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 				ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-				KVPath: parsed.Path, KVNode: parsed.NodeID, Delete: len(input.Payload) == 0,
+				ActorGroups: attribution.ActorGroups,
+				KVPath:      parsed.Path, KVNode: parsed.NodeID, Delete: len(input.Payload) == 0,
 			},
 		})
 	}
@@ -865,6 +917,7 @@ func (e *Engine) ingestAdminEvent(record uns.StateRecord, attribution Attributio
 		Topic: record.Topic, Payload: record.Payload, TS: ts,
 		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
+		ActorGroups: attribution.ActorGroups,
 		// Deliberately no KVPath/KVNode: this class is never state (IsState is
 		// false), so there is nothing to project and nothing to retract.
 	}
@@ -981,7 +1034,7 @@ func (e *Engine) IngestDownlinkAttributed(topic string, payload []byte, ts int64
 	}
 	res, err := e.persistTSAttributed(class, p, topic, payload, ts, attribution)
 	if err == nil {
-		e.maybeExec(p, payload, attribution) // the target executes downlinked commands (cmdadmin design §5)
+		e.maybeExec(p, payload, attribution, e.actorForAttested(attribution)) // the target executes downlinked commands (cmdadmin design §5)
 	}
 	return res, err
 }
@@ -1179,6 +1232,7 @@ func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string
 		Topic: topic, Payload: payload, TS: ts,
 		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
+		ActorGroups: attribution.ActorGroups,
 	}
 	if uns.IsState(class) {
 		rec.KVPath, rec.KVNode = p.Path, p.NodeID

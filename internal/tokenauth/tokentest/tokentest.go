@@ -26,12 +26,13 @@ type MintOpts struct {
 	Grants   []string
 	Exp      time.Time
 	Nbf      time.Time
-	Iss      string // override issuer
-	Aud      string // override audience
-	Alg      string // "RS256" (default) | "none" | "HS256"
-	Kid      string // override key id
-	WrongKey bool   // sign with a key the JWKS does not serve
-	Username string // preferred_username
+	Iss      string   // override issuer
+	Aud      string   // override audience
+	Alg      string   // "RS256" (default) | "none" | "HS256"
+	Kid      string   // override key id
+	WrongKey bool     // sign with a key the JWKS does not serve
+	Username string   // preferred_username
+	Groups   []string // groups claim: the group ids a node resolves against its _Group definitions
 }
 
 type Issuer struct {
@@ -127,6 +128,9 @@ func (i *Issuer) MintOpt(o MintOpts) string {
 	}
 	if o.Username != "" {
 		claims["preferred_username"] = o.Username
+	}
+	if o.Groups != nil {
+		claims["groups"] = o.Groups
 	}
 
 	switch o.Alg {

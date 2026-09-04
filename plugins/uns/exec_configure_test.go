@@ -178,7 +178,7 @@ func TestUpsertWritesEachSignalAtItsPath(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, map[string]any{
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/upsert", body(t, map[string]any{
 		"signals": []any{
 			map[string]any{"path": "line1/m6/temp", "signal": map[string]any{"id": "s1", "name": "temp"}},
 			map[string]any{"path": "line1/m6/speed", "signal": map[string]any{"id": "s2", "name": "speed"}},
@@ -206,11 +206,11 @@ func TestUpsertRejectsEntriesItCannotPlace(t *testing.T) {
 		{"no path", map[string]any{"signals": []any{map[string]any{"signal": map[string]any{"id": "s"}}}}},
 		{"no signal", map[string]any{"signals": []any{map[string]any{"path": "a/b"}}}},
 	} {
-		if code, _, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, tc.body)); code != 422 {
+		if code, _, _ := c.Execute(asHuman, "_CmdConfigure", "signal/upsert", body(t, tc.body)); code != 422 {
 			t.Errorf("%s: code = %d, want 422", tc.name, code)
 		}
 	}
-	if code, _, _ := c.Execute("_CmdConfigure", "signal/upsert", []byte("{")); code != 422 {
+	if code, _, _ := c.Execute(asHuman, "_CmdConfigure", "signal/upsert", []byte("{")); code != 422 {
 		t.Errorf("unreadable payload: code = %d, want 422", code)
 	}
 }
@@ -222,7 +222,7 @@ func TestUpsertSurfacesADoorRejection(t *testing.T) {
 	f.fail["colca/v1/_Signal/n-edge1/line1/bad"] = "validation: missing required field name"
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, map[string]any{
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/upsert", body(t, map[string]any{
 		"signals": []any{map[string]any{"path": "line1/bad", "signal": map[string]any{"id": "s"}}},
 	}))
 
@@ -251,7 +251,7 @@ func TestARefusedRecordLeavesTheWholeCommandUncommitted(t *testing.T) {
 		},
 	})
 
-	code, msg, result, writes := c.ExecuteWithWrites("_CmdConfigure", "signal/upsert", command)
+	code, msg, result, writes := c.ExecuteWithWrites(asHuman, "_CmdConfigure", "signal/upsert", command)
 
 	if code != 422 || result != "invalid" {
 		t.Fatalf("code %d result %q msg %q — want 422/invalid; the seeded refusal did not bite", code, result, msg)
@@ -278,7 +278,7 @@ func TestAnAcceptedCommandCommitsEveryRecordInOneTransition(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, msg, _, writes := c.ExecuteWithWrites("_CmdConfigure", "signal/upsert", body(t, map[string]any{
+	code, msg, _, writes := c.ExecuteWithWrites(asHuman, "_CmdConfigure", "signal/upsert", body(t, map[string]any{
 		"signals": []any{
 			map[string]any{"path": "line1/first", "signal": map[string]any{"id": "s1", "name": "first"}},
 			map[string]any{"path": "line1/second", "signal": map[string]any{"id": "s2", "name": "second"}},
@@ -316,7 +316,7 @@ func TestARefusedAutobindBindsNothing(t *testing.T) {
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/press3/opcua-press",
 		tags("01JTAG1", "01JTAG2", "01JTAG3"))
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
 
 	if code != 422 {
 		t.Fatalf("autobind = %d %q, want 422 — the seeded refusal did not bite", code, msg)
@@ -342,7 +342,7 @@ func TestDeleteTombstonesTheRecord(t *testing.T) {
 	f.records["colca/v1/_Signal/n-edge1/line1/temp"] = mustJSON(map[string]any{"id": "s1", "name": "temp"})
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, _, _ := c.Execute("_CmdConfigure", "signal/delete", body(t, map[string]any{
+	code, _, _ := c.Execute(asHuman, "_CmdConfigure", "signal/delete", body(t, map[string]any{
 		"paths": []string{"line1/temp"},
 	}))
 
@@ -358,7 +358,7 @@ func TestDeleteOfAnAbsentSignalIs404(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/delete", body(t, map[string]any{
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/delete", body(t, map[string]any{
 		"paths": []string{"line1/nothing"},
 	}))
 
@@ -547,7 +547,7 @@ func rebind(t *testing.T, c *ConfigExec, signalID, newTag string) {
 			continue
 		}
 		s.DataTag = newTag
-		code, msg, _ := c.Execute("_CmdConfigure", "signal/upsert", body(t, map[string]any{
+		code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/upsert", body(t, map[string]any{
 			"signals": []any{map[string]any{"path": rec.Path, "signal": s}},
 		}))
 		if code != 200 {
@@ -577,7 +577,7 @@ func TestAutobindReadsOnlyTheComputedCatalogueTopic(t *testing.T) {
 	// A forgery: right name, wrong place. Nothing may read it.
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/junk/opcua-press", tags("t9"))
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
 	if code != 200 {
 		t.Fatalf("autobind = %d %s", code, msg)
 	}
@@ -589,7 +589,7 @@ func TestAutobindReadsOnlyTheComputedCatalogueTopic(t *testing.T) {
 
 func TestAutobindRefusesAConnectorThisNodeDoesNotHold(t *testing.T) {
 	c := newConfigExec(t)
-	code, _, _ := c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JNOBODY"}`))
+	code, _, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JNOBODY"}`))
 	if code != 404 {
 		t.Fatalf("autobind for an unknown connector = %d; want 404 — a parent must not "+
 			"guess at a connector only its child holds", code)
@@ -611,7 +611,7 @@ func TestAutobindRefusesAConnectorBoundToAnUnresolvableElement(t *testing.T) {
 	// accident of there being no catalogue to read either way.
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/opcua-press", tags("t1"))
 
-	code, msg, result := c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
 	if code != 409 || result != "conflict" || !strings.Contains(msg, "opcua-press") {
 		t.Fatalf("code %d result %q msg %q — want 409/conflict naming the connector", code, result, msg)
 	}
@@ -623,7 +623,7 @@ func TestASignalPointsAtTheTagsIdentityAndKeepsItsOwn(t *testing.T) {
 	bindEntry(t, c, "01JCONN", "opcua-press", "el-press3")
 	// The catalogue's tags carry their own ULIDs, minted by the connector.
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/press3/opcua-press", tagsWithIDs("01JTAG1"))
-	c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+	c.Execute(asHuman, "_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
 
 	s := oneSignal(t, c)
 	if s.DataTag != "01JTAG1" {
@@ -651,7 +651,7 @@ func TestATagsMetaElementAuthorsMissingSegmentsAndReusesExisting(t *testing.T) {
 		{"id": "t1", "name": "temperature", "data_type": "float", "meta": map[string]any{"element": "m/a/b"}},
 	})
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
 	if code != 200 {
 		t.Fatalf("autobind = %d %q", code, msg)
 	}
@@ -697,7 +697,7 @@ func TestRebindingASignalPreservesItsID(t *testing.T) {
 	place(t, c, "el-press3", "line1/press3")
 	bindEntry(t, c, "01JCONN", "opcua-press", "el-press3")
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/press3/opcua-press", tagsWithIDs("01JTAG1"))
-	c.Execute("_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
+	c.Execute(asHuman, "_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
 	before := oneSignal(t, c)
 
 	rebind(t, c, before.ID, "01JTAG2")
@@ -720,10 +720,10 @@ func TestAutobindIsIdempotent(t *testing.T) {
 	bindEntry(t, c, "01JCONN", "opcua-1", "el-1")
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/m6/opcua-1", tags("t1", "t2"))
 
-	c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
 	before := signalsAt(c)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
 
 	if code != 200 || !strings.Contains(msg, `"created":0`) || !strings.Contains(msg, `"skipped":2`) {
 		t.Fatalf("second run = %d %q, want 0 created / 2 skipped", code, msg)
@@ -745,7 +745,7 @@ func TestAutobindNeverOverwritesAnExistingBinding(t *testing.T) {
 		"is_published": true, "precision": 2,
 	})
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
 
 	if code != 200 || !strings.Contains(msg, `"created":1`) || !strings.Contains(msg, `"skipped":1`) {
 		t.Fatalf("autobind = %d %q, want 1 created / 1 skipped", code, msg)
@@ -764,7 +764,7 @@ func TestAutobindWithoutACatalogueIsAConflict(t *testing.T) {
 	c := newConfigExec(t)
 	bindEntry(t, c, "01JCONN", "opcua-1", "")
 
-	code, msg, result := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{
+	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{
 		"connector": "01JCONN",
 	}))
 
@@ -781,7 +781,7 @@ func TestAutobindPlacesSignalsUnderTheGivenPath(t *testing.T) {
 	placeElement(t, c, "line1/m6", "01HM6")
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/opcua-1", tags("t1"))
 
-	c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{
+	c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{
 		"connector": "01JCONN", "under": "line1/m6",
 	}))
 
@@ -805,7 +805,7 @@ func TestAutobindRefusesAPathNoElementOccupies(t *testing.T) {
 	bindEntry(t, c, "01JCONN", "opcua-1", "")
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/opcua-1", tags("t1"))
 
-	code, msg, result := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{
+	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{
 		"connector": "01JCONN", "under": "line1/nowhere",
 	}))
 
@@ -829,7 +829,7 @@ func TestAutobindBindsSignalsToTheConnectorsElement(t *testing.T) {
 	bindEntry(t, c, "01JCONN", "opcua-1", "01HLINE1")
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", tags("t1", "t2"))
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
 	if code != 200 {
 		t.Fatalf("autobind = %d %q", code, msg)
 	}
@@ -875,7 +875,7 @@ func TestAutobindMakesTagNamesAddressable(t *testing.T) {
 		{"id": "t3", "name": "+", "data_type": "float"},
 	})
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
 	if code != 200 || !strings.Contains(msg, `"created":3`) {
 		t.Fatalf("autobind = %d %q, want 3 created", code, msg)
 	}
@@ -1002,7 +1002,7 @@ func TestARepublishedCatalogueIsNotANewConnector(t *testing.T) {
 	if deletedPath == "" {
 		t.Fatal("setup: no signal bound to t2")
 	}
-	c.Execute("_CmdConfigure", "signal/delete", body(t, map[string]any{"paths": []string{deletedPath}}))
+	c.Execute(asHuman, "_CmdConfigure", "signal/delete", body(t, map[string]any{"paths": []string{deletedPath}}))
 	c.Observe("_DataTags", topic, payload)
 
 	for _, s := range signalsAt(c) {
@@ -1038,7 +1038,7 @@ func TestConfigExecClaimsOnlyItsContract(t *testing.T) {
 
 func TestUnknownConfigureVerbIsAnswered(t *testing.T) {
 	c := NewConfigExec(newStore("n-edge1"), nil, nil, nil, nil, nil)
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/rebuild", body(t, map[string]any{}))
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/rebuild", body(t, map[string]any{}))
 	if code != 422 || !strings.Contains(msg, "signal/rebuild") {
 		t.Fatalf("code %d msg %q — a command aimed at the node deserves an answer", code, msg)
 	}
@@ -1072,7 +1072,7 @@ func elementsUnder(f *fakeStore, node string) map[string]string {
 // standing on it (a resource, a binding) has somewhere real to stand.
 func placeElement(t *testing.T, exec *ConfigExec, path, id string) {
 	t.Helper()
-	if code, msg, _ := exec.Execute("_CmdConfigure", "element/upsert", elementBody(t, element(path, id, path))); code != 200 {
+	if code, msg, _ := exec.Execute(asHuman, "_CmdConfigure", "element/upsert", elementBody(t, element(path, id, path))); code != 200 {
 		t.Fatalf("placeElement(%s, %s) failed: %d %s", path, id, code, msg)
 	}
 }
@@ -1081,7 +1081,7 @@ func TestElementUpsertWritesEachElementAtItsPath(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "element/upsert", elementBody(t,
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "element/upsert", elementBody(t,
 		element("line1", "01HLINE1", "Linie 1"),
 		element("line1/m6", "01HM6", "Maschine 6"),
 	))
@@ -1100,9 +1100,9 @@ func TestElementUpsertWritesEachElementAtItsPath(t *testing.T) {
 func TestElementUpsertRefusesACollidingSibling(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
-	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
+	c.Execute(asHuman, "_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
 
-	code, msg, result := c.Execute("_CmdConfigure", "element/upsert",
+	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "element/upsert",
 		elementBody(t, element("line1", "01HOTHER", "Linie 1")))
 
 	if code != 409 || result != "conflict" || !strings.Contains(msg, "line1") {
@@ -1118,9 +1118,9 @@ func TestElementUpsertRefusesACollidingSibling(t *testing.T) {
 func TestElementUpsertOfTheSameElementIsNotACollision(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
-	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
+	c.Execute(asHuman, "_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
 
-	code, msg, _ := c.Execute("_CmdConfigure", "element/upsert",
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "element/upsert",
 		elementBody(t, element("line1", "01HLINE1", "Linie 1 (Ost)")))
 
 	if code != 200 {
@@ -1140,7 +1140,7 @@ func TestElementUpsertRejectsWhatCannotBeAddressed(t *testing.T) {
 		{"no element", map[string]any{"path": "line1"}},
 		{"no id", map[string]any{"path": "line1", "element": map[string]any{"name": "X"}}},
 	} {
-		if code, _, _ := c.Execute("_CmdConfigure", "element/upsert", elementBody(t, tc.entry)); code != 422 {
+		if code, _, _ := c.Execute(asHuman, "_CmdConfigure", "element/upsert", elementBody(t, tc.entry)); code != 422 {
 			t.Errorf("%s: code = %d, want 422", tc.name, code)
 		}
 	}
@@ -1149,9 +1149,9 @@ func TestElementUpsertRejectsWhatCannotBeAddressed(t *testing.T) {
 func TestElementDeleteTombstonesTheRecord(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
-	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
+	c.Execute(asHuman, "_CmdConfigure", "element/upsert", elementBody(t, element("line1", "01HLINE1", "Linie 1")))
 
-	code, _, _ := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
+	code, _, _ := c.Execute(asHuman, "_CmdConfigure", "element/delete", body(t, map[string]any{
 		"paths": []string{"line1"},
 	}))
 
@@ -1169,12 +1169,12 @@ func TestElementDeleteTombstonesTheRecord(t *testing.T) {
 func TestElementDeleteRefusesWhileChildrenRemain(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
-	c.Execute("_CmdConfigure", "element/upsert", elementBody(t,
+	c.Execute(asHuman, "_CmdConfigure", "element/upsert", elementBody(t,
 		element("line1", "01HLINE1", "Linie 1"),
 		element("line1/m6", "01HM6", "Maschine 6"),
 	))
 
-	code, msg, result := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
+	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "element/delete", body(t, map[string]any{
 		"paths": []string{"line1"},
 	}))
 
@@ -1201,9 +1201,9 @@ func (b bindings) Entries() []EntryRef                   { return nil }
 func TestElementDeleteRefusesWhileAnIdentityBindsToIt(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, bindings{"01HM6": {"m6-connector"}}, nil, nil, nil, nil)
-	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1/m6", "01HM6", "Maschine 6")))
+	c.Execute(asHuman, "_CmdConfigure", "element/upsert", elementBody(t, element("line1/m6", "01HM6", "Maschine 6")))
 
-	code, msg, result := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
+	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "element/delete", body(t, map[string]any{
 		"paths": []string{"line1/m6"},
 	}))
 
@@ -1220,9 +1220,9 @@ func TestElementDeleteRefusesWhileAnIdentityBindsToIt(t *testing.T) {
 func TestElementDeleteProceedsWhenNothingBindsToIt(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, bindings{"01HOTHER": {"someone-else"}}, nil, nil, nil, nil)
-	c.Execute("_CmdConfigure", "element/upsert", elementBody(t, element("line1/m6", "01HM6", "Maschine 6")))
+	c.Execute(asHuman, "_CmdConfigure", "element/upsert", elementBody(t, element("line1/m6", "01HM6", "Maschine 6")))
 
-	if code, msg, _ := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "element/delete", body(t, map[string]any{
 		"paths": []string{"line1/m6"},
 	})); code != 200 {
 		t.Fatalf("delete = %d (%s), want 200", code, msg)
@@ -1233,7 +1233,7 @@ func TestElementDeleteOfAnAbsentElementIs404(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "element/delete", body(t, map[string]any{
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "element/delete", body(t, map[string]any{
 		"paths": []string{"nothing"},
 	}))
 
@@ -1247,12 +1247,12 @@ func TestElementDeleteRefusesWhileAResourceIsAttached(t *testing.T) {
 	blobs := newFakeBlobs(testSHA)
 	exec := NewConfigExec(store, nil, nil, blobs, nil, nil)
 	placeElement(t, exec, "press3", "el1") // existing helper in this file
-	if code, msg, _, _ := exec.ExecuteWithWrites("_CmdConfigure", "resource/upsert",
+	if code, msg, _, _ := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/upsert",
 		resourceBody("press3/r1", "r1", testSHA)); code != 200 {
 		t.Fatalf("setup upsert failed: %d %s", code, msg)
 	}
 
-	code, msg, result, _ := exec.ExecuteWithWrites("_CmdConfigure", "element/delete",
+	code, msg, result, _ := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "element/delete",
 		[]byte(`{"paths":["press3"]}`))
 	if code != 409 {
 		t.Fatalf("code = %d (%s), want 409 — an orphaned resource pins a blob alive forever", code, msg)
@@ -1265,11 +1265,11 @@ func TestElementDeleteRefusesWhileAResourceIsAttached(t *testing.T) {
 	}
 
 	// Denominator: with the resource retracted, the same delete succeeds.
-	if code, msg, _, _ := exec.ExecuteWithWrites("_CmdConfigure", "resource/delete",
+	if code, msg, _, _ := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/delete",
 		[]byte(`{"paths":["press3/r1"]}`)); code != 200 {
 		t.Fatalf("resource/delete failed: %d %s", code, msg)
 	}
-	if code, msg, _, _ := exec.ExecuteWithWrites("_CmdConfigure", "element/delete",
+	if code, msg, _, _ := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "element/delete",
 		[]byte(`{"paths":["press3"]}`)); code != 200 {
 		t.Fatalf("element/delete = %d (%s), want 200 once nothing is attached", code, msg)
 	}
@@ -1315,7 +1315,7 @@ func TestResourceUpsertWritesWhenTheBlobIsHeld(t *testing.T) {
 	blobs := newFakeBlobs(testSHA)
 	exec := NewConfigExec(store, nil, nil, blobs, nil, nil)
 
-	code, msg, result, writes := exec.ExecuteWithWrites("_CmdConfigure", "resource/upsert",
+	code, msg, result, writes := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/upsert",
 		resourceBody("press3/r1", "r1", testSHA))
 	if code != 200 {
 		t.Fatalf("code = %d (%s), want 200", code, msg)
@@ -1339,7 +1339,7 @@ func TestResourceUpsertPullsAMissingBlobBeforeWriting(t *testing.T) {
 	blobs := newFakeBlobs() // holds nothing
 	exec := NewConfigExec(store, nil, nil, blobs, nil, nil)
 
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdConfigure", "resource/upsert",
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/upsert",
 		resourceBody("press3/r1", "r1", testSHA))
 	if code != 200 {
 		t.Fatalf("code = %d (%s), want 200 — a provisioning command must pull first", code, msg)
@@ -1358,7 +1358,7 @@ func TestResourceUpsertRefusesWhenTheBlobCannotBePulled(t *testing.T) {
 	blobs.pullErr = errors.New("no parent")
 	exec := NewConfigExec(store, nil, nil, blobs, nil, nil)
 
-	code, msg, result, writes := exec.ExecuteWithWrites("_CmdConfigure", "resource/upsert",
+	code, msg, result, writes := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/upsert",
 		resourceBody("press3/r1", "r1", testSHA))
 	if code != 422 {
 		t.Fatalf("code = %d, want 422", code)
@@ -1383,7 +1383,7 @@ func TestResourceUpsertRefusesWhenTheBlobCannotBePulled(t *testing.T) {
 	// failure — otherwise "blob_unreachable" would just be this verb's name
 	// for every refusal, and an operator reading it would stage bytes to fix
 	// a typo.
-	badCode, badMsg, badResult, badWrites := exec.ExecuteWithWrites("_CmdConfigure", "resource/upsert",
+	badCode, badMsg, badResult, badWrites := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/upsert",
 		[]byte(`{"resources":[]}`))
 	if badCode != 422 || len(badWrites) != 0 {
 		t.Fatalf("a malformed command must still be refused: code = %d, writes = %d", badCode, len(badWrites))
@@ -1394,7 +1394,7 @@ func TestResourceUpsertRefusesWhenTheBlobCannotBePulled(t *testing.T) {
 
 	// Denominator: the same executor DOES write once the blob is reachable.
 	blobs.pullErr = nil
-	if code, _, result, writes := exec.ExecuteWithWrites("_CmdConfigure", "resource/upsert",
+	if code, _, result, writes := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/upsert",
 		resourceBody("press3/r1", "r1", testSHA)); code != 200 || len(writes) != 1 || result != "ok" {
 		t.Fatal("the refusal above proves nothing if this path cannot write at all")
 	}
@@ -1404,12 +1404,12 @@ func TestResourceDeleteTombstones(t *testing.T) {
 	store := newStore("n1")
 	blobs := newFakeBlobs(testSHA)
 	exec := NewConfigExec(store, nil, nil, blobs, nil, nil)
-	if code, msg, _, _ := exec.ExecuteWithWrites("_CmdConfigure", "resource/upsert",
+	if code, msg, _, _ := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/upsert",
 		resourceBody("press3/r1", "r1", testSHA)); code != 200 {
 		t.Fatalf("setup upsert failed: %d %s", code, msg)
 	}
 
-	code, msg, _, writes := exec.ExecuteWithWrites("_CmdConfigure", "resource/delete",
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/delete",
 		[]byte(`{"paths":["press3/r1"]}`))
 	if code != 200 {
 		t.Fatalf("code = %d (%s), want 200", code, msg)
@@ -1425,7 +1425,7 @@ func TestResourceDeleteTombstones(t *testing.T) {
 func TestResourceDeleteReportsAMissingPath(t *testing.T) {
 	store := newStore("n1")
 	exec := NewConfigExec(store, nil, nil, newFakeBlobs(), nil, nil)
-	if code, _, _, _ := exec.ExecuteWithWrites("_CmdConfigure", "resource/delete",
+	if code, _, _, _ := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/delete",
 		[]byte(`{"paths":["press3/absent"]}`)); code != 404 {
 		t.Fatalf("code = %d, want 404", code)
 	}
@@ -1463,7 +1463,7 @@ func TestConstantUpsertWritesTypedValuesAtTheirPaths(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "constant/upsert", constantBody(t,
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "constant/upsert", constantBody(t,
 		constant("line1/m6/target-speed", "01HINT", "int64", 18000),
 		constant("line1/m6/enabled", "01HBOOL", "boolean", true),
 		constant("line1/m6/recipe", "01HJSON", "json", map[string]any{"sku": "A-42"}),
@@ -1482,7 +1482,7 @@ func TestConstantUpsertValidatesTheWholeBatchBeforeWriting(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "constant/upsert", constantBody(t,
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "constant/upsert", constantBody(t,
 		constant("line1/m6/valid", "01HVALID", "string", "ready"),
 		constant("line1/m6/invalid", "01HINVALID", "int64", 1.5),
 	))
@@ -1517,7 +1517,7 @@ func TestConstantUpsertRejectsEveryInvalidTypeAndPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newStore("n-edge1")
 			c := NewConfigExec(f, nil, nil, nil, nil, nil)
-			code, _, _ := c.Execute("_CmdConfigure", "constant/upsert", constantBody(t, tc.entry))
+			code, _, _ := c.Execute(asHuman, "_CmdConfigure", "constant/upsert", constantBody(t, tc.entry))
 			if code != tc.wantCode {
 				t.Fatalf("code = %d, want %d", code, tc.wantCode)
 			}
@@ -1528,11 +1528,11 @@ func TestConstantUpsertRejectsEveryInvalidTypeAndPath(t *testing.T) {
 func TestConstantUpsertRefusesAPathOwnedByAnotherConstant(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
-	c.Execute("_CmdConfigure", "constant/upsert", constantBody(t,
+	c.Execute(asHuman, "_CmdConfigure", "constant/upsert", constantBody(t,
 		constant("line1/m6/target-speed", "01HOLD", "int64", 18000),
 	))
 
-	code, msg, result := c.Execute("_CmdConfigure", "constant/upsert", constantBody(t,
+	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "constant/upsert", constantBody(t,
 		constant("line1/m6/target-speed", "01HOTHER", "int64", 19000),
 	))
 
@@ -1569,7 +1569,7 @@ func TestElementUpsertRefusesAnIdThatIsNotAnIdentity(t *testing.T) {
 			f := newStore("n-edge1")
 			c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-			code, msg, _ := c.Execute("_CmdConfigure", "element/upsert",
+			code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "element/upsert",
 				elementBody(t, element("site1/spare", tc.id, "Spare")))
 
 			if code != tc.wantCode {
@@ -1682,14 +1682,14 @@ func TestUpsertRefusesOneIdentityAtTwoPositions(t *testing.T) {
 			f := newStore("n-edge1")
 			c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-			if code, msg, _ := c.Execute("_CmdConfigure", tc.verb, tc.first(t)); code != 200 {
+			if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.first(t)); code != 200 {
 				t.Fatalf("first upsert = %d %q, want 200", code, msg)
 			}
-			if code, msg, _ := c.Execute("_CmdConfigure", tc.verb, tc.sameID(t)); code != 200 {
+			if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.sameID(t)); code != 200 {
 				t.Fatalf("re-upsert at the same path = %d %q, want 200 — the guard refuses updates", code, msg)
 			}
 
-			code, msg, result := c.Execute("_CmdConfigure", tc.verb, tc.secondPath(t))
+			code, msg, result := c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.secondPath(t))
 			if code != 409 || result != "conflict" || !strings.Contains(msg, tc.heldAt) {
 				t.Fatalf("second position = %d %q result %q, want 409 naming %s", code, msg, result, tc.heldAt)
 			}
@@ -1700,7 +1700,7 @@ func TestUpsertRefusesOneIdentityAtTwoPositions(t *testing.T) {
 			// Two positions for one id inside ONE command: the store shows
 			// neither yet, so only the growing claim map can catch it.
 			before := f.offset
-			code, msg, result = c.Execute("_CmdConfigure", tc.verb, tc.oneCommand(t))
+			code, msg, result = c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.oneCommand(t))
 			if code != 409 || result != "conflict" {
 				t.Fatalf("one command, two positions = %d %q result %q, want 409", code, msg, result)
 			}
@@ -1714,12 +1714,12 @@ func TestUpsertRefusesOneIdentityAtTwoPositions(t *testing.T) {
 func TestConstantDeleteValidatesAllPathsThenWritesTombstones(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
-	c.Execute("_CmdConfigure", "constant/upsert", constantBody(t,
+	c.Execute(asHuman, "_CmdConfigure", "constant/upsert", constantBody(t,
 		constant("line1/m6/a", "01HA", "string", "a"),
 		constant("line1/m6/b", "01HB", "string", "b"),
 	))
 
-	code, msg, _ := c.Execute("_CmdConfigure", "constant/delete", body(t, map[string]any{
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "constant/delete", body(t, map[string]any{
 		"paths": []string{"line1/m6/a", "missing"},
 	}))
 	if code != 404 || !strings.Contains(msg, "missing") {
@@ -1729,7 +1729,7 @@ func TestConstantDeleteValidatesAllPathsThenWritesTombstones(t *testing.T) {
 		t.Fatalf("rejected delete wrote partial tombstones: %+v", got)
 	}
 
-	code, msg, _ = c.Execute("_CmdConfigure", "constant/delete", body(t, map[string]any{
+	code, msg, _ = c.Execute(asHuman, "_CmdConfigure", "constant/delete", body(t, map[string]any{
 		"paths": []string{"line1/m6/a", "line1/m6/b"},
 	}))
 	if code != 200 {
@@ -1767,7 +1767,7 @@ func TestDefinitionUpsertFilesUnderTheIdWithNoPosition(t *testing.T) {
 	f := newStore("n-global")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops", "grants": []string{"read:01HLINE1/#"}}))
 
 	if code != 200 {
@@ -1788,7 +1788,7 @@ func TestPlatformEntityCommandDerivesReservedPathAndReportsStateWrite(t *testing
 		},
 	}}})
 
-	code, msg, _, writes := c.ExecuteWithWrites("_CmdConfigure", "entity/upsert", payload)
+	code, msg, _, writes := c.ExecuteWithWrites(asHuman, "_CmdConfigure", "entity/upsert", payload)
 	if code != 200 {
 		t.Fatalf("entity/upsert = %d (%s), want 200", code, msg)
 	}
@@ -1809,7 +1809,7 @@ func TestPlatformEntityCommandRefusesObservedServiceState(t *testing.T) {
 		"entity":   map[string]any{"id": "svc-1", "name": "api"},
 	}}})
 
-	code, msg, _, writes := c.ExecuteWithWrites("_CmdConfigure", "entity/upsert", payload)
+	code, msg, _, writes := c.ExecuteWithWrites(asHuman, "_CmdConfigure", "entity/upsert", payload)
 	if code != 422 || !strings.Contains(msg, "own writer") || len(writes) != 0 {
 		t.Fatalf("observed service = %d %q writes=%+v, want refused", code, msg, writes)
 	}
@@ -1828,7 +1828,7 @@ func TestAlarmNotificationConfigCommandWritesOneNodeScopedSnapshot(t *testing.T)
 		"contract": "_AlarmNotificationConfig", "entity": entity,
 	}}})
 
-	code, msg, _, writes := c.ExecuteWithWrites("_CmdConfigure", "entity/upsert", payload)
+	code, msg, _, writes := c.ExecuteWithWrites(asHuman, "_CmdConfigure", "entity/upsert", payload)
 	if code != 200 {
 		t.Fatalf("entity/upsert = %d (%s), want 200", code, msg)
 	}
@@ -1859,7 +1859,7 @@ func TestAlarmNotificationConfigCommandRejectsWrongTargetOrIdentity(t *testing.T
 				"contract": "_AlarmNotificationConfig",
 				"entity":   map[string]any{"id": test.id, "target_node_id": test.target},
 			}}})
-			code, _, _, writes := c.ExecuteWithWrites("_CmdConfigure", "entity/upsert", payload)
+			code, _, _, writes := c.ExecuteWithWrites(asHuman, "_CmdConfigure", "entity/upsert", payload)
 			if code != 422 || len(writes) != 0 || len(keysOf(f)) != 0 {
 				t.Fatalf("upsert = %d writes=%+v records=%v, want atomic refusal", code, writes, keysOf(f))
 			}
@@ -1876,13 +1876,13 @@ func TestAlarmNotificationConfigDeleteTombstonesTheReservedSnapshot(t *testing.T
 			"id": "alarm-notification-config", "target_node_id": "n-leaf",
 		},
 	}}})
-	if code, msg, _ := c.Execute("_CmdConfigure", "entity/upsert", upsert); code != 200 {
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "entity/upsert", upsert); code != 200 {
 		t.Fatalf("seed config = %d (%s)", code, msg)
 	}
 	remove := body(t, map[string]any{"entities": []map[string]any{{
 		"contract": "_AlarmNotificationConfig", "id": "alarm-notification-config",
 	}}})
-	if code, msg, _ := c.Execute("_CmdConfigure", "entity/delete", remove); code != 200 {
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "entity/delete", remove); code != 200 {
 		t.Fatalf("delete config = %d (%s)", code, msg)
 	}
 	topic := "colca/v1/_AlarmNotificationConfig/n-leaf/_colca/alarm-notification-config/alarm-notification-config"
@@ -1899,7 +1899,7 @@ func TestPlatformEntityCommandRefusesNotificationConfigStatus(t *testing.T) {
 		"entity":   map[string]any{"id": "status-1", "status": "applied"},
 	}}})
 
-	code, msg, _, writes := c.ExecuteWithWrites("_CmdConfigure", "entity/upsert", payload)
+	code, msg, _, writes := c.ExecuteWithWrites(asHuman, "_CmdConfigure", "entity/upsert", payload)
 	if code != 422 || !strings.Contains(msg, "observed state") || len(writes) != 0 {
 		t.Fatalf("notification status = %d %q writes=%+v, want refused", code, msg, writes)
 	}
@@ -1920,7 +1920,7 @@ func TestDefinitionUpsertRefusesWhatItCannotAddress(t *testing.T) {
 	for _, tc := range cases {
 		f := newStore("n-global")
 		c := NewConfigExec(f, nil, nil, nil, nil, nil)
-		code, msg, result := c.Execute("_CmdConfigure", "definition/upsert", tc.body)
+		code, msg, result := c.Execute(asHuman, "_CmdConfigure", "definition/upsert", tc.body)
 		if code != 422 || result != "invalid" {
 			t.Errorf("%s: code %d result %q, want 422/invalid", tc.name, code, result)
 		}
@@ -1937,7 +1937,7 @@ func TestDefinitionUpsertRefusesAContractThatIsNotADefinition(t *testing.T) {
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
 	for _, contract := range []string{"_SystemElement", "_Metric", "_CmdParam", ""} {
-		code, msg, _ := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, contract,
+		code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "definition/upsert", definitionBody(t, contract,
 			map[string]any{"id": "01HX", "name": "x"}))
 		if code != 422 {
 			t.Errorf("%s: code %d, want 422 (%s)", contract, code, msg)
@@ -1951,19 +1951,19 @@ func TestDefinitionUpsertRefusesAContractThatIsNotADefinition(t *testing.T) {
 func TestDefinitionDeleteTombstonesAndReportsAbsence(t *testing.T) {
 	f := newStore("n-global")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
-	c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
+	c.Execute(asHuman, "_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops"}))
 
 	del := body(t, map[string]any{"definitions": []map[string]any{
 		{"contract": "_Group", "id": "01HGRP-OPS"}}})
-	if code, msg, _ := c.Execute("_CmdConfigure", "definition/delete", del); code != 200 {
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "definition/delete", del); code != 200 {
 		t.Fatalf("delete = %d (%s), want 200", code, msg)
 	}
 	if payload := f.records["colca/v1/_Group/n-global/01HGRP-OPS"]; payload != nil {
 		t.Fatalf("definition still present: %s", payload)
 	}
 	// Retracting what is not there is a 404 naming it, not a silent success.
-	code, msg, _ := c.Execute("_CmdConfigure", "definition/delete", del)
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "definition/delete", del)
 	if code != 404 || !strings.Contains(msg, "01HGRP-OPS") {
 		t.Fatalf("second delete = %d (%s), want 404 naming the id", code, msg)
 	}
@@ -1976,7 +1976,7 @@ func TestDefinitionUpsertRefusesAGroupWithAMalformedGrant(t *testing.T) {
 	f := newStore("n-global")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, msg, result := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
+	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops",
 			"grants": []string{"read:01HLINE1/#", "cmd:01HLINE1/#"}}))
 
@@ -1997,7 +1997,7 @@ func TestDefinitionUpsertRefusesAGroupGrantNamingAPath(t *testing.T) {
 	f := newStore("n-global")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-	code, msg, _ := c.Execute("_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "definition/upsert", definitionBody(t, "_Group",
 		map[string]any{"id": "01HGRP-OPS", "name": "Ops", "grants": []string{"read:site1/edge1/#"}}))
 
 	if code != 422 || !strings.Contains(msg, "element") {

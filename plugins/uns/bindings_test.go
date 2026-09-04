@@ -24,7 +24,7 @@ func autobindOneTag(t *testing.T, heldBy string) (created, skipped int) {
 		})
 	}
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind",
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind",
 		body(t, map[string]any{"connector": "01JCONN"}))
 	if code != 200 {
 		t.Fatalf("autobind = %d %q, want 200 — provisioning never refuses over a binding", code, msg)
@@ -72,7 +72,7 @@ func editBindOneTag(t *testing.T, heldBy string) (code int, message string) {
 			"signal_id": "sig-new", "parent_id": "el-line1", "name": "Temperature",
 		}},
 	})
-	code, message, _, _ = NewEditExec(f, nil).ExecuteWithWrites("_CmdEdit", "apply", payload)
+	code, message, _, _ = NewEditExec(f, nil).ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	return code, message
 }
 
@@ -142,7 +142,7 @@ func TestProvisioningDoesNotInheritTheEditOnlyChecks(t *testing.T) {
 		{"id": "t1", "name": "Temperature", "data_type": "string", "is_stale": true},
 	})
 
-	code, msg, _ := c.Execute("_CmdConfigure", "signal/autobind",
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind",
 		body(t, map[string]any{"connector": "01JCONN"}))
 
 	if code != 200 || !strings.Contains(msg, `"created":1`) {

@@ -48,7 +48,11 @@ type EditExec struct {
 	// to cut off a child node the configure verb would have refused to strand.
 	bound       Bindings
 	attachments NodeAttachmentWriter
-	mu          sync.Mutex
+	// scope resolves a grant's element to the zone it covers here — the
+	// node's own element index in production (SetScope). Nil resolves only
+	// realm-wide grants.
+	scope Scope
+	mu    sync.Mutex
 
 	replays     map[string]editReplay
 	replayOrder []string
@@ -182,12 +186,13 @@ func NewEditExec(
 
 func (w *EditExec) Handles(contract string) bool { return contract == "_CmdEdit" }
 
-func (w *EditExec) Execute(contract, verb string, payload []byte) (int, string, string) {
-	code, message, result, _ := w.ExecuteWithWrites(contract, verb, payload)
+func (w *EditExec) Execute(ctx CommandContext, contract, verb string, payload []byte) (int, string, string) {
+	code, message, result, _ := w.ExecuteWithWrites(ctx, contract, verb, payload)
 	return code, message, result
 }
 
 func (w *EditExec) ExecuteWithWrites(
+	ctx CommandContext,
 	contract, verb string,
 	payload []byte,
 ) (int, string, string, []StateWrite) {
@@ -196,6 +201,13 @@ func (w *EditExec) ExecuteWithWrites(
 
 	if contract != "_CmdEdit" {
 		return 422, "unsupported edit contract", "invalid", nil
+	}
+	// An Edit command is a person's intent and is authorized against that
+	// person (node-side command authorization design §3A). Refused before
+	// the replay lookup: a non-human never earns a receipt, so a later replay
+	// cannot return an outcome nobody was authorized to produce.
+	if !ctx.Actor.IsHuman() {
+		return 403, "_CmdEdit requires a human actor: forward the person's token, or carry their attested groups on the record", "denied", nil
 	}
 	if verb != "apply" {
 		return 422, fmt.Sprintf("unknown edit verb %q", verb), "invalid", nil
@@ -265,7 +277,7 @@ func (w *EditExec) ExecuteWithWrites(
 	}
 	if intent.Type == "node_attachment" {
 		return w.executeNodeAttachment(
-			envelope.OperationID, digest, intent, expectedVersions, entities, attachments,
+			ctx, envelope.OperationID, digest, intent, expectedVersions, entities, attachments,
 		)
 	}
 
@@ -273,6 +285,12 @@ func (w *EditExec) ExecuteWithWrites(
 		intent, expectedVersions, entities, catalogues, externalSystems,
 	)
 	if code != 200 {
+		return w.remember(envelope.OperationID, digest, code, message, result, nil)
+	}
+	// The plan is composed; nothing is written yet. Every position it
+	// touches must be covered by the person's configure grants, or the whole
+	// command is refused with zero writes (design §3C).
+	if code, message, result := w.authorizeTouched(ctx, w.planFor(ctx, intent, records, entities, catalogues)); code != 0 {
 		return w.remember(envelope.OperationID, digest, code, message, result, nil)
 	}
 	if intent.Type == "annotation" {

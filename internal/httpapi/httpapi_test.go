@@ -1551,7 +1551,7 @@ func TestHealthzCarriesThePubkeySoAParentCanEnrollIt(t *testing.T) {
 
 // localAPI is the fixture for the local HTTP door (local-service-trust design
 // §4): no TLS, no admin routes, and self-registration's mount-authoring wired
-// EXACTLY as node.Start wires it — domain.Execute("_CmdConfigure",
+// EXACTLY as node.Start wires it — domain.Execute(uns.CommandContext{}, "_CmdConfigure",
 // "element/author", ...) is the one authoring path in this system. Mirrors
 // mqttsrv_test.go's startServerWithLocalDoor so both local doors are proven
 // against the same wiring, not a test-only shortcut that could pass while
@@ -1587,7 +1587,7 @@ func newLocalHandler(t *testing.T) *localAPI {
 		if err != nil {
 			return "", err
 		}
-		code, msg, _ := domain.Execute("_CmdConfigure", "element/author", payload)
+		code, msg, _ := domain.Execute(uns.CommandContext{}, "_CmdConfigure", "element/author", payload)
 		if code != 200 {
 			return "", fmt.Errorf("author element at %s: %s", path, msg)
 		}
@@ -2337,4 +2337,122 @@ func offsetsOf(t *testing.T, out map[string]any) []float64 {
 		offsets = append(offsets, record.(map[string]any)["offset"].(float64))
 	}
 	return offsets
+}
+
+// newLocalHandlerWithVerifier is newLocalHandler with the human verifier the
+// node's published doors use, so the local door can resolve a forwarded
+// Bearer (node-side command authorization design §3B).
+func newLocalHandlerWithVerifier(t *testing.T) (*localAPI, *tokentest.Issuer) {
+	t.Helper()
+	h := newLocalHandler(t)
+	iss := tokentest.NewIssuer(t)
+	ver, err := tokenauth.New(tokenauth.Config{
+		Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL(),
+	}, h.eng.Store(), h.m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primeVerifier(t, ver)
+	h.Handler = Handler(h.eng, &config.Config{ULID: "n-test"}, h.reg, ver, h.m, testBlobs(t, &config.Config{ULID: "n-test"}), "deadbeef", true)
+	return h, iss
+}
+
+func localPublish(t *testing.T, h *localAPI, headers map[string]string, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/publish", bytes.NewReader(raw))
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// A local service acting AS a person forwards the person's token: the local
+// door resolves the Bearer to the human entry — groups and all — and the
+// record is attributed to the person, not to the service beside it.
+func TestTheLocalDoorResolvesAForwardedBearerToThePerson(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	token := iss.MintOpt(tokentest.MintOpts{
+		Sub: "kc-sub-anna", Grants: []string{"cmd:#:configure"}, Groups: []string{"operators"}, Username: "anna",
+	})
+	rec := localPublish(t, h,
+		map[string]string{"Authorization": "Bearer " + token, "X-Colca-Service": "api"},
+		map[string]any{"topic": "colca/v1/_CmdEdit/n-test/apply",
+			"payload": map[string]any{"correlation_id": "c-fwd", "expires_at": 9999999999999}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("forwarded Bearer on the local door = %d: %s", rec.Code, rec.Body.String())
+	}
+	recs, _, err := h.eng.Store().Read("commands", 1, 10, nil)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("commands stream: %v %+v", err, recs)
+	}
+	got := recs[0]
+	if got.WrittenBy != "kc-sub-anna" || got.ActorKind != "human" || got.ActorLabel != "anna" ||
+		len(got.ActorGroups) != 1 || got.ActorGroups[0] != "operators" {
+		t.Fatalf("record attributed to %+v, want anna (human) with her groups", got)
+	}
+	if _, registered := h.reg.ByName("api"); registered {
+		t.Fatal("a forwarded Bearer must not also register the carrying service")
+	}
+}
+
+// A PRESENTED token that fails is 401 — it never falls through to the
+// service name beside it, and with no verifier the human world does not
+// exist on this door at all.
+func TestTheLocalDoorNeverFallsBackFromABadBearerToTheServiceName(t *testing.T) {
+	withVerifier, _ := newLocalHandlerWithVerifier(t)
+	without := newLocalHandler(t)
+	for name, h := range map[string]*localAPI{"bad token": withVerifier, "no verifier": without} {
+		rec := localPublish(t, h,
+			map[string]string{"Authorization": "Bearer garbage", "X-Colca-Service": "api"},
+			map[string]any{"topic": "colca/v1/_CmdConfigure/n-test/definition/upsert",
+				"payload": map[string]any{"correlation_id": "c-bad", "expires_at": 9999999999999}})
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: = %d, want 401: %s", name, rec.Code, rec.Body.String())
+		}
+		if _, registered := h.reg.ByName("api"); registered {
+			t.Fatalf("%s: a rejected Bearer fell through to the service identity", name)
+		}
+	}
+}
+
+// The fallback for a job that no longer holds the token: the service attests
+// the person's group ids and MUST say why. Without a reason it is refused;
+// with one, the record carries the groups for the executor to resolve.
+func TestTheLocalDoorRequiresAReasonToAttestAPersonsGroups(t *testing.T) {
+	h := newLocalHandler(t)
+	if _, err := h.eng.EntityStore().PublishBatch([]uns.StateRecord{{
+		Topic: "colca/v1/_Group/n-test/operators", Payload: []byte(`{"id":"operators","grants":["cmd:#:configure"]}`),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	body := func(corr string, reason string) map[string]any {
+		b := map[string]any{"topic": "colca/v1/_CmdEdit/n-test/apply",
+			"payload":  map[string]any{"correlation_id": corr, "expires_at": 9999999999999},
+			"actor_id": "kc-sub-anna", "actor_label": "anna", "actor_kind": "human",
+			"actor_groups": []string{"operators"}}
+		if reason != "" {
+			b["fallback_reason"] = reason
+		}
+		return b
+	}
+	svc := map[string]string{"X-Colca-Service": "api"}
+	if rec := localPublish(t, h, svc, body("c-noreason", "")); rec.Code != http.StatusBadRequest {
+		t.Fatalf("attested groups without a reason = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if rec := localPublish(t, h, svc, body("c-reason", "background job after request")); rec.Code != http.StatusOK {
+		t.Fatalf("attested groups with a reason = %d: %s", rec.Code, rec.Body.String())
+	}
+	recs, _, err := h.eng.Store().Read("commands", 1, 10, nil)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("commands stream: %v %+v", err, recs)
+	}
+	if got := recs[0]; got.ActorKind != "human" || got.ActorID != "kc-sub-anna" || len(got.ActorGroups) != 1 {
+		t.Fatalf("attested record = %+v, want anna with her groups", got)
+	}
 }

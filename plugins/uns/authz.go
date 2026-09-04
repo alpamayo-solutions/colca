@@ -58,6 +58,19 @@ type Entry struct {
 	// freeze the position as it was at enrollment.
 	Element string   `json:"element,omitempty"`
 	Grants  []string `json:"grants,omitempty"`
+	// Groups are the group ids a KindHuman entry's grants were resolved from
+	// (TokenEntryWithGroups). They travel with a command the human issues —
+	// persisted as the record's attribution — so a node that executes it
+	// after replication can reconstitute the same human against its own
+	// _Group definitions (node-side command authorization design §3B). Never
+	// set on a registry entry.
+	Groups []string `json:"groups,omitempty"`
+	// Username is a KindHuman entry's preferred_username, set by the door
+	// that verified the token. It decides the KIND of identity behind the
+	// sub — a Keycloak service account is named service-account-<client> —
+	// which AnnotationSource needs. Never persisted, never on a registry
+	// entry.
+	Username string `json:"-"`
 	// Status is the entry's lifecycle state (move-drain design §3.2):
 	// StatusActive or "" (absent ⇒ active, so entries persisted before this
 	// field existed need no migration) or StatusDraining. Only a kind=node
@@ -204,6 +217,26 @@ func (e *Entry) MayUseDoor(d Door) bool {
 		return e.Kind == KindLocal
 	}
 	return false
+}
+
+// MayPublishContract is the door predicate beside MayUseDoor: may THIS kind of
+// identity publish THIS contract at all, before any grant is consulted.
+// Humans command through _CmdEdit only (node-side command authorization
+// design §3F): a _CmdEdit is planned and every planned write authorized
+// against the person, while _CmdConfigure executes what it is handed with no
+// principal — its callers are the admin door and placed local services, whose
+// authority is the token or their placement. A person holding a configure
+// grant therefore still may not publish _CmdConfigure; the editor is the
+// one door a person's configuration goes through. Every other kind keeps its
+// contracts; what they may write is decided by their placement and grants.
+func (e *Entry) MayPublishContract(contract string) bool {
+	if e == nil {
+		return false
+	}
+	if e.Kind == KindHuman {
+		return contract != "_CmdConfigure"
+	}
+	return true
 }
 
 // Registry is the in-memory map the doors consult (ulid → entry). Plain data:
@@ -509,6 +542,7 @@ func TokenEntryWithGroups(sub string, grants, groupIDs []string, idx *GroupIndex
 	if err != nil {
 		return nil, nil, err
 	}
+	e.Groups = append([]string(nil), groupIDs...)
 	if idx == nil || len(groupIDs) == 0 {
 		return e, nil, nil
 	}
@@ -572,8 +606,73 @@ func (e *Entry) ActorKind() string {
 // node's model. A placed service is subtree-scoped and needs an explicit cmd
 // grant. `_CmdAdmin` and every other command are never implicit.
 func (e *Entry) MayImplicitlyConfigure(contract string) bool {
-	return e != nil && e.Kind == KindLocal && e.Element == "" && CmdClass(contract) == "configure"
+	// Only _CmdConfigure — not the whole configure class. A _CmdEdit
+	// carries a PERSON's intent and is authorized against that person at the
+	// executor (node-side command authorization design §3A); if an unplaced
+	// local service such as the api could issue one under its own identity,
+	// one forgotten header would launder any Edit write past every
+	// grant. The api forwards the person's token instead (§3B).
+	return e != nil && e.Kind == KindLocal && e.Element == "" && contract == "_CmdConfigure"
 }
+
+// AuthorizeCmdAt is the cmd decision for one POSITION: does a cmd grant of
+// the class cover the path, resolved through the scope. The door applies it
+// to a command's topic path; the Edit executor applies it to every
+// position of the plan it composed (design §3C). One comparison, two
+// callers, so the fine check cannot drift from the coarse one.
+func AuthorizeCmdAt(sc Scope, e *Entry, class, path string) bool {
+	if e == nil {
+		return false
+	}
+	for _, g := range e.Grants {
+		pg, err := ParseGrant(g)
+		if err != nil || pg.Verb != "cmd" {
+			continue
+		}
+		zone, ok := zoneOf(sc, pg.Element)
+		if !ok || !coverPath(zone, path) {
+			continue
+		}
+		for _, c := range pg.Classes {
+			if c == class {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// AuthorizedAtExecutor reports whether a command contract is authorized
+// against the plan its executor composes rather than against its topic's
+// path: true for _CmdEdit, whose path is the owning node's route, not a
+// position. The door still requires the command class to be held.
+func AuthorizedAtExecutor(contract string) bool { return contract == "_CmdEdit" }
+
+// HoldsCmdClass reports whether any cmd grant the entry carries names the
+// class, whatever element it names — the door's question for a command that
+// is authorized at its executor.
+func (e *Entry) HoldsCmdClass(class string) bool {
+	if e == nil {
+		return false
+	}
+	for _, g := range e.Grants {
+		pg, err := ParseGrant(g)
+		if err != nil || pg.Verb != "cmd" {
+			continue
+		}
+		for _, c := range pg.Classes {
+			if c == class {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsHuman reports whether this entry is a verified person — a token at a
+// human door, or a human reconstituted from attested groups on a replicated
+// command. Nil-safe like the other predicates: no identity is not a person.
+func (e *Entry) IsHuman() bool { return e != nil && e.Kind == KindHuman }
 
 // parseZone accepts "#" (everything) or one element id, with or without the
 // trailing "/#" that reads as "and below" — an element grant always covers the
@@ -771,22 +870,19 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 			return false
 		}
 		class := CmdClass(p.Contract)
-		for _, g := range e.Grants {
-			pg, err := ParseGrant(g)
-			if err != nil || pg.Verb != "cmd" {
-				continue
-			}
-			zone, ok := zoneOf(sc, pg.Element)
-			if !ok || !coverPath(zone, p.Path) {
-				continue
-			}
-			for _, c := range pg.Classes {
-				if c == class {
-					return true
-				}
-			}
+		if AuthorizedAtExecutor(p.Contract) {
+			// The topic's path routes the command to the node that owns
+			// the entities (`{owner-route}/apply`); it names no element,
+			// so a prefix comparison against it would refuse every person
+			// whose grant is narrower than the owning node. The door asks
+			// only whether the person holds a class the editor honours
+			// at all — configure, or operate for the annotation intent; the
+			// executor authorizes the plan it composes, position by
+			// position, with AuthorizeCmdAt (node-side command
+			// authorization design §3C).
+			return e.HoldsCmdClass(class) || e.HoldsCmdClass("operate")
 		}
-		return false
+		return AuthorizeCmdAt(sc, e, class, p.Path)
 
 	case ActPub:
 		p, err := Parse(topic)
