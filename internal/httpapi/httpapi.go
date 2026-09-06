@@ -737,7 +737,20 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		prefix := r.URL.Query().Get("prefix")
-		entries, next, err := e.Store().KVScanPage(prefix, after, pageSize)
+		// contract narrows the page to a set of uns contracts (repeatable,
+		// e.g. ?contract=_Group&contract=_MetadataType); absent means every
+		// contract, as before this parameter existed. Each name is validated
+		// against plugins/uns's vocabulary — the one place contract names are
+		// defined (architecture principle 4) — rather than let an unknown
+		// name silently match nothing.
+		contracts := r.URL.Query()["contract"]
+		for _, ct := range contracts {
+			if !uns.IsKnown(uns.ClassOf(ct)) {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("unknown contract: %q", ct)})
+				return
+			}
+		}
+		entries, next, err := e.Store().KVScanPage(prefix, after, pageSize, contracts)
 		if err != nil {
 			if errors.Is(err, store.ErrInvalidPageToken) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid page token"})

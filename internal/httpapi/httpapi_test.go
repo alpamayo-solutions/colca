@@ -1766,6 +1766,70 @@ func TestTheLocalKVRoutePaginatesAndRejectsBadTokens(t *testing.T) {
 	}
 }
 
+// TestTheLocalKVRouteFiltersByContractAndRejectsUnknownOnes seeds two
+// contracts at the SAME path and proves ?contract= selects only the one
+// asked for over HTTP, end to end through the /kv door — the retired
+// api-side kludge ("Element-Scoped Authorization") needed exactly
+// this and could not have it, so it fetched and filtered a full snapshot
+// itself instead. The presence assertion (an unfiltered fetch sees both) is
+// checked before either absence assertion, per testing.md.
+func TestTheLocalKVRouteFiltersByContractAndRejectsUnknownOnes(t *testing.T) {
+	h := newLocalHandler(t)
+	if _, _, err := h.eng.Store().Append("definitions", []store.Record{
+		{Topic: "colca/v1/_Group/n-test/grp/a", Payload: []byte(`{"id":"a"}`), TS: 1, KVPath: "grp/a", KVNode: "n-test"},
+		{Topic: "colca/v1/_MetadataType/n-test/grp/a", Payload: []byte(`{"id":"a"}`), TS: 2, KVPath: "grp/a", KVNode: "n-test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	request := func(path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set("X-Colca-Service", "projector")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, r)
+		return rr
+	}
+	type page struct {
+		Entries []struct {
+			Topic string `json:"topic"`
+		} `json:"entries"`
+		Next string `json:"next"`
+	}
+	decode := func(rr *httptest.ResponseRecorder) page {
+		t.Helper()
+		var p page
+		if err := json.Unmarshal(rr.Body.Bytes(), &p); err != nil {
+			t.Fatalf("decode %s: %v", rr.Body.String(), err)
+		}
+		return p
+	}
+
+	unfiltered := decode(request("/kv?prefix=grp%2Fa"))
+	if len(unfiltered.Entries) != 2 {
+		t.Fatalf("unfiltered = %+v, want both contracts at this path", unfiltered)
+	}
+
+	groupOnly := request("/kv?prefix=grp%2Fa&contract=_Group")
+	if groupOnly.Code != http.StatusOK {
+		t.Fatalf("contract=_Group = %d: %s", groupOnly.Code, groupOnly.Body.String())
+	}
+	groups := decode(groupOnly)
+	if len(groups.Entries) != 1 || !strings.HasPrefix(groups.Entries[0].Topic, "colca/v1/_Group/") {
+		t.Fatalf("contract=_Group entries = %+v, want exactly the _Group record", groups)
+	}
+
+	metaOnly := decode(request("/kv?prefix=grp%2Fa&contract=_MetadataType"))
+	if len(metaOnly.Entries) != 1 || !strings.HasPrefix(metaOnly.Entries[0].Topic, "colca/v1/_MetadataType/") {
+		t.Fatalf("contract=_MetadataType entries = %+v, want exactly the _MetadataType record", metaOnly)
+	}
+
+	if bad := request("/kv?prefix=grp%2Fa&contract=_NotARealContract"); bad.Code != http.StatusBadRequest {
+		t.Fatalf("unknown contract = %d, want 400: %s", bad.Code, bad.Body.String())
+	} else if !strings.Contains(bad.Body.String(), "_NotARealContract") {
+		t.Fatalf("400 body must name the unknown contract, got %s", bad.Body.String())
+	}
+}
+
 func TestLocalSelfReturnsTheMintedIdentityAndAuthoritativeMount(t *testing.T) {
 	h := newLocalHandler(t)
 	// Seed an unrelated element first. A client that guesses its own mount by

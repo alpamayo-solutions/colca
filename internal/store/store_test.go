@@ -441,19 +441,90 @@ func TestKVScanPageIsBoundedAndTokensArePrefixScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, next, err := s.KVScanPage("line/", "", 2)
+	first, next, err := s.KVScanPage("line/", "", 2, nil)
 	if err != nil || len(first) != 2 || next == "" {
 		t.Fatalf("first page = %+v next=%q err=%v", first, next, err)
 	}
-	second, final, err := s.KVScanPage("line/", next, 2)
+	second, final, err := s.KVScanPage("line/", next, 2, nil)
 	if err != nil || len(second) != 1 || second[0].Path != "line/c" || final != "" {
 		t.Fatalf("second page = %+v next=%q err=%v", second, final, err)
 	}
-	if _, _, err := s.KVScanPage("other/", next, 2); !errors.Is(err, ErrInvalidPageToken) {
+	if _, _, err := s.KVScanPage("other/", next, 2, nil); !errors.Is(err, ErrInvalidPageToken) {
 		t.Fatalf("cross-prefix token error = %v, want ErrInvalidPageToken", err)
 	}
-	if _, _, err := s.KVScanPage("line/", "not-a-token!", 2); !errors.Is(err, ErrInvalidPageToken) {
+	if _, _, err := s.KVScanPage("line/", "not-a-token!", 2, nil); !errors.Is(err, ErrInvalidPageToken) {
 		t.Fatalf("malformed token error = %v, want ErrInvalidPageToken", err)
+	}
+}
+
+// TestKVScanPageFiltersByContractDuringTheScan seeds two contracts at every
+// path under a prefix and proves the contract filter returns exactly the
+// requested one, paginating over ONLY the matching entries (a page of `max`
+// MATCHES, not `max` raw keys with the rest thrown away) rather than
+// requiring the caller to page past entries it asked to exclude. The
+// presence assertion (a filtered page finds the requested contract) comes
+// before the absence assertion (the same page contains none of the other
+// one) in every case, per testing.md: an absence check is only as strong as
+// the presence check that pins its denominator.
+func TestKVScanPageFiltersByContractDuringTheScan(t *testing.T) {
+	s := mustOpen(t)
+	if _, _, err := s.Append("definitions", []Record{
+		{Topic: "colca/v1/_Group/n1/g1", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "g1", KVNode: "n1"},
+		{Topic: "colca/v1/_MetadataType/n1/g1", Payload: []byte(`{"v":2}`), TS: 2, KVPath: "g1", KVNode: "n1"},
+		{Topic: "colca/v1/_Group/n1/g2", Payload: []byte(`{"v":3}`), TS: 3, KVPath: "g2", KVNode: "n1"},
+		{Topic: "colca/v1/_MetadataType/n1/g2", Payload: []byte(`{"v":4}`), TS: 4, KVPath: "g2", KVNode: "n1"},
+		{Topic: "colca/v1/_Group/n1/g3", Payload: []byte(`{"v":5}`), TS: 5, KVPath: "g3", KVNode: "n1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unfiltered: 5 entries at this prefix — the denominator every filtered
+	// assertion below is checked against.
+	all, allNext, err := s.KVScanPage("", "", 100, nil)
+	if err != nil || len(all) != 5 || allNext != "" {
+		t.Fatalf("unfiltered scan = %+v next=%q err=%v, want 5 entries", all, allNext, err)
+	}
+
+	// A page of max=2 MATCHING _Group entries: the two _MetadataType entries
+	// interleaved between them must be skipped in the scan, not counted
+	// against the page size.
+	groups, groupsNext, err := s.KVScanPage("", "", 2, []string{"_Group"})
+	if err != nil || len(groups) != 2 {
+		t.Fatalf("filtered page = %+v next=%q err=%v, want 2 matching _Group entries", groups, groupsNext, err)
+	}
+	for _, g := range groups {
+		if g.Topic[:len("colca/v1/_Group")] != "colca/v1/_Group" {
+			t.Fatalf("entry %+v is not a _Group record", g)
+		}
+	}
+	if groupsNext == "" {
+		t.Fatal("next must be set: a third _Group entry (g3) remains beyond this page")
+	}
+	rest, restNext, err := s.KVScanPage("", groupsNext, 2, []string{"_Group"})
+	if err != nil || len(rest) != 1 || restNext != "" {
+		t.Fatalf("final _Group page = %+v next=%q err=%v, want exactly g3 and no further page", rest, restNext, err)
+	}
+	if rest[0].Path != "g3" {
+		t.Fatalf("final _Group page path = %q, want g3", rest[0].Path)
+	}
+
+	// The complementary filter proves this is a real filter, not a page-size
+	// coincidence: _MetadataType alone returns the other 2 entries and none
+	// of the _Group ones.
+	metaTypes, metaNext, err := s.KVScanPage("", "", 100, []string{"_MetadataType"})
+	if err != nil || len(metaTypes) != 2 || metaNext != "" {
+		t.Fatalf("_MetadataType page = %+v next=%q err=%v, want 2 matching entries", metaTypes, metaNext, err)
+	}
+
+	// A set naming both contracts matches everything the unfiltered scan
+	// found; a set naming neither seen contract matches nothing.
+	both, bothNext, err := s.KVScanPage("", "", 100, []string{"_Group", "_MetadataType"})
+	if err != nil || len(both) != 5 || bothNext != "" {
+		t.Fatalf("both-contracts page = %+v next=%q err=%v, want all 5 entries", both, bothNext, err)
+	}
+	none, noneNext, err := s.KVScanPage("", "", 100, []string{"_AnnotationType"})
+	if err != nil || len(none) != 0 || noneNext != "" {
+		t.Fatalf("unmatched-contract page = %+v next=%q err=%v, want 0 entries", none, noneNext, err)
 	}
 }
 

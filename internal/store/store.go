@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // streams is the fixed set of streams a store maintains offsets for.
@@ -1340,9 +1342,24 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 // KVScanPage returns at most max raw KV entries and an opaque continuation
 // token. The scan bound applies before HTTP authorization filtering, so one
 // request cannot turn a sparse grant into an unbounded database walk.
-func (s *Store) KVScanPage(prefix, after string, max int) ([]KVEntry, string, error) {
+//
+// contracts, when non-empty, restricts the page to entries whose uns contract
+// (the topic's `_Contract` segment) is in the set — a page of `max` MATCHING
+// entries, not `max` raw keys with the rest thrown away. The check runs
+// against the topic embedded verbatim in the KV key (kvKey: `path\x00node\x00
+// topic`), so a non-matching entry is skipped WITHOUT ever JSON-decoding its
+// payload — the whole point of filtering in the scan, not after it. A nil or
+// empty contracts matches everything, same as before this parameter existed.
+func (s *Store) KVScanPage(prefix, after string, max int, contracts []string) ([]KVEntry, string, error) {
 	if max <= 0 {
 		return nil, "", fmt.Errorf("store: KV page size must be positive")
+	}
+	var want map[string]bool
+	if len(contracts) > 0 {
+		want = make(map[string]bool, len(contracts))
+		for _, c := range contracts {
+			want[c] = true
+		}
 	}
 	lb := kvPrefix(prefix)
 	ub := append(append([]byte{}, lb...), 0xFF)
@@ -1365,21 +1382,25 @@ func (s *Store) KVScanPage(prefix, after string, max int) ([]KVEntry, string, er
 	}
 
 	out := make([]KVEntry, 0, max)
+	matched := 0
 	var lastKey []byte
-	for scanned := 0; valid && scanned < max; scanned++ {
+	for valid && matched < max {
 		lastKey = append(lastKey[:0], iter.Key()...)
 		key := string(iter.Key()[2:]) // strip "k\x00"
-		pathSep := strings.IndexByte(key, 0)
-		if pathSep >= 0 {
+		if pathSep := strings.IndexByte(key, 0); pathSep >= 0 {
 			rest := key[pathSep+1:]
 			if nodeSep := strings.IndexByte(rest, 0); nodeSep >= 0 {
-				var e kvEnc
-				if json.Unmarshal(iter.Value(), &e) == nil {
-					out = append(out, KVEntry{
-						Path: key[:pathSep], NodeID: rest[:nodeSep], Topic: e.Topic,
-						Payload: e.Payload, TS: e.TS, Offset: e.Offset,
-						OriginOffset: originOffset(e.OriginOffset, e.Offset),
-					})
+				topic := rest[nodeSep+1:]
+				if kvContractMatches(topic, want) {
+					var e kvEnc
+					if json.Unmarshal(iter.Value(), &e) == nil {
+						out = append(out, KVEntry{
+							Path: key[:pathSep], NodeID: rest[:nodeSep], Topic: e.Topic,
+							Payload: e.Payload, TS: e.TS, Offset: e.Offset,
+							OriginOffset: originOffset(e.OriginOffset, e.Offset),
+						})
+						matched++
+					}
 				}
 			}
 		}
@@ -1392,6 +1413,22 @@ func (s *Store) KVScanPage(prefix, after string, max int) ([]KVEntry, string, er
 		return out, base64.RawURLEncoding.EncodeToString(lastKey), nil
 	}
 	return out, "", nil
+}
+
+// kvContractMatches reports whether topic's uns contract (Parse's segment
+// index 2, e.g. "_Group") is in want. A nil want matches everything — the
+// no-filter case. Topic grammar is plugins/uns's fact to own (architecture
+// principle 4), so this defers to uns.Parse rather than re-deriving the
+// grammar by hand-splitting the string a second time.
+func kvContractMatches(topic string, want map[string]bool) bool {
+	if want == nil {
+		return true
+	}
+	parsed, err := uns.Parse(topic)
+	if err != nil {
+		return false
+	}
+	return want[parsed.Contract]
 }
 
 func originOffset(origin, local uint64) uint64 {
