@@ -39,6 +39,10 @@ func (w *EditExec) compose(
 		return w.composeModel(intent, expected, entities)
 	case "annotation":
 		return w.composeAnnotation(intent)
+	case "resource":
+		return w.composeResource(intent)
+	case "alarm", "alarm_acknowledgement":
+		return w.composeAlarm(intent)
 	default:
 		return 422, fmt.Sprintf("unknown edit intent %q", intent.Type), "invalid", nil
 	}

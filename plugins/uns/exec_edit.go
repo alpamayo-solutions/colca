@@ -52,6 +52,9 @@ type EditExec struct {
 	// node's own element index in production (SetScope). Nil resolves only
 	// realm-wide grants.
 	scope Scope
+	// blobs is the resource intent's port onto this node's content-addressed
+	// store (SetBlobs); nil in unit tests that compose no resource records.
+	blobs Blobs
 	mu    sync.Mutex
 
 	replays     map[string]editReplay
@@ -115,6 +118,17 @@ type editIntent struct {
 	Value            json.RawMessage `json:"value"`
 	SignalIDs        []string        `json:"signal_ids"`
 	Source           string          `json:"source"`
+	// The `resource` intent's own — see exec_edit_resource.go. `Path` is
+	// where the resource sits (element path plus the resource id); `FromPath`
+	// is set only by a move, and makes the vacated position part of the same
+	// batch and the same authorization decision.
+	Path     string          `json:"path"`
+	FromPath string          `json:"from_path"`
+	Resource json.RawMessage `json:"resource"`
+	// The alarm family's own — see exec_edit_alarm.go. The snapshot IS
+	// the `_AlarmNotificationConfig` record; an acknowledgement carries none,
+	// because current alarm status is the evaluator's, not KV state.
+	Snapshot json.RawMessage `json:"snapshot"`
 }
 
 type editNodeAttachment struct {
@@ -183,6 +197,13 @@ func NewEditExec(
 		store: store, bound: bound, attachments: attachments, replays: map[string]editReplay{},
 	}
 }
+
+// SetBlobs gives the executor the blob store the `resource` intent needs, so
+// it can hold the same invariant `ConfigExec` does: never author a record
+// pointing at bytes this node cannot produce. Nil leaves resource writes
+// refusing with `blob_unreachable`, which is the honest answer for a node with
+// no blob store.
+func (w *EditExec) SetBlobs(blobs Blobs) { w.blobs = blobs }
 
 func (w *EditExec) Handles(contract string) bool { return contract == "_CmdEdit" }
 

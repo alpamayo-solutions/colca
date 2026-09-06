@@ -248,6 +248,10 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.Engine.EntityStore(), reg, editAttachmentWriter{registry: reg},
 	)
 	edit.SetScope(n.Engine.Scope()) // a person's grants resolve against this node's elements (authz design §3C)
+	// The same blob port the configure executor holds: a `resource` intent
+	// must never author a record pointing at bytes this node cannot produce,
+	// and there is one invariant, so there is one port.
+	edit.SetBlobs(blobPort)
 	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain, edit))
 	n.Engine.SetObserver(domain)
 	// The observer only sees records from here on; the retained set persisted

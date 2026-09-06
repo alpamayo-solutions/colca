@@ -229,6 +229,16 @@ func (w *EditExec) planFor(
 			touched = append(touched, t)
 		}
 		return touched
+	case "alarm", "alarm_acknowledgement":
+		// The signal the alarm is about — never the config record's own
+		// reserved path, which no element owns.
+		return w.alarmPositions(intent, entities)
+	case "resource":
+		// The positions the composed records sit on — one for a create or an
+		// in-place update, two for a move, both checked. Not `touchedByRecords`:
+		// a resource is not in the entity snapshot, it is addressed by its own
+		// position, and its element is the path above the record.
+		return w.resourcePositions(intent, records)
 	default: // update, delete, model
 		anchor := entityVersionKey(intent.Entity.Kind, intent.Entity.ID)
 		return touchedByRecords(records, entities, anchor)
