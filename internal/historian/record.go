@@ -37,6 +37,15 @@ type Row struct {
 	Text   *string
 	Bool   *bool
 	JSON   json.RawMessage
+
+	// Offset and Topic are NOT written to historian_metric — they are the
+	// stream position this row was decoded from, carried through purely so a
+	// row the schema permanently refuses (sink.go's poison classification)
+	// can be logged and counted with enough context to find the offending
+	// publisher. Set by the bridge in Once; zero-valued and harmless for any
+	// caller that predates per-row rejection (the boundary suite included).
+	Offset int64
+	Topic  string
 }
 
 // RowFrom decodes one stored record.

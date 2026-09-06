@@ -80,10 +80,10 @@ func TestApplyingTheSamePageTwiceLeavesOneRow(t *testing.T) {
 	value := 21.5
 	rows := []Row{{Timestamp: at, SignalID: signalID, NodeID: "n1", Number: &value}}
 
-	if err := sink.Apply(ctx, rows, "test:metrics", 1); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:metrics", 1); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
-	if err := sink.Apply(ctx, rows, "test:metrics", 1); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:metrics", 1); err != nil {
 		t.Fatalf("replay: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestTheMarkerAndTheRowsCommitTogether(t *testing.T) {
 		Timestamp: time.Now().UTC().Truncate(time.Millisecond),
 		SignalID:  sigID("sig-boundary-2"), NodeID: "n1", Number: &value,
 	}}
-	if err := sink.Apply(ctx, rows, "test:together", 42); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:together", 42); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 
@@ -125,7 +125,7 @@ func TestAnEmptyBatchStillMovesTheMarker(t *testing.T) {
 	ctx := context.Background()
 	sink := testPool(t)
 
-	if err := sink.Apply(ctx, nil, "test:empty", 7); err != nil {
+	if _, err := sink.Apply(ctx, nil, "test:empty", 7); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	applied, err := sink.Applied(ctx, "test:empty")
@@ -150,12 +150,12 @@ func TestExactMatchOverwritesTheRow(t *testing.T) {
 	first, second := 1.0, 2.0
 	rows := []Row{{Timestamp: at, SignalID: signalID, NodeID: "n1", Number: &first}}
 
-	if err := sink.Apply(ctx, rows, "test:overwrite", 1); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:overwrite", 1); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 
 	rows[0].Number = &second
-	if err := sink.Apply(ctx, rows, "test:overwrite", 2); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:overwrite", 2); err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
 
@@ -192,7 +192,7 @@ func TestIdenticalReapplyDoesNotChurnTheRow(t *testing.T) {
 	value := 42.0
 	rows := []Row{{Timestamp: at, SignalID: signalID, NodeID: "n1", Number: &value}}
 
-	if err := sink.Apply(ctx, rows, "test:no-churn", 1); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:no-churn", 1); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 
@@ -204,7 +204,7 @@ func TestIdenticalReapplyDoesNotChurnTheRow(t *testing.T) {
 	}
 
 	// Same signal, same timestamp, same value: a pure redelivery.
-	if err := sink.Apply(ctx, rows, "test:no-churn", 2); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:no-churn", 2); err != nil {
 		t.Fatalf("replay: %v", err)
 	}
 
@@ -237,13 +237,13 @@ func TestAValueTypeChangeClearsTheStaleColumn(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Millisecond)
 	number := 3.0
 	numeric := []Row{{Timestamp: at, SignalID: signalID, NodeID: "n1", Number: &number}}
-	if err := sink.Apply(ctx, numeric, "test:type-change", 1); err != nil {
+	if _, err := sink.Apply(ctx, numeric, "test:type-change", 1); err != nil {
 		t.Fatalf("apply numeric: %v", err)
 	}
 
 	text := "now-textual"
 	textual := []Row{{Timestamp: at, SignalID: signalID, NodeID: "n1", Text: &text}}
-	if err := sink.Apply(ctx, textual, "test:type-change", 2); err != nil {
+	if _, err := sink.Apply(ctx, textual, "test:type-change", 2); err != nil {
 		t.Fatalf("apply textual: %v", err)
 	}
 
@@ -273,12 +273,12 @@ func TestTheMarkerStillMovesOnAnOverwritingApply(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Millisecond)
 	first, second := 1.0, 2.0
 	rows := []Row{{Timestamp: at, SignalID: sigID("sig-marker-overwrite"), NodeID: "n1", Number: &first}}
-	if err := sink.Apply(ctx, rows, "test:marker-overwrite", 5); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:marker-overwrite", 5); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 
 	rows[0].Number = &second
-	if err := sink.Apply(ctx, rows, "test:marker-overwrite", 6); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:marker-overwrite", 6); err != nil {
 		t.Fatalf("overwriting apply: %v", err)
 	}
 
@@ -304,7 +304,7 @@ func TestEachValueKindSurvivesTheRoundTrip(t *testing.T) {
 		{Timestamp: at, SignalID: boolSignalID, Bool: &yes},
 		{Timestamp: at, SignalID: jsonSignalID, JSON: []byte(`{"x":[1,2]}`)},
 	}
-	if err := sink.Apply(ctx, rows, "test:kinds", 3); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:kinds", 3); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 

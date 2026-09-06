@@ -190,6 +190,12 @@ func serveObservability(addr string, bridge *historian.Bridge, log *slog.Logger)
 			"# HELP colca_historian_stream_gaps_total Pruned ranges this bridge could not historise.\n"+
 				"# TYPE colca_historian_stream_gaps_total counter\n"+
 				"colca_historian_stream_gaps_total %d\n", bridge.Gaps())
+		fmt.Fprintf(w,
+			"# HELP colca_historian_rows_rejected_total Rows the schema permanently refused and set aside, by reason — a non-zero value means a publisher is sending data this table's schema cannot hold; the rest of that page still historised and the cursor still advanced past it.\n"+
+				"# TYPE colca_historian_rows_rejected_total counter\n")
+		for _, reason := range historian.PoisonReasons() {
+			fmt.Fprintf(w, "colca_historian_rows_rejected_total{reason=%q} %d\n", reason, bridge.Rejected(reason))
+		}
 	})
 	server := httpserver.NewAt(addr, mux)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

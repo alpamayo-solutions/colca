@@ -38,13 +38,13 @@ type fakeStore struct {
 
 func (s *fakeStore) Applied(context.Context, string) (int64, error) { return s.applied, nil }
 
-func (s *fakeStore) Apply(_ context.Context, rows []Row, _ string, offset int64) error {
+func (s *fakeStore) Apply(_ context.Context, rows []Row, _ string, offset int64) ([]Rejection, error) {
 	if s.fail != nil {
-		return s.fail
+		return nil, s.fail
 	}
 	s.batches = append(s.batches, rows)
 	s.applied = offset
-	return nil
+	return nil, nil
 }
 
 func record(offset int64, payload string) door.Record {
