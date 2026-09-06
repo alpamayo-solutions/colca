@@ -126,6 +126,13 @@ func startTopo(t *testing.T) *topo {
 	}
 	tp.site1, tp.cfgs["n-site1"] = s, scfg
 	enrollObserver(s)
+	// A node teaches its children their position only once it knows its
+	// own, so the edges start after site1 has learned its prefix: each hop
+	// then gets its own window below instead of edge1's window having to
+	// absorb site1's hop as well — which is what timed out on a loaded
+	// runner (`n-edge1 learns its prefix` after 15 s, -race, four packages
+	// in parallel). The same order a real tree comes up in.
+	waitForPrefix(t, "n-site1", s)
 	authtest.EnrollNodeAt(t, s.Registry, s.Engine, "n-edge1", tp.keys["n-edge1"].PublicHex(), "edge1")
 	authtest.EnrollNodeAt(t, s.Registry, s.Engine, "n-edge2", tp.keys["n-edge2"].PublicHex(), "edge2")
 
@@ -157,13 +164,19 @@ func startTopo(t *testing.T) *topo {
 	// (cmdadmin design §3): human grants are root-frame, and a node that has
 	// not yet learned its prefix fails closed on scoped grants — a legitimate
 	// startup state, but a race in tests. The first downlink poll teaches it.
-	for ulid, n := range map[string]*node.Node{"n-site1": s, "n-edge1": e1, "n-edge2": e2} {
-		waitFor(t, ulid+" learns its prefix", 15*time.Second, func() bool {
-			_, ok := n.Engine.Prefix()
-			return ok
-		})
-	}
+	waitForPrefix(t, "n-edge1", e1)
+	waitForPrefix(t, "n-edge2", e2)
 	return tp
+}
+
+// waitForPrefix blocks until n has learned its root-frame prefix from its
+// parent — one hop, one window.
+func waitForPrefix(t *testing.T, ulid string, n *node.Node) {
+	t.Helper()
+	waitFor(t, ulid+" learns its prefix", 15*time.Second, func() bool {
+		_, ok := n.Engine.Prefix()
+		return ok
+	})
 }
 
 // ---- helpers ----
