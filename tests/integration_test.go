@@ -964,6 +964,35 @@ func TestResourceUpsertAtAChildPullsTheBlobFromItsParent(t *testing.T) {
 	}
 }
 
+// TestANodeDescribesItselfOnce: a fresh child wrote two records per boot --
+// one at startup bound to nothing (its ancestry was empty but unknown, and
+// the empty chain was read as the root's), one when the downlink taught it
+// its position. Both replicated up; the first was a lie about the binding
+// that a parent's re-teaching could replay over the truth. A child now waits
+// for its position and writes once; the root, bound to nothing above itself
+// by construction, still writes exactly once.
+func TestANodeDescribesItselfOnce(t *testing.T) {
+	tp := startTopo(t)
+	count := func(n *node.Node, prefix string) int {
+		total := 0
+		for _, r := range fetchRecords(t, n, "entities", "describe-once", prefix, 200) {
+			if strings.Contains(r.(map[string]any)["topic"].(string), "/_Node/") {
+				total++
+			}
+		}
+		return total
+	}
+	waitFor(t, "edge1 to describe itself", 20*time.Second, func() bool {
+		return count(tp.edge1, "_colca/nodes/n-edge1") >= 1
+	})
+	if got := count(tp.edge1, "_colca/nodes/n-edge1"); got != 1 {
+		t.Fatalf("a fresh child wrote %d _Node records at boot, want exactly 1 (the one carrying its position)", got)
+	}
+	if got := count(tp.global, "_colca/nodes/n-global"); got != 1 {
+		t.Fatalf("the root wrote %d _Node records at boot, want exactly 1", got)
+	}
+}
+
 // TestANodeDescribesItselfWhereItsParentMountedIt pins the wiring of
 // node.go's SetOnPosition hook. `_Node` is "authored by the node it
 // describes" (the contract's words), and the one fact about itself a node

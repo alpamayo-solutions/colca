@@ -346,7 +346,15 @@ func Start(cfg *config.Config) (*Node, error) {
 	// without this change and were deleted rather than kept as decoration.
 	// The oracle is the deployed tree: the records carry interfaces or they
 	// do not.
-	if ancestry, known := n.Engine.Ancestry(); known || len(ancestry) == 0 {
+	// A node authors its record at startup only when it KNOWS where it sits:
+	// a persisted ancestry, or no configured parent -- the root, whose empty
+	// chain is a real position. A fresh child's ancestry is also empty, but
+	// unknown: it used to author a record bound to nothing here and a second
+	// one when the downlink taught it its position -- two records per boot,
+	// both replicated up the tree, the first of them a lie about the binding
+	// that the parent's re-teaching could replay over the truth. It now waits
+	// and writes once.
+	if ancestry, known := n.Engine.Ancestry(); known || cfg.Parent == nil {
 		positionMu.Lock()
 		lastPosition = append(uns.Ancestry(nil), ancestry...)
 		positionKnown = true
