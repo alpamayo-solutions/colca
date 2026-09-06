@@ -47,8 +47,12 @@ type editTouched struct {
 // position allows it. code 0 means covered.
 func (w *EditExec) authorizeTouched(ctx CommandContext, touched []editTouched) (int, string, string) {
 	for _, t := range touched {
-		// The node root (an empty path) is covered by a realm-wide grant
-		// only: coverPath treats "" as the root every element sits under.
+		// The node root (an empty path) is the position every element here
+		// sits under, so only a zone of "#" covers it: a realm-wide grant, or
+		// a grant naming the node's own element or one of its ancestors —
+		// which zoneOf resolves to "#" through Scope.Reaches, the ancestry the
+		// parent taught. A grant on any element BELOW the node resolves to
+		// that element's path and does not cover the root.
 		covered := AuthorizeCmdAt(w.scope, ctx.Actor, "configure", t.path) ||
 			(t.operate && AuthorizeCmdAt(w.scope, ctx.Actor, "operate", t.path))
 		if !covered {
@@ -233,6 +237,11 @@ func (w *EditExec) planFor(
 		// The signal the alarm is about — never the config record's own
 		// reserved path, which no element owns.
 		return w.alarmPositions(intent, entities)
+	case "notification_config":
+		// The whole node: one position, the node's own root. See
+		// notificationConfigPositions for how a grant on the element the
+		// node's parent enrolled it at resolves to cover it.
+		return w.notificationConfigPositions()
 	case "resource":
 		// The positions the composed records sit on — one for a create or an
 		// in-place update, two for a move, both checked. Not `touchedByRecords`:

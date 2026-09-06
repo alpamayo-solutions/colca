@@ -1,6 +1,7 @@
 package uns
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -110,5 +111,139 @@ func TestEditAlarmRefusesAConfigForAnotherNode(t *testing.T) {
 	})
 	if code, message, _, _ = exec.ExecuteWithWrites(full, "_CmdEdit", "apply", wrongID); code != 422 {
 		t.Fatalf("alarm config with a foreign id = %d %q, want it refused", code, message)
+	}
+}
+
+// enrolledScope is the scope of a node its parent enrolled at `own`: the
+// element index answers for everything at or below the node (scopeOf), and
+// the ancestry the parent taught answers for the node's own element and
+// everything above it. `own` is deliberately NOT seeded as a `_SystemElement`
+// in the store — its record lives at the parent and entities never descend —
+// so PathOf cannot resolve it and only Reaches can. That is the production
+// shape (engine.scope), and the point these tests pin.
+type enrolledScope struct {
+	scopeOf
+	own string
+}
+
+func (s enrolledScope) Reaches(elementID string) bool { return elementID != "" && elementID == s.own }
+
+func applyIntent(t *testing.T, op string, snapshot map[string]any, extra map[string]any) []byte {
+	t.Helper()
+	intent := map[string]any{"type": "notification_config", "action": "apply", "snapshot": snapshot}
+	for k, v := range extra {
+		intent[k] = v
+	}
+	return editBody(t, op, map[string]uint64{}, intent)
+}
+
+// A whole-node apply is authorized on the node's own element — the one its
+// parent enrolled it at — with class configure. A person granted configure on
+// that element covers it; so does a realm-wide grant; a person granted
+// configure only on a child element of the node does NOT, and the refusal
+// writes nothing. Dropping the position from notificationConfigPositions
+// turns the child-element refusal into a 200.
+func TestEditNotificationConfigApplyIsAuthorizedOnTheNodesOwnElement(t *testing.T) {
+	f, exec, _ := twoLines(t)
+	exec.SetScope(enrolledScope{scopeOf: scopeOf{f}, own: "el-edge1"})
+	snapshot := alarmSnapshot("n-edge1")
+
+	cases := []struct {
+		name  string
+		actor CommandContext
+		want  int
+	}{
+		{"the node's own element", scopedTo("el-edge1"), 200},
+		{"realm-wide", CommandContext{Actor: &Entry{
+			ULID: "kc-admin", Kind: KindHuman, Grants: []string{"cmd:#:configure"},
+		}}, 200},
+		{"a child element of the node", scopedTo("el-line1"), 409},
+		{"operate on the node's own element", CommandContext{Actor: &Entry{
+			ULID: "kc-operator", Kind: KindHuman, Grants: []string{"cmd:el-edge1/#:operate"},
+		}}, 409},
+	}
+	for i, tc := range cases {
+		before := f.offset
+		code, message, result, writes := exec.ExecuteWithWrites(
+			tc.actor, "_CmdEdit", "apply", applyIntent(t, fmt.Sprintf("op-apply-%d", i), snapshot, nil),
+		)
+		if code != tc.want {
+			t.Fatalf("%s: apply = %d %q %q, want %d", tc.name, code, message, result, tc.want)
+		}
+		if tc.want == 200 {
+			if len(writes) != 1 || !strings.Contains(writes[0].Topic, "/_AlarmNotificationConfig/") {
+				t.Fatalf("%s: writes=%v, want the one alarm configuration record", tc.name, writes)
+			}
+			continue
+		}
+		if result != "conflict" || message != "entity_not_found: colca-node:n-edge1" {
+			t.Fatalf("%s: refusal = %q %q, want the not-found shape naming the node", tc.name, message, result)
+		}
+		if len(writes) != 0 || f.offset != before {
+			t.Fatalf("%s: a refused apply wrote: writes=%d offset %d → %d", tc.name, len(writes), before, f.offset)
+		}
+	}
+}
+
+// The node's own element is resolved through the ancestry, not the element
+// index: the same grant that covers the apply on an enrolled node covers
+// nothing on a node whose scope does not reach that element (the root, whose
+// ancestry is empty — or a node that has not learned its position yet). Fail
+// closed; a realm-wide grant is what covers a root node.
+func TestEditNotificationConfigApplyFailsClosedWhenTheScopeDoesNotReachTheElement(t *testing.T) {
+	f, exec, _ := twoLines(t) // scopeOf: Reaches is false for everything
+	before := f.offset
+	code, message, _, writes := exec.ExecuteWithWrites(
+		scopedTo("el-edge1"), "_CmdEdit", "apply", applyIntent(t, "op-apply-root", alarmSnapshot("n-edge1"), nil),
+	)
+	if code != 409 || message != "entity_not_found: colca-node:n-edge1" || len(writes) != 0 || f.offset != before {
+		t.Fatalf("apply with a grant the scope does not reach = %d %q writes=%d, want a refusal with nothing written",
+			code, message, len(writes))
+	}
+	full := CommandContext{Actor: &Entry{ULID: "kc-admin", Kind: KindHuman, Grants: []string{"cmd:#:configure"}}}
+	if code, message, _, writes := exec.ExecuteWithWrites(
+		full, "_CmdEdit", "apply", applyIntent(t, "op-apply-root-wide", alarmSnapshot("n-edge1"), nil),
+	); code != 200 || len(writes) != 1 {
+		t.Fatalf("realm-wide apply at a root node = %d %q writes=%d", code, message, len(writes))
+	}
+}
+
+// The record is the same one the `alarm` family writes, under the same
+// identity rules; and the intent names no entity — the snapshot's
+// target_node_id is the one statement of which node this is.
+func TestEditNotificationConfigApplyKeepsTheConfigIdentityRules(t *testing.T) {
+	f, exec, _ := twoLines(t)
+	exec.SetScope(enrolledScope{scopeOf: scopeOf{f}, own: "el-edge1"})
+	anna := scopedTo("el-edge1")
+	before := f.offset
+
+	refused := map[string][]byte{
+		"another node's config": applyIntent(t, "op-foreign", alarmSnapshot("n-somewhere-else"), nil),
+		"a foreign config id": applyIntent(t, "op-id",
+			map[string]any{"id": "not-the-one", "target_node_id": "n-edge1"}, nil),
+		"an entity on the intent": applyIntent(t, "op-entity", alarmSnapshot("n-edge1"),
+			map[string]any{"entity": map[string]any{"kind": "colca-node", "id": "n-edge1"}}),
+		"an action other than apply": editBody(t, "op-action", map[string]uint64{}, map[string]any{
+			"type": "notification_config", "action": "update", "snapshot": alarmSnapshot("n-edge1"),
+		}),
+		"no snapshot": editBody(t, "op-none", map[string]uint64{}, map[string]any{
+			"type": "notification_config", "action": "apply",
+		}),
+	}
+	for name, payload := range refused {
+		code, message, _, writes := exec.ExecuteWithWrites(anna, "_CmdEdit", "apply", payload)
+		if code != 422 || len(writes) != 0 {
+			t.Fatalf("%s = %d %q writes=%d, want 422 and nothing written", name, code, message, len(writes))
+		}
+	}
+	if f.offset != before {
+		t.Fatalf("a refused apply wrote: offset %d → %d", before, f.offset)
+	}
+	code, message, _, writes := exec.ExecuteWithWrites(
+		anna, "_CmdEdit", "apply", applyIntent(t, "op-ok", alarmSnapshot("n-edge1"), nil),
+	)
+	if code != 200 || len(writes) != 1 ||
+		writes[0].Topic != "colca/v1/_AlarmNotificationConfig/n-edge1/_colca/alarm-notification-config/"+alarmConfigID {
+		t.Fatalf("apply = %d %q writes=%v, want the one record at the reserved path", code, message, writes)
 	}
 }

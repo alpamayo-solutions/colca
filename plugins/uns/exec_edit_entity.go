@@ -43,6 +43,8 @@ func (w *EditExec) compose(
 		return w.composeResource(intent)
 	case "alarm", "alarm_acknowledgement":
 		return w.composeAlarm(intent)
+	case "notification_config":
+		return w.composeNotificationConfig(intent)
 	default:
 		return 422, fmt.Sprintf("unknown edit intent %q", intent.Type), "invalid", nil
 	}
