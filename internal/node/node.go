@@ -638,7 +638,40 @@ func Start(cfg *config.Config) (*Node, error) {
 	logPublisher.Start(context.Background())
 
 	log.Info("colca node started", "ulid", cfg.ULID, "api", n.APIAddr, "repl", n.ReplAddr, "mqtt", n.MQTTAddr)
+	if cfg.AddrFile != "" {
+		if err := n.writeAddrFile(cfg.AddrFile); err != nil {
+			// The supervisor is waiting on this file; a node that cannot
+			// tell it where its doors are is not usable to it. Fail the
+			// start rather than leave it polling to its timeout.
+			n.Stop()
+			return nil, fmt.Errorf("node %s: write addr_file %s: %w", cfg.ULID, cfg.AddrFile, err)
+		}
+	}
 	return n, nil
+}
+
+// writeAddrFile publishes the resolved door addresses for a supervisor that
+// configured them as `:0` (config.AddrFile). Atomic: a reader never sees a
+// partial file, and a file that exists is complete.
+func (n *Node) writeAddrFile(path string) error {
+	body, err := json.Marshal(map[string]string{
+		"api":        n.APIAddr,
+		"api_local":  n.LocalAPIAddr,
+		"mqtt":       n.MQTTAddr,
+		"mqtt_local": n.MQTTLocalAddr,
+		"repl":       n.ReplAddr,
+	})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // trackInflight makes every request at every door — API, local API, and

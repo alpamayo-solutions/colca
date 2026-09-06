@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1020,5 +1021,62 @@ graceDrain:
 		case <-grace.C:
 			return
 		}
+	}
+}
+
+// TestAddrFileNamesEveryResolvedDoor pins the contract a subprocess
+// supervisor (chaski.Node) relies on when it configures every door as `:0`:
+// the file appears once the node is up, is complete when it exists, and names
+// the same addresses the node itself resolved — five doors, five distinct
+// ports. The supervisor cannot pick "free" ports itself: bind-and-release
+// hands the same port to consecutive callers on Linux, which put the SDK's
+// MQTT traffic on its own HTTP door on CI.
+func TestAddrFileNamesEveryResolvedDoor(t *testing.T) {
+	base := t.TempDir()
+	keyFile := filepath.Join(base, "n-addr.key")
+	genKey(t, keyFile)
+	addrFile := filepath.Join(base, "run", "addresses.json")
+
+	cfg := &config.Config{
+		ULID:      "n-addr",
+		DataDir:   filepath.Join(base, "data"),
+		LogLevel:  "info",
+		KeyFile:   keyFile,
+		AddrFile:  addrFile,
+		API:       config.API{Addr: "127.0.0.1:0", LocalAddr: "127.0.0.1:0", Token: tok},
+		MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
+		MQTTLocal: config.Endpoint{Addr: "127.0.0.1:0"},
+		Repl:      config.Endpoint{Addr: "127.0.0.1:0"},
+	}
+	n := mustStart(t, cfg)
+
+	raw, err := os.ReadFile(addrFile)
+	if err != nil {
+		t.Fatalf("addr_file after Start: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("addr_file is not JSON: %v\n%s", err, raw)
+	}
+	want := map[string]string{
+		"api": n.APIAddr, "api_local": n.LocalAPIAddr,
+		"mqtt": n.MQTTAddr, "mqtt_local": n.MQTTLocalAddr, "repl": n.ReplAddr,
+	}
+	ports := map[string]string{}
+	for door, addr := range want {
+		if got[door] != addr {
+			t.Errorf("addr_file[%s] = %q, want the resolved %q", door, got[door], addr)
+		}
+		if addr == "" || strings.HasSuffix(addr, ":0") {
+			t.Errorf("%s resolved to %q — `:0` must have been replaced by a real port", door, addr)
+		}
+		_, port, _ := net.SplitHostPort(addr)
+		if other, dup := ports[port]; dup {
+			t.Errorf("%s and %s share port %s — the whole point is that they cannot", door, other, port)
+		}
+		ports[port] = door
+	}
+	if _, err := os.Stat(addrFile + ".tmp"); err == nil {
+		t.Errorf("temp file left behind: the write must finish with a rename")
 	}
 }

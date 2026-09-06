@@ -93,6 +93,17 @@ type Config struct {
 	// describes itself by its ULID.
 	Name    string `yaml:"name"`
 	DataDir string `yaml:"data_dir"`
+	// AddrFile, when set, receives the node's RESOLVED door addresses as JSON
+	// once every listener is up — `{"api","api_local","mqtt","mqtt_local",
+	// "repl"}`, each a host:port. It exists for a supervisor that starts
+	// colcad as a subprocess and configures its doors as `:0` so the kernel
+	// picks the ports: the alternative, picking "free" ports in the
+	// supervisor by binding and releasing them first, hands the same port to
+	// two doors on Linux (the kernel re-issues a just-released ephemeral port
+	// to the next bind) — which is how `chaski.Node` came to speak MQTT to
+	// what was actually its own HTTP door, on CI and nowhere else. Written
+	// atomically (temp file + rename); empty means never written.
+	AddrFile string `yaml:"addr_file"`
 	// SecretsDir is a separate node-local Pebble database containing only
 	// service-sealed ciphertext. It is deliberately outside DataDir so stream
 	// reset/restore and replication lifecycle can never include it by accident.
