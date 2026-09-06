@@ -1681,7 +1681,7 @@ func checkDefinitionContents(contract string, raw []byte) error {
 		if token.OwnerSub == "" {
 			return fmt.Errorf("owner_sub is required")
 		}
-		allowedScopes := map[string]bool{"api": true, "i3x": true, "mcp": true, "broker-http": true, "broker-mqtt": true}
+		allowedScopes := map[string]bool{ScopeAPI: true, ScopeI3X: true, ScopeMCP: true, ScopeBrokerHTTP: true, ScopeBrokerMQTT: true}
 		if len(token.Scopes) == 0 {
 			return fmt.Errorf("scopes must not be empty")
 		}

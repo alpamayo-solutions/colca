@@ -95,7 +95,7 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 		return false
 	}
 	user := string(pk.Connect.Username)
-	v, reason, err := h.ver.VerifyForScope(string(pk.Connect.Password), "broker-mqtt")
+	v, reason, err := h.ver.VerifyForScope(string(pk.Connect.Password), uns.ScopeBrokerMQTT)
 	if err != nil {
 		h.log.Warn("human auth rejected", "user", user, "reason", reason, "err", err)
 		h.metrics.AuthReject(metrics.DoorMQTT, reason)
@@ -157,7 +157,7 @@ func (s *Server) sweepInvalidHumanSessions(now time.Time) {
 		} else if session.credential == "pat" {
 			var err error
 			reason, err = s.hook.ver.VerifyPersonalAccessTokenSession(
-				session.credentialID, session.credentialDigest, "broker-mqtt", now,
+				session.credentialID, session.credentialDigest, uns.ScopeBrokerMQTT, now,
 			)
 			if err == nil {
 				continue

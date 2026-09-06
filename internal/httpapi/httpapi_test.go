@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -2601,5 +2603,83 @@ func TestTheLocalDoorRequiresAReasonToAttestAPersonsGroups(t *testing.T) {
 	}
 	if got := recs[0]; got.ActorKind != "human" || got.ActorID != "kc-sub-anna" || len(got.ActorGroups) != 1 {
 		t.Fatalf("attested record = %+v, want anna with her groups", got)
+	}
+}
+
+// installPersonalAccessToken publishes a hash-only _PersonalAccessToken
+// definition into the handler's store and wires the verifier's index to it,
+// the way the api's key issuance plus the node's boot do. Returns the plaintext.
+func installPersonalAccessToken(t *testing.T, h *localAPI, ver *tokenauth.Verifier, id string, scopes []string) string {
+	t.Helper()
+	token := "pk_pat_" + id + "_secret"
+	digest := sha256.Sum256([]byte(token))
+	payload, err := json.Marshal(uns.PersonalAccessToken{
+		ID: id, HashedSecret: hex.EncodeToString(digest[:]), OwnerSub: "kc-sub-franz",
+		OwnerEmail: "franz@example.com", Scopes: scopes, Roles: []string{"admin"},
+		Grants: []string{"read:#", "cmd:#:configure"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.eng.EntityStore().PublishBatch([]uns.StateRecord{{
+		Topic: "colca/v1/" + uns.PersonalAccessTokenContract + "/n-test/" + id, Payload: payload,
+	}}); err != nil {
+		t.Fatalf("publish PAT definition: %v", err)
+	}
+	ver.SetPersonalAccessTokenIndex(uns.NewPersonalAccessTokenIndex(h.eng.EntityStore()))
+	return token
+}
+
+func newLocalHandlerWithPersonalAccessToken(t *testing.T, id string, scopes []string) (*localAPI, string) {
+	t.Helper()
+	h := newLocalHandler(t)
+	iss := tokentest.NewIssuer(t)
+	ver, err := tokenauth.New(tokenauth.Config{
+		Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL(),
+	}, h.eng.Store(), h.m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primeVerifier(t, ver)
+	token := installPersonalAccessToken(t, h, ver, id, scopes)
+	h.Handler = Handler(h.eng, &config.Config{ULID: "n-test"}, h.reg, ver, h.m, testBlobs(t, &config.Config{ULID: "n-test"}), "deadbeef", true, nil)
+	return h, token
+}
+
+// The api forwards the person's own personal access token to the local door
+// (§3B). Every key the api issues carries the "api" scope and none carries
+// "broker-http" by default, so requiring the human doors' scope here refused
+// every Edit command made under a personal access token -- `colca dm
+// deploy` lost all of its resource uploads with "no enrolled client key and
+// no valid X-Colca-Token". The local door asks for the api scope: the scope
+// the person actually used.
+func TestTheLocalDoorAcceptsAForwardedPersonalAccessTokenScopedToTheApi(t *testing.T) {
+	h, token := newLocalHandlerWithPersonalAccessToken(t, "01PATAPIONLY000000000000AA", []string{uns.ScopeAPI, uns.ScopeI3X})
+	rec := localPublish(t, h,
+		map[string]string{"Authorization": "Bearer " + token, "X-Colca-Service": "api"},
+		map[string]any{"topic": "colca/v1/_CmdEdit/n-test/apply",
+			"payload": map[string]any{"correlation_id": "c-pat", "expires_at": 9999999999999}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("forwarded api-scoped PAT on the local door = %d: %s", rec.Code, rec.Body.String())
+	}
+	recs, _, err := h.eng.Store().Read("commands", 1, 10, nil)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("commands stream: %v %+v", err, recs)
+	}
+	if recs[0].WrittenBy != "kc-sub-franz" || recs[0].ActorKind != "human" {
+		t.Fatalf("record attributed to %+v, want the token's owner as a human", recs[0])
+	}
+}
+
+// A token scoped to the human doors alone is not one the person used at the
+// api; the local door refuses it, the published door is where it belongs.
+func TestTheLocalDoorRefusesAPersonalAccessTokenWithoutTheApiScope(t *testing.T) {
+	h, token := newLocalHandlerWithPersonalAccessToken(t, "01PATBROKERONLY00000000000", []string{uns.ScopeBrokerHTTP})
+	rec := localPublish(t, h,
+		map[string]string{"Authorization": "Bearer " + token, "X-Colca-Service": "api"},
+		map[string]any{"topic": "colca/v1/_CmdEdit/n-test/apply",
+			"payload": map[string]any{"correlation_id": "c-pat2", "expires_at": 9999999999999}})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("broker-only PAT on the local door = %d, want 401: %s", rec.Code, rec.Body.String())
 	}
 }

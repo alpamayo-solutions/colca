@@ -220,7 +220,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 					auditDenied(r, metrics.DoorLocal, tokenauth.ReasonBadToken, nil)
 					return caller{}, false // no verifier: the human world does not exist here
 				}
-				v, reason, err := ver.VerifyForScope(strings.TrimPrefix(h, "Bearer "), "broker-http")
+				v, reason, err := ver.VerifyForScope(strings.TrimPrefix(h, "Bearer "), uns.ScopeAPI)
 				if err != nil {
 					m.AuthReject(metrics.DoorLocal, reason)
 					auditDenied(r, metrics.DoorLocal, reason, nil)
@@ -287,7 +287,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 					auditDenied(r, metrics.DoorHTTP, tokenauth.ReasonBadToken, nil)
 					return caller{}, false // no auth: block → the human world does not exist here
 				}
-				v, reason, err := ver.VerifyForScope(strings.TrimPrefix(h, "Bearer "), "broker-http")
+				v, reason, err := ver.VerifyForScope(strings.TrimPrefix(h, "Bearer "), uns.ScopeBrokerHTTP)
 				if err != nil {
 					m.AuthReject(metrics.DoorHTTP, reason)
 					auditDenied(r, metrics.DoorHTTP, reason, nil)
