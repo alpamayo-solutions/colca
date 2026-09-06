@@ -783,6 +783,18 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// records. The entry remains the single source of truth, so an operator's
 	// reparent is reflected immediately and a stale X-Colca-Mount declaration
 	// never moves it back.
+	// The resource-file route (resources design §6) is mounted on BOTH doors:
+	// it is the ONLY way a file is read anywhere except the raw local/repl
+	// digest routes, whose own trust model (deployment-network reachability,
+	// parent pinning) is the authorization. On the local door a caller is
+	// either a forwarded human Bearer — authorized as that person, exactly as
+	// an Edit command is (node-side command authorization design §3B) —
+	// or a plain local-service identity, authorized by its own placement; no
+	// credential is 401 there, as it always was. Every read still passes
+	// through a resource id so the element-scoped grant check always runs —
+	// a digest is a pointer, never a capability, on either door.
+	mountResourceRoutes(mux, e, blobs, m, writeJSON, authFor)
+
 	if local {
 		mountBlobRoutes(mux, blobs, m, cfg.Limits.EffectiveMaxBlobBytes(), writeJSON, authFor)
 		if secretDB != nil {
@@ -830,12 +842,6 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if secretDB != nil {
 			mountAdminSecretRoutes(mux, secretDB, writeJSON, adminFor)
 		}
-		// The published door's resource read (resources design §6): the ONLY
-		// way a file is read on an authenticated door. Every read passes
-		// through a resource id so the element-scoped grant check always
-		// runs — raw digest access stays on the local and replication doors,
-		// where the door itself is the authorization.
-		mountResourceRoutes(mux, e, blobs, m, writeJSON, authFor)
 
 		// The enrollment door (auth §4): the ONLY write path for registry
 		// entries, admin-guarded. Local-only — downward provisioning

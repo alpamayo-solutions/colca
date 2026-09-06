@@ -13,14 +13,19 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// mountResourceRoutes adds the published door's resource read (resources
-// design §6).
-//
-// This is the ONLY way a file is read on an authenticated door. Raw
-// /blobs/{sha} lives on the local and replication doors, whose own trust model
-// is the authorization; here every read passes through a resource id so the
-// element-scoped grant check always runs. A digest is a pointer, not a
-// capability.
+// mountResourceRoutes adds the resource-file read, on BOTH the local and the
+// published door (resources design §6, revised: a digest is a pointer, never
+// a capability, so raw digest access must never be how a person's or a
+// forwarded service's read is authorized — not even on the local door). Raw
+// /blobs/{sha} remains local- and replication-door-only, where the door's own
+// trust model (deployment-network reachability, parent pinning) IS the
+// authorization for whichever local service or child node reads it. This
+// route is the ONLY way a file is read anywhere else: every read passes
+// through a resource id so the element-scoped grant check always runs,
+// whichever door the caller reached — a forwarded human Bearer on the local
+// door is authorized exactly as an Edit command is (node-side command
+// authorization design §3B), and a plain local-service caller is authorized
+// by its own placement, the same as any other local read.
 func mountResourceRoutes(
 	mux *http.ServeMux,
 	e *engine.Engine,
