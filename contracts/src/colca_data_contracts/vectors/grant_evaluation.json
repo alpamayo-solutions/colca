@@ -1,0 +1,134 @@
+{
+  "description": "Golden human-authorization vectors (architecture principle 2, tier 2 'necessary duplication'). Human authorization is evaluated by two independent, stdlib/framework-native implementations of the SAME rules: Go in plugins/uns (authz.go: Authorize, AuthorizeCmdAt, HoldsCmdClass, Ancestry/Scope) and Python in the Django api (authentication/grants.py + authentication/utils/namespace_filter.py, which resolve a token's group ids against the `_Group` definitions a node holds and expand a granted element to its descendants). Neither may import the other, so this file is the one place the rule they must agree on is written down, judged by one test on each side: plugins/uns/grant_evaluation_test.go and api/src/authentication/tests/test_grant_evaluation_vectors.py.\n\nShape: `elements` is a small tree, `id -> parent id or null`, written parent-first. `groups` maps a group id to the list of DEFINITIONS this node holds for it -- each definition is a list of grant strings from one authoring node. A group with exactly one definition resolves to that definition's grants. A group with more than one definition is a COLLISION (two nodes claiming the same group id) and resolves to nothing, per colca's GroupIndex.GrantsOf and the api's group_definitions/_resolved_grants. A group id referenced by a case's `principal_groups` but absent from `groups` altogether is a MISSING definition and likewise contributes nothing -- the fail-closed default for a group a node has never heard of, or has lost the definition for.\n\nEach case is one authorization question against a fresh token naming exactly `principal_groups` (no grants carried directly on the token, no admin role, no service-account scope): a scoped human resolving strictly through `_Group` definitions, the case both implementations must agree on. `question.type` is one of:\n  - \"read\": may this principal read the record at `question.element`?\n  - \"cmd\": may this principal issue a command of hazard class `question.class` (`configure` or `operate` -- the only two classes the api's REST/Edit resolver models; `param`/`maintain`/`admin` are MQTT-only and have no REST equivalent to pin here) at `question.element`?\n  - \"read_all\": may this principal subscribe to the realm-wide wildcard (colca's `colca/#`, the api's read-unrestricted flag)? Carries no `element`.\n`allowed` is the expected answer. An optional `disputed` field on a case names a vector where the two real implementations disagree; both consuming tests must skip such a case loudly rather than bend it to pass, and report the disagreement.",
+  "elements": {
+    "site1": null,
+    "line1": "site1",
+    "press1": "line1",
+    "line2": "site1",
+    "press2": "line2",
+    "site2": null,
+    "line3": "site2"
+  },
+  "groups": {
+    "g-realm-read": [["read:#"]],
+    "g-line1-read": [["read:line1/#"]],
+    "g-line3-read": [["read:line3/#"]],
+    "g-line1-configure": [["cmd:line1/#:configure"]],
+    "g-line1-operate": [["cmd:line1/#:operate"]],
+    "g-site1-write": [["write:site1/#"]],
+    "g-admin-verb": [["admin:#"]],
+    "g-unknown-read": [["read:ghost/#"]],
+    "g-collision": [["read:line1/#"], ["read:#"]]
+  },
+  "cases": [
+    {
+      "name": "realm_wide_read_covers_any_known_element",
+      "principal_groups": ["g-realm-read"],
+      "question": {"type": "read", "element": "press1"},
+      "allowed": true
+    },
+    {
+      "name": "ancestor_grant_covers_descendant",
+      "principal_groups": ["g-line1-read"],
+      "question": {"type": "read", "element": "press1"},
+      "allowed": true
+    },
+    {
+      "name": "ancestor_grant_covers_the_element_itself",
+      "principal_groups": ["g-line1-read"],
+      "question": {"type": "read", "element": "line1"},
+      "allowed": true
+    },
+    {
+      "name": "sibling_branch_is_not_covered",
+      "principal_groups": ["g-line1-read"],
+      "question": {"type": "read", "element": "press2"},
+      "allowed": false
+    },
+    {
+      "name": "unrelated_root_is_not_covered",
+      "principal_groups": ["g-line1-read"],
+      "question": {"type": "read", "element": "line3"},
+      "allowed": false
+    },
+    {
+      "name": "unknown_element_grant_contributes_nothing",
+      "principal_groups": ["g-unknown-read"],
+      "question": {"type": "read", "element": "line1"},
+      "allowed": false
+    },
+    {
+      "name": "missing_group_definition_contributes_nothing",
+      "principal_groups": ["g-missing"],
+      "question": {"type": "read", "element": "line1"},
+      "allowed": false
+    },
+    {
+      "name": "missing_group_does_not_break_other_grants_in_the_same_token",
+      "principal_groups": ["g-line1-read", "g-missing"],
+      "question": {"type": "read", "element": "press1"},
+      "allowed": true
+    },
+    {
+      "name": "colliding_group_definition_contributes_nothing",
+      "note": "Two nodes claim the id 'g-collision'; even though one of the two colliding definitions grants read:#, the id resolves to nothing.",
+      "principal_groups": ["g-collision"],
+      "question": {"type": "read", "element": "line1"},
+      "allowed": false
+    },
+    {
+      "name": "cmd_configure_grant_covers_configure_at_the_element",
+      "principal_groups": ["g-line1-configure"],
+      "question": {"type": "cmd", "class": "configure", "element": "line1"},
+      "allowed": true
+    },
+    {
+      "name": "cmd_configure_grant_covers_configure_below_the_element",
+      "principal_groups": ["g-line1-configure"],
+      "question": {"type": "cmd", "class": "configure", "element": "press1"},
+      "allowed": true
+    },
+    {
+      "name": "cmd_configure_grant_does_not_cover_operate",
+      "principal_groups": ["g-line1-configure"],
+      "question": {"type": "cmd", "class": "operate", "element": "line1"},
+      "allowed": false
+    },
+    {
+      "name": "cmd_operate_grant_does_not_cover_configure",
+      "principal_groups": ["g-line1-operate"],
+      "question": {"type": "cmd", "class": "configure", "element": "line1"},
+      "allowed": false
+    },
+    {
+      "name": "cmd_operate_grant_covers_operate_at_the_element",
+      "principal_groups": ["g-line1-operate"],
+      "question": {"type": "cmd", "class": "operate", "element": "line1"},
+      "allowed": true
+    },
+    {
+      "name": "write_grant_does_not_authorize_a_human_read",
+      "principal_groups": ["g-site1-write"],
+      "question": {"type": "read", "element": "site1"},
+      "allowed": false
+    },
+    {
+      "name": "admin_grant_does_not_authorize_a_human_read",
+      "principal_groups": ["g-admin-verb"],
+      "question": {"type": "read", "element": "line1"},
+      "allowed": false
+    },
+    {
+      "name": "read_hash_wildcard_requires_a_read_all_grant_not_a_scoped_one",
+      "principal_groups": ["g-line1-read"],
+      "question": {"type": "read_all"},
+      "allowed": false
+    },
+    {
+      "name": "read_hash_wildcard_granted_by_read_hash",
+      "principal_groups": ["g-realm-read"],
+      "question": {"type": "read_all"},
+      "allowed": true
+    }
+  ]
+}
