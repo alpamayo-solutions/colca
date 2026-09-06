@@ -476,3 +476,34 @@ func TestStopWithoutStartReturns(t *testing.T) {
 		t.Fatal("Stop hung on a publisher that was never started")
 	}
 }
+
+func TestARecordWithoutAProgramCounterStillSatisfiesTheContract(t *testing.T) {
+	// Go's standard log package is bridged into the default slog handler,
+	// and slog captures a program counter for those records only when the
+	// log flags ask for a location. badger's "Found 0 WALs" was such a
+	// record on every boot: PC 0, `function` empty, refused by the node with
+	// "at '/function': minLength: got 0, want 1" -- and the notice on stderr
+	// did not say which record. The contract's string fields must be
+	// non-empty whatever the record's provenance.
+	node, server := newFakeNode()
+	defer server.Close()
+	publisher := NewLogPublisher(&countingHandler{},
+		&Client{BaseURL: server.URL, Service: "colca-historian"},
+		LogPublisherOptions{MinLevel: slog.LevelInfo})
+	publisher.Start(context.Background())
+	handler := slog.New(publisher).With("service", "colca-historian").Handler()
+
+	record := slog.NewRecord(time.Now(), slog.LevelInfo, "Found 0 WALs", 0)
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := node.waitFor(t, 1)[0].Payload
+	for _, field := range []string{"module", "function", "logger_name", "message", "level", "timestamp"} {
+		value, _ := payload[field].(string)
+		if value == "" {
+			t.Errorf("a record without a program counter sends %q empty; _Log requires "+
+				"minLength 1 and the node refuses the whole record (payload %v)", field, payload)
+		}
+	}
+}

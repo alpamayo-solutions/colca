@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -123,6 +124,13 @@ func Start(cfg *config.Config) (*Node, error) {
 		logSink,
 		door.LogPublisherOptions{MinLevel: publishLevel, Skip: nodelog.SkipsItsOwnPublishing},
 	)
+	// slog.SetDefault also routes Go's standard log package into this
+	// handler, and captures a program counter for those records only when
+	// the log flags ask for a location. Without it a bridged line -- badger's
+	// "Found 0 WALs" on every boot -- arrives with PC 0, no function, and the
+	// node refuses it against `_Log` ("at '/function': minLength: got 0").
+	// SetDefault resets the flags to 0 afterwards; this is read before that.
+	log.SetFlags(log.Lshortfile)
 	slog.SetDefault(slog.New(logPublisher).With("service", nodelog.ServiceName))
 
 	// First boot mints this node's identity; every later boot loads it. The key

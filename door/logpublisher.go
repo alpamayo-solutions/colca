@@ -345,7 +345,7 @@ func (p *LogPublisher) publish(ctx context.Context, item logRecord) {
 	segments = append(segments, item.level)
 	topic := strings.Join(segments, "/")
 	if err := p.sink.PublishLog(ctx, topic, item.payload); err != nil {
-		p.failures.note(err)
+		p.failures.note(fmt.Errorf("%s (%q): %w", topic, item.payload["message"], err))
 	}
 }
 
@@ -422,7 +422,11 @@ func (p *LogPublisher) loggerName(record slog.Record) string {
 // than failing: an unattributed line is still worth publishing.
 func source(record slog.Record) (module, function string, line int) {
 	if record.PC == 0 {
-		return "colca", "", 0
+		// A record built by hand, or bridged from the standard log package
+		// without a location flag, has no program counter. The contract
+		// requires a non-empty function, and a record is worth more than
+		// its source: name the gap rather than have the node refuse it.
+		return "colca", "unknown", 0
 	}
 	frame, _ := runtime.CallersFrames([]uintptr{record.PC}).Next()
 	module = strings.TrimSuffix(filepath.Base(frame.File), ".go")
