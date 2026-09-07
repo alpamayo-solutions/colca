@@ -348,6 +348,28 @@ var nodePrivateContracts = map[string]bool{
 // past what it keeps home, so a private record can never hold a lane.
 func IsNodePrivate(contract string) bool { return nodePrivateContracts[contract] }
 
+// NodePrivateStreams lists, sorted, the streams a node-private record can sit
+// on — the only streams a node has to sweep for copies authored by OTHER
+// nodes. Such copies exist: before the uplink kept private records home, an
+// ancestor received every one of them and, because their tombstones no longer
+// rise either, nothing else will ever remove them. DERIVED from
+// nodePrivateContracts, like partialUplinkStreams, so a private contract added
+// on another stream is swept from the day it is added.
+func NodePrivateStreams() []string {
+	set := map[string]bool{}
+	for contract := range nodePrivateContracts {
+		if stream := StreamFor(ClassOf(contract)); stream != "" {
+			set[stream] = true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for stream := range set {
+		out = append(out, stream)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // partialUplinkStreams are the streams whose uplink is a filtered SUBSET of
 // the child's stream, so the child offsets a parent receives on them are not
 // contiguous even when nothing was lost. DERIVED, like uplinkStreamSet: a

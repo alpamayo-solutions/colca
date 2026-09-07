@@ -58,6 +58,12 @@ type Pruner struct {
 	// and the Prune call — the exact window the store's in-batch cursor
 	// recheck (spec §5.2 [delta]) exists to close.
 	beforePrune func(stream string)
+	// evictFrom is where the foreign node-private sweep resumes per stream
+	// (evictForeignPrivateState): one bounded pass per cycle, wrapping to the
+	// LWM once a pass reaches the head. In memory only — a restart begins
+	// the sweep again from the LWM, which costs one more walk and nothing
+	// else, since every pass is idempotent.
+	evictFrom map[string]uint64
 }
 
 // NewPruner builds a pruner. ulid is the node's own ULID — it becomes level 4
@@ -66,8 +72,9 @@ type Pruner struct {
 func NewPruner(st *store.Store, eng *engine.Engine, cfg config.Retention, m *metrics.Metrics, ulid string) *Pruner {
 	return &Pruner{
 		st: st, eng: eng, cfg: cfg, m: m, ulid: ulid,
-		log: slog.Default().With("node", ulid, "comp", "retention"),
-		now: time.Now,
+		log:       slog.Default().With("node", ulid, "comp", "retention"),
+		now:       time.Now,
+		evictFrom: map[string]uint64{},
 		publish: func(topic string, payload []byte, ifKVOffset uint64) (bool, error) {
 			_, applied, err := eng.IngestRefresh(topic, payload, ifKVOffset)
 			return applied, err
@@ -107,14 +114,70 @@ func (p *Pruner) Run(stop <-chan struct{}) {
 
 // runOnce is one full cycle: any pending refresh first (crash recovery and
 // retry of previously failed appends), then one policy evaluation and at
-// most one Prune per stream. Per-stream failures are logged and never abort
-// the other streams.
+// most one Prune per stream, then the two reclamations the prefix policy
+// cannot express — definitions compaction and the sweep of node-private state
+// authored elsewhere. Per-stream failures are logged and never abort the
+// other streams.
 func (p *Pruner) runOnce() {
 	p.completePendingRefresh()
 	for _, stream := range streams {
 		p.pruneStream(stream)
 	}
 	p.compactDefinitions()
+	p.evictForeignPrivateState()
+}
+
+// evictForeignPrivateState removes state that stays on its author
+// (uns.IsNodePrivate) but was authored by ANOTHER node: the Edit replay
+// receipts every ancestor accumulated before the uplink kept them home. Their
+// only reader is the author's own replay, so at this node they are a
+// projection with zero readers — and since their tombstones stay home too now,
+// no record will ever retire them. Own-node private state is untouched: its
+// author caps it (exec_edit_receipt.go).
+//
+// Not a policy prune, deliberately: the doomed records are scattered through
+// the stream, not a prefix of it, and nothing about them is a function of age
+// or size. Shaped like compactDefinitions instead — a per-cycle reclamation
+// with no knobs — but bounded: the KV walk decodes nothing it keeps, and the
+// stream pass examines at most DefaultPolicyScanCap records per cycle,
+// resuming where it stopped and wrapping to the LWM once it reaches the head,
+// so a long stream is swept across cycles rather than held in one.
+func (p *Pruner) evictForeignPrivateState() {
+	removedKV, err := p.st.EvictKV(p.strandedHere)
+	if err != nil {
+		p.log.Error("evicting foreign node-private KV entries failed — they stay in every /kv listing until this clears", "err", err)
+	}
+	var removedRecords, bytes uint64
+	for _, stream := range uns.NodePrivateStreams() {
+		st, err := p.st.EvictRecords(stream, p.evictFrom[stream], store.DefaultPolicyScanCap, p.strandedHere)
+		if err != nil {
+			p.log.Error("evicting foreign node-private records failed — the sweep restarts next cycle",
+				"stream", stream, "err", err)
+			p.evictFrom[stream] = 0
+			continue
+		}
+		if st.Done {
+			p.evictFrom[stream] = 0
+		} else {
+			p.evictFrom[stream] = st.Resume
+		}
+		removedRecords += st.Removed
+		bytes += st.Bytes
+	}
+	if removedKV == 0 && removedRecords == 0 {
+		return
+	}
+	p.log.Info("evicted node-private state authored by other nodes",
+		"kv_entries", removedKV, "records", removedRecords, "bytes", bytes)
+}
+
+// strandedHere dooms a topic whose contract never leaves its author and whose
+// author is not this node. The same two questions the uplink asks before
+// offering a record (repl.leavesTheNode), turned around: what a child no
+// longer sends is what its parent no longer keeps.
+func (p *Pruner) strandedHere(topic string) bool {
+	parsed, err := uns.Parse(topic)
+	return err == nil && uns.IsNodePrivate(parsed.Contract) && parsed.NodeID != p.ulid
 }
 
 // compactDefinitions runs the definitions stream's own reclamation

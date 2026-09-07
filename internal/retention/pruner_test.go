@@ -880,3 +880,112 @@ func TestRunOnceCompactsTheDefinitionsStream(t *testing.T) {
 		t.Fatalf("the surviving record is not the latest: %s", recs[0].Payload)
 	}
 }
+
+// An Edit replay receipt stays on the node that executed the command
+// (uns.IsNodePrivate); before the uplink kept it home, every ancestor received
+// it, and since its tombstone no longer rises either, nothing will ever retire
+// the copy. One prune cycle removes such foreign copies — KV entry and stream
+// records alike, superseded versions and tombstones included — and leaves both
+// the node's OWN receipts (its replay reads them; the 1024 cap owns them) and
+// the child's ordinary state (a _Signal, which the parent genuinely holds).
+// Presence and absence are asserted through the same two queries, in this
+// test, so a broken query cannot pass as an empty one.
+func TestRunOnceEvictsForeignNodePrivateStateOnly(t *testing.T) {
+	st, eng := mustParts(t)
+	const child = "n-child"
+	receipt := func(node, op string) string {
+		return "colca/v1/_EditOperation/" + node + "/_colca/edit/operations/" + op
+	}
+	ownReceipt := receipt(nodeULID, "op-own")
+	foreignReceipt := receipt(child, "op-1") // upserted twice: the superseded version must go too
+	retiredReceipt := receipt(child, "op-2") // upserted then tombstoned: the tombstone must go too
+	foreignSignal := "colca/v1/_Signal/" + child + "/line1/temp"
+	ownSignal := "colca/v1/_Signal/" + nodeULID + "/line1/press"
+	entity := func(topic, path, node string, payload string) store.Record {
+		rec := store.Record{Topic: topic, TS: 1, KVPath: path, KVNode: node}
+		if payload == "" {
+			rec.Delete = true
+		} else {
+			rec.Payload = []byte(payload)
+		}
+		return rec
+	}
+	seed := []store.Record{
+		entity(ownReceipt, "_colca/edit/operations/op-own", nodeULID, `{"status":"succeeded"}`),
+		entity(foreignReceipt, "_colca/edit/operations/op-1", child, `{"status":"pending"}`),
+		entity(foreignSignal, "line1/temp", child, `{"id":"01SIG"}`),
+		entity(foreignReceipt, "_colca/edit/operations/op-1", child, `{"status":"succeeded"}`),
+		entity(retiredReceipt, "_colca/edit/operations/op-2", child, `{"status":"succeeded"}`),
+		entity(retiredReceipt, "_colca/edit/operations/op-2", child, ""),
+		entity(ownSignal, "line1/press", nodeULID, `{"id":"01SIG2"}`),
+	}
+	if _, _, err := st.Append("entities", seed); err != nil {
+		t.Fatal(err)
+	}
+	// keep_forever: the policy prune stays out of the picture (these records
+	// carry TS=1, which the 365-day default would otherwise age out), so
+	// whatever disappears below disappeared through the sweep alone.
+	ret := config.Retention{Streams: map[string]config.StreamRetention{"entities": {KeepForever: true}}}
+	p := newPruner(t, st, eng, ret)
+
+	kvTopics := func() map[string]int {
+		out := map[string]int{}
+		for _, e := range mustKVScan(t, st, "") {
+			out[e.Topic]++
+		}
+		return out
+	}
+	streamTopics := func() map[string]int {
+		recs, _, err := st.Read("entities", 1, 100, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]int{}
+		for _, r := range recs {
+			out[r.Topic]++
+		}
+		return out
+	}
+
+	// Presence: the seed is where both queries look.
+	if kv := kvTopics(); kv[foreignReceipt] != 1 || kv[ownReceipt] != 1 || kv[foreignSignal] != 1 || kv[retiredReceipt] != 0 {
+		t.Fatalf("seeded KV = %v, want the two live receipts and the foreign signal projected (the retired one tombstoned)", kv)
+	}
+	if recs := streamTopics(); recs[foreignReceipt] != 2 || recs[retiredReceipt] != 2 || recs[ownReceipt] != 1 || recs[foreignSignal] != 1 {
+		t.Fatalf("seeded entities = %v, want every seed record on the stream", recs)
+	}
+	bytesBefore := st.StreamBytes("entities")
+
+	p.runOnce()
+
+	kv := kvTopics()
+	if kv[foreignReceipt] != 0 {
+		t.Fatalf("foreign receipt %s still projected after a prune cycle: %v", foreignReceipt, kv)
+	}
+	if kv[ownReceipt] != 1 || kv[foreignSignal] != 1 || kv[ownSignal] != 1 {
+		t.Fatalf("the sweep took more than foreign private state: KV after = %v (want own receipt, foreign signal, own signal)", kv)
+	}
+	recs := streamTopics()
+	if recs[foreignReceipt] != 0 || recs[retiredReceipt] != 0 {
+		t.Fatalf("foreign receipt records survive on the entities stream: %v (want none, superseded versions and tombstones included)", recs)
+	}
+	if recs[ownReceipt] != 1 || recs[foreignSignal] != 1 || recs[ownSignal] != 1 {
+		t.Fatalf("the sweep removed records it must keep: entities after = %v", recs)
+	}
+	if st.LWM("entities") != 1 {
+		t.Fatalf("LWM moved to %d — eviction deletes scattered offsets and must leave the prefix mark alone", st.LWM("entities"))
+	}
+	if after := st.StreamBytes("entities"); after >= bytesBefore {
+		t.Fatalf("entities byte accounting %d -> %d: the four evicted records shed nothing", bytesBefore, after)
+	}
+
+	// Idempotent: a second cycle over a clean store changes nothing.
+	kvAfter, recsAfter := kv, recs
+	p.runOnce()
+	if got := kvTopics(); fmt.Sprint(got) != fmt.Sprint(kvAfter) {
+		t.Fatalf("a second cycle changed KV: %v -> %v", kvAfter, got)
+	}
+	if got := streamTopics(); fmt.Sprint(got) != fmt.Sprint(recsAfter) {
+		t.Fatalf("a second cycle changed the entities stream: %v -> %v", recsAfter, got)
+	}
+}
