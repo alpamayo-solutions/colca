@@ -90,7 +90,13 @@ func AnnotationSource(e *Entry) string {
 // annotation intent: a create always (the annotation will be the person's
 // own), an update or delete only of an annotation the person authored —
 // provable without any lookup, because the id is derived from
-// (type, source, time_start) and the source names the author.
+// (type, source, time_start, signal set) and the source names the author.
+// The signal set is re-derived from the intent's own `signal_ids`, so under
+// an `operate` grant an update must carry the set the annotation was
+// created with: a different set derives a different identity, and an
+// update naming one id while describing another is not provably the
+// person's own. `configure` coverage (the superset) is not routed through
+// here and may still repoint any annotation.
 func annotationOperable(intent editIntent, actor *Entry) bool {
 	if intent.Action == "create" {
 		return true
@@ -99,7 +105,7 @@ func annotationOperable(intent editIntent, actor *Entry) bool {
 		return false
 	}
 	source := AnnotationSource(actor)
-	own := deriveAnnotationID(intent.AnnotationTypeID, source, *intent.TimeStart)
+	own := deriveAnnotationID(intent.AnnotationTypeID, source, *intent.TimeStart, intent.SignalIDs)
 	return intent.Source == source && intent.AnnotationID == own
 }
 

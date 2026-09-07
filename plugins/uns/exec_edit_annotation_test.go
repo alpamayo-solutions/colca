@@ -2,8 +2,10 @@ package uns
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -17,13 +19,16 @@ import (
 // prevent.
 const annotationIDVectorPath = "../../contracts/src/colca_data_contracts/vectors/annotation_id.json"
 
+type annotationIDVectorCase struct {
+	AnnotationTypeID string   `json:"annotation_type_id"`
+	Source           string   `json:"source"`
+	TimeStart        float64  `json:"time_start"`
+	SignalIDs        []string `json:"signal_ids"`
+	ID               string   `json:"id"`
+}
+
 type annotationIDVectorFile struct {
-	Cases []struct {
-		AnnotationTypeID string  `json:"annotation_type_id"`
-		Source           string  `json:"source"`
-		TimeStart        float64 `json:"time_start"`
-		ID               string  `json:"id"`
-	} `json:"cases"`
+	Cases []annotationIDVectorCase `json:"cases"`
 }
 
 func loadAnnotationIDVectors(t *testing.T) annotationIDVectorFile {
@@ -48,10 +53,50 @@ func loadAnnotationIDVectors(t *testing.T) annotationIDVectorFile {
 // side's algorithm that stops agreeing with the other fails here before a
 // producer and a human ever derive different ids for the same annotation.
 func TestDeriveAnnotationIDMatchesTheGoldenVectors(t *testing.T) {
-	for _, c := range loadAnnotationIDVectors(t).Cases {
-		if got := deriveAnnotationID(c.AnnotationTypeID, c.Source, c.TimeStart); got != c.ID {
-			t.Errorf("deriveAnnotationID(%q, %q, %v) = %q, vectors want %q",
-				c.AnnotationTypeID, c.Source, c.TimeStart, got, c.ID)
+	cases := loadAnnotationIDVectors(t).Cases
+	// The file must exercise every shape of the signal set the rule
+	// distinguishes — none, one, several, and several in more than one
+	// order — or the sort inside the rule is never pinned.
+	sizes := map[int]bool{}
+	orders := map[string]map[string]bool{}
+	for _, c := range cases {
+		sizes[len(c.SignalIDs)] = true
+		set := append([]string(nil), c.SignalIDs...)
+		sort.Strings(set)
+		key := fmt.Sprintf("%s|%s|%v|%s", c.AnnotationTypeID, c.Source, c.TimeStart, strings.Join(set, ","))
+		if orders[key] == nil {
+			orders[key] = map[string]bool{}
+		}
+		orders[key][strings.Join(c.SignalIDs, ",")] = true
+	}
+	several := false
+	for size := range sizes {
+		if size > 1 {
+			several = true
+		}
+	}
+	if !sizes[0] || !sizes[1] || !several {
+		t.Fatalf("golden vectors must carry cases with zero, one and several signals, got sizes %v", sizes)
+	}
+	twoOrders := false
+	for _, o := range orders {
+		if len(o) > 1 {
+			twoOrders = true
+		}
+	}
+	if !twoOrders {
+		t.Fatal("no golden vector case gives the same signal set in two orders")
+	}
+	for _, c := range cases {
+		given := append([]string(nil), c.SignalIDs...)
+		if got := deriveAnnotationID(c.AnnotationTypeID, c.Source, c.TimeStart, c.SignalIDs); got != c.ID {
+			t.Errorf("deriveAnnotationID(%q, %q, %v, %q) = %q, vectors want %q",
+				c.AnnotationTypeID, c.Source, c.TimeStart, c.SignalIDs, got, c.ID)
+		}
+		// The derivation sorts a copy: the caller's slice must come back
+		// in the order it went in, since the composed record carries it.
+		if strings.Join(given, ",") != strings.Join(c.SignalIDs, ",") {
+			t.Errorf("deriveAnnotationID reordered the caller's signal_ids: %q -> %q", given, c.SignalIDs)
 		}
 	}
 }
@@ -61,18 +106,32 @@ func TestDeriveAnnotationIDMatchesTheGoldenVectors(t *testing.T) {
 // native copies are held to the same behavioral claims, not just the same
 // golden values.
 func TestDeriveAnnotationIDIsDeterministicAndDistinct(t *testing.T) {
-	baseline := deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0)
-	if deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0) != baseline {
+	one := []string{"sig-1"}
+	baseline := deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0, one)
+	if deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0, one) != baseline {
 		t.Fatal("deriveAnnotationID is not deterministic for identical inputs")
 	}
 	for name, got := range map[string]string{
-		"annotation_type_id": deriveAnnotationID("annotation-type-2", "dataops/part-cycle", 1710000000.0),
-		"source":             deriveAnnotationID("annotation-type-1", "dataops/other-producer", 1710000000.0),
-		"time_start":         deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000001.0),
+		"annotation_type_id": deriveAnnotationID("annotation-type-2", "dataops/part-cycle", 1710000000.0, one),
+		"source":             deriveAnnotationID("annotation-type-1", "dataops/other-producer", 1710000000.0, one),
+		"time_start":         deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000001.0, one),
+		// a different machine is a different annotation.
+		"signal_ids":       deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0, []string{"sig-2"}),
+		"signal_ids=none":  deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0, nil),
+		"signal_ids=wider": deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0, []string{"sig-1", "sig-2"}),
 	} {
 		if got == baseline {
 			t.Fatalf("varying %s alone did not change the derived id", name)
 		}
+	}
+	// The signals are a SET: order is not identity.
+	sortedIn := deriveAnnotationID("annotation-type-1", "user/u-franz", 1700000000.0, []string{"a", "b", "c"})
+	unsortedIn := deriveAnnotationID("annotation-type-1", "user/u-franz", 1700000000.0, []string{"c", "a", "b"})
+	if sortedIn != unsortedIn {
+		t.Fatalf("the same signal set in two orders derived two ids: %s vs %s", sortedIn, unsortedIn)
+	}
+	if nilSet, empty := deriveAnnotationID("t", "s", 1.0, nil), deriveAnnotationID("t", "s", 1.0, []string{}); nilSet != empty {
+		t.Fatalf("a nil and an empty signal set must be the same identity, got %s vs %s", nilSet, empty)
 	}
 }
 
@@ -97,7 +156,7 @@ func TestComposeAnnotationCreateDerivesTheDocumentedID(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("create composed %d records, want exactly 1", len(records))
 	}
-	wantID := deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0)
+	wantID := deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0, []string{"sig-1", "sig-2"})
 	wantTopic := "colca/v1/_Annotation/n-edge1/_colca/annotations/" + wantID
 	if records[0].Topic != wantTopic {
 		t.Fatalf("create topic = %q, want %q", records[0].Topic, wantTopic)
@@ -296,7 +355,7 @@ func TestEditAnnotationCommitsThroughTheEventDoorNeverKV(t *testing.T) {
 	if writes[0].Stream != "annotations" {
 		t.Fatalf("annotation write landed on stream %q, want %q", writes[0].Stream, "annotations")
 	}
-	wantID := deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0)
+	wantID := deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0, []string{"sig-1"})
 	parsed, err := Parse(writes[0].Topic)
 	if err != nil {
 		t.Fatal(err)

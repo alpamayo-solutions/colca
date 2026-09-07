@@ -189,11 +189,11 @@ func TestAnOperatorAnnotatesAndEditsOnlyTheirOwn(t *testing.T) {
 	if code, message, _, _ := exec.ExecuteWithWrites(operator, "_CmdEdit", "apply", annotate("op-c2", "create", own, "", []string{"sig-2"})); code != 409 {
 		t.Fatalf("operator create outside their zone = %d %q, want refused", code, message)
 	}
-	ownID := deriveAnnotationID("at-1", own, 1710000000.0)
+	ownID := deriveAnnotationID("at-1", own, 1710000000.0, []string{"sig-1"})
 	if code, message, _, _ := exec.ExecuteWithWrites(operator, "_CmdEdit", "apply", annotate("op-u-own", "update", own, ownID, []string{"sig-1"})); code != 200 {
 		t.Fatalf("operator updating their own annotation = %d %q", code, message)
 	}
-	othersID := deriveAnnotationID("at-1", AnnotationSource(&Entry{ULID: "kc-sub-anna", Kind: KindHuman}), 1710000000.0)
+	othersID := deriveAnnotationID("at-1", AnnotationSource(&Entry{ULID: "kc-sub-anna", Kind: KindHuman}), 1710000000.0, []string{"sig-1"})
 	if code, message, _, _ := exec.ExecuteWithWrites(operator, "_CmdEdit", "apply", annotate("op-d-other", "delete", own, othersID, []string{"sig-1"})); code != 409 {
 		t.Fatalf("operator deleting another author's annotation = %d %q, want refused", code, message)
 	}

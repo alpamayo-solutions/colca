@@ -19,7 +19,7 @@
 //
 // Id derivation is the contract's fact, not the command's (architecture
 // principle 2): colca_data_contracts.derive_annotation_id
-// (payload.py:365-380) is the one definition, and deriveAnnotationID below is
+// (payload.py) is the one definition, and deriveAnnotationID below is
 // the necessary Go-native duplicate a human-authored command needs (Go
 // cannot import Python, and plugins/uns is stdlib-only — arch_test.go — so it
 // cannot pull in a ULID library either). Both sides are pinned against the
@@ -37,6 +37,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 // composeAnnotation validates and composes the ONE `_Annotation` record a
@@ -73,7 +75,7 @@ func (w *EditExec) composeAnnotation(intent editIntent) (int, string, string, []
 		if intent.AnnotationID != "" {
 			return 409, "annotation_id_supplied_on_create: " + intent.AnnotationID, "conflict", nil
 		}
-		id = deriveAnnotationID(intent.AnnotationTypeID, intent.Source, *intent.TimeStart)
+		id = deriveAnnotationID(intent.AnnotationTypeID, intent.Source, *intent.TimeStart, intent.SignalIDs)
 	case "update", "delete":
 		if intent.AnnotationID == "" {
 			return 422, fmt.Sprintf("annotation: annotation_id is required for %s", intent.Action), "invalid", nil
@@ -194,16 +196,29 @@ func ulidFromBytes(id []byte) string {
 }
 
 // deriveAnnotationID is the Go-native copy of
-// colca_data_contracts.derive_annotation_id (payload.py:365-380): ULID-encode
-// the first 16 bytes of SHA-256(f"{annotation_type_id}|{source}|{time_start:.6f}").
+// colca_data_contracts.derive_annotation_id (payload.py): ULID-encode the
+// first 16 bytes of
+// SHA-256(f"{annotation_type_id}|{source}|{time_start:.6f}|{','.join(sorted(signal_ids))}").
 // Folding the producer's own idempotency into the identity itself is what
 // lets create, update (setting time_end) and delete of the same logical
 // annotation all be appends carrying the SAME id on the append-only
 // `annotations` stream (design D1/D6b) — a re-derivation here for a human
 // create intent must land on the exact same id a dataops producer would have
-// derived for the identical (type, source, time_start), or the two authors
-// (design D4) would not actually be one act.
-func deriveAnnotationID(annotationTypeID, source string, timeStart float64) string {
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%.6f", annotationTypeID, source, timeStart)))
+// derived for the identical (type, source, time_start, signal set), or the
+// two authors (design D4) would not actually be one act.
+//
+// The signal set is part of the identity (design §8): one
+// author opening two annotations of the same type at the same instant on two
+// different machines is two annotations, and before this rule the second
+// was refused as a collision with the first. The set is sorted on a copy —
+// the caller's order is not identity, and the intent's own slice is left as
+// it arrived so the composed record still carries the caller's order. No
+// signals contributes the empty string after the final `|`.
+func deriveAnnotationID(annotationTypeID, source string, timeStart float64, signalIDs []string) string {
+	sorted := append([]string(nil), signalIDs...)
+	sort.Strings(sorted)
+	digest := sha256.Sum256([]byte(fmt.Sprintf(
+		"%s|%s|%.6f|%s", annotationTypeID, source, timeStart, strings.Join(sorted, ","),
+	)))
 	return ulidFromBytes(digest[:16])
 }
