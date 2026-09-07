@@ -95,6 +95,22 @@ def test_mqtt_uses_v5_name_and_mount_without_tls_or_password():
     assert client.tls_calls == []
 
 
+def test_outgoing_queue_limit_is_set_before_connecting():
+    calls = []
+
+    class BoundedClient(_Client):
+        def max_queued_messages_set(self, limit):
+            calls.append(("queue", limit))
+
+        def connect(self, **kwargs):
+            calls.append(("connect", kwargs["host"]))
+            return super().connect(**kwargs)
+
+    with patch("colca_data_contracts.local_service.Client", BoundedClient):
+        connect_local_mqtt("connector", identity=_identity(), max_queued_messages=100)
+    assert calls == [("queue", 100), ("connect", "colca")]
+
+
 def _details(name="notifications", service_id="svc-1"):
     return ServiceDetails(
         id=service_id,

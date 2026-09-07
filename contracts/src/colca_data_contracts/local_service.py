@@ -177,6 +177,7 @@ def connect_local_mqtt(
     identity: Optional[LocalServiceIdentity] = None,
     publish_logs: bool = True,
     will: Optional[tuple[Topic, Payload]] = None,
+    max_queued_messages: int = 0,
 ) -> tuple[Client, LocalServiceIdentity]:
     """Connect to local Colca MQTT without credentials or client TLS.
 
@@ -198,6 +199,8 @@ def connect_local_mqtt(
         mount=mount,
     )
     client = Client(client_id=client_id or service_name, protocol=pahomqtt.MQTTv5)
+    if max_queued_messages:
+        client.max_queued_messages_set(max_queued_messages)
     client.node_id = resolved.node_id
     client.username_pw_set(service_name)
     if publish_logs:
