@@ -437,3 +437,11 @@ func resourceBody(r Resource) map[string]any {
 		"attributes":  r.Attributes,
 	}
 }
+
+// truncate bounds a Keycloak response body quoted into an error.
+func truncate(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "…"
+}

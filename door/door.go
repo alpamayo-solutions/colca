@@ -180,14 +180,25 @@ func (c *Client) FetchWithOptions(ctx context.Context, options FetchOptions) (Pa
 	return page, nil
 }
 
-// KV returns retained entries visible below prefix.
-func (c *Client) KV(ctx context.Context, prefix string) ([]KVEntry, error) {
+// KV returns retained entries visible below prefix, narrowed to the named uns
+// contracts when any are given (none means every contract, as the door does).
+//
+// It follows the door's paging to the end and returns entries only for a
+// listing it read completely: a page that cannot be read fails the whole call,
+// and a caller never sees a short listing dressed as a small one. That is
+// load-bearing for a consumer that converges on absence — colca-grantsync
+// retires the Keycloak resource of any element the listing does not hold, and
+// Keycloak does not restore that resource's permissions when it comes back.
+func (c *Client) KV(ctx context.Context, prefix string, contracts ...string) ([]KVEntry, error) {
 	var entries []KVEntry
 	after := ""
 	for {
 		q := url.Values{"max": {"10000"}}
 		if prefix != "" {
 			q.Set("prefix", prefix)
+		}
+		for _, contract := range contracts {
+			q.Add("contract", contract)
 		}
 		if after != "" {
 			q.Set("after", after)

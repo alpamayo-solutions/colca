@@ -17,12 +17,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/alpamayo-solutions/colca/door"
-	"time"
-
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -31,13 +28,13 @@ const (
 	groupContract   = "_Group"
 )
 
-// KVEntry is one row of a node's /kv projection.
-type KVEntry struct {
-	Path    string          `json:"path"`
-	NodeID  string          `json:"node_id"`
-	Topic   string          `json:"topic"`
-	Payload json.RawMessage `json:"payload"`
-}
+// treeContracts is every contract ParseKV consumes, and therefore everything
+// Tree asks the node for. The filter is not an optimisation: a node's KV also
+// holds every retained metric, catalogue and Edit operation it has ever
+// seen, and the door pages that listing. Asking for the whole projection and
+// reading one page of it is how a hub with a few thousand entries once showed
+// this service eight of its thirty-one elements — and it retired the rest.
+var treeContracts = []string{elementContract, groupContract}
 
 // HeldGroup is a _Group definition the tree already holds, with the node that
 // authored it. The author is the load-bearing part: the service converges only
@@ -52,6 +49,12 @@ type HeldGroup struct {
 // TreeView is what the root node currently holds, in the two shapes this
 // service needs: which elements exist (so they can be registered as authz
 // resources) and which groups are already defined (so it knows what to change).
+//
+// A TreeView only ever comes from a COMPLETE listing. Tree returns one after
+// the door's paging has run to its end and not before; a read that fails on
+// any page yields an error and no view at all. That is the evidence the
+// resource plan stands on when it retires an element: absent from a listing
+// that was read whole, not merely absent from the part of it that arrived.
 type TreeView struct {
 	Elements map[string]string // element id → path at the root
 	Groups   map[string]HeldGroup
@@ -77,7 +80,7 @@ type group struct {
 // replicate upward with the mount inserted at each hop, so at the root every
 // element already carries its full path — which is exactly the display name an
 // administrator needs to recognise it by.
-func ParseKV(entries []KVEntry) TreeView {
+func ParseKV(entries []door.KVEntry) TreeView {
 	view := TreeView{Elements: map[string]string{}, Groups: map[string]HeldGroup{}}
 	for _, entry := range entries {
 		p, err := uns.Parse(entry.Topic)
@@ -110,10 +113,9 @@ func ParseKV(entries []KVEntry) TreeView {
 
 // NodeClient talks to one colca node.
 //
-// Tree is grantsync's own — it parses the KV projection into a TreeView. Every
-// generic call (publish, ulid) comes from the shared door client, so there is
-// one implementation of the node's HTTP contract rather than a copy per
-// service.
+// Every call goes through the shared door client, so there is one
+// implementation of the node's HTTP contract — headers, status rule, paging —
+// rather than a copy per service. Tree adds only the parse into a TreeView.
 type NodeClient struct {
 	BaseURL string
 	Token   string
@@ -127,48 +129,19 @@ func (c *NodeClient) door() *door.Client {
 	}
 }
 
-func (c *NodeClient) client() *http.Client {
-	if c.HTTP != nil {
-		return c.HTTP
-	}
-	return &http.Client{Timeout: 30 * time.Second}
-}
-
-// Tree reads the node's KV projection.
+// Tree reads the node's KV projection — only the contracts this service
+// consumes, and every page of them.
 //
-// Every non-200 is an error, and callers must treat it as one: a read that did
-// not succeed must never be mistaken for a tree with nothing in it.
+// Every failure is an error, and callers must treat it as one: a read that did
+// not succeed, or did not finish, must never be mistaken for a tree with less
+// in it. The door client enforces the second half — it returns entries only
+// once the listing's last page has answered with an empty `next`.
 func (c *NodeClient) Tree(ctx context.Context) (TreeView, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/kv", nil)
-	if err != nil {
-		return TreeView{}, err
-	}
-	if c.Token != "" {
-		req.Header.Set("X-Colca-Token", c.Token)
-	}
-	if c.Service != "" {
-		req.Header.Set("X-Colca-Service", c.Service)
-	}
-	resp, err := c.client().Do(req)
+	entries, err := c.door().KV(ctx, "", treeContracts...)
 	if err != nil {
 		return TreeView{}, fmt.Errorf("reading %s/kv: %w", c.BaseURL, err)
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return TreeView{}, fmt.Errorf("reading %s/kv: %w", c.BaseURL, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return TreeView{}, fmt.Errorf("reading %s/kv: HTTP %d: %s",
-			c.BaseURL, resp.StatusCode, truncate(body, 300))
-	}
-	var payload struct {
-		Entries []KVEntry `json:"entries"`
-	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return TreeView{}, fmt.Errorf("reading %s/kv: %w", c.BaseURL, err)
-	}
-	return ParseKV(payload.Entries), nil
+	return ParseKV(entries), nil
 }
 
 // ULID asks the node who it is, so the service does not have to be told.
@@ -179,11 +152,4 @@ func (c *NodeClient) ULID(ctx context.Context) (string, error) {
 // Publish posts one record through the configured node door.
 func (c *NodeClient) Publish(ctx context.Context, topic string, payload any) error {
 	return c.door().Publish(ctx, topic, payload)
-}
-
-func truncate(b []byte, n int) string {
-	if len(b) <= n {
-		return string(b)
-	}
-	return string(b[:n]) + "…"
 }

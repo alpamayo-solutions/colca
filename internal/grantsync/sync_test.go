@@ -114,6 +114,63 @@ func TestATreeFailureWritesNothingAtAll(t *testing.T) {
 	}
 }
 
+func TestAShortTreeReadRetiresNoResourceAndWritesNothing(t *testing.T) {
+	// The defect this pins, seen live on a hub: the door pages /kv, the first
+	// page came back healthy, and everything sorting after it read as retired.
+	// Its Keycloak resource was deleted — and with it every permission on that
+	// subtree, which Keycloak does not restore when the resource is registered
+	// again. A listing that stopped short must be a failed read, not a smaller
+	// tree: no resource retired, no definition written, the cycle skipped.
+	elements := elementsAt("a", "b", "c")
+	deleted := &deletions{}
+	kc := fakeRealm(t, realmFixture{
+		Groups:   []fakeGroup{{ID: "g1", Name: "ops"}},
+		Policies: []fakePolicy{{ID: "p1", Name: "group:ops", GroupUUIDs: []string{"g1"}}},
+		Permissions: []fakePerm{{
+			ID: "perm1", Name: "ops@01HA", PolicyIDs: []string{"p1"},
+			Elements: []string{"01HA"}, ScopeNames: []string{"read"},
+		}},
+		Resources: `[
+			{"_id":"r-a","name":"01HA","displayName":"a","type":"colca:element","attributes":{"colca.managed-by":["dev-hub"]}},
+			{"_id":"r-b","name":"01HB","displayName":"b","type":"colca:element","attributes":{"colca.managed-by":["dev-hub"]}},
+			{"_id":"r-c","name":"01HC","displayName":"c","type":"colca:element","attributes":{"colca.managed-by":["dev-hub"]}},
+			{"_id":"r-gone","name":"01HGONE","displayName":"gone","type":"colca:element","attributes":{"colca.managed-by":["dev-hub"]}}
+		]`,
+		Deleted: deleted,
+	})
+
+	// The denominator first: read whole, the one element that is genuinely
+	// gone IS retired and the group IS defined. Without this, the assertions
+	// below would pass against a recorder that records nothing.
+	whole := servePaged(t, elements, 2, 0)
+	if _, err := syncer(whole.client, kc).Once(context.Background()); err != nil {
+		t.Fatalf("complete read: %v", err)
+	}
+	if got := deleted.all(); len(got) != 1 || got[0] != "r-gone" {
+		t.Fatalf("a complete listing should retire exactly the element it lacks, retired %v", got)
+	}
+	if rows := whole.seen.all(); len(rows) != 1 {
+		t.Fatalf("a complete read should define the group once, published %v", rows)
+	}
+
+	// Now the same tree with its second page unreadable. 01HC sorts past the
+	// break and is absent from what arrived.
+	short := servePaged(t, elements, 2, 2)
+	_, err := syncer(short.client, kc).Once(context.Background())
+	if err == nil {
+		t.Fatal("a listing that failed on page 2 reported success")
+	}
+	if !strings.Contains(err.Error(), "tree read failed") {
+		t.Fatalf("the cycle should say the tree read is what failed, said: %v", err)
+	}
+	if got := deleted.all(); len(got) != 1 {
+		t.Fatalf("a short read retired %v — permanent grant loss for every element past the break", got[1:])
+	}
+	if rows := short.seen.all(); len(rows) != 0 {
+		t.Fatalf("published %v after a short read", rows)
+	}
+}
+
 func TestAFullCyclePublishesTheDefinition(t *testing.T) {
 	node, seen := fakeNode(t, treeWithOneElement, http.StatusOK)
 	report, err := syncer(node, grantingRealm(t)).Once(context.Background())

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -25,6 +26,26 @@ type realmFixture struct {
 	Resources   string // raw JSON for the resource list
 	TokenStatus int    // non-200 to fail the token request
 	FailPath    string // any request path containing this substring 500s
+	// Deleted, when set, records the id of every resource the service retires.
+	Deleted *deletions
+}
+
+// deletions records the resource ids a fake realm was asked to delete.
+type deletions struct {
+	mu  sync.Mutex
+	ids []string
+}
+
+func (d *deletions) add(id string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.ids = append(d.ids, id)
+}
+
+func (d *deletions) all() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.ids...)
 }
 
 type fakeGroup struct {
@@ -124,6 +145,9 @@ func fakeRealm(t *testing.T, f realmFixture) *Keycloak {
 	})
 	mux.HandleFunc(base+"/resource/", func(w http.ResponseWriter, r *http.Request) {
 		// PUT (relabel) and DELETE (retire) of one resource.
+		if r.Method == http.MethodDelete && f.Deleted != nil {
+			f.Deleted.add(strings.TrimPrefix(r.URL.Path, base+"/resource/"))
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc(base+"/policy/group", func(w http.ResponseWriter, r *http.Request) {
