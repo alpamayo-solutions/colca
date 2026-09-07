@@ -36,7 +36,9 @@ def test_annotation_topic_is_stable_contract_name():
 
 def test_annotation_encode_decode_round_trip():
     annotation = AnnotationPayload(
-        annotation_id=derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0),
+        annotation_id=derive_annotation_id(
+            "annotation-type-1", "dataops/part-cycle", 1710000000.0, ["signal-1", "signal-2"],
+        ),
         annotation_type_id="annotation-type-1",
         time_start=1710000000.0,
         time_end=1710000030.0,
@@ -64,7 +66,7 @@ def test_annotation_delete_is_an_append_carrying_a_marker():
     """A delete is a record with `deleted=True`, not an absence — it round
     trips through encode/decode like any other field, and it carries the
     SAME id as the annotation it deletes."""
-    created_id = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0)
+    created_id = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["signal-1"])
     tombstone = AnnotationPayload(
         annotation_id=created_id,
         annotation_type_id="annotation-type-1",
@@ -81,18 +83,40 @@ def test_annotation_delete_is_an_append_carrying_a_marker():
 
 
 def test_derive_annotation_id_is_deterministic():
-    first = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0)
-    second = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0)
+    first = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["sig-1"])
+    second = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["sig-1"])
 
     assert first == second
 
 
 def test_derive_annotation_id_is_distinct_for_distinct_inputs():
-    baseline = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0)
+    baseline = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["sig-1"])
 
-    assert derive_annotation_id("annotation-type-2", "dataops/part-cycle", 1710000000.0) != baseline
-    assert derive_annotation_id("annotation-type-1", "dataops/other-producer", 1710000000.0) != baseline
-    assert derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000001.0) != baseline
+    assert derive_annotation_id("annotation-type-2", "dataops/part-cycle", 1710000000.0, ["sig-1"]) != baseline
+    assert derive_annotation_id("annotation-type-1", "dataops/other-producer", 1710000000.0, ["sig-1"]) != baseline
+    assert derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000001.0, ["sig-1"]) != baseline
+    # the same author, type and instant on a different
+    # machine is a different annotation, not a collision.
+    assert derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["sig-2"]) != baseline
+    assert derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, []) != baseline
+    assert (
+        derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["sig-1", "sig-2"])
+        != baseline
+    )
+
+
+def test_derive_annotation_id_ignores_the_order_of_the_signal_set():
+    """The signals are a SET: the caller's order is not part of the identity,
+    so an update that lists the same signals differently still lands on the
+    record it means to replace. Sorted input, unsorted input, any input --
+    one id. The denominator is the distinct set right below it."""
+    sorted_input = derive_annotation_id("annotation-type-1", "user/u-franz", 1700000000.0, ["a", "b", "c"])
+    unsorted_input = derive_annotation_id("annotation-type-1", "user/u-franz", 1700000000.0, ["c", "a", "b"])
+    as_tuple = derive_annotation_id("annotation-type-1", "user/u-franz", 1700000000.0, ("b", "c", "a"))
+    different_set = derive_annotation_id("annotation-type-1", "user/u-franz", 1700000000.0, ["a", "b"])
+
+    assert sorted_input == unsorted_input == as_tuple
+    assert different_set != sorted_input
 
 
 def test_derive_annotation_id_rounds_the_fractional_second_boundary():
@@ -100,16 +124,18 @@ def test_derive_annotation_id_rounds_the_fractional_second_boundary():
     that round to the same microsecond string collide by design (identity
     is idempotency, not raw float equality) while a genuinely distinct
     microsecond does not."""
-    base = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0000001)
-    same_rounding = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0000002)
-    distinct = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.000001)
+    base = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0000001, ["sig-1"])
+    same_rounding = derive_annotation_id(
+        "annotation-type-1", "dataops/part-cycle", 1710000000.0000002, ["sig-1"],
+    )
+    distinct = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.000001, ["sig-1"])
 
     assert base == same_rounding
     assert base != distinct
 
 
 def test_derive_annotation_id_is_a_valid_ulid():
-    identifier = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0)
+    identifier = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["sig-1"])
 
     assert isinstance(identifier, str)
     assert len(identifier) == 26
@@ -129,10 +155,25 @@ def test_derive_annotation_id_matches_the_golden_vectors():
     derive different ids for the same annotation.
     """
     vectors = json.loads(ANNOTATION_ID_VECTORS_PATH.read_text())
-    assert vectors["cases"], "golden annotation_id vectors carry no cases"
-    for case in vectors["cases"]:
-        got = derive_annotation_id(case["annotation_type_id"], case["source"], case["time_start"])
+    cases = vectors["cases"]
+    assert cases, "golden annotation_id vectors carry no cases"
+    # The file must exercise every shape of the signal set the rule
+    # distinguishes: none, one, several -- and several in more than one
+    # order, or the sort inside the rule is never pinned.
+    sizes = {len(case["signal_ids"]) for case in cases}
+    assert 0 in sizes and 1 in sizes and any(size > 1 for size in sizes), sizes
+    by_set = {}
+    for case in cases:
+        key = (case["annotation_type_id"], case["source"], case["time_start"], frozenset(case["signal_ids"]))
+        by_set.setdefault(key, set()).add(tuple(case["signal_ids"]))
+    assert any(len(orders) > 1 for orders in by_set.values()), (
+        "no vector case gives the same signal set in two orders"
+    )
+    for case in cases:
+        got = derive_annotation_id(
+            case["annotation_type_id"], case["source"], case["time_start"], case["signal_ids"],
+        )
         assert got == case["id"], (
             f"derive_annotation_id({case['annotation_type_id']!r}, {case['source']!r}, "
-            f"{case['time_start']!r}) = {got!r}, vectors want {case['id']!r}"
+            f"{case['time_start']!r}, {case['signal_ids']!r}) = {got!r}, vectors want {case['id']!r}"
         )

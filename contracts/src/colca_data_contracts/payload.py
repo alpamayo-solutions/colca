@@ -2,7 +2,7 @@ import json
 import hashlib
 import datetime
 import ulid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 
 from franzmq.data_contracts.base import (
@@ -451,20 +451,30 @@ class NotificationDispatched(Payload):
     terminal: bool = True
 
 
-def derive_annotation_id(annotation_type_id: str, source: str, time_start: float) -> str:
+def derive_annotation_id(
+    annotation_type_id: str, source: str, time_start: float, signal_ids: Iterable[str],
+) -> str:
     """Deterministic ``Annotation.annotation_id`` (design §8).
 
     ULID-encodes the first 16 bytes of
-    ``SHA-256(f"{annotation_type_id}|{source}|{time_start:.6f}")``. Folding
-    the ``ensure_annotation`` idempotency into the identity itself is what
-    lets create, update (e.g. setting ``time_end``), and delete of the same
-    logical annotation all be appends carrying the SAME id on the append-only
-    ``annotations`` stream — a re-run producer naturally overwrites its own
-    prior record instead of duplicating it, and consumers apply last-write-
-    wins per id in stream order.
+    ``SHA-256(f"{annotation_type_id}|{source}|{time_start:.6f}|{','.join(sorted(signal_ids))}")``.
+    Folding the ``ensure_annotation`` idempotency into the identity itself
+    is what lets create, update (e.g. setting ``time_end``), and delete of the
+    same logical annotation all be appends carrying the SAME id on the
+    append-only ``annotations`` stream — a re-run producer naturally
+    overwrites its own prior record instead of duplicating it, and consumers
+    apply last-write-wins per id in stream order.
+
+    The signals the annotation is about are part of its identity (annotation-cutover design §8): one author opening two
+    annotations of the same type at the same instant on two different
+    machines is two annotations, not one, so the second must not collide
+    with the first. The set is sorted before hashing, so the caller's order
+    never changes the id; an annotation about no signal contributes the
+    empty string.
     """
+    signal_set = ",".join(sorted(signal_ids))
     digest = hashlib.sha256(
-        f"{annotation_type_id}|{source}|{time_start:.6f}".encode("utf-8")
+        f"{annotation_type_id}|{source}|{time_start:.6f}|{signal_set}".encode("utf-8")
     ).digest()
     return str(ulid.from_bytes(digest[:16]))
 

@@ -1,62 +1,152 @@
 {
-  "_comment": "Golden `derive_annotation_id` vectors (annotation-cutover design). `derive_annotation_id` (colca_data_contracts.payload, this package) is the one owner of the id-derivation rule: ULID-encode the first 16 bytes of SHA-256(f\"{annotation_type_id}|{source}|{time_start:.6f}\"). plugins/uns/exec_edit_annotation.go needs the identical rule natively in Go (a human-authored annotation command derives its id at the node, never in the API, and plugins/uns is stdlib-only so it cannot import a ULID library or this package). Necessary duplication (architecture principle 2, tier 2), pinned by one checked-in dataset both native copies answer to: this package's tests/test_annotation_payload.py, and colca's plugins/uns/exec_edit_annotation_test.go. A change to either implementation that stops matching these vectors fails on both sides before it ever reaches a producer and a human deriving different ids for the same annotation. `source` values follow whichever author actually stamps them in production: a dataops producer's broker-native AnnotationOutput uses `dataops/{producer.name}` (dataops.outputs.bind_annotation_outputs); a person authoring through the Edit `annotation` intent gets a server-stamped `user/<sub>` and a machine identity gets `service/<client-id>` or `service/<service-name>`. The `api/human:u-franz` row predates the `user/<sub>` convention and is kept only because it is a real pinned regression vector (source is opaque to the Go executor -- unparsed, just hashed); `user/u-franz` alongside it at the same type/time_start is the row that matches what production emits today for a human author.",
+  "_comment": "Golden `derive_annotation_id` vectors (annotation-cutover design). `derive_annotation_id` (colca_data_contracts.payload, this package) is the one owner of the id-derivation rule: ULID-encode the first 16 bytes of SHA-256(f\"{annotation_type_id}|{source}|{time_start:.6f}|{','.join(sorted(signal_ids))}\"). The signal set is part of the identity since 2026-09-07 (design §8): the `signal_ids` of every case are hashed sorted, so the two rows that carry the same set in a different order must derive the SAME id, a case with no signals contributes the empty string after the final `|`, and two rows that differ only in their signal set must derive DIFFERENT ids — that last pair is the 409 collision this rule exists to end. plugins/uns/exec_edit_annotation.go needs the identical rule natively in Go (a human-authored annotation command derives its id at the node, never in the API, and plugins/uns is stdlib-only so it cannot import a ULID library or this package). Necessary duplication (architecture principle 2, tier 2), pinned by one checked-in dataset both native copies answer to: this package's tests/test_annotation_payload.py, and colca's plugins/uns/exec_edit_annotation_test.go. A change to either implementation that stops matching these vectors fails on both sides before it ever reaches a producer and a human deriving different ids for the same annotation. `source` values follow whichever author actually stamps them in production: a dataops producer's broker-native AnnotationOutput uses `dataops/{producer.name}` (dataops.outputs.bind_annotation_outputs); a person authoring through the Edit `annotation` intent gets a server-stamped `user/<sub>` and a machine identity gets `service/<client-id>` or `service/<service-name>`. The `api/human:u-franz` row predates the `user/<sub>` convention and is kept only because it is a real pinned regression vector (source is opaque to the Go executor -- unparsed, just hashed); `user/u-franz` alongside it at the same type/time_start is the row that matches what production emits today for a human author.",
   "cases": [
     {
       "annotation_type_id": "annotation-type-1",
       "source": "dataops/part-cycle",
       "time_start": 1710000000.0,
-      "id": "1P9WC73RZ1S0QREW4AJSBN8WNG"
+      "signal_ids": [],
+      "id": "6WPPCKNR2ZAQGRBFM1FERNJPMJ"
     },
     {
       "annotation_type_id": "annotation-type-2",
       "source": "dataops/part-cycle",
       "time_start": 1710000000.0,
-      "id": "3AC793FBCV885DJ306ZPR3R2ZP"
+      "signal_ids": [],
+      "id": "7QHDD7KPFPY7RD11PSMSC2TY1E"
     },
     {
       "annotation_type_id": "annotation-type-1",
       "source": "dataops/other-producer",
       "time_start": 1710000000.0,
-      "id": "5F6NCK0N85K9M3F2JTB9CFX9Q7"
+      "signal_ids": [],
+      "id": "5YF9P4VJ7FT9MBZD3RRD9Q5GE5"
     },
     {
       "annotation_type_id": "annotation-type-1",
       "source": "dataops/part-cycle",
       "time_start": 1710000001.0,
-      "id": "4T1ETS1R0GEXH1YTJW4XNGNKGQ"
+      "signal_ids": [],
+      "id": "2Q4TRRV2CZRAW696HHHATK4DB9"
     },
     {
       "annotation_type_id": "annotation-type-1",
       "source": "api/human:u-franz",
       "time_start": 1700000000.123456,
-      "id": "1JKZC78SRQKAJKVJYP8F5851MV"
+      "signal_ids": [],
+      "id": "2HY5RB8HSZYRK247HQN867X8DW"
     },
     {
       "annotation_type_id": "annotation-type-1",
       "source": "user/u-franz",
       "time_start": 1700000000.123456,
-      "id": "1ZXPV4PS78FE17E7XP3V1VP6Y6"
+      "signal_ids": [],
+      "id": "24AYC6TWB815YF539MVDJZZF6E"
     },
     {
       "annotation_type_id": "annotation-type-1",
       "source": "dataops/part-cycle",
       "time_start": 0.0,
-      "id": "2B7SX1EV8H7CXJJPPME7MS72N6"
+      "signal_ids": [],
+      "id": "4H24KQ9HAQ3E4YWTCCXX4CWNA6"
     },
     {
       "annotation_type_id": "annotation-type-1",
       "source": "dataops/part-cycle",
       "time_start": 1735689599.999999,
-      "id": "43ZAA8S2XMJCWYCEJG0TEPQY96"
+      "signal_ids": [],
+      "id": "1NE9ZV0WS5JTAJYRZ9PVKM7D3S"
     },
     {
-      "annotation_type_id": "annotation-type-unicode-\u00fc\u00e9",
+      "annotation_type_id": "annotation-type-unicode-üé",
       "source": "dataops/producer",
       "time_start": 123456.789,
-      "id": "4KQT36W8PM35C46Q46NPJC6J1F"
+      "signal_ids": [],
+      "id": "0876NJNJYE4K3YFEC3M26XPBHR"
+    },
+    {
+      "annotation_type_id": "annotation-type-1",
+      "source": "dataops/part-cycle",
+      "time_start": 1710000000.0,
+      "signal_ids": [
+        "sig-1"
+      ],
+      "id": "1G8CZWNNT3P42GFGKM36YVJ7HX"
+    },
+    {
+      "annotation_type_id": "annotation-type-1",
+      "source": "dataops/part-cycle",
+      "time_start": 1710000000.0,
+      "signal_ids": [
+        "sig-2"
+      ],
+      "_note": "same triple as the sig-1 row above; must not collide with it",
+      "id": "7TPFGABNM317C5PGKKKXY4JTQ5"
+    },
+    {
+      "annotation_type_id": "annotation-type-1",
+      "source": "api/human:u-franz",
+      "time_start": 1700000000.123456,
+      "signal_ids": [
+        "sig-1"
+      ],
+      "id": "5SCEGT7XW6GVHWV0Z4H653768F"
+    },
+    {
+      "annotation_type_id": "annotation-type-1",
+      "source": "dataops/other-producer",
+      "time_start": 1710000000.0,
+      "signal_ids": [
+        "sig-1"
+      ],
+      "id": "2PFZX768E04M4YBFQWY0KGXWK1"
+    },
+    {
+      "annotation_type_id": "annotation-type-1",
+      "source": "user/u-franz",
+      "time_start": 1700000000.123456,
+      "signal_ids": [
+        "01J0000000000000000000SIGA",
+        "01J0000000000000000000SIGB"
+      ],
+      "id": "308ZDQ6TXDC9NR158WKRQA83P0"
+    },
+    {
+      "annotation_type_id": "annotation-type-1",
+      "source": "user/u-franz",
+      "time_start": 1700000000.123456,
+      "signal_ids": [
+        "01J0000000000000000000SIGB",
+        "01J0000000000000000000SIGA"
+      ],
+      "_note": "same set as the row above in a different order; identical id",
+      "id": "308ZDQ6TXDC9NR158WKRQA83P0"
+    },
+    {
+      "annotation_type_id": "annotation-type-2",
+      "source": "service/erp-bridge",
+      "time_start": 1710000000.0,
+      "signal_ids": [
+        "01J0000000000000000000SIGC",
+        "01J0000000000000000000SIGA",
+        "01J0000000000000000000SIGB"
+      ],
+      "id": "2VK2FS4Z5PYJ2VTJ3H1VDQPVJB"
+    },
+    {
+      "annotation_type_id": "annotation-type-2",
+      "source": "service/erp-bridge",
+      "time_start": 1710000000.0,
+      "signal_ids": [
+        "01J0000000000000000000SIGA",
+        "01J0000000000000000000SIGB",
+        "01J0000000000000000000SIGC"
+      ],
+      "_note": "same set as the row above, sorted; identical id",
+      "id": "2VK2FS4Z5PYJ2VTJ3H1VDQPVJB"
     }
   ],
-  "_sources_comment": "Golden `source` vectors per identity KIND (node-side command authorization design): the `source` half of a derived annotation id names the kind of identity that authored it. The rule has two native owners \u2014 the API's annotation_source (stamps it on every intent) and plugins/uns AnnotationSource (re-derives it at the executor to prove authorship under an operate grant) \u2014 and both must answer these cases: a person (JWT or an API key on that person) -> user/<sub>; a Keycloak service account (preferred_username starts with service-account-) -> service/<client-id>; an mTLS edge.Service -> service/<service-name> (api only: a service is never the Edit executor's actor).",
+  "_sources_comment": "Golden `source` vectors per identity KIND (node-side command authorization design): the `source` half of a derived annotation id names the kind of identity that authored it. The rule has two native owners — the API's annotation_source (stamps it on every intent) and plugins/uns AnnotationSource (re-derives it at the executor to prove authorship under an operate grant) — and both must answer these cases: a person (JWT or an API key on that person) -> user/<sub>; a Keycloak service account (preferred_username starts with service-account-) -> service/<client-id>; an mTLS edge.Service -> service/<service-name> (api only: a service is never the Edit executor's actor).",
   "sources": [
     {
       "kind": "person",
