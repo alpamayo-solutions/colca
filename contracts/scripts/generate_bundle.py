@@ -28,6 +28,7 @@ from dataclasses import MISSING, fields, is_dataclass
 import colca_data_contracts  # noqa: F401  (import populates the registry)
 from franzmq.data_contracts import PAYLOAD_CLASSES
 
+from colca_data_contracts.payload import Pattern
 from colca_data_contracts.routing import CLASS_TABLE
 from franzmq.data_contracts.base import Ack, Cmd
 
@@ -93,10 +94,13 @@ NOT_ON_THE_WIRE: dict[str, str] = {
     ),
 }
 
-# The JSON-Schema keyword subset the loader enforces (design §4.1).
+# The JSON-Schema keyword subset the loader enforces (design §4.1; `pattern`
+# and `maxLength` admitted by the rule — a ULID is 26 characters
+# of one alphabet, and neither `minLength` nor a type can say so).
 ALLOWED_KEYWORDS = {
     "type", "properties", "required", "enum", "items",
-    "minLength", "minimum", "maximum", "minItems", "additionalProperties",
+    "minLength", "maxLength", "pattern", "minimum", "maximum", "minItems",
+    "additionalProperties",
 }
 
 # These nested value objects are security/interpretation boundaries rather
@@ -120,6 +124,17 @@ STRICT_NESTED_DATACLASSES = {
 def _schema_for_type(t: object, *, required: bool) -> dict:
     origin = typing.get_origin(t)
     args = typing.get_args(t)
+
+    # Annotated[str, Pattern(...)] — the one place a wire-level string
+    # constraint is declared (payload.py `ULID`). The pattern subsumes any
+    # non-empty check, so `minLength` is dropped where one applies.
+    if origin is typing.Annotated:
+        inner = _schema_for_type(args[0], required=required)
+        for meta in args[1:]:
+            if isinstance(meta, Pattern):
+                inner["pattern"] = meta.regex
+                inner.pop("minLength", None)
+        return inner
 
     # Optional[X] / X | None → nullable schema of X
     if origin is typing.Union or str(origin) == "types.UnionType":
@@ -161,7 +176,7 @@ def _schema_for_type(t: object, *, required: bool) -> dict:
 
 
 def _schema_for_dataclass(cls: type, *, required_extra: list[str], required_drop: list[str]) -> dict:
-    hints = typing.get_type_hints(cls)
+    hints = typing.get_type_hints(cls, include_extras=True)  # keep Annotated[...] metadata
     props: dict = {}
     required: list[str] = []
     for f in fields(cls):

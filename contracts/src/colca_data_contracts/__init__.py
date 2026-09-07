@@ -42,6 +42,9 @@ from colca_data_contracts.topics import (  # noqa: E402
 )
 
 from colca_data_contracts.payload import (
+    Pattern,
+    ULID,
+    ULID_PATTERN,
     ServiceType,
     AuditSource,
     AuditAction,
@@ -146,6 +149,10 @@ __all__ = [
     "node_id",
     "node_topic",
     "TOPICS_CARRY_NODE_ID",
+    # Wire-level string constraints (schema-bundle design §4.1)
+    "Pattern",
+    "ULID",
+    "ULID_PATTERN",
     # Extended base types
     "ServiceType",
     "AuditSource",

@@ -154,9 +154,13 @@ def test_subset_lint_only_allowed_keywords():
         assert isinstance(entry["tombstone"], bool), ident
 
 
+#: A syntactically valid ULID for golden instances of pattern-constrained fields.
+GOLDEN_ULID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+
 def _golden_instance(cls: type):
     """Fill every required field with a type-correct value."""
-    hints = typing.get_type_hints(cls)
+    hints = typing.get_type_hints(cls, include_extras=True)
     kwargs = {}
     for f in dataclasses.fields(cls):
         if not (f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING):
@@ -168,6 +172,10 @@ def _golden_instance(cls: type):
 def _dummy(t):
     origin = typing.get_origin(t)
     args = typing.get_args(t)
+    if origin is typing.Annotated:
+        if any(isinstance(m, gb.Pattern) for m in args[1:]):
+            return GOLDEN_ULID
+        return _dummy(args[0])
     if origin is typing.Union or str(origin) == "types.UnionType":
         non_none = [a for a in args if a is not type(None)]
         return _dummy(non_none[0]) if non_none else None
@@ -206,7 +214,7 @@ def test_parity_golden_encodes_validate_and_mutants_reject():
         # must be present in the golden instance too.
         for extra in gb.REQUIRED_EXTRA.get(ident, []):
             if not getattr(inst, extra, None):
-                setattr(inst, extra, _dummy(typing.get_type_hints(cls).get(extra, str)))
+                setattr(inst, extra, _dummy(typing.get_type_hints(cls, include_extras=True).get(extra, str)))
         encoded = json.loads(inst.encode())
         errs = list(validator.iter_errors(encoded))
         assert not errs, f"{ident}: golden encode() fails its own schema: {errs[0].message}"
@@ -221,6 +229,14 @@ def test_parity_golden_encodes_validate_and_mutants_reject():
                 broken = dict(encoded)
                 broken[name] = 42
                 assert not validator.is_valid(broken), f"{ident}: wrong-type {name} must be rejected"
+            if "pattern" in prop:
+                # The gap this closes: a 31-character id the door accepted
+                # and the projector's 26-character column refused.
+                broken = dict(encoded)
+                broken[name] = GOLDEN_ULID + "EXTRA"
+                assert not validator.is_valid(broken), f"{ident}: 31-char {name} must be rejected"
+                broken[name] = GOLDEN_ULID.lower()
+                assert not validator.is_valid(broken), f"{ident}: lowercase {name} must be rejected"
 
 
 def test_cmd_contracts_carry_the_door_contract():
@@ -387,3 +403,64 @@ def test_every_definition_is_addressable_by_id():
         if entry["class"] != "definition":
             continue
         assert "id" in entry["schema"]["required"], ident
+
+
+#: Every (contract, JSON pointer) the ULID pattern must reach. Derived from the
+#: models by hand once and pinned here so a field that
+#: loses its `ULID` annotation — or a new ULID-keyed field that never gets
+#: one — is a red test, not a projector stall.
+ULID_CONSTRAINED_FIELDS = {
+    "_SystemElement": ["id", "parent_id", "semantic_type_id"],
+    "_Signal": ["id", "system_element_id", "data_tag", "semantic_type_id"],
+    "_Constant": ["id", "system_element_id", "semantic_type_id"],
+    "_Resource": ["id", "system_element_id"],
+    "_ExternalReference": ["id", "external_system_id"],
+    # annotation_type_id stays unconstrained until the golden annotation-id
+    # vectors derive from ULID type ids — see payload.Annotation.
+    "_Annotation": ["annotation_id", "signal_ids/items"],
+    "_AnnotationType": ["id"],
+    "_MetadataType": ["id"],
+    "_SemanticTag": ["id"],
+    "_DataModel": ["id"],
+    "_ExternalSystem": ["id"],
+    "_PersonalAccessToken": ["id"],
+    "_DataTags": ["data_tags/items/id"],
+}
+
+
+def _walk(schema: dict, pointer: str) -> dict:
+    node = schema
+    for step in pointer.split("/"):
+        node = node["items"] if step == "items" else node["properties"][step]
+    return node
+
+
+def _pointers_with_pattern(schema: dict, prefix: str = "") -> list[str]:
+    out: list[str] = []
+    for name, prop in schema.get("properties", {}).items():
+        here = f"{prefix}{name}"
+        if "pattern" in prop:
+            out.append(here)
+        if "pattern" in prop.get("items", {}):
+            out.append(f"{here}/items")
+        out += _pointers_with_pattern(prop, f"{here}/")
+        out += _pointers_with_pattern(prop.get("items", {}), f"{here}/items/")
+    return out
+
+
+def test_ulid_fields_carry_the_one_pattern():
+    """Principle 2: the ULID grammar is defined once (`payload.ULID_PATTERN`)
+    and every ULID-by-contract field carries exactly it. Both directions are
+    pinned — a constrained field the table forgot fails too, so the table
+    cannot silently shrink below what the models declare."""
+    from colca_data_contracts import ULID_PATTERN
+
+    body, _ = gb.build_bundle()
+    seen: dict[str, list[str]] = {}
+    for ident, entry in body["contracts"].items():
+        for pointer in _pointers_with_pattern(entry["schema"]):
+            seen.setdefault(ident, []).append(pointer)
+            assert _walk(entry["schema"], pointer)["pattern"] == ULID_PATTERN, (ident, pointer)
+    assert {k: sorted(v) for k, v in seen.items()} == {
+        k: sorted(v) for k, v in ULID_CONSTRAINED_FIELDS.items()
+    }

@@ -2,7 +2,7 @@ import json
 import hashlib
 import datetime
 import ulid
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Annotated, Any, Dict, Iterable, List, Optional
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 
 from franzmq.data_contracts.base import (
@@ -149,6 +149,37 @@ class CustomEncoder(json.JSONEncoder):
         if is_dataclass(obj):
             return asdict(obj)
         raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+# ---------------------------------------------------------------------------
+# Wire-level string constraints (schema-bundle design §4.1)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Pattern:
+    """A regular expression a string field's WIRE value must match.
+
+    Attached to a field type through ``typing.Annotated``; the bundle
+    generator emits it as JSON-Schema ``pattern`` so the colca door refuses a
+    value that does not match. The Python constructors stay unchecked — the
+    door is the gate, and this is the one definition it is generated from.
+    """
+
+    regex: str
+
+
+#: The one ULID grammar: 26 Crockford-base32 characters (no I, L, O, U).
+#: Django's ``ULIDConverter`` and ``is_ulid`` spell the same expression; the
+#: bundle carries it to the door so a 31-character id is refused where it is
+#: published rather than where the projector's 26-character column meets it.
+ULID_PATTERN = r"^[0-9A-HJKMNP-TV-Z]{26}$"
+
+#: A string field whose value is a ULID by contract — an entity's own id and
+#: every reference to one. Publishers that mint these always mint ULIDs
+#: (``ulid.new()``, ``node_manager.ids.stable_id``, ``registry.NewULID``); the
+#: bundle now says so.
+ULID = Annotated[str, Pattern(ULID_PATTERN)]
 
 
 @dataclass
@@ -494,12 +525,18 @@ class Annotation(Payload):
     appends too, so "was this annotation ever deleted" survives replication
     and replay the same way every other state change on the stream does.
     """
-    annotation_id: str
+    annotation_id: ULID
+    #: A ULID in every producer (the projector's column, `stable_id`,
+    #: preflight) but NOT yet constrained on the wire: the shared golden
+    #: `vectors/annotation_id.json` — pinned by the Go and Python derivation
+    #: tests and consumed by the level-3 annotation suite — derives ids from
+    #: readable type ids such as ``annotation-type-1``. Constrain it together
+    #: with a vector rewrite, not before.
     annotation_type_id: str
     time_start: float
     time_end: Optional[float] = None
     value: Optional[Any] = None
-    signal_ids: List[str] = field(default_factory=list)
+    signal_ids: List[ULID] = field(default_factory=list)
     #: Producing identity for audit, e.g. ``"dataops/<producer-name>"``.
     source: str = ""
     deleted: bool = False
@@ -523,7 +560,7 @@ class DataTag(Payload):
     old id was ``hierarchy + name`` joined) and empty for every protocol but
     OPC-UA. The natural key becomes ``(connector, source)``.
     """
-    id: str
+    id: ULID
     name: str
     source: str
     is_writable: bool
@@ -577,7 +614,7 @@ class DataTags(Payload):
 class AnnotationType(Payload):
     """A global annotation definition projected at every descendant node."""
 
-    id: str
+    id: ULID
     name: str
     data_type: str
     i18n_name: str = ""
@@ -598,7 +635,7 @@ class AnnotationType(Payload):
 class MetadataType(Payload):
     """A global metadata definition projected at every descendant node."""
 
-    id: str
+    id: ULID
     name: str
     data_type: str
     i18n_name: str = ""
@@ -616,7 +653,7 @@ class MetadataType(Payload):
 class SemanticTag(Payload):
     """A global semantic-type definition projected at every descendant node."""
 
-    id: str
+    id: ULID
     name: str
     i18n_name: str = ""
     description: str = ""
@@ -672,7 +709,7 @@ class PersonalAccessToken(Payload):
     privilege ceiling captured when the owner created the token.
     """
 
-    id: str
+    id: ULID
     hashed_secret: str
     owner_sub: str
     owner_email: str
@@ -703,7 +740,7 @@ class DataModel(Payload):
     #: The definition's identity — its path on the wire, and what a system
     #: element references when it claims to implement this data model. A
     #: definition without one could not be addressed at all.
-    id: str
+    id: ULID
     name: str
     version: str = "1.0"
     description: str = ""
@@ -720,7 +757,7 @@ class DataModel(Payload):
 class ExternalSystem(Payload):
     """A non-secret global definition for an external integration system."""
 
-    id: str
+    id: ULID
     key: str
     name: str
     system_type: str
@@ -736,11 +773,11 @@ class ExternalSystem(Payload):
 class ExternalReference(Payload):
     """An upward reference from a Colca object to an external-system row."""
 
-    id: str
+    id: ULID
     source_entity: str
     source_object_id: str
     relationship_type: str
-    external_system_id: str
+    external_system_id: ULID
     external_table: str
     external_row_id: str
     external_column: str = ""
@@ -768,18 +805,18 @@ class SystemElement(Payload):
     element is a retained empty payload (tombstone).
     """
 
-    id: str
+    id: ULID
     name: str
     description: str = ""
     #: ULID of the enclosing element; None for a root.
-    parent_id: Optional[str] = None
+    parent_id: Optional[ULID] = None
     implements: List[str] = field(default_factory=list)  # DataModel names this SE fulfils
     external_asset_id: Optional[str] = None
     external_asset_id_type: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     #: ULID of the `_SemanticTag` definition that says what this entity IS.
     #: None means unclassified, which is a valid state.
-    semantic_type_id: Optional[str] = None
+    semantic_type_id: Optional[ULID] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -813,15 +850,15 @@ class Signal(Payload):
     signal is a retained empty payload (tombstone).
     """
 
-    id: str
+    id: ULID
     name: str
     description: str = ""
     #: ULID of the SystemElement that owns this signal.
-    system_element_id: Optional[str] = None
+    system_element_id: Optional[ULID] = None
     #: ULID of the DataTag this signal reads from (its natural key is
     #: (connector, source); the connector that owns it is reached through the
     #: tag, never stored here).
-    data_tag: Optional[str] = None
+    data_tag: Optional[ULID] = None
     #: The connector publishes metrics for this signal.
     is_published: bool = False
     #: The read side historises it (consumed by the historian bridge).
@@ -837,7 +874,7 @@ class Signal(Payload):
     has_contract: bool = False
     #: ULID of the `_SemanticTag` definition that says what this entity IS.
     #: None means unclassified, which is a valid state.
-    semantic_type_id: Optional[str] = None
+    semantic_type_id: Optional[ULID] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -872,7 +909,7 @@ class Constant(Payload):
     value retained in this record.
     """
 
-    id: str
+    id: ULID
     name: str
     data_type: ConstantDataType
     #: The Django model's ``value`` column is ``JSONField(null=True)`` — a
@@ -885,13 +922,13 @@ class Constant(Payload):
     #: fixes alongside it.
     value: Any = None
     description: str = ""
-    system_element_id: Optional[str] = None
+    system_element_id: Optional[ULID] = None
     unit: Optional[str] = None
     precision: Optional[int] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     #: ULID of the `_SemanticTag` definition that says what this entity IS.
     #: None means unclassified, which is a valid state.
-    semantic_type_id: Optional[str] = None
+    semantic_type_id: Optional[ULID] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -921,8 +958,8 @@ class Resource(Payload):
     record can be certain which blob it needs and can verify it on arrival.
     """
 
-    id: str
-    system_element_id: str
+    id: ULID
+    system_element_id: ULID
     filename: str
     #: Both ``blank=True, default=""`` on the Django model
     #: (``edge/models/resource.py``): the only current writer
