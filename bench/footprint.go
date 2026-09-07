@@ -114,15 +114,16 @@ mqtt:
 	}
 	// m1 binds to an element, so the element has to exist first — published
 	// through the same admin door a deployment would use.
+	m1Element := elementIDFor("m1")
 	element, _ := json.Marshal(map[string]any{
 		"topic":   "colca/v1/_SystemElement/n-fp/m1",
-		"payload": map[string]string{"id": "el-m1", "name": "m1"},
+		"payload": map[string]string{"id": m1Element, "name": "m1"},
 	})
 	if err := postAdmin(hc, apiAddr, "/publish", element); err != nil {
 		return nil, fmt.Errorf("place element for m1: %w", err)
 	}
-	entry, _ := json.Marshal(map[string]any{"ulid": "m1", "pubkey": m1id.PublicHex(), "kind": "external", "element": "el-m1",
-		"grants": []string{"write:el-m1/#"}})
+	entry, _ := json.Marshal(map[string]any{"ulid": "m1", "pubkey": m1id.PublicHex(), "kind": "external", "element": m1Element,
+		"grants": []string{"write:" + m1Element + "/#"}})
 	if err := postAdmin(hc, apiAddr, "/enroll", entry); err != nil {
 		return nil, fmt.Errorf("enroll m1: %w", err)
 	}

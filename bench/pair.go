@@ -4,7 +4,9 @@
 package bench
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -41,13 +43,22 @@ type Pair struct {
 	observerID      *benchIdentity
 }
 
-// enroll generates a key for ulid, enrolls it (kind external) at reg and
-// returns the identity.
+// elementIDFor is the ULID the bench authors for the element at path —
+// derived from the path so a run is reproducible. An entity id is a ULID by
+// contract (schema-bundle design §4.1) and the baked bundle
+// refuses anything else, so the readable "el-<path>" ids are gone: a leading
+// "0" plus 25 uppercase hex characters is a 26-character Crockford string
+// that fits 128 bits. Same derivation as the level-3/4 worlds and smoke.sh.
+func elementIDFor(path string) string {
+	sum := sha256.Sum256([]byte("element:" + path))
+	return "0" + strings.ToUpper(hex.EncodeToString(sum[:]))[:25]
+}
+
 // place authors a system element at path in n's own namespace and returns its
 // id. An identity binds to an element, not to a path (id-grants design §4), so
 // every placed enrollment needs this first.
 func place(n *node.Node, path string) (string, error) {
-	elementID := "el-" + strings.ReplaceAll(path, "/", "-")
+	elementID := elementIDFor(path)
 	payload, err := json.Marshal(map[string]string{"id": elementID, "name": path})
 	if err != nil {
 		return "", err

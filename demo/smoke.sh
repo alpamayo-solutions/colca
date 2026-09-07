@@ -100,7 +100,10 @@ say "   POST /enroll (entry-before-connect); everything below retries until then
 # so the element is authored first and the entry names it. The mount is then
 # wherever that element sits, now and after any later rename.
 place() { # $1 = base url, $2 = node ulid, $3 = path -> echoes the element id
-  element="el-$(echo "$3" | tr '/' '-')"
+  # An entity id is a ULID by contract (schema-bundle design §4.1) and the baked bundle refuses anything else: "0" + 25 uppercase
+  # hex chars of sha256("element:<path>"), the same derivation the level-3/4
+  # worlds and the bench use, so a path always maps to the same ULID.
+  element="0$(printf 'element:%s' "$3" | shasum -a 256 | cut -c1-25 | tr 'a-f' 'A-F')"
   ok=0
   for _ in $(seq 1 60); do
     if curl -skf -H "$TOK" -H "Content-Type: application/json" -X POST "$1/publish" \

@@ -29,10 +29,19 @@ var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true,
 
 // allowedKeywords is the §4.1 schema subset, re-enforced at load so a bundle
 // can never pull capabilities the broker did not sign up for.
+//
+// `pattern` and `maxLength` joined the subset on 2026-09-07 (design §4.1): an entity id is a ULID — 26 characters of one alphabet — and the
+// door accepted a 31-character `_SystemElement.id` that the projector's
+// 26-character column then refused. `pattern` is compiled ONCE per rule, at
+// bundle load: the jsonschema compiler hands every `pattern` to Go's
+// `regexp.Compile` inside `compile` below (its default RegexpEngine), so a
+// malformed expression is a fail-start condition (§7.1) and a publish pays
+// only a match against the compiled program. Go's RE2 has no backtracking,
+// so a bundle cannot smuggle in a pathological expression.
 var allowedKeywords = map[string]bool{
 	"type": true, "properties": true, "required": true, "enum": true,
-	"items": true, "minLength": true, "minimum": true, "maximum": true,
-	"minItems": true, "additionalProperties": true,
+	"items": true, "minLength": true, "maxLength": true, "pattern": true,
+	"minimum": true, "maximum": true, "minItems": true, "additionalProperties": true,
 }
 
 // Rule is everything the engine needs to judge one contract.

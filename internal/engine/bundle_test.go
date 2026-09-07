@@ -11,6 +11,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/contracts"
+	"github.com/alpamayo-solutions/colca/internal/contracts/contractstest"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -245,6 +246,48 @@ func TestRejectErrorsCarryReasons(t *testing.T) {
 		if err == nil || ReasonOf(err) != c.reason {
 			t.Errorf("want reason %q, got %v (reason %q)", c.reason, err, ReasonOf(err))
 		}
+	}
+}
+
+// The gap of 2026-09-07, pinned at the door under the REAL generated bundle:
+// a `_SystemElement` whose id is 31 characters was accepted here and refused
+// by the projector's 26-character column, stalling projection. The bundle now
+// carries the one ULID pattern (payload.py `ULID`, design §4.1), so the
+// door refuses it with reason=validation naming the pattern, and a ULID
+// passes. Mutation check: drop `ULID` from `SystemElement.id` in payload.py,
+// regenerate, and this fails at the first assertion.
+func TestRealBundleRefusesNonULIDEntityIDsAtTheDoor(t *testing.T) {
+	tbl, err := contracts.Load(contractstest.GeneratedBundlePath(t), "")
+	if err != nil {
+		t.Fatalf("real generated bundle failed to load: %v", err)
+	}
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	e := New(s, &config.Config{ULID: "n-edge1"}, testIDs(), nil, nil, nil)
+	e.SetContracts(tbl)
+
+	// The admin door (POST /publish — what the api, `colca node enroll` and
+	// the test worlds use to author elements) hands the schema error back
+	// verbatim, so the publisher reads which field violated which pattern.
+	const pattern = "^[0-9A-HJKMNP-TV-Z]{26}$"
+	topic := "colca/v1/_SystemElement/n-edge1/site1"
+	const ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	_, err = e.IngestAdmin(topic, []byte(`{"id":"`+ulid+`EXTRA","name":"site1"}`))
+	if err == nil || !strings.Contains(err.Error(), "'/id'") || !strings.Contains(err.Error(), pattern) {
+		t.Fatalf("a 31-character id must be refused at the door naming /id and the ULID pattern, got: %v", err)
+	}
+	if _, err := e.IngestAdmin(topic, []byte(`{"id":"`+ulid+`","name":"site1"}`)); err != nil {
+		t.Fatalf("a ULID id must be accepted: %v", err)
+	}
+	// The references share the definition: a parent_id that is not a ULID is
+	// refused the same way, so a bad reference cannot enter through the back.
+	_, err = e.IngestAdmin("colca/v1/_SystemElement/n-edge1/site1/line1",
+		[]byte(`{"id":"01ARZ3NDEKTSV4RRFFQ69G5FAW","name":"line1","parent_id":"el-site1"}`))
+	if err == nil || !strings.Contains(err.Error(), "'/parent_id'") || !strings.Contains(err.Error(), pattern) {
+		t.Fatalf("a non-ULID parent_id must be refused naming /parent_id and the pattern, got: %v", err)
 	}
 }
 
