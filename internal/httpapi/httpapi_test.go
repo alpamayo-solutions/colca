@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/authtest"
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/contracts"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/httplimit"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -1830,6 +1832,75 @@ func TestTheLocalKVRouteFiltersByContractAndRejectsUnknownOnes(t *testing.T) {
 	} else if !strings.Contains(bad.Body.String(), "_NotARealContract") {
 		t.Fatalf("400 body must name the unknown contract, got %s", bad.Body.String())
 	}
+
+	// A contract the node stores because its BUNDLE declares it, which
+	// `plugins/uns` does not name itself. `_DataTags` — the connector's
+	// catalogue, retained and KV-projected — is exactly that, so the filter
+	// has to ask the ENGINE (`Engine.ClassOf`, the authority every other
+	// routing decision uses; its own doc comment says a bundle-declared
+	// contract "exists for all of them or none"). Asking uns's builtin table
+	// alone refused it with 400, and since the SDK's `Service` reads its
+	// previous catalogue back through exactly this filter at startup, every
+	// connector stopped publishing one (levels 3 and 4, 2026-09-07).
+	h.eng.SetContracts(bundleWith(t, map[string]any{
+		"_DataTags": map[string]any{
+			"class": "entity", "tombstone": true,
+			"schema": map[string]any{"type": "object", "properties": map[string]any{}},
+		},
+	}))
+	if _, _, err := h.eng.Store().Append("entities", []store.Record{
+		{Topic: "colca/v1/_DataTags/n-test/grp/a", Payload: []byte(`{"connector":"c"}`), TS: 3, KVPath: "grp/a", KVNode: "n-test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	catalogue := request("/kv?prefix=grp%2Fa&contract=_DataTags")
+	if catalogue.Code != http.StatusOK {
+		t.Fatalf("contract=_DataTags = %d, want 200: %s", catalogue.Code, catalogue.Body.String())
+	}
+	tags := decode(catalogue)
+	if len(tags.Entries) != 1 || !strings.HasPrefix(tags.Entries[0].Topic, "colca/v1/_DataTags/") {
+		t.Fatalf("contract=_DataTags entries = %+v, want exactly the catalogue record", tags)
+	}
+	// The refusal still means something with a bundle loaded: a name no
+	// authority knows is still 400, so the filter never silently matches
+	// nothing.
+	if bad := request("/kv?prefix=grp%2Fa&contract=_StillNotReal"); bad.Code != http.StatusBadRequest {
+		t.Fatalf("unknown contract with a bundle loaded = %d, want 400: %s", bad.Code, bad.Body.String())
+	}
+}
+
+// bundleWith writes a minimal loadable bundle declaring `entries` and returns
+// its table — the httpapi package's own copy of what engine's tests do, kept
+// small because only this test needs a bundle-declared contract at the door.
+func bundleWith(t *testing.T, entries map[string]any) *contracts.Table {
+	t.Helper()
+	body := map[string]any{
+		"bundle_version": "test",
+		"source":         map[string]any{"package": "colca-data-contracts", "git_sha": "fixture"},
+		"contracts":      entries,
+	}
+	canon, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(canon)
+	full := map[string]any{"digest": hex.EncodeToString(sum[:]), "generated_at": "2026-09-07T00:00:00Z"}
+	for k, v := range body {
+		full[k] = v
+	}
+	raw, err := json.Marshal(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "bundle.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	table, err := contracts.Load(path, "")
+	if err != nil {
+		t.Fatalf("fixture bundle failed to load: %v", err)
+	}
+	return table
 }
 
 func TestLocalSelfReturnsTheMintedIdentityAndAuthoritativeMount(t *testing.T) {

@@ -745,7 +745,15 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		// name silently match nothing.
 		contracts := r.URL.Query()["contract"]
 		for _, ct := range contracts {
-			if !uns.IsKnown(uns.ClassOf(ct)) {
+			// Through the ENGINE's authority, not uns's builtin table alone:
+			// a node that loaded a schema bundle stores bundle-declared
+			// contracts too, and `Engine.ClassOf` is the one authority every
+			// other routing decision uses (its own doc comment says so).
+			// Validating here against the builtins refused `_DataTags` — a
+			// retained, KV-projected catalogue the connector reads back at
+			// startup — with 400, which is how a filter meant to keep a scan
+			// bounded stopped every connector from publishing its catalogue.
+			if !uns.IsKnown(e.ClassOf(ct)) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("unknown contract: %q", ct)})
 				return
 			}
