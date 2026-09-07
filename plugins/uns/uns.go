@@ -328,6 +328,58 @@ func UplinkStreams() []string {
 	return out
 }
 
+// nodePrivateContracts are the state contracts whose only reader is the node
+// that authored them. Their class still flows up — that is what makes them
+// KV-projected and retained locally — but the record itself must not.
+//
+// `_EditOperation` is the durable replay receipt EditExec commits
+// alongside a command's state (exec_edit_receipt.go). Its one reader is
+// the same node's durableReplay, scanning its OWN node id; an ancestor's copy
+// is a projection with zero readers (architecture principle 2), and it was
+// the largest single occupant of a hub's KV — up to 1024 receipts and their
+// tombstones per descendant, two entity appends per annotation on every hop.
+var nodePrivateContracts = map[string]bool{
+	"_EditOperation": true,
+}
+
+// IsNodePrivate reports whether a contract's records stay on the node that
+// authored them: never offered to a parent on any uplink lane, tombstones
+// included. The uplink asks this per record and still advances its cursor
+// past what it keeps home, so a private record can never hold a lane.
+func IsNodePrivate(contract string) bool { return nodePrivateContracts[contract] }
+
+// partialUplinkStreams are the streams whose uplink is a filtered SUBSET of
+// the child's stream, so the child offsets a parent receives on them are not
+// contiguous even when nothing was lost. DERIVED, like uplinkStreamSet: a
+// stream is partial when a class on it does not flow up at all (`commands`:
+// `_Cmd*` descend, only acks and gap markers rise) or when a node-private
+// contract lives on it (`entities`, via `_EditOperation`). Adding a
+// node-private contract therefore exempts its stream here without a second
+// list to keep in step.
+var partialUplinkStreams = func() map[string]bool {
+	set := map[string]bool{}
+	for _, c := range manifestClasses {
+		if !FlowsUp(c) {
+			if stream := StreamFor(c); stream != "" {
+				set[stream] = true
+			}
+		}
+	}
+	for contract := range nodePrivateContracts {
+		if stream := StreamFor(ClassOf(contract)); stream != "" {
+			set[stream] = true
+		}
+	}
+	return set
+}()
+
+// UplinkCarriesEveryRecord reports whether a child's uplink of stream is the
+// stream in full — the premise a parent's child-offset gap detection rests
+// on (retention design §6.4, the second net). Where it is false, a hole in
+// the child offsets is the filter working, not data loss, and the durable
+// `_StreamGap` marker is the only honesty mechanism on that wire.
+func UplinkCarriesEveryRecord(stream string) bool { return !partialUplinkStreams[stream] }
+
 // ValidateAuditTopic pins the append-only event identity to the canonical
 // `_colca/audit/{event-id}` path at its authoring node.
 func ValidateAuditTopic(p Parsed, payload []byte) error {

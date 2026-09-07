@@ -289,16 +289,22 @@ func TestGapAppliedCountsOffsetJumpsOnly(t *testing.T) {
 		t.Fatalf("%s = %v after the 2→5 jump, want 1", line, v)
 	}
 
-	// The commands stream is exempt (filtered uplink): no series at all, no
-	// matter how large the child-offset hole.
-	const commandsLine = `colca_repl_gap_applied_total{child="n-edge1",stream="commands"}`
-	if _, _, err := e.IngestReplicated("n-edge1", "commands", []store.ReplRecord{
-		{ChildOffset: 9, Topic: "colca/v1/_Ack/m1/edge1/m1/go", Payload: []byte(`{"v":1}`), TS: 9},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if body := scrapeBody(t, m); strings.Contains(body, commandsLine) {
-		t.Fatalf("%s present, want no series (commands stream is exempt from jump detection):\n%s", commandsLine, body)
+	// The filtered uplinks are exempt: commands (acks and gap markers only)
+	// and entities (the node-private Edit receipt stays home). No series
+	// at all, no matter how large the child-offset hole.
+	for stream, topic := range map[string]string{
+		"commands": "colca/v1/_Ack/m1/edge1/m1/go",
+		"entities": "colca/v1/_SystemElement/m1/edge1/m1/a",
+	} {
+		exemptLine := `colca_repl_gap_applied_total{child="n-edge1",stream="` + stream + `"}`
+		if _, _, err := e.IngestReplicated("n-edge1", stream, []store.ReplRecord{
+			{ChildOffset: 9, Topic: topic, Payload: []byte(`{"v":1}`), TS: 9},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if body := scrapeBody(t, m); strings.Contains(body, exemptLine) {
+			t.Fatalf("%s present, want no series (%s stream is exempt from jump detection):\n%s", exemptLine, stream, body)
+		}
 	}
 }
 

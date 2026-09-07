@@ -1231,7 +1231,7 @@ func TestIngestReplicatedLogsOffsetJumps(t *testing.T) {
 		// The child pruned before ever replicating: the parent genuinely
 		// misses [1..3] — the fresh-cursor twin of the §6.1 [delta].
 		e, buf := newCapturedEngine(t)
-		if _, _, err := e.IngestReplicated("n-child", "entities", replBatchAt("colca/v1/_SystemElement/m1/child1/m1/a", 4, 5)); err != nil {
+		if _, _, err := e.IngestReplicated("n-child", "audit", replBatchAt("colca/v1/_AuditEvent/n-child/child1/_colca/audit/e1", 4, 5)); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(buf.String(), marker) || !strings.Contains(buf.String(), "have=0") || !strings.Contains(buf.String(), "got=4") {
@@ -1239,15 +1239,24 @@ func TestIngestReplicatedLogsOffsetJumps(t *testing.T) {
 		}
 	})
 
-	t.Run("commands stream is exempt", func(t *testing.T) {
-		// The commands uplink is filtered (_Ack + _StreamGap only), so
-		// child-offset holes there are the filter working, not data loss.
-		e, buf := newCapturedEngine(t)
-		if _, _, err := e.IngestReplicated("n-child", "commands", replBatchAt("colca/v1/_Ack/m1/child1/m1/go", 3, 9)); err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(buf.String(), marker) {
-			t.Fatalf("filtered commands stream must not report offset jumps:\n%s", buf.String())
+	t.Run("filtered uplinks are exempt", func(t *testing.T) {
+		// The commands uplink carries only _Ack + _StreamGap, and the entities
+		// uplink keeps the node-private Edit receipt home, so child-offset
+		// holes on either are the filter working, not data loss. The domain
+		// answers which streams (uns.UplinkCarriesEveryRecord); a hand-kept
+		// `stream == "commands"` here would have reported every Edit
+		// command executed at a child as a gap at its parent.
+		for stream, topic := range map[string]string{
+			"commands": "colca/v1/_Ack/m1/child1/m1/go",
+			"entities": "colca/v1/_SystemElement/m1/child1/m1/a",
+		} {
+			e, buf := newCapturedEngine(t)
+			if _, _, err := e.IngestReplicated("n-child", stream, replBatchAt(topic, 3, 9)); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(buf.String(), marker) {
+				t.Fatalf("filtered %s stream must not report offset jumps:\n%s", stream, buf.String())
+			}
 		}
 	})
 }

@@ -390,6 +390,29 @@ func ackOnly(topic string) bool {
 	return err == nil && (p.Contract == "_Ack" || p.Contract == "_StreamGap")
 }
 
+// leavesTheNode is applied to EVERY lane and the metrics floor, ahead of the
+// lane's own filter: a node-private record (uns.IsNodePrivate — today the
+// Edit replay receipt, tombstones included) is never offered to the
+// parent. The store's Read still advances `next` past what it filters, so the
+// uplink cursor moves over a kept-home record exactly as over a pushed one and
+// a private record can never hold a lane. One rule for all lanes rather than a
+// filter on the one lane that carries such a record today: a private contract
+// added on another stream would otherwise start leaving the node on the day
+// it was added. An unparseable topic passes, as it always did — this filter
+// drops only what the predicate names.
+func leavesTheNode(topic string) bool {
+	p, err := uns.Parse(topic)
+	return err != nil || !uns.IsNodePrivate(p.Contract)
+}
+
+// pushable composes the universal keep-home rule with a lane's own filter.
+func pushable(laneFilter func(string) bool) func(string) bool {
+	if laneFilter == nil {
+		return leavesTheNode
+	}
+	return func(topic string) bool { return leavesTheNode(topic) && laneFilter(topic) }
+}
+
 // priorityLanes are drained to empty, in this order, before `metrics` is
 // touched at all (alarm-stream design §4).
 //
@@ -404,6 +427,10 @@ func ackOnly(topic string) bool {
 // `definitions` is deliberately absent and must stay absent (definition-stream
 // design §4): definitions descend. A child pushing them upward would let a
 // leaf author policy for the whole tree.
+//
+// A lane's filter is the lane's OWN rule. The keep-home rule for node-private
+// records (leavesTheNode) is not listed here because it applies to every lane
+// and the floor alike — pushOnce composes it in.
 var priorityLanes = []struct {
 	name   string
 	filter func(string) bool
@@ -631,7 +658,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			eng.Store().CursorAck(uns.UplinkCursor(c.parentPub), stream, lwm)
 			from = lwm
 		}
-		recs, next, err := eng.Store().Read(stream, from, replBatch, filter)
+		recs, next, err := eng.Store().Read(stream, from, replBatch, pushable(filter))
 		if err != nil {
 			c.log.Error("uplink read", "stream", stream, "err", err)
 			return false, false

@@ -102,6 +102,55 @@ func TestManifestVocabularyExcludesBuiltinAuthoredClasses(t *testing.T) {
 	}
 }
 
+// The Edit replay receipt is entity-class state — KV-projected, retained,
+// tombstonable, so the authoring node's durableReplay can find it — and yet it
+// must never leave that node: its only reader scans its own node id, so an
+// ancestor's copy is a projection nobody reads. The two answers are different
+// questions and both must hold; conflating "flows up as a class" with "this
+// record leaves the node" is exactly what filled a hub's KV with receipts.
+func TestTheEditReceiptIsNodePrivateStateAndNothingElseIs(t *testing.T) {
+	const receipt = "_EditOperation"
+	if !IsNodePrivate(receipt) {
+		t.Fatalf("IsNodePrivate(%s) = false: every ancestor would hold receipts only the author reads", receipt)
+	}
+	if c := ClassOf(receipt); !IsState(c) || !IsOwnedState(c) || !FlowsUp(c) {
+		t.Fatalf("%s must stay ordinary entity-class state locally (state=%v owned=%v flowsUp=%v) — "+
+			"node-private is a per-record question, not a class", receipt, IsState(c), IsOwnedState(c), FlowsUp(c))
+	}
+	for _, contract := range []string{
+		"_Metric", "_Node", "_ServiceDetails", "_SystemElement", "_Signal", "_Constant",
+		"_ExternalReference", "_Resource", "_EnrolledIdentity", "_AlarmNotificationConfig",
+		"_NotificationConfigStatus", "_Group", "_MetadataType", "_AnnotationType", "_DataModel",
+		"_Ack", "_StreamGap", "_AuditEvent", "_AlarmStateChange", "_Annotation", "_Log", "_CmdParam",
+	} {
+		if IsNodePrivate(contract) {
+			t.Errorf("IsNodePrivate(%s) = true: the record would silently stop reaching the tree", contract)
+		}
+	}
+}
+
+// A parent's child-offset gap detection assumes the uplink carries the stream
+// in full. That holds for every lane except the two whose uplink is a filtered
+// subset: `commands` (only acks and gap markers rise) and `entities` (the
+// node-private receipt stays home). Both are derived from the vocabulary, so
+// the pinned answers are what a class or a private contract implies, not a
+// second hand-kept list.
+func TestOnlyFilteredUplinksAreNotGapless(t *testing.T) {
+	for _, stream := range []string{"commands", "entities"} {
+		if UplinkCarriesEveryRecord(stream) {
+			t.Errorf("UplinkCarriesEveryRecord(%q) = true: a parent would report the uplink filter as data loss", stream)
+		}
+	}
+	for _, stream := range []string{"metrics", "alarms", "audit", "annotations", "logs"} {
+		if !UplinkCarriesEveryRecord(stream) {
+			t.Errorf("UplinkCarriesEveryRecord(%q) = false: a real child-offset gap there would go unreported", stream)
+		}
+	}
+	if UplinkCarriesEveryRecord(StreamFor(ClassOf("_EditOperation"))) {
+		t.Error("the stream a node-private contract lives on must read as partial — the exemption is derived, not listed")
+	}
+}
+
 func TestOnlyOwnedEventsAndStateFlowUp(t *testing.T) {
 	for _, c := range []Class{ClassData, ClassEntity, ClassAck, ClassGap, ClassAudit} {
 		if !FlowsUp(c) {

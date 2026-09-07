@@ -1156,9 +1156,13 @@ func (e *Engine) rejectTimeSync(child string, recs []store.ReplRecord) (filtered
 // otherwise pass unnoticed. Detection only, from values IngestReplicated
 // already has (prev HWM + the applied batch); the store is not involved.
 //
-// The commands stream is exempt: its uplink is filtered (only _Ack and
-// _StreamGap travel up), so child-offset holes there are the filter working,
-// not data loss — the premise "gapless offsets" does not hold on that wire.
+// A stream whose uplink is a filtered subset is exempt — the domain says
+// which (uns.UplinkCarriesEveryRecord): `commands`, where only _Ack and
+// _StreamGap travel up, and `entities`, where the node-private Edit
+// receipt stays at its author. Child-offset holes there are the filter
+// working, not data loss — the premise "gapless offsets" does not hold on
+// that wire, and the durable _StreamGap marker (the first net) is the only
+// honesty mechanism left on it.
 //
 // droppedTimeSync (rejectTimeSync's return) exempts a jump this SAME call's
 // own _TimeSync filtering created: a jump is only
@@ -1167,7 +1171,7 @@ func (e *Engine) rejectTimeSync(child string, recs []store.ReplRecord) (filtered
 // missing a genuinely unaccounted offset still logs, so this only removes
 // the false positive, never masks a real one.
 func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []store.ReplRecord, droppedTimeSync map[uint64]bool) {
-	if stream == "commands" {
+	if !uns.UplinkCarriesEveryRecord(stream) {
 		return
 	}
 	last := prev
