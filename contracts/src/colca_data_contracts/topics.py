@@ -10,8 +10,6 @@ This module is that code, once. Topic knowledge itself stays in franzmq; nothing
 here is added to the payload classes.
 """
 
-from typing import Optional, Union
-
 from decouple import config
 from franzmq.data_contracts.base import Payload
 from franzmq.topic import Topic
@@ -42,8 +40,8 @@ def node_id() -> str:
 
 def node_topic(
     payload_type: type[Payload],
-    *path: Union[str, int],
-    node: Optional[str] = None,
+    *path: str | int,
+    node: str | None = None,
 ) -> Topic:
     """Build ``colca/v1/_{payload_type}/{node}/{path…}``.
 

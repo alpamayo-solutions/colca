@@ -38,6 +38,7 @@ lint = [
     "ruff==0.16.6",
     "bandit==1.9.4",
     "mypy==2.3.1",
+    "types-PyYAML==6.0.12.20260906",
 ]
 
 [tool.setuptools.packages.find]
@@ -48,6 +49,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 colca_data_contracts = [
+    "py.typed",
     "semantic_tags/*.yaml",
     "metadata_types/*.yaml",
     "annotation_types/*.yaml",
@@ -74,4 +76,24 @@ line-length = 120
 extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
-ignore = ["E402", "E501", "F403"]
+select = ["E", "W", "F", "I", "B", "UP", "S", "SIM", "C4", "PIE", "RUF"]
+# Line length is the formatter's job.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+# The franzmq Topic patch has to run before the payload modules are imported.
+"src/colca_data_contracts/__init__.py" = ["E402"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# These publish no type information.
+module = ["franzmq", "franzmq.*", "decouple"]
+ignore_missing_imports = true

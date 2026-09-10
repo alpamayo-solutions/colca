@@ -205,7 +205,6 @@ def test_connecting_mqtt_adds_the_log_publisher_without_owning_the_log():
     import logging
 
     from colca_data_contracts.local_service import _LogPublishingHandler as MQTTHandler
-
     from colca_data_contracts.local_service import attach_log_publisher
     from colca_data_contracts.logging import COLCA_LOG_FORMAT
 

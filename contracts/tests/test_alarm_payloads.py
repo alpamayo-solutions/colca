@@ -1,8 +1,8 @@
 from franzmq import Topic
 
 from colca_data_contracts import (
-    AlarmNotificationSummary,
     AlarmNotificationConfigSnapshot,
+    AlarmNotificationSummary,
     AlarmStateChange,
     NotificationChannelConfig,
     NotificationChannelOutcome,

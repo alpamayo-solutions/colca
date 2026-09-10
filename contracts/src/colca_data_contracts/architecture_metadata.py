@@ -5,8 +5,8 @@ This module provides utilities for services to publish architecture-specific
 metadata that will be used by the architecture diagram view.
 """
 
-from typing import Dict, Any, Optional, List, Union
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -14,8 +14,8 @@ class KpiThresholds:
     """Threshold configuration for KPI status evaluation."""
 
     mode: str = "above"  # "above" = higher is better, "below" = lower is better
-    success: Optional[float] = None
-    warning: Optional[float] = None
+    success: float | None = None
+    warning: float | None = None
 
 
 @dataclass
@@ -26,7 +26,7 @@ class KpiDefinition:
     label: str  # display label
     query: str  # PromQL query (supports {service_name} placeholder)
     format: str  # "health" | "percent" | "rate" | "seconds" | "count" | "bytes"
-    thresholds: Optional[KpiThresholds] = None
+    thresholds: KpiThresholds | None = None
 
 
 @dataclass
@@ -43,34 +43,34 @@ class ArchitectureMetrics:
 class ArchitectureLayout:
     """Layout configuration for the architecture diagram."""
 
-    zone: Optional[str] = None  # 'left' | 'right' | 'top' | 'bottom' | 'center'
-    order: Optional[int] = None  # Order within the zone (lower = earlier)
-    index: Optional[int] = None  # Global index for overall ordering (lower = earlier)
-    group: Optional[str] = None  # Group services together (e.g., 'plc-pair-1')
-    offset: Optional[Dict[str, float]] = None  # { x?: number, y?: number }
-    alignWith: Optional[str] = None  # Align with another service ID
-    alignment: Optional[str] = None  # 'horizontal' | 'vertical'
+    zone: str | None = None  # 'left' | 'right' | 'top' | 'bottom' | 'center'
+    order: int | None = None  # Order within the zone (lower = earlier)
+    index: int | None = None  # Global index for overall ordering (lower = earlier)
+    group: str | None = None  # Group services together (e.g., 'plc-pair-1')
+    offset: dict[str, float] | None = None  # { x?: number, y?: number }
+    alignWith: str | None = None  # Align with another service ID
+    alignment: str | None = None  # 'horizontal' | 'vertical'
 
 
 @dataclass
 class ArchitectureConnection:
     """Connection configuration for a specific dependency."""
 
-    from_side: Optional[str] = None  # 'top' | 'right' | 'bottom' | 'left'
-    to_side: Optional[str] = None  # 'top' | 'right' | 'bottom' | 'left'
+    from_side: str | None = None  # 'top' | 'right' | 'bottom' | 'left'
+    to_side: str | None = None  # 'top' | 'right' | 'bottom' | 'left'
 
 
 @dataclass
 class ArchitectureDependencies:
     """Dependencies configuration for the architecture diagram."""
 
-    upstream: List[str] = field(default_factory=list)
-    downstream: List[str] = field(default_factory=list)
-    connections: Optional[Dict[str, ArchitectureConnection]] = None
+    upstream: list[str] = field(default_factory=list)
+    downstream: list[str] = field(default_factory=list)
+    connections: dict[str, ArchitectureConnection] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for metadata."""
-        result = {
+        result: dict[str, Any] = {
             "upstream": self.upstream,
             "downstream": self.downstream,
         }
@@ -91,19 +91,19 @@ class ArchitectureMetadata:
 
     status: str  # 'healthy' | 'starting' | 'unhealthy'
     description: str
-    metrics: Optional[ArchitectureMetrics] = None
-    icon: Optional[str] = None  # Icon file name (e.g., 'svc-mqtt.webp')
-    layout: Optional[ArchitectureLayout] = None
-    dependencies: Optional[ArchitectureDependencies] = None
-    tag: Optional[str] = None  # Service tag (e.g., 'Data Ingestion')
-    is_central: Optional[bool] = None
-    is_auxiliary: Optional[bool] = None
-    kpis: Optional[List[KpiDefinition]] = None
-    visibility: Optional[str] = None  # "default" | "detail" | "hidden"
+    metrics: ArchitectureMetrics | None = None
+    icon: str | None = None  # Icon file name (e.g., 'svc-mqtt.webp')
+    layout: ArchitectureLayout | None = None
+    dependencies: ArchitectureDependencies | None = None
+    tag: str | None = None  # Service tag (e.g., 'Data Ingestion')
+    is_central: bool | None = None
+    is_auxiliary: bool | None = None
+    kpis: list[KpiDefinition] | None = None
+    visibility: str | None = None  # "default" | "detail" | "hidden"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for ServiceDetails.metadata."""
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "status": self.status,
             "description": self.description,
         }
@@ -115,7 +115,7 @@ class ArchitectureMetadata:
             result["icon"] = self.icon
 
         if self.layout:
-            layout_dict = {}
+            layout_dict: dict[str, Any] = {}
             if self.layout.zone:
                 layout_dict["zone"] = self.layout.zone
             if self.layout.order is not None:
@@ -166,16 +166,16 @@ class ArchitectureMetadata:
 def create_architecture_metadata(
     status: str,
     description: str,
-    metrics: Optional[ArchitectureMetrics] = None,
-    icon: Optional[str] = None,
-    layout: Optional[ArchitectureLayout] = None,
-    dependencies: Optional[ArchitectureDependencies] = None,
-    tag: Optional[str] = None,
-    is_central: Optional[bool] = None,
-    is_auxiliary: Optional[bool] = None,
-    kpis: Optional[List[Union[KpiDefinition, Dict[str, Any]]]] = None,
-    visibility: Optional[str] = None,
-) -> Dict[str, Any]:
+    metrics: ArchitectureMetrics | None = None,
+    icon: str | None = None,
+    layout: ArchitectureLayout | None = None,
+    dependencies: ArchitectureDependencies | None = None,
+    tag: str | None = None,
+    is_central: bool | None = None,
+    is_auxiliary: bool | None = None,
+    kpis: list[KpiDefinition | dict[str, Any]] | None = None,
+    visibility: str | None = None,
+) -> dict[str, Any]:
     """
     Helper function to create architecture metadata dictionary.
 

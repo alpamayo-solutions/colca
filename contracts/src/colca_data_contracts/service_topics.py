@@ -29,4 +29,4 @@ def service_context(mount: str, service_name: str) -> tuple[str, ...]:
     records — and it is stated HERE so the connector and every other local
     service cannot each keep their own version of it.
     """
-    return tuple(segment for segment in mount.split("/") if segment) + (service_name,)
+    return (*(segment for segment in mount.split("/") if segment), service_name)

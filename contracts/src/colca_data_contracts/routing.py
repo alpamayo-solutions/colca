@@ -98,5 +98,5 @@ def stream_of_contract(contract: str) -> str:
 
 def streams_by_contract() -> dict[str, str]:
     """Every classified contract mapped to its stream, omitting the streamless."""
-    contracts = list(CLASS_TABLE) + ["_Ack", "_CmdConfigure", "_CmdEdit", "_CmdAdmin"]
+    contracts = [*CLASS_TABLE, "_Ack", "_CmdConfigure", "_CmdEdit", "_CmdAdmin"]
     return {contract: stream_of_contract(contract) for contract in contracts if stream_of_contract(contract)}

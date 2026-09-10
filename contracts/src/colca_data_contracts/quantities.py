@@ -10,7 +10,6 @@ export -- can do the arithmetic itself.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -23,7 +22,7 @@ class Unit:
 
 @dataclass(frozen=True)
 class QuantityKind:
-    base_unit: Optional[str]
+    base_unit: str | None
     units: dict[str, Unit] = field(default_factory=dict)
 
 

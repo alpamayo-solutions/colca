@@ -322,7 +322,7 @@ def compile_models(source_dir: Path | None = None) -> list[dict[str, Any]]:
             valid_parents.append(parent)
         parents[name] = valid_parents
 
-    extends_edges = {name: [(p,) for p in parents[name]] for name in documents}
+    extends_edges: dict[str, list[tuple[str, ...]]] = {name: [(p,) for p in parents[name]] for name in documents}
     problems.extend(_detect_cycles(list(documents), extends_edges))
 
     cache: dict[str, dict[str, dict[str, Any]]] = {}
@@ -349,7 +349,7 @@ def compile_models(source_dir: Path | None = None) -> list[dict[str, Any]]:
                 problems.append(f"{name}.{slot_key}: child_model {child_name!r} is not a known data model")
         problems.extend(_duplicate_child_names(name, manifest["slots"]))
 
-    child_edges = {
+    child_edges: dict[str, list[tuple[str, ...]]] = {
         name: [
             (slot_key, child_name)
             for slot_key, child_name in _child_edges(manifests[name]["slots"])

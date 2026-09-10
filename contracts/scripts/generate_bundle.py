@@ -25,12 +25,12 @@ import sys
 import typing
 from dataclasses import MISSING, fields, is_dataclass
 
-import colca_data_contracts  # noqa: F401  (import populates the registry)
 from franzmq.data_contracts import PAYLOAD_CLASSES
+from franzmq.data_contracts.base import Ack, Cmd
 
+import colca_data_contracts  # noqa: F401  (import populates the registry)
 from colca_data_contracts.payload import Pattern
 from colca_data_contracts.routing import CLASS_TABLE
-from franzmq.data_contracts.base import Ack, Cmd
 
 # ---------------------------------------------------------------------------
 # Explicit tables (design §5.1: "an explicit small table in the generator")
@@ -286,7 +286,7 @@ def write_bundle(out_path: str, git_sha: str = "unknown") -> str:
     body, digest = build_bundle(git_sha)
     artifact = dict(body)
     artifact["digest"] = digest
-    artifact["generated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    artifact["generated_at"] = datetime.datetime.now(datetime.UTC).isoformat()
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(artifact, fh, sort_keys=True, separators=(",", ":"))
         fh.write("\n")

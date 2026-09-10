@@ -18,8 +18,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import generate_bundle as gb  # noqa: E402
-from franzmq.data_contracts import PAYLOAD_CLASSES  # noqa: E402
+import generate_bundle as gb
+from franzmq.data_contracts import PAYLOAD_CLASSES
 
 jsonschema = pytest.importorskip("jsonschema", reason="parity gate needs the jsonschema test dep")
 
@@ -60,7 +60,7 @@ def test_the_catalogue_is_one_record_carrying_its_own_revision():
     first = DataTags(data_tags=tags, connector="opcua-1")
     same = DataTags(data_tags=list(tags), connector="opcua-1")
     other = DataTags(
-        data_tags=tags + [DataTag(id="b", name="B", source="Sensors/B", is_writable=False, is_readable=True)],
+        data_tags=[*tags, DataTag(id="b", name="B", source="Sensors/B", is_writable=False, is_readable=True)],
         connector="opcua-1",
     )
     assert first.version == same.version
@@ -186,7 +186,7 @@ def _dummy(t):
     if t is typing.Any:
         return "x"
     if isinstance(t, type) and issubclass(t, enum.Enum):
-        return list(t)[0]
+        return next(iter(t))
     if t is str:
         return "x"
     if t in (int, float):
@@ -194,7 +194,7 @@ def _dummy(t):
     if t is bool:
         return True
     if t is datetime.datetime:
-        return datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+        return datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
     if origin is dict or t is dict:
         return {}
     if origin is list or t is list:

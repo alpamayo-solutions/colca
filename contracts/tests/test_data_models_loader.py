@@ -490,4 +490,4 @@ def test_duplicate_data_model_name_is_a_compile_error(tmp_path):
 def test_canonical_data_types_matches_golden_vector():
     # test_data_models_vocabulary.py owns the golden-vector comparison; this
     # just confirms the loader package still exports the same set.
-    assert CANONICAL_DATA_TYPES == frozenset({"boolean", "integer", "number", "string", "json"})
+    assert frozenset({"boolean", "integer", "number", "string", "json"}) == CANONICAL_DATA_TYPES

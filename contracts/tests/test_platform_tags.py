@@ -27,7 +27,7 @@ def _seed_names() -> set[str]:
 def test_the_published_set_is_exactly_what_the_seed_ships():
     names = _seed_names()
     assert names, "the platform seed is empty, so this proves nothing"
-    assert PLATFORM_SEMANTIC_TAG_NAMES == names
+    assert names == PLATFORM_SEMANTIC_TAG_NAMES
 
 
 def test_the_set_is_read_from_the_shipped_seed_file():

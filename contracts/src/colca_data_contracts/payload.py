@@ -1,18 +1,26 @@
-import json
-import hashlib
 import datetime
-import ulid
-from typing import Annotated, Any, Dict, Iterable, List, Optional
+import hashlib
+import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from typing import TYPE_CHECKING, Annotated, Any
 
+import ulid
 from franzmq.data_contracts.base import (
-    Payload,
     Cmd,
-    Metric as BaseMetric,
-    StrEnum as BaseStrEnum,
-    IndexType,
     DataType,
+    IndexType,
+    Payload,
 )
+from franzmq.data_contracts.base import (
+    Metric as BaseMetric,
+)
+
+if TYPE_CHECKING:
+    # franzmq publishes no types; its StrEnum is a plain (str, Enum).
+    from enum import StrEnum as BaseStrEnum
+else:
+    from franzmq.data_contracts.base import StrEnum as BaseStrEnum
 
 
 class ServiceType(BaseStrEnum):
@@ -194,8 +202,8 @@ ULID = Annotated[str, Pattern(ULID_PATTERN)]
 @dataclass
 class Metric(BaseMetric):
     signal_id: str = ""
-    error: Optional[str] = None
-    colca_node_id: Optional[str] = None
+    error: str | None = None
+    colca_node_id: str | None = None
 
     def encode(self):
         data = self.__dict__.copy()
@@ -234,10 +242,10 @@ class HealthMetricDeclaration:
     query: str = ""
     visualization: HealthMetricVisualization = HealthMetricVisualization.TIMELINE
     unit: str = ""
-    precision: Optional[int] = None
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
-    thresholds: Dict[str, float] = field(default_factory=dict)
+    precision: int | None = None
+    min_value: float | None = None
+    max_value: float | None = None
+    thresholds: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -246,7 +254,7 @@ class NetworkInterface:
 
     name: str
     interface_type: NetworkInterfaceType
-    addresses: List[str] = field(default_factory=list)
+    addresses: list[str] = field(default_factory=list)
     mac_address: str = ""
     observed_at: int = 0
 
@@ -264,12 +272,12 @@ class Node(Payload):
 
     id: str
     name: str
-    root_system_element_id: Optional[str] = None
+    root_system_element_id: str | None = None
     display_name: str = ""
     description: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    health_metrics: List[HealthMetricDeclaration] = field(default_factory=list)
-    network_interfaces: List[NetworkInterface] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    health_metrics: list[HealthMetricDeclaration] = field(default_factory=list)
+    network_interfaces: list[NetworkInterface] = field(default_factory=list)
 
 
 @dataclass
@@ -282,12 +290,12 @@ class ServiceDetails(Payload):
     colca_node_id: str
     display_name: str = ""
     description: str = ""
-    system_element_id: Optional[str] = None
-    hierarchy: List[str] = field(default_factory=list)
+    system_element_id: str | None = None
+    hierarchy: list[str] = field(default_factory=list)
     is_active: bool = True
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    architecture_metadata: Dict[str, Any] = field(default_factory=dict)
-    health_metrics: List[HealthMetricDeclaration] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    architecture_metadata: dict[str, Any] = field(default_factory=dict)
+    health_metrics: list[HealthMetricDeclaration] = field(default_factory=list)
 
 
 @dataclass
@@ -300,18 +308,18 @@ class AuditEvent(Payload):
     outcome: AuditOutcome
     actor_kind: ActorKind
     occurred_at: int
-    operation: Optional[str] = None
-    actor_id: Optional[str] = None
-    actor_label: Optional[str] = None
-    entity_type: Optional[str] = None
-    entity_id: Optional[str] = None
-    correlation_id: Optional[str] = None
-    reason_code: Optional[str] = None
-    changed_fields: List[str] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    operation: str | None = None
+    actor_id: str | None = None
+    actor_label: str | None = None
+    entity_type: str | None = None
+    entity_id: str | None = None
+    correlation_id: str | None = None
+    reason_code: str | None = None
+    changed_fields: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
-def _sorted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _sorted_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(items, key=lambda item: str(item.get("id", "")))
 
 
@@ -336,8 +344,8 @@ class NotificationChannelConfig:
     id: str
     name: str
     kind: str
-    public_config: Dict[str, Any]
-    sealed_secret: Optional[SealedSecretEnvelope]
+    public_config: dict[str, Any]
+    sealed_secret: SealedSecretEnvelope | None
     rate_limit_per_minute: int = 60
     enabled: bool = True
 
@@ -349,34 +357,35 @@ class AlarmNotificationConfigSnapshot(Payload):
     issued_at: float
     target_node_id: str
     revision_id: str
-    alarms: List[Dict[str, Any]]
-    channels: List[NotificationChannelConfig]
-    recipients: List[Dict[str, Any]]
-    policies: List[Dict[str, Any]]
-    policy_targets: List[Dict[str, Any]]
-    active_silences: List[Dict[str, Any]]
+    alarms: list[dict[str, Any]]
+    channels: list[NotificationChannelConfig]
+    recipients: list[dict[str, Any]]
+    policies: list[dict[str, Any]]
+    policy_targets: list[dict[str, Any]]
+    active_silences: list[dict[str, Any]]
 
     def __init__(
         self,
         schema_version: int,
-        generated_at: Optional[float] = None,
+        generated_at: float | None = None,
         *,
-        issued_at: Optional[float] = None,
-        alarms: List[Dict[str, Any]],
-        channels: List[NotificationChannelConfig],
-        recipients: List[Dict[str, Any]],
-        policies: List[Dict[str, Any]],
-        policy_targets: List[Dict[str, Any]],
-        active_silences: Optional[List[Dict[str, Any]]] = None,
+        issued_at: float | None = None,
+        alarms: list[dict[str, Any]],
+        channels: list[NotificationChannelConfig],
+        recipients: list[dict[str, Any]],
+        policies: list[dict[str, Any]],
+        policy_targets: list[dict[str, Any]],
+        active_silences: list[dict[str, Any]] | None = None,
         id: str = "alarm-notification-config",
         target_node_id: str = "",
-        revision_id: Optional[str] = None,
+        revision_id: str | None = None,
     ):
-        if issued_at is None and generated_at is None:
+        resolved_issued_at = issued_at if issued_at is not None else generated_at
+        if resolved_issued_at is None:
             raise TypeError("issued_at is required")
         self.id = id
         self.schema_version = schema_version
-        self.issued_at = issued_at if issued_at is not None else generated_at
+        self.issued_at = resolved_issued_at
         self.target_node_id = target_node_id
         self.alarms = alarms
         self.channels = channels
@@ -421,8 +430,8 @@ class NotificationConfigStatus(Payload):
     target_node_id: str
     status: str
     applied_at: float
-    reason_code: Optional[str] = None
-    message: Optional[str] = None
+    reason_code: str | None = None
+    message: str | None = None
 
 
 @dataclass
@@ -432,29 +441,29 @@ class NotificationChannelOutcome:
     status: str
     sent: bool
     attempt: int = 0
-    policy_id: Optional[str] = None
-    target_id: Optional[str] = None
-    recipient_id: Optional[str] = None
-    provider_message_id: Optional[str] = None
-    error_code: Optional[str] = None
+    policy_id: str | None = None
+    target_id: str | None = None
+    recipient_id: str | None = None
+    provider_message_id: str | None = None
+    error_code: str | None = None
 
 
 @dataclass
 class AlarmNotificationSummary:
     status: str
     requested: bool
-    channels: List[NotificationChannelOutcome] = field(default_factory=list)
+    channels: list[NotificationChannelOutcome] = field(default_factory=list)
 
 
 @dataclass
 class AlarmStateChange(Payload):
     event_id: str
     alarm_id: str
-    from_status: Optional[str]
+    from_status: str | None
     to_status: str
     at: float
-    signal_value: Optional[Any]
-    metadata_json: Dict[str, Any] = field(default_factory=dict)
+    signal_value: Any | None
+    metadata_json: dict[str, Any] = field(default_factory=dict)
     revision: int = 1
     notification: AlarmNotificationSummary = field(
         default_factory=lambda: AlarmNotificationSummary(
@@ -465,25 +474,25 @@ class AlarmStateChange(Payload):
     # Sanitized notification settings resolved for this alarm at publish time
     # (severity, labels, covering policies → channels/recipients), so downstream
     # MQTT consumers are self-contained. Never carries channel secrets.
-    notification_settings: Optional[Dict[str, Any]] = None
+    notification_settings: dict[str, Any] | None = None
 
 
 @dataclass
 class NotificationDispatched(Payload):
     idempotency_key: str
-    policy_id: Optional[str]
+    policy_id: str | None
     channel_id: str
     recipient_id: str
-    alarm_event_id: Optional[str]
+    alarm_event_id: str | None
     status: str
     at: float
     attempt: int
-    latency_ms: Optional[int]
-    error: Optional[str] = None
-    metadata_json: Dict[str, Any] = field(default_factory=dict)
-    channel_kind: Optional[str] = None
-    provider: Optional[str] = None
-    provider_message_id: Optional[str] = None
+    latency_ms: int | None
+    error: str | None = None
+    metadata_json: dict[str, Any] = field(default_factory=dict)
+    channel_kind: str | None = None
+    provider: str | None = None
+    provider_message_id: str | None = None
     retryable: bool = False
     terminal: bool = True
 
@@ -513,7 +522,7 @@ def derive_annotation_id(
     empty string.
     """
     signal_set = ",".join(sorted(signal_ids))
-    digest = hashlib.sha256(f"{annotation_type_id}|{source}|{time_start:.6f}|{signal_set}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{annotation_type_id}|{source}|{time_start:.6f}|{signal_set}".encode()).digest()
     return str(ulid.from_bytes(digest[:16]))
 
 
@@ -542,9 +551,9 @@ class Annotation(Payload):
     #: with a vector rewrite, not before.
     annotation_type_id: str
     time_start: float
-    time_end: Optional[float] = None
-    value: Optional[Any] = None
-    signal_ids: List[ULID] = field(default_factory=list)
+    time_end: float | None = None
+    value: Any | None = None
+    signal_ids: list[ULID] = field(default_factory=list)
     #: Producing identity for audit, e.g. ``"dataops/<producer-name>"``.
     source: str = ""
     deleted: bool = False
@@ -574,19 +583,19 @@ class DataTag(Payload):
     source: str
     is_writable: bool
     is_readable: bool
-    data_type: Optional[str] = None
+    data_type: str | None = None
     #: True when this tag no longer exists at the source (carried forward
     #: from the previous catalogue rather than dropped, so a signal bound to
     #: it stays bound instead of silently rebinding — design §6).
     is_stale: bool = False
-    meta: Dict[str, Any] = field(default_factory=dict)
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class Result:
     value: Any
-    timestamp: float = field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
-    error: Optional[str] = None
+    timestamp: float = field(default_factory=lambda: datetime.datetime.now(datetime.UTC).timestamp())
+    error: str | None = None
 
     def to_metric(self, signal_id: str) -> Metric:
         return Metric(value=self.value, signal_id=signal_id, timestamp=self.timestamp, error=self.error)
@@ -594,14 +603,16 @@ class Result:
 
 @dataclass
 class DataTags(Payload):
-    data_tags: List[DataTag]
+    data_tags: list[DataTag]
     connector: str
 
     @property
     def version(self) -> str:
         sorted_tags = sorted(self.data_tags, key=lambda x: x.id)
         tags_dict = [tag.__dict__ for tag in sorted_tags]
-        return hashlib.md5(json.dumps(tags_dict, cls=CustomEncoder, sort_keys=True).encode()).hexdigest()
+        return hashlib.md5(
+            json.dumps(tags_dict, cls=CustomEncoder, sort_keys=True).encode(), usedforsecurity=False
+        ).hexdigest()
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "DataTags":
@@ -628,11 +639,11 @@ class AnnotationType(Payload):
     data_type: str
     i18n_name: str = ""
     description: str = ""
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
-    unit: Optional[str] = None
+    min_value: float | None = None
+    max_value: float | None = None
+    unit: str | None = None
     create_option_on_input_new: bool = False
-    options: List[Dict[str, Any]] = field(default_factory=list)
+    options: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "AnnotationType":
@@ -650,7 +661,7 @@ class MetadataType(Payload):
     i18n_name: str = ""
     description: str = ""
     is_mandatory: bool = False
-    allowed_content_type_keys: List[str] = field(default_factory=list)
+    allowed_content_type_keys: list[str] = field(default_factory=list)
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "MetadataType":
@@ -666,10 +677,10 @@ class SemanticTag(Payload):
     name: str
     i18n_name: str = ""
     description: str = ""
-    applies_to: List[str] = field(default_factory=list)
+    applies_to: list[str] = field(default_factory=list)
     icon: str = ""
-    quantity_kind: Optional[str] = None
-    data_type: Optional[str] = None
+    quantity_kind: str | None = None
+    data_type: str | None = None
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "SemanticTag":
@@ -700,7 +711,7 @@ class Group(Payload):
     #: Grant strings in the uns grammar (``read:<element>/#``,
     #: ``cmd:<element>/#:classes``, ``admin:#``). Validated at authoring time by
     #: the reconciler and again by the node that applies the definition.
-    grants: List[str] = field(default_factory=list)
+    grants: list[str] = field(default_factory=list)
     description: str = ""
 
     @classmethod
@@ -722,12 +733,12 @@ class PersonalAccessToken(Payload):
     hashed_secret: str
     owner_sub: str
     owner_email: str
-    scopes: List[str] = field(default_factory=list)
-    roles: List[str] = field(default_factory=list)
-    grants: List[str] = field(default_factory=list)
-    namespace_read_permissions: List[str] = field(default_factory=list)
-    namespace_write_permissions: List[str] = field(default_factory=list)
-    expires_at: Optional[str] = None
+    scopes: list[str] = field(default_factory=list)
+    roles: list[str] = field(default_factory=list)
+    grants: list[str] = field(default_factory=list)
+    namespace_read_permissions: list[str] = field(default_factory=list)
+    namespace_write_permissions: list[str] = field(default_factory=list)
+    expires_at: str | None = None
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "PersonalAccessToken":
@@ -753,8 +764,8 @@ class DataModel(Payload):
     name: str
     version: str = "1.0"
     description: str = ""
-    extends: List[str] = field(default_factory=list)
-    slots: List[Dict[str, Any]] = field(default_factory=list)
+    extends: list[str] = field(default_factory=list)
+    slots: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "DataModel":
@@ -771,7 +782,7 @@ class ExternalSystem(Payload):
     name: str
     system_type: str
     description: str = ""
-    properties: Dict[str, Any] = field(default_factory=dict)
+    properties: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "ExternalSystem":
@@ -818,16 +829,16 @@ class SystemElement(Payload):
     name: str
     description: str = ""
     #: ULID of the enclosing element; None for a root.
-    parent_id: Optional[ULID] = None
-    implements: List[str] = field(default_factory=list)  # DataModel names this SE fulfils
-    external_asset_id: Optional[str] = None
-    external_asset_id_type: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    parent_id: ULID | None = None
+    implements: list[str] = field(default_factory=list)  # DataModel names this SE fulfils
+    external_asset_id: str | None = None
+    external_asset_id_type: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     #: ULID of the `_SemanticTag` definition that says what this entity IS.
     #: None means unclassified, which is a valid state.
-    semantic_type_id: Optional[ULID] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    semantic_type_id: ULID | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "SystemElement":
@@ -863,29 +874,29 @@ class Signal(Payload):
     name: str
     description: str = ""
     #: ULID of the SystemElement that owns this signal.
-    system_element_id: Optional[ULID] = None
+    system_element_id: ULID | None = None
     #: ULID of the DataTag this signal reads from (its natural key is
     #: (connector, source); the connector that owns it is reached through the
     #: tag, never stored here).
-    data_tag: Optional[ULID] = None
+    data_tag: ULID | None = None
     #: The connector publishes metrics for this signal.
     is_published: bool = False
     #: The read side historises it (consumed by the historian bridge).
     is_logged: bool = False
-    data_type: Optional[DataType] = None
-    index_type: Optional[IndexType] = None
-    unit: Optional[str] = None
-    precision: Optional[int] = None
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
-    config: Dict[str, Any] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    data_type: DataType | None = None
+    index_type: IndexType | None = None
+    unit: str | None = None
+    precision: int | None = None
+    min_value: float | None = None
+    max_value: float | None = None
+    config: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     has_contract: bool = False
     #: ULID of the `_SemanticTag` definition that says what this entity IS.
     #: None means unclassified, which is a valid state.
-    semantic_type_id: Optional[ULID] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    semantic_type_id: ULID | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
     @property
     def __dict__(self):
@@ -926,15 +937,15 @@ class Constant(Payload):
     #: such a record for missing a required property.
     value: Any = None
     description: str = ""
-    system_element_id: Optional[ULID] = None
-    unit: Optional[str] = None
-    precision: Optional[int] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    system_element_id: ULID | None = None
+    unit: str | None = None
+    precision: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     #: ULID of the `_SemanticTag` definition that says what this entity IS.
     #: None means unclassified, which is a valid state.
-    semantic_type_id: Optional[ULID] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    semantic_type_id: ULID | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
     @property
     def __dict__(self):
@@ -973,9 +984,9 @@ class Resource(Payload):
     description: str = ""
     resource_type: str = "other"
     size_bytes: int = 0
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "Resource":
@@ -996,7 +1007,7 @@ class EditOperation(Payload):
     digest: str
     message: str
     result: str
-    topics: List[str]
+    topics: list[str]
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "EditOperation":
@@ -1056,9 +1067,9 @@ class CmdEdit(Cmd):
     """
 
     operation_id: str = ""
-    intent: Dict[str, Any] = field(default_factory=dict)
+    intent: dict[str, Any] = field(default_factory=dict)
     # Decimal strings keep uint64 stream offsets exact in JavaScript clients.
-    expected_versions: Dict[str, str] = field(default_factory=dict)
+    expected_versions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

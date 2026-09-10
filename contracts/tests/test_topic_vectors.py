@@ -17,11 +17,11 @@ from importlib import resources
 from pathlib import Path
 
 import pytest
-
-import colca_data_contracts  # noqa: F401  — registers the Colca contracts
 from franzmq.data_contracts import PAYLOAD_CLASSES
 from franzmq.data_contracts.base import Cmd, Payload
 from franzmq.topic import Topic
+
+import colca_data_contracts
 
 pytestmark = pytest.mark.skipif(
     not colca_data_contracts.TOPICS_CARRY_NODE_ID,

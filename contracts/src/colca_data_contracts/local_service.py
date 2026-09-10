@@ -12,8 +12,8 @@ import datetime
 import json
 import logging
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 import paho.mqtt.client as pahomqtt
 from franzmq import Client, Topic
@@ -54,11 +54,11 @@ class _LogPublishingHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            from franzmq.data_contracts.base import Log
             from franzmq import Topic
+            from franzmq.data_contracts.base import Log
 
             payload = Log(
-                timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                timestamp=datetime.datetime.now(datetime.UTC).isoformat(),
                 level=record.levelname,
                 message=self.format(record),
                 logger_name=record.name,
@@ -73,7 +73,7 @@ class _LogPublishingHandler(logging.Handler):
             topic = Topic(
                 payload_type=Log,
                 node_id=self.client.require_node_id(),
-                context=self.context + (record.levelname,),
+                context=(*self.context, record.levelname),
             )
             self.client.publish(topic, payload)
         except Exception:
@@ -140,7 +140,7 @@ def resolve_local_identity(
             "X-Colca-Mount": mount,
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - always http://  # nosec B310
         payload = json.load(response)
 
     required = ("ulid", "name", "node", "element", "mount")
@@ -167,12 +167,12 @@ def connect_local_mqtt(
     mqtt_port: int = 1883,
     http_port: int = 80,
     mount: str = "",
-    client_id: Optional[str] = None,
-    on_connect: Optional[Callable] = None,
-    on_disconnect: Optional[Callable] = None,
-    identity: Optional[LocalServiceIdentity] = None,
+    client_id: str | None = None,
+    on_connect: Callable | None = None,
+    on_disconnect: Callable | None = None,
+    identity: LocalServiceIdentity | None = None,
     publish_logs: bool = True,
-    will: Optional[tuple[Topic, Payload]] = None,
+    will: tuple[Topic, Payload] | None = None,
     max_queued_messages: int = 0,
 ) -> tuple[Client, LocalServiceIdentity]:
     """Connect to local Colca MQTT without credentials or client TLS.
@@ -230,7 +230,7 @@ def service_details_topic(identity: LocalServiceIdentity) -> Topic:
     return Topic(
         payload_type=ServiceDetails,
         node_id=identity.node_id,
-        context=identity.hierarchy + ("_service",),
+        context=(*identity.hierarchy, "_service"),
     )
 
 
