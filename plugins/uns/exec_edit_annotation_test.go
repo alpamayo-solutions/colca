@@ -10,13 +10,8 @@ import (
 	"testing"
 )
 
-// annotationIDVectorPath is the golden `derive_annotation_id` dataset
-// (annotation-cutover design), the same shared-file mechanism
-// sanitize.json and data_model_vocabulary.json already use: ONE checked-in
-// file, judged by both this Go suite and the Python suite
-// (colca-data-contracts/tests/test_annotation_payload.py) — never a
-// colca-local copy, which would just be the drift the vector exists to
-// prevent.
+// annotationIDVectorPath is the golden derive_annotation_id dataset, shared
+// with the Python tests (tests/test_annotation_payload.py).
 const annotationIDVectorPath = "../../contracts/src/colca_data_contracts/vectors/annotation_id.json"
 
 type annotationIDVectorCase struct {
@@ -47,16 +42,12 @@ func loadAnnotationIDVectors(t *testing.T) annotationIDVectorFile {
 	return v
 }
 
-// TestDeriveAnnotationIDMatchesTheGoldenVectors pins deriveAnnotationID
-// (this package) against the vectors computed from the real
-// colca_data_contracts.payload.derive_annotation_id. A change to either
-// side's algorithm that stops agreeing with the other fails here before a
-// producer and a human ever derive different ids for the same annotation.
+// TestDeriveAnnotationIDMatchesTheGoldenVectors checks deriveAnnotationID
+// against vectors computed by colca_data_contracts.payload.derive_annotation_id.
 func TestDeriveAnnotationIDMatchesTheGoldenVectors(t *testing.T) {
 	cases := loadAnnotationIDVectors(t).Cases
-	// The file must exercise every shape of the signal set the rule
-	// distinguishes — none, one, several, and several in more than one
-	// order — or the sort inside the rule is never pinned.
+	// The file must cover every signal-set shape (none, one, several, and
+	// several in different orders), or the sort is never tested.
 	sizes := map[int]bool{}
 	orders := map[string]map[string]bool{}
 	for _, c := range cases {
@@ -93,18 +84,15 @@ func TestDeriveAnnotationIDMatchesTheGoldenVectors(t *testing.T) {
 			t.Errorf("deriveAnnotationID(%q, %q, %v, %q) = %q, vectors want %q",
 				c.AnnotationTypeID, c.Source, c.TimeStart, c.SignalIDs, got, c.ID)
 		}
-		// The derivation sorts a copy: the caller's slice must come back
-		// in the order it went in, since the composed record carries it.
+		// The derivation sorts a copy; the caller's slice keeps its order.
 		if strings.Join(given, ",") != strings.Join(c.SignalIDs, ",") {
 			t.Errorf("deriveAnnotationID reordered the caller's signal_ids: %q -> %q", given, c.SignalIDs)
 		}
 	}
 }
 
-// TestDeriveAnnotationIDIsDeterministicAndDistinct mirrors the Python-side
-// pins in colca-data-contracts/tests/test_annotation_payload.py so the two
-// native copies are held to the same behavioral claims, not just the same
-// golden values.
+// TestDeriveAnnotationIDIsDeterministicAndDistinct mirrors the Python tests,
+// so both copies meet the same behavioural claims, not just the same values.
 func TestDeriveAnnotationIDIsDeterministicAndDistinct(t *testing.T) {
 	one := []string{"sig-1"}
 	baseline := deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0, one)
@@ -183,10 +171,8 @@ func TestComposeAnnotationCreateDerivesTheDocumentedID(t *testing.T) {
 	}
 }
 
-// TestComposeAnnotationRefusesACallerSuppliedIDOnCreate is the create-id
-// Critical's exact shape (preflight-authz-audit precedent): a caller naming
-// an id on create must be refused outright, with zero records queued
-// (atomicity) — never silently ignored in favor of the derived one.
+// TestComposeAnnotationRefusesACallerSuppliedIDOnCreate checks that a create
+// naming an id is refused with nothing queued, not given the derived id.
 func TestComposeAnnotationRefusesACallerSuppliedIDOnCreate(t *testing.T) {
 	intent := annotationCreateIntent()
 	intent.AnnotationID = "attacker-chosen-id"
@@ -236,12 +222,9 @@ func TestComposeAnnotationRejectsAnUnknownAction(t *testing.T) {
 	}
 }
 
-// TestComposeAnnotationUpdateAndDeleteUseTheSuppliedIDVerbatim pins D6b: an
-// update or delete targets an EXISTING id the caller names, never a
-// re-derived one — re-deriving would only be correct if annotation_type_id,
-// source and time_start were all unchanged, which composeAnnotation has no
-// way to know for an existing annotation (it is never KV-projected, so there
-// is no prior record here to compare against).
+// TestComposeAnnotationUpdateAndDeleteUseTheSuppliedIDVerbatim checks that
+// update and delete use the id the caller names. Re-deriving would only be right
+// if type, source and start were unchanged, which the executor cannot know.
 func TestComposeAnnotationUpdateAndDeleteUseTheSuppliedIDVerbatim(t *testing.T) {
 	const existingID = "01J000000000000000000ANNOT"
 
@@ -311,9 +294,8 @@ func TestComposeAnnotationUpdateAndDeleteUseTheSuppliedIDVerbatim(t *testing.T) 
 	})
 }
 
-// annotationWireIntent renders an annotation intent as the JSON shape the
-// Edit envelope carries (editBody's "intent" map), mirroring how
-// a client serializes one.
+// annotationWireIntent renders an annotation intent as the JSON a client puts
+// in the Edit envelope.
 func annotationWireIntent(overrides map[string]any) map[string]any {
 	intent := map[string]any{
 		"type": "annotation", "action": "create",
@@ -326,15 +308,10 @@ func annotationWireIntent(overrides map[string]any) map[string]any {
 	return intent
 }
 
-// TestEditAnnotationCommitsThroughTheEventDoorNeverKV is the level-1 pin
-// for the design's own acceptance list: the executor derives the id, the
-// record lands on the annotations stream, and it is never KV-projected — all
-// through the real _CmdEdit envelope, not composeAnnotation directly.
-//
-// The KV-absence claim is paired with a presence claim on the SAME KVGet
-// query (an absence assertion is only as strong as the presence
-// assertion pinning its denominator) — seeding an ordinary entity first
-// proves KVGet actually finds something when it should, in this same test.
+// TestEditAnnotationCommitsThroughTheEventDoorNeverKV runs the real _CmdEdit
+// envelope: the executor derives the id, the record lands on the annotations
+// stream, and it is never KV-projected. An ordinary entity is seeded first to
+// show KVGet finds records when they exist.
 func TestEditAnnotationCommitsThroughTheEventDoorNeverKV(t *testing.T) {
 	f := newStore("n-edge1")
 	presenceTopic := "colca/v1/_Constant/n-edge1/line1/pin"
@@ -373,11 +350,9 @@ func TestEditAnnotationCommitsThroughTheEventDoorNeverKV(t *testing.T) {
 		t.Fatalf("%s appeared in KV — an annotation must never be KV-projected", writes[0].Topic)
 	}
 
-	// Replaying the identical operation_id must return the cached outcome
-	// without appending the event or the receipt a second time — the same
-	// exactly-once guarantee every other intent gets, even though this intent
-	// commits its event and its receipt as two separate writes rather than
-	// one atomic batch.
+	// Replaying the same operation_id returns the cached outcome without
+	// appending the event or the receipt again, even though they are two
+	// separate writes.
 	code, _, _, replayWrites := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
 	if code != 200 || len(replayWrites) != 1 || replayWrites[0].Topic != writes[0].Topic {
 		t.Fatalf("replay = %d writes=%+v, want the identical cached write", code, replayWrites)
@@ -388,8 +363,8 @@ func TestEditAnnotationCommitsThroughTheEventDoorNeverKV(t *testing.T) {
 	}
 }
 
-// TestEditAnnotationRefusalWritesNothing is the atomicity half of the
-// create-id refusal: a 409 at compose time must reach neither write door.
+// TestEditAnnotationRefusalWritesNothing checks that a 409 at compose time
+// reaches neither write path.
 func TestEditAnnotationRefusalWritesNothing(t *testing.T) {
 	f := newStore("n-edge1")
 	exec := NewEditExec(f, nil)
@@ -409,10 +384,9 @@ func TestEditAnnotationRefusalWritesNothing(t *testing.T) {
 	}
 }
 
-// TestEditAnnotationDeleteAppendsAtAnExistingIDThroughTheEventDoor
-// covers the create-then-delete lifecycle end to end: the delete names the
-// id the create produced, and it too lands on the annotations stream via the
-// event door, never KV.
+// TestEditAnnotationDeleteAppendsAtAnExistingIDThroughTheEventDoor covers create
+// then delete: the delete names the created id and also lands on the
+// annotations stream, never in KV.
 func TestEditAnnotationDeleteAppendsAtAnExistingIDThroughTheEventDoor(t *testing.T) {
 	f := newStore("n-edge1")
 	exec := NewEditExec(f, nil)

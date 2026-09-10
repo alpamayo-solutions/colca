@@ -2,10 +2,9 @@ package store
 
 import "testing"
 
-// One pass examines at most maxScan records; the sweep still reaches every
-// doomed record because each pass resumes where the last one stopped. A cap
-// without a resume position would rescan the same clean prefix forever and
-// never reach a doomed record behind it — the failure this pins.
+// One pass examines at most maxScan records, and the sweep still reaches every
+// doomed record because each pass resumes where the last stopped. Without the
+// resume position a capped pass would rescan the same clean prefix forever.
 func TestEvictRecordsIsBoundedPerPassAndCompleteAcrossPasses(t *testing.T) {
 	s := defStore(t)
 	var recs []Record

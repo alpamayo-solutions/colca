@@ -24,11 +24,10 @@ type Params struct {
 	WorkDir    string        // scratch dir; caller owns cleanup
 }
 
-// RunIngest measures the MQTT→engine→fsync path flat out: every machine
-// publishes QoS-1 as fast as its PUBACKs come back for Duration. Each PUBLISH
-// is one synced Pebble batch today, so ingest_msgs_per_sec IS the per-record
-// fsync rate of the storage device, and disk_bytes_per_record ×
-// write_amplification is the flash-endurance input.
+// RunIngest measures the MQTT, engine and fsync path flat out: every machine
+// publishes at QoS 1 as fast as PUBACKs return. Each publish is one synced
+// Pebble batch, so ingest_msgs_per_sec is the device's fsync rate, and
+// disk_bytes_per_record times write_amplification estimates flash wear.
 func RunIngest(p Params) (*Report, error) {
 	pair, err := StartPair(p.WorkDir, p.Machines)
 	if err != nil {

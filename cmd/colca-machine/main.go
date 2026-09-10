@@ -1,35 +1,14 @@
-// Command colca-machine is the demo machine simulator: a long-running MQTT
-// client that behaves like a real machine attached to a Colca edge node.
+// Command colca-machine is the demo machine simulator: an MQTT client that
+// behaves like a machine attached to an edge node.
 //
-// Ownership resolves to nodes, never to services (local-service-trust design
-// §2): topic level 4 is the NODE_ULID env var, not this machine's own
-// identity. It publishes a sine-shaped temperature metric to
-// colca/v1/_Metric/{node-ulid}/{ulid}/temp every PUBLISH_INTERVAL_MS,
-// subscribes to colca/v1/_CmdParam/{ulid}/# and acks every command it receives
-// to colca/v1/_Ack/{node-ulid}/{ulid}/{command-name} with result code 200, or
-// 498 when the command's expires_at (unix milliseconds) already passed —
-// expiry is decided by the machine at execution time, never by the queue.
+// It publishes a temperature metric under its node's ULID (NODE_ULID) every
+// PUBLISH_INTERVAL_MS, subscribes to its commands and acks each with 200, or
+// 498 when expires_at has passed. Expiry is judged against the time learned
+// from the node's _TimeSync beacon; after a reconnect, decisions wait for a
+// beacon or TIME_SYNC_HOLD_MS. SIM_CLOCK_OFFSET_MS skews its clock for tests.
 //
-// Expiry is decided against SYNCED time, not the machine's raw wall clock
-// (the time sync move drain design
-// §2.3): it subscribes to colca/v1/_TimeSync/+ and maintains offset_ms from the
-// most recent beacon, so a machine whose own clock has drifted (dead RTC
-// battery, no NTP reach) still decides expiry correctly. After every
-// (re)connect, expiry decisions are BUFFERED — never rejected — until either
-// the first beacon received after the connect instant, or TIME_SYNC_HOLD_MS
-// elapses (default 10000; env, mirrors the node's time_sync.hold_ms), at
-// which point it proceeds on the last-known offset (0 if it never synced)
-// and logs a warning.
-//
-// Env SIM_CLOCK_OFFSET_MS (default 0, signed milliseconds) skews this
-// process's own notion of wall time everywhere it reads the clock — a
-// SIMULATOR-ONLY convenience for skew scenarios (chaos design §5's "skewed
-// machine" cases); production colcad has no such knob.
-//
-// It is a container process in the demo topology: it must survive a broker
-// restart (docker compose stop/start of an edge node), must never exit because
-// of a malformed message, and must shut down cleanly on SIGTERM so that
-// `docker compose down` never has to escalate to SIGKILL.
+// It survives broker restarts and malformed messages and exits cleanly on
+// SIGTERM.
 package main
 
 import (
@@ -65,9 +44,8 @@ const (
 	publishTimeout       = 5 * time.Second
 	disconnectQuiesceMS  = 250
 
-	// defaultHoldMS is the time-sync design §2.5 default for hold_ms — how
-	// long a post-(re)connect expiry decision is buffered before the machine
-	// fails open on its last-known offset.
+	// defaultHoldMS is how long expiry decisions wait for a beacon after a
+	// reconnect.
 	defaultHoldMS = 10000
 )
 
@@ -90,34 +68,22 @@ func envInt64(log *slog.Logger, k string, def int64) int64 {
 	return v
 }
 
-// newSimClock builds this process's single wall-clock read point (time-sync
-// task's SIM_CLOCK_OFFSET_MS): every decision in timeSync/handleCommand reads
-// time through this func, never through a bare time.Now() — the same
-// injectable-clock pattern colcad's own time-sync state uses
-// (internal/clock.Clock). offsetMS skews what "now" means everywhere the
-// simulator reads the clock; it is constant for the process lifetime (read
-// once at startup), which is what makes it safe to mix with real
-// time.Timer/time.Since durations elsewhere (a constant additive skew always
-// cancels out of a subtraction between two readings of this same clock).
+// newSimClock is the process's only wall-clock read, skewed by offsetMS. The
+// skew is constant, so durations between two readings stay correct.
 func newSimClock(offsetMS int64) func() time.Time {
 	return func() time.Time { return time.Now().Add(time.Duration(offsetMS) * time.Millisecond) }
 }
 
-// syncState is a snapshot of timeSync's decision-relevant fields — exists so
-// decide (the pure function every time-sync test exercises) needs no lock and
-// no goroutine: give it a snapshot and a wall reading, get a decision.
+// syncState is a snapshot of timeSync's state, so decide needs no lock.
 type syncState struct {
 	offsetMS int64
 	holding  bool
 	deadline time.Time
 }
 
-// decide is the pure state machine at the heart of design §2.3 rule 2: ready
-// is false exactly while a hold is open and its deadline has not passed yet
-// — the caller must buffer the decision, never reject it. Once ready,
-// syncedNow is wall_now + offset_ms (rule 1); deadlineHit reports whether it
-// was the DEADLINE, not a beacon, that let the decision through — the
-// caller's cue to log the design §2.4 warning.
+// decide reports whether an expiry decision may proceed: not while a hold is
+// open and its deadline has not passed. syncedNow is the wall time plus the
+// offset; deadlineHit says the deadline, not a beacon, ended the hold.
 func decide(s syncState, wallNow time.Time) (ready bool, syncedNow time.Time, deadlineHit bool) {
 	if s.holding && wallNow.Before(s.deadline) {
 		return false, time.Time{}, false
@@ -125,15 +91,9 @@ func decide(s syncState, wallNow time.Time) (ready bool, syncedNow time.Time, de
 	return true, wallNow.Add(time.Duration(s.offsetMS) * time.Millisecond), s.holding
 }
 
-// timeSync is the machine-side half of the time-sync rule (design §2.3): the
-// offset learned from the most recent _TimeSync beacon, plus the
-// post-(re)connect hold that buffers expiry decisions — never rejects them —
-// until either the first beacon received after the connect instant, or
-// hold_ms elapses (rule 2: fail open on deadline, with a warning).
-//
-// now is the injectable wall clock (mandatory for every decision here — no
-// bare time.Now()): production passes newSimClock's SIM_CLOCK_OFFSET_MS-
-// wrapped clock, tests pass a fake.
+// timeSync keeps the offset from the latest _TimeSync beacon and the hold after
+// a reconnect: expiry decisions wait, never fail, until a beacon arrives or the
+// hold ends. now is the injectable clock.
 type timeSync struct {
 	now    func() time.Time
 	holdMS int64
@@ -147,11 +107,8 @@ func newTimeSync(now func() time.Time, holdMS int64) *timeSync {
 	return &timeSync{now: now, holdMS: holdMS, release: make(chan struct{})}
 }
 
-// Connect starts a new hold window (design §2.3 rule 2): a (re)connect must
-// not trust a pre-reconnect offset for expiry decisions until either a fresh
-// beacon lands or hold_ms elapses. holdMS <= 0 is the operator's explicit "no
-// hold" (config.TimeSync.EffectiveHoldMS's own contract on the node side) —
-// proceed immediately on the last-known offset.
+// Connect opens a hold, so a reconnect does not trust an old offset until a
+// beacon lands or the hold ends. holdMS <= 0 means no hold.
 func (t *timeSync) Connect() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -163,11 +120,8 @@ func (t *timeSync) Connect() {
 	t.st.deadline = t.now().Add(time.Duration(t.holdMS) * time.Millisecond)
 }
 
-// Beacon records offset = now_ms - wall_receipt (design §2.1/§2.3 rule 1:
-// last sample wins, no smoothing) and releases any open hold immediately —
-// this IS "the first beacon received after the connect instant" the rule
-// calls for, since Connect resets the hold on every (re)connect before any
-// beacon can arrive.
+// Beacon records offset = now_ms - wall time (the latest sample wins) and ends
+// any open hold.
 func (t *timeSync) Beacon(nowMS int64) {
 	t.mu.Lock()
 	t.st.offsetMS = nowMS - t.now().UnixMilli()
@@ -190,13 +144,8 @@ func (t *timeSync) Snapshot() syncState {
 	return t.st
 }
 
-// Await blocks until an expiry decision may proceed (design §2.3 rule 2:
-// "commands buffered, not rejected"): either a beacon lands (immediate
-// release via the closed channel — no poll-interval delay, so the hold is
-// milliseconds in practice per the design's own claim) or the hold's
-// deadline passes (fail open on the last-known offset, deadlineHit=true so
-// the caller logs the required warning). ctx cancellation (process shutdown)
-// also returns, best-effort, so a draining process is never stuck here.
+// Await blocks until an expiry decision may proceed: a beacon arrives, the
+// hold's deadline passes (deadlineHit is then true), or ctx is cancelled.
 func (t *timeSync) Await(ctx context.Context) (syncedNow time.Time, offsetMS int64, deadlineHit bool) {
 	for {
 		t.mu.Lock()
@@ -213,12 +162,8 @@ func (t *timeSync) Await(ctx context.Context) (syncedNow time.Time, offsetMS int
 		deadline, ch := t.st.deadline, t.release
 		t.mu.Unlock()
 
-		// deadline.Sub(wallNow), NOT time.Until(deadline): both deadline and
-		// wallNow were read through the SAME (possibly skewed) clock, so
-		// their difference is the correct REAL remaining duration regardless
-		// of any constant SIM_CLOCK_OFFSET_MS skew — time.Until would instead
-		// subtract the unskewed time.Now(), silently reintroducing the skew
-		// into the timer length.
+		// Both readings come from the same skewed clock, so their difference is the
+		// real remaining time; time.Until would add the skew back.
 		timer := time.NewTimer(deadline.Sub(wallNow))
 		select {
 		case <-ch:
@@ -236,10 +181,8 @@ func (t *timeSync) Await(ctx context.Context) (syncedNow time.Time, offsetMS int
 
 func main() { os.Exit(run()) }
 
-// beaconFilter is the MQTT subscribe filter for the node's time-sync beacon
-// (<root>/v1/_TimeSync/{node-ulid}, no hierarchy path). The node-id level is
-// a wildcard: this process only ever sees the beacon from whichever node it
-// happens to be connected to.
+// beaconFilter matches the time beacon of whichever node this process is
+// connected to.
 func beaconFilter() string { return uns.Prefix() + "_TimeSync/+" }
 
 func run() int {
@@ -252,11 +195,8 @@ func run() int {
 	broker := env("BROKER_ADDR", "127.0.0.1:8883")
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("machine", ulid)
 
-	// Ownership resolves to NODES, never to services (local-service-trust
-	// design §2): topic level 4 is the NODE this machine is attached to, not
-	// its own identity — the engine rejects anything else. Required, not
-	// defaulted: guessing a node ulid would silently mint traffic no real
-	// node admits.
+	// Topics carry the ULID of the node this machine is attached to, not the
+	// machine's own. There is no default: a guessed node would refuse the traffic.
 	nodeULID := env("NODE_ULID", "")
 	if nodeULID == "" {
 		log.Error("NODE_ULID is required — colca-machine publishes under the node's own identity now, not its own (local-service-trust design §2)")
@@ -264,9 +204,8 @@ func run() int {
 	}
 	interval := publishInterval(log)
 
-	// Time-sync design §2.1/§2.3: the machine's own wall-clock read point
-	// (SIM_CLOCK_OFFSET_MS-skewable, simulator-only) and the offset/hold
-	// state derived from the node's _TimeSync beacon.
+	// The machine's clock, skewable for tests, and the offset and hold state fed by
+	// the node's beacon.
 	simOffsetMS := envInt64(log, "SIM_CLOCK_OFFSET_MS", 0)
 	simNow := newSimClock(simOffsetMS)
 	holdMS := envInt64(log, "TIME_SYNC_HOLD_MS", defaultHoldMS)
@@ -275,8 +214,8 @@ func run() int {
 		log.Warn("SIM_CLOCK_OFFSET_MS active — this process's wall clock is deliberately skewed (simulator only)", "offset_ms", simOffsetMS)
 	}
 
-	// The machine's key IS its credential (auth design §6.1): pre-provisioned
-	// at keyPath (gen-keys.sh) and enrolled at the node before first connect.
+	// The machine's key is its credential; it is enrolled at the node before the
+	// first connect.
 	id, err := identity.Load(keyPath)
 	if err != nil {
 		log.Error("cannot load machine key — generate it with colca-keygen and enroll the pubkey", "key", keyPath, "err", err)
@@ -313,19 +252,10 @@ func run() int {
 			MinVersion:         tls.VersionTLS13,
 		}).
 		SetClientID(ulid).SetUsername(ulid).
-		// Clean session, deliberately (command-redelivery design §3). Asking
-		// the broker to KEEP the session is asking mochi's in-memory queue to
-		// hold commands issued while this machine is away — and that queue
-		// dies with the broker process, which is precisely the case that used
-		// to lose commands. A clean session drops this machine's subscription
-		// from the topic index the moment it disconnects, which is what makes
-		// the node record those commands as undelivered and replay them from
-		// the durable commands stream on the next subscribe.
-		//
-		// So this is not a downgrade from "persistent" to "clean": it swaps a
-		// volatile redelivery mechanism for a durable one, and having BOTH
-		// would mean two mechanisms with different guarantees delivering the
-		// same command twice.
+		// Clean session on purpose. A kept session would queue commands in mochi's
+		// memory, which a broker restart loses. With a clean session the node records
+		// undelivered commands and replays them from the durable commands stream when
+		// the machine subscribes again.
 		SetCleanSession(true).
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
@@ -337,47 +267,15 @@ func run() int {
 
 	opts.SetOnConnectHandler(func(c pahomqtt.Client) {
 		log.Info("CONNECTED", "broker", broker, "client_id", ulid)
-		// Time-sync design §2.3 rule 2: refresh the hold here too, though
-		// the window that actually matters against redelivery races is
-		// already open by now — SetReconnectingHandler (or, for the very
-		// first connect, the call right before client.Connect() below)
-		// opens it BEFORE this connection attempt began, closing the race
-		// this call alone could not (a command routed through
-		// SetDefaultPublishHandler could otherwise reach handleCommand
-		// before this callback even runs — SetOrderMatters(false) gives no
-		// ordering guarantee between them). This call is a harmless,
-		// redundant refresh for the ordinary case, not the sole guarantee.
+		// The hold is already open (see SetReconnectingHandler and the call before
+		// Connect); refreshing it here is harmless.
 		ts.Connect()
 
-		// Both SUBSCRIBE packets are issued CONCURRENTLY — c.Subscribe
-		// itself is non-blocking (it queues the packet and returns a
-		// token immediately); only WAITING on that token blocks. Calling
-		// Subscribe for cmd, THEN blocking on its token, THEN calling
-		// Subscribe for beacon (the original shape) meant a slow or
-		// contended broker's cmd SUBACK — bounded by the SAME
-		// subscribeTimeout order of magnitude as time_sync's hold_ms —
-		// could eat into the beacon subscribe's own share of the
-		// reconnect-hold window before its packet was even SENT. Found
-		// hardening the design §2.2 subscribe-triggered beacon fix: a CI run showed the reconnect-hold decision land on
-		// the deadline despite the structural fix, and this sequential
-		// coupling is the residual explanation once the primary
-		// connect-vs-subscribe race was already closed. Issuing both
-		// packets back-to-back before waiting on either token removes the
-		// coupling: the beacon SUBSCRIBE is in flight at essentially the
-		// same instant as the cmd one, not queued behind its full round
-		// trip.
+		// Send both SUBSCRIBEs before waiting on either, so a slow command SUBACK
+		// cannot push the beacon subscribe past the hold.
 		cmdTok := c.Subscribe(cmdFilter, 1, onCommand)
-		// Time-sync design §2.2: the node beacons on this session's
-		// SUBSCRIBE to colca/v1/_TimeSync/+, so issuing it here — immediately,
-		// concurrently with the cmd subscribe above, not queued behind it —
-		// is what makes the reconnect hold (design §2.3 rule 2) land inside
-		// hold_ms deterministically, not merely usually.
-		//
-		// QoS 0: the node now publishes the beacon
-		// at QoS 0 (mqttsrv.go), so the effective delivered QoS is
-		// min(0, sub.Qos) = 0 regardless of what's requested here — matching
-		// it explicitly documents that this subscription deliberately wants
-		// no at-least-once/redelivery semantics, not accidentally-QoS-0.
+		// The node sends a beacon when this subscription arrives, which is what ends
+		// the reconnect hold within hold_ms. The beacon is QoS 0.
 		beaconTok := c.Subscribe(beaconFilter(), 0, onBeacon)
 
 		if !cmdTok.WaitTimeout(subscribeTimeout) {
@@ -405,51 +303,21 @@ func run() int {
 	})
 	opts.SetReconnectingHandler(func(_ pahomqtt.Client, _ *pahomqtt.ClientOptions) {
 		log.Info("reconnecting", "broker", broker)
-		// Time-sync design §2.3 rule 2: open the hold HERE, before the
-		// reconnect attempt even begins — not only in SetOnConnectHandler
-		// below. SetOrderMatters(false) (this client's own config) means
-		// inbound messages are dispatched on their own goroutines with no
-		// ordering guarantee relative to the onConnect callback.
-		//
-		// The specific race this was written for is gone: it was a persistent
-		// session's queued commands being flushed the instant the connection
-		// re-established, before onConnect's own ts.Connect() had run. With a
-		// clean session (command-redelivery design §3) nothing is queued, and
-		// the replay is triggered BY the SUBSCRIBE that onConnect issues after
-		// ts.Connect(). The hold is kept anyway, because the ordering
-		// guarantee it provides is what makes that safe rather than merely
-		// likely: SetOrderMatters(false) still admits any inbound message on
-		// its own goroutine. If a command's handler reaches
-		// ts.Await() first, it sees the zero-value syncState{} (holding
-		// false, offset 0) left over from before this reconnect even
-		// started, and decides on the raw, unsynced clock immediately —
-		// found in CI: a reconnect-hold decision
-		// landed in well under a second, not anywhere near hold_ms, which
-		// only a lost race with an ALREADY-OPEN hold (not a slow beacon)
-		// explained at the time. Calling Connect() here closes the window: the
-		// hold is open before the TCP connection that could deliver anything even
-		// exists.
+		// Open the hold before the reconnect starts. Inbound messages run on their own
+		// goroutines with no ordering against onConnect, so a command could otherwise
+		// be decided on an unsynced clock.
 		ts.Connect()
 	})
-	// This used to re-route commands and beacons by hand, because a persistent
-	// session let the broker flush its queue before the SUBSCRIBE of a fresh
-	// connection had been registered as a route. With a clean session there is
-	// no queue to flush: both the replay (command-redelivery design §3) and
-	// the beacon (time-sync design §2.2) are triggered BY the subscribe, so
-	// nothing this client cares about can arrive before its own route exists.
-	// What is left is diagnosis — an unrouted message now means a real
-	// mismatch between what this machine subscribed to and what the node sent
-	// it, which is worth a log line rather than a silent drop.
+	// Commands and beacons only arrive once their subscription exists, so an
+	// unrouted message is a real mismatch and worth a log line.
 	opts.SetDefaultPublishHandler(func(_ pahomqtt.Client, msg pahomqtt.Message) {
 		log.Warn("message with no matching route", "topic", msg.Topic())
 	})
 
 	client := pahomqtt.NewClient(opts)
 	log.Info("connecting", "broker", broker, "client_id", ulid, "interval", interval)
-	// Same reasoning as SetReconnectingHandler above: open the hold before
-	// this FIRST connection attempt begins too, not only on later
-	// reconnects — SetReconnectingHandler fires on retries after a failed
-	// or lost connection, not necessarily on this very first attempt.
+	// SetReconnectingHandler does not fire for the first attempt, so open the hold
+	// here too.
 	ts.Connect()
 	// Connect() is called exactly once: SetConnectRetry(true) makes paho retry
 	// internally, so calling it again per iteration would stack connection
@@ -488,56 +356,32 @@ func run() int {
 			return 0
 		case <-ticker.C:
 			seq++
-			// Serialized on purpose (machine-hop ordering contract, design
-			// §2.6 [delta]): this blocks the tick until seq's PUBACK lands,
-			// so at most one seq is ever inflight. See publishSeqSerialized.
+			// Blocks until this seq's PUBACK arrives, so at most one metric is in flight
+			// (see publishSeqSerialized).
 			publishSeqSerialized(ctx, log, client.Publish, metricTopic, seq)
 		}
 	}
 }
 
-// publishSeqSerialized publishes one seq's metric and blocks (bounded, via
-// waitForConfirm) until it is confirmed — or ctx cancels — before returning.
-// The caller (the ticker loop above) must not call this again for seq+1
-// until it returns; that is the entire mechanism behind the machine-hop
-// ordering contract (design §2.6 [delta]).
+// publishSeqSerialized publishes one metric and blocks until it is confirmed or
+// ctx is cancelled. The caller must not publish the next seq before it returns.
 //
-// Why this closes the race: paho's MemoryStore-backed persist replays
-// whatever is still stored on ANY reconnect (client.go's resume(), which
-// iterates a plain, randomly-ordered Go map) concurrently with the app's own
-// new Publish() calls. With >1 seq inflight across a reconnect, an old
-// unacked seq can be re-queued onto the wire AFTER a newer seq that was
-// published while the old one was still outstanding — a duplicate-free,
-// loss-free single-seq displacement (exactly-once holds; arrival order
-// doesn't). Keeping the store's outstanding set at ≤1 entry removes the
-// "newer" message that could ever race past it: there is nothing left to
-// reorder. publish is client.Publish itself (a function value, not the
-// whole Client) so tests can substitute a fake without a broker.
-//
-// SetOrderMatters(false) (set on this client's options) governs INBOUND
-// callback dispatch — whether onCommand/onBeacon calls may run concurrently
-// with each other and with OnConnect — not outbound publish serialization.
-// It is orthogonal to and compatible with this function's guarantee: nothing
-// here relies on inbound ordering, and nothing about inbound dispatch
-// ordering could reintroduce >1 inflight outbound seq.
+// This keeps metrics in order across reconnects: paho replays unacked messages
+// from an unordered map while new publishes go out, so with more than one in
+// flight an old seq could arrive after a newer one. publish is client.Publish,
+// so tests can pass a fake.
 func publishSeqSerialized(ctx context.Context, log *slog.Logger, publish func(topic string, qos byte, retained bool, payload interface{}) pahomqtt.Token, topic string, seq int) {
 	v := 20 + 5*math.Sin(float64(seq)/10)
-	// DUAL shape during the schema-bundle cutover (design §12): the real
-	// _Metric contract requires value+signal_id (bundle-validated doors);
-	// the builtin floor's stand-in requires v (bare trees, in-process
-	// suites). Both present = valid at every door; additionalProperties
-	// stays open by the §4.1 subset, so seq rides along untouched.
+	// value and signal_id satisfy the _Metric contract; v is what the built-in
+	// rules expect when no bundle is loaded.
 	payload := fmt.Sprintf(`{"v": %.2f, "value": %.2f, "signal_id": %q, "seq": %d, "timestamp": %.3f}`, v, v, topic, seq, float64(time.Now().UnixNano())/1e9)
 	log.Debug("publish metric", "topic", topic, "seq", seq, "v", v)
 	waitForConfirm(ctx, log, publish(topic, 1, false, payload), "metric publish", "topic", topic, "seq", seq)
 }
 
-// waitForConfirm blocks until tok completes, logging progress at
-// publishTimeout intervals rather than giving up. Giving up early would let
-// the ticker loop start a second inflight publish while this one is still
-// unacked — reopening exactly the concurrent-resume() race
-// publishSeqSerialized exists to close — so this retries the wait, not the
-// publish, until either tok completes or ctx is cancelled (shutdown).
+// waitForConfirm waits for tok, logging progress, until it completes or ctx is
+// cancelled. It never gives up early: that would let a second publish go out
+// while this one is unacked.
 func waitForConfirm(ctx context.Context, log *slog.Logger, tok pahomqtt.Token, what string, attrs ...any) bool {
 	for !tok.WaitTimeout(publishTimeout) {
 		select {
@@ -569,14 +413,9 @@ func publishInterval(log *slog.Logger) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// handleCommand logs a received command prominently, decides 200 vs 498 and
-// acks it. Every failure path returns instead of panicking: this process must
-// outlive any message a node can send it.
-//
-// Time-sync design §2.3 rule 2: the expiry decision is BUFFERED (ts.Await)
-// until a post-connect beacon lands or the hold deadline passes — never
-// rejected. This runs in the message's own goroutine (SetOrderMatters(false)
-// above), so blocking here for up to hold_ms never stalls the router.
+// handleCommand decides 200 or 498 and acks the command, never panicking on a
+// bad message. The expiry decision waits for the time-sync hold; each message
+// has its own goroutine, so waiting does not stall the router.
 func handleCommand(ctx context.Context, log *slog.Logger, c pahomqtt.Client, ulid, nodeULID string, ts *timeSync, msg pahomqtt.Message) {
 	topic := msg.Topic()
 	var cmd map[string]any
@@ -648,21 +487,10 @@ func expiresAt(cmd map[string]any) (int64, bool) {
 	return 0, false
 }
 
-// handleBeacon parses a _TimeSync beacon (design §2.2: {"now_ms": <int64>})
-// and records the offset sample. A malformed payload is logged and dropped —
-// this process must never crash on a message a node can send it, same rule
-// as handleCommand.
-//
-// A message flagged Duplicate() is a broker-side resend, never a fresh
-// sample, and is dropped outright: it must never be
-// allowed to satisfy the post-connect hold or update the offset, since a
-// resend necessarily carries an OLD now_ms racing a stale wall-clock
-// reading — exactly the "clock behind" corruption design §1.1 exists to
-// prevent. The beacon now publishes at QoS 0 (mqttsrv.go), which already
-// removes the one delivery path that could produce a resend in this
-// codebase's own broker (mochi only queues/resends QoS>0); this check is
-// defense in depth against any other source of a Duplicate-flagged message
-// and costs nothing, since _TimeSync is "only the latest matters" by design.
+// handleBeacon records the offset from a _TimeSync beacon ({"now_ms": ...}). A
+// malformed payload is logged and dropped. A message flagged as a duplicate is
+// a resend carrying an old now_ms and is ignored, so it cannot end a hold or
+// skew the offset.
 func handleBeacon(log *slog.Logger, ts *timeSync, msg pahomqtt.Message) {
 	if msg.Duplicate() {
 		log.Debug("_TimeSync beacon ignored — broker-flagged duplicate/resend, never a fresh sample", "topic", msg.Topic())

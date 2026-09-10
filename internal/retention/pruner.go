@@ -1,12 +1,8 @@
-// Package retention implements the background pruner (the retention design §4–§6): per-stream age/size
-// policy evaluation, the cursor clamp (§5 — never prune past the slowest
-// protected cursor), the staleness override with its durable _StreamGap
-// marker (§6.4), and the entities state refresh that heals a parent's
-// current-state view after an overridden prune (§6.5).
-//
-// The pruner never deletes anything itself: it decides a target LWM and hands
-// it to store.Prune, which commits the range tombstone, LWM, byte counter,
-// journal entry and the gap marker in ONE atomic synced batch.
+// Package retention is the background pruner: per-stream age and size policy,
+// clamped at the slowest protected cursor, with a staleness override that
+// leaves a durable _StreamGap marker, and a state refresh that restores the
+// parent's view of entities after an overridden prune. The pruner only picks a
+// target; store.Prune commits it in one atomic batch.
 package retention
 
 import (
@@ -22,14 +18,9 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// streams mirrors the store's fixed stream set (same precedent as the metrics
-// package).
-//
-// `definitions` is deliberately absent: it is never pruned by age or size
-// (definition-stream design §6). A definition has no read side to fall back on,
-// so a pruned one is a node that no longer knows what a type or a group is,
-// with nowhere to ask. It is compacted instead — latest per path — which is a
-// different algorithm and lives outside this policy loop.
+// streams mirrors the store's stream set. definitions is left out on purpose: a
+// pruned definition cannot be fetched again, so that stream is compacted
+// instead.
 var streams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations", "logs"}
 
 // definitionsStream is reclaimed by compaction instead (compactDefinitions).
@@ -41,34 +32,27 @@ type Pruner struct {
 	st  *store.Store
 	eng *engine.Engine
 	cfg config.Retention
-	m   *metrics.Metrics // nil-safe surface: prune/gap/refresh counters (design §8)
-	// ulid is the node's own ULID: level 4 of the _StreamGap topic is the
-	// PRUNING node (design §6.4), so the marker needs the node identity.
+	m   *metrics.Metrics // nil-safe; prune, gap and refresh counters
+	// ulid is this node's ULID; level 4 of a _StreamGap topic names the pruning
+	// node.
 	ulid string
 	log  *slog.Logger
 	now  func() time.Time // injectable clock for tests; defaults to time.Now
-	// publish is the §6.5 refresh append path, defaulting to
-	// engine.IngestRefresh: guarded on the KVScan snapshot's Offset so a
-	// tombstone or newer write racing the refresh is skipped, never
-	// resurrected (spec §6.5 [delta]/§7.1). applied=false with nil error is
-	// the guard skip. A seam so tests can fail or interleave individual
-	// appends deterministically.
+	// publish appends a state refresh, engine.IngestRefresh by default. It is
+	// guarded on the snapshot's Offset, so a tombstone or newer write racing the
+	// refresh wins; applied=false with a nil error is that skip. Tests replace it.
 	publish func(topic string, payload []byte, ifKVOffset uint64) (applied bool, err error)
-	// beforePrune, when set (tests only), runs between the policy evaluation
-	// and the Prune call — the exact window the store's in-batch cursor
-	// recheck (spec §5.2 [delta]) exists to close.
+	// beforePrune (tests only) runs between the policy evaluation and Prune, the
+	// window the store's in-batch cursor recheck closes.
 	beforePrune func(stream string)
-	// evictFrom is where the foreign node-private sweep resumes per stream
-	// (evictForeignPrivateState): one bounded pass per cycle, wrapping to the
-	// LWM once a pass reaches the head. In memory only — a restart begins
-	// the sweep again from the LWM, which costs one more walk and nothing
-	// else, since every pass is idempotent.
+	// evictFrom is where the foreign node-private sweep resumes per stream. It lives
+	// in memory only; after a restart the sweep starts over at the LWM, which is
+	// harmless.
 	evictFrom map[string]uint64
 }
 
-// NewPruner builds a pruner. ulid is the node's own ULID — it becomes level 4
-// of every _StreamGap topic this pruner emits (design §6.4: "level 4 is the
-// pruning node"). m may be nil (every Metrics method is nil-safe).
+// NewPruner builds a pruner. ulid is this node's ULID, level 4 of every
+// _StreamGap topic it emits. m may be nil.
 func NewPruner(st *store.Store, eng *engine.Engine, cfg config.Retention, m *metrics.Metrics, ulid string) *Pruner {
 	return &Pruner{
 		st: st, eng: eng, cfg: cfg, m: m, ulid: ulid,
@@ -82,17 +66,10 @@ func NewPruner(st *store.Store, eng *engine.Engine, cfg config.Retention, m *met
 	}
 }
 
-// Run executes one prune cycle every EffectiveInterval until stop is closed.
-// An EffectiveInterval of 0 is the operator's explicit "pruner disabled"
-// (config contract: the absent-vs-0 translation already happened in
-// EffectiveInterval) — Run returns immediately and never touches the store.
-// A cycle in progress always completes before Run returns; the caller's
-// WaitGroup discipline (node.Stop waits before closing the store) is what
-// makes that sufficient.
-//
-// Before the first cycle, Run completes any state-refresh obligation a
-// previous process persisted but did not finish (spec §6.5 [delta] — the
-// rp/ key survives a crash between the prune batch and the refresh).
+// Run runs one prune cycle every EffectiveInterval until stop is closed; an
+// interval of 0 disables the pruner and Run returns at once. A running cycle
+// always completes before Run returns. Before the first cycle, Run finishes any
+// state refresh a previous process left pending.
 func (p *Pruner) Run(stop <-chan struct{}) {
 	interval := p.cfg.EffectiveInterval()
 	if interval <= 0 {
@@ -112,12 +89,9 @@ func (p *Pruner) Run(stop <-chan struct{}) {
 	}
 }
 
-// runOnce is one full cycle: any pending refresh first (crash recovery and
-// retry of previously failed appends), then one policy evaluation and at
-// most one Prune per stream, then the two reclamations the prefix policy
-// cannot express — definitions compaction and the sweep of node-private state
-// authored elsewhere. Per-stream failures are logged and never abort the
-// other streams.
+// runOnce is one cycle: pending refreshes first, then at most one Prune per
+// stream, then definitions compaction and the sweep of node-private state
+// authored elsewhere. A failing stream is logged and does not stop the others.
 func (p *Pruner) runOnce() {
 	p.completePendingRefresh()
 	for _, stream := range streams {
@@ -127,21 +101,11 @@ func (p *Pruner) runOnce() {
 	p.evictForeignPrivateState()
 }
 
-// evictForeignPrivateState removes state that stays on its author
-// (uns.IsNodePrivate) but was authored by ANOTHER node: the Edit replay
-// receipts every ancestor accumulated before the uplink kept them home. Their
-// only reader is the author's own replay, so at this node they are a
-// projection with zero readers — and since their tombstones stay home too now,
-// no record will ever retire them. Own-node private state is untouched: its
-// author caps it (exec_edit_receipt.go).
-//
-// Not a policy prune, deliberately: the doomed records are scattered through
-// the stream, not a prefix of it, and nothing about them is a function of age
-// or size. Shaped like compactDefinitions instead — a per-cycle reclamation
-// with no knobs — but bounded: the KV walk decodes nothing it keeps, and the
-// stream pass examines at most DefaultPolicyScanCap records per cycle,
-// resuming where it stopped and wrapping to the LWM once it reaches the head,
-// so a long stream is swept across cycles rather than held in one.
+// evictForeignPrivateState removes node-private state (uns.IsNodePrivate) that
+// another node authored, such as the Edit replay receipts ancestors collected.
+// Only the author reads it, and nothing will ever retire it here. The records
+// are scattered rather than a prefix, so each cycle walks at most
+// DefaultPolicyScanCap records and the next resumes where it stopped.
 func (p *Pruner) evictForeignPrivateState() {
 	removedKV, err := p.st.EvictKV(p.strandedHere)
 	if err != nil {
@@ -171,23 +135,16 @@ func (p *Pruner) evictForeignPrivateState() {
 		"kv_entries", removedKV, "records", removedRecords, "bytes", bytes)
 }
 
-// strandedHere dooms a topic whose contract never leaves its author and whose
-// author is not this node. The same two questions the uplink asks before
-// offering a record (repl.leavesTheNode), turned around: what a child no
-// longer sends is what its parent no longer keeps.
+// strandedHere reports whether topic is node-private state authored by another
+// node: the uplink's leavesTheNode check, turned around.
 func (p *Pruner) strandedHere(topic string) bool {
 	parsed, err := uns.Parse(topic)
 	return err == nil && uns.IsNodePrivate(parsed.Contract) && parsed.NodeID != p.ulid
 }
 
-// compactDefinitions runs the definitions stream's own reclamation
-// (definition-stream design §6). It is not in the loop above because it is not
-// the same operation: the policy prunes a contiguous prefix by age and size,
-// and this drops whatever a later record superseded, wherever it sits.
-//
-// No policy knobs, deliberately. There is nothing to tune — a superseded
-// definition is dead the moment its successor lands, and a retraction lives
-// exactly until every consumer has read it.
+// compactDefinitions drops definitions a later record superseded, wherever they
+// sit, which a prefix prune cannot express. There is nothing to tune: a
+// superseded definition is dead once its successor lands.
 func (p *Pruner) compactDefinitions() {
 	st, err := p.st.Compact(definitionsStream)
 	if err != nil {
@@ -210,9 +167,8 @@ type overriddenCursor struct {
 	staleFor time.Duration
 }
 
-// gapPayload is the _StreamGap contract payload (design §6.4), offsets in the
-// pruning node's local coordinates. The json tags are the wire contract
-// uns.Validate enforces — do not rename them.
+// gapPayload is the _StreamGap payload, with offsets in the pruning node's local
+// coordinates. The json tags are the wire format uns.Validate checks.
 type gapPayload struct {
 	Stream            string   `json:"stream"`
 	FromOffset        uint64   `json:"from_offset"`
@@ -222,8 +178,8 @@ type gapPayload struct {
 	OverriddenCursors []string `json:"overridden_cursors"`
 }
 
-// pruneStream evaluates the retention policy of one stream and commits at
-// most one Prune (design §4.1 steps 1–3, §5, §6.4, §6.5).
+// pruneStream evaluates one stream's retention policy and commits at most one
+// Prune.
 func (p *Pruner) pruneStream(stream string) {
 	pol := p.cfg.EffectiveStream(stream)
 	maxAge := time.Duration(pol.MaxAge)
@@ -235,31 +191,22 @@ func (p *Pruner) pruneStream(stream string) {
 	now := p.now()
 	nowMS := now.UnixMilli()
 
-	// §4.1 step 1 — read state, no store mutex.
+	// Read state without the store mutex.
 	lwm := p.st.LWM(stream)
 	next := p.st.NextOffset(stream)
 	liveBytes := p.st.StreamBytes(stream)
 
-	// §5.1/§5.2 — the protected-cursor floor. Every named cursor on this
-	// stream protects it unless the staleness window has passed since its
-	// last advance. Cursors on other streams — including the child-side
-	// "commands-parent" pseudo-stream, which tracks PARENT offsets — never
-	// protect this stream (the existing "never mix the two" rule holds by
-	// store.ProtectedCursors' own Stream match). Shared with the metrics
-	// collector (design §8) so both always classify identically — one scan,
-	// not two hand-kept copies.
+	// The protected-cursor floor: every cursor on this stream protects it until the
+	// staleness window has passed since its last advance. Cursors on other streams,
+	// such as commands-parent, never count.
 	protecting, staleCursors := p.st.ProtectedCursors(stream, now, window)
 	clamp := next
 	blocking := ""
 	var stale []overriddenCursor
 	for _, c := range protecting {
 		if c.LastAdvanceMS == 0 {
-			// §5.2 upgrade case: a cursor predating the ct/ timestamps is
-			// treated as advancing NOW at first sighting (persisted, so the
-			// staleness clock does not restart on every process restart).
-			// ProtectedCursors is read-only and never does this itself —
-			// only the pruner, which is actually about to prune this cycle,
-			// persists the stamp.
+			// A cursor from before ct/ timestamps counts as advancing now. Only the pruner
+			// persists that stamp, since it is about to prune.
 			p.st.CursorMarkSeen(c.Name, stream, nowMS)
 		}
 		if c.Position < clamp {
@@ -268,32 +215,15 @@ func (p *Pruner) pruneStream(stream string) {
 		}
 	}
 	for _, c := range staleCursors {
-		// staleCursors never contains a first-sighting (LastAdvanceMS==0)
-		// cursor — ProtectedCursors' own staleFor-vs-window classification
-		// always resolves that case into protecting — so recomputing
-		// staleFor from the raw timestamp here reproduces the exact value
-		// ProtectedCursors used internally.
+		// staleCursors never holds a cursor without a timestamp, so this recomputes the
+		// value ProtectedCursors used.
 		staleFor := now.Sub(time.UnixMilli(c.LastAdvanceMS))
 		stale = append(stale, overriddenCursor{name: c.Name, pos: c.Position, staleFor: staleFor})
 	}
 
-	// §4.1 step 2 — policy scan from the LWM, capped at the protected floor
-	// AND at store.DefaultPolicyScanCap records examined. The cursor cap
-	// makes over-pruning structurally impossible, not a checked condition.
-	// The scan runs one record PAST the cursor cap only to learn whether the
-	// policy is cursor-clamped (the §5.2 WARN + pressure signal); it never
-	// advances newLWM past it. Shared with the metrics collector (design §8,
-	// called there with an uncapped clamp).
-	//
-	// The scan cap matters here too: when the staleness override is active
-	// and a cursor has just crossed into "stale" (spec §5.2), it drops out of
-	// the clamp entirely — clamp reverts to next, uncapped — so a long-dead
-	// consumer plus a large backlog can make this a very long walk. Hitting
-	// the scan cap in that state is not an error: newLWM is still a safe
-	// floor (never past what the policy actually examined and accepted), so
-	// the pruner simply advances as far as it scanned and picks up the rest
-	// on the next cycle(s) — chunked pruning across cycles, not a single
-	// unbounded pass.
+	// The policy scan stops at the protected floor and after DefaultPolicyScanCap
+	// records, so it cannot prune past a live cursor. If the scan cap stops it,
+	// newLWM is still a safe floor and the next cycle continues from there.
 	newLWM, clamped, capped, scanErr := p.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, store.DefaultPolicyScanCap)
 	if scanErr != nil {
 		p.log.Error("retention policy scan failed", "stream", stream, "err", scanErr)
@@ -311,19 +241,10 @@ func (p *Pruner) pruneStream(stream string) {
 		return // nothing to prune this cycle
 	}
 
-	// §6.4 — one durable _StreamGap marker per overridden prune run.
-	// "Overridden" = a stale cursor the pruned range is being pruned past:
-	// its position is below the new LWM, so records it had not read are now
-	// gone. The marker describes THIS run's pruned span and its time span —
-	// the same numbers as the run's journal entry; spans destroyed by
-	// earlier runs were covered by earlier markers.
-	//
-	// The store's in-batch cursor recheck (spec §5.2 [delta]) may SHRINK the
-	// range below newLWM if a live cursor was acked concurrently, so the
-	// marker and the refresh range are built inside the plan callback from
-	// the EFFECTIVE span the store hands it — one source of truth for the
-	// span, shared with the journal entry. Candidates whose position falls
-	// outside the effective span are no longer overridden and drop out.
+	// One durable _StreamGap marker per run that prunes past a stale cursor,
+	// describing this run's span. The store may shrink the range if a cursor acked
+	// meanwhile, so the marker and the refresh range are built in the plan callback
+	// from the effective span; cursors outside it are no longer overridden.
 	var candidates []overriddenCursor
 	for _, c := range stale {
 		if c.pos < newLWM {
@@ -371,18 +292,16 @@ func (p *Pruner) pruneStream(stream string) {
 			applied = nil
 			return store.PruneOutcome{}
 		}
-		// ClassGap: an event, no KV projection (KVPath empty), not retained.
-		// Appended in the prune batch itself, post-LWM, so it survives its
-		// own prune run (§6.4).
+		// A gap marker is an event with no KV projection. It is appended in the prune
+		// batch after the new LWM, so it survives its own prune.
 		out := store.PruneOutcome{GapRecords: []store.Record{{
 			Topic:   uns.Prefix() + "_StreamGap/" + p.ulid + "/" + stream,
 			Payload: payload,
 			TS:      nowMS,
 		}}}
 		if stream == "entities" {
-			// §6.5 [delta]: the refresh obligation rides the prune batch as
-			// rp/{stream} — a crash between batch and refresh leaves it owed,
-			// not lost.
+			// The refresh obligation goes into the prune batch as rp/{stream}, so a crash
+			// before the refresh leaves it owed.
 			out.Refresh = &store.RefreshRange{From: minPos, To: span.To + 1}
 		}
 		return out
@@ -391,8 +310,7 @@ func (p *Pruner) pruneStream(stream string) {
 	if p.beforePrune != nil {
 		p.beforePrune(stream)
 	}
-	// §4.1 step 3 — one atomic synced batch inside the store (which also
-	// runs the §5.2 in-batch cursor recheck against `names`).
+	// One atomic, synced batch; the store rechecks cursors against names.
 	removed, err := p.st.Prune(stream, newLWM, names, plan)
 	if err != nil {
 		p.log.Error("prune failed", "stream", stream, "up_to", newLWM, "err", err)
@@ -401,13 +319,9 @@ func (p *Pruner) pruneStream(stream string) {
 	if removed == 0 {
 		return // shrunk to a no-op by the in-batch recheck: nothing was deleted
 	}
-	// design §8: a "run" is one cycle that actually removed something —
-	// distinct from pruned records/bytes, which measure the removed span
-	// itself. effectiveShed comes from the store's own post-in-batch-recheck
-	// accounting (store.PruneSpan.Shed, set inside plan above), not the
-	// pre-commit scan's `shed` local — that value describes the INTENDED
-	// span and can overstate the true figure whenever the in-batch recheck
-	// shrinks upTo (spec §5.2 [delta]).
+	// A run is a cycle that removed something. The bytes come from the store's count
+	// after its recheck (PruneSpan.Shed), not from shed above, which overstates them
+	// when the range shrank.
 	p.m.RetentionPruneRun(stream)
 	p.m.RetentionPruned(stream, removed, effectiveShed)
 	if len(applied) > 0 {
@@ -421,25 +335,18 @@ func (p *Pruner) pruneStream(stream string) {
 	p.log.Info("pruned", "stream", stream, "records", removed,
 		"lwm", lwm+removed, "overridden_cursors", len(applied))
 
-	// §6.5 — entities state refresh, AFTER the prune batch (and therefore
-	// after the marker) committed: gap-then-state, in offsets. Executed via
-	// the persisted obligation so the crash window between batch and refresh
-	// is closed. Only entities carry one — metrics self-heal at their own
-	// cadence (re-presenting a dead signal's pre-outage reading as fresh
-	// state is the wrong move) and commands have no current state at all.
+	// Refresh entities once the prune batch, and with it the marker, has committed.
+	// Only entities need this: metrics refresh themselves and commands have no
+	// current state.
 	if stream == "entities" && len(applied) > 0 {
 		p.completePendingRefresh()
 	}
 }
 
-// completePendingRefresh executes the persisted entities refresh obligation,
-// if any (spec §6.5 [delta]). Runs at pruner startup (crash recovery), at
-// every cycle start (retry of previously failed appends) and immediately
-// after an overriding entities prune (the normal same-run path). The rp/ key
-// is cleared — its own synced write — only once EVERY affected append
-// succeeded; partial failure keeps the range pending and is retried next
-// cycle, with already-refreshed paths naturally dropping out because their KV
-// Offset now points past the range.
+// completePendingRefresh runs the persisted entities refresh, if any: at
+// startup, at each cycle start and right after an overriding entities prune. The
+// rp/ key is cleared only once every affected append succeeded; paths already
+// refreshed drop out on retry because their KV Offset has moved past the range.
 func (p *Pruner) completePendingRefresh() {
 	r, ok := p.st.RefreshPending("entities")
 	if !ok {
@@ -453,48 +360,24 @@ func (p *Pruner) completePendingRefresh() {
 	}
 }
 
-// refreshEntities re-appends the current KV entry of every affected entity
-// path to the entities stream (design §6.5). Affected = entity-class KV
-// entries whose Offset ∈ [from, to): produced by a record some overridden
-// consumer had not yet read and that is now gone. Entries below the range
-// were already consumed; entries at or above it still exist in the stream and
-// flow normally. Returns whether every affected append succeeded.
-//
-// Each refresh goes through the publish seam — engine.IngestRefresh, the
-// guarded variant of the on-node admin path: original topic and payload in
-// local coordinates (no rewrite), contract validation, atomic append with a
-// new offset and new KV Offset, local bus mirror and retained republish for
-// free, and the uplink picks it up like any other entities record. The
-// record's timestamp is the refresh time, which is what keeps a refresh from
-// being age-pruned again immediately (a preserved original timestamp would
-// recreate the hole on the next cycle).
-//
-// The append is a CAS on the snapshot's KV Offset (spec §6.5 [delta]): a
-// tombstone (§7) or newer write landing between this function's KVScan and an
-// entry's publish makes the guard fail and the entry is SKIPPED — re-stating
-// it would resurrect a retired path or clobber the newer value, and in either
-// case the obligation for that path is void (nothing current to refresh, or
-// the newer record flows through the stream normally). Skips therefore count
-// toward completion. A payload that fails re-validation (contract drift) logs
-// ERROR each cycle and keeps the range pending: bounded noise, honest, never
-// silent.
-// refreshNamesLogged bounds how many refreshed topics one line may carry. A
-// refresh after a long outage can touch every entity the node holds, and a log
-// line is not the place to enumerate them all.
+// refreshNamesLogged bounds how many refreshed topics one log line lists.
 const refreshNamesLogged = 32
 
+// refreshEntities appends the current KV entry of every entity path whose
+// Offset is in [from, to) again: state an overridden consumer never read and
+// that is now pruned. Each append goes through publish with the refresh time as
+// timestamp, so it is not pruned again at once, and is guarded on the
+// snapshot's Offset, so a tombstone or newer write wins and the skip counts as
+// done. It reports whether every append succeeded; a payload that fails
+// validation keeps the range pending.
 func (p *Pruner) refreshEntities(from, to uint64) bool {
 	refreshed, skipped, failed := 0, 0, 0
-	// The topics re-appended, for the log line below. The count alone says a
-	// path was refreshed without saying which, and the affected set is the
-	// whole point of §6.5 -- an unexpected count is then a hunt rather than a
-	// read. Bounded so a large refresh cannot write an unbounded line.
+	// The refreshed topics for the log line, capped so a large refresh cannot write
+	// an unbounded line.
 	var names []string
 	entries, err := p.st.KVScan("")
 	if err != nil {
-		// Same treatment as an individual append failure below: the
-		// obligation stays pending and is retried next cycle rather than
-		// silently completing on a scan the store could not actually finish.
+		// Like a failed append: the range stays pending and is retried next cycle.
 		p.log.Error("entities state refresh KV scan failed (range stays pending, retried next cycle)", "err", err)
 		return false
 	}
@@ -504,7 +387,7 @@ func (p *Pruner) refreshEntities(from, to uint64) bool {
 		}
 		parsed, err := uns.Parse(e.Topic)
 		if err != nil || !uns.NeedsStateRefresh(p.eng.ClassOf(parsed.Contract)) {
-			continue // metrics-class KV entries share the projection; only entities refresh (§6.5)
+			continue // only entity-class entries are refreshed
 		}
 		applied, err := p.publish(e.Topic, e.Payload, e.Offset)
 		if err != nil {

@@ -9,44 +9,21 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 )
 
-// closeBudget is how long a shutdown may take before the test calls it hung. It
-// is deliberately far above any real shutdown: the failure it catches is a
-// deadlock, where Close never returns at all, so any finite bound works and a
-// generous one cannot flake on a loaded CI runner.
+// closeBudget is how long shutdown may take before the test calls it hung. The
+// failure is a deadlock, so a generous bound cannot flake.
 const closeBudget = 30 * time.Second
 
 // promptCloseBudget is the tighter bound for the "shutdown is not merely finite,
 // it is quick" claim.
 const promptCloseBudget = 5 * time.Second
 
-// Shutdown used to be able to hang forever. mochi's Clients.GetByListener
-// (clients.go:95) holds a read lock and then calls Clients.Len, which takes the
-// same read lock again; Go blocks that second acquisition the moment a writer
-// is queued, and the writer is Clients.Delete — what every client runs as it
-// disconnects. Closing the listeners while a client unwound therefore deadlocked
-// Close against that client. It surfaced as a 10-minute package timeout in
-// TestTimeSyncBeaconPeriodicCadence, i.e. as an unrelated test, which is why it
-// gets its own named coverage here.
-//
-// Server.Close now raises the door's closing flag, disconnects its clients from
-// a copied snapshot (holding no lock), and shuts the listeners down with a
-// no-op closer — so closeListenerClients is never reached with clients in
-// flight, and GetByListener never runs with a writer queued behind it.
+// Shutdown could deadlock: mochi's GetByListener takes a read lock twice, and a
+// disconnecting client's Delete queued in between blocks it. Server.Close avoids
+// reaching it with clients in flight; these tests pin that.
 
-// waitAttached blocks until the broker has finished attaching want clients.
-//
-// paho's Connect returns when the CONNACK arrives, which is BEFORE mochi has
-// finished attachClient — so a test that closes immediately can be shutting
-// down while a handshake is still in flight. That is not the claim any of these
-// tests make ("Close returns with clients ATTACHED"), and it trips a race in
-// mochi itself: attachClient does `defer ClientsWg.Done()` and then
-// `ClientsWg.Add(1)` (server.go:407-408), while Listeners.CloseAll ends with
-// ClientsWg.Wait() (listeners.go:134) — an Add concurrent with a Wait, which
-// the race detector fails the build over.
-//
-// Waiting here does not paper over that: it makes each test set up the state it
-// says it is testing. The residual window — a connection accepted at the exact
-// instant of shutdown — is mochi's to close, and is invisible outside -race.
+// waitAttached blocks until the broker has attached want clients. paho's Connect
+// returns at CONNACK, before mochi finished attachClient, and closing in that
+// window trips a WaitGroup race inside mochi.
 func waitAttached(t *testing.T, w *world, want int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -61,9 +38,7 @@ func waitAttached(t *testing.T, w *world, want int) {
 	}
 }
 
-// A node must finish shutting down while clients are attached — the case that
-// deadlocked. The deadline is the assertion: on the old code Close never
-// returned at all, so any bound catches it.
+// Shutdown finishes while clients are attached. The deadline is the assertion.
 func TestCloseReturnsWithClientsAttached(t *testing.T) {
 	w := newWorld(t)
 	addr := w.srv.Addr()
@@ -86,9 +61,8 @@ func TestCloseReturnsWithClientsAttached(t *testing.T) {
 	}
 }
 
-// Shutdown must be prompt, not merely finite. A Close that crawled would mean
-// clients are not unwinding when told to, which is the state the deadlock needs;
-// a client that has been disconnected unwinds in milliseconds.
+// Shutdown is prompt, not merely finite: a disconnected client unwinds in
+// milliseconds.
 func TestCloseIsPromptWithAClientAttached(t *testing.T) {
 	w := newWorld(t)
 	connect(t, w.srv.Addr(), "drain-me", w.m1)
@@ -105,9 +79,7 @@ func TestCloseIsPromptWithAClientAttached(t *testing.T) {
 	}
 }
 
-// The other half of the drain: once closing, the door must refuse arrivals.
-// Without this a connection accepted mid-drain becomes the very writer the drain
-// just removed, and the map cannot reach empty while clients keep arriving.
+// Once closing, the door refuses new connections, or the drain could never finish.
 func TestClosingDoorRefusesNewConnections(t *testing.T) {
 	w := newWorld(t)
 	addr := w.srv.Addr()
@@ -128,15 +100,9 @@ func TestClosingDoorRefusesNewConnections(t *testing.T) {
 	}
 }
 
-// The trigger in the wild was a client disconnecting at the same moment the
-// listeners closed, so this drives that collision directly: clients dropping
-// while Close runs, over enough rounds to hit the interleaving.
-//
-// Honest about what it is — the deadlock is a race inside mochi, so no test
-// outside that package can force it deterministically. This one cannot fail
-// spuriously (it only fails if shutdown genuinely fails to return), and the two
-// tests above pin the conditions that make the race unreachable; this one is the
-// end-to-end net beneath them.
+// Clients disconnect while Close runs, over many rounds. The deadlock is a race
+// inside mochi that no outside test can force; this one only fails if shutdown
+// really does not return.
 func TestCloseRacesDisconnectingClients(t *testing.T) {
 	for round := range 8 {
 		w := newWorld(t)
@@ -146,8 +112,7 @@ func TestCloseRacesDisconnectingClients(t *testing.T) {
 		for i := range 3 {
 			clients = append(clients, connect(t, addr, fmt.Sprintf("racer-%d-%d", round, i), w.m1))
 		}
-		// The race this test means is Close against DISCONNECTING clients, not
-		// Close against a handshake that has not finished attaching.
+		// Race Close against disconnecting clients, not against unfinished handshakes.
 		waitAttached(t, w, 3)
 
 		var wg sync.WaitGroup

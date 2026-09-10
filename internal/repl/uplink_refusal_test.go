@@ -13,18 +13,11 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// A batch the parent ANSWERED and refused is held, counted as a refusal, and
-// described as one.
-//
-// Every non-200 used to mean "the parent is down": the same retry, the same
-// counter, and a log line that named enrollment as the cause whatever the
-// parent had actually said. An operator looking at a wedged lane was sent to
-// the network to debug a disagreement between two nodes — for the whole class
-// of permanent refusals (a record on a stream it may not travel on, a record
-// larger than the parent's bound) that no amount of waiting repairs.
-//
-// Holding rather than skipping is the deliberate half of the rule: see the
-// comment in RunUplink's pushOnce. The uplink never decides to lose a record.
+// A batch the parent answered and refused is held, counted as a refusal and
+// logged as one, not as "the parent is down". Permanent refusals, such as a
+// record on a stream it may not travel on or one larger than the parent's limit,
+// are not fixed by waiting. Holding instead of skipping is deliberate; see
+// pushOnce in RunUplink.
 func TestARefusedUplinkBatchIsHeldAndNamedARefusal(t *testing.T) {
 	logs := captureLogs(t)
 	f := newParentFixture(t)
@@ -47,9 +40,9 @@ func TestARefusedUplinkBatchIsHeldAndNamedARefusal(t *testing.T) {
 		return f.ps.NextOffset("metrics") == 2
 	})
 
-	// Then a record the parent will refuse on the stream it is offered on: a
-	// command never rises. Writing it straight into the stream is what a
-	// buggy or half-upgraded child amounts to here.
+	// Then a record the parent will refuse on this stream, since a command never
+	// rises. Writing it straight into the stream is what a buggy or half-upgraded
+	// child amounts to.
 	if _, _, err := cs.Append("metrics", []store.Record{
 		{Topic: "colca/v1/_CmdParam/n-child/m1/go",
 			Payload: []byte(`{"correlation_id":"c1","expires_at":99999999999}`), TS: 2},

@@ -23,10 +23,8 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// parentFixture is the standard mTLS parent + one registered child. pm is the
-// parent's own metrics registry (design §8, e.g. colca_gap_served_total —
-// wired for every fixture since it is pure observability and changes no
-// behavior the other gap_test.go tests assert on).
+// parentFixture is an mTLS parent with one registered child. pm is the parent's
+// metrics registry, wired for every fixture since metrics change no behaviour.
 type parentFixture struct {
 	ps      *store.Store
 	pcfg    *config.Config
@@ -58,9 +56,9 @@ func newParentFixture(t *testing.T) *parentFixture {
 	}
 }
 
-// seedParentCommands appends n commands for the child's mount with
-// deterministic timestamps 10, 20, … directly through the store, so the wire
-// test can assert exact JSON.
+// seedParentCommands appends n commands for the child's mount with timestamps
+// 10, 20 and so on directly through the store, so wire tests can compare exact
+// JSON.
 func seedParentCommands(t *testing.T, ps *store.Store, n int) {
 	t.Helper()
 	var recs []store.Record
@@ -76,11 +74,9 @@ func seedParentCommands(t *testing.T, ps *store.Store, n int) {
 	}
 }
 
-// Spec §6.2: GET /downlink gains the identical gap object under the same
-// condition — the child's poll position below the LWM of the parent's
-// commands stream — with offsets in PARENT coordinates. The response is a
-// wire contract, so the assertion is exact-JSON (raw request through the
-// client's own mTLS transport).
+// GET /downlink carries the same gap object as /fetch when the child's position
+// is below the LWM of the parent's commands stream, with offsets in parent
+// coordinates. The response is a wire contract, so the test compares exact JSON.
 func TestDownlinkGapExactWireShape(t *testing.T) {
 	f := newParentFixture(t)
 	seedParentCommands(t, f.ps, 4) // offsets 1..4, TS 10..40
@@ -102,19 +98,15 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	b64 := func(i int) string {
 		return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`{"correlation_id":"c%d","expires_at":99999999999}`, i)))
 	}
-	// now_ms (time-sync design §2.1) is a live timestamp — checked
-	// separately for plausibility and stripped before the exact-shape
-	// comparison of everything else on the wire.
+	// now_ms is a live timestamp: checked for plausibility separately and removed
+	// before the exact comparison.
 	rest, nowMS := stripNowMS(t, body)
 	if nowMS < before || nowMS > after {
 		t.Fatalf("now_ms %d outside [%d, %d] — the parent is root here, so it must stamp its own raw wall clock", nowMS, before, after)
 	}
-	// Mount-stripped topics, parent offsets, records beginning at the LWM.
-	// Every response also carries the definitions half (definition-stream
-	// design §5) — empty here, and its own cursor, independent of the command
-	// one. No `head`: that field belongs to the hello response alone
-	// (parent-scoped-cursors design §3.3), and this exact-shape comparison is
-	// what keeps it from drifting back onto the ordinary poll.
+	// Mount-stripped topics, parent offsets, records from the LWM on, and the empty
+	// definitions half with its own cursor. There is no head: only the hello
+	// response carries it, and this exact comparison keeps it off ordinary polls.
 	want := `{"def_next":1,"definitions":[],"gap":{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":10,"last_ts":20,"approx":false},` +
 		`"next":5,"records":[` +
 		`{"o":3,"t":"colca/v1/_CmdParam/m1/m1/go","p":"` + b64(3) + `","ts":30},` +
@@ -139,10 +131,8 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	}
 }
 
-// stripNowMS decodes body, removes the now_ms key, and re-marshals
-// deterministically (encoding/json sorts map keys) so exact-wire-shape
-// assertions can check everything EXCEPT the live timestamp, which callers
-// verify separately for plausibility.
+// stripNowMS removes now_ms from body and marshals it again with sorted keys, so
+// exact-shape assertions can check everything but the live timestamp.
 func stripNowMS(t *testing.T, body []byte) (rest string, nowMS int64) {
 	t.Helper()
 	var m map[string]json.RawMessage
@@ -164,9 +154,9 @@ func stripNowMS(t *testing.T, body []byte) (rest string, nowMS int64) {
 	return string(b), nowMS
 }
 
-// A gap answers the long poll immediately, and when no records survived the
-// prune, next points past the hole (the LWM) — otherwise the child could
-// never ack and would re-receive the gap forever.
+// A gap answers the long poll at once, and when no records survived, next
+// points past the gap (the LWM); otherwise the child could never ack and would
+// receive the gap forever.
 func TestDownlinkGapOnlyResponseIsPromptAndPointsPastHole(t *testing.T) {
 	f := newParentFixture(t)
 	seedParentCommands(t, f.ps, 2)
@@ -193,12 +183,10 @@ func TestDownlinkGapOnlyResponseIsPromptAndPointsPastHole(t *testing.T) {
 	}
 }
 
-// Spec §6.3, uplink half: the local pruner overrode the uplink cursor while
-// the parent was down (explicit §5.2 opt-in). The loop must not stall — it
-// jumps the cursor to the LWM and delivers everything that survived once the
-// parent returns. Reuses the offline-buffering mTLS pattern: prune under a
-// live uplink loop with the parent down, restart the parent on the same
-// address, assert convergence.
+// The local pruner overrode the uplink cursor while the parent was down. The
+// loop must not stall: it jumps to the LWM and delivers the survivors once the
+// parent is back. The test prunes under a live uplink loop with the parent down,
+// then restarts the parent on the same address.
 func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -233,22 +221,21 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 	}()
 	time.Sleep(300 * time.Millisecond) // pushes are failing; cursor pinned at 1
 
-	// Retention overrides the uplink cursor (the §5.2 opt-in already decided):
-	// offsets 1..3 are gone, LWM 4.
+	// Retention overrides the uplink cursor: offsets 1..3 are gone, LWM is 4.
 	if n, err := cs.Prune("metrics", 4, []string{uns.UplinkCursor(parentID.PublicHex())}, nil); err != nil || n != 3 {
 		t.Fatalf("prune: %d %v", n, err)
 	}
 
-	// design §8: the loop's own jump over the pruned range counts
-	// colca_gap_received_total{stream="metrics"} exactly once — independent
-	// of the parent being reachable yet.
+	// The loop's jump over the pruned range counts
+	// colca_gap_received_total{stream="metrics"} once, whether or not the parent is
+	// reachable yet.
 	const gapReceived = `colca_gap_received_total{stream="metrics"}`
 	waitFor(t, "the uplink jump to count colca_gap_received_total", 5*time.Second, func() bool {
 		return metricstest.Value(t, cm, gapReceived) == 1
 	})
 
-	// Parent returns on the same address; the loop must jump 1 → 4 and push
-	// the survivors — never stall on the pruned range.
+	// The parent comes back on the same address; the loop must jump from 1 to 4 and
+	// push the survivors.
 	srv2, err := NewServer(pcfg, peng, parentID, preg, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -276,13 +263,10 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 	}
 }
 
-// Spec §6.3, downlink half: on receiving a gap object the child logs,
-// continues past the hole, and ingests the surviving commands — nothing
-// stalls, nothing propagates further down. Also design §8: the parent's
-// gap-carrying /downlink response counts colca_gap_served_total{stream=
-// "commands",surface="downlink"} and the child's handling of it counts
-// colca_gap_received_total{stream="commands"} — the two ends of the same
-// wire event, on two different registries.
+// On a gap object the child logs, continues past the gap and ingests the
+// surviving commands. The parent's response counts colca_gap_served_total and
+// the child counts colca_gap_received_total: both ends of the same event, on two
+// registries.
 func TestRunDownlinkContinuesPastGap(t *testing.T) {
 	f := newParentFixture(t)
 	seedParentCommands(t, f.ps, 3)
@@ -294,9 +278,9 @@ func TestRunDownlinkContinuesPastGap(t *testing.T) {
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	cm := metrics.New(cs, config.Retention{}, nil)
 	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
-	// The claim is about a child whose POSITION lies inside the hole, which is
-	// a child that was already attached here — a first-contact child adopts the
-	// parent's head instead and never meets the hole at all (§3.2).
+	// This is about a child whose position lies inside the gap, one already
+	// attached here; a first-contact child adopts the parent's head and never meets
+	// it.
 	attachAt(t, cs, f.cl, 2)
 
 	stop := make(chan struct{})
@@ -328,19 +312,18 @@ func TestRunDownlinkContinuesPastGap(t *testing.T) {
 	}
 }
 
-// RunUplink's commands filter must pass _StreamGap in
-// addition to _Ack — the durable §6.4 marker for a pruned commands stream
-// travels in that very stream, and dropping it would break the
-// replicates-upward guarantee. Ordinary commands still never travel up.
+// RunUplink's commands filter must pass _StreamGap as well as _Ack: the marker
+// for a pruned commands stream travels in that stream. Ordinary commands never
+// go up.
 func TestUplinkPassesStreamGapMarkerButNotCommands(t *testing.T) {
 	f := newParentFixture(t)
 
 	dir := t.TempDir()
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
-	// Child's commands stream: a command (must stay), a gap marker and an ack
-	// (both must travel). Appended through the store: the marker is written by
-	// the pruner's prune batch in production, not through an ingest path.
+	// The child's commands stream holds a command (stays), a gap marker and an ack
+	// (both travel). They are appended through the store because the pruner writes
+	// markers that way.
 	if _, _, err := cs.Append("commands", []store.Record{
 		{Topic: "colca/v1/_CmdParam/m1/m1/go", Payload: []byte(`{"correlation_id":"c1","expires_at":99999999999}`), TS: 1},
 		{Topic: "colca/v1/_StreamGap/n-child/commands", Payload: []byte(`{"stream":"commands","from_offset":1,"to_offset":9,"first_ts":1,"last_ts":9,"overridden_cursors":["downlink:x"]}`), TS: 2},
@@ -378,16 +361,11 @@ func TestUplinkPassesStreamGapMarkerButNotCommands(t *testing.T) {
 	}
 }
 
-// A marker that already crossed one hop crosses the next one too.
-//
-// Retention design §9 expects the root's stream to hold the edges' markers
-// "with mount-inserted provenance", which means a middle node offers its
-// child's marker — stored under that child's mount — to its own parent. The
-// door used to bind a marker to its stream by the WHOLE path, which is the
-// stream name only at the authoring node: at the grandparent the path reads
-// `leaf1/metrics`, the record came back 403, and RunUplink kept re-sending
-// the same batch forever with every record behind it, the whole subtree's
-// _Acks included.
+// A marker that crossed one hop crosses the next too. A middle node offers its
+// child's marker, stored under that child's mount, to its own parent, so the
+// door must bind a marker to its stream by the segment a mount cannot move, not
+// by the whole path, which reads leaf1/metrics at the grandparent. Otherwise
+// the record is refused and RunUplink resends the batch forever.
 func TestGapMarkerReplicatesPastTheFirstHop(t *testing.T) {
 	f := newParentFixture(t)
 	gap := []byte(`{"stream":"metrics","from_offset":1,"to_offset":9,"first_ts":1,"last_ts":9,"overridden_cursors":["uplink"]}`)
@@ -416,10 +394,10 @@ func TestGapMarkerReplicatesPastTheFirstHop(t *testing.T) {
 	}
 }
 
-// The §6.3 jump is the loop's own act, not a side effect of pushing: even
-// with NOTHING left to push (everything pruned) and the parent unreachable,
-// the uplink cursor must move to the LWM and the ERROR surface must fire —
-// otherwise the override would go unnoticed until new data happens to arrive.
+// The jump is the loop's own act, not a side effect of pushing: with nothing
+// left to push and the parent unreachable, the cursor still moves to the LWM and
+// the error is logged, so the override does not go unnoticed until new data
+// arrives.
 func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 	logs := captureLogs(t)
 	dir := t.TempDir()
@@ -431,11 +409,9 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		mustIngestAdmin(t, ceng, "colca/v1/_Metric/m1/m1/temp", fmt.Sprintf(`{"v":%d}`, i))
 	}
-	// The override this pins is the pruner passing a cursor that EXISTS: a node
-	// that had already offered {v:1} to this parent. First contact is the other
-	// case entirely — it is seeded at the LWM and has nothing to be overridden
-	// (§3.2), which is why the position is planted here rather than left at the
-	// default.
+	// This pins the pruner passing a cursor that exists, one that already offered
+	// {v:1} to this parent. A first-contact cursor starts at the LWM and cannot be
+	// overridden, so the position is planted here.
 	if !cs.CursorAck(uns.UplinkCursor(parentID.PublicHex()), "metrics", 2) {
 		t.Fatal("seeding the uplink cursor did not move it — the precondition is a no-op")
 	}
@@ -485,11 +461,9 @@ func unreachableAddr(t *testing.T) string {
 	return addr
 }
 
-// Spec §5.1 [delta]: the parent persists each child's downlink progress as an
-// ordinary named cursor downlink:{child-ulid} on its commands stream — from
-// the AUTHENTICATED identity plus the after parameter, forward-only, stamped
-// like every CursorAck — and the store's prune clamp honors it like any other
-// cursor.
+// The parent persists each child's downlink progress as an ordinary cursor
+// downlink:{child} on its commands stream, from the authenticated identity and
+// the after parameter, forward-only, and the prune clamp honours it.
 func TestDownlinkPollPersistsChildCursorAndClampsPrune(t *testing.T) {
 	f := newParentFixture(t)
 	seedParentCommands(t, f.ps, 2)
@@ -504,8 +478,8 @@ func TestDownlinkPollPersistsChildCursorAndClampsPrune(t *testing.T) {
 		return store.CursorInfo{}, false
 	}
 
-	// A poll at the start position (after=1) is no advance: no cursor key is
-	// created — same "acking is what buys protection" semantics as /fetch.
+	// A poll at the start position (after=1) is no advance and creates no cursor
+	// key; as with /fetch, only acking protects.
 	if _, _, _, err := f.cl.Downlink(1, 10, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
@@ -513,8 +487,7 @@ func TestDownlinkPollPersistsChildCursorAndClampsPrune(t *testing.T) {
 		t.Fatalf("poll at position 1 must not create a cursor, got %+v", c)
 	}
 
-	// A poll reporting progress persists it immediately — before the long poll
-	// parks (the request itself stays parked; only the cursor write matters).
+	// A poll reporting progress persists it at once, before the long poll parks.
 	pollDone := make(chan struct{})
 	go func() {
 		defer close(pollDone)
@@ -529,7 +502,7 @@ func TestDownlinkPollPersistsChildCursorAndClampsPrune(t *testing.T) {
 		t.Fatal("the downlink cursor must carry the ct/ last-advance stamp (spec §5.2 staleness input)")
 	}
 
-	// A later poll with a LOWER after must not move it backwards.
+	// A later poll with a lower after must not move it back.
 	if _, _, _, err := f.cl.Downlink(2, 10, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
@@ -537,8 +510,8 @@ func TestDownlinkPollPersistsChildCursorAndClampsPrune(t *testing.T) {
 		t.Fatalf("cursor regressed to %d after a lower poll, want 3", c.Position)
 	}
 
-	// The pruner's clamp honors it: pruning the whole stream stops at the
-	// slowest child's persisted position (store in-batch recheck, spec §5.2).
+	// The pruner's clamp honours it: pruning the whole stream stops at the slowest
+	// child's position.
 	seedParentCommands(t, f.ps, 2) // offsets 3..4, so there is something past the cursor
 	if n, err := f.ps.Prune("commands", 5, nil, nil); err != nil || n != 2 {
 		t.Fatalf("prune removed %d (%v), want 2 — clamped at the downlink cursor", n, err)

@@ -1,7 +1,5 @@
-// Package tokentest is the fake OIDC issuer every Go test level uses
-// (human-authz design §9): a generated RSA keypair, a static JWKS served over
-// httptest, and token minting — hermetic, no containers. The REAL issuer path
-// (Keycloak, mapper, aggregation) is proven once, in the level-4 system suite.
+// Package tokentest is a fake OIDC issuer for Go tests: an RSA key pair, a JWKS
+// served over httptest, and token minting.
 package tokentest
 
 import (
@@ -67,21 +65,20 @@ func NewIssuer(t *testing.T) *Issuer {
 	return i
 }
 
-// Iss and Aud expose the issuer coordinates (for building tokenauth.Config —
-// tokentest must not import tokenauth, the dependency points the other way).
+// Iss and Aud return the issuer coordinates for building a tokenauth.Config;
+// tokentest cannot import tokenauth.
 func (i *Issuer) Iss() string     { return i.iss }
 func (i *Issuer) Aud() string     { return i.aud }
 func (i *Issuer) JWKSURL() string { return i.srv.URL }
 
-// Requests returns how many JWKS fetches the server has answered — tests use
-// it to pin the refresh-on-unknown-kid rate limit.
+// Requests returns how many JWKS fetches the server answered, for rate-limit
+// tests.
 func (i *Issuer) Requests() int64 { return i.requests.Load() }
 
 // CloseServer stops serving the JWKS (offline-issuer tests). Safe to call once.
 func (i *Issuer) CloseServer() { i.srv.Close() }
 
-// Rotate replaces the signing key AND the kid; the JWKS serves ONLY the new
-// key (no overlap — the harsh rotation the refresh-on-unknown-kid heals).
+// Rotate replaces the signing key and kid. The JWKS serves only the new key.
 func (i *Issuer) Rotate(t *testing.T) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)

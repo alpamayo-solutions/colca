@@ -11,13 +11,10 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 )
 
-// mountBlobRoutes adds the local door's blob endpoints (resources design §4).
-//
-// These exist ONLY on the local door. Reachability from inside the
-// deployment's own network is the credential there, exactly as it is for
-// every other local read. On an authenticated door a file is reached through
-// its resource id so the element-scoped grant check always runs — a digest is
-// a pointer, never a capability.
+// mountBlobRoutes adds the local door's blob endpoints. They exist only on the
+// local door, where reaching it is the credential. On an authenticated door a
+// file is read through its resource id, so the element grant check always runs: a
+// digest is a pointer, not a capability.
 func mountBlobRoutes(
 	mux *http.ServeMux,
 	blobs *blobstore.Store,
@@ -33,20 +30,9 @@ func mountBlobRoutes(
 	mux.HandleFunc("POST /blobs", auth(limitClassTransfer, transferPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes)) //nolint:gosec // config caps max_blob_bytes
 		sha, size, err := blobs.Put(r.Body, r.Header.Get("X-Colca-Blob-SHA256"))
-		// BlobTransfer is deliberately NOT counted on this door, unlike the
-		// repl door's handleBlobPut/handleBlobGet. That metric family means
-		// node-to-node transfers (push/pull/receive); a local staging upload
-		// is not one, and counting it here would poison the counter.
-		//
-		// blobstore.ErrTooLarge is deliberately not one of the cases below.
-		// r.Body is wrapped in http.MaxBytesReader with the SAME cap
-		// (maxBytes, the same config value the store itself was opened with)
-		// before Put ever sees the stream, so MaxBytesReader always trips
-		// first and Put's own size check can never fire on this door — a
-		// case for it here would be dead code. blobstore.Put keeps its own
-		// check regardless: that is the store's unconditional guarantee, not
-		// this door's, and it still holds for any other caller of Put that
-		// does not wrap its reader the same way.
+		// Local uploads are not counted as BlobTransfer, which is for node-to-node
+		// transfers. blobstore.ErrTooLarge cannot occur here: MaxBytesReader with the same
+		// cap always trips first.
 		var tooLarge *http.MaxBytesError
 		switch {
 		case err == nil:
@@ -83,12 +69,9 @@ func mountBlobRoutes(
 		}
 		size, ok := blobs.Has(sha)
 		if !ok {
-			// Has() cannot tell a malformed digest from an absent one, so ask
-			// Get() which error it would have been — HEAD must agree with GET.
-			// The blob may have landed between the Has() miss above and this
-			// Get() call: on that success path the read must still be closed
-			// (nothing else will) and its real size used, not the 0 Has()
-			// reported for a blob it never found.
+			// Has cannot tell a malformed digest from an absent one, so ask Get, keeping HEAD
+			// consistent with GET. If the blob landed in between, close the reader and report
+			// its real size.
 			rc, gotSize, err := blobs.Get(sha)
 			if err != nil {
 				blobReadError(w, err, writeJSON)
@@ -110,11 +93,8 @@ func mountBlobRoutes(
 	}))
 }
 
-// blobReadError maps a blobstore read error to its HTTP status. Unlike
-// mountBlobRoutes' POST arm, this never touches m.BlobRejected: that metric
-// counts blobs refused AT INGRESS (its own doc comment, resources design
-// §5) — a malformed or absent digest on a read is a different failure mode,
-// not a write the store turned away.
+// blobReadError maps a blobstore read error to its HTTP status. Reads never count
+// BlobRejected, which is for blobs refused on upload.
 func blobReadError(w http.ResponseWriter, err error, writeJSON func(http.ResponseWriter, int, any)) {
 	switch {
 	case errors.Is(err, blobstore.ErrBadDigest):

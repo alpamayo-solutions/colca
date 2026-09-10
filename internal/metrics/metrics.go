@@ -1,16 +1,11 @@
-// Package metrics owns Colca's Prometheus surface: cheap
-// atomic counters incremented from the hot paths, and a store-reading
-// collector that derives every gauge (stream offsets, cursor lag, child HWMs,
-// low-water marks, retention pressure) from the store AT SCRAPE TIME — no
-// background sampling, no self-reported state.
+// Package metrics is Colca's Prometheus surface: atomic counters bumped on the
+// hot paths, and a collector that derives every gauge (stream offsets, cursor
+// lag, child high-water marks, low-water marks, retention pressure) from the
+// store at scrape time.
 //
-// The family names and labels below are a contract: the retention plan
-// (the retention design §8) references
-// them.
-//
-// Every increment method is safe on a nil *Metrics receiver (no-op), so the
-// engine, broker, repl and retention packages stay testable without a
-// registry.
+// Family names and labels are a contract that dashboards and alerts rely on.
+// Every method is a no-op on a nil *Metrics, so packages stay testable without
+// a registry.
 package metrics
 
 import (
@@ -29,7 +24,7 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// Reject reasons — the allowed label values of colca_rejected_publishes_total.
+// Reject reasons: the label values of colca_rejected_publishes_total.
 const (
 	ReasonNodeID      = "node_id"      // topic level 4 is not this node
 	ReasonGrammar     = "grammar"      // topic does not parse as uns grammar
@@ -37,57 +32,44 @@ const (
 	ReasonIdentity    = "identity"     // payload authorship contradicts the authenticated identity
 	ReasonWriteDenied = "write_denied" // no write scope covers the topic
 	ReasonCmdDenied   = "cmd_denied"   // a client's _Cmd* publish had no covering cmd grant
-	// ReasonRegistryContract: _EnrolledIdentity arrived at an ordinary ingest door —
-	// registry entries enter only through the enrollment endpoint (auth §3).
+	// ReasonRegistryContract: an _EnrolledIdentity arrived at an ingest door.
+	// Registry entries only enter through the enrollment endpoint.
 	ReasonRegistryContract = "registry_contract"
-	// ReasonHumanWrite: a human published a data/entity/ack contract — the
-	// World-2 rule (humans command, machines write state; human-authz §5.2).
+	// ReasonHumanWrite: a person published data, entity or ack records. People
+	// command; machines write state.
 	ReasonHumanWrite = "human_write"
-	// ReasonTimeSync: a _TimeSync publish arrived from a client, an admin
-	// caller, or a replicated batch (time-sync design §2.2/§4). _TimeSync is
-	// ephemeral and node-local-publish-only — only the node's own beacon loop
-	// may ever produce it, straight to the local bus, never through an
-	// ingest door.
+	// ReasonTimeSync: a _TimeSync publish came from a client, an admin caller or a
+	// replicated batch. Only the node's own beacon may publish it.
 	ReasonTimeSync = "time_sync"
-	// ReasonDraining: a ClassCmd publish (client or admin) targeted a mount
-	// currently under move-drain (move-drain design §3.2 item 2/§3.4) — new
-	// commands are refused at admission so the drain converges instead of
-	// chasing a moving tail.
+	// ReasonDraining: a command targeted a mount that is being drained. New
+	// commands are refused so the drain can finish.
 	ReasonDraining = "draining"
 )
 
 var reasons = []string{ReasonNodeID, ReasonGrammar, ReasonValidation, ReasonIdentity, ReasonWriteDenied, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonTimeSync, ReasonDraining}
 
-// Move-drain outcome labels — the allowed `outcome` values of
-// colca_drains_completed_total (move-drain design §3.2/§3.4).
+// Move-drain outcomes: the label values of colca_drains_completed_total.
 const (
 	DrainOutcomeDelivered = "delivered" // the commands queue was already empty at completion
 	DrainOutcomeExpired   = "expired"   // undelivered leftovers timed out (expires_at < now)
 	DrainOutcomeForced    = "forced"    // DELETE /enroll/{ulid} interrupted an active drain
-	// DrainOutcomeGapped [delta]: retention pruned some or all of a
-	// draining child's undelivered commands before they were fetched or
-	// expired — a distinct, honest outcome so
-	// "delivered" never silently covers for data destroyed by an unrelated
-	// retention policy. Not in the original design §3.4 list; documented
-	// there with a [delta] marker alongside this constant.
+	// DrainOutcomeGapped: retention pruned some of a draining child's undelivered
+	// commands, so "delivered" would not be true.
 	DrainOutcomeGapped = "gapped"
 )
 
 var drainOutcomes = []string{DrainOutcomeDelivered, DrainOutcomeExpired, DrainOutcomeForced, DrainOutcomeGapped}
 
-// Auth doors and rejection reasons — the label values of
-// colca_auth_rejections_total{door,reason} (auth design §9). CONNECT/request
-// authentication failures live here, NOT in colca_rejected_publishes_total:
-// that family counts publishes, this one counts identities turned away at a
-// door.
+// Auth doors and rejection reasons: the labels of
+// colca_auth_rejections_total{door,reason}. It counts identities turned away at
+// a door; rejected publishes have their own family.
 const (
 	DoorMQTT = "mqtt"
 	DoorHTTP = "http"
 	DoorRepl = "repl"
-	// DoorLocal is the unpublished, plaintext local door (local-service-trust
-	// design §4): reachability is the credential, so rejections here are rare
-	// (a missing name, or a name colliding with a keyed identity's ULID) but
-	// still counted like every other door.
+	// DoorLocal is the plaintext local door. Reachability is the credential, so
+	// rejections are rare (no name, or a name that collides with a keyed
+	// identity), but they are counted like any other.
 	DoorLocal = "local"
 
 	AuthUnknownKey       = "unknown_key"       // TLS peer key not in the local registry (incl. revoked)
@@ -101,9 +83,8 @@ const (
 var authDoors = []string{DoorMQTT, DoorHTTP, DoorRepl, DoorLocal}
 var authReasons = []string{AuthUnknownKey, AuthKind, AuthUsernameMismatch, AuthToken, AuthNoName, AuthRegister}
 
-// ACL denial actions — label values of colca_acl_denials_total{action}:
-// read-side denials only (sub = MQTT subscribe filter, read = HTTP record
-// scope). Write-side rejections stay in colca_rejected_publishes_total.
+// ACL denial actions: the labels of colca_acl_denials_total{action}. Only
+// read-side denials are counted here (sub: MQTT subscribe, read: HTTP scope).
 const (
 	ACLSub  = "sub"
 	ACLRead = "read"
@@ -126,50 +107,35 @@ var securityChangeKinds = []string{
 	SecurityChangeConfigure,
 }
 
-// streams is every persistent stream — what has an offset, live bytes and an
-// ingest count. DERIVED from the store, never mirrored: a copy here could not
-// tell that the store's set grew, and the families below would then silently
-// cover one stream fewer than they claim to.
+// streams is every persistent stream, taken from the store so the families
+// below cannot miss a stream added later.
 var streams = store.Streams()
 
-// uplinkStreams is the subset that RISES. DERIVED from the domain, for the
-// same reason `streams` is derived from the store: a copy here could not tell
-// that the set grew. `definitions` is absent because they descend and never
-// rise (definition-stream design §4): a "last uplink success" gauge for a
-// stream the uplink never touches would sit at zero forever and read exactly
-// like a broken uplink.
+// uplinkStreams are the streams that replicate upward. definitions only flow
+// down, so an uplink gauge for it would look like a broken uplink.
 var uplinkStreams = uns.UplinkStreams()
 
-// retentionStreams is the subset the retention POLICY applies to. `definitions`
-// is absent for the same reason it is absent from the pruner's own list
-// (definition-stream design §6): it is never pruned by age or size, so a
-// pressure or blocked-by-cursor gauge for it would report progress toward a
-// policy that does not exist.
+// retentionStreams are the streams the retention policy applies to.
+// definitions is never pruned by age or size.
 var retentionStreams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations", "logs"}
 
-// Blob transfer and ingress-rejection label values (resources design §5/§7).
+// Blob transfer and ingress rejection label values.
 var blobDirections = []string{"push", "pull", "receive"}
 var blobResults = []string{"ok", "error"}
 var blobRejectReasons = []string{"too_large", "digest_mismatch", "bad_digest"}
 var recordRejectReasons = []string{"too_large"}
 
-// resourceReadResults — the allowed `result` label values of
-// colca_resource_reads_total (resources design §6). "pending" is reserved for
-// a genuinely in-flight blob (blobstore.ErrNotFound) — any other blob-store
-// failure (a malformed stored digest, a disk or permission fault on this
-// node) is "error", never "pending": that label is a promise the file will
-// still arrive, which a fault can't keep.
+// resourceReadResults are the result labels of colca_resource_reads_total.
+// "pending" means the blob has not replicated here yet and a retry may help;
+// any other blob-store fault is "error".
 var resourceReadResults = []string{"ok", "pending", "denied", "not_found", "error"}
 
-// gapSurfaces — the allowed `surface` label values of colca_gap_served_total
-// (design §8): `fetch` is GET /fetch (any stream), `downlink` is GET
-// /downlink (commands only, in practice — pre-created for every stream
-// anyway so the family never has to grow a child mid-flight).
+// gapSurfaces are the surface labels of colca_gap_served_total: GET /fetch and
+// GET /downlink.
 var gapSurfaces = []string{"fetch", "downlink"}
 
-// Metrics is the node's metric registry plus the pre-created children the hot
-// paths increment. Labels are resolved once at construction — never per
-// message.
+// Metrics is the node's registry plus pre-created children for the hot paths,
+// so labels are resolved once and never per message.
 type Metrics struct {
 	reg *prometheus.Registry
 
@@ -177,138 +143,70 @@ type Metrics struct {
 	rejected   *prometheus.CounterVec
 	uplinkOK   *prometheus.GaugeVec
 	uplinkFail *prometheus.CounterVec
-	// colca_uplink_refused_total: the parent ANSWERED and refused the batch
-	// (4xx), as opposed to being unreachable. A rising count here is a
-	// misconfiguration or a bug between two nodes, never a network problem,
-	// and the lane behind it is not moving.
+	// colca_uplink_refused_total: the parent answered and refused the batch (4xx).
+	// That is a misconfiguration or a bug, not a network problem.
 	uplinkRefused *prometheus.CounterVec
 	downlinkOK    prometheus.Gauge
 	downlinkFail  prometheus.Counter
-	// colca_downlink_cursor_beyond_head_total (parent-scoped-cursors design
-	// §7): this node's command position is past its parent's stream head, so
-	// it will hear nothing until that stream grows past it.
+	// colca_downlink_cursor_beyond_head_total: this node's command position is past
+	// the parent's stream head, so it hears nothing until the head passes it.
 	downlinkBeyondHead prometheus.Counter
-	// colca_downlink_head_absent_total (parent-scoped-cursors design §3.3):
-	// the parent answered hello without a head, so it predates that field and
-	// this node cannot adopt a start position from it. Counted once per
-	// process start against such a parent, whether or not this node already
-	// holds a commands cursor for it.
+	// colca_downlink_head_absent_total: the parent answered hello without a command
+	// head, as older parents do, so no start position could be adopted.
 	downlinkHeadAbsent prometheus.Counter
 	reseed             prometheus.Gauge
 	authReject         *prometheus.CounterVec
 	aclDeny            *prometheus.CounterVec
 	kicks              prometheus.Counter
-	// colca_mqtt_publish_dropped_total: mochi found a client's outbound
-	// queue (MaximumClientWritesPending) full and dropped the publish — no
-	// retry, no error to the publisher, and until this counter existed no
-	// trace anywhere. A retained replay on subscribe is the burst that fills
-	// that queue; a nonzero value here is delivered state going missing.
+	// colca_mqtt_publish_dropped_total: mochi dropped a publish because a client's
+	// outbound queue was full. A retained replay on subscribe is the usual burst;
+	// a non-zero value means delivered state went missing.
 	publishDropped prometheus.Counter
-	// Human world (human-authz design §7).
+	// People on the token doors.
 	humanSessions prometheus.Gauge   // colca_human_sessions
 	jwksKeys      prometheus.Gauge   // colca_jwks_keys
 	jwksFailures  prometheus.Counter // colca_jwks_refresh_failures_total
 
-	// CmdAdmin world (cmdadmin design §9).
+	// Remote administration.
 	nodeCmds         *prometheus.CounterVec // colca_node_cmds_total{contract,verb,result}
 	securityChanges  *prometheus.CounterVec // colca_security_changes_total{kind}
 	securityChangeBy map[string]prometheus.Counter
 	nodePrefix       *prometheus.GaugeVec // colca_node_prefix_info{prefix}
 
-	// colca_command_undelivered_total: a live command was published to the
-	// local MQTT bus and had zero live SUBSCRIPTIONS at that moment (see
-	// engine.deliverCommand). Since command-redelivery design §3 this
-	// is no longer where the story ends: the same condition leaves the
-	// machine's delivery cursor un-advanced, so the record is replayed when
-	// it next subscribes and counted again on commandRedelivered. Read the
-	// pair together — undelivered rising with redelivered flat is the one
-	// shape that means commands are actually being missed rather than merely
-	// deferred. It counts only commands addressed to a
-	// machine enrolled AT THIS NODE — the one target this node's own bus can
-	// reach. A command relaying down toward a descendant, or one addressed to
-	// a child node, reaches zero subscribers at every node it passes through
-	// and is not counted anywhere: those are delivered over the replication
-	// door. Three things this is NOT:
-	//
-	//   - NOT "a command went nowhere": in the tree, most commands are
-	//     delivered by replication, and this counter is deliberately silent
-	//     about all of them.
-	//   - NOT "the command was lost forever": the record is durable in the
-	//     commands stream regardless, it is replayed on the machine's next
-	//     subscribe, and the issuer's own ack-timeout handling is what
-	//     recovers the case where the machine never comes back at all.
-	//   - NOT byte-level delivery confirmation: it reports subscription
-	//     existence (mqttsrv.HasSubscriberFor), which cannot see a
-	//     per-client write that mochi attempted and failed — that failure is
-	//     logged at Debug and swallowed inside mochi, never surfaced to the
-	//     caller. So this counter can UNDERcount real delivery failures
-	//     (a subscription existed but the write to it failed) but cannot
-	//     OVERcount them (barring a sub-millisecond snapshot race — see
-	//     HasSubscriberFor's doc comment).
-	//
-	// It is an honest, narrower signal than "delivered": "nobody was even
-	// listening", not "the bytes arrived".
+	// colca_command_undelivered_total: a live command for a machine enrolled here
+	// found no subscriber on the local bus. It stays durable and is replayed when
+	// the machine subscribes (commandRedelivered). Commands on their way to a
+	// descendant are not counted. It checks subscriptions, not bytes, so it can
+	// undercount but never overcount.
 	commandUndelivered prometheus.Counter
 
-	// colca_command_unroutable_total: a command addressed to a node other than
-	// this one was persisted at admission while NO enrolled child node's mount
-	// covered its path — so no child's downlink will ever hand it over, and it
-	// can never be executed or acked anywhere.
-	//
-	// The counter exists because that failure is otherwise completely silent.
-	// Expiry is evaluated at the TARGET, inside maybeExec, so a command that
-	// never reaches a target never expires visibly either: it simply sits in
-	// the commands stream and nothing ever happens. "Nothing happened, ever"
-	// is the one outcome an operator cannot distinguish from "still in
-	// flight".
-	//
-	// It counts, it never refuses. Refusing at admission would break
-	// publish-before-enroll and every re-enrollment / reparent window, in
-	// which a legitimate command is issued while the child that will execute
-	// it is briefly absent from the registry — a design decision, not a counter's
-	// decision. So a non-zero rate here is a question ("is that route
-	// right?"), not a verdict.
-	//
-	// Deliberately NOT counted, each for its own reason:
-	//
-	//   - a command addressed to THIS node: it executes in-process via
-	//     maybeExec, and there is nothing to route.
-	//   - a command addressed to a machine enrolled HERE: it is delivered over
-	//     the local bus, and colca_command_undelivered_total above is the
-	//     counter that owns that case.
-	//   - a command addressed to a DRAINING child: a drain exists precisely to
-	//     deliver what is already queued, so calling those unroutable would
-	//     report the mechanism working as a fault (registry.RoutesUnder).
+	// colca_command_unroutable_total: a command for another node was stored while
+	// no enrolled child's mount covered its path, so nothing will hand it down.
+	// Expiry is decided at the target, so such a command would otherwise sit
+	// silently forever. It only counts: refusing would break publishing before
+	// enrollment and reparenting.
 	commandUnroutable prometheus.Counter
 
-	// colca_command_redelivered_total: a durable command was replayed from
-	// the commands stream onto the local bus because the machine it is
-	// addressed to subscribed and its delivery cursor still stood before that
-	// record (command-redelivery design §3). This is the recovery half of the
-	// counter above: every replay here is a command that would previously
-	// have been dropped when the broker restarted or when it was issued
-	// before the machine's first connect.
+	// colca_command_redelivered_total: a stored command was replayed onto the local
+	// bus because its machine subscribed with its delivery cursor still before it.
 	commandRedelivered prometheus.Counter
 
-	// Schema bundle (schema-bundle design §11).
+	// Contracts bundle.
 	bundleInfo      *prometheus.GaugeVec // colca_contracts_bundle_info{version,digest,source}
 	bundleContracts prometheus.Gauge     // colca_contracts_bundle_contracts
 
-	// Retention (design §8): pruner-side counters.
+	// Retention pruner.
 	prunedRecords *prometheus.CounterVec // colca_retention_pruned_records_total{stream}
 	prunedBytes   *prometheus.CounterVec // colca_retention_pruned_bytes_total{stream}
 	pruneRuns     *prometheus.CounterVec // colca_retention_prune_runs_total{stream}
 	gapRecords    *prometheus.CounterVec // colca_retention_gap_records_total{stream}
-	// State refresh (design §6.5/§8): unlabeled — only the entities stream
-	// ever refreshes. refreshFailures is the counter the pruner's §6.5 append
-	// failures move now, replacing the RejectPublish mislabel IngestRefresh
-	// used to fall through to (a refresh append is an internal repair action,
-	// never a client's rejected publish).
+	// The state refresh only runs on the entities stream, so these are unlabeled.
+	// A failed refresh append is internal repair, not a rejected publish.
 	refreshRecords  prometheus.Counter // colca_retention_state_refresh_records_total
 	refreshSkipped  prometheus.Counter // colca_retention_state_refresh_skipped_total
 	refreshFailures prometheus.Counter // colca_retention_state_refresh_failures_total
 
-	// Gap contract (design §6/§8).
+	// Stream gaps.
 	gapServed      *prometheus.CounterVec // colca_gap_served_total{stream,surface}
 	gapReceived    *prometheus.CounterVec // colca_gap_received_total{stream}
 	replGapApplied *prometheus.CounterVec // colca_repl_gap_applied_total{child,stream}
@@ -316,7 +214,7 @@ type Metrics struct {
 	// the detailed family above remains the source for child/stream diagnosis.
 	replIntegrityFailures prometheus.Counter // colca_replication_integrity_failures_total
 
-	// Move-drain (design §3.2/§3.4).
+	// Move-drain.
 	drainsActive         prometheus.Gauge       // colca_drains_active
 	drainPendingCommands *prometheus.GaugeVec   // colca_drain_pending_commands{child}
 	drainsCompleted      *prometheus.CounterVec // colca_drains_completed_total{outcome}
@@ -325,7 +223,7 @@ type Metrics struct {
 	auditWriteFailures   prometheus.Counter     // colca_audit_write_failures_total
 	drainsCompletedBy    map[string]prometheus.Counter
 
-	// Blob transfer and ingress rejections (resources design §5/§7).
+	// Blob transfers and ingress rejections.
 	blobTransfers   *prometheus.CounterVec // colca_blob_transfers_total{direction,result}
 	blobTransfersBy map[string]prometheus.Counter
 	blobRejects     *prometheus.CounterVec // colca_blob_rejects_total{reason}
@@ -333,23 +231,19 @@ type Metrics struct {
 	recordRejects   *prometheus.CounterVec // colca_record_rejects_total{reason}
 	recordRejectsBy map[string]prometheus.Counter
 
-	// Resource file reads on the published door (resources design §6).
+	// Resource file reads on the published door.
 	resourceReads   *prometheus.CounterVec // colca_resource_reads_total{result}
 	resourceReadsBy map[string]prometheus.Counter
 
-	// Availability controls (IEC 62443-inspired SR 7.1/SR 7.2). Both labels
-	// are fixed route/door classes, never request paths or caller identities.
+	// Rate and concurrency limits. Both labels are fixed door and route classes,
+	// never paths or identities.
 	httpRequestLimited *prometheus.CounterVec // colca_http_request_limited_total{door,class}
 
-	// Blob sweeper (resources design §8): unreferenced blobs reclaimed past
-	// their grace period. Unlabeled — every deletion is the same event.
+	// Blob sweeper: unreferenced blobs reclaimed after their grace period.
 	blobsSwept prometheus.Counter // colca_blobs_swept_total
 
-	// colca_metrics_unbound_total (SDK design §7 gap 6): a _Metric accepted
-	// on a path with no _Signal at that path — today a silent, invisible,
-	// replicated write. Unlabeled: the path itself is attacker/integrator
-	// controlled and unbounded, so it can never be a label; the accompanying
-	// rate-limited log line (engine.go) carries the path instead.
+	// colca_metrics_unbound_total: a _Metric accepted on a path with no _Signal.
+	// Unlabeled because paths are unbounded; a rate-limited log line names them.
 	metricsUnbound prometheus.Counter // colca_metrics_unbound_total
 
 	ingestBy        map[string]prometheus.Counter
@@ -366,20 +260,12 @@ type Metrics struct {
 	gapReceivedBy   map[string]prometheus.Counter
 }
 
-// New builds the registry: the store collector plus every counter/gauge
-// family, pre-created and zero-valued so all families are present from the
-// first scrape. cfg is the node's retention policy — the collector needs it
-// to derive colca_retention_pressure and colca_retention_blocked_by_cursor at
-// scrape time (EffectiveStream applies the §3.1 defaults the same way the
-// pruner does).
+// New builds the registry with every family pre-created, so all of them are
+// present from the first scrape. cfg is the retention policy the collector
+// needs for the pressure and blocked-by-cursor gauges.
 //
-// clk is the node's authoritative-time state (time-sync design §2.1/§2.4);
-// it must be the SAME *clock.Clock instance passed to the node's
-// *engine.Engine (see engine.New's doc comment) or these gauges report state
-// nobody ever updates. clk may be nil (unit tests that do not exercise
-// time-sync): colca_clock_offset_ms reads 0 and colca_clock_sync_age_seconds
-// reads +Inf ("never synced"), same as a non-root node before its first
-// sample.
+// clk must be the same *clock.Clock the engine uses, or the clock gauges
+// report state nobody updates. A nil clk reads as never synced.
 func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m := &Metrics{
 		reg: prometheus.NewRegistry(),
@@ -621,21 +507,15 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.recordRejectsBy = counterChildren(m.recordRejects, recordRejectReasons)
 	m.resourceReadsBy = counterChildren(m.resourceReads, resourceReadResults)
 
-	// colca_drains_active starts at the count of entries persisted with
-	// status=draining (move-drain design §3.2: "status survives restart") —
-	// runtime Inc/Dec (DrainStarted/DrainCompleted) only ever adjusts THIS
-	// process' counter, so re-deriving the starting point from the store on
-	// every construction is what keeps it correct across a restart instead
-	// of silently resetting to 0 while children are still mid-drain.
+	// A restart must not reset colca_drains_active while children are still
+	// draining, so it starts from the entries persisted as draining.
 	draining := 0
 	persisted, err := st.RegistryScan()
 	if err != nil {
 		slog.Warn("metrics: cannot count draining entries", "err", err)
 	}
 	for _, raw := range persisted {
-		// Decoded as the real entry rather than a local struct carrying just
-		// the status field: the entry's JSON shape has one owner, and asking
-		// it whether it drains keeps that rule out of here entirely.
+		// Decode the real entry so the rule for draining has one owner.
 		var e uns.Entry
 		if err := json.Unmarshal(raw, &e); err == nil && e.IsDraining() {
 			draining++
@@ -643,12 +523,8 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	}
 	m.drainsActive.Set(float64(draining))
 
-	// Time-sync (design §2.1/§2.4): read directly from clk at scrape time —
-	// GaugeFunc, not a pushed Set(), because colca_clock_sync_age_seconds is
-	// genuinely "seconds since the last sample right now", not a value any
-	// write path could push in advance. clk == nil (unit tests that never
-	// wire time-sync) reads exactly like a non-root node that has never
-	// synced: offset 0, age +Inf.
+	// The clock gauges are read at scrape time: the sync age is seconds since the
+	// last sample, now, which no write path could push ahead of time.
 	clockOffset := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "colca_clock_offset_ms",
 		Help: "Current authoritative-time offset estimate in milliseconds (design §2.1/§2.4): offset_ms = now_ms - wall_receipt from the most recent /downlink or /replicate response. Always 0 on the root and on a node that has never synced.",
@@ -665,10 +541,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		if clk == nil {
 			return math.Inf(1)
 		}
-		// clk.Now(), not time.Now(): this stays on the SAME injectable clock
-		// the rest of the time-sync decision logic uses (mandatory per
-		// design §2.1 — no bare time.Now() in this feature's decision code),
-		// so a test with a fake clock sees a deterministic age.
+		// clk.Now() keeps tests with a fake clock deterministic.
 		return clk.SyncAgeSeconds(clk.Now())
 	})
 
@@ -719,8 +592,7 @@ func (m *Metrics) ACLDeny(action string) {
 	m.aclDeny.WithLabelValues(action).Inc()
 }
 
-// SessionKick counts one live session disconnected by a registry change.
-// SetHumanSessions tracks the live human-door session count.
+// SetHumanSessions reports the number of live sessions on the token doors.
 func (m *Metrics) SetHumanSessions(n int) {
 	if m == nil {
 		return
@@ -737,18 +609,10 @@ func (m *Metrics) SetJWKSKeys(n int) {
 }
 
 // NodeCmd counts one command executed by this node, by contract, verb and
-// outcome (ok | conflict | invalid | expired | error | blob_unreachable).
-//
-// blob_unreachable is the resource path's own outcome: a well-formed
-// `resource/upsert` whose blob this node neither holds nor could pull from its
-// parent (resources design §7.1/§9.1). It is separated from `invalid` because
-// it is the one refusal here that says nothing about the command — an
-// operator watching a provisioning run needs to see failed pulls apart from
-// bad commands, since only one of the two is fixed by staging bytes.
-//
-// A command addressed to ANOTHER node is deliberately not counted at all: this
-// node did not execute it. It is persisted, relayed down, and executed at its
-// target, which counts it there.
+// outcome (ok, conflict, invalid, expired, error, blob_unreachable).
+// blob_unreachable means the resource's blob could not be pulled, which is
+// fixed by staging bytes rather than by changing the command. Commands for
+// other nodes are counted where they execute.
 func (m *Metrics) NodeCmd(contract, verb, result string) {
 	if m == nil {
 		return
@@ -765,9 +629,8 @@ func (m *Metrics) NodeCmd(contract, verb, result string) {
 	}
 }
 
-// CommandUndelivered counts one live command published to the local MQTT bus
-// that reached zero subscribers — see the field comment above and
-// engine.deliverCommand for exactly what is and is not counted here.
+// CommandUndelivered counts one live command that reached no subscriber on the
+// local bus.
 func (m *Metrics) CommandUndelivered() {
 	if m == nil {
 		return
@@ -775,9 +638,8 @@ func (m *Metrics) CommandUndelivered() {
 	m.commandUndelivered.Inc()
 }
 
-// CommandUnroutable counts one command addressed downward that no enrolled
-// child's mount covers — see the field comment above and
-// engine.countIfUnroutable for exactly what is and is not counted here.
+// CommandUnroutable counts one command for a node no enrolled child's mount
+// covers.
 func (m *Metrics) CommandUnroutable() {
 	if m == nil {
 		return
@@ -786,7 +648,7 @@ func (m *Metrics) CommandUnroutable() {
 }
 
 // CommandRedelivered counts one command replayed from the commands stream onto
-// the local bus — see the field comment above and engine.ReplayOwedCommands.
+// the local bus.
 func (m *Metrics) CommandRedelivered() {
 	if m == nil {
 		return
@@ -794,8 +656,8 @@ func (m *Metrics) CommandRedelivered() {
 	m.commandRedelivered.Inc()
 }
 
-// SetBundleInfo reports the active contract authority (schema-bundle design
-// §11): version/digest of the loaded bundle, or source=builtin for the floor.
+// SetBundleInfo reports the loaded contracts bundle, or source=builtin when only
+// the built-in rules apply.
 func (m *Metrics) SetBundleInfo(version, digest, source string, contracts int) {
 	if m == nil {
 		return
@@ -823,6 +685,7 @@ func (m *Metrics) JWKSRefreshFailed() {
 	m.jwksFailures.Inc()
 }
 
+// SessionKick counts one live session disconnected by a registry change.
 func (m *Metrics) SessionKick() {
 	if m == nil {
 		return
@@ -830,8 +693,8 @@ func (m *Metrics) SessionKick() {
 	m.kicks.Inc()
 }
 
-// PublishDropped counts one publish mochi discarded because the receiving
-// client's outbound queue was full — see the field comment.
+// PublishDropped counts one publish mochi dropped because the client's outbound
+// queue was full.
 func (m *Metrics) PublishDropped() {
 	if m == nil {
 		return
@@ -903,11 +766,8 @@ func (m *Metrics) UplinkPushFailed(stream string) {
 	m.uplinkFail.WithLabelValues(stream).Inc()
 }
 
-// UplinkRefused counts one uplink push the parent answered and refused.
-//
-// Counted IN ADDITION to UplinkPushFailed — the push did fail, and every
-// existing view of failed pushes keeps its meaning; this family is the
-// discriminator that says the parent was reachable and said no.
+// UplinkRefused counts one uplink push the parent answered and refused. It is
+// counted in addition to UplinkPushFailed and tells a refusal from an outage.
 func (m *Metrics) UplinkRefused(stream string) {
 	if m == nil {
 		return
@@ -919,8 +779,8 @@ func (m *Metrics) UplinkRefused(stream string) {
 	m.uplinkRefused.WithLabelValues(stream).Inc()
 }
 
-// DownlinkFetched records a successful downlink fetch — empty fetches count:
-// progress means the loop is alive, not that data flowed.
+// DownlinkFetched records a successful downlink fetch. Empty fetches count too:
+// they show the loop is alive.
 func (m *Metrics) DownlinkFetched(at time.Time) {
 	if m == nil {
 		return
@@ -936,13 +796,10 @@ func (m *Metrics) DownlinkFetchFailed() {
 	m.downlinkFail.Inc()
 }
 
-// DownlinkCursorBeyondHead counts one start that found this node's command
-// cursor already past its parent's stream head (parent-scoped-cursors design
-// §7) — the parent pruned past that position, or was rebuilt from empty.
-//
-// Worth alerting on for the same reason a rejected definition is: the node is
-// not failing, it is silent. Read(after > head) returns nothing forever, so it
-// executes no commands and cannot be repaired remotely either.
+// DownlinkCursorBeyondHead counts one start whose command cursor was already
+// past the parent's stream head, because the parent pruned past it or was
+// rebuilt. Worth an alert: such a node receives no commands and cannot be
+// repaired remotely.
 func (m *Metrics) DownlinkCursorBeyondHead() {
 	if m == nil {
 		return
@@ -950,24 +807,11 @@ func (m *Metrics) DownlinkCursorBeyondHead() {
 	m.downlinkBeyondHead.Inc()
 }
 
-// DownlinkHeadAbsent counts one process start whose parent answered hello
-// without a command head (parent-scoped-cursors design §3.3) — a parent that
-// predates the field, which is what a leaf-first rolling upgrade produces.
-//
-// Read it as "this node is talking to a pre-head parent", not as "commands
-// were mishandled". Hello runs once per process, and the check does not know
-// whether this node already holds a commands cursor for that parent, so the
-// counter rises on EVERY start against such a parent — including the common
-// one where a cursor exists, no position has to be adopted and nothing is at
-// risk.
-//
-// The case it exists to surface is the other one: a node with no cursor for
-// this parent yet has no head to adopt, so its cursor stays at the default of
-// 1 and the first poll hands it every retained command issued under its mount
-// before it attached, which §3.2 exists to refuse. That degradation is
-// otherwise invisible — nothing fails and nothing logs again — which is why
-// the counter is worth alerting on even at the cost of counting the harmless
-// starts alongside it.
+// DownlinkHeadAbsent counts one start whose parent answered hello without a
+// command head, as an older parent does during a rolling upgrade. It rises on
+// every start against such a parent, harmless or not. The case to alert on is
+// a node without a cursor for that parent: it starts at 1 and receives commands
+// issued under its mount before it attached.
 func (m *Metrics) DownlinkHeadAbsent() {
 	if m == nil {
 		return
@@ -983,9 +827,7 @@ func (m *Metrics) SetReseedCount(n int) {
 	m.reseed.Set(float64(n))
 }
 
-// RetentionPruneRun counts one prune cycle that actually removed at least one
-// record from stream (design §8, colca_retention_prune_runs_total) — a cycle
-// that evaluated the policy and found nothing to do does not count.
+// RetentionPruneRun counts one prune cycle that removed at least one record.
 func (m *Metrics) RetentionPruneRun(stream string) {
 	if m == nil {
 		return
@@ -997,14 +839,9 @@ func (m *Metrics) RetentionPruneRun(stream string) {
 	m.pruneRuns.WithLabelValues(stream).Inc()
 }
 
-// RetentionPruned adds one run's removed records and shed logical bytes to
-// stream's running totals (design §8, colca_retention_pruned_records_total /
-// colca_retention_pruned_bytes_total). Both records and bytes must be the
-// store's own authoritative post-commit figures (store.Prune's return value
-// and store.PruneSpan.Shed respectively) — the store's in-batch cursor
-// recheck (spec §5.2 [delta]) can shrink the pruned range after the caller's
-// own pre-commit scan, and only the store's own accounting reflects what was
-// actually removed.
+// RetentionPruned adds one run's removed records and bytes. Pass the store's
+// own post-commit figures: its in-batch cursor recheck can shrink the range
+// after the caller's scan.
 func (m *Metrics) RetentionPruned(stream string, records, bytes uint64) {
 	if m == nil {
 		return
@@ -1021,8 +858,7 @@ func (m *Metrics) RetentionPruned(stream string, records, bytes uint64) {
 	}
 }
 
-// RetentionGapRecorded counts one durable _StreamGap record emitted for
-// stream (design §6.4/§8, colca_retention_gap_records_total).
+// RetentionGapRecorded counts one durable _StreamGap record for stream.
 func (m *Metrics) RetentionGapRecorded(stream string) {
 	if m == nil {
 		return
@@ -1034,8 +870,7 @@ func (m *Metrics) RetentionGapRecorded(stream string) {
 	m.gapRecords.WithLabelValues(stream).Inc()
 }
 
-// StateRefreshApplied counts one entities KV entry the §6.5 state refresh
-// successfully re-appended (design §8, colca_retention_state_refresh_records_total).
+// StateRefreshApplied counts one entities entry re-appended by the state refresh.
 func (m *Metrics) StateRefreshApplied() {
 	if m == nil {
 		return
@@ -1043,9 +878,8 @@ func (m *Metrics) StateRefreshApplied() {
 	m.refreshRecords.Inc()
 }
 
-// StateRefreshSkipped counts one state-refresh append the CAS guard skipped
-// because the snapshot was superseded by a tombstone or a newer write (spec
-// §6.5/§7.1) — a completion, not a failure.
+// StateRefreshSkipped counts one refresh append skipped because a tombstone or
+// newer write superseded the snapshot. That is a completion, not a failure.
 func (m *Metrics) StateRefreshSkipped() {
 	if m == nil {
 		return
@@ -1053,11 +887,8 @@ func (m *Metrics) StateRefreshSkipped() {
 	m.refreshSkipped.Inc()
 }
 
-// StateRefreshFailed counts one state-refresh append that errored and left
-// the refresh obligation pending for retry. This is the refresh path's OWN
-// failure counter — refresh appends must never move
-// colca_rejected_publishes_total, which describes rejected client/admin
-// publishes, not the pruner's internal repair traffic.
+// StateRefreshFailed counts one refresh append that failed and stays pending.
+// It never moves colca_rejected_publishes_total, which is for client publishes.
 func (m *Metrics) StateRefreshFailed() {
 	if m == nil {
 		return
@@ -1065,9 +896,8 @@ func (m *Metrics) StateRefreshFailed() {
 	m.refreshFailures.Inc()
 }
 
-// GapServed counts one wire gap served to a consumer (design §6/§8,
-// colca_gap_served_total). surface is "fetch" (GET /fetch) or "downlink"
-// (GET /downlink).
+// GapServed counts one gap served to a consumer on surface "fetch" or
+// "downlink".
 func (m *Metrics) GapServed(stream, surface string) {
 	if m == nil {
 		return
@@ -1081,9 +911,8 @@ func (m *Metrics) GapServed(stream, surface string) {
 	m.gapServed.WithLabelValues(stream, surface).Inc()
 }
 
-// GapReceived counts one gap a repl client observed on stream: an uplink LWM
-// jump (the local pruner overrode the uplink cursor) or a downlink gap object
-// from the parent (design §6.3/§8, colca_gap_received_total).
+// GapReceived counts one gap a repl client saw on stream: an uplink low-water
+// jump or a gap object from the parent.
 func (m *Metrics) GapReceived(stream string) {
 	if m == nil {
 		return
@@ -1095,11 +924,9 @@ func (m *Metrics) GapReceived(stream string) {
 	m.gapReceived.WithLabelValues(stream).Inc()
 }
 
-// GapApplied counts one child-offset jump observed in IngestReplicated —
-// records the parent never received because the child pruned past them
-// before replicating (design §6.4 second net/§8, colca_repl_gap_applied_total).
-// child and stream are dynamic (children are configured per node), so unlike
-// the fixed-label counters above there is no pre-created child to hit.
+// GapApplied counts one child-offset jump in IngestReplicated: records the
+// child pruned before replicating them. Children are dynamic, so there is no
+// pre-created child to hit.
 func (m *Metrics) GapApplied(child, stream string) {
 	if m == nil {
 		return
@@ -1108,9 +935,7 @@ func (m *Metrics) GapApplied(child, stream string) {
 	m.replIntegrityFailures.Inc()
 }
 
-// DrainStarted increments colca_drains_active — one enrolled kind=node child
-// began a move-drain decommission (move-drain design §3.1, POST
-// /enroll/{ulid}/drain).
+// DrainStarted counts one child node that started a move-drain.
 func (m *Metrics) DrainStarted() {
 	if m == nil {
 		return
@@ -1118,10 +943,8 @@ func (m *Metrics) DrainStarted() {
 	m.drainsActive.Inc()
 }
 
-// DrainPending sets colca_drain_pending_commands{child} to the count of
-// live, undelivered ClassCmd records currently blocking child's drain
-// (move-drain design §3.2 item 3/§3.4). Called on every completion-predicate
-// evaluation, whether or not the drain completes this round.
+// DrainPending sets the number of live, undelivered commands blocking child's
+// drain. It is called on every completion check.
 func (m *Metrics) DrainPending(child string, n int) {
 	if m == nil {
 		return
@@ -1129,12 +952,8 @@ func (m *Metrics) DrainPending(child string, n int) {
 	m.drainPendingCommands.WithLabelValues(child).Set(float64(n))
 }
 
-// DrainCompleted records one move-drain's terminal outcome (move-drain
-// design §3.4, one of DrainOutcome*): decrements colca_drains_active and
-// clears child's now-meaningless colca_drain_pending_commands series — by
-// the time a caller reaches this method, the registry has already revoked
-// child (or is in the process of the same DELETE that produced a "forced"
-// outcome), so the series describes an identity that no longer exists.
+// DrainCompleted records a drain's outcome (one of DrainOutcome*) and drops
+// child's pending-commands series, since the child has been revoked.
 func (m *Metrics) DrainCompleted(child, outcome string) {
 	if m == nil {
 		return
@@ -1148,8 +967,7 @@ func (m *Metrics) DrainCompleted(child, outcome string) {
 	m.drainsCompleted.WithLabelValues(outcome).Inc()
 }
 
-// DefinitionApplied counts one definition applied from the downlink
-// (definition-stream design §5).
+// DefinitionApplied counts one definition applied from the downlink.
 func (m *Metrics) DefinitionApplied() {
 	if m == nil {
 		return
@@ -1157,12 +975,9 @@ func (m *Metrics) DefinitionApplied() {
 	m.definitionsApplied.Inc()
 }
 
-// DefinitionRejected counts one definition this node refused to apply.
-//
-// Worth alerting on: unlike a rejected client publish, which costs one client
-// one message, a rejected definition parks the node's definition cursor — so
-// nothing behind it arrives either, and the node quietly stops learning about
-// new groups and types.
+// DefinitionRejected counts one definition this node refused. Worth an alert:
+// a rejected definition parks the definition cursor, so nothing behind it
+// arrives either.
 func (m *Metrics) DefinitionRejected() {
 	if m == nil {
 		return
@@ -1170,7 +985,7 @@ func (m *Metrics) DefinitionRejected() {
 	m.definitionsRejected.Inc()
 }
 
-// BlobTransfer counts one completed blob transfer (resources design §7).
+// BlobTransfer counts one completed blob transfer.
 func (m *Metrics) BlobTransfer(direction, result string) {
 	if m == nil {
 		return
@@ -1182,7 +997,7 @@ func (m *Metrics) BlobTransfer(direction, result string) {
 	m.blobTransfers.WithLabelValues(direction, result).Inc()
 }
 
-// BlobRejected counts one blob refused at ingress (resources design §5).
+// BlobRejected counts one blob refused at ingress.
 func (m *Metrics) BlobRejected(reason string) {
 	if m == nil {
 		return
@@ -1215,8 +1030,7 @@ func (m *Metrics) HTTPRequestLimited(door, class string) {
 	}
 }
 
-// ResourceRead counts one resource file read attempt on the published door's
-// GET /resources/{id}/file, by result (resources design §6).
+// ResourceRead counts one read of GET /resources/{id}/file, by result.
 func (m *Metrics) ResourceRead(result string) {
 	if m == nil {
 		return
@@ -1228,8 +1042,7 @@ func (m *Metrics) ResourceRead(result string) {
 	m.resourceReads.WithLabelValues(result).Inc()
 }
 
-// BlobSwept counts one blob the sweeper deleted (resources design §8): no
-// live _Resource referenced it and it was older than the configured grace
+// BlobSwept counts one unreferenced blob the sweeper deleted after its grace
 // period.
 func (m *Metrics) BlobSwept() {
 	if m == nil {
@@ -1238,8 +1051,7 @@ func (m *Metrics) BlobSwept() {
 	m.blobsSwept.Inc()
 }
 
-// MetricUnbound counts one _Metric accepted on a path with no _Signal there
-// (SDK design §7 gap 6). Unlabeled by design — see the field comment.
+// MetricUnbound counts one _Metric accepted on a path with no _Signal.
 func (m *Metrics) MetricUnbound() {
 	if m == nil {
 		return
@@ -1252,16 +1064,12 @@ func (m *Metrics) MetricUnbound() {
 type storeCollector struct {
 	st  *store.Store
 	cfg config.Retention
-	// scanCap bounds blockedByCursor's PolicyPruneTarget scan (see
-	// store.DefaultPolicyScanCap). Always the production default via New;
-	// tests construct a collector directly with a small value to prove the
-	// walk is bounded without seeding hundreds of thousands of records.
+	// scanCap bounds the policy target scan in blockedByCursor. Tests pass a small
+	// value.
 	scanCap uint64
 }
 
-// newStoreCollector builds the collector with an explicit scan cap — New
-// (the production constructor) always passes store.DefaultPolicyScanCap;
-// this seam exists so tests can pass a small cap instead.
+// newStoreCollector builds the collector; tests use it to pass a small scan cap.
 func newStoreCollector(st *store.Store, cfg config.Retention, scanCap uint64) *storeCollector {
 	return &storeCollector{st: st, cfg: cfg, scanCap: scanCap}
 }
@@ -1351,13 +1159,9 @@ func (c *storeCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-// pressure computes design §8's colca_retention_pressure for stream:
-// max(age_used/max_age, live_bytes/max_bytes), where age_used is the age of
-// the OLDEST currently retained record (the one sitting at the LWM) — not a
-// re-run of the pruner's scan. A term is omitted when its limit is unset
-// (age_used/max_age when max_age<=0, live_bytes/max_bytes when max_bytes==0),
-// matching EffectiveStream's "either limit is sufficient to enable pruning"
-// contract (config.go).
+// pressure is max(age_used/max_age, live_bytes/max_bytes), where age_used is
+// the age of the oldest retained record. A term is left out when its limit is
+// unset.
 func (c *storeCollector) pressure(stream string, now time.Time) float64 {
 	pol := c.cfg.EffectiveStream(stream)
 	maxAge := time.Duration(pol.MaxAge)
@@ -1378,11 +1182,8 @@ func (c *storeCollector) pressure(stream string, now time.Time) float64 {
 	return p
 }
 
-// oldestTS returns the timestamp of the record at stream's current LWM — the
-// oldest record still retained — via a single-record ScanRecords window. ok
-// is false when the stream currently retains nothing (LWM == next_offset). A
-// scan error is swallowed (same convention as KVScan): this is a best-effort
-// scrape-time gauge, not a correctness path.
+// oldestTS returns the timestamp of the oldest retained record; ok is false
+// when the stream is empty. Errors are ignored, as this only feeds a gauge.
 func (c *storeCollector) oldestTS(stream string) (ts int64, ok bool) {
 	lwm := c.st.LWM(stream)
 	_ = c.st.ScanRecords(stream, lwm, lwm+1, func(_ uint64, t int64, _ uint64) bool {
@@ -1392,24 +1193,11 @@ func (c *storeCollector) oldestTS(stream string) (ts int64, ok bool) {
 	return ts, ok
 }
 
-// blockedByCursor derives design §8's colca_retention_blocked_by_cursor for
-// stream: the count of protected cursors sitting below the offset the
-// age/size policy would prune to if no cursor existed. Built entirely from
-// store.ProtectedCursors and store.PolicyPruneTarget — the exact same
-// classification and scan retention.Pruner.pruneStream uses for the real
-// clamp/override decision (drift between the two is structurally
-// impossible; there is only one implementation) — called here read-only
-// (no CursorMarkSeen, no batch, no mutation) and unclamped (clamp=next: how
-// far the policy would go with no cursor floor at all).
-//
-// The scan is bounded by c.scanCap (store.DefaultPolicyScanCap in
-// production): in the exact alert state this gauge exists to catch — a dead
-// consumer, default ignore_cursors_after=0 never overriding, backlog
-// growing unbounded — an uncapped scan here would JSON-decode the entire
-// clamped backlog on every single scrape. When the cap is hit, target is a
-// FLOOR (see PolicyPruneTarget's doc): every cursor counted below it is
-// still exactly blocked, so this can only undercount cursors sitting
-// between the floor and the true (unscanned) target, never overcount.
+// blockedByCursor counts the protected cursors below the offset the age and
+// size policy would prune to, using the pruner's own store functions,
+// read-only. The scan is capped because this gauge matters most when a dead
+// consumer lets the backlog grow; past the cap the target is a floor, so the
+// count can undercount but never overcount.
 func (c *storeCollector) blockedByCursor(stream string, now time.Time) int {
 	pol := c.cfg.EffectiveStream(stream)
 	maxAge := time.Duration(pol.MaxAge)

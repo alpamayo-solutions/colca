@@ -1,10 +1,9 @@
-// Command colca-keygen generates an ed25519 identity key and prints its
-// public key (hex) — the value an admin enrolls at a node (POST /enroll).
+// Command colca-keygen generates an ed25519 identity key and prints its public
+// key in hex, the value an admin enrolls at a node.
 //
-// With -cert it additionally writes <out.key>.crt, a PEM self-signed
-// certificate wrapping the key (cert = key container, trust = registry
-// pinning — no CA anywhere): exactly what a non-Go MQTT/HTTPS client needs to
-// present the key as a TLS client certificate.
+// With -cert it also writes <out.key>.crt, a self-signed certificate wrapping
+// the key, for MQTT and HTTPS clients that need a TLS client certificate. Trust
+// comes from pinning the key; there is no CA.
 package main
 
 import (

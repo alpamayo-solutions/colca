@@ -12,9 +12,8 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
-// newClockEngine builds an engine wired to an explicit *clock.Clock (and,
-// optionally, a *metrics.Metrics sharing that same clock — the contract
-// engine.New's doc comment and metrics.New's doc comment both require).
+// newClockEngine builds an engine on an explicit clock. Pass the same clock to
+// metrics.New when the test reads clock metrics.
 func newClockEngine(t *testing.T, cfg *config.Config, clk *clock.Clock, m *metrics.Metrics) *Engine {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -25,9 +24,8 @@ func newClockEngine(t *testing.T, cfg *config.Config, clk *clock.Clock, m *metri
 	return New(s, cfg, testIDs(), nil, m, clk)
 }
 
-// TestEngineAuthoritativeNowRootIsRawWallClock pins design §2.1 through the
-// engine surface: a root engine's AuthoritativeNow is exactly its raw
-// injected clock, unaffected by ApplyClockSample.
+// A root engine's AuthoritativeNow is its raw clock, unaffected by
+// ApplyClockSample.
 func TestEngineAuthoritativeNowRootIsRawWallClock(t *testing.T) {
 	base := time.UnixMilli(1_700_000_000_000)
 	clk := clock.New(true, func() time.Time { return base })
@@ -42,8 +40,7 @@ func TestEngineAuthoritativeNowRootIsRawWallClock(t *testing.T) {
 	}
 }
 
-// TestEngineApplyClockSampleCorrectsAuthoritativeNow pins the wiring between
-// ApplyClockSample and AuthoritativeNow on a non-root engine (design §2.1).
+// ApplyClockSample corrects AuthoritativeNow on a non-root engine.
 func TestEngineApplyClockSampleCorrectsAuthoritativeNow(t *testing.T) {
 	wall := time.UnixMilli(1_700_000_000_000)
 	cur := wall
@@ -67,9 +64,7 @@ func TestEngineApplyClockSampleCorrectsAuthoritativeNow(t *testing.T) {
 	}
 }
 
-// TestEngineApplyClockSampleWarnsPastDriftThreshold pins design §2.4: a
-// sample whose |offset_ms| exceeds time_sync.drift_warn_ms logs a warning;
-// one within the threshold does not.
+// A sample beyond time_sync.drift_warn_ms logs a warning; one within it does not.
 func TestEngineApplyClockSampleWarnsPastDriftThreshold(t *testing.T) {
 	buf := captureLogs(t)
 	wall := time.UnixMilli(0)
@@ -89,10 +84,8 @@ func TestEngineApplyClockSampleWarnsPastDriftThreshold(t *testing.T) {
 	}
 }
 
-// TestEngineClockOffsetVisibleInMetrics pins the metrics wiring end to end
-// (design §2.4): colca_clock_offset_ms and colca_clock_sync_age_seconds
-// reflect a *clock.Clock shared between engine.New and metrics.New, both
-// before and after a sample.
+// colca_clock_offset_ms and colca_clock_sync_age_seconds follow a clock shared by
+// engine.New and metrics.New, before and after a sample.
 func TestEngineClockOffsetVisibleInMetrics(t *testing.T) {
 	wall := time.UnixMilli(1_700_000_000_000)
 	clk := clock.New(false, func() time.Time { return wall })
@@ -120,8 +113,7 @@ func TestEngineClockOffsetVisibleInMetrics(t *testing.T) {
 	}
 }
 
-// TestEngineRootClockAlwaysZeroInMetrics pins design §2.4's "root exports 0
-// age" through the metrics surface.
+// The root reports zero clock age in its metrics.
 func TestEngineRootClockAlwaysZeroInMetrics(t *testing.T) {
 	wall := time.UnixMilli(1_700_000_000_000)
 	clk := clock.New(true, func() time.Time { return wall })
@@ -132,7 +124,7 @@ func TestEngineRootClockAlwaysZeroInMetrics(t *testing.T) {
 	t.Cleanup(func() { s.Close() })
 	m := metrics.New(s, config.Retention{}, clk)
 	e := New(s, &config.Config{ULID: "n-root"}, testIDs(), nil, m, clk)
-	e.ApplyClockSample(wall.UnixMilli() + 60_000) // must be ignored — root
+	e.ApplyClockSample(wall.UnixMilli() + 60_000) // ignored on the root
 
 	if v := scrapeMetric(t, m, "colca_clock_offset_ms"); v != 0 {
 		t.Fatalf("colca_clock_offset_ms on root = %v, want 0", v)

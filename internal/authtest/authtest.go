@@ -1,7 +1,5 @@
-// Package authtest provides shared test helpers for the mTLS + registry auth
-// world: machine identities (key + client cert), enrollment JSON, and paho
-// TLS configs. It exists so mqttsrv, node and the in-process integration
-// suite build their fixtures the same way (same pattern as metricstest).
+// Package authtest provides shared test helpers for key-based auth: machine
+// identities with client certificates, enrollment JSON and paho TLS configs.
 package authtest
 
 import (
@@ -40,9 +38,8 @@ func NewMachine(t *testing.T, ulid string) *Machine {
 	return &Machine{ULID: ulid, ID: id, Cert: cert, Pubkey: id.PublicHex()}
 }
 
-// ElementID is the element a placement at path gets. Derived from the path so a
-// failing assertion names something readable, and stable so two calls for the
-// same position agree.
+// ElementID is the element id a placement at path gets. It is derived from the
+// path, so failures stay readable and repeated calls agree.
 func ElementID(path string) string {
 	if path == "" {
 		return ""
@@ -50,11 +47,8 @@ func ElementID(path string) string {
 	return "el-" + strings.ReplaceAll(path, "/", "-")
 }
 
-// Place authors a system element at path in the node's own namespace and
-// returns its id, so an identity can be enrolled there (id-grants design §4).
-// It goes through IngestAdmin — the same door `_CmdConfigure element/upsert`
-// publishes through — so the node's element index sees it exactly as it would
-// in production.
+// Place authors a system element at path through IngestAdmin, the door
+// _CmdConfigure uses, and returns its id so an identity can be enrolled there.
 func Place(t *testing.T, eng *engine.Engine, path string) string {
 	t.Helper()
 	id := ElementID(path)
@@ -88,15 +82,14 @@ func Enroll(t *testing.T, reg *registry.Manager, m *Machine, element string, gra
 	}
 }
 
-// EnrollAt places an element at path and enrolls the machine there — the two
-// steps every placed identity needs, in the order a deployment performs them.
+// EnrollAt places an element at path and enrolls the machine there.
 func EnrollAt(t *testing.T, reg *registry.Manager, eng *engine.Engine, m *Machine, path string, grants ...string) {
 	t.Helper()
 	Enroll(t, reg, m, Place(t, eng, path), grants...)
 }
 
-// EnrollNode enrolls a child node's key (kind node) at the parent's registry —
-// entry-before-connect for the repl door.
+// EnrollNode enrolls a child node's key at the parent's registry, before the
+// child connects.
 func EnrollNode(t *testing.T, reg *registry.Manager, ulid, pubkeyHex, element string) {
 	t.Helper()
 	b, err := json.Marshal(uns.Entry{ULID: ulid, Pubkey: pubkeyHex, Kind: uns.KindNode, Element: element})
@@ -114,9 +107,8 @@ func EnrollNodeAt(t *testing.T, reg *registry.Manager, eng *engine.Engine, ulid,
 	EnrollNode(t, reg, ulid, pubkeyHex, Place(t, eng, path))
 }
 
-// TLSConfig is the machine's client-side TLS config: presents the machine
-// key, skips CA verification (trust is the registry's pinning, and in tests
-// the server cert is self-signed by construction).
+// TLSConfig is the machine's client TLS config. It presents the machine key and
+// skips CA verification: trust comes from the registry's key pinning.
 func (m *Machine) TLSConfig() *tls.Config {
 	return &tls.Config{
 		Certificates:       []tls.Certificate{m.Cert},

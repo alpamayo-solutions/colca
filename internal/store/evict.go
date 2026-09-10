@@ -8,21 +8,12 @@ import (
 	"github.com/cockroachdb/pebble/v2"
 )
 
-// Eviction of records this node holds but that nothing at this node will ever
-// read: state whose contract stays on its author (uns.IsNodePrivate) and whose
-// author is another node. Such copies arrived before the uplink kept private
-// records home, and since their tombstones no longer rise either, no later
-// record will ever retire them — the sweep here is the only way out.
-//
-// Like compaction and unlike Prune, this deletes SCATTERED offsets and leaves
-// the LWM alone: the doomed records sit wherever their author's uplink put
-// them. The holes are not reported as gaps: the stream carrying them is a
-// filtered uplink already (uns.UplinkCarriesEveryRecord is false for it), so
-// no reader treats a missing offset there as loss.
-//
-// The store knows nothing about which topics are doomed. The caller hands in
-// the predicate; the store owns only the mechanics — bounded scan, atomic
-// batch, byte accounting.
+// Eviction of records nothing at this node will ever read: node-private state
+// (uns.IsNodePrivate) authored by another node, which no later record will
+// retire. Like compaction it deletes scattered offsets and leaves the LWM alone;
+// the holes are not gaps, since the stream is already a filtered uplink. The
+// caller supplies the predicate; the store only does the bounded scan, the
+// atomic batch and the byte accounting.
 
 // EvictStats reports what one EvictRecords pass did.
 type EvictStats struct {
@@ -35,14 +26,9 @@ type EvictStats struct {
 }
 
 // EvictRecords deletes every record in [from, next) whose topic the caller
-// dooms, examining at most maxScan records per call so one pass over a long
-// stream cannot hold a cycle. The caller drives the sweep from Resume until
-// Done and then starts over from the LWM — a pass is bounded, the sweep is
-// complete, and a repeated pass over clean records removes nothing.
-//
-// KV projections are NOT touched here: a doomed topic's current-state entry is
-// removed by EvictKV, which sees every entry regardless of where — or whether
-// — its stream record still exists.
+// dooms, examining at most maxScan records per call. The caller continues from
+// Resume until Done and then starts over at the LWM; a pass over clean records
+// removes nothing. KV entries are left to EvictKV.
 func (s *Store) EvictRecords(stream string, from, maxScan uint64, doomed func(topic string) bool) (EvictStats, error) {
 	var st EvictStats
 	s.mu.Lock()
@@ -62,10 +48,9 @@ func (s *Store) EvictRecords(stream string, from, maxScan uint64, doomed func(to
 		return st, nil
 	}
 
-	// Pass 1, without the mutex (same discipline as scanDoomed and Compact):
-	// find the doomed offsets in the window. Append writes only at offsets
-	// >= next, and the prefix can only shrink through Prune, which the LWM
-	// recheck below serializes against.
+	// Pass 1 without the mutex, as in scanDoomed and Compact: find the doomed
+	// offsets. Appends only write at offsets >= next, and the prefix only shrinks
+	// through Prune, which the LWM recheck below serializes.
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: streamKey(stream, from),
 		UpperBound: streamKey(stream, next),
@@ -112,9 +97,9 @@ func (s *Store) EvictRecords(stream string, from, maxScan uint64, doomed func(to
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lwm[stream] != lwm {
-		// A prefix prune landed under the scan and may already have removed
-		// some of these keys; deleting them again would shed their bytes
-		// twice. Nothing is deleted; the caller restarts the sweep.
+		// A prefix prune ran during the scan and may have removed some of these keys;
+		// deleting them again would count their bytes twice. Delete nothing and let the
+		// caller restart.
 		return EvictStats{}, fmt.Errorf("concurrent prune on stream %q during eviction", stream)
 	}
 	b := s.db.NewBatch()
@@ -141,15 +126,10 @@ func (s *Store) EvictRecords(stream string, from, maxScan uint64, doomed func(to
 }
 
 // EvictKV deletes every current-state entry whose topic the caller dooms and
-// returns how many it removed. The topic is read from the KV key itself
-// (kvKey: path\x00node\x00topic), so an entry that is kept is never decoded —
-// the pass is one key walk over the KV space, the same cost KVScanPage's
-// contract filter pays. A repeated pass removes nothing.
-//
-// The scan runs without the mutex and the delete batch under it. A doomed
-// entry re-written in between is deleted all the same — the predicate is a
-// function of the topic alone, so whatever was written there is doomed too,
-// and its stream record falls to the next EvictRecords pass.
+// returns how many. The topic comes from the key, so kept entries are never
+// decoded. The scan runs without the mutex and the delete under it; an entry
+// rewritten in between is still doomed, since the predicate only looks at the
+// topic.
 func (s *Store) EvictKV(doomed func(topic string) bool) (uint64, error) {
 	lb := kvPrefix("")
 	ub := append(append([]byte{}, lb...), 0xFF)

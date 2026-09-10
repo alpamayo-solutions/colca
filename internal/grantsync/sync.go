@@ -51,20 +51,10 @@ func (s *Syncer) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// Once runs one full read-diff-write.
-//
-// BOTH reads complete before ANY write. Convergence-including-removal and
-// "cannot read the source" are the same code path unless they are deliberately
-// separated, and the version that is not separated revokes everybody's access
-// the moment Keycloak restarts. Absence in an unreachable source is not absence.
-//
-// The same holds for the tree, and "complete" is the operative word: a tree
-// read that stops short — a page the door could not serve — is a failed read,
-// not a smaller tree. Both directions are skipped for the cycle, because both
-// stand on the listing: an element missing from it is retired in Keycloak
-// (and Keycloak does not give a re-registered resource its permissions back),
-// and a definition missing from it would be re-published or left unretracted.
-// Nothing is compiled from a partial view; the next cycle reads whole.
+// Once runs one full read, diff and write. Both reads complete before any
+// write: an unreachable or incomplete source is not an empty one, and treating
+// it as empty would revoke access or retire resources. A partial view skips the
+// cycle; the next one reads everything again.
 func (s *Syncer) Once(ctx context.Context) (Report, error) {
 	clientUUID, err := s.KC.ClientUUID(ctx)
 	if err != nil {
@@ -204,11 +194,8 @@ func randomID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// Run polls until the context is cancelled.
-//
-// A cycle that fails is logged and retried, never fatal: a Keycloak restart is
-// not a reason to exit, and statelessness means the next cycle needs nothing
-// the failed one produced.
+// Run polls until ctx is cancelled. A failed cycle is logged and retried, never
+// fatal.
 func (s *Syncer) Run(ctx context.Context, every time.Duration) {
 	log := s.logger()
 	ticker := time.NewTicker(every)

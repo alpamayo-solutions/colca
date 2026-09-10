@@ -23,25 +23,19 @@ import (
 )
 
 const (
-	// downlinkStream is a pseudo-stream name: the cursor tracks PARENT offsets,
-	// which are unrelated to the local commands stream — never mix the two.
+	// downlinkStream is a pseudo-stream: its cursor tracks the parent's offsets,
+	// which have nothing to do with the local commands stream.
 	downlinkStream = "commands-parent"
-	// The definitions half of the same idea: a separate cursor over a separate
-	// pseudo-stream, because a node caught up on commands may still be behind
-	// on definitions (definition-stream design §5).
+	// downlinkDefStream does the same for definitions, which advance independently
+	// of commands.
 	downlinkDefStream = "definitions-parent"
 
-	// metricsStream is the uplink floor — the one stream RunUplink pushes
-	// outside the priority lanes. Named rather than written out at each use so
-	// that priorityLanes plus this constant are the whole answer to "what
-	// rises", and uplinkStreams can derive its set from them instead of
-	// restating it.
+	// metricsStream is the uplink floor, the one stream RunUplink pushes outside the
+	// priority lanes. uplinkStreams derives the full set from it and priorityLanes.
 	metricsStream = "metrics"
 
-	// The pre-scoping cursor names (parent-scoped-cursors design §3.5). They
-	// exist for exactly one purpose: to be adopted once under the parent-scoped
-	// names on the first start after this change, and then deleted. Nothing
-	// writes them any more.
+	// Cursor names from before cursors were scoped by parent. They are adopted once
+	// under the scoped names and then deleted; nothing writes them.
 	legacyUplinkCursor      = "uplink"
 	legacyDownlinkCursor    = "downlink"
 	legacyDownlinkDefCursor = "downlink-def"
@@ -51,20 +45,9 @@ const (
 	downlinkWait = 20 * time.Second
 	retryAfter   = 500 * time.Millisecond
 
-	// A request is bounded by what it CARRIES. transferGrace covers the round
-	// trip itself — connect, serve, answer — and minTransferBPS is the
-	// slowest link this still has to work on, so a request's deadline grows
-	// with its bytes.
-	//
-	// One fixed cap could not do this. The shared 30s http.Client.Timeout
-	// covered the whole exchange including the body, so a blob needed more
-	// than size/30s bytes per second to finish: at the default 32 MiB cap,
-	// better than ~9 Mbit/s sustained, which no edge uplink is. Every PUT
-	// aborted mid-body, was not marked rejected (a transport failure says
-	// nothing about the blob), and was retried on the next uplink pass — a
-	// 30s upload burst every 30s forever, while every ancestor answered 409
-	// blob_pending. Pull-through failed the same way, with a digest mismatch
-	// on the truncated body.
+	// A request's deadline grows with what it carries: transferGrace covers the
+	// round trip and minTransferBPS is the slowest link this must still work on. A
+	// fixed timeout would cut a large blob off mid-body on a slow edge uplink.
 	transferGrace  = 30 * time.Second
 	minTransferBPS = 32 * 1024 // 256 kbit/s
 )
@@ -79,13 +62,10 @@ func transferDeadline(size int64) time.Duration {
 
 type Client struct {
 	base string
-	// parentPub is the parent's PINNED public key — the identity every
-	// connection verifies, and the scope key for this child's replication
-	// cursors (parent-scoped-cursors design §3.1). Cursor NAMES are built from
-	// it via uns.UplinkCursor/DownlinkCursor/DownlinkDefCursor at every call
-	// site, so a reparent (a different parentPub) never resumes against the
-	// old parent's offsets, and returning to a former parent finds its old
-	// position intact.
+	// parentPub is the parent's pinned public key. Every connection verifies it, and
+	// cursor names are derived from it (uns.UplinkCursor and friends), so a reparent
+	// never resumes against the old parent's offsets and a return to a former parent
+	// finds its position intact.
 	parentPub        string
 	http             *http.Client
 	log              *slog.Logger
@@ -93,14 +73,13 @@ type Client struct {
 	// Whether each replication lane is currently failing, so an outage logs
 	// as a state change rather than once per retry (see linkstate.go).
 	links *linkState
-	// status is this client's current uplink condition (status.go), read by
-	// httpapi's /healthz. An atomic.Value rather than a mutex: RunUplink and
-	// RunDownlink write it from their own goroutines on every attempt, and a
-	// concurrent /healthz read must never contend with the hot loop.
+	// status is the current uplink condition, read by /healthz. It is an
+	// atomic.Value so a /healthz read never contends with the loops that write it.
 	status atomic.Value
 }
 
-// NewClient: TLS client presenting the child's cert, pinning the parent's pubkey.
+// NewClient returns a TLS client that presents this node's certificate and pins
+// the parent's public key.
 func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordBytes ...uint64) (*Client, error) {
 	cert, err := id.SelfSignedCert("colca-child")
 	if err != nil {
@@ -129,11 +108,9 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 	if len(maxRecordBytes) > 0 {
 		limits.MaxRecordBytes = config.ByteSize(maxRecordBytes[0])
 	}
-	// No client-wide Timeout: it covers the whole exchange, body included, so
-	// one number would have to bound both a 200-byte poll and a 32 MiB blob.
-	// The 30s it used to be made any blob larger than roughly link_bps×30/8
-	// impossible to transfer at all — see transferDeadline. What IS fixed is
-	// getting a connection, which does not depend on how much crosses it.
+	// No client-wide Timeout: it would cover the body too, so one number would have
+	// to fit a tiny poll and a 32 MiB blob (see transferDeadline). Only getting a
+	// connection has a fixed bound.
 	transport := &http.Transport{
 		TLSClientConfig:       tlsCfg,
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -153,8 +130,8 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 	return cl, nil
 }
 
-// ParentPub is the pinned parent key this client is bound to — the scope of
-// every cursor the repl loops maintain against it.
+// ParentPub is the pinned parent key this client is bound to, and the scope of
+// every replication cursor against it.
 func (c *Client) ParentPub() string { return c.parentPub }
 
 func (c *Client) Replicate(stream string, recs []store.ReplRecord) (hwm uint64, err error) {
@@ -162,11 +139,9 @@ func (c *Client) Replicate(stream string, recs []store.ReplRecord) (hwm uint64, 
 	return hwm, err
 }
 
-// replicate is the ctx-carrying implementation Replicate and RunUplink share.
-// nowMS is the parent's now_ms from the response envelope (time-sync design
-// §2.1) — callers that care about clock sync (RunUplink) apply it via
-// engine.ApplyClockSample; Replicate's exported wrapper drops it, since
-// direct callers (tests) do not need it.
+// replicate is the context-aware implementation behind Replicate and RunUplink.
+// nowMS is the parent's clock from the response; RunUplink applies it and
+// Replicate drops it.
 func (c *Client) replicate(ctx context.Context, stream string, recs []store.ReplRecord) (hwm uint64, nowMS int64, err error) {
 	if len(recs) > maxReplicateRecords {
 		return 0, 0, fmt.Errorf("replicate: batch has %d records, maximum is %d", len(recs), maxReplicateRecords)
@@ -255,9 +230,8 @@ type DownRec struct {
 	ActorGroups  []string
 }
 
-// downResult is one decoded downlink response. Definitions ride the same
-// response as commands but keep their own records and their own cursor: the two
-// streams advance independently (definition-stream design §5).
+// downResult is one decoded downlink response. Definitions share the response
+// with commands but keep their own records and cursor.
 type downResult struct {
 	Records     []DownRec
 	Next        uint64
@@ -266,19 +240,14 @@ type downResult struct {
 	Ancestry    *uns.Ancestry
 	Definitions []DownRec
 	DefNext     uint64
-	// Head is the parent's own commands stream head (NextOffset("commands"))
-	// at hello time — the position a child with no cursor for THIS parent must
-	// start from (parent-scoped-cursors design §3.2/§3.3). The HELLO response
-	// carries it and nothing else does: it is consumed once, before the first
-	// poll, so a copy on every poll would be an integer no one reads. 0 means
-	// the parent did not send one, which on the hello path means a parent that
-	// predates the field — RunDownlink reports that.
+	// Head is the parent's commands stream head at hello time, where a child with no
+	// cursor for this parent must start. Only the hello response carries it; 0 means
+	// the parent sent none.
 	Head uint64
 }
 
-// Downlink polls the parent once. gap is non-nil when the poll position lies
-// inside a hole the parent's retention pruned (spec §6.2) — next then already
-// points past it.
+// Downlink polls the parent once. gap is non-nil when the position falls in a
+// range the parent's retention pruned; next then already points past it.
 func (c *Client) Downlink(after uint64, limit int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, error) {
 	res, err := c.downlink(context.Background(), after, 1, limit, timeout)
 	if err != nil {
@@ -287,8 +256,8 @@ func (c *Client) Downlink(after uint64, limit int, timeout time.Duration) ([]Dow
 	return res.Records, res.Next, res.Gap, nil
 }
 
-// DownlinkWithAncestry is Downlink plus the parent-taught position (id-grants
-// design §4); ancestry is nil when the parent did not hand one down.
+// DownlinkWithAncestry is Downlink plus the position the parent teaches;
+// ancestry is nil when the parent sent none.
 func (c *Client) DownlinkWithAncestry(after uint64, limit int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, *uns.Ancestry, error) {
 	res, err := c.downlink(context.Background(), after, 1, limit, timeout)
 	if err != nil {
@@ -297,9 +266,8 @@ func (c *Client) DownlinkWithAncestry(after uint64, limit int, timeout time.Dura
 	return res.Records, res.Next, res.Gap, res.Ancestry, nil
 }
 
-// DownlinkDefinitions is Downlink from the definitions side: the records the
-// parent handed down and the next position on that stream
-// (definition-stream design §5).
+// DownlinkDefinitions is Downlink for the definitions stream: the records the
+// parent handed down and the next position on that stream.
 func (c *Client) DownlinkDefinitions(defAfter uint64, limit int, timeout time.Duration) ([]DownRec, uint64, error) {
 	res, err := c.downlink(context.Background(), 1, defAfter, limit, timeout)
 	if err != nil {
@@ -308,20 +276,17 @@ func (c *Client) DownlinkDefinitions(defAfter uint64, limit int, timeout time.Du
 	return res.Definitions, res.DefNext, nil
 }
 
-// hello performs the immediate-answer first contact (id-grants design §4):
-// no long poll, no records consumed — it exists to learn the position, and
-// whatever definitions are already waiting, in one RTT right after the loop
-// starts.
+// hello is the first contact: an immediate answer, with no long poll and no
+// records consumed, that returns the position and any waiting definitions in one
+// round trip.
 func (c *Client) hello(ctx context.Context, defAfter uint64) (downResult, error) {
 	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=1&max=1&hello=1&def_after=%d",
 		c.base, defAfter), 10*time.Second)
 }
 
-// downlink is the ctx-carrying implementation the wrappers and RunDownlink
-// share. NowMS is the parent's now_ms from the response envelope (time-sync
-// design §2.1) — RunDownlink applies it via engine.ApplyClockSample before
-// ingesting anything (design §2.3 rule 4). Ancestry is the parent-taught
-// position (id-grants design §4), nil when the parent did not hand one down.
+// downlink is the context-aware implementation behind the wrappers and
+// RunDownlink. NowMS is the parent's clock, which RunDownlink applies before
+// ingesting anything. Ancestry is the position the parent teaches, or nil.
 func (c *Client) downlink(ctx context.Context, after, defAfter uint64, limit int, timeout time.Duration) (downResult, error) {
 	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d",
 		c.base, after, defAfter, limit), timeout)
@@ -381,25 +346,18 @@ func toDownRecs(in []wireRec) []DownRec {
 	return out
 }
 
-// ackOnly passes exactly the two command-stream records that may rise. A
-// command is never mirrored back to the node it came from; _StreamGap markers
-// must pass so a pruned commands stream stays honest upstream (spec §6.4: the
-// marker replicates like any other record).
+// ackOnly lets exactly two kinds of commands-stream record rise: acks, and
+// _StreamGap markers so a pruned commands stream is reported upstream. A command
+// never goes back to the node it came from.
 func ackOnly(topic string) bool {
 	p, err := uns.Parse(topic)
 	return err == nil && (p.Contract == "_Ack" || p.Contract == "_StreamGap")
 }
 
-// leavesTheNode is applied to EVERY lane and the metrics floor, ahead of the
-// lane's own filter: a node-private record (uns.IsNodePrivate — today the
-// Edit replay receipt, tombstones included) is never offered to the
-// parent. The store's Read still advances `next` past what it filters, so the
-// uplink cursor moves over a kept-home record exactly as over a pushed one and
-// a private record can never hold a lane. One rule for all lanes rather than a
-// filter on the one lane that carries such a record today: a private contract
-// added on another stream would otherwise start leaving the node on the day
-// it was added. An unparseable topic passes, as it always did — this filter
-// drops only what the predicate names.
+// leavesTheNode runs on every lane and the metrics floor before the lane's own
+// filter: node-private records (uns.IsNodePrivate, such as Edit replay receipts
+// and their tombstones) never go to the parent. Read still advances past what it
+// filters, so a private record cannot hold a lane. Unparseable topics pass.
 func leavesTheNode(topic string) bool {
 	p, err := uns.Parse(topic)
 	return err != nil || !uns.IsNodePrivate(p.Contract)
@@ -413,24 +371,13 @@ func pushable(laneFilter func(string) bool) func(string) bool {
 	return func(topic string) bool { return leavesTheNode(topic) && laneFilter(topic) }
 }
 
-// priorityLanes are drained to empty, in this order, before `metrics` is
-// touched at all (alarm-stream design §4).
+// priorityLanes are drained to empty, in this order, before metrics. Acks come
+// first because a parent's move-drain waits for them, then alarms and entities,
+// which operators wait for after an outage, then audit, then annotations.
 //
-// Acks first: a parent's move-drain cannot complete until they rise, so an
-// undelivered ack blocks a node move, and their volume is the smallest of all.
-// Then alarms and entities — small in volume, high in value, and the two the
-// operator is waiting for after an outage. Then audit, low-volume and
-// long-retention. Then annotations — dataops-evaluator design §8: still ahead
-// of the metrics backlog, so a producer's output reaches the root promptly,
-// but behind audit because a security event outranks it.
-//
-// `definitions` is deliberately absent and must stay absent (definition-stream
-// design §4): definitions descend. A child pushing them upward would let a
-// leaf author policy for the whole tree.
-//
-// A lane's filter is the lane's OWN rule. The keep-home rule for node-private
-// records (leavesTheNode) is not listed here because it applies to every lane
-// and the floor alike — pushOnce composes it in.
+// definitions is absent on purpose: definitions only descend, and a child
+// pushing them up could author policy for the whole tree. The node-private rule
+// (leavesTheNode) applies to every lane and is added in pushOnce.
 var priorityLanes = []struct {
 	name   string
 	filter func(string) bool
@@ -440,17 +387,13 @@ var priorityLanes = []struct {
 	{"entities", nil},
 	{"audit", nil},
 	{"annotations", nil},
-	// Last of the priority lanes, ahead of the metrics floor: a log line is
-	// worth less than an alarm and more than a sample, and it must never
-	// starve the samples the way it did when it shared their lane.
+	// Logs go last among the lanes: worth less than an alarm, more than a sample,
+	// and on their own lane they cannot starve the samples.
 	{"logs", nil},
 }
 
-// uplinkStreams is exactly the set RunUplink pushes: every priority lane plus
-// the metrics floor. Derived from the lane list rather than restated, because a
-// second hand-written copy of the stream set is a copy someone eventually
-// forgets to extend — and the one that silently stops seeding a cursor here
-// would be invisible until a reparented node came up deaf on that stream.
+// uplinkStreams is the set RunUplink pushes: every priority lane plus the
+// metrics floor, derived so a new lane also gets its cursor seeded.
 func uplinkStreams() []string {
 	streams := make([]string, 0, len(priorityLanes)+1)
 	for _, lane := range priorityLanes {
@@ -459,15 +402,9 @@ func uplinkStreams() []string {
 	return append(streams, metricsStream)
 }
 
-// adoptLegacy moves a pre-scoping cursor's VALUE to its parent-scoped name and
-// removes the old key (design §3.5). It reports whether there was anything to
-// adopt, so the caller can tell "migrated" from "genuinely first contact".
-//
-// One shot by construction: the legacy key is gone afterwards, so a second
-// start finds nothing here and the scoped cursor — which by then is the only
-// one — carries the position on alone. A delete that fails is logged rather
-// than retried; the adoption itself already landed, so the worst case is that
-// the next start adopts the same value again, which is a no-op against a
+// adoptLegacy moves a legacy cursor's value to its parent-scoped name, deletes
+// the old key and reports whether there was anything to adopt. A failed delete
+// is only logged: adopting the same value again later is a no-op on a
 // forward-only cursor.
 func adoptLegacy(c *Client, st *store.Store, legacyName, scopedName, stream string) bool {
 	pos := st.CursorGet(legacyName, stream)
@@ -482,52 +419,20 @@ func adoptLegacy(c *Client, st *store.Store, legacyName, scopedName, stream stri
 	return true
 }
 
-// initCursors settles this child's position against the CONFIGURED parent
-// before either loop reads a cursor (parent-scoped-cursors design §3.2/§3.5).
+// initCursors settles this child's cursors against the configured parent before
+// either loop reads them. For each cursor:
 //
-// Three cases, evaluated per cursor in this order:
+//  1. A scoped cursor exists: keep it (every normal start, or a return to a
+//     former parent).
+//  2. Only a legacy cursor exists: adopt its value under the scoped name.
+//  3. Neither exists, so this is first contact. Uplink starts at each stream's
+//     LWM and the parent's HWM drops duplicates; definitions start at 1;
+//     commands start at the parent's head, since commands issued before this
+//     child attached were not meant for it.
 //
-//  1. A scoped cursor already exists — leave it alone. This is every
-//     steady-state start, and every return to a FORMER parent, which resumes
-//     exactly where it left off because its cursors were never touched while
-//     the node was attached elsewhere.
-//  2. A legacy un-scoped cursor exists and a scoped one does not — adopt the
-//     legacy VALUE under the scoped name and delete the legacy key (§3.5).
-//     Correct for every node that is not mid-reparent, which is every running
-//     node, since a reparent already requires a restart.
-//  3. Neither exists — first contact with THIS parent, so initialize rather
-//     than assume:
-//     - Uplink starts at each stream's LWM: offer everything still retained
-//     and let the parent's per-child HWM dedup whatever it already has. This
-//     is the state transfer reparenting was missing. Seeding it here rather
-//     than letting pushOnce's §6.3 clamp arrive at the same offset also keeps
-//     first contact from REPORTING a gap: a gap means records were lost
-//     against a position this parent held, and it never held one.
-//     - Definitions start at 1, which is simply the default — not special
-//     handling, but exactly what a freshly enrolled child does. The stream is
-//     compacted rather than pruned, so "from 1" is the current definition set.
-//     - Commands start at the parent's head. Instructions issued before this
-//     child attached were addressed to whatever occupied the mount then;
-//     delivering them to a newcomer would run a command its author never
-//     meant for it.
-//
-// The uplink and definitions halves test case 1 with "position above 1", which
-// is imprecise but harmless there: re-running case 3 on a cursor sitting at 1
-// re-seeds the LWM, and a forward-only ack makes that a no-op whenever it would
-// not already have happened. The commands half cannot afford the imprecision
-// and probes for the key itself — see there.
-//
-// head is the parent's commands NextOffset from a hello response. 0 means no
-// hello has answered — RunUplink always passes 0, because the uplink half needs
-// no head and a metric it can never emit is worse than none.
-//
-// Idempotent, and safe under the race the two loops create by both calling it.
-// Every write here either moves a cursor forward (CursorAck) or claims one that
-// does not exist (CursorSetIfAbsent), and every delete is a no-op on an absent
-// key — so concurrent calls converge on the same set no matter which order they
-// interleave in, and none of them can move a cursor backwards.
-//
-// m may be nil (every Metrics method is nil-safe).
+// head is the parent's commands head from hello, or 0 without one. Every write
+// moves a cursor forward or claims a missing one, so the two loops calling this
+// concurrently converge. m may be nil.
 func initCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64) {
 	st := eng.Store()
 
@@ -551,42 +456,28 @@ func initCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64)
 		adoptLegacy(c, st, legacyDownlinkDefCursor, def, downlinkDefStream)
 	}
 
-	// Commands are the one cursor where the three cases must be told apart
-	// EXACTLY, so this branch probes for the key rather than for a position
-	// above 1. CursorGet answers 1 both for "never met this parent" and for "met
-	// it, and its stream was empty at the time" — and those two demand opposite
-	// behaviour: the first adopts the head, the second must deliver everything
-	// from offset 1, which is exactly the offline-catch-up contract (cmdadmin
-	// design §10: a command issued while its target is down waits durably and
-	// executes on restart). Adopting a head there would drop it.
+	// Commands need the exact case, so probe for the key: CursorGet returns 1 both
+	// for "never met this parent" and for "met it while its stream was empty", and
+	// the second must deliver from offset 1 so a command queued while the target was
+	// down still runs.
 	cmd := uns.DownlinkCursor(c.parentPub)
 	if !adoptLegacy(c, st, legacyDownlinkCursor, cmd, downlinkStream) { // case 2
-		// Case 3, and only on genuine first contact: SetIfAbsent leaves a cursor
-		// that already exists untouched (case 1) and records the position even
-		// when it is 1, so the next start knows this parent has been met. head 0
-		// means no hello has answered — claim nothing and let the caller that
-		// has a head settle it.
+		// First contact only: CursorSetIfAbsent leaves an existing cursor alone and
+		// records even position 1. With head 0 nothing is claimed; a caller with a head
+		// settles it.
 		if head > 0 {
 			if _, err := st.CursorSetIfAbsent(cmd, downlinkStream, head); err != nil {
-				// Same consequence as a parent with no head at all: with nothing
-				// recorded, CursorGet answers 1 and the first poll reads the
-				// pre-attachment commands §3.2 declines.
+				// Nothing recorded, so CursorGet returns 1 and the first poll reads commands
+				// issued before this node attached.
 				c.log.Warn("first-contact commands cursor not recorded — this node polls from 1 and may "+
 					"execute commands issued under its mount before it attached",
 					"cursor", cmd, "head", head, "err", err)
 			}
 		}
 	}
-	// The one diagnostic head buys (§7), evaluated after the cases above so a
-	// cursor this call just created (pos == head) can never trip it. A position
-	// past the parent's head means the parent pruned past it or was rebuilt from
-	// empty: Read(after > head) returns nothing, next == after, and the node
-	// stays command-deaf without ever failing at anything — and being
-	// command-deaf, it cannot be repaired remotely either.
-	//
-	// Detection only — never reset it here. A parent whose stream is shorter
-	// than this cursor is also exactly what a legitimately pruned parent looks
-	// like, and rewinding would re-deliver commands that already ran.
+	// A position past the parent's head means the parent pruned past it or was
+	// rebuilt empty, and this node would stay deaf to commands without an error.
+	// Only report it: rewinding would re-deliver commands that already ran.
 	if pos := st.CursorGet(cmd, downlinkStream); head > 0 && pos > head {
 		c.log.Warn("downlink commands cursor is past the parent's head — the parent pruned past "+
 			"this position or was rebuilt; this node will receive no commands until the parent's "+
@@ -596,40 +487,23 @@ func initCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64)
 	}
 }
 
-// RunUplink pushes this node's streams to its parent forever (until stop is
-// closed), draining the priority lanes to empty before each metrics batch.
-//
-// Order within a stream is never changed, so a lane is the ONLY way a record
-// can overtake a backlog — which is why alarms have their own stream rather
-// than a place in the metrics queue.
-//
-// The single metrics batch per pass is a floor, not a courtesy. Without it a
-// lane that never empties holds the metrics cursor still; once the local
-// pruner passes that cursor the backlog is gone and only a §6.4 marker
-// remains, so lane pressure would quietly become data loss.
-//
-// blobs is the local blob store this node offers to its parent; nil-safe:
-// syncBlobs no-ops when it is nil. m may be nil (every Metrics method is
-// nil-safe).
+// RunUplink pushes this node's streams to its parent until stop is closed,
+// draining the priority lanes before each metrics batch. Order within a stream
+// never changes, so a lane is the only way past a backlog. Each pass sends at
+// least one metrics batch, so a lane that never empties cannot hold the metrics
+// cursor until retention prunes past it. blobs and m may be nil.
 func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
-	// Settle this node's position against the configured parent before the
-	// first cursor read below. head is 0: the uplink half needs none, and
-	// RunDownlink's hello supplies it for the commands cursor. m is nil for the
-	// same reason — the only metric this can emit belongs to the commands
-	// cursor, which a head of 0 never reaches.
+	// Settle the position before the first cursor read. Neither a head nor metrics
+	// are needed here; RunDownlink's hello supplies the head for commands.
 	initCursors(c, eng, nil, 0)
 
-	// Scoped to this client, and therefore to this pinned parent key. Keyed
-	// by digest, valued by the local blob's Modified time at confirmation
-	// (blobs.go's syncBlobs doc comment) so a swept-then-recreated blob is
-	// recognized as needing a re-push rather than skipped forever.
+	// Blobs this parent confirmed, keyed by digest, with the local blob's
+	// modification time so a swept and recreated blob is pushed again.
 	confirmedBlobs := map[string]time.Time{}
-	// A blob this parent has permanently refused (a 4xx: bad digest, or over
-	// its cap). Session-scoped like confirmedBlobs, for the same reason: a
-	// reparent re-offers everything, because a new parent may accept what
-	// this one wouldn't.
+	// Blobs this parent permanently refused (a 4xx). Kept per session, because a new
+	// parent may accept them.
 	rejectedBlobs := map[string]bool{}
 
 	stopped := func() bool {
@@ -641,16 +515,13 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		}
 	}
 
-	// pushOnce moves at most one batch of stream and reports whether it
-	// scanned anything — which is what "drained to empty" is measured by.
-	// aborted distinguishes our own shutdown from a real failure.
+	// pushOnce pushes at most one batch of stream and reports whether it scanned
+	// anything, which is how "drained" is measured. aborted means our own shutdown.
 	pushOnce := func(stream string, filter func(string) bool) (scanned, aborted bool) {
 		from := eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), stream)
-		// Spec §6.3, uplink half: a cursor below the local LWM means the
-		// local pruner overrode it (only possible after the explicit §5.2
-		// staleness opt-in — the parent was gone longer than the window).
-		// The data is gone and the durable §6.4 marker already carries the
-		// fact upstream, so never stall: jump to the LWM and keep going.
+		// A cursor below the local LWM means retention pruned past it after the parent
+		// was gone longer than the staleness window. The gap marker already tells the
+		// parent, so jump to the LWM instead of stalling.
 		if lwm := eng.Store().LWM(stream); from < lwm {
 			c.log.Error("uplink cursor below the stream LWM — local retention pruned past it (spec §6.3): jumping to the LWM",
 				"stream", stream, "position", from, "lwm", lwm)
@@ -691,24 +562,13 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				if stopped() {
 					return false, true // aborted by our own shutdown, not a failure
 				}
-				// A parent that ANSWERED and refused (4xx) is a different
-				// state from a parent that is unreachable, and the line has
-				// to say which — reporting a refused batch as "the parent is
-				// down" sent operators looking at the network for a
-				// misconfiguration between two nodes.
+				// A parent that answered and refused (4xx) is not a parent that is down, and the
+				// log must say which.
 				//
-				// THE RULE, and it is deliberate: a refused batch is HELD and
-				// retried, never skipped and never quarantined. The uplink
-				// does not decide to lose a record. Retention is the one
-				// place in this system where dropping data is decided, it is
-				// opt-in (§5.2 staleness), and it leaves a durable _StreamGap
-				// marker saying what went missing. A child that skipped
-				// ahead here would delete records with no such trace, on its
-				// own judgement, over what is usually a config difference
-				// (two nodes' max_record_bytes) that an operator can fix.
-				// The cost of holding is that the lane does not move, and
-				// that is what colca_uplink_refused_total and this ERROR line
-				// exist to make impossible to miss.
+				// A refused batch is held and retried, never skipped. Only retention decides to
+				// drop data, and it leaves a _StreamGap marker; skipping here would lose records
+				// without a trace over what is usually a config mismatch (max_record_bytes).
+				// colca_uplink_refused_total and this error make the stalled lane visible.
 				var refusal *replError
 				refused := errors.As(err, &refusal) && refusal.Refused()
 				if report, attempts, down := c.links.Failed("uplink:"+stream, time.Now()); report {
@@ -728,10 +588,8 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				if refused {
 					m.UplinkRefused(stream)
 				}
-				// Cursor stays, offline buffering in action. Report "not
-				// scanned" so a parent that cannot take this batch ends the
-				// drain loop instead of spinning on a lane that cannot
-				// advance.
+				// The cursor stays put. Report "not scanned" so a batch the parent cannot take
+				// ends the drain loop instead of spinning.
 				return false, false
 			}
 			if wasFailing, attempts, down := c.links.Recovered("uplink:"+stream, time.Now()); wasFailing {
@@ -739,9 +597,8 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 					"stream", stream, "parent", c.base,
 					"attempts", attempts, "down_for", down.Round(time.Second))
 			}
-			// Every /replicate response carries the parent's now_ms
-			// (time-sync design §2.1) — keep the offset fresh regardless
-			// of which stream happened to trigger this push.
+			// Every /replicate response carries the parent's clock; keep the offset fresh
+			// whichever stream triggered the push.
 			eng.ApplyClockSample(nowMS)
 			pushed = true
 		}
@@ -758,14 +615,9 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		}
 		idle := true
 		for _, lane := range priorityLanes {
-			// Snapshot the lane's end at pass start and drain only to there.
-			// Everything already queued goes before metrics is touched; records
-			// written DURING the pass wait for the next one.
-			//
-			// Draining to "empty" instead would be unbounded: a lane written
-			// faster than it drains never empties, the loop never reaches the
-			// metrics floor below, and the floor stops holding in exactly the
-			// case it exists for.
+			// Drain only up to the lane's end at pass start. Draining until empty would
+			// never finish on a lane written faster than it drains, and metrics would never
+			// get their turn.
 			target := eng.Store().NextOffset(lane.name)
 			for eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), lane.name) < target {
 				scanned, aborted := pushOnce(lane.name, lane.filter)
@@ -790,9 +642,8 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		if scanned {
 			idle = false
 		}
-		// Blobs last: they are not in any stream, and a file must never delay
-		// a record. A pass that pushed nothing costs one HEAD per unconfirmed
-		// blob, which is why confirmations are remembered.
+		// Blobs last: they are not in any stream and must never delay a record. A quiet
+		// pass costs one HEAD per unconfirmed blob, which is why confirmations are kept.
 		syncBlobs(c, blobs, m, confirmedBlobs, rejectedBlobs)
 		if idle {
 			select {
@@ -805,46 +656,22 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 }
 
 // RunDownlink fetches from the parent and hands the result to the engine:
-// commands are executed at their target, definitions are applied wherever they
-// land (definition-stream design §5). m may be nil (every Metrics method is
-// nil-safe).
+// commands run at their target, definitions are applied where they land. m may
+// be nil.
 func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
-	// First contact: learn the node's position, and whatever definitions are
-	// already waiting, in one RTT (id-grants design §4) instead of after the
-	// first long-poll drains.
-	//
-	// Retried until it answers. A failed hello used to be harmless — position
-	// and definitions ride every poll anyway — but since parent-scoped cursors
-	// the head it carries is a PRECONDITION of the first poll: a child with no
-	// cursor for this parent must adopt that head before it reads anything
-	// (§3.2), and polling first would hand it every instruction issued before it
-	// was attached. One transient failure would otherwise defeat the rule
-	// outright. Waiting costs nothing — while hello is failing the parent is
-	// unreachable, so the poll below would be failing too, and it counts as the
-	// fetch failure it is.
+	// First contact: learn the position and waiting definitions in one round trip.
+	// Retry until it answers: a child with no cursor for this parent must adopt the
+	// head before its first poll, or it would receive every command issued before it
+	// attached. While hello fails the parent is unreachable anyway.
 	for {
 		res, err := c.hello(ctx, eng.Store().CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream))
 		if err == nil {
-			// A parent that answers without a head predates the field (§3.3) —
-			// a mixed-version tree during a leaf-first rolling upgrade. Nothing
-			// here can repair that: with no head there is no position to adopt,
-			// so a commands cursor this node does not have yet stays at its
-			// default of 1 and the poll below hands it every retained command
-			// issued under its mount before it attached, which is exactly what
-			// §3.2 exists to refuse.
-			//
-			// Said on every start against such a parent, not only on genuine
-			// first contact — hello runs once per process and this branch reads
-			// the response alone, before initCursors has asked whether a cursor
-			// for this parent exists. A node that already holds one adopts
-			// nothing, risks nothing, and still logs: the line names a
-			// mixed-version parent, and only the first-contact case behind it is
-			// a hazard. Leaving the distinction to the reader rather than
-			// probing the store here keeps one meaning per branch — the §7
-			// diagnostic below cannot speak for this case either, since it needs
-			// a head of its own to compare against.
+			// A parent without a head predates the field, as during a rolling upgrade.
+			// There is nothing to adopt, so a missing commands cursor stays at 1 and the
+			// poll delivers commands issued before this node attached. This is logged on
+			// every start against such a parent, even when a cursor already exists.
 			if res.Head == 0 {
 				c.log.Warn("parent answered hello without a command head — it predates parent-scoped "+
 					"cursors; if this node has no commands cursor for it yet, that cursor starts at 1 "+
@@ -853,10 +680,8 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 					"parent", c.base, "parent_key", short(c.parentPub))
 				m.DownlinkHeadAbsent()
 			}
-			// Before anything is applied: a first-contact definitions cursor must
-			// be settled at 1 when this batch lands, and a first-contact commands
-			// cursor must have adopted the head this response carries before the
-			// poll below reads it (§3.2).
+			// Before anything is applied, settle first-contact cursors, including adopting
+			// the head from this response before the poll reads commands.
 			initCursors(c, eng, m, res.Head)
 			if res.Ancestry != nil {
 				eng.SetAncestry(*res.Ancestry)
@@ -915,38 +740,26 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		}
 		c.setStatus(UplinkConnected)
 		m.DownlinkFetched(time.Now())
-		// Time-sync design §2.3 rule 4: the offset learned from this
-		// response is applied BEFORE its records are ingested, so the first
-		// poll after reconnect refreshes time before any expiry decision
-		// downstream of it.
+		// Apply the clock offset from this response before ingesting its records, so
+		// expiry decisions after a reconnect use fresh time.
 		eng.ApplyClockSample(nowMS)
 		if ancestry != nil {
 			eng.SetAncestry(*ancestry) // idempotent: every poll may carry it
 		}
 		if gap != nil {
-			// Spec §6.3, downlink half: log, count, continue — next already
-			// points past the hole and the cursor advances through the normal
-			// ack below. Nothing propagates further down: pruned commands are,
-			// by the §3.4 config rule, commands whose TTL had already expired.
+			// The parent pruned commands this node never got. Log, count and continue; next
+			// already points past the gap. Commands are retained past their TTL, so these
+			// had expired anyway.
 			c.log.Error("downlink gap: the parent pruned commands this node never received (spec §6.3) — continuing past the hole",
 				"from_offset", gap.FromOffset, "to_offset", gap.ToOffset,
 				"first_ts", gap.FirstTS, "last_ts", gap.LastTS, "approx", gap.Approx)
 			m.GapReceived("commands")
 		}
-		// A record this node REFUSED is skipped; a record it could not STORE
-		// holds the cursor at its offset, so the parent offers it again next
-		// poll.
-		//
-		// The two are the same error return and opposite obligations. A
-		// refusal (draining, grammar — every one an engine.RejectError) is
-		// this node's own decision and will be made identically forever, so
-		// re-reading it would stall the lane for nothing. A store failure —
-		// a full disk, an I/O error, a record larger than this node's
-		// max_record_bytes — says nothing about the record: acking past it
-		// drops a command that survived a whole parent outage durably, with
-		// one log line, and leaves its issuer watching a target that will
-		// never answer. Definitions on the same response always had this
-		// treatment; commands did not.
+		// A record this node refused is skipped; a record it could not store holds the
+		// cursor so the parent offers it again. A refusal (engine.RejectError) will be
+		// made the same way every time, so rereading it would stall the lane. A store
+		// failure (full disk, I/O error, record over max_record_bytes) says nothing about
+		// the record, and acking past it would silently drop the command.
 		ackTo := next
 		for _, r := range recs {
 			if _, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
@@ -971,13 +784,8 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			progressed = true
 		}
 		if !progressed {
-			// Neither cursor moved. Usually that is an idle long poll, which
-			// already waited out its 20s and loses nothing by waiting a little
-			// longer. The case that matters is a poll that answered
-			// IMMEDIATELY and left this node exactly where it was — a parent
-			// answering with a position we already hold, or a record this node
-			// could not apply — where polling straight back would spin at the
-			// rate limit for as long as the condition lasts.
+			// Neither cursor moved. Usually that is an idle long poll, but a poll that
+			// answered immediately without progress would otherwise spin at the rate limit.
 			select {
 			case <-stop:
 				return
@@ -987,23 +795,12 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 	}
 }
 
-// applyDefinitions stores what the parent handed down and advances the
-// definitions cursor. It reports whether the cursor moved.
-//
-// The same rule as the command half above, for the same reasons: a definition
-// this node could not STORE holds the cursor at its offset, because unlike a
-// command there is no read side to recover it from later (which is also why
-// the stream is compacted rather than pruned — definition-stream design §6).
-// A definition this node REFUSED is skipped.
-//
-// That second case is a rolling upgrade, not a fault. A hub upgraded before
-// its edges authors a definition contract the older bundle downstream does
-// not know (this branch added _DataModel and PAT records exactly that way);
-// every child classifies it as unknown and refuses it. Re-offering it forever
-// would park the channel there, so no LATER definition — new groups, new
-// types, a revoked group's tombstone — would reach that node until someone
-// upgraded it. One warning per skipped record, and the rest of policy keeps
-// flowing.
+// applyDefinitions stores what the parent handed down, advances the definitions
+// cursor and reports whether it moved. As with commands, a definition that could
+// not be stored holds the cursor, since there is nothing to recover it from
+// later. A refused definition is skipped with a warning: in a rolling upgrade a
+// newer parent sends contracts an older child does not know, and holding on them
+// would block every later definition, such as a group revocation.
 func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res downResult) bool {
 	cursor := uns.DownlinkDefCursor(c.parentPub)
 	advanceTo := res.DefNext

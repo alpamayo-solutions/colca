@@ -10,8 +10,8 @@ func fixed(t time.Time) func() time.Time {
 	return func() time.Time { return t }
 }
 
-// TestRootNeverLearnsAnOffset pins design §2.1: the root's offset is always
-// 0 no matter what sample it is fed, and its sync age is always 0 (§2.4).
+// TestRootNeverLearnsAnOffset: the root's offset stays 0 whatever it is fed, and
+// its sync age is 0.
 func TestRootNeverLearnsAnOffset(t *testing.T) {
 	base := time.UnixMilli(1_000_000)
 	c := New(true, fixed(base))
@@ -19,7 +19,7 @@ func TestRootNeverLearnsAnOffset(t *testing.T) {
 	if got := c.AuthoritativeNow(); !got.Equal(base) {
 		t.Fatalf("root AuthoritativeNow = %v, want %v", got, base)
 	}
-	// Feed it a sample wildly different from its own clock — must be ignored.
+	// A sample far from its own clock must be ignored.
 	if off := c.ApplySample(base.UnixMilli() + 999_999); off != 0 {
 		t.Fatalf("root ApplySample returned offset %d, want 0", off)
 	}
@@ -34,10 +34,8 @@ func TestRootNeverLearnsAnOffset(t *testing.T) {
 	}
 }
 
-// TestNeverSyncedNonRootServesOwnWallClock pins design §2.1's "best effort":
-// a non-root node that has received no sample yet has offset 0, so
-// AuthoritativeNow is exactly its own raw wall clock — and its sync age is
-// +Inf (design §2.4: "absent means never synced").
+// TestNeverSyncedNonRootServesOwnWallClock: a non-root node without a sample has
+// offset 0, so AuthoritativeNow is its raw wall clock, and its sync age is +Inf.
 func TestNeverSyncedNonRootServesOwnWallClock(t *testing.T) {
 	base := time.UnixMilli(5_000_000)
 	c := New(false, fixed(base))
@@ -50,9 +48,9 @@ func TestNeverSyncedNonRootServesOwnWallClock(t *testing.T) {
 	}
 }
 
-// TestApplySampleComputesOffsetAndCorrectsAuthoritativeNow pins the core
-// formula (design §2.1): offset_ms = now_ms - wall_receipt, and
-// AuthoritativeNow = wall_now + offset_ms thereafter.
+// TestApplySampleComputesOffsetAndCorrectsAuthoritativeNow: the offset is now_ms
+// minus the wall time at receipt, and AuthoritativeNow adds it to wall time
+// afterwards.
 func TestApplySampleComputesOffsetAndCorrectsAuthoritativeNow(t *testing.T) {
 	wall := time.UnixMilli(10_000)              // this node's raw clock at receipt
 	authorityNowMS := wall.UnixMilli() + 30_000 // authority is 30s ahead
@@ -74,9 +72,8 @@ func TestApplySampleComputesOffsetAndCorrectsAuthoritativeNow(t *testing.T) {
 	}
 }
 
-// TestApplySampleLastWriteWinsNoSmoothing pins design §2.1: "last sample
-// wins — no smoothing". A second, very different sample must fully replace
-// the first, not average with it.
+// TestApplySampleLastWriteWinsNoSmoothing: a second, very different sample
+// replaces the first instead of averaging with it.
 func TestApplySampleLastWriteWinsNoSmoothing(t *testing.T) {
 	wall := time.UnixMilli(0)
 	c := New(false, fixed(wall))
@@ -91,10 +88,9 @@ func TestApplySampleLastWriteWinsNoSmoothing(t *testing.T) {
 	}
 }
 
-// TestSyncAgeSecondsTracksElapsedTimeSinceLastSample pins design §2.4: the
-// gauge is elapsed wall time since the last accepted sample, evaluated
-// against an explicit "now" (a metrics scrape's own clock reading), not the
-// injected decision clock.
+// TestSyncAgeSecondsTracksElapsedTimeSinceLastSample: the gauge is wall time
+// since the last accepted sample, measured against an explicit now rather than
+// the injected clock.
 func TestSyncAgeSecondsTracksElapsedTimeSinceLastSample(t *testing.T) {
 	receiptWall := time.UnixMilli(1_000_000)
 	c := New(false, fixed(receiptWall))

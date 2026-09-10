@@ -5,30 +5,12 @@ import (
 	"strings"
 )
 
-// composeResource composes the records a `resource` Edit intent writes,
-// so that a person's resource command is authorized at the node against the
-// element the resource sits on — like every other intent, and unlike the
-// `_CmdConfigure` path it replaces (node-side command authorization design
-// §G).
-//
-// Until now the api addressed resource writes as ITSELF: `ConfigExec` takes no
-// principal, so nothing here knew who was asking and preflight on the far side
-// of the door was the only gate. That is the single-gate shape this design
-// retires.
-//
-// A MOVE is one command, not two. `_CmdConfigure` needed an upsert at the new
-// position and a separate tombstone at the old one, with two correlation ids
-// and a window in between where the resource existed twice or not at all. Here
-// both records are composed together and committed in one batch, and BOTH
-// positions are authorized before either is written — which is also the only
-// way to stop a caller moving a resource out of a zone they hold into one they
-// do not.
-//
-// The blob is deliberately not part of this. Bytes carry no position, so there
-// is no element to authorize them against; what a caller needs is the right to
-// attach them to THIS resource at THIS position, which is exactly what the
-// records below are checked for. The upload door stays where it is and only
-// accepts bytes for a resource the node has already accepted a command for.
+// composeResource composes the records a resource Edit intent writes, so the
+// person is authorized at the element the resource sits on. A move is one
+// command: the new record and the tombstone at the old position commit in one
+// batch, and both positions are authorized first. Blobs are not part of this;
+// bytes have no position, and the upload door only accepts bytes for a
+// resource the node already accepted.
 func (w *EditExec) composeResource(intent editIntent) (int, string, string, []StateRecord) {
 	switch intent.Action {
 	case "create", "update", "delete":
@@ -55,9 +37,8 @@ func (w *EditExec) composeResource(intent editIntent) (int, string, string, []St
 				"resource: %s holds resource %s, not %s", intent.Path, id, intent.Entity.ID,
 			), "conflict", nil
 		}
-		// An empty payload is the tombstone; the blob is left alone, exactly
-		// as `resourceDelete` leaves it — bytes are swept by retention, never
-		// by a command, because another resource may name the same digest.
+		// An empty payload is the tombstone. The blob stays: another resource
+		// may use the same digest, and retention sweeps unused bytes.
 		return 200, "deleted 1", "ok", []StateRecord{{Topic: topic, Payload: nil}}
 	}
 
@@ -73,9 +54,8 @@ func (w *EditExec) composeResource(intent editIntent) (int, string, string, []St
 			"resource: payload is resource %s but the intent names %s", incoming.ID, intent.Entity.ID,
 		), "invalid", nil
 	}
-	// One resource per position, judged the same way `resourceUpsert` judges
-	// it: a retained record here belonging to a DIFFERENT resource is a
-	// conflict, never a silent overwrite that would unaddress the first.
+	// One resource per position, as resourceUpsert checks: a record of a
+	// different resource here is a conflict, never overwritten.
 	if held, ok := w.store.KVGet(topic); ok {
 		existing, err := validateResourcePayload(held)
 		if err != nil || existing.ID != incoming.ID {
@@ -89,10 +69,9 @@ func (w *EditExec) composeResource(intent editIntent) (int, string, string, []St
 			), "conflict", nil
 		}
 	}
-	// Never author a record pointing at bytes this node does not hold. Same
-	// invariant, same remedy and the same distinct outcome class as the
-	// configure verb: the command was well formed, so a caller can tell a
-	// missing blob from a bad request without reading the message.
+	// Never author a record pointing at bytes this node does not hold. The
+	// outcome is blob_unreachable, as for the configure verb, so callers can
+	// tell it from a bad request.
 	if err := w.ensureBlob(incoming.SHA256); err != nil {
 		return 422, fmt.Sprintf(
 			"blob_unreachable: resource %s: blob %s is not held by this node and could not be fetched: %v",
@@ -101,9 +80,8 @@ func (w *EditExec) composeResource(intent editIntent) (int, string, string, []St
 	}
 
 	records := []StateRecord{{Topic: topic, Payload: intent.Resource}}
-	// A move: vacate the old position in the SAME batch. Composed here rather
-	// than left to a second command, so the two positions commit together and
-	// are authorized together.
+	// A move vacates the old position in the same batch, so both positions
+	// commit and are authorized together.
 	if intent.FromPath != "" && intent.FromPath != intent.Path {
 		if err := validatePositionPath(intent.FromPath); err != nil {
 			return 422, "resource: from_path: " + err.Error(), "invalid", nil
@@ -146,14 +124,10 @@ func (w *EditExec) ensureBlob(sha string) error {
 	return nil
 }
 
-// resourcePositions is the resource intent's write-set: every position the
-// composed records touch, as element paths.
-//
-// A create or an in-place update touches one. A move touches two, and both are
-// checked — a gate that looked only at the destination would let a person lift
-// a resource out of a zone they may not write, which is precisely the hole
-// `_preflight_resource` closes on the api side and the reason this returns
-// both.
+// resourcePositions returns every position the composed records touch, as
+// element paths: one for a create or update, two for a move. Checking only the
+// destination would let a person move a resource out of a zone they cannot
+// write.
 func (w *EditExec) resourcePositions(intent editIntent, records []StateRecord) []editTouched {
 	touched := make([]editTouched, 0, len(records))
 	seen := make(map[string]bool, len(records))

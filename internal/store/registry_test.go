@@ -4,13 +4,9 @@ import (
 	"testing"
 )
 
-// Registry family tests (auth design §2.2): one atomic batch writes the
-// r/{ulid} entry together with its _EnrolledIdentity entity record. Atomicity is by
-// construction — RegistryPut/RegistryDelete build ONE pebble batch applied
-// with Sync. Mutation check (documented, not automated): splitting either
-// method into two Apply calls makes the reopen assertions below racy against
-// a crash between them; the singular batch is asserted structurally by these
-// tests plus review of the implementation.
+// Registry tests: one synced batch writes the r/{ulid} entry together with its
+// _EnrolledIdentity record. RegistryPut and RegistryDelete each apply a single
+// batch; the reopen assertions below check the result.
 
 func testEntryJSON(ulid string) []byte {
 	return []byte(`{"ulid":"` + ulid + `","pubkey":"abab","kind":"external","mount":"z/` + ulid + `"}`)
@@ -118,8 +114,8 @@ func TestRegistryDelete(t *testing.T) {
 	if got, err := s.RegistryScan(); err != nil || len(got) != 0 {
 		t.Fatalf("registry entry survived delete: %v", got)
 	}
-	// The identity's KV projection is retired in the same batch — a restart's
-	// retained-set reseed must not resurrect a revoked identity.
+	// The identity's KV entry is retired in the same batch, so a restart's reseed
+	// cannot bring a revoked identity back.
 	if kv := mustKVScan(t, s, "_colca/identities/01M1"); len(kv) != 0 {
 		t.Fatalf("KV entry survived revocation: %v", kv)
 	}

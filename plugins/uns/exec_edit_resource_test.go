@@ -5,9 +5,8 @@ import (
 	"testing"
 )
 
-// heldBlobs is a node that already has every blob asked of it. The resource
-// intent's blob invariant has its own tests below; the authorization tests
-// must not fail for want of bytes.
+// heldBlobs is a node that has every blob, so authorization tests never fail
+// for lack of bytes.
 type heldBlobs struct {
 	pulled []string
 	absent bool
@@ -45,8 +44,8 @@ func resourceExec(t *testing.T) (*fakeStore, *EditExec) {
 	return f, exec
 }
 
-// The claim §G exists for: a resource command is authorized at the element the
-// resource sits on, as the person, before anything is written.
+// A resource command is authorized at the resource's element, as the person,
+// before anything is written.
 func TestEditResourceIsAuthorizedAtItsElement(t *testing.T) {
 	f, exec := resourceExec(t)
 	anna := scopedTo("el-line1")
@@ -75,9 +74,9 @@ func TestEditResourceIsAuthorizedAtItsElement(t *testing.T) {
 	}
 }
 
-// A move is one command over two positions, and BOTH are authorized. Checking
-// only the destination would let a person lift a resource out of a zone they
-// may not write.
+// A move covers two positions and both are authorized; checking only the
+// destination would let a person lift a resource out of a zone they cannot
+// write.
 func TestEditResourceMoveIsAuthorizedAtBothPositions(t *testing.T) {
 	f, exec := resourceExec(t)
 	full := CommandContext{Actor: &Entry{ULID: "kc-admin", Kind: KindHuman, Grants: []string{"cmd:#:configure"}}}
@@ -102,8 +101,8 @@ func TestEditResourceMoveIsAuthorizedAtBothPositions(t *testing.T) {
 		t.Fatalf("a refused move wrote: offset %d → %d", before, f.offset)
 	}
 
-	// The same move, by someone who holds both, writes both records at once:
-	// the new position and the tombstone at the old one.
+	// Someone holding both positions writes both records at once: the new
+	// position and the tombstone at the old one.
 	code, message, _, writes = exec.ExecuteWithWrites(full, "_CmdEdit", "apply",
 		resourceIntent(t, "op-res-move-ok", "update", "line1/res-1", map[string]any{
 			"resource": resourcePayload("res-1", "el-line1"), "from_path": "line2/res-1",
@@ -114,8 +113,7 @@ func TestEditResourceMoveIsAuthorizedAtBothPositions(t *testing.T) {
 	}
 }
 
-// The invariant `ConfigExec` holds, held here too: never author a record
-// pointing at bytes this node cannot produce.
+// Never author a record pointing at bytes this node cannot produce.
 func TestEditResourceRefusesWhenTheBlobIsUnreachable(t *testing.T) {
 	f, exec := resourceExec(t)
 	blobs := &heldBlobs{absent: true}
@@ -140,8 +138,7 @@ func TestEditResourceRefusesWhenTheBlobIsUnreachable(t *testing.T) {
 	}
 }
 
-// Two resources cannot share one position — the same rule the configure verb
-// enforces, so the two doors cannot disagree about what a position holds.
+// Two resources cannot share a position, as the configure verb enforces.
 func TestEditResourceRefusesASecondResourceAtOnePosition(t *testing.T) {
 	_, exec := resourceExec(t)
 	full := CommandContext{Actor: &Entry{ULID: "kc-admin", Kind: KindHuman, Grants: []string{"cmd:#:configure"}}}
@@ -189,8 +186,7 @@ func TestEditResourceDeleteIsAuthorizedAndTombstones(t *testing.T) {
 	if code != 200 || len(writes) != 1 {
 		t.Fatalf("delete = %d %q writes=%d", code, message, len(writes))
 	}
-	// The tombstone lands at the resource's own position — a StateWrite
-	// carries where it went, and the empty payload is read back from the store.
+	// The tombstone lands at the resource's position and reads back empty.
 	if held, ok := f.KVGet(writes[0].Topic); ok && len(held) != 0 {
 		t.Fatalf("delete left %d bytes at %s, want the position empty", len(held), writes[0].Topic)
 	}

@@ -170,11 +170,8 @@ func TestTreeReadsBothProjectionsFromOneCall(t *testing.T) {
 }
 
 func TestTreeAsksForOnlyTheContractsItConsumes(t *testing.T) {
-	// The whole projection holds every retained metric, catalogue and Edit
-	// operation the node has seen; the door pages it, and this service reads
-	// two contracts out of it. Asking for exactly those is what keeps the read
-	// bounded by the size of the TREE rather than by everything else the node
-	// retains.
+	// Tree asks only for the two contracts it reads, which keeps the read bounded by
+	// the size of the tree.
 	node := servePaged(t, elementsAt("site1"), 10, 0)
 	if _, err := node.client.Tree(context.Background()); err != nil {
 		t.Fatalf("Tree: %v", err)
@@ -193,10 +190,8 @@ func TestTreeAsksForOnlyTheContractsItConsumes(t *testing.T) {
 }
 
 func TestTreeFollowsEveryPageOfTheListing(t *testing.T) {
-	// The defect this pins: a hub's KV ran past one page, Tree kept the first
-	// page and dropped `next`, and every element that sorted after the break
-	// read as retired. Five elements in pages of two is three requests, and
-	// all five must be in the view.
+	// Five elements in pages of two take three requests, and all five must be in the
+	// view.
 	node := servePaged(t, elementsAt("a/e1", "a/e2", "a/e3", "a/e4", "a/e5"), 2, 0)
 	view, err := node.client.Tree(context.Background())
 	if err != nil {
@@ -217,10 +212,7 @@ func TestTreeFollowsEveryPageOfTheListing(t *testing.T) {
 }
 
 func TestTreeFailsWhenALaterPageCannotBeRead(t *testing.T) {
-	// The dangerous shape is not the first page failing — that has always been
-	// an error. It is the second one: a first page that looked healthy, then a
-	// 503. Handing back what arrived would be a tree with fewer elements in it,
-	// and every element past the break would lose its resource.
+	// A healthy first page followed by a 503 is an error, not a smaller tree.
 	node := servePaged(t, elementsAt("a/e1", "a/e2", "a/e3", "a/e4"), 2, 2)
 	view, err := node.client.Tree(context.Background())
 	if err == nil {
@@ -235,11 +227,8 @@ func TestTreeFailsWhenALaterPageCannotBeRead(t *testing.T) {
 }
 
 func TestTreeFailsLoudOnAnErrorStatusThatParsesAsAnEmptyTree(t *testing.T) {
-	// The dangerous shape, and the reason the status is checked at all: an
-	// error response whose body happens to be readable JSON with no entries.
-	// Ignore the status and this is indistinguishable from a tree that holds
-	// nothing — which is the one input that would make convergence revoke
-	// every group in it.
+	// An error response with a readable, empty JSON body must not look like an empty
+	// tree, which would revoke every group.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte(`{"entries":[]}`))

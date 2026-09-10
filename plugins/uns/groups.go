@@ -7,19 +7,11 @@ import (
 	"strings"
 )
 
-// GroupIndex resolves a group id to the grants its members hold.
-//
-// It is a projection of the `_Group` definitions the node holds, which arrived
-// down the definition channel from wherever they were authored
-// (definition-stream design §8). That is what lets a node authorize a human it
-// has never been told about individually, offline, with no read side to consult:
-// the token names groups, and the groups are already here.
-//
-// Two definitions claiming the same id resolve to NOTHING (design §10.3). The
-// store keeps both — records are keyed by path and author, so neither
-// overwrites the other — and picking one silently would let a node shadow a
-// group authored above it and widen its own grants. A collision is a
-// provisioning error, and it is reported as one.
+// GroupIndex resolves a group id to the grants its members hold. It projects
+// the _Group definitions that descended to this node, so a node can authorize a
+// person offline from the groups their token names. Two definitions claiming
+// one id resolve to nothing, since picking one could let a node shadow a group
+// authored above it; the collision is reported.
 type GroupIndex struct {
 	store EntityStore
 }
@@ -34,9 +26,8 @@ type group struct {
 	Grants []string `json:"grants"`
 }
 
-// GrantsOf returns the grants of one group. ok=false when the node holds no
-// such group, or holds more than one claiming that id — the reason is in err,
-// which is never nil when ok is false.
+// GrantsOf returns one group's grants. ok is false when the node holds no such
+// group or more than one definition for it; err then says why.
 func (g *GroupIndex) GrantsOf(id string) (grants []string, ok bool, err error) {
 	if id == "" {
 		return nil, false, fmt.Errorf("group: empty id")
@@ -67,13 +58,9 @@ func (g *GroupIndex) GrantsOf(id string) (grants []string, ok bool, err error) {
 	}
 }
 
-// GrantsFor is the union of the grants of every named group, in the order the
-// groups were named and with duplicates dropped.
-//
-// A group that does not resolve contributes nothing and its reason is returned
-// alongside — the caller logs them. Failing the whole token because one group
-// is unknown would let a single stale membership lock a human out of everything
-// rather than out of that group.
+// GrantsFor returns the union of the named groups' grants, in order and
+// without duplicates. Groups that do not resolve add nothing and are returned
+// as problems; one stale membership must not lock a person out of everything.
 func (g *GroupIndex) GrantsFor(ids []string) (grants []string, problems []error) {
 	seen := map[string]bool{}
 	for _, id := range ids {

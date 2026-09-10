@@ -25,9 +25,8 @@ func alarmIntent(t *testing.T, op, kind, action, signal string, extra map[string
 	return editBody(t, op, map[string]uint64{}, intent)
 }
 
-// Alarm configuration is authorized at the SIGNAL the alarm is about — the
-// config record's own path is reserved and owned by no element, so checking
-// there would demand a realm-wide grant of everyone.
+// Alarm configuration is authorized at the signal the alarm is about; the
+// config record's own path belongs to no element.
 func TestEditAlarmIsAuthorizedAtItsSignal(t *testing.T) {
 	f, exec, _ := twoLines(t)
 	anna := scopedTo("el-line1")
@@ -59,8 +58,8 @@ func TestEditAlarmIsAuthorizedAtItsSignal(t *testing.T) {
 	}
 }
 
-// An operator holds `operate` and no configure anywhere: they may acknowledge,
-// and they may not configure. That split is the whole point of the class.
+// An operator with operate and no configure may acknowledge but not
+// configure.
 func TestEditAlarmAcknowledgementTakesTheOperateClass(t *testing.T) {
 	_, exec, _ := twoLines(t)
 	operator := CommandContext{Actor: &Entry{
@@ -114,13 +113,10 @@ func TestEditAlarmRefusesAConfigForAnotherNode(t *testing.T) {
 	}
 }
 
-// enrolledScope is the scope of a node its parent enrolled at `own`: the
-// element index answers for everything at or below the node (scopeOf), and
-// the ancestry the parent taught answers for the node's own element and
-// everything above it. `own` is deliberately NOT seeded as a `_SystemElement`
-// in the store — its record lives at the parent and entities never descend —
-// so PathOf cannot resolve it and only Reaches can. That is the production
-// shape (engine.scope), and the point these tests pin.
+// enrolledScope is the scope of a node enrolled at own: the element index for
+// the node and below, the taught ancestry for its own element and above. own is
+// not seeded as a _SystemElement, since its record lives at the parent, so only
+// Reaches can resolve it, as in production.
 type enrolledScope struct {
 	scopeOf
 	own string
@@ -137,12 +133,9 @@ func applyIntent(t *testing.T, op string, snapshot map[string]any, extra map[str
 	return editBody(t, op, map[string]uint64{}, intent)
 }
 
-// A whole-node apply is authorized on the node's own element — the one its
-// parent enrolled it at — with class configure. A person granted configure on
-// that element covers it; so does a realm-wide grant; a person granted
-// configure only on a child element of the node does NOT, and the refusal
-// writes nothing. Dropping the position from notificationConfigPositions
-// turns the child-element refusal into a 200.
+// A whole-node apply is authorized on the node's own element with configure:
+// a grant on that element or a realm-wide grant covers it, a grant on a child
+// element does not, and that refusal writes nothing.
 func TestEditNotificationConfigApplyIsAuthorizedOnTheNodesOwnElement(t *testing.T) {
 	f, exec, _ := twoLines(t)
 	exec.SetScope(enrolledScope{scopeOf: scopeOf{f}, own: "el-edge1"})
@@ -185,11 +178,9 @@ func TestEditNotificationConfigApplyIsAuthorizedOnTheNodesOwnElement(t *testing.
 	}
 }
 
-// The node's own element is resolved through the ancestry, not the element
-// index: the same grant that covers the apply on an enrolled node covers
-// nothing on a node whose scope does not reach that element (the root, whose
-// ancestry is empty — or a node that has not learned its position yet). Fail
-// closed; a realm-wide grant is what covers a root node.
+// The node's own element resolves through the ancestry, so a node whose
+// scope does not reach it (the root, or a node that has not learned its
+// position) needs a realm-wide grant.
 func TestEditNotificationConfigApplyFailsClosedWhenTheScopeDoesNotReachTheElement(t *testing.T) {
 	f, exec, _ := twoLines(t) // scopeOf: Reaches is false for everything
 	before := f.offset
@@ -208,9 +199,8 @@ func TestEditNotificationConfigApplyFailsClosedWhenTheScopeDoesNotReachTheElemen
 	}
 }
 
-// The record is the same one the `alarm` family writes, under the same
-// identity rules; and the intent names no entity — the snapshot's
-// target_node_id is the one statement of which node this is.
+// The record follows the same identity rules as the alarm intents, and the
+// snapshot's target_node_id is the only statement of which node it is for.
 func TestEditNotificationConfigApplyKeepsTheConfigIdentityRules(t *testing.T) {
 	f, exec, _ := twoLines(t)
 	exec.SetScope(enrolledScope{scopeOf: scopeOf{f}, own: "el-edge1"})

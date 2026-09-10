@@ -10,17 +10,14 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 )
 
-// BlobFetcher is the parent link as this adapter needs it (resources design
-// §7.1). It is an interface rather than *repl.Client because repl imports
-// engine — taking the concrete type would be an import cycle. The real client
-// is injected after it exists, exactly as repl.Server's upstream is.
+// BlobFetcher is the parent link as the blob port needs it. It is an interface
+// because repl imports engine; the client is injected once it exists.
 type BlobFetcher interface {
 	BlobGet(sha string, hops int) (io.ReadCloser, int64, error)
 }
 
-// defaultPullHops bounds the rootward walk a pull may trigger. The tree has no
-// cycles; this stops a misconfigured parent chain hanging a command instead of
-// failing it.
+// defaultPullHops bounds how far up the tree a pull may walk, so a misconfigured
+// parent chain fails a command instead of hanging it.
 const defaultPullHops = 8
 
 // BlobPort satisfies uns.Blobs over this node's blob store and its parent
@@ -52,13 +49,10 @@ func (p *BlobPort) upstream() BlobFetcher {
 	return p.fetcher
 }
 
-// Has reports whether this node's store already holds sha. A hit also
-// touches the blob (resources design §9.1 TOCTOU), restarting its
-// grace clock at the moment a caller claims it — this is what stops the
-// sweeper from deleting a blob out from under an in-flight resource/upsert
-// that already checked Has and is about to commit a record naming it. A
-// touch failure is logged and otherwise ignored: the worst case it leaves is
-// the pre-existing race, never a refused check.
+// Has reports whether the store holds sha. A hit also touches the blob,
+// restarting its grace period, so the sweeper cannot delete it before a
+// resource/upsert that just checked commits. A failed touch is logged and
+// ignored.
 func (p *BlobPort) Has(sha string) bool {
 	if p == nil || p.store == nil {
 		return false

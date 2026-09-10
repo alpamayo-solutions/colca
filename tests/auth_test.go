@@ -1,8 +1,7 @@
-// End-to-end authorization scenarios on the live 4-node tree (auth design
-// §12): unknown keys at every
-// door, revocation kicks, fleet inventory with local-only authority, scoped
-// subscriptions on replicated data, the enrollment-door-only rule for
-// _EnrolledIdentity, and cmd grants.
+// Authorization on the live four-node tree: unknown keys at every door,
+// revocation kicks, fleet inventory with local authority, scoped subscriptions
+// on replicated data, _EnrolledIdentity only through enrollment, and command
+// grants.
 package tests
 
 import (
@@ -70,9 +69,7 @@ func (*timeoutErr) Error() string { return "connect timed out" }
 // non-2xx like api() does).
 func apiStatus(t *testing.T, url, method, path, token string, body string) int {
 	t.Helper()
-	// Through doRequest like every other helper: a 429 is not an answer to
-	// the question these callers ask ("does this door say 401/403/200?"), so
-	// it must be waited out rather than returned as the verdict.
+	// A 429 is not the answer these callers check for, so wait it out.
 	resp := doRequest(t, httpsClient, method+" "+path, func() (*http.Request, error) {
 		return newRequest(method, url+path, token, body)
 	})
@@ -80,10 +77,8 @@ func apiStatus(t *testing.T, url, method, path, token string, body string) int {
 	return resp.StatusCode
 }
 
-// TestAuthRejectionsAtEveryDoor: an un-enrolled key is turned away at the
-// MQTT door and the HTTP door of every node it tries; the repl door of the
-// parent rejects it too (covered at unit level; here the black-box check is
-// that a stranger cannot read ANYTHING out of a live tree).
+// TestAuthRejectionsAtEveryDoor: an unenrolled key is turned away at every
+// node's MQTT and HTTP doors and cannot read anything from a live tree.
 func TestAuthRejectionsAtEveryDoor(t *testing.T) {
 	tp := startTopo(t)
 	stranger := authtest.NewMachine(t, "stranger")
@@ -143,9 +138,9 @@ func TestRevocationKicksAcrossTheTree(t *testing.T) {
 	})
 }
 
-// TestFleetInventoryAndLocalAuthority: an enrollment at a leaf is VISIBLE at
-// the hub (security inventory via the replicated _EnrolledIdentity entity) but does NOT
-// authenticate there — authority is local, delegation like DNS (§2.2).
+// TestFleetInventoryAndLocalAuthority: an enrollment at a leaf is visible at the
+// hub through the replicated _EnrolledIdentity but does not authenticate there.
+// Authority is local.
 func TestFleetInventoryAndLocalAuthority(t *testing.T) {
 	tp := startTopo(t)
 
@@ -164,7 +159,7 @@ func TestFleetInventoryAndLocalAuthority(t *testing.T) {
 		t.Fatalf("m1's _EnrolledIdentity entity not in the hub inventory: %v", entries)
 	}
 
-	// But the hub does NOT authenticate m1's key: enrolled-at-leaf ≠ trusted-at-hub.
+	// The hub does not authenticate m1's key.
 	if err := tryMachine(tp.global.MQTTAddr, tp.m1); err == nil {
 		t.Fatal("leaf-enrolled key authenticated at the hub — authority must be local")
 	}
@@ -196,9 +191,9 @@ func TestScopedSubscribeOnReplicatedTree(t *testing.T) {
 	awaitTopic(t, msgs, "colca/v1/_Metric/n-edge1/edge1/m1/temp", 15*time.Second)
 }
 
-// TestEnrolledIdentityRejectedAtEveryOrdinaryDoor: no door but the enrollment
-// endpoint accepts a registry contract — not the machine's MQTT publish, not
-// the machine's HTTP publish, not even the admin's /publish.
+// TestEnrolledIdentityRejectedAtEveryOrdinaryDoor: only the enrollment endpoint
+// accepts a registry contract, not MQTT, not HTTP, not even the admin's
+// /publish.
 func TestEnrolledIdentityRejectedAtEveryOrdinaryDoor(t *testing.T) {
 	tp := startTopo(t)
 	entitiesBefore := tp.edge1.Store.NextOffset("entities")

@@ -17,31 +17,18 @@ const mochiLogWindow = time.Minute
 // repeat logs once more.
 const mochiLogKeyLimit = 1024
 
-// mochiLogHandler is the handler colca hands mochi for the broker's own
-// logging. It exists for two defects the raw library logger has in
-// production:
-//
-//   - mochi logs some transport errors with an EMPTY message (a WARN that is
-//     nothing but attrs) — those get a name here.
-//   - mochi logs per OCCURRENCE with no bound: a single slow QoS>0
-//     subscriber emits "client store quota reached" for every dropped
-//     delivery, which turns the broker's log into megabytes of one line and
-//     makes the log floodable by whoever runs one bad client. Identical
-//     lines (same level, message, client, listener) log once per window;
-//     the next occurrence after the window carries how many were suppressed.
-//
-// Colca's own log calls do not go through this handler — a rule the broker
-// enforces on a library is not a licence to sample its own reporting.
+// mochiLogHandler wraps mochi's logging to fix two problems: some transport errors
+// are logged with an empty message, which get a name here, and mochi logs every
+// occurrence, so one slow subscriber can flood the log with "client store quota
+// reached". Identical lines log once per window, and the next one reports how many
+// were suppressed. Colca's own logging does not go through it.
 type mochiLogHandler struct {
 	inner slog.Handler
 	state *mochiLogShared
 }
 
-// mochiLogShared is the suppression table and ITS lock, one allocation shared
-// by every WithAttrs/WithGroup derivative. The first version copied the map
-// pointer into derivatives that each carried their own zero mutex — two locks
-// guarding one map, which -race caught the first time mochi logged through a
-// derived logger while another goroutine logged through the base.
+// mochiLogShared is the suppression table and its lock, shared by every WithAttrs
+// and WithGroup derivative, so one lock guards the map.
 type mochiLogShared struct {
 	mu   sync.Mutex
 	seen map[string]*mochiLogState

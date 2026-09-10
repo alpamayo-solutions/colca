@@ -1,63 +1,36 @@
 package uns
 
-// EntityStore is the node's record surface as this plugin needs it: read the
-// current state of an entity, list the entities of one contract belonging to
-// one identity, write a record as the node.
-//
-// It is declared HERE, in stdlib types only, and satisfied by an adapter on the
-// core side. Go interfaces are structural, so that adapter needs no import from
-// this package and this package needs none from the core — which is what keeps
-// `go list -deps` on this package at "standard library only" (arch_test.go)
-// while still letting domain logic touch storage.
+// EntityStore is the node's record store as this plugin needs it: read an
+// entity, list a contract's records for one identity, write as the node. It is
+// declared here in stdlib types and implemented by a core adapter, which keeps
+// this package free of non-stdlib imports.
 type EntityStore interface {
 	// KVGet returns the current payload stored at a topic, if any.
 	KVGet(topic string) ([]byte, bool)
 	// KVScan returns the current records of one contract published under one
-	// identity — the level-4 ULID, not a path, so the answer is the same at
-	// every level of the tree.
+	// node id, which is the same at every level of the tree.
 	KVScan(contract, nodeID string) []KVRecord
-	// KVScanAll returns the current records of one contract whoever published
-	// them, each at the path THIS node holds it under. The element index needs
-	// this: a child's elements arrive here mount-inserted, already in this
-	// node's frame, and they are as much a position here as the node's own.
+	// KVScanAll returns the current records of one contract from any publisher,
+	// at the path this node holds each under. Children's elements arrive
+	// mount-inserted and count as positions here too.
 	KVScanAll(contract string) []KVRecord
-	// PublishBatch validates and commits a complete command result as one
-	// atomic state transition, in the node's own frame. Either every record
-	// receives a durable stream position and becomes current KV state, or none
-	// of them do, and the returned positions are what a command acknowledgement
-	// carries so an API can wait for its exact projected state.
-	//
-	// This is the ONLY way an executor authors STATE. There is deliberately no
-	// per-record door beside it for that: one existed, and a command that
-	// failed at its thirtieth record left twenty-nine committed and told the
-	// caller only that something had gone wrong.
-	//
-	// PublishBatch refuses anything that is not command-authored STATE
-	// (uns.IsCommandAuthoredState) — an annotation is never state
-	// (IsState(ClassAnnotation) is false, dataops-evaluator design §8), so it
-	// cannot ride this door. PublishEvent below is the separate one it does
-	// ride.
+	// PublishBatch validates and commits a command's result as one atomic
+	// transition in the node's frame: every record gets a stream position and
+	// becomes KV state, or none does. The returned positions go into the ack.
+	// It is the only way an executor writes state, and it refuses anything that
+	// is not command-authored state; annotations go through PublishEvent.
 	PublishBatch(records []StateRecord) ([]StateWrite, error)
-	// PublishEvent commits ONE append-only event record a command executor
-	// authored directly — the door for a class that is never KV-projected and
-	// never retained (uns.IsCommandAuthoredEvent; ClassAnnotation today). There
-	// is no batch here because there is nothing to make atomic WITH: an event
-	// carries no current value anything downstream compares against, so one
-	// event is one commit, unlike PublishBatch's whole-command transition.
+	// PublishEvent commits one event record authored by a command executor, for
+	// classes that are never KV-projected (uns.IsCommandAuthoredEvent). An event
+	// has no current value to compare, so there is nothing to batch it with.
 	PublishEvent(record StateRecord) (StateWrite, error)
 	// NodeID is the identity this node publishes under.
 	NodeID() string
 }
 
-// Blobs is the domain's view of this node's file store (resources design §3).
-//
-// The executor holds one invariant that needs both halves of this interface:
-// a _Resource is never authored pointing at bytes the node does not hold. Has
-// answers whether it holds them; Pull fetches them from the parent, which is
-// what lets the same verb arrive as a provisioning command from above (§9.1).
-//
-// Declared here in stdlib types and satisfied by a core-side adapter, for the
-// same reason as EntityStore: this package must stay stdlib-only.
+// Blobs is the domain's view of this node's file store. A _Resource is never
+// authored pointing at bytes the node lacks: Has checks, Pull fetches them from
+// the parent. Declared in stdlib types like EntityStore.
 type Blobs interface {
 	// Has reports whether this node already holds the blob with this digest.
 	Has(sha string) bool
@@ -67,83 +40,54 @@ type Blobs interface {
 	Pull(sha string) error
 }
 
-// StateRecord is one desired state mutation produced by a domain command.
-// An empty payload is the contract's tombstone when that contract permits it.
-// It deliberately carries no stream, offset or owner choice: the engine
-// validates the topic and derives those authoritative values at commit time.
+// StateRecord is one state change a command produces. An empty payload is the
+// contract's tombstone where allowed. The engine derives stream, offset and
+// owner at commit time.
 type StateRecord struct {
 	Topic   string
 	Payload []byte
 }
 
-// StateWrite identifies one state record produced while executing a command.
-// It is deliberately a plugin type so the domain executor remains independent
-// of the engine package that implements the store adapter.
+// StateWrite identifies one state record written while executing a command.
 type StateWrite struct {
 	Stream string `json:"stream"`
 	Offset uint64 `json:"offset"`
 	Topic  string `json:"topic"`
 }
 
-// CommandContext is who is acting when a command executes (node-side command
-// authorization design §3A). The engine fills it from the entry it already
-// authorized at the door — a human's verified token, a local or external
-// service's registry entry — or, for a command replicated down from an
-// ancestor, from the group ids the ancestor's door verified and persisted with
-// the record (§3B fallback), reconstituted against the _Group definitions this
-// node holds. Actor is nil only for the admin door, which presents a token and
-// no identity. Executors authorize against Actor; they never learn it any other
-// way, so a command cannot be laundered through the identity of whoever
-// carried it.
+// CommandContext is who is acting when a command executes. The engine fills it
+// from the entry it authorized at the door, or, for a command replicated from
+// an ancestor, from the group ids recorded with it, resolved against this
+// node's _Group definitions. Actor is nil only for the admin door. Executors
+// authorize against Actor, never against whoever carried the command.
 type CommandContext struct {
 	Actor *Entry
 }
 
 // EntryRef is the part of a registry entry the domain needs to compute where
-// it publishes: its identity, its name, and its element. Returned by
-// Bindings.Entries rather than *uns.Entry to keep the port narrow, the same
-// reason EntryOf returns two fields instead of the whole entry.
+// an identity publishes: its ULID, name and element.
 type EntryRef struct{ ULID, Name, Element string }
 
-// Bindings answers which identities bind to an element, and who one identity
-// is. Declared here for the same reason as EntityStore and satisfied the same
-// way — the core's registry manager fits it structurally, without either side
-// importing the other.
+// Bindings says which identities bind to an element and who an identity is.
+// The core's registry manager satisfies it without either side importing the
+// other.
 type Bindings interface {
 	// BoundTo lists the ULIDs of the identities bound to an element.
 	BoundTo(elementID string) []string
-	// EntryOf answers who an identity is and where it is bound: its name and
-	// its element ("" for unplaced — bound to the node itself). ok is false
-	// when this node has never enrolled that identity. Autobind needs both to
-	// COMPUTE where that identity's catalogue sits, rather than searching for
-	// records that look like they might be its (local-service-trust design
-	// §6). Returning the two fields rather than *uns.Entry keeps this port
-	// narrow and stops the domain depending on the entry's whole shape.
+	// EntryOf returns an identity's name and element ("" for unplaced); ok is
+	// false if this node never enrolled it. Autobind uses both to compute
+	// where the identity's catalogue is.
 	EntryOf(ulid string) (name, element string, ok bool)
-	// Entries lists the identities enrolled at this node, so the domain can
-	// ask which of them, if any, a record's arrival position belongs to — the
-	// lifecycle trigger's version of the same computation autobind runs
-	// forward. The registry only lists; it has no notion of what a catalogue
-	// topic looks like — that knowledge stays in this package (design §4/§6).
-	// The list is the local registry, a handful of identities, so a scan over
-	// it costs nothing; the reverted design's mistake was scanning RECORDS,
-	// not identities.
+	// Entries lists the identities enrolled at this node, so the lifecycle
+	// trigger can tell which one a record's topic belongs to. The registry
+	// only lists; what a catalogue topic looks like is known here.
 	Entries() []EntryRef
 }
 
-// occupantsOf lists the identities standing on an element — the one occupancy
-// question BOTH element-retiring doors ask before they retire anything.
-//
-// An entry names an element to get its place, so retiring that element leaves
-// an identity that authenticates and can write nowhere: a child node is refused
-// at the replication door, a connector can no longer autobind. That is true
-// whichever door composed the retirement, which is why the `_CmdConfigure`
-// element/delete verb and the Edit delete intent judge it here rather than
-// each carrying their own version of "is anything standing on this".
-//
-// An absent registry or an element with no id answers "nothing", never
-// "everything": both mean this decision has nothing to go on, and the only safe
-// reading of nothing-to-go-on at a LIST is an empty list.
+// occupantsOf lists the identities standing on an element. Retiring such an
+// element would leave them able to authenticate but unable to write, so both
+// element/delete and the Edit delete intent ask here. No registry or no id
+// means an empty list.
 func occupantsOf(bound Bindings, elementID string) []string {
 	if bound == nil || elementID == "" {
 		return nil
@@ -163,8 +107,7 @@ type KVRecord struct {
 	// Offset is the entity stream version that produced this current state.
 	// It is local to the node and remains the coordinate for retention/CAS.
 	Offset uint64
-	// OriginOffset is the owner node's entity-stream coordinate. Replication
-	// keeps it unchanged across hops, so an ancestor's Edit projection and
-	// the owner executing a command compare the same version.
+	// OriginOffset is the owner node's entity-stream offset. Replication keeps
+	// it across hops, so an ancestor and the owner compare the same version.
 	OriginOffset uint64
 }

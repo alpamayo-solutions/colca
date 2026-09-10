@@ -24,11 +24,8 @@ func newMetricsTestEngine(t *testing.T) (*Engine, *metrics.Metrics) {
 	return e, m
 }
 
-// TestMetricWithNoSignalIsCountedAndOncePerReminderLogged is the level-1 pin
-// of SDK design §7 gap 6: a _Metric accepted on a path with no _Signal there
-// is counted EVERY time (colca_metrics_unbound_total is never rate-limited —
-// it must reflect the true volume) but logged only once per reminder window,
-// exactly mirroring internal/repl/linkstate.go's own reminder shape.
+// A _Metric on an unbound path is counted every time but logged once per reminder
+// window.
 func TestMetricWithNoSignalIsCountedAndOncePerReminderLogged(t *testing.T) {
 	e, m := newMetricsTestEngine(t)
 
@@ -37,9 +34,8 @@ func TestMetricWithNoSignalIsCountedAndOncePerReminderLogged(t *testing.T) {
 		t.Fatalf("%s = %v before any publish, want 0", line, v)
 	}
 
-	// Deny denominator: prove the query finds a bound path
-	// before trusting it to report an unbound one as absent — otherwise a
-	// broken KVGet lookup would pass this test by finding nothing either way.
+	// Denominator: the lookup finds a bound path, so its silence about the unbound one
+	// means something.
 	if _, err := e.IngestAdmin("colca/v1/_Signal/n-edge1/m1/bound", []byte(`{"id":"01SIGBOUND"}`)); err != nil {
 		t.Fatalf("place bound signal: %v", err)
 	}
@@ -57,8 +53,8 @@ func TestMetricWithNoSignalIsCountedAndOncePerReminderLogged(t *testing.T) {
 		t.Fatalf("%s = %v after one unbound metric, want 1", line, v)
 	}
 
-	// A second sample on the SAME path within the reminder window still
-	// counts (the metric is never throttled) — only the log line is.
+	// A second sample on the same path inside the window still counts; only the log is
+	// throttled.
 	if _, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/unbound", []byte(`{"v":2}`)); err != nil {
 		t.Fatalf("publish second unbound metric: %v", err)
 	}
@@ -95,9 +91,7 @@ func TestUnboundMetricLogRateLimiting(t *testing.T) {
 	}
 }
 
-// TestMetricWithSignalOnAnotherPathStillCountsSeparately guards against a
-// checkMetricBinding that answers "bound" for the wrong path (e.g. a KVGet
-// that ignores the path segment) by planting the signal at a sibling path.
+// A signal at a sibling path does not count as bound for this one.
 func TestMetricWithSignalOnAnotherPathStillCountsSeparately(t *testing.T) {
 	e, m := newMetricsTestEngine(t)
 	if _, err := e.IngestAdmin("colca/v1/_Signal/n-edge1/m1/sibling-bound", []byte(`{"id":"01SIGSIB"}`)); err != nil {

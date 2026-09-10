@@ -1,9 +1,8 @@
-// Human MQTT doors (human-authz design §5.1): two optional TLS listeners —
-// raw MQTT ("human-tcp") and MQTT over WebSocket ("human-ws") — with NO
-// client-certificate requirement. The CONNECT password carries a JWT or PAT, the
-// username must equal the token's sub, and the session lives exactly as long
-// as the token: per-delivery ACL checks evaluate grants AND exp, and a 10s
-// sweeper kicks expired sessions with the same mechanism revocation uses.
+// Human MQTT doors: optional TLS listeners for raw MQTT (human-tcp) and MQTT over
+// WebSocket (human-ws), with no client certificate. The CONNECT password carries a
+// JWT or PAT and the username must equal its sub. A session lasts as long as the
+// token: every delivery checks grants and expiry, and a sweeper kicks expired
+// sessions every 10 seconds.
 
 package mqttsrv
 
@@ -88,8 +87,8 @@ func isHumanListener(cl *mqtt.Client) bool {
 // credential in the CONNECT password, require username == sub, store the session.
 func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 	if h.ver == nil {
-		// Config validation forbids human listeners without an auth block, so
-		// this is a programming error — but a door must fail closed, not open.
+		// Config validation forbids human listeners without an auth block, so this is a
+		// bug, but the door must still fail closed.
 		h.log.Error("human door with no verifier — rejecting", "listener", cl.Net.Listener)
 		h.metrics.AuthReject(metrics.DoorMQTT, tokenauth.ReasonBadToken)
 		h.auditDenied("authenticate", tokenauth.ReasonBadToken, metrics.DoorMQTT, nil, nil)
@@ -120,10 +119,9 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 	return true
 }
 
-// humanACL is the human branch of OnACLCheck's read path: the session must
-// exist, must not be expired (per-delivery enforcement — an expired session
-// stops receiving before the sweeper kicks it), and the filter/topic must be
-// covered by the session's read grants.
+// humanACL is the human branch of OnACLCheck: the session must exist and not be
+// expired, so an expired session stops receiving before the sweeper kicks it, and
+// the topic must be covered by its read grants.
 func (h *colcaHook) humanACL(cl *mqtt.Client, topic string) bool {
 	s, ok := h.humans.get(cl.ID)
 	if !ok || time.Now().After(s.exp) {

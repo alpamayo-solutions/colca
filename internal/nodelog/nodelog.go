@@ -1,18 +1,8 @@
-// Package nodelog lets colcad publish its own log into the tree it owns.
-//
-// Every other service reaches the `logs` stream through the node's door. The
-// node cannot: the door authenticates a caller by service name, and colcad is
-// not one of its own services -- it IS the node. Nor should it acquire one.
-// "Everything is a node" says a participant binds to an element and writes its
-// own subtree; colcad is not a participant in its own registry, and inventing
-// an entry for it would put a second identity on a position that already has
-// one.
-//
-// So the last step is an in-process append instead of an HTTP call, and
-// everything before it -- the record, the topic, the queue, the bound, the
-// drop policy -- is the publisher every other Go service uses. The node's own
-// voice is addressed like an unplaced service's: level 4 is its ULID, and its
-// one position segment is `colca`.
+// Package nodelog lets colcad publish its own log into its tree. Services reach
+// the logs stream through the node's door, but colcad is the node, not one of
+// its services, so the last step is an in-process append. Everything else is
+// the publisher every Go service uses; the node's records carry its ULID at
+// level 4 and one position segment, colca.
 package nodelog
 
 import (
@@ -30,14 +20,9 @@ import (
 // against its lines.
 const ServiceName = "colca"
 
-// Sink appends a finished log record straight to the store.
-//
-// It is created BEFORE the engine exists, because the logger has to be
-// installed before anything worth logging happens -- a node's most valuable
-// lines are the ones it writes while starting up, and those are exactly the
-// ones a publisher built after the engine would miss. Until Attach is called
-// it reports "not ready", and the publisher's queue holds what it cannot
-// deliver yet (bounded, oldest dropped, like any other outage).
+// Sink appends a finished log record straight to the store. It exists before
+// the engine so startup lines are captured; until Attach it reports not ready
+// and the publisher's queue holds the records.
 type Sink struct {
 	mu     sync.RWMutex
 	engine *engine.Engine
@@ -68,11 +53,8 @@ func (s *Sink) LogPosition(_ context.Context) (string, []string, error) {
 	return node, []string{ServiceName}, nil
 }
 
-// PublishLog appends the record as the node itself.
-//
-// `IngestAdminAttributed` is the right door for it: this write has no scope
-// to check, because the writer owns the store. Attribution says plainly who
-// wrote it, so a reader of the audit trail sees the node and not "admin".
+// PublishLog appends the record as the node itself, attributed to the node
+// rather than to "admin".
 func (s *Sink) PublishLog(_ context.Context, topic string, payload map[string]any) error {
 	e, _ := s.current()
 	if e == nil {
@@ -91,19 +73,9 @@ func (s *Sink) PublishLog(_ context.Context, topic string, payload map[string]an
 	return err
 }
 
-// SkipsItsOwnPublishing reports whether a record is ABOUT publishing a log,
-// and so must never itself be published.
-//
-// The engine logs every append at debug with the topic it appended
-// (`atomic event ingest`). Publishing those would close a cycle: one log
-// record appended produces one log record about the append, forever. The
-// queue is bounded and non-blocking so this could never deadlock or grow, but
-// on a node started with LOG_LEVEL=debug it would be a hot loop burning a core
-// to say nothing.
-//
-// Cutting it here, at the one record that closes the cycle, is narrower than
-// muting the engine or refusing debug outright: everything else the node logs
-// at debug still reaches the tree.
+// SkipsItsOwnPublishing reports whether a record is about publishing a log. The
+// engine logs every append at debug; publishing those would log again for each
+// append, a loop on a node running at debug.
 func SkipsItsOwnPublishing(record slog.Record) bool {
 	skip := false
 	record.Attrs(func(attr slog.Attr) bool {

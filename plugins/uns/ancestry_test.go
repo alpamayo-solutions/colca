@@ -7,9 +7,8 @@ type placements map[string]string
 
 func (p placements) IDAt(path string) (string, bool) { id, ok := p[path]; return id, ok }
 
-// The rendered path is what the parent used to hand down as a bare string, so
-// it has to come out identical — that equality is what lets everything still
-// holding a prefix keep working while the identities arrive alongside it.
+// The rendered path must equal the prefix string the parent used to send, so
+// code that still reads a prefix keeps working.
 func TestPrefixRendersTheSamePathTheStringCarried(t *testing.T) {
 	cases := []struct {
 		name string
@@ -74,16 +73,15 @@ func TestExtendAddsOnePositionPerMountSegment(t *testing.T) {
 	if p := got.Prefix(); p != "site1/line1/m6" {
 		t.Fatalf("derived prefix = %q, want site1/line1/m6", p)
 	}
-	// Extending must not scribble on the ancestry it extends: the parent hands
-	// its own chain to every child, one after another.
+	// Extend must not modify the ancestry it extends: the parent passes its
+	// own chain to every child.
 	if len(site1) != 1 {
 		t.Fatalf("Extend mutated the receiver: %+v", site1)
 	}
 }
 
-// An element may sit below a path segment nobody placed an element on. The
-// position still contributes its name — the path must stay exact — but it
-// carries no identity, so no grant can name it.
+// An element can sit below a segment with no element; that position keeps
+// its name in the path but has no identity a grant could name.
 func TestExtendKeepsThePathExactAcrossAnUnplacedSegment(t *testing.T) {
 	ns := placements{"line1/m6": "01HM6"} // nothing at "line1"
 

@@ -21,9 +21,7 @@ func complete() map[string]string {
 }
 
 func TestConfigNamesEveryMissingVariableAtOnce(t *testing.T) {
-	// A service that starts with half its configuration and dies on the first
-	// cycle is harder to diagnose than one that refuses to start and says why —
-	// and naming them one per restart is worse still.
+	// All missing variables are named at once, not one per restart.
 	_, err := loadConfig(env(map[string]string{"COLCA_URL": "http://global:8080"}))
 	if err == nil {
 		t.Fatal("started with nothing configured")

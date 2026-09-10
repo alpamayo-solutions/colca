@@ -10,11 +10,9 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
-// TestServerStampsNowMSFromEngineAuthoritativeNow pins the low-level wire
-// contract (time-sync design §2.1/§2.3 rule 4) for both response envelopes:
-// now_ms is exactly the SERVER's own AuthoritativeNow, not raw local time —
-// checked here with an injected, non-advancing clock so the assertion is
-// exact, not a plausibility window.
+// TestServerStampsNowMSFromEngineAuthoritativeNow: both response envelopes carry
+// now_ms from the server's AuthoritativeNow, not raw local time. A fixed clock
+// makes the check exact.
 func TestServerStampsNowMSFromEngineAuthoritativeNow(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -57,18 +55,11 @@ func TestServerStampsNowMSFromEngineAuthoritativeNow(t *testing.T) {
 	}
 }
 
-// TestThreeLevelChainTelescopesToRootClock is the Go-level proof of design
-// §2.1's core claim: a root R at authority time T, a mid node M whose own
-// clock reads 5s behind T, and a leaf L whose own clock reads 20s behind T —
-// after M syncs from R over one /downlink poll, and L syncs from M over one
-// /downlink poll, L's AuthoritativeNow converges to T (the ROOT's clock),
-// not to M's own uncorrected (T-5s) clock. That is telescoping: L never
-// talks to R directly, only through M.
-//
-// Every clock here is fixed (non-advancing) and injected, so once a poll
-// applies the correction the assertion holds forever — no timing flakiness.
-// waitFor's poll loop exists only to wait out the one real HTTP round trip
-// each level needs, not to average out any simulated clock drift.
+// TestThreeLevelChainTelescopesToRootClock: root R at time T, mid M 5s behind,
+// leaf L 20s behind. After M syncs from R and L from M, L's AuthoritativeNow is
+// T, the root's clock, although L only talks to M. All clocks are fixed, so once
+// a poll applies the correction the assertion holds; waitFor only waits for the
+// HTTP round trips.
 func TestThreeLevelChainTelescopesToRootClock(t *testing.T) {
 	dir := t.TempDir()
 	const authorityMS = int64(3_000_000_000_000) // T
@@ -83,11 +74,9 @@ func TestThreeLevelChainTelescopesToRootClock(t *testing.T) {
 	rreg, reng := nodeParts(t, rs, rcfg, nil, nil, rclk, childSpec{"n-mid", midID.PublicHex(), "mid1"})
 	rsrv, raddr := startServer(t, rcfg, reng, rootID, rreg)
 	defer rsrv.Stop()
-	// A command addressed under M's mount so M's first downlink poll returns
-	// immediately instead of riding out the 20s long poll. M is attached in
-	// front of it below rather than arriving fresh: a child with no cursor for
-	// this parent adopts its head and hears nothing that predates it (§3.2), so
-	// the filler exists only to make M's attach position seedable.
+	// A command under M's mount so M's first poll returns at once. M is attached in
+	// front of it: a child without a cursor adopts the head, so the filler only
+	// makes M's position seedable.
 	mustIngestAdmin(t, reng, "colca/v1/_CmdParam/m1/mid1/m1/filler", `{"correlation_id":"c0","expires_at":99999999999}`)
 	midAt := rs.NextOffset("commands")
 	mustIngestAdmin(t, reng, "colca/v1/_CmdParam/m1/mid1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
@@ -114,15 +103,10 @@ func TestThreeLevelChainTelescopesToRootClock(t *testing.T) {
 		t.Fatalf("mid AuthoritativeNow = %v, want root's clock %v", got, T)
 	}
 
-	// M now itself queues a command addressed under L's mount — M's server
-	// stamps now_ms from meng.AuthoritativeNow(), which is now the corrected
-	// (T) value, not M's raw (T-5s) clock.
-	//
-	// L attaches in front of that record, so its offset has to be captured
-	// after M's own downlinked command has landed: the clock assertion above
-	// is applied BEFORE the ingest in the same poll, so without this wait the
-	// two records could take either order and L would be attached past the one
-	// it is waiting for.
+	// M now queues a command under L's mount and stamps now_ms from its corrected
+	// clock (T), not its raw T-5s. L attaches in front of that record, so its offset
+	// is captured after M's own command from the root has landed; the clock is
+	// applied before ingest in the same poll, so the two could land in either order.
 	waitFor(t, "mid to have ingested the root's command", 5*time.Second, func() bool {
 		return ms.NextOffset("commands") > 1
 	})
@@ -152,10 +136,8 @@ func TestThreeLevelChainTelescopesToRootClock(t *testing.T) {
 	}
 }
 
-// TestNeverSyncedNodeServesOwnWallClockOverRepl is the repl-surface
-// companion to clock.TestNeverSyncedNonRootServesOwnWallClock: a non-root
-// engine that has never received a /downlink or /replicate response reports
-// its own raw wall clock as AuthoritativeNow (design §2.1, "best effort").
+// TestNeverSyncedNodeServesOwnWallClockOverRepl: a non-root engine that never
+// received a response reports its raw wall clock as AuthoritativeNow.
 func TestNeverSyncedNodeServesOwnWallClockOverRepl(t *testing.T) {
 	raw := time.UnixMilli(4_000_000_000_000)
 	clk := clock.New(false, func() time.Time { return raw })

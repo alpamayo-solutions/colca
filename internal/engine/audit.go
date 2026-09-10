@@ -11,9 +11,9 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-// AuditDenial is the safe, deliberately small input to Colca's internal audit
-// writer. Callers pass identifiers and allow-listed context only; credentials,
-// request bodies and arbitrary headers have no field through which to enter.
+// AuditDenial is the input to the internal audit writer. It only has fields for
+// identifiers and allow-listed context, so credentials and request bodies cannot
+// get in.
 type AuditDenial struct {
 	Operation  string
 	ReasonCode string
@@ -33,9 +33,8 @@ func newAuditID(now time.Time) string {
 	return ulid.MustNew(ulid.Timestamp(now), rand.Reader).String()
 }
 
-// RecordDenial appends directly to the audit stream. It intentionally does not
-// call a public Ingest* method: an audit failure must never recurse through the
-// same authorization path whose denial is being recorded.
+// RecordDenial appends straight to the audit stream, bypassing the Ingest*
+// methods, so an audit failure cannot recurse through the path that denied.
 func (e *Engine) RecordDenial(d AuditDenial) error {
 	if d.ActorKind == "" {
 		d.ActorKind = "anonymous"
@@ -73,11 +72,8 @@ func (e *Engine) RecordDenial(d AuditDenial) error {
 		return e.auditFailure(d, fmt.Errorf("encode audit event: %w", err))
 	}
 	topic := uns.Prefix() + "_AuditEvent/" + e.cfg.ULID + "/_colca/audit/" + eventID
-	// store.ErrRecordTooLarge here is deliberately NOT counted as
-	// RecordRejected: that metric means an INGRESS refusal, one with an
-	// external author for the door to answer 4xx to. An audit record is
-	// engine-authored, not ingress, and its write failure is already
-	// counted below by auditFailure's AuditWriteFailure.
+	// An oversize audit record is not counted as RecordRejected, which is for
+	// ingress refusals; auditFailure counts it below.
 	first, _, err := e.store.Append("audit", []store.Record{{
 		Topic: topic, Payload: raw, TS: now, WrittenBy: e.cfg.ULID,
 		ActorID: d.ActorID, ActorLabel: d.ActorLabel, ActorKind: d.ActorKind,

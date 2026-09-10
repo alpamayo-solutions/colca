@@ -8,10 +8,7 @@ import (
 )
 
 // authzVectorPath is the golden dataset for the Keycloak authorization objects
-// a grant is made of (architecture principle 2, necessary duplication -- the
-// same mechanism plugins/uns uses for the topic grammar and the slot
-// vocabulary). One checked-in file that every native copy of this vocabulary
-// answers to: this package reads it, and every tool that writes grants into
+// grants are made of. This package and every tool that writes grants into
 // Keycloak must agree with it.
 const authzVectorPath = "../../contracts/src/colca_data_contracts/vectors/authz_objects.json"
 
@@ -37,11 +34,8 @@ func loadAuthzVectors(t *testing.T) authzVectors {
 	return vectors
 }
 
-// Vocabulary pin (architecture principle 2: one owner per fact). Neither Python
-// side can import this package and it cannot import them, so a scope renamed on
-// one side would otherwise show up only as a grant that silently stops
-// compiling. With this pin, renaming it here fails until the vectors move, and
-// moving the vectors fails the two Python suites until they move too.
+// The scope vocabulary must match the golden vectors, which the Python suites
+// check too, so a rename on one side fails until every side moves.
 func TestTheAuthzVocabularyMatchesTheGoldenVectors(t *testing.T) {
 	vectors := loadAuthzVectors(t)
 
@@ -63,9 +57,7 @@ func TestTheAuthzVocabularyMatchesTheGoldenVectors(t *testing.T) {
 	}
 }
 
-// The constants above are only worth pinning if the objects BUILT from them
-// carry the same values -- a right constant behind a wrong payload is the drift
-// this vector exists to catch.
+// The objects built from the constants must carry the same values.
 func TestTheResourceThisPackageAuthorsCarriesTheGoldenVocabulary(t *testing.T) {
 	vectors := loadAuthzVectors(t)
 

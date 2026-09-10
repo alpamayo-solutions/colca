@@ -16,9 +16,8 @@ import (
 	"time"
 )
 
-// jwk is the subset of RFC 7517 colca understands: RSA (n, e) and EC P-256
-// (crv, x, y) signature keys. Everything else is skipped — an unusable key in
-// the document must not fail the usable ones.
+// jwk is the subset of RFC 7517 colca understands: RSA and EC P-256 signature
+// keys. Other keys are skipped so they cannot break the usable ones.
 type jwk struct {
 	Kty string `json:"kty"`
 	Use string `json:"use"`
@@ -34,9 +33,8 @@ type jwks struct {
 	Keys []jwk `json:"keys"`
 }
 
-// parseJWKS converts a JWKS document into kid → public key. Unknown ktys and
-// non-sig keys are skipped; a document yielding ZERO usable keys is an error
-// (a verifier with no keys can only reject, better to say why).
+// parseJWKS maps kid to public key and skips unusable keys. A document with no
+// usable key is an error.
 func parseJWKS(raw []byte) (map[string]crypto.PublicKey, error) {
 	var doc jwks
 	if err := json.Unmarshal(raw, &doc); err != nil {

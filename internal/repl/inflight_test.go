@@ -11,22 +11,12 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
-// The repl door must run every request inside the in-flight tracker its owner
-// installs, because Stop closes connections instead of draining them: without
-// this, a handler is still inside ApplyReplicated (or writing an audit denial)
-// when the node closes Pebble, and Pebble panics on use after close. A hub
-// applies child batches continuously, so the window is not theoretical.
-//
-// The tracker is the node's WaitGroup middleware (node.trackInflight), handed
-// down through SetInflightTracker. What this test pins is the contract that
-// makes that wiring worth anything: the wrap is OUTSIDE both the rate limiter
-// and authentication, so a request is counted for its whole life at this door
-// — including a rejected one, which still writes an audit denial to the store
-// and is therefore exactly as dangerous to close underneath.
-//
-// Ordering is what is asserted, not just a count: the tracker records "before"
-// on the way in and "after" on the way out, and a real response body proves
-// the handler ran between them.
+// Every repl request must run inside the in-flight tracker the node installs,
+// because Stop closes connections instead of draining them: otherwise a handler
+// could still be in ApplyReplicated, or writing an audit denial, when Pebble
+// closes. The tracker wraps outside the rate limiter and authentication, so a
+// rejected request counts too. The test checks order, not just a count:
+// "before" on the way in, "after" on the way out, and a real response between.
 func TestEveryReplRequestRunsInsideTheInstalledInflightTracker(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))

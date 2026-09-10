@@ -1,8 +1,6 @@
-// Data-model binding through a real node (data-model binding design §5/§6):
-// a connector publishes its catalogue at the child, an operator issues
-// signal/autobind at the PARENT, the child executes it and the resulting
-// _Signal records replicate back up. Everything a person, a preprovisioned
-// model file and the lifecycle trigger would do arrives here as this one verb.
+// Data-model binding through a real tree: a connector publishes its catalogue at
+// the child, an operator issues signal/autobind at the parent, the child
+// executes it, and the _Signal records replicate back up.
 package tests
 
 import (
@@ -23,9 +21,7 @@ func bindingBundle(t *testing.T) string {
 	t.Helper()
 	str := map[string]any{"type": "string", "minLength": 1}
 	return bundleFixture(t, "binding", map[string]any{
-		// The real shape, not the skew fixture's placeholder: id + name are what
-		// a signal must carry, and data_tag is the binding — the tag's own
-		// identity, not a connector (design §6).
+		// The real shape: id and name are required, and data_tag is the binding.
 		"_Signal": map[string]any{"class": "entity", "tombstone": true,
 			"schema": map[string]any{"type": "object",
 				"properties": map[string]any{
@@ -54,11 +50,8 @@ func bindingBundle(t *testing.T) string {
 }
 
 // enrollMachineAt places an element at mount and enrolls a machine key there,
-// named ulid (autobind's tests reuse the ulid as a human-readable name — real
-// deployments mint a ULID and name separately), with an explicit write: grant
-// over its own zone — a machine gets no implicit write (auth §5), so a
-// connector that will publish its catalogue needs one just as a real
-// deployment's would.
+// named ulid, with an explicit write grant over its own zone so it can publish
+// its catalogue.
 func enrollMachineAt(t *testing.T, n *node.Node, ulid, pubkey, mount string) {
 	t.Helper()
 	element := authtest.Place(t, n.Engine, mount)
@@ -130,9 +123,8 @@ func TestAutobindIssuedAtTheParentBindsAtTheChild(t *testing.T) {
 	}
 	defer child.Stop()
 
-	// A connector enrolls at the child and publishes its catalogue — one
-	// record, the whole discovery result, at the topic its own entry computes
-	// to: node/mount/name (design §6), not a path it gets to choose.
+	// A connector enrolls at the child and publishes its catalogue at the topic its
+	// entry computes: node, mount, name.
 	conn := authtest.NewMachine(t, "opcua-1")
 	enrollMachineAt(t, child, "opcua-1", conn.Pubkey, "opcua-1")
 	c := machine(t, child.MQTTAddr, conn)
@@ -164,8 +156,7 @@ func TestAutobindIssuedAtTheParentBindsAtTheChild(t *testing.T) {
 		if payload["data_tag"] == "" {
 			t.Errorf("%s: binding not recorded: %v", topic, payload)
 		}
-		// Minted through the same port every other identity in this system
-		// uses — a ULID, 26 Crockford base32 characters.
+		// Minted as a real ULID, 26 Crockford base32 characters.
 		if id, _ := payload["id"].(string); len(id) != 26 {
 			t.Errorf("%s: signal id = %q, want a 26-character ULID", topic, id)
 		}
@@ -208,10 +199,8 @@ func TestAutobindWithoutACatalogueAcksConflict(t *testing.T) {
 	}
 	defer n.Stop()
 
-	// The connector is enrolled — this node knows who it is, by name — but has
-	// published nothing yet: a retry after it does will succeed, so this is a
-	// conflict with the current state, not an unknown identity (that case is
-	// TestAutobindRefusesAConnectorThisNodeDoesNotHold at the unit level).
+	// The connector is enrolled but has not published yet, so this conflicts with
+	// the current state, and a retry after publishing succeeds.
 	b, err := json.Marshal(map[string]any{"ulid": "never-seen", "kind": "local", "name": "never-seen"})
 	if err != nil {
 		t.Fatal(err)

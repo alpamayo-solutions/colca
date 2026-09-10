@@ -7,21 +7,11 @@ import (
 	"github.com/cockroachdb/pebble/v2"
 )
 
-// Compaction for state streams whose value is the LATEST record per topic, not
-// the history of them (definition-stream design §6).
-//
-// This is NOT pruning and cannot reuse it. Prune deletes a contiguous prefix
-// [LWM, upTo) and moves the low-water mark, which is the right shape for a
-// stream where the oldest records are the least useful. A definitions stream has
-// no such gradient: the record that matters is whichever one came last for its
-// topic, and it may sit anywhere. Compaction therefore deletes SCATTERED
-// offsets and leaves the LWM alone.
-//
-// Holes are fine and are deliberately NOT reported as gaps. A pruned metric is
-// information nobody will ever see again, which is why §6.3 makes the system say
-// so. A compacted definition is information that still exists — in the record
-// that superseded it, further along the same stream. Nothing was lost, so
-// nothing is announced.
+// Compaction for streams whose value is the latest record per topic rather than
+// their history. Unlike Prune it deletes scattered offsets and leaves the LWM
+// alone, because the record that matters is whichever came last for its topic.
+// The holes are not reported as gaps: a compacted definition still exists in the
+// record that superseded it.
 
 // CompactStats reports what one compaction pass removed.
 type CompactStats struct {
@@ -30,25 +20,16 @@ type CompactStats struct {
 	Bytes      uint64 // storage reclaimed
 }
 
-// Compact removes records the stream no longer needs.
+// Compact removes records the stream no longer needs, by two different rules:
 //
-// Two rules, and they are not the same rule:
+//   - A superseded record may go at once. A later record for the same topic sits
+//     further along, so every consumer still ends with the current value.
+//   - A tombstone may only go once every cursor on the stream has passed it. A
+//     consumer behind a dropped tombstone would keep the retracted definition
+//     forever, and for a group that is an authorization thought revoked.
 //
-//   - A SUPERSEDED record may go immediately. A later record for the same topic
-//     carries the truth and sits further along the stream, so every consumer —
-//     including one whose cursor is still behind the dropped record — ends up
-//     with the current value. Dropping it changes what a consumer replays, never
-//     what it concludes.
-//
-//   - A TOMBSTONE may only go once every cursor on this stream has passed it.
-//     A consumer behind a dropped tombstone would never learn the definition was
-//     retracted, and it already holds the value being retracted — so it would
-//     keep a withdrawn group or type forever. For groups that is a live
-//     authorization the operator believes they revoked, which is why this half
-//     is a floor and not an optimisation.
-//
-// The floor is the lowest position of any cursor on the stream, which for a
-// parent is every child's downlink-definitions cursor.
+// The floor is the lowest cursor on the stream; for a parent, that is every
+// child's downlink-definitions cursor.
 func (s *Store) Compact(stream string) (CompactStats, error) {
 	var st CompactStats
 	s.mu.Lock()

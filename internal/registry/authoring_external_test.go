@@ -1,9 +1,5 @@
-// An external test package (registry_test, not registry) because it wires a
-// real engine.Engine alongside a real registry.Manager, and internal/engine
-// imports internal/registry — an internal test file augmenting registry
-// itself cannot also import something that imports registry back (Go's
-// import-cycle rule for test binaries), even though production code has no
-// such cycle (engine depends on registry; registry never depends on engine).
+// An external test package, because it wires a real engine next to a real
+// registry and engine imports registry.
 package registry_test
 
 import (
@@ -18,24 +14,10 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// TestALocalServiceAndACatalogueTagAuthorTheSameElementsThroughOneWalk pins
-// architecture principle 1 against a REAL store: registry.Manager.Register (a
-// local service's declared mount) and a catalogue tag's own meta.element
-// (ConfigExec.bindCatalogue) must converge on the identical element at a
-// path, never mint two. This uses the "element/author" _CmdConfigure verb
-// directly to stand in for bindCatalogue's own call — bindCatalogue reaches
-// the exact same ConfigExec.authorElementAt this verb calls (proven in
-// plugins/uns's exec_configure_test.go
-// TestATagsMetaElementAuthorsMissingSegmentsAndReusesExisting); publishing a
-// real _DataTags catalogue here would need a loaded schema bundle the floor
-// validator does not carry, which is unrelated setup weight for what this
-// test exists to pin: the cross-package convergence, not the catalogue
-// contract.
-//
-// Both orders are exercised — a/b/c authored by the registry first and
-// reused by the verb, x/y/z authored by the verb first and reused by the
-// registry — because "one walk, not two" must hold whichever caller gets
-// there first.
+// A local service's declared mount and a catalogue tag's meta.element must
+// resolve to the same element at a path, never two. The "element/author" verb
+// stands in for bindCatalogue, which calls the same authorElementAt. Both orders
+// are covered, since either caller may get there first.
 func TestALocalServiceAndACatalogueTagAuthorTheSameElementsThroughOneWalk(t *testing.T) {
 	st, err := store.Open(t.TempDir())
 	if err != nil {
@@ -88,9 +70,7 @@ func TestALocalServiceAndACatalogueTagAuthorTheSameElementsThroughOneWalk(t *tes
 			verbID, registryEntry.Element)
 	}
 
-	// The verb authors x/y/z first (standing in for a catalogue tag's own
-	// meta.element); a local service later declaring the SAME mount must
-	// reuse it, not mint a second one.
+	// The verb authors x/y/z first; a service declaring the same mount must reuse it.
 	verbFirstID := author("x/y/z")
 	catalogueFirstEntry, err := reg.Register("svc-catalogue-first", "x/y/z")
 	if err != nil {

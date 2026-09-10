@@ -13,9 +13,9 @@ var siteEdge = uns.Ancestry{
 	{Element: "01HEDGE1", Name: "edge1"},
 }
 
-// The node's position (id-grants design §4): unknown until taught, persisted so
-// a restart while the parent is unreachable keeps answering human grants. The
-// prefix is rendered from it and is never itself stored.
+// The node's position is unknown until taught and then persisted, so a restart
+// while the parent is unreachable still answers human grants. The prefix is
+// rendered from it, never stored.
 func TestEngineAncestryLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	s, err := store.Open(dir)
@@ -41,8 +41,7 @@ func TestEngineAncestryLifecycle(t *testing.T) {
 		t.Fatalf("re-teach changed value: (%q, %v)", p, ok)
 	}
 
-	// Persistence: a new engine over the SAME store knows where it sits, with
-	// the identities intact — not just the rendered path.
+	// A new engine over the same store knows its position, identities included.
 	s.Close()
 	s2, err := store.Open(dir)
 	if err != nil {
@@ -58,16 +57,15 @@ func TestEngineAncestryLifecycle(t *testing.T) {
 		t.Fatalf("prefix after restart = %q, want site1/edge1", p)
 	}
 
-	// The root's empty chain is a KNOWN value, not absence.
+	// The root's empty chain is a known value, not absence.
 	e2.SetAncestry(uns.Ancestry{})
 	if p, ok := e2.Prefix(); !ok || p != "" {
 		t.Fatalf("the root's empty position must be known, got (%q, %v)", p, ok)
 	}
 }
 
-// A node that knows where it sits can answer whether a grant's element reaches
-// it — the question the prefix string could never answer, because a path
-// carries no identity.
+// A node that knows its position can answer whether a grant's element reaches
+// it, which a path string cannot.
 func TestAncestryAnswersWhetherAnElementReachesThisNode(t *testing.T) {
 	s, err := store.Open(t.TempDir())
 	if err != nil {

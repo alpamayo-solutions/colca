@@ -1,10 +1,8 @@
-// Package tokenauth verifies human OIDC tokens OFFLINE (human-authz design
-// §2): signature against a cached JWKS (persisted in the store so restarts
-// while the issuer is unreachable keep validating), issuer/audience/lifetime
-// checks with fixed 60s skew, and extraction of the colca_grants claim into
-// an ephemeral uns.Entry. The issuer is never called on a request path — the
-// only network I/O is the background refresh and the rate-limited
-// refresh-on-unknown-kid.
+// Package tokenauth verifies OIDC tokens offline: the signature against a JWKS
+// cached in the store (so restarts work while the issuer is down), issuer,
+// audience and lifetime with 60s skew, then the grants claim into a uns.Entry.
+// The only network calls are the periodic refresh and a rate-limited refresh on
+// an unknown kid.
 package tokenauth
 
 import (
@@ -23,7 +21,7 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// Reject reasons — EXACT metric label values (design §7).
+// Reject reasons, used verbatim as metric labels.
 const (
 	ReasonBadToken = "bad_token" // malformed, bad signature, wrong alg, unknown kid after re-fetch
 	ReasonExpired  = "expired"   // exp passed or nbf in the future (±60s skew)
@@ -33,9 +31,8 @@ const (
 
 const (
 	defaultRefresh = time.Hour
-	// unknownKidMinInterval rate-limits the synchronous re-fetch an unknown
-	// kid triggers (§2.2): a garbage-token flood must not become an outbound
-	// request flood.
+	// unknownKidMinInterval rate-limits the refetch an unknown kid triggers, so a
+	// flood of bad tokens cannot turn into a flood of requests.
 	unknownKidMinInterval = 5 * time.Minute
 	clockSkew             = 60 * time.Second
 )
@@ -79,10 +76,8 @@ type Verifier struct {
 	keys      map[string]crypto.PublicKey
 	lastFetch time.Time // last unknown-kid-triggered fetch attempt (rate limit)
 
-	// groupsIdx resolves a token's group ids to grants. Late-bound: the index
-	// is a projection of records the engine holds, and the verifier is built
-	// before the engine. Nil until wired, which resolves every group to nothing
-	// — the fail-closed direction.
+	// groupsIdx resolves a token's group ids to grants. It is wired once the engine
+	// exists; until then groups grant nothing.
 	groupsMu  sync.RWMutex
 	groupsIdx *uns.GroupIndex
 	patIdx    *uns.PersonalAccessTokenIndex
@@ -115,9 +110,8 @@ func (v *Verifier) personalAccessTokens() *uns.PersonalAccessTokenIndex {
 	return v.patIdx
 }
 
-// New builds a verifier and loads the persisted JWKS if one exists. NO
-// network happens here — the first fetch is Run's job (or the first unknown
-// kid). A node starting offline with a persisted JWKS is fully functional.
+// New builds a verifier and loads the persisted JWKS, without network access. A
+// node that starts offline with a persisted JWKS works.
 func New(cfg Config, st *store.Store, m Metrics) (*Verifier, error) {
 	if cfg.Issuer == "" || cfg.Audience == "" || cfg.JWKSURL == "" {
 		return nil, fmt.Errorf("tokenauth: issuer, audience and jwks_url are all required")
@@ -135,8 +129,7 @@ func New(cfg Config, st *store.Store, m Metrics) (*Verifier, error) {
 	if raw := st.JWKSGet(); raw != nil {
 		keys, err := parseJWKS(raw)
 		if err != nil {
-			// Fail-loud: a corrupt persisted document would silently lock every
-			// human out until the next successful fetch — name it instead.
+			// A corrupt persisted document would silently lock every human out; fail loudly.
 			return nil, fmt.Errorf("tokenauth: persisted JWKS is corrupt: %w", err)
 		}
 		v.keys = keys
@@ -145,9 +138,8 @@ func New(cfg Config, st *store.Store, m Metrics) (*Verifier, error) {
 	return v, nil
 }
 
-// Run refreshes the JWKS on the configured cadence until stop closes. The
-// first refresh happens immediately (a fresh node needs keys before the
-// first human connects).
+// Run refreshes the JWKS on the configured cadence until stop closes, starting
+// immediately.
 func (v *Verifier) Run(stop <-chan struct{}) {
 	v.refresh()
 	t := time.NewTicker(v.cfg.Refresh)
@@ -162,8 +154,8 @@ func (v *Verifier) Run(stop <-chan struct{}) {
 	}
 }
 
-// refresh fetches, parses, persists and swaps the key set. A failure keeps
-// the current keys — cached keys are only ever REPLACED by a good fetch.
+// refresh fetches, parses, persists and swaps the key set. On failure the current
+// keys stay.
 func (v *Verifier) refresh() {
 	raw, err := fetchJWKS(v.client, v.cfg.JWKSURL)
 	if err != nil {
@@ -200,9 +192,8 @@ func (v *Verifier) notifyKeyCount() {
 	}
 }
 
-// keyFor resolves a kid. On a miss it performs ONE rate-limited synchronous
-// re-fetch (§2.2 refresh-on-unknown-kid: an unknown kid IS the rotation
-// signal) and retries the lookup once.
+// keyFor resolves a kid. On a miss it refetches once, rate-limited, since an
+// unknown kid usually means the keys were rotated.
 func (v *Verifier) keyFor(kid string) (crypto.PublicKey, bool) {
 	v.mu.RLock()
 	k, ok := v.keys[kid]
@@ -226,8 +217,8 @@ func (v *Verifier) keyFor(kid string) (crypto.PublicKey, bool) {
 	return k, ok
 }
 
-// Verify checks the token per §2.2 order and returns the Verified identity,
-// or a reject reason from the Reason* vocabulary.
+// Verify checks the token and returns the verified identity, or a reason from
+// the Reason* vocabulary.
 func (v *Verifier) Verify(token string) (*Verified, string, error) {
 	return v.VerifyForScope(token, "")
 }
@@ -307,14 +298,9 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		return nil, ReasonBadToken, fmt.Errorf("token rejected: unreadable exp")
 	}
 	grants := stringList(claims["colca_grants"])
-	// No translation: a grant names a system element, and an element id means
-	// the same thing at every node (id-grants design §4). The frame arithmetic
-	// this used to do at verification is a lookup at decision time now.
-	//
-	// The groups claim is where a human's authority normally comes from
-	// (definition-stream design §8): the token names groups, the node resolves
-	// them against the definitions its parent pushed down. Membership lives in
-	// the identity provider; grants live in the tree.
+	// Grants name system elements, which mean the same at every node, so they are
+	// kept as they are. The groups claim is resolved against the _Group definitions
+	// this node holds: membership lives in the identity provider, grants in the tree.
 	entry, problems, err := uns.TokenEntryWithGroups(sub, grants, stringList(claims["groups"]), v.groups())
 	if err != nil {
 		return nil, ReasonBadToken, fmt.Errorf("token rejected: %w", err)

@@ -1,11 +1,7 @@
-// The read half of a edit command: one consistent view of everything an
-// intent may touch, plus the optimistic-concurrency check against it.
-//
-// Every edit command carries expected_versions, and every version is
-// checked against this single snapshot before anything is composed. That is
-// what makes a edit apply atomic in the sense the UI needs: the versions a
-// browser saw are the versions the command is judged against, and a concurrent
-// edit is a 409 rather than a lost update.
+// The read side of an edit command: one consistent snapshot of everything an
+// intent may touch, and the optimistic version check. Every expected version
+// is checked against this snapshot before anything is composed, so a
+// concurrent edit is a 409, not a lost update.
 
 package uns
 

@@ -39,10 +39,8 @@ func mochiRecord(at time.Time, msg string, attrs ...slog.Attr) slog.Record {
 	return record
 }
 
-// A flood of one line — mochi's per-occurrence "client store quota reached"
-// — must reach the log once per window, and the first line of the next
-// window must say how many were swallowed. Without this bound a single slow
-// QoS>0 subscriber writes the broker's whole log for it.
+// A flood of one line logs once per window, and the next window's first line says
+// how many were swallowed.
 func TestARepeatedMochiLineLogsOncePerWindowWithACount(t *testing.T) {
 	sink := &capturingHandler{}
 	handler := newMochiLogHandler(sink)

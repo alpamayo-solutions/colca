@@ -81,8 +81,7 @@ func apiCall(t *testing.T, n *Node, method, path string, body any) (int, map[str
 	return resp.StatusCode, out
 }
 
-// mustKVScan is KVScan with the error handled the only way a test fixture
-// can: fail loud (resources design §8).
+// mustKVScan is KVScan that fails the test on error.
 func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
 	t.Helper()
 	entries, err := st.KVScan(prefix)
@@ -135,8 +134,7 @@ func TestStartStopResolvesAddressesAndReleasesPorts(t *testing.T) {
 		KeyFile:  keyFile,
 		API:      config.API{Addr: "127.0.0.1:0", LocalAddr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
-		// Children are enrolled at runtime, so a repl address ALWAYS produces
-		// a listener — a child enrolled later must be able to connect.
+		// Children are enrolled at runtime, so a repl address always opens a listener.
 		Repl: config.Endpoint{Addr: "127.0.0.1:0"},
 	}
 	n := mustStart(t, cfg)
@@ -170,9 +168,8 @@ func TestStartStopResolvesAddressesAndReleasesPorts(t *testing.T) {
 		t.Errorf("/healthz ulid = %v, want n1", health["ulid"])
 	}
 
-	// The local API door is plain HTTP, no TLS, no credential (local-service-
-	// trust design §4) — a plain http.Get proves that end to end, not merely
-	// that Handler(local=true) behaves correctly in isolation.
+	// The local door is plain HTTP with no credential; a plain http.Get proves it
+	// end to end.
 	localResp, err := http.Get("http://" + n.LocalAPIAddr + "/healthz")
 	if err != nil {
 		t.Fatalf("GET local /healthz: %v", err)
@@ -392,12 +389,10 @@ func publishMQTT(t *testing.T, cl paho.Client, topic, payload string) {
 	}
 }
 
-// TestRestartRepopulatesRetainedFromKV pins the restart half of the "retained
-// set ≡ KV view" contract: mochi's retained store is in-memory, so a restarted
-// node must re-seed it from the KV projection — a fresh subscriber connecting
-// after a restart gets the current value of every state path with no new
-// publish, commands are NOT replayed, and (the seed-before-Serve ordering) a
-// value published right after the restart wins over the stale snapshot.
+// TestRestartRepopulatesRetainedFromKV: mochi's retained store is in memory, so
+// a restarted node reseeds it from KV. A fresh subscriber after the restart gets
+// every state path and no commands, and a value published right after the
+// restart wins over the snapshot.
 func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 	base := t.TempDir()
 	keyFile := filepath.Join(base, "n1.key")
@@ -418,14 +413,10 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 	authtest.EnrollAt(t, first.Registry, first.Engine, m1machine, "m1", "write:"+authtest.ElementID("m1")+"/#")
 	authtest.EnrollAt(t, first.Registry, first.Engine, obsMachine, "obs", "read:#")
 	m1 := connectMQTT(t, first.MQTTAddr, "m1-pre", m1machine)
-	// Two data topics: "pressure" is never touched again — only the KV
-	// re-seed can bring it back, so it is the assertion the mutation check
-	// bites on. "temp" gets a FRESH value right after the restart — it pins
-	// the seed-before-Serve ordering instead.
-	//
-	// A _Signal deliberately occupies the exact same node/path as pressure.
-	// Both are retained state, so the restart must restore both contracts; a KV
-	// key that omits the contract loses the signal as soon as the metric lands.
+	// "pressure" is never published again, so only the reseed can restore it;
+	// "temp" gets a new value after the restart to check the reseed runs before
+	// Serve. A _Signal on the same path must survive too: a KV key without the
+	// contract would lose it.
 	if _, err := first.Engine.IngestAdmin(
 		"colca/v1/_Signal/n1/m1/pressure",
 		[]byte(`{"id":"01HSIGPRESSURE","name":"pressure"}`),
@@ -451,9 +442,7 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 	}
 	t.Cleanup(second.Stop)
 
-	// Seed-ordering assertion (the race a post-Serve replay would open): a
-	// FRESH value published immediately after the restart must win over the
-	// pre-restart snapshot value in the retained set.
+	// A value published right after the restart must win over the snapshot.
 	m1b := connectMQTT(t, second.MQTTAddr, "m1-post", m1machine)
 	publishMQTT(t, m1b, "colca/v1/_Metric/n1/m1/temp", `{"v":2}`)
 
@@ -474,9 +463,8 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 		t.Fatalf("mqtt subscribe colca/#: %v", err)
 	}
 
-	// Drain until both metrics and the same-path signal arrived (deadline-bounded),
-	// then keep draining briefly: if a command had been wrongly retained it
-	// would be replayed in the same on-subscribe burst.
+	// Drain until both metrics and the signal arrived, then briefly longer: a
+	// wrongly retained command would arrive in the same burst.
 	seen := map[string]received{}
 	deadline := time.After(10 * time.Second)
 	for len(seen) < 3 {
@@ -524,12 +512,9 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 	}
 }
 
-// TestRetainedSeedStartupCostTenThousandPaths bounds the availability cost of
-// the retained re-seed: Start replays one in-memory mochi publish per KV path
-// before the API listener opens, so /healthz is gated on it. At the 10k-path
-// cardinality the benchmarks anticipate this must stay far below a second;
-// the generous bound only catches pathological regressions (per-entry fsyncs,
-// accidental O(n²)). The measured number is logged.
+// TestRetainedSeedStartupCostTenThousandPaths bounds the reseed cost: Start
+// replays one publish per KV path before the API opens. The bound only catches
+// pathological regressions; the measured time is logged.
 func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 	const paths = 10_000
 	base := t.TempDir()
@@ -573,11 +558,8 @@ func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 		t.Fatalf("node.Start with %d KV paths took %v — the retained re-seed is delaying readiness pathologically", paths, elapsed)
 	}
 
-	// The reseed count is exported on /metrics (tokenless), as a startup-cost
-	// witness: it must equal the number of seeded KV paths, plus the one
-	// record every node retains from its first start — its own `_Node`,
-	// which it authors the moment it learns its position (at the root, that
-	// is startup itself).
+	// The reseed count equals the seeded paths plus the node's own _Node record,
+	// written at startup on the root.
 	resp, err := httpsClient.Get("https://" + n.APIAddr + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
@@ -594,9 +576,8 @@ func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 		t.Fatalf("/metrics must report %q after the seed, got:\n%s", want, body)
 	}
 
-	// The timing is only meaningful if the seed actually happened: spot-check
-	// one retained path on a fresh subscriber. Enrolled AFTER Start, so the
-	// reseed count above stays exactly the seeded path count.
+	// Check that the seed really reached the broker. The observer is enrolled after
+	// Start, so it does not change the reseed count.
 	obsMachine := authtest.NewMachine(t, "obs")
 	authtest.EnrollAt(t, n.Registry, n.Engine, obsMachine, "obs", "read:#")
 	obs := connectMQTT(t, n.MQTTAddr, "obs-cost", obsMachine)
@@ -717,11 +698,9 @@ func TestParentChildUplinkThroughNodes(t *testing.T) {
 	}
 }
 
-// The retention pruner runs inside the node lifecycle: it prunes on its
-// cadence, Stop never closes the store under a running cycle (Pebble would
-// panic on use-after-Close), and a restart on the same data dir picks the
-// persisted LWM back up. Stop fires while the 5ms-cadence pruner is mid-flight
-// by construction — this is the restart-style shutdown-safety test.
+// The pruner runs inside the node's lifecycle: it prunes on schedule, Stop never
+// closes the store under a running cycle, and a restart picks up the persisted
+// low-water mark. Stop runs while the 5ms pruner is active.
 func TestRetentionPrunerRunsInNodeLifecycleAndRestartsSafely(t *testing.T) {
 	base := t.TempDir()
 	keyFile := filepath.Join(base, "n-ret.key")
@@ -773,11 +752,8 @@ func TestRetentionPrunerRunsInNodeLifecycleAndRestartsSafely(t *testing.T) {
 	n2.Stop()
 }
 
-// Retention design §7.1 "symmetry with the reseed": a tombstoned path has no KV
-// key, so the restart reseed replays nothing for it — with ZERO reseed changes.
-// The inverse of TestRestartRepopulatesRetainedFromKV: after tombstone +
-// restart, a fresh subscriber gets the surviving path's retained value but the
-// retired path stays gone, and the KV view agrees.
+// A tombstoned path has no KV key, so the reseed does not bring it back after a
+// restart, while the surviving path is still retained.
 func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
 	base := t.TempDir()
 	keyFile := filepath.Join(base, "n1.key")
@@ -839,9 +815,8 @@ func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
 		t.Fatalf("mqtt subscribe colca/#: %v", err)
 	}
 
-	// The surviving path must replay retained; the retired path must never
-	// arrive. The temp arrival proves the reseed ran, so the 500ms grace after
-	// it is a real absence check, not a vacuous timeout.
+	// The surviving path proves the reseed ran, so the grace period after it is a
+	// real check that the retired path stays away.
 	deadline := time.After(10 * time.Second)
 	for {
 		select {
@@ -873,10 +848,8 @@ graceDrain:
 	}
 }
 
-// Retention design §7.1 step 1: the tombstone record replicates upward like any
-// record, and the parent's ApplyReplicated retires the path the same way — KV
-// key deleted, retained message cleared. Full black-box fixture: child broker →
-// child store → uplink → parent mount-insert → parent KV + parent bus.
+// A tombstone replicates upward and retires the path at the parent too: the KV
+// key is deleted and the retained message cleared.
 func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 	base := t.TempDir()
 	parentKey := filepath.Join(base, "parent.key")
@@ -894,8 +867,7 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 		Repl:     config.Endpoint{Addr: "127.0.0.1:0"},
 	}
 	parent := mustStart(t, parentCfg)
-	// Entry-before-connect: the child's key and the parent-bus observer are
-	// runtime registry state, enrolled before the child node starts.
+	// The child's key and the observer are enrolled before the child starts.
 	authtest.EnrollNodeAt(t, parent.Registry, parent.Engine, "n-child", childID.PublicHex(), "child1")
 	obsMachine := authtest.NewMachine(t, "obs")
 	authtest.EnrollAt(t, parent.Registry, parent.Engine, obsMachine, "obs", "read:#")
@@ -939,11 +911,9 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 	waitParentKV("child1/m1/temp", 1, "setup: metric never replicated up")
 	waitParentKV("child1/m1/keep", 1, "setup: sibling never replicated up")
 
-	// A live observer on the PARENT bus, subscribed before the tombstone: its
-	// receipt of the empty-payload clear is the synchronization point — mochi
-	// updates its retained store before delivering to subscribers, so once the
-	// clear arrives the fresh-subscriber absence check below cannot race the
-	// parent's KV-apply → bus-mirror window.
+	// The live observer receiving the empty-payload clear is the sync point: mochi
+	// updates its retained store before delivering, so the fresh subscriber check
+	// below cannot race it.
 	type received struct {
 		topic    string
 		payload  string
@@ -1024,13 +994,9 @@ graceDrain:
 	}
 }
 
-// TestAddrFileNamesEveryResolvedDoor pins the contract a subprocess
-// supervisor (chaski.Node) relies on when it configures every door as `:0`:
-// the file appears once the node is up, is complete when it exists, and names
-// the same addresses the node itself resolved — five doors, five distinct
-// ports. The supervisor cannot pick "free" ports itself: bind-and-release
-// hands the same port to consecutive callers on Linux, which put the SDK's
-// MQTT traffic on its own HTTP door on CI.
+// TestAddrFileNamesEveryResolvedDoor: a supervisor that configures every door
+// as ":0" gets a complete file naming the resolved addresses, five doors on
+// five distinct ports.
 func TestAddrFileNamesEveryResolvedDoor(t *testing.T) {
 	base := t.TempDir()
 	keyFile := filepath.Join(base, "n-addr.key")

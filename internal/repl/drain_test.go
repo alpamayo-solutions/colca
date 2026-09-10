@@ -14,12 +14,10 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// Full lifecycle (move-drain design §3.2 items 1-4): the child stays fully
-// functional while draining (connects, fetches, acks — items 1), a queued
-// command is delivered through the live connection, and the drain
-// auto-revokes with outcome "delivered" once a poll observes the queue
-// caught up to its own delivery-floor cursor. A fixed, non-advancing clock
-// keeps "not yet expired" unambiguous throughout.
+// Full lifecycle: the child keeps working while draining, a queued command is
+// delivered over the live connection, and the drain auto-revokes with outcome
+// "delivered" once a poll sees the queue caught up to the child's
+// delivery-floor cursor. A fixed clock keeps every command unexpired.
 func TestDrainLifecycleDeliveredThenAutoRevoke(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -29,7 +27,7 @@ func TestDrainLifecycleDeliveredThenAutoRevoke(t *testing.T) {
 	clk := clock.New(true, func() time.Time { return time.UnixMilli(1_000_000) })
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, clk, childSpec{"n-child", childID.PublicHex(), "child1"})
 	pm := metrics.New(ps, config.Retention{}, clk)
-	preg.SetMetrics(pm) // move-drain design §3.4: colca_drains_active is registry-owned
+	preg.SetMetrics(pm) // the registry owns colca_drains_active
 	srv, addr := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
 	t.Cleanup(srv.Stop)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
@@ -43,9 +41,8 @@ func TestDrainLifecycleDeliveredThenAutoRevoke(t *testing.T) {
 		t.Fatalf("colca_drains_active after Drain = %v, want 1", v)
 	}
 
-	// First poll: the child fetches the queued command. The identity is
-	// still fully valid mid-drain (item 1) — this must succeed exactly like
-	// an ordinary downlink.
+	// The first poll fetches the queued command; the identity is still valid
+	// mid-drain.
 	recs, next, _, err := cl.Downlink(1, 10, 5*time.Second)
 	if err != nil {
 		t.Fatalf("first downlink: %v", err)
@@ -56,45 +53,24 @@ func TestDrainLifecycleDeliveredThenAutoRevoke(t *testing.T) {
 	if next != 2 {
 		t.Fatalf("next = %d, want 2", next)
 	}
-	// Not complete yet: this poll's own CursorAck(after=1) leaves the just
-	// -delivered record still counted as pending by the completion scan
-	// (evaluated BEFORE this poll's records were served) — the child has not
-	// yet come back reporting it consumed them.
+	// Not complete yet: this poll's ack (after=1) still leaves the delivered record
+	// pending, because completion was evaluated before the records were served.
 	if _, ok := preg.Get("n-child"); !ok {
 		t.Fatal("child must still be enrolled after only one poll")
 	}
 
-	// Second poll: after=2 (what the client would send next in real usage)
-	// persists the delivery-floor cursor past the only command, so THIS
-	// poll's completion check (which runs synchronously at the top of the
-	// handler, before the long-poll wait) finds nothing pending and
-	// auto-revokes. The response itself has nothing left to deliver, so it
-	// legitimately rides out the server's full 20s long poll — fired in the
-	// background and left for srv.Stop's cleanup to kill, same pattern as
-	// TestDownlinkPollPersistsChildCursorAndClampsPrune.
+	// The second poll with after=2 moves the delivery floor past the only command,
+	// so this poll's completion check, which runs before the long-poll wait, finds
+	// nothing pending and auto-revokes. The response itself waits out the full long
+	// poll, so it runs in the background and srv.Stop cleans it up.
 	go func() {
 		_, _, _, _ = cl.Downlink(next, 10, 25*time.Second) //nolint:errcheck // fire-and-forget, killed by srv.Stop
 	}()
 
-	// Wait on the LAST thing completion does, not the first. evaluateDrain
-	// revokes and only then calls Metrics.DrainCompleted, which decrements
-	// colca_drains_active, drops the pending series, and increments the
-	// outcome counter — in that order, on the handler's goroutine. That
-	// ordering is deliberate and documented on DrainCompleted itself ("by
-	// the time a caller reaches this method, the registry has already
-	// revoked child"): the revoke is the authoritative kill switch and must
-	// not be made to wait on telemetry, exactly as registry.Revoke fires its
-	// kick/deliver callbacks outside its own lock.
-	//
-	// So waiting on the registry entry disappearing — the first effect —
-	// and then asserting the gauge — the second — is a wait on one
-	// observable and an assertion on another that lags it. It failed in CI
-	// as `colca_drains_active after completion = 1, want 0`.
-	//
-	// The outcome counter is the final statement of DrainCompleted, so
-	// observing it means every earlier effect (the gauge, the pending
-	// series, and the revoke that preceded the whole call) has already
-	// landed. One wait, downstream of everything this test asserts.
+	// Wait on the last thing completion does. evaluateDrain revokes first and then
+	// calls Metrics.DrainCompleted, which updates the gauge, the pending series and
+	// finally the outcome counter. Seeing the counter means everything this test
+	// asserts has landed.
 	waitFor(t, "the drain to be recorded complete once the queue caught up", 5*time.Second, func() bool {
 		return metricstest.Value(t, pm, `colca_drains_completed_total{outcome="delivered"}`) == 1
 	})
@@ -109,12 +85,9 @@ func TestDrainLifecycleDeliveredThenAutoRevoke(t *testing.T) {
 	}
 }
 
-// Expiry-bounded completion (move-drain design §3.2 item 3, "deliver or
-// expire, literally"): a child that never fetches at all still converges —
-// once AuthoritativeNow passes every queued command's expires_at, the drain
-// completes with outcome "expired". clkNow is mutated directly between the
-// two evaluations: single test goroutine, no concurrent tick running, so no
-// synchronization is needed for the closure read.
+// A child that never fetches still converges: once AuthoritativeNow passes
+// every queued command's expires_at, the drain completes with "expired".
+// clkNow is changed directly; nothing else runs concurrently.
 func TestDrainExpiryBoundedCompletion(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -125,7 +98,7 @@ func TestDrainExpiryBoundedCompletion(t *testing.T) {
 	clk := clock.New(true, func() time.Time { return time.UnixMilli(clkNow) })
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, clk, childSpec{"n-child", childID.PublicHex(), "child1"})
 	pm := metrics.New(ps, config.Retention{}, clk)
-	preg.SetMetrics(pm) // move-drain design §3.4: colca_drains_active is registry-owned
+	preg.SetMetrics(pm) // the registry owns colca_drains_active
 	srv, _ := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
 	t.Cleanup(srv.Stop)
 
@@ -136,8 +109,8 @@ func TestDrainExpiryBoundedCompletion(t *testing.T) {
 		t.Fatalf("Drain: %v", err)
 	}
 
-	// The child never polls. Before expiry the tick must find the command
-	// still live and NOT complete the drain.
+	// The child never polls. Before expiry the tick finds the command live and does
+	// not complete the drain.
 	srv.evaluateAllDrains() // simulates one 30s tick, called directly per the pruner test precedent
 	if _, ok := preg.Get("n-child"); !ok {
 		t.Fatal("drain must not complete while the queued command is still live")
@@ -160,12 +133,10 @@ func TestDrainExpiryBoundedCompletion(t *testing.T) {
 	}
 }
 
-// Move-drain design §3.2: "status ... persisted in the r/ entry; survives
-// restart" and "the tick re-evaluates after boot". Simulates a restart by
-// reopening the SAME store with a fresh registry.Manager/Engine/Server
-// (mirroring node.Start's assembly order), then calling evaluateAllDrains
-// once the way RunDrainTicker does before its first real tick — the
-// pre-restart drain (with an already-expired command) must still converge.
+// Drain status is persisted and survives a restart, and the boot tick evaluates
+// it again. The test reopens the same store with a fresh registry, engine and
+// server in node.Start's order and runs evaluateAllDrains once like
+// RunDrainTicker; the drain with an expired command must still complete.
 func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -189,9 +160,8 @@ func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 		if _, ok := preg.Get("n-child"); !ok {
 			t.Fatal("setup: child must still be draining before the simulated restart")
 		}
-		// No completion check ran in this "process" at all (unlike the real
-		// node, which would have a 30s ticker) — the persisted state alone
-		// carries the drain across the restart.
+		// No completion check ran in this "process"; the persisted state alone carries
+		// the drain across the restart.
 		ps.Close()
 	}()
 
@@ -209,7 +179,7 @@ func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 		t.Fatalf("mount after restart = %q %v, want child1", mount, ok)
 	}
 	pm2 := metrics.New(ps2, config.Retention{}, clk)
-	preg2.SetMetrics(pm2) // move-drain design §3.4: colca_drains_active is registry-owned
+	preg2.SetMetrics(pm2) // the registry owns colca_drains_active
 	if v := metricstest.Value(t, pm2, `colca_drains_active`); v != 1 {
 		t.Fatalf("colca_drains_active on the fresh Metrics instance = %v, want 1 (re-derived from the persisted status)", v)
 	}
@@ -230,11 +200,9 @@ func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 	}
 }
 
-// Concurrency safety: a /downlink poll and the periodic tick (or two ticks)
-// can race to evaluate — and complete — the same drain. registry.Revoke is
-// the synchronization point (registry design), so exactly one caller must
-// observe success and record the outcome; the other must see ErrNotEnrolled
-// and log nothing as an error. Run under -race.
+// A /downlink poll and the tick (or two ticks) can race to complete the same
+// drain. registry.Revoke decides: exactly one caller records the outcome, the
+// other sees ErrNotEnrolled and logs no error. Run with -race.
 func TestDrainConcurrentEvaluationCompletesExactlyOnce(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -244,7 +212,7 @@ func TestDrainConcurrentEvaluationCompletesExactlyOnce(t *testing.T) {
 	clk := clock.New(true, func() time.Time { return time.UnixMilli(1_000_000) })
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, clk, childSpec{"n-child", childID.PublicHex(), "child1"})
 	pm := metrics.New(ps, config.Retention{}, clk)
-	preg.SetMetrics(pm) // move-drain design §3.4: colca_drains_active is registry-owned
+	preg.SetMetrics(pm) // the registry owns colca_drains_active
 	srv, _ := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
 	t.Cleanup(srv.Stop)
 
@@ -275,30 +243,25 @@ func TestDrainConcurrentEvaluationCompletesExactlyOnce(t *testing.T) {
 	}
 }
 
-// In a multi-hop tree (root A -> mid B -> leaf C, C
-// draining at B), a command authored ABOVE B — where B's own draining child
-// is invisible — must still be bounced once it relays down through B's
-// downlink-poll loop into engine.IngestDownlink, exactly as if it had been
-// admitted directly at B. Without the fix this reaches B's local commands
-// stream (already in B-local coordinates under C's mount) and C fetches it
-// normally through B's own /downlink door: the "chasing a moving tail"
-// failure §3.2 item 2 exists to prevent, reachable even though the direct
-// client/admin doors are covered.
+// In a tree A -> B -> C with C draining at B, a command authored above B, where
+// C is invisible, must still be rejected when it relays through B's downlink
+// loop into engine.IngestDownlink, as if it had been admitted at B. Otherwise it
+// reaches B's commands stream and C fetches it through B's own door.
 func TestDownlinkRelayRejectsCommandForDrainingGrandchildMount(t *testing.T) {
 	dir := t.TempDir()
 	rootID := mustIdentity(t, filepath.Join(dir, "root.key"))
 	midID := mustIdentity(t, filepath.Join(dir, "mid.key"))
 	leafID := mustIdentity(t, filepath.Join(dir, "leaf.key"))
 
-	// --- Root A: parent of B, has no idea C (B's own child) exists at all.
+	// Root A: parent of B, unaware of C.
 	rs := mustStore(t, filepath.Join(dir, "rdata"))
 	rcfg := &config.Config{ULID: "n-root", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	rreg, reng := nodeParts(t, rs, rcfg, nil, nil, nil, childSpec{"n-mid", midID.PublicHex(), "mid1"})
 	rsrv, raddr := startServer(t, rcfg, reng, rootID, rreg)
 	t.Cleanup(rsrv.Stop)
 
-	// --- Mid B: child of A, parent of C. C is draining HERE, at B — a fact
-	// with no representation anywhere in A's own registry.
+	// Mid B: child of A, parent of C, which is draining here. A's registry knows
+	// nothing of it.
 	ms := mustStore(t, filepath.Join(dir, "mdata"))
 	mcfg := &config.Config{ULID: "n-mid", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	mm := metrics.New(ms, config.Retention{}, nil)
@@ -311,26 +274,21 @@ func TestDownlinkRelayRejectsCommandForDrainingGrandchildMount(t *testing.T) {
 	mStop, mDone := make(chan struct{}), make(chan struct{})
 	go func() { defer close(mDone); RunDownlink(mcl, meng, nil, mStop) }()
 	t.Cleanup(func() { close(mStop); waitForClosed(t, "mid RunDownlink to stop", mDone, 5*time.Second) })
-	// B must be attached before A is given the command: a command already
-	// sitting in A's stream when B first contacts it is pre-attachment and
-	// never relayed (parent-scoped-cursors design §3.2), which would leave this
-	// test racing the handshake.
+	// Attach B before A gets the command: a command already in A's stream at first
+	// contact is never relayed, which would make this test race the handshake.
 	waitForAttached(t, ms, mcl)
 
 	if _, err := mreg.Drain("n-leaf"); err != nil {
 		t.Fatalf("Drain C at B: %v", err)
 	}
 
-	// A admits this without complaint: from A's vantage point it is an
-	// ordinary command addressed somewhere under B's own mount — A's
-	// DrainingMount check only ever sees A's OWN registry, which has no
-	// entry for C at all.
+	// A accepts this: for A it is an ordinary command under B's mount, and A's
+	// registry has no entry for C.
 	mustIngestAdmin(t, reng, "colca/v1/_CmdParam/m1/mid1/leaf1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
 
-	// B's downlink-poll loop fetches it from A (arriving already stripped
-	// to B-local coordinates, path "leaf1/go") and must bounce it at
-	// engine.IngestDownlink — never persisting it into B's own commands
-	// stream, and counting it exactly like the direct-door rejections.
+	// B's downlink loop fetches it from A, already in B's coordinates ("leaf1/go"),
+	// and must reject it at engine.IngestDownlink without storing it, counted like
+	// the direct-door rejections.
 	const rejectedLine = `colca_rejected_publishes_total{reason="draining"}`
 	waitFor(t, "B to relay and reject the command via IngestDownlink", 5*time.Second, func() bool {
 		return metricstest.Value(t, mm, rejectedLine) == 1
@@ -340,15 +298,10 @@ func TestDownlinkRelayRejectsCommandForDrainingGrandchildMount(t *testing.T) {
 	}
 }
 
-// A live, unexpired command addressed to a draining
-// child's mount, never fetched, physically removed by retention BEFORE the
-// drain's own completion predicate ever sees it — the child's own
-// delivery-floor cursor never advanced past it, so this is indistinguishable
-// (from the drain's viewpoint) from the staleness-override scenario: some data this child was owed is now gone. The drain
-// must still terminate (never hang on data that can no longer arrive) but
-// must record outcome "gapped", never "delivered" — the design's own §3.2
-// definition of "delivered" is "fetched-and-acked on the downlink cursor",
-// which a pruned record never was.
+// A live command for a draining child, never fetched, is removed by retention
+// before the drain's completion check sees it. The drain must still end, since
+// the data can no longer arrive, but with outcome "gapped", never "delivered":
+// the command was never fetched and acked.
 func TestDrainCompletesGappedNotDeliveredWhenRetentionPrunesUndeliveredCommand(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -362,20 +315,16 @@ func TestDrainCompletesGappedNotDeliveredWhenRetentionPrunesUndeliveredCommand(t
 	srv, _ := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
 	t.Cleanup(srv.Stop)
 
-	// A live command (expires_at far in the future) for the child's mount,
-	// queued but never fetched — the child's downlink cursor is still at its
-	// never-acked default (1).
+	// A live command for the child's mount, queued but never fetched; the child's
+	// downlink cursor is still at its default of 1.
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
 
 	if _, err := preg.Drain("n-child"); err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
 
-	// Simulate retention (staleness-override or, just as commonly, ordinary
-	// age/size pruning on a stream this never-polled cursor never
-	// protected) physically removing the record before the child ever
-	// fetched it: prune the commands stream past offset 1, directly through
-	// the store, exactly as the pruner itself would commit it.
+	// Retention removes the record before the child fetched it: prune the commands
+	// stream past offset 1 directly through the store, as the pruner would.
 	if n, err := ps.Prune("commands", 2, nil, nil); err != nil || n != 1 {
 		t.Fatalf("setup prune: removed=%d err=%v, want 1 record removed", n, err)
 	}
@@ -396,16 +345,10 @@ func TestDrainCompletesGappedNotDeliveredWhenRetentionPrunesUndeliveredCommand(t
 	}
 }
 
-// A gap and surviving pending
-// work are orthogonal facts, not alternatives. store.Gap only proves the
-// PREFIX [cursor, LWM) is lost — it says nothing about [LWM, next), which
-// can still hold a live, undelivered, unexpired command. The round-1 shape
-// (return gapped=true and skip the scan entirely) would auto-revoke here
-// while that surviving command sits unread — command abandonment, strictly
-// worse than the mislabeling round-1 targeted. The drain must keep waiting
-// on the surviving range exactly as if there were no gap at all, and only
-// once THAT clears does the earlier gap decide the outcome label (gapped,
-// not expired, even though the surviving command's own fate was expiry).
+// A gap and surviving pending work are independent. store.Gap only shows that
+// [cursor, LWM) is lost; [LWM, next) can still hold a live, undelivered command.
+// The drain must keep waiting on that range as if there were no gap, and only
+// once it clears does the earlier gap decide the label: gapped, not expired.
 func TestDrainWaitsOnSurvivingRangeDespiteGapThenCompletesGapped(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -420,10 +363,8 @@ func TestDrainWaitsOnSurvivingRangeDespiteGapThenCompletesGapped(t *testing.T) {
 	srv, _ := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
 	t.Cleanup(srv.Stop)
 
-	// Offset 1: will be pruned (the lost prefix, same setup as the sibling
-	// test above). Offset 2: a SEPARATE live command that SURVIVES the
-	// prune — this is the record round-1's short-circuit would have
-	// silently abandoned.
+	// Offset 1 gets pruned. Offset 2 is a separate live command that survives the
+	// prune, the one a shortcut on the gap would abandon.
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/lost", `{"correlation_id":"c1","expires_at":99999999999}`)
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/survives", `{"correlation_id":"c2","expires_at":1500000}`)
 
@@ -431,15 +372,13 @@ func TestDrainWaitsOnSurvivingRangeDespiteGapThenCompletesGapped(t *testing.T) {
 		t.Fatalf("Drain: %v", err)
 	}
 
-	// Prune only offset 1 — offset 2 survives, unread, in [LWM, next).
+	// Prune only offset 1; offset 2 survives, unread, in [LWM, next).
 	if n, err := ps.Prune("commands", 2, nil, nil); err != nil || n != 1 {
 		t.Fatalf("setup prune: removed=%d err=%v, want 1 record removed", n, err)
 	}
 
-	// A gap exists (cursor 1 < LWM 2) AND a live, undelivered command sits
-	// at offset 2 (expires_at 1500000, clkNow 1000000 — still live). The
-	// drain must NOT complete: the gap does not excuse waiting on real,
-	// currently-live work.
+	// There is a gap (cursor 1 < LWM 2) and a live command at offset 2 (expires_at
+	// 1500000, clkNow 1000000). The drain must not complete.
 	srv.evaluateAllDrains()
 	if _, ok := preg.Get("n-child"); !ok {
 		t.Fatal("the drain must NOT complete while a live command survives past the gap in [LWM, next) — this is the round-2 regression")
@@ -451,11 +390,9 @@ func TestDrainWaitsOnSurvivingRangeDespiteGapThenCompletesGapped(t *testing.T) {
 		t.Fatalf(`colca_drains_completed_total{outcome="gapped"} = %v, want 0 — must not complete yet`, v)
 	}
 
-	// Advance time past the surviving command's expiry and re-evaluate: now
-	// pending clears, and the EARLIER gap decides the outcome label — even
-	// though the surviving record's own fate was expiry, the drain has lost
-	// data it can never account for, so the honest label is "gapped", not
-	// "expired".
+	// Past the surviving command's expiry nothing is pending, and the earlier gap
+	// decides the label: the drain lost data it cannot account for, so "gapped",
+	// not "expired".
 	clkNow = 2_000_000
 	srv.evaluateAllDrains()
 	if _, ok := preg.Get("n-child"); ok {

@@ -29,13 +29,10 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// scrapeMetric reads back one metric value through the shared test helper
-// (metricstest.Value) — see that package's doc comment for why this goes
-// through Handler() rather than a Collector/Gatherer accessor.
+// scrapeMetric reads one metric value through metricstest.Value.
 var scrapeMetric = metricstest.Value
 
-// mustKVScan is KVScan with the error handled the only way a test fixture
-// can: fail loud (resources design §8).
+// mustKVScan is KVScan that fails the test on error.
 func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
 	t.Helper()
 	entries, err := st.KVScan(prefix)
@@ -45,11 +42,9 @@ func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
 	return entries
 }
 
-// world is the broker fixture: TLS listener, registry with two enrolled
-// machines (m1 mounted at "m1" with an explicit write:el-m1/# grant — a
-// machine gets no implicit write, auth §5; obs mounted at "obs" with read:#
-// — reads everything through the grant, not through its own placement),
-// engine late-bound like node assembly does, kick wired.
+// world is the broker fixture: TLS listener, registry with m1 at mount m1
+// (explicit write grant) and obs at obs (read:#), engine bound late as in node
+// assembly, kick wired.
 type world struct {
 	srv     *Server
 	st      *store.Store
@@ -98,8 +93,7 @@ func newWorldWithConfig(t *testing.T, configure func(*config.Config)) *world {
 	eng := engine.New(st, cfg, reg, s.DeliverLocal, m, nil)
 	s.SetEngine(eng)
 	w.eng = eng
-	// Placement resolves through the engine's element index, so the element m1
-	// binds to is authored before it enrolls (id-grants design §4).
+	// The element m1 binds to is authored before it enrolls.
 	reg.SetNamespace(eng.Elements())
 	authtest.EnrollAt(t, reg, eng, w.m1, "m1", "write:"+authtest.ElementID("m1")+"/#")
 	authtest.EnrollAt(t, reg, eng, w.obs, "obs", "read:#")
@@ -113,9 +107,8 @@ func newWorldWithConfig(t *testing.T, configure func(*config.Config)) *world {
 	return w
 }
 
-// TestBrokerCapsPacketSize pins that New derives mochi's packet-size ceiling
-// from the configured record cap instead of leaving it at mochi's default of
-// 0 (unlimited) — the gap that let an oversize publish reach Pebble at all.
+// New derives mochi's packet-size limit from the record cap instead of leaving it
+// unlimited.
 func TestBrokerCapsPacketSize(t *testing.T) {
 	st, err := store.Open(t.TempDir())
 	if err != nil {
@@ -192,8 +185,8 @@ func connect(t *testing.T, addr, clientID string, m *authtest.Machine) paho.Clie
 	return c
 }
 
-// tryConnect is connect without the test-failure: for assertions on REJECTED
-// connects. username lets a test present a mismatched name on purpose.
+// tryConnect is connect without failing the test, for rejected connects. username
+// lets a test present a mismatched name.
 func tryConnect(addr, clientID string, m *authtest.Machine, username string) (paho.Client, error) {
 	opts := paho.NewClientOptions().
 		AddBroker("ssl://" + addr).
@@ -201,14 +194,9 @@ func tryConnect(addr, clientID string, m *authtest.Machine, username string) (pa
 		SetClientID(clientID).
 		SetUsername(username).
 		SetProtocolVersion(4). // one physical connect per attempt (no 3.1 downgrade retry)
-		// paho reconnects on its own by default, which puts the client
-		// population outside the test's control: every test that drops a
-		// connection (revocation kicks, shutdown) gets a reconnect it never
-		// asked for. In the shutdown tests that reconnect lands DURING
-		// Listeners.CloseAll — an attachClient Add(1) concurrent with the
-		// Wait() that ends CloseAll, which is mochi's documented WaitGroup
-		// misuse (server.go:407-408 vs listeners.go:134) and fails -race.
-		// Tests here reconnect by calling tryConnect again, never implicitly.
+		// No automatic reconnect: paho would reconnect after kicks and shutdowns, and in
+		// the shutdown tests that races mochi's WaitGroup and fails -race. Tests reconnect
+		// explicitly.
 		SetAutoReconnect(false).
 		SetConnectRetry(false).
 		SetConnectTimeout(5 * time.Second)
@@ -239,13 +227,9 @@ func waitRecords(t *testing.T, st *store.Store, stream string, want int, d time.
 	}
 }
 
-// startServerWithLocalDoor builds a world with the local MQTT door enabled and
-// self-registration's mount-authoring wired EXACTLY as node.New wires it
-// (node.go, right after reg.SetNamespace): domain.Execute(uns.CommandContext{}, "_CmdConfigure",
-// "element/author", ...) is the one authoring path in this system. A declared
-// mount must go through it here too — a test that wired a shortcut instead
-// could pass while node.go's own wiring stayed missing, which is precisely the
-// gap found earlier (nothing called Manager.SetAuthoring anywhere).
+// startServerWithLocalDoor builds a world with the local door and mount authoring
+// wired as node startup wires it, so the test cannot pass while the real wiring is
+// missing.
 func startServerWithLocalDoor(t *testing.T) *world {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
@@ -304,9 +288,8 @@ func (w *world) LocalAddr() string           { return w.srv.LocalAddr() }
 func (w *world) Registry() *registry.Manager { return w.srv.Registry() }
 func (w *world) Elements() *uns.ElementIndex { return w.srv.Elements() }
 
-// enrollMachine enrolls a fresh machine identity at ulid, placed at path, the
-// ordinary way (auth §6.1) — for tests asserting the local door refuses to
-// hand out a keyed identity by name.
+// enrollMachine enrolls a machine at ulid, placed at path, for the tests that check
+// the local door refuses keyed identities.
 func enrollMachine(t *testing.T, w *world, ulid, path string) *authtest.Machine {
 	t.Helper()
 	m := authtest.NewMachine(t, ulid)
@@ -314,16 +297,10 @@ func enrollMachine(t *testing.T, w *world, ulid, path string) *authtest.Machine 
 	return m
 }
 
-// localClient is a not-yet-connected local-door dial. Connect() performs the
-// actual net.Dial + MQTT v5 CONNECT and returns its error instead of failing
-// the test, mirroring tryConnect's split from connect — a test asserting a
-// REJECTED connect needs the error, not a t.Fatal baked into the dial itself.
-//
-// This uses paho.golang (MQTT v5), not the usual test client (tryConnect,
-// paho.mqtt.golang pinned via SetProtocolVersion(4)): the `mount` declaration
-// rides a CONNECT user property, which MQTT 3.1.1 has no room for. The dial is
-// plain net.Dial, never tls.Dial — the local door carries no TLSConfig at all
-// (design §4).
+// localClient is an unconnected local-door dial; Connect returns the error instead
+// of failing the test. It uses the MQTT 5 client, because the mount declaration is
+// a CONNECT user property, and a plain TCP dial, because the local door has no
+// TLS.
 type localClient struct {
 	t        *testing.T
 	addr     string
@@ -375,13 +352,9 @@ func (c *localClient) Connect() error {
 	return nil
 }
 
-// The local door is the door with no key to present at all (local-service-
-// trust design §4): a plain TCP dial, no TLS, admitted on a name alone. The
-// `mount` CONNECT user property is read only at the moment the entry is
-// created (§3.2), and Register's own auto-authoring must resolve it — which
-// exercises the SetAuthoring wiring end to end, not merely Register in
-// isolation (see startServerWithLocalDoor's doc comment for why that
-// distinction matters here).
+// The local door admits a plain TCP client on a name alone. The mount property is
+// read when the entry is created and authored through Register, which exercises the
+// SetAuthoring wiring.
 func TestTheLocalDoorAdmitsAClientWithNoCertificate(t *testing.T) {
 	s := startServerWithLocalDoor(t)
 	c := dialPlainMQTT(t, s.LocalAddr(), "connector-opcua", withMountProperty("line1/press3"))
@@ -442,16 +415,8 @@ func TestAMachineKeyIsNotAcceptedOnTheLocalDoor(t *testing.T) {
 	}
 }
 
-// A machine (or child node) may be given a friendly `name` — uns.Entry.Validate
-// permits it on any kind, and Manager.Enroll indexes any non-empty Name into
-// byName regardless of kind (registry.go). That makes it resolvable through
-// ByName, not merely the ULID collision TestAMachineKeyIsNotAcceptedOnTheLocalDoor
-// covers, and Register's own idempotent-reconnect branch ("entry exists? return
-// it") does no kind check — so without the post-Register MayUseDoor(DoorLocal)
-// check, a certless local session could present that name and be handed the
-// machine's own ULID: its topic identity, its grants, its mount. Nothing in the
-// tree sets Name on a machine or node today, so this was latent rather than
-// live — one operator action away.
+// A machine given a friendly name must not be handed out by name at the local door;
+// the MayUseDoor check after Register refuses it.
 func TestALocalNameThatResolvesToAKeyedIdentityByNameIsRefused(t *testing.T) {
 	s := startServerWithLocalDoor(t)
 	element := authtest.Place(t, s.eng, "press3")
@@ -464,9 +429,7 @@ func TestALocalNameThatResolvesToAKeyedIdentityByNameIsRefused(t *testing.T) {
 	if _, _, err := s.reg.Enroll(raw); err != nil {
 		t.Fatalf("enroll a named machine: %v", err)
 	}
-	// Get(name) must NOT be the thing catching this: "friendly-name" is not
-	// anyone's ULID, so that check passes clean through, and only the
-	// post-Register MayUseDoor check can still refuse it.
+	// friendly-name is nobody's ULID, so only the MayUseDoor check can refuse it.
 	if _, ok := s.reg.Get("friendly-name"); ok {
 		t.Fatal("precondition broken: \"friendly-name\" must not itself be a ulid")
 	}
@@ -485,20 +448,12 @@ func TestALocalNameThatResolvesToAKeyedIdentityByNameIsRefused(t *testing.T) {
 	}
 }
 
-// TestRetainedReplayDeliversAllMessages is a behavioral regression test for
-// the data-loss bug the cardinality benchmark scenario found
-// (colca/bench/cardinality.go): a fresh subscriber replaying the retained set
-// can burst more QoS-1 messages than mochi's inflight window, and anything
-// past the window used to be silently dropped with no retry. It seeds
-// retainedCount retained messages — just past mochi's 8192 default
-// MaximumInflight — then connects ONE fresh subscriber and asserts it
-// receives every single one. Seeding goes straight to the store (one batched
-// Append) and DeliverLocal to stay fsync-cheap; see git history for the full
-// rationale.
+// A new subscriber receives the whole retained set, just past mochi's default
+// inflight window of 8192. Seeding goes straight to the store and DeliverLocal to
+// stay fast.
 func TestRetainedReplayDeliversAllMessages(t *testing.T) {
-	// Just past mochi's 8192 default for BOTH per-client ceilings — MaximumInflight
-	// and MaximumClientWritesPending. Either one, set below the burst, drops
-	// part of the replay silently; #370 proved that for the second.
+	// Just past mochi's default of 8192 for both MaximumInflight and
+	// MaximumClientWritesPending; either one set below the burst drops messages.
 	const retainedCount = 9000
 	w := newWorld(t)
 
@@ -568,12 +523,8 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 		}
 	})
 
-	// OnPublish trusts that no session which reached it can carry an empty
-	// identity (mqttsrv.go: `if ident == ""` lets the packet through
-	// UNVALIDATED, straight to mochi's own fanout). That trust rests entirely
-	// on OnConnectAuthenticate refusing every path that could produce one — on
-	// the machine door, "" can never equal an enrolled entry's (non-empty)
-	// ULID, so this must fail exactly like any other username mismatch.
+	// OnPublish lets an empty identity through unvalidated, so OnConnectAuthenticate
+	// must refuse it; an empty username can never equal an enrolled ULID.
 	t.Run("empty username is rejected", func(t *testing.T) {
 		c, err := tryConnect(addr, "m1-empty-user", w.m1, "")
 		defer c.Disconnect(100)
@@ -624,9 +575,8 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 		c := connect(t, addr, "m1-sub", w.m1)
 
 		msgs := make(chan paho.Message, 1)
-		// Path-anchored filter: the node-id level is a wildcard for readers,
-		// the PATH must sit inside the granted zone (a `#` straight after the
-		// node-id level would be path-open and need read:#).
+		// The node-id level is a wildcard for readers; the path must lie inside the granted
+		// zone. A # right after the node id would need read:#.
 		tok := c.Subscribe("colca/v1/_CmdParam/+/m1/#", 1, func(_ paho.Client, m paho.Message) {
 			msgs <- m
 		})
@@ -657,8 +607,8 @@ func TestBrokerAuthIngestAndDeliverLocal(t *testing.T) {
 	})
 }
 
-// Subscribe-side ACLs (auth §6.1): a machine's default read scope is its own
-// zone; filters outside it are denied at SUBSCRIBE time and counted.
+// A machine reads its own zone by default; other filters are denied at SUBSCRIBE
+// and counted.
 func TestSubscribeACLScopes(t *testing.T) {
 	w := newWorld(t)
 	c := connect(t, w.srv.Addr(), "m1-acl", w.m1)
@@ -713,29 +663,18 @@ func TestSubscribeACLScopes(t *testing.T) {
 	}
 }
 
-// A shared subscription is an ALIAS the broker resolves after the ACL hook
-// has already judged the raw filter, so "$share/<group>/colca/#" used to be
-// read as non-UNS traffic, granted unconditionally, and then registered as
-// "colca/#" — every record on the node, delivered to a machine scoped to its
-// own zone. This pins the whole path through the real broker: the SUBACK
-// refuses it, and nothing published outside the machine's zone arrives.
-//
-// The unaliased subscription is the denominator: the same client, the same
-// broker, a filter it IS allowed, receiving a record. Without it "nothing
-// arrived" would also pass with delivery broken entirely.
+// A shared subscription is resolved after the ACL judged the raw filter, so
+// $share/<group>/colca/# must be refused rather than read as non-UNS traffic. The
+// allowed subscription is the denominator.
 func TestSharedSubscriptionCannotSmuggleAFilterPastTheACL(t *testing.T) {
 	w := newWorld(t)
-	// Two clients for one machine: the smuggler's callbacks must not also see
-	// the traffic the legitimate subscription earns, or "nothing smuggled"
-	// would be indistinguishable from paho fanning one delivery out to every
-	// matching local route.
+	// Two clients for one machine, so the smuggler cannot see deliveries the legitimate
+	// subscription earns.
 	smuggler := connect(t, w.srv.Addr(), "m1-share", w.m1)
 	zoned := connect(t, w.srv.Addr(), "m1-zone", w.m1)
 
-	// paho rewrites a "$share/<group>/" filter to the aliased one before it
-	// records the SUBACK result, so the result map is keyed by whatever it
-	// ended up asking for. Each Subscribe here carries exactly one filter, so
-	// read the single entry rather than guessing the key.
+	// paho rewrites a $share filter before recording the SUBACK, so read the single
+	// entry instead of guessing the key.
 	suback := func(c paho.Client, filter string, sink func(paho.Client, paho.Message)) byte {
 		t.Helper()
 		tok := c.Subscribe(filter, 1, sink)
@@ -834,8 +773,7 @@ func TestSubscriptionQuotaAllowsReplacementButRejectsGrowth(t *testing.T) {
 	}
 }
 
-// A denied subscription must not leak the retained set (the replay happens at
-// SUBSCRIBE time, so the ACL denial suppresses it).
+// A denied subscription does not leak the retained set.
 func TestDeniedSubscribeLeaksNoRetained(t *testing.T) {
 	w := newWorld(t)
 	// Seed one retained record OUTSIDE m1's zone.
@@ -853,27 +791,10 @@ func TestDeniedSubscribeLeaksNoRetained(t *testing.T) {
 	}
 }
 
-// Time-sync design §2.2: the node beacons on every machine session
-// establishment — a client already subscribed to the beacon filter sees a
-// fresh, unretained {"now_ms": ...} message the instant ANOTHER client
-// connects.
-// Time-sync design §2.2 (as amended, [delta]): the beacon fires on
-// SUBSCRIBE to colca/v1/_TimeSync/+ (OnSubscribed, mqttsrv.go), not on bare
-// session establishment — see the erratum above §2.3's normative rule for
-// why the original session-establishment trigger was deterministically
-// racy (mochi fires OnSessionEstablished right after CONNACK, structurally
-// before the client can have completed its own SUBSCRIBE, so at QoS 0 that
-// first publish was reliably lost to the very client it targeted) and had
-// to be REPLACED, not merely supplemented.
-//
-// This is the direct regression test for that defect: the SUBSCRIBING
-// client itself — not just an already-subscribed bystander — must receive
-// its own beacon, deterministically, within one broker round trip of its
-// own SUBSCRIBE packet. It also re-proves the broadcast property the old
-// test covered (a bystander subscribed beforehand still sees a beacon
-// triggered by someone else's subscribe), so both properties stay pinned
-// in one place instead of silently regressing if only the bystander path
-// were re-tested.
+// The beacon fires on SUBSCRIBE to the beacon topic: the subscribing client gets
+// its own beacon within a round trip, and a bystander subscribed earlier sees it
+// too. A beacon on connect arrived before the client could subscribe and was lost
+// at QoS 0.
 func TestTimeSyncBeaconOnSubscribe(t *testing.T) {
 	w := newWorld(t)
 
@@ -883,9 +804,8 @@ func TestTimeSyncBeaconOnSubscribe(t *testing.T) {
 	if !btok.WaitTimeout(5*time.Second) || btok.Error() != nil {
 		t.Fatalf("bystander subscribe: %v", btok.Error())
 	}
-	// The bystander's OWN subscribe already triggered (and this test does
-	// not care about) its own baseline beacon; drain it so the assertion
-	// below is unambiguously about the client-under-test's subscribe.
+	// The bystander's own subscribe produced a beacon of its own; drain it so the
+	// assertion below is about the client under test.
 	select {
 	case <-byMsgs:
 	case <-time.After(5 * time.Second):
@@ -923,16 +843,13 @@ func TestTimeSyncBeaconOnSubscribe(t *testing.T) {
 		}
 	}
 
-	// The defect this hook fixes: the SUBSCRIBING client's own subscribe
-	// must deterministically produce a beacon for itself.
+	// The subscribing client's own subscribe produces its beacon.
 	checkBeacon(t, ownMsgs, "subscribing client")
 	// The broadcast still reaches an unrelated bystander too.
 	checkBeacon(t, byMsgs, "bystander")
 }
 
-// Time-sync design §2.2: the periodic beacon_interval trigger is independent
-// of connection activity — RunBeacon keeps publishing on a live subscriber
-// with no further connects.
+// RunBeacon keeps publishing to a live subscriber without further connects.
 func TestTimeSyncBeaconPeriodicCadence(t *testing.T) {
 	w := newWorld(t)
 	sub := connect(t, w.srv.Addr(), "obs-cadence", w.obs)
@@ -941,12 +858,8 @@ func TestTimeSyncBeaconPeriodicCadence(t *testing.T) {
 	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
 		t.Fatalf("subscribe: %v", tok.Error())
 	}
-	// obs's own subscribe above already triggered (and lands in msgs as)
-	// one baseline beacon (design §2.2 as amended: beacon-on-subscribe) —
-	// not drained separately, just folded into the "at least 3" tally below
-	// alongside the periodic ones; this test's actual claim (RunBeacon
-	// keeps publishing independent of further connection activity) does
-	// not depend on distinguishing which beacon came from which trigger.
+	// obs's own subscribe already produced one beacon; it counts toward the three
+	// below, which does not change what this test shows.
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -964,8 +877,7 @@ func TestTimeSyncBeaconPeriodicCadence(t *testing.T) {
 	}
 }
 
-// Time-sync design §2.2/§4: _TimeSync is node-local-publish-only — a client
-// attempting to publish it is rejected and counted with the dedicated reason.
+// A client publishing _TimeSync is rejected and counted with the time_sync reason.
 func TestTimeSyncPublishRejectedFromClient(t *testing.T) {
 	w := newWorld(t)
 	c := connect(t, w.srv.Addr(), "m1-pub-timesync", w.m1)
@@ -987,15 +899,9 @@ func TestTimeSyncPublishRejectedFromClient(t *testing.T) {
 	}
 }
 
-// The beacon publishes at QoS 0 specifically so it is
-// NEVER queued for an offline subscriber. Confirmed against the vendored
-// mochi-mqtt/server/v2 source: publishToClient only ever touches
-// cl.State.Inflight (the map attachClient's ResendInflightMessages replays
-// on reconnect) inside `if out.FixedHeader.Qos > 0` — at QoS 0 a publish to
-// an offline client is simply dropped, never queued. A persistent-session
-// (CleanSession=false) machine that misses beacons while disconnected must
-// NOT receive them backdated on reconnect — only fresh beacons published
-// while it is actually connected.
+// The beacon is QoS 0 so it is never queued for an offline subscriber: mochi only
+// queues QoS>0 messages. A persistent-session machine must not get stale beacons on
+// reconnect.
 func TestTimeSyncBeaconAtQoS0NeverQueuedForOfflineSubscriber(t *testing.T) {
 	w := newWorld(t)
 
@@ -1007,7 +913,7 @@ func TestTimeSyncBeaconAtQoS0NeverQueuedForOfflineSubscriber(t *testing.T) {
 			SetClientID(clientID).
 			SetUsername(w.m1.ULID).
 			SetProtocolVersion(4).
-			SetCleanSession(false). // persistent session — the property the bug depends on
+			SetCleanSession(false). // persistent session
 			SetConnectTimeout(5 * time.Second)
 		c := paho.NewClient(opts)
 		tok := c.Connect()
@@ -1017,31 +923,22 @@ func TestTimeSyncBeaconAtQoS0NeverQueuedForOfflineSubscriber(t *testing.T) {
 		return c
 	}
 
-	// Subscribe at QoS 1 deliberately, even though the real colca-machine
-	// subscribes at QoS 0 post-fix: mochi's effective delivered QoS is
-	// min(publish_qos, subscribe_qos), so subscribing at 0 here would clamp
-	// delivery to 0 regardless of what the node publishes at, and this test
-	// would no longer isolate — and could no longer catch a regression of —
-	// the PUBLISH-side QoS this fix is actually about.
+	// Subscribe at QoS 1: the delivered QoS is the lower of publish and subscribe, so a
+	// QoS 0 subscription would hide the publish QoS this test is about.
 	msgs := make(chan paho.Message, 8)
 	c1 := dial("m1-persistent")
 	tok := c1.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
 	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
 		t.Fatalf("subscribe: %v", tok.Error())
 	}
-	// c1's own SUBSCRIBE deterministically triggers its baseline beacon
-	// (design §2.2 as amended, [delta]: beacon-on-subscribe, not on bare
-	// session establishment) — no manual trigger-and-drain needed to
-	// establish a known-good baseline before the "outage" below, unlike
-	// the old connect-triggered design this replaced.
+	// c1's own subscribe produces its baseline beacon.
 	select {
 	case <-msgs:
 	case <-time.After(5 * time.Second):
 		t.Fatal("no beacon received for c1's own subscribe")
 	}
 
-	// "Outage": disconnect WITHOUT unsubscribing — the persistent session
-	// survives server-side (mochi's expire guard on Clean=false).
+	// Disconnect without unsubscribing; the persistent session survives on the server.
 	c1.Disconnect(100)
 	deadline := time.Now().Add(5 * time.Second)
 	for c1.IsConnectionOpen() {
@@ -1051,15 +948,13 @@ func TestTimeSyncBeaconAtQoS0NeverQueuedForOfflineSubscriber(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Beacons published while offline — the stale ones a QoS-1 beacon would
-	// have queued and redelivered on reconnect.
+	// Beacons published while offline, which a QoS 1 beacon would queue.
 	for i := 0; i < 3; i++ {
 		w.srv.PublishTimeSync()
 	}
 
-	// Reconnect with the SAME persistent session (same client ID) and
-	// re-subscribe. Only ONE beacon may arrive: this reconnect's own
-	// subscribe-triggered beacon (design §2.2 as amended).
+	// Reconnect with the same session and resubscribe. Only this subscribe's own
+	// beacon may arrive.
 	c2 := dial("m1-persistent")
 	defer c2.Disconnect(100)
 	tok = c2.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
@@ -1079,10 +974,8 @@ func TestTimeSyncBeaconAtQoS0NeverQueuedForOfflineSubscriber(t *testing.T) {
 	}
 }
 
-// Time-sync design §2.2/§4: every machine session may subscribe the beacon
-// filter regardless of its zone grants — m1 has no read:# grant and its own
-// zone is "m1", nothing to do with _TimeSync, yet the subscribe must still
-// succeed.
+// Any machine may subscribe the beacon topic regardless of its grants; m1 has no
+// read:#.
 func TestTimeSyncSubscribeAllowedRegardlessOfZone(t *testing.T) {
 	w := newWorld(t)
 	c := connect(t, w.srv.Addr(), "m1-timesync-acl", w.m1)
@@ -1106,7 +999,7 @@ func TestTimeSyncSubscribeAllowedRegardlessOfZone(t *testing.T) {
 	}
 }
 
-// Revocation kicks the live session and the key cannot reconnect (auth §7).
+// Revocation kicks the live session and the key cannot reconnect.
 func TestRevocationKicksAndBlocksReconnect(t *testing.T) {
 	w := newWorld(t)
 	c := connect(t, w.srv.Addr(), "m1-kick", w.m1)
@@ -1138,8 +1031,8 @@ func TestRevocationKicksAndBlocksReconnect(t *testing.T) {
 	}
 }
 
-// A failed CONNECT counts against colca_auth_rejections_total{door="mqtt"} —
-// the door's own family, distinct from every engine publish-reject path.
+// A failed CONNECT counts against colca_auth_rejections_total{door="mqtt"},
+// separate from engine rejections.
 func TestBrokerAuthFailureIncrementsDoorMetric(t *testing.T) {
 	w := newWorld(t)
 
@@ -1167,10 +1060,8 @@ func TestBrokerAuthFailureIncrementsDoorMetric(t *testing.T) {
 	}
 }
 
-// The no-double-delivery guarantee: mochi's own fanout of a client's raw
-// publish is suppressed (CodeSuccessIgnore) and only the engine's LocalDeliver
-// mirror of the STORED record is distributed. A subscriber on colca/# must see
-// each record exactly once.
+// mochi's fanout of the raw publish is suppressed and only the engine's mirror of
+// the stored record goes out, so a subscriber on colca/# sees each record once.
 func TestClientPublishDistributedOnlyAsCanonicalTopic(t *testing.T) {
 	w := newWorld(t)
 
@@ -1193,16 +1084,11 @@ drain:
 	for {
 		select {
 		case m := <-msgs:
-			// The time-sync beacon (design §2.2) fires on every session
-			// establishment, including both connects above — it is an
-			// unrelated feature to the no-double-delivery invariant this
-			// test pins, so it is filtered out here rather than asserted on.
+			// Beacons are unrelated to this test and filtered out.
 			if strings.HasPrefix(m.Topic(), "colca/v1/_TimeSync/") {
 				continue
 			}
-			// Likewise the fixture's own element record: it is retained state
-			// authored during setup, replayed to any new colca/# subscriber, and
-			// says nothing about how THIS publish was delivered.
+			// So is the fixture's own retained element record.
 			if strings.HasPrefix(m.Topic(), "colca/v1/_SystemElement/") {
 				continue
 			}
@@ -1226,17 +1112,9 @@ drain:
 	}
 }
 
-// TestWillDeliveryReachesTheEngineTooNotJustLiveSubscribers pins the
-// OnWillSent hook: mochi's own sendLWT (server.go) broadcasts a
-// disconnecting client's last will to live subscribers and its own
-// in-memory retained cache, but never calls OnPublish — the one hook that
-// feeds engine.IngestClient. Discovered via the colca SDK's level-3
-// contract test (design §3.2, "crash: MQTT last will ... set on the client
-// before CONNECT"): without this, a will-delivered `_ServiceDetails`
-// update never reached /kv or the engine's retained state at all, no
-// matter how long a caller waited — this is a correctness gap, not a
-// timing one, so it belongs at level 1 where it can be pinned in
-// milliseconds instead of guessed at with a Docker-crossing timeout.
+// mochi broadcasts a last will without calling OnPublish, so OnWillSent must feed
+// it to the engine; otherwise a crashed service's _ServiceDetails never reaches
+// /kv.
 func TestWillDeliveryReachesTheEngineTooNotJustLiveSubscribers(t *testing.T) {
 	w := newWorld(t)
 
@@ -1269,8 +1147,7 @@ func TestWillDeliveryReachesTheEngineTooNotJustLiveSubscribers(t *testing.T) {
 		t.Fatalf("CONNACK refused: reason %d", ca.ReasonCode)
 	}
 
-	// Kill the raw connection WITHOUT sending a DISCONNECT packet — an abrupt
-	// drop, the exact condition a last will exists for.
+	// Drop the connection without DISCONNECT, the case a last will is for.
 	if err := conn.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -1284,8 +1161,8 @@ func TestWillDeliveryReachesTheEngineTooNotJustLiveSubscribers(t *testing.T) {
 	}
 }
 
-// Outside colca/# Colca is just a broker: a non-UNS publish is not persisted and
-// must be distributed unchanged — and non-UNS subscriptions need no grant.
+// Outside colca/# Colca is just a broker: non-UNS publishes are delivered unchanged
+// and not persisted, and non-UNS subscriptions need no grant.
 func TestNonUnsTopicStillDistributed(t *testing.T) {
 	w := newWorld(t)
 	// Baseline: enrollments already appended _EnrolledIdentity entities.
@@ -1322,12 +1199,9 @@ func TestNonUnsTopicStillDistributed(t *testing.T) {
 	}
 }
 
-// Retention design §7.1 step 3, against the real broker: the engine's
-// empty-payload delivery with retain=true makes mochi clear the retained
-// message per the MQTT spec. Asserted from both sides of the contract — a
-// subscriber online at tombstone time receives the empty-payload clear, and a
-// FRESH subscriber connecting afterwards gets no retained message for the
-// retired path while an untouched sibling path still replays.
+// A tombstone clears the retained message on the real broker: an online subscriber
+// receives the empty clear, and a new subscriber gets nothing for the retired path
+// while a sibling still replays.
 func TestTombstoneClearsRetainedOnBroker(t *testing.T) {
 	w := newWorld(t)
 	s, st := w.srv, w.st
@@ -1348,7 +1222,7 @@ func TestTombstoneClearsRetainedOnBroker(t *testing.T) {
 	pub("colca/v1/_Metric/n1/m1/temp", `{"v":7}`)
 	pub("colca/v1/_Metric/n1/m1/keep", `{"v":1}`)
 
-	// A subscriber online BEFORE the tombstone: it must see the live clear.
+	// A subscriber online before the tombstone sees the live clear.
 	type msg struct {
 		topic, payload string
 		retained       bool
@@ -1398,8 +1272,8 @@ func TestTombstoneClearsRetainedOnBroker(t *testing.T) {
 	}
 cleared:
 
-	// A FRESH subscriber gets the sibling's retained value but nothing —
-	// retained or otherwise — for the retired path.
+	// A new subscriber gets the sibling's retained value and nothing for the retired
+	// path.
 	freshMsgs := make(chan msg, 16)
 	fresh := connect(t, s.Addr(), "obs-fresh", w.obs)
 	defer fresh.Disconnect(100)
@@ -1421,9 +1295,8 @@ cleared:
 			}
 			if m.topic == keepTopic && m.retained {
 				keepSeen = true
-				// The sibling arrived: the retained replay is demonstrably
-				// working, so give the retired path a short grace window to
-				// prove its absence, then finish.
+				// The sibling arrived, so replay works; give the retired path a short window to
+				// show up, then finish.
 				grace.Reset(500 * time.Millisecond)
 			}
 		case <-grace.C:
@@ -1483,10 +1356,8 @@ func dialCommonName(t *testing.T, addr string, client *tls.Config) string {
 }
 
 func TestASuppliedCertificateServesTheHumanDoorAndNotTheMachineDoor(t *testing.T) {
-	// The machine door must keep the key container: trust on the pinned doors is
-	// "the certificate carries the peer's ed25519 key", and replication's child
-	// pins its parent exactly that way. A CA-issued certificate there would
-	// break every uplink beneath the node.
+	// The machine door keeps the key container: replication pins its parent by the key
+	// in the certificate, and a CA-issued one would break every uplink below.
 	certFile, keyFile := suppliedPair(t)
 
 	st, err := store.Open(t.TempDir())
@@ -1526,12 +1397,9 @@ func TestASuppliedCertificateServesTheHumanDoorAndNotTheMachineDoor(t *testing.T
 	}
 }
 
-// A retained DeliverLocal racing a wildcard SUBSCRIBE's retained scan is the
-// data race the Go suite hit on CI (TestPairUplinkAndHubRestart): mochi v2.7.9 wrote particle.retainPath under the particle
-// lock in RetainMessage and read it with no lock in scanMessages
-// (mochi-mqtt/server#200, closed upstream as not reproducible). colca pins a
-// fork with the read locked; this test is what fails, under -race, the day
-// that pin is dropped.
+// A retained DeliverLocal racing a wildcard subscribe's retained scan. Upstream
+// mochi reads retainPath without the lock (mochi-mqtt/server#200); we pin a fork
+// that locks it, and this test fails under -race if the pin is dropped.
 func TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace(t *testing.T) {
 	w := newWorld(t)
 	obs := connect(t, w.srv.Addr(), "obs", w.obs)

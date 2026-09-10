@@ -10,11 +10,9 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// colca-node design §3.1/§7 gap 4: /healthz's uplink field is read straight
-// off Client.Status(), so its three observable transitions — never having
-// reached the parent, having been refused, and being current — have to be
-// pinned here, at the source, rather than only through the HTTP surface that
-// merely relays them.
+// /healthz reads the uplink field straight from Client.Status(), so its three
+// transitions (never reached the parent, refused, current) are pinned here at
+// the source.
 func TestUplinkStatusTransitionsThroughConnectingUnauthorizedConnected(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -22,7 +20,7 @@ func TestUplinkStatusTransitionsThroughConnectingUnauthorizedConnected(t *testin
 
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	// The parent does not know this child yet — first phase is a real 401.
+	// The parent does not know this child yet, so the first phase is a real 401.
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil)
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	defer srv.Stop()
@@ -47,9 +45,8 @@ func TestUplinkStatusTransitionsThroughConnectingUnauthorizedConnected(t *testin
 	waitFor(t, "the client to report unauthorized against a parent that has not enrolled it",
 		20*time.Second, func() bool { return cl.Status().State == UplinkUnauthorized })
 
-	// Enroll the child at runtime — exactly what an operator does —
-	// while the SAME loop keeps retrying. It must observe the transition on
-	// its own, with no restart.
+	// Enroll the child at runtime, as an operator would, while the same loop keeps
+	// retrying; it must see the transition without a restart.
 	element := placeElement(t, peng, "child1")
 	entry, err := json.Marshal(uns.Entry{ULID: "n-child", Pubkey: childID.PublicHex(), Kind: uns.KindNode, Element: element})
 	if err != nil {
@@ -63,10 +60,8 @@ func TestUplinkStatusTransitionsThroughConnectingUnauthorizedConnected(t *testin
 		20*time.Second, func() bool { return cl.Status().State == UplinkConnected })
 }
 
-// A Since that moves on every successful poll would be useless to a caller
-// trying to tell "just connected" from "connected for a week" apart — it has
-// to mark the START of the current state, not the timestamp of the most
-// recent read.
+// Since must mark the start of the current state, not the latest read, or a
+// caller could not tell "just connected" from "connected for a week".
 func TestUplinkStatusSinceOnlyMovesOnATransition(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))

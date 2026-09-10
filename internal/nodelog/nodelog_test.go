@@ -44,9 +44,8 @@ func TestEveryOtherRecordStillPublishes(t *testing.T) {
 }
 
 func TestTheSinkRefusesUntilTheEngineIsAttached(t *testing.T) {
-	// The publisher is installed before the engine exists, so that startup
-	// lines are captured. Until Attach, delivery must fail rather than panic
-	// -- the publisher treats it as an outage and holds the records.
+	// The publisher exists before the engine. Until Attach, delivery fails rather
+	// than panics, and the publisher holds the records.
 	sink := &Sink{}
 	if _, _, err := sink.LogPosition(context.Background()); err == nil {
 		t.Error("LogPosition must report not-ready before Attach, not answer with an empty node")

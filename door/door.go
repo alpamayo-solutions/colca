@@ -1,14 +1,7 @@
-// Package door is the client for a colca node's HTTP API.
-//
-// One client for one door. `colca-grantsync` reads the KV and publishes through
-// it; `colca-historian` follows a stream through it; whatever comes next uses
-// the same one. A second client for the same six routes would be two places for
-// a header, a status-code rule or a retry to be wrong.
-//
-// Where the door is and what it wants for a credential is CONFIGURATION: an
-// admin token on the published API door today, a service NAME and no credential
-// on the unpublished local door once that lands
-// (2026-08-19-colca-local-service-trust-design.md §4).
+// Package door is the client for a Colca node's HTTP API, shared by every
+// service so headers, status handling and paging live in one place. The
+// published API door takes an admin token; the local door takes a service name
+// and no credential.
 package door
 
 import (
@@ -139,9 +132,8 @@ type SecretWrite struct {
 	ExpectedRevision *uint64          `json:"expected_revision,omitempty"`
 }
 
-// Fetch reads one page. It does NOT move the cursor: reading is side-effect
-// free, which is what lets a consumer that dies mid-batch re-read exactly what
-// it had not acked.
+// Fetch reads one page without moving the cursor, so a consumer that dies
+// mid-batch re-reads exactly what it had not acked.
 func (c *Client) Fetch(ctx context.Context, stream, cursor string, limit int) (Page, error) {
 	return c.FetchWithOptions(ctx, FetchOptions{Stream: stream, Cursor: cursor, Max: limit})
 }
@@ -180,15 +172,9 @@ func (c *Client) FetchWithOptions(ctx context.Context, options FetchOptions) (Pa
 	return page, nil
 }
 
-// KV returns retained entries visible below prefix, narrowed to the named uns
-// contracts when any are given (none means every contract, as the door does).
-//
-// It follows the door's paging to the end and returns entries only for a
-// listing it read completely: a page that cannot be read fails the whole call,
-// and a caller never sees a short listing dressed as a small one. That is
-// load-bearing for a consumer that converges on absence — colca-grantsync
-// retires the Keycloak resource of any element the listing does not hold, and
-// Keycloak does not restore that resource's permissions when it comes back.
+// KV returns retained entries below prefix, limited to the given contracts (none
+// means all). It follows paging to the end and fails if any page fails, so a
+// caller never mistakes a partial listing for a short one.
 func (c *Client) KV(ctx context.Context, prefix string, contracts ...string) ([]KVEntry, error) {
 	var entries []KVEntry
 	after := ""
@@ -466,14 +452,9 @@ func (c *Client) Ack(ctx context.Context, stream, cursor string, offset int64) (
 	return out.Moved, nil
 }
 
-// CursorDelete retires a cursor instead of moving it. It is what a consumer
-// that mints a fresh cursor name whenever it rebuilds (colca cursors only
-// move forward, so re-reading a stream needs a new name) uses to retire the
-// generation it is replacing — otherwise the old cursor lingers forever and
-// holds back retention pruning for every node that ever read it. Deleting an
-// absent or already-deleted cursor is a no-op, so a caller may call this
-// unconditionally during cleanup without first checking whether the cursor
-// still exists.
+// CursorDelete retires a cursor. A consumer that rebuilds under a new cursor
+// name uses it to drop the old one, which would otherwise hold back retention
+// forever. Deleting an absent cursor is a no-op.
 func (c *Client) CursorDelete(ctx context.Context, stream, cursor string) error {
 	body, err := json.Marshal(map[string]any{"cursor": cursor, "stream": stream, "delete": true})
 	if err != nil {

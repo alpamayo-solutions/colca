@@ -1,10 +1,8 @@
-// Package node assembles a complete Colca node out of the component packages
-// and owns its lifecycle. Start wires identity, store, embedded broker, engine,
-// HTTP API, replication server and the uplink/downlink loops in one order that
-// resolves the engine/broker cycle (the broker is built first with a nil engine
-// and gets it late-bound via SetEngine). Stop tears everything down again so the
-// SAME data dir and the SAME ports can be reused by an immediately following
-// Start — restarting a node is a first-class operation, not a leak.
+// Package node assembles a Colca node from its components and owns its
+// lifecycle. Start wires everything in dependency order; the broker is built
+// before the engine and receives it through SetEngine. Stop releases
+// everything, so the same data directory and ports can be reused by the next
+// Start.
 package node
 
 import (
@@ -61,13 +59,11 @@ type Node struct {
 	APIAddr  string // resolved HTTP API address ("" if no api configured)
 	ReplAddr string // resolved replication address ("" if this node has no children)
 	MQTTAddr string // resolved MQTT address ("" if no mqtt configured)
-	// MQTTLocalAddr and LocalAPIAddr are the resolved local-door addresses
-	// ("" if not configured). Unlike the other *Addr fields these are never
-	// meant to be published (local-service-trust design §4) — they exist for
-	// local services' own configuration and for tests.
+	// MQTTLocalAddr and LocalAPIAddr are the local doors, "" if not configured.
+	// They are never published.
 	MQTTLocalAddr string
 	LocalAPIAddr  string
-	// Human doors (human-authz design §5.1); "" when not configured.
+	// Token doors for people; "" when not configured.
 	MQTTHumanTCPAddr string
 	MQTTHumanWSAddr  string
 
@@ -81,10 +77,8 @@ type Node struct {
 	apiLn       net.Listener
 	localAPISrv *http.Server
 	localAPILn  net.Listener
-	// logPublisher drains this node's own log records into its store, on a
-	// goroutine of its own that wg never tracked. Stop must end and join it
-	// before closing the store, or a line logged during shutdown lands on a
-	// closed Pebble — see Stop.
+	// logPublisher writes this node's own log into its store from a goroutine wg
+	// does not track, so Stop must stop it before closing the store.
 	logPublisher *door.LogPublisher
 }
 
@@ -101,25 +95,13 @@ func Start(cfg *config.Config) (*Node, error) {
 	if cfg.LogLevel == "debug" {
 		lvl = slog.LevelDebug
 	}
-	// The node publishes its own log into the tree it owns, the same as every
-	// other service -- and it is installed HERE, before anything is built,
-	// because a node's most valuable lines are the ones it writes while
-	// starting up. The sink has no engine yet; the publisher's queue holds
-	// what it cannot deliver, and Attach below drains it.
+	// The node publishes its own log into its tree. The handler is installed before
+	// anything else so startup lines are kept; they queue until Attach.
 	logSink := &nodelog.Sink{}
-	// The tree carries INFO and above even when the console is at debug.
-	//
-	// LOG_LEVEL=debug is a local, temporary instrument: it turns on a line
-	// per append, per delivery, per replication batch. Those belong in the
-	// container's log, which is cheap and thrown away, not on a durable
-	// stream that is retained for 14 days and replicated to every ancestor.
-	// One level-3 run with debug published 982 records from a single node.
-	//
-	// It also removes the feedback cycle by construction rather than by
-	// guard: the engine's per-append line is debug, so it is no longer a
-	// candidate for publishing at all. `SkipsItsOwnPublishing` stays as the
-	// belt to this braces -- a future INFO line naming a `_Log` topic would
-	// close the cycle again.
+	// The tree gets INFO and above even when the console is at debug: debug lines
+	// come per append and per batch and do not belong on a replicated stream. It
+	// also keeps the engine's per-append line from being published, which would
+	// feed back into itself.
 	publishLevel := lvl
 	if publishLevel < slog.LevelInfo {
 		publishLevel = slog.LevelInfo
@@ -129,12 +111,9 @@ func Start(cfg *config.Config) (*Node, error) {
 		logSink,
 		door.LogPublisherOptions{MinLevel: publishLevel, Skip: nodelog.SkipsItsOwnPublishing},
 	)
-	// slog.SetDefault also routes Go's standard log package into this
-	// handler, and captures a program counter for those records only when
-	// the log flags ask for a location. Without it a bridged line -- badger's
-	// "Found 0 WALs" on every boot -- arrives with PC 0, no function, and the
-	// node refuses it against `_Log` ("at '/function': minLength: got 0").
-	// SetDefault resets the flags to 0 afterwards; this is read before that.
+	// SetDefault also routes the standard log package here, and those records only
+	// carry a caller when the log flags ask for one; _Log requires it. SetDefault
+	// clears the flags afterwards, but reads them first.
 	log.SetFlags(log.Lshortfile)
 	slog.SetDefault(slog.New(logPublisher).With("service", nodelog.ServiceName))
 
@@ -164,11 +143,8 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 	}
 
-	// clk is this node's authoritative-time state (time-sync design §2.1): a
-	// node with no configured parent is the root/authority. Built once and
-	// shared between Metrics (scrape-time gauges) and Engine (offset
-	// read/write) — they must be the SAME instance (engine.New's doc
-	// comment).
+	// clk is this node's authoritative time; a node without a parent is the
+	// authority. Metrics and Engine must share this instance.
 	clk := clock.New(cfg.Parent == nil, time.Now)
 	n := &Node{Cfg: cfg, Store: st, Secrets: secretDB, Metrics: metrics.New(st, cfg.Retention, clk), stop: make(chan struct{})}
 	log := slog.Default().With("node", cfg.ULID, "comp", "node")
@@ -186,21 +162,17 @@ func Start(cfg *config.Config) (*Node, error) {
 	}
 	n.Blobs = blobs
 
-	// 1. Registry: the identity source every door consults. Loads the r/
-	//    family; a corrupt persisted entry is fatal (fail-loud, like the
-	//    store's own counters).
+	// 1. Registry: every door consults it. A corrupt entry fails startup.
 	reg, err := registry.New(st, cfg.ULID)
 	if err != nil {
 		return fail(fmt.Errorf("node %s: registry: %w", cfg.ULID, err))
 	}
 	n.Registry = reg
-	// Move-drain design §3.4: Drain owns incrementing colca_drains_active
-	// itself once this is wired, the same way kick/deliver are wired below.
+	// The registry updates colca_drains_active itself.
 	reg.SetMetrics(n.Metrics)
 
-	// 1b. Token verifier: the human identity world (human-authz §2). Built
-	//     before the doors that consume it; the refresh loop joins the node
-	//     WaitGroup so Stop never closes the store under a JWKS persist.
+	// 1b. Token verifier for people, built before the doors that use it. Its
+	//     refresh loop joins wg so Stop never closes the store mid-write.
 	var ver *tokenauth.Verifier
 	if cfg.Auth != nil {
 		ver, err = tokenauth.New(tokenauth.Config{
@@ -219,10 +191,8 @@ func Start(cfg *config.Config) (*Node, error) {
 		}()
 	}
 
-	// 2. Broker: New binds the sockets, so the addrs are known before Serve
-	//    and before the engine exists. The engine is late-bound below. A node
-	//    with ONLY human listeners is legal (§4), and so is one with only a
-	//    local door.
+	// 2. Broker: New binds the sockets, so addresses are known before Serve. The
+	//    engine is set later. Token doors or a local door alone are fine.
 	if cfg.MQTT.Addr != "" || cfg.MQTTLocal.Addr != "" || cfg.MQTTHuman.TCPAddr != "" || cfg.MQTTHuman.WSAddr != "" {
 		mq, err := mqttsrv.New(cfg, id, reg, ver, nil, n.Metrics, cfg.Limits.EffectiveMaxRecordBytes())
 		if err != nil {
@@ -244,42 +214,31 @@ func Start(cfg *config.Config) (*Node, error) {
 		hasSubscriber = n.MQTT.HasSubscriberFor
 	}
 	n.Engine = engine.New(st, cfg, reg, deliver, n.Metrics, clk)
-	// Wired separately from New (like SetExecutor/SetObserver below) so a
-	// node with no broker leaves it nil and deliverCommand never counts
-	// a false undelivered command for want of an answer it cannot give.
+	// Without a broker there is nothing to check, and deliverCommand must not count
+	// undelivered commands.
 	n.Engine.SetSubscriberCheck(hasSubscriber)
-	// Command execution: the engine dispatches by contract, each executor owns
-	// its own verbs. _CmdAdmin drives the SAME registry writes as the
-	// enrollment door — one write path inside (cmdadmin design §5). The data
-	// model lives in the plugin, so the core never learns what a signal is
-	// (data-model binding design §7).
+	// Each executor owns its contract's verbs. _CmdAdmin uses the same registry
+	// writes as the enrollment door, and the data model lives in the plugin, so the
+	// core never learns what a signal is.
 	blobPort := engine.NewBlobPort(blobs)
 	domain := uns.NewConfigExec(n.Engine.EntityStore(), reg, n.Engine.Elements(), blobPort,
 		registry.NewULID, cfg.Plugin)
 	edit := uns.NewEditExec(
 		n.Engine.EntityStore(), reg, editAttachmentWriter{registry: reg},
 	)
-	edit.SetScope(n.Engine.Scope()) // a person's grants resolve against this node's elements (authz design §3C)
-	// The same blob port the configure executor holds: a `resource` intent
-	// must never author a record pointing at bytes this node cannot produce,
-	// and there is one invariant, so there is one port.
+	edit.SetScope(n.Engine.Scope()) // a person's grants resolve against this node's elements
+	// The configure executor's blob port: a resource must never point at bytes
+	// this node cannot produce.
 	edit.SetBlobs(blobPort)
 	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain, edit))
 	n.Engine.SetObserver(domain)
-	// The observer only sees records from here on; the retained set persisted
-	// by earlier incarnations of this node is replayed to it once, so a
-	// catalogue that arrived while no observer was wired (a restart, or a
-	// binding a re-declaration once wiped) still gets its lifecycle pass.
+	// The observer only sees new records, so the retained state from earlier runs
+	// is replayed to it once.
 	n.Engine.ReplayRetained()
-	// A node describes itself: `_Node` is "authored by the node it
-	// describes" (the contract's own words), and the one fact about itself a
-	// node cannot read from config is where it sits — the element its parent
-	// bound it to, learned from the ancestry the downlink hands down. So the
-	// record is written from the moment a position is learned, through the
-	// ONE authoring path, merging into whatever an operator has since put on
-	// it (a display name, a description): only the position is this hook's
-	// to set, and it writes only when that changed. At the root the ancestry
-	// is empty and the node is bound to nothing above itself.
+	// A node authors its own _Node record. The one thing it cannot take from config
+	// is its position, which it learns from the downlink. The record goes through
+	// the normal authoring path, merges with what operators set, and is rewritten
+	// only when the position or the interfaces change.
 	var nodeRecordMu sync.Mutex
 	var positionMu sync.RWMutex
 	var lastPosition uns.Ancestry
@@ -328,36 +287,10 @@ func Start(cfg *config.Config) (*Node, error) {
 		positionMu.Unlock()
 		authorNodeRecord(a)
 	})
-	// Author once at startup, from the position the engine already holds.
-	//
-	// `SetOnPosition` fires when a position is LEARNED, and the engine loads a
-	// persisted ancestry while it is constructed -- before this callback is
-	// registered. So a node that comes up already knowing where it sits never
-	// calls back, and the root has nothing to learn in the first place: in the
-	// deployed tree `node position learned` appears exactly zero times, on the
-	// hub and on every edge. The hook never ran, `positionKnown` stayed false,
-	// the refresh ticker below is gated on it and never ran either, and every
-	// `_Node` record carried an empty `network_interfaces` -- the one
-	// field the bootstrap manifest does not write, which is why only the
-	// editor's network card looked broken.
-	//
-	// An empty ancestry IS a position -- the root's -- so this does not wait
-	// to be taught one.
-	//
-	// NOT covered by a test: neither the in-process suite nor the level-3
-	// world reproduces the condition, because both enroll or restart in a way
-	// that still fires the callback. Two tests written for it passed with and
-	// without this change and were deleted rather than kept as decoration.
-	// The oracle is the deployed tree: the records carry interfaces or they
-	// do not.
-	// A node authors its record at startup only when it KNOWS where it sits:
-	// a persisted ancestry, or no configured parent -- the root, whose empty
-	// chain is a real position. A fresh child's ancestry is also empty, but
-	// unknown: it used to author a record bound to nothing here and a second
-	// one when the downlink taught it its position -- two records per boot,
-	// both replicated up the tree, the first of them a lie about the binding
-	// that the parent's re-teaching could replay over the truth. It now waits
-	// and writes once.
+	// Author once at startup when the position is already known: a persisted
+	// ancestry, or no parent at all (the root's empty chain is a position).
+	// SetOnPosition does not fire for a position loaded before it was registered.
+	// A new child waits for the downlink and writes once.
 	if ancestry, known := n.Engine.Ancestry(); known || cfg.Parent == nil {
 		positionMu.Lock()
 		lastPosition = append(uns.Ancestry(nil), ancestry...)
@@ -388,21 +321,12 @@ func Start(cfg *config.Config) (*Node, error) {
 			}
 		}
 	}()
-	// The registry resolves placements through the engine's element index
-	// (id-grants design §4). Wired here rather than at construction because the
-	// namespace is a projection of records the engine holds, and the registry
-	// is built first — every door consults it, so it has to exist earliest.
+	// The registry resolves placements through the engine's element index. It is
+	// set here because the registry has to exist before the engine.
 	reg.SetNamespace(n.Engine.Elements())
-	// A local service's self-registration (local-service-trust design §3.2)
-	// authors the elements along a declared mount that does not exist yet —
-	// the identical walk a catalogue tag's own meta.element uses
-	// (exec_configure.go bindCatalogue), reached through the ONE authoring
-	// path in this system, domain.Execute("_CmdConfigure", "element/author",
-	// ...) — never a second, direct write to the element index. Wired here
-	// because this is the first point domain exists (built just above).
-	// Without this, Register's declared-mount branch fails closed with
-	// "mount authoring is not wired at this node" and every local CONNECT
-	// carrying a mount is refused.
+	// A local service registering with a mount that does not exist yet gets its
+	// elements authored through the same path as everything else. Without this,
+	// such registrations are refused.
 	reg.SetAuthoring(func(path string) (string, error) {
 		payload, err := json.Marshal(map[string]string{"path": path})
 		if err != nil {
@@ -415,17 +339,16 @@ func Start(cfg *config.Config) (*Node, error) {
 		return msg, nil
 	})
 	if ver != nil {
-		// A human's grants come from the groups their token names, resolved
-		// against the definitions this node holds (definition-stream design §8).
+		// People's grants come from their token's groups, resolved against the
+		// definitions this node holds.
 		ver.SetGroupIndex(n.Engine.Groups())
 		ver.SetPersonalAccessTokenIndex(uns.NewPersonalAccessTokenIndex(
 			n.Engine.EntityStore(),
 		))
 	}
-	// Schema bundle (schema-bundle design §6/§7): explicit path, or the
-	// baked default when present, or the builtin floor. Any configured-but-
-	// bad bundle refuses to start — a broker that silently fell back to
-	// weaker validation would be a validated namespace in name only.
+	// Contracts bundle: the configured path, the baked one if present, or the
+	// built-in rules. A configured bundle that fails to load stops startup rather
+	// than silently validating less.
 	bundlePath := cfg.Contracts.Bundle
 	if bundlePath == "" {
 		if _, err := os.Stat(config.BakedBundlePath); err == nil {
@@ -443,45 +366,26 @@ func Start(cfg *config.Config) (*Node, error) {
 			"digest", digest[:12], "contracts", count)
 	}
 	n.Metrics.SetBundleInfo(n.Engine.BundleInfo())
-	// Position in the tree (id-grants design §4): a node without a parent IS
-	// the root — it sits on nothing above itself, so its chain is known-empty
-	// by construction. Children learn theirs from the downlink hand-down;
-	// grant translation reads the rendered prefix per Verify.
+	// A node without a parent is the root, so its chain is known to be empty.
+	// Children learn theirs from the downlink.
 	if cfg.Parent == nil {
 		n.Engine.SetAncestry(uns.Ancestry{})
 	}
 
 	if n.MQTT != nil {
 		n.MQTT.SetEngine(n.Engine)
-		// Revocation / re-enroll kicks the live session immediately (auth §7),
-		// and registry changes mirror onto the local bus like any entity
-		// (enroll = retained _EnrolledIdentity, revoke = retained-clear).
+		// Revocation kicks the live session, and registry changes appear on the local
+		// bus like any entity.
 		reg.SetKick(n.MQTT.Kick)
 		reg.SetDeliver(n.MQTT.DeliverLocal)
-		// Re-seed the broker's retained set from the KV projection. The two are
-		// ONE contract seen from two sides (engine.retainFor retains exactly the
-		// classes that project into KV), but mochi's retained store is in-memory:
-		// without this replay a restarted node comes back with an intact KV view
-		// and an EMPTY retained set, silently breaking the "fresh subscriber gets
-		// the current state on connect" guarantee the bus makes.
-		//
-		// The seed MUST run before Serve: mochi's Publish/InjectPacket works
-		// entirely on in-memory state, while Serve is what starts the listener
-		// accept loops — so no client CONNECT (and therefore no client publish)
-		// can interleave with the replay, and a fresh live value can never be
-		// overwritten by this stale snapshot. Connections attempted meanwhile
-		// just wait in the kernel accept backlog (the listener is already
-		// bound). Cost is one in-memory publish per KV path — node.Start with
-		// 10k seeded paths measures ~70ms total, ~380ms under -race
-		// (TestRetainedSeedStartupCostTenThousandPaths) — so it does not
-		// meaningfully delay /healthz, which opens after it.
+		// Reseed the broker's retained set from KV: mochi keeps it in memory, so a
+		// restarted node would otherwise give new subscribers no state. This runs
+		// before Serve, so no client publish can race it and be overwritten by the
+		// snapshot. 10k paths take about 70ms.
 		seeded := 0
 		entries, err := st.KVScan("")
 		if err != nil {
-			// This IS the "fresh subscriber gets current state" guarantee the
-			// comment above describes; a scan that could not complete must
-			// fail startup rather than come up silently claiming an empty
-			// retained set is correct.
+			// Without the full scan the retained set would be silently incomplete.
 			return fail(fmt.Errorf("node %s: reseed retained set: %w", cfg.ULID, err))
 		}
 		for _, en := range entries {
@@ -495,13 +399,8 @@ func Start(cfg *config.Config) (*Node, error) {
 			}
 		}(n.MQTT)
 
-		// Periodic time-sync beacon (design §2.2): the per-subscribe publish
-		// is wired inside mqttsrv's hook (OnSubscribed, as amended [delta] —
-		// session-establishment was deterministically racy and was replaced,
-		// not supplemented); this is the OTHER trigger, every
-		// time_sync.beacon_interval regardless of subscription activity.
-		// Joins n.wg exactly like the repl loops and the pruner: Stop must
-		// wait for it before MQTT.Close() runs.
+		// The periodic time beacon; mqttsrv also sends one on each subscribe. It joins
+		// wg so Stop waits for it before closing MQTT.
 		n.wg.Add(1)
 		go func(mq *mqttsrv.Server) {
 			defer n.wg.Done()
@@ -509,12 +408,8 @@ func Start(cfg *config.Config) (*Node, error) {
 		}(n.MQTT)
 	}
 
-	// This node's own uplink client towards ITS parent, built here (before the
-	// HTTP doors) rather than at step 6 below, purely so /healthz — which the
-	// doors open a few lines down — can report its Status() from the moment
-	// this node starts answering requests. The uplink loops themselves still
-	// start at step 6, once the replication server (step 5) exists for
-	// SetUpstream to wire recursive pulls through.
+	// The uplink client is built before the HTTP doors so /healthz can report its
+	// status from the start. Its loops start in step 6.
 	var replClient *repl.Client
 	if cfg.Parent != nil {
 		replClient, err = repl.NewClient(cfg.Parent.URL, cfg.Parent.Pubkey, id, cfg.Limits.EffectiveMaxRecordBytes())
@@ -523,8 +418,8 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 	}
 
-	// 4. Local HTTPS control API: TLS with the node's own key; machine callers
-	//    present their pinned client key, admin tooling uses the token (§6.3).
+	// 4. HTTPS API with the node's key: machines present their pinned key, admin
+	//    tooling uses the token.
 	if cfg.API.Addr != "" {
 		tlsCfg, err := httpapi.TLSConfig(id, cfg.ULID, cfg.TLS.CertFile, cfg.TLS.KeyFile)
 		if err != nil {
@@ -544,12 +439,8 @@ func Start(cfg *config.Config) (*Node, error) {
 		}(n.httpSrv, ln)
 	}
 
-	// 4b. The local HTTP door: plaintext, no TLS, no admin routes
-	//     (local-service-trust design §4) — reachability from inside the
-	//     deployment's own network IS the credential, exactly like the local
-	//     MQTT door above. /healthz and /metrics are served here too, so
-	//     Prometheus (itself a local service) scrapes over plain HTTP and
-	//     never needs the insecure_skip_verify a self-signed door required.
+	// 4b. The plaintext local HTTP door, without admin routes. /healthz and
+	//     /metrics are served here too, so Prometheus scrapes over plain HTTP.
 	if cfg.API.LocalAddr != "" {
 		ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", cfg.API.LocalAddr)
 		if err != nil {
@@ -573,11 +464,8 @@ func Start(cfg *config.Config) (*Node, error) {
 			return fail(fmt.Errorf("node %s: repl server: %w", cfg.ULID, err))
 		}
 		n.ReplSrv = rs
-		// The repl door joins the same in-flight tracking as the API doors.
-		// Stop closes its connections instead of draining them, so without
-		// this a handler can still be inside ApplyReplicated when Store.Close
-		// runs — Pebble panics on use after close, and a hub applies child
-		// batches continuously.
+		// Stop closes repl connections instead of draining them, so the repl door needs
+		// in-flight tracking or a handler could outlive the store.
 		rs.SetInflightTracker(n.trackInflight)
 		addr, err := rs.Start()
 		if err != nil {
@@ -585,13 +473,8 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.ReplAddr = addr
 
-		// Move-drain periodic sweep (design §3.2): the second completion
-		// trigger alongside every /downlink poll — covers a draining child
-		// that never polls again, and re-evaluates any drain that persisted
-		// through this restart. Only meaningful where kind=node children can
-		// be enrolled at all, i.e. wherever the repl door exists. Joins the
-		// same WaitGroup as the repl loops and the pruner: Stop must wait for
-		// an in-flight sweep before closing the store.
+		// The drain sweep finishes drains for children that no longer poll, including
+		// drains that survived a restart. It joins wg like the others.
 		n.wg.Add(1)
 		go func() {
 			defer n.wg.Done()
@@ -599,17 +482,14 @@ func Start(cfg *config.Config) (*Node, error) {
 		}()
 	}
 
-	// 6. Uplink + downlink loops towards the parent. replClient was already
-	//    built above (before the HTTP doors) so /healthz can report it from
-	//    the moment this node starts answering requests.
+	// 6. Uplink and downlink loops towards the parent.
 	if cfg.Parent != nil {
 		cl := replClient
 		// A child's pull can now recurse through this node to its own parent.
 		if n.ReplSrv != nil {
 			n.ReplSrv.SetUpstream(cl)
 		}
-		// The executor can now fetch a blob a provisioning command names but
-		// this node does not hold yet (resources design §3, §7.1).
+		// The executor can fetch a blob a command names but this node lacks.
 		blobPort.SetFetcher(cl)
 		n.wg.Add(2)
 		go func() {
@@ -622,10 +502,8 @@ func Start(cfg *config.Config) (*Node, error) {
 		}()
 	}
 
-	// 7. Retention pruner. Joins the same WaitGroup as the repl loops: a prune
-	//    batch or refresh append in flight must finish before Stop closes the
-	//    store. With retention.interval: 0 (explicit disable) Run returns
-	//    immediately; the default (absent) config prunes on the §3.1 defaults.
+	// 7. Retention pruner. It joins wg so a prune in flight finishes before the
+	//    store closes. interval: 0 disables it.
 	pruner := retention.NewPruner(st, n.Engine, cfg.Retention, n.Metrics, cfg.ULID)
 	n.wg.Add(1)
 	go func() {
@@ -633,10 +511,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		pruner.Run(n.stop)
 	}()
 
-	// 8. Blob sweeper (resources design §8). Joins the same WaitGroup as the
-	//    pruner: a sweep in flight must finish before Stop closes the blob
-	//    store. With blob_gc.interval: 0 (explicit disable) Run returns
-	//    immediately; the default (absent) config sweeps on the §8 defaults.
+	// 8. Blob sweeper, joined to wg for the same reason. interval: 0 disables it.
 	sweeper := blobgc.NewSweeper(blobs, n.Engine, cfg.BlobGC, n.Metrics, cfg.ULID)
 	n.wg.Add(1)
 	go func() {
@@ -644,19 +519,9 @@ func Start(cfg *config.Config) (*Node, error) {
 		sweeper.Run(n.stop)
 	}()
 
-	// The node's own log can be delivered only NOW, and the two reasons are
-	// both things `-race` and the contract validator said out loud:
-	//
-	//   * everything above still CONFIGURES the engine (SetContracts,
-	//     SetExecutor, SetObserver). A publisher goroutine appending through
-	//     it while those run is a data race on the engine's own fields.
-	//   * `_Log` is a contract, and until the bundle is loaded the validated
-	//     namespace rejects it as unknown -- the first records were refused
-	//     with `unknown contract "_Log"`.
-	//
-	// Startup is not lost by waiting: every line since the handler was
-	// installed is in the publisher's queue, and draining it now delivers
-	// them in order.
+	// The node's own log is delivered only now: the engine is fully configured (a
+	// publisher appending earlier would race with that), and the bundle that
+	// defines _Log is loaded. Earlier lines wait in the queue, in order.
 	logSink.Attach(n.Engine, cfg.ULID)
 	n.logPublisher = logPublisher
 	logPublisher.Start(context.Background())
@@ -664,9 +529,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	log.Info("colca node started", "ulid", cfg.ULID, "api", n.APIAddr, "repl", n.ReplAddr, "mqtt", n.MQTTAddr)
 	if cfg.AddrFile != "" {
 		if err := n.writeAddrFile(cfg.AddrFile); err != nil {
-			// The supervisor is waiting on this file; a node that cannot
-			// tell it where its doors are is not usable to it. Fail the
-			// start rather than leave it polling to its timeout.
+			// The supervisor is waiting for this file, so fail the start.
 			n.Stop()
 			return nil, fmt.Errorf("node %s: write addr_file %s: %w", cfg.ULID, cfg.AddrFile, err)
 		}
@@ -709,10 +572,8 @@ func (n *Node) trackInflight(h http.Handler) http.Handler {
 	})
 }
 
-// Stop shuts the node down and releases every resource it holds: when it
-// returns, the API and repl ports are re-bindable and the data dir is
-// re-openable. It is safe to call more than once (Pebble panics on a second
-// Close, so the whole teardown — not just the stop channel — runs exactly once).
+// Stop shuts the node down and releases everything: afterwards the ports can be
+// bound and the data directory opened again. It is safe to call more than once.
 func (n *Node) Stop() {
 	n.stopOnce.Do(func() {
 		close(n.stop)
@@ -736,14 +597,8 @@ func (n *Node) Stop() {
 		// Everything that reads or writes the store must be finished before the
 		// store goes away.
 		n.wg.Wait()
-		// The node's own log drain is one of those writers, and it is not in
-		// wg: it runs on a goroutine LogPublisher owns. Every line logged from
-		// here on still reaches stderr, it is simply no longer appended — which
-		// is the only correct answer once the store is about to close. Left
-		// running, a single shutdown line reached `store.Append` after Close
-		// and took the process down with `panic: pebble: closed`; under Docker
-		// the process was exiting anyway, so only a host-supervised node
-		// (`chaski.Node`) ever showed it.
+		// The node's log drain also writes to the store but is not in wg. Stop it
+		// before closing the store; later lines still reach stderr.
 		if n.logPublisher != nil {
 			n.logPublisher.Stop()
 		}

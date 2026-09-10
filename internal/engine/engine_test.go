@@ -14,9 +14,7 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// fakeIDs is a test Mounts: ulid → entry. The engine asks Authorize for the
-// write-scope answer now (auth §5, writeZones) — there is no separate mount
-// to fake.
+// fakeIDs is a test Mounts: ulid to entry.
 type fakeIDs struct {
 	entries  map[string]*uns.Entry
 	draining []string // mounts DrainingMount treats as under an active drain
@@ -25,9 +23,8 @@ type fakeIDs struct {
 
 func (f fakeIDs) Get(ulid string) (*uns.Entry, bool) { e, ok := f.entries[ulid]; return e, ok }
 
-// DrainingMount and RoutesUnder both defer to uns.UnderMount, the same
-// predicate registry.Manager uses — the boundary rule is the domain's, and a
-// fake that spelled it out again could drift from the thing it stands in for.
+// DrainingMount and RoutesUnder use uns.UnderMount, the predicate registry.Manager
+// uses, so the fake cannot drift from it.
 func (f fakeIDs) DrainingMount(path string) bool { return coversAny(f.draining, path) }
 
 func (f fakeIDs) RoutesUnder(path string) bool { return coversAny(f.routes, path) }
@@ -41,11 +38,9 @@ func coversAny(mounts []string, path string) bool {
 	return false
 }
 
-// testIDs' "m1" carries an explicit write: grant over its own zone — a
-// machine gets no implicit write, unlike a local service (auth §5, table
-// §3), so the fixture states that grant the same way a real deployment would.
-// "hmi" carries a cmd grant only, which is exactly what the no-write-scope
-// tests need: an entry that authenticates and reads but may not write.
+// testIDs' m1 has an explicit write grant over its zone, since machines get no
+// implicit write. hmi has only a cmd grant: it authenticates and reads but may
+// not write.
 func testIDs() fakeIDs {
 	return fakeIDs{
 		entries: map[string]*uns.Entry{
@@ -55,9 +50,8 @@ func testIDs() fakeIDs {
 	}
 }
 
-// testIDsWithDraining is testIDs plus mount "m1" under an active move-drain —
-// the ClassCmd admission check (engine.go) must reject any new command
-// addressed under it regardless of the caller's own grants.
+// testIDsWithDraining is testIDs with mount m1 draining, so any new command under
+// it must be rejected whatever the caller's grants.
 func testIDsWithDraining() fakeIDs {
 	f := testIDs()
 	f.draining = []string{"m1"}
@@ -82,10 +76,9 @@ func newEngineWithIDs(t *testing.T, ids fakeIDs) *Engine {
 	return e
 }
 
-// placeTestElements gives the fixture node the elements its identities bind to
-// and its grants name. Grants resolve through the element index (id-grants
-// design §4), so a fixture without them would deny everything for the right
-// reason and prove nothing.
+// placeTestElements authors the elements the fixture's identities bind to and
+// their grants name; without them every grant would be denied and the tests
+// would prove nothing.
 func placeTestElements(t *testing.T, e *Engine) {
 	t.Helper()
 	for _, el := range []struct{ id, path string }{{"el-m1", "m1"}, {"el-hmi", "hmi"}} {
@@ -146,10 +139,8 @@ func newRecordingEngine(t *testing.T) (*Engine, *recorder) {
 	return e, rec
 }
 
-// The mount rewrite is gone: level 4 is the node's own ULID for every
-// publisher, and the path a client publishes is stored EXACTLY as sent — "m1"
-// writes at "m1/temp" because that is where its write:el-m1/# grant covers,
-// not because the engine inserted anything.
+// Level 4 is the node's ULID for every publisher and the published path is stored
+// exactly as sent; m1 writes at m1/temp because its grant covers it.
 func TestClientPublishNoRewriteAndKV(t *testing.T) {
 	e := newEngine(t)
 	res, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", []byte(`{"v":7}`))
@@ -234,10 +225,8 @@ func TestEntityStorePublishBatchRejectsLateInvalidRecordWithoutWrites(t *testing
 	}
 }
 
-// Definitions are authored through the same commit boundary as entities and
-// land on their own stream. They have to: `definition/upsert` files several
-// definitions in one command, and a command is one transition whatever it
-// files.
+// Definitions go through the same commit boundary as entities and land on their
+// own stream, so definition/upsert can file several in one command.
 func TestEntityStorePublishBatchCommitsDefinitionsOnTheirOwnStream(t *testing.T) {
 	e, _ := newRecordingEngine(t)
 	entitiesBefore := e.Store().NextOffset("entities")
@@ -260,9 +249,8 @@ func TestEntityStorePublishBatchCommitsDefinitionsOnTheirOwnStream(t *testing.T)
 	}
 }
 
-// One batch is one Pebble batch on one stream, so records for two streams could
-// only be committed as two — which is the half-applied outcome this path exists
-// to prevent. No verb mixes them; this refusal is what keeps that true.
+// Records for two streams would need two Pebble batches, the half-applied outcome
+// the batch prevents, so they are refused.
 func TestEntityStorePublishBatchRefusesRecordsFromTwoStreams(t *testing.T) {
 	e, delivered := newRecordingEngine(t)
 	entitiesBefore := e.Store().NextOffset("entities")
@@ -276,11 +264,8 @@ func TestEntityStorePublishBatchRefusesRecordsFromTwoStreams(t *testing.T) {
 	if err == nil {
 		t.Fatal("PublishBatch accepted a batch spanning the entities and definitions streams")
 	}
-	// Pin the two-stream refusal by name, not merely that SOME error came
-	// back: the stream check runs before validateContract today, so a
-	// reordering that let a different rule refuse first (or a validation
-	// bug on the _Group payload) would still make err != nil while no
-	// longer testing the two-stream rule this test claims to pin.
+	// Check the refusal by message, so a different rule refusing first cannot make
+	// this pass.
 	if !strings.Contains(err.Error(), `belongs to stream "definitions", not "entities"`) {
 		t.Fatalf("PublishBatch error = %q, want it to name the two-stream refusal", err)
 	}
@@ -295,16 +280,14 @@ func TestEntityStorePublishBatchRefusesRecordsFromTwoStreams(t *testing.T) {
 	}
 }
 
-// The whole point of routing ConfigExec through the atomic port, proven against
-// the real store and the real contract floor rather than a fake: a configure
-// command whose late record fails validation leaves the node exactly as it was.
+// Against the real store and contract floor: a configure command whose second
+// record fails validation leaves the node unchanged.
 func TestAConfigureCommandCommitsNothingWhenALateRecordFailsValidation(t *testing.T) {
 	e, delivered := newRecordingEngine(t)
 	domain := uns.NewConfigExec(e.EntityStore(), nil, nil, nil, nil, nil)
 
-	// Precondition, asserted rather than assumed: this command shape is
-	// accepted, so the refusal below is the late payload's doing and not the
-	// fixture quietly rejecting everything.
+	// Precondition: this command shape is accepted, so the refusal below comes from
+	// the bad record.
 	if code, msg, _ := domain.Execute(uns.CommandContext{}, "_CmdConfigure", "signal/upsert", []byte(`{"signals":[
 		{"path":"line1/temp","signal":{"id":"sig-temp","name":"Temperature"}},
 		{"path":"line1/speed","signal":{"id":"sig-speed","name":"Speed"}}]}`)); code != 200 {
@@ -313,9 +296,8 @@ func TestAConfigureCommandCommitsNothingWhenALateRecordFailsValidation(t *testin
 	offsetBefore := e.Store().NextOffset("entities")
 	delivered.reset()
 
-	// Second record has no id, which the floor requires of every data-model
-	// record. The first is valid and, before the executor committed as one
-	// transition, would already have been written by the time it was refused.
+	// The second record has no id, which the floor requires. The first is valid and
+	// must not be written either.
 	code, msg, result := domain.Execute(uns.CommandContext{}, "_CmdConfigure", "signal/upsert", []byte(`{"signals":[
 		{"path":"line1/press","signal":{"id":"sig-press","name":"Press"}},
 		{"path":"line1/broken","signal":{"name":"no id"}}]}`))
@@ -340,8 +322,7 @@ func TestAConfigureCommandCommitsNothingWhenALateRecordFailsValidation(t *testin
 	}
 }
 
-// Level 4 must be THIS node's own ULID for every publisher — not the
-// client's identity, which no longer appears in the topic at all (auth §2).
+// Level 4 must be this node's ULID for every publisher.
 func TestClientLevel4MustBeThisNode(t *testing.T) {
 	e := newEngine(t)
 	_, err := e.IngestClient("m1", "colca/v1/_Metric/OTHER/temp", []byte(`{"v":1}`))
@@ -354,13 +335,10 @@ func TestClientLevel4MustBeThisNode(t *testing.T) {
 	}
 }
 
-// metricPayload is a valid _Metric body, shared by the write-rule tests below
-// (local-service-trust design §2/§5) — none of them care about the
-// payload's content, only about whether the publish is admitted.
+// metricPayload is a valid _Metric body shared by the write-rule tests below.
 var metricPayload = []byte(`{"v":1}`)
 
-// mustKVScan is KVScan with the error handled the only way a test fixture
-// can: fail loud (resources design §8).
+// mustKVScan is KVScan that fails the test on error.
 func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
 	t.Helper()
 	entries, err := st.KVScan(prefix)
@@ -370,13 +348,9 @@ func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
 	return entries
 }
 
-// newTestEngine builds a fresh engine identified by nodeULID, whose OWN
-// element is "el-root" (a one-step ancestry: this node IS el-root), and
-// enrolls one KindLocal service "01JSVC" bound to that same element — i.e.
-// bound to the node itself. writeZones resolves el-root's zone through
-// Scope.Reaches (it is the node's own element) to "#": the local service may
-// write anywhere on the node, exactly what "bound to the node itself" means
-// (design §2, §3).
+// newTestEngine builds an engine for nodeULID whose own element is el-root, with
+// local service 01JSVC bound to it, so the service may write anywhere on the
+// node.
 func newTestEngine(t *testing.T, nodeULID string) *Engine {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -393,9 +367,8 @@ func newTestEngine(t *testing.T, nodeULID string) *Engine {
 	return e
 }
 
-// newTestEngineScoped is newTestEngine, but the local service "01JSVC" binds
-// to elementID placed at path instead of the node's own root — its write
-// scope narrows to that subtree (writeZones, auth §5.2).
+// newTestEngineScoped is newTestEngine with 01JSVC bound to elementID at path,
+// narrowing its write scope to that subtree.
 func newTestEngineScoped(t *testing.T, nodeULID, elementID, path string) *Engine {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -415,10 +388,8 @@ func newTestEngineScoped(t *testing.T, nodeULID, elementID, path string) *Engine
 	return e
 }
 
-// lastTopic reads back the topic of the most recently persisted metrics-
-// stream record — asserting what the engine actually STORED, not what a
-// Result claims, since the whole point of this task is that the stored topic
-// is the published one, unchanged.
+// lastTopic returns the topic of the newest record on the metrics stream: what
+// the engine stored, not what a Result claims.
 func lastTopic(t *testing.T, e *Engine) string {
 	t.Helper()
 	next := e.Store().NextOffset("metrics")
@@ -432,10 +403,8 @@ func lastTopic(t *testing.T, e *Engine) string {
 	return recs[0].Topic
 }
 
-// assertRejectReason fails the test unless err is an engine rejection
-// carrying exactly the given metrics reason. Takes the error itself (via
-// ReasonOf, engine.go's typed accessor) rather than the engine — nothing
-// about "why was the last publish rejected" is state the *Engine holds.
+// assertRejectReason fails the test unless err is an engine rejection with
+// exactly the given reason.
 func assertRejectReason(t *testing.T, err error, want string) {
 	t.Helper()
 	if got := ReasonOf(err); got != want {
@@ -443,8 +412,8 @@ func assertRejectReason(t *testing.T, err error, want string) {
 	}
 }
 
-// A local service publishes inside its own scope: no rewrite, level 4 is the
-// node's own ULID (local-service-trust design §2, §5).
+// A local service publishes inside its scope: no rewrite, level 4 is the node's
+// ULID.
 func TestAClientPublishesUnderTheNodesULID(t *testing.T) {
 	e := newTestEngine(t, "n1")
 	res, err := e.IngestClient("01JSVC", "colca/v1/_Metric/n1/line1/temp", metricPayload)
@@ -529,7 +498,7 @@ func TestLocalConfigureAuthorityFollowsPlacement(t *testing.T) {
 	}
 }
 
-// Level 4 must name THIS node, whoever the publisher is.
+// Level 4 must name this node, whoever publishes.
 func TestLevel4MustBeThisNode(t *testing.T) {
 	e := newTestEngine(t, "n1")
 	_, err := e.IngestClient("01JSVC", "colca/v1/_Metric/other-node/line1/temp", metricPayload)
@@ -543,10 +512,8 @@ func TestLevel4MustBeThisNode(t *testing.T) {
 func TestAPublishOutsideTheWriteScopeIsRejected(t *testing.T) {
 	e := newTestEngineScoped(t, "n1", "el-press3", "line1/press3")
 
-	// Inside the granted element's subtree: admitted. Asserted first so a
-	// broken placement (el-press3 never actually resolving to line1/press3)
-	// cannot make the rejection below pass for the wrong reason — a scope
-	// that grants nothing rejects everything too.
+	// Inside the granted subtree the publish is admitted. Checked first so a broken
+	// placement cannot make the rejection below pass.
 	res, err := e.IngestClient("01JSVC", "colca/v1/_Metric/n1/line1/press3/leaf", metricPayload)
 	if err != nil || !res.Persisted {
 		t.Fatalf("a publish inside the granted write scope was rejected: %v", err)
@@ -605,8 +572,8 @@ func TestDefinitionsAreAuthoredByTheLocalNodeOnly(t *testing.T) {
 	}
 }
 
-// Registry entries enter through the enrollment door ONLY (auth §3): _EnrolledIdentity
-// is rejected at both ordinary ingest doors, no matter who sends it.
+// _EnrolledIdentity is rejected at both ordinary doors, whoever sends it;
+// registry entries enter only through enrollment.
 func TestEnrolledIdentityRejectedAtOrdinaryDoors(t *testing.T) {
 	e := newEngine(t)
 	before := e.Store().NextOffset("entities") // the fixture's own element placements
@@ -619,8 +586,8 @@ func TestEnrolledIdentityRejectedAtOrdinaryDoors(t *testing.T) {
 	if got := e.Store().NextOffset("entities"); got != before {
 		t.Fatalf("rejected _EnrolledIdentity must not be persisted: entities %d → %d", before, got)
 	}
-	// Replication is NOT an ordinary door: a child's already-enrolled fact
-	// rides upward like any entity (rejecting it would hole the stream).
+	// Replication is not an ordinary door: a child's enrolled identity replicates up
+	// like any entity.
 	recs := []store.ReplRecord{{ChildOffset: 1, Topic: "colca/v1/_EnrolledIdentity/child1/edge1/_colca/identities/m9",
 		Payload: []byte(`{"ulid":"m9"}`), TS: 1, KVPath: "edge1/_colca/identities/m9", KVNode: "child1"}}
 	if _, _, err := e.IngestReplicated("child1", "entities", recs); err != nil {
@@ -631,13 +598,9 @@ func TestEnrolledIdentityRejectedAtOrdinaryDoors(t *testing.T) {
 	}
 }
 
-// Time-sync design §2.2/§4: _TimeSync is ephemeral and node-local-publish-only
-// — unlike _EnrolledIdentity, it is rejected at EVERY ingest door including
-// replication, since a well-behaved child's own store can never legitimately
-// contain one (its own engine already rejects it before persistence). Both
-// the canonical (no-path) and a padded topic shape must be rejected with the
-// SAME dedicated reason, not the generic "grammar" reason Parse's 4-segment
-// relaxation would otherwise produce.
+// _TimeSync is rejected at every door, replication included, with its own reason
+// rather than the generic grammar reason, for both the canonical and a padded
+// topic.
 func TestTimeSyncRejectedAtEveryIngestDoor(t *testing.T) {
 	s, err := store.Open(t.TempDir())
 	if err != nil {
@@ -660,9 +623,7 @@ func TestTimeSyncRejectedAtEveryIngestDoor(t *testing.T) {
 		if _, err := e.IngestAdmin(topic, []byte(`{"now_ms":1}`)); err == nil || !strings.Contains(err.Error(), "_TimeSync") {
 			t.Fatalf("admin publish of %s must be rejected with a _TimeSync-specific error, got %v", topic, err)
 		}
-		// The human door too (merge composition, human-authz × time-sync):
-		// rejected with the dedicated time_sync reason, not human_write —
-		// and no grant, however wide, changes that.
+		// The human door rejects it with the time_sync reason too, whatever the grants.
 		if _, err := e.IngestHuman(humanEntry(t, "read:#", "cmd:#:admin", "admin:#"), topic, []byte(`{"now_ms":1}`)); err == nil || !strings.Contains(err.Error(), "_TimeSync") {
 			t.Fatalf("human publish of %s must be rejected with a _TimeSync-specific error, got %v", topic, err)
 		}
@@ -676,9 +637,8 @@ func TestTimeSyncRejectedAtEveryIngestDoor(t *testing.T) {
 		t.Fatalf("%s = %v after 6 rejected attempts (2 topic shapes x client+admin+human), want 6", rejectedLine, v)
 	}
 
-	// Replication: a forged child offset carrying a _TimeSync record is
-	// dropped before it reaches the store; sibling records in the same batch
-	// still apply, and the surviving higher offset still advances the hwm.
+	// Replication drops a forged _TimeSync record; the other records in the batch
+	// still apply and advance the HWM.
 	recs := []store.ReplRecord{
 		{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/child1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "child1/m1/a", KVNode: "m1"},
 		{ChildOffset: 2, Topic: "colca/v1/_TimeSync/n-child", Payload: []byte(`{"now_ms":1}`), TS: 1},
@@ -699,13 +659,8 @@ func TestTimeSyncRejectedAtEveryIngestDoor(t *testing.T) {
 	}
 }
 
-// Dropping a forged _TimeSync record from a replicated
-// batch must not falsely trip the §6.4 gap-jump detector — that log/metric
-// means genuine, investigatable child-side data loss, and dropping an
-// ephemeral _TimeSync record lost nothing. A gap only PARTIALLY explained by
-// a dropped _TimeSync record (a real offset is also genuinely missing) must
-// still log, unchanged — the fix removes the false positive, not real
-// detection.
+// Dropping a forged _TimeSync record does not trip the gap detector, but a gap
+// only partly explained by the drop still logs.
 func TestTimeSyncDropDoesNotFalsePositiveGapJump(t *testing.T) {
 	const marker = "replication offset jump"
 
@@ -749,9 +704,8 @@ func TestTimeSyncDropDoesNotFalsePositiveGapJump(t *testing.T) {
 		m := metrics.New(s, config.Retention{}, nil)
 		e := New(s, &config.Config{ULID: "n-parent"}, testIDs(), nil, m, nil)
 
-		// Offset 2 is the forged _TimeSync (dropped, explained); offset 3 is
-		// ALSO simply absent from the batch — a real, separate loss — so the
-		// gap from 1 to 4 is only partially explained by the drop.
+		// Offset 2 is the dropped _TimeSync; offset 3 is simply missing, a real loss, so
+		// the gap from 1 to 4 is only partly explained.
 		recs := []store.ReplRecord{
 			{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/child1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "child1/m1/a", KVNode: "m1"},
 			{ChildOffset: 2, Topic: "colca/v1/_TimeSync/n-child", Payload: []byte(`{"now_ms":1}`), TS: 1},
@@ -773,9 +727,8 @@ func TestTimeSyncDropDoesNotFalsePositiveGapJump(t *testing.T) {
 	})
 }
 
-// A client with a covering cmd grant may publish commands of the granted
-// class into the granted zone — absolute node-local paths, no mount rewrite,
-// no level-4 identity rule (auth §5.3 ActCmd).
+// A client with a covering cmd grant may publish commands of that class into the
+// granted zone, at absolute node-local paths.
 func TestClientCmdGrants(t *testing.T) {
 	e := newEngine(t)
 	payload := []byte(`{"correlation_id":"c","expires_at":99999999999}`)
@@ -814,7 +767,7 @@ func humanEntry(t *testing.T, grants ...string) *uns.Entry {
 	return e
 }
 
-// Humans command and nothing else (World-2 rule, human-authz §5.2).
+// Humans send commands and nothing else.
 func TestIngestHumanCommandsOnly(t *testing.T) {
 	e := newEngine(t)
 	payload := []byte(`{"correlation_id":"c","expires_at":99999999999999}`)
@@ -841,8 +794,8 @@ func TestIngestHumanCommandsOnly(t *testing.T) {
 		t.Fatal("grantless human cmd must be rejected")
 	}
 
-	// Data / entity / ack: rejected regardless of grants — there IS no grant
-	// that allows a human to write state.
+	// Data, entity and ack are rejected whatever the grants: no grant lets a human
+	// write state.
 	before := map[string]uint64{}
 	for _, s := range []string{"metrics", "entities", "commands", "audit"} {
 		before[s] = e.Store().NextOffset(s)
@@ -872,10 +825,8 @@ func TestIngestHumanCommandsOnly(t *testing.T) {
 	}
 }
 
-// Move-drain design §3.2 item 2: a mount under an active drain rejects new
-// ClassCmd publishes at admission — client (grant notwithstanding) and admin
-// alike — with reason "draining", not the ordinary "cmd_denied". A command
-// outside the draining mount is unaffected.
+// A draining mount rejects new commands at admission, from clients and admin
+// alike, with reason draining. Commands outside it are unaffected.
 func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
 	s, err := store.Open(t.TempDir())
 	if err != nil {
@@ -893,8 +844,8 @@ func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
 	}
 
 	payload := []byte(`{"correlation_id":"c","expires_at":99999999999}`)
-	// A client with a covering grant still gets rejected — draining outranks
-	// the grant check (engine.go checks it first).
+	// A client with a covering grant is still rejected: draining is checked before
+	// grants.
 	if _, err := e.IngestClient("hmi", "colca/v1/_CmdParam/m1/m1/set-speed", payload); err == nil || !strings.Contains(err.Error(), "draining") {
 		t.Fatalf("client cmd under a draining mount must be rejected mentioning 'draining', got %v", err)
 	}
@@ -902,12 +853,8 @@ func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
 	if _, err := e.IngestAdmin("colca/v1/_CmdParam/m1/m1/set-speed", payload); err == nil || !strings.Contains(err.Error(), "draining") {
 		t.Fatalf("admin cmd under a draining mount must be rejected mentioning 'draining', got %v", err)
 	}
-	// Nor is the parent->child relay door: in a
-	// multi-hop tree, a command authored ABOVE this node's own parent —
-	// where this node's own draining child is invisible — relays down and
-	// arrives here exactly like any other downlinked command. Without this
-	// check it would land straight in the draining mount, the "chasing a
-	// moving tail" failure the admission gate exists to prevent.
+	// So is the downlink relay door: a command authored above this node's parent
+	// relays down like any other and must not land in the draining mount.
 	if _, err := e.IngestDownlink("colca/v1/_CmdParam/m1/m1/set-speed", payload, 4711); err == nil || !strings.Contains(err.Error(), "draining") {
 		t.Fatalf("downlinked cmd under a draining mount must be rejected mentioning 'draining', got %v", err)
 	}
@@ -926,9 +873,8 @@ func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
 		t.Fatalf("cmd outside the draining mount must still be admitted (downlink): %v", err)
 	}
 
-	// The human door is a door too ("at every door", move-drain design §3.2
-	// item 2): a human's covering cmd grant does not exempt them from the
-	// draining admission gate.
+	// The human door too: a covering cmd grant does not exempt a person from the
+	// drain.
 	if _, err := e.IngestHuman(humanEntry(t, "cmd:el-m1/#:param"), "colca/v1/_CmdParam/m1/m1/set-speed", payload); err == nil || !strings.Contains(err.Error(), "draining") {
 		t.Fatalf("human cmd under a draining mount must be rejected mentioning 'draining', got %v", err)
 	}
@@ -977,9 +923,8 @@ func TestNonUnsIgnored(t *testing.T) {
 	}
 }
 
-// The bus mirrors the STORE, so what a subscriber sees is exactly the topic
-// the client published — there is no rewrite any more — and a metric is
-// state, so it is retained.
+// The bus mirrors the store, so a subscriber sees exactly the published topic,
+// and a metric is state, so it is retained.
 func TestIngestClientDeliversCanonicalTopicRetained(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 	if _, err := e.IngestClient("m1", "colca/v1/_Metric/n-edge1/m1/temp", []byte(`{"v":7}`)); err != nil {
@@ -1015,17 +960,13 @@ func TestIngestAdminDeliversCommandUnretained(t *testing.T) {
 	}
 }
 
-// A _StreamGap marker is an event (design §6.4: "no KV projection, not
-// retained"), exactly like a command/ack — it must never hit the local
-// broker's retained set. Pins the real retainFor function directly (not just
-// the class enum in plugins/uns): mutating retainFor to also cover ClassGap
-// turns this red.
+// A _StreamGap marker is an event and must never be retained.
 func TestRetainForExcludesStreamGap(t *testing.T) {
 	if retainFor(uns.ClassGap) {
 		t.Fatal("retainFor(ClassGap) must be false — _StreamGap is an event, not state")
 	}
-	// Sanity: the two classes that ARE retained still are, so the assertion
-	// above is actually exercising the gate, not a vacuously-false function.
+	// Sanity: the retained classes still are, so the assertion above exercises the
+	// gate.
 	if !retainFor(uns.ClassData) || !retainFor(uns.ClassEntity) {
 		t.Fatal("retainFor must still retain data/entity classes")
 	}
@@ -1062,10 +1003,9 @@ func TestRejectedPublishDeliversNothing(t *testing.T) {
 	}
 }
 
-// An identity with no write grant covering the topic — "hmi" holds only a
-// cmd grant — may connect and subscribe, but the engine refuses everything it
-// publishes. The rejected metric never reaches the bus; the security audit
-// event does, unretained (auth §5, writeZones).
+// An identity without a covering write grant (hmi has only a cmd grant) may
+// connect and subscribe, but every publish is refused. The metric never reaches
+// the bus; the unretained audit event does.
 func TestClientWithNoWriteScopeMayNotPublish(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 	_, err := e.IngestClient("hmi", "colca/v1/_Metric/n-edge1/hmi/temp", []byte(`{"v":1}`))
@@ -1080,9 +1020,8 @@ func TestClientWithNoWriteScopeMayNotPublish(t *testing.T) {
 	}
 }
 
-// Replication is the fourth write path and must mirror too — but only records
-// that were actually applied. Pushing the same batch twice delivers nothing the
-// second time, exactly like the high-water-mark dedupe in the store.
+// Replication mirrors only records that were applied: pushing the same batch
+// twice delivers nothing the second time.
 func TestIngestReplicatedDeliversOnlyNewRecords(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 	batch := []store.ReplRecord{
@@ -1132,8 +1071,8 @@ func TestIngestReplicatedDeliversOnlyNewRecords(t *testing.T) {
 	}
 }
 
-// A record whose topic does not parse is logged and skipped — never a panic,
-// and never a reason to fail the apply that already happened.
+// A record with an unparseable topic is logged and skipped; it never panics or
+// fails the apply.
 func TestIngestReplicatedSkipsUnparseableTopic(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 	batch := []store.ReplRecord{
@@ -1153,8 +1092,8 @@ func TestIngestReplicatedSkipsUnparseableTopic(t *testing.T) {
 	}
 }
 
-// captureLogs routes slog.Default through a buffer for the duration of the
-// test, returning the buffer. Engines constructed AFTER the call log into it.
+// captureLogs routes slog.Default through a buffer for the test; engines built
+// after the call log into it.
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -1183,10 +1122,8 @@ func replBatchAt(topic string, offsets ...uint64) []store.ReplRecord {
 	return out
 }
 
-// Spec §6.4 second net: child stream offsets are gapless and the uplink reads
-// them contiguously, so an applied ChildOffset above HWM+1 is a gap — the
-// parent logs it to catch a child that failed to emit its _StreamGap marker.
-// Detection only; the batch is still applied unchanged.
+// An applied ChildOffset above HWM+1 is a gap the parent logs, in case the child
+// failed to emit a _StreamGap marker. The batch still applies.
 func TestIngestReplicatedLogsOffsetJumps(t *testing.T) {
 	const marker = "replication offset jump"
 	metric := "colca/v1/_Metric/m1/child1/m1/t"
@@ -1226,8 +1163,7 @@ func TestIngestReplicatedLogsOffsetJumps(t *testing.T) {
 	})
 
 	t.Run("first contact past offset 1 is a gap", func(t *testing.T) {
-		// The child pruned before ever replicating: the parent genuinely
-		// misses [1..3] — the fresh-cursor twin of the §6.1 [delta].
+		// The child pruned before it ever replicated, so the parent misses 1 to 3.
 		e, buf := newCapturedEngine(t)
 		if _, _, err := e.IngestReplicated("n-child", "audit", replBatchAt("colca/v1/_AuditEvent/n-child/child1/_colca/audit/e1", 4, 5)); err != nil {
 			t.Fatal(err)
@@ -1238,12 +1174,8 @@ func TestIngestReplicatedLogsOffsetJumps(t *testing.T) {
 	})
 
 	t.Run("filtered uplinks are exempt", func(t *testing.T) {
-		// The commands uplink carries only _Ack + _StreamGap, and the entities
-		// uplink keeps the node-private Edit receipt home, so child-offset
-		// holes on either are the filter working, not data loss. The domain
-		// answers which streams (uns.UplinkCarriesEveryRecord); a hand-kept
-		// `stream == "commands"` here would have reported every Edit
-		// command executed at a child as a gap at its parent.
+		// The commands and entities uplinks are filtered, so child-offset holes there are
+		// expected. The domain says which streams (uns.UplinkCarriesEveryRecord).
 		for stream, topic := range map[string]string{
 			"commands": "colca/v1/_Ack/m1/child1/m1/go",
 			"entities": "colca/v1/_SystemElement/m1/child1/m1/a",
@@ -1259,12 +1191,9 @@ func TestIngestReplicatedLogsOffsetJumps(t *testing.T) {
 	})
 }
 
-// Retention design §7.1: an empty payload on a KV-projecting class is the
-// tombstone. The engine appends the record as history (correct class/stream,
-// validation's field checks bypassed by the §7 rule), deletes the KV key in the
-// same batch, and mirrors the empty payload retained — the retained-clear —
-// onto the bus. Exercised for both KV classes: data (client path, no rewrite)
-// and entity (admin path, no rewrite).
+// An empty payload on a KV-projecting class is a tombstone: appended as history,
+// KV key deleted in the same batch, retained clear on the bus. Covered for data
+// through the client door and entities through the admin door.
 func TestEmptyPayloadTombstonesKVAndDeliversRetainedClear(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 
@@ -1302,8 +1231,8 @@ func TestEmptyPayloadTombstonesKVAndDeliversRetainedClear(t *testing.T) {
 		t.Fatalf("entity tombstone did not retire the KV key: %+v", got)
 	}
 
-	// Delivery: each tombstone is mirrored as an empty payload with retain=true
-	// — the MQTT retained-clear — under the stored topic.
+	// Each tombstone is delivered as an empty retained payload under the stored
+	// topic.
 	got := rec.got()
 	if len(got) != 4 {
 		t.Fatalf("want 4 deliveries (2 sets + 2 clears), got %d: %+v", len(got), got)
@@ -1316,9 +1245,8 @@ func TestEmptyPayloadTombstonesKVAndDeliversRetainedClear(t *testing.T) {
 	}
 }
 
-// Retention design §7.3: for non-KV classes an empty payload was never a valid
-// value and deletion is not meaningful — commands and acks with empty payloads
-// are rejected, nothing is persisted, nothing reaches the bus.
+// For non-KV classes an empty payload is not a value: commands and acks with
+// empty payloads are rejected and nothing is stored or delivered.
 func TestEmptyPayloadRejectedForNonKVClasses(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 	if _, err := e.IngestAdmin("colca/v1/_CmdParam/m1/m1/set-speed", nil); err == nil {
@@ -1335,8 +1263,8 @@ func TestEmptyPayloadRejectedForNonKVClasses(t *testing.T) {
 	}
 }
 
-// The level-4-is-this-node rule already gates tombstones: an empty payload is
-// a publish like any other, so a client cannot retire another NODE's path.
+// An empty payload is a publish like any other, so the level-4 rule keeps a
+// client from retiring another node's path.
 func TestClientCannotTombstoneForeignPath(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 	// A path owned by node OTHER, seeded as replicated state would be.
@@ -1360,9 +1288,8 @@ func TestClientCannotTombstoneForeignPath(t *testing.T) {
 	}
 }
 
-// Retention design §7.1: the tombstone replicates upward like any record and
-// retires the path at the ancestor the same way — KV key deleted by
-// ApplyReplicated, retained message cleared by the empty-payload mirror.
+// A tombstone replicates up and retires the path at the ancestor too: KV key
+// deleted, retained message cleared.
 func TestIngestReplicatedTombstoneRetiresKVAndClearsRetained(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 	set := []store.ReplRecord{{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/edge1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "edge1/m1/a", KVNode: "m1"}}
@@ -1393,17 +1320,14 @@ func TestIngestReplicatedTombstoneRetiresKVAndClearsRetained(t *testing.T) {
 	}
 }
 
-// IngestRefresh (retention spec §6.5 [delta]) is the pruner's guarded refresh
-// entry: full admin semantics when the KV guard holds — append, KV upsert, bus
-// mirror with retain — and a TOTAL skip when it does not: no record, no
-// delivery, nil error. Non-KV classes and empty payloads (a refresh must never
-// smuggle a tombstone) are rejected outright.
+// IngestRefresh applies with full admin semantics while the KV guard holds, and
+// skips completely when it does not: no record, no delivery, nil error. Non-KV
+// classes and empty payloads are rejected.
 func TestIngestRefreshGuardAndSkipSemantics(t *testing.T) {
 	e, rec := newRecordingEngine(t)
 	topic := "colca/v1/_SystemElement/n-edge1/line1/press"
-	// Offsets are relative to whatever the fixture already wrote (its own
-	// element placements), so the test states the CAS position it means rather
-	// than assuming an empty stream.
+	// Offsets are relative to what the fixture already wrote, so the test states the
+	// CAS position it means.
 	seeded, err := e.IngestAdmin(topic, []byte(`{"id":"P1"}`))
 	if err != nil {
 		t.Fatal(err)

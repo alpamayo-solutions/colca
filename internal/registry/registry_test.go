@@ -20,8 +20,7 @@ func openStore(t *testing.T, dir string) *store.Store {
 	return st
 }
 
-// mustKVScan is KVScan with the error handled the only way a test fixture
-// can: fail loud (resources design §8).
+// mustKVScan is KVScan that fails the test on error.
 func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
 	t.Helper()
 	entries, err := st.KVScan(prefix)
@@ -46,9 +45,8 @@ func machine(ulid, mount, pub string) uns.Entry {
 
 func pub(seed string) string { return strings.Repeat(seed, 64/len(seed)) }
 
-// elementAt is the element a test places at a path. The registry never derives
-// one — it only ever asks the namespace — so the shape is the test's own
-// convention and exists purely to keep failures readable.
+// elementAt is the element id tests place at a path; the shape only keeps
+// failures readable.
 func elementAt(path string) string {
 	if path == "" {
 		return ""
@@ -62,9 +60,8 @@ type ns map[string]string // element id → this node's local path
 
 func (n ns) PathOf(id string) (string, bool) { p, ok := n[id]; return p, ok }
 
-// place puts an element at a path, or moves it when it already sits somewhere —
-// which is how a rename reaches the registry: the namespace changes underneath,
-// nothing is re-enrolled.
+// place puts an element at path or moves it there, which is how a rename reaches
+// the registry.
 func (n ns) place(path string) { n[elementAt(path)] = path }
 
 // newManager builds a manager whose namespace holds an element at each path.
@@ -82,9 +79,8 @@ func newManager(t *testing.T, st *store.Store, paths ...string) (*Manager, ns) {
 	return m, n
 }
 
-// newTestManager builds a manager for the name-index tests below: a fresh
-// store plus a namespace resolving "el-press3" (elementAt("press3")), the
-// element every local-service entry in this file binds to.
+// newTestManager builds a manager whose namespace resolves el-press3, the element
+// the local entries in this file bind to.
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
 	m, _ := newManager(t, openStore(t, t.TempDir()), "press3")
@@ -175,9 +171,7 @@ func TestEnrollValidationAndUniqueness(t *testing.T) {
 		{"invalid entry", machine("", "z/c", pub("ef"))},
 		{"element named by a path", uns.Entry{ULID: "01M4", Pubkey: pub("12"), Kind: uns.KindExternal, Element: "z/c"}},
 		{"element not placed at this node", uns.Entry{ULID: "01M5", Pubkey: pub("34"), Kind: uns.KindExternal, Element: "el-nowhere"}},
-		// The element-less read-only observer is gone (design §7): a machine
-		// must be placed, same as a node — nothing proved an unplaced identity
-		// belongs to this deployment.
+		// Every machine must be placed.
 		{"element-less machine", machine("01O1", "", pub("56"))},
 	}
 	for _, c := range cases {
@@ -212,7 +206,7 @@ func TestReEnrollUpdatesAndKicks(t *testing.T) {
 	if e, _ := m.Get("01M1"); e.Element != elementAt("z/b") || e.Pubkey != pub("cd") {
 		t.Fatalf("entry not updated: %+v", e)
 	}
-	// The OLD pubkey no longer authenticates.
+	// The old pubkey no longer authenticates.
 	if _, ok := m.ByPubkey(pub("ab")); ok {
 		t.Fatal("stale pubkey still resolves after re-enroll")
 	}
@@ -262,9 +256,8 @@ func TestRevoke(t *testing.T) {
 	}
 }
 
-// Registry changes mirror onto the local bus like any entity: enroll delivers
-// the retained _EnrolledIdentity, revoke delivers an empty retained payload (the MQTT
-// retained-clear), both AFTER the map swap and outside the manager's lock.
+// Enroll publishes the retained _EnrolledIdentity and revoke clears it, both
+// after the map swap and outside the lock.
 func TestEnrollAndRevokeMirrorToBus(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "z/a")
@@ -275,8 +268,8 @@ func TestEnrollAndRevokeMirrorToBus(t *testing.T) {
 	}
 	var seen []msg
 	m.SetDeliver(func(topic string, payload []byte, retain bool) {
-		// Re-enter the manager like the broker's per-delivery ACL check does —
-		// this deadlocks if callbacks fire under the write lock.
+		// Re-enter the manager as the broker's ACL check does; this deadlocks if
+		// callbacks run under the write lock.
 		m.Get("01M1")
 		seen = append(seen, msg{topic, len(payload), retain})
 	})
@@ -320,11 +313,8 @@ func node(ulid, mount, pub string) uns.Entry {
 	return uns.Entry{ULID: ulid, Pubkey: pub, Kind: uns.KindNode, Element: elementAt(mount)}
 }
 
-// Move-drain design §3.1/§3.2: Drain persists status "draining" on a
-// kind=node entry, republishes its (now-draining) entity retained like any
-// entry update, but — unlike Enroll's re-enroll path — does NOT kick the
-// live session: the whole point is to keep the connection the queue drains
-// through alive.
+// Drain persists and republishes the draining status but keeps the session,
+// since the queue drains through it.
 func TestDrainPersistsStatusAndDoesNotKick(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "z/child")
@@ -380,8 +370,7 @@ func TestDrainPersistsStatusAndDoesNotKick(t *testing.T) {
 		t.Fatal("Drain must not invalidate the pubkey — the child must still authenticate")
 	}
 
-	// The persisted r/ entry carries the status too (design §3.2: "persisted
-	// in the r/ entry; survives restart").
+	// The persisted entry carries the status too, so it survives a restart.
 	m2, _ := newManager(t, st, "z/child")
 	e2, ok := m2.Get("01N1")
 	if !ok || e2.Status != uns.StatusDraining {
@@ -389,10 +378,8 @@ func TestDrainPersistsStatusAndDoesNotKick(t *testing.T) {
 	}
 }
 
-// Drain's error surface: 404-shaped (ErrNotEnrolled) for an unknown ulid,
-// 409-shaped (ErrNotNode) for a machine — move-drain applies only to
-// kind=node (design §3.2 [delta]) — and 409-shaped (ErrAlreadyDraining) for
-// a second Drain call on the same child.
+// Drain returns ErrNotEnrolled for an unknown ULID, ErrNotNode for a machine and
+// ErrAlreadyDraining for a second call.
 func TestDrainErrors(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "z/a", "z/child")
@@ -418,12 +405,8 @@ func TestDrainErrors(t *testing.T) {
 	}
 }
 
-// DrainingMount is the engine.Mounts extension the ClassCmd admission check
-// consults (move-drain design §3.2 item 2): true for any path under a
-// draining kind=node child's mount, respecting the path-separator boundary
-// (a sibling mount that merely shares a string prefix must not match), and
-// false once the drain ends (auto-revoke or DELETE removes the entry
-// entirely, so there is nothing left to match).
+// DrainingMount respects the path-segment boundary and clears once the drained
+// entry is gone.
 func TestDrainingMountBoundaryAndClears(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "site1/edge1")
@@ -467,9 +450,7 @@ func TestCorruptPersistedEntryFailsLoad(t *testing.T) {
 	}
 }
 
-// The whole point of binding to an element instead of asserting a path: the
-// element moves, the mount moves with it, and nobody re-enrolls anything. A
-// stored mount string would still read "z/a" here.
+// The element moves, the mount moves with it, and nothing is re-enrolled.
 func TestARenamedElementMovesTheMountWithNoReEnrollment(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, elements := newManager(t, st, "z/a")
@@ -497,9 +478,8 @@ func TestARenamedElementMovesTheMountWithNoReEnrollment(t *testing.T) {
 	}
 }
 
-// A mount that cannot be resolved is not a mount: the identity authenticates but
-// has nowhere to write, and the engine rejects its publishes. Placing it
-// somewhere by guesswork is the one failure worth avoiding at any cost.
+// An identity whose element no longer resolves has no mount and cannot write;
+// the registry never guesses a place.
 func TestAnIdentityWhoseElementStopsResolvingHasNoMount(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, elements := newManager(t, st, "z/a")
@@ -537,9 +517,7 @@ func TestBoundToNamesTheIdentitiesStandingOnAnElement(t *testing.T) {
 	if got := m.BoundTo(elementAt("z/b")); len(got) != 0 {
 		t.Fatalf("BoundTo(z/b) = %v, want nothing", got)
 	}
-	// "" is not a position query (design §7: an empty element now means
-	// bound-to-the-node for the one kind that may go unplaced) — BoundTo
-	// short-circuits it rather than answer a question it was never asked.
+	// An empty element is not a position, so BoundTo answers nothing.
 	if got := m.BoundTo(""); len(got) != 0 {
 		t.Fatalf("BoundTo(%q) = %v, want nothing", "", got)
 	}
@@ -551,9 +529,7 @@ func TestBoundToNamesTheIdentitiesStandingOnAnElement(t *testing.T) {
 	}
 }
 
-// Every entry stays keyed by ULID, local ones included; name is a second
-// index, exactly as pubkey is (byPK) — ByName resolves through it, the local
-// door's equivalent of ByPubkey (local-service-trust design §3).
+// Local entries stay keyed by ULID; the name is a second index, like the pubkey.
 func TestByNameFindsALocalEntry(t *testing.T) {
 	m := newTestManager(t)
 	mustEnroll(t, m, `{"ulid":"01JSVC","kind":"local","name":"connector-opcua","element":"el-press3"}`)
@@ -567,16 +543,8 @@ func TestByNameFindsALocalEntry(t *testing.T) {
 	}
 }
 
-// KindLocal carries no pubkey (Entry.Validate requires it blank), so a bare
-// "" must never be dedup-checked as though it were a real key — otherwise the
-// FIRST local service ever enrolled at a node permanently blocks every other
-// one, regardless of name, since they'd all collide on the shared blank
-// pubkey before the name check is even reached. Found by mutation-checking
-// TestTwoLocalServicesCannotShareAName: with the name-uniqueness check
-// deleted, that test still passed — not via the name-uniqueness code path
-// it's meant to pin, but via this pre-existing blank-pubkey collision (dating
-// to KindLocal's introduction), which fires first and produces the
-// same ErrConflict for the wrong reason.
+// Local entries have no pubkey, so the empty key must not count as a duplicate;
+// otherwise the first local service would block every other one.
 func TestTwoLocalServicesWithDifferentNamesBothEnroll(t *testing.T) {
 	m := newTestManager(t)
 	mustEnroll(t, m, `{"ulid":"01JA","kind":"local","name":"connA"}`)
@@ -591,16 +559,8 @@ func TestTwoLocalServicesWithDifferentNamesBothEnroll(t *testing.T) {
 	}
 }
 
-// Name uniqueness is enforced beside pubkey uniqueness: two local services
-// cannot both present the same name at the door, or ByName could not tell
-// them apart. Both entries are left unplaced (no element) on purpose: Enroll's
-// element-uniqueness check is guarded by `if e.Element != ""`, so two unplaced
-// entries can never trip it, and placement is optional for KindLocal (Task
-// 3) — that leaves exactly one rule able to reject the second entry, the
-// name-uniqueness guard this test is named after. (An earlier version of
-// this test gave both entries the same element too, which meant the
-// pre-existing element-uniqueness check fired first and the test passed even
-// with the name check deleted — confirmed by mutation-check.)
+// Two local services cannot share a name. Both entries are unplaced, so element
+// uniqueness cannot be what rejects the second one.
 func TestTwoLocalServicesCannotShareAName(t *testing.T) {
 	m := newTestManager(t)
 	mustEnroll(t, m, `{"ulid":"01JA","kind":"local","name":"conn"}`)
@@ -611,15 +571,9 @@ func TestTwoLocalServicesCannotShareAName(t *testing.T) {
 	}
 }
 
-// A revoked entry's name must not keep resolving — the index must not
-// outlive the entry it points at. The direct ByName-after-Revoke assertion
-// below is necessary but not sufficient: ByName's second step looks the ulid
-// up in byID, which Revoke also deletes, so ByName would report a miss even
-// if byName itself were never cleaned up — that mutation was confirmed to
-// leave this test green. What isolates a stale byName entry is re-enrolling
-// a NEW identity under the freed name: if byName still pointed at the
-// revoked ulid, Enroll's uniqueness check would reject the newcomer as a
-// conflict with an identity that no longer exists.
+// A revoked entry's name stops resolving. Re-enrolling a new identity under the
+// freed name proves the name index was cleaned up; ByName alone would miss
+// through byID anyway.
 func TestByNameForgetsARevokedEntry(t *testing.T) {
 	m := newTestManager(t)
 	mustEnroll(t, m, `{"ulid":"01JSVC","kind":"local","name":"conn","element":"el-press3"}`)
@@ -634,23 +588,10 @@ func TestByNameForgetsARevokedEntry(t *testing.T) {
 	}
 }
 
-// Design §3.4: a revoked child's parent-side COMMAND cursor dies with its
-// identity, because it otherwise accumulates one per revoked device forever.
-//
-// §3.4's stated REASON for why this is safe — "they protect retention only,
-// delivery position rides the child's `after` parameter" — turned out to be
-// false: the commands cursor is also the move-drain completion predicate's
-// floor. Deleting it is still right, but only because Enroll now re-seats
-// that floor at the current head
-// (TestEnrollSeatsTheDownlinkFloorAtTheCommandsHead). The two tests are one
-// claim in two halves; neither is safe alone. The replication HWM is NOT
-// deleted either way: a
-// re-enrolled child re-offering from its LWM is deduped by it, which is the
-// difference between a cheap reconciliation and duplicate application.
-//
-// The definitions cursor is the deliberate exception and is asserted to
-// SURVIVE here — see TestRevokeKeepsTheDefinitionsFloorSoARetractionSurvives
-// for why.
+// Revoke deletes a child's command cursor (Enroll re-seats it) but keeps the
+// replication HWM, which dedupes a re-enrolled child re-offering records. The
+// definitions cursor survives, see
+// TestRevokeKeepsTheDefinitionsFloorSoARetractionSurvives.
 func TestRevokeDeletesTheCommandFloorAndKeepsTheHWM(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "z/a")
@@ -659,9 +600,7 @@ func TestRevokeDeletesTheCommandFloorAndKeepsTheHWM(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// off=2: CursorAck's monotonic guard treats 1 (the never-acked default)
-	// as no movement, so it never persists a key — the cursor must actually
-	// advance to exist for this test to prove anything.
+	// Ack to 2: acking the default of 1 persists nothing.
 	if !st.CursorAck(uns.DownlinkCursorPrefix+ulid, "commands", 2) {
 		t.Fatal("seed ack of the downlink cursor did not move it")
 	}
@@ -697,23 +636,11 @@ func TestRevokeDeletesTheCommandFloorAndKeepsTheHWM(t *testing.T) {
 	}
 }
 
-// A retraction must reach a child that was revoked and enrolled again.
-//
-// This is the authorization half of Revoke's cursor rule, and it is the one
-// case where deleting a parent-side cursor is not merely untidy but wrong. A
-// definition is APPLIED AS STATE (definition-stream design §2), so a revoked
-// child still HOLDS the groups it read; its own read position is keyed by the
-// PARENT's pubkey and survives the revoke untouched, so a re-enrolled child
-// resumes exactly where it stopped. Deleting the parent's copy therefore
-// lowers the tombstone floor to "nobody is behind this" while a consumer that
-// IS behind it is alive and coming back — compaction drops the retraction, the
-// child resumes past the hole, and the withdrawn group keeps authorizing.
-//
-// The positive control at the end is load-bearing, not decoration: every
-// assertion above is "the tombstone is still there", which a broken Read or a
-// mis-typed cursor name would satisfy just as happily. Acking the same cursor
-// past the tombstone and watching compaction finally remove it proves the
-// floor is what held it.
+// A retraction must reach a child that was revoked and enrolled again. The child
+// keeps the definitions it applied and resumes from its own position, so the
+// parent's definitions cursor must survive the revoke or compaction drops the
+// retraction. The positive control at the end shows the floor is what holds the
+// tombstone.
 func TestRevokeKeepsTheDefinitionsFloorSoARetractionSurvives(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "z/child")
@@ -734,7 +661,7 @@ func TestRevokeKeepsTheDefinitionsFloorSoARetractionSurvives(t *testing.T) {
 	if !st.CursorAck(cursor, "definitions", 2) {
 		t.Fatal("seed ack of the definitions cursor did not move it")
 	}
-	// Offset 2: the retraction the child has NOT read.
+	// Offset 2: the retraction the child has not read.
 	if _, _, err := st.Append("definitions", []store.Record{
 		{Topic: group, Payload: nil, TS: 2, KVPath: "01HGRP-OPS", KVNode: "01NODE", Delete: true},
 	}); err != nil {
@@ -766,8 +693,7 @@ func TestRevokeKeepsTheDefinitionsFloorSoARetractionSurvives(t *testing.T) {
 		t.Fatalf("re-enrolled child reading from 2 got %+v, want the retraction of %s", recs, group)
 	}
 
-	// Positive control: once the floor itself has passed the tombstone, the
-	// tombstone goes — which is what makes the assertions above mean anything.
+	// Positive control: once the floor passes the tombstone, compaction removes it.
 	if !st.CursorAck(cursor, "definitions", st.NextOffset("definitions")) {
 		t.Fatal("ack past the tombstone did not move the cursor")
 	}
@@ -781,9 +707,7 @@ func TestRevokeKeepsTheDefinitionsFloorSoARetractionSurvives(t *testing.T) {
 	}
 }
 
-// appendCommands puts n records on the commands stream so NextOffset moves —
-// the head this test's claim is about. Contents are irrelevant: the delivery
-// floor is a position, not a payload.
+// appendCommands appends n records to the commands stream to move its head.
 func appendCommands(t *testing.T, st *store.Store, n int) uint64 {
 	t.Helper()
 	recs := make([]store.Record, n)
@@ -800,22 +724,9 @@ func appendCommands(t *testing.T, st *store.Store, n int) uint64 {
 	return st.NextOffset("commands")
 }
 
-// Parent-scoped-cursors design §3.2, the parent-side mirror: a freshly
-// enrolled repl child starts at the parent's CURRENT commands head, never at
-// the stream's beginning. Commands issued before it was enrolled were
-// addressed to whatever occupied its mount then.
-//
-// This is also the regression §3.4 shipped, and the seat is its repair. That
-// section deletes the child's parent-side cursors on Revoke, justified by
-// "they protect retention only — delivery position rides the child's own
-// `after`". The cursor is ALSO the move-drain completion predicate's floor
-// (repl.drainPendingCommands), so without the seat a re-enrolled ULID gets
-// CursorGet's default of 1 back, every command already delivered under its
-// mount is scanned as pending again, and the next drain of that child cannot
-// complete until the OLDEST of them expires — effectively never, for the
-// generous TTLs a delivery test uses. Found at level 4, by a reparent
-// scenario whose second test then timed out waiting for a drain outcome it
-// could never get.
+// A newly enrolled repl child starts at the parent's current commands head.
+// Without the seat, a re-enrolled child's drain would treat every delivered
+// command as pending until the oldest one expires.
 func TestEnrollSeatsTheDownlinkFloorAtTheCommandsHead(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "z/child")
@@ -851,8 +762,7 @@ func TestEnrollSeatsTheDownlinkFloorAtTheCommandsHead(t *testing.T) {
 		t.Fatalf("revoke left the floor at %d, want it deleted (CursorGet's default 1) — §3.4's own claim", got)
 	}
 
-	// The repair. Without the seat this answers 1, and every command in
-	// [1, headAfter) — including the ones acked above — is pending again.
+	// Without the seat this is 1, and every command before headAfter is pending again.
 	headAfter := appendCommands(t, st, 4)
 	if _, _, err := m.Enroll(entryJSON(t, node(ulid, "z/child", pub("ab")))); err != nil {
 		t.Fatal(err)
@@ -864,10 +774,8 @@ func TestEnrollSeatsTheDownlinkFloorAtTheCommandsHead(t *testing.T) {
 	}
 }
 
-// The seat is gated on the replication DOOR, not on kind: a machine and a
-// local service have no downlink at all, so seating one would put back the
-// per-device key accumulation §3.4 removed — one dead cursor per enrolled
-// identity, forever.
+// The seat depends on the repl door: machines and local services have no
+// downlink, so they get no cursor.
 func TestEnrollSeatsNoDownlinkFloorForIdentitiesWithoutAReplDoor(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "z/a")
@@ -890,13 +798,8 @@ func TestEnrollSeatsNoDownlinkFloorForIdentitiesWithoutAReplDoor(t *testing.T) {
 	}
 }
 
-// The seat is also skipped when the commands stream is EMPTY. CursorGet
-// already answers 1 for an absent key, so a cursor written at 1 decides
-// nothing — but it is a live retention floor pinning the stream at its first
-// record on behalf of a child that may never connect, which is exactly the
-// accumulation §3.4 set out to remove. The downlink door pins the same rule
-// from its own side (repl: "a poll at position 1 must not create a cursor");
-// this is that claim at the enrollment end.
+// No seat while the commands stream is empty: a cursor at 1 decides nothing and
+// would only pin retention.
 func TestEnrollSeatsNoDeliveryFloorWhenThereIsNothingOlderToDecline(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "z/child")
@@ -916,10 +819,7 @@ func TestEnrollSeatsNoDeliveryFloorWhenThereIsNothingOlderToDecline(t *testing.T
 	}
 }
 
-// An Enroll against a LIVE child is an edit (the manager is idempotent and
-// doubles as update), and must never move a floor that child is using: the
-// seat claims the position only when there is none, so an edit mid-flight
-// cannot skip commands the child has not fetched yet.
+// Re-enrolling a live child is an edit and must not move the floor it is using.
 func TestReEnrollingALiveChildDoesNotMoveItsDeliveryFloor(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, _ := newManager(t, st, "z/child")
@@ -932,8 +832,8 @@ func TestReEnrollingALiveChildDoesNotMoveItsDeliveryFloor(t *testing.T) {
 	}
 	floor := st.CursorGet(cursor, "commands")
 
-	// Commands arrive that this child has NOT fetched, then its entry is
-	// edited. Its floor must still point at them.
+	// Commands the child has not fetched arrive, then its entry is edited; the floor
+	// must still point at them.
 	appendCommands(t, st, 5)
 	if _, _, err := m.Enroll(entryJSON(t, node(ulid, "z/child", pub("ab")))); err != nil {
 		t.Fatal(err)
@@ -945,19 +845,15 @@ func TestReEnrollingALiveChildDoesNotMoveItsDeliveryFloor(t *testing.T) {
 	}
 }
 
-// RoutesUnder answers whether a command at a path could reach any child node
-// at all — the routability signal engine.countIfUnroutable counts on. It
-// deliberately differs from DrainingMount above in exactly two ways: it looks
-// at every child rather than the draining ones, and a draining child still
-// counts as routable, because a drain exists to deliver what is already queued.
+// RoutesUnder differs from DrainingMount in two ways: it considers every child,
+// and a draining child still counts as routable.
 func TestRoutesUnderCoversEveryChildNodeAndOnlyChildNodes(t *testing.T) {
 	st := openStore(t, t.TempDir())
 	m, n := newManager(t, st, "site1/edge1", "site1/edge10", "hall/press3")
 	if _, _, err := m.Enroll(entryJSON(t, node("01N1", "site1/edge1", pub("ab")))); err != nil {
 		t.Fatal(err)
 	}
-	// A MACHINE at its own mount: enrolled, placed, and never fed by a
-	// downlink — so its mount must not make a command look routable.
+	// A machine's mount does not make a command routable; machines get no downlink.
 	if _, _, err := m.Enroll(entryJSON(t, machine("01M1", "hall/press3", pub("cd")))); err != nil {
 		t.Fatal(err)
 	}
@@ -984,8 +880,7 @@ func TestRoutesUnderCoversEveryChildNodeAndOnlyChildNodes(t *testing.T) {
 		t.Fatal("a draining child is still routable — reporting otherwise would call the mechanism a fault")
 	}
 
-	// The mount is read live, so a rename moves routability with the element
-	// rather than needing a re-enrollment — the same property DrainingMount has.
+	// Routability follows the element when it is renamed.
 	delete(n, elementAt("site1/edge1"))
 	n["el-site1-edge1"] = "site2/edge1"
 	m.SetNamespace(n)

@@ -1,26 +1,10 @@
 package historian
 
-// The defect this file pins: colca-historian's own log, from the level-4
-// historian world (PR #544), repeating every ~5s with a GROWING offset —
-//
-//	historian pass failed, retrying  err="historian: applying a batch of 36 at
-//	offset 36: ERROR: value too long for type character varying(26) (SQLSTATE 22001)"
-//	... 46, 56, 66 ...
-//
-// `historian_metric.signal_id` is varchar(26) (a ULID, correct for
-// production); one _Metric on the `metrics` stream carried a longer,
-// non-ULID signal_id (a test/demo publisher's mistake). Sink.Apply applied a
-// whole page as ONE batch, so that single row failed every pass, the cursor
-// (colca_applied_offset AND the door's own fetch cursor — see
-// TestAPoisonedRowStillAdvancesTheDoorCursor below) never moved, and NOTHING
-// from ANY signal was ever historised again.
-//
-// pgx.Tx and pgx.BatchResults are interfaces "to allow tests to mock
-// transactions" (pgx's own doc comment on Tx) and dbPool (sink.go) narrows
-// *pgxpool.Pool to exactly the methods Sink.Apply calls — so the poison/retry
-// algorithm that fixes this is provable here, at level 1, against a fake
-// transaction with no real database. See boundary_test.go (build tag
-// "boundary") for the same claims proven against real Postgres.
+// These tests cover a row the schema will never accept, such as a signal_id
+// longer than historian_metric's varchar(26). Applied as one batch, such a row
+// would fail every pass and stop the cursor, so nothing would be historised
+// again. The fake transaction runs the retry logic without a database;
+// boundary_test.go covers the same against Postgres.
 
 import (
 	"context"
@@ -36,8 +20,7 @@ import (
 
 // ---- fakes ----------------------------------------------------------------
 
-// fakeBatchResults plays back one closure per queued statement, in order —
-// the same sequential-Exec() shape applyBatch drives.
+// fakeBatchResults plays back one closure per queued statement, in order.
 type fakeBatchResults struct {
 	execs []func() (pgconn.CommandTag, error)
 	i     int
@@ -59,19 +42,14 @@ func (r *fakeBatchResults) QueryRow() pgx.Row {
 }
 func (r *fakeBatchResults) Close() error { return nil }
 
-// fakeTx fakes exactly the pgx.Tx methods Sink.Apply's two paths use
-// (SendBatch for applyBatch; Exec/Commit/Rollback for applyRowByRow). Every
-// other pgx.Tx method is promoted from the embedded nil interface, so calling
-// one panics loudly instead of silently returning a zero value — a sign this
-// fake needs to grow, not a gap to paper over.
+// fakeTx fakes the pgx.Tx methods Sink.Apply uses. Any other method panics
+// through the embedded nil interface, which means the fake needs to grow.
 type fakeTx struct {
 	pgx.Tx
 
 	sendBatch func(ctx context.Context, b *pgx.Batch) pgx.BatchResults
-	// execRow classifies one insertMetric attempt during the row-by-row
-	// retry, by its bound arguments (the last argument is always
-	// row.SignalID — see the parameter order shared by applyBatch and
-	// applyRowByRow in sink.go). nil means every row succeeds.
+	// execRow decides one insertMetric during the row-by-row retry from its
+	// arguments; the last one is the signal ID. nil means every row succeeds.
 	execRow func(args []any) error
 
 	committed  bool
@@ -84,8 +62,7 @@ func (f *fakeTx) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
 
 func (f *fakeTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	if sql != insertMetric {
-		// SAVEPOINT / RELEASE SAVEPOINT / ROLLBACK TO SAVEPOINT / upsertOffset:
-		// none of these tests need any of these to fail.
+		// Savepoints and the marker upsert always succeed here.
 		return pgconn.CommandTag{}, nil
 	}
 	if f.execRow != nil {
@@ -99,9 +76,8 @@ func (f *fakeTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comm
 func (f *fakeTx) Commit(ctx context.Context) error   { f.committed = true; return nil }
 func (f *fakeTx) Rollback(ctx context.Context) error { f.rolledBack = true; return nil }
 
-// fakePool fakes dbPool (sink.go). begin is scripted per call: attempt 1 is
-// always applyBatch's transaction; attempt 2, reached only after a
-// poison-classified batch failure, is applyRowByRow's.
+// fakePool fakes dbPool. The first Begin is applyBatch's transaction, the second
+// applyRowByRow's.
 type fakePool struct {
 	begin func(attempt int) (pgx.Tx, error)
 	calls int
@@ -115,10 +91,7 @@ func (p *fakePool) Exec(ctx context.Context, sql string, args ...any) (pgconn.Co
 	panic("fakePool.Exec: not used by Sink.Apply")
 }
 
-// QueryRow backs Sink.Applied, which Bridge.Once calls before Apply. Always
-// reporting pgx.ErrNoRows is exactly Applied's "never run yet" case (offset
-// 0) — the shape every test in this file needs, since none of them exercise
-// the marker-skew handling bridge_test.go already pins.
+// QueryRow backs Sink.Applied and always reports that there is no marker yet.
 func (p *fakePool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	return fakeNoRowsRow{}
 }
@@ -127,10 +100,9 @@ type fakeNoRowsRow struct{}
 
 func (fakeNoRowsRow) Scan(dest ...any) error { return pgx.ErrNoRows }
 
-// batchTxFailingAt builds the batch-attempt transaction: every queued
-// statement succeeds except the one at position failAt (failAt < 0 means
-// nothing fails). Position len(rows) is the marker upsert, exactly like
-// applyBatch's own queueing order.
+// batchTxFailingAt builds the batch transaction: every statement succeeds except
+// the one at failAt (negative means none). Position len(rows) is the marker
+// upsert.
 func batchTxFailingAt(failAt int, failErr error) *fakeTx {
 	return &fakeTx{
 		sendBatch: func(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
@@ -156,16 +128,9 @@ func poisonRow(signalID string) Row {
 
 // ---- the pins ---------------------------------------------------------
 
-// (a) A page with one over-long signal_id among otherwise-valid rows: the
-// valid rows land, the marker (and so the door's fetch cursor — see the
-// Bridge-level test below) advances PAST the whole page, and the rejection is
-// counted with reason value_too_long. This is the exact incident from the
-// log line quoted at the top of this file: a batch of otherwise-good rows,
-// one of them a non-ULID signal_id too long for varchar(26).
-//
-// Removing applyRowByRow (making Apply just return applyBatch's error) turns
-// this red: written would be 0, err would be non-nil, and rejections nil —
-// mutation-checked by hand against sink.go.
+// A page with one over-long signal_id: the valid rows land and the rejection is
+// counted as value_too_long. Without the row-by-row fallback nothing would be
+// written.
 func TestAPoisonedRowLandsTheRestAndIsCounted(t *testing.T) {
 	tooLong := poisonRow("this-signal-id-is-nowhere-near-a-valid-ulid-length")
 	rows := []Row{
@@ -212,10 +177,8 @@ func TestAPoisonedRowLandsTheRestAndIsCounted(t *testing.T) {
 	}
 }
 
-// (b) A TRANSIENT batch failure (connection lost — no PgError, or a PgError
-// code that is not one of sink.go's poison codes) must be returned as an
-// error and must NOT trigger the row-by-row fallback: a row rejected for a
-// transient reason is a retry, exactly as before this fix, never a skip.
+// A transient batch failure is returned as an error and does not trigger the
+// row-by-row fallback: it is retried, never skipped.
 func TestATransientFailureIsRetriedNotIsolated(t *testing.T) {
 	rows := []Row{{SignalID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}, {SignalID: "01ARZ3NDEKTSV4RRFFQ69G5FAW"}}
 	transient := errors.New("timescale is down")
@@ -241,9 +204,8 @@ func TestATransientFailureIsRetriedNotIsolated(t *testing.T) {
 	}
 }
 
-// A PgError whose code IS one of Postgres's, but not one sink.go treats as
-// poison, must be treated the same as a non-PgError transient failure — the
-// classification is by code, not merely "was this a PgError".
+// A Postgres error outside the poison list is transient too: classification is
+// by code.
 func TestAPgErrorOutsideThePoisonListIsStillTransient(t *testing.T) {
 	rows := []Row{{SignalID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}}
 	// 40001: serialization_failure — a concurrency conflict, retryable.
@@ -266,11 +228,9 @@ func TestAPgErrorOutsideThePoisonListIsStillTransient(t *testing.T) {
 	}
 }
 
-// (c) The denominator: the same shape with every row valid must still land
-// every row via the plain batch path, with zero rejections and no row-by-row
-// fallback attempted. Without this, (a) above would pass just as happily
-// against a Sink that always falls back to row-by-row, whether or not
-// anything was actually poisoned.
+// With every row valid, the plain batch path writes everything with no
+// rejections and no fallback. Without this, the test above would also pass
+// against a sink that always falls back.
 func TestAllValidRowsLandWithNoRejectionsAndNoFallback(t *testing.T) {
 	rows := []Row{
 		{SignalID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"},
@@ -299,14 +259,8 @@ func TestAllValidRowsLandWithNoRejectionsAndNoFallback(t *testing.T) {
 
 // ---- Bridge-level: the cursor actually advances -----------------------
 
-// The observable that proves the wedge is gone: the DOOR's own fetch cursor
-// (Cursor = "c/historian/metrics", acked via Bridge.Once -> Door.Ack) moves
-// past a page that contained a rejected row. Before this fix, Store.Apply
-// returned an error for such a page, Once returned before ever calling
-// Door.Ack, and the SAME page was re-fetched forever — which is exactly the
-// growing "batch of 36, then 46, then 56..." in the incident log: offset 0
-// was never acked, so every pass re-read the stream from the start and
-// failed on the same poisoned record.
+// A page containing a rejected row still acks the door's cursor past it, so
+// the page is not fetched again.
 func TestAPoisonedRowStillAdvancesTheDoorCursor(t *testing.T) {
 	tooLong := "this-signal-id-is-nowhere-near-a-valid-ulid-length"
 	pgErr := &pgconn.PgError{Code: "22001", Message: "value too long for type character varying(26)"}

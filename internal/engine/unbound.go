@@ -7,25 +7,17 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// unboundMetricReminder is how long a path may keep arriving with no _Signal
-// before it is logged again — same rationale and interval as
-// internal/repl/linkstate.go's linkReminderInterval: an expected startup
-// window (a connector publishing before its own catalogue has bound) must
-// not turn into a log line per sample.
+// unboundMetricReminder is how long before an unbound path is logged again, the
+// same interval as linkReminderInterval: a connector publishing before its
+// catalogue is bound should not log once per sample.
 const unboundMetricReminder = 5 * time.Minute
 
-// unboundMetricLogCap bounds the tracker's memory the same way every other
-// per-lane log tracker in this codebase is bounded ("Every
-// publisher is asynchronous, bounded..."): an unbounded number of distinct
-// never-bound paths must cost bounded memory. Past the cap, a path that is
-// not already tracked is logged every time instead of being silently
-// dropped from tracking — visibility degrades to "no rate limit for the
-// overflow", never to silence.
+// unboundMetricLogCap bounds the tracker's memory. Past the cap an untracked path
+// is logged every time instead of dropped, so visibility degrades to no rate
+// limit, never to silence.
 const unboundMetricLogCap = 4096
 
-// unboundMetricLog tracks, per path, when a "_Metric with no _Signal" line
-// was last logged, so a connector publishing ahead of its own catalogue
-// binding does not flood the log once per sample.
+// unboundMetricLog remembers per path when an unbound _Metric was last logged.
 type unboundMetricLog struct {
 	mu   sync.Mutex
 	seen map[string]time.Time
@@ -56,12 +48,9 @@ func (u *unboundMetricLog) shouldLog(path string, now time.Time) bool {
 	return true
 }
 
-// checkMetricBinding is SDK design §7 gap 6: a _Metric accepted on a path
-// with no _Signal there is a valid, authorized write that will never surface
-// as a signal in the editor or replicate as a governed entity — today a
-// silent, invisible write. Called after a _Metric is durably persisted, so a
-// miss here never blocks or delays a write; it only misses telling someone
-// about one.
+// checkMetricBinding counts and logs a _Metric accepted on a path with no _Signal,
+// which would never show up as a signal. It runs after the write is persisted, so
+// it never delays one.
 func (e *Engine) checkMetricBinding(p uns.Parsed) {
 	if !uns.IsMetric(p.Contract) {
 		return

@@ -1,10 +1,8 @@
-// Package blobstore is colcad's content-addressed file store: the bytes
-// behind a resource, keyed by their SHA-256 (resources design §4).
-//
-// Content addressing is what makes every operation here safe to repeat: a
-// write of content already held is a no-op, identical files from different
-// nodes dedup, and every transfer is verifiable end to end. Nothing in this
-// package knows about doors, replication, or what a resource is.
+// Package blobstore is colcad's content-addressed file store: the bytes behind a
+// resource, keyed by their SHA-256. Content addressing makes every operation
+// safe to repeat: storing held content is a no-op, identical files dedupe, and
+// every transfer can be verified. The package knows nothing about doors,
+// replication or resources.
 package blobstore
 
 import (
@@ -75,28 +73,19 @@ func (s *Store) path(sha string) string {
 	return filepath.Join(s.dir, sha[:2], sha)
 }
 
-// tempPrefix and tempSuffix bracket the name Put writes through before the
-// rename that publishes a blob. They live here because this package is the
-// only one that may know what an unfinished blob looks like on disk — the
-// sweeper asks for reclamation, it does not go looking for filenames.
+// tempPrefix and tempSuffix frame the name Put writes to before the rename that
+// publishes a blob. Only this package knows what an unfinished blob looks like
+// on disk.
 const (
 	tempPrefix = ".incoming-"
 	tempSuffix = ".tmp"
 )
 
-// abandonedTempAge is how long an unfinished blob must have sat untouched
-// before ReclaimAbandonedTemp treats it as debris rather than a transfer.
-//
-// It is a constant, not a knob, and deliberately NOT the sweeper's blob grace
-// even though both are an hour today. The grace answers a different question —
-// "might the record that references this blob still be on its way?" — and an
-// operator may legitimately set it to 0 ("no grace, sweep immediately"), which
-// would then delete the temp file of every upload in flight.
-//
-// An hour is safe with room to spare because a write bumps the file's mtime:
-// a transfer that is still making any progress at all is never a candidate,
-// however slow the link or however large the blob. Only a transfer whose
-// process died, or that has been stalled for an hour, qualifies.
+// abandonedTempAge is how long an unfinished blob must sit untouched before
+// ReclaimAbandonedTemp treats it as debris. It is not the sweeper's grace, which
+// an operator may set to 0; that would delete every upload in flight. A write
+// bumps the file's mtime, so only a transfer whose process died or that stalled
+// for an hour qualifies.
 const abandonedTempAge = time.Hour
 
 // Put streams r into the store, hashing as it goes. When expect is non-empty
@@ -112,10 +101,9 @@ func (s *Store) Put(r io.Reader, expect string) (string, int64, error) {
 		return "", 0, fmt.Errorf("blobstore: %w", err)
 	}
 	tmpName := tmp.Name()
-	// Every failure path below must remove the temp file: no other path here
-	// can see it, since it has no digest and List only reports digests. A
-	// process that dies before this defer runs is what ReclaimAbandonedTemp
-	// exists for.
+	// Every failure below must remove the temp file, since nothing else can see it:
+	// it has no digest. A process that dies before this defer is what
+	// ReclaimAbandonedTemp is for.
 	defer func() {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
@@ -149,9 +137,8 @@ func (s *Store) Put(r io.Reader, expect string) (string, int64, error) {
 	if err := os.MkdirAll(shardDir, 0o700); err != nil {
 		return "", 0, fmt.Errorf("blobstore: %w", err)
 	}
-	// The shard directory may have just been created above (a new fan-out
-	// bucket): fsync its parent so that dirent survives a crash too, or a
-	// later List() on a fresh mount could walk right past it.
+	// The shard directory may be new, so fsync its parent too, or a crash could lose
+	// that directory entry.
 	if err := syncDir(s.dir); err != nil {
 		return "", 0, fmt.Errorf("blobstore: %w", err)
 	}
@@ -160,24 +147,18 @@ func (s *Store) Put(r io.Reader, expect string) (string, int64, error) {
 	if err := os.Rename(tmpName, target); err != nil {
 		return "", 0, fmt.Errorf("blobstore: %w", err)
 	}
-	// fsync the temp file (above) makes the CONTENT durable; fsync the shard
-	// directory makes the RENAME durable. Without this, a crash between the
-	// rename and the directory's next background flush can lose the dirent
-	// while the data blocks it points at are already on disk — the blob
-	// silently vanishes, and because the child's confirmation map is
-	// in-memory and does not survive a PARENT restart either, nothing ever
-	// re-offers it: eager push degrades to "blob absent at the parent"
-	// forever, with no error anywhere to say so.
+	// fsync of the temp file made the content durable; fsync of the shard directory
+	// makes the rename durable. Without it a crash could lose the directory entry,
+	// and since confirmations are not persisted, nothing would ever push the blob
+	// again.
 	if err := syncDir(shardDir); err != nil {
 		return "", 0, fmt.Errorf("blobstore: %w", err)
 	}
 	return sha, size, nil
 }
 
-// syncDir fsyncs a directory so that changes to its entries — a create, a
-// rename, a delete — survive a crash. A file's own fsync only makes its
-// CONTENT durable; the directory entry that makes the file findable again is
-// a separate write that needs its own fsync.
+// syncDir fsyncs a directory so creates, renames and deletes in it survive a
+// crash. A file's own fsync does not cover its directory entry.
 func syncDir(path string) error {
 	d, err := os.Open(path) //nolint:gosec // a directory inside the blob store
 	if err != nil {
@@ -219,16 +200,9 @@ func (s *Store) Has(sha string) (int64, bool) {
 	return info.Size(), true
 }
 
-// Touch bumps a blob's Modified time to now, without touching its content.
-// This is what lets a claim on a blob (an in-flight resource upsert reading
-// Has) restart the sweeper's grace clock: the sweeper only deletes a blob
-// that is both unreferenced AND past grace, so a fresh Modified means a sweep
-// racing the claim sees the blob as newly touched and leaves it alone for
-// another full grace period (resources design §8, §9.1 TOCTOU fix).
-//
-// A digest that is not present, or not a valid digest, is not an error here —
-// the caller (BlobPort.Has) treats a touch failure as advisory, never as a
-// reason to fail the check it is answering.
+// Touch sets a blob's modification time to now without changing its content. A
+// claim on a blob (a resource upsert calling Has) touches it, restarting the
+// sweeper's grace for that blob. Callers treat a failed touch as advisory.
 func (s *Store) Touch(sha string) error {
 	if !validDigest(sha) {
 		return ErrBadDigest
@@ -255,19 +229,11 @@ func (s *Store) Delete(sha string) error {
 	return nil
 }
 
-// ReclaimAbandonedTemp removes unfinished blobs left behind by a process that
-// died mid-Put, and reports how many it removed.
-//
-// Put's own deferred cleanup covers every failure THAT process lives through;
-// it cannot cover a SIGKILL, an OOM, or a power cut, and the file it leaves is
-// invisible to every other path here: it has no digest, so List skips it and
-// the sweeper can never see it. Without this the debris is permanent, bounded
-// only by crash count times blob size — up to 32 MiB a time on an edge with
-// small flash.
-//
-// A temp file is reclaimed only once it is older than abandonedTempAge; see
-// there for why that is a constant and not the sweeper's grace. now is passed
-// in rather than read here so a caller (and its tests) has one clock.
+// ReclaimAbandonedTemp removes unfinished blobs left by a process that died
+// mid-Put and reports how many. Put cleans up after every failure it survives,
+// but not after a kill or power cut, and such a file has no digest, so nothing
+// else would ever remove it. Only files older than abandonedTempAge are removed;
+// now is passed in so callers and tests share one clock.
 func (s *Store) ReclaimAbandonedTemp(now time.Time) (removed int, err error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {

@@ -18,11 +18,8 @@ func TestPathOfResolvesAnElementToItsPosition(t *testing.T) {
 	}
 }
 
-// The reason grants and mounts name elements at all: the position changes, the
-// identity does not, and nothing has to be re-authored.
-//
-// The index is loaded FIRST here, so this exercises the maintained map rather
-// than a lazy load that happens to run after the change.
+// A renamed element resolves at its new path without re-authoring anything.
+// The index is loaded first, so this tests the maintained map, not a late load.
 func TestARenamedElementMovesInTheLoadedIndex(t *testing.T) {
 	f := newStore("n-edge1")
 	placed(f, "line1", "01HLINE1", "Linie 1")
@@ -31,8 +28,8 @@ func TestARenamedElementMovesInTheLoadedIndex(t *testing.T) {
 		t.Fatalf("before rename PathOf = %q, want line1", got)
 	}
 
-	// The rename as it actually arrives: retired at the old position, written
-	// at the new one, each announced to the index.
+	// A rename as it arrives: retired at the old path, written at the new
+	// one, each announced to the index.
 	f.records["colca/v1/_SystemElement/n-edge1/line1"] = nil
 	x.Observe("_SystemElement", "colca/v1/_SystemElement/n-edge1/line1", nil)
 	placed(f, "line1a", "01HLINE1", "Linie 1a")
@@ -47,22 +44,11 @@ func TestARenamedElementMovesInTheLoadedIndex(t *testing.T) {
 	}
 }
 
-// Once loaded, the index is maintained by ANNOUNCEMENT and never re-reads the
-// store. A record that is durable but not yet announced therefore does not
-// resolve — and that is why "the record is in the KV" is not a proxy for "this
-// node can resolve the element".
-//
-// The consequence is not theoretical. Engine.IngestReplicated commits a
-// replicated batch to the store and only then loops over the applied records
-// calling Observe, so a reader polling /kv sees the element while a grant
-// naming it still resolves to nothing. A level-1 test waited on the KV and
-// published a command in that window; the hub answered "no cmd grant covers
-// …" with PUBACK 0x87, once in about 300 runs under load. `awaitElement`
-// (colca/tests/integration_test.go) now waits on this index instead.
-//
-// If this ever goes red because the index learned to re-scan on a miss, that
-// is a design change, not a broken test — but `awaitElement`'s reasoning has
-// to be revisited with it.
+// Once loaded, the index learns only from Observe and never re-reads the
+// store, so a record that is stored but not yet announced does not resolve.
+// Engine.IngestReplicated commits a batch before calling Observe, which is
+// why awaitElement in tests/integration_test.go waits on this index, not on
+// the KV. If the index ever re-scans on a miss, revisit awaitElement.
 func TestALoadedIndexDoesNotSeeAStoreWriteItWasNotToldAbout(t *testing.T) {
 	f := newStore("n-edge1")
 	placed(f, "line1", "01HLINE1", "Linie 1")
@@ -71,7 +57,7 @@ func TestALoadedIndexDoesNotSeeAStoreWriteItWasNotToldAbout(t *testing.T) {
 		t.Fatal("the seeded element does not resolve, so nothing below means anything")
 	}
 
-	// Durable, unannounced — the window between ApplyReplicated and Observe.
+	// Stored but not announced: the window between ApplyReplicated and Observe.
 	placed(f, "line1/m6", "01HM6", "Maschine 6")
 	if _, ok := x.PathOf("01HM6"); ok {
 		t.Fatal("a store write the index was never told about resolved anyway — then a KV read " +
@@ -81,9 +67,8 @@ func TestALoadedIndexDoesNotSeeAStoreWriteItWasNotToldAbout(t *testing.T) {
 		t.Fatal("the reverse lookup saw an unannounced store write")
 	}
 
-	// The announcement is what makes it resolvable — the denominator: without
-	// this the assertions above would also pass against an index that never
-	// resolved anything at all.
+	// Announcing makes it resolvable; without this the assertions above
+	// would also pass for an index that resolves nothing.
 	x.Observe("_SystemElement", "colca/v1/_SystemElement/n-edge1/line1/m6",
 		f.records["colca/v1/_SystemElement/n-edge1/line1/m6"])
 	if got, ok := x.PathOf("01HM6"); !ok || got != "line1/m6" {
@@ -91,9 +76,8 @@ func TestALoadedIndexDoesNotSeeAStoreWriteItWasNotToldAbout(t *testing.T) {
 	}
 }
 
-// A position that changes hands must not leave the previous occupant mapped:
-// resolving a retired element to a live path would grant access to whatever
-// moved in.
+// When a position changes hands, the previous element must not stay mapped,
+// or it would resolve to whatever moved in.
 func TestAPositionChangingHandsDropsThePreviousOccupant(t *testing.T) {
 	f := newStore("n-edge1")
 	placed(f, "line1", "01HOLD", "Linie 1")
@@ -112,10 +96,9 @@ func TestAPositionChangingHandsDropsThePreviousOccupant(t *testing.T) {
 	}
 }
 
-// A child's elements replicate upward with the mount inserted at each hop, so
-// at an ancestor they already sit at that ancestor's own local path. Indexing
-// only the node's OWN records would leave a hub unable to answer any grant
-// naming an element deeper in its tree — which is most of them.
+// A child's elements arrive mount-inserted, already at this node's local path.
+// Indexing only the node's own records would leave a hub unable to resolve
+// most grants.
 func TestElementsReplicatedFromBelowResolveAtTheirLocalPath(t *testing.T) {
 	f := newStore("n-global")
 	placed(f, "site1", "01HSITE1", "Werk 1")

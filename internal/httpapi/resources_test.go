@@ -26,12 +26,8 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/tokenauth/tokentest"
 )
 
-// resourceAPI is a published-door test fixture — the same shape as newAPI in
-// httpapi_test.go — that also keeps the blob store reachable, because these
-// tests seed a resource's bytes directly (the door under test has no route
-// that accepts an upload; only /resources/{id}/file, which reads). blobsDir
-// is kept (rather than opening via the package's testBlobs helper) so a test
-// can reach into the store's on-disk layout to simulate a genuine I/O fault.
+// resourceAPI is a published-door fixture like newAPI that keeps the blob store
+// reachable, so tests can seed bytes and break file permissions.
 type resourceAPI struct {
 	url      string
 	eng      *engine.Engine
@@ -81,16 +77,9 @@ func newResourceAPI(t *testing.T) *resourceAPI {
 	return &resourceAPI{url: "https://" + ln.Addr().String(), eng: e, reg: reg, blobs: blobs, blobsDir: blobsDir, m: m}
 }
 
-// breakBlobPermissions makes an already-stored blob's file unreadable — a
-// stand-in for a disk or permission fault on this node. blobs.Get(sha) then
-// returns a generic wrapped I/O error: neither ErrNotFound (the file is
-// still there, just unreadable) nor ErrBadDigest (sha is well-formed). This
-// is the only one of blobstore's three read-error kinds a test can trigger
-// without corrupting the store's validated write path — a malformed digest
-// can never reach here in the first place, because uns.ResourceID and
-// uns.ResourceBlob both gate on the record's full validity (the same
-// isSHA256Hex check blobstore itself applies), so a record naming a bad
-// digest is never even found by id.
+// breakBlobPermissions makes a stored blob's file unreadable, standing in for a
+// disk fault. Get then returns a generic I/O error, neither ErrNotFound nor
+// ErrBadDigest.
 func (a *resourceAPI) breakBlobPermissions(t *testing.T, sha string) {
 	t.Helper()
 	if os.Geteuid() == 0 {
@@ -103,10 +92,7 @@ func (a *resourceAPI) breakBlobPermissions(t *testing.T, sha string) {
 	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 }
 
-// putBlob stores body directly in blobs (bypassing HTTP — neither door under
-// test in this file has an upload route) and returns its digest and size.
-// A free function, not a method, so both the published-door (resourceAPI)
-// and local-door (localResourceAPI) fixtures below seed bytes the same way.
+// putBlob stores body directly in the blob store and returns its digest and size.
 func putBlob(t *testing.T, blobs *blobstore.Store, body []byte) (string, int64) {
 	t.Helper()
 	sha, size, err := blobs.Put(bytes.NewReader(body), "")
@@ -116,10 +102,8 @@ func putBlob(t *testing.T, blobs *blobstore.Store, body []byte) (string, int64) 
 	return sha, size
 }
 
-// authorResource places an element at elementPath and publishes a _Resource
-// record naming it id/sha/size at elementPath+"/"+id — exactly the topic
-// shape ConfigExec.resourceTopic produces for a resource attached there. A
-// free function for the same reason as putBlob.
+// authorResource places an element at elementPath and publishes a _Resource for
+// id, sha and size under it, the topic ConfigExec.resourceTopic produces.
 func authorResource(t *testing.T, eng *engine.Engine, elementPath, id, sha string, size int64) {
 	t.Helper()
 	elementID := authtest.Place(t, eng, elementPath)
@@ -176,8 +160,7 @@ func TestResourceFileReportsPendingWhenTheBlobHasNotArrived(t *testing.T) {
 		t.Fatalf("409 body must name blob_pending and the digest: %s", got)
 	}
 
-	// Denominator: once the blob lands, the identical request returns 200 —
-	// otherwise the 409 above would just as well be a broken route.
+	// Denominator: once the blob lands the same request returns 200.
 	if _, _, err := a.blobs.Put(bytes.NewReader(body), sha); err != nil {
 		t.Fatal(err)
 	}
@@ -204,8 +187,7 @@ func TestResourceFileRefusesACallerWithoutAGrant(t *testing.T) {
 		t.Fatalf("caller granted elsewhere: got %d, want 403 (%s)", resp.StatusCode, got)
 	}
 
-	// Denominator: a caller granted on the resource's own element gets 200 —
-	// otherwise the 403 above would just as well mean the route is broken.
+	// Denominator: a caller granted on the resource's element gets 200.
 	granted := authtest.NewMachine(t, "granted")
 	authtest.EnrollAt(t, a.reg, a.eng, granted, "press3")
 	resp, got = raw(t, client(granted), "GET", a.url+"/resources/r1/file", "", "")
@@ -228,21 +210,15 @@ func TestResourceFileReportsAnUnknownId(t *testing.T) {
 		t.Fatalf("unknown id: got %d, want 404 (%s)", resp.StatusCode, got)
 	}
 
-	// Denominator: a known id returns 200 in the same test — otherwise the
-	// 404 above would just as well mean the route was never registered.
+	// Denominator: a known id returns 200.
 	resp, got = raw(t, client(m1), "GET", a.url+"/resources/r1/file", "", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("known id: got %d, want 200 (%s)", resp.StatusCode, got)
 	}
 }
 
-// TestResourceFileNeverReportsPendingForANonRetryableBlobError pins the
-// 409 blob_pending is a promise the file is still in
-// flight, and only blobstore.ErrNotFound (the blob genuinely has not
-// replicated here yet) may make that promise. Anything else — a malformed
-// stored digest, a disk or permission fault on this node — is an internal
-// fault that will never clear on its own, so it must never collapse into
-// pending.
+// 409 blob_pending means the file is still on its way, and only ErrNotFound may
+// say that. Other errors will not clear on their own and must not look pending.
 func TestResourceFileNeverReportsPendingForANonRetryableBlobError(t *testing.T) {
 	a := newResourceAPI(t)
 	body := []byte("mixing instructions")
@@ -261,9 +237,7 @@ func TestResourceFileNeverReportsPendingForANonRetryableBlobError(t *testing.T) 
 		t.Fatalf("unreadable blob: got %d, want 500 (%s)", resp.StatusCode, got)
 	}
 
-	// Denominator: a genuinely absent digest still answers 409 in the same
-	// test — otherwise "not 409" above could pass just as well because the
-	// route broke for everyone, not because the discrimination works.
+	// Denominator: a genuinely absent digest still answers 409.
 	absent := strings.Repeat("c", 64)
 	authorResource(t, a.eng, "press3", "r2", absent, 5)
 	resp, got = raw(t, client(m1), "GET", a.url+"/resources/r2/file", "", "")
@@ -275,13 +249,8 @@ func TestResourceFileNeverReportsPendingForANonRetryableBlobError(t *testing.T) 
 	}
 }
 
-// localResourceAPI is the local-door counterpart of resourceAPI: same
-// engine/registry/blob wiring, served directly through the local door's
-// http.Handler (no TLS — reachability is the credential, exactly like every
-// other local-door fixture in this package) with a human verifier attached,
-// so a test can present a forwarded Bearer the way the api does when it
-// reads a resource AS the person (node-side command authorization design
-// §3B), alongside a plain local-service caller reading by its own placement.
+// localResourceAPI is the local-door counterpart of resourceAPI, with a human
+// verifier so tests can forward a bearer as the api does.
 type localResourceAPI struct {
 	http.Handler
 	eng   *engine.Engine
@@ -318,9 +287,8 @@ func newLocalResourceAPI(t *testing.T) (*localResourceAPI, *tokentest.Issuer) {
 	return &localResourceAPI{Handler: h, eng: e, blobs: blobs}, iss
 }
 
-// resourceFileRequest issues one GET on the local door, optionally carrying a
-// forwarded Bearer and/or a local-service name, exactly as command_transport
-// forwards a person's credential to the local door today.
+// resourceFileRequest makes one GET on the local door with an optional forwarded
+// bearer and service name.
 func resourceFileRequest(a *localResourceAPI, id, bearer, serviceName string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/resources/"+id+"/file", nil)
 	if bearer != "" {
@@ -334,9 +302,8 @@ func resourceFileRequest(a *localResourceAPI, id, bearer, serviceName string) *h
 	return rec
 }
 
-// A forwarded human Bearer scoped to the resource's own element reads the
-// bytes on the local door — the node authorizes the person exactly as it
-// would on the published door, not the forwarding service's own placement.
+// A forwarded bearer scoped to the resource's element reads the bytes on the local
+// door; the person is authorized, not the service's placement.
 func TestTheLocalDoorServesAResourceFileToAForwardedBearerScopedToItsElement(t *testing.T) {
 	a, iss := newLocalResourceAPI(t)
 	body := []byte("mixing instructions")
@@ -356,9 +323,7 @@ func TestTheLocalDoorServesAResourceFileToAForwardedBearerScopedToItsElement(t *
 	}
 }
 
-// The same person scoped to a DIFFERENT element gets 403 on the local door,
-// not the free pass the forwarding service's own local placement would carry
-// — a digest is a pointer, never a capability, on either door.
+// The same person scoped to another element gets 403 on the local door.
 func TestTheLocalDoorRefusesAForwardedBearerScopedElsewhere(t *testing.T) {
 	a, iss := newLocalResourceAPI(t)
 	body := []byte("mixing instructions")
@@ -374,9 +339,7 @@ func TestTheLocalDoorRefusesAForwardedBearerScopedElsewhere(t *testing.T) {
 		t.Fatalf("forwarded Bearer scoped elsewhere: got %d, want 403 (%s)", rec.Code, rec.Body.String())
 	}
 
-	// Denominator: the identical request with a grant that covers the
-	// element gets 200 — otherwise the 403 above would just as well mean the
-	// route is broken (or never mounted) on the local door.
+	// Denominator: a grant covering the element gets 200.
 	granted := iss.MintOpt(tokentest.MintOpts{
 		Sub: "kc-sub-anna", Username: "anna",
 		Grants: []string{"read:" + authtest.ElementID("press3") + "/#"},
@@ -387,11 +350,8 @@ func TestTheLocalDoorRefusesAForwardedBearerScopedElsewhere(t *testing.T) {
 	}
 }
 
-// No credential at all is 401 on the local door, exactly as it always was
-// for every other local route — the resource route adds no exception. A
-// plain local-service caller (unplaced, so bound to the whole node) still
-// reads the same resource in the same test, so the 401 above cannot be
-// mistaken for the route never having been mounted.
+// No credential is 401 on the local door, as for every local route. A plain local
+// service reads the same resource in the same test.
 func TestTheLocalDoorRefusesAResourceFileReadWithNoCredential(t *testing.T) {
 	a, _ := newLocalResourceAPI(t)
 	body := []byte("mixing instructions")
@@ -403,10 +363,8 @@ func TestTheLocalDoorRefusesAResourceFileReadWithNoCredential(t *testing.T) {
 		t.Fatalf("no credential: got %d, want 401 (%s)", rec.Code, rec.Body.String())
 	}
 
-	// Denominator: a plain local-service caller, named but unplaced, reads
-	// the same resource — its placement is the whole node (architecture
-	// principle 6), so its own local trust covers it, not a forwarded
-	// person's grant.
+	// Denominator: an unplaced local service is bound to the whole node, so it may
+	// read.
 	rec = resourceFileRequest(a, "r1", "", "connector-opcua")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("plain local-service caller: got %d, want 200 (%s)", rec.Code, rec.Body.String())

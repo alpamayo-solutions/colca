@@ -1,8 +1,5 @@
-// Package historian turns `_Metric` records into hypertable rows.
-//
-// The sink is `historian_metric`, with its unique index on (signal_id,
-// timestamp). The records come from a node's `metrics` stream, followed with a
-// cursor.
+// Package historian turns _Metric records from a node's metrics stream into rows
+// of historian_metric.
 package historian
 
 import (
@@ -16,9 +13,8 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// ErrNotAMeasurement means the record is well-formed but carries no value to
-// historise — a tombstone, which deletes a retained value rather than
-// measuring one.
+// ErrNotAMeasurement means the record carries no value to historise: a
+// tombstone, or a record that is not a _Metric.
 var ErrNotAMeasurement = errors.New("historian: record carries no measurement")
 
 // Row is one `historian_metric` row.
@@ -36,32 +32,21 @@ type Row struct {
 	Bool   *bool
 	JSON   json.RawMessage
 
-	// Offset and Topic are NOT written to historian_metric — they are the
-	// stream position this row was decoded from, carried through purely so a
-	// row the schema permanently refuses (sink.go's poison classification)
-	// can be logged and counted with enough context to find the offending
-	// publisher. Set by the bridge in Once; zero-valued and harmless for any
-	// caller that predates per-row rejection (the boundary suite included).
+	// Offset and Topic are not written; they identify a refused row in logs and
+	// metrics.
 	Offset int64
 	Topic  string
 }
 
-// RowFrom decodes one stored record.
-//
-// `ts` is the store's ingest timestamp, used only when the payload carries none
-// of its own: a metric records when it was MEASURED, and historising the ingest
-// time would silently re-date everything that arrives after an outage.
+// RowFrom decodes one stored record. ts, the store's ingest time, is used only
+// when the payload has no timestamp: a metric records when it was measured.
 func RowFrom(topic string, payload []byte, ts int64) (Row, error) {
-	// The metrics stream carries more than measurements -- `_Log` records
-	// ride the same lane -- and only a `_Metric` is one. Anything else is
-	// not a decoding failure worth a warning per record; it is simply not
-	// this bridge's to historise.
+	// _Log records share the metrics stream; only _Metric rows are stored.
 	if parsed, err := uns.Parse(topic); err == nil && parsed.Contract != "_Metric" {
 		return Row{}, ErrNotAMeasurement
 	}
-	// json.Number keeps the digits as written, so a value beyond float64
-	// precision survives — the door hands payloads through verbatim for
-	// exactly this reason, and this is the last place it could be lost.
+	// json.Number keeps the digits as written, so values beyond float64 precision
+	// survive.
 	decoder := json.NewDecoder(strings.NewReader(string(payload)))
 	decoder.UseNumber()
 
@@ -98,11 +83,8 @@ func RowFrom(topic string, payload []byte, ts int64) (Row, error) {
 	return row, nil
 }
 
-// nodeFromTopic reads level 4 — `colca/v1/_Metric/<node>/…`.
-//
-// It is the PUBLISHER's id, which is why the signal is never taken from here:
-// a machine publishes its own metrics under its own id, and the signal they
-// belong to lives in the payload.
+// nodeFromTopic reads the publishing node from level 4. The signal always comes
+// from the payload.
 func nodeFromTopic(topic string) string {
 	parts := strings.Split(topic, "/")
 	if len(parts) < 4 {
@@ -111,12 +93,8 @@ func nodeFromTopic(topic string) string {
 	return parts[3]
 }
 
-// timestampOf decodes the payload's own timestamp, which is the wire unit
-// every publisher uses: unix seconds, float, fractional part allowed
-// (franzmq's default `datetime.now(UTC).timestamp()`; connector and dataops
-// both encode this way too). The store-TS fallback is a different clock
-// entirely — colca's own ingest time, in epoch-MILLISECONDS — and keeps its
-// own unit rather than being coerced to match.
+// timestampOf decodes the payload's timestamp in unix seconds (a float), the
+// unit publishers use. The fallback is the store's ingest time in milliseconds.
 func timestampOf(payload *json.Number, storeTS int64) time.Time {
 	if payload != nil {
 		if f, err := payload.Float64(); err == nil {

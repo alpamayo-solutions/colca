@@ -1,7 +1,6 @@
-// Package bench contains the Colca benchmark scenarios: the
-// benchmark gate. Scenarios build REAL topologies — real keys,
-// real mTLS replication, real Pebble dirs, real paho machines — and emit a
-// uniform Report that cmd/colca-bench serializes and gates.
+// Package bench contains the benchmark scenarios. They run real topologies
+// (keys, mTLS replication, Pebble directories, paho machines) and emit a uniform
+// Report that colca-bench records and gates.
 package bench
 
 import (
@@ -27,10 +26,8 @@ type Host struct {
 type Report struct {
 	Scenario  string `json:"scenario"`
 	StartedAt string `json:"started_at"`
-	// Service, GitCommit, and GitDirty identify what produced this run record
-	// (run-record convention, not colca-specific): every
-	// performance-test execution is stamped with the service that ran it and
-	// the exact commit it ran at, via Stamp.
+	// Service, GitCommit and GitDirty record what produced this run; Stamp sets
+	// them.
 	Service   string             `json:"service"`
 	GitCommit string             `json:"git_commit"`
 	GitDirty  bool               `json:"git_dirty"`

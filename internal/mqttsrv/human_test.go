@@ -26,8 +26,8 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// humanWorld is the human-door fixture: machine listener + BOTH human doors,
-// a fake issuer, one enrolled machine (m1, mount "m1") for cross-checks.
+// humanWorld is the human-door fixture: the machine listener, both human doors, a
+// fake issuer and machine m1.
 type humanWorld struct {
 	srv *Server
 	st  *store.Store
@@ -76,8 +76,7 @@ func newHumanWorld(t *testing.T) *humanWorld {
 	}
 	eng := engine.New(st, cfg, reg, s.DeliverLocal, m, nil)
 	s.SetEngine(eng)
-	// Placement resolves through the engine's element index, so the element m1
-	// binds to is authored before it enrolls (id-grants design §4).
+	// The element m1 binds to is authored before it enrolls.
 	reg.SetNamespace(eng.Elements())
 	authtest.EnrollAt(t, reg, eng, w.m1, "m1")
 	reg.SetKick(s.Kick)
@@ -102,8 +101,8 @@ func verifierPrime(t *testing.T, v *tokenauth.Verifier) {
 	<-done
 }
 
-// insecureTLS: no client cert (the human doors don't ask for one), server
-// cert unverified — pinning model, the NODE pins nothing about humans.
+// insecureTLS presents no client certificate and does not verify the server;
+// nothing is pinned for humans.
 func insecureTLS() *tls.Config {
 	return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13} // #nosec G402 -- test
 }
@@ -242,15 +241,9 @@ func TestHumanDoorRejections(t *testing.T) {
 		{"expired token", "anna", w.iss.Mint("anna", nil, time.Now().Add(-3*time.Minute))},
 		{"wrong audience", "anna", w.iss.MintOpt(tokentest.MintOpts{Sub: "anna", Exp: future, Aud: "other"})},
 		{"username != sub", "not-anna", w.iss.Mint("anna", nil, future)},
-		// OnPublish trusts that no session which reached it can carry an empty
-		// identity (mqttsrv.go: `if ident == ""` lets the packet through
-		// UNVALIDATED). Half of that trust, for the human door, is that a
-		// token whose own "sub" claim is empty is refused at the source
-		// (plugins/uns.TokenEntry: "token entry: empty sub") before
-		// user == v.Sub is ever reached — so v.Sub can never itself be "". A
-		// non-empty username here isolates that: it proves the empty-sub
-		// token is rejected on its own terms, not merely because it also
-		// happens to mismatch the username.
+		// OnPublish lets a session with an empty identity through unvalidated, so an
+		// empty-sub token must be refused before the username comparison. A non-empty
+		// username shows it is refused for the empty sub, not for a mismatch.
 		{"empty sub claim", "someone", w.iss.MintOpt(tokentest.MintOpts{Sub: "", Exp: future})},
 	}
 	for _, c := range cases {
@@ -263,8 +256,7 @@ func TestHumanDoorRejections(t *testing.T) {
 		})
 	}
 
-	// A machine's cert-less token attempt at the MACHINE door still fails
-	// (regression pin: the machine door does not accept tokens).
+	// A token at the machine door still fails; that door does not accept tokens.
 	cl, err := humanConnect(t, w.srv.Addr(), "ssl", "anna", w.iss.Mint("anna", nil, future))
 	defer cl.Disconnect(50)
 	if err == nil {
@@ -272,20 +264,9 @@ func TestHumanDoorRejections(t *testing.T) {
 	}
 }
 
-// A CONNECT with an empty username but a well-formed, correctly signed token
-// (real, non-empty sub) is the other half of the OnPublish trust that
-// TestHumanDoorRejections' "empty sub claim" case does not reach: it proves
-// user == v.Sub itself refuses "" against a real sub, not merely that a
-// malformed/empty-sub token gets rejected first.
-//
-// This needs the MQTT 5 client (paho.golang), not humanConnect's MQTT 3.1.1
-// one: paho.mqtt.golang's CONNECT builder refuses to set PasswordFlag unless
-// Username is non-empty ("mustn't have password without user as well" —
-// message.go), so it cannot even construct the packet this test needs to
-// send — the adversarial CONNECT (empty username, password present) would
-// silently degrade into an empty-token CONNECT and prove nothing. paho.golang
-// exposes UsernameFlag/PasswordFlag independently of the string values, so it
-// can send exactly that packet.
+// An empty username with a valid token for a real sub is refused by the username
+// comparison itself. This needs the MQTT 5 client: paho.mqtt.golang cannot send a
+// password without a username.
 func TestHumanDoorRejectsEmptyUsernameAgainstARealToken(t *testing.T) {
 	w := newHumanWorld(t)
 	tok := w.iss.Mint("anna", nil, time.Now().Add(5*time.Minute))
@@ -356,8 +337,8 @@ func TestHumanPATRevocationAndScopeRemovalKickLiveSessions(t *testing.T) {
 	}
 }
 
-// The session lives exactly as long as the token: per-delivery denial after
-// exp, sweeper kick, fresh-token reconnect works (§5.1).
+// A session lasts as long as its token: deliveries stop after exp, the sweeper
+// kicks it, and a fresh token reconnects.
 func TestHumanExpiryKick(t *testing.T) {
 	w := newHumanWorld(t)
 	shortTok := w.iss.Mint("anna", []string{"read:" + authtest.ElementID("m1") + "/#"}, time.Now().Add(2*time.Second))
@@ -389,8 +370,7 @@ func TestHumanExpiryKick(t *testing.T) {
 	case <-time.After(700 * time.Millisecond):
 	}
 
-	// The sweeper kicks the session (drive it directly — the 10s ticker is
-	// wall-clock; the sweep body is the contract).
+	// Run the sweep directly; the 10s ticker is wall-clock.
 	w.srv.sweepInvalidHumanSessions(time.Now())
 	waitHumanConnectionClosed(t, c)
 
@@ -403,7 +383,7 @@ func TestHumanExpiryKick(t *testing.T) {
 	c2.Disconnect(100)
 }
 
-// Humans publish commands through IngestHuman; writes are rejected (§5.2).
+// Humans publish commands through IngestHuman; state writes are rejected.
 func TestHumanPublishThroughDoor(t *testing.T) {
 	w := newHumanWorld(t)
 	future := time.Now().Add(5 * time.Minute)

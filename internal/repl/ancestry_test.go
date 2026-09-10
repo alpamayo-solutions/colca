@@ -11,10 +11,9 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// Position hand-down (id-grants design §4): the parent tells the child where it
-// sits in every downlink response — the parent's own chain extended by the
-// child's element. Nothing is handed down while the parent's own position is
-// unknown, because a guessed frame is worse than none.
+// The parent tells the child where it sits in every downlink response: its own
+// chain extended by the child's element. Nothing is sent while the parent's own
+// position is unknown.
 func TestDownlinkHandsDownAncestry(t *testing.T) {
 	dir := t.TempDir()
 	parentID, _ := identity.Generate(filepath.Join(dir, "p.key"))
@@ -92,10 +91,9 @@ func TestDownlinkHandsDownAncestry(t *testing.T) {
 // naming convention) — the one the fixture child binds to.
 const elementAtChild1 = "el-child1"
 
-// RunDownlink teaches the child engine: after one poll cycle against a parent
-// that knows where it sits, the child knows too — and it keeps knowing across a
-// restart while the parent is unreachable, which is the whole reason the
-// position is persisted rather than re-fetched.
+// After one poll against a parent that knows where it sits, the child knows too,
+// and still knows after a restart with the parent unreachable, which is why the
+// position is persisted.
 func TestRunDownlinkTeachesTheChildItsPosition(t *testing.T) {
 	dir := t.TempDir()
 	parentID, _ := identity.Generate(filepath.Join(dir, "p.key"))

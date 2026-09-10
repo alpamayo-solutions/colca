@@ -16,13 +16,9 @@ type ResourcePlan struct {
 	Unmanaged []string
 }
 
-// PlanResources diffs the tree's elements against the registered resources.
-//
-// The resource NAME is the element id — what a grant carries, and what survives
-// a rename. The DISPLAY NAME is the current path, which is what an
-// administrator recognises in the console and therefore what a rename must
-// update. Keycloak preserves a resource's identity across a display-name
-// change, so a renamed element keeps every grant pointing at the same thing.
+// PlanResources diffs the tree's elements against the registered resources. A
+// resource's name is the element id, which survives a rename; its display name
+// is the current path, which a rename updates while grants stay attached.
 func PlanResources(elements map[string]string, existing []Resource, owner string) ResourcePlan {
 	var plan ResourcePlan
 	byName := map[string]Resource{}
@@ -90,20 +86,16 @@ type Orphan struct {
 type DefinitionPlan struct {
 	Upsert  []GroupDefinition
 	Retract []string
-	// Foreign names definitions authored by another node that Keycloak does not
-	// account for. Not ours to withdraw — a tombstone written here would not
-	// remove them anyway, since records are keyed by author.
+	// Foreign names definitions another node authored that Keycloak does not account
+	// for. They are not ours to withdraw.
 	Foreign []string
 	// Unresolvable names grants pointing at elements no node holds.
 	Unresolvable []Orphan
 }
 
-// PlanDefinitions diffs Keycloak's compiled grants against the tree.
-//
-// Convergence INCLUDES removal: a group deleted in Keycloak, or a permission
-// withdrawn, retracts its definition — otherwise access outlives its own
-// revocation, which is the failure with the worst consequences here. But only
-// over definitions this node authored.
+// PlanDefinitions diffs Keycloak's compiled grants against the tree, including
+// removals: a withdrawn permission retracts its definition, or access would
+// outlive its revocation. Only definitions this node authored are touched.
 func PlanDefinitions(desired map[string][]string, tree TreeView, rootULID string) DefinitionPlan {
 	var plan DefinitionPlan
 

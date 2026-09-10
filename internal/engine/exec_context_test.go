@@ -7,12 +7,9 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// The executor learns who is acting from the engine and nowhere else
-// (node-side command authorization design §3A): the entry the door verified
-// reaches it unchanged, the admin door reaches it as nobody, and a command
-// replicated down from an ancestor reaches it as the person the ancestor's
-// door verified — reconstituted from the group ids persisted on the record,
-// resolved against the _Group definitions THIS node holds (§3B).
+// The executor learns the acting identity from the engine only: the verified
+// entry from a door, nobody from the admin door, and for a downlinked command the
+// person reconstituted from the groups on the record.
 func TestExecutorReceivesTheActingEntry(t *testing.T) {
 	rec := &recordingExec{contract: "_CmdEdit"}
 	e := execEngine(t, Executors(rec))
@@ -78,12 +75,10 @@ func TestExecutorReceivesTheActingEntry(t *testing.T) {
 	}
 }
 
-// A local service that cannot forward a person's token may attest their
-// group ids instead (§3B fallback). The command is then judged AS that
-// person — reconstituted against this node's _Group definitions — at the
-// door and at the executor: the service's implicit configure never applies,
-// an unknown group buys nothing, and a service publishing as itself is still
-// itself.
+// A local service may attest a person's group ids when it cannot forward their
+// token. The command is then judged as that person at the door and at the
+// executor: the service's configure grant never applies and an unknown group adds
+// nothing.
 func TestALocalServiceAttestingAPersonIsJudgedAsThatPerson(t *testing.T) {
 	ids := fakeIDs{entries: map[string]*uns.Entry{
 		"svc-api": {ULID: "svc-api", Kind: uns.KindLocal, Name: "api"},
@@ -123,8 +118,8 @@ func TestALocalServiceAttestingAPersonIsJudgedAsThatPerson(t *testing.T) {
 	}
 }
 
-// The human door applies §3F: the same person, holding a covering configure
-// grant, is refused _CmdConfigure and admitted _CmdEdit.
+// At the human door the same person with a covering configure grant is refused
+// _CmdConfigure and admitted _CmdEdit.
 func TestTheHumanDoorRefusesConfigureAndAdmitsEdit(t *testing.T) {
 	rec := &recordingExec{contract: "_CmdEdit"}
 	e := execEngine(t, Executors(rec))

@@ -13,91 +13,23 @@ import (
 	"testing"
 )
 
-// adminTokenField is the field name this gate treats as the admin credential.
-// Name-matched, with no type information: see the "What this gate cannot see"
-// list on the test below for what that costs and why it is still the right
-// trade here.
+// adminTokenField is the field name the gate treats as the admin credential. It
+// matches by name, without type information.
 const adminTokenField = "Token"
 
-// TestAdminTokenIsOnlyUsedInAConstantTimeCompare is a mechanical gate on the
-// fix pinned by TestAdminTokenComparisonRejectsSameLengthMismatch. That test
-// drives a correct token, a wrong same-length token, and an empty configured
-// token, and checks 200/401/401 — but == answers all three identically to
-// subtle.ConstantTimeCompare, so a revert from ConstantTimeCompare back to ==
-// would leave every assertion in that test green. Nothing in the behavioral
-// suite can catch a regression to a timing side channel; only reading the
-// comparison itself can.
+// TestAdminTokenIsOnlyUsedInAConstantTimeCompare guards the constant-time
+// comparison of the admin token. Behavioural tests cannot tell == from
+// subtle.ConstantTimeCompare, so this reads the code.
 //
-// It walks EVERY non-test .go file under this package's directory tree, not
-// just the one file that holds the comparison today — a gate scoped to one
-// file is escaped by moving the comparison to a new file, which is the
-// cheapest possible way to reintroduce the very thing it guards. The walk
-// recurses (rather than reading one directory) so moving the token-bearing
-// route into a subpackage of httpapi does not silently drop it from
-// coverage either.
+// It walks every non-test .go file under this package and allows exactly two uses
+// of the field: a comparison with "" (the no-token guard), and an argument, bare or
+// as []byte, to subtle.ConstantTimeCompare or hmac.Equal, with the package name
+// checked against the file's imports. Anything else fails, including copying the
+// value or passing it to a helper. It also fails when it finds no mention of the
+// field at all.
 //
-// The gate also refuses to pass for free: it counts every mention of
-// adminTokenField it saw, allowed or not, and fails if that count is zero.
-// filepath matched > 0 only proves it parsed some Go source — renaming the
-// field, or moving it to a struct this package never touches, leaves that
-// count positive while the gate reads real code and matches nothing, passing
-// forever while guarding nothing. That is the same failure shape the
-// walked > 0 check below exists to close, one level down: a check that
-// cannot go red.
-//
-// The rule is an ALLOWLIST over every mention of the field, not a blacklist of
-// equality-shaped constructs. The admin token has exactly two permitted uses:
-//
-//   - an == / != against the empty-string literal — the deliberate "no
-//     configured token" guard ahead of the compare, which is a test for
-//     configuration rather than a comparison against attacker-controlled input;
-//   - an argument (bare, or under a []byte conversion) of
-//     subtle.ConstantTimeCompare or hmac.Equal.
-//
-// Every other appearance is an offence, including ones no blacklist would have
-// thought to name: `tok := cfg.API.Token` (which would carry the value beyond
-// this gate's reach under a different name), `switch cfg.API.Token {`, a
-// `case` naming it, a struct literal field, a log argument, or a call to any
-// other function — which is what closes the same-package wrapper escape
-// (`equalTokens(hdr, cfg.API.Token)` with `func equalTokens(a, b string) bool
-// { return a == b }`), since the wrapper is simply not one of the two allowed
-// sinks. A gate that reads one expression cannot follow an arbitrary call
-// graph, so it refuses to let the value leave instead.
-//
-// The two allowed sinks are resolved, not name-matched: a call qualifies only
-// if the file imports crypto/subtle (resp. crypto/hmac) under that name AND
-// that name is not re-bound anywhere in the file. Without that,
-// `subtle := subtleFake{}; subtle.Equal(hdr, cfg.API.Token)` shadowed the
-// package and exempted itself — verified green against the earlier
-// name-matching version of this gate.
-//
-// What this gate cannot see, stated so no reader assumes it is airtight:
-//
-//   - It reads this package only. cfg is a *config.Config and any other
-//     package holding one could compare the field itself; nothing here would
-//     know. Today no other package mentions it (`grep -rn "API.Token"`), which
-//     is the property that makes a package-local gate sufficient rather than a
-//     package-local gate that merely feels sufficient.
-//   - It matches the field by NAME, so it guards routes that name the token
-//     and nothing else. Handing the enclosing struct to a helper
-//     (`authorize(cfg.API, hdr)`), a method that returns the token, or
-//     reflection all carry the value past it. Over-matching is the deliberate
-//     direction of that trade: any `.Token` selector in this package is
-//     treated as the admin token, so a false positive costs an argument with
-//     this test and a false negative costs a side channel.
-//   - Known over-match: `len(cfg.API.Token) == 0` is exactly as safe as the
-//     allowed `cfg.API.Token == ""` (the "no configured token" guard is a
-//     length/emptiness check either way, not a compare against attacker
-//     input), but this gate flags it — the selector's immediate parent is
-//     the `len(...)` CallExpr, not the outer `== 0` BinaryExpr, so it is
-//     classified as "passed to len" rather than recognized as the guard.
-//     Deliberately left unfixed: nothing in this package writes the guard
-//     that way today (`grep -rn "len(cfg.API.Token)"` finds nothing), and
-//     correlating two AST levels — the call and its enclosing comparison
-//     against a zero literal — to special-case it would add real complexity
-//     for a form nobody uses. If that changes, prefer rewriting the call
-//     site to `== ""` over teaching the gate a second accepted spelling of
-//     the same guard (one way to do one thing).
+// Limits: it reads only this package, matches the field by name, and flags
+// len(cfg.API.Token) == 0 even though that is safe.
 func TestAdminTokenIsOnlyUsedInAConstantTimeCompare(t *testing.T) {
 	files, err := goFilesUnder(".")
 	if err != nil {
@@ -119,20 +51,15 @@ func TestAdminTokenIsOnlyUsedInAConstantTimeCompare(t *testing.T) {
 		matched += fileMatches
 		offences = append(offences, fileOffences...)
 	}
-	// A walk that silently matched nothing would make this gate pass while
-	// reading no code at all — the failure mode the branch exists to remove.
+	// A walk that matched no files would pass while reading nothing.
 	if walked == 0 {
 		if wd, wderr := os.Getwd(); wderr == nil {
 			t.Fatalf("no non-test .go files found in %s — this gate read nothing", wd)
 		}
 		t.Fatal("no non-test .go files found — this gate read nothing")
 	}
-	// walked > 0 only proves the gate parsed source; it says nothing about
-	// whether that source still contains the field this gate exists to
-	// guard. Renaming adminTokenField, or moving the admin-token comparison
-	// to a struct/package this gate never reads, leaves walked positive and
-	// matched at zero — the gate would keep passing while protecting
-	// nothing. Fail loud and say what to do about it.
+	// Parsing files says nothing about finding the field. If it was renamed or moved,
+	// the gate would pass guarding nothing, so fail.
 	if matched == 0 {
 		t.Fatalf("walked %d non-test .go file(s) under %q but never saw a %q selector — "+
 			"this gate is not reading the admin token at all, so it is protecting nothing. "+
@@ -146,11 +73,8 @@ func TestAdminTokenIsOnlyUsedInAConstantTimeCompare(t *testing.T) {
 	}
 }
 
-// goFilesUnder recursively collects every .go file at or below root, so
-// moving the admin-token comparison into a subpackage of httpapi (e.g.
-// httpapi/routes) does not silently fall out of this gate's reach. A single
-// filepath.Glob("*.go") only reads one directory — recursion closes exactly
-// that escape while staying inside the httpapi package tree.
+// goFilesUnder collects every .go file at or below root, so moving the comparison
+// into a subpackage keeps it covered.
 func goFilesUnder(root string) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -168,13 +92,9 @@ func goFilesUnder(root string) ([]string, error) {
 	return files, err
 }
 
-// tokenUseOffences reports every disallowed appearance of the admin token
-// field in one parsed file, plus how many times the field was mentioned at
-// all (allowed or not) — the count TestAdminTokenIsOnlyUsedInAConstantTimeCompare
-// sums across files to make sure the gate is reading the field it claims to
-// guard, not silently matching nothing. The walk carries a parent stack
-// because the rule is about the CONTEXT a mention sits in, not about the
-// mention itself.
+// tokenUseOffences reports every disallowed use of the admin token field in a file
+// and how often the field appears at all. It tracks parents because the context of
+// a mention decides.
 func tokenUseOffences(fset *token.FileSet, f *ast.File) ([]string, int) {
 	imports := importNames(f)
 	rebound := reboundNames(f)
@@ -206,10 +126,9 @@ func tokenUseOffences(fset *token.FileSet, f *ast.File) ([]string, int) {
 	return offences, matched
 }
 
-// disallowedUse classifies one mention of the admin token by the context it
-// sits in. It returns "" when the use is one of the two allowed ones, and a
-// short description of the offending context otherwise. stack ends with the
-// selector itself, so stack[len-2] is its parent.
+// disallowedUse classifies one mention by its context: "" for an allowed use,
+// otherwise a short description. stack ends with the selector, so stack[len-2] is
+// its parent.
 func disallowedUse(stack []ast.Node, imports map[string]string, rebound map[string]bool) string {
 	parent := ancestor(stack, 1)
 	switch p := parent.(type) {
@@ -220,9 +139,8 @@ func disallowedUse(stack []ast.Node, imports map[string]string, rebound map[stri
 		return "compared with " + p.Op.String()
 
 	case *ast.CallExpr:
-		// Either the call IS an allowed sink, or it is the []byte conversion
-		// in front of one — anything else (a same-package wrapper, a logger,
-		// a variable-time Equal from any package) carries the value away.
+		// The call is an allowed sink or the []byte conversion in front of one; anything
+		// else carries the value away.
 		if isConstantTimeCompare(p.Fun, imports, rebound) {
 			return ""
 		}
@@ -246,9 +164,8 @@ func ancestor(stack []ast.Node, n int) ast.Node {
 	return stack[len(stack)-1-n]
 }
 
-// importNames maps each import's local name in this file to its path, so the
-// gate can ask whether the `subtle` in `subtle.ConstantTimeCompare` is really
-// crypto/subtle rather than something that merely renders that way.
+// importNames maps each import's local name to its path, so the gate can check that
+// subtle really is crypto/subtle.
 func importNames(f *ast.File) map[string]string {
 	names := map[string]string{}
 	for _, spec := range f.Imports {
@@ -265,17 +182,9 @@ func importNames(f *ast.File) map[string]string {
 	return names
 }
 
-// reboundNames collects every identifier this file BINDS anywhere: short
-// declarations, var/const/type specs, function names, receivers, parameters,
-// results, and range variables.
-//
-// File-wide rather than scope-accurate on purpose. Resolving scopes properly
-// means go/types and a full package load; the question this gate actually
-// needs answered is narrower — "could the `subtle` in this call be anything
-// other than the imported package?" — and a name that is bound ANYWHERE in a
-// file is already reason enough to refuse the exemption there. The cost is a
-// false positive if somebody names an unrelated local `subtle` or `hmac`,
-// which is a trade the gate takes gladly in this direction.
+// reboundNames collects every identifier bound anywhere in the file. Scope-accurate
+// resolution would need go/types; a name rebound anywhere in the file is reason
+// enough to deny the exemption.
 func reboundNames(f *ast.File) map[string]bool {
 	bound := map[string]bool{}
 	add := func(idents ...*ast.Ident) {
@@ -327,9 +236,9 @@ func reboundNames(f *ast.File) map[string]bool {
 	return bound
 }
 
-// isConstantTimeCompare reports whether fun is one of the two constant-time
-// sinks the admin token may reach, with the package qualifier RESOLVED against
-// the file's imports and refused if that name is re-bound in the file.
+// isConstantTimeCompare reports whether fun is subtle.ConstantTimeCompare or
+// hmac.Equal, with the package name resolved against the imports and not rebound
+// in the file.
 func isConstantTimeCompare(fun ast.Expr, imports map[string]string, rebound map[string]bool) bool {
 	sel, ok := fun.(*ast.SelectorExpr)
 	if !ok {
@@ -348,8 +257,7 @@ func isConstantTimeCompare(fun ast.Expr, imports map[string]string, rebound map[
 	return false
 }
 
-// isByteSliceConversion matches the `[]byte(…)` in
-// subtle.ConstantTimeCompare([]byte(a), []byte(b)) — the one wrapper allowed
+// isByteSliceConversion matches the []byte(...) conversion, the one wrapper allowed
 // between the field and its sink.
 func isByteSliceConversion(fun ast.Expr) bool {
 	arr, ok := fun.(*ast.ArrayType)
@@ -365,10 +273,8 @@ func isEmptyStringLiteral(n ast.Expr) bool {
 	return ok && lit.Kind == token.STRING && (lit.Value == `""` || lit.Value == "``")
 }
 
-// render prints a called function the way the source reads it — "bytes.Equal",
-// "equalTokens" — for the offence message, which is the only place it is used:
-// nothing is DECIDED by a rendered name (that is isConstantTimeCompare's job,
-// and it resolves).
+// render prints a called function as the source reads, for the offence message
+// only.
 func render(fun ast.Expr) string {
 	switch f := fun.(type) {
 	case *ast.SelectorExpr:

@@ -7,16 +7,11 @@
 //	   ▲ mTLS          ▲ mTLS
 //	n-edge1  (level 3) n-edge2        edge1 holds client m1, edge2 holds client m2
 //
-// Everything here is real: generated ed25519 keys, mTLS between the nodes,
-// embedded MQTT brokers with paho clients as machines, Pebble data directories
-// on disk. The topic strings asserted below are the specification of the
-// NODE-to-node replication mount chain (still a rewrite: each ancestor
-// inserts the child's mount into the path on the way up) — they are not
-// negotiable. A client's own publish carries no rewrite any more: level 4 is
-// always the node it is attached to, and the path is exactly what it sent.
-//
-// The suite is deliberately sequential (no t.Parallel): the nodes bind real
-// ports and share a process-wide slog default.
+// Keys, mTLS, brokers, paho machines and Pebble directories are all real. The
+// topics asserted here specify the mount chain: each ancestor inserts the
+// child's mount on the way up, while a client's own publish is stored as sent.
+// The suite is sequential because the nodes bind real ports and share the
+// process-wide slog default.
 package tests
 
 import (
@@ -87,9 +82,7 @@ func startTopo(t *testing.T) *topo {
 			MQTT:   config.Endpoint{Addr: "127.0.0.1:0"},
 			Repl:   config.Endpoint{Addr: "127.0.0.1:0"},
 			Parent: parent,
-			// Every node trusts the same fake issuer and opens both human
-			// doors (human-authz §4/§5.1) — the human contract is tested at
-			// every level of the tree.
+			// Every node trusts the same fake issuer and opens both token doors.
 			Auth: &config.Auth{Issuer: tp.iss.Iss(), Audience: tp.iss.Aud(), JWKSURL: tp.iss.JWKSURL()},
 			MQTTHuman: config.MQTTHuman{
 				TCPAddr: "127.0.0.1:0",
@@ -97,12 +90,9 @@ func startTopo(t *testing.T) *topo {
 			},
 		}
 	}
-	// Every node gets a read-all `observer` identity (may subscribe to
-	// everything via its read:# grant, can never publish; its own placement at
-	// "observer" carries no extra scope beyond that grant). The two edges each
-	// mount one machine besides. Enrollment happens AFTER a node starts —
-	// entry-before-connect is the contract, and the registry is runtime state,
-	// not config.
+	// Every node gets a read-all observer that can subscribe to everything and
+	// publish nothing; the edges also get one machine each. Enrollment happens
+	// after a node starts, because the registry is runtime state.
 	enrollObserver := func(n *node.Node) {
 		o := authtest.NewMachine(t, "observer")
 		authtest.EnrollAt(t, n.Registry, n.Engine, o, "observer", "read:#")
@@ -126,12 +116,9 @@ func startTopo(t *testing.T) *topo {
 	}
 	tp.site1, tp.cfgs["n-site1"] = s, scfg
 	enrollObserver(s)
-	// A node teaches its children their position only once it knows its
-	// own, so the edges start after site1 has learned its prefix: each hop
-	// then gets its own window below instead of edge1's window having to
-	// absorb site1's hop as well — which is what timed out on a loaded
-	// runner (`n-edge1 learns its prefix` after 15 s, -race, four packages
-	// in parallel). The same order a real tree comes up in.
+	// A node teaches its children their position only once it knows its own, so
+	// the edges start after site1 has learned its prefix. Each hop then gets its
+	// own wait instead of one wait covering two hops on a slow runner.
 	waitForPrefix(t, "n-site1", s)
 	authtest.EnrollNodeAt(t, s.Registry, s.Engine, "n-edge1", tp.keys["n-edge1"].PublicHex(), "edge1")
 	authtest.EnrollNodeAt(t, s.Registry, s.Engine, "n-edge2", tp.keys["n-edge2"].PublicHex(), "edge2")
@@ -160,10 +147,8 @@ func startTopo(t *testing.T) *topo {
 
 	t.Cleanup(func() { e2.Stop(); e1.Stop(); s.Stop(); g.Stop() })
 
-	// Every non-root node must know its root-frame prefix before tests run
-	// (cmdadmin design §3): human grants are root-frame, and a node that has
-	// not yet learned its prefix fails closed on scoped grants — a legitimate
-	// startup state, but a race in tests. The first downlink poll teaches it.
+	// Every non-root node must know its prefix before tests run: scoped grants
+	// fail closed until it does. The first downlink poll teaches it.
 	waitForPrefix(t, "n-edge1", e1)
 	waitForPrefix(t, "n-edge2", e2)
 	return tp
@@ -181,30 +166,14 @@ func waitForPrefix(t *testing.T, ulid string, n *node.Node) {
 
 // ---- helpers ----
 
-// rateLimitBudget bounds how long doRequest will keep re-sending one request
-// that the door is answering 429 to. Generous enough to absorb several
-// Retry-After rounds (the door advertises whole seconds, minimum 1), short
-// enough that a genuinely wedged limiter fails the test rather than hanging.
+// rateLimitBudget bounds how long doRequest keeps retrying a request the door
+// answers with 429.
 const rateLimitBudget = 15 * time.Second
 
-// doRequest sends a request and retries for as long as the door answers 429.
-//
-// A 429 is the door saying "not now", not "no". Every helper here used to
-// treat it as a final answer — api() called t.Fatalf on any status >= 300,
-// apiStatus() and bearer() returned 429 where the caller was asserting a
-// specific code — so a rate-limited poll failed the test instead of waiting.
-//
-// It is reachable from an ordinary poll: waitFor ticks every 50 ms, which is
-// 20 requests/second, while scanPolicy (internal/httpapi/limits.go) allows 5/s
-// with a burst of 10. Any condition that takes longer than the burst — a
-// metric crossing three replication hops on a loaded runner — exhausts it and
-// starts collecting 429s. TestUplinkMountChainAndKV died exactly there:
-// "GET /kv?prefix=site1/edge1/m1/temp → 429: request limit exceeded".
-//
-// The door tells us how long to wait (acquireRequest sets Retry-After), so
-// honour it: that throttles the poll to the pace the door allows instead of
-// guessing a slower tick, and it needs no per-caller quota raised for tests.
-// build is a factory, not a request, because a retry has to re-read the body.
+// doRequest sends a request and retries while the door answers 429, waiting as
+// long as Retry-After says. waitFor polls 20 times a second while the scan
+// routes allow 5, so a slow condition would otherwise fail on the rate limit.
+// build is a factory because a retry needs a fresh body.
 func doRequest(t *testing.T, client *http.Client, what string, build func() (*http.Request, error)) *http.Response {
 	t.Helper()
 	deadline := time.Now().Add(rateLimitBudget)
@@ -279,28 +248,10 @@ func api(t *testing.T, n *node.Node, method, path string, body any) map[string]a
 	return out
 }
 
-// awaitElement waits until n can RESOLVE the system element sitting at path —
-// the fact a grant check consults, not merely the record being in its KV.
-//
-// A grant naming an element deep in the tree is inert at an ancestor until that
-// element's record has replicated up to it (id-grants design §4): the ancestor
-// places elements from its own subtree at their mount-inserted paths, and it
-// cannot place one it has not received yet. Provisioning propagates; the wait
-// is what makes a test observe that rather than race it.
-//
-// Resolvable and durable are two different moments, and the gap between them
-// is real work: Engine.IngestReplicated commits the replicated batch to the
-// store (KV included) and only THEN loops over the applied records calling
-// ElementIndex.Observe. Polling /kv therefore returns as soon as the record is
-// durable, while a grant naming that element still resolves to nothing —
-// "no cmd grant covers …", PUBACK 0x87 — until Observe reaches it. Invisible
-// on an idle machine, and 1 of 12 concurrent -race batches under load.
-//
-// That ordering is right: durable first, projection second. It is the waiting
-// that was wrong. The index is strictly downstream of the durable write, so
-// waiting on it implies the KV holds the record too — the reverse is what was
-// never true. IDAt and PathOf read the same pair of maps, written together by
-// one apply, so this is the same fact authorization asks for.
+// awaitElement waits until n can resolve the element at path, which is what a
+// grant check consults. Replication commits the record to KV before the
+// element index observes it, so polling /kv alone can race a grant that still
+// resolves to nothing.
 func awaitElement(t *testing.T, n *node.Node, path string) {
 	t.Helper()
 	waitFor(t, "the element at "+path+" to be resolvable at "+n.Cfg.ULID, 20*time.Second, func() bool {
@@ -649,10 +600,8 @@ func TestAuthRejections(t *testing.T) {
 		t.Fatal("un-enrolled key must be refused")
 	}
 
-	// write-scope violation: m1 tries to write under m2's zone → not persisted
-	// anywhere. Level 4 is always this node's own ULID now, so there is no more
-	// "foreign identity at level 4" to spoof — the write-scope check is what
-	// keeps m1 out of m2's zone.
+	// m1 writing under m2's zone is not persisted: its write scope does not cover
+	// it.
 	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 	m1.Publish("colca/v1/_Metric/n-edge1/m2/temp", 1, false, `{"v": 666}`).WaitTimeout(5 * time.Second)
 	time.Sleep(1 * time.Second)
@@ -766,12 +715,9 @@ func TestRetainedSetEqualsKVView(t *testing.T) {
 	awaitTopic(t, cmds, "colca/v1/_CmdParam/m1/m1/set-speed", 20*time.Second)
 	m1.Publish("colca/v1/_Ack/n-edge1/m1/set-speed", 1, false, `{"correlation_id":"kv-eq-1","result_code":200}`).WaitTimeout(5 * time.Second)
 
-	// settle: all three state paths in KV (plus the two _EnrolledIdentity registry
-	// entities enrollment wrote, the two _SystemElement records m1 and the
-	// observer each bind to — a machine must be placed now, so the observer's
-	// own enrollment authors one too — and the node's own _Node, which
-	// it authored on learning its position: all state like any other entity),
-	// the ack in the commands stream
+	// Settle: KV holds the three state paths, two _EnrolledIdentity entries, the
+	// _SystemElement records of m1 and the observer, and the node's own _Node
+	// record. The ack is in the commands stream.
 	waitFor(t, "state and ack persisted at edge1", 10*time.Second, func() bool {
 		if len(kvAt(t, tp.edge1, "")) != 8 {
 			return false
@@ -884,12 +830,9 @@ func TestRetainedDeliversCurrentStateOnConnect(t *testing.T) {
 	}
 }
 
-// A definition authored at the ROOT reaches a level-3 edge through two hops
-// with no special routing, and arrives byte-identical: a node applies it to its
-// own store, and its children read it from there (definition-stream design §5).
-//
-// This is the transitivity the design claims falls out of the transport rather
-// than being built into it — nothing in the code knows how deep the tree is.
+// A definition authored at the root reaches a level-3 edge through two hops and
+// arrives unchanged: each node applies it to its own store, and its children
+// read it from there. Nothing in the code knows how deep the tree is.
 func TestDefinitionAuthoredAtTheRootReachesEveryLevel(t *testing.T) {
 	tp := startTopo(t)
 	const topic = "colca/v1/_Group/n-global/01HGRP-OPS"
@@ -924,14 +867,9 @@ func TestDefinitionAuthoredAtTheRootReachesEveryLevel(t *testing.T) {
 	}
 }
 
-// TestResourceUpsertAtAChildPullsTheBlobFromItsParent is the wiring guard
-// for node.go's SetFetcher call (resources design §3, §7.1): a blob staged
-// only at the parent (n-site1), never at the child, must reach the child
-// (n-edge1) as a side effect of resource/upsert executing there. This
-// exercises the real path — node.Start's blobPort injection, ConfigExec's
-// ensureBlob, BlobPort.Pull, the repl client's BlobGet — not just the
-// BlobPort unit in isolation. A getter would only prove the getter works;
-// this proves the wiring the getter would have been for.
+// TestResourceUpsertAtAChildPullsTheBlobFromItsParent checks the SetFetcher
+// wiring in node.go: a blob staged only at n-site1 must reach n-edge1 when
+// resource/upsert executes there, through the real pull path.
 func TestResourceUpsertAtAChildPullsTheBlobFromItsParent(t *testing.T) {
 	tp := startTopo(t)
 
@@ -964,13 +902,8 @@ func TestResourceUpsertAtAChildPullsTheBlobFromItsParent(t *testing.T) {
 	}
 }
 
-// TestANodeDescribesItselfOnce: a fresh child wrote two records per boot --
-// one at startup bound to nothing (its ancestry was empty but unknown, and
-// the empty chain was read as the root's), one when the downlink taught it
-// its position. Both replicated up; the first was a lie about the binding
-// that a parent's re-teaching could replay over the truth. A child now waits
-// for its position and writes once; the root, bound to nothing above itself
-// by construction, still writes exactly once.
+// TestANodeDescribesItselfOnce: a fresh child waits for its position and
+// writes one _Node record; the root also writes exactly one.
 func TestANodeDescribesItselfOnce(t *testing.T) {
 	tp := startTopo(t)
 	count := func(n *node.Node, prefix string) int {
@@ -993,15 +926,10 @@ func TestANodeDescribesItselfOnce(t *testing.T) {
 	}
 }
 
-// TestANodeDescribesItselfWhereItsParentMountedIt pins the wiring of
-// node.go's SetOnPosition hook. `_Node` is "authored by the node it
-// describes" (the contract's words), and the one fact about itself a node
-// cannot read from config is where it sits: the element its parent bound it
-// to, which it learns from the ancestry the downlink hands down. So the
-// record must appear at the ROOT, mount-inserted like any other entity, naming
-// exactly the element the parent's enrollment created — without any operator
-// running a bootstrap against the child. The root itself is bound to nothing
-// above it and says so.
+// TestANodeDescribesItselfWhereItsParentMountedIt checks the SetOnPosition
+// wiring in node.go: each node's _Node record reaches the root at its
+// mount-inserted path, bound to the element its parent's enrollment created,
+// without any bootstrap. The root is bound to nothing above it.
 func TestANodeDescribesItselfWhereItsParentMountedIt(t *testing.T) {
 	tp := startTopo(t)
 

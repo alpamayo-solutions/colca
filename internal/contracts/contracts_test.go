@@ -108,8 +108,8 @@ func TestLoadValidBundle(t *testing.T) {
 	}
 }
 
-// The generator's real output loads — cross-language digest parity: the Go
-// loader recomputes the exact digest Python computed.
+// The generator's real output loads, and the Go loader computes the same digest
+// Python did.
 func TestLoadRealGeneratedBundle(t *testing.T) {
 	path := contractstest.GeneratedBundlePath(t)
 	tbl, err := Load(path, "")
@@ -133,10 +133,9 @@ func TestLoadRealGeneratedBundle(t *testing.T) {
 	}
 }
 
-// §4.1: `pattern` and `maxLength` are in the subset. A
-// bundle carrying them loads, the pattern is compiled once at load, and the
-// rule refuses a value outside it with a message that names the pattern —
-// the shape a publisher sees in its PUBACK reason / HTTP 4xx body.
+// pattern and maxLength are in the subset: a bundle using them loads, the
+// pattern is compiled once, and a value outside it is refused with a message
+// naming the pattern.
 func TestPatternAndMaxLengthAreInTheSubset(t *testing.T) {
 	e := metricEntry()
 	e["schema"].(map[string]any)["properties"].(map[string]any)["signal_id"] = map[string]any{
@@ -188,9 +187,8 @@ func TestFailStartConditions(t *testing.T) {
 			return fixture(t, valid, strings.Repeat("ab", 32))
 		}, "does not match content"},
 		{"malformed pattern", func(t *testing.T) string {
-			// `pattern` is compiled at load (§4.1), so an
-			// expression Go's regexp refuses is a fail-start, not a publish
-			// that silently never matches.
+			// pattern is compiled at load, so an expression Go's regexp refuses fails
+			// startup.
 			e := metricEntry()
 			e["schema"].(map[string]any)["properties"].(map[string]any)["signal_id"] = map[string]any{"type": "string", "pattern": "^[0-9A-Z{26}$"}
 			return fixture(t, map[string]any{"_Metric": e}, "")

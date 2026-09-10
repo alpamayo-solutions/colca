@@ -13,16 +13,10 @@ import (
 	"testing"
 )
 
-// TestPluginDependsOnStdlibOnly enforces the documented dependency boundary
-// (README.md "Layout"): plugins/uns depends on
-// the Go standard library only — which is what makes it impossible for the
-// plugin to import the core. The opposite direction is by design: the core
-// (engine, httpapi, repl) imports this package to call Parse/Validate.
-//
-// The check goes through the Go toolchain itself: `go list -deps` resolves the
-// full transitive import graph of the package (test files excluded), so any
-// new dependency — direct or transitive — fails here with its import path
-// named.
+// TestPluginDependsOnStdlibOnly enforces that plugins/uns depends on the
+// standard library only, so it can never import the core. It uses
+// `go list -deps`, so any new direct or transitive dependency fails with its
+// import path.
 func TestPluginDependsOnStdlibOnly(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps",
 		"-f", "{{if not .Standard}}{{.ImportPath}}{{end}}", ".").CombinedOutput()
@@ -43,27 +37,14 @@ func TestPluginDependsOnStdlibOnly(t *testing.T) {
 }
 
 // TestCoreAsksQuestionsRatherThanSwitchingOnVocabulary enforces the other half
-// of the boundary: domain knowledge
-// lives in exactly one package, so the core may HOLD a domain value but must
-// never make a decision by comparing against one.
-//
-// `class == uns.ClassCmd` inside internal/ means "commands drain, need a cmd
-// grant and flow down" is now a rule in two packages, and the next class added
-// here has to be chased through every door that spelled it out. A predicate —
-// uns.IsCommand, uns.IsOwnedState, Entry.IsDraining, Entry.MayUseDoor — keeps
-// the rule where the vocabulary is.
-//
-// Value positions are deliberately allowed: passing uns.ClassAck to persist, or
-// emitting uns.StatusDraining in an HTTP response, carries a domain value
-// without duplicating a domain rule. Only comparisons and switch cases fail.
+// of the boundary: the core may hold a domain value but never decide by
+// comparing against one. Use a predicate such as uns.IsCommand instead.
+// Passing a value along (uns.ClassAck, uns.StatusDraining) is fine; only
+// comparisons and switch cases fail.
 func TestCoreAsksQuestionsRatherThanSwitchingOnVocabulary(t *testing.T) {
-	// The core is everything in the module except plugins/uns itself — the
-	// domain package legitimately owns the vocabulary it defines. Walking the
-	// module root rather than an enumerated list of core directories is the
-	// point: internal/, cmd/, and door/ were once named explicitly here, and
-	// that list is exactly what let bench/ (which also imports plugins/uns)
-	// go unwalked. A directory list drifts the moment a new one is added;
-	// "everything but the domain package" cannot.
+	// The core is everything in the module except plugins/uns. Walking the
+	// module root instead of a list of directories means a new directory
+	// cannot be missed.
 	const moduleRoot = "../.."
 	vocabulary := regexp.MustCompile(`^(Class|Kind|Status)[A-Z]`)
 
@@ -79,16 +60,8 @@ func TestCoreAsksQuestionsRatherThanSwitchingOnVocabulary(t *testing.T) {
 		return "uns." + sel.Sel.Name, true
 	}
 
-	// domainDir is plugins/uns exactly — the one package that legitimately
-	// owns this vocabulary. Excluding all of plugins/ instead would read the
-	// same today (uns is its only occupant) and quietly stop reading a second
-	// plugin the day one is added: that plugin would be core-side code with
-	// respect to the domain, and letting it switch on uns.Class* unwalked is
-	// the drift this gate exists to catch. Excluded by path rather than by
-	// name, so a "plugins/uns" appearing elsewhere in the tree would still be
-	// walked. vendor/ and testdata/ are excluded by name wherever they appear
-	// — the standard Go convention for code this test has no business parsing
-	// (third-party sources, fixture data).
+	// Exclude plugins/uns exactly, by path, so a future plugin is still
+	// checked. vendor/ and testdata/ are skipped wherever they appear.
 	domainDir := filepath.Clean(filepath.Join(moduleRoot, "plugins", "uns"))
 
 	var offences []string

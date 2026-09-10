@@ -11,33 +11,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// The sink's contract is fixed by a table that already exists and that Grafana
-// and the API's history endpoints already read. `historian_metric` carries the
-// value columns and a unique index on (signal_id, timestamp); the deleted Kafka
-// writer used ON CONFLICT DO NOTHING against exactly that index. This uses
-// ON CONFLICT DO UPDATE instead: metrics are idempotent by (signal_id,
-// timestamp), not by revision (design §6), so the evaluator can recompute a
-// window and safely re-publish the same points — the historian must end up
-// with the NEW value, not the first one it ever saw. This is still the second
-// net behind the marker: a redelivered batch cannot double-write even if the
-// marker were somehow lost, it just now overwrites in place rather than
-// silently dropping.
+// insertMetric writes one row into historian_metric, which Grafana and the
+// API's history endpoints read. Metrics are idempotent by (signal_id,
+// timestamp), so a recomputed point overwrites the stored value.
 //
-// Every value column is written unconditionally from EXCLUDED, not just the
-// one the new row set. A Row carries at most one of Number/Text/Bool/JSON;
-// the others arrive as NULL parameters (see nullable/nullableJSON below). If
-// the SET list only touched the incoming row's own column, a value-type
-// change at the same (signal_id, timestamp) — e.g. a signal that used to be a
-// number now publishing text — would leave the stale value_number in place
-// alongside the new value_text, corrupting the "exactly one column is set"
-// invariant the API's reader depends on. Setting all four every time keeps
-// that invariant no matter which column, if any, changes.
-//
-// The WHERE clause is the guard against churn: an identical redelivery must
-// not write a new row version (no update, no replication, no cost) — only a
-// genuine value change may. IS DISTINCT FROM treats NULL <> NULL as "not
-// distinct", so a redelivery that still carries three NULL value columns and
-// one unchanged value correctly matches as identical.
+// Every value column is set from EXCLUDED, not only the incoming one: a row has
+// exactly one value column, and a type change at the same key must not leave the
+// old column behind. The WHERE clause skips identical redeliveries, so they
+// write no new row version.
 const insertMetric = `
 INSERT INTO historian_metric
     (timestamp, value_json, value_number, value_text, value_bool, colca_node_id, signal_id)
@@ -54,8 +35,8 @@ WHERE (historian_metric.value_json, historian_metric.value_number, historian_met
       (EXCLUDED.value_json, EXCLUDED.value_number, EXCLUDED.value_text,
        EXCLUDED.value_bool, EXCLUDED.colca_node_id)`
 
-// The marker lives beside the rows it describes, in the same database and the
-// same transaction — the guarantee, not a convenience (projector design §4).
+// upsertOffset moves the marker in the same transaction as the rows it
+// describes.
 const upsertOffset = `
 INSERT INTO colca_applied_offset (consumer, "offset", updated_at)
 VALUES ($1, $2, now())
@@ -68,13 +49,8 @@ CREATE TABLE IF NOT EXISTS colca_applied_offset (
     updated_at timestamptz NOT NULL DEFAULT now()
 )`
 
-// dbPool is the slice of *pgxpool.Pool the sink actually calls, narrowed to an
-// interface for exactly one reason: pgx.Tx and pgx.BatchResults are already
-// interfaces ("to allow tests to mock transactions" — their own doc comment),
-// so a fake dbPool.Begin lets the poison/retry algorithm in Apply below be
-// proven at level 1 (poison_test.go) with no real database, while
-// *pgxpool.Pool (as built by Open) satisfies this exactly as-is — production
-// wiring does not change.
+// dbPool is the part of *pgxpool.Pool the sink uses. pgx.Tx is already an
+// interface, so poison_test.go can fake Begin without a database.
 type dbPool interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
@@ -86,11 +62,8 @@ type Sink struct {
 	Pool dbPool
 }
 
-// Rejection is one row the schema permanently refused, set aside by
-// applyRowByRow so the rest of the page — and every page behind it — keeps
-// flowing. Row.Offset/Row.Topic (record.go) carry enough context for the
-// bridge to log and count it without this package knowing anything about the
-// door or the stream.
+// Rejection is one row the schema permanently refused, set aside so the rest of
+// the page and every later page keep flowing.
 type Rejection struct {
 	Row      Row
 	Reason   string // bounded label — see poisonReasons below
@@ -98,29 +71,20 @@ type Rejection struct {
 	Err      error
 }
 
-// poisonState pairs one Postgres error code a bad publisher can trigger with
-// the bounded reason label colca_historian_rows_rejected_total carries for
-// it. This is the ONE list — poisonReasons (what cmd/colca-historian
-// pre-creates as zero-valued metric children) is derived from it rather than
-// hand-duplicated, so the two can never silently disagree about which reasons
-// exist (architecture principle 2, one owner per fact).
+// poisonStates maps the Postgres error codes a bad publisher can cause to the
+// reason labels of colca_historian_rows_rejected_total. PoisonReasons derives
+// from this list.
 var poisonStates = []struct {
 	code   string
 	reason string
 }{
-	// The concrete incident this exists for: a non-ULID signal_id (or any
-	// text) longer than a column allows. No retry ever changes the length of
-	// the same bytes.
+	// A value longer than its column, such as a non-ULID signal_id.
 	{"22001", "value_too_long"},
-	// Malformed input for the target type — e.g. a numeric column fed text
-	// that doesn't parse. Same row, same bytes, same failure every retry.
+	// Input that does not parse as the column's type.
 	{"22P02", "invalid_text_representation"},
-	// A NOT NULL column left empty by the publisher. Retrying supplies the
-	// same missing value.
+	// A NOT NULL column left empty.
 	{"23502", "not_null_violation"},
-	// A numeric literal outside the column's range (e.g. a double that
-	// doesn't fit where the schema expects it to). Same value, same overflow
-	// every time.
+	// A number outside the column's range.
 	{"22003", "numeric_out_of_range"},
 }
 
@@ -132,12 +96,8 @@ var poisonReasonByCode = func() map[string]string {
 	return m
 }()
 
-// PoisonReasons returns the bounded reason labels
-// colca_historian_rows_rejected_total can carry, so cmd/colca-historian's
-// /metrics handler can pre-create a zero-valued child for each — the same
-// "every label combination scrapes as zero from boot" convention
-// internal/metrics uses, so the first real incident is alertable rather than
-// appearing as a previously-absent series.
+// PoisonReasons returns the reason labels, so colca-historian can pre-create a
+// zero-valued series for each and the first incident is alertable.
 func PoisonReasons() []string {
 	out := make([]string, len(poisonStates))
 	for i, s := range poisonStates {
@@ -146,14 +106,9 @@ func PoisonReasons() []string {
 	return out
 }
 
-// poisonReason reports the bounded reason label for an error the schema will
-// NEVER accept regardless of how many times the same bytes are retried — a
-// row-level data problem a bad publisher caused. ok is false for every other
-// error: a dropped connection, a deadlock, a serialization failure, disk
-// full, Postgres itself being down. Those are TRANSIENT — retrying is exactly
-// right, and treating them as poison would durably lose a measurement that a
-// moment's retry would have written. This is the one place that line is
-// drawn; nothing else in this package guesses at a SQLSTATE.
+// poisonReason reports the reason label for an error no retry can fix: bad
+// data in the row. Everything else (a dropped connection, a deadlock, a full
+// disk) is transient and must be retried, or a measurement would be lost.
 func poisonReason(err error) (reason, sqlstate string, ok bool) {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
@@ -163,11 +118,8 @@ func poisonReason(err error) (reason, sqlstate string, ok bool) {
 	return reason, pgErr.Code, ok
 }
 
-// EnsureSchema creates what this service owns and nothing else.
-//
-// It creates ONLY the offset table. `historian_metric` belongs to the api's
-// migrations: a service that created another service's table would give that
-// table two definitions, and the one that ran first would win.
+// EnsureSchema creates the offset table and applies the retention policy.
+// historian_metric itself belongs to the API's migrations.
 func (s *Sink) EnsureSchema(ctx context.Context, retentionDays int) error {
 	if _, err := s.Pool.Exec(ctx, createOffsetTable); err != nil {
 		return fmt.Errorf("historian: creating the offset table: %w", err)
@@ -221,29 +173,13 @@ func (s *Sink) Applied(ctx context.Context, consumer string) (int64, error) {
 	return offset, nil
 }
 
-// Apply writes the rows and moves the marker, in ONE transaction.
+// Apply writes the rows and moves the marker in one transaction. An empty batch
+// still moves the marker, or a page of tombstones would be fetched forever.
 //
-// An empty batch still moves the marker: a page whose records were all
-// tombstones or all already-applied would otherwise be re-fetched forever.
-//
-// The batch path (applyBatch) is tried first — one round trip, and the path
-// every page takes the overwhelming majority of the time. It fails wholesale
-// only when the connection cannot deliver it (a real outage) or when ONE row
-// in it is something the schema will never accept: a non-ULID signal_id
-// longer than the column, a NOT NULL left empty, a value of the wrong shape.
-// Before this fix that second case wedged the sink forever — the log line
-// this fix exists for was the SAME batch (offset 36, then 46, then 56…)
-// failing on the same poisoned row on every pass, because the cursor cannot
-// advance past a page whose Apply keeps erroring.
-//
-// poisonReason is what tells the two cases apart. A poison-classified error
-// falls back to applyRowByRow, which retries the SAME rows one at a time so
-// every row this schema accepts still lands and the poisoned one is set aside
-// instead of blocking it and everything on every later page. Any other error
-// (the connection dropped, a deadlock, Postgres is down) is returned exactly
-// as before: the whole page is retried unchanged on the next pass, and the
-// marker does not move — skipping here would durably lose a measurement a
-// moment's retry would have written.
+// The batch path runs first. If it fails because one row is poison, the page is
+// applied row by row so the good rows land and the bad one is set aside;
+// otherwise the page would block the sink forever. Any other error is returned
+// and the whole page is retried.
 func (s *Sink) Apply(ctx context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error) {
 	err := s.applyBatch(ctx, rows, consumer, offset)
 	if err == nil {
@@ -255,8 +191,7 @@ func (s *Sink) Apply(ctx context.Context, rows []Row, consumer string, offset in
 	return s.applyRowByRow(ctx, rows, consumer, offset)
 }
 
-// applyBatch is the original, still-the-common-case path: every row plus the
-// marker pipelined in one batch, one transaction, one round trip.
+// applyBatch sends every row and the marker in one batch and one transaction.
 func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offset int64) error {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -286,24 +221,9 @@ func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offs
 	return tx.Commit(ctx)
 }
 
-// applyRowByRow is applyBatch's fallback once a poison-classified error says
-// one row in this page will never apply, however many times it is retried.
-//
-// Each row gets its own SAVEPOINT inside a single transaction: a poisoned row
-// rolls back to a clean point without discarding the rows already inserted
-// ahead of it, and the marker upsert at the end still commits alongside every
-// row that DID apply — one transaction, same guarantee applyBatch always had
-// (rows and marker commit together, or neither does). Moving the marker here
-// is the fix's actual observable effect: it is what lets the follow loop's
-// cursor advance past a page that contains a poisoned row, instead of
-// re-fetching the same page forever with a growing "batch of N" offset.
-//
-// A TRANSIENT failure hit during this retry (the same class applyBatch could
-// hit) aborts the whole thing: the function returns an error, the deferred
-// Rollback undoes every row this pass already inserted, and the caller
-// retries the untouched page on its next pass — nothing here is durable until
-// the final Commit, so aborting mid-way costs one redundant re-apply, not a
-// lost row. Only a poison-classified row is ever skipped.
+// applyRowByRow applies each row under its own savepoint in one transaction,
+// skipping poisoned rows and committing the marker with the rows that landed. A
+// transient error aborts the whole pass, and the page is retried.
 func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error) {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {

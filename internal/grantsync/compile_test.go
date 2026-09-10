@@ -112,9 +112,7 @@ func TestAnUnknownScopeIsReportedNotGuessed(t *testing.T) {
 }
 
 func TestEveryCompiledGrantSurvivesTheNodesOwnParser(t *testing.T) {
-	// The claim this whole package rests on: what it emits, uns accepts. If the
-	// two ever diverge the service publishes definitions every node rejects —
-	// and being in colca's module is what lets this be a test rather than a hope.
+	// What this package emits, uns must accept.
 	perms := []Permission{{
 		Groups:   []string{"ops"},
 		Elements: []string{"01HM6", "01HSITE1"},
@@ -149,16 +147,9 @@ func TestAGrantThatWouldNotParseIsNeverReturned(t *testing.T) {
 	}
 }
 
-// A resource name that is a wildcard rather than an identity WIDENS instead of
-// failing: FormatGrant reads "#" (and "") as the whole namespace, so a
-// permission on such a resource renders as "read:#" — the entire tree — and
-// the downstream ParseGrant re-check accepts it, because by then the two are
-// the same string. The name is therefore judged as an element id while it is
-// still one.
-//
-// The last row is the denominator: an ordinary id through the identical call
-// still compiles, so a refusal above is this rule and not compilation failing
-// outright.
+// A wildcard resource name ("#" or "") would widen to the whole tree and still
+// pass ParseGrant, so it is refused as an element id. The last row shows an
+// ordinary id still compiles.
 func TestAResourceNameThatWidensTheGrantIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

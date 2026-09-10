@@ -94,11 +94,10 @@ func authorizePersonalAccessToken(record *PersonalAccessToken, requiredScope str
 	return nil
 }
 
-// AuthorizeSession rechecks an already authenticated PAT against this node's
-// current replicated definition. It needs only the lookup id, never the
-// plaintext secret: CONNECT already proved the secret, while this check makes
-// a tombstone, expiry, duplicate definition, corrupt digest, or removed scope
-// terminate the live session on the next broker sweep.
+// AuthorizeSession rechecks an authenticated PAT against this node's current
+// definition, using only the lookup id. CONNECT already proved the secret; this
+// ends the session on the next sweep after a tombstone, expiry, duplicate,
+// corrupt digest or removed scope.
 func (p *PersonalAccessTokenIndex) AuthorizeSession(
 	id, authenticatedDigest, requiredScope string, now time.Time,
 ) error {

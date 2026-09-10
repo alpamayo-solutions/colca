@@ -6,9 +6,8 @@ import (
 	"testing"
 )
 
-// declareSignal authors a signal at path the way a bootstrap manifest does:
-// with its own id and everything a declaration knows, but no data_tag — the
-// tag is minted by the connector at discovery, so a declaration cannot name it.
+// declareSignal authors a signal at path as a bootstrap manifest does: with its
+// id and declared fields but no data_tag, which only discovery can provide.
 func declareSignal(t *testing.T, c *ConfigExec, path, id, element string, extra map[string]any) {
 	t.Helper()
 	signal := map[string]any{"id": id, "name": path[strings.LastIndex(path, "/")+1:], "data_tag": nil}
@@ -26,8 +25,8 @@ func declareSignal(t *testing.T, c *ConfigExec, path, id, element string, extra 
 	}
 }
 
-// signalRecordAt is the raw record at a local path, so a test can see every
-// field the declaration authored, not only the binding fields boundSignal reads.
+// signalRecordAt returns the raw record at a local path, with every declared
+// field.
 func signalRecordAt(t *testing.T, c *ConfigExec, path string) map[string]any {
 	t.Helper()
 	raw, ok := c.store.KVGet(c.signalTopic(path))
@@ -41,10 +40,8 @@ func signalRecordAt(t *testing.T, c *ConfigExec, path string) map[string]any {
 	return record
 }
 
-// A bootstrap declares what a signal IS before any connector has published;
-// the catalogue says where its value comes from. They meet at the path: the
-// declared record gains the binding and keeps everything it declared, and no
-// `<name>-2` appears beside it.
+// A declared signal and a catalogue tag meet at the path: the declared record
+// gains the binding, keeps its fields, and no "<name>-2" appears.
 func TestAutobindBindsADeclaredSignalInsteadOfShadowingIt(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "01HLINE1", "line1")
@@ -96,8 +93,8 @@ func TestADeclaredTypeOutranksTheTagsType(t *testing.T) {
 	}
 }
 
-// A tag's meta.unit becomes the minted signal's unit — the SDK's own
-// publish(path, value, unit=...) reaches the tree (SDK design §3, gap 2).
+// A tag's meta.unit becomes the new signal's unit, so the SDK's
+// publish(path, value, unit=...) reaches the tree.
 func TestATagsUnitIsCopiedOntoTheMintedSignal(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "01HLINE1", "line1")
@@ -114,10 +111,8 @@ func TestATagsUnitIsCopiedOntoTheMintedSignal(t *testing.T) {
 	}
 }
 
-// A predeclared signal with no unit of its own takes the tag's — the same
-// "the declaration owns what it states, the tag fills the rest" rule
-// TestAutobindBindsADeclaredSignalInsteadOfShadowingIt already pins for
-// data_type.
+// A declared signal without a unit takes the tag's unit; the declaration owns
+// what it states, the tag fills in the rest.
 func TestATagsUnitFillsAPredeclaredSignalWithNoUnit(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "01HLINE1", "line1")
@@ -135,8 +130,7 @@ func TestATagsUnitFillsAPredeclaredSignalWithNoUnit(t *testing.T) {
 	}
 }
 
-// A declared unit outranks the tag's — an operator's own declaration must
-// never be overwritten by a republish, the same rule the type already gets.
+// A declared unit is never overwritten by a republish.
 func TestADeclaredUnitOutranksTheTagsUnit(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "01HLINE1", "line1")
@@ -154,8 +148,8 @@ func TestADeclaredUnitOutranksTheTagsUnit(t *testing.T) {
 	}
 }
 
-// A signal that already holds a DIFFERENT tag is not "declared and waiting";
-// it is a collision, and gets the sibling it always got.
+// A signal that already holds a different tag is a collision and gets a
+// sibling.
 func TestAutobindStillSidestepsASignalBoundToAnotherTag(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "01HLINE1", "line1")
@@ -194,9 +188,8 @@ func TestBindingADeclaredSignalIsIdempotent(t *testing.T) {
 	}
 }
 
-// The lifecycle trigger binds a declared signal exactly as the verb does —
-// this is the path a generated node actually takes: bootstrap first, then
-// the connector starts and publishes.
+// The lifecycle trigger binds a declared signal as the verb does: bootstrap
+// first, then the connector publishes.
 func TestNewConnectorBindsDeclaredSignalsOnArrival(t *testing.T) {
 	c := newTriggerConfigExec(t)
 	place(t, c, "01HLINE1", "line1")
@@ -211,9 +204,8 @@ func TestNewConnectorBindsDeclaredSignalsOnArrival(t *testing.T) {
 	}
 }
 
-// One unplaced participant computing for several machines names, per tag,
-// the element its output belongs under. The signal lands there — under that
-// element, bound to it — not at the participant's own mount.
+// A participant computing for several machines names the element per tag; the
+// signal lands under that element, not at the participant's mount.
 func TestATagNamingItsElementIsPlacedThere(t *testing.T) {
 	c := newConfigExec(t)
 	bindEntry(t, c, "01JDATAOPS", "dataops", "")
@@ -245,14 +237,8 @@ func TestATagNamingItsElementIsPlacedThere(t *testing.T) {
 	}
 }
 
-// Naming an element the node does not hold leaves the tag unbound — reported,
-// never misplaced at the mount, where it would be a second `oee` for the
-// wrong machine.
-// A tag naming an element this node does not hold yet used to leave the tag
-// unbound forever (nothing re-triggers autobind once the catalogue stops
-// growing). It now AUTHORS the missing path and binds — the publisher's own
-// path becomes tree structure (SDK design §3 rule 2), through the identical
-// element-authoring code a local service's declared mount uses.
+// A tag naming an element this node does not hold yet creates the missing
+// path and binds, using the same element walk as a local service's mount.
 func TestATagNamingAMissingElementAuthorsItAndBinds(t *testing.T) {
 	c := newConfigExec(t)
 	bindEntry(t, c, "01JDATAOPS", "dataops", "")
@@ -284,10 +270,8 @@ func TestATagNamingAMissingElementAuthorsItAndBinds(t *testing.T) {
 	}
 }
 
-// A catalogue can grow after its first publish — an OPC UA connector announces
-// its synthetic tags before the browse finishes and the full set afterwards.
-// The tags a later publish adds are bound too; the ones already bound are
-// left exactly as they were.
+// A catalogue can grow after its first publish. Tags a later publish adds
+// are bound; tags already bound stay as they were.
 func TestACatalogueThatGrowsBindsItsNewTagsOnArrival(t *testing.T) {
 	c := newTriggerConfigExec(t)
 	place(t, c, "01HLINE1", "line1")
@@ -310,12 +294,9 @@ func TestACatalogueThatGrowsBindsItsNewTagsOnArrival(t *testing.T) {
 	}
 }
 
-// A node authors where it sits, learned from the ancestry its parent teaches.
-// Re-applying a generated bootstrap — which states no position, because a
-// deployment file cannot know one — must not take that away: the position
-// hook does not fire again (the ancestry did not change), so a cleared
-// position stays cleared, and every signal on the node then resolves to the
-// wrong owner.
+// Re-applying a bootstrap, which states no position, must not clear the
+// position the node learned from its parent: the position hook would not run
+// again, and every signal would resolve to the wrong owner.
 func TestAnUpsertOfANodesOwnRecordKeepsTheLearnedPosition(t *testing.T) {
 	c := newConfigExec(t)
 	learn := func(element string) {
@@ -360,16 +341,16 @@ func TestAnUpsertOfANodesOwnRecordKeepsTheLearnedPosition(t *testing.T) {
 		t.Fatalf("position = %q after a bootstrap that states none, want the learned 01HAREA", got)
 	}
 
-	// A writer that DOES state one still wins — this is how the node's own
-	// position hook re-places it after a move.
+	// A writer that states a position still wins; that is how the position
+	// hook re-places the node after a move.
 	learn("01HOTHER")
 	if got := position(); got != "01HOTHER" {
 		t.Fatalf("position = %q, want the re-taught 01HOTHER", got)
 	}
 }
 
-// Another node's record is not this node's position to defend: only the
-// record whose id IS this node's carries the rule.
+// Another node's record is left alone; the rule only covers this node's
+// own record.
 func TestAnUpsertOfAnotherNodesRecordIsUntouched(t *testing.T) {
 	c := newConfigExec(t)
 	body := mustJSON(map[string]any{"entities": []map[string]any{{
@@ -389,12 +370,9 @@ func TestAnUpsertOfAnotherNodesRecordIsUntouched(t *testing.T) {
 	}
 }
 
-// A bootstrap runs on every reconcile-up and re-declares what it already
-// declared. The declaration owns what a signal IS; the binding (`data_tag`,
-// `is_published`, the learned `data_type`) is runtime state the catalogue
-// lifecycle earned. A re-declaration that silently replaced the record whole
-// unbound every declared signal of a running node — the demo plant's OEE
-// outputs went dark on every `demo up`, with no republish left to rebind them.
+// A bootstrap re-declares its signals on every reconcile. The binding
+// (data_tag, is_published, learned data_type) must survive, or every declared
+// signal of a running node would be unbound with nothing left to rebind it.
 func TestReDeclaringABoundSignalKeepsItsBinding(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "01HLINE1", "line1")
@@ -411,8 +389,8 @@ func TestReDeclaringABoundSignalKeepsItsBinding(t *testing.T) {
 		t.Fatalf("precondition: signal not bound after autobind: %+v", bound)
 	}
 
-	// The same declaration again — the exact record a bootstrap manifest
-	// carries, `data_tag` explicitly null (projection_bootstrap emits it so).
+	// The same declaration again, with data_tag explicitly null as a
+	// bootstrap manifest carries it.
 	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", map[string]any{
 		"unit": "°C", "description": "Drum temperature",
 	})
@@ -429,8 +407,7 @@ func TestReDeclaringABoundSignalKeepsItsBinding(t *testing.T) {
 	}
 }
 
-// The preserve rule must not swallow a caller that MEANS to set the binding:
-// an upsert naming a non-empty data_tag still wins over the stored one.
+// An upsert that names a non-empty data_tag still sets the binding.
 func TestAnUpsertNamingATagStillSetsIt(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "01HLINE1", "line1")

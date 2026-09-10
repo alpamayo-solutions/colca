@@ -18,11 +18,7 @@ func mustOpen(t *testing.T) *Store {
 	return s
 }
 
-// mustKVScan is KVScan with the error handled the only way a test can: fail
-// loud. KVScan now returns an error (resources
-// design §8) so every caller decides explicitly what a storage fault means;
-// for these tests it means the fixture is broken, not the assertion under
-// test, so it belongs in t.Fatal rather than in the assertion being pinned.
+// mustKVScan is KVScan that fails the test on error.
 func mustKVScan(t *testing.T, s *Store, prefix string) []KVEntry {
 	t.Helper()
 	entries, err := s.KVScan(prefix)
@@ -333,8 +329,8 @@ func TestApplyReplicatedDedupe(t *testing.T) {
 	if len(applied) != 2 || hwm != 2 {
 		t.Fatalf("applied %d hwm %d", len(applied), hwm)
 	}
-	// the returned slice IS the set of records written, in write order — that is
-	// what the engine mirrors onto the local MQTT bus.
+	// The returned slice is exactly the records written, in write order; the engine
+	// mirrors it onto the local MQTT bus.
 	if applied[0].ChildOffset != 1 || applied[0].Topic != batch[0].Topic ||
 		applied[1].ChildOffset != 2 || applied[1].Topic != batch[1].Topic {
 		t.Fatalf("returned records are not the applied ones, in order: %+v", applied)
@@ -457,15 +453,10 @@ func TestKVScanPageIsBoundedAndTokensArePrefixScoped(t *testing.T) {
 	}
 }
 
-// TestKVScanPageFiltersByContractDuringTheScan seeds two contracts at every
-// path under a prefix and proves the contract filter returns exactly the
-// requested one, paginating over ONLY the matching entries (a page of `max`
-// MATCHES, not `max` raw keys with the rest thrown away) rather than
-// requiring the caller to page past entries it asked to exclude. The
-// presence assertion (a filtered page finds the requested contract) comes
-// before the absence assertion (the same page contains none of the other
-// one) in every case: an absence check is only as strong as
-// the presence check that pins its denominator.
+// TestKVScanPageFiltersByContractDuringTheScan seeds two contracts at every path
+// and checks that the filter returns only the requested one, paging over
+// matching entries only. Each case checks presence before absence, since an
+// absence check is only as strong as the presence check next to it.
 func TestKVScanPageFiltersByContractDuringTheScan(t *testing.T) {
 	s := mustOpen(t)
 	if _, _, err := s.Append("definitions", []Record{
@@ -478,16 +469,15 @@ func TestKVScanPageFiltersByContractDuringTheScan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Unfiltered: 5 entries at this prefix — the denominator every filtered
-	// assertion below is checked against.
+	// Unfiltered: 5 entries at this prefix, the total the filtered cases are checked
+	// against.
 	all, allNext, err := s.KVScanPage("", "", 100, nil)
 	if err != nil || len(all) != 5 || allNext != "" {
 		t.Fatalf("unfiltered scan = %+v next=%q err=%v, want 5 entries", all, allNext, err)
 	}
 
-	// A page of max=2 MATCHING _Group entries: the two _MetadataType entries
-	// interleaved between them must be skipped in the scan, not counted
-	// against the page size.
+	// A page of 2 matching _Group entries: the _MetadataType entries between them
+	// are skipped in the scan, not counted against the page size.
 	groups, groupsNext, err := s.KVScanPage("", "", 2, []string{"_Group"})
 	if err != nil || len(groups) != 2 {
 		t.Fatalf("filtered page = %+v next=%q err=%v, want 2 matching _Group entries", groups, groupsNext, err)
@@ -508,9 +498,8 @@ func TestKVScanPageFiltersByContractDuringTheScan(t *testing.T) {
 		t.Fatalf("final _Group page path = %q, want g3", rest[0].Path)
 	}
 
-	// The complementary filter proves this is a real filter, not a page-size
-	// coincidence: _MetadataType alone returns the other 2 entries and none
-	// of the _Group ones.
+	// The opposite filter shows this is a real filter and not a page-size accident:
+	// _MetadataType alone returns the other 2 entries and no _Group.
 	metaTypes, metaNext, err := s.KVScanPage("", "", 100, []string{"_MetadataType"})
 	if err != nil || len(metaTypes) != 2 || metaNext != "" {
 		t.Fatalf("_MetadataType page = %+v next=%q err=%v, want 2 matching entries", metaTypes, metaNext, err)
@@ -528,9 +517,8 @@ func TestKVScanPageFiltersByContractDuringTheScan(t *testing.T) {
 	}
 }
 
-// Cursors()/HWMs() report exactly the persisted read-only state the metrics
-// collector derives gauges from, and tolerate malformed keys/values the same
-// way KVScan does (skip, never fail).
+// Cursors() and HWMs() report the persisted state the metrics collector reads,
+// skipping malformed keys and values as KVScan does.
 func TestCursorsAndHWMsScan(t *testing.T) {
 	s := mustOpen(t)
 	if got := s.Cursors(); len(got) != 0 {
@@ -616,9 +604,8 @@ func TestDiskMetricsGrowWithWrites(t *testing.T) {
 	}
 }
 
-// sumRecordBytes recomputes a stream's live logical bytes from the records
-// themselves (ScanRecords reports the exact per-record cost the b/ accounting
-// uses), so a drifted counter cannot hide behind its own bookkeeping.
+// sumRecordBytes recomputes a stream's live bytes from the records themselves,
+// so a drifted counter cannot hide behind its own bookkeeping.
 func sumRecordBytes(t *testing.T, s *Store, stream string) uint64 {
 	t.Helper()
 	var sum uint64
@@ -631,10 +618,9 @@ func sumRecordBytes(t *testing.T, s *Store, stream string) uint64 {
 	return sum
 }
 
-// Retention design §7.1: a Record with the Delete flag appends the tombstone to
-// the stream as history AND deletes the KV key — one atomic batch, byte
-// accounting intact, and the deletion durable across a reopen (which is what
-// makes the reseed correct with zero reseed changes).
+// A Record with Delete appends the tombstone to the stream and deletes the KV
+// key in one atomic batch, keeps the byte accounting intact, and the deletion
+// survives a reopen.
 func TestAppendTombstoneDeletesKVInBatch(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)
@@ -679,8 +665,8 @@ func TestAppendTombstoneDeletesKVInBatch(t *testing.T) {
 		t.Fatalf("StreamBytes = %d, want %d (sum of per-record costs incl. the tombstone)", got, want)
 	}
 
-	// Durability: the deletion is part of the synced batch, so a reopen shows
-	// the same picture — the KV key stays gone, nothing to reseed from.
+	// The deletion is part of the synced batch, so after a reopen the KV key is
+	// still gone.
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -700,11 +686,10 @@ func TestAppendTombstoneDeletesKVInBatch(t *testing.T) {
 	}
 }
 
-// Retention design §7.1: ApplyReplicated applies a replicated tombstone
-// identically — KV key deleted in the same batch as the appended record and the
-// HWM advance. A REPLAYED tombstone is dropped by the HWM dedupe, and a
-// tombstone for an already-absent key applies cleanly (batch delete is
-// idempotent), so replication can never wedge on a delete.
+// ApplyReplicated applies a replicated tombstone the same way: the KV key is
+// deleted in the batch that appends the record and advances the HWM. A replayed
+// tombstone is dropped by the HWM, and one for an absent key applies cleanly, so
+// replication never gets stuck on a delete.
 func TestApplyReplicatedTombstone(t *testing.T) {
 	s := mustOpen(t)
 	set := ReplRecord{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/edge1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "edge1/m1/a", KVNode: "m1"}
@@ -739,8 +724,8 @@ func TestApplyReplicatedTombstone(t *testing.T) {
 		t.Fatalf("replay resurrected the KV key: %+v", got)
 	}
 
-	// A tombstone for a path this node never had: delete of an absent key is a
-	// no-op inside the batch — the record still lands, the HWM still advances.
+	// A tombstone for a path this node never had: deleting an absent key is a
+	// no-op, so the record still lands and the HWM still advances.
 	ghost := ReplRecord{ChildOffset: 3, Topic: "colca/v1/_Metric/m1/edge1/m1/never", TS: 3, KVPath: "edge1/m1/never", KVNode: "m1", Delete: true}
 	applied, hwm, err = s.ApplyReplicated("n-edge1", "metrics", []ReplRecord{ghost})
 	if err != nil {
@@ -757,10 +742,9 @@ func TestApplyReplicatedTombstone(t *testing.T) {
 	}
 }
 
-// Design §3: `alarms` is a stream the store maintains offsets for. A stream
-// absent from the set has NextOffset 0, which is also how /fetch tells an
-// unknown stream from an empty one — so 0 here would make every alarm write
-// fail at the door rather than land.
+// alarms needs offsets in the store. A stream missing from the set has
+// NextOffset 0, which /fetch reads as an unknown stream, so every alarm write
+// would fail at the door.
 func TestAlarmsStreamExists(t *testing.T) {
 	s := mustOpen(t)
 	if got := s.NextOffset("alarms"); got != 1 {
@@ -769,8 +753,7 @@ func TestAlarmsStreamExists(t *testing.T) {
 	}
 }
 
-// Design §8 (dataops-evaluator). `annotations` is a stream the store
-// maintains offsets for, same precedent as `alarms` above.
+// annotations needs offsets in the store too.
 func TestAnnotationsStreamExists(t *testing.T) {
 	s := mustOpen(t)
 	if got := s.NextOffset("annotations"); got != 1 {
@@ -779,10 +762,9 @@ func TestAnnotationsStreamExists(t *testing.T) {
 	}
 }
 
-// Streams is the stream set every other package asks for rather than
-// restates. The copy matters: a caller that mutated the returned slice would
-// silently reshape what every derived check covers, and a check that covers
-// less is still green.
+// Streams is the one stream set other packages ask for. It returns a copy: a
+// caller mutating the slice would otherwise change what every derived check
+// covers.
 func TestStreamsIsTheSingleSourceAndCopies(t *testing.T) {
 	got := Streams()
 	if len(got) != len(streams) {
@@ -799,20 +781,18 @@ func TestStreamsIsTheSingleSourceAndCopies(t *testing.T) {
 	}
 }
 
-// CursorDelete is how a revoked identity's parent-side downlink cursors stop
-// accumulating forever (registry.Revoke calls it directly). It must remove
-// both halves CursorAck writes atomically — the position and its ct/
-// timestamp — and be a no-op on a cursor that was never there, which is what
-// makes a repeated revoke idempotent.
+// CursorDelete stops a revoked identity's downlink cursors from accumulating
+// (registry.Revoke calls it). It must remove the position and its ct/ timestamp
+// together and do nothing for a cursor that was never there, so a repeated
+// revoke is harmless.
 func TestCursorDeleteRemovesPositionAndTimestamp(t *testing.T) {
 	s := mustOpen(t)
 	recs := []Record{{Topic: "colca/v1/_Metric/m1/m1/t", Payload: []byte(`{"v":1}`), TS: 1}}
 	if _, _, err := s.Append("metrics", recs); err != nil {
 		t.Fatal(err)
 	}
-	// off=2: the offset AFTER the record consumed at offset 1. Acking to 1
-	// (the never-acked default itself) is a no-op by CursorAck's own
-	// monotonic guard — the cursor must actually move to exist as a key.
+	// off=2 is the offset after the record at 1. Acking to 1, the default, is a
+	// no-op, and the cursor must move to exist as a key.
 	if !s.CursorAck("c-gone", "metrics", 2) {
 		t.Fatal("seed ack did not move the cursor")
 	}
@@ -838,12 +818,10 @@ func TestCursorDeleteRemovesPositionAndTimestamp(t *testing.T) {
 	}
 }
 
-// CursorSetIfAbsent exists for the one thing CursorGet cannot express:
-// "absent" and "at 1" read identically through it, and the replication cursors
-// need them told apart. So the claims are that position 1 — the value
-// CursorAck refuses because it is the default — becomes a REAL key, that a
-// second call changes nothing, and that an existing cursor is never moved,
-// forwards or backwards.
+// CursorSetIfAbsent exists because CursorGet reads "absent" and "at 1" alike,
+// and replication cursors need them apart. So position 1, which CursorAck
+// refuses, becomes a real key, a second call changes nothing, and an existing
+// cursor never moves.
 func TestCursorSetIfAbsentRecordsThePositionOnlyOnce(t *testing.T) {
 	s := mustOpen(t)
 
@@ -866,8 +844,8 @@ func TestCursorSetIfAbsentRecordsThePositionOnlyOnce(t *testing.T) {
 		t.Fatal("a cursor set to 1 must be a real key — otherwise it still reads as never met")
 	}
 
-	// An existing cursor is not an error: created false, err nil — the one
-	// outcome a caller must be able to tell apart from a failed write.
+	// An existing cursor is not an error (created false, err nil), which a caller
+	// must tell apart from a failed write.
 	if created, err := s.CursorSetIfAbsent("c-new", "metrics", 9); created || err != nil {
 		t.Fatalf("the second call must report that the cursor already existed (created %v, err %v)", created, err)
 	}

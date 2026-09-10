@@ -19,10 +19,8 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
-// newLocalTestHandler builds a local-door Handler (local=true) with the
-// default blob-size ceiling — reachability from inside the deployment's own
-// network is the credential on this door, so requests need only name
-// themselves via X-Colca-Service, exactly as doLocal does below.
+// newLocalTestHandler builds a local-door Handler with the default blob cap.
+// Requests only need to name themselves with X-Colca-Service.
 func newLocalTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	return newLocalTestHandlerWithBlobCap(t, config.Limits{}.EffectiveMaxBlobBytes())
@@ -49,9 +47,8 @@ func newLocalTestHandlerWithBlobCap(t *testing.T, limit uint64) http.Handler {
 	return Handler(eng, cfg, reg, nil, m, blobs, "deadbeef", true, nil)
 }
 
-// doLocal performs a request against a local-door Handler's mux (no
-// listener), naming the caller "connector" via X-Colca-Service exactly as a
-// local service would — the local door has nothing else to authenticate.
+// doLocal performs a request against a local-door Handler as the local service
+// "connector".
 func doLocal(t *testing.T, h http.Handler, method, path string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	r, err := http.NewRequest(method, path, bytes.NewReader(body))

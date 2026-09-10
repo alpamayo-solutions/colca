@@ -1,6 +1,4 @@
-// Package bench hosts the benchmark-gate scenarios and the shared harness they
-// run against: an in-process, restartable hub←edge topology (Pair) built from
-// the same node.Start/config.Config primitives proven in tests/integration_test.go.
+// Package bench runs the benchmark scenarios against an in-process hub and edge.
 package bench
 
 import (
@@ -31,10 +29,9 @@ type benchIdentity struct {
 	cert tls.Certificate
 }
 
-// Pair is a running 2-level topology: hub ← mTLS ← edge, with `machines`
-// enrolled MQTT identities at the edge and a read-all observer at the hub. It
-// is the standard fixture for every scenario except footprint (which needs
-// the real binary).
+// Pair is a running two-level topology, hub and edge over mTLS, with enrolled
+// machines at the edge and a read-all observer at the hub. Every scenario except
+// footprint, which needs the real binary, uses it.
 type Pair struct {
 	Hub, Edge       *node.Node
 	HubCfg, EdgeCfg *config.Config
@@ -43,20 +40,16 @@ type Pair struct {
 	observerID      *benchIdentity
 }
 
-// elementIDFor is the ULID the bench authors for the element at path —
-// derived from the path so a run is reproducible. An entity id is a ULID by
-// contract (schema-bundle design §4.1) and the baked bundle
-// refuses anything else, so the readable "el-<path>" ids are gone: a leading
-// "0" plus 25 uppercase hex characters is a 26-character Crockford string
-// that fits 128 bits. Same derivation as the level-3/4 worlds and smoke.sh.
+// elementIDFor derives the element ULID for path, so runs are reproducible: a
+// "0" followed by 25 hex characters is a valid 26-character ULID. smoke.sh uses
+// the same derivation.
 func elementIDFor(path string) string {
 	sum := sha256.Sum256([]byte("element:" + path))
 	return "0" + strings.ToUpper(hex.EncodeToString(sum[:]))[:25]
 }
 
-// place authors a system element at path in n's own namespace and returns its
-// id. An identity binds to an element, not to a path (id-grants design §4), so
-// every placed enrollment needs this first.
+// place authors a system element at path in n's namespace and returns its id.
+// An identity binds to an element, so every enrollment needs one first.
 func place(n *node.Node, path string) (string, error) {
 	elementID := elementIDFor(path)
 	payload, err := json.Marshal(map[string]string{"id": elementID, "name": path})
@@ -89,12 +82,8 @@ func enroll(dir string, reg *registry.Manager, ulid, element string, grants ...s
 	return &benchIdentity{id: id, cert: cert}, nil
 }
 
-// StartPair builds and starts a hub and an edge, mTLS-linked with the edge
-// mounted at "edge1" on the hub, and returns them running. It enrolls
-// `machines` MQTT identities at the edge (m1..mN, each mounted at its own
-// ulid) plus a read-all observer at the hub, mounted at "observer" (a machine
-// must be placed; it reads everything through its read:# grant, not through
-// its own placement).
+// StartPair starts a hub and an edge mounted at "edge1", enrolls machines m1 to
+// mN at the edge and a read-all observer at the hub, and returns them running.
 func StartPair(dir string, machines int) (*Pair, error) {
 	hubKey := filepath.Join(dir, "hub.key")
 	edgeKey := filepath.Join(dir, "edge.key")
@@ -117,8 +106,7 @@ func StartPair(dir string, machines int) (*Pair, error) {
 	if err != nil {
 		return nil, fmt.Errorf("start hub: %w", err)
 	}
-	// Pin the resolved repl address so StartHub after StopHub rebinds the SAME
-	// port — the edge's parent URL stays valid across the restart.
+	// Keep the resolved repl address so a restarted hub binds the same port.
 	hubCfg.Repl.Addr = hub.ReplAddr
 
 	p := &Pair{Hub: hub, HubCfg: hubCfg, Machines: machines, machineIDs: map[string]*benchIdentity{}}
@@ -169,8 +157,8 @@ func StartPair(dir string, machines int) (*Pair, error) {
 			hub.Stop()
 			return nil, err
 		}
-		// A machine gets no implicit write (auth §5) — an explicit write:
-		// grant over its own zone is what lets it publish at all.
+		// Machines get no implicit write; an explicit grant over their own zone lets
+		// them publish.
 		mid, err := enroll(dir, edge.Registry, ulid, machineElement, "write:"+machineElement+"/#")
 		if err != nil {
 			edge.Stop()

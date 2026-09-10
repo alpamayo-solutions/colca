@@ -15,9 +15,7 @@ import (
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-// fakeBeaconMessage is a minimal pahomqtt.Message for driving handleBeacon
-// directly in tests — the paho Message interface is small enough that a real
-// broker round trip is unnecessary to pin the Duplicate() handling.
+// fakeBeaconMessage is a minimal pahomqtt.Message for driving handleBeacon.
 type fakeBeaconMessage struct {
 	nowMS     int64
 	duplicate bool
@@ -40,10 +38,7 @@ var _ pahomqtt.Message = fakeBeaconMessage{}
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-// fakeClock is a manually-advanced wall clock (no real time.Sleep anywhere in
-// this file — poll with deadlines, prefer fake clocks):
-// every decision below is driven by explicit Advance calls, not wall-clock
-// waits.
+// fakeClock is a manually advanced clock, so decisions need no real waiting.
 type fakeClock struct {
 	mu  sync.Mutex
 	now time.Time
@@ -65,8 +60,7 @@ func (f *fakeClock) Advance(d time.Duration) {
 
 var epoch = time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 
-// Design §2.3 rule 3: a command with no usable expires_at always executes,
-// regardless of the clock.
+// A command without a usable expires_at always executes.
 func TestResultNoUsableExpiryAlwaysExecutes(t *testing.T) {
 	cases := []map[string]any{
 		{},
@@ -95,10 +89,8 @@ func TestResultExpiryBoundary(t *testing.T) {
 	}
 }
 
-// Design §2.3 rule 2: immediately after Connect, with a nonzero hold, an
-// expiry decision must be held — never allowed to proceed — until a beacon
-// arrives. This is the pure decide() state machine: no goroutines, no real
-// time, fully deterministic.
+// After Connect with a non-zero hold, an expiry decision waits until a beacon
+// arrives.
 func TestHoldReleasesOnBeacon(t *testing.T) {
 	fc := newFakeClock(epoch)
 	ts := newTimeSync(fc.Now, 10000) // 10s hold
@@ -123,9 +115,8 @@ func TestHoldReleasesOnBeacon(t *testing.T) {
 	}
 }
 
-// Design §2.3 rule 2: on deadline with no beacon, the decision proceeds
-// (fail open) on the last-known offset (0 here, since none was ever
-// learned) and reports deadlineHit so the caller logs the warning.
+// When the hold ends without a beacon, the decision proceeds on the last known
+// offset and reports deadlineHit so the caller logs a warning.
 func TestHoldDeadlineProceedsWithWarning(t *testing.T) {
 	fc := newFakeClock(epoch)
 	ts := newTimeSync(fc.Now, 10000)
@@ -149,10 +140,7 @@ func TestHoldDeadlineProceedsWithWarning(t *testing.T) {
 	}
 }
 
-// hold_ms == 0 is the operator's explicit "no hold" (mirrors
-// config.TimeSync.EffectiveHoldMS's own contract): Connect must not open a
-// hold at all, so a decision proceeds immediately even with no beacon ever
-// received.
+// hold_ms 0 means no hold: a decision proceeds immediately without a beacon.
 func TestZeroHoldMeansNoHold(t *testing.T) {
 	fc := newFakeClock(epoch)
 	ts := newTimeSync(fc.Now, 0)
@@ -163,12 +151,9 @@ func TestZeroHoldMeansNoHold(t *testing.T) {
 	}
 }
 
-// Design §2.3 rule 1 + §2.1: offset = beacon.now_ms - wall_receipt, and
-// synced_now = wall_now + offset corrects a machine's skewed wall clock back
-// to the authority's time — proven in BOTH directions (design §5's two
-// skewed-machine chaos cases), with an inline mutation check: deciding on the
-// RAW (uncorrected) skewed clock must give the WRONG answer for each case,
-// or this test would not actually be pinning synced_now as load-bearing.
+// The learned offset corrects a skewed machine clock in both directions.
+// Deciding on the raw skewed clock must give the wrong answer in each case, or
+// the test would not show the correction matters.
 func TestSkewedClockCorrectsBothDirections(t *testing.T) {
 	const fiveMinMS = 5 * 60 * 1000
 	tests := []struct {
@@ -195,8 +180,7 @@ func TestSkewedClockCorrectsBothDirections(t *testing.T) {
 			skewedNow := func() time.Time { return epoch.Add(time.Duration(tc.skewMS) * time.Millisecond) }
 			ts := newTimeSync(skewedNow, 0) // no hold: isolate the offset-correction math
 			ts.Connect()
-			// The beacon reports the AUTHORITATIVE (unskewed) now — exactly
-			// what the node's real beacon does (engine.AuthoritativeNow).
+			// The beacon reports the unskewed time, as the node's beacon does.
 			ts.Beacon(epoch.UnixMilli())
 
 			ready, syncedNow, _ := decide(ts.Snapshot(), skewedNow())
@@ -215,11 +199,7 @@ func TestSkewedClockCorrectsBothDirections(t *testing.T) {
 				t.Fatalf("deciding on synced_now: code = %d (%s), want %d", code, msg, tc.wantCode)
 			}
 
-			// Mutation check: deciding on the RAW skewed wall clock (as if
-			// result() were wired to time.Now() directly, ignoring the
-			// learned offset) must give the OPPOSITE, wrong answer here —
-			// otherwise this test would not catch a regression back to a
-			// bare wall-clock read.
+			// Deciding on the raw skewed clock must give the other answer.
 			rawCode, _ := result(cmd, skewedNow().UnixMilli())
 			if rawCode == tc.wantCode {
 				t.Fatalf("mutation check failed: deciding on the raw skewed wall clock also produced %d — "+
@@ -229,13 +209,8 @@ func TestSkewedClockCorrectsBothDirections(t *testing.T) {
 	}
 }
 
-// Await is the blocking production wrapper around decide(): a beacon
-// arriving mid-wait must release it immediately, without waiting anywhere
-// near the (long) configured hold deadline. Real goroutine, real (but
-// generous) timeout in the test's own select — a legitimate poll-with-
-// deadline, not a synchronization sleep: Beacon is called with no sleep in
-// between, and correctness does not depend on scheduling order (see the
-// Await/Connect/Beacon doc comments).
+// A beacon arriving while Await waits releases it right away, well before the
+// hold's deadline.
 func TestAwaitReleasesOnBeaconWithoutWaitingForDeadline(t *testing.T) {
 	ts := newTimeSync(time.Now, 5000) // 5s hold — must NOT be what we wait out
 	ts.Connect()
@@ -266,9 +241,7 @@ func TestAwaitReleasesOnBeaconWithoutWaitingForDeadline(t *testing.T) {
 	}
 }
 
-// Await's deadline path: with NO beacon at all, it must still return
-// (fail open) once the (short) configured hold elapses, with
-// deadlineHit=true.
+// Without a beacon, Await returns once the hold elapses, with deadlineHit set.
 func TestAwaitDeadlineFailsOpen(t *testing.T) {
 	ts := newTimeSync(time.Now, 100) // 100ms hold — short but real wall-clock time
 	ts.Connect()
@@ -310,12 +283,8 @@ func TestAwaitReturnsOnContextCancel(t *testing.T) {
 	}
 }
 
-// newSimClock's offset is constant for the process lifetime: two readings
-// taken apart in real time must differ by (approximately) that real elapsed
-// time, not by the elapsed time plus/minus the skew — pinning the doc
-// comment's claim that a constant additive skew cancels out of a subtraction
-// between two readings of the SAME clock (load-bearing for Await's
-// deadline.Sub(wallNow) timer-duration math).
+// Two readings of the skewed clock differ by the real elapsed time: the
+// constant skew cancels out, which Await's timer relies on.
 func TestSimClockConstantSkewCancelsInSubtraction(t *testing.T) {
 	clk := newSimClock(10 * 60 * 1000) // +10 minutes
 	a := clk()
@@ -330,18 +299,9 @@ func TestSimClockConstantSkewCancelsInSubtraction(t *testing.T) {
 	}
 }
 
-// A broker-flagged duplicate/resent beacon — the
-// exact shape of a stale beacon a persistent MQTT session could otherwise
-// redeliver after an outage spanning >= 1 beacon_interval — must be dropped
-// outright by handleBeacon: it must not release the post-connect hold, and
-// it must not corrupt the offset. This pins the traced scenario
-// through mochi-mqtt/paho: on reconnect, ts.Connect() opens a fresh hold,
-// then a stale (Duplicate()==true) beacon carrying an OLD now_ms could
-// otherwise satisfy wasHolding and compute
-// offsetMS = old_now_ms - current_wall_receipt, understating authoritative
-// time by roughly the outage length — the "clock behind -> expired commands
-// execute" failure design §1.1 exists to prevent. A genuine (non-duplicate)
-// beacon that arrives afterwards must still work normally.
+// A beacon flagged as a duplicate is a resend carrying an old now_ms.
+// handleBeacon drops it, so it neither ends the hold nor skews the offset; a
+// genuine beacon afterwards still works.
 func TestHandleBeaconIgnoresDuplicateFlaggedMessage(t *testing.T) {
 	fc := newFakeClock(epoch)
 	ts := newTimeSync(fc.Now, 10000) // 10s hold
@@ -371,22 +331,13 @@ func TestHandleBeaconIgnoresDuplicateFlaggedMessage(t *testing.T) {
 	}
 }
 
-// Same scenario as above, but proving the concrete failure mode end to end
-// through result() — the mutation-evidence companion to
-// TestHandleBeaconIgnoresDuplicateFlaggedMessage. Per design §1.1, the
-// dangerous direction is a clock reading BEHIND true time: "genuinely
-// expired commands execute." A stale beacon's negative offset makes
-// synced_now UNDERSTATE true time, so a command that is ALREADY EXPIRED
-// relative to the real reconnect instant can look not-yet-expired relative
-// to the corrupted synced_now — a false 200 on a command that should 498.
+// What the duplicate guard prevents, shown through result(): a stale beacon
+// makes the synced time lag behind, so an already expired command would be
+// acked 200 instead of 498.
 func TestStaleDuplicateBeaconWouldCorruptExpiryWithoutTheGuard(t *testing.T) {
-	// The reconnect happens at `epoch`. The command expired 1 minute BEFORE
-	// that, in real/authoritative time — a genuinely stale command that must
-	// 498 no matter what.
+	// The command expired one minute before the reconnect.
 	cmd := map[string]any{"expires_at": float64(epoch.Add(-1 * time.Minute).UnixMilli())}
-	// The stale, redelivered beacon reports authoritative time from 10
-	// minutes before the outage even started — an old now_ms a persistent
-	// session could requeue and redeliver on reconnect.
+	// The stale beacon's now_ms is from ten minutes earlier.
 	staleNowMS := epoch.Add(-10 * time.Minute).UnixMilli()
 
 	t.Run("guarded: the stale duplicate is ignored, decision stays correct", func(t *testing.T) {
@@ -412,8 +363,7 @@ func TestStaleDuplicateBeaconWouldCorruptExpiryWithoutTheGuard(t *testing.T) {
 	})
 
 	t.Run("mutation check: skipping the Duplicate() guard reproduces the false-200 bug", func(t *testing.T) {
-		// Simulates main.go with handleBeacon's `if msg.Duplicate() { return }`
-		// removed: the stale sample is fed straight into ts.Beacon.
+		// Without the Duplicate() check, the stale sample goes straight into Beacon.
 		fc := newFakeClock(epoch)
 		ts := newTimeSync(fc.Now, 10000)
 		ts.Connect()
@@ -431,11 +381,7 @@ func TestStaleDuplicateBeaconWouldCorruptExpiryWithoutTheGuard(t *testing.T) {
 	})
 }
 
-// fakeToken is a minimal pahomqtt.Token for driving publishSeqSerialized and
-// waitForConfirm without a real broker: complete() closes done, which is
-// what both WaitTimeout and Done rely on. err is always nil here — these
-// tests are about inflight-count ordering, not error handling (already
-// covered by confirm's existing use in handleCommand's ack path).
+// fakeToken is a minimal pahomqtt.Token whose completion the test controls.
 type fakeToken struct{ done chan struct{} }
 
 func newFakeToken() *fakeToken { return &fakeToken{done: make(chan struct{})} }
@@ -455,18 +401,10 @@ func (t *fakeToken) complete()             { close(t.done) }
 
 var _ pahomqtt.Token = (*fakeToken)(nil)
 
-// TestSeqPublishesAreSerialized pins the machine-hop ordering contract
-// (design §2.6 [delta]): the ticker loop must never start a seq's Publish()
-// call while an earlier seq's token is still unconfirmed. This is the whole
-// mechanism that makes paho's resume() replay on reconnect (a randomly-
-// iterated Go map, client.go's MemoryStore.All()) harmless — with ≤1 entry
-// ever outstanding, there is nothing "newer" it could displace an older seq
-// behind.
-//
-// Both subtests drive the SAME production publish signature
-// (func(topic string, qos byte, retained bool, payload interface{}) Token)
-// through a fake token that only completes when the test says so, so the
-// only variable between them is which loop body issues the calls.
+// TestSeqPublishesAreSerialized checks that the publish loop never starts a seq
+// while an earlier one is unconfirmed, which keeps paho's replay after a
+// reconnect from reordering metrics. Both subtests use the real publish
+// signature with tokens the test completes.
 func TestSeqPublishesAreSerialized(t *testing.T) {
 	const n = 3
 
@@ -514,11 +452,8 @@ func TestSeqPublishesAreSerialized(t *testing.T) {
 		}
 	})
 
-	// Mutation evidence: reproduces the PRE-FIX main.go loop body
-	// (`go confirm(log, client.Publish(...), ...)`, never waited on by the
-	// loop itself) and shows it lets all n seqs pile up inflight
-	// simultaneously — the exact condition that lets paho's resume() replay
-	// an old seq after a newer one.
+	// Fire-and-forget publishing lets every seq be in flight at once, which is what
+	// allows paho's replay to reorder them.
 	t.Run("mutation check: fire-and-forget (pre-fix pattern) allows >1 inflight", func(t *testing.T) {
 		var callCount int32
 		var mu sync.Mutex
@@ -552,10 +487,7 @@ func TestSeqPublishesAreSerialized(t *testing.T) {
 		if got := atomic.LoadInt32(&callCount); got != n {
 			t.Fatalf("expected all %d seqs published without blocking, got %d calls", n, got)
 		}
-		// The loop already finished (done closed) and NONE of the tokens have
-		// been completed yet: all n were simultaneously inflight at that
-		// instant. A correctly-serialized loop could not have reached "done"
-		// without completing each token one at a time first.
+		// The loop finished with no token completed, so all n were in flight at once.
 		mu.Lock()
 		pending := len(tokens)
 		mu.Unlock()

@@ -21,10 +21,8 @@ import (
 // b64Payload encodes a payload the way a wire record carries it.
 func b64Payload(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
-// stubParent is a parent whose /downlink answers the test writes itself. It
-// exists to pin what the CHILD does with an answer, independent of any parent
-// implementation: the client must be well behaved against a parent that is
-// buggy, older, or simply has nothing to give it.
+// stubParent is a parent whose /downlink answers are written by the test, to pin
+// what the child does with an answer from a buggy, older or empty parent.
 type stubParent struct {
 	polls  atomic.Int64
 	answer func(poll int64) string
@@ -56,15 +54,10 @@ func newStubParent(t *testing.T, id *identity.Identity, answer func(poll int64) 
 	return sp
 }
 
-// A poll that answers instantly and leaves this node exactly where it was is
-// not repeated immediately.
-//
-// Both cursors staying put is the condition, whatever caused it: a parent
-// answering with a position the child already holds, or a record the child
-// could not apply. Without the wait, the loop re-polls at once and the pair
-// spins at the replication rate limit (~100 req/s per child) for as long as
-// the condition lasts — the state a compacted definitions tail used to leave
-// every freshly enrolled child in, indefinitely.
+// A poll that answers at once and leaves this node where it was is not repeated
+// immediately. Whatever the cause, a position the child already holds or a
+// record it could not apply, re-polling at once would spin at the rate limit
+// (about 100 requests per second per child) for as long as the condition lasts.
 func TestADownlinkPollWithNoProgressIsNotRepeatedImmediately(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -97,17 +90,10 @@ func TestADownlinkPollWithNoProgressIsNotRepeatedImmediately(t *testing.T) {
 	}
 }
 
-// A command that fails to PERSIST holds the cursor: it is offered again on
-// the next poll rather than acked past.
-//
-// The cursor used to advance whatever happened, so a record that could not be
-// written — a full disk, an I/O error, or (as here) a parent whose
-// max_record_bytes is larger than this node's — was dropped at the last hop
-// with one log line and no ack. The issuer sees "target slow" forever.
-// Definitions on the same response always had the opposite, correct handling.
-//
-// Retrying is only safe because the loop backs off when nothing advanced
-// (pinned above); together they retry the record without spinning.
+// A command that fails to persist holds the cursor and is offered again on the
+// next poll instead of being acked past. Here the parent's max_record_bytes is
+// larger than this node's. Retrying is only safe because the loop backs off when
+// nothing advanced, as pinned above.
 func TestADownlinkCommandThatCannotBePersistedHoldsTheCursor(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -142,9 +128,8 @@ func TestADownlinkCommandThatCannotBePersistedHoldsTheCursor(t *testing.T) {
 	if pos := cs.CursorGet(uns.DownlinkCursor(cl.ParentPub()), downlinkStream); pos > 1 {
 		t.Fatalf("commands cursor = %d, want it held at 1 — the parent will never offer the unwritten command again", pos)
 	}
-	// The denominator: nothing landed, and in particular the record BEHIND
-	// the failing one did not overtake it. A command stream that skipped
-	// ahead would execute out of order.
+	// Nothing landed, and the record behind the failing one did not overtake it: a
+	// commands stream that skipped ahead would run commands out of order.
 	recs, _, err := cs.Read("commands", 1, 10, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -152,8 +137,8 @@ func TestADownlinkCommandThatCannotBePersistedHoldsTheCursor(t *testing.T) {
 	if len(recs) != 0 {
 		t.Fatalf("child commands = %+v, want none: the first record could not be written", recs)
 	}
-	// And the same child DOES persist a command that fits, so the assertion
-	// above measures the size failure and not a broken downlink.
+	// The same child does persist a command that fits, so the assertion above
+	// measures the size failure and not a broken downlink.
 	if _, err := ceng.IngestDownlink("colca/v1/_CmdParam/n-child/m1/stop", []byte(small), 20); err != nil {
 		t.Fatalf("a command within the limit was refused too: %v", err)
 	}
@@ -162,13 +147,9 @@ func TestADownlinkCommandThatCannotBePersistedHoldsTheCursor(t *testing.T) {
 	}
 }
 
-// The definitions half of the same rule: a definition that fails to PERSIST
-// holds its cursor, so it is offered again.
-//
-// Skipping a definition this node's contracts refuse (pinned in
-// definitions_test.go) must not become skipping every definition that fails
-// for any reason: a definition has no read side to recover it from later, so
-// one lost to a transient write error is lost for good.
+// A definition that fails to persist holds its cursor too. Only definitions this
+// node refuses are skipped: a definition lost to a transient write error could
+// never be recovered.
 func TestADownlinkDefinitionThatCannotBePersistedHoldsTheCursor(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))

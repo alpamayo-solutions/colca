@@ -115,12 +115,8 @@ func TestATreeFailureWritesNothingAtAll(t *testing.T) {
 }
 
 func TestAShortTreeReadRetiresNoResourceAndWritesNothing(t *testing.T) {
-	// The defect this pins, seen live on a hub: the door pages /kv, the first
-	// page came back healthy, and everything sorting after it read as retired.
-	// Its Keycloak resource was deleted — and with it every permission on that
-	// subtree, which Keycloak does not restore when the resource is registered
-	// again. A listing that stopped short must be a failed read, not a smaller
-	// tree: no resource retired, no definition written, the cycle skipped.
+	// The door pages /kv. If a later page fails, nothing may be retired and no
+	// definition written: the cycle is skipped.
 	elements := elementsAt("a", "b", "c")
 	deleted := &deletions{}
 	kc := fakeRealm(t, realmFixture{
@@ -139,9 +135,8 @@ func TestAShortTreeReadRetiresNoResourceAndWritesNothing(t *testing.T) {
 		Deleted: deleted,
 	})
 
-	// The denominator first: read whole, the one element that is genuinely
-	// gone IS retired and the group IS defined. Without this, the assertions
-	// below would pass against a recorder that records nothing.
+	// First the whole read: the element that is really gone is retired and the group
+	// defined, so the assertions below are not vacuous.
 	whole := servePaged(t, elements, 2, 0)
 	if _, err := syncer(whole.client, kc).Once(context.Background()); err != nil {
 		t.Fatalf("complete read: %v", err)

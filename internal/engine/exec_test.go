@@ -145,8 +145,8 @@ func TestEditCommandCommitsStateAndDurableReplayReceiptTogether(t *testing.T) {
 	}
 	entitiesNext := e.Store().NextOffset("entities")
 
-	// Replace the executor to prove replay comes from retained COLCA state,
-	// not an in-process map.
+	// Replace the executor to show replay comes from retained state, not an
+	// in-process map.
 	e.SetExecutor(uns.NewEditExec(e.EntityStore(), nil))
 	replayed, err := e.IngestHuman(humanEntry(t, "cmd:#:configure"), "colca/v1/_CmdEdit/n-edge1/apply", payload)
 	if err != nil {
@@ -161,8 +161,8 @@ func TestEditCommandCommitsStateAndDurableReplayReceiptTogether(t *testing.T) {
 	}
 }
 
-// A command for a machine passes through the node untouched: no execution, and
-// crucially no ack — an ack here would answer on the machine's behalf.
+// A command for a machine passes through untouched: no execution and no ack,
+// which would answer on the machine's behalf.
 func TestUnclaimedContractsAreLeftAlone(t *testing.T) {
 	rec := &recordingExec{contract: "_CmdConfigure"}
 	e := execEngine(t, Executors(rec))
@@ -218,7 +218,7 @@ func TestExpiryIsCheckedBeforeExecution(t *testing.T) {
 }
 
 // A command addressed to another node is stored and forwarded, never executed
-// here — that holds for every contract, not just the ones core used to know.
+// here, for every contract.
 func TestForeignTargetsNeverExecute(t *testing.T) {
 	rec := &recordingExec{contract: "_CmdConfigure"}
 	e := execEngine(t, Executors(rec))
@@ -231,15 +231,9 @@ func TestForeignTargetsNeverExecute(t *testing.T) {
 	}
 }
 
-// A command an ancestor addresses to a DESCENDANT is accepted and persisted,
-// and answers with no execution outcome at all — that absence IS how "queued"
-// is carried (resources design §9.1: the command rides the commands downlink
-// and the target executes it). A client reads exactly this absence as
-// "queued".
-//
-// The node must also stay silent: acking here would tell the operator a
-// command succeeded that has not run yet, and would put a second ack on the
-// wire beside the target's own.
+// A command addressed to a descendant is accepted and persisted with no outcome,
+// which is how a client learns it is queued. The node must not ack it either:
+// that would report success before the target ran it.
 func TestACommandForAnotherNodeIsAcceptedWithNoOutcomeAndNoAck(t *testing.T) {
 	rec := &recordingExec{contract: "_CmdConfigure"}
 	e := execEngine(t, Executors(rec))
@@ -262,9 +256,8 @@ func TestACommandForAnotherNodeIsAcceptedWithNoOutcomeAndNoAck(t *testing.T) {
 		t.Fatalf("nothing may ack a command it did not execute; found %v", acks)
 	}
 
-	// Denominator: the same verb, addressed to THIS node, DOES answer with an
-	// outcome and DOES ack. Without it, every assertion above would pass just
-	// as well against an engine that had stopped executing commands entirely.
+	// Denominator: the same verb addressed to this node does return an outcome and
+	// ack.
 	applied, err := e.IngestAdmin("colca/v1/_CmdConfigure/n-edge1/resource/upsert", cmdPayload("c-applied"))
 	if err != nil {
 		t.Fatal(err)
@@ -280,9 +273,8 @@ func TestACommandForAnotherNodeIsAcceptedWithNoOutcomeAndNoAck(t *testing.T) {
 	}
 }
 
-// acksOnCommands lists the correlation_ids of every _Ack on the commands
-// stream, whatever frame it was written in — a scan wide enough to catch an
-// ack this node should never have authored.
+// acksOnCommands lists the correlation ids of every _Ack on the commands stream,
+// in any frame.
 func acksOnCommands(t *testing.T, e *Engine) []string {
 	t.Helper()
 	recs, _, err := e.Store().Read("commands", 1, 100, nil)

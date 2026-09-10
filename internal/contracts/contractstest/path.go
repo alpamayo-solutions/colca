@@ -1,8 +1,6 @@
-// Package contractstest locates the generator's REAL bundle for the tests
-// that must judge the schemas the doors actually run — not a fixture
-// mirroring them. It is the one lookup both `internal/contracts` (digest
-// parity) and `internal/engine` (door refusal) use, so the two cannot drift
-// onto different files.
+// Package contractstest finds the real generated bundle for tests that must
+// check the schemas the doors run. internal/contracts and internal/engine both
+// use it, so they read the same file.
 package contractstest
 
 import (

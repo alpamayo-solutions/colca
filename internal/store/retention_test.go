@@ -38,10 +38,9 @@ func appendMetrics(t *testing.T, s *Store, n int, tsBase int64) {
 	}
 }
 
-// Prune removes exactly the contiguous prefix [LWM..upTo) and nothing else:
-// records at/after upTo keep their offsets and payloads, KV projections
-// (including ones whose producing record is pruned), cursors and HWMs are
-// untouched, and NextOffset is unaffected (gapless contract).
+// Prune removes exactly the prefix [LWM..upTo): later records keep their offsets
+// and payloads, KV projections (even those whose record was pruned), cursors and
+// HWMs are untouched, and NextOffset does not change.
 func TestPruneDeletesExactlyThePrefix(t *testing.T) {
 	s := mustOpen(t)
 	recs := []Record{
@@ -63,10 +62,9 @@ func TestPruneDeletesExactlyThePrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// "hub" sits at 2, inside the doomed range: the in-batch cursor recheck
-	// (spec §5.2 [delta]) would clamp the prune there, so this test — whose
-	// subject is the prefix-deletion mechanics, not the floor — explicitly
-	// overrides it.
+	// "hub" sits at 2, inside the doomed range, where the in-batch cursor recheck
+	// would clamp the prune. This test is about the prefix deletion, so it overrides
+	// the cursor.
 	pruned, err := s.Prune("metrics", 4, []string{"hub"}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +75,7 @@ func TestPruneDeletesExactlyThePrefix(t *testing.T) {
 	if got := s.LWM("metrics"); got != 4 {
 		t.Fatalf("LWM = %d, want 4", got)
 	}
-	// NextOffset unaffected — offsets stay gapless across a prune.
+	// NextOffset is unaffected; offsets stay gapless across a prune.
 	if got := s.NextOffset("metrics"); got != 6 {
 		t.Fatalf("NextOffset = %d, want 6", got)
 	}
@@ -99,9 +97,8 @@ func TestPruneDeletesExactlyThePrefix(t *testing.T) {
 		t.Fatalf("read from inside pruned range: %+v err=%v", got, err)
 	}
 
-	// KV projection untouched — including m1/a, whose producing record
-	// (offset 1) is pruned: the entry is current state, its Offset field is
-	// provenance and may point below the LWM.
+	// The KV projection is untouched, including m1/a whose record (offset 1) was
+	// pruned: the entry is current state, and its Offset may point below the LWM.
 	kv := map[string]KVEntry{}
 	for _, e := range mustKVScan(t, s, "") {
 		kv[e.Path] = e
@@ -205,8 +202,8 @@ func TestRetentionStateSurvivesRestart(t *testing.T) {
 	}
 }
 
-// A corrupt l/ or b/ value must fail Open loudly — a corrupt LWM silently
-// read as 1 would resurrect the pruned range as a phantom gap (spec §4.2).
+// A corrupt l/ or b/ value must fail Open: a corrupt LWM read as 1 would bring
+// the pruned range back as a phantom gap.
 func TestCorruptRetentionCountersFailOpen(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -234,9 +231,9 @@ func TestCorruptRetentionCountersFailOpen(t *testing.T) {
 	}
 }
 
-// b/{stream} tracks exactly len(stream key)+len(encoded value) per live
-// record across Append, ApplyReplicated and Prune. KV projection keys are
-// current state, not stream history, and are not counted.
+// b/{stream} counts exactly len(key) + len(value) per live record across
+// Append, ApplyReplicated and Prune. KV projection keys are current state and
+// not counted.
 func TestStreamBytesAccounting(t *testing.T) {
 	s := mustOpen(t)
 	if got := s.StreamBytes("metrics"); got != 0 {
@@ -291,9 +288,8 @@ func TestStreamBytesAccounting(t *testing.T) {
 	}
 }
 
-// gapRecords ride in the prune batch as ordinary records with KV semantics:
-// appended at the head (they survive their own prune run), counted in b/,
-// meta advanced and persisted.
+// Gap records go into the prune batch as ordinary records: appended at the head
+// so they survive their own prune, counted in b/, with meta advanced.
 func TestPruneAppendsGapRecords(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)
@@ -316,8 +312,8 @@ func TestPruneAppendsGapRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The plan callback receives the effective span — the same values the
-	// journal entry records (single source of truth for marker spans).
+	// The plan callback receives the effective span, the same values the journal
+	// entry records.
 	if gotSpan.From != 1 || gotSpan.To != 3 || gotSpan.FirstTS != 100 || gotSpan.LastTS != 102 {
 		t.Fatalf("plan span = %+v, want [1..3] ts [100..102]", gotSpan)
 	}
@@ -363,9 +359,8 @@ func TestPruneAppendsGapRecords(t *testing.T) {
 	}
 }
 
-// The journal is bounded at journalCap entries by coalescing the two oldest
-// (union range, min/max ts); coverage of [1..LWM) stays a contiguous,
-// complete partition.
+// The journal stays within journalCap entries by merging the two oldest, and
+// still partitions [1..LWM) without holes.
 func TestPruneJournalCoalescesAtCap(t *testing.T) {
 	s := mustOpen(t)
 	const runs = journalCap + 6
@@ -379,9 +374,8 @@ func TestPruneJournalCoalescesAtCap(t *testing.T) {
 	if len(j) != journalCap {
 		t.Fatalf("journal length = %d, want %d", len(j), journalCap)
 	}
-	// Head absorbed the 6 overflow runs: [1..7] with the union time span,
-	// marked Coalesced (merging an already-coalesced head stays true) so the
-	// API layer can report the gap's first_ts as approximate.
+	// The head absorbed the 6 overflow runs: [1..7] with the union time span, marked
+	// Coalesced so the API reports the gap's first_ts as approximate.
 	head := PruneSpan{From: 1, To: 7, FirstTS: 100, LastTS: 106, Coalesced: true}
 	if j[0] != head {
 		t.Fatalf("coalesced head = %+v, want %+v", j[0], head)
@@ -403,11 +397,9 @@ func TestPruneJournalCoalescesAtCap(t *testing.T) {
 	}
 }
 
-// Prune interleaved with concurrent Append leaves a fully consistent store
-// (run under -race): the surviving records are exactly [LWM..NextOffset),
-// gapless, and b/ equals the recomputed cost of exactly those records. This
-// pins the one-synced-batch discipline structurally — a torn prune (delete
-// without counter/LWM update or vice versa) breaks one of these equalities.
+// Prune interleaved with concurrent Append (run under -race) leaves a consistent
+// store: the surviving records are exactly [LWM..NextOffset) with no holes, and
+// b/ equals their recomputed cost. A torn prune breaks one of these.
 func TestPruneConcurrentWithAppendStaysConsistent(t *testing.T) {
 	s := mustOpen(t)
 	const total = 400
@@ -473,9 +465,9 @@ drained:
 	}
 }
 
-// Spec §2/§5.2: every CursorAck writes the ct/ last-advance timestamp in the
-// same synced write as the cursor, and both survive restart — the staleness
-// clock must not rewind when the process restarts.
+// Every CursorAck writes the ct/ last-advance timestamp in the same synced write
+// as the cursor, and both survive a restart, so the staleness clock does not
+// rewind.
 func TestCursorLastAdvanceStampedAndSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)
@@ -491,17 +483,16 @@ func TestCursorLastAdvanceStampedAndSurvivesRestart(t *testing.T) {
 
 	cs := s.Cursors()
 	if len(cs) != 1 || cs[0].Name != "uplink" || cs[0].Stream != "metrics" {
-		// Exactly one clean cursor also pins the scan bounds: ct/ keys share
-		// the first byte with c/ keys and must never surface as a bogus
-		// cursor with an empty name.
+		// Exactly one cursor also checks the scan bounds: ct/ keys share their first
+		// byte with c/ keys and must not show up as a cursor with an empty name.
 		t.Fatalf("Cursors() = %+v, want exactly [uplink/metrics]", cs)
 	}
 	stamped := cs[0].LastAdvanceMS
 	if stamped < before || stamped > after {
 		t.Fatalf("LastAdvanceMS = %d, want within [%d..%d]", stamped, before, after)
 	}
-	// A non-advancing ack (same offset) must NOT refresh the timestamp: the
-	// clock tracks advances, not polls.
+	// An ack that does not advance must not refresh the timestamp: the clock tracks
+	// advances, not polls.
 	if s.CursorAck("uplink", "metrics", 4) {
 		t.Fatal("non-advancing ack must report false")
 	}
@@ -520,14 +511,12 @@ func TestCursorLastAdvanceStampedAndSurvivesRestart(t *testing.T) {
 	}
 }
 
-// Spec §5.2 upgrade case: a cursor key that predates the ct/ timestamps reads
-// LastAdvanceMS 0, and CursorMarkSeen stamps it exactly once (first sighting
-// counts as an advance; later sightings must not keep resetting the clock).
+// A cursor from before ct/ timestamps reads LastAdvanceMS 0, and CursorMarkSeen
+// stamps it exactly once; later sightings must not reset the clock.
 func TestCursorMarkSeenStampsLegacyCursorOnce(t *testing.T) {
 	s := mustOpen(t)
 	appendMetrics(t, s, 5, 100)
-	// A pre-ct cursor: the raw c/ key without its ct/ companion — exactly
-	// what a store written by an older build contains.
+	// A cursor without a ct/ key, as an older build wrote it.
 	if err := s.db.Set(cursorKey("legacy", "metrics"), be64(3), pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
@@ -540,12 +529,12 @@ func TestCursorMarkSeenStampsLegacyCursorOnce(t *testing.T) {
 	if got := s.Cursors()[0].LastAdvanceMS; got != 42_000 {
 		t.Fatalf("LastAdvanceMS after first sighting = %d, want 42000", got)
 	}
-	// Second sighting: no-op — the staleness clock keeps running.
+	// A second sighting changes nothing; the staleness clock keeps running.
 	s.CursorMarkSeen("legacy", "metrics", 99_000)
 	if got := s.Cursors()[0].LastAdvanceMS; got != 42_000 {
 		t.Fatalf("second CursorMarkSeen moved the clock: %d, want 42000", got)
 	}
-	// A real advance DOES refresh it.
+	// A real advance does refresh it.
 	if !s.CursorAck("legacy", "metrics", 5) {
 		t.Fatal("ack must move")
 	}
@@ -554,9 +543,8 @@ func TestCursorMarkSeenStampsLegacyCursorOnce(t *testing.T) {
 	}
 }
 
-// ScanRecords reports each record's offset, timestamp and the exact logical
-// byte cost the b/ accounting charges, honors [from, upTo) and the early-exit
-// return.
+// ScanRecords reports each record's offset, timestamp and byte cost as b/
+// counts it, honours [from, upTo) and stops early when asked.
 func TestScanRecordsBoundsAndSizes(t *testing.T) {
 	s := mustOpen(t)
 	appendMetrics(t, s, 6, 100)
@@ -598,11 +586,9 @@ func TestScanRecordsBoundsAndSizes(t *testing.T) {
 	}
 }
 
-// Spec §5.2 [delta]: Prune recomputes the protected-cursor floor UNDER the
-// mutex, inside the commit path. A caller working from a stale snapshot (the
-// TOCTOU window between policy evaluation and commit) can therefore never
-// prune past a cursor it did not explicitly override — and the journal and
-// plan span shrink with it, one source of truth.
+// Prune recomputes the protected-cursor floor under the mutex, in the commit
+// path, so a caller with a stale snapshot never prunes past a cursor it did not
+// override, and the journal and plan span shrink with it.
 func TestPruneRechecksCursorFloorInBatch(t *testing.T) {
 	s := mustOpen(t)
 	appendMetrics(t, s, 10, 100)
@@ -652,9 +638,8 @@ func TestPruneRechecksCursorFloorInBatch(t *testing.T) {
 	}
 }
 
-// Spec §6.5 [delta]: the pending-refresh range rides the prune batch, unions
-// with an existing obligation, survives restart, clears explicitly, and a
-// corrupt value fails Open loudly.
+// The pending-refresh range goes into the prune batch, merges with an existing
+// one, survives a restart, clears explicitly, and a corrupt value fails Open.
 func TestRefreshPendingRidesBatchUnionsAndClears(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)
@@ -682,7 +667,7 @@ func TestRefreshPendingRidesBatchUnionsAndClears(t *testing.T) {
 	if r, ok := s.RefreshPending("metrics"); !ok || r != (RefreshRange{From: 3, To: 9}) {
 		t.Fatalf("pending after union = %+v/%v, want [3,9)", r, ok)
 	}
-	// Survives restart — that is the whole point of persisting it.
+	// It survives a restart, which is why it is persisted.
 	s.Close()
 	s, err = Open(dir)
 	if err != nil {
@@ -697,8 +682,8 @@ func TestRefreshPendingRidesBatchUnionsAndClears(t *testing.T) {
 	if _, ok := s.RefreshPending("metrics"); ok {
 		t.Fatal("pending survived ClearRefreshPending")
 	}
-	// Corrupt rp/ fails Open loudly — silently reading "nothing pending"
-	// would drop a crash-persisted obligation.
+	// A corrupt rp/ fails Open: reading it as "nothing pending" would drop a refresh
+	// still owed after a crash.
 	if err := s.db.Set(rpKey("metrics"), []byte("bogus"), pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
@@ -708,10 +693,9 @@ func TestRefreshPendingRidesBatchUnionsAndClears(t *testing.T) {
 	}
 }
 
-// Gap's degenerate inputs must never fabricate a span on the wire: an unknown
-// stream has no LWM (0) and the LWM-1 arithmetic would underflow into a
-// [1..max-uint64] gap; a raw position 0 compared before clamping would invert
-// the span. Both return ok=false / the clamped result instead.
+// Gap must not invent a span from degenerate input: an unknown stream has LWM 0,
+// where LWM-1 would underflow, and position 0 compared before clamping would
+// invert the span.
 func TestGapDegenerateInputs(t *testing.T) {
 	s := mustOpen(t)
 
@@ -722,8 +706,8 @@ func TestGapDegenerateInputs(t *testing.T) {
 		}
 	}
 
-	// Untouched stream (LWM 1): position 0 clamps to 1 → no gap, not an
-	// inverted [0..0] span.
+	// Untouched stream (LWM 1): position 0 clamps to 1, so there is no gap rather
+	// than an inverted [0..0] span.
 	if g, ok := s.Gap("metrics", 0); ok {
 		t.Fatalf("Gap(metrics, 0) on an untouched stream = %+v, want none", g)
 	}
@@ -740,9 +724,9 @@ func TestGapDegenerateInputs(t *testing.T) {
 	}
 }
 
-// Spec §6.5 [delta]: AppendIfKVUnchanged is a true CAS under s.mu — the record
-// (stream append AND KV set) applies only while the KV entry still sits at the
-// snapshot offset. Superseded or retired entries skip the whole record.
+// AppendIfKVUnchanged is a real compare-and-swap under s.mu: the record (stream
+// append and KV set) applies only while the KV entry still has the snapshot
+// offset. Superseded or retired entries skip the whole record.
 func TestAppendIfKVUnchangedGuards(t *testing.T) {
 	s := mustOpen(t)
 	rec := func(v string) Record {
@@ -761,7 +745,8 @@ func TestAppendIfKVUnchangedGuards(t *testing.T) {
 		t.Fatalf("KV after guarded append = %+v, want Offset 2", kv)
 	}
 
-	// Guard fails — superseded: the entry moved to offset 2, snapshot says 1.
+	// The guard fails for a superseded entry: it moved to offset 2, the snapshot
+	// says 1.
 	bytesBefore, nextBefore := s.StreamBytes("metrics"), s.NextOffset("metrics")
 	if _, applied, err := s.AppendIfKVUnchanged("metrics", rec(`{"v":stale}`), 1); err != nil || applied {
 		t.Fatalf("superseded guard = (%v, %v), want (false, nil)", applied, err)
@@ -773,7 +758,7 @@ func TestAppendIfKVUnchangedGuards(t *testing.T) {
 		t.Fatalf("skipped record clobbered KV: %s", kv[0].Payload)
 	}
 
-	// Guard fails — retired: tombstone the path, then try to refresh it.
+	// The guard fails for a retired entry: tombstone the path, then refresh it.
 	tomb := rec("")
 	tomb.Delete = true
 	if _, _, err := s.Append("metrics", []Record{tomb}); err != nil { // offset 3

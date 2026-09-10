@@ -5,29 +5,17 @@ import (
 	"strings"
 )
 
-// Plan before write, then authorize the plan (node-side command authorization
-// design §3C).
+// Plan before write, then authorize the plan. A _CmdEdit is composed into the
+// records it will write, and every position in that plan is checked with
+// AuthorizeCmdAt against the actor's configure grants; one uncovered position
+// refuses the whole command with nothing written. The door only checks the
+// class, since the route names the owning node, not a position.
 //
-// A `_CmdEdit` is composed into the exact records it will write BEFORE
-// any of them is written. Every position in that plan is then checked with
-// the one per-position decision the doors use for every other command —
-// `AuthorizeCmdAt(scope, actor, "configure", path)`, a prefix comparison of
-// the actor's configure grants against the record's path — and one
-// uncovered position refuses the whole command with zero writes. The door's
-// own check for this contract is class-only (its route names the owning
-// node, not a position); this is the fine check, against what the command
-// actually touches, which is the property preflight on the api side could
-// only approximate from the other side of the door.
-//
-// The refusal is shaped like a not-found: the same `entity_not_found: <key>`
-// a missing entity earns, naming the entity the caller named. A caller
-// cannot learn that an element exists by being refused on it (the existence
-// oracle stays closed, as it does in preflight's `_require_row`).
+// A refusal looks like entity_not_found for the named entity, so a caller
+// cannot learn that an element exists by being refused on it.
 
-// SetScope wires the node's element scope in. Without it only `#` grants
-// resolve (zoneOf fails closed on a nil scope), so a scoped grant covers
-// nothing — the production node always sets it; a test that exercises
-// element-scoped grants supplies its own.
+// SetScope sets the node's element scope. Without it only "#" grants resolve;
+// production always sets it.
 func (w *EditExec) SetScope(sc Scope) { w.scope = sc }
 
 // editTouched is one position a plan writes or repositions, with the
@@ -35,10 +23,8 @@ func (w *EditExec) SetScope(sc Scope) { w.scope = sc }
 type editTouched struct {
 	path string
 	key  string
-	// operate marks a position an `operate` grant covers as well as a
-	// configure one: an annotation the person creates, or one they authored
-	// (annotation-cutover design: an operator annotates; only configure
-	// edits another author's annotation).
+	// operate marks a position an operate grant also covers: an annotation
+	// the person creates or authored. Editing someone else's needs configure.
 	operate bool
 }
 
@@ -47,12 +33,9 @@ type editTouched struct {
 // position allows it. code 0 means covered.
 func (w *EditExec) authorizeTouched(ctx CommandContext, touched []editTouched) (int, string, string) {
 	for _, t := range touched {
-		// The node root (an empty path) is the position every element here
-		// sits under, so only a zone of "#" covers it: a realm-wide grant, or
-		// a grant naming the node's own element or one of its ancestors —
-		// which zoneOf resolves to "#" through Scope.Reaches, the ancestry the
-		// parent taught. A grant on any element BELOW the node resolves to
-		// that element's path and does not cover the root.
+		// Only a "#" zone covers the node root (empty path): a realm-wide
+		// grant, or a grant on the node's own element or an ancestor, which
+		// zoneOf resolves to "#". A grant on an element below the node does not.
 		covered := AuthorizeCmdAt(w.scope, ctx.Actor, "configure", t.path) ||
 			(t.operate && AuthorizeCmdAt(w.scope, ctx.Actor, "operate", t.path))
 		if !covered {
@@ -62,18 +45,14 @@ func (w *EditExec) authorizeTouched(ctx CommandContext, touched []editTouched) (
 	return 0, "", ""
 }
 
-// keycloakServiceAccountPrefix is how Keycloak names a client-credentials
-// token's preferred_username — the same constant the api's
-// `_service_account_client_id` keys on.
+// keycloakServiceAccountPrefix starts the preferred_username of a Keycloak
+// client-credentials token.
 const keycloakServiceAccountPrefix = "service-account-"
 
-// AnnotationSource is the `source` the api stamps on an annotation this
-// actor authors (`commands.annotation_source`, pinned by the shared
-// `vectors/annotation_id.json` `sources` cases): half of the annotation's
-// derived id, which is what lets a node prove authorship from the id alone.
-// A person is `user/<sub>`; a Keycloak service account — nobody is behind
-// its sub — is `service/<client-id>`. An mTLS service never acts here (the
-// executor refuses a non-human actor), so that kind is the api's alone.
+// AnnotationSource is the source the api stamps on an annotation this actor
+// authors, and half of its derived id, so a node can prove authorship from the
+// id alone. A person is user/<sub>, a Keycloak service account
+// service/<client-id>. The vectors in annotation_id.json pin both.
 func AnnotationSource(e *Entry) string {
 	if e == nil {
 		return ""
@@ -86,17 +65,11 @@ func AnnotationSource(e *Entry) string {
 	return "user/" + e.ULID
 }
 
-// annotationOperable reports whether an `operate` grant may carry this
-// annotation intent: a create always (the annotation will be the person's
-// own), an update or delete only of an annotation the person authored —
-// provable without any lookup, because the id is derived from
-// (type, source, time_start, signal set) and the source names the author.
-// The signal set is re-derived from the intent's own `signal_ids`, so under
-// an `operate` grant an update must carry the set the annotation was
-// created with: a different set derives a different identity, and an
-// update naming one id while describing another is not provably the
-// person's own. `configure` coverage (the superset) is not routed through
-// here and may still repoint any annotation.
+// annotationOperable reports whether an operate grant may carry this annotation
+// intent: always for a create, and for an update or delete only of the
+// person's own annotation, which the derived id proves without a lookup. The id
+// is re-derived from the intent's signal_ids, so an update under operate must
+// keep the original signal set. Configure may change any annotation.
 func annotationOperable(intent editIntent, actor *Entry) bool {
 	if intent.Action == "create" {
 		return true
@@ -109,10 +82,9 @@ func annotationOperable(intent editIntent, actor *Entry) bool {
 	return intent.Source == source && intent.AnnotationID == own
 }
 
-// touchedByRecords is the plan a composer produced, as positions: one per
-// record (a tombstone at an old topic, a payload at a new one). The key is
-// the snapshot entity at that topic when there is one, otherwise the anchor
-// the caller named — the parent of a create, the target of a placement.
+// touchedByRecords turns a composer's records into positions, one per record.
+// The key is the snapshot entity at that topic, or else the anchor the caller
+// named (a create's parent, a placement's target).
 func touchedByRecords(
 	records []StateRecord, entities map[string]editSnapshot, anchor string,
 ) []editTouched {
@@ -146,8 +118,7 @@ func touchedByRecords(
 }
 
 // touchedEntity is the position of one snapshot entity, or the not-found
-// shape when the snapshot has no such entity — the same answer either way,
-// so refusing on it never says which.
+// shape if there is none; both refuse the same way.
 func touchedEntity(entities map[string]editSnapshot, kind, id string) editTouched {
 	key := entityVersionKey(kind, id)
 	entity, ok := entities[key]
@@ -186,10 +157,9 @@ func recordID(payload []byte) string {
 	return value.ID
 }
 
-// planFor is the write-set of one composed intent (design §3C table): the
-// records it will write, plus what a record does not spell out — the target
-// of a placement, the connector a binding draws on, every signal an
-// annotation names.
+// planFor returns the positions one composed intent writes: its records plus
+// what they do not spell out, such as a placement's target, a binding's
+// connector or an annotation's signals.
 func (w *EditExec) planFor(
 	ctx CommandContext,
 	intent editIntent,
@@ -224,10 +194,9 @@ func (w *EditExec) planFor(
 		}
 		return append(touched, touchedByRecords(records, entities, anchor)...)
 	case "annotation":
-		// The record sits at a reserved path no element owns; what the
-		// annotation touches is every signal it names. None named → only a
-		// realm-wide grant may write it. An operate grant carries it too,
-		// for a create or the person's own annotation.
+		// The record sits at a reserved path, so the positions are the signals
+		// the annotation names; with none, only a realm-wide grant covers it.
+		// An operate grant also covers a create or the person's own annotation.
 		operable := annotationOperable(intent, ctx.Actor)
 		if len(intent.SignalIDs) == 0 {
 			return []editTouched{{path: "", key: "signal:", operate: operable}}
@@ -244,15 +213,12 @@ func (w *EditExec) planFor(
 		// reserved path, which no element owns.
 		return w.alarmPositions(intent, entities)
 	case "notification_config":
-		// The whole node: one position, the node's own root. See
-		// notificationConfigPositions for how a grant on the element the
-		// node's parent enrolled it at resolves to cover it.
+		// The whole node: one position, its root. See
+		// notificationConfigPositions.
 		return w.notificationConfigPositions()
 	case "resource":
-		// The positions the composed records sit on — one for a create or an
-		// in-place update, two for a move, both checked. Not `touchedByRecords`:
-		// a resource is not in the entity snapshot, it is addressed by its own
-		// position, and its element is the path above the record.
+		// A resource is not in the entity snapshot, so check the positions of
+		// its records: one for a create or update, two for a move.
 		return w.resourcePositions(intent, records)
 	default: // update, delete, model
 		anchor := entityVersionKey(intent.Entity.Kind, intent.Entity.ID)

@@ -1,17 +1,10 @@
 // Command execution at the target node.
 //
-// A command record addressed to THIS node (level-4 ULID match) is executed
-// right after it was durably persisted, and the outcome goes back up as an
-// _Ack in the node's own frame. The hook fires on the trusted-down paths only
-// — downlink from the parent and the local doors — never on IngestReplicated:
-// commands flow down, and a child pushing commands upward must not administer
-// its ancestors.
-//
-// The engine owns the mechanism (is this addressed to me, has it expired, how
-// does the outcome get acked, what is counted) and nothing about the meaning:
-// what a verb does lives behind the CommandExecutor port. That is what keeps
-// domain knowledge — the Colca data model in particular — out of the broker
-// core and inside the plugin that owns it.
+// A command addressed to this node is executed right after it is persisted, and
+// the outcome goes back up as an _Ack. Only paths coming down execute (the
+// parent's downlink and the local doors), never IngestReplicated: a child must
+// not command its ancestors. The engine owns the mechanism; what a verb means
+// lives behind CommandExecutor.
 
 package engine
 
@@ -24,12 +17,10 @@ import (
 
 // CommandExecutor executes commands addressed to this node.
 //
-// Handles decides ownership by contract alone, before anything is parsed or
-// executed: a contract nobody claims is a machine's command riding through to
-// its target, and the engine leaves it completely alone — no ack, no metric. An
-// executor that claims a contract answers every verb of it, returning 422 for
-// ones it does not know, because a command aimed at the node deserves an answer
-// even when the node cannot carry it out.
+// Handles decides by contract alone. A contract nobody claims is a machine's
+// command passing through, and the engine leaves it alone: no ack, no metric. An
+// executor that claims a contract answers every verb of it, with 422 for verbs it
+// does not know.
 type CommandExecutor interface {
 	Handles(contract string) bool
 	Execute(ctx uns.CommandContext, contract, verb string, payload []byte) (code int, message, result string)
@@ -69,16 +60,10 @@ type RecordObserver interface {
 // SetObserver wires the record observer in (node startup).
 func (e *Engine) SetObserver(o RecordObserver) { e.observer = o }
 
-// ReplayRetained hands every currently retained record to the observer once,
-// in store order. An observer reacts to records AS THEY PERSIST; whatever was
-// already persisted when this process started otherwise never reaches it. The
-// lifecycle trigger's own comment priced that as "a catalogue that grew
-// across a restart is not bound" — and the price turned out to also cover a
-// binding wiped by a re-declaration, with no republish left to rebind it
-// (the demo plant's computed outputs went dark on every reconcile-up).
-// Observers are idempotent by contract (autobind's own invariant), so
-// replaying on every boot changes nothing when there is nothing to do. A
-// topic that does not parse is not a domain record and is skipped.
+// ReplayRetained hands every retained record to the observer once, in store
+// order, so state persisted before this process started reaches it too,
+// including bindings a re-declaration wiped. Observers are idempotent, so
+// replaying on every boot is harmless. Topics that do not parse are skipped.
 func (e *Engine) ReplayRetained() {
 	if e.observer == nil {
 		return
@@ -97,9 +82,8 @@ func (e *Engine) ReplayRetained() {
 	}
 }
 
-// SetSubscriberCheck wires the local-bus subscriber lookup in (node startup,
-// once the broker exists). See HasSubscriberFor and deliverCommand in
-// redelivery.go.
+// SetSubscriberCheck wires the local-bus subscriber lookup once the broker
+// exists. See HasSubscriberFor and deliverCommand.
 func (e *Engine) SetSubscriberCheck(fn HasSubscriberFor) { e.hasSubscriber = fn }
 
 func (e *Engine) observe(p uns.Parsed, topic string, payload []byte) {
@@ -151,19 +135,18 @@ func (m multiExec) ExecuteWithWrites(
 	return 500, "no executor claims " + contract, "error", nil
 }
 
-// cmdEnvelope is the part of a command payload every class shares (cmdadmin
-// design §2): correlation_id routes the ack, expires_at bounds execution.
-// Everything else is the verb's own business and stays in the raw payload.
+// cmdEnvelope is the part of a command payload every class shares:
+// correlation_id routes the ack, expires_at bounds execution. The rest belongs to
+// the verb.
 type cmdEnvelope struct {
 	CorrelationID string `json:"correlation_id"`
 	ExpiresAt     int64  `json:"expires_at"`
 }
 
-// maybeExec runs after a _Cmd* record was persisted by a trusted-down path.
-// actor is the identity the door authorized (nil at the admin door); a
-// downlinked record has none here, so the human who issued it is
-// reconstituted from the attested groups its attribution carries — see
-// actorForDownlink.
+// maybeExec runs after a _Cmd* record was persisted by a path coming down. actor
+// is the identity the door authorized (nil at the admin door); for a downlinked
+// record the person is reconstituted from the attested groups in its
+// attribution.
 func (e *Engine) maybeExec(
 	p uns.Parsed,
 	payload []byte,
@@ -216,9 +199,8 @@ func (e *Engine) maybeExec(
 	return outcome
 }
 
-// ack publishes the execution outcome into the node's own commands stream (own
-// frame — uplink mount-insert rebuilds the path hop by hop, cmdadmin design §6)
-// and counts the metric.
+// ack publishes the execution outcome into this node's commands stream in its
+// own frame and counts it. The uplink inserts mounts hop by hop on the way up.
 func (e *Engine) ack(
 	contract, verb string,
 	outcome *CommandOutcome,

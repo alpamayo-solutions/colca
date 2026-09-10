@@ -170,8 +170,7 @@ func TestExecAdminIgnoresOtherTargets(t *testing.T) {
 	}
 }
 
-// Records pushed UP by a child never execute (commands flow down; a child
-// must not administer its ancestors) — even when they name this node.
+// Records pushed up by a child never execute, even when they name this node.
 func TestExecAdminNeverOnReplicated(t *testing.T) {
 	e, fa := adminEngine(t)
 	recs := []store.ReplRecord{{ChildOffset: 1, Topic: "colca/v1/_CmdAdmin/n-edge1/enroll", Payload: enrollPayload("c-8", futureMS()), TS: 1}}
@@ -199,15 +198,14 @@ func TestExecAdminSelfTargetLocalDoors(t *testing.T) {
 	if ackFor(t, e, "enroll", "c-9") == nil || ackFor(t, e, "enroll", "c-10") == nil {
 		t.Fatal("both local-door executions must ack")
 	}
-	// A machine WITHOUT the admin class is refused at the door.
+	// A machine without the admin class is refused at the door.
 	if _, err := e.IngestClient("hmi", "colca/v1/_CmdAdmin/n-edge1/enroll", enrollPayload("c-11", futureMS())); err == nil {
 		t.Fatal("cmd:m1/#:param must not authorize _CmdAdmin")
 	}
 }
 
-// A node whose registry never got wired still answers — loudly, with 500.
-// Silence is reserved for commands no executor claims at all, which is how a
-// machine's command rides through untouched.
+// A node without a registry still answers, with 500. Only commands no executor
+// claims pass silently.
 func TestExecAdminWithoutARegistry(t *testing.T) {
 	s, err := store.Open(t.TempDir())
 	if err != nil {

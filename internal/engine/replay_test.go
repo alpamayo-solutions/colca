@@ -14,21 +14,18 @@ import (
 
 const redeliveredCounter = "colca_command_redelivered_total"
 
-// replayHarness is the undelivered harness with the two things the replay
-// tests must steer per topic rather than once per engine: which topics
-// currently have a subscriber, and what was actually published to the bus.
+// replayHarness lets replay tests steer per topic which subscribers are listening,
+// and records what was published.
 type replayHarness struct {
 	e  *Engine
 	m  *metrics.Metrics
 	mu sync.Mutex
-	// sub is keyed by {topic, subscriber ULID}: the stub must be able to say
-	// "somebody is listening here, but not the machine this command is for",
-	// which is the whole substance of the identity rule.
+	// sub is keyed by topic and subscriber ULID, so the stub can say someone else is
+	// listening but not the target.
 	sub map[[2]string]bool
 	out []string
-	// onDeliver, when set, runs inside the delivery callback — the hook the
-	// concurrency test uses to hold one replay mid-publish while another runs.
-	// Called with h.mu released, so the hook may call back into the harness.
+	// onDeliver, when set, runs inside the delivery callback with h.mu released, so a
+	// test can hold one replay mid-publish.
 	onDeliver func(topic string)
 }
 
@@ -61,9 +58,8 @@ func newReplayHarness(t *testing.T, ids fakeIDs) *replayHarness {
 	return h
 }
 
-// listen/deafen model one identity connecting and dropping. Under a clean
-// session (cmd/colca-machine) the subscription leaves mochi's topic index the
-// moment the machine disconnects, which is exactly what deafen represents.
+// listen and deafen model one identity connecting and dropping; with a clean
+// session the subscription disappears on disconnect.
 func (h *replayHarness) listen(ulid string, topics ...string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -107,9 +103,8 @@ func machine(t *testing.T, ids fakeIDs, ulid string) *uns.Entry {
 	return e
 }
 
-// The gap itself, closed: a command published while the machine was not
-// listening is republished when it subscribes. Before this, the record sat in
-// the stream and nothing ever read it on the machine's behalf.
+// A command published while the machine was not listening is republished when it
+// subscribes.
 func TestOwedCommandIsReplayedWhenTheMachineSubscribes(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)
@@ -135,9 +130,8 @@ func TestOwedCommandIsReplayedWhenTheMachineSubscribes(t *testing.T) {
 	}
 }
 
-// The denominator for every "is not replayed" assertion in this file: a
-// command that DID reach a subscriber must not be replayed. Without this half,
-// a ReplayOwedCommands that always returned 0 would satisfy all of them.
+// A command that reached a subscriber is not replayed. This is the denominator
+// for every not-replayed assertion here.
 func TestDeliveredCommandIsNotReplayed(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)
@@ -156,9 +150,7 @@ func TestDeliveredCommandIsNotReplayed(t *testing.T) {
 	}
 }
 
-// A replay must never hand one identity another's commands. This is the
-// engine-side wiring of uns.OwedCommand's identity rule — the guard that stops
-// a subscribing machine from draining the whole command stream onto the bus.
+// A replay never hands one identity another's commands.
 func TestReplayNeverHandsOneMachineAnothersCommands(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)
@@ -168,9 +160,8 @@ func TestReplayNeverHandsOneMachineAnothersCommands(t *testing.T) {
 		t.Fatalf("IngestAdmin: %v", err)
 	}
 	h.resetPublished()
-	// Both identities are listening on m1's command topic — hmi may, holding
-	// cmd: over el-m1 — so nothing but the record-selection rule can keep m1's
-	// command away from hmi.
+	// Both identities listen on m1's command topic, so only record selection keeps
+	// m1's command from hmi.
 	h.listen("hmi", forM1)
 	h.listen("m1", forM1)
 	if n := h.e.ReplayOwedCommands(machine(t, ids, "hmi")); n != 0 {
@@ -186,8 +177,8 @@ func TestReplayNeverHandsOneMachineAnothersCommands(t *testing.T) {
 	}
 }
 
-// An expired command is never replayed, and — the half that matters for cost —
-// the cursor moves past it, so it is not rescanned on every future subscribe.
+// An expired command is never replayed, and the cursor moves past it so it is not
+// rescanned.
 func TestExpiredCommandIsSkippedAndLeftBehind(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)
@@ -207,9 +198,8 @@ func TestExpiredCommandIsSkippedAndLeftBehind(t *testing.T) {
 	}
 }
 
-// Order is the whole point of a cursor: a replay that hit a record nobody is
-// listening on must STOP there rather than skip ahead, or the machine receives
-// a later command before an earlier one it never got at all.
+// A replay stops at the first record nobody is listening on, so commands never
+// arrive out of order.
 func TestReplayStopsAtTheFirstRecordWithNoSubscriber(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)
@@ -222,8 +212,8 @@ func TestReplayStopsAtTheFirstRecordWithNoSubscriber(t *testing.T) {
 		}
 	}
 	h.resetPublished()
-	// The machine subscribed to only one of the two — an artificial split, but
-	// it is the only way to put an unlistened record BEFORE a listened one.
+	// The machine listens to only one of the two, to put an unlistened record before
+	// a listened one.
 	h.listen("m1", second)
 	h.deafen("m1", first)
 	if n := h.e.ReplayOwedCommands(machine(t, ids, "m1")); n != 0 {
@@ -243,9 +233,7 @@ func TestReplayStopsAtTheFirstRecordWithNoSubscriber(t *testing.T) {
 	}
 }
 
-// A second subscribe must not re-publish what the first one already replayed.
-// Machines reconnect and resubscribe routinely; an unadvanced cursor would
-// re-run every command in the backlog each time.
+// A second subscribe does not republish what the first one replayed.
 func TestReplayIsIdempotentAcrossSubscribes(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)
@@ -267,10 +255,9 @@ func TestReplayIsIdempotentAcrossSubscribes(t *testing.T) {
 	}
 }
 
-// Nothing is owed to an identity that cannot be handed a command over this bus
-// — a child node (fed over replication) and a nil entry both answer "no door".
-// Without this the replay would publish a descendant's transiting commands
-// onto the local bus at every ancestor.
+// Nothing is owed to identities without an MQTT door: a child node and a nil
+// entry. Otherwise every ancestor would replay a descendant's commands onto its
+// bus.
 func TestReplayOffersNothingToIdentitiesWithNoMQTTDoor(t *testing.T) {
 	ids := testIDs()
 	ids.entries["n-child"] = &uns.Entry{ULID: "n-child", Kind: uns.KindNode, Element: "el-m1"}
@@ -293,31 +280,21 @@ func TestReplayOffersNothingToIdentitiesWithNoMQTTDoor(t *testing.T) {
 	}
 }
 
-// A command arriving while an older one is still owed must
-// not strand that older one, and must not overtake it either.
-//
-// The floor is a watermark: it can say "everything below is handled", never "A
-// is owed but B was delivered". So the ingest path advances it only by
-// compare-and-swap from the record's own offset, and — the half that makes
-// that coherent — publishes live only when the floor stands at that record. B
-// is therefore HELD, and the replay hands the machine A then B, in order, each
-// once. A forward ack instead would have moved the floor past A and lost it.
-//
-// This is not a narrow race: it is reached whenever a replay stalled or hit
-// its cap, and also in the microseconds between mochi registering a
-// subscription and OnSubscribed running the replay.
+// A command arriving while an older one is owed is held, and the replay delivers
+// both in order, each once. A forward ack would have moved the floor past the
+// older command and lost it. This happens whenever a replay stalled or hit its
+// cap.
 func TestACommandArrivingBehindAnOwedOneWaitsForIt(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)
 	first := "colca/v1/_CmdParam/m1/temp/set"
 	second := "colca/v1/_CmdParam/m1/speed/set"
 
-	// A: published while the machine is away — owed.
+	// A: published while the machine is away, so it is owed.
 	if _, err := h.e.IngestAdmin(first, cmdPayload("corr-A")); err != nil {
 		t.Fatalf("IngestAdmin A: %v", err)
 	}
-	// B: published once the machine is listening. It must NOT go out live,
-	// because A is still owed and would otherwise be overtaken.
+	// B: published once the machine listens. It must not go out live while A is owed.
 	h.listen("m1", first, second)
 	h.resetPublished()
 	if _, err := h.e.IngestAdmin(second, cmdPayload("corr-B")); err != nil {
@@ -336,14 +313,8 @@ func TestACommandArrivingBehindAnOwedOneWaitsForIt(t *testing.T) {
 	}
 }
 
-// The delivery floor must move only for a subscription
-// belonging to the command's OWN target.
-//
-// An observer holding read:# legitimately subscribes to command topics for
-// diagnostics. If the subscriber check answered "does anyone subscribe here",
-// that observer would mark an absent machine's commands delivered — no replay,
-// and no counter either, so the loss would be silent. This is the finding's
-// scenario exactly: only the observer is listening when the command lands.
+// The delivery floor moves only for a subscription of the command's own target.
+// Here only an observer with read:# is listening when the command lands.
 func TestAThirdPartySubscriberDoesNotMarkACommandDelivered(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)
@@ -364,20 +335,10 @@ func TestAThirdPartySubscriberDoesNotMarkACommandDelivered(t *testing.T) {
 	}
 }
 
-// Two replays for one identity must not publish the same
-// command twice, and a command run twice is a physical-world action.
-//
-// The overlap is real: a session takeover does not wait for the displaced
-// connection's OnSubscribed to return, and two clients presenting one
-// certificate under different client IDs coexist without takeover at all.
-// Neither the per-record subscriber check nor the cursor's compare-and-swap
-// dedupes a publish — only the per-identity lock does.
-// The interleaving is FORCED rather than raced for. Two goroutines started
-// together almost never overlap in the few microseconds that matter, so a
-// timing-based version of this test passes with the lock removed — verified by
-// mutation, which is why it is written this way. The first replay blocks inside
-// its own deliver callback until the second replay has been given every chance
-// to read the same cursor and publish from it.
+// Two concurrent replays for one identity publish each command once. The
+// interleaving is forced: the first replay blocks in its deliver callback while
+// the second gets every chance to publish. A timing-based version passes without
+// the lock.
 func TestConcurrentReplaysForOneIdentityPublishOnce(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)
@@ -413,9 +374,8 @@ func TestConcurrentReplaysForOneIdentityPublishOnce(t *testing.T) {
 		defer wg.Done()
 		total[1] = h.e.ReplayOwedCommands(machine(t, ids, "m1"))
 	}()
-	// Give replay #2 a real chance to read the un-advanced cursor and publish
-	// from it. Without the per-identity lock it does exactly that; with the
-	// lock it blocks here until replay #1 releases.
+	// Let replay 2 read the unadvanced cursor. Without the lock it publishes; with it,
+	// it waits for replay 1.
 	time.Sleep(50 * time.Millisecond)
 	close(release)
 	wg.Wait()
@@ -428,18 +388,10 @@ func TestConcurrentReplaysForOneIdentityPublishOnce(t *testing.T) {
 	}
 }
 
-// The delivery floor legitimately lags head, and live delivery must survive
-// that. Found by the container tests, the first place the commands
-// stream is long enough for it to show.
-//
-// The floor advances only over records concerning ONE machine, while the
-// commands stream also carries acks and other machines' commands. So after m1
-// is handed a command at offset 10 its floor is 11, and the next command
-// addressed to it may land at offset 30 with a dozen unrelated records in
-// between. A gate asking "is the floor exactly at this record" reads that
-// ordinary state as "something is owed" and holds every command forever,
-// delivering nothing at all. The gate has to ask whether anything is owed
-// BELOW the record instead.
+// Live delivery works while the floor lags the head. The floor only advances over
+// this machine's records, so unrelated records in between are normal; the gate
+// must ask whether anything below is owed, not whether the floor is at this
+// record.
 func TestDeliveryWorksWhenTheFloorLagsBehindUnrelatedRecords(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)
@@ -477,18 +429,10 @@ func TestDeliveryWorksWhenTheFloorLagsBehindUnrelatedRecords(t *testing.T) {
 	}
 }
 
-// The other half of finding I1: a live delivery racing a replay must not hand
-// the machine two copies either.
-//
-// The window is real because a replay captures the stream head when it starts,
-// so a command appended just before that is inside its scan while the ingest
-// path is still publishing it. Ingest publishes B and has not yet advanced the
-// floor; the replay reads that un-advanced floor, sees B as owed, and publishes
-// it a second time. Holding the target's lock across ingest's publish-and-
-// advance is what closes it — the same lock the replay takes.
-//
-// Forced, not raced for: ingest is held inside its own deliver callback while
-// the replay runs.
+// A live delivery racing a replay publishes once. The replay captures the head
+// when it starts, so it can see a record ingest is still publishing; holding the
+// target's lock across publish and advance prevents the second copy. Forced:
+// ingest is held in its deliver callback while the replay runs.
 func TestALiveDeliveryRacingAReplayPublishesOnce(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)
@@ -535,10 +479,8 @@ func TestALiveDeliveryRacingAReplayPublishesOnce(t *testing.T) {
 	}
 }
 
-// The cursor advances on ordinary delivery, not only on replay. This is what
-// keeps a long-connected machine's replay scan short: without it the cursor
-// would sit at 1 forever and every subscribe would rescan the whole stream to
-// discover it owes nothing.
+// Ordinary delivery advances the cursor too, so a long-connected machine's replay
+// scan stays short.
 func TestDeliveryAdvancesTheCursorSoReplayStaysCheap(t *testing.T) {
 	ids := testIDs()
 	h := newReplayHarness(t, ids)

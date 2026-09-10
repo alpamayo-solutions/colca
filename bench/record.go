@@ -1,11 +1,8 @@
 package bench
 
-// Always-on run records. This is the reference implementation of a
-// repo-wide pattern: every performance-test execution leaves a durable,
-// commit-stamped record on disk, one compact JSON line per report
-// (bench/results/<host>.jsonl), committed to git. READMEs and results
-// tables are written FROM these records after the fact, never the other
-// way around.
+// Run records: every benchmark run appends one commit-stamped JSON line per
+// report to bench/results/<host>.jsonl. Result tables are written from these
+// records, never the other way around.
 
 import (
 	"bufio"
@@ -77,10 +74,9 @@ func vcsFromGitCLI() (commit string, dirty bool, ok bool) {
 	return commit, dirty, true
 }
 
-// AppendRecords appends each report to path as one compact JSON line,
-// creating the parent directory if needed. It never reads or rewrites
-// existing content — one os.Write call per line, so concurrent appenders
-// (and interrupted runs) never corrupt earlier records.
+// AppendRecords appends each report to path as one JSON line, creating the
+// directory if needed. One write per line, so concurrent or interrupted runs
+// never corrupt earlier records.
 func AppendRecords(path string, reports []*Report) (err error) {
 	if dir := filepath.Dir(path); dir != "." {
 		if err := os.MkdirAll(dir, 0o750); err != nil {

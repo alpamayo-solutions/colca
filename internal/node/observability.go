@@ -34,11 +34,8 @@ func interfaceType(iface net.Interface) string {
 func networkInventory(now time.Time) []map[string]any {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		// Silently returning nothing here is how a node came to publish an
-		// empty network inventory with no explanation anywhere: the Edit
-		// showed an empty panel, the record held `[]`, and the reason existed
-		// only in an error nobody kept. An empty list and a failed enumeration
-		// are different facts and must not look the same.
+		// An empty list and a failed enumeration are different facts, so say why the
+		// inventory is empty.
 		slog.Default().Warn("network inventory unavailable — the node will report no interfaces",
 			"err", err)
 		return []map[string]any{}

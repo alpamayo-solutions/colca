@@ -1,8 +1,6 @@
-// _CmdAdmin execution: enrolling and revoking the identities this node knows
-// (cmdadmin design §5). This one stays in the core because it IS core — the
-// registry is colca's own tree membership, not domain data. It reaches the
-// engine through the same CommandExecutor port as every other executor, so the
-// dispatch has no special case for it.
+// _CmdAdmin execution: enrolling and revoking identities on this node. It stays
+// in the core because the registry is Colca's own membership, not domain data,
+// and uses the same CommandExecutor port as every other executor.
 
 package engine
 
@@ -15,9 +13,8 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/registry"
 )
 
-// AdminExec is the registry write surface the admin executor drives — the exact
-// code path the local enrollment door calls (one write path inside). Satisfied
-// by *registry.Manager.
+// AdminExec is the registry write surface the admin executor drives, the same
+// one the enrollment door uses. Satisfied by *registry.Manager.
 type AdminExec interface {
 	Enroll(entryJSON []byte) (ulid string, offset uint64, err error)
 	Revoke(ulid string) (offset uint64, wasDraining bool, err error)
@@ -26,8 +23,8 @@ type AdminExec interface {
 // AdminExecutor answers _CmdAdmin against a node's registry.
 type AdminExecutor struct{ registry AdminExec }
 
-// NewAdminExecutor wires the registry manager in (node startup). A nil registry
-// answers 500 on every _CmdAdmin addressed here — fail loud, never panic.
+// NewAdminExecutor wires the registry manager in. With a nil registry every
+// _CmdAdmin addressed here answers 500.
 func NewAdminExecutor(r AdminExec) *AdminExecutor { return &AdminExecutor{registry: r} }
 
 func (a *AdminExecutor) Handles(contract string) bool { return contract == "_CmdAdmin" }
@@ -64,8 +61,7 @@ func (a *AdminExecutor) Execute(_ uns.CommandContext, contract, verb string, pay
 		}
 		if _, _, err := a.registry.Revoke(body.ULID); err != nil {
 			if errors.Is(err, registry.ErrNotEnrolled) {
-				// Idempotent by design (cmdadmin design §7): the desired state
-				// already holds.
+				// Idempotent: the desired state already holds.
 				return 200, "already revoked", "ok"
 			}
 			return 500, err.Error(), "error"

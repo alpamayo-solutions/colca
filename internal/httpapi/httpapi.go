@@ -1,25 +1,17 @@
-// Package httpapi exposes the node's HTTP control surface: publish, cursor
-// fetch/ack, the KV projection, the enrollment door, Prometheus metrics and a
-// debug view (auth design §4, §6.3). Handler builds this over TWO listeners
-// (local-service-trust design §4):
+// Package httpapi is the node's HTTP surface: publish, cursor fetch and ack, the
+// KV projection, enrollment, Prometheus metrics and a debug view. Handler serves
+// two listeners:
 //
-//   - The main door speaks TLS with the node's own key (cert = key container,
-//     trust = pinning; ClientAuth requests but does not require a client
-//     cert). A caller is either a MACHINE (TLS client key resolved against
-//     the local registry — reads are grant-scoped, cursors are namespaced) or
-//     the ADMIN (X-Colca-Token — unscoped, and the only identity that may
-//     enroll/revoke).
-//   - The local door (Handler's local=true) is plaintext and unpublished:
-//     reachability from inside the deployment's own network IS the
-//     credential, the caller names itself via X-Colca-Service, and the
-//     admin routes are never mounted on it at all.
+//   - The main door speaks TLS with the node's own key and requests, but does not
+//     require, a client certificate. A caller is a machine (its key resolved
+//     against the registry, reads scoped by grants), a human with a bearer token,
+//     or the admin (X-Colca-Token, unscoped, the only one who may enroll).
+//   - The local door is plaintext and never published: reaching it is the
+//     credential, the caller names itself with X-Colca-Service, and the admin
+//     routes do not exist there.
 //
-// /healthz and /metrics stay open on both: scrapers and probes carry neither
-// certs nor admin tokens, and Prometheus is itself a local service.
-//
-// Payloads travel as json.RawMessage in both directions: they are never decoded
-// into map[string]any and re-encoded, so a number keeps the exact form the
-// publisher sent it in.
+// /healthz and /metrics are open on both. Payloads travel as json.RawMessage both
+// ways, so numbers keep the exact form the publisher sent.
 package httpapi
 
 import (
@@ -49,21 +41,9 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// rawPayload wraps a stored record's payload bytes for the wire.
-//
-// An empty payload is not a special case to guard against — it is the
-// tombstone (retention design §7.1): a KV-projecting state contract's
-// deliberate, valid way of saying "this path was retired". Every projector
-// consumer already expects to see it as JSON null (`_apply_entity`'s
-// `_is_tombstone` treats `payload in (None, {})` as a delete). Passing the
-// zero-length bytes through as json.RawMessage is what breaks that contract:
-// `json.RawMessage.MarshalJSON` returns them unchanged, encoding/json's
-// compact() then rejects zero bytes as "unexpected end of JSON input", and
-// the whole top-level Encode fails — after writeJSON already sent
-// WriteHeader(200), so nothing is left to send but an empty body. A consumer
-// whose cursor lands on ANY tombstone anywhere in the deployment then sees a
-// silent 200 with no records, forever, since /fetch never moves a cursor
-// itself and every retry re-reads the same poisoned page.
+// rawPayload wraps a stored payload for the wire. An empty payload is a tombstone
+// and must go out as JSON null: a zero-length json.RawMessage fails to encode,
+// which would break the whole response.
 func rawPayload(payload []byte) json.RawMessage {
 	if len(payload) == 0 {
 		return json.RawMessage("null")
@@ -77,14 +57,11 @@ const (
 	maxMax     = 1000
 )
 
-// TLSConfig builds the API listener's TLS config: client certs REQUESTED but
-// not required — machine callers present their pinned key, admin tooling and
-// scrapers stay certless.
-//
-// The SERVER certificate is the supplied pair when the node configures one, and
-// its own key container otherwise. Nothing pins this door's server certificate
-// (clients here authenticate themselves, not the node), so it is one of the
-// doors where a browser-trusted certificate is both possible and useful.
+// TLSConfig builds the API listener's TLS config. Client certificates are
+// requested but not required, so machines present their pinned key while admin
+// tooling and scrapers need none. The server certificate is the configured pair
+// if there is one, else the node's key container; nothing pins this door's
+// certificate, so a browser-trusted one works.
 func TLSConfig(id *identity.Identity, ulid, certFile, keyFile string) (*tls.Config, error) {
 	cert, err := identity.ServerCert(id, ulid, certFile, keyFile)
 	if err != nil {
@@ -97,34 +74,26 @@ func TLSConfig(id *identity.Identity, ulid, certFile, keyFile string) (*tls.Conf
 	}, nil
 }
 
-// caller is the resolved identity of one request: exactly one of admin,
-// machine (entry, human == nil) or human (entry + human) is set. For humans
-// the entry IS human.Entry (KindHuman) — the read-scope and cursor-ownership
-// code paths work identically for machines and humans through it.
+// caller is the resolved identity of one request: exactly one of admin, machine
+// (entry) or human (entry and human) is set. For humans the entry is
+// human.Entry, so read scopes and cursor ownership work the same for both.
 type caller struct {
 	admin bool
 	entry *uns.Entry
 	human *tokenauth.Verified
 }
 
-// Handler builds the node's HTTP surface. pubkey is this node's public key in
-// hex — served on /healthz so a parent can enroll this node before trusting
-// it, which is the only order enrollment can happen in.
+// Handler builds the node's HTTP surface. pubkey is the node's public key in hex,
+// served on /healthz so a parent can enroll the node before trusting it.
 //
-// local selects the local API door (local-service-trust design §4): the
-// listener is unreachable from outside the deployment, so reaching it IS the
-// credential — there is nothing to authenticate, only a caller to name and
-// register. The local door omits the admin routes entirely (reading and
-// writing the node's own data is a local service's job; provisioning
-// identities is not), so it never registers them at all — an admin route
-// that 404s because it was never mounted, rather than 403s because it
-// refused, is what keeps a scanner from learning the route exists.
+// local selects the local door. Reaching it is the credential, so there is
+// nothing to authenticate, only a caller to name and register. The admin routes
+// are not mounted there at all, so a scanner gets 404 rather than learning they
+// exist.
 //
-// uplink is this node's repl client towards ITS OWN parent, nil when this
-// node has none (a root, or one not yet given a parent block) -- /healthz
-// reads its Status() so a Python chaski.Node (or an operator) can tell
-// "not yet enrolled" apart from "reachable and current" without shelling in
-// or scraping logs (colca-node design section 3.1 / gap 4).
+// uplink is the node's replication client toward its parent, nil without one.
+// /healthz reports its status, so chaski.Node or an operator can tell "not
+// enrolled yet" from "connected".
 func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, blobs *blobstore.Store, pubkey string, local bool, uplink *repl.Client, secretStores ...*secretstore.Store) http.Handler {
 	mux := http.NewServeMux()
 	var secretDB *secretstore.Store
@@ -132,24 +101,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		secretDB = secretStores[0]
 	}
 
-	// The body carries the payload base64-encoded inside a JSON envelope, so
-	// it is legitimately larger than the record itself: 2x covers base64's
-	// 4/3 inflation with room for the envelope's fields. Store.Append remains
-	// the authority on the record; this only stops a huge body being read
-	// into memory before that check can run.
+	// The payload is base64 inside a JSON envelope, so the body may be about twice the
+	// record cap. Store.Append still enforces the record cap; this only keeps a huge
+	// body out of memory.
 	maxPublishBody := int64(cfg.Limits.EffectiveMaxRecordBytes())*2 + 4096 //nolint:gosec // config caps max_record_bytes at 1 GiB
 
-	// writeJSON encodes to a buffer FIRST and only then touches the
-	// ResponseWriter. The alternative — encode straight to w after
-	// WriteHeader(code) — is what let the tombstone bug (rawPayload's doc
-	// comment above) reach a caller as a clean 200 with a totally empty
-	// body: the encode failed partway, the status line had already gone
-	// out, and there was nothing left to do but discard the error and send
-	// nothing. Every other 2xx/4xx/5xx path in this file builds its own `v`
-	// from data this handler already validated, so this is defense in
-	// depth against the NEXT value that turns out not to encode, not a fix
-	// for one contract — a caller gets a 500 it can act on instead of a 200
-	// it cannot tell apart from "nothing to report".
+	// writeJSON encodes into a buffer before touching the ResponseWriter, so an
+	// encoding failure becomes a 500 instead of a 200 with an empty body.
 	writeJSON := func(w http.ResponseWriter, code int, v any) {
 		var buf bytes.Buffer
 		if err := json.NewEncoder(&buf).Encode(v); err != nil {
@@ -176,44 +134,19 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 
 	var resolve func(r *http.Request) (caller, bool)
 	if local {
-		// The local door: the request arrived on a listener that cannot be
-		// reached from outside the deployment, so there is nothing to
-		// authenticate. The service names itself (X-Colca-Service) and is
-		// registered on first sight, exactly as on the local MQTT door
-		// (mqttsrv/local.go's authenticateLocal — kept in sync deliberately;
-		// the two doors differing here would be exactly the second path
-		// architecture principle 1 forbids).
+		// On the local door the listener is only reachable inside the deployment, so
+		// there is nothing to authenticate. The service names itself with
+		// X-Colca-Service and is registered on first sight, as on the local MQTT door
+		// (authenticateLocal); the two must stay in sync.
 		//
-		// Two checks refuse a name that resolves to a KEYED identity (a
-		// machine or child node), and both are needed — they catch it
-		// through different paths:
-		//
-		//   - reg.Get(name): a name that collides with some OTHER entry's
-		//     ULID. Register alone would not catch this — its own
-		//     uniqueness check is scoped to the byName index, a different
-		//     key space than byID — so presenting a machine's ULID as a
-		//     "name" here would otherwise fall straight through to
-		//     self-registration and silently mint an unrelated kind=local
-		//     entry.
-		//   - entry.MayUseDoor(uns.DoorLocal), checked AFTER Register
-		//     returns: uns.Entry.Validate permits a `name` field on
-		//     KindExternal and KindNode too, and Manager.Enroll indexes ANY
-		//     non-empty Name into byName regardless of kind. So an operator
-		//     who gives a machine or child node a friendly `name` makes it
-		//     resolvable by ByName — and Register's own idempotent-reconnect
-		//     path ("entry exists? return it, no kind check") would hand
-		//     that keyed identity's ULID to a credential-free local request.
-		//     This is the check that actually closes that hole: it asks the
-		//     domain a question rather than enumerating the ways a name
-		//     might resolve to something keyed, so it also subsumes the
-		//     Get(name) case above and any future kind.
+		// A name must never hand out a keyed identity (a machine or child node).
+		// reg.Get(name) catches a name that is another entry's ULID. MayUseDoor(DoorLocal)
+		// after Register catches a machine that was given a friendly name, which Register
+		// would otherwise return as is.
 		resolve = func(r *http.Request) (caller, bool) {
-			// Bearer = a person, forwarded by a local service acting AS them
-			// (node-side command authorization design §3B): the api hands
-			// the editor user's own token through instead of its service
-			// name, so the executor authorizes the person. Verified with the
-			// verifier the human doors use; a PRESENTED token that fails is
-			// 401 and never falls through to the service identity beside it.
+			// A bearer token is a person, forwarded by a local service acting for them, so
+			// the executor authorizes the person. A presented token that fails is 401 and
+			// never falls back to the service identity.
 			if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 				if ver == nil {
 					m.AuthReject(metrics.DoorLocal, tokenauth.ReasonBadToken)
@@ -253,11 +186,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return caller{entry: entry}, true
 		}
 	} else {
-		// resolve identifies the caller (auth §6.3). A presented client cert
-		// MUST resolve to an enrolled machine — an unknown cert never falls
-		// through to token auth. The admin token rejects everything when
-		// unconfigured: an empty token is a missing secret, not a permission
-		// to skip authentication.
+		// resolve identifies the caller. A presented client certificate must resolve to
+		// an enrolled machine and never falls through to token auth. An unconfigured admin
+		// token rejects everything.
 		resolve = func(r *http.Request) (caller, bool) {
 			if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 				pub, err := identity.PeerPubHex(r.TLS.PeerCertificates[0].Raw)
@@ -279,8 +210,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				}
 				return caller{entry: entry}, true
 			}
-			// Bearer = human (human-authz §5.3). A PRESENTED token that fails
-			// is 401 — it never falls through to the admin token check.
+			// Bearer means a human. A presented token that fails is 401 and never falls
+			// through to the admin token.
 			if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 				if ver == nil {
 					m.AuthReject(metrics.DoorHTTP, tokenauth.ReasonBadToken)
@@ -295,13 +226,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				}
 				return caller{entry: v.Entry, human: v}, true
 			}
-			// Constant-time compare: this is the unscoped admin credential, so a
-			// byte-at-a-time short-circuit on == would let a network attacker
-			// recover it one byte at a time via timing. ConstantTimeCompare
-			// still returns 0 immediately on a length mismatch — that leaks
-			// length, not content, and is accepted (design note above the
-			// guard: an empty configured token must never authorize anyone,
-			// which the != "" check ahead of the compare still guarantees).
+			// The admin token is compared in constant time so it cannot be recovered byte by
+			// byte through timing. A length mismatch still returns early, which leaks only
+			// the length. An empty configured token never authorizes; the != "" check
+			// guarantees that.
 			if cfg.API.Token != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Colca-Token")), []byte(cfg.API.Token)) == 1 {
 				return caller{admin: true}, true
 			}
@@ -345,9 +273,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			next(w, r, c)
 		}
 	}
-	// adminFor admits the static token AND humans carrying admin:# (§3):
-	// same routes, two credentials — human admin actions are attributable
-	// (sub in the log), token actions are not.
+	// adminFor admits the static token and humans holding admin:#. Human admin actions
+	// are attributable, token actions are not.
 	adminFor := func(class string, policy httplimit.Policy, next http.HandlerFunc) http.HandlerFunc {
 		return authFor(class, policy, func(w http.ResponseWriter, r *http.Request, c caller) {
 			if !c.admin && (c.human == nil || !c.human.Entry.IsAdmin()) {
@@ -369,14 +296,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		defer release()
-		// The ULID and pubkey are what enrolling this node at a parent needs. Enrollment
-		// happens BEFORE this node is trusted by anything, so both have to be
-		// readable at the one unauthenticated door.
+		// Enrolling this node at a parent needs its ULID and pubkey before anything trusts
+		// it, so both are readable at this unauthenticated door.
 		payload := map[string]any{"ok": true, "ulid": cfg.ULID, "pubkey": pubkey}
-		// uplink: what a Python chaski.Node.status() (or an operator) needs to
-		// tell "not yet enrolled" apart from "reachable and current" without a
-		// shell or a log tail. "none" is itself an answer, not an omission: a
-		// root (or a not-yet-parented) node genuinely has no uplink to report.
+		// uplink lets chaski.Node or an operator tell "not enrolled yet" from "connected"
+		// without reading logs. "none" is an answer: a root has no uplink.
 		switch {
 		case cfg.Parent == nil:
 			payload["uplink"] = map[string]any{"state": "none"}
@@ -413,13 +337,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			ActorID    string          `json:"actor_id"`
 			ActorLabel string          `json:"actor_label"`
 			ActorKind  string          `json:"actor_kind"`
-			// ActorGroups + FallbackReason: a local service attesting the
-			// group ids of a person it acts for when it cannot forward their
-			// token (node-side command authorization design §3B fallback —
-			// a background job after the request ended). The node resolves
-			// the ids against its own _Group definitions, so this narrows
-			// the service to the person's grants and never widens it; every
-			// use is logged here with the stated reason.
+			// ActorGroups and FallbackReason: a local service that cannot forward a person's
+			// token, such as a background job, attests their group ids instead. The node
+			// resolves them against its own _Group definitions, which narrows the service to
+			// the person's grants, and logs every use with the stated reason.
 			ActorGroups    []string `json:"actor_groups"`
 			FallbackReason string   `json:"fallback_reason"`
 		}
@@ -462,7 +383,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				ActorLabel: actorLabel, ActorKind: actorKind,
 			})
 		case c.human != nil:
-			// Humans command and nothing else (§5.2) — IngestHuman enforces it.
+			// Humans only send commands; IngestHuman enforces it.
 			actor := c.human.Username
 			if actor == "" {
 				actor = c.human.Sub
@@ -492,28 +413,15 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		}
 		if err != nil {
 			if errors.Is(err, store.ErrRecordTooLarge) {
-				// A DIFFERENT case from the MaxBytesReader arm above: that one
-				// trips on the raw HTTP body before JSON decode ever
-				// completes (a `return` inside the decode-error branch, so
-				// this code is unreachable for it — no double count), and
-				// counts m.RecordRejected itself since only this door sees
-				// that failure. This one is a record whose payload still fit
-				// inside the JSON envelope (§5 caps the record, not just the
-				// wire request) but is too large once decoded — Store.Append
-				// is what discovers that, so persistTSAttributed/
-				// ingestAdminStateBatch (engine.go) are where it is counted:
-				// the same call sites MQTT ingest goes through, so counting
-				// there covers both doors from one place.
+				// A record that fit the JSON envelope but exceeds the record cap once decoded.
+				// Store.Append finds it and the engine counts it, for MQTT and HTTP alike; the
+				// raw-body limit above returns early, so nothing is counted twice.
 				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": err.Error()})
 				return
 			}
-			// An authorization denial (rejectDenied: a machine outside its
-			// write zone, a human outside a cmd grant, a human publishing
-			// state, …) is "well-formed request, refused" → 403, the same
-			// status the admin-only and cursor-ownership checks in this door
-			// already use. Everything else that reaches here — grammar,
-			// unknown contract, payload validation — is "well-formed
-			// request, unacceptable content" → 422.
+			// An authorization denial is a well-formed request refused, 403, like the other
+			// ownership checks on this door. Grammar, unknown contracts and validation
+			// failures are unacceptable content, 422.
 			var re *engine.RejectError
 			if errors.Is(err, engine.ErrDenied) {
 				errors.As(err, &re)
@@ -534,34 +442,21 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		writeJSON(w, http.StatusOK, body)
 	}))
 
-	// GET /fetch reads from the cursor's current position and never advances it:
-	// reading is side-effect free, /ack is the only thing that moves a cursor.
+	// GET /fetch reads from the cursor's position and never moves it; only /ack does.
 	//
-	// Gap contract (spec §6.1): when the cursor's position is below the
-	// stream's LWM the response gains a "gap" object and records begin at the
-	// LWM (the pruned prefix is gone from disk, so Read starts there by
-	// construction). The gap does NOT move the cursor — the consumer sees the
-	// same gap on every fetch until it acks a record at or past the LWM. A
-	// brand-new cursor (position 1) on a long-pruned stream gets the gap too:
-	// a new consumer genuinely cannot see history. Unlike GET /downlink, next
-	// is never bumped past the hole here — /fetch is side-effect free and
-	// ack-driven, so a consumer with nothing readable past the LWM clears the
-	// gap by acking gap.to_offset (which puts its cursor exactly at the LWM).
+	// If the cursor is below the stream's LWM the response carries a gap object and
+	// records start at the LWM. The consumer sees the same gap until it acks at or
+	// past the LWM (gap.to_offset). A new cursor on a pruned stream gets the gap too.
 	//
-	// A machine caller sees only records inside its read grants — filtered, not
-	// erred: scope is a view, not a denial (the request itself is legitimate).
-	// The gap object rides OUTSIDE that filter on purpose: pruning is
-	// offset-based and stream-wide, so a cursor below the LWM has lost records
-	// regardless of which topics its grants cover — a consumer must learn its
-	// position is inside a hole even when every surviving record is filtered
-	// out of its view. The gap carries only stream offsets, which the same
-	// door already exposes to every authenticated caller via "next"; content
-	// stays grant-gated. Unauthenticated callers never reach the gap logic.
+	// Records are filtered by the caller's read grants, but the gap is not: pruning
+	// is stream-wide, so a consumer must learn it is in a hole even if every surviving
+	// record is outside its view. The gap only carries offsets, which "next" already
+	// exposes.
 	mux.HandleFunc("GET /fetch", authFor(limitClassFetch, fetchPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		q := r.URL.Query()
 		stream, cursor := q.Get("stream"), q.Get("cursor")
-		// An unknown stream is a malformed request, not an empty result — and
-		// it has no LWM, so the gap machinery must never see it.
+		// An unknown stream is a bad request, not an empty result, and has no LWM for the
+		// gap logic.
 		if e.Store().NextOffset(stream) == 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown stream " + strconv.Quote(stream)})
 			return
@@ -630,18 +525,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		from := e.Store().CursorGet(cursor, stream)
-		// tail=1 reads the END of the stream instead of the cursor's position.
-		//
-		// A cursor answers "what have I not seen yet", which is what a consumer
-		// wants and the wrong question for a viewer. A log or audit view asks
-		// "what happened most recently", and with a forward-only read from an
-		// unacked cursor the honest answer it got was the first N records ever
-		// written — the same boot messages forever, on a node that had been
-		// running for weeks.
-		//
-		// It does not move the cursor, because /fetch never does. A consumer
-		// and a viewer can therefore share one cursor name without the viewer
-		// costing the consumer its position.
+		// tail=1 reads the end of the stream instead of from the cursor. A viewer asks what
+		// happened most recently, which a forward read from an unacked cursor cannot
+		// answer. The cursor does not move, so a viewer and a consumer can share a cursor
+		// name.
 		if q.Get("tail") != "" {
 			head := e.Store().NextOffset(stream)
 			if head > uint64(limit) {
@@ -677,19 +564,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		writeJSON(w, http.StatusOK, resp)
 	}))
 
-	// POST /ack: the client acks the last PROCESSED offset, the store holds the
-	// next offset to read — hence offset+1. Cursors are namespaced by
-	// uns.Entry.CursorPrefix ({ulid}/... for a machine or human, c/{name}/...
-	// for a local service) so one identity can never move another's cursor.
+	// POST /ack acks the last processed offset; the store keeps the next offset to
+	// read, hence offset+1. Cursors are namespaced by uns.Entry.CursorPrefix, so no
+	// identity can move another's cursor.
 	//
-	// "delete": true retires the cursor instead of moving it (mutually
-	// exclusive with "offset" — when set, offset is ignored and no ack
-	// happens). This is what lets a consumer that mints a fresh cursor name
-	// on every rebuild (the dataops evaluator's "generation" cursors: colca
-	// cursors only move forward, so re-reading a stream needs a new name)
-	// retire the one it is replacing, instead of leaving it to linger forever
-	// and hold back retention pruning. Same ownership guard as the ack path:
-	// an identity may only delete cursors under its own prefix.
+	// "delete": true retires the cursor instead and ignores offset. A consumer that
+	// mints a new cursor name per rebuild uses it to drop the old one, which would
+	// otherwise hold back retention. The same ownership rule applies.
 	mux.HandleFunc("POST /ack", authFor(limitClassWrite, writePolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxAckBodyBytes)
 		var in struct {
@@ -737,22 +618,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		prefix := r.URL.Query().Get("prefix")
-		// contract narrows the page to a set of uns contracts (repeatable,
-		// e.g. ?contract=_Group&contract=_MetadataType); absent means every
-		// contract, as before this parameter existed. Each name is validated
-		// against plugins/uns's vocabulary — the one place contract names are
-		// defined (architecture principle 4) — rather than let an unknown
-		// name silently match nothing.
+		// contract narrows the page to the given contracts (repeatable). Unknown names are
+		// rejected rather than silently matching nothing.
 		contracts := r.URL.Query()["contract"]
 		for _, ct := range contracts {
-			// Through the ENGINE's authority, not uns's builtin table alone:
-			// a node that loaded a schema bundle stores bundle-declared
-			// contracts too, and `Engine.ClassOf` is the one authority every
-			// other routing decision uses (its own doc comment says so).
-			// Validating here against the builtins refused `_DataTags` — a
-			// retained, KV-projected catalogue the connector reads back at
-			// startup — with 400, which is how a filter meant to keep a scan
-			// bounded stopped every connector from publishing its catalogue.
+			// Check through the engine's authority, not uns's builtin table: bundle-declared
+			// contracts such as _DataTags are stored too, and connectors read their catalogue
+			// back through this filter.
 			if !uns.IsKnown(e.ClassOf(ct)) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("unknown contract: %q", ct)})
 				return
@@ -764,12 +636,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid page token"})
 				return
 			}
-			// A storage-layer failure, not "no entries" — answering 200 with
-			// an empty list here would tell a caller a prefix holds nothing
-			// when the truth is the scan itself never completed. The response
-			// body stays static (no err.Error()) so a storage-layer detail
-			// such as a filesystem path never reaches the caller; the real
-			// error still reaches operators through the log.
+			// A failed scan is not an empty prefix. The body stays generic so storage details
+			// such as paths stay off the wire; the log has the error.
 			slog.Default().Error("kv scan failed", "prefix", prefix, "err", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "scan failed"})
 			return
@@ -796,24 +664,16 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		writeJSON(w, http.StatusOK, map[string]any{"entries": out, "next": next})
 	}))
 
-	// GET /self is the local service's bootstrap view of the registry entry
-	// the door resolved for this request. It is deliberately local-only: a
-	// service needs the ULID minted during self-registration and its CURRENT
-	// mount in order to publish an identity-bearing catalogue at the right
-	// topic. Neither fact is metadata the service may guess from visible KV
-	// records. The entry remains the single source of truth, so an operator's
-	// reparent is reflected immediately and a stale X-Colca-Mount declaration
-	// never moves it back.
-	// The resource-file route (resources design §6) is mounted on BOTH doors:
-	// it is the ONLY way a file is read anywhere except the raw local/repl
-	// digest routes, whose own trust model (deployment-network reachability,
-	// parent pinning) is the authorization. On the local door a caller is
-	// either a forwarded human Bearer — authorized as that person, exactly as
-	// an Edit command is (node-side command authorization design §3B) —
-	// or a plain local-service identity, authorized by its own placement; no
-	// credential is 401 there, as it always was. Every read still passes
-	// through a resource id so the element-scoped grant check always runs —
-	// a digest is a pointer, never a capability, on either door.
+	// GET /self is a local service's view of its own registry entry: the ULID minted
+	// at self-registration and its current mount, which it needs to publish its
+	// catalogue at the right topic. The entry decides, so an operator's move shows at
+	// once.
+	//
+	// The resource-file route is mounted on both doors and is the only way to read a
+	// file outside the raw local and replication digest routes. Every read goes
+	// through a resource id, so the element grant check always runs. On the local door
+	// a forwarded bearer is authorized as that person and a plain local service by its
+	// placement; no credential is 401.
 	mountResourceRoutes(mux, e, blobs, m, writeJSON, authFor)
 
 	if local {
@@ -828,9 +688,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				var ok bool
 				mount, ok = e.Elements().PathOf(c.entry.Element)
 				if !ok {
-					// A bound entry whose element is absent from this node's
-					// namespace is inconsistent state. Never collapse it into
-					// the unplaced position: that would silently widen scope.
+					// An entry bound to an element missing from this node's namespace is
+					// inconsistent. Never treat it as unplaced; that would widen its scope.
 					writeJSON(w, http.StatusConflict, map[string]any{
 						"error": "the local service's bound element is not present in this node's namespace",
 					})
@@ -843,9 +702,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				"node":    e.NodeID(),
 				"element": c.entry.Element,
 				"mount":   mount,
-				// The upload caps a local service must respect. One owner
-				// for the number: a caller reads it here instead of holding
-				// its own copy of cfg.Limits (resources design §5).
+				// The upload caps a local service must respect, read here instead of copying the
+				// config.
 				"limits": map[string]any{
 					"max_record_bytes": cfg.Limits.EffectiveMaxRecordBytes(),
 					"max_blob_bytes":   cfg.Limits.EffectiveMaxBlobBytes(),
@@ -854,19 +712,15 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		}))
 	}
 
-	// Admin routes: never mounted on the local door at all (design §4) — a
-	// route that was never registered 404s, which tells a caller nothing;
-	// a route that exists and refuses would 403, which confirms it exists.
-	// Provisioning identities is not a local service's job; reading and
-	// writing the node's own data is.
+	// Admin routes are never mounted on the local door: an unregistered route 404s and
+	// reveals nothing, while a refusing one would confirm it exists.
 	if !local {
 		if secretDB != nil {
 			mountAdminSecretRoutes(mux, secretDB, writeJSON, adminFor)
 		}
 
-		// The enrollment door (auth §4): the ONLY write path for registry
-		// entries, admin-guarded. Local-only — downward provisioning
-		// via a _CmdAdmin flow is the intended direction.
+		// The enrollment door is the only write path for registry entries and requires
+		// admin.
 		mux.HandleFunc("POST /enroll", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
 			r.Body = http.MaxBytesReader(w, r.Body, maxEnrollBodyBytes)
 			body, err := readBody(r)
@@ -893,12 +747,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 
 		mux.HandleFunc("DELETE /enroll/{ulid}", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
 			ulid := r.PathValue("ulid")
-			// Move-drain design §3.1/§3.4: DELETE stays the immediate kill-switch
-			// — no drain precondition ever creeps into registry.Revoke itself
-			// (unchanged below). wasDraining is read by Revoke under its OWN
-			// lock, atomically with the removal — no separate pre-check call, no
-			// window for a concurrent POST .../drain to start and finish
-			// unaccounted between a check and this revoke.
+			// DELETE stays an immediate kill switch with no drain precondition. Revoke reports
+			// wasDraining under its own lock, so a concurrent drain cannot slip in between a
+			// check and the revoke.
 			off, wasDraining, err := reg.Revoke(ulid)
 			if err != nil {
 				if errors.Is(err, registry.ErrNotEnrolled) {
@@ -914,14 +765,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "offset": off})
 		}))
 
-		// Move-drain design §3.1: a deliberate, admin-initiated decommission of a
-		// kind=node child, distinct from the DELETE kill-switch above — the
-		// child stays fully functional (connects, fetches /downlink, acks) while
-		// its queue drains, and new commands addressed under its mount are
-		// rejected at admission (engine draining check, reason "draining"). The
-		// node auto-revokes through the same Revoke path once the completion
-		// predicate holds (repl.Server.evaluateDrain), or immediately via DELETE
-		// above (outcome "forced").
+		// POST /enroll/{ulid}/drain decommissions a child node: it keeps working while its
+		// queue drains, and new commands under its mount are refused. The node revokes it
+		// when the drain completes, or immediately on DELETE (outcome "forced").
 		mux.HandleFunc("POST /enroll/{ulid}/drain", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
 			ulid := r.PathValue("ulid")
 			off, err := reg.Drain(ulid)
@@ -936,10 +782,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				writeJSON(w, code, map[string]any{"error": err.Error()})
 				return
 			}
-			// colca_drains_active is incremented by reg.Drain itself (registry
-			// design: a state transition it fully understands owns its own
-			// metric, the same way Enroll owns firing kick/deliver) — nothing to
-			// do here.
+			// reg.Drain increments colca_drains_active itself.
 			writeJSON(w, http.StatusOK, map[string]any{"ulid": ulid, "offset": off, "status": uns.StatusDraining})
 		}))
 
@@ -955,9 +798,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 
 		mux.HandleFunc("GET /debug/state", adminFor(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request) {
 			streams := map[string]any{}
-			// Derived, not listed: this route is what the test harnesses read
-			// to learn a node's stream set, so a copy here would let their
-			// coverage drift from what the store actually holds.
+			// Derived from the store: test harnesses read a node's stream set here, so a copy
+			// could drift.
 			for _, st := range store.Streams() {
 				streams[st] = map[string]any{"next_offset": e.Store().NextOffset(st)}
 			}
@@ -968,16 +810,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	return mux
 }
 
-// ownsCursor: whether the caller may move this cursor itself. The whole rule
-// is a domain question, so it is answered in one place (uns.Entry.OwnsCursor):
-// the caller's own prefix — ULID-prefixed for every keyed identity,
-// name-prefixed for a local service, which never learns the ULID Register
-// minted for it (local-service-trust design §4) — minus the cursors the node
-// alone may write, which today means the command delivery floor.
-//
-// The predicate is nil-safe, so a future caller that forgets today's
-// `c.entry != nil && !ownsCursor(...)` guard gets "owns nothing" rather than a
-// panic, which is the correct answer anyway.
+// ownsCursor reports whether the caller may move this cursor
+// (uns.Entry.OwnsCursor): its own prefix, ULID-based for keyed identities and
+// name-based for local services, minus the cursors only the node writes. It is
+// nil-safe: no entry owns nothing.
 func ownsCursor(e *uns.Entry, cursor string) bool {
 	return e.OwnsCursor(cursor)
 }

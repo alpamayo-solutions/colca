@@ -1,14 +1,8 @@
-// Composing the `model` intent: assigning a data model to a system element,
-// and unassigning one.
-//
-// It is its own file because it is the only intent that composes a SUBTREE.
-// Every other composer decides about one entity and the position it occupies;
-// this one walks a model's slots, resolves each against what the element
-// already has — adopting a matching signal, minting one the caller
-// pre-generated an id for, descending into a child element and its own
-// model — and answers 409 the moment two slots want the same thing. Like the
-// other composers it never writes: it either returns the whole subtree's
-// records or none of them, which is what makes a recursive assign atomic.
+// The model intent assigns a data model to a system element, or unassigns
+// one. It is the only intent that composes a subtree: it walks the model's
+// slots, adopts matching signals, creates the ones the caller supplied ids for,
+// and descends into child elements and their models. Like every composer it
+// never writes, so a recursive assign is all or nothing.
 
 package uns
 
@@ -19,13 +13,10 @@ import (
 	"sort"
 )
 
-// modelSlot is the part of a _DataModel slot the compose logic needs: what it
-// is called, whether it is measured or engineered, its canonical type, and
-// the semantic type (a _SemanticTag NAME, not id) it requires. DeclaredBy is
-// the model whose YAML originally declared the slot (data_models/loader.py)
-// — a model that merely inherits a computed slot via extends: carries its
-// parent's declared_by, which is what lets an ancestor/descendant pair share
-// one computed slot without that being two independent facts.
+// modelSlot is the part of a _DataModel slot compose needs: name, kind,
+// canonical type and required semantic tag name. DeclaredBy is the model whose
+// YAML declared the slot; a model that inherits it via extends keeps the
+// parent's value, so the two share one computed slot.
 type modelSlot struct {
 	Key          string `json:"key"`
 	Kind         string `json:"kind"`
@@ -35,37 +26,31 @@ type modelSlot struct {
 	Required     bool   `json:"required"`
 	Description  string `json:"description"`
 	DeclaredBy   string `json:"declared_by"`
-	// ChildModel is the referenced model's name for a "child" slot authored
-	// with children: [{child_model: Model}]; empty for a plain structural
-	// child (a children: entry with no child_model).
+	// ChildModel is the referenced model for a child slot written as
+	// children: [{child_model: Model}]; empty for a plain child.
 	ChildModel string `json:"child_model"`
-	// EntityName is the child's name: the slot key by default, or the
-	// entity_name: override recorded in the YAML. Always non-empty for a
-	// "child" slot.
+	// EntityName is the child's name: the slot key, or the entity_name
+	// override from the YAML. Never empty for a child slot.
 	EntityName string `json:"entity_name"`
 }
 
-// dataModelManifest is the part of a _DataModel record composeModel reads.
-// The manifest is authored as YAML and compiled by the loader, then carried
-// down the definitions stream (colca_data_contracts/data_models/loader.py);
-// this struct only names the fields the executor consumes, not every field
-// the record carries.
+// dataModelManifest holds the fields of a _DataModel record composeModel
+// reads. The loader compiles the YAML, and the record arrives on the
+// definitions stream.
 type dataModelManifest struct {
 	ID    string      `json:"id"`
 	Name  string      `json:"name"`
 	Slots []modelSlot `json:"slots"`
 }
 
-// slotDataTypes maps a slot's canonical data_type (semantic-types design §3)
-// to the _Signal contract's own data_type vocabulary.
+// slotDataTypes maps a slot's canonical data_type to the _Signal data_type
+// vocabulary.
 var slotDataTypes = map[string]string{
 	"boolean": "boolean", "integer": "int", "number": "float", "string": "string", "json": "json",
 }
 
-// modelPlanState is the mutable state threaded through one recursive model
-// compose (assign or unassign). It is shared across every level of the tree
-// so path-collision detection and the pending-write set stay whole-batch,
-// not per-element.
+// modelPlanState is the state shared across one recursive model compose, so
+// collision checks and pending writes cover the whole batch.
 type modelPlanState struct {
 	entities   map[string]editSnapshot
 	manifests  map[string]dataModelManifest
@@ -74,68 +59,35 @@ type modelPlanState struct {
 	queue      func(string, map[string]json.RawMessage) error
 	tagsByName map[string]string
 	tagsLoaded bool
-	// signalPaths/elementPaths are whole-store occupancy sets (every
-	// existing signal/constant path, every existing system-element path),
-	// grown as this batch queues new creates — a create anywhere in the
-	// tree must not collide with a foreign entity OR a sibling create.
+	// signalPaths and elementPaths hold every occupied signal, constant and
+	// element path, plus this batch's creates, so a create collides with
+	// neither an existing entity nor a sibling create.
 	signalPaths  map[string]bool
 	elementPaths map[string]bool
-	// takenIDs is the same kind of occupancy set for IDENTITY rather than
-	// position: every entityVersionKey the store already holds, grown as
-	// this batch queues new creates. A create's id comes from the caller's
-	// intent.Creates map, and nothing else here checks it is free — so
-	// without this an id naming an existing entity is written verbatim at a
-	// NEW path, leaving two retained records under one identity. That state
-	// is unreachable by any other route and wedges the whole node: snapshot()
-	// answers "duplicate retained identity" and every subsequent edit
-	// command at that node 409s until an operator removes a record by hand.
-	// The projector applies it as a rename+reparent of the victim into the
-	// caller's subtree, which no grant anywhere authorized.
-	//
-	// This is a BACKSTOP, not the primary guard, and it is per-node by
-	// construction: `entities` (see below) comes from snapshot(), which scans
-	// `w.store.KVScan(contract, w.store.NodeID())` -- this node's own records
-	// only. A create id that names an entity at ANOTHER node is invisible to
-	// this map and reaches compose unrefused; a client that checks ids across
-	// nodes before submitting is what closes that case.
+	// takenIDs does the same for ids: every entity id the store holds plus
+	// this batch's creates. Without it a create id naming an existing entity
+	// would be written at a new path, leaving one id at two paths, which
+	// breaks snapshot() and every later edit at the node. It only sees this
+	// node's records; ids at other nodes are the client's to check.
 	takenIDs map[string]bool
-	// visiting is the cycle guard shared by resolveModelSlots and
-	// releaseModelSlots: keyed by elementID+"\x00"+modelName, an entry is
-	// present only while that (element, model) pair is on the CURRENT
-	// recursion path (pushed on entry, popped via defer on exit) — a
-	// hand-authored definition/upsert can create a child_model cycle AND a
-	// parent_id cycle in the entity graph at once, which the Python
-	// compiler's compile-time check cannot see, so this is the only thing
-	// standing between that input and an unbounded recursion.
+	// visiting guards resolveModelSlots and releaseModelSlots against cycles:
+	// an element+model key is present while that pair is on the current
+	// recursion path. A hand-written child_model cycle combined with a
+	// parent_id cycle would otherwise recurse forever.
 	visiting map[string]bool
-	// stillMandated is populated only for unassign, once, before release
-	// walks the removed models: the set of (childID, modelName) pairs the
-	// still-DESIRED models independently mandate. releaseModelSlots must
-	// never strip a model name (or touch/recurse into its subtree) that
-	// this set still names — two desired models can mandate the very same
-	// child via the very same child_model, and removing only one of them
-	// must not release what the other still requires.
+	// stillMandated, set only for unassign, holds the (child, model) pairs
+	// the remaining models still mandate. releaseModelSlots never releases
+	// those, since two models can mandate the same child model.
 	stillMandated map[string]bool
 }
 
-// claimID takes the identity a create slot asked for, or refuses the whole
-// command. An id is free only if the store does not already hold an entity of
-// that kind under it AND no earlier create in this same batch claimed it —
-// exactly the two halves signalPaths/elementPaths cover for position, and for
-// the same reason: a batch that half-checks either one can still queue two
-// records under one identity.
-//
-// Refusing is a 409 like every other conflict here, and — because compose
-// never writes — it costs zero StateRecords: the command is answered before
-// anything is committed, so the node is left exactly as it was.
-//
-// This is deliberately the same shape composeCreate and composeBinding's
-// create_signal_and_bind already use for their own caller-supplied ids. The
-// model intent was the one create path that did not check.
+// claimID takes the id a create slot asked for, or refuses the command with
+// a 409. An id is free only if the store has no entity of that kind under it
+// and no earlier create in the batch claimed it. Nothing has been written yet,
+// so a refusal leaves the node unchanged.
 func (state *modelPlanState) claimID(kind, id, slotPath string) (int, string) {
-	// An element id becomes a grant zone once grantsync registers it, so a
-	// slot may not mint one that is a wildcard rather than an identity — see
-	// ValidElementID. Signal ids never reach the grant grammar.
+	// Element ids become grant zones, so a slot may not mint a wildcard;
+	// see ValidElementID. Signal ids never reach the grant grammar.
 	if kind == "system-element" {
 		if err := ValidElementID(id); err != nil {
 			return 422, fmt.Sprintf("model: slot %q: %v", slotPath, err)
@@ -168,10 +120,9 @@ func (w *EditExec) resolveSemanticTag(state *modelPlanState, name string) (strin
 	return id, ok
 }
 
-// modelSlotPath joins a parent slot path with a slot key: "" + "drive_end_bearing"
-// -> "drive_end_bearing"; "drive_end_bearing" + "vibration" ->
-// "drive_end_bearing/vibration" (spec §4/§5's slot-path convention, shared
-// verbatim with the Python plan/creates keying).
+// modelSlotPath joins a parent slot path and a key: "" + "bearing" is
+// "bearing", "bearing" + "vibration" is "bearing/vibration". The Python plan
+// keys creates the same way.
 func modelSlotPath(path, key string) string {
 	if path == "" {
 		return key
@@ -228,9 +179,8 @@ func modelsRemoved(original, desired []string) []string {
 	return removed
 }
 
-// directChildrenByName indexes the direct system-element children of
-// parentID by name, the lowest id winning a duplicate name (same
-// determinism rule as signal-name matching).
+// directChildrenByName indexes parentID's direct element children by name;
+// the lowest id wins a duplicate name.
 func directChildrenByName(entities map[string]editSnapshot, parentID string) map[string]editSnapshot {
 	type candidate struct {
 		id     string
@@ -262,16 +212,10 @@ func directChildrenByName(entities map[string]editSnapshot, parentID string) map
 	return byName
 }
 
-// mandatedChildModels computes, read-only, the full set of (childID,
-// modelName) pairs that "models" mandates when walked against whichever
-// children currently EXIST under "element" — no writes, no creation of
-// missing children (a missing child mandates nothing yet). This is what lets
-// releaseModelSlots tell "still mandated by a model that stays desired" apart
-// from "no longer mandated by anything", so unassigning one of two models
-// that independently name the same child does not release what the other
-// still requires (spec §4 unassign). It carries its own cycle guard, local to
-// this call, for the same hand-authored-cycle reason resolveModelSlots and
-// releaseModelSlots do.
+// mandatedChildModels returns the (child, model) pairs models mandate for the
+// children that exist under element, without writing or creating anything.
+// Unassign uses it so removing one of two models that name the same child keeps
+// what the other requires. It has its own cycle guard.
 func (w *EditExec) mandatedChildModels(
 	element editSnapshot,
 	models []string,
@@ -333,17 +277,11 @@ func (w *EditExec) mandatedChildModels(
 	return mandated, 0, ""
 }
 
-// composeModel implements the edit "model" intent: assigning or
-// unassigning a system element's desired _DataModel implements list.
-//
-// "models" always names the FULL desired list (spec §6) — assign sends the
-// list with additions, unassign sends it shrunk — so the root element update
-// is the same write either way. "assign" recursively resolves every slot of
-// every desired model — signals AND mandated children — against the whole
-// tree in one atomic batch (child-model design §4); "unassign" recomputes
-// the mandated tree of whichever models were REMOVED and strips just those
-// model names from the mandated children's own implements, recursively.
-// Neither action ever deletes an element or a signal.
+// composeModel implements the model intent: assign or unassign models on a
+// system element. "models" is always the full desired list, so the element
+// update is the same for both. Assign resolves every slot of every model,
+// signals and child elements, in one batch; unassign strips the removed models
+// from the mandated children. Neither deletes an element or a signal.
 func (w *EditExec) composeModel(
 	intent editIntent,
 	expected map[string]uint64,
@@ -362,9 +300,7 @@ func (w *EditExec) composeModel(
 		return code, "model: " + message, resultFor(code), nil
 	}
 
-	// Load every _DataModel definition visible at this node (definitions
-	// descend from any authoring node — same access pattern groups.go uses
-	// for _Group).
+	// Load every _DataModel definition visible at this node.
 	manifests := map[string]dataModelManifest{}
 	for _, rec := range w.store.KVScanAll("_DataModel") {
 		var m dataModelManifest
@@ -434,10 +370,8 @@ func (w *EditExec) composeModel(
 		}
 	}
 
-	// The root element update is the same for both actions: "implements"
-	// becomes the full desired list the caller sent, verbatim. Queue it only
-	// if it actually changes something — an identical re-assign with no slot
-	// work must not manufacture a write, mirroring composeUpdate's no-op path.
+	// implements becomes the full list the caller sent. Queue the update
+	// only if it changes something, so a repeated assign writes nothing.
 	elementPayload := cloneRawMap(element.Payload)
 	elementPayload["id"] = rawJSON(intent.Entity.ID)
 	elementPayload["implements"] = rawJSON(desired)
@@ -464,19 +398,11 @@ func (w *EditExec) composeModel(
 	return 200, fmt.Sprintf("model %s: %s now implements %v", verb, intent.Entity.ID, desired), "ok", records
 }
 
-// resolveModelSlots is composeModel's recursive assign engine (child-model
-// design §4). It matches every slot of every model in "models" against
-// "element": signal slots against the element's own signals (exactly as the
-// flat implementation did), child slots against the element's direct
-// system-element children by exact entity_name. A matched child gains any
-// newly-mandated model names in its own "implements" (dedup, list
-// semantics); a missing REQUIRED child is created from intent.Creates
-// (keyed by the slot path, spec §4.2) with its own initial "implements".
-// Either way, resolveModelSlots then recurses into that child with whatever
-// models its slot mandated, at "path" extended by the slot key — so a whole
-// mandated subtree resolves into ONE pending batch before anything commits.
-// It queues nothing and returns a non-zero code on any conflict anywhere in
-// the subtree, exactly as the flat implementation did for one element.
+// resolveModelSlots is the recursive assign. Signal slots match the element's
+// signals, child slots its direct children by entity_name. A matched child
+// gains the newly mandated models in its implements; a missing required child
+// is created from intent.Creates, keyed by slot path. It then recurses into the
+// child, so the whole subtree ends up in one batch. Any conflict returns a code.
 func (w *EditExec) resolveModelSlots(
 	state *modelPlanState,
 	element editSnapshot,
@@ -485,13 +411,10 @@ func (w *EditExec) resolveModelSlots(
 ) (int, string) {
 	elementID, _ := rawString(element.Payload["id"])
 
-	// Cycle guard: a hand-authored child_model reference cycle combined with
-	// a parent_id cycle in the entity graph would otherwise recurse forever
-	// (the Python compiler's cycle check cannot see this — it only inspects
-	// the model graph, never entity data). Revisiting the same (element,
-	// model) pair on the CURRENT recursion path is the cycle; pop on exit so
-	// a legitimately re-used element/model pair reached via a different,
-	// non-cyclic branch is unaffected.
+	// Cycle guard: revisiting an (element, model) pair on the current path
+	// is a cycle. The Python compiler only checks the model graph, not
+	// entity data. The entry is removed on exit, so other branches may
+	// reuse the pair.
 	for _, name := range models {
 		if state.visiting[elementID+"\x00"+name] {
 			return 409, fmt.Sprintf(
@@ -508,12 +431,8 @@ func (w *EditExec) resolveModelSlots(
 		}
 	}()
 
-	// Rule: every non-child slot of every desired model must name a known
-	// canonical data_type — an unrecognized one must not silently become ""
-	// and land on a created signal. A "child" slot's data_type is always ""
-	// by construction (the loader never sets one for a children: entry) and
-	// is not a canonical type at all, so it is exempt from this check
-	// (child-model design §3).
+	// Every non-child slot must name a known data_type; an unknown one must
+	// not become "" on a created signal. Child slots have no data_type.
 	for _, name := range models {
 		for _, slot := range state.manifests[name].Slots {
 			if slot.Kind == "child" {
@@ -525,12 +444,10 @@ func (w *EditExec) resolveModelSlots(
 		}
 	}
 
-	// Rule: two desired models may not both compute the same slot key (one
-	// computer per signal) UNLESS it is the same fact — an ancestor and a
-	// descendant that both carry the slot via MRO flattening share one
-	// declared_by, and that is one computed slot, not two. Two desired
-	// models requiring the same signal slot key must also agree on its
-	// data_type and semantic_type.
+	// Two desired models may not compute the same slot unless it is the
+	// same slot inherited from one declaration (same declared_by). Models
+	// requiring the same signal slot must agree on data_type and
+	// semantic_type.
 	type computer struct{ model, declaredBy string }
 	computedBy := map[string]computer{}
 	type requirement struct {
@@ -540,19 +457,11 @@ func (w *EditExec) resolveModelSlots(
 	requiredSignals := map[string]requirement{}
 	signalOrder := []string{}
 
-	// Child slots sharing a key merge instead of conflicting (a
-	// child slot IS a plain child plus an implements requirement, and
-	// implements is a list) — every model that names a child_model at this
-	// key gets applied to the same child, all mandating models recursed
-	// into together below. Two DIFFERENT keys resolving to the same
-	// entity_name is a different case: it is an authoring error, not a
-	// merge, because matching two independent childRequirement entries
-	// against the very same physical child would let the second one silently
-	// overwrite the first's queued implements update (both would key off the
-	// SAME topic in "pending", and the loop only ever holds one local copy of
-	// the child's payload at a time — nothing propagates the first's addition
-	// before the second reads it). childNameOwner catches this before either
-	// entry is ever matched or written.
+	// Child slots with the same key merge: every child_model at that key is
+	// applied to the same child. Two different keys with the same
+	// entity_name are an authoring error, because the second would
+	// overwrite the first's queued update of that child; childNameOwner
+	// catches it first.
 	type childRequirement struct {
 		slot        modelSlot
 		model       string
@@ -626,10 +535,8 @@ func (w *EditExec) resolveModelSlots(
 		return 0, ""
 	}
 
-	// Index the element's own signals by name — the slot-matching key — in
-	// deterministic (ascending id) order, so a duplicate name under one
-	// element always resolves to its LOWEST-id signal regardless of map
-	// iteration order.
+	// Index the element's signals by name in ascending id order, so a
+	// duplicate name always resolves to its lowest-id signal.
 	type ownedSignal struct {
 		id     string
 		entity editSnapshot
@@ -822,15 +729,10 @@ func (w *EditExec) resolveModelSlots(
 	return 0, ""
 }
 
-// releaseModelSlots is composeModel's recursive unassign engine. "models"
-// names the model(s) just REMOVED from element's implements; for each of
-// their child slots, it finds the existing matching child (by entity_name)
-// and — if present, and not still mandated by a model that stays desired
-// (state.stillMandated) — strips that child_model name from the child's own
-// implements, then recurses into what THAT child_model itself mandated
-// (spec §4 unassign). A child that was never created, or never carried the
-// mandated name, is left exactly as it is: unassign only ever shrinks
-// implements lists, never creates, adopts, or deletes anything.
+// releaseModelSlots is the recursive unassign. For each child slot of the
+// removed models it finds the existing child and, unless a remaining model
+// still mandates it, strips that child_model from the child's implements and
+// recurses. It only shrinks implements lists; it never creates or deletes.
 func (w *EditExec) releaseModelSlots(
 	state *modelPlanState,
 	element editSnapshot,
@@ -839,9 +741,7 @@ func (w *EditExec) releaseModelSlots(
 ) (int, string) {
 	elementID, _ := rawString(element.Payload["id"])
 
-	// Same cycle guard as resolveModelSlots (see its comment): a
-	// hand-authored child_model cycle plus a parent_id cycle in the entity
-	// graph would otherwise recurse forever here too.
+	// Same cycle guard as resolveModelSlots.
 	for _, name := range models {
 		if state.visiting[elementID+"\x00"+name] {
 			return 409, fmt.Sprintf(
@@ -858,21 +758,11 @@ func (w *EditExec) releaseModelSlots(
 		}
 	}()
 
-	// Aggregate every child_model to release per slot KEY before ever
-	// touching childrenByName — the same childNameOwner-style pass
-	// resolveModelSlots runs before its own childrenByName loop (see its
-	// comment above requiredChildren). Without this, childrenByName is read
-	// once per REMOVED model's slot straight from a map built once at the
-	// top of this call: a second slot key that resolves to the same
-	// entity_name as an earlier one reads a snapshot the earlier key's
-	// queued write never touched, so its own write recomputes "implements"
-	// from that stale, ORIGINAL list and overwrites the first's queued
-	// record at the same topic — silently reverting the first model's
-	// release while still returning 200 (the exact last-write-wins bug the
-	// assign side's childNameOwner guard already prevents). Two DIFFERENT
-	// keys resolving to the same entity_name is an authoring error here too,
-	// not a merge; two models sharing the SAME key still merge onto one
-	// child, released together in one pass below.
+	// Group the child models to release by slot key before touching
+	// childrenByName, as resolveModelSlots does. Otherwise a second key with
+	// the same entity_name would recompute implements from the original
+	// list and silently revert the first release. Different keys with the
+	// same entity_name are an authoring error; the same key merges.
 	type releaseTarget struct {
 		entityName  string
 		childModels []string
@@ -884,9 +774,8 @@ func (w *EditExec) releaseModelSlots(
 	for _, name := range models {
 		manifest, ok := state.manifests[name]
 		if !ok {
-			// A previously-assigned model whose definition no longer
-			// exists: nothing left to recompute against, so there is
-			// nothing to release below it either.
+			// The model definition no longer exists, so there is nothing to
+			// release below it.
 			continue
 		}
 		for _, slot := range manifest.Slots {
@@ -928,10 +817,8 @@ func (w *EditExec) releaseModelSlots(
 		toRelease := make([]string, 0, len(rt.childModels))
 		for _, childModel := range rt.childModels {
 			if state.stillMandated[childID+"\x00"+childModel] {
-				// A model that stays desired independently mandates this
-				// exact child_model on this exact child — leave it, and everything below it, exactly
-				// as it is. Nothing about it is read or written, so it
-				// needs no expected version either.
+				// A remaining model still mandates this child_model on this child:
+				// leave it and everything below it alone.
 				continue
 			}
 			toRelease = append(toRelease, childModel)

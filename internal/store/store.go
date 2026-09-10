@@ -1,6 +1,6 @@
-// Package store implements Colca's durable storage: append-only streams with
-// gapless offsets on top of Pebble, plus a KV projection written atomically
-// with the records that produce it.
+// Package store is Colca's durable storage: append-only streams with gapless
+// offsets on Pebble, and a KV projection written in the same batch as the
+// records that produce it.
 package store
 
 import (
@@ -23,26 +23,21 @@ import (
 // streams is the fixed set of streams a store maintains offsets for.
 var streams = []string{"metrics", "entities", "commands", "definitions", "audit", "alarms", "annotations", "logs"}
 
-// Streams is the stream set every other package must ASK for rather than
-// restate. A hand-written copy elsewhere cannot detect that this list grew,
-// which is how a stream ends up outside a check that looks like it covers
-// everything — and a check that covers less is still green. The returned
-// slice is a copy: callers iterate it, they do not own it.
+// Streams returns the stream set. Other packages should ask for it instead of
+// keeping a copy that silently misses a new stream. The result is a copy.
 func Streams() []string {
 	out := make([]string, len(streams))
 	copy(out, streams)
 	return out
 }
 
-// ErrRecordTooLarge is returned by Append when a record's payload exceeds the
-// configured cap (resources design §5). It is an INGRESS guard: replication
-// never checks it, because refusing a record a child already stored would
-// wedge that child's uplink on it forever.
+// ErrRecordTooLarge is returned by Append when a payload exceeds the configured
+// cap. Only ingress checks it: refusing a record a child already stored would
+// block that child's uplink forever.
 var ErrRecordTooLarge = errors.New("record payload exceeds the configured limit")
 
-// ErrInvalidPageToken marks a malformed or prefix-mismatched KV page token.
-// Tokens are opaque wire values; callers must return the token exactly as the
-// previous page supplied it.
+// ErrInvalidPageToken marks a malformed KV page token, or one issued for another
+// prefix. Callers pass tokens back unchanged.
 var ErrInvalidPageToken = errors.New("invalid KV page token")
 
 type Record struct {
@@ -54,19 +49,16 @@ type Record struct {
 	ActorID      string `json:"aid,omitempty"`
 	ActorLabel   string `json:"al,omitempty"`
 	ActorKind    string `json:"ak,omitempty"`
-	// ActorGroups are the group ids a human actor's grants came from,
-	// persisted so a replicated command can be re-authorized where it
-	// executes (engine.Attribution.ActorGroups).
+	// ActorGroups are the groups a person's grants came from, kept so a replicated
+	// command can be authorized again where it executes.
 	ActorGroups []string `json:"ag,omitempty"`
 	// optional KV projection written in the same atomic batch:
 	KVPath string `json:"-"` // hierarchy path (segments after contract, post-mount)
 	KVNode string `json:"-"` // node-id (level 4)
-	// Delete marks the record as a tombstone (retention design §7.1): the KV
-	// key k/{KVPath}\x00{KVNode}\x00{Topic} is DELETED in the same atomic batch
-	// instead of set. Topic carries the contract identity, so retiring one
-	// contract never removes another at the same node/path. The stream record
-	// itself is appended as usual — the retirement is history. Set by the engine
-	// on an empty payload for a KV-projecting class.
+	// Delete makes the record a tombstone: the KV key (path, node, topic) is deleted
+	// in the same batch instead of set, so retiring one contract leaves the others
+	// at that path alone. The stream record is still appended. The engine sets it
+	// for an empty payload on a KV-projecting class.
 	Delete bool `json:"-"`
 }
 
@@ -100,9 +92,8 @@ type Store struct {
 	// appendApply is Pebble's atomic apply boundary. Keeping the bound method
 	// injectable lets tests prove an apply failure changes neither stream nor KV.
 	appendApply func(*pebble.Batch, *pebble.WriteOptions) error
-	// maxRecordBytes is 0 until SetMaxRecordBytes is called, and 0 means no cap.
-	// Set once at startup before any append; not guarded by s.mu because nothing
-	// writes it after the node is running.
+	// maxRecordBytes is 0 (no cap) until SetMaxRecordBytes. It is set once before
+	// the first append, so s.mu does not guard it.
 	maxRecordBytes uint64
 }
 
@@ -110,9 +101,8 @@ type Store struct {
 // before the doors are listening; 0 leaves the store uncapped.
 func (s *Store) SetMaxRecordBytes(limit uint64) { s.maxRecordBytes = limit }
 
-// Open opens (or creates) the store at dir and restores the next offset,
-// low-water mark and byte counter of every stream from persisted meta, so
-// offsets stay gapless and the pruned-prefix contract holds across restarts.
+// Open opens or creates the store at dir and restores each stream's next offset,
+// low-water mark and byte counter, so offsets stay gapless across restarts.
 func Open(dir string) (*Store, error) {
 	db, err := pebble.Open(dir, &pebble.Options{})
 	if err != nil {
@@ -147,9 +137,8 @@ func Open(dir string) (*Store, error) {
 			_ = db.Close()
 			return nil, err
 		}
-		// Same for the pending-refresh range: a corrupt rp/ silently read as
-		// "nothing pending" would drop a crash-persisted refresh obligation —
-		// exactly the loss the key exists to prevent.
+		// A corrupt rp/ key read as "nothing pending" would silently drop a refresh a
+		// crash left owed.
 		if err := validateRefreshPending(db, stream); err != nil {
 			_ = db.Close()
 			return nil, err
@@ -178,11 +167,9 @@ func validateRefreshPending(db *pebble.DB, stream string) error {
 	return nil
 }
 
-// readCounter returns the 8-byte big-endian counter at key, or dflt when the
-// key was never written. Any other outcome is fatal: silently substituting the
-// default would break the invariant the counter protects — offset continuity
-// for m/, the pruned-prefix contract for l/ (a corrupt LWM read as 1 would
-// resurrect the pruned range as a phantom gap), honest size accounting for b/.
+// readCounter returns the 8-byte big-endian counter at key, or dflt if the key
+// was never written. Anything else is an error: a made-up default would break
+// offset continuity (m/), the pruned prefix (l/) or the byte accounting (b/).
 func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (uint64, error) {
 	v, closer, err := db.Get(key)
 	if errors.Is(err, pebble.ErrNotFound) {
@@ -210,9 +197,8 @@ type recEnc struct {
 	ActorLabel   string   `json:"al,omitempty"`
 	ActorKind    string   `json:"ak,omitempty"`
 	ActorGroups  []string `json:"ag,omitempty"`
-	// size is the encoded length of THIS record as stored, filled in by
-	// scanRecords. Never serialized — it is what the byte accounting needs and
-	// only the reader can know it.
+	// size is the encoded length of this record as stored, set by scanRecords for
+	// the byte accounting. Not serialized.
 	size uint64 `json:"-"`
 }
 type kvEnc struct {
@@ -223,13 +209,10 @@ type kvEnc struct {
 	OriginOffset uint64 `json:"oo,omitempty"`
 }
 
-// addRecord writes one stream record (and its optional KV projection) into the
-// batch and returns the record's logical byte cost — len(stream key) +
-// len(encoded value), the unit the b/{stream} accounting tracks (spec §4).
-//
-// del is the tombstone flag (retention design §7.1): the KV key is deleted in
-// the batch instead of set. Deleting an absent key is a no-op in Pebble, so a
-// replayed tombstone is idempotent by construction.
+// addRecord writes one stream record and its optional KV projection into the
+// batch and returns its byte cost, len(key) + len(value), the unit b/{stream}
+// counts. For a tombstone it deletes the KV key instead; deleting an absent key
+// is a no-op, so a replayed tombstone is harmless.
 func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, error) {
 	originOffset := rec.OriginOffset
 	if originOffset == 0 {
@@ -268,8 +251,8 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 	return uint64(len(key) + len(val)), nil
 }
 
-// Append writes records + meta + byte counter + KV projections in ONE atomic,
-// synced batch.
+// Append writes records, meta, the byte counter and KV projections in one
+// atomic, synced batch.
 func (s *Store) Append(stream string, recs []Record) (first, last uint64, err error) {
 	if len(recs) == 0 {
 		return 0, 0, nil
@@ -320,9 +303,9 @@ func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, 
 	return first, last, nil
 }
 
-// kvOffset returns the Offset field of the current KV entry for the canonical
-// topic at (path, node), ok=false when the key is absent or undecodable.
-// Callers hold s.mu.
+// kvOffsets returns the local and origin offsets of the current KV entry for
+// (path, node, topic); ok is false when the key is absent or undecodable. The
+// caller holds s.mu.
 func (s *Store) kvOffsets(path, node, topic string) (local, origin uint64, ok bool) {
 	v, closer, err := s.db.Get(kvKey(path, node, topic))
 	if err != nil {
@@ -340,20 +323,12 @@ func (s *Store) kvOffsets(path, node, topic string) (local, origin uint64, ok bo
 	return e.Offset, origin, true
 }
 
-// AppendIfKVUnchanged appends rec — stream record AND KV projection — only if
-// the current KV entry for (rec.KVPath, rec.KVNode, rec.Topic) still exists
-// with Offset == ifKVOffset. The topic carries the contract identity. The
-// guard is evaluated under s.mu, the same mutex every KV write serializes on,
-// so it is a true compare-and-swap: nothing can retire or supersede the entry
-// between the check and the batch application.
-//
-// This is the §6.5 state refresh's append path (spec §6.5 [delta]) and its
-// only intended caller: a refresh re-states a KV snapshot, and a tombstone
-// (§7) or newer write landing after that snapshot makes the re-statement
-// stale — applying it would resurrect a retired path or clobber the newer
-// value. When the guard fails the WHOLE record is skipped (applied=false, no
-// stream append either): a refresh of a superseded snapshot is not history
-// worth writing. rec must carry a KV projection.
+// AppendIfKVUnchanged appends rec (stream record and KV projection) only if the
+// KV entry for (rec.KVPath, rec.KVNode, rec.Topic) still has Offset ==
+// ifKVOffset. The check runs under s.mu, so it is a real compare-and-swap.
+// Retention's state refresh relies on it: a refresh of a snapshot that a
+// tombstone or newer write has superseded is skipped entirely (applied=false).
+// rec must carry a KV projection.
 func (s *Store) AppendIfKVUnchanged(stream string, rec Record, ifKVOffset uint64) (off uint64, applied bool, err error) {
 	if rec.KVPath == "" {
 		return 0, false, fmt.Errorf("guarded append requires a KV projection")
@@ -364,9 +339,8 @@ func (s *Store) AppendIfKVUnchanged(stream string, rec Record, ifKVOffset uint64
 	if !ok || cur != ifKVOffset {
 		return 0, false, nil // retired or superseded since the snapshot — skip entirely
 	}
-	// A retention refresh re-states the same owner-authored version. Keeping its
-	// origin coordinate prevents an ancestor's local refresh offset from
-	// becoming a false Edit version at that ancestor.
+	// A refresh restates the owner's version. Keeping the origin offset stops an
+	// ancestor's local refresh from posing as a new Edit version there.
 	rec.OriginOffset = origin
 	first, _, err := s.appendLocked(stream, []Record{rec})
 	if err != nil {
@@ -381,9 +355,8 @@ func (s *Store) NextOffset(stream string) uint64 {
 	return s.next[stream]
 }
 
-// Read returns up to max records with Offset >= from, optionally topic-filtered.
-// It is the compatibility wrapper for callers whose view depends only on the
-// topic. New payload-aware views use ReadRecords.
+// Read returns up to limit records with Offset >= from, optionally filtered by
+// topic. Views that need the payload use ReadRecords.
 func (s *Store) Read(stream string, from uint64, limit int, filter func(string) bool) (out []StoredRecord, next uint64, err error) {
 	var recordFilter func(StoredRecord) bool
 	if filter != nil {
@@ -392,10 +365,9 @@ func (s *Store) Read(stream string, from uint64, limit int, filter func(string) 
 	return s.ReadRecords(stream, from, limit, recordFilter)
 }
 
-// ReadRecords returns up to max matching records with Offset >= from.
-// next is the scanned position + 1, including filtered-out records. A consumer
-// can therefore advance through a sparse server-side view without rereading
-// unrelated records forever.
+// ReadRecords returns up to limit matching records with Offset >= from. next is
+// the last scanned position + 1, filtered records included, so a consumer of a
+// sparse view keeps moving forward.
 func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: streamKey(stream, from),
@@ -451,10 +423,8 @@ func (s *Store) CursorGet(name, stream string) uint64 {
 	return s.readU64(cursorKey(name, stream), 1)
 }
 
-// CursorAck moves the cursor forward only (monotonic); returns whether it moved.
-// The cursor and its last-advance timestamp (ct/, the staleness input of spec
-// §5.2) are ONE synced batch: a crash can never persist an advance without its
-// timestamp or vice versa.
+// CursorAck moves the cursor forward only and reports whether it moved. The
+// cursor and its last-advance timestamp (ct/) are written in one synced batch.
 func (s *Store) CursorAck(name, stream string, off uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -475,29 +445,12 @@ func (s *Store) CursorAck(name, stream string, off uint64) bool {
 	return true
 }
 
-// CursorSetIfAbsent creates a cursor at off when the key does not exist yet and
-// reports whether it created it. An existing cursor is left exactly as it is,
-// whatever its position.
-//
-// This is the one cursor write that is not forward-only, and it exists because
-// CursorGet cannot tell "absent" from "at 1": it returns 1 for both. That
-// distinction is invisible on a stream a consumer merely reads from the start,
-// and load-bearing for the parent-scoped replication cursors, where "I have
-// never met this parent" (adopt its head) and "I have met it and am still at
-// its first offset" (deliver everything from there) demand opposite behaviour.
-// Recording the position — even position 1, which CursorAck refuses because it
-// is the default — is what makes the difference durable across a restart.
-//
-// The cursor and its ct/ timestamp go in one synced batch, exactly as in
-// CursorAck: the staleness input of spec §5.2 must never be missing for a
-// cursor that exists.
-//
-// The error is returned separately from created, unlike CursorAck's bare bool,
-// because here the two outcomes behind "did not create" are not equivalent: an
-// existing cursor is the ordinary case (an idempotent re-enroll, a second
-// start), while a failed write means the caller's floor was never recorded and
-// its next start will re-decide from scratch. A caller that cannot tell them
-// apart has no honest way to log either.
+// CursorSetIfAbsent creates a cursor at off unless one exists and reports
+// whether it did. It can record position 1, which CursorAck refuses: CursorGet
+// returns 1 for a missing cursor too, and replication must tell "never met this
+// parent" from "still at its first offset". The cursor and its ct/ timestamp go
+// in one synced batch; a failed write is returned as an error, distinct from
+// "already existed".
 func (s *Store) CursorSetIfAbsent(name, stream string, off uint64) (created bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -520,10 +473,7 @@ func (s *Store) CursorSetIfAbsent(name, stream string, off uint64) (created bool
 }
 
 // CursorDelete removes a cursor and its last-advance timestamp in one synced
-// batch, so retention can never see a position without its staleness input or
-// vice versa. Deleting an absent cursor is a no-op: Pebble's Delete on a
-// missing key succeeds, which makes revoke idempotent by construction — a
-// second revoke of the same identity can call this again without erroring.
+// batch. Deleting an absent cursor is a no-op, so a repeated revoke is fine.
 func (s *Store) CursorDelete(name, stream string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -538,12 +488,9 @@ func (s *Store) CursorDelete(name, stream string) error {
 	return s.db.Apply(b, pebble.Sync)
 }
 
-// CursorMarkSeen records ts (unix ms) as the last-advance time of a cursor
-// that has no recorded timestamp yet; a no-op when one exists. This is the
-// spec §5.2 upgrade case: a cursor key that predates the ct/ timestamps is
-// treated as advancing NOW at first sighting, so it gets a full staleness
-// window before it can ever be overridden. Synced: the sighting must survive
-// restart, otherwise every restart would rewind the staleness clock.
+// CursorMarkSeen sets ts (unix ms) as the last-advance time of a cursor that has
+// none yet, so a cursor from before ct/ timestamps gets a full staleness window
+// from its first sighting. Synced, so a restart does not reset that clock.
 func (s *Store) CursorMarkSeen(name, stream string, ts int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -551,9 +498,8 @@ func (s *Store) CursorMarkSeen(name, stream string, ts int64) {
 		return
 	}
 	if err := s.db.Set(ctKey(name, stream), be64(uint64(ts)), pebble.Sync); err != nil { //nolint:gosec // an int64 timestamp stored bit for bit
-		// Non-fatal by design (the caller treats the cursor as fresh either
-		// way), but never silent: an unpersisted sighting rewinds the
-		// staleness clock on the next restart.
+		// Not fatal, since the caller treats the cursor as fresh either way, but
+		// logged: an unpersisted sighting resets the staleness clock on restart.
 		slog.Warn("store: persisting cursor first-sighting timestamp failed",
 			"cursor", name, "stream", stream, "err", err)
 	}
@@ -565,12 +511,9 @@ func (s *Store) HWMGet(child, stream string) uint64 {
 	return s.readU64(hwmKey(child, stream), 0)
 }
 
-// CursorInfo is one persisted consumer cursor: the next offset the named
-// consumer will read from a stream. LastAdvanceMS is the unix-ms timestamp of
-// the cursor's last advance (the ct/ key, spec §5.2's staleness input); 0
-// means no timestamp was ever recorded — a cursor key predating the ct/
-// mechanism, which the pruner treats as advancing now at first sighting
-// (CursorMarkSeen).
+// CursorInfo is a persisted consumer cursor: the next offset the consumer reads.
+// LastAdvanceMS is the unix-ms time of its last advance, or 0 if none was ever
+// recorded (see CursorMarkSeen).
 type CursorInfo struct {
 	Name, Stream  string
 	Position      uint64
@@ -584,12 +527,9 @@ type HWMInfo struct {
 	HWM           uint64
 }
 
-// scanU64Pairs iterates every key of the form {prefix}\x00{first}\x00{second}
-// holding an 8-byte big-endian counter. Malformed keys and values are skipped,
-// the same tolerance KVScan applies. The upper bound is {prefix, 0x01}, not
-// {prefix, 0xFF}: only keys whose SECOND byte is the \x00 separator belong to
-// the family — a wider bound would sweep up multi-byte prefixes sharing the
-// first byte (concretely: ct/ cursor timestamps inside the c/ cursor scan).
+// scanU64Pairs calls fn for every {prefix}\x00{first}\x00{second} key holding
+// an 8-byte counter, skipping malformed entries. The upper bound is
+// {prefix, 0x01} so key families sharing the first byte (ct/ inside c/) stay out.
 func (s *Store) scanU64Pairs(prefix byte, fn func(first, second string, v uint64)) error {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: []byte{prefix, 0x00},
@@ -629,26 +569,12 @@ func (s *Store) Cursors() []CursorInfo {
 	return out
 }
 
-// ProtectedCursors classifies stream's persisted cursors against the §5.2
-// staleness window at now: cursors still protecting the stream (silence
-// window not passed, or window<=0 meaning "never override") and cursors the
-// staleness override has stopped protecting ("stale"). Shared by
-// retention.Pruner (the actual clamp/override decision) and the metrics
-// collector (colca_retention_pressure/_blocked_by_cursor, design §8) so both
-// always see the identical classification — one scan, not two hand-kept
-// copies.
-//
-// A cursor with no persisted last-advance timestamp (LastAdvanceMS==0, the
-// upgrade case) is treated as advancing NOW for this classification only —
-// conservatively giving it a full staleness window before it can ever be
-// overridden — which always resolves it into `protecting` (staleFor≈0 can
-// never exceed a positive window). Its CursorInfo is returned UNCHANGED
-// (LastAdvanceMS still 0): a caller that is actually about to prune this
-// cycle (only the pruner) detects that and persists the stamp itself via
-// CursorMarkSeen, so the staleness clock does not restart on every process
-// restart. A read-only caller (the collector) does no such thing and simply
-// re-derives the same classification on every scrape — this method itself
-// never mutates the store.
+// ProtectedCursors splits stream's cursors at now into those still protecting
+// the stream (inside the staleness window, or window <= 0 meaning never
+// override) and stale ones. The pruner and the metrics collector share it so
+// they classify alike. A cursor without a timestamp counts as advancing now, so
+// it protects; its CursorInfo comes back unchanged and the pruner persists the
+// stamp with CursorMarkSeen. This method never writes.
 func (s *Store) ProtectedCursors(stream string, now time.Time, window time.Duration) (protecting, stale []CursorInfo) {
 	for _, c := range s.Cursors() {
 		if c.Stream != stream {
@@ -694,23 +620,16 @@ type ReplRecord struct {
 	ActorGroups  []string `json:"ag,omitempty"`
 	KVPath       string   `json:"kp,omitempty"`
 	KVNode       string   `json:"kn,omitempty"`
-	// Delete mirrors Record.Delete (retention design §7.1): ApplyReplicated
-	// deletes the KV key in its batch instead of setting it. The parent's
-	// replication server derives it the same way the engine does — empty
-	// payload on a KV-projecting class — because the empty payload IS the wire
-	// truth of the tombstone (§7.1 rejected-alternative argument). NOT a wire
-	// field (the repl wire type is wireRec; this flag is derived server-side
-	// after decoding), hence excluded from marshaling.
+	// Delete mirrors Record.Delete. The parent derives it after decoding, as the
+	// engine does, from an empty payload on a KV-projecting class; it is not a wire
+	// field.
 	Delete bool `json:"-"`
 }
 
-// ApplyReplicated appends records with ChildOffset > HWM(child,stream), assigns LOCAL offsets,
-// updates KV and the HWM — all in one atomic batch. Idempotent by construction.
-//
-// It returns the records it ACTUALLY wrote, in write order. That is what makes
-// the caller able to mirror exactly the new records onto the local MQTT bus:
-// deduplicated records are not in the returned slice, and on any error the
-// slice is nil, so nothing that is not durable can ever reach the bus.
+// ApplyReplicated appends records with ChildOffset > HWM(child, stream) under
+// local offsets and updates KV and the HWM in one atomic batch, so replays are
+// harmless. It returns exactly the records it wrote, or nil on error, so the
+// caller mirrors only durable records onto the local MQTT bus.
 func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applied []ReplRecord, hwm uint64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -767,49 +686,40 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 	return applied, hwm, nil
 }
 
-// LWM returns the low-water mark of a stream: the lowest offset still
-// retained. Streams start at 1; pruning advances it — the pruned region is
-// exactly the contiguous prefix [1..LWM).
+// LWM returns the low-water mark of a stream, the lowest retained offset.
+// Streams start at 1, and pruning removes the prefix [1..LWM).
 func (s *Store) LWM(stream string) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lwm[stream]
 }
 
-// StreamBytes returns the live logical bytes of a stream: the sum of
-// len(stream key)+len(encoded value) over every retained record, maintained
-// by Append/ApplyReplicated (+) and Prune (−) inside their atomic batches.
+// StreamBytes returns the live logical bytes of a stream, len(key) + len(value)
+// over retained records, kept current inside the append and prune batches.
 func (s *Store) StreamBytes(stream string) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.bytes[stream]
 }
 
-// PruneSpan is one prune-journal entry: the inclusive offset range [From..To]
-// a prune run removed and the time span of the removed records. The journal
-// is a contiguous ordered partition of [1..LWM) — it answers "what span is
-// missing", never "what were the values". Coalesced marks an entry merged
-// from older entries: its time span is a union, so a gap answered from it is
-// approximate (the API layer maps this to the gap object's approx field,
-// spec §6.1/§6.2).
+// PruneSpan is one prune-journal entry: an inclusive offset range [From..To] a
+// prune removed, with the time span of those records. The entries partition
+// [1..LWM). A Coalesced entry was merged from older ones, so its time span is
+// approximate.
 type PruneSpan struct {
 	From, To        uint64
 	FirstTS, LastTS int64
 	Coalesced       bool
-	// Shed is the logical bytes actually removed by THIS commit — the
-	// post-in-batch-recheck accounting (design §8,
-	// colca_retention_pruned_bytes_total). Only ever populated on the
-	// ephemeral span Prune hands to its plan callback; PruneJournal's
-	// reconstructed spans (read back from the on-disk journal, which never
-	// stored bytes) always carry the zero value.
+	// Shed is the bytes this commit removed after the in-batch recheck. It is only
+	// set on the span Prune passes to its plan callback; spans read back from the
+	// journal leave it zero.
 	Shed uint64
 }
 
-// GapSpan is the wire gap object of spec §6.1/§6.2: the contiguous pruned
-// hole [FromOffset..ToOffset] below a consumer's position, with the time span
-// of the removed records answered from the prune journal. The json tags are
-// the wire contract (/fetch and GET /downlink responses) — do not rename
-// them. Approx is true when a coalesced journal entry answered FirstTS.
+// GapSpan is the gap object on the wire (/fetch and GET /downlink): the pruned
+// range [FromOffset..ToOffset] below a consumer's position and the time span of
+// the removed records. Approx is set when a coalesced journal entry supplied
+// FirstTS. The json tags are the wire format.
 type GapSpan struct {
 	Stream     string `json:"stream"`
 	FromOffset uint64 `json:"from_offset"`
@@ -819,18 +729,10 @@ type GapSpan struct {
 	Approx     bool   `json:"approx"`
 }
 
-// Gap reports the pruned hole a consumer positioned at position (the next
-// offset it would read) faces on a stream: ok is false when position >= LWM
-// (nothing it wants is gone — including the whole untouched-stream case,
-// LWM 1). Because pruning removes only the contiguous prefix [1..LWM),
-// the hole is exactly [position..LWM-1]; FirstTS/LastTS come from the
-// journal entries containing the two boundary offsets (the journal is a
-// complete ordered partition of [1..LWM), so both lookups always hit).
-//
-// An unknown stream has no LWM (0) and therefore no gap — without the guard
-// the LWM-1 arithmetic would underflow into a fabricated max-uint64 span on
-// the wire. Position 0 is clamped to 1 BEFORE the comparison: cursor
-// positions start at 1, and comparing the raw 0 would invert the span.
+// Gap reports the pruned range a consumer at position (the next offset it would
+// read) has missed; ok is false when position >= LWM. Pruning removes only the
+// prefix, so the range is [position..LWM-1], timed from the journal. An unknown
+// stream has LWM 0 and no gap, and position 0 counts as 1.
 func (s *Store) Gap(stream string, position uint64) (GapSpan, bool) {
 	lwm := s.LWM(stream)
 	if position < 1 {
@@ -843,7 +745,7 @@ func (s *Store) Gap(stream string, position uint64) (GapSpan, bool) {
 	for _, sp := range s.PruneJournal(stream) {
 		if g.FromOffset >= sp.From && g.FromOffset <= sp.To {
 			g.FirstTS = sp.FirstTS
-			g.Approx = sp.Coalesced // spec §6.2: approx marks a blurred first_ts
+			g.Approx = sp.Coalesced // a coalesced entry blurs first_ts
 		}
 		if g.ToOffset >= sp.From && g.ToOffset <= sp.To {
 			g.LastTS = sp.LastTS
@@ -852,10 +754,9 @@ func (s *Store) Gap(stream string, position uint64) (GapSpan, bool) {
 	return g, true
 }
 
-// journalCap bounds the prune journal per stream (spec §6.2). When a new
-// entry would exceed it, the two oldest are coalesced (union range, min/max
-// ts) in the same batch — coverage of [1..LWM) stays complete forever,
-// granularity degrades only for the oldest history.
+// journalCap bounds the prune journal per stream. Past it the two oldest entries
+// are merged, so the journal still covers [1..LWM) and only old history loses
+// detail.
 const journalCap = 64
 
 type journalEnc struct {
@@ -869,19 +770,17 @@ type journalEnc struct {
 func (s *Store) PruneJournal(stream string) []PruneSpan {
 	spans, err := s.readJournal(stream)
 	if err != nil {
-		// Journals are validated at Open and every write goes through
-		// writeJournal; corruption here means the disk changed under a
-		// running process. Nothing sane to return — the next Open fails
-		// loudly on it.
+		// Journals are validated at Open and only written through writeJournal, so
+		// corruption here means the disk changed underneath us; the next Open reports
+		// it.
 		return nil
 	}
 	return spans
 }
 
-// readJournal scans the journal entries of a stream in key order (ascending
-// From). A malformed key or value is an error, the same fail-loud discipline
-// as the l/ and b/ counters: a silently dropped entry would punch a hole in
-// the [1..LWM) partition and misreport a gap's time span.
+// readJournal returns the journal entries of a stream in key order. A malformed
+// entry is an error: dropping it would leave a hole in [1..LWM) and misreport a
+// gap's time span.
 func (s *Store) readJournal(stream string) ([]PruneSpan, error) {
 	lb, ub := journalBounds(stream)
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
@@ -921,9 +820,8 @@ func setJournal(b *pebble.Batch, stream string, span PruneSpan) error {
 	return b.Set(journalKey(stream, span.From), val, nil)
 }
 
-// writeJournal adds one entry to the prune batch, coalescing the two oldest
-// entries (union range, min/max ts, marked Coalesced) while the journal would
-// exceed journalCap. Called under s.mu.
+// writeJournal adds an entry to the prune batch, merging the two oldest entries
+// while the journal would exceed journalCap. The caller holds s.mu.
 func (s *Store) writeJournal(b *pebble.Batch, stream string, span PruneSpan) error {
 	entries, err := s.readJournal(stream)
 	if err != nil {
@@ -992,48 +890,30 @@ func (s *Store) scanDoomed(stream string, from, upTo uint64) (pruneStats, error)
 	return st, nil
 }
 
-// RefreshRange is a pending entities state-refresh obligation (spec §6.5
-// [delta]): the KV-projection Offsets [From, To) whose current entries must be
-// re-appended. Persisted as rp/{stream} inside the prune batch and cleared
-// only after every refresh append succeeded, so a crash between the batch and
-// the refresh leaves the obligation on disk instead of losing it.
+// RefreshRange is an owed state refresh: KV entries with Offset in [From, To)
+// must be appended again. It is stored as rp/{stream} in the prune batch and
+// cleared only after every refresh append succeeded, so a crash cannot lose it.
 type RefreshRange struct {
 	From, To uint64
 }
 
-// PruneOutcome is what a Prune plan callback contributes to the prune batch:
-// gap-marker records appended at the head (spec §6.4) and an optional pending
-// refresh range persisted as rp/{stream} (spec §6.5 [delta]).
+// PruneOutcome is what a plan callback adds to the prune batch: gap markers
+// appended at the head, and optionally a refresh range stored as rp/{stream}.
 type PruneOutcome struct {
 	GapRecords []Record
 	Refresh    *RefreshRange
 }
 
-// Prune removes the contiguous prefix [LWM..upTo) of a stream in ONE atomic,
-// synced batch: a single range tombstone, the advanced l/{stream}, the
-// decremented b/{stream}, the journal entry, plus whatever the plan callback
-// contributes — gap markers appended at the head (spec §6.4, so they survive
-// their own prune run) and the pending refresh range (spec §6.5). Because it
-// is one batch there is no "crash between delete and LWM" state: after a
-// crash the stream is either fully pre-prune or fully post-prune (spec §4.2).
+// Prune removes the prefix [LWM..upTo) of a stream in one atomic, synced batch
+// (range tombstone, l/ and b/ counters, journal entry, and whatever plan adds),
+// so a crash leaves the stream either fully pruned or untouched.
 //
-// In-batch cursor recheck (spec §5.2 [delta]): under the mutex — which
-// CursorAck also takes, so no ack can interleave before the commit — the
-// protected-cursor floor is recomputed and upTo shrinks to the position of
-// any cursor on the stream NOT named in overridden. This closes the
-// caller-snapshot race: a consumer whose first ack lands between the caller's
-// policy evaluation and this commit is structurally impossible to prune past.
-// If the shrink makes upTo <= LWM the prune is a no-op — no batch, no
-// journal, no marker.
-//
-// plan, if non-nil, is invoked exactly once per committing prune with the
-// EFFECTIVE span (post-shrink offsets and time span — the same values the
-// journal entry records), making it the single source of truth for marker
-// spans. It runs under the store mutex and must not call back into the store.
-//
-// upTo <= LWM is a no-op (0, nil). Unknown streams and upTo beyond the next
-// offset (pruning the future) are errors. KV projections, cursors and HWMs
-// are never touched. Returns the number of records removed.
+// Under the mutex, which CursorAck also takes, upTo shrinks to any cursor not in
+// overridden: a consumer that acks after the caller's policy decision is never
+// pruned past. plan runs once per committing prune with the effective span and
+// must not call back into the store. Unknown streams and upTo beyond the next
+// offset are errors; KV entries, cursors and HWMs are untouched. Prune returns
+// the number of records removed.
 func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func(span PruneSpan) PruneOutcome) (uint64, error) {
 	s.mu.Lock()
 	next, lwm := s.next[stream], s.lwm[stream]
@@ -1048,10 +928,9 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 		return 0, fmt.Errorf("prune %q up to %d: beyond next offset %d", stream, upTo, next)
 	}
 
-	// Accounting scan over the doomed prefix [lwm..upTo), without the mutex
-	// (spec §4.1: the mutex is for the commit, never the scan): Append writes
-	// only at offsets >= next >= upTo, and the prefix can only shrink through
-	// Prune itself, which the LWM recheck below serializes.
+	// Scan the doomed prefix without the mutex: appends only write at offsets >=
+	// upTo, and the prefix only shrinks through Prune, which the LWM recheck below
+	// serializes.
 	stats, err := s.scanDoomed(stream, lwm, upTo)
 	if err != nil {
 		return 0, err
@@ -1062,8 +941,8 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if s.lwm[stream] != lwm {
 		return 0, fmt.Errorf("concurrent prune on stream %q", stream)
 	}
-	// The §5.2 in-batch recheck: shrink upTo to the floor of every cursor on
-	// this stream the caller did not explicitly override.
+	// Recheck under the mutex: shrink upTo to the floor of every cursor the caller
+	// did not override.
 	ov := make(map[string]bool, len(overridden))
 	for _, name := range overridden {
 		ov[name] = true
@@ -1082,10 +961,8 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 		return 0, nil // a live cursor moved into the doomed range: nothing may go
 	}
 	if stats.pruned != upTo-lwm {
-		// The floor shrank after the mutex-free scan — rescan the smaller
-		// range under the mutex so the journal and the plan see the stats of
-		// exactly what is being deleted. Rare (only when a cursor advanced
-		// into the doomed range mid-cycle) and bounded by the original scan.
+		// A cursor moved into the range after the scan. Rescan the smaller range so the
+		// journal and plan see exactly what gets deleted.
 		stats, err = s.scanDoomed(stream, lwm, upTo)
 		if err != nil {
 			return 0, err
@@ -1104,13 +981,8 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if err := b.Set(lwmKey(stream), be64(upTo), nil); err != nil {
 		return 0, err
 	}
-	// A store upgraded from a pre-accounting version has records b/ never
-	// counted; clamp at zero instead of underflowing — sizes are honest for
-	// everything written since the counter existed. Note the clamp can also
-	// absorb legitimately-counted bytes while pre-counter records are being
-	// pruned out (counted and uncounted records share one counter); on this
-	// greenfield branch no pre-counter store exists, so that state is
-	// unreachable in practice.
+	// Records written before the byte counter existed were never counted, so clamp
+	// at zero instead of underflowing.
 	liveBytes := s.bytes[stream]
 	if stats.shed > liveBytes {
 		liveBytes = 0
@@ -1132,10 +1004,8 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 		}
 	}
 	if out.Refresh != nil {
-		// Persist the refresh obligation IN the prune batch (spec §6.5
-		// [delta]): if the process dies before the refresh runs, the range is
-		// still owed after restart. An already-pending range is unioned — the
-		// obligation only ever grows until a completed refresh clears it.
+		// Store the refresh obligation in the prune batch so it survives a crash, merged
+		// with any range still pending.
 		r := *out.Refresh
 		if cur, ok := s.refreshPending(stream); ok {
 			r.From = min(r.From, cur.From)
@@ -1178,31 +1048,25 @@ func (s *Store) refreshPending(stream string) (RefreshRange, bool) {
 	}, true
 }
 
-// RefreshPending returns the stream's persisted pending state-refresh range,
-// if any (spec §6.5 [delta]).
+// RefreshPending returns the stream's pending state-refresh range, if any.
 func (s *Store) RefreshPending(stream string) (RefreshRange, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.refreshPending(stream)
 }
 
-// ClearRefreshPending removes the stream's pending refresh obligation. Called
-// only after EVERY refresh append of the range succeeded; its own small
-// synced write, deliberately separate from (and after) the refresh appends.
+// ClearRefreshPending removes the stream's refresh obligation. Call it only
+// after every refresh append of the range has succeeded.
 func (s *Store) ClearRefreshPending(stream string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.db.Delete(rpKey(stream), pebble.Sync)
 }
 
-// ScanRecords iterates the records of a stream in [from, upTo) in offset
-// order, calling fn with each record's offset, timestamp and logical byte
-// cost — len(stream key) + len(encoded value), the exact unit the b/{stream}
-// accounting and Prune's shed computation use. Iteration stops early when fn
-// returns false. Mutex-free by design: Pebble iterators are
-// snapshot-consistent, and spec §4.1 places the pruner's policy scan outside
-// the store mutex. A record that fails to decode is a fail-loud error, same
-// discipline as Prune's accounting scan.
+// ScanRecords calls fn for each record of stream in [from, upTo), in offset
+// order, with its offset, timestamp and byte cost (the unit b/{stream} counts),
+// until fn returns false. It takes no mutex; Pebble iterators are consistent
+// snapshots. A record that does not decode is an error.
 func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64, ts int64, size uint64) bool) error {
 	if upTo <= from {
 		return nil
@@ -1229,49 +1093,22 @@ func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64
 	return iter.Error()
 }
 
-// DefaultPolicyScanCap bounds how many records a single PolicyPruneTarget
-// call will examine (JSON-decode) before giving up and reporting a floor
-// instead of the true target. Without a cap, the walk from lwm is bounded
-// only by clamp — and clamp is uncapped (=next) whenever no live cursor is
-// protecting the stream, which is exactly the alert state
-// colca_retention_blocked_by_cursor exists to surface (dead consumer,
-// default ignore_cursors_after=0 never overriding, backlog growing without
-// bound). At the measured store throughput (bench/RESULTS.md:
-// BenchmarkReadSequential 924,235 rec/s decoding+paging, BenchmarkKVScan
-// 100,000 paths in ~124ms) 100k records costs on the order of 100ms on
-// development hardware — generous enough that no real backlog ever needs a
-// second pass to answer one scrape, bounded enough to stay well inside any
-// Prometheus scrape timeout even on slower edge storage.
+// DefaultPolicyScanCap bounds how many records one PolicyPruneTarget call
+// decodes. With no cursor to stop it the walk would be unbounded, which is the
+// stuck-consumer case the blocked-by-cursor metric reports. 100k records take on
+// the order of 100 ms, well inside a scrape timeout.
 const DefaultPolicyScanCap = 100_000
 
-// PolicyPruneTarget scans stream's records forward from lwm (via ScanRecords)
-// applying the age (record TS < now−maxAge) and size (running shed total
-// keeps live_bytes−shed > maxBytes) criteria of design §4.1 step 2, and
-// returns the offset the policy alone wants to prune up to — capped at
-// clamp, which it never advances past, AND capped at maxScan records
-// examined (0 disables the scan cap; callers in this codebase always pass
-// DefaultPolicyScanCap). Either policy limit may be disabled (maxAge<=0
-// skips the age check, maxBytes==0 skips the size check).
+// PolicyPruneTarget walks stream forward from lwm and returns the offset the
+// retention policy alone would prune up to: records older than maxAge, and
+// enough bytes to bring the stream under maxBytes (maxAge <= 0 or maxBytes == 0
+// disables either). It never passes clamp or examines more than maxScan records
+// (0 means no limit). The pruner passes the cursor floor as clamp; the metrics
+// collector passes next to see the policy without cursors.
 //
-// Shared by retention.Pruner (called with clamp = the protected-cursor
-// floor, the real prune bound) and the metrics collector (called with
-// clamp = next, i.e. uncapped — colca_retention_pressure/_blocked_by_cursor,
-// design §8, want to know how far the policy would go with NO cursor floor
-// at all). Passing next as clamp is always a no-op cap: ScanRecords never
-// yields an offset >= next in the first place.
-//
-// clampedAtCap is true when the scan stopped only because it hit clamp with
-// the policy still wanting more (the §5.2 WARN log / pressure signal).
-// hitScanCap is true when the scan stopped only because it examined maxScan
-// records with the policy still wanting more — independent of clampedAtCap,
-// since the two have different causes and different callers care about them
-// differently (the pruner's WARN log names a blocking cursor; a scan-cap
-// stop has no cursor to name). Either flag means target is a FLOOR: safe to
-// prune up to (never advances past a record the policy did not examine and
-// accept), but possibly short of where the policy would truly stop — never
-// past it, so a caller building an undercount-safe signal from target (like
-// blocked-cursor counting) stays correct; one that needs the exact target
-// does not get it in one call.
+// clampedAtCap and hitScanCap report which limit stopped a policy that wanted
+// more. Either way target is a floor: safe to prune to, possibly short of the
+// policy's real target.
 func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time, maxAge time.Duration, maxBytes, liveBytes, clamp, maxScan uint64) (target uint64, clampedAtCap, hitScanCap bool, err error) {
 	cutoff := now.UnixMilli() - maxAge.Milliseconds()
 	target = lwm
@@ -1285,7 +1122,7 @@ func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time
 		ageWants := maxAge > 0 && ts < cutoff
 		sizeWants := maxBytes > 0 && liveBytes > shed+maxBytes // liveBytes−shed > maxBytes, underflow-safe
 		if !ageWants && !sizeWants {
-			return false // first record the policy keeps — early exit (§4.1)
+			return false // first record the policy keeps
 		}
 		if off >= clamp {
 			clampedAtCap = true // policy wants more, the cursor cap forbids it
@@ -1298,19 +1135,11 @@ func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time
 	return target, clampedAtCap, hitScanCap, err
 }
 
-// KVScan returns the current KV projection for every path starting with
-// prefix. An empty prefix scans the whole projection. Multiple contracts at
-// the same node/path are returned as separate entries.
-//
-// A non-nil error means the scan could not be trusted to be complete — either
-// the iterator could not be opened, or it stopped early on a storage fault
-// (Pebble surfaces both through the same *pebble.Iterator, the second only
-// visible via Error() once Valid() goes false). Both used to be swallowed to
-// a silent empty result, which is indistinguishable from "this prefix
-// genuinely holds nothing" at every caller — and at least one caller (the
-// blob sweeper, resources design §8) treats "nothing found" as license to
-// delete files. Every caller must now decide explicitly what an error means
-// for it; none may call this and assume `nil, nil` is the only outcome.
+// KVScan returns the KV projection for every path starting with prefix (all of
+// it for ""), one entry per contract at a node and path. An error means the
+// result may be incomplete, whether the iterator failed to open or stopped on a
+// storage fault. Callers must not treat that as empty: the blob sweeper would
+// delete files that are still referenced.
 func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 	lb := kvPrefix(prefix)
 	ub := append(append([]byte{}, lb...), 0xFF)
@@ -1322,9 +1151,8 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 	var out []KVEntry
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := string(iter.Key()[2:]) // strip "k\x00"
-		// key = path \x00 nodeID \x00 canonical-topic. The topic is also stored
-		// in the value; keeping it in the key makes contract identity part of
-		// replacement/deletion semantics without changing path-first scans.
+		// The key is path \x00 node \x00 topic. Keeping the topic in the key makes the
+		// contract part of replacement and deletion without changing path-first scans.
 		pathSep := strings.IndexByte(key, 0)
 		if pathSep < 0 {
 			continue
@@ -1354,17 +1182,11 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 	return out, nil
 }
 
-// KVScanPage returns at most max raw KV entries and an opaque continuation
-// token. The scan bound applies before HTTP authorization filtering, so one
-// request cannot turn a sparse grant into an unbounded database walk.
-//
-// contracts, when non-empty, restricts the page to entries whose uns contract
-// (the topic's `_Contract` segment) is in the set — a page of `max` MATCHING
-// entries, not `max` raw keys with the rest thrown away. The check runs
-// against the topic embedded verbatim in the KV key (kvKey: `path\x00node\x00
-// topic`), so a non-matching entry is skipped WITHOUT ever JSON-decoding its
-// payload — the whole point of filtering in the scan, not after it. A nil or
-// empty contracts matches everything, same as before this parameter existed.
+// KVScanPage returns at most limit KV entries and an opaque continuation token.
+// The limit applies before authorization filtering, so a sparse grant cannot
+// turn one request into a full walk. A non-empty contracts keeps only those
+// contracts; the check reads the topic from the key, so other entries are
+// skipped without decoding their payload.
 func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) ([]KVEntry, string, error) {
 	if limit <= 0 {
 		return nil, "", fmt.Errorf("store: KV page size must be positive")
@@ -1430,11 +1252,8 @@ func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) 
 	return out, "", nil
 }
 
-// kvContractMatches reports whether topic's uns contract (Parse's segment
-// index 2, e.g. "_Group") is in want. A nil want matches everything — the
-// no-filter case. Topic grammar is plugins/uns's fact to own (architecture
-// principle 4), so this defers to uns.Parse rather than re-deriving the
-// grammar by hand-splitting the string a second time.
+// kvContractMatches reports whether topic's contract is in want; a nil want
+// matches everything. uns.Parse owns the topic grammar, so it does the parsing.
 func kvContractMatches(topic string, want map[string]bool) bool {
 	if want == nil {
 		return true

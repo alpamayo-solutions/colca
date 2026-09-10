@@ -33,9 +33,8 @@ func seedRecords(t *testing.T, s *store.Store, stream string, n int) {
 	}
 }
 
-// seedRecordsAt is seedRecords with explicit timestamps base, base+step,
-// base+2*step, … — for the retention gauges, which read record age off real
-// wall-clock-relative timestamps.
+// seedRecordsAt is seedRecords with timestamps base, base+step and so on, for
+// the retention gauges that read record age.
 func seedRecordsAt(t *testing.T, s *store.Store, stream string, n int, base, step int64) {
 	t.Helper()
 	recs := make([]store.Record, n)
@@ -47,11 +46,8 @@ func seedRecordsAt(t *testing.T, s *store.Store, stream string, n int, base, ste
 	}
 }
 
-// gaugeValue scans a Gather() result for one family+label-set combination.
-// The retention gauges are Desc-based ConstMetrics emitted by storeCollector
-// (design: derived at scrape time, never a standalone Gauge object), so
-// testutil.ToFloat64 does not apply — that helper requires a Collector that
-// exposes exactly one metric, and storeCollector exposes many per Collect.
+// gaugeValue finds one family and label set in a scrape. The collector emits
+// many metrics per Collect, so testutil.ToFloat64 does not apply.
 func gaugeValue(t *testing.T, m *Metrics, family string, labels map[string]string) float64 {
 	t.Helper()
 	mfs, err := m.reg.Gather()
@@ -72,16 +68,8 @@ func gaugeValue(t *testing.T, m *Metrics, family string, labels map[string]strin
 	return 0
 }
 
-// counterValue is gaugeValue's Counter-backed equivalent, for families whose
-// children are plain prometheus.Counter (not derived by storeCollector).
-//
-// internal/metrics/metricstest.Value does the same job for every OTHER
-// package (repl, engine, httpapi, mqttsrv, retention) and should stay the
-// first choice there. It cannot be used HERE: this file is `package metrics`
-// (package-internal, so it can reach m.reg directly), and metricstest imports
-// metrics — importing metricstest from this file would be metrics →
-// metricstest → metrics, an import cycle. Do not "fix" this by adding that
-// import.
+// counterValue is gaugeValue for plain counters. Other packages use
+// metricstest.Value; this one cannot, because metricstest imports metrics.
 func counterValue(t *testing.T, m *Metrics, family string, labels map[string]string) float64 {
 	t.Helper()
 	mfs, err := m.reg.Gather()
@@ -114,10 +102,8 @@ func labelsMatch(mm *dto.Metric, want map[string]string) bool {
 	return true
 }
 
-// The collector families carry the STORE's values, derived at scrape time:
-// scraping twice around a store mutation must show the new state without any
-// metrics call in between. Pinned values: 3 appends → next_offset 4; cursor
-// acked to 3 → position 3, lag 1; child HWM applied at 5.
+// The collector families read the store at scrape time: a second scrape after a
+// store change shows the new state with no metrics call in between.
 func TestCollectorDerivesGaugesFromStoreAtScrape(t *testing.T) {
 	s := mustStore(t)
 	seedRecords(t, s, "metrics", 3) // next_offset = 4
@@ -159,8 +145,7 @@ colca_stream_next_offset{stream="metrics"} 4
 		t.Fatal(err)
 	}
 
-	// Mutate the store only — the next scrape must see it (scrape-time
-	// derivation, not a snapshot taken in New).
+	// Change only the store; the next scrape must see it.
 	seedRecords(t, s, "metrics", 2) // next_offset 4 → 6, lag 1 → 3
 	expect2 := `
 # HELP colca_cursor_lag_records Records the cursor has not read yet: next_offset - position, floored at 0.
@@ -183,13 +168,9 @@ colca_stream_next_offset{stream="metrics"} 6
 	}
 }
 
-// The retention gauges (design §8) are derived from the store AND the node's
-// retention policy at scrape time, never cached — values, not just presence.
-// Scenario: 5 records spaced 10 minutes apart, oldest 2h old, against a 1h
-// max_age. Nothing has been pruned (LWM stays 1), so every record is still
-// "live" and the oldest one is what colca_retention_pressure measures. A
-// cursor sitting at offset 3 (below the offset the unclamped age policy would
-// reach) is exactly what colca_retention_blocked_by_cursor counts.
+// The retention gauges read the store and the retention policy at scrape time.
+// Five records ten minutes apart, the oldest two hours old, against a one-hour
+// max_age: nothing is pruned yet, and a cursor at offset 3 blocks the policy.
 func TestRetentionGaugesDerivedFromStoreAndPolicy(t *testing.T) {
 	s := mustStore(t)
 	base := time.Now().Add(-2 * time.Hour).UnixMilli()
@@ -223,10 +204,8 @@ func TestRetentionGaugesDerivedFromStoreAndPolicy(t *testing.T) {
 		t.Fatalf("colca_retention_blocked_by_cursor = %v, want 1", blocked)
 	}
 
-	// Scrape-time derivation, not a snapshot at New: advancing the cursor past
-	// the policy target must drop the block to 0 on the NEXT scrape with no
-	// metrics call in between (mutation guard for blockedByCursor's position
-	// comparison).
+	// Advancing the cursor past the policy target drops the count to 0 on the next
+	// scrape.
 	if !s.CursorAck("slow", "metrics", 6) {
 		t.Fatal("cursor advance must move")
 	}
@@ -235,10 +214,8 @@ func TestRetentionGaugesDerivedFromStoreAndPolicy(t *testing.T) {
 	}
 }
 
-// colca_retention_blocked_by_cursor counts EVERY protecting cursor below the
-// policy target, not just whether any exist — two independently blocking
-// cursors must read 2, not be capped at 1 (mutation guard against an
-// accidental early-return/boolean-collapse in blockedByCursor's loop).
+// colca_retention_blocked_by_cursor counts every protecting cursor below the
+// policy target, so two blocking cursors read 2.
 func TestBlockedByCursorCountsEveryProtectingCursorBelowTarget(t *testing.T) {
 	s := mustStore(t)
 	base := time.Now().Add(-2 * time.Hour).UnixMilli()
@@ -262,9 +239,7 @@ func TestBlockedByCursorCountsEveryProtectingCursorBelowTarget(t *testing.T) {
 		t.Fatalf("colca_retention_blocked_by_cursor = %v, want 2 (both cursors independently block)", blocked)
 	}
 
-	// Advancing only the FURTHER-BEHIND cursor past the target must drop the
-	// count by exactly one, not to zero — pins that the count is a true sum,
-	// not a boolean collapsed to 0/1.
+	// Advancing only the further-behind cursor lowers the count by exactly one.
 	if !s.CursorAck("slower", "metrics", 6) {
 		t.Fatal("cursor advance must move")
 	}
@@ -273,10 +248,7 @@ func TestBlockedByCursorCountsEveryProtectingCursorBelowTarget(t *testing.T) {
 	}
 }
 
-// A cursor sitting below LWM's records is NOT "blocked" when the policy does
-// not want to prune that far in the first place (max_age far larger than any
-// record's age) — blockedByCursor must compare against what the policy
-// actually wants, not just "any cursor below next_offset".
+// A cursor is not blocking when the policy does not want to prune that far.
 func TestBlockedByCursorZeroWhenPolicyWantsNothingPruned(t *testing.T) {
 	s := mustStore(t)
 	seedRecordsAt(t, s, "commands", 3, time.Now().Add(-100*24*time.Hour).UnixMilli(), 1000)
@@ -292,24 +264,10 @@ func TestBlockedByCursorZeroWhenPolicyWantsNothingPruned(t *testing.T) {
 	}
 }
 
-// colca_retention_blocked_by_cursor's scrape-time scan must never walk the
-// full backlog: in the state the gauge exists to alert on (a dead consumer,
-// backlog growing without bound — spec §14 follow-up) an uncapped scan
-// would JSON-decode the entire clamped backlog on every single scrape.
-// Seed a backlog far larger than a small test cap, all old enough that the
-// age policy wants every one of them pruned (so nothing early-exits the
-// scan before the cap is reached), and prove:
-//  1. the underlying PolicyPruneTarget scan stops at EXACTLY the cap — the
-//     returned target is a FLOOR (lwm + cap), not the full backlog's end;
-//  2. the gauge reports floor semantics — a cursor sitting between the
-//     floor and the true (unscanned) backlog end is NOT counted as
-//     blocking, only the cursor below the floor is.
-//
-// The uncapped comparison at the end is the mutation guard: it proves the
-// same backlog, scanned without a cap (scanCap=0 — the pre-fix behavior),
-// finds BOTH cursors blocking. If the cap is ever removed or bypassed, the
-// capped assertion above (blocked==1) fails and reads 2 instead — this is
-// the "assertion goes red" the cap's mutation check is built on.
+// The blocked-by-cursor scan must stop at its cap, or a dead consumer's backlog
+// would be decoded on every scrape. With the cap the target is a floor (lwm +
+// cap) and only the cursor below it counts; without the cap both cursors count,
+// which shows the capped case really exercises the cap.
 func TestBlockedByCursorScanIsBoundedByCap(t *testing.T) {
 	s := mustStore(t)
 	const backlog = 1000
@@ -330,9 +288,7 @@ func TestBlockedByCursorScanIsBoundedByCap(t *testing.T) {
 		"metrics": {MaxAge: config.Duration(time.Hour)},
 	}}
 
-	// Direct PolicyPruneTarget check: with the cap, the scan examines
-	// exactly `testCap` records (lwm starts at 1, every one of the first
-	// testCap records is old enough to be shed) and reports hitScanCap.
+	// With the cap, the scan examines exactly testCap records and reports it.
 	lwm := s.LWM("metrics")
 	next := s.NextOffset("metrics")
 	liveBytes := s.StreamBytes("metrics")
@@ -356,8 +312,7 @@ func TestBlockedByCursorScanIsBoundedByCap(t *testing.T) {
 		t.Fatalf("colca_retention_blocked_by_cursor (capped) = %d, want 1 (only the below-floor cursor; the above-floor cursor sits beyond the scan cap and must not be reported as blocking)", blocked)
 	}
 
-	// Mutation guard: an uncapped scan (scanCap=0, the pre-fix behavior)
-	// walks the entire 1000-record backlog and finds BOTH cursors blocking.
+	// Without a cap the whole backlog is scanned and both cursors block.
 	uncapped := newStoreCollector(s, cfg, 0)
 	if blocked := uncapped.blockedByCursor("metrics", time.Now()); blocked != 2 {
 		t.Fatalf("colca_retention_blocked_by_cursor (uncapped, scanCap=0) = %d, want 2 (sanity check that the capped case above is actually exercising the cap, not returning 1 for some unrelated reason)", blocked)
@@ -384,9 +339,8 @@ colca_cursor_lag_records{cursor="eager",stream="metrics"} 0
 	}
 }
 
-// Every counter/gauge family is present and zero-valued from the first scrape
-// (pre-created children) — dashboards and Plan C queries never see a missing
-// family on an idle node.
+// Every family is present and zero-valued from the first scrape, so dashboards
+// never see a missing family on an idle node.
 func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 	m := New(mustStore(t), config.Retention{}, nil)
 	got, err := m.reg.Gather()
@@ -397,13 +351,9 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 	for _, mf := range got {
 		families[mf.GetName()] = len(mf.GetMetric())
 	}
-	// Stream-labelled families are sized from the lists that BUILD them, not
-	// from a literal. A hand-written count here cannot tell "a stream was
-	// added and its child is correctly present" from "a stream was added and
-	// this test is now wrong", so it would fail every time the set grows and
-	// teach the next reader to bump the number rather than check the claim.
-	// What is being pinned is which LIST each family follows — that is the
-	// real claim, and it still fails if a family follows the wrong one.
+	// Stream-labelled families are sized from the lists that build them, so the
+	// test checks which list each family follows rather than a count that changes
+	// whenever a stream is added.
 	want := map[string]int{
 		"colca_stream_next_offset":       len(streams), // one per stream
 		"colca_ingest_records_total":     len(streams),
@@ -412,9 +362,7 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_acl_denials_total":        2,  // one per action
 		"colca_session_kicks_total":      1,
 		"colca_security_changes_total":   len(securityChangeKinds),
-		// The uplink families cover only the streams that RISE: definitions
-		// descend, so a gauge for them would sit at zero forever and read like
-		// a broken uplink (definition-stream design §4).
+		// Uplink families only cover the streams that rise.
 		"colca_uplink_last_success_timestamp_seconds":   len(uplinkStreams),
 		"colca_uplink_push_failures_total":              len(uplinkStreams),
 		"colca_downlink_last_success_timestamp_seconds": 1,
@@ -422,13 +370,10 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_downlink_cursor_beyond_head_total":       1,
 		"colca_downlink_head_absent_total":              1,
 		"colca_retained_reseed_records":                 1,
-		// Retention (design §8): collector-derived gauges, always one child per
-		// known stream regardless of activity.
+		// Collector gauges: one child per stream regardless of activity.
 		"colca_stream_low_water_mark": len(streams),
 		"colca_stream_live_bytes":     len(streams),
-		// The retention families cover only the streams the POLICY prunes.
-		// Definitions are compacted instead, so a pressure gauge for them would
-		// report progress toward a policy that does not exist (design §6).
+		// Retention families only cover the streams the policy prunes.
 		"colca_retention_pressure":                     len(retentionStreams),
 		"colca_retention_blocked_by_cursor":            len(retentionStreams),
 		"colca_retention_pruned_records_total":         len(retentionStreams),
@@ -440,29 +385,19 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_retention_state_refresh_failures_total": 1,
 		"colca_gap_served_total":                       len(streams) * len(gapSurfaces),
 		"colca_gap_received_total":                     len(streams),
-		// The definition channel (design §5). Applied is the happy path;
-		// rejected is worth alerting on, because a refused definition parks the
-		// node's cursor and nothing behind it arrives either.
+		// Definitions from the parent. A rejected one parks the node's cursor.
 		"colca_definitions_applied_total":            1,
 		"colca_definitions_rejected_total":           1,
 		"colca_replication_integrity_failures_total": 1,
-		// Move-drain (design §3.2/§3.4): colca_drains_active is unlabeled
-		// (always one child, like the retention state-refresh counters) and
-		// colca_drains_completed_total pre-creates all four outcomes
-		// (delivered, expired, forced, gapped [delta]).
+		// colca_drains_active is unlabeled; all four drain outcomes are pre-created.
 		"colca_drains_active":          1,
 		"colca_drains_completed_total": 4,
-		// Blob transfer and ingress-rejection counters (resources design
-		// §5/§7): pre-created so every label combination scrapes at zero
-		// before it first fires.
+		// Blob transfer and ingress rejection counters, pre-created at zero.
 		"colca_blob_transfers_total": len(blobDirections) * len(blobResults),
 		"colca_blob_rejects_total":   len(blobRejectReasons),
 		"colca_record_rejects_total": len(recordRejectReasons),
-		// colca_cursor_position/lag/last_advance_age, colca_child_hwm,
-		// colca_repl_gap_applied_total and colca_drain_pending_commands are
-		// dynamic (no series until a cursor, child or draining child exists)
-		// and deliberately excluded here, same precedent as the pre-existing
-		// cursor/child families.
+		// Cursor, child HWM, repl gap and drain-pending families only have series once
+		// a cursor, child or draining child exists.
 	}
 	for fam, children := range want {
 		if families[fam] != children {
@@ -594,8 +529,7 @@ func TestSecurityChangeSummaryCountsOnlySuccessfulRelevantCommands(t *testing.T)
 	}
 }
 
-// Every method on a nil *Metrics is a no-op — later tasks wire the handle
-// through engine/broker/repl without nil conditionals.
+// Every method on a nil *Metrics is a no-op.
 func TestNilReceiverIsNoOp(t *testing.T) {
 	var m *Metrics
 	m.IngestRecord("metrics")
@@ -622,10 +556,8 @@ func TestNilReceiverIsNoOp(t *testing.T) {
 	m.RecordRejected("too_large")
 }
 
-// Every blob-transfer and ingress-rejection label combination must scrape
-// before it first fires — the same "pre-created children" guarantee
-// TestAllFamiliesPresentZeroValuedBeforeAnyEvent pins by cardinality, checked
-// here by explicit label value instead.
+// Every blob transfer and ingress rejection label combination scrapes at zero
+// before it first fires.
 func TestBlobMetricFamiliesScrapeAtZero(t *testing.T) {
 	m := New(mustStore(t), config.Retention{}, nil)
 	for _, tc := range []struct {

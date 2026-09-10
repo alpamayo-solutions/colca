@@ -56,10 +56,9 @@ func SetRootFromEnv() error {
 	return nil
 }
 
-// ValidRoot reports why r cannot be a topic root. A root is one topic segment
-// of at most 64 letters, digits, '-', '_' or '.', starting with a letter or a
-// digit — which rules out MQTT wildcards, the reserved "$" space and the "_"
-// that marks a contract.
+// ValidRoot reports why r cannot be a topic root. A root is one segment of at
+// most 64 letters, digits, '-', '_' or '.', starting with a letter or digit,
+// which rules out MQTT wildcards, the "$" space and the "_" of a contract.
 func ValidRoot(r string) error {
 	if r == "" || len(r) > 64 {
 		return fmt.Errorf("topic root must be 1 to 64 characters, got %q", r)

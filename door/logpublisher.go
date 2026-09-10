@@ -15,11 +15,8 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// LogSink is where a finished record is handed over. There are two: a door
-// Client, for a service that reaches its node over HTTP, and colcad's own
-// in-process sink -- the node cannot post to its own door, because the door
-// authenticates callers by service name and colcad is not one of its own
-// services. Same record, same publisher, different last step.
+// LogSink receives finished records. A door Client is one sink; colcad has an
+// in-process sink because it cannot post to its own door as a service.
 type LogSink interface {
 	// LogPosition answers the node's ULID and where this publisher sits --
 	// its mount, then its name. Asked once.
@@ -28,9 +25,8 @@ type LogSink interface {
 	PublishLog(ctx context.Context, topic string, payload map[string]any) error
 }
 
-// LogPosition satisfies LogSink for a service that reaches its node over the
-// door: /self already answers both halves, and it is a call the publisher was
-// making anyway for the node id.
+// LogPosition satisfies LogSink over the door, answering both halves from
+// /self.
 func (c *Client) LogPosition(ctx context.Context) (string, []string, error) {
 	self, err := c.Self(ctx)
 	if err != nil {
@@ -54,32 +50,18 @@ func (c *Client) PublishLog(ctx context.Context, topic string, payload map[strin
 }
 
 // LogPublisher is an slog.Handler that also writes each record to the tree's
-// `logs` stream, so a Go service appears in the editor's log view.
+// logs stream, so Go services show up in the log view. It wraps another
+// handler: console output is unchanged, and a record that cannot be published
+// still reaches it.
 //
-// Every Colca service is meant to be visible there. The Python services get
-// this from colca_data_contracts (over MQTT) or from the api's own handler
-// (over this same door); the Go services had no path at all, so the node's
-// historian, its grant convergence and its notification delivery were absent
-// from the log the product shows -- a four-hour window of the deployed demo
-// contained 1000 records, every one of them from dataops.
+// It is built so it cannot take a service down:
 //
-// It WRAPS another handler rather than replacing it: the service's existing
-// console output is untouched, and publishing is added to it. A record that
-// cannot be published is still on stdout.
-//
-// The three ways a log publisher takes a service down, and what is done here:
-//
-//   - Blocking: Handle never waits on the network. Records go to a buffered
-//     channel that one goroutine drains.
-//   - Unbounded growth: that channel is capped and drops the OLDEST record
-//     when full, because during an outage the newest lines are the ones
-//     describing it.
-//   - Recursion: publishing makes an HTTP call, and the node serving it logs.
-//     Cross-process that is not a loop, but a service publishing to its OWN
-//     door would feed itself. Such a caller passes a MinLevel above what its
-//     serving path logs at (see colcad's note in the design), and the
-//     publisher never logs through slog itself -- a publish that fails is
-//     dropped, silently, on purpose.
+//   - Handle never waits on the network; one goroutine drains a buffered channel.
+//   - The channel is capped and drops the oldest record when full, because
+//     during an outage the newest lines describe it.
+//   - A service publishing to its own door would log about its own publishes.
+//     Such a caller sets MinLevel above what its serving path logs, and the
+//     publisher never logs through slog itself.
 type LogPublisher struct {
 	inner    slog.Handler
 	sink     LogSink
@@ -93,9 +75,8 @@ type LogPublisher struct {
 	nodeOnce sync.Once
 	started  sync.Once
 
-	// drain is how Stop reaches the goroutine Start launched: cancel it, then
-	// wait for done. Both are written once inside started.Do and read only
-	// under mu, so Stop can never see a half-initialized pair.
+	// Stop uses cancel and done to end the goroutine Start launched. They are set
+	// once in started.Do and read under mu.
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -109,31 +90,23 @@ type logRecord struct {
 
 // LogPublisherOptions configures NewLogPublisher.
 type LogPublisherOptions struct {
-	// MinLevel is the floor for PUBLISHING. The wrapped handler keeps its own
-	// level, so raising this narrows what reaches the tree without changing
-	// what reaches the console.
+	// MinLevel is the floor for publishing. The wrapped handler keeps its own
+	// level, so the console is unaffected.
 	MinLevel slog.Level
 	// Capacity is how many records may wait to be published. A buffer for a
 	// hiccup, not a store -- the stream is the store.
 	Capacity int
-	// Skip refuses individual records. A publisher that writes THROUGH the
-	// thing it is logging about needs this: colcad appends into its own
-	// store, and the store logs every append, so without a way to refuse
-	// that one record the two would feed each other. Nil accepts everything,
-	// which is right for a publisher whose node is a different process.
+	// Skip refuses individual records. colcad needs it: it appends into its own
+	// store, which logs every append, and the two would feed each other. Nil
+	// accepts everything.
 	Skip func(slog.Record) bool
 }
 
-// DefaultLogCapacity mirrors the api's publisher, for the same reason.
+// DefaultLogCapacity is the default queue capacity.
 const DefaultLogCapacity = 512
 
-// failureNoticeInterval is how often a publisher that cannot reach the node
-// may say so -- on stderr, never through slog. Reporting it through slog would
-// hand the failure straight back to this handler, and one unreachable node
-// would become a storm. On an interval because the failure is a STATE, the
-// same reasoning internal/repl/linkstate.go applies to a replication lane.
-// Silence would be worse: the log view would simply be missing lines with
-// nothing anywhere saying why.
+// failureNoticeInterval is how often an unreachable node is reported on stderr,
+// never through slog, which would feed the failure back into this handler.
 const failureNoticeInterval = 5 * time.Minute
 
 // NewLogPublisher wraps inner so that records at or above MinLevel are also
@@ -153,21 +126,10 @@ func NewLogPublisher(inner slog.Handler, sink LogSink, options LogPublisherOptio
 	}
 }
 
-// usableBase refuses one handler: slog's built-in default.
-//
-// That handler writes through the `log` package, and `slog.SetDefault`
-// redirects `log` back into slog -- so wrapping it and then installing the
-// wrapper (which is the whole point of this type) is an infinite loop. It
-// does not panic or crash: the first log call never returns. A service that
-// did this printed nothing at all and never reached its HTTP listener, and
-// the only symptom anyone saw was a healthcheck that never passed and a
-// container log that was completely empty.
-//
-// A caller who passes it means "whatever logging I already had", and the
-// honest answer for a caller that had none of its own is a real handler on
-// stderr. Substituting one is friendlier than panicking and strictly better
-// than the hang, and it silences nothing: the built-in default writes to
-// stderr too.
+// usableBase replaces slog's built-in default handler with a stderr handler.
+// That handler writes through the log package, which SetDefault routes back
+// into slog, so wrapping it and installing the wrapper hangs on the first log
+// call.
 func usableBase(inner slog.Handler) slog.Handler {
 	if inner == nil || reflect.TypeOf(inner).String() == builtinDefaultHandler {
 		return slog.NewTextHandler(os.Stderr, nil)
@@ -175,10 +137,8 @@ func usableBase(inner slog.Handler) slog.Handler {
 	return inner
 }
 
-// builtinDefaultHandler is the type slog.Default() carries before anything
-// calls SetDefault. slog does not export it, so its name is the only handle
-// on it -- and if a future Go renames it this guard stops matching and the
-// hang comes back, which is what the test on it exists to catch.
+// builtinDefaultHandler is the unexported type of slog's built-in default
+// handler. If Go renames it, the test on usableBase catches it.
 const builtinDefaultHandler = "*slog.defaultHandler"
 
 // Enabled defers to the wrapped handler: publishing must never SILENCE a line
@@ -196,12 +156,8 @@ func (p *LogPublisher) Handle(ctx context.Context, record slog.Record) error {
 	return err
 }
 
-// WithAttrs remembers a `service` (or `logger`) attr as this handler's name.
-//
-// slog puts the attrs from `log.With("service", "colca-historian")` on the
-// HANDLER, not on each record, so reading them off the record at Handle time
-// finds nothing -- which is how every published line was first attributed to
-// a generic "colca" rather than to the service that wrote it.
+// WithAttrs remembers a service (or logger) attribute as this handler's name.
+// slog keeps With attributes on the handler, not on each record.
 func (p *LogPublisher) WithAttrs(attrs []slog.Attr) slog.Handler {
 	derived := p.derive(p.inner.WithAttrs(attrs))
 	for _, attr := range attrs {
@@ -231,20 +187,14 @@ func (p *LogPublisher) derive(inner slog.Handler) *LogPublisher {
 		node:     p.node,
 		position: p.position,
 		failures: p.failures,
-		// nodeOnce/started are per-clone but guard shared state that is
-		// idempotent to set; the worker is started from the ROOT publisher
-		// below, which is the one Start() is called on.
+		// nodeOnce and started are per clone, but only the root publisher is started.
 	}
 }
 
 func (p *LogPublisher) offer(record slog.Record) {
 	module, function, line := source(record)
-	// Every field here is REQUIRED by the `_Log` contract, and a payload
-	// missing one is refused by the node with `jsonschema validation failed
-	// with bundle:///_Log.json#` -- which is what happened to every Go
-	// service's records until this carried module/function/line_no. The list
-	// is pinned against the contract by
-	// colca-data-contracts/vectors/log_payload.json, which both sides read.
+	// Every field is required by the _Log contract; vectors/log_payload.json in the
+	// data contracts pins the list.
 	payload := map[string]any{
 		"timestamp":   record.Time.UTC().Format(time.RFC3339Nano),
 		"level":       levelSegment(record.Level),
@@ -307,22 +257,10 @@ func (p *LogPublisher) Start(ctx context.Context) {
 	})
 }
 
-// Stop ends the drain and waits for it, so that after Stop returns nothing
-// will publish again.
-//
-// The waiting half is the point. This goroutine writes THROUGH the sink into
-// whatever store the sink is attached to, so an owner that closes its store
-// while the drain is still in flight gets a write on a closed store — for a
-// node that is `panic: pebble: closed` on every shutdown, from a goroutine
-// nothing was joining (`internal/nodelog` → `engine.IngestAdminAttributed` →
-// `store.Append`). Under Docker nobody saw it: the process was exiting
-// anyway. A host-supervised node (`chaski.Node`) crashes on every stop.
-//
-// Cancelling alone would not fix it: the drain can be inside publish() when
-// the context is cancelled, and the store would still be closed underneath
-// it. So Stop returns only once that goroutine is gone. Idempotent, and safe
-// on a publisher that was never started — logging keeps working either way,
-// since the wrapped handler is what writes the console.
+// Stop ends the drain and waits for it, so nothing publishes after Stop
+// returns. The drain writes through the sink into a store, and cancelling alone
+// could leave a write in flight when the owner closes that store. Stop is
+// idempotent and a no-op on a publisher that was never started.
 func (p *LogPublisher) Stop() {
 	p.mu.Lock()
 	cancel, done := p.cancel, p.done
@@ -339,11 +277,8 @@ func (p *LogPublisher) publish(ctx context.Context, item logRecord) {
 	if node == "" {
 		return
 	}
-	// The record is addressed at THIS SERVICE'S position -- its mount, then
-	// its name -- because a service may write its own subtree and nothing
-	// above it. Addressed at the node root instead, colcad refuses it with
-	// `no write scope covers colca/v1/_Log/...`, which is what silenced every
-	// placed service. The slog logger's own name stays in the payload.
+	// The record is addressed at this service's position, its mount and then its
+	// name, because a service may only write its own subtree.
 	segments := append([]string{uns.Root(), uns.Version, "_Log", node}, p.position...)
 	segments = append(segments, item.level)
 	topic := strings.Join(segments, "/")
@@ -374,10 +309,8 @@ func (f *failureNotice) note(err error) {
 		f.dropped, err)
 }
 
-// resolveNode asks the door which node this is (topic level 4) and where this
-// service sits (its mount, then its name -- the rule
-// colca_data_contracts.service_topics.service_context states). Both come from
-// one /self call, and neither can change without the process restarting.
+// resolveNode asks the door for the node's ULID and this service's position,
+// once; neither changes while the process runs.
 func (p *LogPublisher) resolveNode(ctx context.Context) string {
 	p.nodeOnce.Do(func() {
 		node, position, err := p.sink.LogPosition(ctx)
@@ -393,10 +326,8 @@ func (p *LogPublisher) resolveNode(ctx context.Context) string {
 	return p.node
 }
 
-// loggerName is the `service` attribute, so a reader can tell
-// colca-historian's lines from colca-grantsync's. slog has no logger names of
-// its own, and the view shows this segment as the source. A per-record attr
-// wins over the handler's, so one call can attribute itself differently.
+// loggerName is the service attribute, which the log view shows as the source.
+// A per-record attribute wins over the handler's.
 func (p *LogPublisher) loggerName(record slog.Record) string {
 	name := ""
 	record.Attrs(func(attr slog.Attr) bool {
@@ -415,20 +346,13 @@ func (p *LogPublisher) loggerName(record slog.Record) string {
 	return "colca"
 }
 
-// source answers where a record was written: the file (as Python names a
-// module), the function, and the line.
-//
-// The `_Log` contract requires all three, because the Python publisher gets
-// them free from logging.LogRecord. slog carries the same information as a
-// program counter, so it costs one lookup rather than a second convention.
-// A record with no PC (one built by hand, as tests do) reports zeroes rather
-// than failing: an unattributed line is still worth publishing.
+// source returns the file, function and line a record was written at, from its
+// program counter. The _Log contract requires all three.
 func source(record slog.Record) (module, function string, line int) {
 	if record.PC == 0 {
-		// A record built by hand, or bridged from the standard log package
-		// without a location flag, has no program counter. The contract
-		// requires a non-empty function, and a record is worth more than
-		// its source: name the gap rather than have the node refuse it.
+		// No program counter: a hand-built record, or one bridged from the log package
+		// without a location flag. The contract needs a function name, so name the gap
+		// rather than have the node refuse the record.
 		return "colca", "unknown", 0
 	}
 	frame, _ := runtime.CallersFrames([]uintptr{record.PC}).Next()
@@ -447,10 +371,8 @@ func topicSegment(name string) string {
 	return strings.ReplaceAll(name, "/", ".")
 }
 
-// levelSegment maps slog's levels onto the five the topic grammar allows.
-// `colca_data_contracts.logging.LOG_LEVELS` is the list, and the API refuses
-// a record whose last segment is not in it -- so an unmapped level would not
-// show up wrong, it would not show up at all.
+// levelSegment maps slog levels onto the five the topic grammar allows; a
+// record with any other level would be refused.
 func levelSegment(level slog.Level) string {
 	switch {
 	case level >= slog.LevelError:

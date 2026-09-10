@@ -1,11 +1,6 @@
-// Composing the two intents that are about POSITION rather than content:
-// moving an entity in the tree, and binding a signal to a connector's tag.
-//
-// They share a file because they share a failure mode. Both are judged against
-// what else currently occupies the position — a path already claimed, a tag
-// already bound — so both must read the snapshot's occupancy before deciding,
-// and both answer 409 rather than overwrite. Like the entity verbs, they
-// compose records and never write.
+// Composing the two position intents: moving an entity and binding a signal to
+// a connector's tag. Both check what already occupies the position and answer
+// 409 instead of overwriting. Like the entity intents, they never write.
 
 package uns
 
@@ -132,9 +127,9 @@ func (w *EditExec) composeBinding(
 		tags[tag.ID] = bindingTag{dataType: tag.DataType, stale: tag.IsStale}
 	}
 	signals := map[string]editSnapshot{}
-	// The binding invariant's one owner (see signalBindings). Autobind consults
-	// the same rule and skips what it may not bind; curating one edit refuses
-	// it instead, so the person is told which binding is in the way.
+	// The binding rule lives in signalBindings. Autobind skips what it may
+	// not bind; the edit refuses, so the person sees which binding is in the
+	// way.
 	bindings := newSignalBindings()
 	takenPaths := map[string]bool{}
 	for key, entity := range entities {
@@ -194,9 +189,8 @@ func (w *EditExec) composeBinding(
 				return 409, fmt.Sprintf("binding: signal %s is already bound to %s",
 					operation.SignalID, bindings.tagHeldBy(operation.SignalID)), "conflict", nil
 			}
-			// Datatype compatibility and staleness are this operation's own
-			// concerns, not the binding invariant: curating one edit checks
-			// them, provisioning a catalogue does not.
+			// Data type compatibility and staleness are checked by the edit only,
+			// not by provisioning.
 			signalType, _ := rawString(signal.Payload["data_type"])
 			if signalType != "" && tag.dataType != "" && !compatibleDataTypes(signalType, tag.dataType) {
 				return 409, fmt.Sprintf("binding: datatype mismatch for operation %s", operation.ID), "conflict", nil
@@ -237,8 +231,8 @@ func (w *EditExec) composeBinding(
 			if _, exists := signals[operation.SignalID]; exists {
 				return 409, fmt.Sprintf("binding: signal %s already exists", operation.SignalID), "conflict", nil
 			}
-			// The signal is new — the guard above refused an id that already
-			// exists — so it holds nothing and only the tag side can refuse.
+			// The signal is new (the guard above refused existing ids), so only
+			// the tag side can refuse.
 			if bindings.propose(operation.TagID, operation.SignalID) != bindFree {
 				return 409, fmt.Sprintf("binding: tag %s is already bound to %s",
 					operation.TagID, bindings.signalHolding(operation.TagID)), "conflict", nil

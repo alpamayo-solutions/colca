@@ -18,33 +18,26 @@ func offsetOf(key []byte) (uint64, bool) {
 }
 func metaKey(stream string) []byte { return []byte("m\x00" + stream) }
 
-// kvKey identifies one current-state record. Path and node keep hierarchy
-// scans efficient; the canonical MQTT topic makes the key contract-aware (and
-// also preserves protocol version/class identity). Different retained
-// contracts may legitimately occupy the same node/path — for example a
-// _Signal definition and its latest _Metric value.
+// kvKey identifies one current-state record. Path and node keep hierarchy scans
+// efficient; the topic makes the key contract-aware, since several retained
+// contracts can share a node and path, such as a _Signal and its latest _Metric.
 func kvKey(path, nodeID, topic string) []byte {
 	return []byte("k\x00" + path + "\x00" + nodeID + "\x00" + topic)
 }
 func kvPrefix(prefix string) []byte        { return []byte("k\x00" + prefix) }
 func cursorKey(name, stream string) []byte { return []byte("c\x00" + name + "\x00" + stream) }
 
-// ctKey holds a cursor's last-advance timestamp in unix ms (spec §2:
-// ct/{name}/{stream}, written by CursorAck in the same synced write as the
-// cursor). The two-byte prefix does NOT collide with the c\x00 cursor scan:
-// scanU64Pairs bounds its iteration to {prefix, 0x00}..{prefix, 0x01}, and
-// 't' sorts after 0x01.
+// ctKey holds a cursor's last-advance time in unix ms, written by CursorAck with
+// the cursor. It does not collide with the c\x00 cursor scan, which stops at
+// {prefix, 0x01}, and 't' sorts after that.
 func ctKey(name, stream string) []byte   { return []byte("ct\x00" + name + "\x00" + stream) }
 func hwmKey(child, stream string) []byte { return []byte("h\x00" + child + "\x00" + stream) }
 func lwmKey(stream string) []byte        { return []byte("l\x00" + stream) }
 func bytesKey(stream string) []byte      { return []byte("b\x00" + stream) }
 
-// rpKey holds a stream's pending state-refresh range (spec §6.5 [delta]): two
-// big-endian uint64s [From, To) over KV-projection Offsets, written in the
-// prune batch when a run overrides cursors on an entities stream, cleared
-// only after every refresh append succeeded. Its survival across a crash is
-// what keeps the §6.4 marker from claiming a completeness the lost refresh
-// never delivered.
+// rpKey holds a stream's pending state-refresh range: two big-endian uint64s
+// [From, To) over KV Offsets, written in the prune batch and cleared once every
+// refresh append succeeded.
 func rpKey(stream string) []byte { return []byte("rp\x00" + stream) }
 
 func journalKey(stream string, first uint64) []byte {

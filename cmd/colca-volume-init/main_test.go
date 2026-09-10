@@ -88,21 +88,10 @@ func TestRunRejectsPartialTLSConfiguration(t *testing.T) {
 	}
 }
 
-// TestCopyHappensBeforeOwnershipChanges pins the ordering that broke every
-// world bring-up.
-//
-// The process runs as uid 0 with all capabilities dropped but CHOWN and
-// DAC_OVERRIDE, and chmod'ing a file it does not own needs CAP_FOWNER
-// specifically. So the moment chownTree hands a path to the target uid,
-// copyTree can no longer set a mode inside it. The initializer died on exactly
-// that — "chmod /volumes/keys: operation not permitted" — and every service
-// waiting on it never started.
-//
-// A test process cannot drop a capability, so it cannot feel that failure. It
-// asserts the property that makes the capability unnecessary instead: run()
-// reaches all of its copying before any of its chowning. That is a claim about
-// call order, so it is checked on the syntax tree, the same way the plugin
-// boundary is.
+// TestCopyHappensBeforeOwnershipChanges: once chownTree hands a path to the
+// target uid, a process without CAP_FOWNER cannot chmod inside it. A test cannot
+// drop capabilities, so it checks on the syntax tree that run() does all
+// copying before any chowning.
 func TestCopyHappensBeforeOwnershipChanges(t *testing.T) {
 	calls := callOrderIn(t, "run")
 
@@ -125,11 +114,9 @@ func TestCopyHappensBeforeOwnershipChanges(t *testing.T) {
 	}
 }
 
-// TestAnAlreadyCorrectModeIsNotReapplied covers the second run.
-//
-// By then the tree belongs to the target uid, so a chmod would fail for the
-// same reason — and there is nothing to change. The guard is what makes the
-// initializer idempotent rather than working exactly once.
+// TestAnAlreadyCorrectModeIsNotReapplied: on a second run the tree belongs to
+// the target uid, so skipping an unchanged mode is what makes the initializer
+// idempotent.
 func TestAnAlreadyCorrectModeIsNotReapplied(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dir")
 	if err := os.Mkdir(path, 0o750); err != nil {
@@ -182,17 +169,10 @@ func callOrderIn(t *testing.T, function string) []string {
 	return nil
 }
 
-// TestTheCopyRootKeepsItsOwnPermissions is the case a fresh temp dir hides.
-//
-// The real target is a named volume the image created 0750 and owned by the
-// runtime user; the real source is a directory on a developer's machine, 0755
-// by umask. Applying the source's mode to that mount point is a downgrade, and
-// it is a chmod on a path this process no longer owns — which without
-// CAP_FOWNER can only fail. Every world bring-up died there.
-//
-// Verifying this on a freshly created directory proves nothing: a fresh one
-// already matches, so the chmod is skipped for the wrong reason. The target
-// here deliberately starts with a DIFFERENT mode from the source.
+// TestTheCopyRootKeepsItsOwnPermissions: the real target is a volume created
+// 0750 and owned by the runtime user, the source a 0755 directory, and the
+// root's mode must not be copied over. The target starts with a different mode,
+// since a fresh directory would already match and prove nothing.
 func TestTheCopyRootKeepsItsOwnPermissions(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
@@ -221,9 +201,8 @@ func TestTheCopyRootKeepsItsOwnPermissions(t *testing.T) {
 			"the mount point the deployment created", info.Mode().Perm())
 	}
 
-	// The denominator: the copy still happened, and a directory BELOW the root
-	// does take the source's mode. Otherwise "unchanged" could mean "did
-	// nothing at all".
+	// The copy still happened, and a directory below the root does take the
+	// source's mode.
 	if _, err := os.Stat(filepath.Join(target, "edge1.key")); err != nil {
 		t.Fatalf("the copy did not land: %v", err)
 	}

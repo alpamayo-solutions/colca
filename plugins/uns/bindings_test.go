@@ -6,9 +6,8 @@ import (
 	"testing"
 )
 
-// autobindOneTag provisions a single-tag catalogue through the real
-// `signal/autobind` verb and reports what it did with that tag. When heldBy is
-// given, a curated signal of that id already holds the tag before the run.
+// autobindOneTag runs signal/autobind on a one-tag catalogue and reports what
+// happened to the tag. If heldBy is set, that signal already holds the tag.
 func autobindOneTag(t *testing.T, heldBy string) (created, skipped int) {
 	t.Helper()
 	c := newConfigExec(t)
@@ -39,9 +38,8 @@ func autobindOneTag(t *testing.T, heldBy string) (created, skipped int) {
 	return outcome.Created, outcome.Skipped
 }
 
-// editBindOneTag curates a single binding of the same tag through the real
-// `_CmdEdit apply` door. When heldBy is given, a curated signal of that id
-// already holds the tag before the edit.
+// editBindOneTag binds the same tag through _CmdEdit apply. If heldBy is set,
+// that signal already holds the tag.
 func editBindOneTag(t *testing.T, heldBy string) (code int, message string) {
 	t.Helper()
 	f := newStore("n-edge1")
@@ -76,17 +74,9 @@ func editBindOneTag(t *testing.T, heldBy string) (code int, message string) {
 	return code, message
 }
 
-// The tag↔signal binding invariant has ONE owner — signalBindings — and two
-// operations that react to its verdict differently on purpose: `signal/autobind`
-// provisions a whole catalogue and SKIPS what it may not bind, so a replay or a
-// lifecycle trigger changes nothing; the edit curates one edit and REFUSES
-// it with a 409, so the person is told what stands in the way.
-//
-// This poses the same situations to both real doors and asserts each one's
-// outcome against the single verdict the owner gives. Nothing here restates the
-// rule: the expectation for both paths is derived from propose. If either path
-// stops following the owner — or starts spelling a rule of its own again — the
-// two answers diverge and this goes red.
+// Both binding paths follow signalBindings: autobind skips what the rule
+// refuses, the edit answers 409. Expectations come from propose, so if either
+// path stops following it the answers diverge and the test fails.
 func TestBothBindingPathsFollowTheOneBindingRule(t *testing.T) {
 	for _, situation := range []struct {
 		name   string
@@ -96,10 +86,8 @@ func TestBothBindingPathsFollowTheOneBindingRule(t *testing.T) {
 		{name: "tag is already held by another signal", heldBy: "sig-curated"},
 	} {
 		t.Run(situation.name, func(t *testing.T) {
-			// The owner's verdict for this situation, asked exactly once. Both
-			// operations propose a signal that does not hold anything yet — a
-			// freshly minted one for autobind, "sig-new" for the edit — so
-			// the situation, and therefore the verdict, is the same for both.
+			// Ask for the verdict once. Both paths propose a signal that holds
+			// nothing yet, so the verdict is the same for both.
 			bindings := newSignalBindings()
 			bindings.bind("t1", situation.heldBy)
 			mayBind := bindings.propose("t1", "sig-new") == bindFree
@@ -131,10 +119,9 @@ func TestBothBindingPathsFollowTheOneBindingRule(t *testing.T) {
 	}
 }
 
-// The extra questions the edit asks — is the tag stale, does its datatype
-// fit the signal — are that operation's own, not the shared invariant. They must
-// not leak into provisioning, which has no person to tell and must stay
-// idempotent: a stale tag with an unrelated datatype is still bound.
+// The edit's extra checks (stale tag, data type fit) must not leak into
+// provisioning, which has to stay idempotent: a stale tag with an unrelated
+// data type is still bound.
 func TestProvisioningDoesNotInheritTheEditOnlyChecks(t *testing.T) {
 	c := newConfigExec(t)
 	bindEntry(t, c, "01JCONN", "opcua-1", "")

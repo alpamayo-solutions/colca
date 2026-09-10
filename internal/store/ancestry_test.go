@@ -2,8 +2,8 @@ package store
 
 import "testing"
 
-// Node-ancestry persistence (id-grants design §4): key presence IS "known" —
-// a root's empty ancestry round-trips as known, absence means never learned.
+// Key presence means known: a root's empty ancestry reads back as known, and a
+// missing key as never learned.
 func TestAncestryPutGet(t *testing.T) {
 	s, err := Open(t.TempDir())
 	if err != nil {
@@ -21,7 +21,7 @@ func TestAncestryPutGet(t *testing.T) {
 	if b, ok := s.AncestryGet(); !ok || string(b) != string(chain) {
 		t.Fatalf("AncestryGet = (%q, %v), want (%q, true)", b, ok, chain)
 	}
-	// The root's empty ancestry is a KNOWN value, not absence.
+	// The root's empty ancestry is a known value, not absence.
 	if err := s.AncestryPut([]byte(`[]`)); err != nil {
 		t.Fatal(err)
 	}

@@ -1,23 +1,11 @@
-// Command colca-grantsync carries authorization between Keycloak and a colca
-// tree.
+// Command colca-grantsync keeps authorization in step between Keycloak and a
+// Colca tree. It registers every system element as a Keycloak authz resource, so
+// administrators can grant on it, and compiles the resulting permissions into
+// _Group definitions at the root node, which pass them down the tree.
 //
-// Keycloak is where a grant is authored: system elements are created and retired
-// at runtime, so a checked-in file cannot name one that did not exist when it
-// was written, and an operator must be able to grant access to a machine
-// somebody just commissioned. This service closes the loop in both directions —
-// it registers every element as an authz resource (so there is something to
-// assign against), and compiles the resulting permissions into `_Group`
-// definitions written at the ROOT node, from where they descend to every node on
-// their own.
-//
-// It is a sibling of colcad, never part of it: Keycloak stays out of the node
-// core and out of the message path, and a separate process is what keeps that
-// true. Being in the same module is what earns it the grammar — it validates
-// every grant with the parser the nodes themselves run.
-//
-// Stateless. Both stores are durable and every cycle reads them whole, so it
-// owns no database, two instances racing produce the same writes, and losing it
-// loses nothing but freshness.
+// It runs beside colcad, never inside it, so Keycloak stays out of the node. It
+// keeps no state: two instances write the same thing, and losing it only costs
+// freshness.
 //
 // Configuration is environment only:
 //
@@ -74,9 +62,8 @@ type config struct {
 	httpAddr      string
 }
 
-// loadConfig reads the environment, naming EVERY missing variable at once. A
-// service that starts with half its configuration and dies on the first cycle
-// is harder to diagnose than one that refuses to start and says why.
+// loadConfig reads the environment and names every missing variable at once, so
+// the service refuses to start with a clear reason.
 func loadConfig(getenv func(string) string) (config, error) {
 	c := config{
 		colcaURL:      strings.TrimRight(or(getenv("COLCA_URL"), "http://colca"), "/"),
@@ -165,10 +152,8 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// The same records, published to the tree's `logs` stream so grant
-	// convergence is visible in the editor's log view. Whether a group's
-	// grants reached a node is exactly the kind of question that view exists
-	// to answer, and until now it could not: no Go service published at all.
+	// The same records also go to the tree's logs stream, so grant convergence shows
+	// in the log view.
 	publisher := door.NewLogPublisher(
 		log.Handler(),
 		&door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService},
@@ -230,9 +215,8 @@ func run() int {
 func serve(ctx context.Context, addr string, reg *prometheus.Registry, log *slog.Logger) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		// Liveness only. Readiness would have to mean "Keycloak and the node are
-		// both reachable", and a service whose job is to survive their outages
-		// must not report itself unhealthy because of one.
+		// Liveness only: this service must survive Keycloak and node outages, so it does
+		// not report unhealthy because of one.
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})

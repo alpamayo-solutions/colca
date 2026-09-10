@@ -1,14 +1,7 @@
-// Package blobgc reclaims blobs nothing references any more (resources
-// design §8).
-//
-// A blob is live iff some live _Resource record names its digest. Everything
-// else is deletable — but only after a grace period, because three
-// legitimate windows put a blob on disk before the record that references it
-// exists: upload-before-upsert at the author, blob-before-entity arrival at
-// an ancestor, and pull-before-execute at a provisioning target (§9.1).
-// Deleting a blob in any of those windows would destroy a file mid-authoring,
-// so an unreferenced blob is only deletable once it is older than the
-// configured grace.
+// Package blobgc reclaims blobs nothing references any more. A blob is live if a
+// live _Resource names its digest. Others are deleted only after a grace period,
+// because a blob legitimately arrives before its record: uploaded before the
+// upsert, replicated before the entity, or pulled before the command runs.
 package blobgc
 
 import (
@@ -35,17 +28,14 @@ type Sweeper struct {
 	// now is a seam: tests age a blob past the grace without sleeping.
 	now func() time.Time
 
-	// records is a seam: tests inject a failing read to prove the sweeper
-	// never computes liveness from it. Defaults to Engine.ScanContractAll,
-	// the one _Resource read that surfaces a storage failure instead of
-	// silently answering "nothing found" — uns.EntityStore.KVScanAll cannot
-	// be used here for exactly that reason (resources design §8).
+	// records returns the _Resource records, Engine.ScanContractAll by default,
+	// which reports storage failures instead of answering "nothing found". Tests
+	// inject a failing read.
 	records func() ([]uns.KVRecord, error)
 }
 
-// NewSweeper builds a sweeper. ulid is the node's own ULID, used only for
-// logging (the sweeper touches no topic that carries an identity of its
-// own). m may be nil (every Metrics method is nil-safe).
+// NewSweeper builds a sweeper. ulid is the node's ULID, used only for logging. m
+// may be nil.
 func NewSweeper(blobs *blobstore.Store, eng *engine.Engine, cfg config.BlobGC, m *metrics.Metrics, ulid string) *Sweeper {
 	return &Sweeper{
 		blobs: blobs, eng: eng, cfg: cfg, m: m, ulid: ulid,
@@ -57,12 +47,9 @@ func NewSweeper(blobs *blobstore.Store, eng *engine.Engine, cfg config.BlobGC, m
 	}
 }
 
-// Run sweeps every EffectiveInterval until stop is closed. An EffectiveInterval
-// of 0 is the operator's explicit "sweeper disabled" (config.BlobGC's doc
-// comment: the same absent-vs-0 precedent as the retention pruner) — Run
-// returns immediately and never touches the blob store. A sweep in progress
-// always completes before Run returns; the caller's WaitGroup discipline
-// (node.Stop waits before closing the store) is what makes that sufficient.
+// Run sweeps every EffectiveInterval until stop is closed; an interval of 0
+// disables the sweeper and Run returns at once. A running sweep always completes
+// before Run returns.
 func (s *Sweeper) Run(stop <-chan struct{}) {
 	interval := s.cfg.EffectiveInterval()
 	if interval <= 0 {
@@ -81,24 +68,15 @@ func (s *Sweeper) Run(stop <-chan struct{}) {
 	}
 }
 
-// runOnce marks the digests every live _Resource references, then deletes
-// every stored blob that is neither live nor still inside its grace window.
-//
-// A failed mark phase must never be read as "nothing is referenced": that
-// would delete every unreferenced-looking blob past the grace, including
-// ones a working scan would have shown as live. So a records() error skips
-// the whole pass, exactly like a blobs.List() failure already does — this
-// sweeper deletes nothing on a cycle where it cannot establish liveness.
-//
-// Known cost, stated rather than hidden: the mark phase scans the whole KV
-// each sweep. At this scale that is cheaper than maintaining an index; if
-// resource counts grow, this is the first thing to change.
+// runOnce marks the digests every live _Resource references, then deletes every
+// blob that is neither live nor inside its grace. If the mark phase fails the
+// whole pass is skipped, as for a failed List: a failed scan must never read as
+// "nothing is referenced". The mark phase scans all of KV each time, which is
+// fine at this scale and the first thing to change if resources grow.
 func (s *Sweeper) runOnce() {
-	// Debris from a process that died mid-Put, reclaimed first and
-	// independently: an unfinished blob has no digest, so no _Resource can
-	// reference it and its liveness needs no mark phase. That is why a failed
-	// scan below skips the sweep but not this — the two answer different
-	// questions, and this one is always answerable.
+	// Debris from a process that died mid-Put is reclaimed first and on its own: an
+	// unfinished blob has no digest, so nothing can reference it and no mark phase
+	// is needed. A failed scan below skips the sweep but not this.
 	if removed, err := s.blobs.ReclaimAbandonedTemp(s.now()); err != nil {
 		s.log.Error("reclaiming abandoned uploads failed", "err", err)
 	} else if removed > 0 {
@@ -126,8 +104,7 @@ func (s *Sweeper) runOnce() {
 			continue
 		}
 		if now.Sub(b.Modified) < grace {
-			// Inside the grace window (§8): may be a blob a legitimate
-			// upload, replication or pull put here before its record.
+			// Inside the grace window: possibly a blob that arrived before its record.
 			continue
 		}
 		// blobstore.Delete is already idempotent, so a concurrent delete

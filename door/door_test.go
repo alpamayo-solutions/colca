@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// The client is shared by every service that talks to a node, so what it must
-// get right is the CONTRACT: which route, which params, which header, and that
-// a refusal is surfaced rather than read as an empty answer.
+// The client is shared by every service, so these tests pin its contract: route,
+// parameters, headers, and that a refusal is an error rather than an empty
+// answer.
 
 func TestFetchAsksForTheStreamAndCursorItWasGiven(t *testing.T) {
 	var gotPath, gotQuery, gotToken string

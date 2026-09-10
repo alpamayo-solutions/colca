@@ -15,22 +15,15 @@ import (
 
 const undeliveredCounter = "colca_command_undelivered_total"
 
-// newUndeliveredTestEngine builds an engine wired with real metrics (so
-// metricstest can read the counter back through the served exposition
-// format, same as production) and a HasSubscriberFor stub the test fully
-// controls, plus a captured log buffer (must start before New — *Engine
-// binds e.log to slog.Default() at construction, per engine_test.go's
-// captureLogs/newCapturedEngine convention). subscribed is what every call
-// to HasSubscriberFor answers — the one variable the delivery-outcome
-// tests below flip.
+// newUndeliveredTestEngine builds an engine with real metrics, a HasSubscriberFor
+// stub that always answers subscribed, and a captured log.
 func newUndeliveredTestEngine(t *testing.T, subscribed bool) (*Engine, *metrics.Metrics, *bytes.Buffer) {
 	t.Helper()
 	return newUndeliveredTestEngineWithIDs(t, subscribed, testIDs())
 }
 
-// newUndeliveredTestEngineWithIDs is the same engine with the registry the
-// caller chooses — what the target-identity tests below vary, since the guard
-// they exercise is a registry lookup.
+// newUndeliveredTestEngineWithIDs is the same with a registry of the caller's
+// choice.
 func newUndeliveredTestEngineWithIDs(
 	t *testing.T, subscribed bool, ids fakeIDs,
 ) (*Engine, *metrics.Metrics, *bytes.Buffer) {
@@ -49,9 +42,7 @@ func newUndeliveredTestEngineWithIDs(
 	return e, m, logBuf
 }
 
-// expiredCmdPayload matches cmdPayload's shape (exec_test.go) but with an
-// expires_at that already passed — same convention TestExpiryIsCheckedBeforeExecution
-// uses (a literal past epoch millisecond, not "now minus something").
+// expiredCmdPayload is cmdPayload with an expires_at in the past.
 func expiredCmdPayload(t *testing.T, corr string) []byte {
 	t.Helper()
 	b, err := json.Marshal(map[string]any{"correlation_id": corr, "expires_at": 1000})
@@ -61,11 +52,8 @@ func expiredCmdPayload(t *testing.T, corr string) []byte {
 	return b
 }
 
-// TestCommandUndeliveredWhenNoSubscriber is the audit finding itself,
-// reproduced as a test: a live command addressed to an ENROLLED MACHINE
-// ("m1", per testIDs — not this node's own ULID "n-edge1") that reaches
-// zero local-bus subscribers must count colca_command_undelivered_total.
-// Nothing before this file made this drop observable at all.
+// A live command for an enrolled machine that reaches no subscriber counts
+// colca_command_undelivered_total.
 func TestCommandUndeliveredWhenNoSubscriber(t *testing.T) {
 	e, m, _ := newUndeliveredTestEngine(t, false /* no subscriber connected */)
 
@@ -78,13 +66,8 @@ func TestCommandUndeliveredWhenNoSubscriber(t *testing.T) {
 	}
 }
 
-// TestCommandDeliveredNotCountedWhenSubscribed is the denominator half: the
-// exact same live, externally-addressed command, but HasSubscriberFor now
-// answers true (a subscriber IS connected and would receive it) — the
-// counter must stay at 0. Without this half, TestCommandUndeliveredWhenNoSubscriber
-// alone cannot prove the counter is CONDITIONAL on the absence of a
-// subscriber — an implementation that increments unconditionally would pass
-// it too (see the mutation check recorded for this pair).
+// The same command with a subscriber connected does not count, which shows the
+// counter is conditional.
 func TestCommandDeliveredNotCountedWhenSubscribed(t *testing.T) {
 	e, m, _ := newUndeliveredTestEngine(t, true /* subscriber connected */)
 
@@ -97,13 +80,7 @@ func TestCommandDeliveredNotCountedWhenSubscribed(t *testing.T) {
 	}
 }
 
-// TestExpiredCommandNotCountedAsUndelivered: a command that arrives already
-// past its expires_at is not a delivery failure — the issuer waited too
-// long before the record was even persisted, which is a different problem
-// with a different owner (the issuer's own ack-timeout handling, cmdadmin
-// design §5/§11). No subscriber is wired here on purpose: without the
-// expiry guard, this alone would false-positive on every expired command
-// replayed or relayed after its window closed.
+// A command that arrives already expired is not a delivery failure.
 func TestExpiredCommandNotCountedAsUndelivered(t *testing.T) {
 	e, m, _ := newUndeliveredTestEngine(t, false /* no subscriber */)
 
@@ -116,16 +93,8 @@ func TestExpiredCommandNotCountedAsUndelivered(t *testing.T) {
 	}
 }
 
-// TestTransitingCommandNotCountedAsUndelivered is the tree case, and the one
-// that decides whether this metric tells the truth in the only topology that
-// matters. A command addressed to a machine enrolled DEEPER in the tree is
-// persisted and mirrored at every ancestor on its way down
-// (IngestDownlink → persistTSAttributed), and reaches zero subscribers at
-// each of them — the target is fed over the replication door, not this bus.
-// That is the healthy path, not a delivery failure, so nothing may be
-// counted here. Reproduces a root publish
-// (colca/v1/_CmdParam/m1/site1/edge1/m1/...) at a node where m1 is not
-// enrolled.
+// A command for a machine enrolled deeper in the tree passes through every
+// ancestor with no subscriber there. That is the healthy path and must not count.
 func TestTransitingCommandNotCountedAsUndelivered(t *testing.T) {
 	// Registry deliberately without the target: exactly what an ancestor's
 	// registry looks like for a machine enrolled below it.
@@ -144,11 +113,8 @@ func TestTransitingCommandNotCountedAsUndelivered(t *testing.T) {
 	}
 }
 
-// TestChildNodeTargetedCommandNotCountedAsUndelivered is the last hop of the
-// same journey: the target IS enrolled here, but as a kind=node child, which
-// is fed over the replication door (9443) and never subscribes to this bus.
-// Presence in the registry is therefore not the question — this is what makes
-// MayUseDoor(DoorMQTT) load-bearing rather than a plain `ok` check.
+// A command for a child node enrolled here is fed over replication, never this
+// bus, so it does not count; being in the registry is not enough.
 func TestChildNodeTargetedCommandNotCountedAsUndelivered(t *testing.T) {
 	ids := testIDs()
 	ids.entries["n-child"] = &uns.Entry{ULID: "n-child", Kind: uns.KindNode, Element: "el-m1", Pubkey: strings.Repeat("ab", 32)}
@@ -164,14 +130,8 @@ func TestChildNodeTargetedCommandNotCountedAsUndelivered(t *testing.T) {
 	}
 }
 
-// TestNodeTargetedCommandNotCountedAsUndelivered: _CmdConfigure/_CmdEdit/
-// _CmdAdmin addressed to THIS node (level 4 == e.cfg.ULID) execute in-process
-// via maybeExec right after this same persist call returns — no MQTT
-// subscriber is ever expected for them, so reaching zero must not trip the
-// counter. It needs no guard of its own: a node holds no kind=machine entry
-// for itself, so the same registry lookup answers it. No subscriber is wired
-// here on purpose: without that lookup, every command a node executes on
-// itself would register as "undelivered" from the very first one.
+// Commands addressed to this node execute in-process and never have a subscriber,
+// so they do not count.
 func TestNodeTargetedCommandNotCountedAsUndelivered(t *testing.T) {
 	e, m, _ := newUndeliveredTestEngine(t, false /* no subscriber */)
 
@@ -184,10 +144,8 @@ func TestNodeTargetedCommandNotCountedAsUndelivered(t *testing.T) {
 	}
 }
 
-// TestCommandUndeliveredLogsTopicAndCorrelationID pins the warning's
-// content, not just the counter: an operator diagnosing a stuck command
-// needs the topic and correlation id in the log line, not merely a metric
-// that something somewhere went unheard.
+// The warning carries the topic and correlation id, which an operator needs to
+// find a stuck command.
 func TestCommandUndeliveredLogsTopicAndCorrelationID(t *testing.T) {
 	e, _, logBuf := newUndeliveredTestEngine(t, false /* no subscriber */)
 
@@ -208,16 +166,8 @@ func TestCommandUndeliveredLogsTopicAndCorrelationID(t *testing.T) {
 	}
 }
 
-// TestNilRegistryEntryIsNotDeliverable reaches the guard the Mounts contract
-// forbids anyone from tripping (engine.go: Get must answer (nil, false), never
-// (nil, true)) — through the only thing that can trip it, a fake. The
-// interface permits the pair, so `!ok || !target.MayUseDoor(…)` dereferences
-// nil unless the predicate is nil-safe, and a panic on this path takes the
-// whole ingest down rather than just the metric.
-//
-// The claim is two things at once: no panic, and no count — "no identity"
-// answers "not deliverable over this bus" the same way an unknown identity
-// does.
+// A fake returning (nil, true) from Get, which the Mounts contract forbids,
+// neither panics nor counts.
 func TestNilRegistryEntryIsNotDeliverable(t *testing.T) {
 	ids := testIDs()
 	ids.entries["m1"] = nil // (nil, true): the pair the contract forbids

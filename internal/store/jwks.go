@@ -2,11 +2,10 @@ package store
 
 import "github.com/cockroachdb/pebble/v2"
 
-// JWKS persistence (human-authz design §2.2, key family "j/"): the last
-// successfully fetched JWKS document survives restarts, so a node that comes
-// back while the issuer is unreachable keeps validating tokens until their
-// exp. One key, whole document, synced write — losing it is not corruption
-// (the next fetch restores it), so reads are best-effort.
+// JWKS persistence (key "j/jwks"): the last fetched JWKS document survives
+// restarts, so a node that comes back while the issuer is unreachable keeps
+// validating tokens until they expire. Losing it is not corruption, since the
+// next fetch restores it, so reads are best effort.
 
 var jwksKey = []byte("j\x00jwks")
 

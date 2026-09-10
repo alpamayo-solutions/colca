@@ -2,17 +2,12 @@ package uns
 
 import "testing"
 
-// The predicates carry rules the core used to spell out for itself. What is
-// worth pinning here is not that each one returns a bool, but the distinctions
-// that are easy to get wrong when a class is added — chiefly that "state" and
-// "state the publisher owns" are different sets, and that the refresh set is
-// narrower than both.
+// These tests pin the distinctions that are easy to get wrong when a class is
+// added: "state" and "state the publisher owns" are different sets, and the
+// refresh set is narrower than both.
 
-// A definition is state — it projects into KV and is retained — but it is not
-// OWNED state: it descends from the parent, its path is its own identity, and
-// no hop rewrites it. Conflating the two would make every hop insert a mount
-// into a definition's topic and break the rule that the same definition means
-// the same thing at every node.
+// A definition is state (projected and retained) but not owned state: it
+// descends, its path is its id, and no hop rewrites it.
 func TestDefinitionsAreStateButNotOwnedState(t *testing.T) {
 	if !IsState(ClassDefinition) {
 		t.Error("a definition must be state: it KV-projects, is retained and is tombstonable")
@@ -27,8 +22,8 @@ func TestDefinitionsAreStateButNotOwnedState(t *testing.T) {
 	}
 }
 
-// Events are neither. Retaining a command would re-deliver stale instructions
-// to every new subscriber, which is the whole reason the split exists.
+// Events are neither; retaining a command would replay stale instructions to
+// every new subscriber.
 func TestEventsAreNeitherStateNorOwnedState(t *testing.T) {
 	for _, c := range []Class{ClassCmd, ClassAck, ClassGap, ClassTimeSync, ClassAudit} {
 		if IsState(c) || IsOwnedState(c) {
@@ -37,9 +32,8 @@ func TestEventsAreNeitherStateNorOwnedState(t *testing.T) {
 	}
 }
 
-// Only entities refresh across a retention boundary: nothing else re-supplies
-// them. Definitions arrive again on the downlink, and data are samples whose
-// ageing out is the point — refreshing either would defeat retention.
+// Only entities refresh across a retention boundary: definitions arrive again
+// on the downlink, and samples are meant to age out.
 func TestOnlyEntitiesNeedStateRefresh(t *testing.T) {
 	if !NeedsStateRefresh(ClassEntity) {
 		t.Error("entities are authored here and nothing re-supplies them — they must refresh")
@@ -51,10 +45,8 @@ func TestOnlyEntitiesNeedStateRefresh(t *testing.T) {
 	}
 }
 
-// A command authors the entity graph and files definitions; both commit as one
-// atomic batch. Nothing else may ride one: a metric is a machine's to publish at
-// its own door, and commands, acks, gap markers, audit events and the beacon are
-// not state at all.
+// A command may author entities and definitions in its batch, nothing else:
+// metrics belong to their machine's door, and events are not state.
 func TestOnlyEntitiesAndDefinitionsMayBeCommandAuthored(t *testing.T) {
 	for _, c := range []Class{ClassEntity, ClassDefinition} {
 		if !IsCommandAuthoredState(c) {
@@ -81,10 +73,8 @@ func TestOnlyClassNoneIsUnknown(t *testing.T) {
 	}
 }
 
-// A bundle may declare the contracts that ride the wire, and only those. Gap
-// markers and time beacons are authored by the binary itself, so their class
-// names are deliberately absent from the manifest vocabulary — a bundle that
-// names one must fail to load rather than silently redefine a builtin.
+// A bundle may declare wire contracts only. Gap markers and time beacons are
+// authored by the binary, so a bundle naming their class must fail to load.
 func TestManifestVocabularyExcludesBuiltinAuthoredClasses(t *testing.T) {
 	for name, want := range map[string]Class{
 		"data": ClassData, "entity": ClassEntity, "definition": ClassDefinition,
@@ -102,12 +92,9 @@ func TestManifestVocabularyExcludesBuiltinAuthoredClasses(t *testing.T) {
 	}
 }
 
-// The Edit replay receipt is entity-class state — KV-projected, retained,
-// tombstonable, so the authoring node's durableReplay can find it — and yet it
-// must never leave that node: its only reader scans its own node id, so an
-// ancestor's copy is a projection nobody reads. The two answers are different
-// questions and both must hold; conflating "flows up as a class" with "this
-// record leaves the node" is exactly what filled a hub's KV with receipts.
+// The Edit receipt is entity-class state, so the authoring node can find it,
+// but it never leaves that node, since only that node reads it. "Its class
+// flows up" and "this record leaves the node" are different questions.
 func TestTheEditReceiptIsNodePrivateStateAndNothingElseIs(t *testing.T) {
 	const receipt = "_EditOperation"
 	if !IsNodePrivate(receipt) {
@@ -129,12 +116,9 @@ func TestTheEditReceiptIsNodePrivateStateAndNothingElseIs(t *testing.T) {
 	}
 }
 
-// A parent's child-offset gap detection assumes the uplink carries the stream
-// in full. That holds for every lane except the two whose uplink is a filtered
-// subset: `commands` (only acks and gap markers rise) and `entities` (the
-// node-private receipt stays home). Both are derived from the vocabulary, so
-// the pinned answers are what a class or a private contract implies, not a
-// second hand-kept list.
+// A parent's offset gap detection assumes the uplink carries the whole stream.
+// Only commands (only acks and gap markers rise) and entities (the private
+// receipt stays home) are filtered, and both are derived, not listed by hand.
 func TestOnlyFilteredUplinksAreNotGapless(t *testing.T) {
 	for _, stream := range []string{"commands", "entities"} {
 		if UplinkCarriesEveryRecord(stream) {
@@ -172,9 +156,8 @@ func TestOnlyOwnedEventsAndStateFlowUp(t *testing.T) {
 	}
 }
 
-// Draining is asked, never spelled out: an entry persisted before the field
-// existed carries no status at all and must read as active, which is exactly
-// the rule a `Status == "active"` comparison at a call site would get wrong.
+// An entry persisted before the status field existed has no status and must
+// read as active, which a `Status == "active"` comparison would get wrong.
 func TestAnEntryWithNoStatusIsNotDraining(t *testing.T) {
 	if (&Entry{Kind: KindNode}).IsDraining() {
 		t.Error("absent status means active — an entry with no status must not read as draining")
@@ -189,8 +172,8 @@ func TestAnEntryWithNoStatusIsNotDraining(t *testing.T) {
 	}
 }
 
-// Only nodes drain. A machine's delivery rides broker QoS-1 session state
-// rather than a cursor, so a parent has nothing to drain it against.
+// Only nodes drain; a machine's delivery lives in broker session state, not
+// in a cursor.
 func TestOnlyNodesCanDrain(t *testing.T) {
 	if !(&Entry{Kind: KindNode}).CanDrain() {
 		t.Error("a node must be drainable")
@@ -202,12 +185,8 @@ func TestOnlyNodesCanDrain(t *testing.T) {
 	}
 }
 
-// A nil entry is "no identity" and gets the same truthful null answer from
-// every boolean predicate on *Entry: not draining, not drainable, not admin
-// — the same rule TestANilEntryHoldsNoDoor pins for MayUseDoor. Without this
-// test the nil guards added alongside MayUseDoor's would be unfalsifiable:
-// removing any one of them would still compile and still pass every other
-// test in this file.
+// A nil entry answers false from every boolean predicate on *Entry. Without
+// this test, removing any nil guard would still pass everything else.
 func TestANilEntryAnswersFalseToEveryBooleanPredicate(t *testing.T) {
 	var e *Entry
 	if e.IsDraining() {
@@ -221,9 +200,8 @@ func TestANilEntryAnswersFalseToEveryBooleanPredicate(t *testing.T) {
 	}
 }
 
-// Doors are answered per kind so no listener re-derives the rule. Humans are
-// the case worth pinning: they arrive as tokens and are authorized per publish,
-// so they hold no door of their own and must be refused at all three.
+// Each kind holds only its own doors. People arrive as tokens and are
+// authorized per publish, so they are refused at all three.
 func TestEachKindHoldsOnlyItsOwnDoors(t *testing.T) {
 	for _, tc := range []struct {
 		kind  Kind
@@ -246,11 +224,8 @@ func TestEachKindHoldsOnlyItsOwnDoors(t *testing.T) {
 	}
 }
 
-// A nil entry is "no identity", and no identity holds a door. The predicate
-// answers that instead of panicking because every caller reaches it through
-// `entry, ok := ids.Get(id); if !ok || !entry.MayUseDoor(…)`, where the right
-// half runs on any registry that hands back (nil, true) — a pair the Mounts
-// contract forbids and a test fake can still produce.
+// A nil entry holds no door. Callers use `if !ok || !entry.MayUseDoor(…)`,
+// which still reaches the predicate if a registry returns (nil, true).
 func TestANilEntryHoldsNoDoor(t *testing.T) {
 	var e *Entry
 	for _, d := range []Door{DoorMQTT, DoorHTTP, DoorRepl, DoorLocal} {

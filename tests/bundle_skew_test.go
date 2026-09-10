@@ -1,8 +1,6 @@
-// Rollout skew (schema-bundle design §9.4/§12): two nodes of one tree may
-// briefly run different bundles. A child pinned to bundle N+1 (one added
-// contract) accepts and persists the new contract; replication applies it
-// upstream UN-revalidated (§10.4) even though the ancestors' bundle N has
-// never heard of it; the same publish directly at an N node is rejected.
+// During a rollout, nodes of one tree may run different bundles. A child on
+// bundle N+1 accepts a new contract, replication applies it upstream without
+// revalidation, and the same publish directly at a node on bundle N is refused.
 package tests
 
 import (
@@ -150,7 +148,7 @@ func TestBundleRolloutSkewAcrossTheTree(t *testing.T) {
 }
 
 // authtestEnrollNode places an element at mount and enrolls a child node key
-// there (kind node) — placement first, because an identity binds to an element.
+// there.
 func authtestEnrollNode(t *testing.T, parent *node.Node, ulid, pubkey, mount string) {
 	t.Helper()
 	b, err := json.Marshal(map[string]any{"ulid": ulid, "pubkey": pubkey, "kind": "node",

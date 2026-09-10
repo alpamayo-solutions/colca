@@ -49,7 +49,7 @@ func TestCompactionDropsSupersededRecordsRegardlessOfCursors(t *testing.T) {
 	first := write(t, s, "01HGRP-OPS", `{"id":"01HGRP-OPS","v":1}`)
 	second := write(t, s, "01HGRP-OPS", `{"id":"01HGRP-OPS","v":2}`)
 	other := write(t, s, "01HGRP-VIEW", `{"id":"01HGRP-VIEW"}`)
-	// A cursor parked at the very beginning — behind everything.
+	// A cursor parked at the very beginning, behind everything.
 	s.CursorAck("downlink-def:n-child", "definitions", 1)
 
 	st, err := s.Compact("definitions")
@@ -87,9 +87,9 @@ func TestCompactionLeavesTheOnlyRecordOfATopicAlone(t *testing.T) {
 	}
 }
 
-// The rule that is a floor and not an optimisation: a consumer behind a dropped
-// tombstone would never learn the definition was retracted, and it already holds
-// the value being retracted — so it would keep a withdrawn group forever.
+// The tombstone rule is a floor, not an optimisation: a consumer behind a
+// dropped tombstone would never learn of the retraction and would keep the
+// withdrawn group forever.
 func TestCompactionKeepsATombstoneUntilEveryCursorHasPassedIt(t *testing.T) {
 	s := defStore(t)
 	write(t, s, "01HGRP-OPS", `{"id":"01HGRP-OPS"}`)

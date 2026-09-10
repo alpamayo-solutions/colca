@@ -1,13 +1,8 @@
-// Package contracts loads the generated schema bundle (schema-bundle design
-// §4/§7): one canonical-JSON artifact carrying, per contract, the routing
-// class, the tombstone capability and a restricted JSON-Schema. Loading is
-// start-time only and all-or-nothing — a bad bundle refuses to start, and
-// with no bundle configured the engine falls back to the builtin floor
-// (plugins/uns), never to a mix of the two.
-//
-// The jsonschema dependency lives HERE, not in plugins/uns — the plugin stays
-// stdlib-only (arch-tested); the engine consults this table through a narrow
-// Rule surface.
+// Package contracts loads the generated schema bundle: one canonical JSON file
+// with each contract's routing class, tombstone capability and restricted JSON
+// Schema. Loading happens at start and is all or nothing; without a bundle the
+// engine uses the built-in rules in plugins/uns, never a mix. The jsonschema
+// dependency lives here so plugins/uns stays standard-library only.
 package contracts
 
 import (
@@ -23,21 +18,14 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// builtinOnly are contracts produced and validated by the colca binary
-// itself (design §10.2); a bundle declaring one is a load error.
+// builtinOnly are contracts colcad produces and validates itself; a bundle that
+// declares one fails to load.
 var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true, "_TimeSync": true}
 
-// allowedKeywords is the §4.1 schema subset, re-enforced at load so a bundle
-// can never pull capabilities the broker did not sign up for.
-//
-// `pattern` and `maxLength` joined the subset on 2026-09-07 (design §4.1): an entity id is a ULID — 26 characters of one alphabet — and the
-// door accepted a 31-character `_SystemElement.id` that the projector's
-// 26-character column then refused. `pattern` is compiled ONCE per rule, at
-// bundle load: the jsonschema compiler hands every `pattern` to Go's
-// `regexp.Compile` inside `compile` below (its default RegexpEngine), so a
-// malformed expression is a fail-start condition (§7.1) and a publish pays
-// only a match against the compiled program. Go's RE2 has no backtracking,
-// so a bundle cannot smuggle in a pathological expression.
+// allowedKeywords is the supported schema subset, enforced at load so a bundle
+// cannot use features the broker does not support. pattern is compiled once at
+// load with Go's RE2, so a bad expression fails startup and matching cannot
+// backtrack.
 var allowedKeywords = map[string]bool{
 	"type": true, "properties": true, "required": true, "enum": true,
 	"items": true, "minLength": true, "maxLength": true, "pattern": true,
@@ -70,8 +58,7 @@ type Table struct {
 	digest  string
 }
 
-// Lookup resolves a contract; ok=false means unknown (reject — validated
-// namespace, design §7.1).
+// Lookup resolves a contract; ok is false for an unknown one, which is rejected.
 func (t *Table) Lookup(contract string) (Rule, bool) {
 	r, ok := t.rules[contract]
 	return r, ok
@@ -96,9 +83,8 @@ type contractEntry struct {
 	Schema    json.RawMessage `json:"schema"`
 }
 
-// Load reads, verifies and compiles a bundle. wantSHA (optional, from the
-// node config) is the revision pin: a mismatch refuses to start (design
-// §6.1). Every failure names its §7.1 condition.
+// Load reads, verifies and compiles a bundle. wantSHA, when set, pins its
+// digest: a mismatch refuses to start.
 func Load(path, wantSHA string) (*Table, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- operator-configured path
 	if err != nil {
@@ -148,9 +134,8 @@ func Load(path, wantSHA string) (*Table, error) {
 	return &Table{rules: rules, version: f.BundleVersion, digest: digest}, nil
 }
 
-// computeDigest reproduces the generator's rule: sha256 over the canonical
-// JSON of {bundle_version, source, contracts} — generated_at and the digest
-// field itself sit outside the hashed region (design §5.1).
+// computeDigest reproduces the generator's digest: sha256 over the canonical
+// JSON of bundle_version, source and contracts.
 func computeDigest(f bundleFile) (string, error) {
 	contracts := make(map[string]json.RawMessage, len(f.Contracts))
 	for k, v := range f.Contracts {
@@ -177,9 +162,8 @@ func computeDigest(f bundleFile) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// canonicalize re-marshals JSON with sorted keys and no insignificant
-// whitespace — Go maps marshal with sorted keys, matching the generator's
-// json.dumps(sort_keys=True, separators=(",", ":")).
+// canonicalize re-marshals JSON with sorted keys and no extra whitespace,
+// matching Python's json.dumps(sort_keys=True, separators=(",", ":")).
 func canonicalize(raw json.RawMessage) (json.RawMessage, error) {
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -198,7 +182,7 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
-// lintSubset walks a schema and rejects any keyword outside §4.1.
+// lintSubset walks a schema and rejects any keyword outside the subset.
 func lintSubset(raw json.RawMessage, path string) error {
 	var node map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &node); err != nil {

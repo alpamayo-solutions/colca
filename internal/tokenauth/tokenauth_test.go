@@ -19,8 +19,8 @@ func openStore(t *testing.T) *store.Store {
 	return st
 }
 
-// world builds a verifier against a fresh fake issuer with the JWKS already
-// fetched (one explicit refresh — Run's first-tick behavior without the loop).
+// world builds a verifier against a fresh fake issuer, with the JWKS already
+// fetched.
 func world(t *testing.T) (*tokentest.Issuer, *Verifier) {
 	t.Helper()
 	iss := tokentest.NewIssuer(t)
@@ -105,8 +105,7 @@ func TestVerifyTruthTable(t *testing.T) {
 	})
 }
 
-// Rotation heals via refresh-on-unknown-kid: exactly ONE re-fetch, then the
-// new-key token validates (§2.2).
+// Key rotation heals through one refetch on the unknown kid.
 func TestUnknownKidTriggersOneRefetchAndValidates(t *testing.T) {
 	iss, v := world(t)
 	before := iss.Requests()
@@ -122,7 +121,7 @@ func TestUnknownKidTriggersOneRefetchAndValidates(t *testing.T) {
 	}
 }
 
-// Unknown kid within the rate limit: rejected WITHOUT hitting the server.
+// Within the rate limit, an unknown kid is rejected without calling the issuer.
 func TestUnknownKidRespectsRateLimit(t *testing.T) {
 	iss, v := world(t)
 	// Arm the limiter with a genuine miss.
@@ -150,8 +149,8 @@ func TestUnknownKidOfflineFailsClosed(t *testing.T) {
 	}
 }
 
-// The persisted JWKS survives a restart: a fresh Verifier on the same store
-// validates with the ISSUER DOWN (§2.2 offline restart).
+// The persisted JWKS survives a restart: a new verifier validates while the
+// issuer is down.
 func TestJWKSPersistsAcrossRestartOffline(t *testing.T) {
 	iss := tokentest.NewIssuer(t)
 	st := openStore(t)
@@ -167,7 +166,7 @@ func TestJWKSPersistsAcrossRestartOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// NO refresh — v2 must run on the persisted document alone.
+	// No refresh: v2 runs on the persisted document alone.
 	got, reason, err := v2.Verify(tok)
 	if err != nil || got == nil || got.Sub != "anna" {
 		t.Fatalf("persisted JWKS must validate offline: %s %v", reason, err)
@@ -185,11 +184,8 @@ func TestFailedRefreshKeepsCachedKeys(t *testing.T) {
 	}
 }
 
-// A verified token's grants arrive exactly as authored and are stored exactly
-// as authored: a grant names a system element, and an element id means the same
-// thing at every node (id-grants design §4). What used to be prefix arithmetic
-// here is a lookup at decision time now, so there is nothing left to translate
-// and nothing about the verifier that depends on where the node sits.
+// Grants are stored exactly as authored; an element id means the same at every
+// node.
 func TestVerifyKeepsGrantsVerbatim(t *testing.T) {
 	iss, v := world(t)
 	authored := []string{"read:01HSITE1/#", "cmd:01HM1/#:param", "admin:#"}

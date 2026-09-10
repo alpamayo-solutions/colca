@@ -12,10 +12,9 @@ func benchPayload(i int) []byte {
 	return b
 }
 
-// BenchmarkAppendBatch measures the cost of one synced batch per iteration at
-// different batch sizes. The per-RECORD rate it reports is the fsync-coalescing
-// curve: batch=1 is the worst case (one fsync per record — the MQTT ingest
-// path today), batch=200 is the replication apply path (replBatch).
+// BenchmarkAppendBatch measures one synced batch per iteration at several batch
+// sizes. The per-record rate shows fsync coalescing: batch=1 is one fsync per
+// record, like MQTT ingest; batch=200 is the replication apply path.
 func BenchmarkAppendBatch(b *testing.B) {
 	for _, size := range []int{1, 10, 100, 200, 1000} {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
@@ -45,9 +44,8 @@ func BenchmarkAppendBatch(b *testing.B) {
 	}
 }
 
-// BenchmarkKVScan measures a full-projection scan at growing path cardinality —
-// the /kv endpoint's cost and the "broker/KV behavior at realistic
-// path cardinality" question at the storage layer.
+// BenchmarkKVScan measures a full projection scan at growing path cardinality,
+// the storage cost behind /kv.
 func BenchmarkKVScan(b *testing.B) {
 	for _, paths := range []int{1_000, 10_000, 100_000} {
 		b.Run(fmt.Sprintf("paths=%d", paths), func(b *testing.B) {
@@ -89,8 +87,8 @@ func BenchmarkKVScan(b *testing.B) {
 	}
 }
 
-// BenchmarkReadSequential measures cursor-style stream reads in replBatch-sized
-// pages — the uplink's read path.
+// BenchmarkReadSequential measures cursor-style reads in replBatch-sized pages,
+// the uplink's read path.
 func BenchmarkReadSequential(b *testing.B) {
 	s, err := Open(b.TempDir())
 	if err != nil {

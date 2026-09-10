@@ -8,12 +8,9 @@ import (
 	"testing"
 )
 
-// grantEvaluationVectorPath is the shared human-authorization dataset (see
-// the vector file's own "description" field for the full rationale): ONE
-// checked-in file that every implementation of these rules is judged by. Same
-// shared-file mechanism annotation_id.json and authz_objects.json already
-// use — never a colca-local copy, which would just be the drift the vector
-// exists to prevent.
+// grantEvaluationVectorPath is the shared human-authorization dataset every
+// implementation of these rules is tested against; its "description" field
+// explains the cases.
 const grantEvaluationVectorPath = "../../contracts/src/colca_data_contracts/vectors/grant_evaluation.json"
 
 type grantEvaluationQuestion struct {
@@ -54,13 +51,9 @@ func loadGrantEvaluationVectors(t *testing.T) grantEvaluationVectorFile {
 	return v
 }
 
-// grantEvaluationScope resolves the vectors' plain id->parent tree into the
-// Scope Authorize/AuthorizeCmdAt need: every element's local path is the
-// chain of ids from its topmost ancestor down to itself, joined by "/". The
-// exact string is this test's own affair — Authorize only ever compares two
-// paths built the same way — so it need not match a path convention built
-// from element NAMES; implementations are pinned on subtree membership, not
-// on string equality of an internal path.
+// grantEvaluationScope builds a Scope from the vectors' id-to-parent tree: an
+// element's local path is the chain of ids from its topmost ancestor, joined by
+// "/". Only subtree membership matters, not the exact strings.
 type grantEvaluationScope struct {
 	paths map[string]string
 }
@@ -99,10 +92,9 @@ func buildGrantEvaluationScope(t *testing.T, elements map[string]*string) grantE
 	return grantEvaluationScope{paths: paths}
 }
 
-// seedGrantEvaluationGroups writes the vectors' group definitions into a fake
-// store, one synthetic authoring node per definition — so a group with more
-// than one definition is a genuine collision (two nodes claiming the same
-// id), exactly as GroupIndex.GrantsOf requires to resolve it to nothing.
+// seedGrantEvaluationGroups writes the vectors' group definitions, each from its
+// own synthetic node, so a group with two definitions is a real collision that
+// GroupIndex.GrantsOf resolves to nothing.
 func seedGrantEvaluationGroups(f *fakeStore, groups map[string][][]string) {
 	for groupID, definitions := range groups {
 		for i, grants := range definitions {
@@ -114,13 +106,10 @@ func seedGrantEvaluationGroups(f *fakeStore, groups map[string][][]string) {
 	}
 }
 
-// TestGrantEvaluationMatchesTheGoldenVectors pins colca's Authorize /
-// AuthorizeCmdAt against the same human-authorization cases the api's
-// grants.py + namespace_filter.py answer to. A vector marked "disputed" names
-// a case where this test's author found the two real implementations
-// disagree; it is skipped here (never bent to pass) and must be skipped on
-// the Python side too, so the disagreement stays visible instead of being
-// silently resolved by whichever suite runs last.
+// TestGrantEvaluationMatchesTheGoldenVectors checks Authorize and AuthorizeCmdAt
+// against the shared human-authorization cases. Vectors marked "disputed" are
+// cases where implementations disagree; they are skipped here and elsewhere, so
+// the disagreement stays visible.
 func TestGrantEvaluationMatchesTheGoldenVectors(t *testing.T) {
 	vectors := loadGrantEvaluationVectors(t)
 	scope := buildGrantEvaluationScope(t, vectors.Elements)

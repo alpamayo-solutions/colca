@@ -1,15 +1,8 @@
-// Edit idempotency: the in-memory replay cache and the durable receipt
-// that outlives it.
-//
-// A edit command is identified by its operation_id and fingerprinted by a
-// canonical digest of its whole payload, so a client that retries gets the
-// ORIGINAL outcome back rather than a second execution — and a client that
-// reuses an operation_id for different content gets 409 rather than a silent
-// overwrite. The cache is bounded and therefore lossy across a restart, which
-// is why the receipt is also written into the same atomic batch as the state
-// it describes: the durable copy is what makes the guarantee survive the
-// process, and committing it with the state is what stops a receipt from ever
-// claiming a write that did not land.
+// Edit idempotency: the in-memory replay cache and the durable receipt. A
+// command is identified by its operation_id and fingerprinted by a digest of
+// its payload, so a retry gets the original outcome and a reused id with
+// different content gets 409. The cache does not survive a restart, so the
+// receipt is committed in the same batch as the state it describes.
 
 package uns
 

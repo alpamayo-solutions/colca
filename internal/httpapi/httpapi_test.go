@@ -35,9 +35,7 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// testBlobs opens a blob store for a test, capped exactly like the node
-// would cap it from cfg.Limits — every Handler fixture in this file needs
-// one now that blob routes live behind it.
+// testBlobs opens a blob store capped like the node would cap it from cfg.Limits.
 func testBlobs(t *testing.T, cfg *config.Config) *blobstore.Store {
 	t.Helper()
 	blobs, err := blobstore.Open(t.TempDir(), cfg.Limits.EffectiveMaxBlobBytes())
@@ -73,10 +71,9 @@ func bearerReq(t *testing.T, hc *http.Client, method, url, token string, body an
 	return resp, out
 }
 
-// api is the fixture: a TLS server exactly as node assembly builds it, with
-// one enrolled machine (m1, mount "m1") and the admin token "tok". st and m
-// are handed out for tests that must seed records with exact timestamps,
-// prune directly, or assert metric values (the gap-contract tests).
+// api is the fixture: a TLS server built like node assembly builds it, with machine
+// m1 at mount m1 and admin token "tok". st and m are exposed for tests that seed
+// records, prune or read metrics.
 type api struct {
 	url string
 	eng *engine.Engine
@@ -92,8 +89,8 @@ func (a *api) mint(sub string, grants []string) string {
 	return a.iss.Mint(sub, grants, time.Now().Add(5*time.Minute))
 }
 
-// place authors an element at path in the fixture node's namespace and returns
-// its id — what an enrollment binds to (id-grants design §4).
+// place authors an element at path in the fixture node's namespace and returns its
+// id.
 func (a *api) place(t *testing.T, path string) string {
 	t.Helper()
 	return authtest.Place(t, a.eng, path)
@@ -116,10 +113,10 @@ func newAPI(t *testing.T) *api {
 	}
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
 	m := metrics.New(s, config.Retention{}, nil)
-	reg.SetMetrics(m) // move-drain design §3.4: colca_drains_active is registry-owned
+	reg.SetMetrics(m) // the registry owns colca_drains_active
 	e := engine.New(s, cfg, reg, nil, m, nil)
-	// The registry resolves placements through the engine's element index, so
-	// the wiring — and the element — come before any enrollment (id-grants §4).
+	// The registry resolves placements through the engine's element index, so wiring
+	// and element come before enrollment.
 	reg.SetNamespace(e.Elements())
 	m1 := authtest.NewMachine(t, "m1")
 	authtest.EnrollAt(t, reg, e, m1, "m1", "write:"+authtest.ElementID("m1")+"/#")
@@ -196,9 +193,8 @@ func req(t *testing.T, hc *http.Client, method, url, token string, body any) (*h
 	return resp, out
 }
 
-// raw performs a request and returns the response together with its body as a
-// string — req() decodes into map[string]any, which destroys exactly the JSON
-// shapes the gap wire-contract tests assert byte-for-byte.
+// raw performs a request and returns the body as a string; req decodes into a map,
+// which would lose the exact JSON the gap tests assert.
 func raw(t *testing.T, hc *http.Client, method, url, token, body string) (*http.Response, string) {
 	t.Helper()
 	r, err := http.NewRequest(method, url, strings.NewReader(body))
@@ -383,8 +379,8 @@ func TestAdminConfigureResponseNamesProducedStateOffset(t *testing.T) {
 	}
 }
 
-// The §6.3 route matrix for a MACHINE caller: data routes allowed and scoped,
-// admin routes forbidden.
+// Route matrix for a machine: data routes allowed and scoped, admin routes
+// forbidden.
 func TestMachineRouteMatrix(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
@@ -403,16 +399,12 @@ func TestMachineRouteMatrix(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("machine publish: %d", resp.StatusCode)
 	}
-	// machine publish with the wrong level-4 → 422 (engine level-4 rule, not
-	// an authorization denial: the topic never even reaches the write-scope
-	// check).
+	// Wrong level 4: 422 from the level-4 rule; the write-scope check is never reached.
 	resp, _ = req(t, mc, "POST", a.url+"/publish", "", map[string]any{"topic": "colca/v1/_Metric/other/x", "payload": map[string]any{"v": 2.0}})
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("machine spoof publish: want 422, got %d", resp.StatusCode)
 	}
-	// machine publish with the RIGHT level-4 but OUTSIDE its write zone →
-	// 403 write_denied: a well-formed request the machine is not authorized
-	// to make, not a malformed one.
+	// Right level 4 but outside the write zone: 403 write_denied.
 	resp, out := req(t, mc, "POST", a.url+"/publish", "", map[string]any{"topic": "colca/v1/_Metric/n-test/outside-m1/x", "payload": map[string]any{"v": 2.0}})
 	if resp.StatusCode != http.StatusForbidden || out["reason"] != "write_denied" {
 		t.Fatalf("machine publish outside its write zone: want 403 reason write_denied, got %d %v", resp.StatusCode, out)
@@ -519,10 +511,8 @@ func TestEnrollmentRoutes(t *testing.T) {
 	}
 }
 
-// Move-drain door semantics (design §3.1): 404 for an unknown ulid, 409 for
-// a non-node entry (machines are out of scope, design §3.2 [delta]), 409 for
-// a second drain on the same child, 200 + status=draining on success — and
-// the drained identity keeps working (still authenticates, still fetches).
+// Drain route: 404 for an unknown ULID, 409 for a machine or a second drain, 200
+// with status draining on success, and the drained identity keeps working.
 func TestDrainRouteDoorSemantics(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
@@ -571,9 +561,7 @@ func TestDrainRouteDoorSemantics(t *testing.T) {
 	}
 }
 
-// Move-drain design §3.1/§3.4: DELETE stays immediate and works during an
-// active drain — no drain precondition on the kill-switch — and records the
-// "forced" outcome (colca_drains_completed_total{outcome="forced"}),
+// DELETE works immediately during a drain and records the forced outcome,
 // decrementing colca_drains_active.
 func TestDeleteDuringDrainIsImmediateAndRecordsForced(t *testing.T) {
 	a := newAPI(t)
@@ -605,8 +593,7 @@ func TestDeleteDuringDrainIsImmediateAndRecordsForced(t *testing.T) {
 		t.Fatalf(`colca_drains_completed_total{outcome="delivered"} = %v, want 0 (this was forced, not delivered)`, v)
 	}
 
-	// A plain DELETE on a never-draining machine must NOT touch the drain
-	// counters at all — the "forced" bookkeeping is drain-specific.
+	// Deleting a machine that never drained leaves the drain counters alone.
 	m2 := authtest.NewMachine(t, "m2")
 	authtest.EnrollAt(t, a.reg, a.eng, m2, "m2")
 	if resp, out := req(t, admin, "DELETE", a.url+"/enroll/m2", "tok", nil); resp.StatusCode != http.StatusOK {
@@ -617,7 +604,7 @@ func TestDeleteDuringDrainIsImmediateAndRecordsForced(t *testing.T) {
 	}
 }
 
-// _EnrolledIdentity may not enter through /publish — not even with the admin token.
+// _EnrolledIdentity may not enter through /publish, not even with the admin token.
 func TestEnrolledIdentityRejectedOnPublish(t *testing.T) {
 	a := newAPI(t)
 	resp, out := req(t, client(nil), "POST", a.url+"/publish", "tok",
@@ -638,9 +625,8 @@ func TestUnknownClientCertNeverFallsThrough(t *testing.T) {
 	}
 }
 
-// Wire-shape guard: /fetch keeps its exact response fields (records with
-// local/owner offsets, topic/payload/ts and attribution, plus next) — the retention gap object composes
-// into this same response, so the base shape is a contract.
+// /fetch keeps its exact response fields; the gap object composes into this
+// response, so the base shape is a contract.
 func TestFetchWireShape(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
@@ -684,10 +670,9 @@ func seedMetrics(t *testing.T, s *store.Store, n int, topic string) {
 	}
 }
 
-// Spec §6.1: when the cursor's position is below the stream's LWM, /fetch
-// gains the gap object — from_offset = cursor position, to_offset = LWM−1,
-// first_ts/last_ts from the prune journal — and records begin at the LWM.
-// The response is a wire contract, so the assertions are exact-JSON.
+// Below the LWM, /fetch adds the gap object (from_offset is the cursor position,
+// to_offset LWM-1, first_ts and last_ts from the prune journal) and records start
+// at the LWM. Asserted as exact JSON.
 func TestFetchGapExactWireShape(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
@@ -721,8 +706,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		t.Fatalf("second fetch differs — /fetch must not move the cursor:\n%s", body2)
 	}
 
-	// Spec §6.1 [delta]: a brand-new cursor (position 1) on a pruned stream
-	// gets the gap too — a new consumer genuinely cannot see history.
+	// A new cursor on a pruned stream gets the gap too.
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh", "tok", "")
 	want = `{"gap":{"stream":"metrics","from_offset":1,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
 		`"next":6,"records":[` + surviving + `]}` + "\n"
@@ -758,9 +742,9 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	}
 }
 
-// design §8: every /fetch response carrying a gap object counts
-// colca_gap_served_total{stream="metrics",surface="fetch"} — a response
-// WITHOUT a gap must never move it.
+// Every response carrying a gap counts
+// colca_gap_served_total{stream="metrics",surface="fetch"}; a response without one
+// does not.
 func TestFetchGapCountsGapServed(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
@@ -797,9 +781,8 @@ func TestFetchGapCountsGapServed(t *testing.T) {
 		t.Fatalf("%s = %v after one gap-carrying fetch, want 1", gapServed, v)
 	}
 
-	// The gap is side-effect free (does not move the cursor): a second fetch
-	// sees the SAME gap and counts a SECOND time — one increment per response
-	// actually served, not per distinct gap.
+	// The gap does not move the cursor: a second fetch sees the same gap and counts
+	// again.
 	if _, body := raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", ""); !strings.Contains(body, `"gap"`) {
 		t.Fatalf("repeat fetch must still see the gap: %s", body)
 	}
@@ -808,9 +791,8 @@ func TestFetchGapCountsGapServed(t *testing.T) {
 	}
 }
 
-// Spec §6.1/§6.2: approx is true exactly when a COALESCED journal entry
-// answered first_ts. Driven end-to-end through real journal coalescing: more
-// prune runs than the journal cap, so the oldest entries merge.
+// approx is true exactly when a coalesced journal entry answered first_ts, driven
+// through real coalescing with more prune runs than the journal holds.
 func TestFetchGapApproxFromCoalescedJournal(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
@@ -860,9 +842,7 @@ func TestFetchGapApproxFromCoalescedJournal(t *testing.T) {
 	}
 }
 
-// An unknown stream is a malformed request: 400 with an error body, never a
-// fabricated gap (an unknown stream has no LWM, and the gap arithmetic must
-// not run on it) and never a silently empty 200.
+// An unknown stream is 400 with an error body: no gap arithmetic and no empty 200.
 func TestFetchUnknownStreamRejected(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
@@ -880,11 +860,8 @@ func TestFetchUnknownStreamRejected(t *testing.T) {
 	}
 }
 
-// The payload must survive as raw JSON in both directions: never decoded into
-// map[string]any and re-encoded, so an integer too large for a float64 keeps
-// its exact digits, and never emitted as a base64 or quoted string. Asserted
-// on the RAW body bytes — req()'s map decode would round the digits away and
-// could never see this regression.
+// Payloads stay raw JSON both ways: an integer beyond float64 keeps its digits and
+// is never base64 or quoted. Asserted on the raw body.
 func TestPayloadStaysRawJSON(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
@@ -915,9 +892,8 @@ func TestPayloadStaysRawJSON(t *testing.T) {
 	}
 }
 
-// prefix filters on the uns hierarchy path, not on the raw topic, and max is
-// bounded (<=0 or >1000 falls back to 100). Run as the admin (unscoped) so
-// the prefix logic is isolated from the grant filter it composes with.
+// prefix filters on the hierarchy path, not the raw topic, and max outside 1..1000
+// falls back to 100. Run as admin to keep grants out of it.
 func TestFetchPrefixAndMax(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
@@ -949,23 +925,9 @@ func TestFetchPrefixAndMax(t *testing.T) {
 	}
 }
 
-// TestFetchServesATombstoneAsJSONNull pins the empty-payload tombstone
-// (retention design §7.1) through GET /fetch. A KV-projecting state contract
-// accepts an empty payload as a deliberate delete (plugins/uns.Validate), and
-// consumers expect to see that as JSON `payload:
-// null`. Before this test existed, /fetch instead answered a
-// clean HTTP 200 with a completely empty body the moment ANY page it served
-// contained a tombstone — json.RawMessage passed the zero-length payload
-// bytes straight through, encoding/json's compact() rejected them as
-// "unexpected end of JSON input", and the whole top-level Encode failed
-// after writeJSON had already sent WriteHeader(200), so nothing was left to
-// send. A cursor that reached that offset was stuck retrying the identical
-// broken page forever, since /fetch never moves a cursor itself.
-//
-// Mirrors the production sequence exactly: a local service registers itself
-// with _ServiceDetails (state, entities stream), then tombstones it — the
-// same pair of records (_ServiceDetails then a state tombstone) that broke
-// the demo hub's projector on 2026-09-04.
+// An empty-payload tombstone comes out of /fetch as payload: null. The sequence
+// mirrors a local service registering with _ServiceDetails and then tombstoning
+// it.
 func TestFetchServesATombstoneAsJSONNull(t *testing.T) {
 	h := newLocalHandler(t)
 	registerLocal(t, h, "svc1", "")
@@ -985,15 +947,9 @@ func TestFetchServesATombstoneAsJSONNull(t *testing.T) {
 		}
 	}
 	publish(fmt.Sprintf(`{"topic":"colca/v1/_ServiceDetails/n-test/_service","payload":{"id":%q}}`, entry.ULID))
-	// The tombstone itself goes straight through Engine.IngestClient with a
-	// non-nil zero-length []byte{} — exactly what mqttsrv.OnPublish hands the
-	// engine for an MQTT PUBLISH carrying an empty (0-byte) payload
-	// (mqttsrv.go: `eng.IngestClient(ident, pk.TopicName, pk.Payload)`), and
-	// what the demo hub actually received. Going through POST /publish's JSON
-	// envelope with the "payload" key omitted would instead leave
-	// in.Payload at its Go zero value — a genuinely nil json.RawMessage, which
-	// round-trips to JSON null with no bug at all, so it would not reproduce
-	// what production hit.
+	// The tombstone goes straight through IngestClient with a non-nil empty []byte, as
+	// an empty MQTT PUBLISH does. An omitted payload through POST /publish would be a
+	// nil RawMessage and would not reproduce the failure.
 	if _, err := h.eng.IngestClient(entry.ULID, "colca/v1/_ServiceDetails/n-test/_service", []byte{}); err != nil {
 		t.Fatalf("tombstone ingest: %v", err)
 	}
@@ -1009,9 +965,7 @@ func TestFetchServesATombstoneAsJSONNull(t *testing.T) {
 		Records []map[string]any `json:"records"`
 	}
 	if err := json.Unmarshal(fetchRec.Body.Bytes(), &out); err != nil {
-		// The exact regression: a 200 whose body decodes to nothing at all,
-		// because the top-level Encode failed after WriteHeader(200) and
-		// nothing was left to send.
+		// The regression: a 200 whose body decodes to nothing.
 		t.Fatalf("response body did not decode as JSON (the tombstone bug): %v; body=%q", err, fetchRec.Body.String())
 	}
 	if len(out.Records) != 3 {
@@ -1026,10 +980,8 @@ func TestFetchServesATombstoneAsJSONNull(t *testing.T) {
 	}
 }
 
-// /debug/state reports the node's ulid and correct per-stream next offsets —
-// field correctness, not just a 200. Offsets are relative to the fixture's
-// own baseline (enrollment appends an _EnrolledIdentity record to entities), so the
-// assertion pins the DELTA a publish causes plus the exact ulid.
+// /debug/state reports the node's ulid and per-stream next offsets. Offsets are
+// checked as the delta a publish causes on top of the fixture's baseline.
 func TestDebugStateFieldCorrectness(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
@@ -1042,8 +994,8 @@ func TestDebugStateFieldCorrectness(t *testing.T) {
 	for stream, v := range out["streams"].(map[string]any) {
 		before[stream] = v.(map[string]any)["next_offset"].(float64)
 	}
-	// The fixture baseline itself is deterministic: one enrolled machine, which
-	// is two entity records — the element it binds to, then its _EnrolledIdentity.
+	// The baseline is deterministic: one enrolled machine is two entity records, its
+	// element and its _EnrolledIdentity.
 	if before["metrics"] != 1 || before["entities"] != 3 || before["commands"] != 1 ||
 		before["definitions"] != 1 || before["audit"] != 1 {
 		t.Fatalf("fixture baseline offsets = %v, want all event streams enumerated", before)
@@ -1067,14 +1019,8 @@ func TestDebugStateFieldCorrectness(t *testing.T) {
 	}
 }
 
-// The admin token check compares with crypto/subtle.ConstantTimeCompare
-// instead of == so the unscoped admin credential (the highest-value secret
-// this door accepts) cannot be recovered a byte at a time via timing on a
-// short-circuiting string compare. This pins the three cases that fix must
-// keep true: a correct token authorizes, a wrong token of the SAME LENGTH is
-// rejected exactly like any other wrong token — the case a short-circuit
-// would leak timing on — and a missing (empty) configured token is never an
-// invitation: it authorizes neither an empty nor a non-empty header.
+// A correct token authorizes, a wrong token of the same length is rejected, and an
+// empty configured token authorizes neither an empty nor a non-empty header.
 func TestAdminTokenComparisonRejectsSameLengthMismatch(t *testing.T) {
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
 	st, err := store.Open(t.TempDir())
@@ -1109,9 +1055,8 @@ func TestAdminTokenComparisonRejectsSameLengthMismatch(t *testing.T) {
 	}
 }
 
-// plainHandler builds a Handler over a plain httptest server (no TLS): the
-// two defensive-construction tests below pin Handler-level contracts that do
-// not depend on the listener's TLS wrapping.
+// plainHandler serves a Handler over plain httptest, for tests that do not depend
+// on TLS.
 func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptest.Server {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -1130,11 +1075,8 @@ func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptes
 	return srv
 }
 
-// newTestHandler builds a Handler directly (no listener), with the caller's
-// cfg — including cfg.Limits — applied BEFORE construction, since Handler
-// bakes its request-size ceiling in at build time. plainHandler above wraps
-// this same shape in a live httptest.Server for tests that need a real
-// client; this one is for tests that only need to drive the mux.
+// newTestHandler builds a Handler without a listener. Set cfg.Limits first, since
+// Handler fixes its request-size cap at build time.
 func newTestHandler(t *testing.T, cfg *config.Config) http.Handler {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -1152,9 +1094,7 @@ func newTestHandler(t *testing.T, cfg *config.Config) http.Handler {
 	return Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false, nil)
 }
 
-// doAdmin performs a request straight against a Handler's mux (no listener,
-// no TLS), authenticated as admin via X-Colca-Token — for tests built on
-// newTestHandler rather than newAPI's full TLS/registration harness.
+// doAdmin performs a request against a Handler's mux as admin via X-Colca-Token.
 func doAdmin(t *testing.T, h http.Handler, method, path string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	r, err := http.NewRequest(method, path, bytes.NewReader(body))
@@ -1167,11 +1107,8 @@ func doAdmin(t *testing.T, h http.Handler, method, path string, body []byte) *ht
 	return rr
 }
 
-// publishBody builds a POST /publish body for _Metric whose JSON encoding is
-// roughly padBytes bytes larger than a bare {"v":...} payload — big enough to
-// drive the size-cap test without depending on the payload's actual content.
-// json.Marshal base64-encodes a []byte value automatically, which is exactly
-// what a real oversized payload looks like on the wire.
+// publishBody builds a POST /publish body for _Metric padded by roughly padBytes;
+// json.Marshal base64-encodes the []byte, like a real oversize payload.
 func publishBody(t *testing.T, topic string, padBytes int) []byte {
 	t.Helper()
 	b, err := json.Marshal(map[string]any{
@@ -1184,9 +1121,8 @@ func publishBody(t *testing.T, topic string, padBytes int) []byte {
 	return b
 }
 
-// TestPublishRefusesAnOversizeBody pins the door-level cap: Store.Append
-// enforces the record cap once a publish reaches the engine, but before this
-// change nothing stopped an oversize body from being read into memory first.
+// The door caps the body before reading it into memory; Store.Append's record cap
+// comes later.
 func TestPublishRefusesAnOversizeBody(t *testing.T) {
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"},
 		Limits: config.Limits{MaxRecordBytes: config.ByteSize(1024)}}
@@ -1254,15 +1190,9 @@ func TestRequestLimitReturns429RetryAfterAndMetric(t *testing.T) {
 	}
 }
 
-// TestPublishOversizeRecordCountsRecordRejectedOnce pins that the two
-// "too_large" arms on POST /publish are mutually exclusive: the raw-body
-// MaxBytesReader (tripped by TestPublishRefusesAnOversizeBody's much bigger
-// pad, before JSON decode ever completes) and Store.Append's decoded-record
-// cap (this test: a body that fits inside the wire cap but decodes to a
-// payload over MaxRecordBytes) can never BOTH fire for the same request — a
-// `return` inside the decode-error branch makes the second arm unreachable
-// once the first has fired. So the metric can never be double-counted across
-// them, which is why only Store.Append's call sites (engine.go) increment it.
+// The raw-body limit and Store.Append's record cap never both fire for one
+// request, so a record rejection is counted once. This body fits the wire cap but
+// decodes above MaxRecordBytes.
 func TestPublishOversizeRecordCountsRecordRejectedOnce(t *testing.T) {
 	st, err := store.Open(t.TempDir())
 	if err != nil {
@@ -1271,10 +1201,8 @@ func TestPublishOversizeRecordCountsRecordRejectedOnce(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"},
 		Limits: config.Limits{MaxRecordBytes: config.ByteSize(1024)}}
-	// Unlike plainHandler/newTestHandler above, this test needs Store.Append's
-	// OWN cap live (not just the door's raw-body MaxBytesReader), so it wires
-	// the store exactly as node.go's Start() does in production — every other
-	// test in this file only exercises the wire-level cap and never calls this.
+	// This test needs Store.Append's own cap, so it sets it on the store as node
+	// startup does.
 	st.SetMaxRecordBytes(cfg.Limits.EffectiveMaxRecordBytes())
 	reg, err := registry.New(st, cfg.ULID)
 	if err != nil {
@@ -1288,10 +1216,9 @@ func TestPublishOversizeRecordCountsRecordRejectedOnce(t *testing.T) {
 	line := `colca_record_rejects_total{reason="too_large"}`
 	before := metricstest.Value(t, m, line)
 
-	// maxPublishBody = 2*MaxRecordBytes + 4096 = 6144: this pad clears
-	// MaxRecordBytes (1024) once decoded but keeps the WIRE body well under
-	// 6144, so the MaxBytesReader arm cannot be what trips here — only
-	// Store.Append's own check can produce the 413 below.
+	// maxPublishBody is 2*1024+4096 = 6144. This pad exceeds MaxRecordBytes once
+	// decoded but keeps the body well below 6144, so only Store.Append can return the
+	// 413.
 	body := publishBody(t, "colca/v1/_Metric/n-test/oversize", 1200)
 	if len(body) >= 6144 {
 		t.Fatalf("test body is %d bytes, already at/over maxPublishBody (6144) — "+
@@ -1340,13 +1267,8 @@ func TestEmptyConfiguredTokenDeniesEveryone(t *testing.T) {
 	}
 }
 
-// Gap × grants composition: pruning is offset-based and stream-wide, so a
-// machine whose cursor sits below the LWM must receive the gap object even
-// when every surviving record is OUTSIDE its read grants — it has to learn
-// its position is inside a hole — while the records stay scope-filtered
-// (no content leak). The gap rides outside the grant filter by design: it
-// carries only stream offsets, the same metadata "next" already exposes to
-// every caller admitted through this door.
+// A machine below the LWM gets the gap even when every surviving record is outside
+// its grants, while the records stay filtered. The gap carries only offsets.
 func TestFetchGapServedToScopedMachine(t *testing.T) {
 	a := newAPI(t)
 	mc := client(a.m1) // enrolled with mount "m1": reads only its own zone
@@ -1369,8 +1291,7 @@ func TestFetchGapServedToScopedMachine(t *testing.T) {
 		t.Fatalf("out-of-scope records must stay filtered next to the gap: %s", body)
 	}
 
-	// Acking past the LWM clears the gap for the machine exactly as for the
-	// admin — the gap lifecycle is cursor-driven, not grant-driven.
+	// Acking past the LWM clears the gap for a machine as for admin.
 	if resp, _ := req(t, mc, "POST", a.url+"/ack", "", map[string]any{"cursor": "m1/c", "stream": "metrics", "offset": 4}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("machine ack: %d", resp.StatusCode)
 	}
@@ -1380,10 +1301,10 @@ func TestFetchGapServedToScopedMachine(t *testing.T) {
 	}
 }
 
-// ---- human callers (human-authz design §5.3) ----
+// ---- human callers ----
 
-// The §5.3 route matrix for a HUMAN caller: scoped reads, {sub}/ cursors,
-// commands-only publish, admin routes gated on admin:#.
+// Route matrix for a human: scoped reads, {sub}/ cursors, commands-only publish,
+// admin routes gated on admin:#.
 func TestHumanRouteMatrix(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
@@ -1427,9 +1348,8 @@ func TestHumanRouteMatrix(t *testing.T) {
 		}
 	}
 
-	// publish: command with grant OK; data → 403 human_write (an
-	// authorization denial — humans command, machines write state — not a
-	// malformed request).
+	// Publishing a command with a grant works; data is 403 human_write, an
+	// authorization denial.
 	if resp, out := bearerReq(t, hc, "POST", a.url+"/publish", tok, map[string]any{
 		"topic":   "colca/v1/_CmdParam/m1/m1/set-speed",
 		"payload": map[string]any{"correlation_id": "h1", "expires_at": float64(99999999999999)},
@@ -1461,7 +1381,7 @@ func TestHumanRouteMatrix(t *testing.T) {
 	}
 }
 
-// admin:# unlocks the admin surface for a human — attributable admin actions.
+// admin:# opens the admin surface to a human, with attributable actions.
 func TestHumanAdminGrant(t *testing.T) {
 	a := newAPI(t)
 	hc := client(nil)
@@ -1478,8 +1398,7 @@ func TestHumanAdminGrant(t *testing.T) {
 	if resp, _ := bearerReq(t, hc, "DELETE", a.url+"/enroll/m2", adminTok, nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("human admin revoke: %d", resp.StatusCode)
 	}
-	// admin does NOT widen reads: fetch returns only what read grants cover
-	// (boss has none → zero records despite seeded data).
+	// admin:# does not widen reads: boss has no read grant and fetches nothing.
 	if resp, out := req(t, client(nil), "POST", a.url+"/publish", "tok",
 		map[string]any{"topic": "colca/v1/_Metric/m1/m1/t", "payload": map[string]any{"v": 1.0}}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("seed: %v", out)
@@ -1490,8 +1409,8 @@ func TestHumanAdminGrant(t *testing.T) {
 	}
 }
 
-// Failed bearer credentials never fall through — not to the admin token, not
-// to anonymous.
+// A failed bearer credential never falls through, neither to the admin token nor to
+// anonymous.
 func TestBearerFailuresAreTerminal(t *testing.T) {
 	a := newAPI(t)
 	hc := client(nil)
@@ -1502,8 +1421,7 @@ func TestBearerFailuresAreTerminal(t *testing.T) {
 		t.Fatalf("expired bearer: want 401, got %d", resp.StatusCode)
 	}
 
-	// Bad bearer + VALID admin token in the same request: still 401 (mutation
-	// guard for the no-fallthrough rule).
+	// A bad bearer with a valid admin token in the same request is still 401.
 	r, err := http.NewRequest(http.MethodGet, a.url+"/debug/state", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1526,9 +1444,8 @@ func TestBearerFailuresAreTerminal(t *testing.T) {
 }
 
 func TestHealthzCarriesThePubkeySoAParentCanEnrollIt(t *testing.T) {
-	// Enrollment needs the child's ULID and pubkey BEFORE the child is trusted
-	// by anything, so /healthz — the one unauthenticated door — is where they
-	// have to be readable. Without it, enrolling a node means a shell on it.
+	// /healthz must show the ULID and pubkey, because enrollment needs them before the
+	// node is trusted.
 	srv := plainHandler(t, &config.Config{ULID: "n-edge-a", API: config.API{Token: "tok"}}, nil)
 
 	resp, err := srv.Client().Get(srv.URL + "/healthz")
@@ -1563,10 +1480,8 @@ type healthzBody struct {
 	Uplink *healthzUplink `json:"uplink"`
 }
 
-// A node with no configured parent is a root (or not yet given one): it
-// genuinely has no uplink to report, and "none" says so explicitly rather
-// than omitting the field — the field's presence is what tells a caller this
-// build actually understands the question (colca-node design §3.1/§7 gap 4).
+// A node without a parent reports uplink "none" explicitly rather than omitting the
+// field.
 func TestHealthzUplinkStateIsNoneWithoutAParent(t *testing.T) {
 	// newTestHandler's cfg carries no Parent block.
 	h := newTestHandler(t, &config.Config{ULID: "n-root"})
@@ -1587,11 +1502,8 @@ func TestHealthzUplinkStateIsNoneWithoutAParent(t *testing.T) {
 	}
 }
 
-// A node WITH a parent reports its repl client's live Status() — here, freshly
-// built and never having reached that parent, which is "connecting": the
-// state a Python chaski.Node.status() must read as "awaiting_enrollment"
-// (or, on a node that had connected before, "offline") rather than silently
-// omitting the field the way a parentless node correctly does.
+// A node with a parent reports its replication client's status: "connecting"
+// before the parent was ever reached.
 func TestHealthzReportsTheUplinkClientsStatus(t *testing.T) {
 	nodeID, err := identity.Generate(filepath.Join(t.TempDir(), "n.key"))
 	if err != nil {
@@ -1635,13 +1547,9 @@ func TestHealthzReportsTheUplinkClientsStatus(t *testing.T) {
 	}
 }
 
-// localAPI is the fixture for the local HTTP door (local-service-trust design
-// §4): no TLS, no admin routes, and self-registration's mount-authoring wired
-// EXACTLY as node.Start wires it — domain.Execute(uns.CommandContext{}, "_CmdConfigure",
-// "element/author", ...) is the one authoring path in this system. Mirrors
-// mqttsrv_test.go's startServerWithLocalDoor so both local doors are proven
-// against the same wiring, not a test-only shortcut that could pass while
-// node.go's own wiring stayed broken.
+// localAPI is the local HTTP door fixture: no TLS, no admin routes, and mount
+// authoring wired as node startup wires it, like mqttsrv's
+// startServerWithLocalDoor.
 type localAPI struct {
 	http.Handler
 	reg *registry.Manager
@@ -1769,11 +1677,8 @@ func TestTheLocalKVRoutePaginatesAndRejectsBadTokens(t *testing.T) {
 	}
 }
 
-// TestTheLocalKVRouteFiltersByContractAndRejectsUnknownOnes seeds two
-// contracts at the SAME path and proves ?contract= selects only the one
-// asked for over HTTP, end to end through the /kv door, so a client never has
-// to fetch and filter a full snapshot itself. The presence assertion (an unfiltered fetch sees both) is
-// checked before either absence assertion.
+// ?contract= selects only the requested one of two contracts at the same path. The
+// unfiltered fetch sees both and is checked before the absence assertions.
 func TestTheLocalKVRouteFiltersByContractAndRejectsUnknownOnes(t *testing.T) {
 	h := newLocalHandler(t)
 	if _, _, err := h.eng.Store().Append("definitions", []store.Record{
@@ -1830,15 +1735,8 @@ func TestTheLocalKVRouteFiltersByContractAndRejectsUnknownOnes(t *testing.T) {
 		t.Fatalf("400 body must name the unknown contract, got %s", bad.Body.String())
 	}
 
-	// A contract the node stores because its BUNDLE declares it, which
-	// `plugins/uns` does not name itself. `_DataTags` — the connector's
-	// catalogue, retained and KV-projected — is exactly that, so the filter
-	// has to ask the ENGINE (`Engine.ClassOf`, the authority every other
-	// routing decision uses; its own doc comment says a bundle-declared
-	// contract "exists for all of them or none"). Asking uns's builtin table
-	// alone refused it with 400, and since the SDK's `Service` reads its
-	// previous catalogue back through exactly this filter at startup, every
-	// connector stopped publishing one (levels 3 and 4, 2026-09-07).
+	// _DataTags is stored because the bundle declares it, not uns. The filter must ask
+	// the engine's authority, or connectors cannot read their catalogue back.
 	h.eng.SetContracts(bundleWith(t, map[string]any{
 		"_DataTags": map[string]any{
 			"class": "entity", "tombstone": true,
@@ -1858,17 +1756,14 @@ func TestTheLocalKVRouteFiltersByContractAndRejectsUnknownOnes(t *testing.T) {
 	if len(tags.Entries) != 1 || !strings.HasPrefix(tags.Entries[0].Topic, "colca/v1/_DataTags/") {
 		t.Fatalf("contract=_DataTags entries = %+v, want exactly the catalogue record", tags)
 	}
-	// The refusal still means something with a bundle loaded: a name no
-	// authority knows is still 400, so the filter never silently matches
-	// nothing.
+	// A name no authority knows is still 400, bundle or not.
 	if bad := request("/kv?prefix=grp%2Fa&contract=_StillNotReal"); bad.Code != http.StatusBadRequest {
 		t.Fatalf("unknown contract with a bundle loaded = %d, want 400: %s", bad.Code, bad.Body.String())
 	}
 }
 
-// bundleWith writes a minimal loadable bundle declaring `entries` and returns
-// its table — the httpapi package's own copy of what engine's tests do, kept
-// small because only this test needs a bundle-declared contract at the door.
+// bundleWith writes a minimal loadable bundle declaring entries and returns its
+// table.
 func bundleWith(t *testing.T, entries map[string]any) *contracts.Table {
 	t.Helper()
 	body := map[string]any{
@@ -1902,9 +1797,8 @@ func bundleWith(t *testing.T, entries map[string]any) *contracts.Table {
 
 func TestLocalSelfReturnsTheMintedIdentityAndAuthoritativeMount(t *testing.T) {
 	h := newLocalHandler(t)
-	// Seed an unrelated element first. A client that guesses its own mount by
-	// taking the first visible _SystemElement can now return the wrong answer;
-	// /self must resolve the caller's registry binding directly.
+	// Seed an unrelated element first, so a client guessing its mount from the first
+	// visible _SystemElement would get it wrong; /self must use the registry binding.
 	authtest.Place(t, h.eng, "unrelated")
 
 	req := httptest.NewRequest(http.MethodGet, "/self", nil)
@@ -1940,8 +1834,7 @@ func TestLocalSelfReturnsTheMintedIdentityAndAuthoritativeMount(t *testing.T) {
 	if !ok || entry.Name != got.Name || entry.Element != got.Element {
 		t.Fatalf("GET /self does not describe the registry entry: response=%+v entry=%+v", got, entry)
 	}
-	// resources design §5: /self is how a caller reads the node's upload
-	// caps instead of holding its own copy of the limits config.
+	// /self is where a caller reads the node's upload caps.
 	wantMaxRecord := config.Limits{}.EffectiveMaxRecordBytes()
 	wantMaxBlob := config.Limits{}.EffectiveMaxBlobBytes()
 	if got.Limits.MaxRecordBytes != wantMaxRecord || got.Limits.MaxBlobBytes != wantMaxBlob {
@@ -2027,9 +1920,8 @@ func TestLocalSelfReflectsOperatorRepositionInsteadOfTheDeclaration(t *testing.T
 		t.Fatalf("reposition local service: %v", err)
 	}
 
-	// The container still declares its original startup mount. Register must
-	// treat that declaration as a seed only, and /self must return the current
-	// registry position chosen by the operator.
+	// The container still declares its original mount; /self must return the current
+	// registry position.
 	req := httptest.NewRequest(http.MethodGet, "/self", nil)
 	req.Header.Set("X-Colca-Service", "connector-opcua")
 	req.Header.Set("X-Colca-Mount", "line1/press3")
@@ -2098,24 +1990,15 @@ func TestTheLocalHandlerRequiresAName(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("nameless request on the local door = %d; want 401 — the name is how its scope is found", rec.Code)
 	}
-	// A 401 for the WRONG reason would still pass a status-only assertion —
-	// pin the reason the code actually produces, mirroring the MQTT twin
-	// (mqttsrv_test.go's TestTheLocalDoorRequiresAName).
+	// Check the reason too, so a 401 for the wrong reason fails, as in the MQTT twin.
 	if v := metricstest.Value(t, h.m, line); v != 1 {
 		t.Fatalf("%s = %v after the nameless request, want exactly 1", line, v)
 	}
 }
 
-// A machine (or child node) may be given a friendly `name` — uns.Entry.Validate
-// permits it on any kind, and Manager.Enroll indexes any non-empty Name into
-// byName regardless of kind (registry.go). That makes it resolvable through
-// ByName, and Register's own idempotent-reconnect branch ("entry exists?
-// return it") does no kind check — so without the post-Register
-// MayUseDoor(DoorLocal) check, a certless local request could present that
-// name and be handed the machine's own ULID: its topic identity, its grants,
-// its mount. Mirrors mqttsrv_test.go's
-// TestALocalNameThatResolvesToAKeyedIdentityByNameIsRefused so both local
-// doors are pinned against the identical hole.
+// A machine given a friendly name must not be handed out by name on the local door:
+// MayUseDoor(DoorLocal) after Register refuses it. Mirrors
+// TestALocalNameThatResolvesToAKeyedIdentityByNameIsRefused.
 func TestTheLocalHandlerRefusesAKeyedIdentityFoundByName(t *testing.T) {
 	h := newLocalHandler(t)
 	reg := testRegistry(t, h)
@@ -2129,9 +2012,7 @@ func TestTheLocalHandlerRefusesAKeyedIdentityFoundByName(t *testing.T) {
 	if _, _, err := reg.Enroll(raw); err != nil {
 		t.Fatalf("enroll a named machine: %v", err)
 	}
-	// Get(name) must NOT be the thing catching this: "friendly-name" is not
-	// anyone's ULID, so that pre-check passes clean through, and only the
-	// post-Register MayUseDoor check can still refuse it.
+	// friendly-name is nobody's ULID, so only the MayUseDoor check can refuse it.
 	if _, ok := reg.Get("friendly-name"); ok {
 		t.Fatal("precondition broken: \"friendly-name\" must not itself be a ulid")
 	}
@@ -2149,28 +2030,20 @@ func TestTheLocalHandlerRefusesAKeyedIdentityFoundByName(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("a machine's friendly name was claimed by a certless request on the local door: got %d, want 401", rec.Code)
 	}
-	// A 401 for the WRONG reason would still pass a status-only assertion —
-	// pin the reason the code actually produces, mirroring the MQTT twin
-	// (mqttsrv_test.go's TestALocalNameThatResolvesToAKeyedIdentityByNameIsRefused).
+	// Check the reason too, so a 401 for the wrong reason fails, as in the MQTT twin.
 	if v := metricstest.Value(t, h.m, line); v != 1 {
 		t.Fatalf("%s = %v after the named-machine request, want exactly 1", line, v)
 	}
-	// And the request must not have been treated as SOME other newly-minted
-	// local identity either — the machine's own entry is what must stay
-	// untouched, not just "some name got refused".
+	// The machine's own entry must stay untouched, not just the request refused.
 	got, ok := reg.Get(m.ULID)
 	if !ok || got.Kind != uns.KindExternal {
 		t.Fatal("the machine entry itself must be untouched by the refused request")
 	}
 }
 
-// The MQTT door has a twin (TestAMachineKeyIsNotAcceptedOnTheLocalDoor): a
-// machine ULID enrolled on the main door must not be assumable by name on the
-// local door either. Register alone would not catch this — its own
-// uniqueness check is scoped to the byName index, a different key space than
-// byID — so this is what the reg.Get(name) pre-check in resolve exists for.
-// Without a dedicated test the collision guard had zero coverage: deleting it
-// left the whole suite green.
+// A machine ULID must not be assumable as a name on the local door. Register's
+// uniqueness check only covers names, so the reg.Get(name) check in resolve catches
+// this.
 func TestTheLocalHandlerRefusesANameThatCollidesWithAnotherEntrysULID(t *testing.T) {
 	h := newLocalHandler(t)
 	reg := testRegistry(t, h)
@@ -2201,10 +2074,8 @@ func TestTheLocalHandlerRefusesANameThatCollidesWithAnotherEntrysULID(t *testing
 	}
 }
 
-// registerLocal sends the CONNECT-equivalent GET a local service makes on
-// first contact, so subsequent /fetch and /ack calls in a test have a real
-// registered (and, when mount != "", placed) entry behind them — not a name
-// the test merely intends to use.
+// registerLocal makes the first GET a local service makes, so later requests have
+// a registered entry behind them, placed when mount is set.
 func registerLocal(t *testing.T, h *localAPI, name, mount string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/kv", nil)
@@ -2219,15 +2090,9 @@ func registerLocal(t *testing.T, h *localAPI, name, mount string) {
 	}
 }
 
-// A local caller never learns the ULID Register mints for it — only the name
-// it presented — so ownsCursor's ULID-prefix rule (correct for a machine or a
-// human, who both already know their own identifier) made /fetch and /ack
-// permanently unreachable from this door: no cursor name it could construct
-// would ever pass. Design §4 specifies the fix: cursors namespaced by NAME
-// under "c/{name}/…". This proves both routes actually work end to end —
-// not merely that the cursor-ownership check stops 403ing — by seeding a
-// real record in the entry's own (implicitly readable) zone and reading it
-// back through /fetch, then moving the cursor through /ack.
+// A local caller never learns its ULID, so its cursors are namespaced by name under
+// c/{name}/. /fetch and /ack work end to end: seed a record in its zone, read it
+// back, move the cursor.
 func TestTheLocalHandlerFetchAndAckWorkWithANameNamespacedCursor(t *testing.T) {
 	h := newLocalHandler(t)
 	registerLocal(t, h, "connector-opcua", "press3")
@@ -2293,9 +2158,7 @@ func TestTheLocalHandlerFetchAndAckWorkWithANameNamespacedCursor(t *testing.T) {
 	}
 }
 
-// One local service must never be able to move another's cursor: that is the
-// one thing name-namespacing has to guarantee (design §4: "so two local
-// services cannot collide on /ack").
+// One local service can never move another's cursor.
 func TestTheLocalHandlerRefusesToAckAnotherServicesCursor(t *testing.T) {
 	h := newLocalHandler(t)
 	registerLocal(t, h, "connector-a", "")
@@ -2312,22 +2175,15 @@ func TestTheLocalHandlerRefusesToAckAnotherServicesCursor(t *testing.T) {
 	}
 }
 
-// TestTheLocalHandlerDeletesItsOwnCursor pins the whole point of cursor
-// delete: the dataops evaluator mints a fresh "generation" cursor whenever it
-// rebuilds (colca cursors only move forward, so re-reading a stream means a
-// new cursor name), and without a way to retire the one it is replacing that
-// old cursor lingers forever and holds back retention pruning. This proves
-// deleting a cursor actually erases its recorded position — CursorGet reports
-// the pre-ack default again — not merely that the request returns 200.
+// Deleting a cursor erases its position: CursorGet reports the default again. A
+// consumer that mints a new cursor per rebuild relies on this so old cursors do not
+// hold back retention.
 func TestTheLocalHandlerDeletesItsOwnCursor(t *testing.T) {
 	h := newLocalHandler(t)
 	registerLocal(t, h, "connector-opcua", "")
 	cursor := uns.LocalCursorPrefix + "connector-opcua/gen1"
 
-	// Presence assertion pinning the same query the absence check below
-	// relies on: ack the cursor forward first, so CursorGet is NOT already
-	// sitting at the default — proving the later "back to default" read
-	// really observed the delete, not a cursor that was never touched.
+	// Ack forward first, so the later default reading proves the delete.
 	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":5}`, cursor)
 	ackReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(ackBody))
 	ackReq.Header.Set("X-Colca-Service", "connector-opcua")
@@ -2363,19 +2219,15 @@ func TestTheLocalHandlerDeletesItsOwnCursor(t *testing.T) {
 	}
 }
 
-// TestTheLocalHandlerRefusesToDeleteAnotherServicesCursor mirrors the ack
-// ownership guard: one local service must never be able to erase another's
-// cursor. This also pins that the refusal is recorded on the audit stream,
-// which the plain ack-denial test above does not check.
+// One local service cannot delete another's cursor, and the refusal is audited.
 func TestTheLocalHandlerRefusesToDeleteAnotherServicesCursor(t *testing.T) {
 	h := newLocalHandler(t)
 	registerLocal(t, h, "connector-a", "")
 	registerLocal(t, h, "connector-b", "")
 	cursor := uns.LocalCursorPrefix + "connector-a/gen1"
 
-	// Give connector-a's cursor a real position first, so a would-be delete
-	// that silently succeeded would be observable — the presence this test's
-	// "still there" assertion depends on.
+	// Give connector-a's cursor a position first, so a delete that wrongly succeeded
+	// would show.
 	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":2}`, cursor)
 	ackReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(ackBody))
 	ackReq.Header.Set("X-Colca-Service", "connector-a")
@@ -2420,9 +2272,8 @@ func TestTheLocalHandlerRefusesToDeleteAnotherServicesCursor(t *testing.T) {
 	}
 }
 
-// TestTheLocalHandlerAcksFreshAfterDeletingACursor proves the actual use
-// case: after a delete, re-acking the SAME cursor name starts a brand-new
-// cursor rather than resuming wherever the retired one left off.
+// After a delete, acking the same cursor name starts a new cursor instead of
+// resuming.
 func TestTheLocalHandlerAcksFreshAfterDeletingACursor(t *testing.T) {
 	h := newLocalHandler(t)
 	registerLocal(t, h, "connector-opcua", "")
@@ -2449,9 +2300,8 @@ func TestTheLocalHandlerAcksFreshAfterDeletingACursor(t *testing.T) {
 		t.Fatalf("POST /ack delete=true = %d: %s", delRec.Code, delRec.Body.String())
 	}
 
-	// A fresh ack under the exact same cursor name must behave as though the
-	// name had never been used: it moves (CursorAck's monotonic guard compares
-	// against the default of 1, not against the erased position of 10).
+	// A fresh ack under the same name moves from the default of 1, not from the erased
+	// position of 10.
 	reAckBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":1}`, cursor)
 	reAckReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(reAckBody))
 	reAckReq.Header.Set("X-Colca-Service", "connector-opcua")
@@ -2474,14 +2324,8 @@ func TestTheLocalHandlerAcksFreshAfterDeletingACursor(t *testing.T) {
 	}
 }
 
-// TestOwnsCursorIsFailClosedOnANilEntry pins ownsCursor's own nil guard
-// directly, rather than relying only on the "c.entry != nil && !ownsCursor"
-// pattern at its call sites. uns.Entry.CursorPrefix is documented as unsafe
-// to call on a nil receiver — HasPrefix(cursor, "") would be true for every
-// cursor, turning "no identity" into "owns everything" — so ownsCursor must
-// short-circuit before ever reaching CursorPrefix. Without this test, that
-// guard could be deleted and nothing would go red until some future caller
-// forgot the "c.entry != nil" check and hit the panic in production.
+// ownsCursor itself refuses a nil entry. CursorPrefix on nil would match every
+// cursor, so a caller that forgot the nil check would otherwise own everything.
 func TestOwnsCursorIsFailClosedOnANilEntry(t *testing.T) {
 	if ownsCursor(nil, "") {
 		t.Fatal("a nil entry must own no cursor, including the empty one")
@@ -2491,13 +2335,8 @@ func TestOwnsCursorIsFailClosedOnANilEntry(t *testing.T) {
 	}
 }
 
-// TestFetchTailReadsTheEndOfTheStream covers the question a viewer asks.
-//
-// A cursor answers "what have I not seen yet". That is right for a consumer
-// and wrong for a log or audit view, which asks "what happened most recently".
-// Without tail, a forward read from an unacked cursor returns the first N
-// records ever written — a log view on a node running for weeks showed its
-// boot messages and nothing else, forever.
+// tail answers what happened most recently, which a forward read from an unacked
+// cursor cannot.
 func TestFetchTailReadsTheEndOfTheStream(t *testing.T) {
 	a := newAPI(t)
 	records := make([]store.Record, 0, 12)
@@ -2512,9 +2351,7 @@ func TestFetchTailReadsTheEndOfTheStream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The denominator: WITHOUT tail the same request returns the OLDEST three,
-	// so the assertion below is about where the read starts, not about the
-	// stream happening to hold three records.
+	// Denominator: without tail the same request returns the oldest three.
 	_, out := req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=viewer&max=3", "tok", nil)
 	if got := offsetsOf(t, out); !reflect.DeepEqual(got, []float64{1, 2, 3}) {
 		t.Fatalf("without tail, want the oldest three, got %v", got)
@@ -2532,10 +2369,8 @@ func TestFetchTailReadsTheEndOfTheStream(t *testing.T) {
 		t.Fatalf("a short stream should tail from its first record, got %v", got)
 	}
 
-	// And it leaves the cursor where it was: a viewer must not cost a consumer
-	// its position, which is why both can share one cursor name. Compared
-	// against what it was BEFORE rather than against a guessed value — an
-	// unacked cursor is not necessarily zero.
+	// tail leaves the cursor where it was, compared with its value before rather than
+	// a guess.
 	before := a.st.CursorGet("consumer", "metrics")
 	req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=consumer&max=3&tail=1", "tok", nil)
 	if after := a.st.CursorGet("consumer", "metrics"); after != before {
@@ -2556,9 +2391,8 @@ func offsetsOf(t *testing.T, out map[string]any) []float64 {
 	return offsets
 }
 
-// newLocalHandlerWithVerifier is newLocalHandler with the human verifier the
-// node's published doors use, so the local door can resolve a forwarded
-// Bearer (node-side command authorization design §3B).
+// newLocalHandlerWithVerifier is newLocalHandler with the human verifier, so the
+// local door can resolve a forwarded bearer.
 func newLocalHandlerWithVerifier(t *testing.T) (*localAPI, *tokentest.Issuer) {
 	t.Helper()
 	h := newLocalHandler(t)
@@ -2589,9 +2423,8 @@ func localPublish(t *testing.T, h *localAPI, headers map[string]string, body map
 	return rec
 }
 
-// A local service acting AS a person forwards the person's token: the local
-// door resolves the Bearer to the human entry — groups and all — and the
-// record is attributed to the person, not to the service beside it.
+// A local service acting as a person forwards their token: the door resolves it to
+// the human entry, groups included, and the record is attributed to the person.
 func TestTheLocalDoorResolvesAForwardedBearerToThePerson(t *testing.T) {
 	h, iss := newLocalHandlerWithVerifier(t)
 	token := iss.MintOpt(tokentest.MintOpts{
@@ -2618,9 +2451,8 @@ func TestTheLocalDoorResolvesAForwardedBearerToThePerson(t *testing.T) {
 	}
 }
 
-// A PRESENTED token that fails is 401 — it never falls through to the
-// service name beside it, and with no verifier the human world does not
-// exist on this door at all.
+// A presented token that fails is 401 and never falls back to the service name;
+// without a verifier the door knows no humans at all.
 func TestTheLocalDoorNeverFallsBackFromABadBearerToTheServiceName(t *testing.T) {
 	withVerifier, _ := newLocalHandlerWithVerifier(t)
 	without := newLocalHandler(t)
@@ -2638,9 +2470,8 @@ func TestTheLocalDoorNeverFallsBackFromABadBearerToTheServiceName(t *testing.T) 
 	}
 }
 
-// The fallback for a job that no longer holds the token: the service attests
-// the person's group ids and MUST say why. Without a reason it is refused;
-// with one, the record carries the groups for the executor to resolve.
+// A job without the token may attest the person's group ids but must state a
+// reason. Without one it is refused; with one the record carries the groups.
 func TestTheLocalDoorRequiresAReasonToAttestAPersonsGroups(t *testing.T) {
 	h := newLocalHandler(t)
 	if _, err := h.eng.EntityStore().PublishBatch([]uns.StateRecord{{
@@ -2675,8 +2506,7 @@ func TestTheLocalDoorRequiresAReasonToAttestAPersonsGroups(t *testing.T) {
 }
 
 // installPersonalAccessToken publishes a hash-only _PersonalAccessToken
-// definition into the handler's store and wires the verifier's index to it,
-// the way the api's key issuance plus the node's boot do. Returns the plaintext.
+// definition, wires the verifier's index to it and returns the plaintext.
 func installPersonalAccessToken(t *testing.T, h *localAPI, ver *tokenauth.Verifier, id string, scopes []string) string {
 	t.Helper()
 	token := "pk_pat_" + id + "_secret"
@@ -2714,13 +2544,8 @@ func newLocalHandlerWithPersonalAccessToken(t *testing.T, id string, scopes []st
 	return h, token
 }
 
-// The api forwards the person's own personal access token to the local door
-// (§3B). Every key the api issues carries the "api" scope and none carries
-// "broker-http" by default, so requiring the human doors' scope here refused
-// every Edit command made under a personal access token -- `colca dm
-// deploy` lost all of its resource uploads with "no enrolled client key and
-// no valid X-Colca-Token". The local door asks for the api scope: the scope
-// the person actually used.
+// A personal access token forwarded to the local door needs the api scope, which
+// every issued key carries, not broker-http.
 func TestTheLocalDoorAcceptsAForwardedPersonalAccessTokenScopedToTheApi(t *testing.T) {
 	h, token := newLocalHandlerWithPersonalAccessToken(t, "01PATAPIONLY000000000000AA", []string{uns.ScopeAPI, uns.ScopeI3X})
 	rec := localPublish(t, h,

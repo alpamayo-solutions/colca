@@ -6,12 +6,9 @@ import (
 	"time"
 )
 
-// A ":0" WebSocket door serves on the port it reports, and holds it from the
-// moment New returns: the listener binds at Init (our mochi fork) instead of
-// pre-resolving the port by binding and releasing it — the release window is
-// where another ":0" door in the same process (the API door, in the topology
-// tests) was handed the same port, after which the WebSocket door failed to
-// serve and the address it advertised answered HTTPS to a wss dial.
+// A ":0" WebSocket door serves on the port it reports and holds it from New on:
+// our mochi fork binds at Init, so no other ":0" door in the process can take the
+// port in between.
 func TestTheHumanWebsocketDoorServesThePortItReports(t *testing.T) {
 	w := newHumanWorld(t)
 	addr := w.srv.HumanWSAddr()

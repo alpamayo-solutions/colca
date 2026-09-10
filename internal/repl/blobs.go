@@ -55,9 +55,8 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 
 	if _, _, putErr := s.blobs.Put(r.Body, sha); putErr != nil {
-		// One classification, one counting site, one response write: a new
-		// error case added later cannot land counted on one branch and silent
-		// on another, which is exactly how the 413 path went uncounted before.
+		// One classification, one place that counts and one response write, so a new
+		// error case cannot end up counted on one branch and silent on another.
 		status, reason, message := blobPutOutcome(putErr, limit)
 		if reason != "" {
 			s.metrics.BlobRejected(reason)
@@ -72,20 +71,10 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 }
 
 // blobPutOutcome maps a blobstore.Put error to the HTTP status, the
-// BlobRejected reason to record (resources design §5), and the response
-// body. reason is "" for an error that is not one of the three known
-// ingress-rejection reasons (a genuine internal failure) — BlobRejected only
-// ever records those three, never a fourth label.
-//
-// blobstore.ErrTooLarge is deliberately not one of the cases here. r.Body is
-// wrapped in http.MaxBytesReader with the SAME cap
-// (cfg.Limits.EffectiveMaxBlobBytes(), the same config the store itself was
-// opened with in node.Start) before Put ever sees the stream, so
-// MaxBytesReader always trips first and Put's own size check can never fire
-// on this door — a case for it here would be dead code. blobstore.Put keeps
-// its own check regardless: that is the store's unconditional guarantee, not
-// this door's, and it still holds for any other caller of Put that does not
-// wrap its reader the same way.
+// BlobRejected reason and the response body. reason is "" for an internal
+// failure; BlobRejected only records the three known reasons. ErrTooLarge
+// cannot occur here: the body is wrapped in http.MaxBytesReader with the same
+// cap, which trips first.
 func blobPutOutcome(err error, limit int64) (status int, reason, message string) {
 	var tooLarge *http.MaxBytesError
 	switch {
@@ -100,19 +89,15 @@ func blobPutOutcome(err error, limit int64) (status int, reason, message string)
 	}
 }
 
-// blobHopsHeader bounds pull-through recursion. Depth, not cycles, is the
-// real risk — the tree has no cycles — but an unbounded rootward walk on a
-// misconfigured parent chain would hang a request instead of failing it.
+// blobHopsHeader bounds pull-through recursion. The tree has no cycles, but a
+// misconfigured parent chain must fail the request instead of hanging it.
 const blobHopsHeader = "X-Colca-Blob-Hops"
 
 const defaultBlobHops = 8
 
-// handleBlobGet serves a blob to a child, fetching it from this node's own
-// parent on a miss and caching what it relays (resources design §7.1).
-//
-// This is the direction provisioning needs: a file staged at the root reaches
-// a headless leaf. Every request in the chain is still a child dialing its
-// parent — no parent ever dials down.
+// handleBlobGet serves a blob to a child, fetching it from this node's parent
+// on a miss and caching what it relays. That is how a file staged at the root
+// reaches a headless leaf, with every request still a child dialing its parent.
 func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 	child, _, err := s.childFromReq(r)
 	if err != nil {
@@ -144,12 +129,9 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 			hops = n
 		}
 	}
-	// The hop that just delivered this request already spent one unit of the
-	// budget — TTL-style: decrement on arrival, not only when forwarding.
-	// Without this, a local hit at the node we ask next answers before it
-	// ever reads the header, so the budget would never actually bound
-	// anything: only the LAST node's local store matters, not how many of
-	// them a request may cross to get there.
+	// The hop that delivered this request already spent one unit of the budget.
+	// Decrement on arrival: otherwise a local hit would answer before the header is
+	// read and the budget would bound nothing.
 	hops--
 	up := s.upstream()
 	if up == nil || hops <= 0 {
@@ -183,11 +165,8 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cached.Close()
-	// The upstream response carried its own Content-Length (size), but the
-	// freshly-Stat'd cachedSize from our own store is what we actually
-	// relay: it is what the bytes we are about to copy really measure to,
-	// immune to a transport that lied about length, and consistent with
-	// every other read off this store.
+	// Relay the size of our own cached copy rather than the upstream
+	// Content-Length: it is what the bytes we copy actually measure.
 	_ = size
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
@@ -213,12 +192,8 @@ func (b *deadlineBody) Close() error {
 }
 
 // BlobGet asks the parent for a blob, letting it recurse rootward on a miss.
-//
-// The returned body carries its own deadline, derived from the size the
-// parent announced (see transferDeadline): a 32 MiB blob on an edge uplink
-// takes minutes, and a fixed cap either aborts it forever or leaves a stalled
-// pull hanging inside a request handler forever. The caller MUST Close it,
-// which every caller does through a defer.
+// The body carries a deadline derived from the size the parent announced (see
+// transferDeadline); the caller must Close it.
 func (c *Client) BlobGet(sha string, hops int) (io.ReadCloser, int64, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/blobs/"+sha, nil)
@@ -274,13 +249,9 @@ func (c *Client) BlobHas(sha string) (bool, error) {
 	}
 }
 
-// BlobPutError reports a PUT the parent actually answered, as opposed to a
-// transport failure (dial error, timeout, connection reset), which never
-// becomes one of these. Carrying the status code as a typed field — rather
-// than folding it into a formatted string — lets a caller decide what the
-// failure means without parsing prose: a 4xx says the parent will never
-// accept this exact blob (bad digest, over its cap), a 5xx says the parent
-// itself is unhealthy right now.
+// BlobPutError is a PUT the parent answered, as opposed to a transport failure.
+// The status code tells the caller what it means: a 4xx says the parent will
+// never accept this blob, a 5xx that the parent is unhealthy right now.
 type BlobPutError struct {
 	SHA    string
 	Status int
@@ -291,18 +262,10 @@ func (e *BlobPutError) Error() string {
 	return fmt.Sprintf("blob put %s: %d: %s", e.SHA[:12], e.Status, e.Body)
 }
 
-// blobRejected reports whether err is a BlobPutError with a 4xx status — the
-// parent answered, and it will never accept this specific blob as it stands.
-// Any other failure (a transport error, or a BlobPutError with a 5xx) says
-// nothing about this particular blob: it means the parent is not currently
-// accepting pushes at all.
-//
-// 403 sits in this range but can never actually reach here as a PUT status:
-// syncBlobs calls BlobHas (a HEAD, hitting the exact same childFromReq check
-// handleBlobPut does) before it ever calls BlobPut, so an unenrolled-child
-// 403 always ends the pass at the HEAD step first. Treating 403 as per-blob
-// here is inert, not wrong — a dead branch this function's own caller
-// happens to make unreachable, kept simple rather than carved out.
+// blobRejected reports whether err is a BlobPutError with a 4xx status, meaning
+// the parent will never accept this blob. Any other failure says the parent is
+// not taking pushes at all right now. A 403 cannot reach here: the HEAD in
+// syncBlobs fails first for an unenrolled child.
 func blobRejected(err error) bool {
 	var pe *BlobPutError
 	return errors.As(err, &pe) && pe.Status >= 400 && pe.Status < 500
@@ -332,29 +295,12 @@ func (c *Client) BlobPut(sha string, r io.Reader, size int64) error {
 	return nil
 }
 
-// syncBlobs pushes every local blob the parent does not hold, one whole file
-// at a time (resources design §7). It runs AFTER the record lanes drain, so a
-// large file can never queue ahead of an alarm or an entity batch — blobs do
-// not ride the streams at all.
-//
-// confirmed and rejected are caller-owned and scoped to one pinned parent
-// key: a reparent builds a new Client and new maps, which is what re-offers
-// everything to the new parent — the new parent may hold what the old one
-// didn't, and may accept what the old one capped out on. Nothing is
-// persisted; a restart re-verifies with a HEAD per blob, which is cheap and
-// idempotent.
-//
-// confirmed is keyed by digest and holds the local blob's Modified time AS
-// OBSERVED at the moment it was confirmed — not a bare bool. A digest is
-// content-addressed, so the same sha can legitimately be confirmed, swept
-// (by blobgc, once nothing references it), and then re-staged later in the
-// SAME client's lifetime (delete a resource, wait out the grace, re-attach
-// the identical file). blobstore.Put always renames a fresh temp file onto
-// the target, so a re-Put always bumps mtime — that is what lets the skip
-// below tell "still the blob I confirmed" from "swept and recreated" without
-// tracking deletes explicitly. A permanent bool would treat both the same
-// and never re-offer the recreated blob, leaving an ancestor's record
-// pointing at bytes that will never arrive (409 blob_pending forever).
+// syncBlobs pushes every local blob the parent lacks, one whole file at a time,
+// after the record lanes have drained. confirmed and rejected belong to the
+// caller and one parent key: a reparent starts with new maps and offers
+// everything again. confirmed holds the local blob's modification time when it
+// was confirmed, so a blob swept by blobgc and staged again later, which Put
+// always writes fresh, is offered again instead of being skipped forever.
 func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed map[string]time.Time, rejected map[string]bool) int {
 	if c == nil || blobs == nil {
 		return 0
@@ -393,11 +339,8 @@ func syncBlobs(c *Client, blobs *blobstore.Store, m *metrics.Metrics, confirmed 
 		if err != nil {
 			m.BlobTransfer("push", "error")
 			if blobRejected(err) {
-				// The parent answered and refused this exact blob (bad
-				// digest, over its cap) — re-offering it unchanged can
-				// never succeed. Skip it, but keep going: one
-				// permanently-rejected blob must not starve every blob
-				// behind it in List() order, forever.
+				// The parent refused this exact blob, so offering it again cannot succeed. Skip
+				// it but keep going, so one rejected blob does not block the rest.
 				c.log.Warn("blob rejected by parent, skipping", "sha", info.SHA256[:12], "err", err)
 				rejected[info.SHA256] = true
 				continue

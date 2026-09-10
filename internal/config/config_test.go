@@ -43,8 +43,7 @@ func TestLoad(t *testing.T) {
 		t.Fatal("want error")
 	}
 
-	// Remaining fields of the sample must round-trip too — later tasks read
-	// these directly off the struct (addresses, admin token, parent URL).
+	// The remaining fields round-trip too.
 	if c.DataDir != "/tmp/colca-test" || c.LogLevel != "debug" || c.KeyFile != "/keys/edge1.key" {
 		t.Fatalf("scalars: %+v", c)
 	}
@@ -59,7 +58,7 @@ func TestLoad(t *testing.T) {
 	}
 }
 
-// Human-authz design §4: auth issuer block + human MQTT listeners.
+// The auth block and the token MQTT listeners.
 func TestAuthAndHumanMQTTConfig(t *testing.T) {
 	doc := `
 ulid: n-edge1
@@ -123,8 +122,8 @@ mqtt_human:
 func TestValidateRequiredFields(t *testing.T) {
 	base := func() *Config { return &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"} }
 
-	// A global node has no parent and no mqtt. Machines and children are NOT
-	// config — they are runtime registry state (auth design §2).
+	// A global node has no parent and no MQTT. Machines and children are not
+	// config.
 	if err := base().Validate(); err != nil {
 		t.Fatalf("minimal config must be valid: %v", err)
 	}
@@ -153,8 +152,7 @@ func TestSecretStoreMustHaveASeparateLifecycleDirectory(t *testing.T) {
 	}
 }
 
-// retentionSample is the full example block from design §3.1, appended to the
-// minimal base config.
+// retentionSample is a full retention block on top of the minimal config.
 const retentionSample = `
 ulid: n-edge1
 data_dir: /tmp/colca-test
@@ -223,9 +221,8 @@ func TestRetentionRoundTrip(t *testing.T) {
 	}
 }
 
-// TestRetentionDefaultsWhenAbsent pins the §3.1 defaults table: no retention:
-// block at all must still leave pruning ON with the documented per-stream
-// max_age values, unset max_bytes, and ignore_cursors_after=never.
+// TestRetentionDefaultsWhenAbsent: without a retention block pruning is on,
+// with the default max_age per stream, no max_bytes and no cursor override.
 func TestRetentionDefaultsWhenAbsent(t *testing.T) {
 	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"}
 	if err := c.Validate(); err != nil {
@@ -242,14 +239,10 @@ func TestRetentionDefaultsWhenAbsent(t *testing.T) {
 		"audit":       8760 * time.Hour,
 		"alarms":      8760 * time.Hour,
 		"annotations": 8760 * time.Hour,
-		// Logs match the metrics window on purpose: "what was the machine
-		// doing when this was logged" has to be answerable from both streams
-		// at once, and a log line is the least valuable record after the fact.
+		// Logs match the metrics window.
 		"logs": 336 * time.Hour,
 	}
-	// A hand-written expectation table cannot see its source grow: adding a
-	// stream to defaultStreamMaxAge without adding it here would leave the new
-	// default unpinned while this test stayed green. Fail instead.
+	// Fail when defaultStreamMaxAge gains a stream this table does not pin.
 	for stream := range defaultStreamMaxAge {
 		if _, ok := cases[stream]; !ok {
 			t.Fatalf("defaultStreamMaxAge has %q but this test does not pin its default; add it to cases", stream)
@@ -287,10 +280,7 @@ func TestRetentionRejectsKeepForeverWithAnAgeBound(t *testing.T) {
 	}
 }
 
-// A stream entry that sets only max_bytes leaves max_age at its Go zero
-// value; EffectiveStream must still apply that stream's default max_age
-// (spec-silent decision: "zero-value = defaults" applies per field, not only
-// when the whole block/entry is absent).
+// A stream entry that sets only max_bytes still gets the default max_age.
 func TestRetentionDefaultsApplyPerFieldNotOnlyWhenStreamEntryAbsent(t *testing.T) {
 	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
 		Retention: Retention{Streams: map[string]StreamRetention{
@@ -309,8 +299,7 @@ func TestRetentionDefaultsApplyPerFieldNotOnlyWhenStreamEntryAbsent(t *testing.T
 	}
 }
 
-// durPtr builds a *Duration for struct-literal test setup, mirroring the
-// pointer YAML unmarshals into for retention.interval (nil = absent).
+// durPtr returns a *Duration, as YAML produces for a written key.
 func durPtr(d time.Duration) *Duration {
 	v := Duration(d)
 	return &v
@@ -335,12 +324,8 @@ func TestRetentionValidationRejectsNegativeDurations(t *testing.T) {
 	}
 }
 
-// loadRetention writes a minimal config with the given retention: body (or no
-// retention: key at all when body == "") and loads it — the Load path is
-// what actually exercises Duration.UnmarshalYAML's presence tracking via the
-// *Duration field, which a struct literal cannot: a struct literal can only
-// ever set the pointer to nil or non-nil explicitly, it cannot reproduce "the
-// YAML decoder never touched this field because the key was absent".
+// loadRetention loads a minimal config with the given retention body, or none
+// when body is empty. Only Load can show a key that was never written.
 func loadRetention(t *testing.T, body string) (*Config, error) {
 	t.Helper()
 	doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nkey_file: /keys/edge1.key\n"
@@ -354,11 +339,8 @@ func loadRetention(t *testing.T, body string) (*Config, error) {
 	return Load(p)
 }
 
-// Pins all three states of retention.interval through the real YAML Load
-// path (design §3.1): absent → 5m default (pruning ON); explicit 0 →
-// disabled (the operator's explicit opt-out, EffectiveInterval returns 0);
-// explicit non-zero → that value. A bare (non-pointer) Duration field cannot
-// distinguish the first two, which was the bug this fix addresses.
+// retention.interval has three states through Load: absent means 5m, an
+// explicit 0 disables the pruner, anything else is used as given.
 func TestRetentionIntervalThreeStatesThroughLoad(t *testing.T) {
 	t.Run("absent defaults to 5m", func(t *testing.T) {
 		c, err := loadRetention(t, "  streams:\n    metrics:\n      max_age: 336h\n")
@@ -407,10 +389,7 @@ func TestRetentionIntervalThreeStatesThroughLoad(t *testing.T) {
 	})
 }
 
-// A negative duration string reaching validate() through the
-// actual Load path (not a struct literal), pinning that UnmarshalYAML's
-// success (a negative duration parses fine syntactically) does not bypass
-// the separate non-negative check in validate().
+// A negative interval parses as a duration but is still rejected by Load.
 func TestRetentionIntervalNegativeThroughLoad(t *testing.T) {
 	_, err := loadRetention(t, "  interval: -5m\n")
 	if err == nil {
@@ -436,8 +415,8 @@ func TestRetentionValidationRejectsUnknownStream(t *testing.T) {
 	}
 }
 
-// §3.4: commands.max_age must exceed the (proposed 7-day, §11.1 open) floor
-// so a still-valid command's audit trail cannot age out from under it.
+// commands.max_age below the floor is rejected, so a valid command's audit
+// trail cannot age out under it.
 func TestRetentionValidationRejectsCommandsBelowFloor(t *testing.T) {
 	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
 		Retention: Retention{Streams: map[string]StreamRetention{
@@ -454,9 +433,7 @@ func TestRetentionValidationRejectsCommandsBelowFloor(t *testing.T) {
 		}
 	}
 
-	// Exactly at the floor and above must pass; below the per-stream default
-	// but still above the floor must also pass (defaults do not clamp
-	// explicit values upward past what the operator asked for).
+	// At the floor and above passes, even below the stream's default.
 	for _, age := range []time.Duration{minCommandsMaxAge, 30 * 24 * time.Hour} {
 		ok := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
 			Retention: Retention{Streams: map[string]StreamRetention{
@@ -515,9 +492,8 @@ func TestLoadRejectsInvalidYAMLAndInvalidConfig(t *testing.T) {
 	}
 }
 
-// TestTimeSyncDefaultsWhenAbsent pins time-sync design §2.5: default-on with
-// zero config — an absent time_sync: block validates and every Effective*
-// getter returns the documented default.
+// TestTimeSyncDefaultsWhenAbsent: without a time_sync block every value has its
+// default.
 func TestTimeSyncDefaultsWhenAbsent(t *testing.T) {
 	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"}
 	if err := c.Validate(); err != nil {
@@ -534,8 +510,7 @@ func TestTimeSyncDefaultsWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestTimeSyncRoundTrip pins that explicit YAML values load verbatim and
-// override every default (design §2.5).
+// TestTimeSyncRoundTrip: explicit values override every default.
 func TestTimeSyncRoundTrip(t *testing.T) {
 	yamlDoc := `
 ulid: n-edge1
@@ -565,14 +540,10 @@ time_sync:
 	}
 }
 
-// msPtr builds a *int64 for struct-literal test setup, mirroring the
-// pointer HoldMS/DriftWarnMS unmarshal into (nil = absent).
+// msPtr returns a *int64, as YAML produces for a written key.
 func msPtr(v int64) *int64 { return &v }
 
-// TestTimeSyncValidationRejectsNegativeValues pins design §2.5's implicit
-// non-negative contract: a negative value is a config error, for all three
-// fields — including an explicit negative HoldMS/DriftWarnMS, not just a
-// negative BeaconInterval.
+// Negative values are rejected for all three time_sync fields.
 func TestTimeSyncValidationRejectsNegativeValues(t *testing.T) {
 	for name, ts := range map[string]TimeSync{
 		"negative beacon_interval": {BeaconInterval: Duration(-time.Second)},
@@ -586,14 +557,8 @@ func TestTimeSyncValidationRejectsNegativeValues(t *testing.T) {
 	}
 }
 
-// TestTimeSyncHoldMSAbsentVsExplicitZeroDiverge and its DriftWarnMS sibling
-// below are the fix for a bug: HoldMS/DriftWarnMS used to be bare
-// int64 fields where an explicit 0 was indistinguishable from "the key was
-// never written", silently collapsing both to the §2.5 default — the exact
-// ambiguity Retention.Interval was made a pointer to fix. These pin the
-// pointer-based three-state contract at the struct level: absent (nil)
-// applies the default; an explicit 0 is a real, distinct, consumable
-// setting.
+// For HoldMS and DriftWarnMS, absent (nil) means the default while an explicit
+// 0 is a real setting.
 func TestTimeSyncHoldMSAbsentVsExplicitZeroDiverge(t *testing.T) {
 	absent := TimeSync{}
 	if got, want := absent.EffectiveHoldMS(), int64(10000); got != want {
@@ -616,8 +581,7 @@ func TestTimeSyncDriftWarnMSAbsentVsExplicitZeroDiverge(t *testing.T) {
 	}
 }
 
-// loadTimeSync mirrors loadRetention: writes a minimal config with a
-// time_sync: block built from body and loads it through the real YAML path.
+// loadTimeSync loads a minimal config with the given time_sync body.
 func loadTimeSync(t *testing.T, body string) (*Config, error) {
 	t.Helper()
 	doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nkey_file: /keys/edge1.key\n"
@@ -631,12 +595,7 @@ func loadTimeSync(t *testing.T, body string) (*Config, error) {
 	return Load(p)
 }
 
-// TestTimeSyncHoldMSAndDriftWarnMSThreeStatesThroughLoad is the same
-// absent-vs-explicit-0 proof as the two struct-level tests above, but
-// through the real YAML Load path — the mutation evidence for the fix: an
-// operator writing "hold_ms: 0" or "drift_warn_ms: 0" in a real config file
-// must get the meaningful zero, not the default silently substituted back
-// in by an old bare-int64 field.
+// The same absent-versus-zero distinction, through the real Load path.
 func TestTimeSyncHoldMSAndDriftWarnMSThreeStatesThroughLoad(t *testing.T) {
 	t.Run("hold_ms absent defaults to 10000", func(t *testing.T) {
 		c, err := loadTimeSync(t, "  beacon_interval: 30s\n")
@@ -734,10 +693,7 @@ key_file: /keys/n.key
 	}
 }
 
-// Design §3.2: alarm history is transition-rate, not sample-rate, and it is
-// the record of what fired and who was told — the same reasoning that puts
-// entities and audit at a year. Inheriting the 14-day metrics window was a
-// consequence of alarms living on that stream, not a decision about them.
+// Alarm history is kept for a year, like entities and audit.
 func TestAlarmsRetentionDefaultsTo365Days(t *testing.T) {
 	var r Retention
 	got := time.Duration(r.EffectiveStream("alarms").MaxAge)
@@ -851,15 +807,11 @@ func TestLimitsRejectABlobCapBelowTheRecordCap(t *testing.T) {
 	}
 }
 
-// mqttsrv.New adds 64KiB of headroom to max_record_bytes and narrows the
-// result into a uint32 (MaximumPacketSize). A record cap above the
-// maxMaxRecordBytes bound would overflow that cast and come out BELOW the
-// record cap it must sit above, so Validate must refuse it at startup rather
-// than let it silently invert at runtime.
+// mqttsrv.New adds 64KiB to max_record_bytes and narrows it to a uint32, so a
+// record cap above maxMaxRecordBytes must fail validation.
 func TestLimitsRejectsARecordCapAboveTheUint32SafetyBound(t *testing.T) {
-	// Presence first: a record cap AT the bound is accepted, with a blob cap
-	// that stays at or above it so this isn't rejected by the inversion check
-	// instead.
+	// At the bound it is accepted, with a blob cap large enough not to trip the
+	// inversion check.
 	at := Config{ULID: "n1", DataDir: "/tmp/x", KeyFile: "/tmp/x.key"}
 	at.Limits = Limits{MaxRecordBytes: ByteSize(maxMaxRecordBytes), MaxBlobBytes: ByteSize(maxMaxRecordBytes)}
 	if err := at.Validate(); err != nil {
@@ -883,9 +835,8 @@ func TestBlobGCDefaultsWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestBlobGCIntervalThreeStatesThroughLoad pins interval's absent-vs-0
-// distinction, matching Retention.Interval's precedent: absent means "apply
-// the default", an explicit 0 means "sweeper disabled".
+// blob_gc.interval: absent means the default, an explicit 0 disables the
+// sweeper.
 func TestBlobGCIntervalThreeStatesThroughLoad(t *testing.T) {
 	t.Run("absent defaults to 15m", func(t *testing.T) {
 		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\n")
@@ -915,11 +866,7 @@ func TestBlobGCIntervalThreeStatesThroughLoad(t *testing.T) {
 	})
 }
 
-// TestBlobGCGraceThreeStatesThroughLoad is the decision this task turns on:
-// grace's zero does NOT mean "disabled" (there is no such state for a grace
-// period) — it means "no grace, sweep immediately". Absent still means
-// "apply the 1h default". A test that only checked presence-of-default would
-// not catch a regression that collapsed these two readings into one.
+// blob_gc.grace: absent means one hour, an explicit 0 means no grace at all.
 func TestBlobGCGraceThreeStatesThroughLoad(t *testing.T) {
 	t.Run("absent defaults to 1h", func(t *testing.T) {
 		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\n")

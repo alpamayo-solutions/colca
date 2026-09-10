@@ -6,9 +6,8 @@ import (
 	"testing"
 )
 
-// The one that decides whether this service is correct at all: level 4 of the
-// topic is the PUBLISHING NODE, never the signal's owner. A bridge that read the signal out of the topic would file every
-// machine's metrics under the machine.
+// Level 4 of the topic is the publishing node, never the signal's owner, so the
+// signal must come from the payload.
 func TestRowTakesTheSignalFromThePayloadNotTheTopic(t *testing.T) {
 	row, err := RowFrom("colca/v1/_Metric/m1/press3/temp",
 		[]byte(`{"signal_id":"sig-1","value":21.5}`), 1755600000000)
@@ -49,9 +48,7 @@ func TestEachValueKindLandsInItsOwnColumn(t *testing.T) {
 	}
 }
 
-// A number that is not representable as a float64 must still historise: the
-// door hands payloads through verbatim precisely so a large integer survives,
-// and a bridge that lost that would be the one place it degrades.
+// A number not representable as a float64 must still historise exactly.
 func TestALargeIntegerKeepsItsValue(t *testing.T) {
 	row, err := RowFrom("colca/v1/_Metric/m1/t", []byte(`{"signal_id":"s","value":9007199254740993}`), 1)
 	if err != nil {
@@ -66,20 +63,15 @@ func TestALargeIntegerKeepsItsValue(t *testing.T) {
 }
 
 func TestARecordWithoutASignalIsRefused(t *testing.T) {
-	// It cannot be historised and it cannot be repaired later — the row would
-	// be unattributable. Refusing is what makes it visible.
+	// Without a signal the row would be unattributable, so it is refused.
 	if _, err := RowFrom("colca/v1/_Metric/m1/t", []byte(`{"value":1}`), 1); err == nil {
 		t.Fatal("a metric with no signal_id was accepted")
 	}
 }
 
 func TestTheRecordsOwnTimestampWins(t *testing.T) {
-	// A metric carries when it was MEASURED; the store's ts is when it was
-	// ingested. Historising the latter would silently re-date everything that
-	// arrives after an outage.
-	//
-	// The payload timestamp is unix SECONDS (the wire unit every publisher
-	// uses — franzmq's default, connector, dataops), not milliseconds.
+	// A metric carries when it was measured, in unix seconds; the store's ts is
+	// when it was ingested.
 	row, err := RowFrom("colca/v1/_Metric/m1/t",
 		[]byte(`{"signal_id":"s","value":1,"timestamp":1700000000}`), 1755600000000)
 	if err != nil {
@@ -90,9 +82,8 @@ func TestTheRecordsOwnTimestampWins(t *testing.T) {
 	}
 }
 
-// TestARecordsFractionalSecondTimestampSurvives is the direct regression test
-// for the wire unit: sub-second precision must round-trip, which a decoder
-// that (mis)treated the value as milliseconds would silently truncate away.
+// TestARecordsFractionalSecondTimestampSurvives: sub-second precision must
+// round-trip.
 func TestARecordsFractionalSecondTimestampSurvives(t *testing.T) {
 	row, err := RowFrom("colca/v1/_Metric/m1/t",
 		[]byte(`{"signal_id":"s","value":1,"timestamp":1700000000.25}`), 1)
@@ -150,9 +141,7 @@ func TestRowJSONStaysValidJSON(t *testing.T) {
 	}
 }
 
-// The metrics stream also carries `_Log` records. They are not measurements
-// and not a decoding failure: the bridge passes them by without a word, so a
-// service that logs a lot does not turn the historian's log into noise.
+// _Log records on the metrics stream are skipped without an error or a warning.
 func TestANonMetricRecordIsPassedBySilently(t *testing.T) {
 	_, err := RowFrom("colca/v1/_Log/n1/line1/dataops/INFO",
 		[]byte(`{"timestamp":"2026-08-25T19:38:09+00:00","level":"INFO","message":"hello"}`), 1)

@@ -10,16 +10,12 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/metrics/metricstest"
 )
 
-// scrapeMetric reads back one metric value through the shared test helper
-// (metricstest.Value) — see that package's doc comment for why this goes
-// through Handler() rather than a Collector/Gatherer accessor.
+// scrapeMetric reads one metric value through the shared test helper.
 var scrapeMetric = metricstest.Value
 
-// TestUplinkMetricsProgressAndFailure pins repl health as numeric progress
-// the per-stream last-success gauge is 0 until the first
-// successful push, advances on every later successful cycle, and stops
-// advancing the moment pushes start failing — while the failure counter moves
-// instead.
+// TestUplinkMetricsProgressAndFailure: the per-stream last-success gauge is 0
+// until the first successful push, advances on each later success, and stops
+// while pushes fail, when the failure counter moves instead.
 func TestUplinkMetricsProgressAndFailure(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -79,11 +75,9 @@ func TestUplinkMetricsProgressAndFailure(t *testing.T) {
 	waitForClosed(t, "RunUplink to return after stop", done, 5*time.Second)
 }
 
-// TestDownlinkMetricsProgressAndFailure is the downlink half of the same
-// contract: the (unlabeled) last-success gauge advances on every successful
-// fetch — including one that turns out to carry data, since the metric fires
-// unconditionally on fetch success, not on payload — and stalls once the
-// parent is gone, while the failure counter moves instead.
+// TestDownlinkMetricsProgressAndFailure is the downlink half: the last-success
+// gauge advances on every successful fetch, with or without data, and stalls
+// once the parent is gone while the failure counter moves.
 func TestDownlinkMetricsProgressAndFailure(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -93,11 +87,9 @@ func TestDownlinkMetricsProgressAndFailure(t *testing.T) {
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
-	// Seed commands so the first /downlink returns immediately instead of
-	// riding the 20s empty long-poll. Two of them, because the child is
-	// attached in front of the second one: a child with no cursor for this
-	// parent adopts its head and hears nothing that predates it (§3.2), so the
-	// first command only exists to make position 2 seedable (see attachAt).
+	// Seed commands so the first /downlink returns at once. The child is attached in
+	// front of the second one, so the first only makes position 2 seedable (see
+	// attachAt).
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/filler", `{"correlation_id":"c0","expires_at":99999999999}`)
 	at := ps.NextOffset("commands")
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/go", `{"correlation_id":"c1","expires_at":99999999999}`)
@@ -130,9 +122,8 @@ func TestDownlinkMetricsProgressAndFailure(t *testing.T) {
 		t.Fatalf("%s = %v after a successful fetch, want 0", fails, v)
 	}
 
-	// Kill the parent: the loop is either mid-long-poll or about to start a
-	// new one; either way the next fetch must fail, bump the failure counter,
-	// and leave the last-success gauge exactly where it was.
+	// Stop the parent. The next fetch must fail, count a failure and leave the
+	// last-success gauge where it was.
 	srv.Stop()
 	waitFor(t, "a fetch failure to be counted", 10*time.Second, func() bool {
 		return scrapeMetric(t, cm, fails) >= 1

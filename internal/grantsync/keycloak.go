@@ -59,15 +59,11 @@ type Permission struct {
 type KeycloakView struct {
 	Resources   []Resource
 	Permissions []Permission
-	// Attributes is the escape hatch: colca_grants set directly on a group,
-	// passed through verbatim. It is how admin:# is expressed — realm-wide, with
-	// no element to hang on.
+	// Attributes are colca_grants set directly on a group, passed through as is,
+	// such as admin:#.
 	Attributes map[string][]string
-	// Problems is data seen but not fixed: a group policy naming a group id
-	// this realm's groups no longer account for — almost always a group deleted
-	// without cleaning up the permission that still points at it. Reported
-	// rather than silently dropped, the same way CompileGrants reports an
-	// unusable hand-typed grant.
+	// Problems are data seen but not fixed, such as a group policy naming a deleted
+	// group. They are reported rather than dropped.
 	Problems []error
 }
 
@@ -201,11 +197,8 @@ type kcGroup struct {
 	ID         string              `json:"id"`
 	Name       string              `json:"name"`
 	Attributes map[string][]string `json:"attributes"`
-	// SubGroupCount is Keycloak 23+'s replacement for inlining children in a
-	// group listing: the listing carries the count, never the members. A
-	// realm whose response omits the field (or an older Keycloak that still
-	// inlines subGroups directly) reads it as zero, which is the correct
-	// "nothing more to fetch" answer either way.
+	// SubGroupCount replaces inlined children in Keycloak 23+ group listings. When
+	// absent it reads as zero, which means nothing more to fetch.
 	SubGroupCount int `json:"subGroupCount"`
 }
 
@@ -217,11 +210,9 @@ type kcGroupPolicy struct {
 	} `json:"groups"`
 }
 
-// View reads the whole resource server and the realm's groups.
-//
-// It returns on the FIRST error and never a partial view. A partial read is the
-// dangerous one: it does not look like a failure, it looks like a smaller set of
-// grants — and the caller would converge the tree down to it.
+// View reads the whole resource server and the realm's groups. It returns on the
+// first error and never a partial view, which would look like fewer grants and
+// make the caller revoke the rest.
 func (k *Keycloak) View(ctx context.Context) (KeycloakView, error) {
 	clientUUID, err := k.ClientUUID(ctx)
 	if err != nil {
@@ -234,11 +225,8 @@ func (k *Keycloak) View(ctx context.Context) (KeycloakView, error) {
 	}
 	groupNames := map[string]string{}
 	attributes := map[string][]string{}
-	// Keycloak 23+ never inlines a group's children in a listing response — the
-	// listing carries only subGroupCount, and the members come exclusively from
-	// GET /groups/{id}/children. This is the one traversal for every realm: a
-	// group with subGroupCount 0 (set, or simply absent from an older response)
-	// has nothing more to fetch.
+	// Keycloak 23+ lists only subGroupCount; children come from
+	// GET /groups/{id}/children. A count of 0, or none, means no children.
 	var walk func(context.Context, []kcGroup) error
 	walk = func(ctx context.Context, gs []kcGroup) error {
 		for _, g := range gs {
@@ -310,10 +298,8 @@ func (k *Keycloak) View(ctx context.Context) (KeycloakView, error) {
 			for _, g := range policy.Groups {
 				name, ok := groupNames[g.ID]
 				if !ok {
-					// The policy still names a group UUID our realm read does not
-					// account for — almost always a group deleted without cleaning
-					// up the permission bound to it. Report it: silently dropping it
-					// makes an intended grant vanish with nothing to explain why.
+					// The policy names a group this realm no longer has, usually one deleted
+					// without cleaning up its permission. Report it.
 					view.Problems = append(view.Problems, fmt.Errorf(
 						"permission %s: group policy %s names group %s, which this realm no longer has",
 						perm.Name, policy.Name, g.ID))

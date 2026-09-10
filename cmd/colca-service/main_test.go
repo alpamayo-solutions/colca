@@ -56,10 +56,8 @@ func TestLocalDoorUsesServiceAndMountWithoutCredential(t *testing.T) {
 
 // ── one process, every service ───────────────────────────────────────────────
 //
-// This binary used to speak for exactly one service, and a generated node ran
-// one container per service. These tests pin what has to stay true now that it
-// speaks for all of them: each still gets its own identity and its own topic,
-// and one bad record cannot cost the others their registration.
+// One process speaks for every service: each still gets its own identity and
+// topic, and one bad record cannot cost the others their registration.
 
 type recordingDoor struct {
 	server    *httptest.Server
@@ -164,8 +162,8 @@ func TestEveryServiceGetsItsOwnIdentityAndItsOwnTopic(t *testing.T) {
 	if len(door.published) != 3 {
 		t.Fatalf("published = %#v", door.published)
 	}
-	// The name is part of the topic, so unplaced services do not erase each
-	// other — the whole reason one process may speak for all of them.
+	// The name is part of the topic, so unplaced services do not overwrite each
+	// other.
 	if got := door.published["projector"]; got != "colca/v1/_ServiceDetails/node-id/projector/_service" {
 		t.Errorf("projector topic = %q", got)
 	}
@@ -197,8 +195,7 @@ func TestARefusedRecordDoesNotCostTheOthersTheirRegistration(t *testing.T) {
 	if err == nil {
 		t.Fatal("a record the node refused must be reported, not swallowed")
 	}
-	// It names the offender and says retrying will not help — the sidecar it
-	// replaces printed the 422 and exited, forever, every two minutes.
+	// The error names the offender and says retrying will not help.
 	if !strings.Contains(err.Error(), "pgbouncer") {
 		t.Errorf("the error does not name the refused service: %v", err)
 	}

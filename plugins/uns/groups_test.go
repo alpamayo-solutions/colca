@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// withGroup puts a _Group definition in the store as if `author` had authored
-// it and it had descended to this node.
+// withGroup stores a _Group definition as if author wrote it and it had
+// descended to this node.
 func withGroup(f *fakeStore, author, id string, grants ...string) {
 	f.records["colca/v1/_Group/"+author+"/"+id] = mustJSON(map[string]any{
 		"id": id, "name": id, "grants": grants,
@@ -56,8 +56,7 @@ func TestGrantsOnTheTokenSurviveAlongsideGroups(t *testing.T) {
 	}
 }
 
-// An unknown group costs the human that group, not everything they hold: one
-// stale membership must not lock somebody out entirely.
+// An unknown group costs the person that group, not everything they hold.
 func TestAnUnknownGroupContributesNothingAndIsReported(t *testing.T) {
 	f := newStore("n-edge1")
 	withGroup(f, "n-global", "01HGRP-OPS", "read:01HLINE1/#")
@@ -75,12 +74,9 @@ func TestAnUnknownGroupContributesNothingAndIsReported(t *testing.T) {
 	}
 }
 
-// Design §10.3: an id names one thing. Two definitions claiming it resolve to
-// NOTHING and the reason names both authors.
-//
-// Picking either silently is the option that must not exist: the local record
-// winning would let a node shadow a group authored above it and widen its own
-// grants — privilege escalation with no attacker in it, just a copy-pasted id.
+// Two definitions claiming one id resolve to nothing, and the reason names
+// both authors. Picking either could let a node widen its own grants with a
+// copied id.
 func TestTwoDefinitionsClaimingOneIdResolveToNothing(t *testing.T) {
 	f := newStore("n-site1")
 	withGroup(f, "n-global", "01HGRP-OPS", "read:01HLINE1/#")
@@ -141,9 +137,8 @@ func TestARetractedGroupGrantsNothing(t *testing.T) {
 	}
 }
 
-// A malformed grant inside a definition is an authoring error that escaped
-// upstream validation. It is dropped and reported; the rest of the group still
-// applies.
+// A malformed grant inside a definition is dropped and reported; the rest of
+// the group still applies.
 func TestAMalformedGrantInsideAGroupIsDroppedNotFatal(t *testing.T) {
 	f := newStore("n-edge1")
 	withGroup(f, "n-global", "01HGRP-OPS", "read:01HLINE1/#", "cmd:01HLINE1/#")

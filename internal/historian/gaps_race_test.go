@@ -9,16 +9,9 @@ import (
 	"github.com/alpamayo-solutions/colca/door"
 )
 
-// The gap counter is written by the follow loop and read by the /metrics
-// handler (cmd/colca-historian serves the scrape from its own goroutine while
-// the bridge runs). Those are two goroutines on one counter, so it has to be
-// atomic — a plain int64 there is a data race whatever number the scrape
-// happens to print.
-//
-// This is the exact production shape: one writer calling Once, one reader
-// scraping, no synchronisation between them. It only ever fails under -race,
-// which is how the suite runs (`make test`) — mutation-checked by putting the field back to a plain int64, which
-// makes it fail there.
+// The follow loop writes the gap counter while /metrics reads it, so it must be
+// atomic. With a plain int64 this fails under -race, which is how the suite
+// runs.
 func TestTheGapCounterIsSafeToScrapeWhileTheBridgeRuns(t *testing.T) {
 	const pages = 200
 	d := &fakeDoor{}

@@ -13,16 +13,11 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
-// scrapeMetric reads back one metric value through the shared test helper
-// (metricstest.Value) — see that package's doc comment for why this goes
-// through Handler() rather than a Collector/Gatherer accessor.
+// scrapeMetric reads one metric value through metricstest.Value.
 var scrapeMetric = metricstest.Value
 
-// newMetricsEngine builds an engine wired to a live *metrics.Metrics (unlike
-// newEngine/newRecordingEngine, which pass nil to keep the plain behavioral
-// tests metrics-agnostic). It has the same clients as newRecordingEngine: "m1"
-// (an explicit write:el-m1/# grant) and "hmi" (a cmd grant only, no write
-// standing).
+// newMetricsEngine builds an engine with live metrics and the same clients as
+// newRecordingEngine: m1 with a write grant, hmi with only a cmd grant.
 func newMetricsEngine(t *testing.T) (*Engine, *metrics.Metrics) {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -37,10 +32,8 @@ func newMetricsEngine(t *testing.T) (*Engine, *metrics.Metrics) {
 	return e, m
 }
 
-// TestRejectPublishByReason pins the reason mapping for every reject branch in
-// IngestClient, IngestAdmin and IngestDownlink: each trigger below must
-// increment exactly its own reason child by exactly one, and touch no other
-// reason.
+// Each reject branch in IngestClient, IngestAdmin and IngestDownlink increments
+// exactly its own reason by one.
 func TestRejectPublishByReason(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -183,9 +176,8 @@ func TestRejectPublishByReason(t *testing.T) {
 	}
 }
 
-// TestIngestRecordOnPersistNotOnReject pins the other half of the ingest
-// contract: a successful persist increments colca_ingest_records_total on the
-// record's stream, and a rejected publish must not touch it at all.
+// A persist increments colca_ingest_records_total for its stream; a rejected
+// publish does not.
 func TestIngestRecordOnPersistNotOnReject(t *testing.T) {
 	e, m := newMetricsEngine(t)
 
@@ -213,10 +205,8 @@ func TestIngestRecordOnPersistNotOnReject(t *testing.T) {
 	}
 }
 
-// TestIngestRecordCountsReplicatedApplies pins the decision: replication
-// is a fourth entry path into the store, so colca_ingest_records_total counts
-// records applied via IngestReplicated exactly like client/admin/downlink
-// writes — once per NEWLY applied record, never for a deduplicated re-push.
+// Replicated applies count toward colca_ingest_records_total once per newly
+// applied record, never for a deduplicated re-push.
 func TestIngestRecordCountsReplicatedApplies(t *testing.T) {
 	e, m := newMetricsEngine(t)
 	const line = `colca_ingest_records_total{stream="metrics"}`
@@ -249,10 +239,8 @@ func TestIngestRecordCountsReplicatedApplies(t *testing.T) {
 	}
 }
 
-// scrapeBody returns m's full exposition text — used for colca_repl_gap_applied_total,
-// whose (child, stream) labels are dynamic (no pre-created children, unlike
-// the fixed-label counters), so ABSENCE has to be checked by substring rather
-// than metricstest.Value (which fails the test when a line is missing).
+// scrapeBody returns m's full exposition text. colca_repl_gap_applied_total has
+// dynamic labels, so its absence is checked by substring.
 func scrapeBody(t *testing.T, m *metrics.Metrics) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -260,11 +248,8 @@ func scrapeBody(t *testing.T, m *metrics.Metrics) string {
 	return rec.Body.String()
 }
 
-// TestGapAppliedCountsOffsetJumpsOnly is the design §8 companion to
-// TestIngestReplicatedLogsOffsetJumps (engine_test.go): colca_repl_gap_applied_total
-// must move on exactly the same event that triggers the ERROR log — a
-// contiguous apply must never create the series, and the commands-stream
-// exemption (filtered uplink, not data loss) must hold for the counter too.
+// colca_repl_gap_applied_total moves on exactly the event that logs an offset
+// jump: never for a contiguous apply, never on a filtered uplink.
 func TestGapAppliedCountsOffsetJumpsOnly(t *testing.T) {
 	e, m := newMetricsEngine(t)
 	metric := "colca/v1/_Metric/m1/edge1/m1/t"
@@ -289,9 +274,8 @@ func TestGapAppliedCountsOffsetJumpsOnly(t *testing.T) {
 		t.Fatalf("%s = %v after the 2→5 jump, want 1", line, v)
 	}
 
-	// The filtered uplinks are exempt: commands (acks and gap markers only)
-	// and entities (the node-private Edit receipt stays home). No series
-	// at all, no matter how large the child-offset hole.
+	// The filtered uplinks (commands and entities) create no series, however large
+	// the hole.
 	for stream, topic := range map[string]string{
 		"commands": "colca/v1/_Ack/m1/edge1/m1/go",
 		"entities": "colca/v1/_SystemElement/m1/edge1/m1/a",
@@ -308,13 +292,8 @@ func TestGapAppliedCountsOffsetJumpsOnly(t *testing.T) {
 	}
 }
 
-// TestIngestRefreshFailuresDoNotCountAsRejectedPublishes is the mutation
-// guard for the reroute: IngestRefresh used to fall through to
-// e.metrics.RejectPublish on every failure branch, conflating the pruner's
-// internal §6.5 repair traffic with a client's rejected publish. Refresh
-// failures are now the caller's (retention.Pruner.refreshEntities) concern —
-// this engine-level method must leave colca_rejected_publishes_total alone
-// entirely, on every one of its own failure branches.
+// IngestRefresh failures are the pruner's to count; the engine must leave
+// colca_rejected_publishes_total alone on every failure branch.
 func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 	e, m := newMetricsEngine(t)
 	topic := "colca/v1/_SystemElement/n-edge1/line1/press"
@@ -327,11 +306,8 @@ func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 		before[reason] = scrapeMetric(t, m, `colca_rejected_publishes_total{reason="`+reason+`"}`)
 	}
 
-	// Non-UNS topic, root-prefixed but unparseable (too few segments —
-	// uns.Parse's own grammar error, distinct from IsUns's prefix check),
-	// non-KV class (grammar), empty payload (validation), and
-	// schema-invalid payload (validation) — every failure branch
-	// IngestRefresh has.
+	// Every IngestRefresh failure branch: non-UNS topic, unparseable topic, non-KV
+	// class, empty payload and schema-invalid payload.
 	if _, _, err := e.IngestRefresh("not-uns-at-all", []byte(`{}`), 1); err == nil {
 		t.Fatal("non-UNS topic must be rejected")
 	}
@@ -356,9 +332,7 @@ func TestIngestRefreshFailuresDoNotCountAsRejectedPublishes(t *testing.T) {
 	}
 }
 
-// TestNilMetricsIsSafe pins the nil-safety contract every caller (including
-// every other test in this package) relies on: an engine built with a nil
-// *metrics.Metrics must not panic on any reject or persist path.
+// An engine with nil metrics does not panic on any reject or persist path.
 func TestNilMetricsIsSafe(t *testing.T) {
 	e := newEngine(t) // built with New(..., nil, nil)
 	if _, err := e.IngestClient("m1", "colca/v1/_Metric/OTHER/temp", []byte(`{"v":1}`)); err == nil {
@@ -374,9 +348,8 @@ func TestNilMetricsIsSafe(t *testing.T) {
 	}
 }
 
-// newRoutedMetricsEngine is newMetricsEngine plus a registry that knows one
-// enrolled child node mounted at "site1/edge1" — the minimum needed to ask the
-// routability question at all.
+// newRoutedMetricsEngine is newMetricsEngine with one child node enrolled at
+// site1/edge1, enough to ask the routability question.
 func newRoutedMetricsEngine(t *testing.T) (*Engine, *metrics.Metrics) {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -392,28 +365,15 @@ func newRoutedMetricsEngine(t *testing.T) (*Engine, *metrics.Metrics) {
 	return e, m
 }
 
-// The production Mounts must satisfy the optional half, or the counter below
-// is dead: countIfUnroutable's `e.ids.(routableMounts)` would answer !ok, take
-// the "no claim either way" path, and colca_command_unroutable_total would sit
-// at zero forever while every test in this package stayed green — its fakes
-// implement RoutesUnder themselves and would never notice. Renaming either
-// side, or dropping the method from the registry, is silent at compile time
-// today and only level 3 would find it, expensively. This makes it a build
-// failure instead.
-//
-// It does not cover a decorator wrapped around the registry on the way into
-// engine.New (internal/node/node.go): *registry.Manager would still satisfy
-// the interface while the value the engine holds no longer did.
-//
-// registry does not import engine, so naming it from a test here is not a
-// cycle.
+// The real registry must implement routableMounts, or
+// colca_command_unroutable_total silently stays at zero while the fakes keep the
+// tests green. This turns a mismatch into a compile error. A decorator around the
+// registry in node assembly would still slip past.
 var _ routableMounts = (*registry.Manager)(nil)
 
-// A command addressed downward that no child's mount covers is the one outcome
-// with no signal of its own: never delivered, never executed, never acked, and
-// never visibly expired (expiry runs at the target). The counter is that
-// signal — and it must stay silent for the three cases other mechanisms own,
-// or it becomes noise nobody reads.
+// A downward command no child's mount covers produces no other signal: it is
+// never delivered, executed, acked or visibly expired. The counter must count it,
+// and stay silent for the cases other mechanisms own.
 func TestCommandUnroutableCountsOnlyTheCommandsNothingCanReach(t *testing.T) {
 	const line = "colca_command_unroutable_total"
 	e, m := newRoutedMetricsEngine(t)
@@ -425,8 +385,7 @@ func TestCommandUnroutableCountsOnlyTheCommandsNothingCanReach(t *testing.T) {
 		}
 	}
 
-	// Presence first, so every "did not count" below has a denominator: a
-	// route no child covers DOES count.
+	// Presence first: an uncovered route does count.
 	before := scrapeMetric(t, m, line)
 	publish("colca/v1/_CmdConfigure/n-elsewhere/nowhere/resource/upsert")
 	if got := scrapeMetric(t, m, line); got != before+1 {
@@ -446,8 +405,8 @@ func TestCommandUnroutableCountsOnlyTheCommandsNothingCanReach(t *testing.T) {
 		}
 	}
 
-	// And the boundary the shared predicate owns: a sibling mount that merely
-	// shares a string prefix is NOT covered, so it counts.
+	// A sibling mount that only shares a string prefix does not cover the path, so it
+	// counts.
 	at := scrapeMetric(t, m, line)
 	publish("colca/v1/_CmdConfigure/n-other/site1/edge10/resource/upsert")
 	if got := scrapeMetric(t, m, line); got != at+1 {

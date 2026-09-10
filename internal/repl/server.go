@@ -1,18 +1,15 @@
-// Package repl implements node-to-node replication over mTLS: the parent side
-// (POST /replicate, GET /downlink) and the child side (uplink push loop,
-// long-poll downlink loop).
+// Package repl replicates between nodes over mTLS: the parent side (POST
+// /replicate, GET /downlink) and the child side (uplink push and long-poll
+// downlink loops).
 //
-// Trust is pure key pinning — there is no CA anywhere. Both ends present a
-// self-signed certificate that is nothing but a container for their ed25519
-// node key. The parent authorises a request by looking the peer's leaf key up
-// in its local registry (kind "node"; never by anything in the request body);
-// the child compares the parent's leaf key against the pinned value from its
-// own config — the parent's registry entry for the child must exist BEFORE
-// the child connects (auth design §6.2, entry-before-connect).
+// Trust is key pinning with no CA. Both ends present a self-signed certificate
+// that only carries their ed25519 node key. The parent looks the peer's key up
+// in its registry (kind "node"), so a child must be enrolled before it
+// connects; the child compares the parent's key with its configured pin.
 //
-// The child always speaks its own local coordinates. The parent decides where
-// they land: every replicated topic gets the child's mount inserted, and every
-// downlinked command gets it stripped again.
+// The child always speaks its own local coordinates: the parent inserts the
+// child's mount into replicated topics and strips it from commands it sends
+// down.
 package repl
 
 import (
@@ -69,26 +66,16 @@ type Server struct {
 	// pull on a local miss. Set once at startup; nil at the root.
 	upstreamClient *Client
 
-	// inflight makes a running handler visible to whoever owns shutdown. Set
-	// once, before Start; nil in tests that never shut a store down under a
-	// request. See SetInflightTracker.
+	// inflight lets the owner of shutdown see running handlers. Set once before
+	// Start; nil in tests. See SetInflightTracker.
 	inflight func(http.Handler) http.Handler
 }
 
 // SetInflightTracker installs the middleware every repl route runs inside, so
-// the owner of the store can wait for handlers that are still touching it.
-//
-// This door needs it for the same reason the API doors do, and it cannot
-// provide it for itself: Stop closes connections rather than draining them
-// (see Stop), on purpose, so the port is free the instant it returns. That
-// leaves a handler inside ApplyReplicated while the caller goes on to close
-// Pebble — a use-after-close panic instead of a clean exit. The WaitGroup that
-// answers "is anything still in the store" belongs to the node, not to this
-// server, so the node hands its tracker down here (node.trackInflight),
-// exactly as it does for the API and local-API doors.
-//
-// Called once at startup, before Start, in the same late-binding style as
-// SetUpstream. nil is allowed and means untracked.
+// the node can wait for handlers still using the store before closing it. Stop
+// closes connections instead of draining them, so without it a handler could
+// still be in ApplyReplicated when Pebble closes. Call it once before Start; nil
+// means untracked.
 func (s *Server) SetInflightTracker(mw func(http.Handler) http.Handler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -121,25 +108,19 @@ func (s *Server) auditDenied(operation, reason string, entry *uns.Entry, metadat
 	_ = s.eng.RecordDenial(d)
 }
 
-// NewServer builds a replication server. m may be nil (unit tests and any
-// caller that does not care about metrics). blobs may be nil in tests that
-// never exercise the blob routes; a node built by node.Start always passes
-// its opened store.
+// NewServer builds a replication server. m may be nil, and blobs may be nil in
+// tests that never touch the blob routes.
 func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, reg *registry.Manager, blobs *blobstore.Store, m *metrics.Metrics) (*Server, error) {
 	return &Server{cfg: cfg, eng: eng, id: id, reg: reg, blobs: blobs, metrics: m, limiter: httplimit.New(),
 		log: slog.Default().With("node", cfg.ULID, "comp", "repl-server")}, nil
 }
 
-// childFromReq resolves the authenticated child from the TLS client cert,
-// pinned against the local registry (kind "node"). This is the ONLY source of
-// identity — nothing from the request body is trusted. A machine key at this
-// door is rejected exactly like an unknown one, with its own metric reason.
-//
-// It also returns the child's mount, resolved from its element at this moment
-// (id-grants design §4): every path this door builds or strips is built from
-// that value, so a renamed element takes effect on the next request instead of
-// needing a re-enrollment. A child whose element does not resolve is turned
-// away — there is no position to insert its records at.
+// childFromReq resolves the authenticated child from its TLS client
+// certificate, pinned against the registry (kind "node"); nothing in the body
+// is trusted. A machine key is rejected like an unknown one. It also returns the
+// child's mount, resolved from its element on every request, so a renamed
+// element takes effect without re-enrollment; a child whose element does not
+// resolve is refused.
 func (s *Server) childFromReq(r *http.Request) (*uns.Entry, string, error) {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
@@ -173,38 +154,24 @@ func (s *Server) childFromReq(r *http.Request) (*uns.Entry, string, error) {
 	return entry, mount, nil
 }
 
-// addDefinitions puts whatever definitions the child has not read yet into the
-// response (definition-stream design §5).
-//
-// Two things this deliberately does NOT do, and both are the same reason: a
-// definition has no position. It is not filtered to the child's subtree —
-// nothing addresses it at one child — and its topic is not touched, so what the
-// child stores is byte-identical to what this node stores. Commands need both
-// operations; definitions need neither, which is why this is five lines and the
-// command path is not.
+// addDefinitions adds the definitions the child has not read yet to the
+// response. Unlike commands they have no position, so they are neither filtered
+// to the child's subtree nor rewritten: the child stores them byte for byte.
 func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter uint64, limit int) {
 	recs, next, err := s.eng.Store().Read("definitions", defAfter, limit, nil)
 	if err != nil {
-		// Durable state the child does not get this round; it will ask again.
-		// Never fail the whole poll over it — commands must keep flowing.
+		// The child stays behind on definitions this round and asks again. Commands
+		// keep flowing either way.
 		s.log.Error("downlink: reading definitions failed — the child stays behind on them",
 			"child", childULID, "err", err)
 		return
 	}
 	if next == defAfter {
-		// Nothing survives at or after the child's position. The stream is
-		// compacted rather than pruned, so this means compaction removed
-		// every record in between — a superseded definition, or a tombstone
-		// every cursor had already passed. A compacted hole is not a gap:
-		// what remains IS the current definition set, and the honest answer
-		// is "caught up, at the head".
-		//
-		// Handing `def_after` back unchanged was not. The child had no
-		// progress to ack while the poll's own wake condition (the stream's
-		// head is past the child) still said a definition was waiting, so
-		// every poll answered instantly and the child re-polled at once —
-		// both nodes spinning at the rate limit until someone authored a new
-		// definition.
+		// Nothing survives from the child's position on: compaction removed every
+		// record in between. That is not a gap, since what remains is the current
+		// definition set, so answer "caught up, at the head". Returning def_after
+		// unchanged would make both nodes spin, because the wake condition still sees a
+		// definition waiting.
 		if head := s.eng.Store().NextOffset("definitions"); head > next {
 			next = head
 		}
@@ -219,15 +186,10 @@ func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter 
 	resp["definitions"], resp["def_next"] = out, next
 }
 
-// ancestryFor builds the position a child mounted at mount must know: this
-// node's own chain, extended by every element from here down to the child's
-// (id-grants design §4). ok=false while this node's own position is unknown —
-// a guessed chain is worse than none, because grants would resolve against a
-// frame nobody chose.
-//
-// The elements come from this node's own index, which is exactly why the child
-// cannot do this for itself: those records live here, published under this
-// node's identity, and the child never sees them.
+// ancestryFor builds the position a child at mount must know: this node's own
+// chain extended by every element down to the child. ok is false while this
+// node's own position is unknown, because grants would resolve against a guessed
+// frame. Only this node can build it, since the elements live in its index.
 func (s *Server) ancestryFor(mount string) (uns.Ancestry, bool) {
 	own, ok := s.eng.Ancestry()
 	if !ok {
@@ -265,9 +227,8 @@ func (s *Server) Start() (addr string, err error) {
 		return "", err
 	}
 	s.ln = ln
-	// Outermost, so a request is counted for the whole time it exists at this
-	// door — including the rate limiter's own accounting and the TLS/registry
-	// lookups before it, all of which read node state.
+	// Outermost, so a request counts for its whole life at this door, including the
+	// rate limiter and the TLS and registry lookups, which all read node state.
 	h := s.limitBeforeAuth(mux)
 	if s.inflight != nil {
 		h = s.inflight(h)
@@ -283,12 +244,10 @@ func (s *Server) Start() (addr string, err error) {
 	return ln.Addr().String(), nil
 }
 
-// Stop closes the listener and every active connection immediately.
-//
-// It deliberately uses Close, never Shutdown: a graceful shutdown waits for
-// in-flight long-poll downlinks (up to longPollFor) and keeps the port bound in
-// the meantime, which breaks restarting a node on the same address. When Stop
-// returns, the port is free. Safe to call twice and before Start.
+// Stop closes the listener and every connection at once. It uses Close, not
+// Shutdown: a graceful shutdown would wait for long polls and keep the port
+// bound, which breaks restarting a node on the same address. Safe to call twice
+// and before Start.
 func (s *Server) Stop() {
 	s.mu.Lock()
 	h, ln := s.http, s.ln
@@ -344,15 +303,11 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "replication batch exceeds 200 records", http.StatusRequestEntityTooLarge)
 		return
 	}
-	// The stream a child names is checked BEFORE any record is looked at, and
-	// regardless of what this node knows about the contracts inside it. The
-	// per-record check below can only speak for a class this node's bundle
-	// declares, so an unknown contract used to ride onto whatever stream the
-	// request named — `definitions` included, the one stream a child must
-	// never write (definition-stream design §4). Every child of this node then
-	// received that record as a definition, rejected it, and stopped advancing
-	// its definitions cursor: one malformed request froze policy distribution
-	// for the whole subtree.
+	// Check the stream before any record, whatever this node knows about the
+	// contracts inside. The per-record check only covers classes this bundle
+	// declares, so without this an unknown contract could land on definitions, the
+	// one stream a child must never write, and stall definition delivery for the
+	// whole subtree.
 	if !uns.IsUplinkStream(in.Stream) {
 		s.auditDenied("replicate", "direction_denied", child,
 			map[string]any{"route": r.URL.Path, "stream": in.Stream})
@@ -384,26 +339,22 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		class := s.eng.ClassOf(parsed.Contract)
-		// During a rolling bundle update the parent may not know a new contract
-		// the child already routes. Preserve that record on the named stream;
-		// enforce direction and stream binding whenever this node does know the
-		// class. The bundle-skew test pins this forward-compatible handoff. The
-		// named stream is one that rises (checked above), so the handoff can
-		// only ever place an unknown contract on a data/entity/event stream.
+		// During a rolling bundle update the parent may not know a contract the child
+		// already routes. Keep that record on the named stream, which is known to rise;
+		// direction and stream binding are enforced whenever this node knows the class.
 		rr := store.ReplRecord{
 			ChildOffset: rec.O, OriginOffset: rec.OO,
 			Topic: topic, Payload: rec.P, TS: rec.TS,
 			WrittenBy: rec.WB, ActorID: rec.AID,
 			ActorLabel: rec.AL, ActorKind: rec.AK, ActorGroups: rec.AG,
 		}
-		// Route by the ENGINE authority (bundle-aware): a bundle-declared
-		// data/entity contract must KV-project here like at any door.
+		// Route by the engine's bundle-aware classes: a declared data or entity
+		// contract projects into KV here as at any door.
 		if uns.IsOwnedState(class) {
 			rr.KVPath, rr.KVNode = parsed.Path, parsed.NodeID
-			// A replicated tombstone retires the path here too (retention
-			// design §7.1): the empty payload is the wire truth, derived
-			// exactly like the engine derives it on first ingest, so every
-			// ancestor's KV + retained set converge on the same fact.
+			// A replicated tombstone retires the path here too. It is derived from the
+			// empty payload the same way the engine does on first ingest, so every ancestor
+			// converges.
 			rr.Delete = len(rec.P) == 0
 		}
 		repl = append(repl, rr)
@@ -417,10 +368,9 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Debug("replicate", "child", child.ULID, "stream", in.Stream, "received", len(repl), "applied", applied, "hwm", hwm)
-	// now_ms is stamped at response-write time, after IngestReplicated has
-	// already run — the parent's own authoritative-now estimate (time-sync
-	// design §2.1), not raw local time, so corrections telescope down the
-	// tree. The root has no offset, so this is its raw clock.
+	// now_ms is stamped after IngestReplicated, from the parent's authoritative
+	// clock rather than raw local time, so corrections carry down the tree. The
+	// root has no offset, so there it is the raw clock.
 	writeJSON(w, map[string]any{"hwm": hwm, "now_ms": s.eng.AuthoritativeNow().UnixMilli()})
 }
 
@@ -450,18 +400,14 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		limit = defaultDownlinkMax
 	}
 
-	// hello=1 answers immediately instead of long-polling: the child's first
-	// contact after (re)connect learns its position (id-grants design §4) in
-	// one RTT instead of one long-poll cycle — a fresh node must not stay
-	// fail-closed for humans until the first idle poll drains.
+	// hello=1 answers at once instead of long-polling, so a reconnecting child
+	// learns its position in one round trip and a fresh node does not keep refusing
+	// people until the first idle poll ends.
 	if r.URL.Query().Get("hello") == "1" {
 		resp := map[string]any{
 			"records": []wireRec{}, "next": after,
-			// The child's start position when it has no cursor for THIS
-			// parent (parent-scoped-cursors design §3.2/§3.3): commands
-			// issued before this child was attached were addressed to
-			// whatever occupied the mount then, and are not delivered to a
-			// newcomer.
+			// Where a child with no cursor for this parent starts: commands issued before
+			// it attached were meant for whatever held the mount then.
 			"head": s.eng.Store().NextOffset("commands"),
 		}
 		if a, ok := s.ancestryFor(mount); ok {
@@ -472,42 +418,28 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Spec §5.1 [delta]: persist the child's downlink progress as an ordinary
-	// named cursor, c/downlink:{child-ulid}/commands ← max(existing, after),
-	// keyed by the AUTHENTICATED identity (the after parameter only carries the
-	// position, never who it belongs to). Without it, a parent pruning its
-	// commands stream is blind to its slowest child. CursorAck gives exactly
-	// the required semantics: forward-only, one synced write per actual
-	// advance (an idle re-poll with the same after writes nothing), and the
-	// ct/ last-advance stamp that puts these cursors under the §5.2 staleness
-	// window like every other cursor.
+	// Persist the child's downlink progress as an ordinary cursor,
+	// downlink:{child}/commands, keyed by the authenticated identity. Without it the
+	// parent's commands prune would not see its slowest child. CursorAck is
+	// forward-only, writes nothing for an idle re-poll and stamps the last advance
+	// for the staleness window.
 	s.eng.Store().CursorAck(uns.DownlinkCursorPrefix+child.ULID, "commands", after)
-	// The definitions cursor is the child's own, separate position: a child
-	// caught up on commands may still be behind on definitions and vice versa,
-	// and one stream must never drag the other's floor along (definition-stream
-	// design §5).
+	// The child's definitions position is a separate cursor, so neither stream
+	// holds back the other's floor.
 	s.eng.Store().CursorAck(uns.DownlinkDefCursorPrefix+child.ULID, "definitions", defAfter)
 
-	// Move-drain design §3.2: "completion is evaluated on every /downlink
-	// poll by that child" — the other trigger is the 30s periodic tick
-	// (RunDrainTicker). Cheap to call unconditionally when not draining
-	// (evaluateDrain's own registry lookup short-circuits), but the status
-	// check here avoids that lookup on the hot path for the common
-	// non-draining case.
+	// Drain completion is checked on each poll by the draining child and by the
+	// periodic tick (RunDrainTicker). The status check skips that lookup in the
+	// common case.
 	if child.IsDraining() {
 		s.evaluateDrain(child.ULID)
 	}
 
-	// A child only ever sees commands for its own subtree — enforced TWICE,
-	// here and again by the MountStrip below, which returns ok=false for a
-	// topic outside the mount and skips the record. Neither is redundant: this
-	// one decides what is READ (and so what `next` counts, which is what lets
-	// the child's cursor skip past a sibling's commands instead of rescanning
-	// them forever), while MountStrip decides what can be REWRITTEN into the
-	// child's own coordinates — a record it cannot rewrite must not be sent
-	// whatever this filter said. Worth stating because a reader who changes
-	// only this line will find the guarantee still holds and conclude the
-	// filter is decorative; a mutation of exactly that shape did.
+	// A child only sees commands for its own subtree, enforced twice. This filter
+	// decides what is read, and so what next counts, which lets the child's cursor
+	// skip siblings' commands. MountStrip below decides what can be rewritten into
+	// the child's coordinates, and a record it cannot rewrite is never sent. Neither
+	// check is redundant.
 	filter := func(topic string) bool {
 		p, err := uns.Parse(topic)
 		if err != nil || !uns.IsCommand(s.eng.ClassOf(p.Contract)) {
@@ -528,16 +460,13 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		// Gap contract on the downlink wire (spec §6.2): same shape and same
-		// journal as /fetch, offsets in PARENT coordinates. The after param is
-		// the first offset the child has not consumed (Read starts there), so
-		// the condition is after < LWM. A gap answers the poll immediately —
-		// making the child wait out the long poll to learn its position is
-		// inside a pruned hole would stall §6.3's log-and-continue handling.
+		// The downlink gap object has the same shape and journal as /fetch, in parent
+		// coordinates. after is the first offset the child has not consumed, so there
+		// is a gap when after < LWM. A gap answers at once instead of making the child
+		// wait out the long poll.
 		gap, hasGap := s.eng.Store().Gap("commands", after)
-		// A definition waiting is as good a reason to answer as a command: a
-		// child must not sit out a 20s poll while policy it needs is already
-		// here.
+		// A waiting definition is as good a reason to answer as a command: a child
+		// should not sit out a 20s poll while policy it needs is already here.
 		hasDefs := s.eng.Store().NextOffset("definitions") > defAfter
 		if len(recs) > 0 || hasGap || hasDefs || time.Now().After(deadline) {
 			out := make([]wireRec, 0, len(recs))
@@ -551,34 +480,24 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 					WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups,
 				})
 			}
-			// now_ms is stamped HERE, at response-write time — after the long
-			// poll wait, so sample error is one-way network latency (ms), not
-			// the poll duration (up to longPollFor). It is the parent's own
-			// authoritative-now estimate (time-sync design §2.1), not raw
-			// local time; the root has no offset, so this is its raw clock.
-			// No head here: it belongs to the hello response alone
-			// (parent-scoped-cursors design §3.3). A child consumes it in
-			// exactly one situation — initializing a command cursor for a
-			// parent it has no cursor for — and that happens before the first
-			// poll, so carrying it on every poll would be an integer nothing
-			// reads.
+			// now_ms is stamped here, after the long-poll wait, so the sample error is
+			// network latency rather than the poll duration. It is the parent's
+			// authoritative clock (raw on the root). No head: only the hello response
+			// carries it.
 			resp := map[string]any{
 				"records": out, "next": next,
 				"now_ms": s.eng.AuthoritativeNow().UnixMilli(),
 			}
-			// Position hand-down (id-grants design §4): the parent knows its own
-			// chain and where the child sits inside it, so every downlink
-			// response teaches the child its position. Omitted while this
-			// node's own position is still unknown — never guess frames.
+			// Every downlink response teaches the child its position in the parent's
+			// chain. It is left out while this node's own position is unknown.
 			if a, ok := s.ancestryFor(mount); ok {
 				resp["ancestry"] = a
 			}
 			s.addDefinitions(resp, child.ULID, defAfter, limit)
 			if hasGap {
-				// §6.3: "next already points past the hole". With surviving
-				// records Read guarantees that; with none it would stay at
-				// `after` and the child would re-receive the gap forever, so
-				// point it at the LWM explicitly.
+				// next must point past the gap. With surviving records Read guarantees that;
+				// with none it would stay at after and the child would receive the gap forever,
+				// so point it at the LWM.
 				if lwm := gap.ToOffset + 1; next < lwm {
 					resp["next"] = lwm
 				}

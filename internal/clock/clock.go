@@ -1,15 +1,9 @@
-// Package clock implements the node-local authoritative-time offset state
-// described in the time sync move drain design
-// §2.1: the root node (no configured parent) is the time authority; every
-// other node maintains offset_ms, the signed difference between the
-// authority's clock and its own, learned from the most recent /downlink or
-// /replicate response and applied with no smoothing (last sample wins), so
-// corrections telescope down the tree.
-//
-// This is a separate package rather than fields on *engine.Engine so the
-// metrics package — which cannot import engine (engine already imports
-// metrics) — can read the exact same live state a scrape-time gauge needs,
-// without introducing an import cycle.
+// Package clock keeps a node's offset to the authoritative time. The root node,
+// with no parent, is the authority; every other node keeps offset_ms, the
+// difference between the authority's clock and its own, taken from the latest
+// /downlink or /replicate response without smoothing, so corrections carry down
+// the tree. It is its own package so metrics can read it without importing
+// engine.
 package clock
 
 import (
@@ -18,9 +12,9 @@ import (
 	"time"
 )
 
-// Clock is one node's authoritative-time state: thread-safe, with an
-// injectable wall clock (mandatory for every new decision path here — no
-// bare time.Now() calls).
+// Clock is one node's authoritative-time state. It is safe for concurrent use
+// and takes an injectable wall clock; decision code never calls time.Now
+// directly.
 type Clock struct {
 	now    func() time.Time
 	isRoot bool
@@ -31,11 +25,8 @@ type Clock struct {
 	lastSyncWall time.Time
 }
 
-// New builds a Clock. isRoot marks the time authority (design §2.1: "a node
-// with no parent configured is the root/authority") — it never learns an
-// offset, so AuthoritativeNow always returns its own raw wall clock. now is
-// the injectable clock; production callers pass time.Now, tests pass a
-// fake.
+// New builds a Clock. isRoot marks the time authority, which never learns an
+// offset. now is the wall clock: time.Now in production, a fake in tests.
 func New(isRoot bool, now func() time.Time) *Clock {
 	return &Clock{now: now, isRoot: isRoot}
 }
@@ -43,16 +34,13 @@ func New(isRoot bool, now func() time.Time) *Clock {
 // IsRoot reports whether this is the time authority.
 func (c *Clock) IsRoot() bool { return c.isRoot }
 
-// Now returns the node's raw, uncorrected wall clock (the injected clock
-// itself) — the reading offset samples are measured AGAINST, never the
-// corrected estimate (design §2.1: "offset_ms = now_ms − wall_receipt_time").
+// Now returns the node's raw wall clock, the reading samples are measured
+// against.
 func (c *Clock) Now() time.Time { return c.now() }
 
-// AuthoritativeNow is this node's current best estimate of the authority's
-// clock: wall_now + offset_ms (design §2.1). The root's offset is always 0
-// (it never learns one), so this is its raw wall clock; a non-root node
-// that has never synced also returns its raw wall clock (offset 0) — "best
-// effort" per §2.1.
+// AuthoritativeNow is this node's best estimate of the authority's clock, wall
+// time plus offset_ms. On the root, or before the first sample, that is the raw
+// wall clock.
 func (c *Clock) AuthoritativeNow() time.Time {
 	c.mu.Lock()
 	offset := c.offsetMS
@@ -60,13 +48,10 @@ func (c *Clock) AuthoritativeNow() time.Time {
 	return c.now().Add(time.Duration(offset) * time.Millisecond)
 }
 
-// ApplySample records one offset sample learned from a parent's now_ms
-// (design §2.1/§2.3 rule 4): offset = now_ms − wall_receipt, last sample
-// wins, no smoothing — sample noise is one-way network latency
-// (milliseconds), irrelevant at the drift scale this rule targets. A no-op
-// on the root: design §2.1 — the authority never learns an offset from
-// anyone (defensive; production call sites never invoke this on a root
-// node, since a root has no parent client to receive a response from).
+// ApplySample records the offset learned from a parent's now_ms, which is now_ms
+// minus the wall time at receipt. The last sample wins with no smoothing: sample
+// noise is network latency, far below the drift this corrects. On the root it
+// does nothing.
 func (c *Clock) ApplySample(nowMS int64) (offsetMS int64) {
 	if c.isRoot {
 		return 0
@@ -89,11 +74,9 @@ func (c *Clock) OffsetMS() int64 {
 	return c.offsetMS
 }
 
-// SyncAgeSeconds returns time since the last accepted sample, evaluated
-// against now (an explicit parameter, not c.now(), so a metrics scrape can
-// use its own wall reading independent of the injected decision clock). The
-// root exports 0 by definition (design §2.4); a non-root node that has
-// never synced exports +Inf ("never synced").
+// SyncAgeSeconds returns the time since the last accepted sample, measured
+// against now so a metrics scrape can use its own reading. The root reports 0;
+// a node that never synced reports +Inf.
 func (c *Clock) SyncAgeSeconds(now time.Time) float64 {
 	if c.isRoot {
 		return 0

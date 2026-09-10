@@ -65,20 +65,9 @@ func run(paths []string, getenv func(string) string) error {
 		}
 	}
 
-	// Ownership LAST, and this order is load-bearing rather than tidy.
-	//
-	// This process runs as uid 0 with every capability dropped but CHOWN and
-	// DAC_OVERRIDE. Root's power to chmod a file it does not own is CAP_FOWNER
-	// specifically, so once a path belongs to `uid`, this process can no longer
-	// change its mode. Chowning first therefore disarmed the copy that follows:
-	// chownTree handed /volumes/keys to 65532, copyTree then chmod'd that same
-	// directory, and the whole initializer died with
-	// "chmod /volumes/keys: operation not permitted" — taking every service
-	// that waits on it down with it.
-	//
-	// Copying while the tree is still root-owned costs nothing and needs no
-	// extra capability. Widening to CAP_FOWNER would also have worked and is
-	// the wrong trade: the fix is to stop chmod'ing what we have given away.
+	// Change ownership last. This process runs as root with only CHOWN and
+	// DAC_OVERRIDE, and changing the mode of a file it no longer owns needs
+	// CAP_FOWNER, so every chmod must happen while the tree is still root-owned.
 	for _, path := range paths {
 		if err := chownTree(path, uid, gid); err != nil {
 			return fmt.Errorf("migrate %s: %w", path, err)
@@ -110,25 +99,13 @@ func copyTree(source, target string, uid, gid int) error {
 				return err
 			}
 			if relative == "." {
-				// The ROOT of the copy is a mount point that already exists,
-				// and its permissions belong to the deployment that declared
-				// it — not to the source. The source here is a directory on a
-				// developer's machine whose mode is whatever their umask gave
-				// it; the target is a named volume the image created 0750 and
-				// owned by the runtime user. Copying 0755 over that is not a
-				// correction, it is a downgrade, and it is the chmod that
-				// killed this process: the mount point is already owned by
-				// `uid`, and without CAP_FOWNER that call can only fail.
-				//
-				// Chowning it is chownTree's job — the mount point is one of
-				// the paths named on the command line.
+				// The copy root is a mount point whose permissions belong to the deployment,
+				// not to the source directory's umask. It is also already owned by uid, so a
+				// chmod would fail. chownTree handles it.
 				return nil
 			}
-			// Below the root: MkdirAll applies the umask, so a directory this
-			// call created may not have the mode asked for, and chmod settles
-			// it. One that ALREADY has that mode is left alone, so a second
-			// run over a tree now owned by `uid` changes nothing rather than
-			// failing to change nothing.
+			// Below the root MkdirAll applies the umask, so set the mode, but only when it
+			// differs: on a second run the tree belongs to uid and a chmod would fail.
 			if err := chmodIfDifferent(destination, mode); err != nil {
 				return err
 			}

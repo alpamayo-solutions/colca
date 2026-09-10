@@ -1,11 +1,7 @@
-// Composing entity mutations: create, update, delete, and the external
-// references that hang off them.
-//
-// "Compose" is the word on purpose — these functions never write. They turn one
-// validated intent into the exact set of state records the command would
-// produce, and hand them back to ExecuteWithWrites, which commits them as one
-// batch alongside the receipt. Nothing here can half-apply, because nothing
-// here applies at all.
+// Composing entity mutations: create, update, delete and their external
+// references. These functions never write; they return the records a command
+// would produce, and ExecuteWithWrites commits them in one batch with the
+// receipt.
 
 package uns
 
@@ -86,8 +82,8 @@ func (w *EditExec) composeCreate(
 		}
 		path = joinPath(parent.Record.Path, segment)
 		if intent.Entity.Kind == "system-element" {
-			// An element id becomes a grant zone once grantsync registers it,
-			// so it must be an identity and not a wildcard — see ValidElementID.
+			// Element ids become grant zones, so this must be an identity, not a
+			// wildcard; see ValidElementID.
 			if err := ValidElementID(intent.Entity.ID); err != nil {
 				return 422, "create: " + err.Error(), "invalid", nil
 			}
@@ -303,19 +299,11 @@ func (w *EditExec) composeDelete(
 		if len(selected) > 1 && !intent.Cascade {
 			return 409, fmt.Sprintf("delete_impact: %s still contains %d entities", key, len(selected)-1), "conflict", nil
 		}
-		// Occupancy, judged over the WHOLE selected subtree and independent of
-		// cascade. An identity — a child node, a connector — names an element
-		// to get its place, so retiring that element leaves it authenticating
-		// with nowhere to write: the child is refused at the replication door,
-		// the connector's autobind can no longer resolve a mount. Cascade says
-		// the caller accepts taking the children with it; it says nothing about
-		// participants, which are not entities in this snapshot and are not the
-		// caller's to strand. This is the same rule and the same port the
-		// `_CmdConfigure` element/delete verb applies (occupantsOf), because two
-		// doors retiring the same positions under two rules is how an Edit
-		// cascade cut off a node the configure verb refused to touch.
-		// Every occupied position is named, sorted, so the refusal reads the
-		// same however the snapshot map happened to iterate.
+		// Occupancy over the whole selected subtree, regardless of cascade:
+		// retiring an element a child node or connector binds to would leave
+		// it authenticated with nowhere to write. Cascade covers children, not
+		// participants. This is the same rule as element/delete (occupantsOf).
+		// Occupied positions are sorted so the refusal is stable.
 		var occupied []string
 		for _, candidate := range selected {
 			if candidate.Kind != "system-element" {

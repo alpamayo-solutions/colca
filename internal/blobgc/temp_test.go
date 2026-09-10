@@ -34,20 +34,11 @@ func exists(t *testing.T, path string) bool {
 	return err == nil
 }
 
-// A process killed mid-Put leaves a `.incoming-*.tmp` file that nothing could
-// ever reclaim: it has no digest, so List skips it and the sweeper never saw
-// it. Bounded only by crash count times blob size, on an edge with small flash.
-//
-// The two temp files are the point of this test, and so is the grace of 0. A
-// blob's grace answers "might the record referencing this still be on its
-// way?" and an operator may legitimately set it to nothing; an unfinished
-// upload has no record and no digest, so it must NOT inherit that setting —
-// under grace 0 an aggressive reclamation would delete the temp file of every
-// transfer in flight. The fresh temp file surviving is what pins that.
-//
-// The two finished blobs are the denominator: without them a sweep that did
-// nothing at all — a broken fixture, an unwired store — would satisfy every
-// assertion about the stale file being gone.
+// A process killed mid-Put leaves a .incoming-*.tmp file with no digest, which
+// nothing else would ever reclaim. The grace is 0 on purpose: an unfinished
+// upload must not inherit the blob grace, or every transfer in flight would be
+// deleted, and the fresh temp file surviving pins that. The two finished blobs
+// show the sweep actually ran.
 func TestSweepReclaimsAbandonedUploadsWithoutTouchingLiveTransfers(t *testing.T) {
 	st, err := store.Open(t.TempDir())
 	if err != nil {

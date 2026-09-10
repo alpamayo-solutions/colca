@@ -5,20 +5,15 @@ import (
 	"testing"
 )
 
-// asHuman is the acting person the executor tests command as. A _CmdEdit
-// is refused for any other kind of actor (node-side command authorization
-// design §3A), and _CmdConfigure ignores the context, so one human context
-// serves every executor test.
+// asHuman is the person the executor tests act as. _CmdEdit refuses any other
+// actor and _CmdConfigure ignores the context, so one context serves all tests.
 var asHuman = CommandContext{Actor: &Entry{
 	ULID: "01HTESTHUMAN00000000000000", Kind: KindHuman, Grants: []string{"cmd:#:configure"},
 }}
 
-// A _CmdEdit is a person's intent. Any other actor — the admin door
-// (no identity), the api under its own local identity, an external service —
-// is refused before the executor looks at the operation, so no replay receipt
-// is written for a command nobody was authorized to run: the same operation
-// id, presented later by a human, executes fresh instead of replaying a
-// refusal or, worse, an outcome.
+// A _CmdEdit is a person's intent. Any other actor is refused before the
+// executor looks at the operation, and no replay receipt is written, so the
+// same operation id from a person later runs fresh.
 func TestEditRefusesEveryNonHumanActor(t *testing.T) {
 	f := newStore("n-edge1")
 	parentVersion := seedEditEntity(t, f, "_SystemElement", "line1", map[string]any{
@@ -55,8 +50,8 @@ func TestEditRefusesEveryNonHumanActor(t *testing.T) {
 		t.Fatalf("a refused actor wrote state: store offset %d, want %d (the seeded parent only)", f.offset, parentVersion)
 	}
 
-	// The same operation, now from a person, is a first execution — not a
-	// replay of a receipt a refusal must never have written.
+	// The same operation from a person runs for the first time, not as a
+	// replay.
 	code, message, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", create)
 	if code != 200 || len(writes) != 1 {
 		t.Fatalf("human after refusals: %d %q writes=%d, want a fresh 200 with one write", code, message, len(writes))
@@ -73,9 +68,8 @@ func TestIsHumanIsNilSafe(t *testing.T) {
 	}
 }
 
-// Humans command through _CmdEdit only (§3F): a configure grant does not
-// open _CmdConfigure to a person, because that executor takes no principal.
-// Every other kind keeps its contracts — placement and grants decide there.
+// People command through _CmdEdit only: a configure grant does not open
+// _CmdConfigure to a person, since that executor takes no principal.
 func TestHumansCommandThroughTheEditOnly(t *testing.T) {
 	human := &Entry{ULID: "kc-sub-anna", Kind: KindHuman, Grants: []string{"cmd:#:configure"}}
 	if human.MayPublishContract("_CmdConfigure") {
@@ -99,9 +93,8 @@ func TestHumansCommandThroughTheEditOnly(t *testing.T) {
 	}
 }
 
-// A _Cmdeditor's topic path is the owning node's route, not an element,
-// so the door admits it on the CLASS alone and leaves position to the
-// executor's plan. Every other command keeps the prefix comparison.
+// A _CmdEdit topic names the owning node, not an element, so the door admits
+// it on the class alone and the executor checks positions.
 func TestTheDoorAdmitsAEditCommandOnTheClassAlone(t *testing.T) {
 	scoped := &Entry{ULID: "kc-sub-anna", Kind: KindHuman, Grants: []string{"cmd:el-line1/#:configure"}}
 	for _, topic := range []string{

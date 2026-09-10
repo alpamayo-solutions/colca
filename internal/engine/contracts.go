@@ -1,10 +1,8 @@
-// Contract authority resolution (schema-bundle design §7): with a loaded
-// bundle the bundle answers class, tombstonability and schema for every
-// contract it carries — fully replacing the builtin floor, never merging.
-// Without one, the floor (plugins/uns) applies unchanged. The builtin-only
-// contracts (_StreamGap, _EnrolledIdentity, _TimeSync) are ALWAYS answered by the
-// binary: their producers live in this process, so their rules evolve with
-// it (§10.2) and a bundle may not redeclare them (loader-enforced).
+// With a loaded bundle, the bundle answers class, tombstonability and schema for
+// every contract it carries, replacing the builtin floor rather than merging with
+// it. Without one, the floor in plugins/uns applies. _StreamGap,
+// _EnrolledIdentity and _TimeSync are always answered by the binary that produces
+// them; a bundle may not redeclare them.
 
 package engine
 
@@ -16,14 +14,10 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// RejectError carries the metrics reason with a door rejection so the broker
-// hook can answer MQTT-5 PUBACK reason codes (design §8) without parsing
-// error strings. Reason values are exactly the metrics label vocabulary.
-// Denied is set only for an authorization denial (rejectDenied) — a
-// well-formed request refused because the actor lacks the grant for it, as
-// opposed to a malformed one (bad grammar, unknown contract, schema
-// violation). Callers distinguish the two with errors.Is(err, ErrDenied)
-// rather than inspecting Reason's string vocabulary.
+// RejectError carries the metrics reason of a door rejection, so the broker can
+// answer MQTT 5 PUBACK reason codes without parsing strings. Denied marks an
+// authorization denial as opposed to a malformed request; check it with
+// errors.Is(err, ErrDenied).
 type RejectError struct {
 	Reason string
 	Denied bool
@@ -40,18 +34,16 @@ func (r *RejectError) Is(target error) bool { return target == ErrDenied && r.De
 // ErrDenied is the sentinel authorization denials match via errors.Is.
 var ErrDenied = errors.New("denied")
 
-// reject counts the reason and returns the typed error — the single exit for
-// every door rejection that can surface on the MQTT wire.
+// reject counts the reason and returns the typed error; every door rejection
+// that can reach the MQTT wire goes through it.
 func (e *Engine) reject(reason, format string, args ...any) (Result, error) {
 	e.metrics.RejectPublish(reason)
 	return Result{}, &RejectError{Reason: reason, Err: fmt.Errorf(format, args...)}
 }
 
-// rejectDenied preserves an authorization denial before returning the same
-// typed error as reject, marked so callers can distinguish it from a
-// malformed request via errors.Is(err, ErrDenied). Audit persistence is
-// best-effort only in the sense that its failure cannot turn the protected
-// operation into an allow.
+// rejectDenied records an authorization denial in the audit stream and returns a
+// RejectError marked as denied. A failed audit write never turns the denial into
+// an allow.
 func (e *Engine) rejectDenied(reason string, actor Attribution, operation string, p *uns.Parsed, format string, args ...any) (Result, error) {
 	d := AuditDenial{
 		Operation: operation, ReasonCode: reason,
@@ -71,11 +63,9 @@ var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true,
 // SetContracts installs the loaded bundle table (node startup; nil = floor).
 func (e *Engine) SetContracts(t *contracts.Table) { e.contracts = t }
 
-// ClassOf resolves a contract's routing class through the active authority.
-// Public because the repl server (KV projection on replicate, downlink
-// command filter), drain accounting and the retention pruner must route by
-// the SAME authority as the doors — a bundle-declared contract exists for
-// all of them or none.
+// ClassOf resolves a contract's routing class through the active authority. It
+// is exported because replication, drain accounting and retention must route
+// exactly like the doors.
 func (e *Engine) ClassOf(contract string) uns.Class {
 	if e.contracts == nil || builtinOnly[contract] {
 		return uns.ClassOf(contract)
@@ -87,9 +77,8 @@ func (e *Engine) ClassOf(contract string) uns.Class {
 }
 
 // validateContract applies the active authority's payload rules: tombstone
-// admissibility for empty payloads, schema for everything else. Unknown
-// contracts are rejected — the validated-namespace principle holds with and
-// without a bundle.
+// admissibility for empty payloads, the schema otherwise. Unknown contracts are
+// rejected.
 func (e *Engine) validateContract(contract string, payload []byte) error {
 	if e.contracts == nil || builtinOnly[contract] {
 		return uns.Validate(contract, payload)
@@ -100,7 +89,7 @@ func (e *Engine) validateContract(contract string, payload []byte) error {
 	}
 	if len(payload) == 0 {
 		if r.Tombstone {
-			return nil // path retirement (retention §7.1), schema never consulted (§10.1)
+			return nil // a tombstone skips the schema
 		}
 		return fmt.Errorf("%s: empty payload (tombstone) is not admissible for this contract", contract)
 	}
@@ -116,9 +105,8 @@ func (e *Engine) BundleInfo() (version, digest, source string, n int) {
 	return version, digest, "bundle", n
 }
 
-// ReasonOf is the exported hook-side accessor (mqttsrv maps it to PUBACK
-// codes, design §8.1). Kept beside RejectError so the vocabulary and the
-// accessor cannot drift apart. "" = untyped error.
+// ReasonOf returns the reason of a RejectError, or "" for any other error.
+// mqttsrv maps it to PUBACK codes.
 func ReasonOf(err error) string {
 	var re *RejectError
 	if errors.As(err, &re) {

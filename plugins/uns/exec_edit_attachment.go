@@ -1,13 +1,8 @@
-// The one edit intent that mutates the REGISTRY rather than the entity
-// store: attaching, remounting or draining a node.
-//
-// It is separate because its writer is separate. Everything else here composes
-// state records and commits them through EntityStore; this reaches the registry
-// through the NodeAttachmentWriter seam, so the domain plugin never imports the
-// core registry package (architecture principle 4). Its idempotency is also its
-// own: a remount that already landed is recognised from the attachment snapshot
-// rather than from a receipt, because the registry write is not part of the
-// entity batch and cannot be replayed from one.
+// The edit intent that changes the registry instead of the entity store:
+// attaching, remounting or draining a node. It writes through the
+// NodeAttachmentWriter seam, so this package never imports the registry. A
+// remount that already happened is recognised from the attachment snapshot,
+// since the registry write is not part of the entity batch.
 
 package uns
 
@@ -108,8 +103,8 @@ func (w *EditExec) executeNodeAttachment(
 		)
 	}
 
-	// The plan: the node's current element (where it stands) and, for a
-	// remount, the element it moves to. Both must be covered (design §3C).
+	// The plan: the node's current element and, for a remount, its new
+	// element. Both must be covered.
 	touched := []editTouched{touchedEntity(entities, "system-element", attachment.Element)}
 	if intent.MountSystemElement != "" {
 		touched = append(touched, touchedEntity(entities, "system-element", intent.MountSystemElement))

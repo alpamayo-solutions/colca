@@ -1,7 +1,6 @@
-// End-to-end human-authorization scenarios on the live 4-node tree
-// (human-authz design §9 core level): scoped reads over the human doors,
-// commands through the tree, admin:# enrollment over Bearer, expiry kicks,
-// and the regression pin that machine/repl doors still reject tokens.
+// Human authorization on the live four-node tree: scoped reads over the token
+// doors, commands through the tree, admin enrollment with a bearer token,
+// expiry kicks, and machine and repl doors that still reject tokens.
 package tests
 
 import (
@@ -54,33 +53,14 @@ func human(t *testing.T, n *node.Node, scheme, sub, token string) pahomqtt.Clien
 	return c
 }
 
-// humanMQTT5Conn dials a node's human MQTT door and hands back a connection
-// whose packet writes are SERIALISED.
+// humanMQTT5Conn dials a node's token MQTT door and returns a connection whose
+// packet writes are serialised.
 //
-// paho.golang writes one control packet with several Write calls (fixed
-// header, then each buffer of the body) and holds a lock across them only when
-// the connection implements sync.Locker — `ClientConfig.Conn`'s own doc says
-// "BEWARE that most wrapped net.Conn implementations like tls.Conn are not
-// thread safe for writing". A *tls.Conn is not, and paho's pinger writes the
-// first PINGREQ from its own goroutine the instant the client connects
-// (paho/pinger.go: `time.NewTimer(0) // Immediately send first pingreq`).
-//
-// Handing the raw tls.Conn over therefore let those two bytes (0xc0 0x00) land
-// INSIDE a PUBLISH, in whichever gap the scheduler chose — one root cause with
-// two faces, both seen:
-//
-//   - between the fixed header and the body, so the topic length decoded as
-//     0xc000: the broker answered "malformed packet: topic", dropped the
-//     connection, and sent no PUBACK at all. The publish then waited out its
-//     whole context ("no PUBACK within the deadline"). This is how CI failed.
-//   - between the topic and the payload, so the payload began 0xc0: the topic
-//     was fine, the contract check reported `_CmdParam: payload is not valid
-//     JSON: invalid character 'À'` (U+00C0 — the PINGREQ opcode read as a
-//     rune) and the human got PUBACK 0x99. This is how it failed locally.
-//
-// Rare when idle — the ping goroutine usually finishes before the publish
-// starts — and reproducible under load: 2 of 12 concurrent -race batches
-// before this wrapper, 0 of 12 after.
+// paho.golang writes one packet with several Write calls and only locks across
+// them when the connection is a sync.Locker; a *tls.Conn is not. Its pinger
+// sends the first PINGREQ right after connecting, from its own goroutine, and
+// those two bytes could land inside a PUBLISH: the broker then saw a malformed
+// packet and never acked, or the payload failed JSON validation.
 func humanMQTT5Conn(t *testing.T, addr string) net.Conn {
 	t.Helper()
 	conn, err := tls.Dial("tcp", addr,
@@ -91,11 +71,8 @@ func humanMQTT5Conn(t *testing.T, addr string) net.Conn {
 	return packets.NewThreadSafeConn(conn)
 }
 
-// humanPublisher uses the synchronous MQTT-5 client for PUBACK assertions.
-// The legacy client reports acknowledgements through a background token
-// dispatcher that can starve under the race detector after the broker has
-// already answered. MQTT-5 Publish binds the five-second deadline to the
-// protocol exchange itself and also exposes the denial reason code.
+// humanPublisher uses the synchronous MQTT 5 client for PUBACK assertions: the
+// deadline covers the exchange itself and the reason code is exposed.
 func humanPublisher(t *testing.T, n *node.Node, sub, token string) *pahov5.Client {
 	t.Helper()
 	c := pahov5.NewClient(pahov5.ClientConfig{Conn: humanMQTT5Conn(t, n.MQTTHumanTCPAddr)})
@@ -122,10 +99,8 @@ func publishHuman5(t *testing.T, c *pahov5.Client, topic, payload string) byte {
 	ack, err := c.Publish(ctx, &pahov5.Publish{
 		Topic: topic, QoS: 1, Payload: []byte(payload),
 	})
-	// A refused publish comes back as an ack carrying the reason code AND a
-	// non-nil error, so the ack — not the error — decides whether there is an
-	// answer to assert on. No ack at all is the failure this helper exists to
-	// name, and it must say so rather than dereference nil.
+	// A refused publish returns an ack with a reason code and an error, so the ack
+	// decides. No ack at all is the failure to report.
 	if ack == nil {
 		t.Fatalf("human publish %s: no PUBACK within the deadline: %v", topic, err)
 	}
@@ -149,10 +124,8 @@ func bearer(t *testing.T, n *node.Node, method, path, token, body string) (int, 
 	return resp.StatusCode, string(buf[:nread])
 }
 
-// A human at the SITE with a read grant for edge1's subtree sees edge1's
-// replicated data live over BOTH human doors and cannot subscribe to edge2's.
-// The grant is ROOT-frame (cmdadmin design §3): site1 learned its prefix from
-// the hub and translates read:site1/edge1/# to its local read:edge1/#.
+// A person at site1 with a read grant for edge1's subtree sees edge1's data on
+// both token doors and cannot subscribe to edge2's.
 func TestHumanScopedReadOnTree(t *testing.T) {
 	tp := startTopo(t)
 	tok := tp.iss.Mint("anna", []string{"read:" + authtest.ElementID("edge1") + "/#"}, time.Now().Add(5*time.Minute))
@@ -178,17 +151,9 @@ func TestHumanScopedReadOnTree(t *testing.T) {
 	}
 }
 
-// The predicate paho actually branches on, pinned so the wrapper cannot be
-// dropped again: packets.ControlPacket.WriteTo serialises a multi-Write packet
-// if and only if the writer is a sync.Locker, and every MQTT-5 human client
-// here shares its connection with a pinger goroutine that writes on its own.
-// Asked the same way the library asks it — a check on the type name, or on
-// humanMQTT5Conn having been called, would go green against a wrapper that had
-// stopped satisfying it.
-//
-// Deliberately not a repetition test. The corruption is a genuine race:
-// hammering it would prove the wrapper works only on the runs where the race
-// happened to be lost, which is the flaky shape this replaces.
+// paho serialises a packet's writes only when the connection is a sync.Locker,
+// so check exactly that. A repetition test would only pass on the runs where
+// the race happened to be lost.
 func TestTheHumanMQTT5ConnectionSerialisesPacketWrites(t *testing.T) {
 	tp := startTopo(t)
 	conn := humanMQTT5Conn(t, tp.global.MQTTHumanTCPAddr)
@@ -249,8 +214,8 @@ func TestHumanCommandsThroughTree(t *testing.T) {
 	}
 }
 
-// admin:# over Bearer enrolls a machine at an edge; the machine connects.
-// Attributable admin: the action rides a token, not the shared secret.
+// admin:# over a bearer token enrolls a machine at an edge, and the machine
+// connects.
 func TestHumanAdminEnrollsOverBearer(t *testing.T) {
 	tp := startTopo(t)
 	adminTok := tp.iss.Mint("boss", []string{"admin:#"}, time.Now().Add(5*time.Minute))
@@ -282,8 +247,7 @@ func TestHumanExpiryKickOnTree(t *testing.T) {
 		t.Fatal("precondition: not connected")
 	}
 
-	// Drive the sweeper via wall clock: the node's own 10s ticker will fire;
-	// poll with a deadline comfortably past exp + one sweep interval.
+	// The node sweeps expired sessions every 10s; wait past expiry plus one sweep.
 	deadline := time.Now().Add(20 * time.Second)
 	for c.IsConnectionOpen() {
 		if time.Now().After(deadline) {

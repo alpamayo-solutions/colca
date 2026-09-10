@@ -102,17 +102,9 @@ func TestAFailedWriteAcksNothing(t *testing.T) {
 }
 
 func TestRecordsAtOrBelowTheMarkerAreNotRewritten(t *testing.T) {
-	// The replay a crash between commit and ack produces. The rows are already
-	// durable; writing them again would be harmless in the database (the unique
-	// index) but would hide a broken marker.
-	//
-	// The page starts at offset 2, not 1, and that is the point: a page that
-	// starts at the stream's FIRST record cannot be told apart from a
-	// recreated colca volume by offsets alone, and Once resolves that
-	// ambiguity toward re-applying rather than dropping (see
-	// TestAMarkerFromABeforeTheVolumeWasRecreatedNeverDropsAPage). Every
-	// replay after the first page of a stream's life — which is every replay
-	// a running deployment sees — is this one.
+	// A replay after a crash between commit and ack. The page starts at offset 2 on
+	// purpose: a page starting at 1 is treated as a possibly recreated stream and
+	// re-applied (see the next test).
 	d := &fakeDoor{pages: []door.Page{page(5,
 		record(2, `{"signal_id":"s1","value":1}`),
 		record(3, `{"signal_id":"s1","value":2}`),
@@ -130,24 +122,11 @@ func TestRecordsAtOrBelowTheMarkerAreNotRewritten(t *testing.T) {
 	}
 }
 
-// Recreating colcad's data volume restarts stream offsets at 1. Timescale
-// keeps `colca_applied_offset`, so the marker now counts a stream that no
-// longer exists — and the filter above read every record on the first page as
-// "already durable" and dropped it, up to FETCH_MAX (500) metrics, silently.
-// Apply then lowered the marker to that page's last offset, so later pages
-// flowed and nothing ever looked wrong again.
-//
-// Both halves of the rule are exercised, because a wipe can leave the marker
-// on either side of the new page's end and only one of them is obviously
-// wrong:
-//
-//   - a large marker (the audit's case: 100000 vs. a page ending at 3), and
-//   - a small marker that happens to fall INSIDE the new page's range, which
-//     no comparison against the page's end can catch.
-//
-// The last subtest is the denominator: the same shape with the marker where a
-// running stream would legitimately put it must still skip, or this test would
-// pass just as happily against a bridge that had no filter at all.
+// Recreating colcad's data volume restarts offsets at 1 while Timescale keeps
+// the marker, and the bridge must not treat the new records as already applied.
+// Both cases are covered: a marker past the page's end, and a small marker
+// inside the new page's range. The last subtest shows a legitimate marker still
+// skips records.
 func TestAMarkerFromABeforeTheVolumeWasRecreatedNeverDropsAPage(t *testing.T) {
 	newPage := func() door.Page {
 		return page(4,
@@ -157,9 +136,8 @@ func TestAMarkerFromABeforeTheVolumeWasRecreatedNeverDropsAPage(t *testing.T) {
 		)
 	}
 
-	// The recreated stream after retention already pruned its first records:
-	// the page no longer starts at 1, so only the marker-past-the-page half of
-	// the rule can see it.
+	// The recreated stream after retention pruned its first records: only the
+	// marker-past-the-page rule can see it.
 	prunedPage := func() door.Page {
 		return page(10,
 			record(7, `{"signal_id":"s1","value":1}`),
@@ -197,10 +175,8 @@ func TestAMarkerFromABeforeTheVolumeWasRecreatedNeverDropsAPage(t *testing.T) {
 		})
 	}
 
-	// Denominator: nothing about a page starting at 1 is special on its own.
-	// With the marker at 0 — a consumer that has recorded no progress — the
-	// same page writes the same three rows, so the subtests above only mean
-	// something because of what they prove about a NON-zero marker.
+	// With the marker at 0 the same page writes the same rows, so the cases above
+	// are about a non-zero marker.
 	t.Run("a stream nobody has followed yet writes the same page", func(t *testing.T) {
 		d := &fakeDoor{pages: []door.Page{newPage()}}
 		store := &fakeStore{}

@@ -38,17 +38,9 @@ func Generate(path string) (*Identity, error) {
 }
 
 // LoadOrGenerate returns the identity at path, minting one if the file does not
-// exist yet. The bool reports whether it minted.
-//
-// First boot mints; every later boot loads. That keeps a node's private key
-// out of whatever is distributed to install it: a key shipped with a
-// deployment would give every device installed from it the same identity. A
-// key minted on the device lives in its volume and survives every update.
-//
-// A file that exists but cannot be parsed is an ERROR, never a reason to mint.
-// Replacing it would silently change the node's identity and orphan it from the
-// parent that pinned the old key — a recoverable situation turned into a
-// mysterious one.
+// exist; the bool reports whether it minted. Minting on the device keeps the
+// private key out of installation media. A file that exists but cannot be
+// parsed is an error, never a reason to mint a new identity.
 func LoadOrGenerate(path string) (*Identity, bool, error) {
 	id, err := Load(path)
 	if err == nil {
@@ -92,19 +84,11 @@ func (i *Identity) PublicHex() string {
 	return hex.EncodeToString(i.Priv.Public().(ed25519.PublicKey))
 }
 
-// SelfSignedCert returns a TLS cert wrapping the ed25519 key (cert = key container, trust = pinning).
-// ServerCert is the certificate a listener serves: the supplied pair when both
-// paths are set, and otherwise this node's self-signed key container.
-//
-// It is for the doors whose trust is NOT pinning — the human MQTT/WebSocket
-// doors and the HTTP API. Replication and the machine door must keep the key
-// container, because a child pins its parent by extracting the ed25519 key from
-// the certificate it is served (repl/client.go): a CA-issued certificate there
-// breaks every uplink beneath this node. Callers pass empty paths for those.
-//
-// A half-configured or unreadable pair is an ERROR, never a silent fallback.
-// Falling back would leave the node serving exactly what the operator
-// configured it not to serve, and looking healthy while doing it.
+// ServerCert returns the certificate a listener serves: the given pair when both
+// paths are set, otherwise this node's self-signed key container. Only the doors
+// people reach may use a supplied certificate; replication and the machine door
+// keep the key container, because children pin their parent's key from it. A
+// half-configured or unreadable pair is an error, never a silent fallback.
 func ServerCert(id *Identity, cn, certFile, keyFile string) (tls.Certificate, error) {
 	switch {
 	case certFile == "" && keyFile == "":
@@ -121,6 +105,8 @@ func ServerCert(id *Identity, cn, certFile, keyFile string) (tls.Certificate, er
 	return cert, nil
 }
 
+// SelfSignedCert returns a TLS certificate that wraps the ed25519 key. Trust
+// comes from pinning the key, not from the certificate.
 func (i *Identity) SelfSignedCert(cn string) (tls.Certificate, error) {
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(time.Now().UnixNano()),

@@ -10,24 +10,15 @@ import (
 	"time"
 )
 
-// The claim only a real database can prove: applying the same page twice leaves
-// one row per (signal_id, timestamp). The marker is the first net; this unique
-// index is the second, and the second is what still holds when the first is
-// somehow lost — a restored backup, a truncated marker table, a bug.
+// Only a real database can show that applying the same page twice leaves one row
+// per (signal_id, timestamp): the unique index still holds if the marker is
+// lost.
 //
-// Runs against the world in tests/docker-compose.historian.yaml
-// (`go test -tags boundary ./internal/historian/`). Skipped without a DSN so a
-// plain `go test ./...` stays hermetic.
+// Runs against tests/docker-compose.historian.yaml with
+// `go test -tags boundary ./internal/historian/`, and is skipped without a DSN.
 
-// boundaryRunID makes every signal_id this suite writes unique to THIS process
-// invocation. A boundary run never wipes the Timescale
-// volume between an up and a down (it tears the whole world down on the way
-// out, but two `up`/`down`-free invocations against a container left running
-// share it) — a rerun that reused the same literal "sig-boundary-1" would find
-// last run's row still there and its own count(*)/xmin/column assertions
-// would be answering last run's row, not this one. Distinct per process (not
-// per test) so a query WHERE signal_id = 'sig-boundary-1-<runID>' inside one
-// run still only ever matches the row that same run wrote.
+// boundaryRunID makes this run's signal IDs unique, so a rerun against a
+// database left running does not assert on the previous run's rows.
 var boundaryRunID = fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
 
 func sigID(base string) string {
@@ -137,10 +128,8 @@ func TestAnEmptyBatchStillMovesTheMarker(t *testing.T) {
 	}
 }
 
-// The write-side half of the evaluator's idempotency contract (design §6): a
-// metric is identified by (signal_id, timestamp), not by revision, so
-// recomputing a window and re-publishing the same points must land the NEW
-// value — not be dropped by the first-write-wins net the Kafka pipeline used.
+// A metric is identified by (signal_id, timestamp), so re-publishing a
+// recomputed point must store the new value.
 func TestExactMatchOverwritesTheRow(t *testing.T) {
 	ctx := context.Background()
 	sink := testPool(t)
@@ -174,15 +163,9 @@ func TestExactMatchOverwritesTheRow(t *testing.T) {
 	}
 }
 
-// The other half of the same contract: an identical redelivery (the case the
-// unique index alone already made safe against duplication) must still leave
-// the row's storage untouched — no new tuple version, no replication churn.
-// xmin is the honest way to see this: Postgres bumps it on any UPDATE that
-// actually executes, including one whose new values equal the old ones, but
-// the WHERE ... IS DISTINCT FROM guard is what suppresses the UPDATE itself
-// on an identical redelivery, so xmin only stays put if that guard is
-// working. A row count assertion alone cannot tell a suppressed UPDATE apart
-// from one that ran and happened to write the same bytes back.
+// An identical redelivery must not write a new row version. xmin changes on any
+// executed UPDATE, even one writing the same values, so an unchanged xmin shows
+// the IS DISTINCT FROM guard suppressed it.
 func TestIdenticalReapplyDoesNotChurnTheRow(t *testing.T) {
 	ctx := context.Background()
 	sink := testPool(t)
@@ -220,15 +203,9 @@ func TestIdenticalReapplyDoesNotChurnTheRow(t *testing.T) {
 	}
 }
 
-// The subtle failure mode: the value columns are mutually exclusive (a row
-// sets at most one of value_json/value_number/value_text/value_bool), so a
-// signal that changes kind at the SAME (signal_id, timestamp) — e.g. a
-// recomputation that used to publish a number and now publishes text — must
-// clear the stale column, not leave both populated. Setting only the
-// incoming row's own column in the UPDATE would leave value_number sitting
-// next to the new value_text, and the API reads value_json/value_number/
-// value_text/value_bool in that fixed order — a leftover value_number would
-// silently win over the real value_text forever.
+// A row sets at most one value column. When a signal changes kind at the same
+// (signal_id, timestamp), the old column must be cleared, or the API, which
+// reads the columns in a fixed order, would keep returning the stale value.
 func TestAValueTypeChangeClearsTheStaleColumn(t *testing.T) {
 	ctx := context.Background()
 	sink := testPool(t)
@@ -262,10 +239,7 @@ func TestAValueTypeChangeClearsTheStaleColumn(t *testing.T) {
 	}
 }
 
-// The marker's own guarantee — untouched by this change — is pinned
-// elsewhere (TestTheMarkerAndTheRowsCommitTogether,
-// TestAnEmptyBatchStillMovesTheMarker); this checks it holds specifically
-// across an overwrite, not just a first write.
+// The marker still moves when an apply overwrites rows.
 func TestTheMarkerStillMovesOnAnOverwritingApply(t *testing.T) {
 	ctx := context.Background()
 	sink := testPool(t)

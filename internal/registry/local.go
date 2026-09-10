@@ -1,7 +1,4 @@
-// Self-registration lives here rather than in registry.go so that file keeps
-// one responsibility (the lifecycle of enrolled entries) and this one carries
-// the other: how an unprovisioned local service becomes an entry
-// (local-service-trust design §3.2).
+// Self-registration: how an unprovisioned local service becomes an entry.
 
 package registry
 
@@ -17,16 +14,11 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// Register resolves a local service's entry, creating it if this node has
-// never seen the name (local-service-trust design §3.2). It is what a local
-// door calls on every CONNECT: cheap when the name is already known, and the
-// whole reason onboarding a local service costs zero provisioning steps.
+// Register returns a local service's entry, creating it the first time this node
+// sees the name. Local doors call it on every CONNECT.
 //
-// The declared mount SEEDS the entry and never maintains it: once an entry
-// exists, the entry wins and a differing declaration is only logged. Re-
-// applying a declaration on every connect would let a container restart
-// silently undo an operator's repositioning, which would make repositioning
-// pointless.
+// The declared mount only seeds a new entry. For an existing entry a differing
+// declaration is logged and ignored, so a restart cannot undo an operator's move.
 func (m *Manager) Register(name, declaredMount string) (*uns.Entry, error) {
 	if name == "" {
 		return nil, fmt.Errorf("register: a local service needs a name")
@@ -60,19 +52,10 @@ func (m *Manager) Register(name, declaredMount string) (*uns.Entry, error) {
 	return &entry, nil
 }
 
-// elementFor resolves a declared mount to the element a new entry binds to.
-// No declaration means unplaced — bound to the node itself — so there is
-// nothing to resolve: elementFor("") returns "", and Enroll already treats
-// an empty element as a complete, valid placement (KindLocal, id-grants
-// design §4).
-//
-// Authoring the branch when it is absent (§3.2: "path exists? bind to the
-// element sitting there. path missing? author the elements along it, bind
-// to the leaf.") is domain knowledge this package does not keep a copy of: a
-// catalogue tag's own meta.element needs the identical walk
-// (exec_configure.go bindCatalogue), so it lives in exactly one place —
-// ConfigExec.authorElementAt — and this just calls it, through whatever
-// SetAuthoring wired (architecture principle 1: one walk, not two).
+// elementFor resolves a declared mount to the element a new entry binds to. An
+// empty mount means bound to the node itself. Missing elements along the path are
+// authored through the authoring hook (ConfigExec.authorElementAt), the same walk
+// a catalogue tag's meta.element takes.
 func (m *Manager) elementFor(mount string) (string, error) {
 	if mount == "" {
 		return "", nil
@@ -90,11 +73,8 @@ func (m *Manager) elementFor(mount string) (string, error) {
 	return id, nil
 }
 
-// normalizeMount strips empty segments (a leading/trailing/doubled "/") so
-// "line1/press3", "/line1/press3" and "line1/press3/" compare equal.
-// elementFor already discards empty segments while authoring a mount, so the
-// drift comparison above must fold the same way, or a merely cosmetic
-// difference in how the declaration was written reads as drift.
+// normalizeMount drops empty segments, so "line1/press3", "/line1/press3" and
+// "line1/press3/" compare equal, matching how elementFor walks a mount.
 func normalizeMount(mount string) string {
 	segs := strings.Split(mount, "/")
 	kept := segs[:0]
@@ -106,19 +86,9 @@ func normalizeMount(mount string) string {
 	return strings.Join(kept, "/")
 }
 
-// NewULID mints a fresh ULID — this system's one identity format (node ids,
-// registry entries, elements, and every Signal.id in the data model).
-// Exported because it is not only Register's need: a local service
-// registering for the first time mints its own entry ULID here, and
-// plugins/uns — stdlib-only (arch_test.go) and unable to import a ULID
-// library itself — declares minting as a port that the core wires with this
-// same function (see NewConfigExec's newID parameter in internal/node).
-//
-// The encoding is oklog/ulid/v2's, not ours: a 130-bit Crockford base32 text
-// form is a specification, and a hand-rolled second implementation of a
-// specification is exactly the re-implemented-knowledge case architecture
-// principle 2 rules out — generate or use the one definition, never
-// reimplement it.
+// NewULID mints a ULID, the identity format for nodes, registry entries,
+// elements and signals. plugins/uns cannot import a ULID library, so the core
+// passes this function in as its id port.
 func NewULID() string {
 	return ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
 }

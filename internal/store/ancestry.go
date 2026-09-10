@@ -2,14 +2,11 @@ package store
 
 import "github.com/cockroachdb/pebble/v2"
 
-// Node-ancestry persistence (id-grants design §4, key family "j/"): the
-// position the parent handed down survives restarts, so a node that comes back
-// while its parent is unreachable keeps answering grants. Key PRESENCE is the
-// "known" bit — a root's empty ancestry is a stored value, absence means the
-// position was never learned (scoped grants fail closed).
-//
-// The value is opaque here: the store keeps bytes, and what they mean belongs
-// to the domain plugin that defines the shape.
+// Node ancestry (key "j/ancestry"): the position the parent handed down survives
+// restarts, so a node that comes back while its parent is unreachable keeps
+// evaluating grants. A stored key means known, even the root's empty ancestry;
+// no key means never learned, and scoped grants fail closed. The value is opaque
+// to the store.
 
 var ancestryKey = []byte("j\x00ancestry")
 

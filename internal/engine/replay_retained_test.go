@@ -12,14 +12,9 @@ func (r *recordingObserver) Observe(contract, topic string, _ []byte) {
 	r.seen = append(r.seen, contract+" "+topic)
 }
 
-// An observer reacts to records as they persist; the retained set persisted
-// before this process existed never reached it — which is how a catalogue
-// binding wiped between restarts stayed wiped forever. ReplayRetained hands
-// the whole retained set to the observer once at startup. The binding
-// outcome itself is the domain's and is pinned in plugins/uns
-// (TestNewConnectorBindsDeclaredSignalsOnArrival and the re-declaration
-// tests); THIS pin is the engine's half: everything retained reaches the
-// observer, with its contract, and nothing does before the call.
+// ReplayRetained hands every retained record to the observer with its contract,
+// and nothing before the call. The binding outcome itself is tested in
+// plugins/uns.
 func TestReplayRetainedHandsTheRetainedSetToTheObserver(t *testing.T) {
 	e := newEngine(t) // persists two elements via IngestAdmin, observer nil
 

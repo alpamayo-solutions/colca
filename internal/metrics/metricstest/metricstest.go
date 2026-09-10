@@ -1,13 +1,5 @@
-// Package metricstest is a test-only helper for reading back individual
-// metric values through *metrics.Metrics' public HTTP contract.
-//
-// *metrics.Metrics exposes no Collector/Gatherer accessor (its registry is
-// unexported, by design — the only production surface is Handler() serving
-// the Prometheus text format), so packages outside internal/metrics cannot
-// use prometheus/client_golang/prometheus/testutil.ToFloat64 directly. This
-// package scrapes through the same Handler() every real Prometheus client
-// uses, then parses the one exposition line the caller asked for — exercising
-// the actual served contract rather than reaching into internals.
+// Package metricstest reads metric values in tests through the served Prometheus
+// text format, since *metrics.Metrics does not expose its registry.
 package metricstest
 
 import (
@@ -20,11 +12,9 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 )
 
-// Value scrapes m and returns the value of one exact family+labels line, e.g.
-// `colca_rejected_publishes_total{reason="identity"}`. It fails t if the line
-// is not present — every family in the contract is pre-created and
-// zero-valued from construction, so a missing line means the wrong
-// family/label was asked for, not that the metric hasn't fired yet.
+// Value scrapes m and returns the value of one exact line, such as
+// `colca_rejected_publishes_total{reason="identity"}`. Every family is
+// pre-created, so a missing line means the wrong name or labels were asked for.
 func Value(t testing.TB, m *metrics.Metrics, line string) float64 {
 	t.Helper()
 	rec := httptest.NewRecorder()

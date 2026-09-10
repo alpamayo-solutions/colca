@@ -1,10 +1,8 @@
-// Command colca-historian carries measurements from a node's `metrics` stream
-// into a TimescaleDB hypertable, `historian_metric`, with a unique index on
-// (signal_id, timestamp), following the stream with a cursor.
+// Command colca-historian follows a node's metrics stream with a cursor and
+// writes measurements into the TimescaleDB table historian_metric.
 //
-// A sibling of colcad, never part of it: historisation is a rate path with its
-// own database connection, its own failure modes and its own restart cadence,
-// and a node must stay ingesting whether or not anything is writing history.
+// It runs beside colcad, never inside it: history has its own database, failure
+// modes and restarts, and a node keeps ingesting whether or not it runs.
 //
 // Configuration is environment only:
 //
@@ -63,10 +61,8 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// The same records, published to the tree's `logs` stream so this service
-	// appears in the editor's log view alongside every other. Installed
-	// after the config is loaded, because it needs the node's address, and
-	// before the work starts, so the first line about that work is carried.
+	// The same records also go to the tree's logs stream. Installed once the node's
+	// address is known and before work starts.
 	logDoor := &door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService}
 	publisher := door.NewLogPublisher(log.Handler(), logDoor, door.LogPublisherOptions{
 		MinLevel: slog.LevelInfo,
@@ -83,10 +79,8 @@ func run() int {
 	defer pool.Close()
 
 	sink := &historian.Sink{Pool: pool}
-	// The database may still be starting — Postgres accepts unix-socket
-	// connections during initdb while TCP is not listening yet, so "is it up"
-	// has no single moment. Retry for a bounded window instead of dying and
-	// relying on a restart policy that a test harness may not have.
+	// Postgres may still be starting, so retry for a bounded time instead of relying
+	// on a restart policy.
 	if err := ensureSchema(ctx, sink, cfg.retentionDays, log, 90*time.Second); err != nil {
 		log.Error("schema", "err", err)
 		return 2
@@ -176,10 +170,8 @@ func intEnv(key string, fallback int) int {
 	return fallback
 }
 
-// serveObservability exposes liveness and the one number that matters
-// operationally: how many pruned-record incidents this bridge has seen. A gap
-// means history has a hole nothing can fill, so it belongs on a dashboard
-// rather than only in a log line.
+// serveObservability exposes liveness and the historian's counters. A gap is a
+// hole in history that cannot be filled, so it belongs on a dashboard.
 func serveObservability(addr string, bridge *historian.Bridge, log *slog.Logger) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {

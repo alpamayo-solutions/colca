@@ -17,9 +17,8 @@ import (
 //   - membership lives in the group-policy list, as a real array.
 type realmFixture struct {
 	Groups []fakeGroup
-	// Children maps a parent group's ID to what GET /groups/{id}/children
-	// answers — Keycloak 23+'s ONLY source of a group's members; the top-level
-	// listing carries a subGroupCount instead of inlining them.
+	// Children maps a parent group's ID to what GET /groups/{id}/children returns,
+	// the only source of members in Keycloak 23+.
 	Children    map[string][]fakeGroup
 	Policies    []fakePolicy
 	Permissions []fakePerm
@@ -250,11 +249,8 @@ func TestViewResolvesGroupUUIDsToTheNamesTheTokenCarries(t *testing.T) {
 }
 
 func TestNestedGroupsAreResolvedThroughChildrenAndCompileIntoGrants(t *testing.T) {
-	// Keycloak 23+ never inlines a group's children in the /groups listing — it
-	// carries subGroupCount instead, and the members come only from
-	// GET /groups/{id}/children (measured against the realm image, 26.7.3). A
-	// permission bound to a subgroup must still resolve, and its grant must
-	// still make it all the way into a compiled _Group definition.
+	// A permission bound to a subgroup, which Keycloak 23+ only returns from
+	// GET /groups/{id}/children, must still end up in a compiled _Group.
 	k := fakeRealm(t, realmFixture{
 		Groups: []fakeGroup{{ID: "g-site1", Name: "Site1", SubGroupCount: 1}},
 		Children: map[string][]fakeGroup{
@@ -291,9 +287,8 @@ func TestNestedGroupsAreResolvedThroughChildrenAndCompileIntoGrants(t *testing.T
 }
 
 func TestAPolicyNamingAnUnknownGroupIsReportedAsAProblem(t *testing.T) {
-	// A group deleted in Keycloak without cleaning up the permission still
-	// bound to it must not silently vanish from the grant — it must be
-	// reported, the way an orphan grant or an unusable hand-typed grant is.
+	// A group deleted without cleaning up its permission is reported, not dropped
+	// silently.
 	k := fakeRealm(t, realmFixture{
 		Groups:   []fakeGroup{{ID: "g1", Name: "ops"}},
 		Policies: []fakePolicy{{ID: "p1", Name: "group:mixed", GroupUUIDs: []string{"g1", "ghost-group-id"}}},
@@ -310,8 +305,7 @@ func TestAPolicyNamingAnUnknownGroupIsReportedAsAProblem(t *testing.T) {
 	if len(view.Problems) != 1 || !strings.Contains(view.Problems[0].Error(), "ghost-group-id") {
 		t.Fatalf("problems = %v, want exactly one naming ghost-group-id", view.Problems)
 	}
-	// The known group in the same policy must still resolve — one unresolvable
-	// group id must not cost the rest of the policy its grant.
+	// The known group in the same policy still resolves.
 	if len(view.Permissions) != 1 || len(view.Permissions[0].Groups) != 1 ||
 		view.Permissions[0].Groups[0] != "ops" {
 		t.Fatalf("the resolvable group did not survive alongside the problem, got %+v", view.Permissions)
@@ -387,8 +381,7 @@ func TestTheTokenErrorNeverEchoesTheResponseBody(t *testing.T) {
 }
 
 func TestViewFailsWhenAnyPartOfTheReadFails(t *testing.T) {
-	// A PARTIAL read is the dangerous one: it does not look like a failure, it
-	// looks like a smaller set of grants — and the caller would converge to it.
+	// A partial read would look like fewer grants, so it must be an error.
 	for _, failing := range []string{"/resource", "/policy/group", "/permission/scope", "/scopes", "/groups"} {
 		t.Run(failing, func(t *testing.T) {
 			k := fakeRealm(t, realmFixture{

@@ -9,20 +9,14 @@ import (
 	"testing"
 )
 
-// vocabularyVectorPath is the golden vocabulary dataset (schema-bundle design
-// §2, tier 2), the same mechanism vectors_test.go uses for the topic grammar:
-// one checked-in file both native copies of the slot data_type vocabulary
-// answer to.
+// vocabularyVectorPath is the golden vocabulary file both native copies of the
+// slot data_type vocabulary are tested against.
 const vocabularyVectorPath = "../../contracts/src/colca_data_contracts/vectors/data_model_vocabulary.json"
 
-// Vocabulary pin (architecture principle 2: one owner per fact). slotDataTypes
-// is this package's copy of the slot canonical-data_type vocabulary; the one
-// definition lives in colca_data_contracts.data_models.loader.CANONICAL_DATA_TYPES.
-// This test judges Go against the golden vectors, the contracts suite judges
-// the vectors against that definition (tests/test_data_models_vocabulary.py),
-// and api's edge/tests/test_model_rules.py judges MODEL_SLOT_DATA_TYPES
-// against it too -- so adding a sixth canonical type really does break all
-// three sites until they move together.
+// slotDataTypes copies the canonical data_type vocabulary defined in
+// colca_data_contracts.data_models.loader.CANONICAL_DATA_TYPES. This test
+// checks Go against the golden vectors; the contracts suite checks the vectors
+// against the definition, so a new canonical type fails until both move.
 func TestSlotDataTypesMatchesTheGoldenVocabulary(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Clean(vocabularyVectorPath))
 	if err != nil {
@@ -50,9 +44,9 @@ func TestSlotDataTypesMatchesTheGoldenVocabulary(t *testing.T) {
 	}
 }
 
-// Test 1: assign creates missing required signals under the element and
-// updates implements. Both slots declare a semantic type; the computed slot
-// gets "source":"dataops", the measured slot omits "source" entirely.
+// Assign creates missing required signals under the element and updates
+// implements. The computed slot gets "source":"dataops"; the measured slot has
+// no source.
 func TestModelAssignCreatesMissingSignals(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -128,8 +122,8 @@ func TestModelAssignCreatesMissingSignals(t *testing.T) {
 	}
 }
 
-// Test 2: adopt — an existing signal with the slot name and a compatible
-// type is left alone (never recreated), and gains the slot's semantic type.
+// An existing signal with the slot's name and a compatible type is adopted,
+// not recreated, and gains the slot's semantic type.
 func TestModelAssignAdoptsCompatibleSignal(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -178,8 +172,7 @@ func TestModelAssignAdoptsCompatibleSignal(t *testing.T) {
 	}
 }
 
-// Test 3: conflict — name match with the wrong data_type aborts with 409 and
-// writes nothing at all (atomicity).
+// A name match with the wrong data_type aborts with 409 and writes nothing.
 func TestModelAssignTypeConflictAborts(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -214,10 +207,8 @@ func TestModelAssignTypeConflictAborts(t *testing.T) {
 	}
 }
 
-// Test 4: two desired models computing the same slot key conflict — one
-// computer per signal. The two models declare it independently (distinct
-// declared_by), which is the dividing line from an inherited slot
-// (see TestModelAssignInheritedComputedSlotIsNotAConflict).
+// Two models that declare the same computed slot independently conflict (one
+// computer per signal); compare TestModelAssignInheritedComputedSlotIsNotAConflict.
 func TestModelAssignTwoComputersConflict(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -254,8 +245,7 @@ func TestModelAssignTwoComputersConflict(t *testing.T) {
 	}
 }
 
-// Test 5: two desired models sharing a compatible required slot are
-// satisfied by one signal — no duplicate creation, no false conflict.
+// Two models sharing a compatible required slot are satisfied by one signal.
 func TestModelAssignSharedRequirementIsOneSignal(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -339,8 +329,7 @@ func TestModelAssignUnknownModel(t *testing.T) {
 	}
 }
 
-// Test 7: unassign shrinks implements and touches nothing else — no signal
-// is created, adopted, or otherwise disturbed.
+// Unassign shrinks implements and leaves every signal alone.
 func TestModelUnassignReleasesOnly(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -367,8 +356,8 @@ func TestModelUnassignReleasesOnly(t *testing.T) {
 		t.Fatalf("unassign = %d %q writes=%+v batches=%d", code, msg, writes, f.batchCalls)
 	}
 
-	// Presence pins the denominator (the query mechanism finds a real signal
-	// when one exists) before the negative claim below is trusted.
+	// Check the signal is found first, so the negative check below means
+	// something.
 	if _, ok := f.KVGet("colca/v1/_Signal/n-edge1/press/temperature"); !ok {
 		t.Fatal("unassign must not touch a signal unrelated to the released model")
 	}
@@ -387,8 +376,8 @@ func TestModelUnassignReleasesOnly(t *testing.T) {
 	}
 }
 
-// Test 8: a stale expected version on the element aborts with 409, reusing
-// the same version-staleness path every other edit intent goes through.
+// A stale expected version on the element aborts with 409, like every other
+// edit intent.
 func TestModelAssignRacedElement(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -417,11 +406,9 @@ func TestModelAssignRacedElement(t *testing.T) {
 	}
 }
 
-// The adopt path must use the same compatibility rule
-// as composeBinding (compatibleDataTypes), not exact string equality. A
-// signal stored as "integer" is what composeBinding accepts for a tag typed
-// "int" — a slot mapping canonical "integer" to _Signal type "int" must
-// adopt the same signal instead of treating it as a conflict.
+// Adoption uses the same compatibility rule as composeBinding, not string
+// equality: a signal stored as "integer" is adopted by a slot that maps to
+// "int".
 func TestModelAssignAdoptsCompatibleButDifferentlySpelledDataType(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -460,9 +447,8 @@ func TestModelAssignAdoptsCompatibleButDifferentlySpelledDataType(t *testing.T) 
 	}
 }
 
-// A manifest naming an unrecognized canonical
-// data_type must be rejected outright, not silently mapped to "" and written
-// onto a created signal.
+// A manifest with an unknown canonical data_type is rejected, not written as
+// "" onto a created signal.
 func TestModelAssignUnknownSlotDataTypeIsRejected(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -499,9 +485,8 @@ func TestModelAssignUnknownSlotDataTypeIsRejected(t *testing.T) {
 	}
 }
 
-// A slot's unit and description land on a created
-// signal when non-empty (Signal has those columns); enum does not (no Signal
-// column for it).
+// A slot's unit and description land on a created signal when set; enum does
+// not, since Signal has no column for it.
 func TestModelAssignCreateCarriesUnitAndDescription(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -544,14 +529,9 @@ func TestModelAssignCreateCarriesUnitAndDescription(t *testing.T) {
 	}
 }
 
-// _DataModel (and the _SemanticTag it names) are read
-// with KVScanAll, so a definition authored by a DIFFERENT node must still be
-// usable — this is the cross-node mechanic the definitions stream relies on
-// (groups.go's _Group read is the same shape). Every other test in this file
-// seeds through seedEditEntity, which always publishes under this
-// node's own id, so swapping KVScanAll for a same-node KVScan would leave
-// them green; this test seeds the manifest and tag under "n-authority"
-// instead, so only the real cross-node scan can find them.
+// Definitions are read with KVScanAll, so a _DataModel and _SemanticTag
+// authored by another node must work. The other tests seed under this node's
+// id and would pass with a same-node scan; this one seeds under "n-authority".
 func TestModelAssignUsesDefinitionsFromAForeignAuthoringNode(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -633,9 +613,8 @@ func TestModelAssignRejectsOverTheMutationLimit(t *testing.T) {
 	}
 }
 
-// Re-assigning an identical implements list with
-// nothing else to change is a no-op — no element write — mirroring
-// composeUpdate's update_unchanged path.
+// Re-assigning an identical implements list with nothing else to change
+// writes nothing, like composeUpdate's update_unchanged path.
 func TestModelAssignUnchangedIsANoOp(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -675,16 +654,15 @@ func TestModelAssignUnchangedIsANoOp(t *testing.T) {
 	}
 }
 
-// Adoption must be deterministic when two signals
-// under one element share a slot's name — the LOWEST signal id wins,
-// regardless of map iteration order.
+// When two signals under one element share a slot's name, the lowest signal
+// id is adopted, whatever the map order.
 func TestModelAssignAdoptsLowestSignalIdOnDuplicateNames(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
 		"id": "el-press", "name": "Press",
 	})
-	// Seed several duplicate-named signals so the winner cannot be an
-	// accident of insertion or map-iteration order.
+	// Several duplicates, so insertion or map order cannot pick the winner
+	// by accident.
 	seedEditEntity(t, f, "_Signal", "press/heartbeat-c", map[string]any{
 		"id": "sig-c-heartbeat", "name": "heartbeat", "system_element_id": "el-press", "data_type": "boolean",
 	})
@@ -702,10 +680,8 @@ func TestModelAssignAdoptsLowestSignalIdOnDuplicateNames(t *testing.T) {
 	})
 	exec := NewEditExec(f, nil)
 
-	// Only sig-a-heartbeat's expected version is supplied. If adoption picked
-	// any other duplicate, requireExpected would reject it with 422 (missing
-	// expected version for that signal) — so a 200 here is only possible
-	// because the lowest id was the one matched, deterministically.
+	// Only sig-a-heartbeat has an expected version. Adopting any other
+	// duplicate would fail with 422, so a 200 means the lowest id won.
 	payload := editBody(t, "op-model-duplicate-names", map[string]uint64{
 		"system-element:el-press": elementVersion,
 		"signal:sig-a-heartbeat":  versionA,
@@ -723,9 +699,8 @@ func TestModelAssignAdoptsLowestSignalIdOnDuplicateNames(t *testing.T) {
 	}
 }
 
-// Final-fix-wave finding: the adopt path requires an expected version for a
-// matched EXISTING signal, same as any other edit mutation of it — a
-// caller that omits it must get a 422, not silently skip the check.
+// Adopting an existing signal requires its expected version, like any other
+// edit of it; omitting it is a 422.
 func TestModelAssignAdoptMissingExpectedVersionIsRejected(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -760,18 +735,15 @@ func TestModelAssignAdoptMissingExpectedVersionIsRejected(t *testing.T) {
 	}
 }
 
-// Final-fix-wave finding: a created slot's path is derived only from the
-// target element's own path and the slot key -- it must still be rejected as
-// a 409 when a signal from a DIFFERENT element already occupies that exact
-// path (takenPaths registers every signal's path, not just the target
-// element's own, per queueModelSignals' doc comment).
+// A created slot's path comes from the element's path and the slot key, and
+// must still 409 when a signal of a different element already sits there.
 func TestModelAssignCreatePathCollidesWithForeignElementSignal(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
 		"id": "el-press", "name": "Press",
 	})
-	// A signal owned by a DIFFERENT element ("el-other"), but published at
-	// the exact path a "heartbeat" create under el-press would use.
+	// A signal of another element ("el-other") at the path a "heartbeat"
+	// create under el-press would use.
 	seedEditEntity(t, f, "_Signal", "press/heartbeat", map[string]any{
 		"id": "sig-foreign-heartbeat", "name": "heartbeat", "system_element_id": "el-other", "data_type": "boolean",
 	})
@@ -801,9 +773,8 @@ func TestModelAssignCreatePathCollidesWithForeignElementSignal(t *testing.T) {
 	}
 }
 
-// Final-fix-wave finding: a slot naming a semantic type with no live
-// _SemanticTag entity must abort with 409, naming the slot and the unknown
-// tag -- not silently create the signal with an empty semantic_type_id.
+// A slot naming a semantic type with no live _SemanticTag aborts with 409,
+// naming the slot and the tag, instead of creating the signal without one.
 func TestModelAssignSlotNamesUnknownSemanticType(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -838,10 +809,9 @@ func TestModelAssignSlotNamesUnknownSemanticType(t *testing.T) {
 	}
 }
 
-// an ancestor and a descendant model that
-// flatten the SAME computed slot (identical declared_by) are one fact, not a
-// conflict — contrast TestModelAssignTwoComputersConflict, where the two
-// models declare the slot independently.
+// An ancestor and a descendant model that carry the same computed slot
+// (identical declared_by) are one slot, not a conflict; compare
+// TestModelAssignTwoComputersConflict.
 func TestModelAssignInheritedComputedSlotIsNotAConflict(t *testing.T) {
 	f := newStore("n-edge1")
 	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -853,9 +823,8 @@ func TestModelAssignInheritedComputedSlotIsNotAConflict(t *testing.T) {
 			{"key": "state", "kind": "computed", "data_type": "string", "required": true, "declared_by": "Machine"},
 		},
 	})
-	// MachineState extends Machine and does not redeclare "state" — the
-	// compiled manifest still carries the slot (MRO flattening), with
-	// declared_by unchanged at the base class that actually defined it.
+	// MachineState extends Machine without redeclaring "state"; the compiled
+	// manifest still has the slot, declared_by the base model.
 	seedEditEntity(t, f, "_DataModel", "_colca/data-models/machine-state", map[string]any{
 		"id": "dm-machine-state", "name": "MachineState", "version": "1.0", "extends": []string{"Machine"},
 		"slots": []map[string]any{
@@ -891,16 +860,13 @@ func TestModelAssignInheritedComputedSlotIsNotAConflict(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Child-model design (the data model children design
-// §4): recursive composeModel — child elements and sub-models resolve in one
+// Recursive composeModel: child elements and sub-models resolve in one
 // atomic batch, and unassign releases them recursively.
 // ---------------------------------------------------------------------------
 
-// Assigning a two-level model creates the mandated
-// child element (correct parent path, name from entity_name, "implements"
-// carrying the child model), then recurses to create the child model's own
-// signal under the CHILD, all in one batch — plus the root's own implements
-// update.
+// Assigning a two-level model creates the mandated child element (parent
+// path, entity_name, implements) and the child model's signal under it, in
+// one batch with the root's implements update.
 func TestModelAssignRecursesIntoChildModel(t *testing.T) {
 	f := newStore("n-edge1")
 	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
@@ -982,10 +948,8 @@ func TestModelAssignRecursesIntoChildModel(t *testing.T) {
 	}
 }
 
-// Adopt — a pre-existing child element matching
-// entity_name (a name= override) is adopted, not duplicated; it gains the
-// child model in its own implements, and its pre-existing compatible signal
-// adopts too.
+// An existing child matching entity_name is adopted, not duplicated: it gains
+// the child model in implements, and its compatible signal is adopted too.
 func TestModelAssignAdoptsExistingChildByName(t *testing.T) {
 	f := newStore("n-edge1")
 	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
@@ -1044,13 +1008,9 @@ func TestModelAssignAdoptsExistingChildByName(t *testing.T) {
 		t.Fatalf("adopted child implements = %+v", childPayload["implements"])
 	}
 
-	// The ONLY path a create would ever have used is
-	// sanitize(entityName) under the parent's path (sanitize replaces
-	// separators/spaces with "_" but does not lowercase or dash) — so the
-	// reachable would-be duplicate is "motor/M-101_DE_Bearing", not the two
-	// unreachable paths previously asserted here. The presence check above
-	// already proves KVGet finds a real record when one exists, so this
-	// absence check is not testing a broken query.
+	// A create would only have used sanitize(entityName) under the
+	// parent path, so "motor/M-101_DE_Bearing" is the duplicate to rule
+	// out. The presence check above shows KVGet finds real records.
 	if _, ok := f.KVGet("colca/v1/_SystemElement/n-edge1/motor/M-101_DE_Bearing"); ok {
 		t.Fatal("adopt must not additionally create a second child element at the create-derived path")
 	}
@@ -1068,8 +1028,8 @@ func TestModelAssignAdoptsExistingChildByName(t *testing.T) {
 	}
 }
 
-// A wrong-kind name match — a SIGNAL named like the
-// mandated child — is a 409 conflict, with zero writes (atomicity).
+// A signal named like the mandated child is a 409 conflict with nothing
+// written.
 func TestModelAssignChildSlotWrongKindNameConflict(t *testing.T) {
 	f := newStore("n-edge1")
 	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
@@ -1186,13 +1146,9 @@ func TestModelAssignChildSlotMissingCreatesID(t *testing.T) {
 	}
 }
 
-// Unassign recomputes what the removed model mandated
-// and recursively strips just those model names from the mandated
-// children's implements — the child element and its signal always stay
-// (presence-pinned). Because implements has no stored provenance, this is
-// the SAME list-entry case as a direct assignment of the same model on the
-// same child (spec §1 5's documented caveat): a parent unassign
-// releases the entry regardless of how it got there.
+// Unassign strips the removed model from the mandated children's implements,
+// recursively; the child element and its signal stay. implements records no
+// provenance, so this also releases an entry assigned directly.
 func TestModelUnassignReleasesRecursively(t *testing.T) {
 	f := newStore("n-edge1")
 	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
@@ -1282,9 +1238,8 @@ func TestModelUnassignReleasesRecursively(t *testing.T) {
 	}
 }
 
-// A model tree whose pending records exceed the
-// 200-entity mutation limit is rejected atomically, exactly as a flat
-// over-the-limit assign already was.
+// A model tree over the 200-entity mutation limit is rejected as a whole, like
+// a flat assign.
 func TestModelAssignChildTreeRejectsOverTheMutationLimit(t *testing.T) {
 	f := newStore("n-edge1")
 	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
@@ -1320,20 +1275,17 @@ func TestModelAssignChildTreeRejectsOverTheMutationLimit(t *testing.T) {
 	}
 }
 
-// The vocabulary/kind pin — a "child" slot's empty
-// data_type is legal (it is not a canonical type at all), while a non-child
-// slot still must name one of the canonical types. Both claims are pinned
-// in the SAME test so a change that accidentally exempts every slot, or
-// stops exempting "child" slots, breaks it.
+// A child slot's empty data_type is legal, while a non-child slot must name a
+// canonical type. Both are checked here, so exempting every slot or no slot
+// breaks the test.
 func TestModelSlotKindExemptsOnlyChildFromCanonicalDataType(t *testing.T) {
 	f := newStore("n-edge1")
 	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
 		"id": "el-motor", "name": "Motor1",
 	})
 
-	// Negative: a child slot with data_type "" alongside a non-child slot
-	// with an unrecognized data_type is still rejected — for the NON-CHILD
-	// slot's sake, not the child slot's empty type.
+	// A child slot with no data_type next to a non-child slot with an
+	// unknown data_type is rejected, because of the non-child slot.
 	seedEditEntity(t, f, "_DataModel", "_colca/data-models/bad-motor", map[string]any{
 		"id": "dm-bad-motor", "name": "BadMotor", "version": "1.0",
 		"slots": []map[string]any{
@@ -1371,8 +1323,7 @@ func TestModelSlotKindExemptsOnlyChildFromCanonicalDataType(t *testing.T) {
 		t.Fatalf("the child slot's empty data_type must not be the reason for rejection: %q", msg)
 	}
 
-	// Positive: a manifest with ONLY a child slot (empty data_type) assigns
-	// cleanly — an empty data_type is not, by itself, a rejection.
+	// A manifest with only a child slot assigns cleanly.
 	seedEditEntity(t, f, "_DataModel", "_colca/data-models/bearing", map[string]any{
 		"id": "dm-bearing", "name": "BearingModel", "version": "1.0",
 		"slots": []map[string]any{},
@@ -1401,17 +1352,13 @@ func TestModelSlotKindExemptsOnlyChildFromCanonicalDataType(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// A same-key merge across models must still work;
-// two DIFFERENT keys resolving to the same entity_name must 409 instead of
-// silently losing an update; a hand-authored cycle must 409 instead of
-// recursing forever; releasing one of two models that independently mandate
-// the same child must not release what the other still requires.
+// Merges and collisions: the same child key across models merges, different
+// keys with one entity_name 409, a hand-written cycle 409s, and releasing one
+// of two models that mandate the same child keeps it.
 // ---------------------------------------------------------------------------
 
-// Regression: two desired models sharing the SAME child slot KEY still
-// merge — both child_models land on the one adopted/created child, and both
-// get recursed into. This is the case the fix above must NOT turn
-// into a conflict.
+// Two models with the same child slot key still merge: both child models land
+// on the one child, and both are recursed into.
 func TestModelAssignSameChildKeyAcrossModelsMerges(t *testing.T) {
 	f := newStore("n-edge1")
 	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
@@ -1479,17 +1426,10 @@ func TestModelAssignSameChildKeyAcrossModelsMerges(t *testing.T) {
 	}
 }
 
-// Two DIFFERENT child slot keys that resolve to the
-// SAME entity_name is an authoring error, not a merge — it must 409 naming
-// both keys and the colliding name, with zero writes. The child ALREADY
-// EXISTS here (the adopt path, not the create path): the create path already
-// 409s on this via elementPaths (both keys would try to create at the same
-// sanitized path), so it does not exercise the bug this guards against.
-// Before the fix, the second key's childrenByName lookup returned a STALE
-// local copy of the child (adopt mutates only a local struct copy, never the
-// childrenByName map), so the second slot's implements addition silently
-// overwrote the first's write to the very same topic in "pending" — losing
-// the first model name entirely while still returning 200.
+// Two different child slot keys resolving to the same entity_name are an
+// authoring error: 409 naming both keys and the name, nothing written. The
+// child already exists here, since the create path already 409s on the shared
+// path. Otherwise the second key would overwrite the first's update.
 func TestModelAssignChildSlotsCollideOnEntityName(t *testing.T) {
 	f := newStore("n-edge1")
 	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
@@ -1541,13 +1481,9 @@ func TestModelAssignChildSlotsCollideOnEntityName(t *testing.T) {
 	}
 }
 
-// A hand-authored child_model cycle (ModelX's child
-// mandates ModelY, ModelY's child mandates ModelX back) combined with a
-// parent_id cycle in the entity graph (el-a's parent is el-b, el-b's parent
-// is el-a) must 409 as a cycle, not recurse forever. The Python compiler's
-// cycle check cannot see this: it only walks the model graph, never entity
-// parent_id data written straight to the KV store (as this test does, same
-// as every other test in this file).
+// A child_model cycle (X mandates Y, Y mandates X) combined with a parent_id
+// cycle between el-a and el-b must 409 instead of recursing forever. The
+// Python compiler only sees the model graph, not entity data.
 func TestModelAssignChildModelCycleWithEntityParentCycleIsRejected(t *testing.T) {
 	f := newStore("n-edge1")
 	aVersion := seedEditEntity(t, f, "_SystemElement", "a", map[string]any{
@@ -1594,9 +1530,8 @@ func TestModelAssignChildModelCycleWithEntityParentCycleIsRejected(t *testing.T)
 	}
 }
 
-// Unassigning one of two models that independently
-// mandate the SAME child_model on the SAME child must not release it while
-// the other model stays desired. Only unassigning both actually releases it.
+// Unassigning one of two models that mandate the same child_model on the same
+// child keeps it; unassigning both releases it.
 func TestModelUnassignPreservesStillMandatedChild(t *testing.T) {
 	f := newStore("n-edge1")
 	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
@@ -1629,9 +1564,8 @@ func TestModelUnassignPreservesStillMandatedChild(t *testing.T) {
 	})
 	exec := NewEditExec(f, nil)
 
-	// Unassign ModelA only (desired keeps ModelB) — Bearing must stay
-	// exactly as it is: no expected version for it is even supplied, so a
-	// wrongly-touched write would 422, not silently succeed.
+	// Unassign ModelA only. No expected version is supplied for Bearing, so
+	// touching it would fail with 422.
 	firstPayload := editBody(t, "op-model-preserve-first", map[string]uint64{
 		"system-element:el-motor": motorVersion,
 	}, map[string]any{
@@ -1645,8 +1579,7 @@ func TestModelUnassignPreservesStillMandatedChild(t *testing.T) {
 	}
 	rootVersion := writes[0].Offset
 
-	// Presence pins the denominator before the two claims below: the child
-	// still exists, and its implements is untouched.
+	// The child still exists and its implements is untouched.
 	child, ok := f.KVGet("colca/v1/_SystemElement/n-edge1/motor/bearing")
 	if !ok {
 		t.Fatal("unassigning ModelA must never delete the child ModelB still mandates")
@@ -1670,8 +1603,8 @@ func TestModelUnassignPreservesStillMandatedChild(t *testing.T) {
 		t.Fatalf("root implements after first unassign = %+v", rootPayload["implements"])
 	}
 
-	// Now unassign ModelB too (desired becomes empty) — nothing mandates
-	// BearingModel on the child any more, so it IS released this time.
+	// Now unassign ModelB too; nothing mandates BearingModel any more, so it
+	// is released.
 	secondPayload := editBody(t, "op-model-preserve-second", map[string]uint64{
 		"system-element:el-motor":   rootVersion,
 		"system-element:el-bearing": bearingVersion,
@@ -1697,20 +1630,10 @@ func TestModelUnassignPreservesStillMandatedChild(t *testing.T) {
 	}
 }
 
-// The release-side stale-copy. releaseModelSlots built
-// childrenByName ONCE and never refreshed it, so two REMOVED models whose
-// child slots resolve to the SAME entity_name (via different slot keys —
-// ModelP's "primary_bearing" and ModelQ's "secondary_bearing" both name
-// "Bearing") hit the exact last-write-wins pattern childNameOwner already
-// guards against on the assign side (TestModelAssignChildSlotsCollideOnEntityName):
-// the second key's childrenByName lookup returns a snapshot the first key's
-// queued write never touched, so the second write recomputes "implements"
-// from the ORIGINAL list and overwrites the first's queued record at the
-// same topic — silently reverting the first model's release while still
-// returning 200. Before the fix, this test's own assertions caught it
-// directly: code came back 200 (not 409), and the survivor's implements was
-// ["BearingModelA"] (BearingModelA's removal reverted) rather than the
-// collision this must now report.
+// Two removed models whose child slots use different keys but the same
+// entity_name ("Bearing") must 409 on the release side too, as they do on
+// assign. Otherwise the second release would recompute implements from the
+// original list and silently revert the first.
 func TestModelUnassignChildSlotsCollideOnEntityName(t *testing.T) {
 	f := newStore("n-edge1")
 	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{
@@ -1768,20 +1691,10 @@ func TestModelUnassignChildSlotsCollideOnEntityName(t *testing.T) {
 	}
 }
 
-// A create slot's id comes from the caller's own intent.Creates map, and it
-// is the one create path in this package that never checked the id was FREE.
-// Naming an existing entity's id wrote a second retained record under one
-// identity, which no other route can produce: the projector then applies it
-// as a rename+reparent of the victim into the caller's subtree (no grant
-// anywhere authorized that), and snapshot() answers "duplicate retained
-// identity" for every LATER edit command at the node until an operator
-// removes a record by hand.
-//
-// So the refusal is checked from both ends here: the hijack is a 409 that
-// writes nothing, and the node still answers the next command normally — the
-// node-wide wedge is unreachable, not merely unlikely. The same command with
-// a free id then succeeds, which is what stops this test from passing on a
-// setup that never reaches the create site at all.
+// A create id naming an existing entity must be refused: it would put one id
+// at two paths, and snapshot() would refuse every later edit at the node. The
+// refusal writes nothing, the next command still works, and the same command
+// with a free id succeeds.
 func TestModelAssignRefusesACreateIDThatAlreadyIdentifiesAnEntity(t *testing.T) {
 	f := newStore("n-edge1")
 	pressVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
@@ -1846,11 +1759,8 @@ func TestModelAssignRefusesACreateIDThatAlreadyIdentifiesAnEntity(t *testing.T) 
 	}
 }
 
-// The other half of "free": an id nothing holds YET, claimed twice inside one
-// batch. Both slots would be written at different paths under one identity —
-// the same duplicate-identity state as the hijack above, reached without any
-// existing entity being named. The occupancy set therefore grows as the batch
-// queues creates, exactly as signalPaths/elementPaths do for position.
+// The same unclaimed id used twice in one batch would also put one id at two
+// paths, so the claim set grows as creates are queued.
 func TestModelAssignRefusesTheSameCreateIDTwiceInOneBatch(t *testing.T) {
 	f := newStore("n-edge1")
 	motorVersion := seedEditEntity(t, f, "_SystemElement", "motor", map[string]any{

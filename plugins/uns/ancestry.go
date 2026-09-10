@@ -2,33 +2,22 @@ package uns
 
 import "strings"
 
-// Ancestor is one position on the way from the root down to a node: the
-// element sitting there, and the name that position carries.
-//
-// Element is empty for a position no element occupies. That is not an error —
-// a child may bind to an element nested under a path segment nobody placed an
-// element on. The name still contributes to the path; the position simply
-// cannot be named in a grant, because there is nothing there to name.
+// Ancestor is one position between the root and a node: the element there and
+// the name of the position. Element is empty where no element was placed; the
+// name still counts toward the path, but no grant can name the position.
 type Ancestor struct {
 	Element string `json:"element"`
 	Name    string `json:"name"`
 }
 
-// Ancestry is a node's position in the tree, from the root down to and
-// including the element the node itself binds to (id-grants design §4).
-//
-// It exists because a node cannot look its own ancestors up: its element index
-// holds only the `_SystemElement` records published under its OWN identity, and
-// an ancestor's records live at that ancestor. So the parent teaches it, hop by
-// hop, on the downlink — the same channel and the same moment the old prefix
-// string was taught, carrying identities instead of a path.
-//
-// The path form is derived, never stored: rendering it is Prefix().
+// Ancestry is a node's position in the tree, from the root down to the element
+// the node binds to. A node cannot look up its ancestors (their records live
+// at the ancestors), so the parent teaches it on the downlink. The path form is
+// derived by Prefix, never stored.
 type Ancestry []Ancestor
 
-// Prefix renders the ancestry as this node's root-frame path — exactly the
-// string the parent used to hand down directly. The root's ancestry is empty
-// and renders as "".
+// Prefix renders the ancestry as this node's root-frame path; an empty ancestry
+// renders as "".
 func (a Ancestry) Prefix() string {
 	names := make([]string, 0, len(a))
 	for _, step := range a {
@@ -37,13 +26,9 @@ func (a Ancestry) Prefix() string {
 	return strings.Join(names, "/")
 }
 
-// Covers reports whether elementID names this node or something above it. A
-// grant on such an element reaches everything here, so the local frame answer
-// is the whole node.
-//
-// The empty id never matches: a position nobody placed an element on cannot be
-// granted, and treating "" as a hit would make every unplaced segment a
-// skeleton key.
+// Covers reports whether elementID names this node or something above it; a
+// grant on such an element reaches the whole node. The empty id never matches,
+// or every unplaced segment would grant everything.
 func (a Ancestry) Covers(elementID string) bool {
 	if elementID == "" {
 		return false
@@ -56,18 +41,16 @@ func (a Ancestry) Covers(elementID string) bool {
 	return false
 }
 
-// Placements answers which element sits at a local path — the reverse of
-// Namespace, and the direction a parent needs when it is looking at a mount and
-// wants the identity there. *ElementIndex implements both.
+// Placements says which element sits at a local path, the reverse of
+// Namespace. *ElementIndex implements both.
 type Placements interface {
 	IDAt(path string) (string, bool)
 }
 
-// Extend returns the ancestry of a child that binds to the element at mount,
-// where mount is that element's path in THIS node's frame. Every segment of the
-// mount becomes one further position, each resolved through the node's own
-// placements — so an element nested below a segment nobody placed still arrives
-// with its identity intact, and the rendered path stays exact either way.
+// Extend returns the ancestry of a child bound to the element at mount, a path
+// in this node's frame. Each mount segment adds a position resolved through
+// this node's placements, so the path stays exact even across unplaced
+// segments.
 func (a Ancestry) Extend(p Placements, mount string) Ancestry {
 	out := append(Ancestry{}, a...)
 	var local string

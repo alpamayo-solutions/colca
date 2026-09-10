@@ -7,12 +7,9 @@ import (
 	"testing"
 )
 
-// The golden topic-transformation vectors (schema-bundle design §2, tier 2):
-// one checked-in dataset judged by BOTH franzmq's Python suite and this Go
-// suite, so the two native implementations of the topic grammar can never
-// drift apart silently. The vectors RESTATE shipped behavior — a red run here
-// means either a protocol change (update vectors + BOTH suites) or a
-// regression (fix the code).
+// vectorPath holds the golden topic-transformation vectors, checked by both
+// franzmq's Python suite and this suite. A failure means either a protocol
+// change (update the vectors and both suites) or a regression.
 const vectorPath = "../../contracts/src/colca_data_contracts/vectors/topic_transformations.json"
 
 type vectorFile struct {
@@ -100,10 +97,9 @@ func TestGoldenVectorsMountStrip(t *testing.T) {
 	}
 }
 
-// The identity rule lives in the engine, but its topic-side half (level-4
-// extraction) is pinned here: the vector's verdict must match "parsed node_id
-// equals the authenticated identity" for non-command contracts, and commands
-// are exempt by class.
+// The identity rule lives in the engine; its topic half is checked here: the
+// verdict must match "node id equals the authenticated identity" for
+// non-command contracts, and commands are exempt.
 func TestGoldenVectorsIdentityRule(t *testing.T) {
 	for _, c := range loadVectors(t).IdentityRule {
 		p, err := Parse(c.Topic)

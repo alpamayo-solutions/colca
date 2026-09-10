@@ -66,9 +66,8 @@ func mirrorBundle(t *testing.T) *contracts.Table {
 	})
 }
 
-// Floor parity (spec §12 level 1): a bundle generated to MIRROR the floor
-// yields identical verdicts for a corpus of valid and invalid payloads —
-// the cutover is behavior-preserving where it claims to be.
+// A bundle generated to mirror the builtin floor gives the same verdicts on a
+// corpus of valid and invalid payloads.
 func TestFloorParityCorpus(t *testing.T) {
 	floor := newEngine(t)
 	bundled := newEngine(t)
@@ -103,8 +102,8 @@ func TestFloorParityCorpus(t *testing.T) {
 	}
 }
 
-// bundleEngine builds an engine with a bundle declaring a NEW data contract
-// and a NEW command contract that no broker release ever heard of.
+// bundleEngine builds an engine with a bundle declaring a data contract and a
+// command contract the builtin floor does not know.
 func bundleEngine(t *testing.T) *Engine {
 	s, err := store.Open(t.TempDir())
 	if err != nil {
@@ -112,10 +111,8 @@ func bundleEngine(t *testing.T) *Engine {
 	}
 	t.Cleanup(func() { s.Close() })
 	ids := testIDs()
-	// NOTE the admin hazard class: uns.CmdClass maps UNKNOWN _Cmd* contracts
-	// to "admin" (conservative by construction) — a bundle-declared new
-	// command contract therefore demands the highest grant class until the
-	// plugin names its hazard class. Pinned below.
+	// Unknown _Cmd* contracts map to the admin hazard class until the plugin names
+	// one, so the new command contract needs the highest grant. Pinned below.
 	ids.entries["writer"] = &uns.Entry{ULID: "writer", Kind: uns.KindExternal, Element: "el-writer", Grants: []string{"cmd:#:admin"}}
 	ids.entries["paramonly"] = &uns.Entry{ULID: "paramonly", Kind: uns.KindExternal, Element: "el-paramonly", Grants: []string{"cmd:#:param"}}
 	e := New(s, &config.Config{ULID: "n-edge1"}, ids, nil, nil, nil)
@@ -130,8 +127,8 @@ func bundleEngine(t *testing.T) *Engine {
 	return e
 }
 
-// A bundle-declared NEW contract lands by rollout alone (§4.1 [delta]):
-// routed to its manifest class's stream, validated by its schema.
+// A bundle-declared contract is routed by its manifest class and validated by
+// its schema.
 func TestBundleDeclaredContractRoutesAndValidates(t *testing.T) {
 	e := bundleEngine(t)
 
@@ -158,27 +155,26 @@ func TestBundleDeclaredContractRoutesAndValidates(t *testing.T) {
 		t.Fatalf("class cmd must route to the commands stream, got %s", res.Stream)
 	}
 
-	// The conservative hazard rule: an unknown _Cmd* contract demands the
-	// ADMIN class — cmd:#:param does not cover it.
+	// An unknown _Cmd* contract needs the admin class; cmd:#:param does not cover it.
 	_, err = e.IngestClient("paramonly", "colca/v1/_CmdWrite/m1/m1/set", []byte(`{"correlation_id": "c", "expires_at": 9e12}`))
 	if err == nil || ReasonOf(err) != "cmd_denied" {
 		t.Fatalf("param grant must not cover a new cmd contract (hazard defaults to admin), got %v", err)
 	}
 
-	// Unknown contracts stay rejected — with a bundle, the bundle is the
-	// whole authority.
+	// Unknown contracts stay rejected: with a bundle loaded, the bundle is the whole
+	// authority.
 	if _, err := e.IngestClient("m1", "colca/v1/_Bogus/m1/x", []byte(`{}`)); err == nil {
 		t.Fatal("unknown contract must be rejected under a bundle")
 	}
-	// The floor's stand-in contracts NOT in this bundle are unknown too (no
-	// merge semantics, §7.1).
+	// Floor contracts missing from the bundle are unknown too; the two are never
+	// merged.
 	if _, err := e.IngestClient("m1", "colca/v1/_Signal/m1/x", []byte(`{"ulid": "u"}`)); err == nil {
 		t.Fatal("a contract absent from the bundle must be unknown — bundle replaces the floor entirely")
 	}
 }
 
-// Tombstones under the bundle: driven by the manifest flag (§10.1); the
-// refresh door rejects empty regardless (retention §6.5).
+// With a bundle the manifest flag decides whether a contract accepts tombstones;
+// the refresh door rejects empty payloads regardless.
 func TestBundleTombstoneFlag(t *testing.T) {
 	e := bundleEngine(t)
 
@@ -212,7 +208,7 @@ func TestBuiltinOnlyContractsBypassTheBundle(t *testing.T) {
 	}
 }
 
-// Every door rejection carries a typed reason for the PUBACK mapping (§8.1).
+// Every door rejection carries a typed reason for the PUBACK mapping.
 func TestRejectErrorsCarryReasons(t *testing.T) {
 	e := newEngine(t)
 	cases := []struct {
@@ -249,13 +245,9 @@ func TestRejectErrorsCarryReasons(t *testing.T) {
 	}
 }
 
-// The gap of 2026-09-07, pinned at the door under the REAL generated bundle:
-// a `_SystemElement` whose id is 31 characters was accepted here and refused
-// by the projector's 26-character column, stalling projection. The bundle now
-// carries the one ULID pattern (payload.py `ULID`, design §4.1), so the
-// door refuses it with reason=validation naming the pattern, and a ULID
-// passes. Mutation check: drop `ULID` from `SystemElement.id` in payload.py,
-// regenerate, and this fails at the first assertion.
+// Under the real generated bundle the door refuses a _SystemElement whose id is
+// not a ULID, naming the pattern, and accepts a ULID. A longer id would otherwise
+// stall the projector's 26-character column.
 func TestRealBundleRefusesNonULIDEntityIDsAtTheDoor(t *testing.T) {
 	tbl, err := contracts.Load(contractstest.GeneratedBundlePath(t), "")
 	if err != nil {
@@ -269,9 +261,8 @@ func TestRealBundleRefusesNonULIDEntityIDsAtTheDoor(t *testing.T) {
 	e := New(s, &config.Config{ULID: "n-edge1"}, testIDs(), nil, nil, nil)
 	e.SetContracts(tbl)
 
-	// The admin door (POST /publish — what administrators and the test worlds
-	// use to author elements) hands the schema error back
-	// verbatim, so the publisher reads which field violated which pattern.
+	// POST /publish returns the schema error verbatim, so the publisher sees which
+	// field broke which pattern.
 	const pattern = "^[0-9A-HJKMNP-TV-Z]{26}$"
 	topic := "colca/v1/_SystemElement/n-edge1/site1"
 	const ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -291,14 +282,9 @@ func TestRealBundleRefusesNonULIDEntityIDsAtTheDoor(t *testing.T) {
 	}
 }
 
-// Alarm-stream design §3, the behaviour the class change exists for: a
-// bundle-declared "alarm" contract routes to `alarms` and projects NO KV.
-//
-// The KV half is the load-bearing assertion. An alarm topic carries the event
-// id, so its KV key is never reused, and Prune deletes only stream keys
-// (`b/…`), never KV keys (`k\x00…`) — as ClassData every transition left one
-// permanent entry behind, on the authoring node and on every ancestor after
-// replication.
+// A bundle-declared alarm contract routes to the alarms stream and projects no
+// KV. Every alarm topic carries a new event id and pruning never deletes KV keys,
+// so a KV entry per transition would stay forever, here and at every ancestor.
 func TestAlarmClassRoutesToAlarmsAndProjectsNoKV(t *testing.T) {
 	s, err := store.Open(t.TempDir())
 	if err != nil {

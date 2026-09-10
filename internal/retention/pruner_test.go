@@ -18,13 +18,10 @@ import (
 
 const nodeULID = "n-edge1"
 
-// scrapeMetric reads back one metric value through the shared test helper —
-// see metricstest's doc comment for why this goes through Handler() rather
-// than a Collector/Gatherer accessor.
+// scrapeMetric reads one metric value through the shared test helper.
 var scrapeMetric = metricstest.Value
 
-// mustKVScan is KVScan with the error handled the only way a test fixture
-// can: fail loud (resources design §8).
+// mustKVScan is KVScan that fails the test on error.
 func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
 	t.Helper()
 	entries, err := st.KVScan(prefix)
@@ -54,17 +51,16 @@ func newPruner(t *testing.T, st *store.Store, eng *engine.Engine, ret config.Ret
 	return NewPruner(st, eng, ret, nil, nodeULID)
 }
 
-// newPrunerWithMetrics is newPruner for tests asserting the design §8
-// counters (colca_retention_pruned_records_total, ..._prune_runs_total,
-// ..._gap_records_total, ..._state_refresh_*_total).
+// newPrunerWithMetrics is newPruner for tests that assert the retention
+// counters.
 func newPrunerWithMetrics(t *testing.T, st *store.Store, eng *engine.Engine, ret config.Retention) (*Pruner, *metrics.Metrics) {
 	t.Helper()
 	m := metrics.New(st, ret, nil)
 	return NewPruner(st, eng, ret, m, nodeULID), m
 }
 
-// appendAt appends n records to a stream with explicit timestamps ts, ts+step,
-// ts+2*step, … — the store surface, exactly how the tests seed history.
+// appendAt appends n records to a stream with timestamps ts, ts+step,
+// ts+2*step and so on.
 func appendAt(t *testing.T, st *store.Store, stream string, n int, ts, step int64) {
 	t.Helper()
 	var recs []store.Record
@@ -80,14 +76,9 @@ func appendAt(t *testing.T, st *store.Store, stream string, n int, ts, step int6
 	}
 }
 
-// Design §3.2: `alarms` is subject to the retention POLICY, which means it
-// must be in the pruner's own stream list. A stream the pruner never visits
-// grows forever regardless of what the config says about it.
-//
-// The gap-marker machinery is deliberately not re-asserted here: a marker is
-// emitted on cursor override, not on a plain policy prune, and it is
-// stream-generic (topic is built from the stream name). Re-testing it per
-// stream would restate a constant rather than pin a claim.
+// alarms is subject to the retention policy, so the pruner must visit it; a
+// stream it never visits grows forever whatever the config says. Gap markers
+// are stream-generic and not tested again here.
 func TestAlarmsIsSubjectToTheRetentionPolicy(t *testing.T) {
 	st, eng := mustParts(t)
 	base := time.Now().UnixMilli()
@@ -117,9 +108,8 @@ func retFor(stream string, pol config.StreamRetention) config.Retention {
 	return config.Retention{Streams: map[string]config.StreamRetention{stream: pol}}
 }
 
-// Spec §4.1: "age: advance while record.TS < now − max_age; stop at the first
-// younger record". The boundary is exact and exclusive — a record whose TS
-// equals the cutoff is NOT pruned.
+// The age boundary is exclusive: records older than now - max_age are pruned,
+// and one exactly at the cutoff is kept.
 func TestAgePolicyPrunesToExactBoundary(t *testing.T) {
 	st, eng := mustParts(t)
 	base := time.Now().UnixMilli()
@@ -144,8 +134,8 @@ func TestAgePolicyPrunesToExactBoundary(t *testing.T) {
 		t.Fatalf("no marker expected on a plain policy prune: next = %d, want 11", next)
 	}
 
-	// design §8: one run removed exactly 5 records and the bytes the store
-	// itself shed (no override on this stream, so no gap-records counter).
+	// One run removed exactly 5 records and the bytes the store shed; no override,
+	// so no gap-records count.
 	if v := scrapeMetric(t, m, `colca_retention_prune_runs_total{stream="metrics"}`); v != 1 {
 		t.Fatalf("prune runs = %v, want 1", v)
 	}
@@ -167,9 +157,8 @@ func TestAgePolicyPrunesToExactBoundary(t *testing.T) {
 	}
 }
 
-// Spec §4.1: "size: additionally advance while live_bytes − bytes_shed >
-// max_bytes". The oldest records are shed until the stream is at or under the
-// limit — and not one record further.
+// The size policy sheds the oldest records until the stream is at or under the
+// limit, and not one record more.
 func TestSizePolicyShedsOldestUntilUnderLimit(t *testing.T) {
 	st, eng := mustParts(t)
 	base := time.Now().UnixMilli()
@@ -201,9 +190,8 @@ func TestSizePolicyShedsOldestUntilUnderLimit(t *testing.T) {
 	}
 }
 
-// Spec §5.2 default: never prune past the slowest protected cursor, no matter
-// how loudly both policies want to. This test is the mutation guard for the
-// clamp: removing the cursor floor turns it red.
+// By default the pruner never prunes past the slowest protected cursor, however
+// much both policies want to. Removing the cursor floor turns this red.
 func TestCursorClampBeatsBothPolicies(t *testing.T) {
 	st, eng := mustParts(t)
 	old := time.Now().Add(-2 * time.Hour).UnixMilli()
@@ -227,10 +215,10 @@ func TestCursorClampBeatsBothPolicies(t *testing.T) {
 	}
 }
 
-// Spec §5.2 opt-in: a cursor stops protecting only once its last advance is
-// older than ignore_cursors_after. Before the window: clamp, no marker. After:
-// override with exactly ONE _StreamGap marker carrying the pruned span and the
-// overridden cursor list (§6.4), appended in the prune batch itself.
+// A cursor stops protecting only once its last advance is older than
+// ignore_cursors_after. Before that the prune is clamped with no marker; after
+// it, exactly one _StreamGap marker carries the pruned span and the overridden
+// cursors, appended in the prune batch.
 func TestStalenessOverrideFiresOnlyPastWindow(t *testing.T) {
 	st, eng := mustParts(t)
 	old := time.Now().Add(-2 * time.Hour).UnixMilli()
@@ -256,8 +244,8 @@ func TestStalenessOverrideFiresOnlyPastWindow(t *testing.T) {
 	if next := st.NextOffset("metrics"); next != 11 {
 		t.Fatalf("inside the window: no marker allowed, next = %d, want 11", next)
 	}
-	// design §8: a real (clamped) prune still counts as a run, but with no
-	// override there is no gap-records tick.
+	// A clamped prune still counts as a run, but without an override there is no
+	// gap-records tick.
 	if v := scrapeMetric(t, m, `colca_retention_prune_runs_total{stream="metrics"}`); v != 1 {
 		t.Fatalf("prune runs after the clamped cycle = %v, want 1", v)
 	}
@@ -277,9 +265,8 @@ func TestStalenessOverrideFiresOnlyPastWindow(t *testing.T) {
 	if next := st.NextOffset("metrics"); next != 12 {
 		t.Fatalf("exactly one marker must be appended: next = %d, want 12", next)
 	}
-	// design §8: the second run adds 8 more pruned records (3..10) and counts
-	// its own run; the override ticks gap-records exactly once — matching the
-	// single _StreamGap marker just asserted above.
+	// The second run adds 8 pruned records (3..10) and its own run, and the
+	// override counts one gap record, matching the single marker above.
 	if v := scrapeMetric(t, m, `colca_retention_prune_runs_total{stream="metrics"}`); v != 2 {
 		t.Fatalf("prune runs after the override cycle = %v, want 2", v)
 	}
@@ -326,11 +313,10 @@ func TestStalenessOverrideFiresOnlyPastWindow(t *testing.T) {
 	}
 }
 
-// Spec §6.5: after an overridden prune on entities, the pruner re-appends the
-// current KV entry of every affected path — entity-class entries with Offset ∈
-// [minOverriddenCursorPos, newLWM) — AFTER the marker, through the ordinary
-// engine path. Entries already consumed (below the range) and entries still in
-// the stream (at or above newLWM) are not touched.
+// After an overridden prune on entities, the pruner appends the current KV
+// entry again for every entity path with Offset in [minOverriddenCursorPos,
+// newLWM), after the marker and through the engine. Entries below the range or
+// still in the stream are left alone.
 func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 	st, eng := mustParts(t)
 	seed := func(topic, payload string) {
@@ -343,9 +329,9 @@ func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/b", `{"id":"B1"}`) // offset 2
 	seed("colca/v1/_Signal/"+nodeULID+"/line1/c", `{"id":"C1"}`)        // offset 3
 	seed("colca/v1/_SystemElement/"+nodeULID+"/line1/a", `{"id":"A2"}`) // offset 4 — update of line1/a
-	// A metric-class KV entry whose Offset (in the METRICS stream) lands
-	// numerically inside the refresh range [3,5): the §6.5 entity-class
-	// filter must skip it — KV offsets from different streams share nothing.
+	// A metric KV entry whose Offset, in the metrics stream, falls inside the
+	// refresh range [3,5) must be skipped: offsets from different streams are
+	// unrelated.
 	for i := 0; i < 3; i++ {
 		seed("colca/v1/_Metric/"+nodeULID+"/line1/m", fmt.Sprintf(`{"v":%d}`, i)) // metrics offsets 1..3
 	}
@@ -361,8 +347,8 @@ func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 	p.now = func() time.Time { return time.Now().Add(2 * time.Hour) } // records old, cursor stale
 	p.runOnce()
 
-	// design §8: exactly the 2 affected paths counted as applied refreshes;
-	// nothing skipped or failed.
+	// Exactly the 2 affected paths count as applied refreshes; nothing skipped or
+	// failed.
 	if v := scrapeMetric(t, m, `colca_retention_state_refresh_records_total`); v != 2 {
 		t.Fatalf("state refresh records = %v, want 2", v)
 	}
@@ -378,9 +364,9 @@ func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 		t.Fatalf("LWM = %d, want 5", got)
 	}
 	recs := readAll(t, st, "entities", 5)
-	// Affected KV entries: line1/a (Offset 4) and line1/c (Offset 3) — both in
-	// [3,5). line1/b (Offset 2) was consumed before the override and must NOT
-	// be re-appended. So: 1 marker + exactly 2 refresh records.
+	// Affected entries: line1/a (Offset 4) and line1/c (Offset 3), both in [3,5).
+	// line1/b (Offset 2) was consumed before the override and is not appended
+	// again, so there is 1 marker plus 2 refresh records.
 	if len(recs) != 3 {
 		t.Fatalf("head records = %d, want 3 (marker + 2 refreshes): %+v", len(recs), recs)
 	}
@@ -401,8 +387,8 @@ func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 		t.Fatalf("line1/c refresh = %q, want {\"ulid\":\"C1\"}", got)
 	}
 
-	// KV converged onto the refresh offsets; the untouched path keeps its
-	// (pruned-below-LWM, provenance-only) offset.
+	// KV now points at the refresh offsets; the untouched path keeps its offset
+	// below the LWM.
 	for _, e := range mustKVScan(t, st, "") {
 		switch e.Path {
 		case "line1/a", "line1/c":
@@ -429,10 +415,9 @@ func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 	}
 }
 
-// Spec §6.5 exclusion: metrics are KV-projected too, but an overridden prune
-// on metrics refreshes NOTHING — the marker is the only record appended. This
-// test is the second mutation guard: dropping the entities-only gate (or the
-// entity-class filter) turns it red.
+// Metrics are projected into KV too, but an overridden prune on metrics
+// refreshes nothing: the marker is the only record appended. Dropping the
+// entities-only gate or the entity-class filter turns this red.
 func TestMetricsOverrideRefreshesNothing(t *testing.T) {
 	st, eng := mustParts(t)
 	for i, topic := range []string{"line1/temp", "line1/pres"} {
@@ -456,8 +441,7 @@ func TestMetricsOverrideRefreshesNothing(t *testing.T) {
 	if next := st.NextOffset("metrics"); next != 4 {
 		t.Fatalf("next = %d, want 4: the marker and NOTHING else — metrics KV entries must not be refreshed", next)
 	}
-	// The metric KV entries stay untouched, offsets pointing below the LWM
-	// (provenance, not a dangling reference — spec §2).
+	// The metric KV entries stay untouched, with offsets below the LWM.
 	for _, e := range mustKVScan(t, st, "line1/") {
 		if e.Offset > 2 {
 			t.Fatalf("metric KV %s was re-appended (Offset %d) — §6.5 refreshes entities only", e.Path, e.Offset)
@@ -469,9 +453,8 @@ func TestMetricsOverrideRefreshesNothing(t *testing.T) {
 	}
 }
 
-// Config contract: EffectiveInterval() == 0 is the operator's
-// explicit "pruner disabled" — Run must return immediately and never touch
-// the store.
+// EffectiveInterval() == 0 disables the pruner: Run returns at once and never
+// touches the store.
 func TestDisabledPrunerNeverRuns(t *testing.T) {
 	st, eng := mustParts(t)
 	appendAt(t, st, "metrics", 5, time.Now().Add(-48*time.Hour).UnixMilli(), 1)
@@ -494,8 +477,8 @@ func TestDisabledPrunerNeverRuns(t *testing.T) {
 	}
 }
 
-// Run prunes on its cadence and returns promptly when stop closes — the
-// node's WaitGroup discipline depends on that return.
+// Run prunes on its cadence and returns promptly when stop closes, which the
+// node's shutdown relies on.
 func TestRunPrunesOnCadenceAndStopsCleanly(t *testing.T) {
 	st, eng := mustParts(t)
 	appendAt(t, st, "metrics", 5, time.Now().Add(-48*time.Hour).UnixMilli(), 1)
@@ -524,12 +507,10 @@ func TestRunPrunesOnCadenceAndStopsCleanly(t *testing.T) {
 	}
 }
 
-// Spec §5.2 [delta]: a cursor whose FIRST ack lands in the TOCTOU window
-// between the pruner's policy evaluation and the Prune commit is never pruned
-// past — the store's in-batch recheck clamps the range, and the §6.4 marker is
-// rewritten to the effective span (one source of truth, shared with the
-// journal). Deterministic: the beforePrune hook injects the ack exactly into
-// the window.
+// A cursor whose first ack lands between the policy evaluation and the Prune
+// commit is never pruned past: the store's recheck shrinks the range and the
+// marker describes the effective span. beforePrune injects the ack into exactly
+// that window.
 func TestConcurrentFirstAckNeverPrunedPast(t *testing.T) {
 	st, eng := mustParts(t)
 	old := time.Now().Add(-2 * time.Hour).UnixMilli()
@@ -537,10 +518,9 @@ func TestConcurrentFirstAckNeverPrunedPast(t *testing.T) {
 	if !st.CursorAck("lag", "metrics", 3) { // stale, will be overridden
 		t.Fatal("ack must move")
 	}
-	// The EFFECTIVE span [1..4] this run actually removes, computed before
-	// the prune so it can still be scanned — the bytes design §8's
-	// colca_retention_pruned_bytes_total must report, NOT the bytes of the
-	// policy's originally intended (and larger) [1..10] span.
+	// The bytes of the effective span [1..4], computed before the prune while it
+	// can still be scanned. The metric must report these, not the bytes of the
+	// larger intended span [1..10].
 	var wantShedBytes uint64
 	if err := st.ScanRecords("metrics", 1, 5, func(_ uint64, _ int64, size uint64) bool {
 		wantShedBytes += size
@@ -564,10 +544,8 @@ func TestConcurrentFirstAckNeverPrunedPast(t *testing.T) {
 	}
 	p.runOnce()
 
-	// design §8: pruned_bytes must be the EFFECTIVE
-	// post-shrink figure (4 records), never the pre-commit scan's larger
-	// intended figure (10 records) — the store's own store.PruneSpan.Shed,
-	// captured by the plan closure, is the only correct source.
+	// pruned_bytes must be the effective figure (4 records), not the pre-commit
+	// scan's intended one (10 records); only PruneSpan.Shed has it.
 	if v := scrapeMetric(t, m, `colca_retention_pruned_records_total{stream="metrics"}`); v != 4 {
 		t.Fatalf("pruned records = %v, want 4 (the shrunk [1..4] span, not the intended 10)", v)
 	}
@@ -591,8 +569,8 @@ func TestConcurrentFirstAckNeverPrunedPast(t *testing.T) {
 	if err := json.Unmarshal(marker.Payload, &gp); err != nil {
 		t.Fatal(err)
 	}
-	// The marker describes the EFFECTIVE pruned span [1..4], not the
-	// requested [1..10] — same numbers as the journal entry.
+	// The marker describes the effective span [1..4], not the requested [1..10],
+	// matching the journal entry.
 	if gp.FromOffset != 1 || gp.ToOffset != 4 {
 		t.Fatalf("marker span = [%d..%d], want the shrunk [1..4]", gp.FromOffset, gp.ToOffset)
 	}
@@ -608,12 +586,10 @@ func TestConcurrentFirstAckNeverPrunedPast(t *testing.T) {
 	}
 }
 
-// Spec §6.5 [delta]: the refresh obligation is persisted in the prune batch
-// (rp/), so a partial refresh failure — or a crash before the refresh — never
-// loses it: the range stays pending, is retried each cycle, and a NEW pruner
-// instance (process restart) completes it at startup. Already-refreshed paths
-// drop out naturally (their KV Offset moved past the range), so retries never
-// double-refresh.
+// The refresh obligation is stored in the prune batch, so a partial failure or a
+// crash before the refresh never loses it: the range stays pending, is retried
+// each cycle, and a new pruner completes it at startup. Paths already refreshed
+// drop out because their KV Offset moved past the range.
 func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 	st, eng := mustParts(t)
 	seed := func(topic, payload string) {
@@ -656,9 +632,8 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 	if next := st.NextOffset("entities"); next != 6 {
 		t.Fatalf("entities next = %d, want 6 (marker + one successful refresh)", next)
 	}
-	// design §8: this is the refresh path's OWN failure counter — line1/c's
-	// injected error counts here, line1/b's success counts as applied, and
-	// nothing was skipped.
+	// The refresh failure counter: line1/c's injected error counts here, line1/b
+	// counts as applied, and nothing is skipped.
 	if v := scrapeMetric(t, mA, `colca_retention_state_refresh_failures_total`); v != 1 {
 		t.Fatalf("pA state refresh failures = %v, want 1", v)
 	}
@@ -669,9 +644,8 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 		t.Fatalf("pA state refresh skipped = %v, want 0", v)
 	}
 
-	// "Restart": a NEW pruner instance (own metrics registry too — a
-	// restarted process starts every Prometheus counter at zero) on the same
-	// store, healthy publish path, completes the obligation at Run startup —
+	// A restart: a new pruner with its own registry (counters start at zero) on the
+	// same store and a healthy publish completes the obligation at Run startup,
 	// before any tick.
 	pB, mB := newPrunerWithMetrics(t, st, eng, ret)
 	stop := make(chan struct{})
@@ -690,7 +664,7 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 	close(stop)
 	<-done
 
-	// line1/c refreshed exactly once (offset 6); line1/b NOT re-refreshed.
+	// line1/c is refreshed exactly once (offset 6); line1/b is not refreshed again.
 	recs := readAll(t, st, "entities", 4)
 	if len(recs) != 3 { // marker, b-refresh, c-refresh
 		t.Fatalf("head records = %d, want 3: %+v", len(recs), recs)
@@ -704,10 +678,8 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 	if next := st.NextOffset("entities"); next != 7 {
 		t.Fatalf("entities next = %d, want 7 — the retry must not double-refresh line1/b", next)
 	}
-	// design §8: on pB's own registry, the retried line1/c is exactly one
-	// applied refresh — no failures, no skips. line1/b never re-enters the
-	// scan (its KV Offset already moved past the range), so it does not
-	// double-count here.
+	// On pB's registry the retried line1/c is one applied refresh. line1/b never
+	// re-enters the scan, so it is not counted twice.
 	if v := scrapeMetric(t, mB, `colca_retention_state_refresh_records_total`); v != 1 {
 		t.Fatalf("pB state refresh records = %v, want 1", v)
 	}
@@ -723,11 +695,9 @@ func TestRefreshObligationSurvivesFailureAndRestart(t *testing.T) {
 	}
 }
 
-// Spec §5.1 [delta] + §5.2: a child's persisted downlink cursor
-// (downlink:{child-ulid} on the parent's commands stream, written by the
-// /downlink handler) is an ordinary named cursor — an offline child blocks
-// the parent's commands prune until the staleness window passes, then is
-// overridden with the marker naming it.
+// A child's persisted downlink cursor on the parent's commands stream is an
+// ordinary cursor: an offline child blocks the commands prune until the
+// staleness window passes, then is overridden and named in the marker.
 func TestStaleDownlinkChildCursorBlocksThenOverridden(t *testing.T) {
 	st, eng := mustParts(t)
 	old := time.Now().Add(-2 * time.Hour).UnixMilli()
@@ -772,13 +742,11 @@ func TestStaleDownlinkChildCursorBlocksThenOverridden(t *testing.T) {
 	}
 }
 
-// Spec §6.5 [delta] × §7.1: a tombstone landing between the refresh's KVScan
-// snapshot and that entry's publish must NOT be resurrected by the refresh.
-// Deterministic: the publish seam injects the tombstone exactly into the
-// window, then delegates to the real guarded publish — which must skip. The
-// skip voids the obligation for that path (nothing current to refresh), so
-// rp/ still clears. This test is the mutation guard for the CAS: dropping the
-// offset check in AppendIfKVUnchanged turns it red.
+// A tombstone that lands between the refresh's KVScan and that entry's publish
+// must not be undone by the refresh. The publish hook injects the tombstone into
+// that window and delegates to the real guarded publish, which must skip; the
+// skip completes the obligation, so rp/ still clears. Dropping the offset check
+// in AppendIfKVUnchanged turns this red.
 func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
 	st, eng := mustParts(t)
 	topicA := "colca/v1/_SystemElement/" + nodeULID + "/line1/a"
@@ -803,8 +771,7 @@ func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
 	realPublish := p.publish
 	p.publish = func(topic string, payload []byte, ifKVOffset uint64) (bool, error) {
 		if topic == topicB {
-			// The race, made deterministic: the path is retired AFTER the
-			// KVScan snapshot, BEFORE its refresh publish.
+			// The path is retired after the KVScan snapshot and before its refresh publish.
 			if _, err := eng.IngestAdmin(topicB, nil); err != nil {
 				t.Errorf("tombstone injection failed: %v", err)
 			}
@@ -813,13 +780,12 @@ func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
 	}
 	p.runOnce()
 
-	// The retired path stays GONE — no resurrection.
+	// The retired path stays gone.
 	if kv := mustKVScan(t, st, "line1/b"); len(kv) != 0 {
 		t.Fatalf("tombstoned path resurrected by the refresh: %+v", kv)
 	}
-	// design §8: the guard skip is a completion, not a failure — it counts
-	// against the skipped family only. Nothing was applied (topicA falls
-	// outside the refresh range [2,3)).
+	// The guard skip is a completion, not a failure: it counts as skipped only.
+	// Nothing was applied, since topicA is outside the refresh range [2,3).
 	if v := scrapeMetric(t, m, `colca_retention_state_refresh_skipped_total`); v != 1 {
 		t.Fatalf("state refresh skipped = %v, want 1", v)
 	}
@@ -851,10 +817,8 @@ func TestTombstoneDuringRefreshIsNotResurrected(t *testing.T) {
 	}
 }
 
-// The pruner's cycle reclaims the definitions stream too — by compaction, not
-// by policy (definition-stream design §6). Without this the stream would grow
-// forever however the retention config is tuned, because no policy applies to
-// it at all.
+// Each cycle also compacts the definitions stream. No policy applies to it, so
+// without this it would grow forever.
 func TestRunOnceCompactsTheDefinitionsStream(t *testing.T) {
 	st, eng := mustParts(t)
 	for _, payload := range []string{`{"id":"01HGRP-OPS","v":1}`, `{"id":"01HGRP-OPS","v":2}`} {
@@ -882,14 +846,11 @@ func TestRunOnceCompactsTheDefinitionsStream(t *testing.T) {
 }
 
 // An Edit replay receipt stays on the node that executed the command
-// (uns.IsNodePrivate); before the uplink kept it home, every ancestor received
-// it, and since its tombstone no longer rises either, nothing will ever retire
-// the copy. One prune cycle removes such foreign copies — KV entry and stream
-// records alike, superseded versions and tombstones included — and leaves both
-// the node's OWN receipts (its replay reads them; the 1024 cap owns them) and
-// the child's ordinary state (a _Signal, which the parent genuinely holds).
-// Presence and absence are asserted through the same two queries, in this
-// test, so a broken query cannot pass as an empty one.
+// (uns.IsNodePrivate), but ancestors that received copies earlier would keep
+// them forever. One prune cycle removes those foreign copies, KV entries and
+// stream records alike, and keeps the node's own receipts and the child's
+// ordinary state. Presence and absence use the same two queries, so a broken
+// query cannot pass as an empty one.
 func TestRunOnceEvictsForeignNodePrivateStateOnly(t *testing.T) {
 	st, eng := mustParts(t)
 	const child = "n-child"
@@ -922,9 +883,8 @@ func TestRunOnceEvictsForeignNodePrivateStateOnly(t *testing.T) {
 	if _, _, err := st.Append("entities", seed); err != nil {
 		t.Fatal(err)
 	}
-	// keep_forever: the policy prune stays out of the picture (these records
-	// carry TS=1, which the 365-day default would otherwise age out), so
-	// whatever disappears below disappeared through the sweep alone.
+	// keep_forever keeps the policy prune out (these records have TS=1), so
+	// whatever disappears went through the sweep.
 	ret := config.Retention{Streams: map[string]config.StreamRetention{"entities": {KeepForever: true}}}
 	p := newPruner(t, st, eng, ret)
 

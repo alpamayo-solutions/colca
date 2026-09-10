@@ -1,10 +1,6 @@
-// Move-drain completion (the time sync move drain design §3.2/§3.4).
-//
-// This lives in repl, not registry: the completion predicate needs the
-// store's commands stream and the /downlink delivery-floor cursor, both of
-// which this package already owns for the /downlink door itself. registry
-// stays the identity/lifecycle authority (status "draining", persisted) and
-// never reaches into stream contents (registry package doc comment).
+// Move-drain completion. It lives in repl rather than registry because the check
+// needs the commands stream and the downlink delivery-floor cursors, which this
+// package owns; registry keeps the identity's lifecycle and never reads streams.
 
 package repl
 
@@ -17,24 +13,18 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// drainTickInterval is the periodic completion sweep (design §3.2):
-// "evaluated on every /downlink poll by that child AND a 30s periodic tick,
-// whichever fires first" — this is the second trigger, the one that still
-// converges a drain whose child never polls again (already offline; the
-// queue then resolves purely by expiry).
+// drainTickInterval is the periodic completion sweep. Completion is also checked
+// on every poll by the draining child; the tick covers a child that never polls
+// again, whose queue then resolves by expiry.
 const drainTickInterval = 30 * time.Second
 
-// drainScanBatch bounds one store.Read call inside the completion scan (the
-// scan as a whole is unbounded — it loops until the commands stream is
-// exhausted); this only caps the per-call cost, same reasoning as the
-// downlink door's own defaultDownlinkMax.
+// drainScanBatch bounds one store.Read in the completion scan. The scan as a
+// whole runs until the stream is exhausted.
 const drainScanBatch = 500
 
-// RunDrainTicker sweeps every draining child every drainTickInterval,
-// auto-revoking whichever completed (design §3.2 item 4). It evaluates once
-// immediately before the first tick, so a restart re-evaluates drains that
-// persisted through it without waiting a full interval (design §3.2:
-// "status ... survives restart; the tick re-evaluates after boot").
+// RunDrainTicker checks every draining child each drainTickInterval and
+// auto-revokes those that completed. It runs once before the first tick, so
+// drains that survived a restart are checked without waiting an interval.
 func (s *Server) RunDrainTicker(stop <-chan struct{}) {
 	s.evaluateAllDrains()
 	ticker := time.NewTicker(drainTickInterval)
@@ -49,8 +39,8 @@ func (s *Server) RunDrainTicker(stop <-chan struct{}) {
 	}
 }
 
-// evaluateAllDrains evaluates every currently draining entry in the
-// registry — the periodic tick's and the post-restart entry point.
+// evaluateAllDrains checks every draining entry in the registry; the tick and
+// the restart path call it.
 func (s *Server) evaluateAllDrains() {
 	for _, e := range s.reg.List() {
 		if e.IsDraining() {
@@ -59,21 +49,12 @@ func (s *Server) evaluateAllDrains() {
 	}
 }
 
-// evaluateDrain checks childULID's completion predicate (design §3.2 item 3)
-// and auto-revokes through the existing registry.Manager.Revoke path on
-// completion (item 4), recording the outcome. Safe to call redundantly and
-// concurrently — from a /downlink poll and the periodic tick at once, or
-// twice in the same tick — registry.Manager.Revoke is the synchronization
-// point: the caller that loses the race gets ErrNotEnrolled and is a no-op
-// here, not an error.
-//
-// A gap and surviving pending work are ORTHOGONAL facts, never alternatives: a pruned prefix
-// [cursor, LWM) being unrecoverable does not mean the SURVIVING range
-// [LWM, next) has nothing left to deliver. drainPendingCommands always
-// scans the surviving range regardless of gapped, so pending here reflects
-// real, currently-live, undelivered commands the drain must still wait on —
-// gapped only ever affects which outcome label the eventual completion
-// gets, never whether the drain is allowed to complete right now.
+// evaluateDrain checks childULID's completion and auto-revokes it through
+// registry.Manager.Revoke, recording the outcome. It is safe to call
+// concurrently: Revoke decides, and the caller that loses gets ErrNotEnrolled,
+// which is not an error here. A gap never lets a drain finish early:
+// drainPendingCommands always scans the surviving range, and gapped only picks
+// the outcome label.
 func (s *Server) evaluateDrain(childULID string) {
 	e, ok := s.reg.Get(childULID)
 	if !ok || !e.IsDraining() {
@@ -85,15 +66,10 @@ func (s *Server) evaluateDrain(childULID string) {
 		return // still live, undelivered commands in the surviving range — not complete, gap or not
 	}
 
-	// Outcome precedence: a detected gap always wins over
-	// "delivered" — the design's own §3.2 clarification defines "delivered"
-	// as fetched-and-acked on the downlink cursor, and the pruned prefix's
-	// contents are gone and can never be proven to have been that — but never wins over "still pending", which the check
-	// above already ruled out. Conservative by construction: ANY cursor
-	// behind the LWM completes as "gapped" once the surviving range clears,
-	// independent of whether the pruned range provably held a command for
-	// THIS mount specifically (the pruned range carries no per-mount
-	// record, so "might have" is treated exactly like "did").
+	// A gap outranks "delivered", which means fetched and acked on the downlink
+	// cursor and cannot be proven for pruned records, but never "still pending",
+	// ruled out above. Any cursor behind the LWM completes as gapped, even if the
+	// pruned range held nothing for this mount; the range cannot tell.
 	outcome := metrics.DrainOutcomeDelivered
 	switch {
 	case gapped:
@@ -118,39 +94,22 @@ func (s *Server) evaluateDrain(childULID string) {
 	s.log.Info("move-drain complete, auto-revoked", "child", childULID, "outcome", outcome, "commands_seen", total)
 }
 
-// drainPendingCommands scans the commands stream under e's mount for
-// ClassCmd records not yet delivered, for the SURVIVING range only (see
-// gapped below). total counts every such record found; pending is the
-// subset still live (expires_at >= AuthoritativeNow) — completion is
-// pending == 0 (design §3.2 item 3, erratum: the cursor boundary is
-// inclusive — offset >= cursor, since store.CursorGet's cursor IS the next
-// offset a consumer has not yet read; the record sitting exactly at that
-// offset has itself not been delivered).
+// drainPendingCommands scans the surviving part of the commands stream under
+// e's mount for undelivered commands, from the cursor inclusive, since the
+// cursor is the next unread offset. total counts them and pending those still
+// live; completion is pending == 0.
 //
-// gapped is true when e's own delivery-floor cursor sits behind the
-// commands stream's current LWM (store.Gap) — retention pruned some or all
-// of [cursor, LWM) before this child (whose cursor may never have advanced
-// past its never-acked default) consumed it.
-//
-// gapped is NOT a short-circuit: a lost
-// prefix says nothing about the SURVIVING range [LWM, next), which the scan
-// below always covers regardless — store.Gap only proves loss up to LWM-1,
-// per its own contract (store.go Gap doc comment), so a live, undelivered,
-// unexpired command sitting at or after the LWM is exactly as real and
-// exactly as blocking as it would be with no gap at all. Returning
-// gapped=true early here (the round-1 shape) meant a draining child could
-// be auto-revoked while such a command sat unread past the hole — command
-// abandonment, strictly worse than the mislabeling round-1 fixed. gapped is
-// therefore pure OUTCOME-LABEL information for the caller once pending
-// naturally reaches 0 on its own — it never itself decides completion.
+// gapped reports that e's delivery floor sits behind the LWM, so retention
+// pruned something the child never consumed. It does not end the scan: a live
+// command past the LWM still blocks the drain, and gapped only labels the
+// outcome once pending reaches 0.
 func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped bool) {
 	st := s.eng.Store()
 	mount, placed := s.eng.Elements().PathOf(e.Element)
 	if !placed {
-		// The child's element stopped resolving mid-drain. Nothing can be said
-		// about what is still addressed to it, and "nothing pending" would
-		// auto-revoke it — so report one pending record and let the drain wait
-		// for the namespace to come back.
+		// The child's element stopped resolving mid-drain. Nothing can be said about
+		// what is still addressed to it, and "nothing pending" would revoke it, so
+		// report one pending record and wait.
 		s.log.Error("move-drain: the draining child's element does not resolve — treating as still pending",
 			"child", e.ULID, "element", e.Element)
 		return 1, 1, false
@@ -159,10 +118,8 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped 
 	_, gapped = st.Gap("commands", cursor)
 	from := cursor
 	if lwm := st.LWM("commands"); gapped && lwm > from {
-		// The pruned prefix [cursor, lwm) no longer exists in the store —
-		// store.Read would silently skip it anyway (deleted keys), but
-		// starting exactly at the LWM makes the surviving range explicit
-		// rather than relying on that skip behavior.
+		// The pruned prefix is gone; Read would skip it anyway, but starting at the LWM
+		// makes the surviving range explicit.
 		from = lwm
 	}
 	next := st.NextOffset("commands")
@@ -172,11 +129,9 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped 
 		if err != nil || !uns.IsCommand(s.eng.ClassOf(p.Contract)) {
 			return false
 		}
-		// The same rule the /downlink filter applies, from the same place
-		// (uns.UnderMount) rather than spelled again here. It has to be the
-		// same one: this scan decides when a drain is COMPLETE, so a boundary
-		// that disagreed with the filter's would complete a drain while
-		// commands under that mount were still deliverable.
+		// The same mount rule the /downlink filter uses (uns.UnderMount). They must
+		// agree: a different boundary here would complete a drain while commands under
+		// that mount were still deliverable.
 		return uns.UnderMount(p.Path, mount)
 	}
 	for from < next {

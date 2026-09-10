@@ -9,15 +9,10 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// RunCatchup measures how fast a parent absorbs a child's offline backlog:
-// hub down → Records buffered at the edge → hub up → time until the hub's
-// metrics stream contains everything. This is the "outage recovery" number
-// that retention sizing divides outage duration by.
-//
-// Prefill goes through the edge's HTTP /publish (admin ingest) instead of
-// paho: it exercises the same engine+fsync path without MQTT round-trip
-// overhead, so the measurement isolates the DRAIN (uplink read → mTLS push →
-// hub apply), not the fill.
+// RunCatchup measures how fast a parent absorbs a child's offline backlog: the
+// hub goes down, records buffer at the edge, the hub comes back, and the clock
+// runs until its metrics stream holds everything. Prefill uses the edge's HTTP
+// /publish, so the measurement covers the drain rather than MQTT overhead.
 func RunCatchup(p Params) (*Report, error) {
 	pair, err := StartPair(p.WorkDir, 1)
 	if err != nil {

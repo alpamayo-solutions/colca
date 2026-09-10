@@ -7,12 +7,8 @@ import (
 	"testing"
 )
 
-// sanitizeVectorPath is the golden `sanitize` dataset (path-collision
-// parity), the same mechanism vectors_test.go and
-// exec_edit_model_test.go's vocabulary pin use: one checked-in file both
-// native copies of `sanitize` answer to -- this Go suite, and the api
-// Python suite (edge/tests/test_model_rules.py) that pins
-// edge/edit/model_rules.py's `sanitize_topic_segment`.
+// sanitizeVectorPath is the golden sanitize dataset that every copy of the
+// sanitize rule is tested against.
 const sanitizeVectorPath = "../../contracts/src/colca_data_contracts/vectors/sanitize.json"
 
 type sanitizeVectorFile struct {
@@ -38,10 +34,8 @@ func loadSanitizeVectors(t *testing.T) sanitizeVectorFile {
 	return v
 }
 
-// TestSanitizeMatchesTheGoldenVectors pins colca's own `sanitize`
-// (exec_configure.go) against the shared dataset. A change to `sanitize`'s
-// behavior that is not also reflected in the vectors (and in the api
-// Python copy the vectors also judge) fails here.
+// TestSanitizeMatchesTheGoldenVectors checks sanitize (exec_configure.go)
+// against the shared dataset.
 func TestSanitizeMatchesTheGoldenVectors(t *testing.T) {
 	for _, c := range loadSanitizeVectors(t).Cases {
 		if got := sanitize(c.Name); got != c.Out {

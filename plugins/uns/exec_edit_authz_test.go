@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// scopeOf resolves a grant's element to its path from what the fake store
-// holds — the executor's scope in production is the node's element index.
+// scopeOf resolves a grant's element to its path from the fake store, as the
+// element index does in production.
 type scopeOf struct{ f *fakeStore }
 
 func (s scopeOf) PathOf(elementID string) (string, bool) {
@@ -29,7 +29,7 @@ func (s scopeOf) PathOf(elementID string) (string, bool) {
 }
 func (scopeOf) Reaches(string) bool { return false }
 
-// scopedTo is a person whose configure grant names ONE element.
+// scopedTo is a person whose configure grant names one element.
 func scopedTo(element string) CommandContext {
 	return CommandContext{Actor: &Entry{
 		ULID: "kc-sub-scoped", Kind: KindHuman, Grants: []string{"cmd:" + element + "/#:configure"},
@@ -63,10 +63,9 @@ func createUnder(t *testing.T, op, parent string, versions map[string]uint64) []
 	})
 }
 
-// A person holding configure on line1 only: a plan that touches line2 is
-// refused before any write, shaped exactly like a not-found on the entity
-// they named — and the same operation under line1 is applied. Removing the
-// authorizeTouched call turns every refusal here into a 200.
+// A person with configure on line1 only: a plan touching line2 is refused
+// before any write, looking like a not-found, while the same operation under
+// line1 applies.
 func TestEditRefusesAPlanOutsideThePersonsGrantWithZeroWrites(t *testing.T) {
 	f, exec, versions := twoLines(t)
 	anna := scopedTo("el-line1")
@@ -164,9 +163,9 @@ func TestEditWithoutAScopeFailsClosedOnScopedGrants(t *testing.T) {
 	}
 }
 
-// An operator — `operate` on line1, no configure anywhere — may annotate a
-// signal there and edit their own annotation, never another author's, and
-// may not configure. Authorship is proven from the annotation id itself.
+// An operator (operate on line1, no configure) may annotate a signal there
+// and edit their own annotation, but not another author's, and may not
+// configure. The annotation id proves authorship.
 func TestAnOperatorAnnotatesAndEditsOnlyTheirOwn(t *testing.T) {
 	_, exec, versions := twoLines(t)
 	operator := CommandContext{Actor: &Entry{
@@ -206,8 +205,8 @@ func TestAnOperatorAnnotatesAndEditsOnlyTheirOwn(t *testing.T) {
 	}
 }
 
-// The per-kind source rule has two native owners (api annotation_source and
-// AnnotationSource here); the shared vectors are what keeps them equal.
+// The source rule exists in the api and here; the shared vectors keep them
+// equal.
 func TestAnnotationSourceMatchesTheGoldenVectors(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Clean(annotationIDVectorPath))
 	if err != nil {
@@ -227,7 +226,7 @@ func TestAnnotationSourceMatchesTheGoldenVectors(t *testing.T) {
 	checked := 0
 	for _, c := range v.Sources {
 		if c.Kind == "service" {
-			continue // an mTLS service never reaches the executor as an actor; the api pins that kind
+			continue // mTLS services never act at the executor; that case is the api's
 		}
 		got := AnnotationSource(&Entry{ULID: c.Sub, Kind: KindHuman, Username: c.Username})
 		if got != c.Source {

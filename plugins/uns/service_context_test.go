@@ -15,9 +15,8 @@ type serviceContextVector struct {
 	Context []string `json:"context"`
 }
 
-// One rule, two languages, one file. The Python side reads the same vectors
-// (colca-data-contracts tests/test_local_service.py), so a change to either
-// implementation that this file does not also describe fails on both sides.
+// The Python side (tests/test_local_service.py) reads the same vectors, so a
+// change to either implementation must be reflected here.
 func TestServiceContextMatchesTheSharedVectors(t *testing.T) {
 	raw, err := os.ReadFile(serviceContextVectorPath)
 	if err != nil {
@@ -42,9 +41,8 @@ func TestServiceContextMatchesTheSharedVectors(t *testing.T) {
 }
 
 func TestTwoUnplacedServicesGetDifferentAddresses(t *testing.T) {
-	// The failure this exists to prevent: an unplaced service has no mount, so
-	// without its name in the address every unplaced service on a node writes
-	// its retained registration to the same topic.
+	// An unplaced service has no mount, so without its name every unplaced
+	// service on a node would write its registration to the same topic.
 	projector := strings.Join(ServiceContext("", "projector"), "/")
 	dataops := strings.Join(ServiceContext("", "dataops"), "/")
 	if projector == dataops {

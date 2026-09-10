@@ -7,9 +7,8 @@ import (
 	"time"
 )
 
-// A lane that stays down must not narrate every retry: the first failure and
-// the recovery are the events, with a bounded reminder in between. A child
-// waiting to be enrolled wrote 114 warnings in four minutes before this.
+// A lane that stays down reports its transitions, the first failure and the
+// recovery, with a bounded reminder in between, not every retry.
 func TestALaneReportsItsTransitionsNotItsRetries(t *testing.T) {
 	state := newLinkState()
 	start := time.Now()
@@ -57,7 +56,7 @@ func TestRecoveryIsReportedOnceAndOnlyAfterAFailure(t *testing.T) {
 	if !wasFailing || attempts != 2 || down < 10*time.Second {
 		t.Fatalf("recovery must carry the outage: failing=%v attempts=%d down=%s", wasFailing, attempts, down)
 	}
-	// And the lane is clean again — a later recovery announces nothing.
+	// The lane is clean again, so a later recovery announces nothing.
 	if wasFailing, _, _ := state.Recovered("uplink:entities", start.Add(20*time.Second)); wasFailing {
 		t.Fatal("recovery must clear the lane")
 	}
@@ -75,9 +74,9 @@ func TestLanesAreTrackedIndependently(t *testing.T) {
 	}
 }
 
-// The status alone ("http 401") says nothing a reader can act on. The 401 a
-// child gets before its parent enrolls it is the single most common one, and
-// it must name the remedy.
+// "http 401" alone says nothing a reader can act on. The 401 a child gets before
+// its parent enrolls it is the most common one, and the message must name the
+// fix.
 func TestAStatusIsTranslatedIntoSomethingActionable(t *testing.T) {
 	unauthorized := replicationStatusMeaning(http.StatusUnauthorized)
 	if !strings.Contains(unauthorized, "401") || !strings.Contains(unauthorized, "enroll") {

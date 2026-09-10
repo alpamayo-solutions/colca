@@ -5,10 +5,8 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// entityStore adapts the engine and its store to the record surface the domain
-// plugin declares (uns.EntityStore). The plugin never sees a core type: this
-// satisfies its interface structurally, which is what lets domain logic touch
-// storage without a single import pointing from the plugin at the core.
+// entityStore adapts the engine's store to uns.EntityStore. The plugin never sees
+// a core type, so no import points from the plugin at the core.
 type entityStore struct{ e *Engine }
 
 // EntityStore returns the plugin-facing record surface of this node. Wiring
@@ -24,11 +22,8 @@ func (s *entityStore) KVGet(topic string) ([]byte, bool) {
 	}
 	kvs, err := s.e.store.KVScan(p.Path)
 	if err != nil {
-		// uns.EntityStore's KVGet signature carries no error (a narrow, stable
-		// port the domain package depends on) — a caller through this port
-		// sees a false "not found", which is wrong but not destructive
-		// (resources design §8). Logged at ERROR
-		// so the failure is never silent, only unpropagated.
+		// The port's KVGet cannot return an error, so a failed scan reads as not found.
+		// Logged at error level so it is never silent.
 		s.e.log.Error("kv scan failed — entity read answered not-found rather than the true state",
 			"path", p.Path, "err", err)
 		return nil, false
@@ -41,10 +36,8 @@ func (s *entityStore) KVGet(topic string) ([]byte, bool) {
 	return nil, false
 }
 
-// KVScan filters the projection by contract and publishing identity. Both come
-// from the topic, so this needs no extra index; the scan is over the node's
-// entity set, which is the set a human curates — hundreds to thousands, not the
-// metric stream.
+// KVScan filters the projection by contract and publishing identity, both taken
+// from the topic. It scans the entity set, which is small next to metrics.
 func (s *entityStore) KVScan(contract, nodeID string) []uns.KVRecord {
 	return s.scan(contract, func(kv store.KVEntry) bool { return kv.NodeID == nodeID })
 }
@@ -55,14 +48,10 @@ func (s *entityStore) KVScanAll(contract string) []uns.KVRecord {
 	return s.scan(contract, func(store.KVEntry) bool { return true })
 }
 
-// scan is the uns.EntityStore port's swallow-and-log adapter over
-// Engine.scanContract: KVScan/KVScanAll carry no error in their signature (a
-// narrow, stable port the domain package depends on), so a storage failure
-// here is logged at ERROR and answered as "nothing found" — wrong, but not
-// destructive, for every consumer this port currently has. A consumer whose
-// decision on an empty answer WOULD be destructive (the blob sweeper marking
-// every blob unreferenced) must not go through this port; it uses
-// Engine.ScanContractAll instead, which surfaces the error (resources design §8).
+// scan wraps scanContract for the uns.EntityStore port, which has no error
+// return: a storage failure is logged and answered as nothing found. A caller for
+// whom an empty answer is destructive, like the blob sweeper, uses
+// ScanContractAll instead.
 func (s *entityStore) scan(contract string, keep func(store.KVEntry) bool) []uns.KVRecord {
 	out, err := s.e.scanContract(contract, keep)
 	if err != nil {
@@ -73,11 +62,9 @@ func (s *entityStore) scan(contract string, keep func(store.KVEntry) bool) []uns
 	return out
 }
 
-// scanContract walks the whole KV projection once and returns the records of
-// one contract that keep accepts, converted to the plugin-facing
-// uns.KVRecord. Shared by entityStore.scan's swallow-and-log adapter and
-// ScanContractAll's error-surfacing one below — same walk, two different
-// answers to "what do I do when the store itself failed".
+// scanContract walks the KV projection once and returns the records of one
+// contract that keep accepts. Shared by scan and ScanContractAll, which differ
+// only in how they treat a store failure.
 func (e *Engine) scanContract(contract string, keep func(store.KVEntry) bool) ([]uns.KVRecord, error) {
 	kvs, err := e.store.KVScan("")
 	if err != nil {
@@ -104,25 +91,17 @@ func (e *Engine) scanContract(contract string, keep func(store.KVEntry) bool) ([
 	return out, nil
 }
 
-// ScanContractAll is EntityStore().KVScanAll(contract) with a storage failure
-// surfaced instead of swallowed to an empty result (critical-finding fix
-// round, resources design §8). A caller whose decision on an empty answer is
-// destructive — the blob sweeper marking every blob unreferenced because it
-// read zero live resources — must be able to tell "nothing referenced this"
-// apart from "the scan itself failed": the two demand opposite actions, and
-// uns.EntityStore's own KVScanAll cannot make that distinction (its signature
-// is a stable, narrow port other, non-destructive consumers already depend
-// on).
+// ScanContractAll is EntityStore().KVScanAll with storage failures returned
+// instead of swallowed. The blob sweeper needs to tell "nothing references this"
+// from "the scan failed".
 func (e *Engine) ScanContractAll(contract string) ([]uns.KVRecord, error) {
 	return e.scanContract(contract, func(store.KVEntry) bool { return true })
 }
 
-// PublishBatch is the domain command commit boundary, and the plugin's only
-// write door. It writes as the node in node-local coordinates, no mount
-// rewrite, still validated against the loaded bundle — a record the node itself
-// authors passes the same checks as everything else. The engine validates the
-// complete result set before it opens one Pebble batch; the adapter merely
-// translates the engine's durable coordinates back into plugin-owned types.
+// PublishBatch is the plugin's only write door and the commit boundary of a
+// domain command. It writes as the node in node-local coordinates and validates
+// like any other write. The engine validates the whole set before opening one
+// Pebble batch.
 func (s *entityStore) PublishBatch(records []uns.StateRecord) ([]uns.StateWrite, error) {
 	results, err := s.e.ingestAdminStateBatch(records, Attribution{WrittenBy: "admin"})
 	if err != nil {
@@ -139,11 +118,8 @@ func (s *entityStore) PublishBatch(records []uns.StateRecord) ([]uns.StateWrite,
 	return writes, nil
 }
 
-// PublishEvent is PublishBatch's sibling for a class a command executor may
-// append but never author as state (uns.IsCommandAuthoredEvent) — an
-// annotation today. See ingestAdminEvent for why this cannot reuse
-// ingestAdminStateBatch: it never KV-projects and it is exactly one record,
-// never a multi-record transition.
+// PublishEvent is PublishBatch for a class an executor may append but never
+// author as state, such as an annotation: one record, no KV projection.
 func (s *entityStore) PublishEvent(record uns.StateRecord) (uns.StateWrite, error) {
 	result, err := s.e.ingestAdminEvent(record, Attribution{WrittenBy: "admin"})
 	if err != nil {

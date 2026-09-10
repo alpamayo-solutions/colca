@@ -117,16 +117,13 @@ func TestPublishedRecordMatchesTheTopicGrammar(t *testing.T) {
 	if parts[3] != "01NODE" {
 		t.Errorf("topic level 4 must be the node the door reported, got %q", parts[3])
 	}
-	// A service may write its own subtree and nothing above it, so a record
-	// addressed at the node root is refused outright -- `no write scope
-	// covers colca/v1/_Log/...` is what silenced every placed service.
+	// A service may only write its own subtree, so the record sits at its mount
+	// and name.
 	if parts[4] != "line1" || parts[5] != "colca-historian" {
 		t.Errorf("the record must sit at the service's own position "+
 			"(mount then name), got %q", records[0].Topic)
 	}
-	// The API drops any record whose last segment is not one of
-	// colca_data_contracts.logging.LOG_LEVELS, so an unmapped slog level
-	// would vanish from the view rather than show up wrong.
+	// The API drops records whose last segment is not a known level.
 	if parts[6] != "WARNING" {
 		t.Errorf("slog.LevelWarn must publish as WARNING, got %q", parts[6])
 	}
@@ -220,16 +217,9 @@ func TestHandleDoesNotWaitOnTheNode(t *testing.T) {
 }
 
 func TestTheBuiltinDefaultHandlerIsRefused(t *testing.T) {
-	// Wrapping slog's built-in default and then calling slog.SetDefault is an
-	// infinite loop: that handler writes through the `log` package, and
-	// SetDefault redirects `log` back into slog. It does not crash -- the
-	// first log call simply never returns, so the service prints nothing and
-	// never reaches its HTTP listener. That is what took the container tests
-	// red: a healthcheck that never passed and an empty container log.
-	//
-	// This also pins the name the guard matches on. slog does not export the
-	// type, so if a future Go renames it the guard stops matching and the
-	// hang returns -- this test is what says so.
+	// Wrapping slog's built-in default and installing the wrapper would hang on
+	// the first log call. This also pins the type name the guard matches, which
+	// slog does not export.
 	builtin := slog.Default().Handler()
 	if got := reflect.TypeOf(builtin).String(); got != builtinDefaultHandler {
 		t.Fatalf("slog's built-in default handler is now %q, not %q -- the guard "+
@@ -242,9 +232,7 @@ func TestTheBuiltinDefaultHandlerIsRefused(t *testing.T) {
 		t.Fatal("the built-in default handler must be replaced, not wrapped")
 	}
 
-	// The claim is that logging through it RETURNS. Nothing else in this file
-	// would notice a hang: a deadlocked Handle fails the suite by timeout,
-	// minutes later, with no indication of which test it was.
+	// A hang would otherwise only show as a suite timeout, minutes later.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -257,10 +245,8 @@ func TestTheBuiltinDefaultHandlerIsRefused(t *testing.T) {
 	}
 }
 
-// logPayloadVector is the shared statement of what a `_Log` payload must
-// carry. Python generates it from the contract dataclass it builds payloads
-// from; Go builds its payload by hand, so this file is the only thing that
-// keeps the two equal.
+// logPayloadVector lists what a _Log payload must carry. It is generated from
+// the Python contract and keeps the hand-built Go payload in step.
 type logPayloadVector struct {
 	Contract string   `json:"contract"`
 	Required []string `json:"required"`
@@ -268,15 +254,8 @@ type logPayloadVector struct {
 }
 
 func TestThePayloadCarriesEveryFieldTheContractRequires(t *testing.T) {
-	// Go was missing module, function and line_no. The node refused every
-	// record with `jsonschema validation failed with bundle:///_Log.json#`
-	// and nothing said so: a log publisher that reports its own failure
-	// through the log is a loop, so four Go services published nothing at
-	// all and looked healthy doing it.
-	//
-	// A hand-written list here would have been just as wrong as the payload.
-	// The vector is generated from the contract and pinned to it by
-	// colca-data-contracts/tests/test_log_payload_vector.py.
+	// The vector is generated from the contract, so a missing field here means the
+	// node would refuse the record.
 	path := filepath.Join("..", "contracts", "src",
 		"colca_data_contracts", "vectors", "log_payload.json")
 	raw, err := os.ReadFile(path)
@@ -315,9 +294,7 @@ func TestThePayloadCarriesEveryFieldTheContractRequires(t *testing.T) {
 }
 
 func TestTheLevelInThePayloadIsTheOneInTheTopic(t *testing.T) {
-	// slog spells it WARN and the topic grammar spells it WARNING. Sending
-	// one in the payload and the other in the topic would have the view
-	// showing a level the record itself contradicts.
+	// slog says WARN, the topic grammar says WARNING; payload and topic must agree.
 	node, server := newFakeNode()
 	defer server.Close()
 	publisher := NewLogPublisher(&countingHandler{}, &Client{BaseURL: server.URL},
@@ -379,15 +356,8 @@ func (s *blockingSink) markStopped() {
 	s.mu.Unlock()
 }
 
-// TestStopWaitsForAnInFlightPublish pins the half of Stop that matters to an
-// owner with a store: not that the drain is asked to end, but that it HAS
-// ended by the time Stop returns.
-//
-// A node closes its store right after stopping its logging. A publish still
-// in flight then writes into a closed Pebble and takes the process down —
-// `panic: pebble: closed` out of a goroutine nothing was joining, which is
-// what a host-supervised node (the SDK's embedded colcad) hit on every stop.
-// Cancelling without waiting would leave exactly that window open.
+// TestStopWaitsForAnInFlightPublish: Stop returns only once an in-flight publish
+// has finished, so the owner can close its store right after.
 func TestStopWaitsForAnInFlightPublish(t *testing.T) {
 	sink := &blockingSink{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	publisher := NewLogPublisher(&countingHandler{level: slog.LevelInfo}, sink,
@@ -478,13 +448,8 @@ func TestStopWithoutStartReturns(t *testing.T) {
 }
 
 func TestARecordWithoutAProgramCounterStillSatisfiesTheContract(t *testing.T) {
-	// Go's standard log package is bridged into the default slog handler,
-	// and slog captures a program counter for those records only when the
-	// log flags ask for a location. badger's "Found 0 WALs" was such a
-	// record on every boot: PC 0, `function` empty, refused by the node with
-	// "at '/function': minLength: got 0, want 1" -- and the notice on stderr
-	// did not say which record. The contract's string fields must be
-	// non-empty whatever the record's provenance.
+	// Records bridged from the standard log package may have no program counter.
+	// The contract's string fields must still be non-empty.
 	node, server := newFakeNode()
 	defer server.Close()
 	publisher := NewLogPublisher(&countingHandler{},

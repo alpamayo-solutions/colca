@@ -1,14 +1,9 @@
-// Command colca-service publishes the `_ServiceDetails` record for every
-// service on this node that cannot publish its own observed state. It uses
-// Colca's deployment-local HTTP door: a service name selects a stable registry
-// entry and no key, certificate, token, or enrollment step exists.
+// Command colca-service publishes the _ServiceDetails record for every service
+// on this node that cannot publish its own. It uses the local HTTP door, where a
+// service name selects a registry entry and no key or enrollment is needed.
 //
-// ONE process for the whole node, not one per service. A generated hub ran 13
-// containers whose entire job was one retained record each plus a five-minute
-// tick — 13 images to pull, 13 restart policies, 13 things that can wedge, and
-// one that did (a `service_type` the contract refuses, restarting forever).
-// Nothing about the records changed: each is still published under its own
-// local identity, to its own topic, with its own payload.
+// One process serves the whole node; each record is still published under its
+// service's own identity and topic.
 package main
 
 import (
@@ -58,8 +53,8 @@ type localIdentity struct {
 	Mount   string `json:"mount"`
 }
 
-// rejected marks a record the node refused on its merits — a contract
-// violation in what the generator emitted, which retrying cannot fix.
+// rejected marks a record the node refused on its merits; retrying cannot fix
+// it.
 type rejected struct{ err error }
 
 func (r rejected) Error() string { return r.err.Error() }
@@ -97,9 +92,8 @@ func run() error {
 			live = append(live, p)
 			fmt.Printf("published %s as %s\n", reg.Details.Name, p.details.ID)
 		case asRejected(err, &refusal):
-			// One bad record must not cost the other twelve their
-			// registration, so keep going and report every refusal at the
-			// end rather than dying on the first.
+			// One bad record must not cost the others their registration, so keep going and
+			// report every refusal at the end.
 			refusals = append(refusals, fmt.Sprintf("%s: %v", reg.Details.Name, refusal.err))
 		default:
 			// The door itself is unreachable. Restarting is the right answer.
@@ -186,10 +180,8 @@ func start(
 	details.ID = identity.ULID
 	details.ColcaNodeID = identity.Node
 	details.SystemElementID = identity.Element
-	// Mount plus this service's NAME — the rule lives in the domain package
-	// because two languages need it and they must not each keep a version.
-	// Without the name every unplaced service publishes to one topic and
-	// erases the others (uns.ServiceContext).
+	// The topic context is the mount plus the service name, so unplaced services do
+	// not overwrite each other. The rule lives in uns because two languages need it.
 	recordContext := uns.ServiceContext(identity.Mount, details.Name)
 	details.Hierarchy = recordContext
 	topic := uns.Prefix() + "_ServiceDetails/" + identity.Node + "/" +
@@ -295,9 +287,8 @@ func postJSON(client *http.Client, url, name, mount string, body any) error {
 	return nil
 }
 
-// statusError separates "the node said no" from "the node did not answer".
-// A 4xx is a judgement on the record itself; retrying an invalid payload just
-// burns, which is precisely what the per-service sidecars used to do.
+// statusError separates "the node said no" from "the node did not answer". A 4xx
+// judges the record itself, and retrying it cannot help.
 func statusError(status int, body []byte) error {
 	err := fmt.Errorf("HTTP %d: %s", status, body)
 	if status >= 400 && status < 500 {

@@ -122,11 +122,10 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	}
 }
 
-// TestStopReleasesPortAndKillsLongPoll pins the shutdown contract the 4-node
-// integration suite depends on: a node is restarted on the SAME address, so
-// Stop() must kill in-flight long polls (Close, never Shutdown), release the
-// port before it returns, leave no handler goroutine behind, and be safe to
-// call twice or without a preceding Start.
+// TestStopReleasesPortAndKillsLongPoll pins the shutdown contract: a node
+// restarts on the same address, so Stop must kill long polls, free the port
+// before it returns, leave no handler goroutine behind, and be safe to call
+// twice or before Start.
 func TestStopReleasesPortAndKillsLongPoll(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -188,9 +187,9 @@ func TestStopReleasesPortAndKillsLongPoll(t *testing.T) {
 	srv.Stop()
 }
 
-// TestDownlinkOnlyOwnMountCommands: a child sees commands for its own subtree
-// only — not a sibling's, not acks — and the returned cursor still advances
-// past everything scanned, so it never re-scans foreign records forever.
+// TestDownlinkOnlyOwnMountCommands: a child sees only commands for its own
+// subtree, not a sibling's and not acks, and its cursor still advances past
+// everything scanned.
 func TestDownlinkOnlyOwnMountCommands(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -235,11 +234,10 @@ func TestDownlinkOnlyOwnMountCommands(t *testing.T) {
 	}
 }
 
-// TestUplinkOfflineBuffersThenDeliversExactlyOnce is the unit-level proof of
-// the offline-buffering mechanism the integration suite relies on: while the
-// parent is unreachable the uplink cursor must not move, and once the parent
-// comes back on the SAME address every buffered record arrives exactly once.
-// It also pins the ack-only filter on the commands stream.
+// TestUplinkOfflineBuffersThenDeliversExactlyOnce: while the parent is
+// unreachable the uplink cursor stays put, and once the parent is back on the
+// same address every buffered record arrives exactly once. It also covers the
+// ack-only filter on commands.
 func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -344,10 +342,9 @@ func TestUplinkOfflineBuffersThenDeliversExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestRunDownlinkIngestsAndStopsPromptly covers the child-side loop: parent
-// offsets are tracked under the pseudo-stream "commands-parent", each record is
-// ingested locally (persist + local delivery), and the loop returns promptly
-// when stop is closed even though it is parked in a 20s long poll.
+// TestRunDownlinkIngestsAndStopsPromptly: parent offsets are tracked under
+// "commands-parent", each record is ingested locally, and the loop returns
+// promptly on stop even while parked in a long poll.
 func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -412,9 +409,8 @@ func TestRunDownlinkIngestsAndStopsPromptly(t *testing.T) {
 }
 
 // The lanes RunUplink pushes are exactly the streams the domain says rise,
-// and the parent's door accepts exactly those. A class that gains a stream
-// must gain a lane here, or its records never leave the node that wrote
-// them — silently, because nothing else would notice.
+// which the parent's door accepts. A class with a new stream needs a lane here,
+// or its records never leave the node.
 func TestEveryRisingStreamHasAnUplinkLane(t *testing.T) {
 	pushed := map[string]bool{}
 	for _, stream := range uplinkStreams() {
@@ -436,8 +432,8 @@ func TestEveryRisingStreamHasAnUplinkLane(t *testing.T) {
 
 // --- helpers ---------------------------------------------------------------
 
-// A machine-kind key at the repl door is rejected like an unknown one: the
-// door is for nodes (auth §6.2 / §2.1 kind rule).
+// A machine-kind key at the repl door is rejected like an unknown one: the door
+// is for nodes.
 func TestMachineKindRejectedAtReplDoor(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -465,13 +461,11 @@ func TestMachineKindRejectedAtReplDoor(t *testing.T) {
 	}
 }
 
-// childSpec is a fixture child: enrolled as kind node at the parent's
-// registry (entry-before-connect by construction), at the element sitting at
-// Mount.
+// childSpec is a fixture child, enrolled as kind node at the parent's registry
+// at the element at Mount.
 type childSpec struct{ ULID, Pubkey, Mount string }
 
-// mustKVScan is KVScan with the error handled the only way a test fixture
-// can: fail loud (resources design §8).
+// mustKVScan is KVScan that fails the test on error.
 func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
 	t.Helper()
 	entries, err := st.KVScan(prefix)
@@ -481,11 +475,9 @@ func mustKVScan(t *testing.T, st *store.Store, prefix string) []store.KVEntry {
 	return entries
 }
 
-// nodeParts builds a registry and an engine wired to each other exactly the way
-// node.Start does — the registry resolving placements through the engine's
-// element index — then places each child's element and enrolls it there.
-// Placement comes first because an identity binds to an element, never to a
-// path (id-grants design §4).
+// nodeParts builds a registry and engine wired to each other as node.Start
+// does, then places each child's element and enrolls the child there;
+// identities bind to elements, not paths.
 func nodeParts(t *testing.T, st *store.Store, cfg *config.Config, deliver engine.LocalDeliver,
 	m *metrics.Metrics, clk *clock.Clock, children ...childSpec) (*registry.Manager, *engine.Engine) {
 	t.Helper()
@@ -523,12 +515,10 @@ func placeElement(t *testing.T, eng *engine.Engine, path string) string {
 	return id
 }
 
-// uplinkPair brings up a live parent and a child engine wired to it, and
-// returns the two stores, the parent's pinned pubkey hex (the scope key for
-// this child's cursors — parent-scoped-cursors design §3.1), plus a started
-// RunUplink whose stop is registered as cleanup. Seeding goes straight to the
-// child store: these tests are about the ORDER lanes drain in, not about
-// contract validation at a door.
+// uplinkPair starts a live parent and a child engine wired to it and returns
+// both stores, the parent's pinned key (the scope of the child's cursors) and a
+// start function whose stop is registered as cleanup. Records go straight into
+// the child store: these tests are about lane order, not validation.
 func uplinkPair(t *testing.T) (child, parent *store.Store, parentPub string, start func()) {
 	t.Helper()
 	dir := t.TempDir()
@@ -574,16 +564,13 @@ func seed(t *testing.T, s *store.Store, stream, topic string, n int) {
 	}
 }
 
-// Design §4. After an outage the small lanes drain BEFORE the metrics
-// backlog. Order inside a stream never changes, so this — not a place in the
-// metrics queue — is the only thing that lets an alarm arrive promptly.
+// After an outage the small lanes drain before the metrics backlog. Order
+// within a stream never changes, so lanes are what let an alarm arrive promptly.
 func TestUplinkDrainsSmallLanesBeforeTheMetricsBacklog(t *testing.T) {
 	cs, ps, _, start := uplinkPair(t)
-	// The alarm lane is deliberately several batches deep. With a single
-	// record any ordering that merely puts metrics last would pass, and this
-	// test would not distinguish lanes from a reshuffled slice. At three
-	// batches the claim bites: the lane must drain ACROSS passes before
-	// metrics moves at all.
+	// The alarm lane is several batches deep: with one record, any order that
+	// merely put metrics last would pass. At three batches the lane must drain
+	// across passes before metrics moves.
 	const alarmBacklog = 3 * replBatch
 	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 5*replBatch)
 	seed(t, cs, "alarms", "colca/v1/_AlarmStateChange/m1/m1/alarm-events/a1/e%d", alarmBacklog)
@@ -593,9 +580,8 @@ func TestUplinkDrainsSmallLanesBeforeTheMetricsBacklog(t *testing.T) {
 		return ps.NextOffset("alarms") == uint64(alarmBacklog)+1
 	})
 
-	// Flat round-robin would have pushed one metrics batch per pass alongside
-	// each alarm batch, so metrics would sit at ~alarmBacklog by now. Lanes
-	// mean at most the single floor batch has gone.
+	// Round-robin would have pushed a metrics batch with each alarm batch; with
+	// lanes at most the single floor batch has gone.
 	if got := ps.NextOffset("metrics") - 1; got > uint64(replBatch) {
 		t.Fatalf("%d metric records reached the parent before the %d-record alarm "+
 			"backlog finished, want at most one %d-record floor batch — the alarm "+
@@ -603,9 +589,8 @@ func TestUplinkDrainsSmallLanesBeforeTheMetricsBacklog(t *testing.T) {
 	}
 }
 
-// Dataops-evaluator design §8. Annotations get the same promptness guarantee
-// as alarms: the lane drains ahead of the metrics backlog, so a producer's
-// output reaches the root without waiting behind a large sample catch-up.
+// Annotations get the same guarantee as alarms: they drain ahead of the metrics
+// backlog.
 func TestUplinkDrainsAnnotationsBeforeTheMetricsBacklog(t *testing.T) {
 	cs, ps, _, start := uplinkPair(t)
 	const annotationBacklog = 3 * replBatch
@@ -624,9 +609,9 @@ func TestUplinkDrainsAnnotationsBeforeTheMetricsBacklog(t *testing.T) {
 	}
 }
 
-// Design §4, the floor. A lane that never empties must not hold the metrics
-// cursor still: once the local pruner passes it the backlog is gone and only
-// a gap marker remains, so lane pressure would become silent data loss.
+// A lane that never empties must not hold the metrics cursor: once the pruner
+// passes it the backlog is gone, and lane pressure would become silent data
+// loss.
 func TestMetricsAdvancesWhileAPriorityLaneStaysHot(t *testing.T) {
 	cs, ps, _, start := uplinkPair(t)
 	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 3*replBatch)
@@ -640,9 +625,8 @@ func TestMetricsAdvancesWhileAPriorityLaneStaysHot(t *testing.T) {
 				return
 			default:
 			}
-			// Append directly, errors ignored: this goroutine outlives nothing
-			// and must not call t.Fatalf, which is illegal off the test
-			// goroutine and races the store's own cleanup.
+			// Append directly and ignore errors: this goroutine must not call t.Fatalf,
+			// which is only allowed on the test goroutine.
 			_, _, _ = cs.Append("alarms", []store.Record{{
 				Topic:   fmt.Sprintf("colca/v1/_AlarmStateChange/m1/m1/alarm-events/a1/e%d", i),
 				Payload: []byte(`{"v":1}`),
@@ -664,15 +648,15 @@ func TestMetricsAdvancesWhileAPriorityLaneStaysHot(t *testing.T) {
 	})
 }
 
-// Design §3.1: two parents, two sets of cursors. A child that changes parents
-// must not resume against the new one at the old one's offsets — and a child
-// that RETURNS to a former parent finds its old position intact.
+// Two parents, two sets of cursors: a child that changes parents does not
+// resume at the old parent's offsets, and one that returns finds its old
+// position.
 func TestCursorsAreScopedPerParent(t *testing.T) {
 	cs, _, parentPub, start := uplinkPair(t)
 	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 3)
 	start()
 
-	// The cursor that moved is the one named for THIS parent.
+	// The cursor that moved is the one named for this parent.
 	waitFor(t, "the uplink cursor for this parent to advance", 20*time.Second, func() bool {
 		return cs.CursorGet(uns.UplinkCursor(parentPub), "metrics") > 1
 	})
@@ -685,9 +669,9 @@ func TestCursorsAreScopedPerParent(t *testing.T) {
 	}
 }
 
-// Design §3.3: hello exists to teach a (re)connecting child its position in
-// one RTT, and the parent's stream head is part of that position — it is what
-// a child with no cursor for THIS parent must start from.
+// hello teaches a reconnecting child its position in one round trip, including
+// the parent's commands head, where a child without a cursor for this parent
+// starts.
 func TestHelloCarriesTheParentsCommandHead(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -748,7 +732,7 @@ func startServer(t *testing.T, cfg *config.Config, eng *engine.Engine, id *ident
 }
 
 // startServerWithMetrics is startServer for tests that assert on the repl
-// server's own counters (design §8, colca_gap_served_total{surface="downlink"}).
+// server's counters.
 func startServerWithMetrics(t *testing.T, cfg *config.Config, eng *engine.Engine, id *identity.Identity, reg *registry.Manager, m *metrics.Metrics) (*Server, string) {
 	t.Helper()
 	srv, err := NewServer(cfg, eng, id, reg, nil, m)
@@ -771,18 +755,11 @@ func mustClient(t *testing.T, addr, parentPubHex string, id *identity.Identity) 
 	return c
 }
 
-// attachAt makes st look like a node that is ALREADY attached to c's parent and
-// positioned at off on that parent's commands stream.
-//
-// Since parent-scoped cursors, a child with no cursor for a parent adopts that
-// parent's head on first contact and never hears what predates it
-// (parent-scoped-cursors design §3.2) — so a test that wants a command seeded
-// BEFORE the loop starts to be delivered has to place the child in front of it
-// instead of relying on a fresh child reading from 1.
-//
-// off must be above 1: 1 is the default position and CursorAck is forward-only,
-// so "seeding" it there would be a silent no-op and the test would pass for the
-// wrong reason. Both that and a refused ack fail loudly here.
+// attachAt makes st look like a node already attached to c's parent and
+// positioned at off on its commands stream. A child without a cursor adopts the
+// head and never sees older commands, so tests that seed a command before the
+// loop starts place the child in front of it. off must be above 1: CursorAck is
+// forward-only and 1 is the default, so seeding 1 would silently do nothing.
 func attachAt(t *testing.T, st *store.Store, c *Client, off uint64) {
 	t.Helper()
 	if off <= 1 {
@@ -794,16 +771,10 @@ func attachAt(t *testing.T, st *store.Store, c *Client, off uint64) {
 	}
 }
 
-// waitForAttached blocks until c's downlink loop has completed first contact
-// with its parent, which since parent-scoped cursors is the moment it becomes
-// safe to issue a command to it: whatever is already in the parent's commands
-// stream when that handshake runs is pre-attachment and deliberately not
-// delivered (design §3.2). A test that seeds a command after starting the loop
-// without this races the handshake and passes or fails on scheduling.
-//
-// The observable is the cursor KEY, not its position: first contact against a
-// parent whose commands stream is empty records position 1, which CursorGet
-// cannot tell apart from no cursor at all.
+// waitForAttached blocks until c's downlink loop has made first contact, the
+// point from which commands issued to it are delivered; anything queued before
+// the handshake is not. It checks the cursor key, because position 1 looks the
+// same as no cursor.
 func waitForAttached(t *testing.T, st *store.Store, c *Client) {
 	t.Helper()
 	waitFor(t, "the downlink loop to complete first contact with its parent", 20*time.Second, func() bool {

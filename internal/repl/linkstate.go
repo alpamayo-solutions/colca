@@ -9,18 +9,14 @@ import (
 	"time"
 )
 
-// linkReminderInterval is how long an uplink or downlink lane may stay down
-// before it says so again. The first failure and the recovery are always
-// logged; between them the lane is a STATE, and repeating it per retry is how
-// an expected startup wait (a child polling a parent that has not enrolled it
-// yet) wrote 114 warnings in four minutes.
+// linkReminderInterval is how long a lane may stay down before it says so again.
+// The first failure and the recovery are always logged; in between the lane is a
+// state, and a child waiting to be enrolled should not log every retry.
 const linkReminderInterval = 5 * time.Minute
 
-// replError is a refusal the parent ANSWERED with, as opposed to a transport
-// failure (dial error, timeout, reset), which never becomes one of these.
-// The status and the parent's own words are carried as fields rather than
-// folded into prose, so a caller can decide what the failure means without
-// parsing a string — the same shape BlobPutError already has.
+// replError is a refusal the parent answered with, as opposed to a transport
+// failure. Status and the parent's message are fields, so callers need not parse
+// a string, as with BlobPutError.
 type replError struct {
 	Route  string
 	Status int
@@ -34,30 +30,21 @@ func (e *replError) Error() string {
 	return fmt.Sprintf("%s: %s — the parent's answer: %s", e.Route, replicationStatusMeaning(e.Status), e.Body)
 }
 
-// Refused reports whether the parent answered 4xx: it was reachable, it read
-// the request, and it said no. Retrying the identical request unchanged
-// cannot make it succeed — but the child retries anyway, and deliberately.
-// See the rule written down in RunUplink's pushOnce.
+// Refused reports whether the parent answered 4xx: it read the request and said
+// no. The child retries anyway, on purpose; see pushOnce in RunUplink.
 func (e *replError) Refused() bool { return e.Status >= 400 && e.Status < 500 }
 
-// readReason reads the parent's explanation off a refused response, bounded:
-// it is a log line, not a payload, and an ill-behaved peer must not be able
-// to write an unbounded string into this node's logs.
+// readReason reads the parent's explanation off a refused response, bounded so
+// a misbehaving peer cannot write an unbounded string into this node's logs.
 func readReason(resp *http.Response) string {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	return strings.TrimSpace(string(body))
 }
 
-// replicationStatusMeaning turns a parent's HTTP status into something a
-// reader can act on. "http 401" alone says only that something was refused —
-// it does not say by whom, why, or what fixes it, which is the whole content
-// of the line for whoever is looking at it at 2am.
-//
-// A refusal never speaks for the parent: 403 was once reported as "the parent
-// has not enrolled this node yet", which is one of several things a 403 can
-// mean and was flatly wrong for the common one (a record refused on the
-// stream it was offered on). The status says what class of answer it is; the
-// body the parent sent says why, and replError carries it.
+// replicationStatusMeaning turns a parent's HTTP status into something a reader
+// can act on. The status only gives the class of answer; the body the parent
+// sent says why, and replError carries it. The text must not guess: a 403 has
+// several causes, not only a missing enrollment.
 func replicationStatusMeaning(status int) string {
 	switch status {
 	case http.StatusUnauthorized:
@@ -83,14 +70,9 @@ func replicationStatusMeaning(status int) string {
 	return fmt.Sprintf("http %d", status)
 }
 
-// linkState remembers whether one named lane is currently failing.
-//
-// A replication lane is a state — reachable or not — and the log should read
-// like one: it goes down once, it comes back once, and a long outage says so
-// on a bounded interval. Every retry in between still happens; it is just not
-// news. This is deliberately NOT the sampling the broker applies to mochi's
-// logging: nothing here is dropped by frequency, the transitions are simply
-// the events worth reporting.
+// linkState remembers whether a named lane is currently failing, so the log
+// reads like a state: down once, up once, and a reminder during a long outage.
+// Every retry still happens.
 type linkState struct {
 	mu    sync.Mutex
 	lanes map[string]*laneFailure
@@ -126,8 +108,8 @@ func (s *linkState) Failed(lane string, now time.Time) (report bool, attempts in
 	return false, failure.attempts, now.Sub(failure.since)
 }
 
-// Recovered clears a lane. It reports whether the lane HAD been failing —
-// only then is the recovery worth a line — along with what the outage cost.
+// Recovered clears a lane. It reports whether the lane had been failing, since
+// only then is a line worth writing, along with what the outage cost.
 func (s *linkState) Recovered(lane string, now time.Time) (wasFailing bool, attempts int, down time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

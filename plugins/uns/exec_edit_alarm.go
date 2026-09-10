@@ -9,23 +9,10 @@ import (
 // record is a node's single alarm configuration, not one row per alarm.
 const alarmConfigID = "alarm-notification-config"
 
-// composeAlarm composes the `_AlarmNotificationConfig` record an `alarm` or
-// `alarm_acknowledgement` intent writes (node-side command authorization
-// design §G).
-//
-// Alarm writes were the second family still reaching the node as
-// `_CmdConfigure` under the API's own identity, which is why a person's alarm
-// command was gated only by preflight on the far side of the door. The record
-// itself is unchanged — same contract, same reserved path, same
-// one-config-per-node identity rules `checkCommandEntityIdentity` applies —
-// so a node's alarm state does not care which door authored it. What changes
-// is that the person is now checked here, at the signal the alarm is about.
-//
-// Where it is checked matters, and it is NOT this record's own path: the
-// config sits under `_colca/alarm-notification-config`, a reserved position
-// no element owns, so authorizing there would demand a realm-wide grant of
-// everyone. The annotation intent has exactly this shape and resolves it the
-// same way — the position that governs is the entity the command is ABOUT.
+// composeAlarm composes the _AlarmNotificationConfig record an alarm or
+// alarm_acknowledgement intent writes. The record lives at a reserved path no
+// element owns, so the person is authorized at the signal the alarm is about,
+// the same way annotations are.
 func (w *EditExec) composeAlarm(intent editIntent) (int, string, string, []StateRecord) {
 	configuring := intent.Type == "alarm"
 	switch {
@@ -51,35 +38,17 @@ func (w *EditExec) composeAlarm(intent editIntent) (int, string, string, []State
 		return 422, "alarm: entity must name the signal the alarm is about", "invalid", nil
 	}
 
-	// Every alarm command that REACHES a node carries the configuration it
-	// wants: a bare acknowledge is settled at the api and never travels
-	// (`alarm_operations`), because current alarm status belongs to the
-	// evaluator's own table at the node that authors the transitions, not to
-	// KV state. What arrives under `alarm_acknowledgement` is a silence or an
-	// unsilence, which do change the config — and are an operator's act, which
-	// is what the `operate` class carries.
+	// A bare acknowledge is settled at the api and never reaches the node.
+	// What arrives under alarm_acknowledgement is a silence or unsilence,
+	// which changes the config and is an operator's act (operate).
 	return w.alarmConfigRecord(intent.Type, intent.Snapshot)
 }
 
-// composeNotificationConfig composes the record a `notification_config`
-// intent writes: the node's WHOLE alarm configuration, applied at once
-// (`action: "apply"`; the editor's "Apply notifications" door).
-//
-// It is the same `_AlarmNotificationConfig` record the `alarm` family writes
-// — one contract, one reserved path, one set of identity rules — but it is a
-// different act. An `alarm` command is ABOUT one signal and is authorized
-// there; this one is about nothing narrower than the node, names no signal,
-// and so has no position below the node to be checked at.
-//
-// A node is a participant bound to a position like everything else
-// (architecture principle 6): the element its parent enrolled it at. In the
-// node's own frame that position is its root, the empty path — see
-// notificationConfigPositions for how a grant naming that element covers it.
-//
-// The intent carries no entity. The snapshot's `target_node_id` is the one
-// statement of which node this is, checked against the local node exactly as
-// for the `alarm` family; a second copy of that fact on the intent would be a
-// second writer of it.
+// composeNotificationConfig composes the record a notification_config intent
+// writes: the node's whole alarm configuration at once. It is the same record
+// the alarm intents write, but it concerns the whole node, so it is authorized
+// at the node's root (see notificationConfigPositions). The snapshot's
+// target_node_id says which node, checked against this one.
 func (w *EditExec) composeNotificationConfig(intent editIntent) (int, string, string, []StateRecord) {
 	if intent.Action != "apply" {
 		return 422, fmt.Sprintf(
@@ -93,12 +62,10 @@ func (w *EditExec) composeNotificationConfig(intent editIntent) (int, string, st
 	return w.alarmConfigRecord(intent.Type, intent.Snapshot)
 }
 
-// alarmConfigRecord validates one `_AlarmNotificationConfig` snapshot and
-// composes the record at the node's reserved path. Every door that writes
-// this record composes it here, so a node's alarm configuration has one shape
-// no matter which intent authored it — the same two identity rules the
-// configure verb enforces (`checkCommandEntityIdentity`): the id is the one
-// config id, and the target is this node.
+// alarmConfigRecord validates an _AlarmNotificationConfig snapshot and composes
+// the record at the node's reserved path. Every intent that writes this record
+// goes through here, with the same identity rules as the configure verb: the
+// one config id, targeting this node.
 func (w *EditExec) alarmConfigRecord(intentType string, snapshot json.RawMessage) (int, string, string, []StateRecord) {
 	if len(snapshot) == 0 {
 		return 422, fmt.Sprintf("%s: snapshot is required", intentType), "invalid", nil
@@ -131,12 +98,7 @@ func (w *EditExec) alarmConfigRecord(intentType string, snapshot json.RawMessage
 }
 
 // alarmPositions is the alarm family's write-set: the signal the alarm is
-// about, never the config record's own reserved path.
-//
-// `operate` carries the acknowledgement family. Acknowledging or silencing an
-// alarm is an operator's act, not a configuration change — the same split the
-// annotation intent already makes, and the reason an operator can act on an
-// alarm without holding configure anywhere.
+// about. Acknowledging or silencing is an operator's act, so operate covers it.
 func (w *EditExec) alarmPositions(
 	intent editIntent, entities map[string]editSnapshot,
 ) []editTouched {
@@ -145,31 +107,13 @@ func (w *EditExec) alarmPositions(
 	return []editTouched{touched}
 }
 
-// notificationConfigPositions is the whole-node apply's write-set: ONE
-// position, the node itself.
-//
-// In the node's own frame the node is the root, so its position is the empty
-// path — the position every element here sits under. Which grants cover it
-// is decided by the doors' own resolution (`zoneOf`), and this is the subtle
-// part: the node's own element is NOT in its element index. Its
-// `_SystemElement` record was authored by the PARENT at enrollment and
-// entities never descend, so `PathOf` cannot answer it here. What answers it
-// is the ancestry the parent taught on the downlink, which ends at the
-// element the node binds to (`Ancestry` is "from the root down to and
-// including the element the node itself binds to"); `Scope.Reaches` consults
-// exactly that, and `zoneOf` resolves a reaching element to "#". So:
-//
-//   - `cmd:<the node's own element>/#:configure` reaches → zone "#" → covers "";
-//   - `cmd:<an ancestor's element>/#:configure` reaches → the same;
-//   - `cmd:#:configure` → "#" → covers "";
-//   - `cmd:<a child element>/#:configure` resolves to that child's path, which
-//     does not cover "" (coverPath: the root is above it) → refused;
-//   - at the ROOT node the ancestry is empty and the node is bound to nothing
-//     above itself, so only a realm-wide grant covers it — as it should.
-//
-// The refusal names the node, keyed like every other colca-node entity, so
-// a refused apply reads as "entity_not_found: colca-node:<node>" and says
-// no more than any other refusal does.
+// notificationConfigPositions is the whole-node apply's write-set: the node's
+// root, the empty path. The node's own element is not in its element index
+// (the parent authored it), but Scope.Reaches knows the ancestry the parent
+// taught, so zoneOf resolves a grant on the node's element or an ancestor to
+// "#". cmd:#:configure covers it too; a grant on a child element does not. At
+// the root node only a realm-wide grant covers it. A refusal reads
+// "entity_not_found: colca-node:<node>".
 func (w *EditExec) notificationConfigPositions() []editTouched {
 	return []editTouched{{path: "", key: entityVersionKey("colca-node", w.store.NodeID())}}
 }

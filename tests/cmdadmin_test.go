@@ -1,6 +1,6 @@
-// CmdAdmin tree scenarios (cmdadmin design §10): remote enroll/revoke ride
-// the commands stream down the real 3-level topology, execute at the target
-// node, and ack back up — including through an offline window.
+// Remote administration on the three-level tree: enroll and revoke commands
+// travel down the commands stream, execute at the target and ack back up, also
+// across an offline window.
 package tests
 
 import (
@@ -77,8 +77,8 @@ func TestCmdAdminRemoteEnrollAndRevokeThroughTree(t *testing.T) {
 	awaitAdminAck(t, tp.global, "colca/v1/_Ack/n-edge1/site1/edge1/revoke", corr, 200)
 }
 
-// The flagship (design §10): the enroll is issued while the target is DOWN,
-// waits in the durable commands stream, and executes on catch-up.
+// An enroll issued while the target is down waits in the commands stream and
+// executes on catch-up.
 func TestCmdAdminExecutesAfterOfflineCatchup(t *testing.T) {
 	tp := startTopo(t)
 	m9 := authtest.NewMachine(t, "m9")
@@ -148,9 +148,8 @@ func TestCmdAdminExpiredNeverExecutes(t *testing.T) {
 	}
 }
 
-// Humans issue admin commands under the normal class authz (design §4): the
-// grant is scoped to edge1's zone, so edge1 works and sibling edge2 is
-// refused at the door.
+// People issue admin commands under normal class grants: a grant scoped to edge1
+// works there and is refused for edge2.
 func TestCmdAdminHumanIssuerZoneScoped(t *testing.T) {
 	tp := startTopo(t)
 	m9 := authtest.NewMachine(t, "m9")

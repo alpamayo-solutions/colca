@@ -13,9 +13,8 @@ import (
 
 const groupTopic = "colca/v1/_Group/n-parent/01HGRP-OPS"
 
-// A definition crosses a hop untouched. No mount is inserted and none is
-// stripped, because a definition has no position — what the parent holds and
-// what the child holds are the same bytes (definition-stream design §2/§3).
+// A definition crosses a hop untouched: no mount is inserted or stripped,
+// because a definition has no position.
 func TestDefinitionCrossesAHopByteIdentical(t *testing.T) {
 	dir := t.TempDir()
 	parentID, _ := identity.Generate(filepath.Join(dir, "p.key"))
@@ -51,7 +50,7 @@ func TestDefinitionCrossesAHopByteIdentical(t *testing.T) {
 }
 
 // Nothing addresses a definition at one child: every child below the author
-// gets every definition (design §10.1, decided: broadcast).
+// gets every definition.
 func TestEveryChildReceivesEveryDefinition(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -98,10 +97,9 @@ func TestDefinitionCursorIsIndependentOfTheCommandCursor(t *testing.T) {
 		`{"correlation_id":"c1","expires_at":99999999999}`)
 
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
-	// Read the definition, leave the command alone. Two polls: the cursor is a
-	// DELIVERY FLOOR — it records the position the child reports, so it only
-	// moves once the child comes back having consumed the first batch. Same
-	// semantics as the command cursor, deliberately.
+	// Read the definition and leave the command alone. The cursor is a delivery
+	// floor: it records the position the child reports, so it moves only once the
+	// child comes back having consumed the first batch, as with commands.
 	_, next, err := cl.DownlinkDefinitions(1, 10, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -119,9 +117,8 @@ func TestDefinitionCursorIsIndependentOfTheCommandCursor(t *testing.T) {
 	}
 }
 
-// Definitions descend. A child that authors one must never push it upward: the
-// uplink carries metrics, entities and acks, and a leaf that could send policy
-// up would be authoring for the whole tree (design §4).
+// Definitions only descend. A child that authors one never pushes it up; a leaf
+// that could send policy up would author it for the whole tree.
 func TestTheUplinkNeverCarriesDefinitions(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -136,7 +133,7 @@ func TestTheUplinkNeverCarriesDefinitions(t *testing.T) {
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	ccfg := &config.Config{ULID: "n-child"}
 	_, ceng := nodeParts(t, cs, ccfg, nil, nil, nil)
-	// The child authors a definition of its own, plus a metric that MUST rise.
+	// The child authors a definition of its own, plus a metric that must rise.
 	mustIngestAdmin(t, ceng, "colca/v1/_Group/n-child/01HGRP-LOCAL", `{"id":"01HGRP-LOCAL","name":"Local"}`)
 	mustIngestAdmin(t, ceng, "colca/v1/_Metric/n-child/temp", `{"v":1}`)
 
@@ -155,9 +152,8 @@ func TestTheUplinkNeverCarriesDefinitions(t *testing.T) {
 	}
 }
 
-// A definition that arrives is APPLIED, not executed: it lands in the store, in
-// the KV view, and retained on the local bus, so a consumer that subscribes
-// later still sees it.
+// An arriving definition is applied, not executed: it lands in the store, in the
+// KV view and retained on the local bus, so a later subscriber still sees it.
 func TestAnArrivingDefinitionIsAppliedAsRetainedState(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -206,15 +202,10 @@ func TestAnArrivingDefinitionIsAppliedAsRetainedState(t *testing.T) {
 	}
 }
 
-// A definition this node's contracts cannot apply is skipped, and the ones
-// behind it still arrive.
-//
-// A hub upgraded before its edges authors a definition contract the older
-// bundle downstream does not know — this branch added _DataModel and PAT
-// records exactly that way. The child classifies it as unknown and refuses
-// it; re-offering it forever parked the channel there, so every later
-// definition (a new group, a type, a revoked group's tombstone) stopped
-// arriving at that node until someone upgraded it.
+// A definition this node cannot apply is skipped, and the ones behind it still
+// arrive. A hub upgraded before its edges sends contracts the older child does
+// not know; if the child held on that record, later definitions such as a
+// revoked group's tombstone would never reach it.
 func TestADefinitionThisNodeCannotApplyDoesNotBlockTheOnesBehindIt(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -226,9 +217,8 @@ func TestADefinitionThisNodeCannotApplyDoesNotBlockTheOnesBehindIt(t *testing.T)
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	defer srv.Stop()
 
-	// The newer hub's definition, written straight into the stream: its
-	// contract is one this binary has no class for, so no door here would
-	// author it either.
+	// The newer hub's definition, written straight into the stream: this binary has
+	// no class for its contract, so no door here would accept it.
 	if _, _, err := ps.Append("definitions", []store.Record{
 		{Topic: "colca/v1/_FutureThing/n-parent/01HFUT", Payload: []byte(`{"id":"01HFUT"}`), TS: 1},
 	}); err != nil {
@@ -255,19 +245,14 @@ func TestADefinitionThisNodeCannotApplyDoesNotBlockTheOnesBehindIt(t *testing.T)
 	}
 }
 
-// After compaction has emptied the tail of the definitions stream, the poll
-// reports the stream's HEAD — not the position the child already holds.
-//
-// The stream is compacted, not pruned, so a hole in it is not a gap: what
-// remains IS the current definition set and a child reading from below the
-// hole is caught up. Answering with its own position back left it nothing to
-// ack while the poll's wake condition still said a definition was waiting, so
-// the poll returned instantly and the child re-polled at once — both nodes
-// spinning at the rate limit until someone authored a new definition.
+// After compaction empties the tail of the definitions stream, the poll reports
+// the stream's head, not the child's own position. A compacted hole is not a
+// gap: what remains is the current set, so the child is caught up. Echoing its
+// position back would make both nodes spin at the rate limit.
 func TestDefinitionsPollReportsTheHeadAfterCompaction(t *testing.T) {
 	f := newParentFixture(t)
-	// A group and its retraction, both read by another child — which is what
-	// lets compaction remove the tombstone too.
+	// A group and its retraction, both read by another child, which lets compaction
+	// remove the tombstone too.
 	if _, _, err := f.ps.Append("definitions", []store.Record{
 		{Topic: groupTopic, Payload: []byte(`{"id":"01HGRP-OPS","name":"Ops"}`), TS: 1,
 			KVPath: "01HGRP-OPS", KVNode: "n-parent"},
@@ -292,9 +277,8 @@ func TestDefinitionsPollReportsTheHeadAfterCompaction(t *testing.T) {
 		t.Fatalf("def_next = %d, want the head %d — with no progress to ack the child re-polls immediately, forever", next, head)
 	}
 
-	// The denominator: from that same position a definition authored AFTER
-	// the hole is still delivered, so the answer above means "caught up",
-	// not "this poll is broken".
+	// From the same position a definition authored after the hole still arrives, so
+	// the answer above means "caught up" and not "the poll is broken".
 	mustIngestAdmin(t, f.peng, groupTopic, `{"id":"01HGRP-OPS","name":"Ops again"}`)
 	defs, next, err = f.cl.DownlinkDefinitions(head, 10, 2*time.Second)
 	if err != nil {
@@ -308,21 +292,16 @@ func TestDefinitionsPollReportsTheHeadAfterCompaction(t *testing.T) {
 	}
 }
 
-// A child may not push onto the definitions stream, whatever contract it puts
-// in the records. TestTheUplinkNeverCarriesDefinitions pins the pusher's half
-// of that rule; this pins the door's, which is the half that has to hold
-// against a child that is buggy or hostile rather than merely well-behaved.
-//
-// The direction check used to run only for a contract this node's bundle
-// declares, so an unknown one landed on whichever stream the request named.
-// One such record on `definitions` was then broadcast to every child of this
-// node, each of which rejected it as "not a definition" and stopped advancing
-// its definitions cursor — no group, PAT or type reached any of them again.
+// A child may not push onto the definitions stream, whatever contracts its
+// records carry. TestTheUplinkNeverCarriesDefinitions covers the pusher; this
+// covers the door, which must hold against a buggy or hostile child. An unknown
+// contract on definitions would reach every child of this node, each would
+// reject it and stop advancing, and no group, PAT or type would reach them again.
 func TestChildCannotReplicateOntoTheDefinitionsStream(t *testing.T) {
 	f := newParentFixture(t)
 	before := f.ps.NextOffset("definitions")
 
-	// The denominator: this child CAN replicate, on a stream that rises.
+	// For comparison, this child can replicate on a stream that rises.
 	if _, err := f.cl.Replicate("metrics", []store.ReplRecord{
 		{ChildOffset: 1, Topic: "colca/v1/_Metric/n-child/t", Payload: []byte(`{"v":1}`), TS: 1},
 	}); err != nil {

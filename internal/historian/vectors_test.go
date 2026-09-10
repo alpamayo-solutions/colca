@@ -8,10 +8,8 @@ import (
 	"time"
 )
 
-// The Go half of the shared metric-row vectors. Which column a
-// measurement lands in is decided here and read back by readers in other
-// languages: a value written to value_number and read from value_text simply
-// disappears from a chart, and nothing would fail. One dataset, judged twice.
+// The Go half of the shared metric-row vectors: the column a measurement lands
+// in must match what readers in other languages expect.
 const vectorPath = "../../contracts/src/colca_data_contracts/vectors/metric_rows.json"
 
 type metricVectors struct {
@@ -102,11 +100,9 @@ func TestGoldenVectorsThatAreNotMeasurements(t *testing.T) {
 	}
 }
 
-// TestGoldenVectorsPinTheWireTimestampUnit is the Go half of the
-// Metric.timestamp wire contract: unix seconds, float, fractional part
-// allowed. Nothing on the Python side re-decodes this value (the API reads
-// timestamps back out of Postgres, already a datetime), so this is the only
-// suite that can catch a unit mismatch here.
+// TestGoldenVectorsPinTheWireTimestampUnit checks the Metric.timestamp wire
+// unit, unix seconds as a float. No Python test decodes it, so this is the only
+// check.
 func TestGoldenVectorsPinTheWireTimestampUnit(t *testing.T) {
 	vectors := loadVectors(t)
 	for _, tc := range vectors.Timestamps.Cases {

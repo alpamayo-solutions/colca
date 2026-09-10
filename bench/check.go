@@ -13,16 +13,10 @@ type Bound struct {
 	Max *float64 `json:"max"`
 }
 
-// Check compares the newest report of each scenario in resultsPath (a JSONL
-// run-record file, see ReadRecords) against thresholdsPath. Metrics with
-// null/absent bounds are printed but never gate — that is how the harness
-// ships BEFORE target-hardware numbers exist. A missing file (either side) is
-// an error: a gate that cannot read its inputs must fail, not pass. A
-// scenario with at least one non-null bound that is absent from resultsPath
-// is also a violation — an empty or stale results file must not silently
-// pass a gate that has real bounds. A scenario whose bounds are all null
-// stays skip-silent when absent, so report-only runs still work with a
-// partial results file.
+// Check compares the newest report of each scenario in resultsPath against
+// thresholdsPath. Metrics with null bounds are printed but never gate. Missing
+// files are errors, and so is a scenario with a real bound that has no result;
+// a scenario whose bounds are all null may be absent.
 func Check(resultsPath, thresholdsPath string, w io.Writer) error {
 	reports, err := ReadRecords(resultsPath)
 	if err != nil {
@@ -50,8 +44,7 @@ func Check(resultsPath, thresholdsPath string, w io.Writer) error {
 			if hasActiveBound(bounds) {
 				violations = append(violations, fmt.Sprintf("scenario %q with active bounds missing from results", scenario))
 			}
-			// else: every bound is null (report-only) — skip silently so
-			// partial runs still work before target-hardware numbers exist.
+			// Every bound is null (report-only), so an absent scenario is fine.
 			continue
 		}
 		for metric, b := range bounds {

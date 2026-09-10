@@ -7,25 +7,16 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// ColcaGrantsAttr is the escape hatch: grant strings written straight onto a
-// Keycloak group. It is how `admin:#` is expressed — realm-wide, with no
-// element to hang a permission on — and how somebody unblocks themselves when
-// the authz objects are wrong. It lives INSIDE Keycloak, so it does not
-// reintroduce a second writer to the tree.
+// ColcaGrantsAttr holds grant strings set directly on a Keycloak group. It is
+// how admin:# is expressed, since there is no element to attach it to, and a
+// way to unblock access when the authz objects are wrong.
 const ColcaGrantsAttr = "colca_grants"
 
-// CompileGrants turns permissions into the grant strings a node evaluates.
-//
-// A permission is (group policies × resources × scopes); a grant is
-// (verb, one element, classes). The mapping is mechanical on purpose — this
-// service CARRIES authorization decisions, it does not make them.
-//
-// Output is sorted and deduplicated. That is not cosmetic: the result is
-// compared against what the tree already holds on every cycle, and an unordered
-// list would diff as a change every time and rewrite every definition forever.
-//
-// Problems are returned rather than raised. One unusable hand-typed grant must
-// not cost a group the grants that are fine.
+// CompileGrants turns permissions into the grant strings a node evaluates. The
+// mapping is mechanical: this service carries decisions, it does not make them.
+// Output is sorted and deduplicated because it is compared with the tree every
+// cycle. Problems are returned, not raised, so one bad grant does not cost a
+// group the rest.
 func CompileGrants(perms []Permission, attrs map[string][]string) (map[string][]string, []error) {
 	var problems []error
 	buckets := map[string]map[string]bool{}
@@ -59,16 +50,9 @@ func CompileGrants(perms []Permission, attrs map[string][]string) (map[string][]
 		}
 
 		for _, element := range perm.Elements {
-			// A resource name is an element ID, and FormatGrant deliberately
-			// reads "#" as the whole namespace: a permission on a resource
-			// named "#" would render as "read:#" / "cmd:#:configure" and hand
-			// its groups the entire tree instead of one element. ParseGrant
-			// cannot catch that downstream — by then the two are the same
-			// string. So the name is judged as an element id, here, where it
-			// is still one.
-			// An EMPTY name widens the same way and must fail closed here too:
-			// FormatGrant reads "" as the whole namespace as well, and a
-			// resource this service could not name is not one it may grant on.
+			// A resource name must be an element id. FormatGrant reads "#" and "" as the
+			// whole namespace, so such a name would grant the entire tree, and ParseGrant
+			// cannot tell afterwards. Refuse it here.
 			if element == "" {
 				problems = append(problems, fmt.Errorf(
 					"permission %s: refusing a resource with no name", perm.Name))
@@ -117,9 +101,8 @@ func CompileGrants(perms []Permission, attrs map[string][]string) (map[string][]
 	for group, set := range buckets {
 		grants := make([]string, 0, len(set))
 		for grant := range set {
-			// Everything this emits must be something a node accepts; a grant
-			// that fails here would be published and then rejected at every node
-			// in the tree, forever.
+			// Only emit what a node accepts, or the definition would be refused at every
+			// node.
 			if _, err := uns.ParseGrant(grant); err != nil {
 				problems = append(problems, fmt.Errorf("group %s: refusing to publish %q: %w",
 					group, grant, err))

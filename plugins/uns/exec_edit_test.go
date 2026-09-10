@@ -613,15 +613,9 @@ func TestEditNodeAttachmentRejectsStaleVersionAndStartsDrain(t *testing.T) {
 	}
 }
 
-// The same rule the `_CmdConfigure` element/upsert door applies, at the
-// Edit create door: an element id becomes a grant zone once grantsync
-// registers it, and FormatGrant reads "#" as the whole namespace, so an
-// element created with that id turns every grant given against it into the
-// entire tree. A well-behaved client sends a ULID, but the node must not
-// depend on a caller it does not control for this.
-//
-// The last row is the denominator: an ordinary id through the identical
-// command still creates the element.
+// The Edit create door applies the same element id rule as element/upsert: an
+// id "#" would turn every grant on the element into the whole tree. The last
+// row checks that an ordinary id still creates.
 func TestEditCreateRefusesAnElementIdThatIsNotAnIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -662,15 +656,9 @@ func TestEditCreateRefusesAnElementIdThatIsNotAnIdentity(t *testing.T) {
 	}
 }
 
-// An Edit delete retires positions, so it answers the same occupancy
-// question `_CmdConfigure element/delete` does: an element an identity binds to
-// may not be retired. It used to answer none — a cascading delete of a site a
-// child node was enrolled at cut that node off at the replication door, while
-// the configure verb refused the very same retirement with 409.
-//
-// Cascade does not license it. Cascade says the caller accepts taking the
-// element's CHILDREN with it; a bound participant is not a child and not the
-// caller's to strand.
+// An Edit delete applies the same occupancy rule as element/delete: an element
+// an identity binds to may not be retired, cascade or not. Cascade covers
+// children, not bound participants.
 func TestEditDeleteRefusesWhileAnIdentityBindsToTheSubtree(t *testing.T) {
 	f := newStore("n-hub")
 	siteVersion := seedEditEntity(t, f, "_SystemElement", "site1", map[string]any{
@@ -714,9 +702,8 @@ func TestEditDeleteRefusesWhileAnIdentityBindsToTheSubtree(t *testing.T) {
 		}
 	}
 
-	// The denominator: the identical command, with nothing standing on the
-	// subtree, retires both positions. Without this the 409 above would also
-	// pass if delete were broken outright.
+	// The same command with nothing bound in the subtree retires both
+	// positions, so the 409 above is not a broken delete.
 	free := NewEditExec(f, bindings{"el-elsewhere": {"n-other"}}, nil)
 	code, message, _, writes = free.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(
 		t, "op-delete-free-cascade", map[string]uint64{

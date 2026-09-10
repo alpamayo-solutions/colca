@@ -16,17 +16,9 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// RunFootprint answers the "lightweight" claim with a number: RSS of the REAL
-// colcad binary (not the in-process harness) as a standalone edge node — idle,
-// then under one machine publishing flat out for Duration.
-// postAdmin POSTs an admin-token request to the running colcad and fails on
-// any non-2xx, so a scenario never proceeds on a silently rejected setup
-// step. It is how every benchmark writes through the API door. The door
-// rate-limits writes (httpapi/limits.go: 100/s, burst 250, per client) and
-// answers 429 with Retry-After — that is the node working, and a production
-// publisher has to wait exactly like this, so the bench waits too rather
-// than asking for a limit nobody deploys. Bounded: a 429 that outlives the
-// budget is returned as the error it is.
+// postAdmin sends an admin-token request to colcad and fails on any non-2xx, so
+// a scenario never continues past a rejected setup step. A 429 is waited out
+// with Retry-After, as a production publisher would, within a bounded budget.
 func postAdmin(hc *http.Client, apiAddr, path string, body []byte) error {
 	const retryBudget = 60 * time.Second
 	deadline := time.Now().Add(retryBudget)
@@ -56,6 +48,8 @@ func postAdmin(hc *http.Client, apiAddr, path string, body []byte) error {
 	}
 }
 
+// RunFootprint measures the RSS of the real colcad binary as a standalone
+// edge node, idle and then under one machine publishing flat out.
 func RunFootprint(p Params) (*Report, error) {
 	dir := p.WorkDir
 	keyPath := filepath.Join(dir, "fp.key")
@@ -118,8 +112,7 @@ mqtt:
 	if err != nil {
 		return nil, err
 	}
-	// m1 binds to an element, so the element has to exist first — published
-	// through the same admin door a deployment would use.
+	// m1 binds to an element, which is published first through the admin door.
 	m1Element := elementIDFor("m1")
 	element, _ := json.Marshal(map[string]any{
 		"topic":   uns.Prefix() + "_SystemElement/n-fp/m1",

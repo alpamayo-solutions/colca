@@ -17,16 +17,10 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// Design §3.2, uplink half: first contact with a parent this child has no
-// cursor for offers everything the child still RETAINS, starting at the
-// stream's LWM.
-//
-// Reaching the survivors is not the whole claim — the loop's §6.3 clamp would
-// reach them from the default position 1 too. It would get there by reporting a
-// gap, and that report would be false: a gap says records were lost between a
-// position this parent held and the one it holds now, and this parent never
-// held one. Seeding the cursor at the LWM up front is what tells the two
-// situations apart, so the metric is the assertion that bites.
+// On first contact with a parent it has no cursor for, the child offers
+// everything it still retains, starting at each stream's LWM. The loop's LWM
+// clamp would reach the same records from position 1 but would report a gap
+// that never happened, so the metric is the real assertion.
 func TestFirstContactUplinkStartsAtTheLWMWithoutReportingAGap(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -44,9 +38,8 @@ func TestFirstContactUplinkStartsAtTheLWMWithoutReportingAGap(t *testing.T) {
 	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 5)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 
-	// Retention already removed offsets 1..3 while this node was attached
-	// elsewhere: the survivors are temp3 and temp4, and no cursor exists for
-	// the parent it is about to meet.
+	// Retention removed offsets 1..3 while this node was attached elsewhere: temp3
+	// and temp4 survive, and there is no cursor for the new parent.
 	if n, err := cs.Prune("metrics", 4, []string{uns.UplinkCursor(cl.ParentPub())}, nil); err != nil || n != 3 {
 		t.Fatalf("prune: removed %d records, err %v — want 3 removed", n, err)
 	}
@@ -85,16 +78,11 @@ func TestFirstContactUplinkStartsAtTheLWMWithoutReportingAGap(t *testing.T) {
 	}
 }
 
-// Design §3.2, downlink half: commands are the opposite of uplink. An
-// instruction issued before this child attached was addressed to whatever
-// occupied the mount then, so handing it to a newcomer would execute a command
-// its author never meant for it. First contact therefore adopts the parent's
-// head and starts listening from there.
-//
-// The post-attachment command is what makes the silence a decision rather than
-// a dead loop: the parent's stream is ordered and the child reads it in order,
-// so a delivery of "post" with no prior delivery of "pre" can only mean "pre"
-// was deliberately skipped.
+// Commands are the opposite of uplink: one issued before this child attached
+// was meant for whatever held the mount then, so first contact adopts the
+// parent's head. The post-attachment command shows this is a decision, not a
+// dead loop: the stream is read in order, so "post" arriving without "pre"
+// means "pre" was skipped on purpose.
 func TestFirstContactCommandsStartAtTheParentsHead(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -155,16 +143,11 @@ func TestFirstContactCommandsStartAtTheParentsHead(t *testing.T) {
 	}
 }
 
-// The head-adoption rule has to survive a parent that is not there yet, which
-// is the ordinary case for a node that boots before (or faster than) its
-// parent. hello is where the head comes from, so a hello that fails must be
-// retried rather than shrugged off: polling without it would read from position
-// 1 and hand this child every instruction issued before it attached — one
-// transient error defeating §3.2 outright.
-//
-// Reuses the offline pattern from the uplink suite: allocate an address, take
-// the parent down, start the loop against it, bring the parent back on the same
-// address with a command already waiting.
+// Head adoption must survive a parent that is not up yet, the normal case for a
+// node that boots first. A failed hello is retried: polling without the head
+// would read from 1 and deliver every command issued before the child attached.
+// The test starts the loop against a stopped parent and brings it back on the
+// same address with a command waiting.
 func TestFirstContactSurvivesAParentThatIsNotUpYet(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -225,15 +208,10 @@ func TestFirstContactSurvivesAParentThatIsNotUpYet(t *testing.T) {
 	}
 }
 
-// Head adoption applies to a parent this child has NEVER met — not to one it
-// met when that parent's commands stream happened to be empty. The two look
-// identical through CursorGet, which answers 1 for "absent" and for "at the
-// first offset" alike, and they demand opposite behaviour: the second must
-// still receive what was queued while it was down, which is the offline
-// catch-up contract (cmdadmin design §10).
-//
-// The sequence is a node's ordinary life: attach to a fresh parent, stop, have
-// a command issued in the meantime, come back.
+// Head adoption is for a parent this child never met, not one it met while its
+// commands stream was empty. CursorGet returns 1 for both, but the second must
+// still receive what was queued while the child was down. The test attaches to
+// a fresh parent, stops, issues a command and comes back.
 func TestARestartAfterMeetingAnEmptyParentStillGetsWhatWasQueued(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -288,13 +266,9 @@ func TestARestartAfterMeetingAnEmptyParentStillGetsWhatWasQueued(t *testing.T) {
 	}
 }
 
-// Design §3.5: an existing deployment's un-scoped cursors are adopted ONCE
-// under the scoped names and then deleted.
-//
-// Two halves, both load-bearing. Adoption must carry the VALUE — a node that
-// already offered its first records must not re-offer them, which is why the
-// parent's contents are asserted and not just the cursor. And no compatibility
-// path may stay behind, which is why the legacy key must be gone afterwards.
+// Existing unscoped cursors are adopted once under the scoped names and then
+// deleted. Adoption must carry the value, so the parent's contents are checked,
+// and the legacy key must be gone afterwards.
 func TestLegacyCursorsAreAdoptedOnceThenGone(t *testing.T) {
 	cs, ps, parentPub, start := uplinkPair(t)
 	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 5)
@@ -332,17 +306,10 @@ func TestLegacyCursorsAreAdoptedOnceThenGone(t *testing.T) {
 	}
 }
 
-// Design §3.5, the commands half of adoption — the path EVERY existing
-// deployment traverses exactly once, on its first start after this change.
-//
-// Control flow is what makes this one different from the uplink half: the
-// commands branch reads `if !adoptLegacy(...) { SetIfAbsent(head) }`, so the
-// two outcomes are not "adopted" and "adopted a bit later" but "resume where
-// this node was" and "jump to the parent's head". The second silently drops
-// every command that queued while the node was down for the upgrade, which is
-// the ordinary shape of an upgrade: stop the node, replace the binary, start
-// it. So the position is asserted, not just the name — reaching cmd2 at all is
-// the claim, and it is unreachable from the head.
+// The commands half of adoption, which every existing deployment goes through
+// once. If adoption fails the code jumps to the parent's head, silently dropping
+// commands queued during the upgrade, so the test asserts the position: cmd2 is
+// unreachable from the head.
 func TestALegacyCommandsCursorIsAdoptedInsteadOfTheParentsHead(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -354,9 +321,8 @@ func TestALegacyCommandsCursorIsAdoptedInsteadOfTheParentsHead(t *testing.T) {
 	srv, addr := startServer(t, pcfg, peng, parentID, preg)
 	defer srv.Stop()
 
-	// Three commands, all issued before this loop ever runs. cmd1 was already
-	// delivered under the pre-scoping cursor; cmd2 and cmd3 queued while the
-	// node was down being upgraded.
+	// Three commands issued before the loop runs: cmd1 was delivered under the old
+	// cursor, cmd2 and cmd3 queued while the node was being upgraded.
 	mustIngestAdmin(t, peng, "colca/v1/_CmdParam/m1/child1/m1/cmd1",
 		`{"correlation_id":"c1","expires_at":99999999999}`)
 	afterCmd1 := ps.NextOffset("commands")
@@ -377,9 +343,8 @@ func TestALegacyCommandsCursorIsAdoptedInsteadOfTheParentsHead(t *testing.T) {
 		func(topic string, _ []byte, _ bool) { delivered <- topic }, nil, nil)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 
-	// The position this node held under the pre-scoping name: past cmd1, in
-	// front of cmd2. CursorAck is forward-only and answers false without moving,
-	// so the seed is asserted rather than assumed.
+	// The position under the old name: past cmd1, before cmd2. CursorAck is
+	// forward-only and returns false without moving, so the seed is checked.
 	if !cs.CursorAck(legacyDownlinkCursor, downlinkStream, afterCmd1) {
 		t.Fatal("seeding the legacy commands cursor did not move it — the precondition is a no-op " +
 			"and everything below would pass for the wrong reason")
@@ -415,14 +380,10 @@ func TestALegacyCommandsCursorIsAdoptedInsteadOfTheParentsHead(t *testing.T) {
 		20*time.Second, func() bool { return !cursorPresent(cs, legacyDownlinkCursor, downlinkStream) })
 }
 
-// Design §3.5, the definitions half — the third cursor, and the one neither of
-// its siblings speaks for: definitions ride their own name under a first-contact
-// rule of their own (start at 1, never at a head), so an adoption that works for
-// commands says nothing about it.
-//
-// The parent's definitions stream is deliberately EMPTY, which is what makes the
-// adopted position mean something: nothing this child could consume can explain
-// a cursor at 4, so the value can only have come from the legacy key.
+// The definitions half: definitions have their own name and first-contact rule
+// (start at 1), so the commands case says nothing about them. The parent's
+// definitions stream is empty, so a cursor at 4 can only come from the legacy
+// key.
 func TestALegacyDefinitionsCursorIsAdoptedOnceThenGone(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -458,9 +419,8 @@ func TestALegacyDefinitionsCursorIsAdoptedOnceThenGone(t *testing.T) {
 	waitFor(t, "the legacy definitions position to appear under the scoped name", 20*time.Second, func() bool {
 		return cs.CursorGet(uns.DownlinkDefCursor(cl.ParentPub()), downlinkDefStream) == legacyPos
 	})
-	// Waited for, not asserted once: adoption writes the scoped position and
-	// deletes the legacy key as two store calls, so the value arriving under
-	// the new name says nothing yet about the old one being gone.
+	// Wait rather than assert once: adoption writes the new position and deletes
+	// the old key in two store calls.
 	waitFor(t, "the legacy definitions cursor to be gone — no compatibility path may stay behind",
 		20*time.Second, func() bool { return !cursorPresent(cs, legacyDownlinkDefCursor, downlinkDefStream) })
 }
@@ -477,16 +437,11 @@ func cursorPresent(st *store.Store, name, stream string) bool {
 	return false
 }
 
-// Design §3.3, the mixed-version case: a parent that predates the `head` field
-// answers hello without one. That is what a leaf-first rolling upgrade produces,
-// and the child cannot repair it — with no head there is nothing to adopt, so
-// its command cursor stays at the default 1 and the first poll hands it the
-// pre-attachment commands §3.2 refuses.
-//
-// Behaviour is deliberately unchanged; what is pinned here is that the
-// degradation is VISIBLE. The §7 diagnostic cannot speak for this case (it needs
-// a head of its own to compare against) and hello runs once per process, so
-// without this report the node is silently wrong forever.
+// A parent older than the head field answers hello without one, as during a
+// leaf-first rolling upgrade. The child cannot fix that: its command cursor
+// stays at 1 and the first poll delivers pre-attachment commands. Behaviour is
+// unchanged; the test pins that the problem is logged, since nothing else would
+// show it.
 func TestAParentThatAnswersHelloWithoutAHeadIsReported(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -511,11 +466,8 @@ func TestAParentThatAnswersHelloWithoutAHeadIsReported(t *testing.T) {
 		return scrapeMetric(t, cm, absent) == 1
 	})
 
-	// And the cursor is left exactly as it was found. Both halves matter: the
-	// POSITION is the default 1 (so the poll reads from the start, which is the
-	// unchanged behaviour), and no KEY exists (so nothing was claimed from a head
-	// this parent never sent, and a later parent that does send one still counts
-	// as first contact).
+	// The cursor is left as found: position 1, so the poll reads from the start, and
+	// no key, so a later parent with a head still counts as first contact.
 	if got := cs.CursorGet(uns.DownlinkCursor(cl.ParentPub()), downlinkStream); got != 1 {
 		t.Fatalf("commands cursor = %d, want the default 1 — a parent that sent no head cannot have "+
 			"taught this node a position", got)
@@ -528,14 +480,10 @@ func TestAParentThatAnswersHelloWithoutAHeadIsReported(t *testing.T) {
 	}
 }
 
-// preScopedParent is a parent from BEFORE this design: it speaks the downlink
-// wire protocol exactly as it did then, which is to say without `head`. A real
-// server cannot stand in for it — NextOffset never answers 0, so the field is
-// always present — and the point of the test is the field's ABSENCE.
-//
-// Nothing but TLS identity is borrowed from the real thing: the client pins the
-// parent's public key and verifies no CA, so presenting that identity's own
-// self-signed certificate is the whole handshake.
+// preScopedParent speaks the downlink protocol without head, as parents did
+// before the field existed. A real server always sends head, so it cannot stand
+// in. Only the TLS identity is borrowed: the client pins the parent's key and
+// checks no CA.
 func preScopedParent(t *testing.T, id *identity.Identity) string {
 	t.Helper()
 	cert, err := id.SelfSignedCert("colca-parent")
@@ -543,9 +491,8 @@ func preScopedParent(t *testing.T, id *identity.Identity) string {
 		t.Fatalf("parent cert: %v", err)
 	}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// An ordinary poll answers nothing, at a long poll's pace: without the
-		// delay the loop under test would spin on an empty answer for the whole
-		// test.
+		// An ordinary poll answers nothing at a long poll's pace, so the loop under
+		// test does not spin.
 		if r.URL.Query().Get("hello") != "1" {
 			time.Sleep(200 * time.Millisecond)
 		}
@@ -559,14 +506,10 @@ func preScopedParent(t *testing.T, id *identity.Identity) string {
 	return strings.TrimPrefix(srv.URL, "https://")
 }
 
-// Design §7, the one diagnostic head buys on an EXISTING cursor. A scoped
-// commands cursor sitting past the parent's head is a node that will hear
-// nothing until the parent's stream grows past it — the parent pruned past this
-// position, or was rebuilt from empty. Today that node waits silently forever.
-//
-// Detection only. The cursor must NOT be rewound: a shorter parent stream is
-// also exactly what a legitimately pruned parent looks like, and rewinding
-// would re-deliver commands that already ran.
+// A commands cursor past the parent's head (the parent pruned past it or was
+// rebuilt empty) would leave the node hearing nothing, silently. It must be
+// reported, and not rewound: a legitimately pruned parent looks the same, and
+// rewinding would re-deliver commands that already ran.
 func TestExistingCommandsCursorPastTheParentsHeadIsReported(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))

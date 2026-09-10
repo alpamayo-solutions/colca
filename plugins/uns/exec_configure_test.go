@@ -17,8 +17,7 @@ type fakeStore struct {
 	fail          map[string]string // topic → error to return from Publish
 	offset        uint64
 	batchCalls    int
-	// eventCalls counts PublishEvent invocations — the door annotation
-	// records take instead of PublishBatch (see PublishEvent below).
+	// eventCalls counts PublishEvent calls, the path annotation records take.
 	eventCalls int
 }
 
@@ -69,9 +68,8 @@ func (f *fakeStore) KVScanAll(contract string) []KVRecord {
 	return out
 }
 
-// put applies one record the way the store would once the batch it belongs to
-// has been accepted. It is not part of EntityStore: the plugin has exactly one
-// write door, and it is atomic. Tests seed through seed() below.
+// put applies one record the way the store does once its batch is accepted.
+// It is not part of EntityStore; tests seed through seed().
 func (f *fakeStore) put(topic string, payload []byte) (StateWrite, error) {
 	if msg, bad := f.fail[topic]; bad {
 		return StateWrite{}, errString(msg)
@@ -93,10 +91,8 @@ func (f *fakeStore) put(topic string, payload []byte) (StateWrite, error) {
 	return write, nil
 }
 
-// PublishBatch mirrors the engine's commit boundary: every record is validated
-// before any of them is applied, and a refusal names the record it refused (the
-// engine's message carries the index and the topic, which is how a caller still
-// learns WHICH entry it was once the executor stopped writing one at a time).
+// PublishBatch mirrors the engine's commit: every record is validated before
+// any is applied, and a refusal names the refused record.
 func (f *fakeStore) PublishBatch(records []StateRecord) ([]StateWrite, error) {
 	for i, record := range records {
 		if msg, bad := f.fail[record.Topic]; bad {
@@ -115,13 +111,9 @@ func (f *fakeStore) PublishBatch(records []StateRecord) ([]StateWrite, error) {
 	return writes, nil
 }
 
-// PublishEvent mirrors the engine's event door (ingestAdminEvent): exactly
-// one record, and — unlike put(), which the fake's PublishBatch uses and
-// which always KV-projects, correctly for the entity/definition classes that
-// door exists for — this NEVER writes f.records, because the whole point of
-// this door is a class ingestAdminEvent never KV-projects either. A test that
-// calls PublishEvent and then asserts KVGet finds nothing is exercising the
-// real distinction, not a fake artifact of this helper.
+// PublishEvent mirrors the engine's event door: one record, never written to
+// f.records, because events are never KV-projected. A KVGet miss after it is
+// the real behaviour, not a quirk of the fake.
 func (f *fakeStore) PublishEvent(record StateRecord) (StateWrite, error) {
 	if msg, bad := f.fail[record.Topic]; bad {
 		return StateWrite{}, errString(msg)
@@ -135,10 +127,8 @@ func (f *fakeStore) PublishEvent(record StateRecord) (StateWrite, error) {
 	return StateWrite{Stream: StreamFor(ClassOf(parsed.Contract)), Offset: f.offset, Topic: record.Topic}, nil
 }
 
-// seed puts one record in place as setup and returns its coordinates. It goes
-// straight to put rather than through PublishBatch: a fixture's own records are
-// setup, not traffic under test, and the tests that count commits would read
-// every seeded row as one.
+// seed stores one record as setup and returns its coordinates. It bypasses
+// PublishBatch so tests that count commits do not count fixtures.
 func (f *fakeStore) seed(topic string, payload []byte) (StateWrite, error) {
 	return f.put(topic, payload)
 }
@@ -231,16 +221,12 @@ func TestUpsertSurfacesADoorRejection(t *testing.T) {
 	}
 }
 
-// A command is ONE state transition. This is the claim the executor was
-// rebuilt around: it used to write each record as it went, so a fortieth signal
-// the door refused left the first thirty-nine committed and returned an error
-// to a caller with no way to learn which half had taken. Idempotency covered
-// for it — a re-run skipped what existed — but "run it again" is not the same
-// guarantee as "nothing happened".
+// A command is one state transition: if the door refuses one record, nothing
+// from the command is committed.
 func TestARefusedRecordLeavesTheWholeCommandUncommitted(t *testing.T) {
 	f := newStore("n-edge1")
-	// The third signal is the one the door will refuse. The 422 asserted below
-	// is what proves this seed bit: without it the command answers 200.
+	// The door refuses the third signal; the 422 below proves the seed took
+	// effect.
 	f.fail["colca/v1/_Signal/n-edge1/line1/third"] = "validation: missing required field name"
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
 	command := body(t, map[string]any{
@@ -271,9 +257,7 @@ func TestARefusedRecordLeavesTheWholeCommandUncommitted(t *testing.T) {
 	}
 }
 
-// The other half of the same claim: the accepted command commits as ONE batch,
-// not as one batch per record. A per-record loop over the atomic port would
-// satisfy the test above and still leave the partial-commit hole open.
+// An accepted command commits as one batch, not one batch per record.
 func TestAnAcceptedCommandCommitsEveryRecordInOneTransition(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
@@ -300,9 +284,7 @@ func TestAnAcceptedCommandCommitsEveryRecordInOneTransition(t *testing.T) {
 	}
 }
 
-// Autobind is the verb the partial-commit hole actually bit: one command
-// creating a signal per unbound tag. A refusal part-way through must leave the
-// connector entirely unbound, not half bound.
+// A refusal part-way through autobind leaves the connector entirely unbound.
 func TestARefusedAutobindBindsNothing(t *testing.T) {
 	c := newConfigExec(t)
 	f, ok := c.store.(*fakeStore)
@@ -321,10 +303,8 @@ func TestARefusedAutobindBindsNothing(t *testing.T) {
 	if code != 422 {
 		t.Fatalf("autobind = %d %q, want 422 — the seeded refusal did not bite", code, msg)
 	}
-	// Pin the specific refusal, not merely a 422: an unrelated failure (a
-	// bad catalogue, a malformed payload) would also satisfy a bare 422
-	// check without ever exercising the seeded per-record rejection this
-	// test claims to pin.
+	// Check the specific refusal: any other failure would also give a
+	// 422.
 	if !strings.Contains(msg, "unknown data_type") || !strings.Contains(msg, "tag-01JTAG3") {
 		t.Fatalf("autobind refusal = %q, want it to name the seeded refusal (unknown data_type) "+
 			"on tag-01JTAG3", msg)
@@ -369,16 +349,14 @@ func TestDeleteOfAnAbsentSignalIs404(t *testing.T) {
 
 // ── autobind ──────────────────────────────────────────────────────────────
 
-// entryFake is one registry entry as the autobind tests need it: who it is
-// (its name) and where it is bound (its element, "" for unplaced).
+// entryFake is a registry entry as the autobind tests need it: its name and
+// its element ("" for unplaced).
 type entryFake struct {
 	name, element string
 }
 
-// registryFake is a stand-in for the registry: which identity is which
-// (EntryOf), and the full list of what's enrolled (Entries, for the lifecycle
-// trigger's legitimacy check) — BoundTo is unused here, kept only to satisfy
-// Bindings.
+// registryFake stands in for the registry: EntryOf and Entries. BoundTo only
+// satisfies Bindings.
 type registryFake struct {
 	entries map[string]entryFake
 }
@@ -400,8 +378,7 @@ func (r *registryFake) Entries() []EntryRef {
 
 func (r *registryFake) BoundTo(string) []string { return nil }
 
-// fakeNamespace is a stand-in for the node's element index: element id → its
-// local path.
+// fakeNamespace maps element ids to local paths.
 type fakeNamespace map[string]string
 
 func (n fakeNamespace) PathOf(elementID string) (string, bool) {
@@ -409,9 +386,8 @@ func (n fakeNamespace) PathOf(elementID string) (string, bool) {
 	return p, ok
 }
 
-// counterIDs is a deterministic stand-in for the production ULID minter — a
-// counter, not a special-cased production path, so autobind's tests can
-// assert on ids without pulling a real ULID library into this package.
+// counterIDs returns a counter in place of the ULID minter, so tests can
+// assert on ids.
 func counterIDs() func() string {
 	n := 0
 	return func() string {
@@ -420,9 +396,7 @@ func counterIDs() func() string {
 	}
 }
 
-// newConfigExec builds an executor over a fake store, a fake registry and a
-// fake namespace — everything autobind needs to COMPUTE a catalogue's topic
-// without touching a real tree.
+// newConfigExec builds an executor over a fake store, registry and namespace.
 func newConfigExec(t *testing.T) *ConfigExec {
 	t.Helper()
 	return NewConfigExec(newStore("n1"), newRegistryFake(), fakeNamespace{}, nil, counterIDs(), nil)
@@ -435,8 +409,7 @@ func newTriggerConfigExec(t *testing.T) *ConfigExec {
 		map[string]string{"autobind": "on_new_connector"})
 }
 
-// place records that elementID sits at path, so PathOf resolves it exactly as
-// the real element index would once the element is authored there.
+// place records that elementID sits at path, as the element index would.
 func place(t *testing.T, c *ConfigExec, elementID, path string) {
 	t.Helper()
 	ns, ok := c.elements.(fakeNamespace)
@@ -446,8 +419,7 @@ func place(t *testing.T, c *ConfigExec, elementID, path string) {
 	ns[elementID] = path
 }
 
-// bindEntry enrolls ulid as an identity named name, bound to element — the
-// registry's answer EntryOf(ulid) will give from here on.
+// bindEntry enrolls ulid as an identity named name, bound to element.
 func bindEntry(t *testing.T, c *ConfigExec, ulid, name, element string) {
 	t.Helper()
 	reg, ok := c.bound.(*registryFake)
@@ -458,8 +430,7 @@ func bindEntry(t *testing.T, c *ConfigExec, ulid, name, element string) {
 }
 
 // publishCatalogue writes a catalogue record directly at topic, bypassing
-// autobind entirely — this is what lets the forgery test prove a record
-// published anywhere but the computed topic is never read.
+// autobind, so tests can plant records at the wrong topic.
 func publishCatalogue(t *testing.T, c *ConfigExec, topic string, tags []map[string]any) {
 	t.Helper()
 	f, ok := c.store.(*fakeStore)
@@ -480,9 +451,8 @@ func tags(ids ...string) []map[string]any {
 	return out
 }
 
-// tagsWithIDs is tags, named at call sites where the point is specifically
-// that the tag carries its OWN identity — a ULID the connector minted — and
-// not a source address (design §6).
+// tagsWithIDs is tags, used where the point is that each tag carries its own
+// ULID rather than a source address.
 func tagsWithIDs(ids ...string) []map[string]any { return tags(ids...) }
 
 // signalsAt is every _Signal record this executor's node holds, by path.
@@ -536,9 +506,8 @@ func signalByID(t *testing.T, c *ConfigExec, id string) boundSignal {
 	return boundSignal{}
 }
 
-// rebind points an already-bound signal at a different tag, the way a person
-// curating the model would — through the same signal/upsert door, at the
-// signal's own path, keeping its id.
+// rebind points a bound signal at a different tag through signal/upsert,
+// keeping its id and path.
 func rebind(t *testing.T, c *ConfigExec, signalID, newTag string) {
 	t.Helper()
 	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
@@ -558,16 +527,10 @@ func rebind(t *testing.T, c *ConfigExec, signalID, newTag string) {
 	t.Fatalf("rebind: no signal with id %q", signalID)
 }
 
-// The catalogue is found by COMPUTING its topic from the connector's entry, so a
-// record published anywhere else is never read — including one that mimics the
-// connector's name at a different path.
-//
-// This is the test a scan-based lookup fails under mutation, and it fails
-// NONDETERMINISTICALLY: which of the two same-named records a scan finds
-// depends on map iteration order, so a reintroduced scan passes some runs and
-// fails others. That flakiness is not a property of this test — it is the
-// reverted design's own bug (a search can match more than one record)
-// surfacing exactly where it should.
+// The catalogue is found by computing its topic from the connector's entry,
+// so a record elsewhere is never read, even one that copies the connector's
+// name at another path. A scan-based lookup would fail this test, though not
+// on every run: which record it finds depends on map order.
 func TestAutobindReadsOnlyTheComputedCatalogueTopic(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "el-press3", "line1/press3")
@@ -596,19 +559,14 @@ func TestAutobindRefusesAConnectorThisNodeDoesNotHold(t *testing.T) {
 	}
 }
 
-// An entry bound to an element this node cannot resolve must not silently
-// read as unplaced (bound to the node itself, mount ""): PathOf fails closed
-// on an unresolvable element, and autobind must too, or it would compute the
-// wrong catalogue topic instead of refusing.
+// An entry bound to an element this node cannot resolve must not read as
+// unplaced; autobind refuses instead of computing the wrong catalogue topic.
 func TestAutobindRefusesAConnectorBoundToAnUnresolvableElement(t *testing.T) {
 	c := newConfigExec(t)
 	// el-ghost is never placed, so PathOf(el-ghost) fails.
 	bindEntry(t, c, "01JCONN", "opcua-press", "el-ghost")
-	// Planted at the topic a silent fallback-to-unplaced would compute
-	// (mount ""): if the unresolvable element were mistaken for "unplaced"
-	// instead of refused, autobind would find this and succeed with 200
-	// instead of refusing — so a wrong implementation cannot pass by
-	// accident of there being no catalogue to read either way.
+	// Planted where a fallback to "unplaced" would look (mount ""), so a
+	// wrong implementation would find it and return 200.
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/opcua-press", tags("t1"))
 
 	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", []byte(`{"connector":"01JCONN"}`))
@@ -635,13 +593,9 @@ func TestASignalPointsAtTheTagsIdentityAndKeepsItsOwn(t *testing.T) {
 	}
 }
 
-// A catalogue tag's meta.element names a path this node does not hold: it is
-// AUTHORED along the way, one missing segment at a time, reusing whichever
-// segments already exist — the identical algorithm a local service's own
-// declared mount uses to seed its position (registry.Manager.elementFor),
-// factored so bindCatalogue authors through it too (architecture principle
-// 1). "m" is the connector's own mount, already placed — it must be reused,
-// not re-minted; "m/a" and "m/a/b" do not exist yet and must be authored.
+// A tag's meta.element names a path this node does not fully hold: missing
+// segments are created one at a time and existing ones reused, the same walk
+// a local service's mount uses. "m" already exists; "m/a" and "m/a/b" do not.
 func TestATagsMetaElementAuthorsMissingSegmentsAndReusesExisting(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "01HMOUNT", "m")
@@ -685,13 +639,8 @@ func TestATagsMetaElementAuthorsMissingSegmentsAndReusesExisting(t *testing.T) {
 	}
 }
 
-// Rebinding — the only mechanism for it is signal/upsert with the same id and
-// a different data_tag — must leave the id untouched. Every Metric carries
-// signal_id, so an id that moved on rebind would orphan that measurement
-// point's whole history under the old one. (Composed-id minting itself is
-// TestASignalPointsAtTheTagsIdentityAndKeepsItsOwn's claim, not this one: this
-// test pins that upsert preserves whatever id it is given, which is the
-// property that actually protects history across a rebind.)
+// Rebinding through signal/upsert with the same id and a new data_tag keeps
+// the id; metrics carry signal_id, so a new id would orphan their history.
 func TestRebindingASignalPreservesItsID(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "el-press3", "line1/press3")
@@ -712,8 +661,8 @@ func TestRebindingASignalPreservesItsID(t *testing.T) {
 	}
 }
 
-// The property that lets a person, a replayed command and a lifecycle trigger
-// all issue this verb without coordinating.
+// Idempotency is what lets a person, a replay and the lifecycle trigger all
+// run this verb.
 func TestAutobindIsIdempotent(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "el-1", "line1/m6")
@@ -768,8 +717,8 @@ func TestAutobindWithoutACatalogueIsAConflict(t *testing.T) {
 		"connector": "01JCONN",
 	}))
 
-	// A retry after the connector publishes will succeed, so this is a conflict
-	// with the current state and not a malformed request.
+	// A retry after the connector publishes succeeds, so this is a
+	// conflict, not a malformed request.
 	if code != 409 || result != "conflict" || !strings.Contains(msg, "opcua-1") {
 		t.Fatalf("code %d result %q msg %q — want 409/conflict naming the connector", code, result, msg)
 	}
@@ -789,17 +738,14 @@ func TestAutobindPlacesSignalsUnderTheGivenPath(t *testing.T) {
 	if !ok {
 		t.Fatalf("signals = %+v, want one under line1/m6", signalsAt(c))
 	}
-	// The path says where; the binding says to WHAT. Both, or the tree and
-	// the namespace disagree about the same signal.
+	// The path says where, the binding says to what; both must agree.
 	if got.Element != "01HM6" {
 		t.Fatalf("signal at line1/m6 is bound to %q, want the element at that path (01HM6)", got.Element)
 	}
 }
 
-// A signal binds to a system element, so a path with no element on it is
-// not a place a signal can be put. Refused as a conflict with the current
-// state — author the element and the same command succeeds — never silently
-// bound to nothing.
+// A path with no element is not a place for a signal. It is a conflict:
+// author the element and the same command succeeds.
 func TestAutobindRefusesAPathNoElementOccupies(t *testing.T) {
 	c := newConfigExec(t)
 	bindEntry(t, c, "01JCONN", "opcua-1", "")
@@ -817,12 +763,8 @@ func TestAutobindRefusesAPathNoElementOccupies(t *testing.T) {
 	}
 }
 
-// The default placement: a connector's signals stand on the element the
-// connector itself is bound to, directly under it. The connector's NAME is
-// not a path segment — the element tree is the namespace, so every segment
-// of a signal's path must be an element, and a connector is a participant,
-// not a position. (Its own records, the catalogue, DO carry the name as a
-// final segment, because those are service-owned; a signal is not.)
+// By default a connector's signals sit directly under the element the
+// connector is bound to. The connector name is not a path segment.
 func TestAutobindBindsSignalsToTheConnectorsElement(t *testing.T) {
 	c := newConfigExec(t)
 	place(t, c, "01HLINE1", "line1")
@@ -890,10 +832,8 @@ func TestAutobindMakesTagNamesAddressable(t *testing.T) {
 			t.Fatalf("path %q is not one addressable segment", path)
 		}
 	}
-	// The original name is not lost, only the addressing form changed: every
-	// signal names the catalogue entry it was bound to, and that entry carries
-	// the raw name. Asserting the binding rather than a copy of the name on the
-	// signal is the point — a copy would be a second owner of one fact.
+	// The raw name is still reachable: each signal names its catalogue
+	// entry, which carries it.
 	bound := map[string]bool{}
 	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
 		var s struct {
@@ -934,11 +874,8 @@ func TestNewConnectorIsBoundOnArrivalWhenEnabled(t *testing.T) {
 	}
 }
 
-// A record shaped exactly like a real catalogue — even one naming real tag
-// ids — triggers nothing if it arrives at a path no enrolled entry's computed
-// topic matches. Read scope lets any service see another connector's tag ids,
-// so the shape and the ids prove nothing; only an entry's own identity
-// computing to this path does.
+// A record shaped like a catalogue, even with real tag ids, triggers nothing
+// at a path no enrolled entry computes to.
 func TestObserveIgnoresARecordAtAPathNoEntryOwns(t *testing.T) {
 	c := newTriggerConfigExec(t)
 	bindEntry(t, c, "01JCONN", "opcua-press", "")
@@ -952,10 +889,8 @@ func TestObserveIgnoresARecordAtAPathNoEntryOwns(t *testing.T) {
 	}
 }
 
-// entryOwns compares the FULL topic, not just the path: a record whose path
-// coincidentally matches a local entry's computed path but arrived under a
-// DIFFERENT node id — the shape a child's record carries once mount-inserted
-// at a parent — must not be treated as that local entry's own catalogue.
+// entryOwns compares the full topic: a matching path under a different node
+// id, as a child's record looks at the parent, is not this entry's catalogue.
 func TestObserveIgnoresARecordAtTheRightPathButAnotherNode(t *testing.T) {
 	c := newTriggerConfigExec(t)
 	bindEntry(t, c, "01JCONN", "opcua-1", "")
@@ -1113,8 +1048,8 @@ func TestElementUpsertRefusesACollidingSibling(t *testing.T) {
 	}
 }
 
-// Re-upserting the SAME element at its own path is how a rename or an edit
-// arrives — it must not be mistaken for a collision.
+// Re-upserting the same element at its own path is an edit, not a
+// collision.
 func TestElementUpsertOfTheSameElementIsNotACollision(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
@@ -1163,9 +1098,7 @@ func TestElementDeleteTombstonesTheRecord(t *testing.T) {
 	}
 }
 
-// Deleting an element that still holds children would strand them: their paths
-// keep working while the position above them is gone, and any grant naming the
-// parent goes inert.
+// Deleting an element that still has children would strand them.
 func TestElementDeleteRefusesWhileChildrenRemain(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
@@ -1186,18 +1119,16 @@ func TestElementDeleteRefusesWhileChildrenRemain(t *testing.T) {
 	}
 }
 
-// bindings is a stub registry: which identities stand on which element. It
-// satisfies Bindings without carrying entries — the element-delete guard
-// tests below only exercise BoundTo.
+// bindings is a stub registry mapping elements to the identities on them;
+// the element-delete tests only use BoundTo.
 type bindings map[string][]string
 
 func (b bindings) BoundTo(elementID string) []string     { return b[elementID] }
 func (b bindings) EntryOf(string) (string, string, bool) { return "", "", false }
 func (b bindings) Entries() []EntryRef                   { return nil }
 
-// Retiring a position an identity binds to would leave that identity able to
-// authenticate with nowhere to write — its mount resolves through this very
-// element. The refusal names who is in the way.
+// Retiring a position an identity binds to would leave it nowhere to write;
+// the refusal names who is in the way.
 func TestElementDeleteRefusesWhileAnIdentityBindsToIt(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, bindings{"01HM6": {"m6-connector"}}, nil, nil, nil, nil)
@@ -1215,8 +1146,7 @@ func TestElementDeleteRefusesWhileAnIdentityBindsToIt(t *testing.T) {
 	}
 }
 
-// The same position with nothing standing on it retires normally — the guard
-// must gate on an actual binding, not on the presence of a registry.
+// With nothing bound to it, the position retires normally.
 func TestElementDeleteProceedsWhenNothingBindsToIt(t *testing.T) {
 	f := newStore("n-edge1")
 	c := NewConfigExec(f, bindings{"01HOTHER": {"someone-else"}}, nil, nil, nil, nil)
@@ -1378,11 +1308,8 @@ func TestResourceUpsertRefusesWhenTheBlobCannotBePulled(t *testing.T) {
 		t.Fatalf("an entity must never be authored pointing at bytes the node lacks; wrote %d", len(writes))
 	}
 
-	// The contrast that makes "its own outcome" mean something: a genuinely
-	// malformed command answers the same 422 but must NOT claim a pull
-	// failure — otherwise "blob_unreachable" would just be this verb's name
-	// for every refusal, and an operator reading it would stage bytes to fix
-	// a typo.
+	// A malformed command also answers 422 but must not claim a pull
+	// failure, or blob_unreachable would mean nothing.
 	badCode, badMsg, badResult, badWrites := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/upsert",
 		[]byte(`{"resources":[]}`))
 	if badCode != 422 || len(badWrites) != 0 {
@@ -1392,7 +1319,7 @@ func TestResourceUpsertRefusesWhenTheBlobCannotBePulled(t *testing.T) {
 		t.Fatalf("a malformed command must not be reported as a pull failure: %q / %q", badResult, badMsg)
 	}
 
-	// Denominator: the same executor DOES write once the blob is reachable.
+	// Once the blob is reachable, the same executor writes.
 	blobs.pullErr = nil
 	if code, _, result, writes := exec.ExecuteWithWrites(asHuman, "_CmdConfigure", "resource/upsert",
 		resourceBody("press3/r1", "r1", testSHA)); code != 200 || len(writes) != 1 || result != "ok" {
@@ -1544,15 +1471,9 @@ func TestConstantUpsertRefusesAPathOwnedByAnotherConstant(t *testing.T) {
 	}
 }
 
-// An element id becomes a grant zone the moment grantsync registers the
-// element as an authz resource, and FormatGrant reads "#" as the whole
-// namespace — so an element authored with id "#" turns any grant given against
-// it into "read:#" / "cmd:#:configure", the entire tree. element/upsert only
-// checked the id was non-empty.
-//
-// The last row is the denominator: an ordinary id through the identical call
-// still writes, so a refusal above is this rule and not upsert refusing
-// everything.
+// An element id becomes a grant zone once grantsync registers it, and "#"
+// would turn any grant on the element into the whole tree. The last row
+// checks that an ordinary id still writes.
 func TestElementUpsertRefusesAnIdThatIsNotAnIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -1583,17 +1504,9 @@ func TestElementUpsertRefusesAnIdThatIsNotAnIdentity(t *testing.T) {
 	}
 }
 
-// A position may hold one entity, and an entity may sit at one position. The
-// upsert verbs checked only the first: element/upsert, signal/upsert and
-// constant/upsert all accepted the same id at a second path, and that state is
-// unrecoverable from the outside — snapshot() answers "duplicate retained
-// identity" and every Edit command at the node 409s, while a later
-// tombstone of either copy drops the id from the element index although the
-// entity still sits at the other path.
-//
-// Each case re-upserts at the SAME path first: that is the denominator, and it
-// must stay a 200, or the guard would be refusing ordinary updates rather than
-// duplicate identities.
+// A position holds one entity and an entity sits at one position. Every
+// upsert verb must refuse the same id at a second path. Each case first
+// re-upserts at the same path, which must stay a 200.
 func TestUpsertRefusesOneIdentityAtTwoPositions(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -1601,7 +1514,7 @@ func TestUpsertRefusesOneIdentityAtTwoPositions(t *testing.T) {
 		first        func(t *testing.T) []byte
 		sameID       func(t *testing.T) []byte // same id, same path: an update
 		secondPath   func(t *testing.T) []byte // same id, different path
-		oneCommand   func(t *testing.T) []byte // both positions in ONE command
+		oneCommand   func(t *testing.T) []byte // both positions in one command
 		heldAt       string
 		strandedPath string
 		contract     string
@@ -1697,8 +1610,8 @@ func TestUpsertRefusesOneIdentityAtTwoPositions(t *testing.T) {
 				t.Fatalf("the refused upsert wrote %s anyway", tc.strandedPath)
 			}
 
-			// Two positions for one id inside ONE command: the store shows
-			// neither yet, so only the growing claim map can catch it.
+			// Two positions for one id in one command: the store shows neither
+			// yet, so only the claim map can catch it.
 			before := f.offset
 			code, msg, result = c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.oneCommand(t))
 			if code != 409 || result != "conflict" {
@@ -1761,8 +1674,8 @@ func keysOf(f *fakeStore) []string {
 	return out
 }
 
-// A definition is filed under its own id, at no position at all — its topic
-// carries the authoring node and the id and nothing else (design §3).
+// A definition is filed under its own id with no position: its topic has
+// only the authoring node and the id.
 func TestDefinitionUpsertFilesUnderTheIdWithNoPosition(t *testing.T) {
 	f := newStore("n-global")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
@@ -1930,8 +1843,7 @@ func TestDefinitionUpsertRefusesWhatItCannotAddress(t *testing.T) {
 	}
 }
 
-// This door authors definitions. An element or a metric arriving here is a
-// caller at the wrong door, and saying so beats filing the record somewhere odd.
+// An element or a metric sent to the definition door is refused.
 func TestDefinitionUpsertRefusesAContractThatIsNotADefinition(t *testing.T) {
 	f := newStore("n-global")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)
@@ -1969,9 +1881,8 @@ func TestDefinitionDeleteTombstonesAndReportsAbsence(t *testing.T) {
 	}
 }
 
-// A group carries grant strings, and a malformed one must die at the door: the
-// definition is about to descend to every node below, and each of them would
-// otherwise drop the bad grant and log it for as long as the definition exists.
+// A malformed grant in a group is refused before the definition descends
+// to every node below.
 func TestDefinitionUpsertRefusesAGroupWithAMalformedGrant(t *testing.T) {
 	f := newStore("n-global")
 	c := NewConfigExec(f, nil, nil, nil, nil, nil)

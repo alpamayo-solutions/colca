@@ -86,7 +86,7 @@ func TestPutRefusesAMismatchedDigest(t *testing.T) {
 	if _, ok := s.Has(wrong); ok {
 		t.Fatal("a rejected blob must not be stored")
 	}
-	// The denominator: the same Has() call finds content that WAS stored.
+	// For comparison, the same Has() call finds content that was stored.
 	good, _, err := s.Put(bytes.NewReader([]byte("actual content")), "")
 	if err != nil {
 		t.Fatal(err)
@@ -114,9 +114,8 @@ func TestPutRefusesAnOversizeBlob(t *testing.T) {
 func TestPutLeavesNoTempFileBehind(t *testing.T) {
 	s := open(t, 64)
 
-	// Denominator: prove the walk can actually see a temp file that genuinely
-	// exists before trusting it to report none. Without this, a walk pointed
-	// at the wrong root or matching the wrong pattern would pass silently.
+	// First check that the walk can see a temp file that exists, so a walk at the
+	// wrong root cannot pass by finding nothing.
 	canary := s.root() + "/.canary-check.tmp"
 	if err := os.WriteFile(canary, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
@@ -155,9 +154,8 @@ func TestGetAndDeleteOnAMissingBlob(t *testing.T) {
 		t.Fatalf("Delete of a missing blob must be a no-op, got %v", err)
 	}
 
-	// Denominator: the same Get/Delete pair against a blob that IS present,
-	// so the ErrNotFound and no-op-delete above are measured against calls
-	// that demonstrably work.
+	// The same Get and Delete against a blob that is present, so the results above
+	// are measured against calls that work.
 	sha, _, err := s.Put(bytes.NewReader([]byte("present")), "")
 	if err != nil {
 		t.Fatal(err)
@@ -175,10 +173,9 @@ func TestGetAndDeleteOnAMissingBlob(t *testing.T) {
 	}
 }
 
-// TestTouchMovesModifiedForwardAndErrorsOnAnAbsentDigest pins the fix that
-// closes the resource/upsert-vs-sweeper TOCTOU (resources design §9.1): a
-// claim on a blob (BlobPort.Has) must be able to restart the sweeper's grace
-// clock, and must not pretend to succeed on a digest this store never held.
+// TestTouchMovesModifiedForwardAndErrorsOnAnAbsentDigest: a claim on a blob
+// must be able to restart the sweeper's grace, and must not pretend to succeed
+// for a digest this store never held.
 func TestTouchMovesModifiedForwardAndErrorsOnAnAbsentDigest(t *testing.T) {
 	s := open(t, 1<<20)
 	sha, _, err := s.Put(bytes.NewReader([]byte("touch me")), "")
@@ -208,9 +205,8 @@ func TestTouchMovesModifiedForwardAndErrorsOnAnAbsentDigest(t *testing.T) {
 		t.Fatalf("Touch did not move Modified forward: before=%v after=%v", before.ModTime(), after.ModTime())
 	}
 
-	// Denominator: an absent digest is not a silent no-op — the caller (which
-	// only calls Touch after Has already returned true) must be able to tell
-	// "genuinely touched" from "nothing was there to touch".
+	// An absent digest is an error, not a silent no-op, so the caller can tell a
+	// real touch from nothing to touch.
 	if err := s.Touch(digest([]byte("never stored"))); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Touch(absent) err = %v, want ErrNotFound", err)
 	}
@@ -226,9 +222,8 @@ func TestRejectsANonDigestKey(t *testing.T) {
 			t.Fatalf("Get(%q) err = %v, want ErrBadDigest", bad, err)
 		}
 	}
-	// Denominator: the same Has/Get pair against a real digest that IS
-	// present, so the rejections above are measured against a lookup that
-	// demonstrably works.
+	// The same Has and Get against a digest that is present, so the rejections
+	// above are measured against a lookup that works.
 	good, _, err := s.Put(bytes.NewReader([]byte("valid content")), "")
 	if err != nil {
 		t.Fatal(err)

@@ -8,20 +8,13 @@ import (
 	"testing"
 )
 
-// The shared vector, relative to this package. Deliberately a path into the
-// contracts package rather than a copy: a copy is the thing this test exists
-// to prevent.
+// manifestStreamsVector is the shared vector, read from the contracts package
+// rather than copied.
 const manifestStreamsVector = "../../contracts/src/colca_data_contracts/vectors/manifest_streams.json"
 
-// TestManifestStreamsVectorMatchesStreamFor pins the one fact two languages
-// both need: which stream a class routes to.
-//
-// Both halves matter, and only one of them is obvious. Checking that every
-// entry in the vector agrees with StreamFor catches a WRONG entry. Checking
-// that every class Go knows HAS an entry catches a missing one — which is the
-// failure that actually happened: _Log was added to the Go side, the Python
-// consumer's hand-written table never learned about it, and nothing anywhere
-// could go red about that.
+// TestManifestStreamsVectorMatchesStreamFor checks which stream each class
+// routes to, in both directions: every vector entry agrees with StreamFor, and
+// every class Go knows has an entry, so a class added on one side only fails.
 func TestManifestStreamsVectorMatchesStreamFor(t *testing.T) {
 	raw, err := os.ReadFile(filepath.FromSlash(manifestStreamsVector))
 	if err != nil {
@@ -57,8 +50,7 @@ func TestManifestStreamsVectorMatchesStreamFor(t *testing.T) {
 		}
 	}
 
-	// The other direction: an entry Go does not recognise is a stream nothing
-	// routes to, which reads as coverage and is not.
+	// The other direction: an entry Go does not know routes nowhere.
 	surplus := []string{}
 	for name := range vector.Streams {
 		if _, ok := ClassFromManifest(name); !ok {

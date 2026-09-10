@@ -1,7 +1,5 @@
-// Command colca-bench runs the Colca benchmark scenarios and
-// writes uniform JSON run records. Recording is always on: every run appends
-// one JSONL line per scenario to bench/results/<host>.jsonl, commit-stamped
-// via bench.Stamp. It is the benchmark gate:
+// Command colca-bench runs the benchmark scenarios and appends one commit-stamped
+// JSON line per scenario to bench/results/<host>.jsonl:
 //
 //	colca-bench ingest --machines 4 --duration 30s --storage emmc
 //	colca-bench all --storage laptop-nvme
@@ -32,10 +30,7 @@ func defaultRecordPath() string {
 	return "bench/results/" + hn + ".jsonl"
 }
 
-// scenarioOrder is the full scenario set colca-bench will eventually run for
-// "all", in a fixed order. "all" filters this down to whatever is currently
-// registered in runners, so later tasks add scenarios purely by adding a
-// runners entry — this list and the "all" logic never need to change.
+// scenarioOrder is the order "all" runs the registered scenarios in.
 var scenarioOrder = []string{"ingest", "live", "catchup", "cardinality", "footprint"}
 
 func main() {

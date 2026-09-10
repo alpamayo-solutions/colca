@@ -1,21 +1,16 @@
-// Package uns is where ALL Colca domain knowledge lives: topic grammar,
-// contract classes, mount insert/strip, payload validation, the identity and
-// grant model, and the element namespace under the topic root (`colca/#`
-// unless configured otherwise).
+// Package uns holds Colca's domain knowledge: topic grammar, contract classes,
+// mount rewriting, payload validation, the identity and grant model, and the
+// element namespace under the topic root.
 //
-// It depends on the Go standard library only, so it can never reach back into
-// colca's infrastructure — that ceiling is what keeps domain knowledge from
-// scattering. The core imports this package (engine, httpapi, repl, retention,
-// registry …) and that direction is by design; the reverse is forbidden and
-// enforced by TestPluginDependsOnStdlibOnly. Where the domain needs something
-// from infrastructure, it declares the port here and the core implements it
-// (EntityStore, Bindings, Placements, Namespace, Scope).
+// It uses only the standard library, so it cannot reach into colca's
+// infrastructure; TestPluginDependsOnStdlibOnly enforces that. Where the domain
+// needs infrastructure it declares a port (EntityStore, Bindings, Placements,
+// Namespace, Scope) and the core implements it.
 //
-// The core asks this package questions; it never switches on its vocabulary.
-// A decision spelled `class == uns.ClassCmd` inside internal/ is a domain rule
-// living in two packages at once, so decisions go through predicates —
-// IsState, IsCommand, IsOwnedState, Entry.IsDraining, Entry.MayUseDoor — and
-// TestCoreAsksQuestionsRatherThanSwitchingOnVocabulary keeps it that way.
+// The core asks this package questions instead of switching on its vocabulary:
+// decisions go through predicates such as IsState, IsCommand and
+// Entry.MayUseDoor, and TestCoreAsksQuestionsRatherThanSwitchingOnVocabulary
+// keeps it that way.
 package uns
 
 import (
@@ -37,15 +32,15 @@ const (
 	ClassNone       Class = iota
 	ClassData             // _Metric …    node-owned state, authorized by write scope
 	ClassEntity           // _Node, _EnrolledIdentity, _SystemElement, _Signal, _Constant, _Resource
-	ClassDefinition       // _Group, _MetadataType …  write: any node, flows DOWN, applied as state
+	ClassDefinition       // _Group, _MetadataType, ...: written by any node, flows down, applied as state
 	ClassCmd              // _Cmd*        write: ancestors/admin, flows down
 	ClassAck              // _Ack         write: owner, flows up
-	ClassGap              // _StreamGap   write: pruner only. Event, no KV, not retained (design §6.4).
-	ClassTimeSync         // _TimeSync    write: node-local-publish-only. Ephemeral: no stream, never persisted, never retained (time-sync design §2.2).
+	ClassGap              // _StreamGap: written by the pruner only; event, no KV, not retained
+	ClassTimeSync         // _TimeSync: published by the node itself; no stream, never persisted or retained
 	ClassAudit            // _AuditEvent  append-only security event, local/internal write, flows up
-	ClassAlarm            // _AlarmStateChange, _NotificationDispatched — append-only alarm event. Event: no KV, not retained. Its own stream so it never queues behind a metrics backlog.
-	ClassLog              // _Log — append-only service log line. Event: no KV, not retained. Its own stream for the same reason alarms got one, and more so: log volume is the highest of any event class, and on the metrics lane it both queued behind the samples and evicted them.
-	ClassAnnotation       // _Annotation — append-only annotation instance. Event: no KV, not retained. Same shape as ClassAlarm and for the same reason (dataops-evaluator design §8): a part-cycle producer emits ~1M/year/machine, so id-keyed retained/KV entries would grow without bound.
+	ClassAlarm            // _AlarmStateChange, _NotificationDispatched: events on their own stream, never behind metrics
+	ClassLog              // _Log: events on their own stream; logs are the loudest class and would crowd out samples
+	ClassAnnotation       // _Annotation: events on their own stream; too many per machine to keep as KV state
 )
 
 // Parsed is a decomposed UNS topic: colca/v1/_Contract/{node-id}/{path…}
@@ -56,17 +51,11 @@ type Parsed struct {
 // IsUns reports whether the topic is under the topic root.
 func IsUns(topic string) bool { return strings.HasPrefix(topic, Root()+"/") }
 
-// Parse decomposes an UNS topic. It requires at least 5 segments (so there is
-// always a non-empty hierarchy path) and a _Contract at segment index 2 — with
-// one exception: _TimeSync (time-sync design §2.2) is the only contract whose
-// wire topic has no hierarchy path at all (colca/v1/_TimeSync/{node-ulid},
-// exactly 4 segments). That shape is accepted here with an empty Path so the
-// engine's reject-path can classify and count a client's attempted _TimeSync
-// publish with its own reject reason instead of falling through to the
-// generic "grammar" rejection. No other contract gets this relaxation: doing
-// it length-only (instead of contract-gated) would let MountInsert/MountStrip
-// silently no-op on a 4-segment topic for contracts whose mount rewrite is
-// load-bearing (data/entity ownership).
+// Parse decomposes a UNS topic. It requires at least 5 segments and a _Contract
+// at index 2. The one exception is _TimeSync, whose topic has no hierarchy path
+// (4 segments); it parses with an empty Path so the engine can reject it with
+// its own reason. The exception is tied to the contract, so MountInsert and
+// MountStrip never silently skip a short topic of another contract.
 func Parse(topic string) (Parsed, error) {
 	seg := strings.Split(topic, "/")
 	if len(seg) == 4 && seg[2] == "_TimeSync" {
@@ -87,27 +76,20 @@ func Parse(topic string) (Parsed, error) {
 	}, nil
 }
 
-// ClassOf maps a contract name to its routing class. Concrete names are matched
-// before the _Cmd prefix rule, so an exact contract can never be swallowed by
-// the prefix; every _Cmd* contract is a command and never falls through to
-// ClassNone.
+// ClassOf maps a contract name to its class. Exact names are matched before the
+// _Cmd prefix, and every _Cmd* contract is a command.
 func ClassOf(contract string) Class {
 	switch {
 	case contract == "_Metric":
 		return ClassData
-	// An alarm is an event with a lifecycle; a metric is a sample. That is the
-	// whole difference, and it is why these two ride their own stream rather
-	// than a place in the sample lane's queue.
+	// Alarms are events with a lifecycle, not samples, so they get their own
+	// stream.
 	case contract == "_AlarmStateChange" || contract == "_NotificationDispatched":
 		return ClassAlarm
-	// An annotation is a time-based instance producers append, mirroring
-	// alarm for the same volume reason (design §8) — see ClassAnnotation.
+	// Annotations are appended like alarms; see ClassAnnotation.
 	case contract == "_Annotation":
 		return ClassAnnotation
-	// A log line is an EVENT — the thing happened, and a later line does not
-	// replace an earlier one. It was data-class, which made it state: KV kept
-	// only the newest line per logger and level, and the history rode the
-	// metrics stream where a chatty service evicted the samples.
+	// A log line is an event: a later line does not replace an earlier one.
 	case contract == "_Log":
 		return ClassLog
 	case contract == "_EnrolledIdentity" || contract == "_Node" ||
@@ -136,48 +118,34 @@ func ClassOf(contract string) Class {
 	return ClassNone
 }
 
-// IsState reports whether a class is STATE rather than an event: latest value
-// per path, KV-projected, retained on the bus, and retractable by an empty
-// payload (the tombstone). Data, entities and definitions are state; commands,
-// acks and gap markers are events, which is why retaining them would re-deliver
-// stale instructions to every new subscriber.
-//
-// One definition of "state" so the three places that care — the KV projection,
-// the retained flag and the tombstone rule — can never drift apart.
+// IsState reports whether a class is state rather than an event: latest value
+// per path, KV-projected, retained, and retired by an empty payload. Data,
+// entities and definitions are state; commands, acks and gap markers are
+// events, and retaining them would replay stale instructions. The KV
+// projection, the retained flag and the tombstone rule all ask this.
 func IsState(c Class) bool {
 	return c == ClassData || c == ClassEntity || c == ClassDefinition
 }
 
-// The predicates below exist so the core can ask what a class DOES without
-// learning which class it is. Every one of them is a domain fact that used to
-// be spelled out as a `class == Class…` comparison inside internal/ — i.e. a
-// rule living in two packages at once. Adding a class here is the whole change;
-// no door, no replicator and no pruner has to be edited to agree.
+// The predicates below let the core ask what a class does without knowing
+// which class it is. Adding a class here needs no change in the doors, the
+// replicator or the pruner.
 
-// IsKnown reports whether the contract resolved to a class this node handles at
-// all. ClassNone is the "no such contract" answer from ClassOf and from the
-// bundle authority alike: the validated namespace rejects it rather than
-// storing something nothing can interpret.
+// IsKnown reports whether the contract resolved to a class this node handles.
+// ClassNone means "no such contract", and the validated namespace rejects it.
 func IsKnown(c Class) bool { return c != ClassNone }
 
 // IsCommand reports whether a record belongs to the command flow: it targets an
-// ABSOLUTE node-local path (no mount rewrite, no level-4 identity rule, because
-// the author is not the target's owner), needs a covering cmd grant, is refused
-// while its destination drains, and travels DOWN the tree.
+// absolute node-local path (no mount rewrite, since the author does not own the
+// target), needs a cmd grant, is refused while its destination drains, and
+// travels down the tree.
 func IsCommand(c Class) bool { return c == ClassCmd }
 
-// CommandStillLive reports whether a ClassCmd record's expires_at has not yet
-// passed authoritativeNowMS. Validate already guarantees every persisted
-// _Cmd* payload carries a numeric expires_at (move-drain design §3.2:
-// "Validate already requires a numeric expires_at on every _Cmd*, so the
-// drain deadline is bounded"), so a decode failure here cannot happen for
-// real data — treated as still-live defensively rather than silently
-// completing a drain, or silently swallowing an undelivered-command signal,
-// on malformed input.
-//
-// One definition of "still live" so the two places that ask it — move-drain
-// completion and the undelivered-command observability signal — can never
-// disagree about the same expires_at field.
+// CommandStillLive reports whether a ClassCmd record's expires_at is still
+// after authoritativeNowMS. Validate requires a numeric expires_at on every
+// _Cmd*, so a decode failure should not happen; it counts as live rather than
+// ending a drain or hiding an undelivered command. Move-drain completion and
+// the undelivered-command signal both ask this.
 func CommandStillLive(payload []byte, authoritativeNowMS int64) bool {
 	var body struct {
 		ExpiresAt float64 `json:"expires_at"`
@@ -188,58 +156,31 @@ func CommandStillLive(payload []byte, authoritativeNowMS int64) bool {
 	return int64(body.ExpiresAt) >= authoritativeNowMS
 }
 
-// IsNodeLocal reports whether a class may only ever be produced by the node
-// itself. No door accepts one from a client, a human or an admin — the beacon
-// loop publishes it straight to the local bus, and it is ephemeral: no stream,
-// never persisted, never retained (time-sync design §2.2).
+// IsNodeLocal reports whether only the node itself may produce a class. No
+// door accepts one; the beacon loop publishes it to the local bus, and it is
+// never stored or retained.
 func IsNodeLocal(c Class) bool { return c == ClassTimeSync }
 
-// IsOwnedState reports whether a class is state that an identity authors under
-// its OWN mount — the set that KV-projects at mount-rewritten coordinates and
-// replicates UP the tree. Definitions are state too (IsState covers them), but
-// they descend instead: their path is their own identity and no hop rewrites
-// them, so they are deliberately not in this set.
+// IsOwnedState reports whether a class is state an identity authors under its
+// own mount: KV-projected at mount-rewritten paths and replicated up the tree.
+// Definitions are state too but travel down, so they are not included.
 func IsOwnedState(c Class) bool { return c == ClassData || c == ClassEntity }
 
-// IsCommandAuthoredState reports whether a class is state a command executor
-// may author. Every domain command commits its complete result as one atomic
-// batch, and this is the admission rule for what may sit in one: the entity
-// graph an Edit intent or a `_CmdConfigure` verb edits, and the definitions
-// that same door files under their own ids.
-//
-// Metrics are state too and are deliberately excluded: a sample is a machine's
-// to publish at its own door, and letting one ride an entity mutation would put
-// the metric lane behind a command's commit. Commands, acks, gap markers, audit
-// events and the ephemeral beacon are not state at all.
-//
-// A batch still has to land on ONE stream — entities and definitions have their
-// own — so the door that admits records also refuses a batch that mixes them.
+// IsCommandAuthoredState reports whether a command executor may author a class
+// in its atomic batch: entities and definitions. Metrics are excluded, since a
+// sample belongs to its machine's door and should not wait for a command's
+// commit. A batch must still land on one stream, so the door refuses a batch
+// that mixes entities and definitions.
 func IsCommandAuthoredState(c Class) bool { return c == ClassEntity || c == ClassDefinition }
 
-// IsCommandAuthoredEvent reports whether a class is an EVENT a command
-// executor may append directly — one record, no batch, no KV projection —
-// through EntityStore.PublishEvent, exactly as IsCommandAuthoredState is the
-// admission rule for PublishBatch. Deliberately a SEPARATE predicate rather
-// than folded into IsCommandAuthoredState: an annotation is never state
-// (IsState(ClassAnnotation) is false, dataops-evaluator design §8, pinned by
-// TestAnnotationIsAnEventNotState), so PublishBatch's batch — which commits
-// entity/definition state alongside the `_EditOperation` receipt on the
-// SAME stream — is the wrong door for it: an annotation record and that
-// receipt never share a stream (StreamFor differs), and admitting
-// ClassAnnotation into IsCommandAuthoredState would either break that
-// existing invariant or silently let an annotation get batched (and thus
-// KV-projected the way ingestAdminStateBatch projects every record in its
-// batch) if the batch-stream check were ever relaxed. One append is one
-// commit instead (annotation-cutover design D1); the durable replay receipt
-// still gets recorded, just via its own PublishBatch call afterward, the same
-// two-writes shape node_attachment already uses for its own non-entity-store
-// door (exec_edit_attachment.go).
+// IsCommandAuthoredEvent reports whether a command executor may append a class
+// as a single event through EntityStore.PublishEvent: annotations. They are not
+// state and live on a different stream than the _EditOperation receipt, so they
+// cannot join PublishBatch; the receipt is written with its own batch after.
 func IsCommandAuthoredEvent(c Class) bool { return c == ClassAnnotation }
 
-// IsDefinition reports whether a class travels DOWN the tree and is applied
-// unconditionally as state wherever it lands. A definition's path is its own
-// identity, so no hop rewrites it — which is what lets the same definition mean
-// the same thing at every node (definition-stream design §2).
+// IsDefinition reports whether a class travels down the tree and is applied as
+// state wherever it lands. Its path is its own id, so no hop rewrites it.
 func IsDefinition(c Class) bool { return c == ClassDefinition }
 
 // IsAudit reports whether a record is a security event. Audit events are
@@ -264,14 +205,9 @@ func FlowsUp(c Class) bool {
 		c == ClassAudit || c == ClassAlarm || c == ClassAnnotation || c == ClassLog
 }
 
-// GapStream names the stream a _StreamGap marker describes.
-//
-// At the node that authored it the path IS the stream name (retention design
-// §6.4). Every hop upward prepends the child's mount — the marker travels as
-// an ordinary record, so MountInsert rewrites it like any other — and at a
-// grandparent the same marker reads `leaf1/metrics`. Only the LAST segment
-// survives the journey, which is why it, and not the whole path, is what
-// binds a marker to its stream at every hop.
+// GapStream names the stream a _StreamGap marker describes. Each hop up
+// prepends the child's mount to the marker's path, so only the last segment
+// still names the stream everywhere.
 func GapStream(p Parsed) string {
 	if i := strings.LastIndex(p.Path, "/"); i >= 0 {
 		return p.Path[i+1:]
@@ -292,15 +228,11 @@ func MatchesUplinkStream(c Class, p Parsed, stream string) bool {
 	return StreamFor(c) == stream
 }
 
-// uplinkStreamSet is every physical stream a child may replicate onto: the
-// stream of each class that flows up. DERIVED from the class vocabulary
-// rather than listed, so a class added to it cannot be forgotten here — and
-// so `definitions`, whose class flows DOWN, can never appear. A child that
-// could write that stream would author policy for the whole tree
-// (definition-stream design §4).
-//
-// _StreamGap needs no entry of its own: a marker rides the stream it
-// describes, and that stream is one of these.
+// uplinkStreamSet is every stream a child may replicate onto: the streams of
+// the classes that flow up. It is derived from the classes, so a new class
+// cannot be forgotten and definitions, which flow down, never appear; a child
+// writing them would author policy for the whole tree. _StreamGap markers ride
+// the stream they describe.
 var uplinkStreamSet = func() map[string]bool {
 	set := map[string]bool{}
 	for _, c := range manifestClasses {
@@ -314,9 +246,8 @@ var uplinkStreamSet = func() map[string]bool {
 	return set
 }()
 
-// IsUplinkStream reports whether a child may replicate onto stream at all —
-// asked before any record in the request is looked at, so an unknown contract
-// cannot carry a record onto a stream its class would never have reached.
+// IsUplinkStream reports whether a child may replicate onto stream at all. It
+// is checked before any record in the request is looked at.
 func IsUplinkStream(stream string) bool { return uplinkStreamSet[stream] }
 
 // UplinkStreams lists those streams, sorted: the enumeration a pusher can
@@ -330,33 +261,22 @@ func UplinkStreams() []string {
 	return out
 }
 
-// nodePrivateContracts are the state contracts whose only reader is the node
-// that authored them. Their class still flows up — that is what makes them
-// KV-projected and retained locally — but the record itself must not.
-//
-// `_EditOperation` is the durable replay receipt EditExec commits
-// alongside a command's state (exec_edit_receipt.go). Its one reader is
-// the same node's durableReplay, scanning its OWN node id; an ancestor's copy
-// is a projection with zero readers (architecture principle 2), and it was
-// the largest single occupant of a hub's KV — up to 1024 receipts and their
-// tombstones per descendant, two entity appends per annotation on every hop.
+// nodePrivateContracts are state contracts only the authoring node reads. Their
+// class flows up, so they are projected and retained locally, but the records
+// stay home. _EditOperation, the replay receipt, is read only by the same
+// node's durableReplay; copies at an ancestor had no reader and filled its KV.
 var nodePrivateContracts = map[string]bool{
 	"_EditOperation": true,
 }
 
-// IsNodePrivate reports whether a contract's records stay on the node that
-// authored them: never offered to a parent on any uplink lane, tombstones
-// included. The uplink asks this per record and still advances its cursor
-// past what it keeps home, so a private record can never hold a lane.
+// IsNodePrivate reports whether a contract's records, tombstones included,
+// stay on the node that wrote them. The uplink still advances its cursor past
+// them, so a private record never blocks a lane.
 func IsNodePrivate(contract string) bool { return nodePrivateContracts[contract] }
 
-// NodePrivateStreams lists, sorted, the streams a node-private record can sit
-// on — the only streams a node has to sweep for copies authored by OTHER
-// nodes. Such copies exist: before the uplink kept private records home, an
-// ancestor received every one of them and, because their tombstones no longer
-// rise either, nothing else will ever remove them. DERIVED from
-// nodePrivateContracts, like partialUplinkStreams, so a private contract added
-// on another stream is swept from the day it is added.
+// NodePrivateStreams lists, sorted, the streams node-private records can sit
+// on: the streams a node sweeps for private copies other nodes sent before the
+// uplink kept them home. It is derived from nodePrivateContracts.
 func NodePrivateStreams() []string {
 	set := map[string]bool{}
 	for contract := range nodePrivateContracts {
@@ -372,14 +292,10 @@ func NodePrivateStreams() []string {
 	return out
 }
 
-// partialUplinkStreams are the streams whose uplink is a filtered SUBSET of
-// the child's stream, so the child offsets a parent receives on them are not
-// contiguous even when nothing was lost. DERIVED, like uplinkStreamSet: a
-// stream is partial when a class on it does not flow up at all (`commands`:
-// `_Cmd*` descend, only acks and gap markers rise) or when a node-private
-// contract lives on it (`entities`, via `_EditOperation`). Adding a
-// node-private contract therefore exempts its stream here without a second
-// list to keep in step.
+// partialUplinkStreams are streams whose uplink carries only a subset of the
+// child's records, so gaps in child offsets are expected there: commands (only
+// acks and gap markers rise) and streams holding a node-private contract
+// (entities). Derived like uplinkStreamSet.
 var partialUplinkStreams = func() map[string]bool {
 	set := map[string]bool{}
 	for _, c := range manifestClasses {
@@ -397,11 +313,9 @@ var partialUplinkStreams = func() map[string]bool {
 	return set
 }()
 
-// UplinkCarriesEveryRecord reports whether a child's uplink of stream is the
-// stream in full — the premise a parent's child-offset gap detection rests
-// on (retention design §6.4, the second net). Where it is false, a hole in
-// the child offsets is the filter working, not data loss, and the durable
-// `_StreamGap` marker is the only honesty mechanism on that wire.
+// UplinkCarriesEveryRecord reports whether a child's uplink of stream carries
+// every record, which a parent's offset gap detection relies on. Where it does
+// not, only _StreamGap markers report real loss.
 func UplinkCarriesEveryRecord(stream string) bool { return !partialUplinkStreams[stream] }
 
 // ValidateAuditTopic pins the append-only event identity to the canonical
@@ -427,26 +341,13 @@ func ValidateAuditTopic(p Parsed, payload []byte) error {
 }
 
 // NeedsStateRefresh reports whether the pruner must re-append a class's KV
-// entries to keep them alive across a retention boundary (retention §6.5).
-//
-// It is exactly the state nothing else re-supplies. Entities are authored here
-// and would simply be lost when their original records age out. Definitions
-// arrive on the downlink and the parent re-sends them, so refreshing locally
-// would duplicate work. Data are samples — ageing out is the point.
+// entries to keep them across a retention boundary. Only entities: definitions
+// are re-sent by the parent, and samples are meant to age out.
 func NeedsStateRefresh(c Class) bool { return c == ClassEntity }
 
-// ClassFromManifest maps a bundle manifest's class name to its Class. The
-// manifest's vocabulary is domain vocabulary, so it is spelled here and not in
-// the loader — the loader's job is to reject what it cannot map, not to know
-// what the names mean.
-//
-// ClassGap and ClassTimeSync have no manifest name on purpose: both are
-// node-authored and builtin, so a bundle can never declare one (schema-bundle
-// design §10.2).
-// manifestClasses is the vocabulary itself, as data rather than as control
-// flow, so that it can be ENUMERATED. A switch cannot be walked, and a class
-// added to a switch is a class no test can notice is missing from anything
-// else — which is how a stream mapping stayed unpinned while the classes grew.
+// manifestClasses maps a bundle manifest's class names to classes. It is data,
+// not a switch, so tests can enumerate it. ClassGap and ClassTimeSync have no
+// manifest name: the node authors them itself.
 var manifestClasses = map[string]Class{
 	"data":       ClassData,
 	"entity":     ClassEntity,
@@ -465,10 +366,8 @@ func ClassFromManifest(name string) (Class, bool) {
 	return c, ok
 }
 
-// ManifestClassNames lists every class name a bundle may declare, sorted.
-// It is the one enumeration of that vocabulary; anything that must stay in
-// step with it (the stream a class routes to, a peer implementation in
-// another language) can iterate this rather than repeat the list.
+// ManifestClassNames lists every class name a bundle may declare, sorted, so
+// anything that must stay in step can iterate it.
 func ManifestClassNames() []string {
 	names := make([]string, 0, len(manifestClasses))
 	for name := range manifestClasses {
@@ -478,14 +377,9 @@ func ManifestClassNames() []string {
 	return names
 }
 
-// StreamFor maps a class to the persistent stream that stores it.
-//
-// ClassGap is deliberately NOT mapped to a fixed stream here: a _StreamGap
-// marker is appended into whichever stream it describes (design §6.4), which
-// varies per record and is carried in the topic itself — Parsed.Path is the
-// stream name for a _StreamGap topic (colca/v1/_StreamGap/{node-ulid}/{stream},
-// ordinary uns grammar, so Parse needs no special case). Callers writing or
-// routing a _StreamGap record must use Parsed.Path, not StreamFor.
+// StreamFor maps a class to the stream that stores it. ClassGap has no fixed
+// stream: a _StreamGap marker goes into the stream named by its topic path, so
+// callers use Parsed.Path for those.
 func StreamFor(c Class) string {
 	switch c {
 	case ClassData:
@@ -507,59 +401,46 @@ func StreamFor(c Class) string {
 	case ClassGap:
 		return ""
 	case ClassTimeSync:
-		return "" // ephemeral: no stream, never persisted (time-sync design §2.2)
+		return "" // ephemeral: no stream, never persisted
 	}
 	return ""
 }
 
-// TimeSyncTopic builds the wire topic for the periodic time beacon (time-sync
-// design §2.2): colca/v1/_TimeSync/{node-ulid} — the only UNS topic with no
-// hierarchy path at all (Parse's 4-segment exception below mirrors this
-// shape). nodeULID is the publishing node's own identity, never a machine's.
+// TimeSyncTopic builds the beacon topic {root}/v1/_TimeSync/{node-ulid}, the
+// only topic without a hierarchy path. nodeULID is the publishing node, never a
+// machine.
 func TimeSyncTopic(nodeULID string) string {
 	return Prefix() + "_TimeSync/" + nodeULID
 }
 
-// IsMetric answers whether contract is _Metric — the core asks this rather
-// than comparing the literal string itself (architecture principle 4: domain
-// vocabulary lives in exactly one package).
+// IsMetric reports whether contract is _Metric, so the core never compares the
+// literal itself.
 func IsMetric(contract string) bool {
 	return contract == "_Metric"
 }
 
-// SignalTopicForMetric returns the _Signal topic sharing p's node and path —
-// the binding a _Metric record at p would need for that path to be a signal
-// (SDK design §7 gap 6). p is expected to describe a _Metric topic; the
-// contract itself is not consulted because a _Signal and its _Metric always
-// share node and path ("Events Catalog").
+// SignalTopicForMetric returns the _Signal topic with p's node and path: the
+// signal a _Metric at p needs. A signal and its metrics always share node and
+// path, so p's contract is not checked.
 func SignalTopicForMetric(p Parsed) string {
 	return Prefix() + "_Signal/" + p.NodeID + "/" + p.Path
 }
 
-// DownlinkCursorPrefix names the PARENT-side cursor a repl server persists
-// per child on its own commands stream (move-drain design §3.2/§3.4,
-// carried over from spec §5.1 [delta]): DownlinkCursorPrefix+{child-ulid} on
-// stream "commands" is the delivery floor — the next offset that child has
-// not yet fetched via GET /downlink. Exported here (rather than living only
-// in internal/repl) so the move-drain completion predicate, which reads it
-// from internal/repl but is conceptually about registry lifecycle, and any
-// future reader agree on one name instead of two hand-kept copies.
+// DownlinkCursorPrefix names the parent-side cursor a repl server keeps per
+// child on its commands stream: DownlinkCursorPrefix+{child-ulid} is the next
+// offset that child has not fetched. It lives here so repl and the move-drain
+// completion check use one name.
 const DownlinkCursorPrefix = "downlink:"
 
-// DownlinkDefCursorPrefix is the same idea for the definitions stream
-// (definition-stream design §5): DownlinkDefCursorPrefix+{child-ulid} on stream
-// "definitions" is how far that child has read. It is separate from the command
-// cursor because the two streams advance independently — and because
-// compaction's floor is this cursor, so a definition may only be superseded
-// once every child has read past it.
+// DownlinkDefCursorPrefix is the same for the definitions stream. It is a
+// separate cursor because the streams advance independently, and compaction
+// only supersedes a definition once every child has read past it.
 const DownlinkDefCursorPrefix = "downlink-def:"
 
-// UplinkCursor names this node's uplink replication cursor against one parent.
-// The parent's pinned pubkey is part of the name, so a node that changes
-// parents never resumes at the old parent's offsets; unlike the parent's ULID,
-// the pubkey is known before first contact. The "up:", "down:" and "down-def:"
-// prefixes keep these cursors apart from the parent-side ones above, which are
-// keyed by child ULID.
+// UplinkCursor names this node's uplink cursor against one parent. The name
+// includes the parent's pinned pubkey, which is known before first contact, so
+// a node that changes parents never resumes at old offsets. The "up:", "down:"
+// and "down-def:" prefixes keep these apart from the parent-side cursors.
 func UplinkCursor(parentPubkey string) string { return "up:" + parentPubkey }
 
 // DownlinkCursor is the commands-side counterpart of UplinkCursor.
@@ -578,38 +459,18 @@ func MountInsert(topic, mount string) string {
 	return strings.Join([]string{seg[0], seg[1], seg[2], seg[3], mount + "/" + seg[4]}, "/")
 }
 
-// UnderMount reports whether a node-local path lies strictly below mount.
-//
-// This is the single rule that decides which child a downward record belongs
-// to, and it has four production callers that must never disagree about it:
-//
-//   - the downlink filter — which commands a child is handed;
-//   - the move-drain completion scan — which commands still hold a drain open;
-//   - the draining-mount admission gate — which commands are refused while a
-//     child is being moved;
-//   - the routability check — whether a command addressed downward can reach
-//     anyone at all.
-//
-// The first two are the pair that must not drift: they read the SAME stream for
-// opposite purposes, so a completion scan whose boundary were narrower than the
-// filter's would declare a drain finished while commands under that mount were
-// still deliverable. It lived as four copies of the same string comparison (a
-// fifth in a test fake, whose own comment admitted it was mirroring one of
-// them); a rule spelled five times is a rule that can be wrong in four places
-// (principle 2).
-//
-// The boundary is the path separator, so "werk10/x" is NOT under "werk1" — the
-// case a bare HasPrefix gets wrong. An empty mount reaches nothing rather than
-// everything: absence must not read as universal scope, the same fail-closed
-// choice Ancestry.Covers makes for an empty element id.
+// UnderMount reports whether a node-local path lies strictly below mount. The
+// downlink filter, the move-drain completion scan, the draining-mount gate and
+// the routability check all use it, so they cannot disagree. The boundary is
+// the path separator ("werk10/x" is not under "werk1"), and an empty mount
+// covers nothing.
 func UnderMount(path, mount string) bool {
 	return mount != "" && strings.HasPrefix(path, mount+"/")
 }
 
-// MountStrip removes the mount prefix from the hierarchy part — the exact
-// inverse of MountInsert, done on every downlink hop. ok=false when the path
-// does not start with the mount, in which case the record belongs to a foreign
-// mount and must not be delivered.
+// MountStrip removes the mount prefix from the hierarchy path, the inverse of
+// MountInsert on every downlink hop. ok is false when the path is not under the
+// mount; such a record belongs elsewhere and must not be delivered.
 func MountStrip(topic, mount string) (string, bool) {
 	seg := strings.SplitN(topic, "/", 5)
 	if len(seg) < 5 {
@@ -622,15 +483,12 @@ func MountStrip(topic, mount string) (string, bool) {
 	return strings.Join([]string{seg[0], seg[1], seg[2], seg[3], rest}, "/"), true
 }
 
-// Validate applies minimal per-contract schema checks (hand-rolled stand-in for
-// the generated schema bundle — same enforcement point, swappable later).
-// Unknown contracts are rejected: that is the point of a validated namespace.
+// Validate applies minimal per-contract checks, a hand-written fallback for the
+// generated schema bundle. Unknown contracts are rejected.
 func Validate(contract string, payload []byte) error {
-	// Empty payload is the tombstone (retention design §7.1): valid exactly for
-	// the KV-projecting state classes (data/entity), where it retires the path —
-	// KV key deleted, retained message cleared. For every other contract an
-	// empty payload was never a valid value and deletion is not meaningful
-	// (§7.3): commands/acks/gaps are events, there is nothing to retire.
+	// An empty payload is a tombstone, valid only for data and entity
+	// classes, where it deletes the KV key and clears the retained message.
+	// Events have nothing to retire.
 	if len(payload) == 0 {
 		if IsState(ClassOf(contract)) {
 			return nil
@@ -753,17 +611,12 @@ func Validate(contract string, payload []byte) error {
 		contract == "_MetadataType" || contract == "_AnnotationType" ||
 		contract == "_DataModel" || contract == "_ExternalSystem" ||
 		contract == "_SemanticTag" || contract == PersonalAccessTokenContract:
-		// Data-model records name themselves by "id" — the field grants and
-		// bindings reference them through. They shared the registry's "ulid" rule
-		// until the binding cutover renamed it; a floor that still asked for
-		// "ulid" rejected every real element and signal.
+		// Data-model records name themselves by "id", which grants and
+		// bindings reference.
 		return reqStr("id")
 	case contract == "_TimeSync":
-		// Reachable only from direct Validate callers (tests, defense in
-		// depth): the engine rejects _TimeSync by class before Validate is
-		// ever called on a client/admin/replicated publish (time-sync design
-		// §2.2/§4) — only the node's own beacon loop publishes this shape,
-		// straight to the local bus, bypassing Validate entirely.
+		// Only direct callers reach this: the engine rejects _TimeSync by
+		// class first, and the node's own beacon bypasses Validate.
 		return reqNum("now_ms")
 	case contract == "_StreamGap":
 		if err := reqStr("stream"); err != nil {
@@ -790,13 +643,8 @@ func Validate(contract string, payload []byte) error {
 		}
 		return reqNum("expires_at")
 	case contract == "_Annotation":
-		// A deployed node always validates this contract against the
-		// generated schema bundle (contracts design §7; the level-3 annotation
-		// contract test's docstring says so explicitly), so this floor case is
-		// defense in depth for a bare/bundle-less engine — required-field
-		// parity with colca_data_contracts.Annotation's no-default fields
-		// (annotation_id, annotation_type_id, time_start), not the full
-		// schema.
+		// Deployed nodes validate against the schema bundle; this checks only
+		// the required fields, for a node without one.
 		if err := reqStr("annotation_id"); err != nil {
 			return err
 		}
@@ -808,9 +656,8 @@ func Validate(contract string, payload []byte) error {
 	return fmt.Errorf("unknown contract %q — validated namespace rejects unknown contracts", contract)
 }
 
-// placedConstant is the authoritative authored value stored at one namespace
-// path. Value stays raw so int64 validation never passes through float64 and
-// silently loses precision before the record reaches storage.
+// placedConstant is the authored value stored at one namespace path. Value
+// stays raw so int64 values never lose precision through float64.
 type placedConstant struct {
 	ID       string          `json:"id"`
 	Name     string          `json:"name"`
@@ -885,10 +732,9 @@ func validateConstantPayload(payload []byte) (placedConstant, error) {
 	return constant, nil
 }
 
-// placedResource is a file-backed entity attached to one system element
-// (resources design §2). The sha256/size_bytes pair is the file pointer: any
-// node holding this record knows exactly which blob it needs and can verify it
-// byte-for-byte, which is what lets metadata and bytes travel separately.
+// placedResource is a file-backed entity attached to one system element. The
+// sha256 and size_bytes identify the blob, so metadata and bytes can travel
+// separately and the bytes can be verified.
 type placedResource struct {
 	ID              string `json:"id"`
 	SystemElementID string `json:"system_element_id"`
@@ -898,9 +744,8 @@ type placedResource struct {
 	SHA256          string `json:"sha256"`
 }
 
-// isSHA256Hex is the same shape the blob store enforces on a path element:
-// 64 lowercase hex characters. Rejecting anything else here means a record can
-// never name a digest the store would refuse to look up.
+// isSHA256Hex matches what the blob store accepts: 64 lowercase hex
+// characters.
 func isSHA256Hex(s string) bool {
 	if len(s) != 64 {
 		return false
@@ -939,14 +784,12 @@ func validateResourcePayload(payload []byte) (placedResource, error) {
 	return resource, nil
 }
 
-// ResourceContract is the contract name a resource record carries. It is
-// exported so the core can filter a KV scan without writing the literal — the
-// vocabulary stays here.
+// ResourceContract is the contract name of a resource record, so the core can
+// filter a KV scan without the literal.
 const ResourceContract = "_Resource"
 
-// ResourceBlob reports the digest a _Resource record references. It is how the
-// core learns which blob a resource needs without parsing a payload it does
-// not own — the same reason LiveBlobDigests exists for the sweeper.
+// ResourceBlob returns the digest a _Resource record references, so the core
+// never parses the payload itself.
 func ResourceBlob(payload []byte) (string, bool) {
 	resource, err := validateResourcePayload(payload)
 	if err != nil {
@@ -955,19 +798,9 @@ func ResourceBlob(payload []byte) (string, bool) {
 	return resource.SHA256, true
 }
 
-// LiveBlobDigests reports the digests referenced by the resources among
-// these records (resources design §8).
-//
-// The caller is expected to have already scoped records to _Resource — via
-// EntityStore.KVScanAll(ResourceContract), which filters by contract in one
-// place — so this function does not re-check the topic's contract itself.
-// It is exactly "map ResourceBlob over these records": payload parsing stays
-// domain knowledge and stays here, but which records to look at is the
-// caller's job, not this function's.
-//
-// An unreadable _Resource record contributes nothing: it cannot be shown to
-// reference anything, and a blob is only kept because something demonstrably
-// points at it.
+// LiveBlobDigests returns the digests referenced by these _Resource records.
+// The caller scopes records to _Resource (EntityStore.KVScanAll). An unreadable
+// record keeps no blob alive.
 func LiveBlobDigests(records []KVRecord) map[string]struct{} {
 	live := make(map[string]struct{})
 	for _, rec := range records {

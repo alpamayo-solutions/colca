@@ -15,11 +15,10 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// RunCardinality seeds Paths distinct signal paths and measures what a big
-// namespace costs: full KV scan time (the /kv endpoint a UI would hit),
-// retained-set replay time for a fresh subscriber (the bus's "current state on
-// connect" contract), and process RSS growth. Replication runs during seeding,
-// so the hub-side numbers include the mount-rewritten copies.
+// RunCardinality seeds Paths distinct signal paths and measures what a large
+// namespace costs: KV scan time, retained replay time for a fresh subscriber and
+// RSS growth. Replication runs during seeding, so hub numbers include the
+// replicated copies.
 func RunCardinality(p Params) (*Report, error) {
 	pair, err := StartPair(p.WorkDir, 1)
 	if err != nil {
@@ -46,8 +45,7 @@ func RunCardinality(p Params) (*Report, error) {
 	}
 	r.Metrics["cardinality_seed_seconds"] = time.Since(seedStart).Seconds()
 
-	// Full KV scan at the edge, timed over 5 runs, best run reported (cold
-	// caches are a separate scenario — this is steady-state read cost).
+	// Full KV scan at the edge, best of 5 runs: the steady-state read cost.
 	var bestScan time.Duration
 	for run := 0; run < 5; run++ {
 		t0 := time.Now()
@@ -75,11 +73,9 @@ func RunCardinality(p Params) (*Report, error) {
 	}
 	r.Metrics["cardinality_kv_scan_ms"] = float64(bestScan.Microseconds()) / 1000.0
 
-	// Retained replay on the HUB: wait until replication has carried every
-	// path across, then time a fresh subscriber receiving the full retained set.
-	// Each wait phase gets its own deadline so a slow replication phase can't
-	// silently eat the budget the replay-wait phase needs, which would surface
-	// as a misleading "retained replay delivered X of Y" error.
+	// Retained replay on the hub: wait until every path has replicated, then time a
+	// fresh subscriber receiving the retained set. Each wait has its own deadline,
+	// so a slow replication does not eat the replay's budget.
 	replicationDeadline := time.Now().Add(5 * time.Minute)
 	for NextOffset(pair.Hub, "metrics") < uint64(p.Paths)+1 { //nolint:gosec // Paths is a positive flag value
 		if time.Now().After(replicationDeadline) {

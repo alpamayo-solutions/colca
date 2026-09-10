@@ -1,29 +1,16 @@
-// The `_CmdEdit` executor: what a edit command IS, and how one is
-// dispatched. The work itself lives in six sibling files, split along the
-// seams ExecuteWithWrites below calls through in order:
+// The _CmdEdit executor: the command types, the dispatch and the helpers the
+// composers share. The composers live in sibling files:
 //
-//	exec_edit_receipt.go     idempotency — the replay cache and the
-//	                              durable receipt that outlives it
-//	exec_edit_snapshot.go    the read half — one consistent view, and the
-//	                              optimistic-version check against it
-//	exec_edit_entity.go      composing create / update / delete and the
-//	                              external references hanging off them
-//	exec_edit_placement.go   composing the two POSITION intents: moving an
-//	                              entity, and binding a signal to a tag
-//	exec_edit_model.go       composing the one intent that spans a
-//	                              SUBTREE: assigning a data model to an
-//	                              element, its child elements and their models
-//	exec_edit_attachment.go  the one intent that writes the REGISTRY
-//	                              rather than the entity store
-//	exec_edit_annotation.go  the one intent whose class is an EVENT, not
-//	                              entity/definition state: it derives its own
-//	                              id and commits through PublishEvent, a
-//	                              separate write door, because
-//	                              IsCommandAuthoredState refuses it in
-//	                              PublishBatch's batch
-//
-// What stays here is what all of them share: the envelope and intent types,
-// the executor struct, and the small helpers more than one composer needs.
+//	exec_edit_receipt.go     replay cache and durable receipt
+//	exec_edit_snapshot.go    consistent snapshot and version checks
+//	exec_edit_entity.go      create, update, delete, external references
+//	exec_edit_placement.go   moving entities, binding signals to tags
+//	exec_edit_model.go       assigning data models to a subtree
+//	exec_edit_attachment.go  node attachments in the registry
+//	exec_edit_annotation.go  annotations, committed as events
+//	exec_edit_alarm.go       alarm and notification configuration
+//	exec_edit_resource.go    resources
+//	exec_edit_authz.go       authorizing the composed plan
 
 package uns
 
@@ -37,21 +24,17 @@ import (
 
 const editMutationLimit = 200
 
-// EditExec turns one typed UI intent into one atomic retained-state
-// transition. Paths, topics and state records are derived here, never supplied
-// by the browser or API transport.
+// EditExec turns one UI intent into one atomic state transition. Paths, topics
+// and records are derived here, never taken from the browser or the API.
 type EditExec struct {
 	store EntityStore
-	// bound answers which identities stand on an element. A delete intent
-	// retires positions exactly as the `_CmdConfigure` element/delete verb
-	// does, so it needs the same port to judge the same occupancy rule; two
-	// doors retiring elements under two rules is how an Edit cascade came
-	// to cut off a child node the configure verb would have refused to strand.
+	// bound says which identities stand on an element. A delete intent
+	// applies the same occupancy rule as element/delete, so both doors
+	// refuse the same retirements.
 	bound       Bindings
 	attachments NodeAttachmentWriter
-	// scope resolves a grant's element to the zone it covers here — the
-	// node's own element index in production (SetScope). Nil resolves only
-	// realm-wide grants.
+	// scope resolves a grant's element to the zone it covers here (the
+	// element index, see SetScope). Nil resolves only realm-wide grants.
 	scope Scope
 	// blobs is the resource intent's port onto this node's content-addressed
 	// store (SetBlobs); nil in unit tests that compose no resource records.
@@ -62,9 +45,9 @@ type EditExec struct {
 	replayOrder []string
 }
 
-// NodeAttachmentWriter is the registry-owned mutation seam used by the
-// Edit executor. The core adapter classifies registry errors; the domain
-// plugin never imports the core registry package.
+// NodeAttachmentWriter is how the Edit executor changes the registry. The core
+// adapter classifies registry errors, so this package never imports the
+// registry.
 type NodeAttachmentWriter interface {
 	RemountNode(entryJSON []byte) (offset uint64, status int, message string)
 	DrainNode(ulid string) (offset uint64, status int, message string)
@@ -106,12 +89,8 @@ type editIntent struct {
 	MountSystemElement string                     `json:"mount_system_element_id"`
 	Models             []string                   `json:"models"`
 	Creates            map[string]string          `json:"creates"`
-	// The fields below are the `annotation` intent's own — see
-	// exec_edit_annotation.go. Action is shared (create/update/delete,
-	// the same vocabulary "model" uses for assign/unassign): an annotation
-	// intent is the only one whose composer never reads `entities`/`expected`
-	// at all, because its record is never KV-projected and there is nothing
-	// to compare a version against.
+	// The fields below belong to the annotation intent (see
+	// exec_edit_annotation.go). Action is shared with the model intent.
 	AnnotationID     string          `json:"annotation_id"`
 	AnnotationTypeID string          `json:"annotation_type_id"`
 	TimeStart        *float64        `json:"time_start"`
@@ -119,16 +98,14 @@ type editIntent struct {
 	Value            json.RawMessage `json:"value"`
 	SignalIDs        []string        `json:"signal_ids"`
 	Source           string          `json:"source"`
-	// The `resource` intent's own — see exec_edit_resource.go. `Path` is
-	// where the resource sits (element path plus the resource id); `FromPath`
-	// is set only by a move, and makes the vacated position part of the same
-	// batch and the same authorization decision.
+	// The resource intent's fields (see exec_edit_resource.go). Path is
+	// where the resource sits; FromPath is set only by a move, which makes
+	// the old position part of the same batch and authorization.
 	Path     string          `json:"path"`
 	FromPath string          `json:"from_path"`
 	Resource json.RawMessage `json:"resource"`
-	// The alarm family's own — see exec_edit_alarm.go. The snapshot IS
-	// the `_AlarmNotificationConfig` record; an acknowledgement carries none,
-	// because current alarm status is the evaluator's, not KV state.
+	// The alarm intents' field (see exec_edit_alarm.go): the
+	// _AlarmNotificationConfig record. Acknowledgements carry none.
 	Snapshot json.RawMessage `json:"snapshot"`
 }
 
@@ -200,11 +177,9 @@ func NewEditExec(
 	}
 }
 
-// SetBlobs gives the executor the blob store the `resource` intent needs, so
-// it can hold the same invariant `ConfigExec` does: never author a record
-// pointing at bytes this node cannot produce. Nil leaves resource writes
-// refusing with `blob_unreachable`, which is the honest answer for a node with
-// no blob store.
+// SetBlobs gives the executor the blob store the resource intent needs to
+// avoid authoring records for bytes the node does not have. Without it,
+// resource writes answer blob_unreachable.
 func (w *EditExec) SetBlobs(blobs Blobs) { w.blobs = blobs }
 
 // Handles reports whether this executor runs the given contract.
@@ -228,10 +203,8 @@ func (w *EditExec) ExecuteWithWrites(
 	if contract != "_CmdEdit" {
 		return 422, "unsupported edit contract", "invalid", nil
 	}
-	// An Edit command is a person's intent and is authorized against that
-	// person (node-side command authorization design §3A). Refused before
-	// the replay lookup: a non-human never earns a receipt, so a later replay
-	// cannot return an outcome nobody was authorized to produce.
+	// An Edit command is authorized against a person. Refuse others
+	// before the replay lookup, so no receipt is ever written for them.
 	if !ctx.Actor.IsHuman() {
 		return 403, "_CmdEdit requires a human actor: forward the person's token, or carry their attested groups on the record", "denied", nil
 	}
@@ -313,9 +286,8 @@ func (w *EditExec) ExecuteWithWrites(
 	if code != 200 {
 		return w.remember(envelope.OperationID, digest, code, message, result, nil)
 	}
-	// The plan is composed; nothing is written yet. Every position it
-	// touches must be covered by the person's configure grants, or the whole
-	// command is refused with zero writes (design §3C).
+	// Nothing is written yet. Every position the plan touches must be
+	// covered by the person's grants, or the whole command is refused.
 	if code, message, result := w.authorizeTouched(ctx, w.planFor(ctx, intent, records, entities, catalogues)); code != 0 {
 		return w.remember(envelope.OperationID, digest, code, message, result, nil)
 	}

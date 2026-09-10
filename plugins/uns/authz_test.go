@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// nsByPath is the default test scope: an element id that carries the path it
-// sits at, with the separators swapped for "~" because an id may not contain
-// one. Cases can then name a placement inline, and every element resolves at
-// this node — no ancestors. Movement is what mapScope below is for.
+// nsByPath is the default test scope: an element id carries its path with
+// "/" replaced by "~", so cases name placements inline. It has no ancestors;
+// use mapScope for movement.
 type nsByPath struct{}
 
 func (nsByPath) PathOf(id string) (string, bool) {
@@ -27,9 +26,9 @@ var ns = nsByPath{}
 // that only need Validate to get past the pubkey shape check.
 var hex64 = strings.Repeat("ab", 32)
 
-// mapScope is the explicit test scope: which elements sit where at this node,
-// and which ones are this node or above it. Used where the answer has to CHANGE
-// — a rename, a reparent, an inherited grant.
+// mapScope is the explicit test scope: where elements sit and which are this
+// node or above it. Use it where the answer has to change (rename, reparent,
+// inherited grant).
 type mapScope struct {
 	paths map[string]string // element id → local path
 	above map[string]bool   // element id is this node or an ancestor
@@ -38,8 +37,8 @@ type mapScope struct {
 func (m mapScope) PathOf(id string) (string, bool) { p, ok := m.paths[id]; return p, ok }
 func (m mapScope) Reaches(id string) bool          { return id != "" && m.above[id] }
 
-// testScope builds a Scope from element id → local path, with no ancestors —
-// a shorthand for mapScope{paths: ...} where a case only needs placements.
+// testScope builds a Scope from element id to local path, with no
+// ancestors.
 func testScope(paths map[string]string) Scope {
 	return mapScope{paths: paths}
 }
@@ -52,8 +51,7 @@ func elementAt(path string) string {
 	return "el-" + strings.ReplaceAll(path, "/", "~")
 }
 
-// readAt / cmdAt author a grant on the element sitting at path — what an
-// operator writes once the ids come out of the plant model.
+// readAt and cmdAt build a grant on the element at path.
 func readAt(path string) string { return "read:" + elementAt(path) + "/#" }
 
 func cmdAt(path, classes string) string { return "cmd:" + elementAt(path) + "/#:" + classes }
@@ -90,9 +88,8 @@ func TestParseGrant(t *testing.T) {
 		{in: "cmd:01HLINE1/#:reboot", wantErr: true},  // unknown class
 		{in: "grant:01HLINE1/#", wantErr: true},       // unknown verb
 		{in: "", wantErr: true},
-		// A path-shaped zone is the mistake this design removes: it means
-		// different things at different nodes and stops meaning anything at all
-		// once somebody renames a position.
+		// A path-shaped zone is refused: a path means different things at
+		// different nodes and breaks when a position is renamed.
 		{in: "read:werk1/linie3/#", wantErr: true},
 		{in: "cmd:werk1/linie3/#:param", wantErr: true},
 	}
@@ -147,11 +144,9 @@ func TestEntryValidate(t *testing.T) {
 	}
 }
 
-// A local service is the one kind that may be unplaced: the local door
-// already proved it belongs to this deployment. A machine or a node must be
-// placed explicitly — the element-less read-only observer is gone (design
-// §7): bound-to-nothing and bound-to-everything must never be the same
-// stored value.
+// A local service is the only kind that may be unplaced, since the local door
+// proved it belongs to the deployment. Machines and nodes must be placed, so
+// "bound to nothing" and "bound to everything" never share a stored value.
 func TestALocalEntryNeedsANameAndNoPubkey(t *testing.T) {
 	e := &Entry{ULID: "01J", Kind: KindLocal, Name: "connector-opcua", Element: "el-press3"}
 	if err := e.Validate(); err != nil {
@@ -176,9 +171,8 @@ func TestALocalServiceNameIsOneTopicSegment(t *testing.T) {
 	}
 }
 
-// Unplaced is a position, not a missing value: a local service with no element is
-// bound to the NODE. A machine's is required — the local door proved a local
-// service belongs to this deployment, and nothing proved that about a machine.
+// A local service with no element is bound to the node. A machine needs an
+// element, since nothing proved it belongs to this deployment.
 func TestALocalServiceMayBeUnplaced(t *testing.T) {
 	e := &Entry{ULID: "01J", Kind: KindLocal, Name: "dataops"}
 	if err := e.Validate(); err != nil {
@@ -220,7 +214,7 @@ func TestCmdClass(t *testing.T) {
 		"_CmdConfigure": "configure",
 		"_CmdEdit":      "configure",
 		"_CmdAdmin":     "admin",
-		"_CmdFoo":       "admin", // unknown command contracts demand the highest class (§5.1)
+		"_CmdFoo":       "admin", // unknown command contracts get the highest class
 	}
 	for contract, want := range cases {
 		if got := CmdClass(contract); got != want {
@@ -229,10 +223,8 @@ func TestCmdClass(t *testing.T) {
 	}
 }
 
-// Editing the data model is not a point on the equipment-hazard ladder: the
-// person who binds a signal must not thereby be able to send maintenance
-// commands to a PLC, and the maintenance technician must not silently gain the
-// ability to rewrite the model (data-model binding design §3.3).
+// configure is not on the hazard ladder: binding a signal must not allow
+// maintenance commands, and maintain must not allow editing the model.
 func TestConfigureAndMaintainDoNotImplyEachOther(t *testing.T) {
 	const (
 		configureCmd = "colca/v1/_CmdConfigure/n1/werk1/signal/upsert"
@@ -281,10 +273,8 @@ func TestOnlyUnplacedLocalServiceGetsImplicitConfigure(t *testing.T) {
 			t.Errorf("%s gained implicit configure", name)
 		}
 	}
-	// _CmdEdit is configure-class but carries a PERSON's intent, so an
-	// unplaced local service (the api) may not issue it under its own
-	// identity — the executor authorizes the person (node-side command
-	// authorization design §3A).
+	// _CmdEdit carries a person's intent, so an unplaced local service
+	// (the api) may not issue it under its own identity.
 	if unplaced.MayImplicitlyConfigure("_CmdEdit") {
 		t.Fatal("an unplaced local service may not implicitly issue _CmdEdit")
 	}
@@ -363,10 +353,8 @@ func TestAuthorizeSub(t *testing.T) {
 	}
 }
 
-// Time-sync design §2.2/§4: every authenticated machine session may subscribe
-// the beacon filter regardless of its zone grants — an element-less observer
-// with NO grants at all still gets it, which a plain zone/read:# check would
-// deny.
+// Every authenticated machine session may subscribe to the beacon filter,
+// even an element-less observer with no grants.
 func TestAuthorizeSubTimeSyncBypassesZoneGrants(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -417,8 +405,8 @@ func TestAdminGrantVerb(t *testing.T) {
 	if g, err := ParseGrant("admin:#"); err != nil || g.Verb != "admin" || g.Element != "#" {
 		t.Fatalf("admin:# must parse: %+v %v", g, err)
 	}
-	// Zone-scoped admin is RESERVED grammar (§3): it must be rejected with an
-	// error that names the reservation, so introducing it later is additive.
+	// Zone-scoped admin is reserved: it must be rejected with an error that
+	// says so, so adding it later is not a breaking change.
 	if _, err := ParseGrant("admin:01HWERK1/#"); err == nil || !strings.Contains(err.Error(), "reserved") {
 		t.Fatalf("admin:01HWERK1/# must be rejected as reserved, got %v", err)
 	}
@@ -448,7 +436,7 @@ func TestTokenEntry(t *testing.T) {
 	if err != nil || noAdmin.IsAdmin() {
 		t.Fatalf("IsAdmin must be false without admin:#: %v %v", noAdmin, err)
 	}
-	// Grants absent = read nothing (spec §2.1): no default zone for humans.
+	// No grants means reading nothing: people have no default zone.
 	bare, err := TokenEntry("s3", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -458,7 +446,7 @@ func TestTokenEntry(t *testing.T) {
 	}
 }
 
-// admin unlocks ROUTES, never data: it does not widen read or cmd (§3).
+// admin unlocks routes, never data: it does not widen read or cmd.
 func TestAdminDoesNotImplyReadOrCmd(t *testing.T) {
 	e, err := TokenEntry("boss", []string{"admin:#"})
 	if err != nil {
@@ -475,8 +463,8 @@ func TestAdminDoesNotImplyReadOrCmd(t *testing.T) {
 	}
 }
 
-// Enrollment stays a machine/node affair: humans are tokens, and registry
-// identities may not hold admin (provisioning is the _CmdAdmin flow, §3).
+// Enrollment is for machines and nodes: people are tokens, and registry
+// identities may not hold admin.
 func TestEnrollmentRejectsHumanAndAdminGrants(t *testing.T) {
 	human := &Entry{ULID: "h1", Pubkey: strings.Repeat("ab", 32), Kind: KindHuman}
 	if err := human.Validate(); err == nil {
@@ -489,12 +477,10 @@ func TestEnrollmentRejectsHumanAndAdminGrants(t *testing.T) {
 	}
 }
 
-// A grant on an element ABOVE this node covers everything here: the node sits
-// inside the granted subtree, so there is nothing here that is outside it. This
-// is the case a node cannot answer from its own records — the element's record
-// lives at the ancestor — and the reason its position is taught to it.
+// A grant on an element above this node covers everything here. The node
+// cannot see that element's record, so its parent teaches it its position.
 func TestAGrantOnAnAncestorElementCoversThisWholeNode(t *testing.T) {
-	// This node is edge1, under site1. It holds m1; site1 it only knows about
+	// This node is edge1 under site1. It holds m1 and knows site1 only
 	// because its parent told it where it sits.
 	sc := mapScope{
 		paths: map[string]string{"01HM1": "m1"},
@@ -517,9 +503,8 @@ func TestAGrantOnAnAncestorElementCoversThisWholeNode(t *testing.T) {
 	}
 }
 
-// A grant on an element this node HOLDS covers that element and below it, and
-// nothing else — the same boundary the path grammar enforced, resolved from an
-// identity instead of read off a string.
+// A grant on an element this node holds covers that element and below it,
+// nothing else.
 func TestAGrantOnALocalElementCoversOnlyItsSubtree(t *testing.T) {
 	sc := mapScope{paths: map[string]string{
 		"01HLINE1":  "line1",
@@ -542,8 +527,8 @@ func TestAGrantOnALocalElementCoversOnlyItsSubtree(t *testing.T) {
 	}
 }
 
-// The point of the whole design: renaming a position changes where the grant
-// applies, and changes nothing about the grant. Nobody re-authors anything.
+// Renaming a position changes where the grant applies and nothing about the
+// grant itself.
 func TestARenameChangesNothingAboutTheGrant(t *testing.T) {
 	sc := mapScope{paths: map[string]string{"01HLINE1": "line1"}}
 	e, err := TokenEntry("anna", []string{"read:01HLINE1/#"})
@@ -564,8 +549,8 @@ func TestARenameChangesNothingAboutTheGrant(t *testing.T) {
 	}
 }
 
-// A reparent moves the element's whole subtree, and the verdict moves with it
-// on the next decision — no re-authoring, no window in between.
+// A reparent moves the element's subtree, and the verdict follows on the next
+// decision.
 func TestAReparentMovesTheVerdictImmediately(t *testing.T) {
 	sc := mapScope{paths: map[string]string{"01HM6": "line1/m6"}}
 	e, err := TokenEntry("anna", []string{"read:01HM6/#"})
@@ -586,9 +571,7 @@ func TestAReparentMovesTheVerdictImmediately(t *testing.T) {
 	}
 }
 
-// An element this node has never heard of grants nothing: it is neither above
-// the node nor held by it, so there is no position to compare against and the
-// answer is no.
+// An element this node has never heard of grants nothing.
 func TestAnUnknownElementGrantsNothing(t *testing.T) {
 	sc := mapScope{paths: map[string]string{"01HM1": "m1"}}
 	e, err := TokenEntry("anna", []string{"read:01HSOMEWHERE-ELSE/#", "cmd:01HSOMEWHERE-ELSE/#:param"})
@@ -606,11 +589,8 @@ func TestAnUnknownElementGrantsNothing(t *testing.T) {
 	}
 }
 
-// Fail closed, and stay useful: a node that has never learned its position
-// resolves no scoped grant — it knows of no ancestor and holds no element it
-// can place — while the frame-invariant "#" grants keep working exactly as
-// before. This replaces the old "prefix never learned" rule and falls out of
-// the same lookup instead of being a special case.
+// A node that has not learned its position resolves no scoped grant, while
+// "#" grants keep working.
 func TestANodeThatKnowsNothingFailsClosedOnScopedGrantsOnly(t *testing.T) {
 	unpositioned := mapScope{} // no elements, no ancestors
 
@@ -637,8 +617,8 @@ func TestANodeThatKnowsNothingFailsClosedOnScopedGrantsOnly(t *testing.T) {
 // --- FormatGrant: constructing and parsing live in one package ---------------
 
 func TestFormatGrantRoundTripsThroughParseGrant(t *testing.T) {
-	// The claim that makes it safe for anything to BUILD grants by asking here
-	// instead of writing the grammar down again.
+	// Round-tripping is what makes it safe to build grants here instead of
+	// spelling out the grammar elsewhere.
 	for _, want := range []string{
 		"read:#",
 		"read:01HM6/#",
@@ -779,16 +759,10 @@ func TestAGrantNamingAnUnheldElementIsInert(t *testing.T) {
 	}
 }
 
-// A subscription filter reaching into MQTT's reserved "$" space is refused at
-// the door, for machines and humans alike and whatever their grants.
-//
-// "$share/<group>/<filter>" is an ALIAS the broker resolves AFTER this
-// decision runs, so the filter this sees is the raw string: "$share" as a
-// first segment used to read as plain-broker traffic and grant the aliased
-// filter unconditionally, handing every record on the node to a subscriber
-// scoped to one element. The unaliased rows are the denominator — the same
-// entries and the same filters without the prefix, judged normally — so a
-// refusal above is the "$" rule and not a grant these entries never had.
+// A subscription filter in MQTT's reserved "$" space is refused for machines
+// and people alike, whatever their grants. The broker resolves "$share/g/..."
+// after this check, so it must not pass as plain-broker traffic. The rows
+// without the prefix are the control: the same filters judged normally.
 func TestAuthorizeSubRefusesTheReservedDollarSpace(t *testing.T) {
 	zoned := entry("werk1/linie3")
 	readAll := entry("", "read:#")

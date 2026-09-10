@@ -26,11 +26,9 @@ func newBody(t *testing.T, content string) io.Reader {
 
 const nodeULID = "n1"
 
-// sweepParts builds one sweeper wired to a real store, engine and blob store
-// — the same fixture shape as the retention pruner's tests (mustParts) plus
-// the blob half resources_test.go's newResourceAPI fixture adds. grace is
-// the sweeper's grace period; tests move the returned sweeper's `now` field
-// to age blobs without sleeping.
+// sweepParts builds a sweeper on a real store, engine and blob store. grace is
+// the sweeper's grace period; tests move the sweeper's now to age blobs without
+// sleeping.
 func sweepParts(t *testing.T, grace time.Duration) (*engine.Engine, *blobstore.Store, *Sweeper) {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
@@ -57,9 +55,8 @@ func sweepParts(t *testing.T, grace time.Duration) (*engine.Engine, *blobstore.S
 }
 
 // authorResource places an element at elementPath and publishes a _Resource
-// record naming id/sha/size there — the same topic shape
-// ConfigExec.resourceTopic produces (resources design §3), and the same
-// pattern httpapi's resources_test.go uses.
+// record naming id, sha and size there, on the topic ConfigExec.resourceTopic
+// builds.
 func authorResource(t *testing.T, eng *engine.Engine, elementPath, id, sha string, size int64) {
 	t.Helper()
 	elementID := authtest.Place(t, eng, elementPath)
@@ -81,9 +78,7 @@ func authorResource(t *testing.T, eng *engine.Engine, elementPath, id, sha strin
 }
 
 // tombstoneResource retires the resource authorResource published at
-// elementPath/id: an empty payload at the same topic (resources design §2 —
-// _Resource's tombstone is the same empty-payload convention every entity
-// contract uses).
+// elementPath/id with an empty payload on the same topic.
 func tombstoneResource(t *testing.T, eng *engine.Engine, elementPath, id string) {
 	t.Helper()
 	topic := "colca/v1/_Resource/" + nodeULID + "/" + elementPath + "/" + id
@@ -99,9 +94,8 @@ func mustHave(t *testing.T, blobs *blobstore.Store, sha string, want bool) {
 	}
 }
 
-// TestSweepKeepsAReferencedBlob pins the sweeper's core positive claim: a
-// blob a live _Resource names survives, no matter its age — grace only ever
-// matters for UNreferenced blobs.
+// TestSweepKeepsAReferencedBlob: a blob a live _Resource names survives whatever
+// its age; grace only matters for unreferenced blobs.
 func TestSweepKeepsAReferencedBlob(t *testing.T) {
 	eng, blobs, sweeper := sweepParts(t, time.Hour)
 	sha, size, err := blobs.Put(newBody(t, "referenced"), "")
@@ -118,9 +112,8 @@ func TestSweepKeepsAReferencedBlob(t *testing.T) {
 	mustHave(t, blobs, sha, true)
 }
 
-// TestSweepDeletesAnUnreferencedBlobPastTheGrace pins the sweeper's core
-// reclamation claim. Denominator: a referenced blob in the SAME sweep
-// survives, so the deletion below cannot be "the sweep deleted everything".
+// TestSweepDeletesAnUnreferencedBlobPastTheGrace: a referenced blob in the same
+// sweep survives, so the deletion is not the sweep deleting everything.
 func TestSweepDeletesAnUnreferencedBlobPastTheGrace(t *testing.T) {
 	eng, blobs, sweeper := sweepParts(t, time.Hour)
 	liveSHA, liveSize, err := blobs.Put(newBody(t, "referenced"), "")
@@ -141,15 +134,12 @@ func TestSweepDeletesAnUnreferencedBlobPastTheGrace(t *testing.T) {
 	mustHave(t, blobs, liveSHA, true) // denominator: the sweep did not delete everything
 }
 
-// TestSweepSparesAYoungUnreferencedBlob is the grace period's whole reason to
-// exist: an unreferenced blob newer than the grace must survive, because it
-// may be mid-upload-before-upsert, mid-blob-before-entity, or
-// mid-pull-before-execute (design §8). Denominator: the same blob, aged past
-// the grace, IS deleted — proving the earlier survival was the grace window,
-// not a sweeper that never deletes unreferenced blobs at all.
+// TestSweepSparesAYoungUnreferencedBlob: an unreferenced blob newer than the
+// grace survives, since it may still be waiting for its record. The same blob
+// aged past the grace is deleted, so the survival was the grace window.
 func TestSweepSparesAYoungUnreferencedBlob(t *testing.T) {
-	// No resource is ever authored for this blob — it stays unreferenced
-	// throughout, so only the grace window explains its early survival.
+	// No resource is ever authored for this blob, so only the grace window explains
+	// its survival.
 	_, blobs, sweeper := sweepParts(t, time.Hour)
 	sha, _, err := blobs.Put(newBody(t, "just uploaded"), "")
 	if err != nil {
@@ -165,9 +155,8 @@ func TestSweepSparesAYoungUnreferencedBlob(t *testing.T) {
 	mustHave(t, blobs, sha, false)
 }
 
-// TestSweepReclaimsAfterATombstone is the whole point of the sweeper: a
-// resource that is retired must eventually give its blob back, once nothing
-// live references it and the grace has passed.
+// TestSweepReclaimsAfterATombstone: a retired resource gives its blob back once
+// nothing live references it and the grace has passed.
 func TestSweepReclaimsAfterATombstone(t *testing.T) {
 	eng, blobs, sweeper := sweepParts(t, time.Hour)
 	sha, size, err := blobs.Put(newBody(t, "will be retired"), "")
@@ -188,16 +177,10 @@ func TestSweepReclaimsAfterATombstone(t *testing.T) {
 	mustHave(t, blobs, sha, false)
 }
 
-// TestSweepNeverDeletesOnAFailedScan is the core
-// guard (resources design §8): a records() failure must never be read as
-// "nothing is referenced". If it were, the sweeper would delete every
-// unreferenced-looking blob past the grace, including ones a working scan
-// would have shown as live — the exact "an iterator failure silently reads
-// as an empty store" bug this seam exists to close.
-//
-// Denominator, in the same test: swap in a working read and the same
-// orphan — unreferenced and already past the grace throughout — IS deleted,
-// so "nothing was deleted" above cannot be "the sweeper is simply broken".
+// TestSweepNeverDeletesOnAFailedScan: a records() failure must never read as
+// "nothing is referenced", which would delete blobs a working scan shows as
+// live. With a working read swapped in, the same orphan past its grace is
+// deleted, so the sweeper is not simply broken.
 func TestSweepNeverDeletesOnAFailedScan(t *testing.T) {
 	_, blobs, sweeper := sweepParts(t, time.Hour)
 	sha, _, err := blobs.Put(newBody(t, "orphan, well past the grace"), "")

@@ -42,10 +42,8 @@ func TestParseAndClass(t *testing.T) {
 		"_ExternalSystem": {ClassDefinition, "definitions"},
 		"_SemanticTag":    {ClassDefinition, "definitions"},
 		"_AuditEvent":     {ClassAudit, "audit"},
-		// _StreamGap (design §6.4) is its own class. StreamFor deliberately
-		// answers "" for it — unlike every other class it has no single fixed
-		// stream, it targets whichever stream it describes (Parsed.Path, see
-		// TestStreamGapTargetsDescribedStream).
+		// _StreamGap has its own class. StreamFor answers "" for it: the marker
+		// goes into the stream it describes (see TestStreamGapTargetsDescribedStream).
 		"_StreamGap": {ClassGap, ""},
 	}
 	for c, want := range cases {
@@ -70,9 +68,8 @@ func TestParseAndClass(t *testing.T) {
 	}
 }
 
-// Time-sync design §2.2: _TimeSync is the only contract whose wire topic has
-// no hierarchy path at all — Parse's one length exception, gated on the
-// contract so it can never accidentally widen to any other class.
+// _TimeSync is the only contract whose topic has no hierarchy path; Parse's
+// length exception is tied to that contract.
 func TestTimeSyncTopicShape(t *testing.T) {
 	p, err := Parse("colca/v1/_TimeSync/n-edge1")
 	if err != nil {
@@ -90,24 +87,21 @@ func TestTimeSyncTopicShape(t *testing.T) {
 	if got := TimeSyncTopic("n-edge1"); got != "colca/v1/_TimeSync/n-edge1" {
 		t.Fatalf("TimeSyncTopic = %q", got)
 	}
-	// A padded (5+-segment) _TimeSync topic still parses normally through the
-	// ordinary >=5 path — the relaxation only ever ADDS the 4-segment shape.
+	// A 5+-segment _TimeSync topic still parses normally; the exception only
+	// adds the 4-segment shape.
 	p2, err := Parse("colca/v1/_TimeSync/n-edge1/extra")
 	if err != nil || p2.Path != "extra" {
 		t.Fatalf("padded _TimeSync topic: %+v, err=%v", p2, err)
 	}
 
-	// The relaxation is contract-gated, not length-only: any OTHER contract
-	// at 4 segments must still be a grammar error (same case already pinned
-	// generically in TestParseAndClass's "missing path" check for _Metric).
+	// Any other contract at 4 segments is still a grammar error.
 	if _, err := Parse("colca/v1/_Metric/n-edge1"); err == nil {
 		t.Fatal("4-segment _Metric must still error — the relaxation is _TimeSync-only")
 	}
 }
 
-// Design §6.4: "topic colca/v1/_StreamGap/{node-ulid}/{stream} — level 4 is the
-// pruning node, ordinary uns grammar" — no Parse special case needed, and the
-// stream the marker describes is exactly Parsed.Path.
+// A _StreamGap topic ({root}/v1/_StreamGap/{node}/{stream}) needs no Parse
+// special case, and Parsed.Path is the stream it describes.
 func TestStreamGapTargetsDescribedStream(t *testing.T) {
 	for _, stream := range []string{"metrics", "entities", "commands", "audit"} {
 		topic := "colca/v1/_StreamGap/n-edge1/" + stream
@@ -124,15 +118,9 @@ func TestStreamGapTargetsDescribedStream(t *testing.T) {
 	}
 }
 
-// A gap marker keeps naming its own stream at every hop.
-//
-// The marker replicates like any other record, so each hop upward prepends
-// the child's mount to its path (retention design §9: "global's stream
-// contains the edges' _StreamGap records with mount-inserted provenance").
-// Binding it to its stream by the WHOLE path held only at the first hop: at
-// the grandparent the path reads `leaf1/metrics`, the marker was refused with
-// 403, and the middle node re-sent the same batch forever — every record
-// behind it on that lane, every _Ack of the whole subtree included, stuck.
+// A gap marker names its stream at every hop. Each hop prepends the child's
+// mount to the path, so a check on the whole path would refuse the marker at
+// the grandparent and block the lane behind it.
 func TestGapMarkerNamesItsStreamAtEveryHop(t *testing.T) {
 	topic := "colca/v1/_StreamGap/n-leaf/metrics"
 	for _, mounts := range [][]string{nil, {"leaf1"}, {"leaf1", "site1"}} {
@@ -156,10 +144,9 @@ func TestGapMarkerNamesItsStreamAtEveryHop(t *testing.T) {
 	}
 }
 
-// A child may replicate onto the streams of the classes that flow up, and
-// onto nothing else. `definitions` is the one that matters: its class flows
-// DOWN, and a child that could write it would author policy for the whole
-// tree (definition-stream design §4).
+// A child may replicate onto the streams of the classes that flow up and
+// nothing else. definitions flows down; a child writing it would author
+// policy for the whole tree.
 func TestUplinkStreamsAreTheStreamsOfTheClassesThatRise(t *testing.T) {
 	want := map[string]bool{}
 	for _, name := range ManifestClassNames() {
@@ -210,11 +197,9 @@ func TestAuditEventIsAnUpwardAppendOnlyEvent(t *testing.T) {
 	}
 }
 
-// engine.retainFor(c) == (c == ClassData || c == ClassEntity), and
-// persistTS's KV-projection gate uses the identical condition — so pinning
-// that ClassGap is neither ClassData nor ClassEntity here pins BOTH "never
-// retained" and "never KV-projected" at the source: the class enum itself.
-// (engine_test.go additionally exercises the real retainFor function.)
+// Retaining and KV projection both apply only to ClassData and ClassEntity,
+// so checking ClassGap against those covers both. engine_test.go tests
+// retainFor itself.
 func TestStreamGapNeverRetainedOrKVProjected(t *testing.T) {
 	if ClassGap == ClassData || ClassGap == ClassEntity {
 		t.Fatal("ClassGap must not be ClassData or ClassEntity — it is an event, not state (design §6.4)")
@@ -263,8 +248,8 @@ func TestValidate(t *testing.T) {
 		{"_CmdParam", `{"correlation_id":"abc","expires_at": 99999999999, "params":{"speed":5}}`},
 		{"_Ack", `{"correlation_id":"abc","result_code":200,"message":"ok"}`},
 		{"_EnrolledIdentity", `{"ulid":"n-edge1","element":"01HEDGE1","kind":"node","grants":[],"status":"active","pubkey":"aa"}`},
-		// A data-model record names itself by "id", not by "ulid" — that is
-		// the field grants and bindings reference it through.
+		// A data-model record names itself by "id", not "ulid"; grants and
+		// bindings reference that field.
 		{"_SystemElement", `{"id":"01HLINE1","name":"Linie 1"}`},
 		{"_Signal", `{"id":"01HSIG1","name":"Temperatur"}`},
 		{"_Constant", `{"id":"01HCONST1","name":"Target speed","data_type":"int64","value":18000}`},
@@ -285,8 +270,7 @@ func TestValidate(t *testing.T) {
 		{"_Ack", `{"result_code":200}`},           // missing correlation_id
 		{"_Unknown", `{}`},                        // unknown contract
 		{"_Metric", `not json`},
-		// _StreamGap: each case is missing exactly one required field (§6.4:
-		// {stream, from_offset, to_offset, first_ts, last_ts, overridden_cursors}).
+		// _StreamGap: each case lacks exactly one required field.
 		{"_StreamGap", `{"from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":["uplink"]}`},              // missing stream
 		{"_StreamGap", `{"stream":"metrics","to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":["uplink"]}`},           // missing from_offset
 		{"_StreamGap", `{"stream":"metrics","from_offset":1,"first_ts":1,"last_ts":2,"overridden_cursors":["uplink"]}`},         // missing to_offset
@@ -315,10 +299,8 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-// Retention design §7.1/§7.3: the empty payload is the tombstone and it is
-// valid EXACTLY for the KV-projecting state classes (data/entity) — there it
-// retires the path. For events (commands, acks, gap markers) and unknown
-// contracts deletion is not meaningful and the empty payload stays rejected.
+// An empty payload is the tombstone, valid only for data and entity classes.
+// For events and unknown contracts it is still rejected.
 func TestValidateEmptyPayloadTombstoneRule(t *testing.T) {
 	for _, contract := range []string{"_Metric", "_EnrolledIdentity", "_Node", "_SystemElement", "_Signal", "_Constant", "_EditOperation"} {
 		if err := Validate(contract, nil); err != nil {
@@ -335,9 +317,8 @@ func TestValidateEmptyPayloadTombstoneRule(t *testing.T) {
 	}
 }
 
-// A definition is its own stream and its own class (definition-stream design
-// §2/§4): state, so an empty payload retracts it, and nowhere near the command
-// path.
+// A definition has its own stream and class: state, so an empty payload
+// retracts it.
 func TestDefinitionsAreStateInTheirOwnStream(t *testing.T) {
 	if got := ClassOf("_Group"); got != ClassDefinition {
 		t.Fatalf("ClassOf(_Group) = %v, want ClassDefinition", got)
@@ -348,8 +329,8 @@ func TestDefinitionsAreStateInTheirOwnStream(t *testing.T) {
 	if !IsState(ClassDefinition) {
 		t.Fatal("a definition is state: KV-projected, retained, retractable")
 	}
-	// The tombstone: an empty payload retracts a definition, the way it retires
-	// a data or entity path — and the way it is still refused for events.
+	// The tombstone retracts a definition as it retires a data or entity
+	// path, and is still refused for events.
 	if err := Validate("_Group", nil); err != nil {
 		t.Fatalf("a definition tombstone must be valid: %v", err)
 	}
@@ -365,9 +346,8 @@ func TestDefinitionsAreStateInTheirOwnStream(t *testing.T) {
 	}
 }
 
-// Design §3.1. Both alarm-subject contracts leave the sample lane. Order
-// inside a stream never changes, so this is the only thing that lets an alarm
-// overtake a metrics backlog.
+// Both alarm contracts leave the sample lane. Order within a stream never
+// changes, so this is what lets an alarm overtake a metrics backlog.
 func TestAlarmContractsRouteToTheAlarmsStream(t *testing.T) {
 	for _, contract := range []string{"_AlarmStateChange", "_NotificationDispatched"} {
 		class := ClassOf(contract)
@@ -386,9 +366,8 @@ func TestAlarmContractsRouteToTheAlarmsStream(t *testing.T) {
 	}
 }
 
-// Design §3. An alarm is an EVENT. Getting this wrong is what made every alarm
-// transition leak a KV entry at a path nothing ever overwrites and Prune never
-// deletes — on the authoring node and on every ancestor.
+// An alarm is an event. As state, every transition left a KV entry that
+// nothing overwrites and Prune never deletes, on every ancestor too.
 func TestAlarmIsAnEventNotState(t *testing.T) {
 	if IsState(ClassAlarm) {
 		t.Fatal("IsState(ClassAlarm): alarm events would KV-project at a never-reused path and be retained forever")
@@ -415,8 +394,8 @@ func TestAlarmIsAnEventNotState(t *testing.T) {
 	}
 }
 
-// Design §3. Alarms rise, and only on their own stream — a child offering one
-// on `metrics` is refused at the parent's door.
+// Alarms rise only on their own stream; a child offering one on metrics is
+// refused at the parent's door.
 func TestAlarmRisesOnItsOwnStreamOnly(t *testing.T) {
 	if !FlowsUp(ClassAlarm) {
 		t.Fatal("FlowsUp(ClassAlarm) = false: an alarm would never reach a parent")
@@ -440,9 +419,8 @@ func TestAlarmManifestName(t *testing.T) {
 	}
 }
 
-// Dataops-evaluator design §8. An annotation instance leaves KV-projected
-// state entirely, mirroring the alarm precedent for the same volume reason: a
-// part-cycle producer at 1 part/30 s is ~1M annotations/year/machine.
+// Annotations are not KV state, like alarms: a producer at one part every 30s
+// writes about a million a year per machine.
 func TestAnnotationContractRoutesToTheAnnotationsStream(t *testing.T) {
 	class := ClassOf("_Annotation")
 	if class != ClassAnnotation {
@@ -453,14 +431,8 @@ func TestAnnotationContractRoutesToTheAnnotationsStream(t *testing.T) {
 	}
 }
 
-// A log line is an EVENT on its own stream.
-//
-// It used to be ClassData, which made it state: KV kept only the newest line
-// per (node, path, logger, level) — so a consolidated view could show one line
-// per logger and no history at all — and the history it did have rode the
-// metrics stream, where a chatty service both queued behind the samples and
-// evicted them. Its own stream is the alarm precedent applied to the class
-// that needed it most.
+// A log line is an event on its own stream. As data it kept only the newest
+// line per logger in KV, and its history crowded the metrics stream.
 func TestLogContractIsAnEventOnItsOwnStream(t *testing.T) {
 	class := ClassOf("_Log")
 	if class != ClassLog {
@@ -475,7 +447,7 @@ func TestLogContractIsAnEventOnItsOwnStream(t *testing.T) {
 	if IsState(class) {
 		t.Fatal("IsState(ClassLog): a log line would be retained and KV-projected, keeping only the newest per logger")
 	}
-	// It must still reach the hub — a consolidated view is the whole point.
+	// It must still reach the hub.
 	if !FlowsUp(class) {
 		t.Fatal("FlowsUp(ClassLog): logs would never leave the node that wrote them")
 	}
@@ -484,10 +456,8 @@ func TestLogContractIsAnEventOnItsOwnStream(t *testing.T) {
 	}
 }
 
-// Design §8. An annotation is an EVENT, not state: create, update (setting
-// time_end) and delete are all appends carrying the same deterministic id,
-// applied last-write-wins in stream order — never KV-projected, never
-// retained.
+// An annotation is an event: create, update and delete are appends with the
+// same id, applied in stream order, never KV-projected or retained.
 func TestAnnotationIsAnEventNotState(t *testing.T) {
 	if IsState(ClassAnnotation) {
 		t.Fatal("IsState(ClassAnnotation): an annotation would KV-project at a never-reused path and be retained forever")
@@ -514,8 +484,8 @@ func TestAnnotationIsAnEventNotState(t *testing.T) {
 	}
 }
 
-// Design §8. Annotations rise, and only on their own stream — a child
-// offering one on `metrics` is refused at the parent's door.
+// Annotations rise only on their own stream; a child offering one on metrics
+// is refused at the parent's door.
 func TestAnnotationRisesOnItsOwnStreamOnly(t *testing.T) {
 	if !FlowsUp(ClassAnnotation) {
 		t.Fatal("FlowsUp(ClassAnnotation) = false: an annotation would never reach a parent")
@@ -553,9 +523,8 @@ func TestSemanticTagIsADefinition(t *testing.T) {
 	}
 }
 
-// Design §3.1: a cursor names a position in one identified peer's stream, so
-// the peer's identity is part of its key. Two parents must never share a
-// cursor — that is the whole defect this fixes.
+// A cursor names a position in one peer's stream, so the peer's identity is
+// part of its name; two parents never share a cursor.
 func TestParentScopedCursorNames(t *testing.T) {
 	const a = "aa11"
 	const b = "bb22"
@@ -577,10 +546,8 @@ func TestParentScopedCursorNames(t *testing.T) {
 	}
 }
 
-// The child-side uplink cursor and the PARENT-side downlink cursor are
-// different facts about different nodes. They must not be able to collide:
-// the parent-side name is keyed by child ULID, the child-side by parent
-// pubkey, and a value that happened to be both would otherwise alias.
+// The child-side uplink cursor is keyed by parent pubkey and the parent-side
+// downlink cursor by child ULID; the names must never collide.
 func TestChildAndParentSideCursorNamesDoNotAlias(t *testing.T) {
 	const shared = "01JSVC"
 	if DownlinkCursor(shared) == DownlinkCursorPrefix+shared {
@@ -659,14 +626,12 @@ func TestLiveBlobDigestsReadsOnlyResources(t *testing.T) {
 	records := []KVRecord{
 		{Topic: "colca/v1/_Resource/n1/press3/r1", Payload: []byte(`{"id":"r1","system_element_id":"el1",
 			"filename":"m.pdf","content_type":"application/pdf","size_bytes":1,"sha256":"` + sha + `"}`)},
-		// A record whose payload does not parse as a resource — whatever
-		// contract it actually carries, LiveBlobDigests contributes nothing
-		// for it. Scoping the scan to _Resource is the caller's job
-		// (EntityStore.KVScanAll(ResourceContract)); this function only ever
-		// asks "does this payload name a digest", not "what contract is this".
+		// A payload that does not parse as a resource contributes nothing,
+		// whatever its contract; scoping the scan to _Resource is the
+		// caller's job.
 		{Topic: "colca/v1/_Signal/n1/press3/temp", Payload: []byte(`{"id":"s1"}`)},
-		// A _Resource record whose payload fails validation (missing fields):
-		// unreadable, so it cannot be shown to reference anything either.
+		// A _Resource payload missing fields cannot be shown to reference
+		// anything either.
 		{Topic: "colca/v1/_Resource/n1/press3/broken", Payload: []byte(`{"id":"r2"}`)},
 	}
 	live := LiveBlobDigests(records)
@@ -678,9 +643,7 @@ func TestLiveBlobDigestsReadsOnlyResources(t *testing.T) {
 	}
 }
 
-// UnderMount is one rule with three callers (the downlink filter, the
-// draining-mount admission gate, the routability counter), so its edges are
-// pinned here once rather than in each of them.
+// UnderMount has several callers, so its edge cases are tested here once.
 func TestUnderMount(t *testing.T) {
 	cases := []struct {
 		path, mount string
@@ -688,15 +651,14 @@ func TestUnderMount(t *testing.T) {
 	}{
 		{"site1/edge1/press3/set-speed", "site1/edge1", true},
 		{"site1/edge1/x", "site1", true},
-		// The separator boundary — the case a bare HasPrefix gets wrong, and
-		// the reason this is a named rule instead of an inline comparison.
+		// The separator boundary, which a bare HasPrefix gets wrong.
 		{"werk10/x", "werk1", false},
-		// The mount itself is not below itself: a command topic always carries
-		// a verb after the mount, so an exact match is a malformed address.
+		// The mount is not below itself: a command topic always has a verb
+		// after the mount.
 		{"site1/edge1", "site1/edge1", false},
 		{"other/x", "site1", false},
-		// Absence reaches NOTHING rather than everything: an entry whose mount
-		// did not resolve must not silently acquire universal scope.
+		// An empty mount reaches nothing, so an unresolved mount never gains
+		// universal scope.
 		{"anything/at/all", "", false},
 	}
 	for _, c := range cases {

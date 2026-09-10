@@ -9,10 +9,8 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// captureLogs routes slog.Default through a buffer for the duration of the
-// test; a Manager built AFTER the call logs into it (its own copy of this
-// helper — internal/repl and internal/engine each keep one too, since a
-// package-private test helper cannot be shared across packages).
+// captureLogs routes slog.Default through a buffer for the test; a Manager built
+// after the call logs into it.
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -22,31 +20,16 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// authoredPlacements is the test double for the path→id side of authoring: a
-// plain map, grown by the fake author closure below exactly as the real
-// ConfigExec.authorElementAt (reached in production through the
-// "element/author" verb) grows the namespace when Register authors a missing
-// mount. Exposed with the same IDAt orientation the real thing answers, so a
-// test can check what got authored without a second resolver of its own.
+// authoredPlacements records what the fake author authored, keyed by path like
+// Placements.IDAt.
 type authoredPlacements map[string]string
 
 func (p authoredPlacements) IDAt(path string) (string, bool) { id, ok := p[path]; return id, ok }
 
-// newTestManagerWithElements builds a manager wired for self-registration:
-// SetNamespace so a bound element's mount resolves (Enroll refuses to bind to
-// an element this node cannot resolve), and SetAuthoring so Register can
-// resolve or author declared mounts. elements maps path -> element id, the
-// same orientation Placements.IDAt answers.
-//
-// The fake author here does NOT walk missing intermediate segments the way
-// ConfigExec.authorElementAt does — that walk is domain knowledge and lives
-// in exactly one place (architecture principle 1), pinned where it actually
-// runs: exec_configure_test.go's
-// TestATagsMetaElementAuthorsMissingSegmentsAndReusesExisting, and
-// TestALocalServiceAndACatalogueTagAuthorTheSameElementsThroughOneWalk below,
-// which exercises the REAL walk through both callers against one store. This
-// fake only has to prove Register calls its authoring dependency and binds to
-// whatever it returns — Register's own behavior, not the walk's.
+// newTestManagerWithElements builds a manager wired for self-registration.
+// elements maps path to element id. The fake author does not walk intermediate
+// segments; that walk is tested in plugins/uns and in
+// TestALocalServiceAndACatalogueTagAuthorTheSameElementsThroughOneWalk.
 func newTestManagerWithElements(t *testing.T, elements map[string]string) *Manager {
 	t.Helper()
 	m, err := New(openStore(t, t.TempDir()), "01NODE")
@@ -72,10 +55,8 @@ func newTestManagerWithElements(t *testing.T, elements map[string]string) *Manag
 	return m
 }
 
-// reposition simulates an operator narrowing an already-registered local
-// service's placement — the data-model door's job, entirely out of band from
-// self-registration. It re-enrolls the same ulid under a new element, exactly
-// as an administrative move would.
+// reposition re-enrolls a registered local service under a new element, as an
+// operator move would.
 func reposition(t *testing.T, m *Manager, name, elementID string) {
 	t.Helper()
 	e, ok := m.ByName(name)
@@ -100,13 +81,8 @@ func TestRegisterBindsToAnExistingDeclaredMount(t *testing.T) {
 	}
 }
 
-// A missing declared mount is authored through m.author (SetAuthoring),
-// and the entry binds to whatever it returns. The walk that authors every
-// missing intermediate segment along the way is domain knowledge, pinned
-// once where it actually lives — exec_configure_test.go's
-// TestATagsMetaElementAuthorsMissingSegmentsAndReusesExisting — and again,
-// through this exact door, by
-// TestALocalServiceAndACatalogueTagAuthorTheSameElementsThroughOneWalk below.
+// A missing declared mount is authored through the authoring hook, and the entry
+// binds to whatever it returns.
 func TestRegisterAuthorsAMissingDeclaredMount(t *testing.T) {
 	m := newTestManagerWithElements(t, map[string]string{})
 
@@ -132,9 +108,8 @@ func TestRegisterWithNoDeclarationLeavesTheServiceUnplaced(t *testing.T) {
 	}
 }
 
-// The rule the whole design rests on: a declaration seeds an entry, it never
-// maintains one. Without this an operator's repositioning is undone by the next
-// container restart, which makes repositioning pointless.
+// A declaration seeds an entry and never moves it; otherwise a container restart
+// would undo an operator's repositioning.
 func TestADeclarationDoesNotMoveAnExistingEntry(t *testing.T) {
 	m := newTestManagerWithElements(t, map[string]string{"line1/press3": "el-press3"})
 	if _, err := m.Register("conn", ""); err != nil {
@@ -151,11 +126,8 @@ func TestADeclarationDoesNotMoveAnExistingEntry(t *testing.T) {
 	}
 }
 
-// Spec §3.2's second safety rule: a declaration that disagrees with the
-// entry's current binding is logged, so drift is visible rather than silent.
-// TestADeclarationDoesNotMoveAnExistingEntry above always redeclares "",
-// which never even reaches the comparison — this is the test that actually
-// exercises it, with a declaration that genuinely disagrees.
+// A declaration that disagrees with the entry's binding is logged, so drift is
+// visible.
 func TestADeclarationThatDisagreesWithTheEntryIsLoggedButDoesNotMoveIt(t *testing.T) {
 	logs := captureLogs(t) // must run before the Manager is built (see captureLogs)
 	m := newTestManagerWithElements(t, map[string]string{
@@ -178,10 +150,7 @@ func TestADeclarationThatDisagreesWithTheEntryIsLoggedButDoesNotMoveIt(t *testin
 		t.Fatalf("drift between the declaration and the bound entry must be logged:\n%s", logs.String())
 	}
 
-	// A declaration that only differs cosmetically (a leading slash) from the
-	// bound path must not be logged as drift: elementFor discards empty
-	// segments while authoring a mount, so the drift comparison has to fold
-	// the same way.
+	// A mount that differs only by a leading slash is not drift.
 	before := strings.Count(logs.String(), "declares a mount it is not bound to")
 	if _, err := m.Register("conn", "/line2/press9"); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -204,12 +173,6 @@ func TestRegisterIsIdempotentAcrossReconnects(t *testing.T) {
 	}
 }
 
-// NewULID mints via oklog/ulid/v2 (architecture principle 2: a 130-bit
-// Crockford base32 text form is a specification, so this package generates it
-// through the canonical library rather than a second implementation of its
-// own). The shape (26 characters) and the freshness (two calls never
-// collide) are ours to pin; the bit layout inside that shape is the
-// library's business, not this package's.
 func TestNewULIDIsA26CharacterStringThatDiffersAcrossCalls(t *testing.T) {
 	a, b := NewULID(), NewULID()
 	if len(a) != 26 || len(b) != 26 {
