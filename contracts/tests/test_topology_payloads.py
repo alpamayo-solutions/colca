@@ -55,8 +55,7 @@ def test_signal_carries_its_binding():
 
 
 def test_signal_holds_no_path_references():
-    """A record's topic is rewritten at every hop; its payload is not, so a path
-    stored inside one means something else at an ancestor (design §3.2)."""
+    """A topic is rewritten at every hop but a payload is not, so payloads hold ids, not paths."""
     fields = SignalPayload.__dataclass_fields__
     assert "topic_name" not in fields
     assert "system_element_topic" not in fields
@@ -234,9 +233,7 @@ def test_signal_with_only_id_name_is_valid():
 
 
 def test_system_element_names_its_parent_by_identity():
-    """A record's topic is rewritten at every hop but its payload is not, so a
-    path stored inside one means something else at an ancestor. The parent
-    reference must be frame-invariant (binding design §3.2)."""
+    """The parent is referenced by id, which means the same at every hop."""
     se = SystemElementPayload(id="01HCHILD", name="Linie 3", parent_id="01HPARENT")
     decoded = SystemElementPayload.decode(se.encode(), timestamp=0)
 

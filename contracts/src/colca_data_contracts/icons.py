@@ -1,13 +1,9 @@
 """The curated Material Symbols Outlined ligature set.
 
-One list, three consumers: the self-hosted font subset build retains exactly
-these glyphs, the semantic-tag editor's picker offers exactly these options,
-and the command boundary refuses a tag whose icon is outside it. An authored
-typo is therefore unrepresentable rather than rendering as literal text in the
-entity tree for everyone downstream.
-
-A name that does not exist in Material Symbols fails the subset build, so
-invalid entries are caught at build time rather than by a user.
+The font subset keeps exactly these glyphs, the semantic-tag picker offers
+exactly these, and the command boundary refuses a tag whose icon is not in the
+set, so a typo cannot render as literal text. A name Material Symbols does not
+have fails the subset build.
 """
 
 # Entity-kind defaults and system-element tags.
@@ -122,12 +118,8 @@ _GENERAL = {
     "route",
 }
 
-# Recurring-property badges (`ui/app/domain/property-badges.ts`). The
-# Edit draws a data type, a source, a file type and so on through one
-# registry; every glyph it names has to survive the subset build, and being
-# in this set is what makes `test_icon_set_ships` check that. `draft` was in
-# that registry and is NOT in the font -- it rendered blank on every binary
-# resource until this list caught it.
+# Glyphs the editor's property badges use (data type, source, file type).
+# Listing them here makes test_icon_set_ships check that the font has them.
 _PROPERTY_BADGES = {
     "image",
     "table",

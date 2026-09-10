@@ -1,16 +1,8 @@
-"""The `_Log` payload's field list is one fact, shared by two languages.
+"""The `_Log` payload's fields, shared by Python and Go.
 
-Python builds a `_Log` payload from the `Log` dataclass, so it cannot omit a
-field. Go builds one by hand — and did, missing `module`, `function` and
-`line_no`. The node refused every record with `jsonschema validation failed
-with bundle:///_Log.json#`, and nothing said so out loud: a log publisher
-that reports its own failure through the log is a loop, so four Go services
-went on publishing nothing.
-
-`vectors/log_payload.json` is the shared statement of that fact — the
-repo's pattern for knowledge two languages need natively (architecture
-principle 2, tier 2). This test keeps it equal to the contract; the Go test
-in `colca/door` reads the same file and keeps the Go payload equal to it.
+Python builds the payload from the `Log` dataclass; Go builds it by hand.
+`vectors/log_payload.json` lists the fields: this test keeps it equal to the
+contract, and a test in `door/` keeps the Go payload equal to it.
 """
 
 from __future__ import annotations

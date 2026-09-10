@@ -1,11 +1,7 @@
-"""Tests for the MachineState contract enums and their consistency with the
-compiled ``MachineState`` data model.
+"""The MachineState enums and the compiled ``MachineState`` data model agree.
 
-The point of these tests: the ordinal ints are a wire/storage contract
-(value_number in the historian, Grafana value-mappings, OEE routing). They
-must never drift silently — not between releases, and not between the Python
-IntEnums and the data model's ``enum`` slot values that the UI / dm / api
-service consume.
+The ordinals are stored, so they must not change between releases or drift
+from the model's ``enum`` slot values.
 """
 
 from colca_data_contracts.data_models import compile_models
@@ -45,16 +41,13 @@ def test_machine_state_ordinals():
 
 
 def test_offline_not_off():
-    """Naming decision (2026-06-15): the de-energized state is OFFLINE, not OFF.
-    Guard against a regression to the old name."""
+    """The de-energized state is called OFFLINE."""
     assert MachineState(1).name == "OFFLINE"
     assert not hasattr(MachineState, "OFF")
 
 
 def test_unknown_is_zero_everywhere():
-    """UNKNOWN/UNCLASSIFIED are the honest defaults and must be the zero value
-    of their axis so an unset signal degrades to 'don't know', never to a
-    confident wrong state."""
+    """UNKNOWN and UNCLASSIFIED are zero, so an unset value means "don't know"."""
     assert MachineState.UNKNOWN == 0
     assert OperatingMode.UNKNOWN == 0
     assert StateReason.UNCLASSIFIED == 0

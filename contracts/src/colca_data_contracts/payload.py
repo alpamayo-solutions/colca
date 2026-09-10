@@ -68,22 +68,8 @@ class NetworkInterfaceType(BaseStrEnum):
 
 
 #: Value types a Colca ``_Signal`` can carry: franzmq's ``DataType`` plus
-#: ``json``.
-#:
-#: The API's Signal column derives from this (``SIGNAL_DATA_TYPE_CHOICES``),
-#: colca's domain maps a model slot's ``json`` straight through
-#: (``slotDataTypes`` in ``exec_edit_model.go``), and the semantic-type
-#: table maps canonical ``json`` to it -- but the WIRE contract did not, so
-#: ``Signal.decode`` raised ``ValueError: 'json' is not a valid DataType`` on a
-#: signal every other layer considers legal. Encoding succeeded (a dataclass
-#: annotation validates nothing), which is what kept it hidden: a json signal
-#: could be written and then never read back by the projector, the connector or
-#: dataops.
-#:
-#: Members are DERIVED from franzmq's enum rather than retyped, so the day
-#: franzmq gains or loses one this cannot silently disagree with it. Pinned
-#: against a golden vector the API suite and the editor suite both read
-#: (``vectors/signal_data_types.json``).
+#: ``json``. Derived from franzmq's enum so the two cannot drift, and pinned by
+#: ``vectors/signal_data_types.json``.
 SignalDataType = BaseStrEnum(  # type: ignore[misc]
     "SignalDataType",
     {member.name: member.value for member in DataType} | {"JSON": "json"},
@@ -91,12 +77,11 @@ SignalDataType = BaseStrEnum(  # type: ignore[misc]
 
 
 class ConstantDataType(BaseStrEnum):
-    """Value types supported by first-class Colca configuration constants.
+    """Value types of Colca configuration constants.
 
-    Constants intentionally use the App 2 editor contract's width-explicit
-    numeric names. Signal ``DataType`` keeps its existing ``int``/``float``
-    wire values because acquired telemetry and authored configuration are
-    separate contracts.
+    Constants use width-explicit numeric names, while a signal's ``DataType``
+    keeps ``int`` and ``float``: telemetry and configuration are separate
+    contracts.
     """
 
     FLOAT64 = "float64"
@@ -169,33 +154,28 @@ class CustomEncoder(json.JSONEncoder):
 
 
 # ---------------------------------------------------------------------------
-# Wire-level string constraints (schema-bundle design §4.1)
+# Wire-level string constraints
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Pattern:
-    """A regular expression a string field's WIRE value must match.
+    """A regular expression a string field's wire value must match.
 
-    Attached to a field type through ``typing.Annotated``; the bundle
-    generator emits it as JSON-Schema ``pattern`` so the colca door refuses a
-    value that does not match. The Python constructors stay unchecked — the
-    door is the gate, and this is the one definition it is generated from.
+    Attach it with ``typing.Annotated``. The bundle carries it as a JSON Schema
+    ``pattern``, so the door refuses a value that does not match; Python
+    constructors do not check it.
     """
 
     regex: str
 
 
-#: The one ULID grammar: 26 Crockford-base32 characters (no I, L, O, U).
-#: Every consumer that checks an id spells the same expression; the
-#: bundle carries it to the door so a 31-character id is refused where it is
-#: published rather than where the projector's 26-character column meets it.
+#: A ULID: 26 Crockford base32 characters (no I, L, O, U). The bundle carries
+#: it to the door, so a malformed id is refused where it is published.
 ULID_PATTERN = r"^[0-9A-HJKMNP-TV-Z]{26}$"
 
-#: A string field whose value is a ULID by contract — an entity's own id and
-#: every reference to one. Publishers that mint these always mint ULIDs
-#: (``ulid.new()``, ``node_manager.ids.stable_id``, ``registry.NewULID``); the
-#: bundle now says so.
+#: A string field whose value is a ULID: an entity's own id and every
+#: reference to one.
 ULID = Annotated[str, Pattern(ULID_PATTERN)]
 
 
@@ -261,13 +241,11 @@ class NetworkInterface:
 
 @dataclass
 class Node(Payload):
-    """A Colca node authored by the node it describes.
+    """A Colca node, authored by the node it describes.
 
-    ``root_system_element_id`` is the element the node is bound to — the one
-    its parent mounted it at, the root of its subtree in the namespace. The
-    root node is bound to nothing above itself and carries none. colcad
-    writes it the moment the node learns its position; everything else here
-    is what a deployment or an operator says about the node.
+    ``root_system_element_id`` is the element the node is bound to, the root
+    of its subtree; the root node has none. colcad sets it once the node learns
+    its position. The other fields come from the deployment or an operator.
     """
 
     id: str
@@ -503,23 +481,17 @@ def derive_annotation_id(
     time_start: float,
     signal_ids: Iterable[str],
 ) -> str:
-    """Deterministic ``Annotation.annotation_id`` (design §8).
+    """Deterministic ``Annotation.annotation_id``.
 
     ULID-encodes the first 16 bytes of
     ``SHA-256(f"{annotation_type_id}|{source}|{time_start:.6f}|{','.join(sorted(signal_ids))}")``.
-    Folding the ``ensure_annotation`` idempotency into the identity itself
-    is what lets create, update (e.g. setting ``time_end``), and delete of the
-    same logical annotation all be appends carrying the SAME id on the
-    append-only ``annotations`` stream — a re-run producer naturally
-    overwrites its own prior record instead of duplicating it, and consumers
-    apply last-write-wins per id in stream order.
+    Create, update and delete of one annotation are appends with the same id,
+    so a re-run producer overwrites its own record and consumers keep the last
+    write per id.
 
-    The signals the annotation is about are part of its identity (annotation-cutover design §8): one author opening two
-    annotations of the same type at the same instant on two different
-    machines is two annotations, not one, so the second must not collide
-    with the first. The set is sorted before hashing, so the caller's order
-    never changes the id; an annotation about no signal contributes the
-    empty string.
+    The signal set is part of the identity, so the same annotation type at the
+    same instant on two machines gives two ids. The set is sorted first, and
+    no signals contribute an empty string.
     """
     signal_set = ",".join(sorted(signal_ids))
     digest = hashlib.sha256(f"{annotation_type_id}|{source}|{time_start:.6f}|{signal_set}".encode()).digest()
@@ -528,27 +500,17 @@ def derive_annotation_id(
 
 @dataclass
 class Annotation(Payload):
-    """A time-based annotation instance (design §8).
+    """A time-based annotation.
 
-    Its own contract (class ``annotation``) on the append-only
-    ``annotations`` stream — never KV-projected, never retained, the same
-    shape as ``alarm`` and for the same reason: a part-cycle producer at
-    1 part/30 s is ~1M annotations/year/machine, so id-keyed retained/KV
-    entries would grow without bound.
-
-    ``annotation_id`` is deterministic — see ``derive_annotation_id``. A
-    delete is a record with ``deleted=True``, not an absence: deletes are
-    appends too, so "was this annotation ever deleted" survives replication
-    and replay the same way every other state change on the stream does.
+    Lives on the append-only ``annotations`` stream and is never kept in KV or
+    retained: a part-cycle producer writes about a million a year per machine.
+    ``annotation_id`` comes from ``derive_annotation_id``. A delete is a record
+    with ``deleted=True``, so it replicates and replays like any other change.
     """
 
     annotation_id: ULID
-    #: A ULID in every producer (the projector's column, `stable_id`,
-    #: preflight) but NOT yet constrained on the wire: the shared golden
-    #: `vectors/annotation_id.json` — pinned by the Go and Python derivation
-    #: tests and consumed by the level-3 annotation suite — derives ids from
-    #: readable type ids such as ``annotation-type-1``. Constrain it together
-    #: with a vector rewrite, not before.
+    #: A ULID in practice, but not constrained on the wire yet: the golden
+    #: vectors in `vectors/annotation_id.json` use readable type ids.
     annotation_type_id: str
     time_start: float
     time_end: float | None = None
@@ -562,20 +524,14 @@ class Annotation(Payload):
 
 @dataclass
 class DataTag(Payload):
-    """One entry of a connector's catalogue (never a record of its own — the
-    catalogue is the unit, data-model binding design §3.1).
+    """One entry of a connector's catalogue; the catalogue is published as a whole.
 
-    ``id`` is a ULID the connector mints at discovery and keeps stable across
-    rediscovery by matching ``source`` against its previous catalogue (design
-    §6): a signal's binding (``Signal.data_tag``) names this, never ``source``
-    or ``name``, so the id must outlive the discovery that created it.
+    ``id`` is a ULID the connector mints at discovery and keeps across
+    rediscovery by matching ``source``. A signal's binding
+    (``Signal.data_tag``) names this id, so it must outlive the discovery.
 
-    ``source`` is the natural key — the tag's full address within the source
-    (what OPC-UA computes as its browse path, a Modbus/Jetter register name).
-    It replaces ``hierarchy``, which modelled the tag's position inside the
-    SOURCE: a second tree parallel to the plant model, already duplicated (the
-    old id was ``hierarchy + name`` joined) and empty for every protocol but
-    OPC-UA. The natural key becomes ``(connector, source)``.
+    ``source`` is the tag's full address within the source, such as an OPC UA
+    browse path or a register name. ``(connector, source)`` is the natural key.
     """
 
     id: ULID
@@ -584,9 +540,8 @@ class DataTag(Payload):
     is_writable: bool
     is_readable: bool
     data_type: str | None = None
-    #: True when this tag no longer exists at the source (carried forward
-    #: from the previous catalogue rather than dropped, so a signal bound to
-    #: it stays bound instead of silently rebinding — design §6).
+    #: True when the tag no longer exists at the source. It stays in the
+    #: catalogue so a signal bound to it stays bound.
     is_stale: bool = False
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -690,20 +645,12 @@ class SemanticTag(Payload):
 
 @dataclass
 class Group(Payload):
-    """A group of humans and the grants its members hold.
+    """A group of people and the grants its members hold.
 
-    Topic: ``colca/v1/_Group/{authoring-node}/{id}``. A definition: authored once,
-    needed at every node that authorizes a human, and the same thing at all of
-    them (definition-stream design §8).
-
-    A group is emphatically NOT an identity. It has no key, it never connects,
-    and it is never a candidate at any door — which is why it lives here rather
-    than in the registry: the registry's invariant is an identity with a pinned
-    key, and a group has neither half.
-
-    A token names the groups its bearer belongs to; the node unions their
-    grants. Membership therefore lives in the identity provider and changes
-    nobody's node state.
+    Topic: ``colca/v1/_Group/{authoring-node}/{id}``. A definition, the same at
+    every node that authorizes people. A group is not an identity: it has no
+    key and never connects. A token names its bearer's groups and the node
+    unions their grants, so membership lives in the identity provider.
     """
 
     id: str
@@ -724,9 +671,9 @@ class Group(Payload):
 class PersonalAccessToken(Payload):
     """Hash-only personal access token record replicated to child nodes.
 
-    The plaintext credential is never written to COLCA.  Nodes compare the
-    SHA-256 digest locally, then reconstruct the immutable identity and
-    privilege ceiling captured when the owner created the token.
+    The plaintext token is never stored. Nodes compare the SHA-256 digest
+    locally, then rebuild the identity and privilege ceiling captured when the
+    owner created the token.
     """
 
     id: ULID
@@ -747,19 +694,16 @@ class PersonalAccessToken(Payload):
 
 @dataclass
 class DataModel(Payload):
-    """A data-model definition: the compiled, flattened shape a system element
-    can claim to implement.
+    """A data-model definition: the compiled shape a system element can claim
+    to implement.
 
-    Topic: ``colca/v1/_DataModel/{authoring-node}/{id}``. A definition, so it
-    descends the tree and is applied as state at every node below its author
-    (definition-stream design §2). ``slots`` carries the loader's manifest
-    flattened slot list (``extends`` already resolved), so consumers don't
-    need to walk ``extends`` themselves.
+    Topic: ``colca/v1/_DataModel/{authoring-node}/{id}``. As a definition it
+    descends the tree and is applied at every node below its author. ``slots``
+    is the flattened slot list, with ``extends`` already resolved.
     """
 
-    #: The definition's identity — its path on the wire, and what a system
-    #: element references when it claims to implement this data model. A
-    #: definition without one could not be addressed at all.
+    #: The definition's identity: its path on the wire, and what a system
+    #: element references to implement this model.
     id: ULID
     name: str
     version: str = "1.0"
@@ -810,19 +754,15 @@ class ExternalReference(Payload):
 
 @dataclass
 class SystemElement(Payload):
-    """A position in the plant — and therefore in the namespace.
+    """A position in the plant, and therefore in the namespace.
 
-    Topic: ``colca/v1/_SystemElement/{node-id}/{path…}``. Elements nest in
-    elements; nodes and machines get their address by binding to one; signals
-    are leaves. The record's own topic is its position, so nothing here restates
-    it (id-grants design §3).
+    Topic: ``colca/v1/_SystemElement/{node-id}/{path…}``. Elements nest;
+    nodes and machines get their address by binding to one; signals are leaves.
+    The topic is the position, so the payload does not repeat it.
 
-    The parent is named by **identity**: a record's topic is rewritten at every
-    hop while its payload is not, so a path stored in here would silently mean
-    something else at an ancestor.
-
-    Written by the node in response to a `_CmdConfigure` command; a retired
-    element is a retained empty payload (tombstone).
+    The parent is named by id, not path: a topic is rewritten at every hop, a
+    payload is not. The node writes the record for a `_CmdConfigure`; a retired
+    element is a retained empty payload.
     """
 
     id: ULID
@@ -834,8 +774,8 @@ class SystemElement(Payload):
     external_asset_id: str | None = None
     external_asset_id_type: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    #: ULID of the `_SemanticTag` definition that says what this entity IS.
-    #: None means unclassified, which is a valid state.
+    #: ULID of the `_SemanticTag` definition saying what this entity is; None
+    #: means unclassified.
     semantic_type_id: ULID | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -848,26 +788,15 @@ class SystemElement(Payload):
 
 @dataclass
 class Signal(Payload):
-    """Topology entity, authored by the node.
+    """A signal, authored by the node.
 
-    Topic: ``colca/v1/_Signal/{node-id}/{path…}`` — the record's own topic is its
-    position in the namespace, so nothing here restates it.
+    Topic: ``colca/v1/_Signal/{node-id}/{path…}``; the topic is the position, so
+    the payload does not repeat it.
 
-    The signal also carries its **binding**: a direct FK to the one data tag
-    it reads from, ``data_tag`` → ``DataTag.id``. That replaces the
-    DataTagContext, whose many-tags-to-one-signal relationship was never
-    adopted (data-model binding design §2), and it replaces an earlier
-    ``(connector, tag_id)`` pair — the connector is reached THROUGH the tag,
-    never stored beside it (local-service-trust design §6): a signal's own
-    identity is never a function of what it is bound to, so rebinding it to a
-    different tag leaves its id, and therefore its whole metric history,
-    untouched. The reference is an identity rather than a path because a
-    record's topic is rewritten at every hop while its payload is not — a
-    path stored in here would silently mean something else at an ancestor
-    (§3.2).
-
-    Written by the node in response to a `_CmdConfigure` command; a retired
-    signal is a retained empty payload (tombstone).
+    ``data_tag`` binds the signal to the one data tag it reads from, by id. The
+    connector is reached through the tag, and rebinding leaves the signal's id,
+    and so its metric history, unchanged. The node writes the record for a
+    `_CmdConfigure`; a retired signal is a retained empty payload.
     """
 
     id: ULID
@@ -875,9 +804,7 @@ class Signal(Payload):
     description: str = ""
     #: ULID of the SystemElement that owns this signal.
     system_element_id: ULID | None = None
-    #: ULID of the DataTag this signal reads from (its natural key is
-    #: (connector, source); the connector that owns it is reached through the
-    #: tag, never stored here).
+    #: ULID of the DataTag this signal reads from.
     data_tag: ULID | None = None
     #: The connector publishes metrics for this signal.
     is_published: bool = False
@@ -892,8 +819,8 @@ class Signal(Payload):
     config: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     has_contract: bool = False
-    #: ULID of the `_SemanticTag` definition that says what this entity IS.
-    #: None means unclassified, which is a valid state.
+    #: ULID of the `_SemanticTag` definition saying what this entity is; None
+    #: means unclassified.
     semantic_type_id: ULID | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -911,9 +838,8 @@ class Signal(Payload):
     def decode(cls, json_str: str, timestamp: int) -> "Signal":
         data = json.loads(json_str)
         if data.get("data_type") is not None:
-            # `SignalDataType`, not franzmq's `DataType`: a `_Signal` may be
-            # `json`, which the narrower enum refuses -- and refusing it here
-            # meant a json signal could be written and never read back.
+            # SignalDataType, because a _Signal may be json and franzmq's
+            # DataType has no such member.
             data["data_type"] = SignalDataType(data["data_type"])
         if data.get("index_type") is not None:
             data["index_type"] = IndexType(data["index_type"])
@@ -932,17 +858,15 @@ class Constant(Payload):
     id: ULID
     name: str
     data_type: ConstantDataType
-    #: A JSON constant may explicitly be ``null``, and a writer may leave
-    #: ``value`` out entirely. Without a default the bundle schema would reject
-    #: such a record for missing a required property.
+    #: May be ``null`` or left out, so the schema does not require it.
     value: Any = None
     description: str = ""
     system_element_id: ULID | None = None
     unit: str | None = None
     precision: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    #: ULID of the `_SemanticTag` definition that says what this entity IS.
-    #: None means unclassified, which is a valid state.
+    #: ULID of the `_SemanticTag` definition saying what this entity is; None
+    #: means unclassified.
     semantic_type_id: ULID | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -1015,14 +939,12 @@ class EditOperation(Payload):
 
 
 # ---------------------------------------------------------------------------
-# Colca command classes (schema-bundle design §3).
-# The class hierarchy IS the routing information: anything deriving from Cmd
-# lands in the commands stream under the hazard class its name carries
-# (_CmdParam → param, _CmdOperate → operate, _CmdMaintain → maintain,
-# _CmdConfigure → configure, _CmdAdmin → admin). The wire contract at the colca door is
-# correlation_id + expires_at (unix milliseconds); created_at is a
-# franzmq-base field colca publishers do not stamp — the bundle generator
-# drops it from `required` for every cmd-class contract.
+# Colca command classes.
+# The class decides the routing: a Cmd subclass lands on the commands stream
+# under the hazard class its name carries (_CmdParam -> param, _CmdOperate ->
+# operate, _CmdMaintain -> maintain, _CmdConfigure -> configure, _CmdAdmin ->
+# admin). The door requires correlation_id and expires_at (unix milliseconds);
+# created_at is not required.
 # ---------------------------------------------------------------------------
 
 
@@ -1046,14 +968,11 @@ class CmdConfigure(Cmd):
     """Data-model editing: signal bindings and the elements that hold them.
 
     Verbs (the path at the target node): ``signal/upsert``, ``signal/delete``,
-    ``signal/autobind``. Executed by the target NODE, which then writes the
-    resulting `_Signal` records under its own identity — a human may command
-    but may not author state (data-model binding design §4).
+    ``signal/autobind``. The target node executes it and writes the resulting
+    `_Signal` records itself; a person may command but not author state.
 
-    Its own hazard class rather than `maintain`: the four machine classes are a
-    ladder of how dangerous a command is to the equipment, and editing the data
-    model is not on that ladder. Someone who may bind a signal must not thereby
-    be allowed to send maintenance commands to a PLC (§3.3)."""
+    It has its own hazard class so that permission to bind a signal does not
+    also allow maintenance commands to a machine."""
 
 
 @dataclass
@@ -1076,5 +995,5 @@ class CmdEdit(Cmd):
 class CmdAdmin(Cmd):
     """Node administration: provisioning (enroll/revoke), restart, firmware.
 
-    Executed by the target NODE, not a machine (colca cmdadmin design §5);
-    verb-specific fields (entry, ulid) ride in the open payload."""
+    Executed by the target node, not a machine; verb-specific fields (entry,
+    ulid) ride in the open payload."""

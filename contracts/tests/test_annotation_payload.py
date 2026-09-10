@@ -1,9 +1,7 @@
-"""`_Annotation` payload contract (dataops-evaluator design §8).
+"""The `_Annotation` payload contract.
 
-Instances ride their own append-only `annotations` stream, the same shape as
-`alarm` — never KV-projected, never retained. Identity is deterministic so
-that create, update (e.g. setting `time_end`), and delete of the same
-logical annotation are all appends carrying the SAME id.
+Annotations live on their own append-only stream. The id is deterministic, so
+create, update and delete of one annotation are appends with the same id.
 """
 
 import json
@@ -64,9 +62,7 @@ def test_annotation_encode_decode_round_trip():
 
 
 def test_annotation_delete_is_an_append_carrying_a_marker():
-    """A delete is a record with `deleted=True`, not an absence — it round
-    trips through encode/decode like any other field, and it carries the
-    SAME id as the annotation it deletes."""
+    """A delete is a record with `deleted=True` and the id of the annotation it deletes."""
     created_id = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["signal-1"])
     tombstone = AnnotationPayload(
         annotation_id=created_id,
@@ -104,10 +100,7 @@ def test_derive_annotation_id_is_distinct_for_distinct_inputs():
 
 
 def test_derive_annotation_id_ignores_the_order_of_the_signal_set():
-    """The signals are a SET: the caller's order is not part of the identity,
-    so an update that lists the same signals differently still lands on the
-    record it means to replace. Sorted input, unsorted input, any input --
-    one id. The denominator is the distinct set right below it."""
+    """The order of the signal set does not change the id; a different set does."""
     sorted_input = derive_annotation_id("annotation-type-1", "user/u-franz", 1700000000.0, ["a", "b", "c"])
     unsorted_input = derive_annotation_id("annotation-type-1", "user/u-franz", 1700000000.0, ["c", "a", "b"])
     as_tuple = derive_annotation_id("annotation-type-1", "user/u-franz", 1700000000.0, ("b", "c", "a"))
@@ -118,10 +111,7 @@ def test_derive_annotation_id_ignores_the_order_of_the_signal_set():
 
 
 def test_derive_annotation_id_rounds_the_fractional_second_boundary():
-    """The id is derived from a `.6f`-formatted timestamp, so two starts
-    that round to the same microsecond string collide by design (identity
-    is idempotency, not raw float equality) while a genuinely distinct
-    microsecond does not."""
+    """Starts that format to the same microsecond give one id; a different microsecond does not."""
     base = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0000001, ["sig-1"])
     same_rounding = derive_annotation_id(
         "annotation-type-1",
@@ -146,21 +136,13 @@ def test_derive_annotation_id_is_a_valid_ulid():
 
 
 def test_derive_annotation_id_matches_the_golden_vectors():
-    """Cross-language pin (annotation-cutover design, architecture
-    principle 2 tier 2): plugins/uns/exec_edit_annotation.go
-    re-implements this exact rule natively in Go, because a human-authored
-    annotation command derives its id at the node, never in the API. Both
-    native copies answer to this one checked-in dataset
-    (vectors/annotation_id.json) so a change to either side that silently
-    diverges from the other fails here before a producer and a human ever
-    derive different ids for the same annotation.
+    """plugins/uns/exec_edit_annotation.go derives the same ids in Go; both
+    sides check against vectors/annotation_id.json.
     """
     vectors = json.loads(ANNOTATION_ID_VECTORS_PATH.read_text())
     cases = vectors["cases"]
     assert cases, "golden annotation_id vectors carry no cases"
-    # The file must exercise every shape of the signal set the rule
-    # distinguishes: none, one, several -- and several in more than one
-    # order, or the sort inside the rule is never pinned.
+    # Cover no signals, one, and several in more than one order.
     sizes = {len(case["signal_ids"]) for case in cases}
     assert 0 in sizes and 1 in sizes and any(size > 1 for size in sizes), sizes
     by_set = {}

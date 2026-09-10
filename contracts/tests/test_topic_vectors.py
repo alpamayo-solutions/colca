@@ -1,14 +1,9 @@
-"""The canonical golden vectors, judged against the installed franzmq.
+"""The golden topic vectors, checked against the installed franzmq.
 
-``vectors/topic_transformations.json`` is the single dataset both sides of the
-language boundary answer to (schema-bundle design §2, tier 2): colca's Go door
-reads it from the repo path, franzmq's own suite runs a copy, and this test runs
-the canonical file against the franzmq release this package pins. That closes the
-loop — a franzmq whose copy of the vectors drifted from this one fails here.
-
-The mount and identity sections are door-side behavior; what this suite asserts
-about them is that their inputs and outputs stay inside the grammar franzmq
-speaks, which is franzmq's half of the contract.
+``vectors/topic_transformations.json`` is read by colca's Go door and by
+franzmq's own suite; this test runs it against the pinned franzmq. For the
+mount and identity cases it checks that inputs and outputs stay inside
+franzmq's grammar.
 """
 
 import json

@@ -32,11 +32,7 @@ def test_an_unknown_kind_is_refused():
 
 
 def test_every_seeded_icon_is_in_the_set():
-    """The one list is the source for the font subset, the picker and
-    validation. A ligature outside it renders as literal text at every node
-    the definition reaches, so the seed that ships with this package must
-    never name one -- and the seed is the only icon source this package owns.
-    """
+    """A seeded icon outside the set would render as literal text."""
     seed = yaml.safe_load(
         (Path(colca_data_contracts.__file__).parent / "semantic_tags" / "platform.yaml").read_text(encoding="utf-8")
     )

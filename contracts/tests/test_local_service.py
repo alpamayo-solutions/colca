@@ -135,15 +135,8 @@ def test_service_details_are_published_under_node_mount_and_service_name():
 
 
 def test_two_unplaced_services_do_not_share_one_record():
-    """The failure this exists to prevent, and it is not a near miss.
-
-    An unplaced service has no mount, so without its name in the address every
-    unplaced service on a node writes its RETAINED registration to the same
-    topic. The last to start is then the only service the node appears to
-    have; every other one loses its projected row, and any catalogue naming
-    one (`_DataTags.connector`) parks forever waiting for a service that never
-    comes back. On the demo node that silently cost dataops its entire tag
-    catalogue.
+    """Unplaced services have no mount, so only their names keep their retained
+    registrations apart.
     """
     projector = LocalServiceIdentity(
         service_id="svc-p",
@@ -173,13 +166,7 @@ def test_two_unplaced_services_do_not_share_one_record():
 
 
 def test_service_context_matches_the_shared_vectors():
-    """One rule, two languages, one file.
-
-    `colca-service` publishes this registration for every service that cannot
-    publish its own, and it needs the rule natively in Go (`uns.ServiceContext`,
-    which reads these same vectors). A change to either implementation that
-    this file does not also describe fails on both sides.
-    """
+    """The Go implementation (`uns.ServiceContext`) reads the same vectors."""
     import json as _json
     from pathlib import Path
 
@@ -197,11 +184,8 @@ def test_service_context_matches_the_shared_vectors():
 
 
 def test_connecting_mqtt_adds_the_log_publisher_without_owning_the_log():
-    """franzmq's configure_mqtt_logger cleared the root logger and reinstalled
-    its own handler — a dash format no Colca service uses, a hard INFO level
-    that undid LOG_LEVEL, and no secret sanitization. Connecting must ADD the
-    _Log publisher to whatever the service configured, and change nothing
-    else: the caller's handler, level and formatter all survive."""
+    """Connecting adds the _Log publisher and keeps the caller's handler, level
+    and formatter."""
     import logging
 
     from colca_data_contracts.local_service import _LogPublishingHandler as MQTTHandler

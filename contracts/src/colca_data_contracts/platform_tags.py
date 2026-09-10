@@ -1,19 +1,11 @@
 """The definitions the platform itself ships.
 
-`semantic_tags/platform.yaml` and `metadata_types/platform.yaml` are the one
-owner of what Colca seeds. This module publishes the `name` values from those
-files so a consumer can tell a platform-owned definition from an authored one:
-the editor refuses to delete or edit one, and the catalog read reports the
-flag per row.
+This module publishes the `name` values from the platform seed files, so a
+consumer can tell a platform-owned definition from an authored one. The names
+are read from the YAML, never copied.
 
-The names are READ from the YAML, never re-typed beside it. A hand-kept copy
-cannot see the seed file grow, so a tag added to `platform.yaml` would ship
-unprotected while the copy stayed green -- a check that cannot go red.
-
-PyYAML is imported here rather than added to this package's dependencies: each
-consumer that reads the shipped YAML declares the parser itself. `__init__` does
-not import this module, so a service that never asks about platform tags never
-pays for it.
+PyYAML is not a dependency of this package: a consumer that reads the shipped
+YAML declares it. `__init__` does not import this module.
 """
 
 from pathlib import Path
@@ -41,15 +33,11 @@ def _seeded_names(seed: Path, section: str) -> frozenset[str]:
 PLATFORM_SEMANTIC_TAG_NAMES: frozenset[str] = _seeded_names(PLATFORM_SEMANTIC_TAG_SEED, "tags")
 
 #: The `name` of every metadata type shipped in `metadata_types/platform.yaml`.
-#: Same rule, same reason: generated services publish records keyed by these
-#: names, so an operator editing or deleting one would break the projection of
-#: every record that carries it — and the next bootstrap would put it back.
+#: Services publish records keyed by these names, so they are read-only too.
 PLATFORM_METADATA_TYPE_NAMES: frozenset[str] = _seeded_names(PLATFORM_METADATA_TYPE_SEED, "types")
 
 #: The `name` of every annotation type shipped in
-#: `annotation_types/platform.yaml`. Same rule again: these are the entry kinds
-#: Colca expects on every node, so a UI may offer them without asking whether
-#: this deployment happened to declare them.
+#: `annotation_types/platform.yaml`, available on every node.
 PLATFORM_ANNOTATION_TYPE_NAMES: frozenset[str] = _seeded_names(
     PLATFORM_ANNOTATION_TYPE_SEED,
     "types",

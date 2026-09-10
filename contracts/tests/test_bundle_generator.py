@@ -1,7 +1,6 @@
-"""Bundle generator gates (schema-bundle design §5.1/§12, contracts job).
+"""Bundle generator tests.
 
-Pins generator and dataclasses together: a contract change the generator
-cannot express fails HERE, not at a customer door.
+A contract change the generator cannot express fails here, not at a door.
 """
 
 from __future__ import annotations
@@ -114,11 +113,8 @@ def test_constant_contract_is_positioned_retractable_and_value_typed():
         "name",
         "data_type",
     }
-    # `value` is declared (so a value a caller DOES send is still schema
-    # validated) but is deliberately NOT required: a JSON constant may be
-    # null, and a writer may leave it out. Requiring it made every such
-    # create publish a payload the schema itself then rejected for missing a
-    # required property.
+    # `value` is validated when sent but not required: a JSON constant may be
+    # null or left out.
     assert "value" not in constant["schema"]["required"]
     assert "value" in constant["schema"]["properties"]
     assert constant["schema"]["properties"]["data_type"]["enum"] == [
@@ -234,8 +230,7 @@ def test_parity_golden_encodes_validate_and_mutants_reject():
                 broken[name] = 42
                 assert not validator.is_valid(broken), f"{ident}: wrong-type {name} must be rejected"
             if "pattern" in prop:
-                # The gap this closes: a 31-character id the door accepted
-                # and the projector's 26-character column refused.
+                # A 31-character id must be refused at the door.
                 broken = dict(encoded)
                 broken[name] = GOLDEN_ULID + "EXTRA"
                 assert not validator.is_valid(broken), f"{ident}: 31-char {name} must be rejected"
@@ -275,9 +270,7 @@ def test_metric_real_shape():
     body, _ = gb.build_bundle()
     m = body["contracts"]["_Metric"]
     assert m["class"] == "data" and m["tombstone"] is True
-    # timestamp is required on the wire a metric is a
-    # value at a time, and the door refuses one without — the dataclass's
-    # "now" default is constructor convenience, not a wire default.
+    # A metric is a value at a time; the "now" default is for constructors only.
     assert sorted(m["schema"]["required"]) == ["signal_id", "timestamp", "value"]
     assert m["schema"]["properties"]["signal_id"]["minLength"] == 1
 
@@ -289,9 +282,8 @@ def test_alarm_notification_contracts_have_revised_direction_and_shape():
     event = body["contracts"]["_AlarmStateChange"]
     dispatch = body["contracts"]["_NotificationDispatched"]
 
-    # The config pair stays on entities — the silence rail is unchanged. The
-    # two EVENT contracts ride the alarms stream instead, so an alarm never
-    # queues behind a metrics backlog (alarm-stream design §3.1).
+    # Alarm configuration stays on entities; the two event contracts use the
+    # alarms stream so they never queue behind metrics.
     assert config["class"] == "entity"
     assert status["class"] == "entity"
     assert event["class"] == "alarm"
@@ -358,13 +350,7 @@ def test_audit_event_is_append_only_and_has_stable_required_fields():
 
 
 def test_definitions_are_their_own_class_and_retractable():
-    """A definition descends and is applied as state (definition-stream design
-    §2): its own routing class, and an empty payload retracts it.
-
-    The three type contracts were "entity" until this stream existed, which
-    meant they replicated the wrong way — up, away from the nodes that need
-    them.
-    """
+    """Definitions have their own routing class, and an empty payload retracts one."""
     body, _ = gb.build_bundle()
     for ident in (
         "_Group",
@@ -380,10 +366,8 @@ def test_definitions_are_their_own_class_and_retractable():
 
 
 def test_annotation_contract_is_its_own_class_and_never_tombstoned():
-    """Instances ride their own stream, same shape as `alarm` and for the
-    same reason (dataops-evaluator design §8): append-only, no KV, no
-    retention. A delete is a record carrying `deleted=True`, not a
-    tombstone, so `tombstone` must stay False."""
+    """Annotations are append-only on their own stream. A delete is a record with
+    `deleted=True`, so `tombstone` stays False."""
     body, _ = gb.build_bundle()
     annotation = body["contracts"]["_Annotation"]
 
@@ -397,8 +381,7 @@ def test_annotation_contract_is_its_own_class_and_never_tombstoned():
 
 
 def test_every_definition_is_addressable_by_id():
-    """A definition's path IS its identity, so one without an id could not be
-    filed at all (definition-stream design §3)."""
+    """A definition's path is its id, so every definition needs one."""
     body, _ = gb.build_bundle()
     for ident, entry in body["contracts"].items():
         if entry["class"] != "definition":
@@ -406,10 +389,8 @@ def test_every_definition_is_addressable_by_id():
         assert "id" in entry["schema"]["required"], ident
 
 
-#: Every (contract, JSON pointer) the ULID pattern must reach. Derived from the
-#: models by hand once and pinned here so a field that
-#: loses its `ULID` annotation — or a new ULID-keyed field that never gets
-#: one — is a red test, not a projector stall.
+#: Every (contract, JSON pointer) the ULID pattern must reach, so a field that
+#: loses its `ULID` annotation, or a new id field without one, fails here.
 ULID_CONSTRAINED_FIELDS = {
     "_SystemElement": ["id", "parent_id", "semantic_type_id"],
     "_Signal": ["id", "system_element_id", "data_tag", "semantic_type_id"],
@@ -450,10 +431,8 @@ def _pointers_with_pattern(schema: dict, prefix: str = "") -> list[str]:
 
 
 def test_ulid_fields_carry_the_one_pattern():
-    """Principle 2: the ULID grammar is defined once (`payload.ULID_PATTERN`)
-    and every ULID-by-contract field carries exactly it. Both directions are
-    pinned — a constrained field the table forgot fails too, so the table
-    cannot silently shrink below what the models declare."""
+    """Every ULID field carries `payload.ULID_PATTERN`, and every constrained
+    field is in the table."""
     from colca_data_contracts import ULID_PATTERN
 
     body, _ = gb.build_bundle()

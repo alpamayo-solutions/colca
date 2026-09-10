@@ -1,15 +1,9 @@
-"""The canonical slot data_type vocabulary, pinned across the language boundary.
+"""The canonical slot data_type vocabulary, shared with Go.
 
-`CANONICAL_DATA_TYPES` (data_models/loader.py) is the one definition. Colca's
-Go door needs it natively too (`plugins/uns.slotDataTypes`), and so does any
-client that validates models before submitting. Go cannot import Python, so the sides meet
-at `vectors/data_model_vocabulary.json` -- the same tier-2 golden-vector
-mechanism `topic_transformations.json` uses for the topic grammar.
-
-This test is the link between the definition and that file: a sixth canonical
-type added to `loader.py` fails here until the vectors are updated, and updating
-the vectors fails colca's `TestSlotDataTypesMatchesTheGoldenVocabulary` until
-`slotDataTypes` moves with it.
+`CANONICAL_DATA_TYPES` in data_models/loader.py is the definition, and
+`vectors/data_model_vocabulary.json` carries it to Go (`plugins/uns.slotDataTypes`).
+This test keeps the file equal to the definition; a Go test does the same on
+the other side.
 """
 
 import json

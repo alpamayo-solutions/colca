@@ -1,32 +1,24 @@
-"""Building Colca topics under the publishing node's own identity.
+"""Building Colca topics under the publishing node's identity.
 
-franzmq 0.5.0 puts the publisher's identity at level 4 of every v1 topic
-(``colca/v1/_Contract/{node_id}/{path…}``). On a node, every service publishes
-under the *same* identity — the node's — so each one reading ``NODE_ID`` and
-threading it through its own topic construction would be the same three lines
-repeated per service, with a different failure message each time it is missing.
-
-This module is that code, once. Topic knowledge itself stays in franzmq; nothing
-here is added to the payload classes.
+The publisher's identity is level 4 of every v1 topic
+(``colca/v1/_Contract/{node_id}/{path…}``), and every service on a node
+publishes under the node's. These helpers read ``NODE_ID`` for all of them;
+the topic grammar itself stays in franzmq.
 """
 
 from decouple import config
 from franzmq.data_contracts.base import Payload
 from franzmq.topic import Topic
 
-#: True when the installed franzmq speaks the node-id topic scheme (>= 0.5.0).
-#: Services migrate one at a time — their franzmq pin is the switch
-#: (schema-bundle design §9.2) — so both are installable while the fleet moves.
+#: True when the installed franzmq uses the node-id topic scheme (>= 0.5.0).
 TOPICS_CARRY_NODE_ID = "node_id" in getattr(Topic, "__dataclass_fields__", {})
 
 
 def node_id() -> str:
-    """The identity this process publishes under, from the ``NODE_ID`` environment.
+    """The identity this process publishes under, from ``NODE_ID``.
 
-    Raises ``RuntimeError`` naming the variable when it is unset: a topic
-    published under the wrong identity is rejected by the broker's identity
-    rule, so guessing a default would trade a startup error for a silent
-    ingest failure.
+    Raises ``RuntimeError`` when it is unset: the broker rejects records under
+    a wrong identity, so there is no safe default.
     """
     value = config("NODE_ID", default="")
     if not value:

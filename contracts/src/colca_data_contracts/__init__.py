@@ -16,16 +16,10 @@ from franzmq.topic import Topic
 
 from colca_data_contracts.root import topic_prefix, topic_root
 
-# Override franzmq's default topic prefix, "example", with the Colca topic
-# root: "colca" unless COLCA_TOPIC_ROOT names another (see root.py).
-# Dataclass defaults are compiled into __init__ at class definition time,
-# so we must replace __init__ to change the effective default.
-#
-# The wrapper forwards whatever it is given instead of restating franzmq's
-# parameter list: franzmq 0.5.0 added `node_id` at level 4, and services move to
-# it one at a time (their franzmq pin is the switch — schema-bundle design §9.2).
-# A hard-coded signature here would break whichever half of the fleet it does
-# not match.
+# Replace franzmq's default topic prefix, "example", with the Colca topic root
+# (see root.py). Dataclass defaults are compiled into __init__, so __init__ has
+# to be wrapped. The wrapper forwards its arguments untouched because franzmq's
+# signature differs between releases (0.5 added node_id).
 _original_topic_init = Topic.__init__
 _TOPIC_FIELDS = list(Topic.__dataclass_fields__)
 _PREFIX_INDEX = _TOPIC_FIELDS.index("prefix")
@@ -179,7 +173,7 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "node_id",
     "node_topic",
     "TOPICS_CARRY_NODE_ID",
-    # Wire-level string constraints (schema-bundle design §4.1)
+    # Wire-level string constraints
     "Pattern",
     "ULID",
     "ULID_PATTERN",
@@ -208,7 +202,7 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "AlarmNotificationSummary",
     "AlarmStateChange",
     "NotificationDispatched",
-    # Annotation instances (own stream, mirrors alarm — design §8)
+    # Annotation instances, on their own stream like alarms
     "AnnotationPayload",
     "derive_annotation_id",
     # Domain payloads

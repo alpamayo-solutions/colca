@@ -26,25 +26,12 @@ from colca_data_contracts.service_topics import service_context
 
 
 class _LogPublishingHandler(logging.Handler):
-    """Turn a log record into a `_Log` at THIS SERVICE'S position in the tree.
+    """Turn a log record into a `_Log` at this service's position in the tree.
 
-    franzmq's own MQTTHandler addresses a record as
-    ``_Log/{node}/{logger}/{LEVEL}`` -- flat at the node root, with no
-    position in it. A service is authorized to write its own subtree, so that
-    topic is outside the scope of every PLACED service: colcad refused each
-    one with `no write scope covers colca/v1/_Log/...`, and the only publisher
-    that got through was dataops, which is unplaced and therefore scoped to
-    the whole node. Eleven connectors published nothing and said nothing
-    about it, because a logging handler that reports its own failure through
-    logging is a loop.
-
-    So the record goes where the service's other records go -- its mount, then
-    its name, which is the rule `service_context` states and what `_DataTags`
-    and `_ServiceDetails` already do. Being authorized is the point; carrying
-    the service's position is the bonus, and the reader shows it as the path.
-
-    The Python logger's own name (`dataops.ingest`) stays in the PAYLOAD,
-    where it is not competing with the address for the same segment.
+    franzmq's MQTTHandler publishes at the node root, which a placed service
+    has no write grant for. The record goes where the service's other records
+    go instead: its mount, then its name (`service_context`). The Python
+    logger name stays in the payload.
     """
 
     def __init__(self, client: Client, context: tuple[str, ...]):
@@ -81,27 +68,15 @@ class _LogPublishingHandler(logging.Handler):
 
 
 def attach_log_publisher(client: Client, context: tuple[str, ...]) -> None:
-    """Publish this service's log records as ``_Log`` — without owning the log.
+    """Publish this service's log records as ``_Log``, without taking over logging.
 
-    This is the ONE way a service on the local MQTT door reaches the tree's
-    `logs` stream, and it is public because it has two callers: services that
-    connect through `connect_local_mqtt` (which calls it for them), and the
-    connector, which builds its own client for reasons of its own. It was
-    private, so the connector could not call it and simply never logged into
-    the tree -- eleven of them in the demo, publishing nothing while an
-    identically-shaped dataops line right beside them was visible.
+    `connect_local_mqtt` calls this for you; a service with its own client
+    calls it directly. `context` is the service's position, from
+    `service_context(mount, name)`.
 
-    `context` is the service's own position, from `service_context(mount,
-    name)`. It is a required argument rather than something derived here
-    because only the caller knows its mount, and a publisher that guessed
-    would be a second implementation of the rule `service_context` owns.
-
-    franzmq's ``configure_mqtt_logger`` is not used for a second reason: it
-    CLEARS the root logger and reinstalls its own stream handler — a dash
-    format no Colca service uses, a hard INFO level that undoes
-    ``LOG_LEVEL``, and no secret sanitization. Publishing is ADDED to
-    whatever logging the service configured, formatted with the shared Colca
-    format.
+    The handler is added to whatever logging the service configured, with the
+    shared Colca format. franzmq's ``configure_mqtt_logger`` is not used
+    because it replaces the root logger's handlers and level.
     """
     from colca_data_contracts.logging import COLCA_LOG_FORMAT
 
@@ -177,15 +152,9 @@ def connect_local_mqtt(
 ) -> tuple[Client, LocalServiceIdentity]:
     """Connect to local Colca MQTT without credentials or client TLS.
 
-    ``publish_logs`` defaults True (every existing caller wants its log
-    attached — "Every service publishes its log") but lets a caller
-    that manages this itself (``chaski.Service(..., logs=False)``) opt out
-    instead of the handler being force-installed underneath it.
-
-    ``will`` is set on the client BEFORE ``connect()`` is called, as MQTT
-    requires: a ``(topic, payload)`` pair published retained if this
-    connection drops without a clean DISCONNECT — the crash-detection half of
-    a service's lifecycle (``chaski.Service``'s last will).
+    ``publish_logs`` attaches the ``_Log`` publisher; turn it off if you
+    manage that yourself. ``will`` is a ``(topic, payload)`` pair the broker
+    publishes retained if the connection drops without a clean DISCONNECT.
     """
 
     resolved = identity or resolve_local_identity(

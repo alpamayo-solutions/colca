@@ -1,10 +1,7 @@
 """The published platform-tag names come from the seed file, not from a copy.
 
-The API refuses to delete or edit a tag whose name is in this set. A set typed
-out beside `platform.yaml` would keep passing while the seed grew, and every
-tag added after the copy was made would ship deletable. So the assertion here
-re-parses the YAML rather than restating any name: re-typing the constant and
-then adding a tag to the seed turns this red.
+The assertions re-parse the YAML instead of listing names, so a hand-kept copy
+would fail as soon as the seed grows.
 """
 
 from pathlib import Path
@@ -38,9 +35,7 @@ def test_the_set_is_read_from_the_shipped_seed_file():
 
 
 def test_a_name_the_projector_joins_on_is_published():
-    """`alarm_events.py` joins `semantic_type__name="platform-alarm"`; renaming
-    that tag drops the alarm-to-signal association until bootstrap restores it.
-    It is the one name whose protection is load-bearing beyond tidiness."""
+    """Consumers join alarms to signals on "platform-alarm", so that name must stay protected."""
     assert "platform-alarm" in PLATFORM_SEMANTIC_TAG_NAMES
 
 

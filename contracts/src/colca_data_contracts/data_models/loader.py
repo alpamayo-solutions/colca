@@ -1,21 +1,15 @@
 """YAML data-model loader and manifest compiler.
 
-A Data Model is a structural contract: what a SystemElement must offer to
-satisfy it (measured/computed signals, mandated child elements) -- never HOW
-an engineered point is computed. Authoring is YAML again
-(the data model yaml authoring design); this module
-is the loader/compiler front-end. ``yaml`` is imported locally inside the
-loading function rather than at module scope, mirroring
-``colca_data_contracts.platform_tags``'s convention: every consumer of this
-package installs it ``--no-deps`` and declares its own YAML parser, so a
-service that never calls ``compile_models()`` never needs PyYAML installed.
+A Data Model is a structural contract: the signals and child elements a
+SystemElement must offer to satisfy it, never how a value is computed.
+``yaml`` is imported inside the loading function, so a service that never
+calls ``compile_models()`` does not need PyYAML.
 
 ``compile_models(source_dir=None)`` loads every ``*.yaml`` file directly
-under ``source_dir`` (default: this package's own ``data_models/``
-directory, i.e. the four builtin platform models), resolves ``extends``,
-validates, and emits a deterministic list of manifests. Manifests are
-generated, never hand-edited -- ids are NOT assigned here (whoever seeds
-the definitions derives them).
+under ``source_dir`` (default: the builtin models in ``data_models/``),
+resolves ``extends``, validates, and returns a deterministic list of
+manifests. Ids are not assigned here; whoever seeds the definitions derives
+them.
 
 YAML schema (one file per model)::
 
@@ -54,9 +48,8 @@ Resolution rules:
   always win over any inherited one (child-over-parent), and among multiple
   parents a later entry in the ``extends`` list wins over an earlier one for
   the same slot key. ``declared_by`` on a merged slot names the model whose
-  YAML originally declared it -- an override changes the value AND the
-  owner. The manifest's own ``extends`` field is the model's directly
-  declared parent list, not the transitive ancestry.
+  YAML declared it; an override changes both the value and the owner. The
+  manifest's own ``extends`` field lists only the direct parents.
 - A cycle in ``extends`` (A extends B extends A) is a load error naming the
   full cycle.
 - A ``children:`` entry whose ``child_model`` names an unknown model is a
@@ -65,15 +58,11 @@ Resolution rules:
 - Two child slots of one (flattened) model resolving to the same
   ``entity_name`` is a load error -- one physical child cannot satisfy two
   slots.
-- A ``children:`` entry's explicit ``entity_name: ""`` is a load error -- an
-  empty override is never intentional. Omitting the key entirely still
-  defaults to the slot key, as before.
-- Two signals -- in the same model or across different models -- referencing
-  the same ``semantic_type`` name with a different ``data_type`` is a load
-  error naming every model involved and the ``data_type`` each one declared.
-  A semantic tag name seeds exactly one stub (``_semantic_tag_stub``); a
-  divergent second declaration would otherwise seed a conflicting one, which
-  the seeder's existing-wins rule then resolves by silent first-write-wins.
+- An explicit ``entity_name: ""`` is a load error; omitting the key defaults
+  to the slot key.
+- Two signals, in one model or in different ones, referencing the same
+  ``semantic_type`` with different ``data_type`` values is a load error
+  naming every model involved. A tag name seeds exactly one stub.
 - Every problem found during a single ``compile_models()`` call is
   accumulated and raised together as one ``CompileError``.
 """
@@ -84,11 +73,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-# Public alias (one owner per fact, architecture principle 2): every other
-# place that needs the canonical slot data_type vocabulary -- the API's
-# `edge.edit.model_rules.MODEL_SLOT_DATA_TYPES` and colca's
-# `plugins/uns.slotDataTypes` -- pins its key set against this frozenset
-# rather than re-declaring it.
+# The canonical slot data_type vocabulary. colca's plugins/uns.slotDataTypes
+# is checked against it through vectors/data_model_vocabulary.json.
 CANONICAL_DATA_TYPES = frozenset({"boolean", "integer", "number", "string", "json"})
 
 
@@ -175,10 +161,8 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
 
 
 def _detect_cycles(nodes: list[str], edges: dict[str, list[tuple[str, ...]]]) -> list[str]:
-    """DFS over an edge map (node -> [(*labels, target), ...]); reports every
-    cycle found as one "trail -> ... -> trail[start]" string, full path
-    included. Edges to a node outside `nodes` are ignored here -- an
-    unresolved reference is reported by its own dedicated check."""
+    """Report every cycle in an edge map (node -> [(*labels, target), ...]) as
+    one "a -> b -> a" string. Edges to unknown nodes are left to their own check."""
     problems: list[str] = []
     WHITE, GRAY, BLACK = 0, 1, 2
     color: dict[str, int] = dict.fromkeys(nodes, WHITE)
@@ -244,14 +228,9 @@ def _semantic_tag_stub(tag_name: str, slot: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tag_stub_conflicts(own_slots: dict[str, dict[str, dict[str, Any]]]) -> list[str]:
-    """Two signals -- in the same model or across different models -- that
-    reference the same `semantic_type` name with different `data_type` would
-    each seed a different tag stub (`_semantic_tag_stub`). The seeder's
-    existing-wins rule then makes whichever happens to seed first silently
-    win, so the loser's data_type is never enforced. One tag name is one fact
-    (architecture principle 2: one owner per fact); reject the divergence at
-    load time instead, naming every model that declared it and the data_type
-    each one chose.
+    """Signals that reference one `semantic_type` with different `data_type`
+    values. Each would seed a different stub and the first seeded would win
+    silently, so the divergence is an error naming every model and data_type.
     """
     problems: list[str] = []
     first_seen: dict[str, tuple[str, str]] = {}  # tag_name -> (data_type, model_name)
@@ -278,11 +257,8 @@ def _child_edges(slots: list[dict[str, Any]]) -> list[tuple[str, str]]:
 
 
 def _duplicate_child_names(model_name: str, slots: list[dict[str, Any]]) -> list[str]:
-    """Two child slots of ONE model resolving to the same `entity_name`.
-
-    A child slot's entity_name is the name of the physical child element the
-    slot resolves to, so two different keys naming the same one describe two
-    slots that can never both be satisfied.
+    """Child slots of one model that resolve to the same `entity_name`, which
+    one physical child can never satisfy twice.
     """
     problems: list[str] = []
     owner_of: dict[str, str] = {}

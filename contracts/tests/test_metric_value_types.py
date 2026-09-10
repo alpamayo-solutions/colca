@@ -1,13 +1,6 @@
-"""``Metric.value`` is typed ``Any`` (franzmq's own ``Metric`` dataclass) and
-has no schema of its own — the *signal*'s ``data_type`` is what says how a
-value should be interpreted (pinned for ``json`` and ``string`` by
-``test_signal_data_type.py``). This test pins the metric side of the same
-claim: a ``string``-kind value is not a special case that needs its own
-handling anywhere in ``Metric.encode``/``decode`` — it round-trips exactly
-like ``json``, ``float``, ``int`` and ``bool`` already do (e.g. dataops's
-``AnnotationOutput`` already publishes ``json`` metric values; a connector
-reading a ``kind="string"`` PLC tag — see the demo's ``factory.py`` — needs
-the identical guarantee for a plain ``str``).
+"""``Metric.value`` has no schema of its own; the signal's ``data_type`` says
+how to read it. Strings round-trip through ``Metric.encode``/``decode`` like
+json, float, int and bool values.
 """
 
 from __future__ import annotations

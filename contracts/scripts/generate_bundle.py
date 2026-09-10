@@ -1,14 +1,10 @@
-"""Generate the colca contracts bundle (schema-bundle design §5).
+"""Generate the colca contracts bundle.
 
-Introspects the registered payload classes (the same PAYLOAD_CLASSES registry
-the package builds on import) and emits ONE canonical-JSON bundle: a manifest
-plus a restricted JSON-Schema (draft 2020-12 subset, design §4.1) per
-contract. The bundle is deterministic — same source tree ⇒ byte-identical
-canonical region ⇒ same sha256 digest; `generated_at` sits OUTSIDE the digest
-input.
+Introspects the registered payload classes and emits one canonical-JSON bundle:
+a manifest plus a JSON Schema (a draft 2020-12 subset) per contract. The same
+source tree always produces the same digest; `generated_at` is not part of it.
 
-Every mapping rule that is not derivable from the dataclasses lives in the
-explicit tables below — visible in review, never inferred by magic (§5.1).
+Rules the dataclasses cannot express live in the explicit tables below.
 
 Usage:
     python scripts/generate_bundle.py [OUT_PATH]
@@ -33,35 +29,26 @@ from colca_data_contracts.payload import Pattern
 from colca_data_contracts.routing import CLASS_TABLE
 
 # ---------------------------------------------------------------------------
-# Explicit tables (design §5.1: "an explicit small table in the generator")
+# Explicit tables
 # ---------------------------------------------------------------------------
 
-# Routing class per contract. Imported, not restated: the same table decides
-# where a record lands for every Python consumer, and a second copy here would
-# be a bundle that disagreed with the code reading it.
+# Routing class per contract, imported so the bundle and the Python consumers
+# cannot disagree.
 
-# Fields required beyond the no-default rule: door contracts the dataclass
-# defaults hide (Metric.signal_id defaults to "" for constructor convenience,
-# but the door demands it; Ack.result_code likewise).
+# Fields the door requires although the dataclass gives them a default for
+# constructor convenience (Metric.signal_id, Ack.result_code).
 REQUIRED_EXTRA: dict[str, list[str]] = {
-    # timestamp: the dataclass defaults it to "now" for constructor
-    # convenience, but a metric IS a value at a time — a record without one
-    # is unusable to every consumer (historian, dataops, the editor) and
-    # `Metric.decode` refuses it. The door refused nothing: the level-4 seeds
-    # published timestamp-less metrics for weeks, and one of them killed
-    # dataops' MQTT thread. Ruling 2026-08-31: required on the wire.
+    # A metric is a value at a time: the "now" default is for constructors,
+    # and Metric.decode refuses a record without a timestamp.
     "_Metric": ["signal_id", "timestamp"],
     "_Ack": ["result_code"],
     "_CmdEdit": ["operation_id", "intent", "expected_versions"],
-    # Constructor defaults preserve source compatibility during the one-way
-    # Python-to-Go cutover; the wire contract is version 2 and requires them.
+    # Defaulted in the constructor, required by version 2 of the wire contract.
     "_AlarmNotificationConfig": ["target_node_id", "revision_id"],
     "_AlarmStateChange": ["revision", "notification"],
 }
 
-# Fields DROPPED from required although the dataclass has no default:
-# colca publishers do not stamp created_at on commands — expires_at is the
-# door contract (cmdadmin design §2).
+# Fields not required on the wire although the dataclass has no default.
 REQUIRED_DROP: dict[str, list[str]] = {}
 
 
@@ -71,21 +58,16 @@ def _required_drop_for(identifier: str, cls: type) -> list[str]:
     return REQUIRED_DROP.get(identifier, [])
 
 
-# Tombstone capability (retention §7 / design §10.1): default = class rule.
+# Tombstone capability per contract; without an entry the routing class decides.
 TOMBSTONE_OVERRIDES: dict[str, bool] = {}
 
-# Builtin-only contracts (design §7.1/§10.2): produced and validated by the
-# colca binary itself — they must never appear in a bundle, and the loader
-# refuses a bundle that declares them.
+# Contracts colcad produces and validates itself. They never appear in a
+# bundle; the loader refuses one that declares them.
 BUILTIN_ONLY = {"_StreamGap", "_EnrolledIdentity", "_TimeSync"}
 
-# Registered payload classes that are deliberately NOT offered to the broker,
-# with the reason each one is here. They stay Python types because something
-# still constructs them; they are absent from the bundle because nothing may
-# publish them, and a door that does not know a contract rejects it (0x90).
-#
-# This is not a place to park contracts that are merely unused — every entry
-# names a concrete producer or container, and the entry leaves when that does.
+# Registered payload classes that nothing may publish, each with the reason it
+# still exists as a Python type. A door rejects a contract it does not know
+# (0x90). An entry leaves when its reason does.
 NOT_ON_THE_WIRE: dict[str, str] = {
     "_DataTag": (
         "an element of the _DataTags catalogue, never a record of its own: "
@@ -94,9 +76,8 @@ NOT_ON_THE_WIRE: dict[str, str] = {
     ),
 }
 
-# The JSON-Schema keyword subset the loader enforces (design §4.1; `pattern`
-# and `maxLength` admitted by the rule — a ULID is 26 characters
-# of one alphabet, and neither `minLength` nor a type can say so).
+# The JSON Schema keywords the loader accepts. `pattern` and `maxLength` are
+# there because a ULID is 26 characters of one alphabet.
 ALLOWED_KEYWORDS = {
     "type",
     "properties",
@@ -112,9 +93,8 @@ ALLOWED_KEYWORDS = {
     "additionalProperties",
 }
 
-# These nested value objects are security/interpretation boundaries rather
-# than extensible top-level records. Unknown keys must not provide a side door
-# for a cleartext password or an outcome that consumers interpret differently.
+# Nested value objects that refuse unknown keys, so no extra field can smuggle
+# in a cleartext password or an outcome consumers read differently.
 STRICT_NESTED_DATACLASSES = {
     "HealthMetricDeclaration",
     "NetworkInterface",
@@ -126,7 +106,7 @@ STRICT_NESTED_DATACLASSES = {
 
 
 # ---------------------------------------------------------------------------
-# Type → schema mapping (design §5.1 rules)
+# Type to schema mapping
 # ---------------------------------------------------------------------------
 
 
@@ -134,9 +114,8 @@ def _schema_for_type(t: object, *, required: bool) -> dict:
     origin = typing.get_origin(t)
     args = typing.get_args(t)
 
-    # Annotated[str, Pattern(...)] — the one place a wire-level string
-    # constraint is declared (payload.py `ULID`). The pattern subsumes any
-    # non-empty check, so `minLength` is dropped where one applies.
+    # Annotated[str, Pattern(...)], as payload.ULID uses. The pattern already
+    # rules out an empty string, so no minLength.
     if origin is typing.Annotated:
         inner = _schema_for_type(args[0], required=required)
         for meta in args[1:]:
@@ -206,7 +185,7 @@ def _schema_for_dataclass(cls: type, *, required_extra: list[str], required_drop
 
 
 def _lint_subset(schema: object, path: str = "") -> list[str]:
-    """Every keyword outside the §4.1 subset is a generator bug — name it."""
+    """Name every keyword outside ALLOWED_KEYWORDS; each one is a generator bug."""
     bad: list[str] = []
     if isinstance(schema, dict):
         for k, v in schema.items():
@@ -267,9 +246,7 @@ def build_bundle(git_sha: str = "unknown") -> tuple[dict, str]:
         )
         if bad := _lint_subset(schema, identifier):
             raise SystemExit(f"generate_bundle: schema outside the §4.1 subset: {bad}")
-        # State classes are retractable: an empty payload retires the path.
-        # Definitions are state too — a group or a type has to be withdrawable,
-        # and a tombstone is how (definition-stream design §4).
+        # State classes, definitions included, are retracted by an empty payload.
         tombstone = TOMBSTONE_OVERRIDES.get(identifier, klass in ("data", "entity", "definition"))
         contracts[identifier] = {"class": klass, "tombstone": tombstone, "schema": schema}
 

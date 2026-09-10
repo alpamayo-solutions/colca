@@ -16,11 +16,8 @@ import sys
 
 from decouple import config
 
-#: The levels a `_Log` topic's last segment may carry, loudest first.
-#:
-#: One owner: the publisher writes them into the topic, the API filters a read
-#: by them, and the editor prefilters a view by them. Spelled once so a
-#: level that exists on the bus can never be one a reader refuses.
+#: The levels a `_Log` topic's last segment may carry, loudest first. Publishers
+#: and readers both use this list.
 LOG_LEVELS: tuple[str, ...] = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
 
 COLCA_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"

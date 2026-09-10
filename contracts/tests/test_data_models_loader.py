@@ -1,10 +1,7 @@
 """The YAML data-model loader: resolution, validation, and determinism.
 
-Every model source under a `compile_models(source_dir)` call is a plain
-`*.yaml` file (see `data_models/loader.py`'s module docstring for the
-schema). These tests build small YAML fixtures with `tmp_path` rather than
-compiling the real platform models -- `test_data_models_builtin.py` is the
-dedicated equivalence test for those.
+The tests build small YAML fixtures in `tmp_path`; the builtin models have
+their own test in `test_data_models_builtin.py`.
 """
 
 import json
@@ -99,10 +96,7 @@ def test_semantic_tags_collects_referenced_names(tmp_path):
 
 
 def test_divergent_semantic_type_data_type_across_models_is_a_compile_error(tmp_path):
-    """Two models referencing the same semantic_type name with different
-    data_type would each seed a different tag stub; the seeder's
-    existing-wins rule then makes whichever seeds first silently win. Reject
-    the divergence at load time instead, naming both models and the tag."""
+    """Two models giving one semantic_type different data_types fail, naming both models and the tag."""
     _write(
         tmp_path,
         "pump.yaml",
@@ -130,9 +124,7 @@ def test_divergent_semantic_type_data_type_across_models_is_a_compile_error(tmp_
 
 
 def test_same_semantic_type_data_type_across_models_stays_legal(tmp_path):
-    """The denominator: the same tag name declared with the SAME data_type by
-    multiple models is legal and produces exactly one stub -- the check above
-    is refusing the divergence, not shared tag references in general."""
+    """Several models using one tag with the same data_type is fine and yields one stub."""
     _write(
         tmp_path,
         "pump.yaml",
@@ -405,8 +397,7 @@ def test_two_child_slots_naming_the_same_entity_is_a_compile_error(tmp_path):
 
 
 def test_empty_explicit_child_entity_name_is_a_compile_error(tmp_path):
-    """`entity_name: ""` is an explicit override that says nothing -- never
-    intentional, so it is rejected rather than silently falling back."""
+    """An explicit `entity_name: ""` is rejected rather than falling back."""
     _write(tmp_path, "bearing.yaml", BEARING)
     _write(
         tmp_path,
@@ -422,9 +413,7 @@ def test_empty_explicit_child_entity_name_is_a_compile_error(tmp_path):
 
 
 def test_omitted_child_entity_name_still_defaults_to_the_slot_key(tmp_path):
-    """The denominator for the check above: omitting `entity_name` entirely
-    (as opposed to declaring it empty) is legal and keeps defaulting to the
-    slot key."""
+    """Omitting `entity_name` keeps defaulting to the slot key."""
     _write(tmp_path, "bearing.yaml", BEARING)
     _write(
         tmp_path,

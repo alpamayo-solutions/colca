@@ -1,12 +1,7 @@
-"""A `_Signal` may be `json`, and must survive being read back.
+"""A `_Signal` may be `json` and must decode again.
 
-The gap this pins: `Signal.data_type` was coerced through franzmq's
-`DataType`, which has no `json` member, while the API's column, colca's
-`slotDataTypes` and the semantic-type table all accepted one. Encoding
-succeeded -- a dataclass annotation validates nothing -- so a json signal
-could be authored and written, and then `Signal.decode` raised
-`ValueError: 'json' is not a valid DataType` in every Python consumer of the
-contract: the projector, the connector, dataops.
+franzmq's `DataType` has no `json` member, so decoding goes through
+`SignalDataType`.
 """
 
 import pytest
@@ -31,8 +26,7 @@ def test_every_other_type_still_round_trips(data_type):
 
 
 def test_the_signal_vocabulary_is_franzmqs_plus_json():
-    """Derived, never retyped -- so a franzmq release that adds or removes a
-    member cannot leave this silently disagreeing with it."""
+    """Derived from franzmq's enum, so a new franzmq member shows up here too."""
     assert {member.value for member in SignalDataType} == {member.value for member in DataType} | {"json"}
 
 

@@ -1,8 +1,6 @@
-"""The four builtin platform YAMLs (machine, machinestate, packmlmachine,
-oee_producer.yaml) compile and reproduce the semantic content
-authored before: same names, enums, required flags, and descriptions as before the
-Python-class era. `compile_models()` with no `source_dir` loads exactly
-these -- the package's own `data_models/` directory."""
+"""The four builtin models (machine, machinestate, packmlmachine, oee_producer)
+compile with the expected names, enums, required flags and descriptions.
+`compile_models()` without `source_dir` loads exactly these."""
 
 from colca_data_contracts.data_models import compile_models
 
