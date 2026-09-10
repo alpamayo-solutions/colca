@@ -25,13 +25,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYWHEEL_SRC = REPO_ROOT / "pywheel"
 
-# (GOOS, GOARCH, wheel platform tag). CGO_ENABLED=0 means the binary is fully
-# static — no libc version dependency — so one manylinux baseline covers every
-# glibc and musl host.
+# (GOOS, GOARCH, wheel platform tag). The binary is static, so one manylinux
+# baseline covers glibc hosts. Go 1.26 needs macOS 12.
 TARGETS = [
     ("linux", "amd64", "manylinux_2_17_x86_64"),
     ("linux", "arm64", "manylinux_2_17_aarch64"),
-    ("darwin", "arm64", "macosx_11_0_arm64"),
+    ("darwin", "arm64", "macosx_12_0_arm64"),
+    ("darwin", "amd64", "macosx_12_0_x86_64"),
 ]
 
 
@@ -50,7 +50,8 @@ def build_one(goos: str, goarch: str, plat_tag: str, version: str, out_dir: Path
 
         env = {**os.environ, "GOOS": goos, "GOARCH": goarch, "CGO_ENABLED": "0"}
         subprocess.run(
-            ["go", "build", "-trimpath", "-o", str(binary_path), "./cmd/colcad"],
+            ["go", "build", "-trimpath", "-ldflags", f"-s -w -X main.version={version}",
+             "-o", str(binary_path), "./cmd/colcad"],
             cwd=REPO_ROOT, env=env, check=True,
         )
         binary_path.chmod(0o755)
