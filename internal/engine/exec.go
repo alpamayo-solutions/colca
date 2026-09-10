@@ -225,7 +225,7 @@ func (e *Engine) ack(
 	attribution Attribution,
 ) {
 	e.metrics.NodeCmd(contract, verb, result)
-	topic := "colca/v1/_Ack/" + e.cfg.ULID + "/" + verb
+	topic := uns.Prefix() + "_Ack/" + e.cfg.ULID + "/" + verb
 	payload, err := json.Marshal(outcome)
 	if err != nil {
 		e.log.Error("command: ack encode failed", "verb", verb, "correlation_id", outcome.CorrelationID, "err", err)

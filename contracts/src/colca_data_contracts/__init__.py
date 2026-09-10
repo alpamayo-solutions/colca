@@ -12,8 +12,10 @@ from franzmq.data_contracts.base import Payload, IndexType, DataType
 from franzmq.data_contracts import PAYLOAD_CLASSES
 from franzmq.topic import Topic
 
-# Override franzmq's default topic prefix from "example" to "colca".
-# All Colca services use "colca/v1/" as the topic namespace.
+from colca_data_contracts.root import topic_prefix, topic_root
+
+# Override franzmq's default topic prefix, "example", with the Colca topic
+# root: "colca" unless COLCA_TOPIC_ROOT names another (see root.py).
 # Dataclass defaults are compiled into __init__ at class definition time,
 # so we must replace __init__ to change the effective default.
 #
@@ -29,7 +31,7 @@ _PREFIX_INDEX = _TOPIC_FIELDS.index("prefix")
 
 def _topic_init_with_root_prefix(self, *args, **kwargs):
     if len(args) <= _PREFIX_INDEX and "prefix" not in kwargs:
-        kwargs["prefix"] = "colca"
+        kwargs["prefix"] = topic_root()
     _original_topic_init(self, *args, **kwargs)
 
 
@@ -146,6 +148,8 @@ json.JSONEncoder.default = _patched_default
 
 __all__ = [
     # Topics
+    "topic_root",
+    "topic_prefix",
     "node_id",
     "node_topic",
     "TOPICS_CARRY_NODE_ID",

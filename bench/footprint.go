@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // RunFootprint answers the "lightweight" claim with a number: RSS of the REAL
@@ -116,7 +117,7 @@ mqtt:
 	// through the same admin door a deployment would use.
 	m1Element := elementIDFor("m1")
 	element, _ := json.Marshal(map[string]any{
-		"topic":   "colca/v1/_SystemElement/n-fp/m1",
+		"topic":   uns.Prefix() + "_SystemElement/n-fp/m1",
 		"payload": map[string]string{"id": m1Element, "name": "m1"},
 	})
 	if err := postAdmin(hc, apiAddr, "/publish", element); err != nil {
@@ -151,7 +152,7 @@ mqtt:
 	for time.Now().Before(stopAt) {
 		seq++
 		payload, _ := json.Marshal(map[string]any{"v": float64(seq), "value": float64(seq), "signal_id": "bench", "timestamp": float64(time.Now().UnixNano()) / 1e9})
-		tk := m.Publish("colca/v1/_Metric/n-fp/m1/temp", 1, false, payload)
+		tk := m.Publish(uns.Prefix()+"_Metric/n-fp/m1/temp", 1, false, payload)
 		if !tk.WaitTimeout(10*time.Second) || tk.Error() != nil {
 			return nil, fmt.Errorf("publish under load: %w", tk.Error())
 		}

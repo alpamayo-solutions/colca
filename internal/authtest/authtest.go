@@ -58,7 +58,7 @@ func ElementID(path string) string {
 func Place(t *testing.T, eng *engine.Engine, path string) string {
 	t.Helper()
 	id := ElementID(path)
-	topic := "colca/v1/_SystemElement/" + eng.NodeID() + "/" + path
+	topic := uns.Prefix() + "_SystemElement/" + eng.NodeID() + "/" + path
 	payload, err := json.Marshal(map[string]string{"id": id, "name": path})
 	if err != nil {
 		t.Fatal(err)

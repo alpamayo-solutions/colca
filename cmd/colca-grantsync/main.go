@@ -55,6 +55,7 @@ import (
 	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/grantsync"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 type config struct {
@@ -145,6 +146,11 @@ func sortStrings(s []string) {
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(log)
+
+	if err := uns.SetRootFromEnv(); err != nil {
+		log.Error("refusing to start", "error", err)
+		os.Exit(2)
+	}
 
 	cfg, err := loadConfig(os.Getenv)
 	if err != nil {

@@ -524,7 +524,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		if !res.Persisted {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "topic outside colca/# is not persisted"})
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "topic outside " + uns.Root() + "/# is not persisted"})
 			return
 		}
 		body := map[string]any{"stream": res.Stream, "offset": res.Offset, "topic": res.Topic}

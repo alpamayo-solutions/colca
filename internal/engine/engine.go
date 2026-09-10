@@ -626,7 +626,7 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 // never an authority input.
 func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic string, payload []byte) (Result, error) {
 	if !uns.IsUns(topic) {
-		return e.reject(metrics.ReasonGrammar, "human publish must be colca/#")
+		return e.reject(metrics.ReasonGrammar, "human publish must be %s/#", uns.Root())
 	}
 	p, err := uns.Parse(topic)
 	if err != nil {
@@ -699,7 +699,7 @@ func (e *Engine) IngestAdmin(topic string, payload []byte) (Result, error) {
 func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution Attribution) (Result, error) {
 	if !uns.IsUns(topic) {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
-		return Result{}, fmt.Errorf("admin publish must be colca/#")
+		return Result{}, fmt.Errorf("admin publish must be %s/#", uns.Root())
 	}
 	p, err := uns.Parse(topic)
 	if err != nil {
@@ -780,7 +780,7 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 	for i, input := range records {
 		if !uns.IsUns(input.Topic) {
 			e.metrics.RejectPublish(metrics.ReasonGrammar)
-			return nil, fmt.Errorf("admin state batch record %d must be colca/#", i)
+			return nil, fmt.Errorf("admin state batch record %d must be %s/#", i, uns.Root())
 		}
 		parsed, err := uns.Parse(input.Topic)
 		if err != nil {
@@ -881,7 +881,7 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 func (e *Engine) ingestAdminEvent(record uns.StateRecord, attribution Attribution) (Result, error) {
 	if !uns.IsUns(record.Topic) {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
-		return Result{}, fmt.Errorf("admin event record must be colca/#")
+		return Result{}, fmt.Errorf("admin event record must be %s/#", uns.Root())
 	}
 	parsed, err := uns.Parse(record.Topic)
 	if err != nil {
@@ -957,7 +957,7 @@ func (e *Engine) ingestAdminEvent(record uns.StateRecord, attribution Attributio
 // success/failure honestly.
 func (e *Engine) IngestRefresh(topic string, payload []byte, ifKVOffset uint64) (Result, bool, error) {
 	if !uns.IsUns(topic) {
-		return Result{}, false, fmt.Errorf("refresh publish must be colca/#")
+		return Result{}, false, fmt.Errorf("refresh publish must be %s/#", uns.Root())
 	}
 	p, err := uns.Parse(topic)
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -71,7 +72,7 @@ func (e *Engine) RecordDenial(d AuditDenial) error {
 	if err != nil {
 		return e.auditFailure(d, fmt.Errorf("encode audit event: %w", err))
 	}
-	topic := "colca/v1/_AuditEvent/" + e.cfg.ULID + "/_colca/audit/" + eventID
+	topic := uns.Prefix() + "_AuditEvent/" + e.cfg.ULID + "/_colca/audit/" + eventID
 	// store.ErrRecordTooLarge here is deliberately NOT counted as
 	// RecordRejected: that metric means an INGRESS refusal, one with an
 	// external author for the door to answer 4xx to. An audit record is

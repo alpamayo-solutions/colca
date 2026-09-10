@@ -163,7 +163,7 @@ func (c *ConfigExec) owningEntry(topic string) (element, mount string, ok bool) 
 		if !ok {
 			continue // cannot place this entry here: it owns nothing
 		}
-		if "colca/v1/_DataTags/"+c.store.NodeID()+"/"+joinPath(m, e.Name) == topic {
+		if Prefix()+"_DataTags/"+c.store.NodeID()+"/"+joinPath(m, e.Name) == topic {
 			return e.Element, m, true
 		}
 	}
@@ -550,7 +550,7 @@ type resourceUpsertBody struct {
 // resourceTopic places a resource exactly as every other positioned entity:
 // the node's own ULID at level 4, the element path and the resource id below.
 func (c *ConfigExec) resourceTopic(path string) string {
-	return "colca/v1/_Resource/" + c.store.NodeID() + "/" + path
+	return Prefix() + "_Resource/" + c.store.NodeID() + "/" + path
 }
 
 func (c *ConfigExec) resourceUpsert(payload []byte) (int, string, string, []StateWrite) {
@@ -873,7 +873,7 @@ func (c *ConfigExec) commandEntityTopic(contract, id string) string {
 		"_ExternalReference":       "external-references",
 		"_AlarmNotificationConfig": "alarm-notification-config",
 	}[contract]
-	return "colca/v1/" + contract + "/" + c.store.NodeID() + "/_colca/" + leaf + "/" + id
+	return Prefix() + contract + "/" + c.store.NodeID() + "/_colca/" + leaf + "/" + id
 }
 
 func (c *ConfigExec) upsert(payload []byte) (int, string, string, []StateWrite) {
@@ -1021,7 +1021,7 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string, []StateWrite
 		// the node itself and its catalogue topic would be computed wrong.
 		return 409, "signal/autobind: " + name + " is bound to an element this node cannot resolve", "conflict", nil
 	}
-	catTopic := "colca/v1/_DataTags/" + c.store.NodeID() + "/" + joinPath(mount, name)
+	catTopic := Prefix() + "_DataTags/" + c.store.NodeID() + "/" + joinPath(mount, name)
 	raw, found := c.store.KVGet(catTopic)
 	if !found {
 		// Nothing to bind against yet — the connector has not published its
@@ -1313,11 +1313,11 @@ func joinPath(mount, leaf string) string {
 }
 
 func (c *ConfigExec) signalTopic(path string) string {
-	return "colca/v1/_Signal/" + c.store.NodeID() + "/" + path
+	return Prefix() + "_Signal/" + c.store.NodeID() + "/" + path
 }
 
 func (c *ConfigExec) constantTopic(path string) string {
-	return "colca/v1/_Constant/" + c.store.NodeID() + "/" + path
+	return Prefix() + "_Constant/" + c.store.NodeID() + "/" + path
 }
 
 // bindings is the tag↔signal state this node already holds — what autobind
@@ -1727,11 +1727,11 @@ func validDefinitionID(id string) error {
 }
 
 func (c *ConfigExec) definitionTopic(contract, id string) string {
-	return "colca/v1/" + contract + "/" + c.store.NodeID() + "/" + id
+	return Prefix() + contract + "/" + c.store.NodeID() + "/" + id
 }
 
 func (c *ConfigExec) elementTopic(path string) string {
-	return "colca/v1/_SystemElement/" + c.store.NodeID() + "/" + path
+	return Prefix() + "_SystemElement/" + c.store.NodeID() + "/" + path
 }
 
 // occupantsBelow lists the element paths sitting under one, so a refusal can

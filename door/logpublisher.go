@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // LogPublisher is an slog.Handler that also writes each record to the tree's
@@ -341,7 +343,7 @@ func (p *LogPublisher) publish(ctx context.Context, item logRecord) {
 	// above it. Addressed at the node root instead, colcad refuses it with
 	// `no write scope covers colca/v1/_Log/...`, which is what silenced every
 	// placed service. The slog logger's own name stays in the payload.
-	segments := append([]string{"colca", "v1", "_Log", node}, p.position...)
+	segments := append([]string{uns.Root(), uns.Version, "_Log", node}, p.position...)
 	segments = append(segments, item.level)
 	topic := strings.Join(segments, "/")
 	if err := p.sink.PublishLog(ctx, topic, item.payload); err != nil {

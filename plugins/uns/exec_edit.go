@@ -373,7 +373,7 @@ func resultFor(code int) string {
 func entityVersionKey(kind, id string) string { return kind + ":" + id }
 
 func editTopic(contract, nodeID, path string) string {
-	return "colca/v1/" + contract + "/" + nodeID + "/" + path
+	return Prefix() + contract + "/" + nodeID + "/" + path
 }
 
 func cloneRawMap(source map[string]json.RawMessage) map[string]json.RawMessage {

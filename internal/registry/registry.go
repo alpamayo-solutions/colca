@@ -166,7 +166,7 @@ func (m *Manager) mountOf(e *uns.Entry) (string, bool) {
 // the reserved inventory path. Placement controls authorization, not topology.
 func (m *Manager) topicFor(e *uns.Entry) (topic, kvPath string) {
 	p := "_colca/identities/" + e.ULID
-	return "colca/v1/_EnrolledIdentity/" + m.nodeID + "/" + p, p
+	return uns.Prefix() + "_EnrolledIdentity/" + m.nodeID + "/" + p, p
 }
 
 // Enroll validates and persists a new or updated entry (§4): entry-shape

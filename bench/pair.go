@@ -63,7 +63,7 @@ func place(n *node.Node, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	topic := "colca/v1/_SystemElement/" + n.Cfg.ULID + "/" + path
+	topic := uns.Prefix() + "_SystemElement/" + n.Cfg.ULID + "/" + path
 	if _, err := n.Engine.IngestAdmin(topic, payload); err != nil {
 		return "", fmt.Errorf("place element at %s: %w", path, err)
 	}

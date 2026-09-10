@@ -125,7 +125,7 @@ func (w *EditExec) composeResource(intent editIntent) (int, string, string, []St
 }
 
 func (w *EditExec) resourceTopic(path string) string {
-	return "colca/v1/_Resource/" + w.store.NodeID() + "/" + path
+	return Prefix() + "_Resource/" + w.store.NodeID() + "/" + path
 }
 
 // ensureBlob mirrors `ConfigExec.ensureBlob`: hold the bytes, or pull them

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // Auth is the human-identity issuer block (human-authz design §4): the OIDC
@@ -91,8 +93,12 @@ type Config struct {
 	// Name is what the node calls itself in its own `_Node` record — a
 	// deployment's name, never its position. Optional: a node with no name
 	// describes itself by its ULID.
-	Name    string `yaml:"name"`
-	DataDir string `yaml:"data_dir"`
+	Name string `yaml:"name"`
+	// TopicRoot is the first segment of every topic in this node's tree,
+	// "colca" when empty. COLCA_TOPIC_ROOT overrides it. All nodes of one tree
+	// must use the same root; nodes do not translate between roots.
+	TopicRoot string `yaml:"topic_root"`
+	DataDir   string `yaml:"data_dir"`
 	// AddrFile, when set, receives the node's RESOLVED door addresses as JSON
 	// once every listener is up — `{"api","api_local","mqtt","mqtt_local",
 	// "repl"}`, each a host:port. It exists for a supervisor that starts
@@ -737,9 +743,24 @@ func (c *Config) NodeName() string {
 	return c.ULID
 }
 
+// EffectiveTopicRoot is the topic root this node runs with: COLCA_TOPIC_ROOT
+// when set, else topic_root, else the default.
+func (c *Config) EffectiveTopicRoot() string {
+	if r := os.Getenv(uns.RootEnv); r != "" {
+		return r
+	}
+	if c.TopicRoot != "" {
+		return c.TopicRoot
+	}
+	return uns.DefaultRoot
+}
+
 func (c *Config) Validate() error {
 	if c.ULID == "" || c.DataDir == "" || c.KeyFile == "" {
 		return fmt.Errorf("config: ulid, data_dir, key_file are required")
+	}
+	if err := uns.ValidRoot(c.EffectiveTopicRoot()); err != nil {
+		return fmt.Errorf("config: %w", err)
 	}
 	if c.SecretsDir != "" && filepath.Clean(c.SecretsDir) == filepath.Clean(c.DataDir) {
 		return fmt.Errorf("config: secrets_dir must be separate from data_dir")

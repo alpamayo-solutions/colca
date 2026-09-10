@@ -50,6 +50,7 @@ import (
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 const (
@@ -63,12 +64,6 @@ const (
 	subscribeTimeout     = 10 * time.Second
 	publishTimeout       = 5 * time.Second
 	disconnectQuiesceMS  = 250
-
-	// beaconFilter is the MQTT subscribe filter for the node's time-sync
-	// beacon (design §2.2: colca/v1/_TimeSync/{node-ulid}, no hierarchy path).
-	// The node-id level is a wildcard: this process only ever sees the beacon
-	// from whichever node it happens to be connected to.
-	beaconFilter = "colca/v1/_TimeSync/+"
 
 	// defaultHoldMS is the time-sync design §2.5 default for hold_ms — how
 	// long a post-(re)connect expiry decision is buffered before the machine
@@ -241,7 +236,17 @@ func (t *timeSync) Await(ctx context.Context) (syncedNow time.Time, offsetMS int
 
 func main() { os.Exit(run()) }
 
+// beaconFilter is the MQTT subscribe filter for the node's time-sync beacon
+// (<root>/v1/_TimeSync/{node-ulid}, no hierarchy path). The node-id level is
+// a wildcard: this process only ever sees the beacon from whichever node it
+// happens to be connected to.
+func beaconFilter() string { return uns.Prefix() + "_TimeSync/+" }
+
 func run() int {
+	if err := uns.SetRootFromEnv(); err != nil {
+		fmt.Fprintln(os.Stderr, "colca-machine:", err)
+		return 2
+	}
 	ulid := env("MACHINE_ULID", "m1")
 	keyPath := env("MACHINE_KEY", "/keys/"+ulid+"-machine.key")
 	broker := env("BROKER_ADDR", "127.0.0.1:8883")
@@ -283,10 +288,10 @@ func run() int {
 		return 1
 	}
 
-	metricTopic := "colca/v1/_Metric/" + nodeULID + "/" + ulid + "/temp"
+	metricTopic := uns.Prefix() + "_Metric/" + nodeULID + "/" + ulid + "/temp"
 	// Path-anchored (node-id level is a wildcard for readers): the machine's
 	// default read grant covers its own zone, which is where its commands land.
-	cmdFilter := "colca/v1/_CmdParam/+/" + ulid + "/#"
+	cmdFilter := uns.Prefix() + "_CmdParam/+/" + ulid + "/#"
 
 	// SIGINT/SIGTERM cancel the context; every wait below selects on it, so the
 	// process always leaves through the single clean shutdown path.
@@ -373,7 +378,7 @@ func run() int {
 		// min(0, sub.Qos) = 0 regardless of what's requested here — matching
 		// it explicitly documents that this subscription deliberately wants
 		// no at-least-once/redelivery semantics, not accidentally-QoS-0.
-		beaconTok := c.Subscribe(beaconFilter, 0, onBeacon)
+		beaconTok := c.Subscribe(beaconFilter(), 0, onBeacon)
 
 		if !cmdTok.WaitTimeout(subscribeTimeout) {
 			log.Error("subscribe not confirmed", "filter", cmdFilter, "waited", subscribeTimeout)
@@ -386,14 +391,14 @@ func run() int {
 		log.Info("subscribed", "filter", cmdFilter, "qos", 1)
 
 		if !beaconTok.WaitTimeout(subscribeTimeout) {
-			log.Error("subscribe not confirmed", "filter", beaconFilter, "waited", subscribeTimeout)
+			log.Error("subscribe not confirmed", "filter", beaconFilter(), "waited", subscribeTimeout)
 			return
 		}
 		if err := beaconTok.Error(); err != nil {
-			log.Error("subscribe failed", "filter", beaconFilter, "err", err)
+			log.Error("subscribe failed", "filter", beaconFilter(), "err", err)
 			return
 		}
-		log.Info("subscribed", "filter", beaconFilter, "qos", 0)
+		log.Info("subscribed", "filter", beaconFilter(), "qos", 0)
 	})
 	opts.SetConnectionLostHandler(func(_ pahomqtt.Client, err error) {
 		log.Warn("CONNECTION LOST — reconnecting", "broker", broker, "err", err)
@@ -603,7 +608,7 @@ func handleCommand(ctx context.Context, log *slog.Logger, c pahomqtt.Client, uli
 		log.Warn("COMMAND not acked — command topic has no name segment", "topic", topic, "correlation_id", corr)
 		return
 	}
-	ackTopic := "colca/v1/_Ack/" + nodeULID + "/" + ulid + "/" + name
+	ackTopic := uns.Prefix() + "_Ack/" + nodeULID + "/" + ulid + "/" + name
 	ack, err := json.Marshal(map[string]any{"correlation_id": corr, "result_code": code, "message": message})
 	if err != nil {
 		log.Error("COMMAND not acked — cannot encode ack", "topic", topic, "correlation_id", corr, "err", err)

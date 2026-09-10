@@ -9,6 +9,8 @@ import (
 	"time"
 
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // RunLive measures end-to-end freshness: machine → edge broker → engine →
@@ -35,7 +37,7 @@ func RunLive(p Params) (*Report, error) {
 		mu   sync.Mutex
 		lats []float64
 	)
-	tk := obs.Subscribe("colca/v1/_Metric/#", 1, func(_ pahomqtt.Client, m pahomqtt.Message) {
+	tk := obs.Subscribe(uns.Prefix()+"_Metric/#", 1, func(_ pahomqtt.Client, m pahomqtt.Message) {
 		now := time.Now().UnixNano()
 		if !strings.Contains(m.Topic(), "/edge1/") {
 			return // only records that crossed the replication hop count
@@ -66,7 +68,7 @@ func RunLive(p Params) (*Report, error) {
 			return nil, err
 		}
 		clients = append(clients, m)
-		topic := fmt.Sprintf("colca/v1/_Metric/n-edge/m%d/temp", i)
+		topic := fmt.Sprintf(uns.Prefix()+"_Metric/n-edge/m%d/temp", i)
 		wg.Add(1)
 		go func(m pahomqtt.Client, topic string) {
 			defer wg.Done()

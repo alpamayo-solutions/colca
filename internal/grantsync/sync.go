@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // definitionTTL bounds how long a definition command stays executable. It is a
@@ -150,7 +152,7 @@ func (s *Syncer) applyDefinitions(
 		if s.DryRun {
 			continue
 		}
-		topic := "colca/v1/_CmdConfigure/" + s.RootULID + "/definition/upsert"
+		topic := uns.Prefix() + "_CmdConfigure/" + s.RootULID + "/definition/upsert"
 		body := envelope(map[string]any{
 			"definitions": []map[string]any{{"contract": "_Group", "definition": def}},
 		})
@@ -164,7 +166,7 @@ func (s *Syncer) applyDefinitions(
 		if s.DryRun {
 			continue
 		}
-		topic := "colca/v1/_CmdConfigure/" + s.RootULID + "/definition/delete"
+		topic := uns.Prefix() + "_CmdConfigure/" + s.RootULID + "/definition/delete"
 		body := envelope(map[string]any{
 			"definitions": []map[string]any{{"contract": "_Group", "id": id}},
 		})

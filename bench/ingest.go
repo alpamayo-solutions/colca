@@ -8,6 +8,8 @@ import (
 	"time"
 
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // Params configures every scenario; each scenario documents the fields it uses.
@@ -54,7 +56,7 @@ func RunIngest(p Params) (*Report, error) {
 			return nil, err
 		}
 		clients = append(clients, m)
-		topic := fmt.Sprintf("colca/v1/_Metric/n-edge/m%d/temp", i)
+		topic := fmt.Sprintf(uns.Prefix()+"_Metric/n-edge/m%d/temp", i)
 		wg.Add(1)
 		go func(m pahomqtt.Client, topic string) {
 			defer wg.Done()

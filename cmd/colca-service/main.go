@@ -71,6 +71,9 @@ func main() {
 }
 
 func run() error {
+	if err := uns.SetRootFromEnv(); err != nil {
+		return err
+	}
 	registrations, err := parseRegistrations(os.Getenv("SERVICE_REGISTRATIONS"))
 	if err != nil {
 		return err
@@ -188,7 +191,7 @@ func start(
 	// erases the others (uns.ServiceContext).
 	recordContext := uns.ServiceContext(identity.Mount, details.Name)
 	details.Hierarchy = recordContext
-	topic := "colca/v1/_ServiceDetails/" + identity.Node + "/" +
+	topic := uns.Prefix() + "_ServiceDetails/" + identity.Node + "/" +
 		strings.Join(recordContext, "/") + "/_service"
 
 	p := &publisher{details: details}

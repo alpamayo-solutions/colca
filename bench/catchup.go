@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // RunCatchup measures how fast a parent absorbs a child's offline backlog:
@@ -31,7 +33,7 @@ func RunCatchup(p Params) (*Report, error) {
 	client := &http.Client{Timeout: 10 * time.Second, Transport: apiTransport()}
 	for i := 0; i < p.Records; i++ {
 		payload := map[string]any{
-			"topic":   "colca/v1/_Metric/n-edge/m1/temp",
+			"topic":   uns.Prefix() + "_Metric/n-edge/m1/temp",
 			"payload": map[string]any{"v": float64(i), "value": float64(i), "signal_id": "bench", "timestamp": float64(time.Now().UnixNano()) / 1e9},
 		}
 		body, _ := json.Marshal(payload)

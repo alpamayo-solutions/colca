@@ -375,7 +375,7 @@ func (h *colcaHook) replayOwedCommands(cl *mqtt.Client) {
 // well-behaved subscriber (e.g. the observer identity).
 func (h *colcaHook) matchesOwnBeacon(filter string) bool {
 	seg := strings.Split(filter, "/")
-	return len(seg) == 4 && seg[0] == "colca" && seg[1] == "v1" && seg[2] == "_TimeSync" &&
+	return len(seg) == 4 && seg[0] == uns.Root() && seg[1] == uns.Version && seg[2] == "_TimeSync" &&
 		(seg[3] == "+" || seg[3] == h.cfg.ULID)
 }
 

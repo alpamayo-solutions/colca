@@ -125,7 +125,7 @@ func (w *EditExec) alarmConfigRecord(intentType string, snapshot json.RawMessage
 		), "invalid", nil
 	}
 
-	topic := "colca/v1/_AlarmNotificationConfig/" + w.store.NodeID() +
+	topic := Prefix() + "_AlarmNotificationConfig/" + w.store.NodeID() +
 		"/_colca/alarm-notification-config/" + alarmConfigID
 	return 200, "upserted 1", "ok", []StateRecord{{Topic: topic, Payload: snapshot}}
 }

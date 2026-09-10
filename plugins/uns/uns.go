@@ -1,6 +1,7 @@
 // Package uns is where ALL Colca domain knowledge lives: topic grammar,
 // contract classes, mount insert/strip, payload validation, the identity and
-// grant model, and the element namespace for the `colca/#` namespace.
+// grant model, and the element namespace under the topic root (`colca/#`
+// unless configured otherwise).
 //
 // It depends on the Go standard library only, so it can never reach back into
 // colca's infrastructure — that ceiling is what keeps domain knowledge from
@@ -51,8 +52,8 @@ type Parsed struct {
 	Prefix, Version, Contract, NodeID, Path string
 }
 
-// IsUns reports whether the topic belongs to the uns namespace.
-func IsUns(topic string) bool { return strings.HasPrefix(topic, "colca/") }
+// IsUns reports whether the topic is under the topic root.
+func IsUns(topic string) bool { return strings.HasPrefix(topic, Root()+"/") }
 
 // Parse decomposes an UNS topic. It requires at least 5 segments (so there is
 // always a non-empty hierarchy path) and a _Contract at segment index 2 — with
@@ -514,7 +515,7 @@ func StreamFor(c Class) string {
 // hierarchy path at all (Parse's 4-segment exception below mirrors this
 // shape). nodeULID is the publishing node's own identity, never a machine's.
 func TimeSyncTopic(nodeULID string) string {
-	return "colca/v1/_TimeSync/" + nodeULID
+	return Prefix() + "_TimeSync/" + nodeULID
 }
 
 // IsMetric answers whether contract is _Metric — the core asks this rather
@@ -530,7 +531,7 @@ func IsMetric(contract string) bool {
 // contract itself is not consulted because a _Signal and its _Metric always
 // share node and path ("Events Catalog").
 func SignalTopicForMetric(p Parsed) string {
-	return "colca/v1/_Signal/" + p.NodeID + "/" + p.Path
+	return Prefix() + "_Signal/" + p.NodeID + "/" + p.Path
 }
 
 // DownlinkCursorPrefix names the PARENT-side cursor a repl server persists

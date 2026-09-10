@@ -10,6 +10,8 @@ import (
 	"time"
 
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // RunCardinality seeds Paths distinct signal paths and measures what a big
@@ -34,7 +36,7 @@ func RunCardinality(p Params) (*Report, error) {
 	seedStart := time.Now()
 	for i := 0; i < p.Paths; i++ {
 		body, _ := json.Marshal(map[string]any{
-			"topic":   fmt.Sprintf("colca/v1/_Metric/n-edge/line%d/sig%d", i/100, i%100),
+			"topic":   fmt.Sprintf(uns.Prefix()+"_Metric/n-edge/line%d/sig%d", i/100, i%100),
 			"payload": map[string]any{"v": float64(i), "value": float64(i), "signal_id": "bench", "timestamp": float64(time.Now().UnixNano()) / 1e9},
 		})
 		if err := postAdmin(client, pair.Edge.APIAddr, "/publish", body); err != nil {
@@ -91,7 +93,7 @@ func RunCardinality(p Params) (*Report, error) {
 	defer obs.Disconnect(250)
 	var got atomic.Int64
 	t0 := time.Now()
-	tk := obs.Subscribe("colca/v1/_Metric/#", 1, func(_ pahomqtt.Client, m pahomqtt.Message) {
+	tk := obs.Subscribe(uns.Prefix()+"_Metric/#", 1, func(_ pahomqtt.Client, m pahomqtt.Message) {
 		if m.Retained() {
 			got.Add(1)
 		}

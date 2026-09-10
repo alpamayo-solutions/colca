@@ -211,7 +211,7 @@ func (w *EditExec) withDurableReceipt(
 }
 
 func editOperationTopic(nodeID, operationID string) string {
-	return "colca/v1/_EditOperation/" + nodeID + "/_colca/edit/operations/" + operationID
+	return Prefix() + "_EditOperation/" + nodeID + "/_colca/edit/operations/" + operationID
 }
 
 const editReplayLimit = 1024

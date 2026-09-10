@@ -375,7 +375,7 @@ func (p *Pruner) pruneStream(stream string) {
 		// Appended in the prune batch itself, post-LWM, so it survives its
 		// own prune run (§6.4).
 		out := store.PruneOutcome{GapRecords: []store.Record{{
-			Topic:   "colca/v1/_StreamGap/" + p.ulid + "/" + stream,
+			Topic:   uns.Prefix() + "_StreamGap/" + p.ulid + "/" + stream,
 			Payload: payload,
 			TS:      nowMS,
 		}}}

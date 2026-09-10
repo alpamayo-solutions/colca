@@ -929,7 +929,7 @@ func isReservedFilter(filter string) bool { return strings.HasPrefix(filter, "$"
 // _TimeSync gets the no-zone-required bypass.
 func isTimeSyncFilter(filter string) bool {
 	seg := strings.SplitN(filter, "/", 4)
-	return len(seg) >= 3 && seg[0] == "colca" && seg[1] == "v1" && seg[2] == "_TimeSync"
+	return len(seg) >= 3 && seg[0] == Root() && seg[1] == Version && seg[2] == "_TimeSync"
 }
 
 // fixedPathPrefix decomposes a subscription filter (§5.3 ActSub). isUns
@@ -941,7 +941,7 @@ func isTimeSyncFilter(filter string) bool {
 // filter that never reaches the path region) can only be covered by read:#.
 func fixedPathPrefix(filter string) (fixed string, isUns bool) {
 	seg := strings.Split(filter, "/")
-	if seg[0] != "colca" && seg[0] != "+" && seg[0] != "#" {
+	if seg[0] != Root() && seg[0] != "+" && seg[0] != "#" {
 		return "", false
 	}
 	var path []string

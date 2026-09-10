@@ -92,6 +92,11 @@ type Node struct {
 // open, everything already started is closed again before returning, so no
 // listener stays bound and no Pebble directory stays locked.
 func Start(cfg *config.Config) (*Node, error) {
+	// The topic root is process-wide: every topic this node builds or accepts
+	// starts with it.
+	if err := uns.SetRoot(cfg.EffectiveTopicRoot()); err != nil {
+		return nil, fmt.Errorf("node %s: %w", cfg.ULID, err)
+	}
 	lvl := slog.LevelInfo
 	if cfg.LogLevel == "debug" {
 		lvl = slog.LevelDebug
@@ -286,7 +291,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		if len(a) > 0 {
 			root = a[len(a)-1].Element
 		}
-		topic := "colca/v1/_Node/" + cfg.ULID + "/_colca/nodes/" + cfg.ULID
+		topic := uns.Prefix() + "_Node/" + cfg.ULID + "/_colca/nodes/" + cfg.ULID
 		entity := map[string]any{}
 		interfaces := networkInventory(time.Now())
 		metrics := nodeHealthMetrics()

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/alpamayo-solutions/colca/bench"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // defaultRecordPath returns bench/results/<short-hostname>.jsonl — the
@@ -38,6 +39,10 @@ func defaultRecordPath() string {
 var scenarioOrder = []string{"ingest", "live", "catchup", "cardinality", "footprint"}
 
 func main() {
+	if err := uns.SetRootFromEnv(); err != nil {
+		fmt.Fprintln(os.Stderr, "colca-bench:", err)
+		os.Exit(2)
+	}
 	if len(os.Args) < 2 {
 		usage()
 	}
