@@ -12,9 +12,17 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/node"
 )
 
+// version is set by release builds with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Println("colcad", version)
+		return
+	}
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: colcad <config.yaml>")
+		fmt.Fprintln(os.Stderr, "       colcad --version")
 		os.Exit(2)
 	}
 	cfg, err := config.Load(os.Args[1])
