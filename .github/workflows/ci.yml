@@ -3,31 +3,87 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  go:
+  go-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: gofmt, go vet, working notes
+        run: make check
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
+        with:
+          version: v2.13.2
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+  python-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.11.17"
+      - name: ruff, bandit, mypy
+        run: make lint-python
+
+  repo-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.11.17"
+      - name: hadolint
+        run: make lint-docker
+      - name: shellcheck
+        run: make lint-shell
+      - name: actionlint
+        run: make lint-actions
+      - name: yamllint
+        run: make lint-yaml
+      - name: No working notes in the commits of this pull request
+        if: github.event_name == 'pull_request'
+        run: scripts/check-no-working-notes.sh "origin/${{ github.base_ref }}"
+
+  go-test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           version: "0.11.17"
-      - name: Formatting, vet and repository hygiene
-        run: make check
       - name: Schema bundle
         run: make bundle
       - name: Tests
         run: make test
 
-  contracts:
+  contracts-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -35,32 +91,191 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           version: "0.11.17"
       - name: Contract tests
         run: uv run --project contracts --python ${{ matrix.python-version }} --extra test pytest contracts/tests
 
   smoke:
+    needs: [go-test]
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [go]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
         with:
           version: "0.11.17"
       - name: Four-node tree in containers
         run: make smoke
 
-  working-notes:
-    if: github.event_name == 'pull_request'
+  # Everything below runs for pushes to main and for version tags, once every
+  # check above has passed.
+
+  version:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      semver: ${{ steps.version.outputs.semver }}
+      python: ${{ steps.version.outputs.python }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            semver="${GITHUB_REF_NAME#v}"
+            if [[ ! "$semver" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(-rc\.([0-9]+))?$ ]]; then
+              echo "::error::tag $GITHUB_REF_NAME is not vX.Y.Z or vX.Y.Z-rc.N"
+              exit 1
+            fi
+            python="${BASH_REMATCH[1]}${BASH_REMATCH[3]:+rc${BASH_REMATCH[3]}}"
+          else
+            semver="0.0.0-dev.${GITHUB_RUN_NUMBER}+${GITHUB_SHA::7}"
+            python="0.0.0.dev${GITHUB_RUN_NUMBER}+g${GITHUB_SHA::7}"
+          fi
+          echo "semver=$semver" >> "$GITHUB_OUTPUT"
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: [version, go-lint, python-lint, repo-lint, go-test, contracts-test, smoke]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.11.17"
+      - name: Schema bundle
+        run: make bundle
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=colca
+            org.opencontainers.image.description=An MQTT broker for plants organised as a tree
+            org.opencontainers.image.licenses=FSL-1.1-ALv2
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          build-contexts: contracts-bundle=build/bundle
+          build-args: VERSION=${{ needs.version.outputs.semver }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        if: github.event.repository.visibility == 'public'
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  packages:
+    needs: [version, go-lint, python-lint, repo-lint, go-test, contracts-test, smoke]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.python }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.11.17"
+      - name: colca-data-contracts wheel and sdist
+        run: |
+          uv version --project contracts --frozen "$VERSION"
+          uv build contracts --out-dir dist
+      - name: colcad wheels
+        run: |
+          make wheels VERSION="$VERSION"
+          cp build/wheels/*.whl dist/
+      - name: Check package metadata
+        run: uvx twine@7.0.0 check --strict dist/*
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.visibility == 'public'
+        with:
+          subject-path: dist/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: python-packages
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    needs: [version, image, packages]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
-      - name: No working notes in any commit of this pull request
-        run: scripts/check-no-working-notes.sh "origin/${{ github.base_ref }}"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.11.17"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: python-packages
+          path: dist
+      - name: Release notes
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:${{ needs.version.outputs.semver }}
+        run: |
+          {
+            echo "Container image: \`$IMAGE\` (linux/amd64, linux/arm64)"
+            echo
+            echo "Attached: \`colca-data-contracts\` as wheel and sdist, and \`colcad\` wheels for \`chaski[node]\`."
+            echo
+            if git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" > /dev/null 2>&1; then
+              uvx git-cliff@2.13.1 --latest --strip header
+            else
+              echo "First public release."
+            fi
+          } > notes.md
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd dist && sha256sum -- * > SHA256SUMS)
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Colca $GITHUB_REF_NAME" \
+            --notes-file notes.md "${prerelease[@]}"

@@ -1,0 +1,12 @@
+extends: default
+
+rules:
+  document-start: disable
+  line-length:
+    max: 120
+    ignore:
+      # One semantic tag per line, read as a table.
+      - contracts/src/colca_data_contracts/semantic_tags/
+  truthy:
+    # GitHub Actions uses `on:` as a key.
+    check-keys: false
