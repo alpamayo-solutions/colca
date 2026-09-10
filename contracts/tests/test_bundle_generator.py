@@ -55,11 +55,14 @@ def test_the_catalogue_is_one_record_carrying_its_own_revision():
     # The content hash is what lets a connector skip republishing an unchanged
     # catalogue, which is the whole reason one fat record is affordable.
     from colca_data_contracts import DataTag, DataTags
+
     tags = [DataTag(id="a", name="A", source="Sensors/A", is_writable=False, is_readable=True)]
     first = DataTags(data_tags=tags, connector="opcua-1")
     same = DataTags(data_tags=list(tags), connector="opcua-1")
-    other = DataTags(data_tags=tags + [DataTag(id="b", name="B", source="Sensors/B", is_writable=False, is_readable=True)],
-                     connector="opcua-1")
+    other = DataTags(
+        data_tags=tags + [DataTag(id="b", name="B", source="Sensors/B", is_writable=False, is_readable=True)],
+        connector="opcua-1",
+    )
     assert first.version == same.version
     assert first.version != other.version
 
@@ -91,9 +94,7 @@ def test_projected_contract_catalogue_has_the_approved_direction():
     }
 
     assert {
-        contract
-        for contract in expected_entities
-        if body["contracts"].get(contract, {}).get("class") == "entity"
+        contract for contract in expected_entities if body["contracts"].get(contract, {}).get("class") == "entity"
     } == expected_entities
     assert {
         contract
@@ -143,7 +144,14 @@ def test_subset_lint_only_allowed_keywords():
     for ident, entry in body["contracts"].items():
         assert gb._lint_subset(entry["schema"], ident) == []
         assert entry["class"] in (
-            "data", "entity", "definition", "cmd", "ack", "audit", "alarm", "annotation",
+            "data",
+            "entity",
+            "definition",
+            "cmd",
+            "ack",
+            "audit",
+            "alarm",
+            "annotation",
             # A log line is an event on its own stream — see uns.ClassLog.
             "log",
         ), ident
@@ -239,8 +247,7 @@ def test_cmd_contracts_carry_the_door_contract():
     """The colca command door needs correlation_id + expires_at; created_at is
     dropped from required (publishers do not stamp it)."""
     body, _ = gb.build_bundle()
-    for ident in ("_CmdParam", "_CmdOperate", "_CmdMaintain", "_CmdConfigure",
-                  "_CmdEdit", "_CmdAdmin", "_Cmd"):
+    for ident in ("_CmdParam", "_CmdOperate", "_CmdMaintain", "_CmdConfigure", "_CmdEdit", "_CmdAdmin", "_Cmd"):
         entry = body["contracts"][ident]
         assert entry["class"] == "cmd", ident
         req = entry["schema"].get("required", [])
@@ -300,9 +307,7 @@ def test_alarm_notification_contracts_have_revised_direction_and_shape():
 
 def test_alarm_channel_schema_requires_sealed_secret_and_rejects_cleartext_fields():
     body, _ = gb.build_bundle()
-    channel = body["contracts"]["_AlarmNotificationConfig"]["schema"]["properties"][
-        "channels"
-    ]["items"]
+    channel = body["contracts"]["_AlarmNotificationConfig"]["schema"]["properties"]["channels"]["items"]
     envelope = channel["properties"]["sealed_secret"]
 
     assert channel["additionalProperties"] is False
@@ -457,6 +462,4 @@ def test_ulid_fields_carry_the_one_pattern():
         for pointer in _pointers_with_pattern(entry["schema"]):
             seen.setdefault(ident, []).append(pointer)
             assert _walk(entry["schema"], pointer)["pattern"] == ULID_PATTERN, (ident, pointer)
-    assert {k: sorted(v) for k, v in seen.items()} == {
-        k: sorted(v) for k, v in ULID_CONSTRAINED_FIELDS.items()
-    }
+    assert {k: sorted(v) for k, v in seen.items()} == {k: sorted(v) for k, v in ULID_CONSTRAINED_FIELDS.items()}

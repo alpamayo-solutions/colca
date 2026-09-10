@@ -33,6 +33,13 @@ test = [
 [project.urls]
 Source = "https://github.com/alpamayo-solutions/colca"
 
+[dependency-groups]
+lint = [
+    "ruff==0.16.6",
+    "bandit==1.9.4",
+    "mypy==2.3.1",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -62,7 +69,9 @@ cache-keys = [
 
 [tool.ruff]
 target-version = "py311"
-line-length = 110
+line-length = 120
+# The examples in Markdown are laid out by hand.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 ignore = ["E402", "E501", "F403"]

@@ -32,8 +32,7 @@ def test_resource_is_registered_under_its_contract_name():
 
 
 def test_system_element_topic_format():
-    topic = Topic(payload_type=SystemElementPayload, node_id="n-edge1",
-                  context=["factory", "line1", "m6"])
+    topic = Topic(payload_type=SystemElementPayload, node_id="n-edge1", context=["factory", "line1", "m6"])
     assert str(topic) == "colca/v1/_SystemElement/n-edge1/factory/line1/m6"
 
 
@@ -41,9 +40,11 @@ def test_signal_carries_its_binding():
     """The tag→signal binding lives on the Signal as a direct FK to the tag's
     id; DataTagContext and the (connector, tag_id) pair are both gone."""
     sig = SignalPayload(
-        id="01HSIG", name="temp",
+        id="01HSIG",
+        name="temp",
         data_tag="01HTAG",
-        is_published=True, is_logged=True,
+        is_published=True,
+        is_logged=True,
         system_element_id="01HSE",
     )
     decoded = SignalPayload.decode(sig.encode(), timestamp=0)
@@ -62,8 +63,7 @@ def test_signal_holds_no_path_references():
 
 
 def test_signal_topic_format():
-    topic = Topic(payload_type=SignalPayload, node_id="n-edge1",
-                  context=["factory", "line1", "m6", "machine_state"])
+    topic = Topic(payload_type=SignalPayload, node_id="n-edge1", context=["factory", "line1", "m6", "machine_state"])
     assert str(topic) == "colca/v1/_Signal/n-edge1/factory/line1/m6/machine_state"
 
 

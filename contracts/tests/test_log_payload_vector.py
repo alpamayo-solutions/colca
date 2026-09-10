@@ -21,23 +21,15 @@ import pathlib
 
 from franzmq.data_contracts.base import Log
 
-VECTOR = pathlib.Path(__file__).resolve().parents[1] / (
-    "src/colca_data_contracts/vectors/log_payload.json"
-)
+VECTOR = pathlib.Path(__file__).resolve().parents[1] / ("src/colca_data_contracts/vectors/log_payload.json")
 
 
 def test_the_vector_matches_the_contract_it_claims_to_describe():
     """A field added to `Log` must appear here, or Go will not know to send it."""
     vector = json.loads(VECTOR.read_text())
 
-    required = [
-        field.name for field in dataclasses.fields(Log)
-        if field.default is dataclasses.MISSING
-    ]
-    optional = [
-        field.name for field in dataclasses.fields(Log)
-        if field.default is not dataclasses.MISSING
-    ]
+    required = [field.name for field in dataclasses.fields(Log) if field.default is dataclasses.MISSING]
+    optional = [field.name for field in dataclasses.fields(Log) if field.default is not dataclasses.MISSING]
 
     assert vector["contract"] == "_Log"
     assert vector["required"] == required, (
@@ -47,8 +39,7 @@ def test_the_vector_matches_the_contract_it_claims_to_describe():
         "refused by the node, silently."
     )
     assert vector["optional"] == optional, (
-        f"the contract's optional fields are {optional}, the vector says "
-        f"{vector['optional']}"
+        f"the contract's optional fields are {optional}, the vector says {vector['optional']}"
     )
 
 

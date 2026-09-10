@@ -77,6 +77,7 @@ Resolution rules:
 - Every problem found during a single ``compile_models()`` call is
   accumulated and raised together as one ``CompileError``.
 """
+
 from __future__ import annotations
 
 import json
@@ -133,10 +134,7 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
         key = item["name"]
         data_type = item.get("data_type")
         if data_type not in CANONICAL_DATA_TYPES:
-            problems.append(
-                f"{name}.{key}: unknown data_type {data_type!r}; "
-                f"use one of {sorted(CANONICAL_DATA_TYPES)}"
-            )
+            problems.append(f"{name}.{key}: unknown data_type {data_type!r}; use one of {sorted(CANONICAL_DATA_TYPES)}")
         slots[key] = {
             "key": key,
             "kind": "computed" if item.get("computed", False) else "measured",
@@ -155,8 +153,7 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
         entity_name = item.get("entity_name")
         if entity_name is not None and not entity_name.strip():
             problems.append(
-                f"{name}.{key}: entity_name is explicitly empty; omit the key entirely "
-                f"to default to the slot key"
+                f"{name}.{key}: entity_name is explicitly empty; omit the key entirely to default to the slot key"
             )
             entity_name = key
         else:
@@ -200,7 +197,7 @@ def _detect_cycles(nodes: list[str], edges: dict[str, list[tuple[str, ...]]]) ->
                 trail.extend(labels)
                 visit(target)
                 if labels:
-                    del trail[-len(labels):]
+                    del trail[-len(labels) :]
         trail.pop()
         color[node] = BLACK
 
@@ -298,8 +295,7 @@ def _duplicate_child_names(model_name: str, slots: list[dict[str, Any]]) -> list
             owner_of[entity_name] = slot["key"]
             continue
         problems.append(
-            f"{model_name}: child slots {owner!r} and {slot['key']!r} both resolve to "
-            f"entity_name {entity_name!r}"
+            f"{model_name}: child slots {owner!r} and {slot['key']!r} both resolve to entity_name {entity_name!r}"
         )
     return problems
 
@@ -350,9 +346,7 @@ def compile_models(source_dir: Path | None = None) -> list[dict[str, Any]]:
     for name, manifest in manifests.items():
         for slot_key, child_name in _child_edges(manifest["slots"]):
             if child_name not in documents:
-                problems.append(
-                    f"{name}.{slot_key}: child_model {child_name!r} is not a known data model"
-                )
+                problems.append(f"{name}.{slot_key}: child_model {child_name!r} is not a known data model")
         problems.extend(_duplicate_child_names(name, manifest["slots"]))
 
     child_edges = {

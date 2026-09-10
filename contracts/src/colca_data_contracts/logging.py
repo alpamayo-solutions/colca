@@ -83,16 +83,26 @@ def setup_logging(name: str, default_level: str = "INFO") -> logging.Logger:
                 r.setLevel(_orig)
                 r.handlers[0].emit(
                     logging.LogRecord(
-                        name, logging.INFO, "", 0,
-                        "[CONFIG] Log level restored to %s", (logging.getLevelName(_orig),), None,
+                        name,
+                        logging.INFO,
+                        "",
+                        0,
+                        "[CONFIG] Log level restored to %s",
+                        (logging.getLevelName(_orig),),
+                        None,
                     )
                 )
             else:
                 r.setLevel(logging.DEBUG)
                 r.handlers[0].emit(
                     logging.LogRecord(
-                        name, logging.INFO, "", 0,
-                        "[CONFIG] Log level switched to DEBUG (SIGUSR1 to restore)", (), None,
+                        name,
+                        logging.INFO,
+                        "",
+                        0,
+                        "[CONFIG] Log level switched to DEBUG (SIGUSR1 to restore)",
+                        (),
+                        None,
                     )
                 )
 

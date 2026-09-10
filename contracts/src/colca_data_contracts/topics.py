@@ -9,6 +9,7 @@ repeated per service, with a different failure message each time it is missing.
 This module is that code, once. Topic knowledge itself stays in franzmq; nothing
 here is added to the payload classes.
 """
+
 from typing import Optional, Union
 
 from decouple import config

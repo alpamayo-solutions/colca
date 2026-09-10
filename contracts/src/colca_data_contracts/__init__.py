@@ -5,6 +5,7 @@ On import, all Colca payload classes are registered into
 franzmq.data_contracts.base.PAYLOAD_CLASSES so that Topic.from_str()
 can resolve Colca topic strings.
 """
+
 import inspect
 import json
 

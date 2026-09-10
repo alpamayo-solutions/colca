@@ -5,6 +5,7 @@ Every node, service and SDK process of one tree uses the same root. It is
 it is asked for, so a process started with a different environment, or a test
 that overrides it, gets the root it asked for.
 """
+
 import os
 import re
 

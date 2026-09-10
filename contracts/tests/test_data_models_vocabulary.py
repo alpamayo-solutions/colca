@@ -11,14 +11,13 @@ type added to `loader.py` fails here until the vectors are updated, and updating
 the vectors fails colca's `TestSlotDataTypesMatchesTheGoldenVocabulary` until
 `slotDataTypes` moves with it.
 """
+
 import json
 from pathlib import Path
 
 from colca_data_contracts.data_models import CANONICAL_DATA_TYPES
 
-VECTORS_PATH = Path(__file__).resolve().parents[1] / (
-    "src/colca_data_contracts/vectors/data_model_vocabulary.json"
-)
+VECTORS_PATH = Path(__file__).resolve().parents[1] / ("src/colca_data_contracts/vectors/data_model_vocabulary.json")
 
 
 def test_golden_vocabulary_matches_the_canonical_definition():

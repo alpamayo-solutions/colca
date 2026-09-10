@@ -66,8 +66,7 @@ class _LogPublishingHandler(logging.Handler):
                 function=record.funcName,
                 line_no=record.lineno,
                 exc_info=(
-                    self.formatter.formatException(record.exc_info)
-                    if record.exc_info and self.formatter else None
+                    self.formatter.formatException(record.exc_info) if record.exc_info and self.formatter else None
                 ),
                 extra=getattr(record, "extra", None),
             )
@@ -111,7 +110,6 @@ def attach_log_publisher(client: Client, context: tuple[str, ...]) -> None:
     logging.getLogger().addHandler(handler)
 
 
-
 @dataclass(frozen=True)
 class LocalServiceIdentity:
     service_id: str
@@ -149,9 +147,7 @@ def resolve_local_identity(
     if any(not isinstance(payload.get(field), str) for field in required):
         raise RuntimeError("Colca /self returned an invalid local service identity")
     if payload["name"] != service_name:
-        raise RuntimeError(
-            f"Colca /self resolved service {payload['name']!r}, expected {service_name!r}"
-        )
+        raise RuntimeError(f"Colca /self resolved service {payload['name']!r}, expected {service_name!r}")
     if not payload["ulid"] or not payload["node"]:
         raise RuntimeError("Colca /self omitted the service or node identity")
 

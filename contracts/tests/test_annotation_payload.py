@@ -29,15 +29,16 @@ def test_annotation_topic_is_stable_contract_name():
     assert AnnotationPayload.get_identifier() == "_Annotation"
     # Level 3 carries the contract name, level 4 the publishing node's identity.
     assert str(topic).split("/")[2] == "_Annotation"
-    assert str(topic) == (
-        "colca/v1/_Annotation/n-edge1/production/line1/01J000000000000000000ANNOT"
-    )
+    assert str(topic) == ("colca/v1/_Annotation/n-edge1/production/line1/01J000000000000000000ANNOT")
 
 
 def test_annotation_encode_decode_round_trip():
     annotation = AnnotationPayload(
         annotation_id=derive_annotation_id(
-            "annotation-type-1", "dataops/part-cycle", 1710000000.0, ["signal-1", "signal-2"],
+            "annotation-type-1",
+            "dataops/part-cycle",
+            1710000000.0,
+            ["signal-1", "signal-2"],
         ),
         annotation_type_id="annotation-type-1",
         time_start=1710000000.0,
@@ -99,10 +100,7 @@ def test_derive_annotation_id_is_distinct_for_distinct_inputs():
     # machine is a different annotation, not a collision.
     assert derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["sig-2"]) != baseline
     assert derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, []) != baseline
-    assert (
-        derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["sig-1", "sig-2"])
-        != baseline
-    )
+    assert derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["sig-1", "sig-2"]) != baseline
 
 
 def test_derive_annotation_id_ignores_the_order_of_the_signal_set():
@@ -126,7 +124,10 @@ def test_derive_annotation_id_rounds_the_fractional_second_boundary():
     microsecond does not."""
     base = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0000001, ["sig-1"])
     same_rounding = derive_annotation_id(
-        "annotation-type-1", "dataops/part-cycle", 1710000000.0000002, ["sig-1"],
+        "annotation-type-1",
+        "dataops/part-cycle",
+        1710000000.0000002,
+        ["sig-1"],
     )
     distinct = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.000001, ["sig-1"])
 
@@ -166,12 +167,13 @@ def test_derive_annotation_id_matches_the_golden_vectors():
     for case in cases:
         key = (case["annotation_type_id"], case["source"], case["time_start"], frozenset(case["signal_ids"]))
         by_set.setdefault(key, set()).add(tuple(case["signal_ids"]))
-    assert any(len(orders) > 1 for orders in by_set.values()), (
-        "no vector case gives the same signal set in two orders"
-    )
+    assert any(len(orders) > 1 for orders in by_set.values()), "no vector case gives the same signal set in two orders"
     for case in cases:
         got = derive_annotation_id(
-            case["annotation_type_id"], case["source"], case["time_start"], case["signal_ids"],
+            case["annotation_type_id"],
+            case["source"],
+            case["time_start"],
+            case["signal_ids"],
         )
         assert got == case["id"], (
             f"derive_annotation_id({case['annotation_type_id']!r}, {case['source']!r}, "

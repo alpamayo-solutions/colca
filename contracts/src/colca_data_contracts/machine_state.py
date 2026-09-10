@@ -31,10 +31,10 @@ class MachineState(IntEnum):
     observation roll-up, not a behavioural state machine.
     """
 
-    UNKNOWN = 0    # honesty sentinel — cannot determine state; OEE uncovered time, not a loss bucket
-    OFFLINE = 1    # de-energized / not scheduled (OPC-UA NotAvailable). Needs a positive power/disconnect signal — never inferred from a stale heartbeat.
-    DOWN = 2       # available but not functional — fault / trip / e-stop / externally blocked. Cause lives in StateReason.
-    IDLE = 3       # available & healthy, performing no activity (NotExecuting)
+    UNKNOWN = 0  # honesty sentinel — cannot determine state; OEE uncovered time, not a loss bucket
+    OFFLINE = 1  # de-energized / not scheduled (OPC-UA NotAvailable). Needs a positive power/disconnect signal — never inferred from a stale heartbeat.
+    DOWN = 2  # available but not functional — fault / trip / e-stop / externally blocked. Cause lives in StateReason.
+    IDLE = 3  # available & healthy, performing no activity (NotExecuting)
     EXECUTING = 4  # actively pursuing its purpose (Executing). The single producing anchor; part-counter-free.
 
 
@@ -59,17 +59,17 @@ class StateReason(IntEnum):
     honest default and is never guessed.
     """
 
-    UNCLASSIFIED = 0         # honest default; OEE routes conservatively to an unplanned stop
-    LOCAL_FAULT = 1          # internal fault — charged to THIS machine's Availability + MTBF/MTTR
-    EMERGENCY_STOP = 2       # e-stop / safety / guard — distinct MTTR, legally sensitive
-    STARVED = 3              # no infeed from upstream — external, attributed to the line
-    BLOCKED = 4              # outfeed full / downstream cannot accept — external, attributed to the line
-    UTILITY_LOSS = 5         # lost shared air / steam / power
-    CHANGEOVER = 6           # format / recipe / tool change; planned when operating_mode=SETUP
-    CLEANING = 7             # CIP / SIP / washdown; planned
+    UNCLASSIFIED = 0  # honest default; OEE routes conservatively to an unplanned stop
+    LOCAL_FAULT = 1  # internal fault — charged to THIS machine's Availability + MTBF/MTTR
+    EMERGENCY_STOP = 2  # e-stop / safety / guard — distinct MTTR, legally sensitive
+    STARVED = 3  # no infeed from upstream — external, attributed to the line
+    BLOCKED = 4  # outfeed full / downstream cannot accept — external, attributed to the line
+    UTILITY_LOSS = 5  # lost shared air / steam / power
+    CHANGEOVER = 6  # format / recipe / tool change; planned when operating_mode=SETUP
+    CLEANING = 7  # CIP / SIP / washdown; planned
     PLANNED_MAINTENANCE = 8  # scheduled PM / calibration; excluded from the Availability denominator
-    NO_DEMAND = 9            # capable but idle, no order by plan
-    NO_SHIFT = 10            # outside scheduled time; the one planned bucket derivable from calendar alone
-    WARMUP = 11              # startup ramp before steady state; feeds Startup-Reject quality loss
-    QUALITY_HOLD = 12        # stopped / holding on an off-spec condition
-    GRADE_CHANGE = 13        # continuous-process transition with NO stop (runs while transitioning, output off-spec)
+    NO_DEMAND = 9  # capable but idle, no order by plan
+    NO_SHIFT = 10  # outside scheduled time; the one planned bucket derivable from calendar alone
+    WARMUP = 11  # startup ramp before steady state; feeds Startup-Reject quality loss
+    QUALITY_HOLD = 12  # stopped / holding on an off-spec condition
+    GRADE_CHANGE = 13  # continuous-process transition with NO stop (runs while transitioning, output off-spec)

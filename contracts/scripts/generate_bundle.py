@@ -98,8 +98,17 @@ NOT_ON_THE_WIRE: dict[str, str] = {
 # and `maxLength` admitted by the rule — a ULID is 26 characters
 # of one alphabet, and neither `minLength` nor a type can say so).
 ALLOWED_KEYWORDS = {
-    "type", "properties", "required", "enum", "items",
-    "minLength", "maxLength", "pattern", "minimum", "maximum", "minItems",
+    "type",
+    "properties",
+    "required",
+    "enum",
+    "items",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "minimum",
+    "maximum",
+    "minItems",
     "additionalProperties",
 }
 
@@ -269,9 +278,7 @@ def build_bundle(git_sha: str = "unknown") -> tuple[dict, str]:
         "source": {"package": "colca-data-contracts", "git_sha": git_sha},
         "contracts": contracts,
     }
-    digest = hashlib.sha256(
-        json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return body, digest
 
 

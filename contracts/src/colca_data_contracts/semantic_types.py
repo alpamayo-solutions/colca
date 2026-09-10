@@ -12,21 +12,25 @@ own (semantic-types design section 3).
 """
 
 #: What a tag may classify. A tag declares a non-empty subset.
-APPLIES_TO_KINDS: frozenset[str] = frozenset({
-    "system_element",
-    "signal",
-    "constant",
-})
+APPLIES_TO_KINDS: frozenset[str] = frozenset(
+    {
+        "system_element",
+        "signal",
+        "constant",
+    }
+)
 
 #: The canonical type a tag may require of the entity it classifies.
-SEMANTIC_DATA_TYPES: frozenset[str] = frozenset({
-    "boolean",
-    "integer",
-    "number",
-    "string",
-    "datetime",
-    "json",
-})
+SEMANTIC_DATA_TYPES: frozenset[str] = frozenset(
+    {
+        "boolean",
+        "integer",
+        "number",
+        "string",
+        "datetime",
+        "json",
+    }
+)
 
 #: Topic groups: the words a person uses for a KIND of data, mapped to the
 #: semantic tags that carry it. This is operator vocabulary — "pull up the
@@ -37,9 +41,15 @@ SEMANTIC_DATA_TYPES: frozenset[str] = frozenset({
 #: plant-authored tag like `quality-index` is found under "quality" even if
 #: this table never names it.
 SEMANTIC_TOPIC_GROUPS: dict[str, frozenset[str]] = {
-    "quality": frozenset({
-        "quality-index", "quality-rate", "moisture", "viscosity", "particle-size",
-    }),
+    "quality": frozenset(
+        {
+            "quality-index",
+            "quality-rate",
+            "moisture",
+            "viscosity",
+            "particle-size",
+        }
+    ),
     "oee": frozenset({"oee", "availability", "performance", "quality-rate"}),
     "throughput": frozenset({"throughput", "parts-per-minute", "cycle-time", "batch"}),
     "state": frozenset({"machine-state", "state-reason", "connectivity", "heartbeat"}),

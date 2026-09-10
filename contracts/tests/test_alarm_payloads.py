@@ -14,15 +14,12 @@ from colca_data_contracts import (
 
 
 def test_alarm_config_snapshot_topic_is_stable_contract_name():
-    topic = Topic(payload_type=AlarmNotificationConfigSnapshot, node_id="n-edge1",
-                  context=("alarms",))
+    topic = Topic(payload_type=AlarmNotificationConfigSnapshot, node_id="n-edge1", context=("alarms",))
 
     assert topic.payload_type is AlarmNotificationConfigSnapshot
     # The contract name sits at level 3, the publishing node's identity at 4.
     assert str(topic).split("/")[2] == AlarmNotificationConfigSnapshot.get_identifier()
-    assert str(topic) == (
-        f"colca/v1/{AlarmNotificationConfigSnapshot.get_identifier()}/n-edge1/alarms"
-    )
+    assert str(topic) == (f"colca/v1/{AlarmNotificationConfigSnapshot.get_identifier()}/n-edge1/alarms")
 
 
 def test_alarm_config_snapshot_revision_is_stable_for_sorted_items():

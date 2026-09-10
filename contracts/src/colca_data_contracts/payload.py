@@ -135,10 +135,19 @@ class ActorKind(BaseStrEnum):
 
 class CustomEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, (
-            ServiceType, HealthMetricVisualization, NetworkInterfaceType,
-            ConstantDataType, AuditSource, AuditAction, AuditOutcome, ActorKind,
-        )):
+        if isinstance(
+            obj,
+            (
+                ServiceType,
+                HealthMetricVisualization,
+                NetworkInterfaceType,
+                ConstantDataType,
+                AuditSource,
+                AuditAction,
+                AuditOutcome,
+                ActorKind,
+            ),
+        ):
             return str(obj)
         if isinstance(obj, datetime.datetime):
             return obj.isoformat()
@@ -387,18 +396,15 @@ class AlarmNotificationConfigSnapshot(Payload):
             "schema_version": self.schema_version,
             "target_node_id": self.target_node_id,
             "alarms": _sorted_items(self.alarms),
-            "channels": _sorted_items([
-                asdict(channel) if is_dataclass(channel) else channel
-                for channel in self.channels
-            ]),
+            "channels": _sorted_items(
+                [asdict(channel) if is_dataclass(channel) else channel for channel in self.channels]
+            ),
             "recipients": _sorted_items(self.recipients),
             "policies": _sorted_items(self.policies),
             "policy_targets": _sorted_items(self.policy_targets),
             "active_silences": _sorted_items(self.active_silences),
         }
-        return hashlib.sha256(
-            json.dumps(data, cls=CustomEncoder, sort_keys=True).encode()
-        ).hexdigest()
+        return hashlib.sha256(json.dumps(data, cls=CustomEncoder, sort_keys=True).encode()).hexdigest()
 
     @property
     def generated_at(self) -> float:
@@ -483,7 +489,10 @@ class NotificationDispatched(Payload):
 
 
 def derive_annotation_id(
-    annotation_type_id: str, source: str, time_start: float, signal_ids: Iterable[str],
+    annotation_type_id: str,
+    source: str,
+    time_start: float,
+    signal_ids: Iterable[str],
 ) -> str:
     """Deterministic ``Annotation.annotation_id`` (design §8).
 
@@ -504,9 +513,7 @@ def derive_annotation_id(
     empty string.
     """
     signal_set = ",".join(sorted(signal_ids))
-    digest = hashlib.sha256(
-        f"{annotation_type_id}|{source}|{time_start:.6f}|{signal_set}".encode("utf-8")
-    ).digest()
+    digest = hashlib.sha256(f"{annotation_type_id}|{source}|{time_start:.6f}|{signal_set}".encode("utf-8")).digest()
     return str(ulid.from_bytes(digest[:16]))
 
 
@@ -525,6 +532,7 @@ class Annotation(Payload):
     appends too, so "was this annotation ever deleted" survives replication
     and replay the same way every other state change on the stream does.
     """
+
     annotation_id: ULID
     #: A ULID in every producer (the projector's column, `stable_id`,
     #: preflight) but NOT yet constrained on the wire: the shared golden
@@ -560,6 +568,7 @@ class DataTag(Payload):
     old id was ``hierarchy + name`` joined) and empty for every protocol but
     OPC-UA. The natural key becomes ``(connector, source)``.
     """
+
     id: ULID
     name: str
     source: str
@@ -595,7 +604,7 @@ class DataTags(Payload):
         return hashlib.md5(json.dumps(tags_dict, cls=CustomEncoder, sort_keys=True).encode()).hexdigest()
 
     @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> 'DataTags':
+    def decode(cls, json_str: str, timestamp: int) -> "DataTags":
         data = json.loads(json_str)
         data_tags = [DataTag(**tag) for tag in data["data_tags"]]
         data["data_tags"] = data_tags

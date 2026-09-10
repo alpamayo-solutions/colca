@@ -14,8 +14,7 @@ def container_resource_health_metrics() -> list[HealthMetricDeclaration]:
     unlabeled series on a node and the externally labeled series upstream.
     """
     selector = (
-        'container_label_com_docker_compose_service=~"(^|.*-){service_name_pattern}$",'
-        'node_id=~"{node_id_pattern}"'
+        'container_label_com_docker_compose_service=~"(^|.*-){service_name_pattern}$",node_id=~"{node_id_pattern}"'
     )
     return [
         HealthMetricDeclaration(
@@ -23,11 +22,7 @@ def container_resource_health_metrics() -> list[HealthMetricDeclaration]:
             name="CPU",
             metric="service_cpu_pct",
             description="CPU used by this service container.",
-            query=(
-                'sum({{__name__=~"(edge|hub):service_cpu_pct",'
-                + selector
-                + '}})'
-            ),
+            query=('sum({{__name__=~"(edge|hub):service_cpu_pct",' + selector + "}})"),
             visualization=HealthMetricVisualization.TIMELINE,
             unit="%",
             precision=1,
@@ -38,11 +33,7 @@ def container_resource_health_metrics() -> list[HealthMetricDeclaration]:
             name="Memory",
             metric="service_memory_working_set_bytes",
             description="Working-set memory used by this service container.",
-            query=(
-                'sum({{__name__=~"(edge|hub):service_memory_working_set_bytes",'
-                + selector
-                + '}})'
-            ),
+            query=('sum({{__name__=~"(edge|hub):service_memory_working_set_bytes",' + selector + "}})"),
             visualization=HealthMetricVisualization.TIMELINE,
             unit="bytes",
             precision=0,

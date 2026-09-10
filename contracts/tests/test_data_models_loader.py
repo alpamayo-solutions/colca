@@ -6,6 +6,7 @@ schema). These tests build small YAML fixtures with `tmp_path` rather than
 compiling the real platform models -- `test_data_models_builtin.py` is the
 dedicated equivalence test for those.
 """
+
 import json
 
 import pytest
@@ -71,9 +72,20 @@ def test_compiling_twice_is_byte_identical_with_child_slots(tmp_path):
     child slots, not just signal slots -- child_model/entity_name resolution
     must not introduce any nondeterministic ordering (e.g. dict/set iteration)."""
     _write(tmp_path, "bearing.yaml", BEARING)
-    _write(tmp_path, "motor.yaml", _motor([
-        {"name": "drive_end_bearing", "child_model": "Bearing", "required": False, "description": "DE bearing."},
-    ]))
+    _write(
+        tmp_path,
+        "motor.yaml",
+        _motor(
+            [
+                {
+                    "name": "drive_end_bearing",
+                    "child_model": "Bearing",
+                    "required": False,
+                    "description": "DE bearing.",
+                },
+            ]
+        ),
+    )
     first = manifest_json(compile_models(tmp_path))
     second = manifest_json(compile_models(tmp_path))
     assert first == second
@@ -91,16 +103,24 @@ def test_divergent_semantic_type_data_type_across_models_is_a_compile_error(tmp_
     data_type would each seed a different tag stub; the seeder's
     existing-wins rule then makes whichever seeds first silently win. Reject
     the divergence at load time instead, naming both models and the tag."""
-    _write(tmp_path, "pump.yaml", {
-        "name": "Pump",
-        "version": "1.0",
-        "signals": [{"name": "reading", "data_type": "number", "semantic_type": "temperature"}],
-    })
-    _write(tmp_path, "sensor.yaml", {
-        "name": "Sensor",
-        "version": "1.0",
-        "signals": [{"name": "reading", "data_type": "string", "semantic_type": "temperature"}],
-    })
+    _write(
+        tmp_path,
+        "pump.yaml",
+        {
+            "name": "Pump",
+            "version": "1.0",
+            "signals": [{"name": "reading", "data_type": "number", "semantic_type": "temperature"}],
+        },
+    )
+    _write(
+        tmp_path,
+        "sensor.yaml",
+        {
+            "name": "Sensor",
+            "version": "1.0",
+            "signals": [{"name": "reading", "data_type": "string", "semantic_type": "temperature"}],
+        },
+    )
     with pytest.raises(CompileError) as exc_info:
         compile_models(tmp_path)
     message = str(exc_info.value)
@@ -113,16 +133,24 @@ def test_same_semantic_type_data_type_across_models_stays_legal(tmp_path):
     """The denominator: the same tag name declared with the SAME data_type by
     multiple models is legal and produces exactly one stub -- the check above
     is refusing the divergence, not shared tag references in general."""
-    _write(tmp_path, "pump.yaml", {
-        "name": "Pump",
-        "version": "1.0",
-        "signals": [{"name": "reading", "data_type": "number", "semantic_type": "temperature"}],
-    })
-    _write(tmp_path, "sensor.yaml", {
-        "name": "Sensor",
-        "version": "1.0",
-        "signals": [{"name": "reading", "data_type": "number", "semantic_type": "temperature"}],
-    })
+    _write(
+        tmp_path,
+        "pump.yaml",
+        {
+            "name": "Pump",
+            "version": "1.0",
+            "signals": [{"name": "reading", "data_type": "number", "semantic_type": "temperature"}],
+        },
+    )
+    _write(
+        tmp_path,
+        "sensor.yaml",
+        {
+            "name": "Sensor",
+            "version": "1.0",
+            "signals": [{"name": "reading", "data_type": "number", "semantic_type": "temperature"}],
+        },
+    )
     manifests = {m["name"]: m for m in compile_models(tmp_path)}
     for model_name in ("Pump", "Sensor"):
         (tag,) = manifests[model_name]["semantic_tags"]
@@ -131,11 +159,15 @@ def test_same_semantic_type_data_type_across_models_stays_legal(tmp_path):
 
 
 def test_unknown_data_type_is_a_compile_error(tmp_path):
-    _write(tmp_path, "broken.yaml", {
-        "name": "Broken",
-        "version": "1.0",
-        "signals": [{"name": "x", "data_type": "wat"}],
-    })
+    _write(
+        tmp_path,
+        "broken.yaml",
+        {
+            "name": "Broken",
+            "version": "1.0",
+            "signals": [{"name": "x", "data_type": "wat"}],
+        },
+    )
     with pytest.raises(CompileError, match=r"Broken\.x.*unknown data_type"):
         compile_models(tmp_path)
 
@@ -187,11 +219,15 @@ def test_child_slot_overrides_parent_slot_and_declared_by_moves(tmp_path):
 
 
 def test_unknown_extends_parent_is_a_compile_error(tmp_path):
-    _write(tmp_path, "orphan.yaml", {
-        "name": "Orphan",
-        "version": "1.0",
-        "extends": ["Nonexistent"],
-    })
+    _write(
+        tmp_path,
+        "orphan.yaml",
+        {
+            "name": "Orphan",
+            "version": "1.0",
+            "extends": ["Nonexistent"],
+        },
+    )
     with pytest.raises(CompileError, match=r"Orphan.*extends unknown model 'Nonexistent'"):
         compile_models(tmp_path)
 
@@ -226,10 +262,16 @@ def _motor(children):
 
 def test_child_slot_records_child_model_and_entity_name(tmp_path):
     _write(tmp_path, "bearing.yaml", BEARING)
-    _write(tmp_path, "motor.yaml", _motor([
-        {"name": "housing", "entity_name": "Housing"},
-        {"name": "drive_end_bearing", "child_model": "Bearing"},
-    ]))
+    _write(
+        tmp_path,
+        "motor.yaml",
+        _motor(
+            [
+                {"name": "housing", "entity_name": "Housing"},
+                {"name": "drive_end_bearing", "child_model": "Bearing"},
+            ]
+        ),
+    )
     manifests = {m["name"]: m for m in compile_models(tmp_path)}
     slots = {s["key"]: s for s in manifests["Motor"]["slots"]}
 
@@ -247,9 +289,20 @@ def test_child_slot_records_child_model_and_entity_name(tmp_path):
 
 def test_child_slot_required_false_and_description_are_recorded(tmp_path):
     _write(tmp_path, "bearing.yaml", BEARING)
-    _write(tmp_path, "motor.yaml", _motor([
-        {"name": "drive_end_bearing", "child_model": "Bearing", "required": False, "description": "DE bearing."},
-    ]))
+    _write(
+        tmp_path,
+        "motor.yaml",
+        _motor(
+            [
+                {
+                    "name": "drive_end_bearing",
+                    "child_model": "Bearing",
+                    "required": False,
+                    "description": "DE bearing.",
+                },
+            ]
+        ),
+    )
     manifests = {m["name"]: m for m in compile_models(tmp_path)}
     slot = {s["key"]: s for s in manifests["Motor"]["slots"]}["drive_end_bearing"]
     assert slot["required"] is False
@@ -262,15 +315,25 @@ def test_child_slot_inherited_across_extends_flattens_with_declared_by(tmp_path)
     declared_by naming the model that actually declared it -- not the model
     that merely inherited it."""
     _write(tmp_path, "bearing.yaml", BEARING)
-    _write(tmp_path, "motor.yaml", _motor([
-        {"name": "drive_end_bearing", "child_model": "Bearing"},
-    ]))
-    _write(tmp_path, "servo.yaml", {
-        "name": "ServoMotor",
-        "version": "1.0",
-        "description": "Extends Motor.",
-        "extends": ["Motor"],
-    })
+    _write(
+        tmp_path,
+        "motor.yaml",
+        _motor(
+            [
+                {"name": "drive_end_bearing", "child_model": "Bearing"},
+            ]
+        ),
+    )
+    _write(
+        tmp_path,
+        "servo.yaml",
+        {
+            "name": "ServoMotor",
+            "version": "1.0",
+            "description": "Extends Motor.",
+            "extends": ["Motor"],
+        },
+    )
     manifests = {m["name"]: m for m in compile_models(tmp_path)}
     slots = {s["key"]: s for s in manifests["ServoMotor"]["slots"]}
     child = slots["drive_end_bearing"]
@@ -294,14 +357,24 @@ def test_unregistered_child_model_reference_is_a_compile_error(tmp_path):
 
 
 def test_child_model_cycle_is_a_compile_error_with_the_full_path(tmp_path):
-    _write(tmp_path, "a.yaml", {
-        "name": "CycleA", "version": "1.0",
-        "children": [{"name": "to_b", "child_model": "CycleB"}],
-    })
-    _write(tmp_path, "b.yaml", {
-        "name": "CycleB", "version": "1.0",
-        "children": [{"name": "to_a", "child_model": "CycleA"}],
-    })
+    _write(
+        tmp_path,
+        "a.yaml",
+        {
+            "name": "CycleA",
+            "version": "1.0",
+            "children": [{"name": "to_b", "child_model": "CycleB"}],
+        },
+    )
+    _write(
+        tmp_path,
+        "b.yaml",
+        {
+            "name": "CycleB",
+            "version": "1.0",
+            "children": [{"name": "to_a", "child_model": "CycleA"}],
+        },
+    )
     with pytest.raises(CompileError) as exc_info:
         compile_models(tmp_path)
     assert "CycleA -> to_b -> CycleB -> to_a -> CycleA" in str(exc_info.value)
@@ -311,14 +384,18 @@ def test_two_child_slots_naming_the_same_entity_is_a_compile_error(tmp_path):
     """Two child slots of one model resolving to the same `entity_name` can
     never both be satisfied -- one physical child cannot be two slots."""
     _write(tmp_path, "bearing.yaml", BEARING)
-    _write(tmp_path, "dual.yaml", {
-        "name": "DualBearing",
-        "version": "1.0",
-        "children": [
-            {"name": "left_bearing", "child_model": "Bearing", "entity_name": "Bearing"},
-            {"name": "right_bearing", "child_model": "Bearing", "entity_name": "Bearing"},
-        ],
-    })
+    _write(
+        tmp_path,
+        "dual.yaml",
+        {
+            "name": "DualBearing",
+            "version": "1.0",
+            "children": [
+                {"name": "left_bearing", "child_model": "Bearing", "entity_name": "Bearing"},
+                {"name": "right_bearing", "child_model": "Bearing", "entity_name": "Bearing"},
+            ],
+        },
+    )
     with pytest.raises(CompileError) as exc_info:
         compile_models(tmp_path)
     message = str(exc_info.value)
@@ -331,9 +408,15 @@ def test_empty_explicit_child_entity_name_is_a_compile_error(tmp_path):
     """`entity_name: ""` is an explicit override that says nothing -- never
     intentional, so it is rejected rather than silently falling back."""
     _write(tmp_path, "bearing.yaml", BEARING)
-    _write(tmp_path, "motor.yaml", _motor([
-        {"name": "drive_end_bearing", "child_model": "Bearing", "entity_name": ""},
-    ]))
+    _write(
+        tmp_path,
+        "motor.yaml",
+        _motor(
+            [
+                {"name": "drive_end_bearing", "child_model": "Bearing", "entity_name": ""},
+            ]
+        ),
+    )
     with pytest.raises(CompileError, match=r"Motor\.drive_end_bearing.*entity_name is explicitly empty"):
         compile_models(tmp_path)
 
@@ -343,9 +426,15 @@ def test_omitted_child_entity_name_still_defaults_to_the_slot_key(tmp_path):
     (as opposed to declaring it empty) is legal and keeps defaulting to the
     slot key."""
     _write(tmp_path, "bearing.yaml", BEARING)
-    _write(tmp_path, "motor.yaml", _motor([
-        {"name": "drive_end_bearing", "child_model": "Bearing"},
-    ]))
+    _write(
+        tmp_path,
+        "motor.yaml",
+        _motor(
+            [
+                {"name": "drive_end_bearing", "child_model": "Bearing"},
+            ]
+        ),
+    )
     manifests = {m["name"]: m for m in compile_models(tmp_path)}
     slot = {s["key"]: s for s in manifests["Motor"]["slots"]}["drive_end_bearing"]
     assert slot["entity_name"] == "drive_end_bearing"
@@ -355,14 +444,18 @@ def test_distinct_child_entity_names_still_compile(tmp_path):
     """The denominator: the same shape with distinct names is legal, so the
     check above is refusing the collision and not child slots in general."""
     _write(tmp_path, "bearing.yaml", BEARING)
-    _write(tmp_path, "two.yaml", {
-        "name": "TwoBearings",
-        "version": "1.0",
-        "children": [
-            {"name": "left_bearing", "child_model": "Bearing", "entity_name": "BearingLeft"},
-            {"name": "right_bearing", "child_model": "Bearing", "entity_name": "BearingRight"},
-        ],
-    })
+    _write(
+        tmp_path,
+        "two.yaml",
+        {
+            "name": "TwoBearings",
+            "version": "1.0",
+            "children": [
+                {"name": "left_bearing", "child_model": "Bearing", "entity_name": "BearingLeft"},
+                {"name": "right_bearing", "child_model": "Bearing", "entity_name": "BearingRight"},
+            ],
+        },
+    )
     manifests = {m["name"]: m for m in compile_models(tmp_path)}
     slots = {s["key"]: s for s in manifests["TwoBearings"]["slots"]}
     assert slots["left_bearing"]["entity_name"] == "BearingLeft"
@@ -380,7 +473,8 @@ def test_missing_version_is_a_compile_error(tmp_path):
 
 def test_missing_name_is_a_compile_error(tmp_path):
     (tmp_path / "nameless.yaml").write_text(
-        yaml.safe_dump({"version": "1.0"}), encoding="utf-8",
+        yaml.safe_dump({"version": "1.0"}),
+        encoding="utf-8",
     )
     with pytest.raises(CompileError, match="missing required 'name'"):
         compile_models(tmp_path)

@@ -33,9 +33,7 @@ def test_every_other_type_still_round_trips(data_type):
 def test_the_signal_vocabulary_is_franzmqs_plus_json():
     """Derived, never retyped -- so a franzmq release that adds or removes a
     member cannot leave this silently disagreeing with it."""
-    assert {member.value for member in SignalDataType} == {
-        member.value for member in DataType
-    } | {"json"}
+    assert {member.value for member in SignalDataType} == {member.value for member in DataType} | {"json"}
 
 
 def test_a_type_no_signal_can_hold_is_still_refused():

@@ -4,6 +4,7 @@ Helper module for adding architecture diagram metadata to ServiceDetails.
 This module provides utilities for services to publish architecture-specific
 metadata that will be used by the architecture diagram view.
 """
+
 from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass, field, asdict
 
@@ -11,6 +12,7 @@ from dataclasses import dataclass, field, asdict
 @dataclass
 class KpiThresholds:
     """Threshold configuration for KPI status evaluation."""
+
     mode: str = "above"  # "above" = higher is better, "below" = lower is better
     success: Optional[float] = None
     warning: Optional[float] = None
@@ -19,6 +21,7 @@ class KpiThresholds:
 @dataclass
 class KpiDefinition:
     """Definition of a Prometheus-based KPI for a service."""
+
     key: str  # unique identifier
     label: str  # display label
     query: str  # PromQL query (supports {service_name} placeholder)
@@ -29,6 +32,7 @@ class KpiDefinition:
 @dataclass
 class ArchitectureMetrics:
     """Metrics for the architecture diagram."""
+
     cpuLoad: str  # e.g., "22%"
     memory: str  # e.g., "1.2GB"
     dataRate: str  # e.g., "4,500 messages/min"
@@ -38,6 +42,7 @@ class ArchitectureMetrics:
 @dataclass
 class ArchitectureLayout:
     """Layout configuration for the architecture diagram."""
+
     zone: Optional[str] = None  # 'left' | 'right' | 'top' | 'bottom' | 'center'
     order: Optional[int] = None  # Order within the zone (lower = earlier)
     index: Optional[int] = None  # Global index for overall ordering (lower = earlier)
@@ -50,6 +55,7 @@ class ArchitectureLayout:
 @dataclass
 class ArchitectureConnection:
     """Connection configuration for a specific dependency."""
+
     from_side: Optional[str] = None  # 'top' | 'right' | 'bottom' | 'left'
     to_side: Optional[str] = None  # 'top' | 'right' | 'bottom' | 'left'
 
@@ -57,6 +63,7 @@ class ArchitectureConnection:
 @dataclass
 class ArchitectureDependencies:
     """Dependencies configuration for the architecture diagram."""
+
     upstream: List[str] = field(default_factory=list)
     downstream: List[str] = field(default_factory=list)
     connections: Optional[Dict[str, ArchitectureConnection]] = None
@@ -81,6 +88,7 @@ class ArchitectureDependencies:
 @dataclass
 class ArchitectureMetadata:
     """Complete architecture metadata for a service."""
+
     status: str  # 'healthy' | 'starting' | 'unhealthy'
     description: str
     metrics: Optional[ArchitectureMetrics] = None
@@ -183,13 +191,15 @@ def create_architecture_metadata(
                 thresholds = kpi.get("thresholds")
                 if isinstance(thresholds, dict):
                     thresholds = KpiThresholds(**thresholds)
-                kpi_objects.append(KpiDefinition(
-                    key=kpi["key"],
-                    label=kpi["label"],
-                    query=kpi["query"],
-                    format=kpi["format"],
-                    thresholds=thresholds,
-                ))
+                kpi_objects.append(
+                    KpiDefinition(
+                        key=kpi["key"],
+                        label=kpi["label"],
+                        query=kpi["query"],
+                        format=kpi["format"],
+                        thresholds=thresholds,
+                    )
+                )
             else:
                 kpi_objects.append(kpi)
 

@@ -38,9 +38,7 @@ def test_every_seeded_icon_is_in_the_set():
     never name one -- and the seed is the only icon source this package owns.
     """
     seed = yaml.safe_load(
-        (
-            Path(colca_data_contracts.__file__).parent / "semantic_tags" / "platform.yaml"
-        ).read_text(encoding="utf-8")
+        (Path(colca_data_contracts.__file__).parent / "semantic_tags" / "platform.yaml").read_text(encoding="utf-8")
     )
     tags = seed["tags"]
     assert tags, "the platform seed is empty, so this proves nothing"

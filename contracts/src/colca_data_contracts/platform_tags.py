@@ -51,5 +51,6 @@ PLATFORM_METADATA_TYPE_NAMES: frozenset[str] = _seeded_names(PLATFORM_METADATA_T
 #: Colca expects on every node, so a UI may offer them without asking whether
 #: this deployment happened to declare them.
 PLATFORM_ANNOTATION_TYPE_NAMES: frozenset[str] = _seeded_names(
-    PLATFORM_ANNOTATION_TYPE_SEED, "types",
+    PLATFORM_ANNOTATION_TYPE_SEED,
+    "types",
 )

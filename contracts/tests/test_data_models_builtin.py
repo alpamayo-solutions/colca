@@ -3,6 +3,7 @@ oee_producer.yaml) compile and reproduce the semantic content
 authored before: same names, enums, required flags, and descriptions as before the
 Python-class era. `compile_models()` with no `source_dir` loads exactly
 these -- the package's own `data_models/` directory."""
+
 from colca_data_contracts.data_models import compile_models
 
 

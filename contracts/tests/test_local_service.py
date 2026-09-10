@@ -57,13 +57,15 @@ def _identity():
 
 
 def test_self_uses_only_local_service_and_creation_mount_headers():
-    body = json.dumps({
-        "ulid": "svc-1",
-        "name": "notifications",
-        "node": "node-1",
-        "element": "el-1",
-        "mount": "line-1/press-1",
-    }).encode()
+    body = json.dumps(
+        {
+            "ulid": "svc-1",
+            "name": "notifications",
+            "node": "node-1",
+            "element": "el-1",
+            "mount": "line-1/press-1",
+        }
+    ).encode()
 
     with patch("urllib.request.urlopen", return_value=_Response(body)) as urlopen:
         identity = resolve_local_identity("notifications", mount="declared/path")
@@ -127,9 +129,7 @@ def test_service_details_are_published_under_node_mount_and_service_name():
 
     publish_local_service_details(client, _identity(), details)
 
-    assert client.published[0][0] == (
-        "colca/v1/_ServiceDetails/node-1/line-1/press-1/notifications/_service"
-    )
+    assert client.published[0][0] == ("colca/v1/_ServiceDetails/node-1/line-1/press-1/notifications/_service")
     assert client.published[0][1] is details
     assert client.published[0][2] == {"qos": 1, "retain": True}
 
@@ -146,12 +146,18 @@ def test_two_unplaced_services_do_not_share_one_record():
     catalogue.
     """
     projector = LocalServiceIdentity(
-        service_id="svc-p", service_name="projector",
-        node_id="node-1", system_element_id="", mount="",
+        service_id="svc-p",
+        service_name="projector",
+        node_id="node-1",
+        system_element_id="",
+        mount="",
     )
     dataops = LocalServiceIdentity(
-        service_id="svc-d", service_name="dataops",
-        node_id="node-1", system_element_id="", mount="",
+        service_id="svc-d",
+        service_name="dataops",
+        node_id="node-1",
+        system_element_id="",
+        mount="",
     )
 
     client = _Client()
@@ -180,8 +186,7 @@ def test_service_context_matches_the_shared_vectors():
     from colca_data_contracts.local_service import service_context
 
     vectors_path = (
-        Path(__file__).resolve().parents[1]
-        / "src" / "colca_data_contracts" / "vectors" / "service_context.json"
+        Path(__file__).resolve().parents[1] / "src" / "colca_data_contracts" / "vectors" / "service_context.json"
     )
     vectors = _json.loads(vectors_path.read_text())["vectors"]
     assert vectors, "empty vectors would make this test pass proving nothing"
@@ -217,9 +222,7 @@ def test_connecting_mqtt_adds_the_log_publisher_without_owning_the_log():
 
         assert sentinel in root.handlers, "the caller's handler was removed"
         assert root.level == logging.DEBUG, "the caller's level was reset"
-        added = [
-            h for h in root.handlers if isinstance(h, MQTTHandler) and h not in before
-        ]
+        added = [h for h in root.handlers if isinstance(h, MQTTHandler) and h not in before]
         assert len(added) == 1, "exactly one _Log publisher must be added"
         assert added[0].formatter._fmt == COLCA_LOG_FORMAT
     finally:

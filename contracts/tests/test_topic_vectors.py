@@ -10,6 +10,7 @@ The mount and identity sections are door-side behavior; what this suite asserts
 about them is that their inputs and outputs stay inside the grammar franzmq
 speaks, which is franzmq's half of the contract.
 """
+
 import json
 from dataclasses import dataclass
 from importlib import resources
@@ -30,21 +31,21 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
-VECTORS_PATH = Path(__file__).resolve().parents[1] / (
-    "src/colca_data_contracts/vectors/topic_transformations.json"
-)
+VECTORS_PATH = Path(__file__).resolve().parents[1] / ("src/colca_data_contracts/vectors/topic_transformations.json")
 VECTORS = json.loads(VECTORS_PATH.read_text())
 
 
 @dataclass
 class EnrolledIdentity(Payload):
     """Stand-in for the enrollment contract, which the broker binary owns."""
+
     id: str = ""
 
 
 @dataclass
 class TimeSync(Payload):
     """Stand-in for the time beacon, which the broker binary owns."""
+
     now_ms: int = 0
 
 
@@ -61,9 +62,7 @@ def _register_broker_owned_contracts():
 def test_the_vector_file_ships_as_package_data():
     # colca reads it from the repo path; franzmq's suite gets it from the
     # installed package — a file that stops shipping breaks the far side only.
-    packaged = resources.files("colca_data_contracts").joinpath(
-        "vectors/topic_transformations.json"
-    )
+    packaged = resources.files("colca_data_contracts").joinpath("vectors/topic_transformations.json")
     assert json.loads(packaged.read_text()) == VECTORS
 
 
@@ -116,9 +115,7 @@ def test_mount_strip_keeps_the_identity_and_the_grammar(case):
     assert tuple(case["mount"].split("/")) + after.context == before.context
 
 
-@pytest.mark.parametrize(
-    "case", VECTORS["identity_rule"], ids=lambda c: f"{c['topic']}@{c['authenticated_as']}"
-)
+@pytest.mark.parametrize("case", VECTORS["identity_rule"], ids=lambda c: f"{c['topic']}@{c['authenticated_as']}")
 def test_identity_rule_reads_level_four(case):
     topic = Topic.from_str(case["topic"])
     is_command = issubclass(topic.payload_type, Cmd)

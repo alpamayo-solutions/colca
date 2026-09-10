@@ -73,13 +73,10 @@ def test_state_reason_is_fixed_14():
 def _assert_manifest_matches_enum(slot_name: str, enum_cls):
     enum_values = _slot(slot_name)["enum"]
     # index-for-index == value-for-value, name-for-name
-    assert enum_values == [member.name for member in enum_cls], (
-        f"{slot_name} enum drifted from {enum_cls.__name__}"
-    )
+    assert enum_values == [member.name for member in enum_cls], f"{slot_name} enum drifted from {enum_cls.__name__}"
     for index, name in enumerate(enum_values):
         assert enum_cls[name].value == index, (
-            f"{slot_name}: {name} is index {index} in the manifest but "
-            f"{enum_cls[name].value} in {enum_cls.__name__}"
+            f"{slot_name}: {name} is index {index} in the manifest but {enum_cls[name].value} in {enum_cls.__name__}"
         )
 
 

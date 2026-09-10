@@ -26,8 +26,8 @@ def _round_trip(value):
 @pytest.mark.parametrize(
     "value",
     [
-        "PO-2026-00042",          # a plain string value, e.g. a work_order tag
-        "",                        # the idle sentinel a string signal rests at
+        "PO-2026-00042",  # a plain string value, e.g. a work_order tag
+        "",  # the idle sentinel a string signal rests at
         3.5,
         1,
         True,
