@@ -232,8 +232,7 @@ def build_bundle(git_sha: str = "unknown") -> tuple[dict, str]:
         cls = PAYLOAD_CLASSES[identifier]
         if identifier in BUILTIN_ONLY:
             raise SystemExit(
-                f"generate_bundle: {identifier} is builtin-only and must never "
-                f"be a registered payload class"
+                f"generate_bundle: {identifier} is builtin-only and must never be a registered payload class"
             )
         if identifier in NOT_ON_THE_WIRE:
             continue

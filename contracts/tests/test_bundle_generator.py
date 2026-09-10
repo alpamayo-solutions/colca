@@ -33,8 +33,7 @@ def test_determinism_two_runs_one_digest():
 def test_inventory_every_registered_class_exactly_once():
     body, _ = gb.build_bundle()
     assert set(body["contracts"]) == set(PAYLOAD_CLASSES) - set(gb.NOT_ON_THE_WIRE), (
-        "bundle inventory must equal the payload registry minus the contracts "
-        "deliberately kept off the wire"
+        "bundle inventory must equal the payload registry minus the contracts deliberately kept off the wire"
     )
 
 
