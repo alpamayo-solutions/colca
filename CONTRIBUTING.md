@@ -2,6 +2,7 @@
 
 Bug reports, questions and pull requests are welcome. This page says how to
 build and test the project and what a change needs before it can be merged.
+Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Build and test
 
@@ -18,7 +19,18 @@ make smoke           # builds the image, starts a four-node tree, asserts on it
 
 `make test` is what most changes need. Run `make smoke` when you touch
 replication, the doors, or anything the demo topology exercises. CI runs all of
-them on every pull request; `make lint` needs Docker for hadolint.
+them on every pull request; `make lint` needs Docker for hadolint and gitleaks.
+
+## Git hooks
+
+The repository ships [pre-commit](https://pre-commit.com) hooks: gitleaks,
+formatting and the fast linters on every commit, golangci-lint and mypy before
+a push, and a check that the commit subject follows the convention below.
+
+```bash
+uv tool install pre-commit
+pre-commit install
+```
 
 ## Changing a contract
 
@@ -52,8 +64,8 @@ was planned.
 Maintainers release by pushing a tag `vX.Y.Z`, or `vX.Y.Z-rc.N` for a release
 candidate, on `main`. Once every check has passed, CI publishes the image to
 `ghcr.io/alpamayo-solutions/colca` and creates a GitHub release with the
-`colca-data-contracts` packages, the `colcad` wheels, checksums, and notes
-built from the commit subjects. Every push to `main` also publishes the image as
+`colca-data-contracts` packages, the `colcad` wheels, SBOMs, checksums, and
+notes built from the commit subjects. Every push to `main` also publishes the image as
 `main` and `sha-<commit>`.
 
 ## Contributor License Agreement

@@ -112,7 +112,8 @@ in a process.
 
 Issues and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md)
 explains how to build and test, and what a pull request needs. Please report
-security problems privately, as described in [SECURITY.md](SECURITY.md).
+security problems privately, as described in [SECURITY.md](SECURITY.md), and
+follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
