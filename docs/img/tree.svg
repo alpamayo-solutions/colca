@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" width="800" height="400" role="img" aria-labelledby="t d">
+  <title id="t">A Colca tree</title>
+  <desc id="d">Two edge nodes replicate to a site node, which replicates to a global node. The same metric is stored at every level, with the child's mount inserted on each hop.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <style>
+      .sans { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .node { fill: #f8fafc; stroke: #334155; stroke-width: 1.5; }
+      .machine { fill: #ffffff; stroke: #94a3b8; stroke-width: 1.2; stroke-dasharray: 4 3; }
+      .name { font-size: 14px; font-weight: 600; fill: #0f172a; }
+      .caption { font-size: 11px; fill: #64748b; }
+      .edge { stroke: #475569; stroke-width: 1.4; fill: none; }
+      .label { font-size: 11px; fill: #475569; }
+      .topic { font-size: 11.5px; fill: #334155; }
+      .mount { fill: #0f766e; font-weight: 600; }
+      .head { font-size: 13px; font-weight: 600; fill: #0f172a; }
+      .note { font-size: 12px; fill: #475569; }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="798" height="398" rx="12" fill="#ffffff" stroke="#e2e8f0"/>
+
+  <!-- the tree -->
+  <rect class="node" x="150" y="30" width="140" height="46" rx="8"/>
+  <text class="sans name" x="220" y="51" text-anchor="middle">global</text>
+  <text class="sans caption" x="220" y="67" text-anchor="middle">colcad</text>
+
+  <rect class="node" x="150" y="130" width="140" height="46" rx="8"/>
+  <text class="sans name" x="220" y="151" text-anchor="middle">site-1</text>
+  <text class="sans caption" x="220" y="167" text-anchor="middle">colcad</text>
+
+  <rect class="node" x="50" y="230" width="140" height="46" rx="8"/>
+  <text class="sans name" x="120" y="251" text-anchor="middle">edge-1</text>
+  <text class="sans caption" x="120" y="267" text-anchor="middle">colcad</text>
+
+  <rect class="node" x="250" y="230" width="140" height="46" rx="8"/>
+  <text class="sans name" x="320" y="251" text-anchor="middle">edge-2</text>
+  <text class="sans caption" x="320" y="267" text-anchor="middle">colcad</text>
+
+  <rect class="machine" x="65" y="330" width="110" height="36" rx="6"/>
+  <text class="sans caption" x="120" y="352" text-anchor="middle">press 3</text>
+  <rect class="machine" x="265" y="330" width="110" height="36" rx="6"/>
+  <text class="sans caption" x="320" y="352" text-anchor="middle">oven</text>
+
+  <path class="edge" d="M120,330 L120,280" marker-end="url(#arrow)"/>
+  <path class="edge" d="M320,330 L320,280" marker-end="url(#arrow)"/>
+  <text class="sans label" x="128" y="309">MQTT</text>
+  <text class="sans label" x="328" y="309">MQTT</text>
+
+  <path class="edge" d="M140,230 L200,180" marker-end="url(#arrow)"/>
+  <path class="edge" d="M300,230 L240,180" marker-end="url(#arrow)"/>
+  <text class="sans label" x="94" y="206">mount edge-1</text>
+  <text class="sans label" x="270" y="206">mount edge-2</text>
+
+  <path class="edge" d="M220,130 L220,80" marker-end="url(#arrow)"/>
+  <text class="sans label" x="228" y="109">mount site-1</text>
+
+  <!-- one metric, three places -->
+  <text class="sans head" x="440" y="52">One metric, stored at three levels</text>
+
+  <text class="sans caption" x="440" y="84">at edge-1</text>
+  <text class="mono topic" x="440" y="101">colca/v1/_Metric/n-edge1/press3/temp</text>
+
+  <text class="sans caption" x="440" y="134">at site-1</text>
+  <text class="mono topic" x="440" y="151">colca/v1/_Metric/n-edge1/<tspan class="mount">edge-1/</tspan>press3/temp</text>
+
+  <text class="sans caption" x="440" y="184">at global</text>
+  <text class="mono topic" x="440" y="201">colca/v1/_Metric/n-edge1/<tspan class="mount">site-1/edge-1/</tspan>press3/temp</text>
+
+  <text class="sans note" x="440" y="248">Every node is the same binary and keeps its own</text>
+  <text class="sans note" x="440" y="266">durable copy. A child dials out to its parent;</text>
+  <text class="sans note" x="440" y="284">the parent inserts the child's mount on the way up</text>
+  <text class="sans note" x="440" y="302">and strips it from commands on the way down.</text>
+  <text class="sans note" x="440" y="330">The owning node (n-edge1) never changes.</text>
+</svg>

@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 440" width="800" height="440" role="img" aria-labelledby="t d">
+  <title id="t">Inside one Colca node</title>
+  <desc id="d">Local services, machines and people reach the node through separate doors. Every record goes through the ingest engine into the store, is mirrored onto the local MQTT bus, and is replicated to the parent.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <style>
+      .sans { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .shell { fill: #f8fafc; stroke: #334155; stroke-width: 1.5; }
+      .box { fill: #ffffff; stroke: #334155; stroke-width: 1.2; }
+      .engine { fill: #ecfdf5; stroke: #0f766e; stroke-width: 1.5; }
+      .actor { fill: #ffffff; stroke: #94a3b8; stroke-width: 1.2; stroke-dasharray: 4 3; }
+      .name { font-size: 13px; font-weight: 600; fill: #0f172a; }
+      .caption { font-size: 11px; fill: #64748b; }
+      .door { font-size: 11px; fill: #334155; }
+      .edge { stroke: #475569; stroke-width: 1.4; fill: none; }
+      .soft { stroke: #475569; stroke-width: 1.2; fill: none; stroke-dasharray: 5 4; }
+      .row { font-size: 11px; fill: #334155; }
+      .label { font-size: 11px; fill: #475569; }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="798" height="438" rx="12" fill="#ffffff" stroke="#e2e8f0"/>
+
+  <!-- parent -->
+  <rect class="box" x="520" y="18" width="150" height="40" rx="8"/>
+  <text class="sans name" x="595" y="43" text-anchor="middle">parent node</text>
+
+  <!-- the node -->
+  <rect class="shell" x="200" y="80" width="560" height="330" rx="12"/>
+  <text class="sans name" x="220" y="104">colcad</text>
+
+  <!-- actors and doors -->
+  <rect class="actor" x="20" y="120" width="150" height="48" rx="6"/>
+  <text class="sans name" x="95" y="140" text-anchor="middle">local service</text>
+  <text class="sans caption" x="95" y="156" text-anchor="middle">same network</text>
+  <path class="edge" d="M170,144 L214,144" marker-end="url(#arrow)"/>
+  <text class="mono door" x="220" y="140">HTTP :80  MQTT :1883</text>
+  <text class="sans caption" x="220" y="155">no credential, never published</text>
+
+  <rect class="actor" x="20" y="200" width="150" height="48" rx="6"/>
+  <text class="sans name" x="95" y="220" text-anchor="middle">machine</text>
+  <text class="sans caption" x="95" y="236" text-anchor="middle">or external service</text>
+  <path class="edge" d="M170,224 L214,224" marker-end="url(#arrow)"/>
+  <text class="mono door" x="220" y="220">HTTPS :443  MQTT :8883</text>
+  <text class="sans caption" x="220" y="235">enrolled key, pinned</text>
+
+  <rect class="actor" x="20" y="280" width="150" height="48" rx="6"/>
+  <text class="sans name" x="95" y="300" text-anchor="middle">person</text>
+  <text class="sans caption" x="95" y="316" text-anchor="middle">or application</text>
+  <path class="edge" d="M170,304 L214,304" marker-end="url(#arrow)"/>
+  <text class="mono door" x="220" y="300">MQTT :8884  WS :8885</text>
+  <text class="sans caption" x="220" y="315">OIDC token, grants by group</text>
+
+  <!-- engine -->
+  <rect class="engine" x="400" y="190" width="150" height="68" rx="8"/>
+  <text class="sans name" x="475" y="215" text-anchor="middle">ingest engine</text>
+  <text class="sans caption" x="475" y="232" text-anchor="middle">ownership, grants,</text>
+  <text class="sans caption" x="475" y="246" text-anchor="middle">contract schema</text>
+  <path class="edge" d="M372,150 C390,160 395,190 400,205" marker-end="url(#arrow)"/>
+  <path class="edge" d="M372,224 L396,224" marker-end="url(#arrow)"/>
+  <path class="edge" d="M372,300 C390,290 395,260 400,245" marker-end="url(#arrow)"/>
+
+  <!-- store -->
+  <rect class="box" x="590" y="120" width="150" height="206" rx="8"/>
+  <text class="sans name" x="665" y="142" text-anchor="middle">store</text>
+  <text class="mono row" x="606" y="164">metrics</text>
+  <text class="mono row" x="606" y="180">entities</text>
+  <text class="mono row" x="606" y="196">commands</text>
+  <text class="mono row" x="606" y="212">definitions</text>
+  <text class="mono row" x="606" y="228">alarms  logs</text>
+  <text class="mono row" x="606" y="244">audit  annotations</text>
+  <line x1="606" y1="256" x2="724" y2="256" stroke="#e2e8f0"/>
+  <text class="sans row" x="606" y="274">current state (KV)</text>
+  <text class="sans row" x="606" y="290">named cursors</text>
+  <text class="sans caption" x="606" y="312">one atomic batch each</text>
+  <path class="edge" d="M550,224 L586,224" marker-end="url(#arrow)"/>
+
+  <!-- bus -->
+  <rect class="box" x="400" y="340" width="150" height="50" rx="8"/>
+  <text class="sans name" x="475" y="361" text-anchor="middle">local MQTT bus</text>
+  <text class="sans caption" x="475" y="377" text-anchor="middle">shows what was stored</text>
+  <path class="edge" d="M640,326 C640,360 600,365 554,365" marker-end="url(#arrow)"/>
+
+  <!-- replication -->
+  <path class="edge" d="M635,120 L635,62" marker-end="url(#arrow)"/>
+  <text class="sans label" x="560" y="98">records up</text>
+  <path class="soft" d="M690,62 L690,116" marker-end="url(#arrow)"/>
+  <text class="sans label" x="698" y="98">commands down</text>
+  <text class="sans caption" x="220" y="396">The node dials out to its parent over one mutually authenticated connection.</text>
+</svg>
