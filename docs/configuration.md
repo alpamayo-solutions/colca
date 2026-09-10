@@ -41,13 +41,15 @@ system element, not to a path, so the element comes first; its id is a ULID.
 The child's mount is wherever that element sits, now and after any rename:
 
 ```bash
+export COLCA_TOKEN=...   # api.token from the parent's config
+
 # 1. the element the child hangs from
-curl -sk -H "X-Colca-Token: change-me" -H "Content-Type: application/json" \
+curl -sk -H "X-Colca-Token: $COLCA_TOKEN" -H "Content-Type: application/json" \
   -X POST https://global.example.com/publish \
   -d '{"topic":"colca/v1/_SystemElement/n-global/edge1","payload":{"id":"01J8Z3Y8S5ZC0KQ9M2F5T7W4XB","name":"edge1"}}'
 
 # 2. the child's key, bound to that element
-curl -sk -H "X-Colca-Token: change-me" -H "Content-Type: application/json" \
+curl -sk -H "X-Colca-Token: $COLCA_TOKEN" -H "Content-Type: application/json" \
   -X POST https://global.example.com/enroll \
   -d '{"ulid":"n-edge1","kind":"node","element":"01J8Z3Y8S5ZC0KQ9M2F5T7W4XB","pubkey":"<edge1 public key>"}'
 ```

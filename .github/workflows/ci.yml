@@ -63,6 +63,8 @@ jobs:
         run: make lint-actions
       - name: yamllint
         run: make lint-yaml
+      - name: gitleaks
+        run: make lint-secrets
       - name: No working notes in the commits of this pull request
         if: github.event_name == 'pull_request'
         run: scripts/check-no-working-notes.sh "origin/${{ github.base_ref }}"
@@ -195,6 +197,40 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+      - id: syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
+        with:
+          syft-version: v1.51.1
+      - name: SBOMs of the image
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p sbom
+          for platform in linux/amd64 linux/arm64; do
+            name="colca-image-${platform//\//-}"
+            "$SYFT" scan "registry:$IMAGE" --platform "$platform" \
+              -o "spdx-json=sbom/$name.spdx.json" -o "cyclonedx-json=sbom/$name.cdx.json"
+          done
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        if: github.event.repository.visibility == 'public'
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom/colca-image-linux-amd64.spdx.json
+          push-to-registry: true
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        if: github.event.repository.visibility == 'public'
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom/colca-image-linux-arm64.spdx.json
+          push-to-registry: true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom-image
+          path: sbom/
+          if-no-files-found: error
 
   packages:
     needs: [version, go-lint, python-lint, repo-lint, go-test, contracts-test, smoke]
@@ -225,14 +261,43 @@ jobs:
           cp build/wheels/*.whl dist/
       - name: Check package metadata
         run: uvx twine@7.0.0 check --strict dist/*
+      - id: syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
+        with:
+          syft-version: v1.51.1
+      # The runtime dependencies of the contracts package; the image SBOMs cover colcad.
+      - name: SBOM of colca-data-contracts
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          mkdir -p sbom
+          uv export --project contracts --frozen --no-dev --format cyclonedx1.5 -o sbom/colca-data-contracts.cdx.json
+          python3 - "$VERSION" <<'EOF'
+          import json, sys
+          path = "sbom/colca-data-contracts.cdx.json"
+          bom = json.load(open(path))
+          bom["metadata"]["component"]["version"] = sys.argv[1]
+          json.dump(bom, open(path, "w"), indent=2)
+          EOF
+          "$SYFT" convert sbom/colca-data-contracts.cdx.json -o spdx-json=sbom/colca-data-contracts.spdx.json
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.visibility == 'public'
         with:
           subject-path: dist/*
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.visibility == 'public'
+        with:
+          subject-path: dist/colca_data_contracts-*.whl
+          sbom-path: sbom/colca-data-contracts.spdx.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: python-packages
           path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom-contracts
+          path: sbom/
           if-no-files-found: error
 
   release:
@@ -253,6 +318,11 @@ jobs:
         with:
           name: python-packages
           path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: sbom-*
+          path: dist
+          merge-multiple: true
       - name: Release notes
         env:
           IMAGE: ghcr.io/${{ github.repository }}:${{ needs.version.outputs.semver }}
@@ -261,6 +331,7 @@ jobs:
             echo "Container image: \`$IMAGE\` (linux/amd64, linux/arm64)"
             echo
             echo "Attached: \`colca-data-contracts\` as wheel and sdist, and \`colcad\` wheels for \`chaski[node]\`."
+            echo "SBOMs in SPDX and CycloneDX: the image per platform, and \`colca-data-contracts\`."
             echo
             if git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" > /dev/null 2>&1; then
               uvx git-cliff@2.13.1 --latest --strip header

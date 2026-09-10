@@ -1,0 +1,4 @@
+# Placeholder tokens in the curl examples of docs/configuration.md, not secrets.
+3ce0eff31bd8dae7ed414c0f7f4845621d39861c:docs/configuration.md:curl-auth-header:42
+89834195d08ad7c95a43268ab7bc91def783cbba:docs/configuration.md:curl-auth-header:45
+89834195d08ad7c95a43268ab7bc91def783cbba:docs/configuration.md:curl-auth-header:50

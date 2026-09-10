@@ -14,9 +14,11 @@ GOVULNCHECK   ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.8.0
 ACTIONLINT    ?= $(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 HADOLINT      ?= docker run --rm -i hadolint/hadolint:v2.15.1-alpine hadolint
 YAMLLINT      ?= $(UV) tool run yamllint@1.38.0
+GITLEAKS      ?= docker run --rm -v "$(CURDIR):/repo" -w /repo -e GIT_CONFIG_COUNT=1 \
+                 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' zricethezav/gitleaks:v8.30.1
 
 .PHONY: help test contracts-test check lint lint-go lint-python lint-docker lint-shell lint-actions \
-        lint-yaml bundle build docker smoke demo ci wheels bench bench-scenarios bench-check clean
+        lint-yaml lint-secrets bundle build docker smoke demo ci wheels bench bench-scenarios bench-check clean
 
 help: ## list the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -33,7 +35,7 @@ check: ## formatting, vet and repository hygiene
 	$(GO) vet ./...
 	scripts/check-no-working-notes.sh
 
-lint: lint-go lint-python lint-docker lint-shell lint-actions lint-yaml ## every linter CI runs
+lint: lint-go lint-python lint-docker lint-shell lint-actions lint-yaml lint-secrets ## every linter CI runs
 
 lint-go: ## golangci-lint and govulncheck
 	$(GOLANGCI_LINT) run ./...
@@ -56,6 +58,9 @@ lint-actions: ## actionlint
 
 lint-yaml: ## yamllint
 	git ls-files -z '*.yml' '*.yaml' | xargs -0 $(YAMLLINT) --strict
+
+lint-secrets: ## gitleaks over the whole history
+	$(GITLEAKS) git /repo --redact --no-banner
 
 bundle: ## the contracts schema bundle for this commit
 	@mkdir -p $(dir $(BUNDLE))
