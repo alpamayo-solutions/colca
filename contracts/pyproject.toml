@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "colca-data-contracts"
-version = "0.1.0"
+# Release builds take the version from the git tag.
+version = "0.0.0"
 description = "Payload contracts, topic helpers and golden vectors for Colca"
 readme = "README.md"
 license = { text = "FSL-1.1-ALv2" }
