@@ -1218,7 +1218,13 @@ func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) 
 		}
 	}
 
-	out := make([]KVEntry, 0, limit)
+	// A large limit must not preallocate a large slice; append grows it as needed.
+	const maxPrealloc = 1000
+	capacity := limit
+	if capacity > maxPrealloc {
+		capacity = maxPrealloc
+	}
+	out := make([]KVEntry, 0, capacity)
 	matched := 0
 	var lastKey []byte
 	for valid && matched < limit {

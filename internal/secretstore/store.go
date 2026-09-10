@@ -195,7 +195,13 @@ func (s *Store) ListPage(owner, after string, limit int) ([]Metadata, string, er
 		}
 	}
 
-	out := make([]Metadata, 0, limit)
+	// A large limit must not preallocate a large slice; append grows it as needed.
+	const maxPrealloc = 1000
+	capacity := limit
+	if capacity > maxPrealloc {
+		capacity = maxPrealloc
+	}
+	out := make([]Metadata, 0, capacity)
 	var lastKey []byte
 	for ; valid && len(out) < limit; valid = iter.Next() {
 		lastKey = append(lastKey[:0], iter.Key()...)
