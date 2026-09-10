@@ -71,8 +71,7 @@ BUILTIN_ONLY = {"_StreamGap", "_EnrolledIdentity", "_TimeSync"}
 NOT_ON_THE_WIRE: dict[str, str] = {
     "_DataTag": (
         "an element of the _DataTags catalogue, never a record of its own: "
-        "discovery is atomic, so a single tag is not a valid state "
-        "(data-model binding design §3.1)"
+        "discovery is atomic, so a single tag is not a valid state"
     ),
 }
 
@@ -215,7 +214,7 @@ def _class_of(identifier: str, cls: type) -> str:
         return CLASS_TABLE[identifier]
     raise SystemExit(
         f"generate_bundle: contract {identifier} ({cls.__name__}) has no routing class — "
-        f"derive it from Cmd/Ack or add it to CLASS_TABLE (design §5.1: explicit, reviewed)"
+        "derive it from Cmd/Ack or add it to CLASS_TABLE"
     )
 
 
@@ -233,7 +232,7 @@ def build_bundle(git_sha: str = "unknown") -> tuple[dict, str]:
         cls = PAYLOAD_CLASSES[identifier]
         if identifier in BUILTIN_ONLY:
             raise SystemExit(
-                f"generate_bundle: {identifier} is builtin-only (design §10.2) and must never "
+                f"generate_bundle: {identifier} is builtin-only and must never "
                 f"be a registered payload class"
             )
         if identifier in NOT_ON_THE_WIRE:
@@ -245,7 +244,7 @@ def build_bundle(git_sha: str = "unknown") -> tuple[dict, str]:
             required_drop=_required_drop_for(identifier, cls),
         )
         if bad := _lint_subset(schema, identifier):
-            raise SystemExit(f"generate_bundle: schema outside the §4.1 subset: {bad}")
+            raise SystemExit(f"generate_bundle: schema outside the supported subset: {bad}")
         # State classes, definitions included, are retracted by an empty payload.
         tombstone = TOMBSTONE_OVERRIDES.get(identifier, klass in ("data", "entity", "definition"))
         contracts[identifier] = {"class": klass, "tombstone": tombstone, "schema": schema}

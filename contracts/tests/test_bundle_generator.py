@@ -26,7 +26,7 @@ jsonschema = pytest.importorskip("jsonschema", reason="parity gate needs the jso
 def test_determinism_two_runs_one_digest():
     b1, d1 = gb.build_bundle("sha-x")
     b2, d2 = gb.build_bundle("sha-x")
-    assert d1 == d2, "same tree must yield the same digest (design §5.1)"
+    assert d1 == d2, "same tree must yield the same digest"
     assert json.dumps(b1, sort_keys=True) == json.dumps(b2, sort_keys=True)
 
 
@@ -34,7 +34,7 @@ def test_inventory_every_registered_class_exactly_once():
     body, _ = gb.build_bundle()
     assert set(body["contracts"]) == set(PAYLOAD_CLASSES) - set(gb.NOT_ON_THE_WIRE), (
         "bundle inventory must equal the payload registry minus the contracts "
-        "deliberately kept off the wire (§14.3: full set, unpruned)"
+        "deliberately kept off the wire"
     )
 
 
@@ -69,7 +69,7 @@ def test_the_catalogue_is_one_record_carrying_its_own_revision():
 def test_builtin_only_contracts_absent():
     body, _ = gb.build_bundle()
     for c in gb.BUILTIN_ONLY:
-        assert c not in body["contracts"], f"{c} is builtin-only (design §10.2)"
+        assert c not in body["contracts"], f"{c} is builtin-only"
 
 
 def test_projected_contract_catalogue_has_the_approved_direction():
