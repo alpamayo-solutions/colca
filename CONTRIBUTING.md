@@ -5,7 +5,7 @@ build and test the project and what a change needs before it can be merged.
 
 ## Build and test
 
-You need Go 1.25, [uv](https://docs.astral.sh/uv/) for the Python side, and
+You need Go 1.26, [uv](https://docs.astral.sh/uv/) for the Python side, and
 Docker for the end-to-end demo.
 
 ```bash
