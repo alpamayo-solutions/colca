@@ -138,6 +138,6 @@ var editKinds = map[string]string{
 	"_SystemElement":     "system-element",
 	"_Signal":            "signal",
 	"_Constant":          "constant",
-	"_Node":        "colca-node",
+	"_Node":              "colca-node",
 	"_ExternalReference": "external-reference",
 }

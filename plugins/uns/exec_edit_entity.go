@@ -373,7 +373,7 @@ func editSourceEntity(kind string) string {
 		"system-element": "SystemElement",
 		"signal":         "Signal",
 		"constant":       "Constant",
-		"colca-node":    "Node",
+		"colca-node":     "Node",
 	}[kind]
 }
 
@@ -430,6 +430,6 @@ var editContracts = map[string]string{
 	"system-element":     "_SystemElement",
 	"signal":             "_Signal",
 	"constant":           "_Constant",
-	"colca-node":        "_Node",
+	"colca-node":         "_Node",
 	"external-reference": "_ExternalReference",
 }

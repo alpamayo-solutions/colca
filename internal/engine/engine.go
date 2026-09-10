@@ -379,7 +379,7 @@ func stateIdentity(payload []byte) (id, colcaNodeID string, err error) {
 		return "", "", nil
 	}
 	var value struct {
-		ID           string `json:"id"`
+		ID          string `json:"id"`
 		ColcaNodeID string `json:"colca_node_id"`
 	}
 	if err := json.Unmarshal(payload, &value); err != nil {

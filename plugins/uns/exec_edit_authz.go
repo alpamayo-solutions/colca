@@ -164,7 +164,7 @@ func editKindOf(contract string) string {
 		"system-element": "SystemElement",
 		"signal":         "Signal",
 		"constant":       "Constant",
-		"colca-node":    "Node",
+		"colca-node":     "Node",
 	} {
 		if "_"+source == contract {
 			return kind

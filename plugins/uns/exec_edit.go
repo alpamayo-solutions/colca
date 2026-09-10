@@ -91,20 +91,20 @@ type editEntityKey struct {
 }
 
 type editIntent struct {
-	Type               string                        `json:"type"`
-	Entity             editEntityKey            `json:"entity"`
-	ParentID           string                        `json:"parent_id"`
-	TargetParentID     string                        `json:"target_parent_id"`
-	Segment            string                        `json:"segment"`
-	Attributes         map[string]json.RawMessage    `json:"attributes"`
-	ExternalReferences *[]editExternalReference `json:"external_references"`
-	Cascade            bool                          `json:"cascade"`
-	ConnectorID        string                        `json:"connector_id"`
-	Operations         []editBindingOperation   `json:"operations"`
-	Action             string                        `json:"action"`
-	MountSystemElement string                        `json:"mount_system_element_id"`
-	Models             []string                      `json:"models"`
-	Creates            map[string]string             `json:"creates"`
+	Type               string                     `json:"type"`
+	Entity             editEntityKey              `json:"entity"`
+	ParentID           string                     `json:"parent_id"`
+	TargetParentID     string                     `json:"target_parent_id"`
+	Segment            string                     `json:"segment"`
+	Attributes         map[string]json.RawMessage `json:"attributes"`
+	ExternalReferences *[]editExternalReference   `json:"external_references"`
+	Cascade            bool                       `json:"cascade"`
+	ConnectorID        string                     `json:"connector_id"`
+	Operations         []editBindingOperation     `json:"operations"`
+	Action             string                     `json:"action"`
+	MountSystemElement string                     `json:"mount_system_element_id"`
+	Models             []string                   `json:"models"`
+	Creates            map[string]string          `json:"creates"`
 	// The fields below are the `annotation` intent's own — see
 	// exec_edit_annotation.go. Action is shared (create/update/delete,
 	// the same vocabulary "model" uses for assign/unassign): an annotation

@@ -33,7 +33,7 @@ type serviceDetails struct {
 	DisplayName          string           `json:"display_name"`
 	Description          string           `json:"description"`
 	ServiceType          string           `json:"service_type"`
-	ColcaNodeID         string           `json:"colca_node_id"`
+	ColcaNodeID          string           `json:"colca_node_id"`
 	SystemElementID      string           `json:"system_element_id,omitempty"`
 	Hierarchy            []string         `json:"hierarchy"`
 	IsActive             bool             `json:"is_active"`

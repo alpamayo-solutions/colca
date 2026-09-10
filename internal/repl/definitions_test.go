@@ -331,7 +331,7 @@ func TestChildCannotReplicateOntoTheDefinitionsStream(t *testing.T) {
 
 	for _, topic := range []string{
 		"colca/v1/_Bogus/n-child/whatever", // unknown here: used to bypass the check
-		groupTopic,                       // known, and a definition: flows down, never up
+		groupTopic,                         // known, and a definition: flows down, never up
 	} {
 		if _, err := f.cl.Replicate("definitions", []store.ReplRecord{
 			{ChildOffset: 2, Topic: topic, Payload: []byte(`{"x":1}`), TS: 2},

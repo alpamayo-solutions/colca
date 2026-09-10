@@ -869,7 +869,7 @@ func (c *ConfigExec) checkCommandEntityIdentity(contract, id string, raw []byte)
 
 func (c *ConfigExec) commandEntityTopic(contract, id string) string {
 	leaf := map[string]string{
-		"_Node":              "nodes",
+		"_Node":                    "nodes",
 		"_ExternalReference":       "external-references",
 		"_AlarmNotificationConfig": "alarm-notification-config",
 	}[contract]
