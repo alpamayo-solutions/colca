@@ -28,7 +28,7 @@ the container image, and one for `colca-data-contracts`. The image and the
 release packages come with signed build provenance and SBOM attestations:
 
 ```bash
-gh attestation verify oci://ghcr.io/alpamayo-solutions/colca:<version> --owner alpamayo-solutions
+gh attestation verify oci://ghcr.io/alpamayo-solutions/colca:<version> --repo alpamayo-solutions/colca
 ```
 
 Every night, CI builds fresh SBOMs of the `latest` and `main` images, of the
