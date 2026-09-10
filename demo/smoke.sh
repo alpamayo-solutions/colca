@@ -19,7 +19,7 @@ S1=https://127.0.0.1:18081
 E1=https://127.0.0.1:18082
 E2=https://127.0.0.1:18083
 CMD_TOPIC="colca/v1/_CmdParam/m1/site1/edge1/m1/set-speed"
-ACK_TOPIC="colca/v1/_Ack/m1/site1/edge1/m1/set-speed"
+ACK_TOPIC="colca/v1/_Ack/n-edge1/site1/edge1/m1/set-speed"
 
 narrating() { [ "${COLCA_NARRATE:-0}" = "1" ]; }
 say() { if narrating; then printf '%s\n' "$*"; fi; }
@@ -116,12 +116,16 @@ place() { # $1 = base url, $2 = node ulid, $3 = path -> echoes the element id
   [ "$ok" = 1 ] || fail "placing element at $3 on $1 failed"
   echo "$element"
 }
-enroll() { # $1 = base url, $2 = ulid, $3 = kind, $4 = mount, $5 = pubkey file, $6 = node ulid
+enroll() { # $1 = base url, $2 = ulid, $3 = kind, $4 = mount, $5 = pubkey file, $6 = node ulid, $7 = "write" to grant writes below the element
   element=$(place "$1" "$6" "$4")
+  grants="[]"
+  # An external identity gets no implicit write: a machine that publishes needs
+  # an explicit grant on its own element.
+  [ "${7:-}" = write ] && grants="[\"write:$element/#\"]"
   ok=0
   for _ in $(seq 1 60); do
     if curl -skf -H "$TOK" -H "Content-Type: application/json" -X POST "$1/enroll" \
-      -d "{\"ulid\":\"$2\",\"kind\":\"$3\",\"element\":\"$element\",\"pubkey\":\"$(cat "$5")\"}" >/dev/null 2>&1; then
+      -d "{\"ulid\":\"$2\",\"kind\":\"$3\",\"element\":\"$element\",\"grants\":$grants,\"pubkey\":\"$(cat "$5")\"}" >/dev/null 2>&1; then
       ok=1
       break
     fi
@@ -150,15 +154,15 @@ define_group() { # $1 = base url, $2 = node ulid, $3 = group id, $4 = grants JSO
 enroll "$G" n-site1 node site1 keys/site1.pub n-global
 enroll "$S1" n-edge1 node edge1 keys/edge1.pub n-site1
 enroll "$S1" n-edge2 node edge2 keys/edge2.pub n-site1
-enroll "$E1" m1 machine m1 keys/m1-machine.pub n-edge1
-enroll "$E2" m2 machine m2 keys/m2-machine.pub n-edge2
+enroll "$E1" m1 external m1 keys/m1-machine.pub n-edge1 write
+enroll "$E2" m2 external m2 keys/m2-machine.pub n-edge2 write
 
 define_group "$G" n-global 01HGRP-SITE1-OPERATORS '["read:el-site1/#","cmd:el-m1/#:param"]'
 define_group "$G" n-global 01HGRP-ADMINS '["admin:#","read:#","cmd:#:admin"]'
 
 echo "── 1) uplink: metrics from both machines reach global with full paths"
-say "   m1 publishes colca/v1/_Metric/m1/temp to edge1 — global must store it as"
-say "   colca/v1/_Metric/m1/site1/edge1/m1/temp (mount inserted at every hop)."
+say "   m1 publishes colca/v1/_Metric/n-edge1/m1/temp to edge1 — global must store it as"
+say "   colca/v1/_Metric/n-edge1/site1/edge1/m1/temp (mount inserted at every hop)."
 for path in "site1/edge1/m1/temp" "site1/edge2/m2/temp"; do
   ok=0
   n=""
