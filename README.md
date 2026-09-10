@@ -1,5 +1,10 @@
 # Colca
 
+[![ci](https://github.com/alpamayo-solutions/colca/actions/workflows/ci.yml/badge.svg)](https://github.com/alpamayo-solutions/colca/actions/workflows/ci.yml)
+[![codeql](https://github.com/alpamayo-solutions/colca/actions/workflows/codeql.yml/badge.svg)](https://github.com/alpamayo-solutions/colca/actions/workflows/codeql.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/alpamayo-solutions/colca.svg)](https://pkg.go.dev/github.com/alpamayo-solutions/colca)
+[![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE.md)
+
 ![A Colca tree](docs/img/tree.svg)
 
 Colca is an MQTT broker for plants that are organised as a tree: machines at
@@ -31,6 +36,18 @@ with Homebrew and put `$(brew --prefix curl)/bin` first on your `PATH`.
 make smoke    # builds the image, starts four nodes and two machines, checks the tree, cleans up
 make demo     # the same, explained as it goes
 ```
+
+## Install
+
+Every release publishes:
+
+- the image `ghcr.io/alpamayo-solutions/colca:<version>` for linux/amd64 and
+  linux/arm64, with every binary and the contracts bundle of that release. The
+  `main` tag follows the main branch.
+- `colca-data-contracts` as wheel and sdist, and `colcad` wheels for Linux and
+  macOS, on the [releases page](https://github.com/alpamayo-solutions/colca/releases).
+
+From source, `make build` puts the binaries in `bin/`.
 
 ## Run a single node
 

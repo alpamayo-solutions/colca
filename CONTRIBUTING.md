@@ -12,11 +12,13 @@ Docker for the end-to-end demo.
 make test            # Go unit and in-process integration tests, with -race
 make contracts-test  # the data contracts package (Python)
 make check           # gofmt, go vet, and the repository hygiene checks
+make lint            # golangci-lint, govulncheck, ruff, bandit, mypy, hadolint, shellcheck, actionlint, yamllint
 make smoke           # builds the image, starts a four-node tree, asserts on it
 ```
 
 `make test` is what most changes need. Run `make smoke` when you touch
-replication, the doors, or anything the demo topology exercises.
+replication, the doors, or anything the demo topology exercises. CI runs all of
+them on every pull request; `make lint` needs Docker for hadolint.
 
 ## Changing a contract
 
@@ -44,6 +46,15 @@ belong in commits. Keep them in the issue tracker or in your local checkout.
 CI rejects them; `scripts/check-no-working-notes.sh` runs the same check
 locally. Code comments explain the code as it is, not the history of how it
 was planned.
+
+## Releases
+
+Maintainers release by pushing a tag `vX.Y.Z`, or `vX.Y.Z-rc.N` for a release
+candidate, on `main`. Once every check has passed, CI publishes the image to
+`ghcr.io/alpamayo-solutions/colca` and creates a GitHub release with the
+`colca-data-contracts` packages, the `colcad` wheels, checksums, and notes
+built from the commit subjects. Every push to `main` also publishes the image as
+`main` and `sha-<commit>`.
 
 ## Contributor License Agreement
 
