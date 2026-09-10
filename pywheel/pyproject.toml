@@ -1,11 +1,11 @@
 [project]
 name = "colcad"
-# Stamped by scripts/build_colcad_wheels.py at build time (matches every
-# other artifact in this repo — "Versioning Strategy"). The 0.0.0
-# placeholder here is never itself published.
+# Stamped by scripts/build_colcad_wheels.py at build time. The 0.0.0
+# placeholder is never published.
 version = "0.0.0"
-description = "The colcad binary, packaged for chaski.Node (chaski[node]) — colca-node design §6/§7 gap 5"
+description = "The colcad binary, packaged for chaski.Node (chaski[node])"
 readme = "README.md"
+license = { text = "FSL-1.1-ALv2" }
 requires-python = ">=3.9"
 
 [build-system]

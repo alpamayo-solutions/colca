@@ -5,30 +5,32 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "colca-data-contracts"
 version = "0.1.0"
-description = "Colca domain-specific data contracts extending franzmq"
+description = "Payload contracts, topic helpers and golden vectors for Colca"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "FSL-1.1-ALv2" }
 requires-python = ">=3.11"
 authors = [
     { name = "Colca contributors" }
 ]
 dependencies = [
-    # Transition window (schema-bundle design §9.2/§12a): 0.5.0 moved the
-    # publisher's identity to topic level 4 and 0.6.x aligned authentication and
-    # acknowledgement with the broker. Services cut over one at a time and their
-    # own franzmq pin is the switch, so an exact pin here would make that switch
-    # global — every service depending on this package by path resolves against
-    # it. The range spans the migration (the connector is already on 0.6.x, the
-    # rest still on 0.4.1) and closes to an exact pin when the last consumer has
-    # moved; until then scripts/check-dependency-boundary.py is what keeps
-    # the skew readable.
+    # franzmq 0.5 moved the publishing node to topic level 4 and 0.6 aligned
+    # authentication and acknowledgement with the broker. The package supports
+    # the whole range, so a service can move its own pin when it is ready.
     "franzmq>=0.4.1,<0.7",
     "python-decouple>=3.8",
-    # derive_annotation_id (dataops-evaluator design §8) ULID-encodes a
-    # content hash; the same library every other service already uses to
-    # mint ids (connector, dataops, node-manager).
+    # derive_annotation_id ULID-encodes a content hash.
     "ulid-py>=1.1",
 ]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.4,<10",
+    "pyyaml>=6.0",
+    "paho-mqtt>=2.1,<3",
+]
+
+[project.urls]
+Source = "https://github.com/alpamayo-solutions/colca"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -45,11 +47,10 @@ colca_data_contracts = [
     "data_models/*.yaml",
 ]
 
-# Consumers install this package from its path (node-manager, dataops, ...).
-# uv rebuilds a path dependency only when its cache keys change, and the
-# default key is pyproject.toml alone — a new data-model YAML or a changed
-# payload would otherwise stay invisible to every sibling's environment until
-# someone reinstalled by hand.
+# Projects that install this package from a path, such as a chaski checkout
+# next to this one, would otherwise only see a changed payload or data model
+# after reinstalling by hand: uv rebuilds a path dependency only when its cache
+# keys change, and the default key is pyproject.toml alone.
 [tool.uv]
 cache-keys = [
     { file = "pyproject.toml" },
@@ -59,7 +60,7 @@ cache-keys = [
 ]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 110
 
 [tool.ruff.lint]

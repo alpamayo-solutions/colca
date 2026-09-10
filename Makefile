@@ -1,34 +1,62 @@
-# colca/Makefile
-.PHONY: test build docker demo world world-down smoke ci bench bench-scenarios bench-check
-test:
-	go test ./... -race -count=1 -v
-build:
-	CGO_ENABLED=0 go build -o bin/colcad ./cmd/colcad
-	CGO_ENABLED=0 go build -o bin/colca-keygen ./cmd/colca-keygen
-	CGO_ENABLED=0 go build -o bin/colca-machine ./cmd/colca-machine
-	CGO_ENABLED=0 go build -o bin/colca-grantsync ./cmd/colca-grantsync
-docker:
-	cd .. && uv run scripts/dev.py bundle --context
-	docker build -f deploy/Dockerfile -t colca:dev \
-		--build-context contracts-bundle=../test-results/bundle-ctx .
-# demo runs demo/demo.sh, which executes demo/smoke.sh with narration. That
-# script is the human walkthrough only — the AUTHORITATIVE CI gate for these
-# assertions is the pytest system suite (tests/system, smoke marker), which
-# `smoke` below delegates to. Do not let smoke.sh's assertions drift from it.
-demo: docker
-	bash demo/demo.sh
-# An interactive world that STAYS up (the level-4 topology, enrolled and
-# seeded): see docs/source/development/testing.rst.
-world:
-	cd .. && uv run scripts/dev.py world up
-world-down:
-	cd .. && uv run scripts/dev.py world down
-smoke: docker
-	cd .. && COLCA_IMAGE=colca:dev uv run scripts/dev.py test system -m smoke
-ci: test docker smoke
-bench:
-	go test ./internal/store/ -run '^$$' -bench . -benchtime 2s
-bench-scenarios: build
-	go run ./cmd/colca-bench all --colcad bin/colcad
-bench-check:
-	go run ./cmd/colca-bench check --thresholds bench/thresholds.json
+# Build, test and run Colca. `make help` lists the targets.
+GO       ?= go
+UV       ?= uv
+IMAGE    ?= colca:dev
+BUNDLE   := build/bundle/contracts-bundle.json
+COMMIT   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BINARIES := colcad colca-keygen colca-machine colca-grantsync colca-historian colca-service \
+            colca-healthcheck colca-volume-init colca-bench
+
+.PHONY: help test contracts-test check bundle build docker smoke demo ci wheels \
+        bench bench-scenarios bench-check clean
+
+help: ## list the targets
+	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
+
+test: ## Go tests, with the race detector
+	$(GO) test ./... -race -count=1
+
+contracts-test: ## tests of the Python data contracts
+	$(UV) run --project contracts --extra test pytest contracts/tests
+
+check: ## formatting, vet and repository hygiene
+	@unformatted="$$(gofmt -l $$(git ls-files '*.go'))"; \
+	  if [ -n "$$unformatted" ]; then echo "gofmt needed:"; echo "$$unformatted"; exit 1; fi
+	$(GO) vet ./...
+	scripts/check-no-working-notes.sh
+
+bundle: ## the contracts schema bundle for this commit
+	@mkdir -p $(dir $(BUNDLE))
+	$(UV) run --project contracts python contracts/scripts/generate_bundle.py $(BUNDLE) $(COMMIT)
+
+build: ## all binaries into bin/
+	@mkdir -p bin
+	@for b in $(BINARIES); do echo "go build $$b"; CGO_ENABLED=0 $(GO) build -trimpath -o bin/$$b ./cmd/$$b || exit 1; done
+
+docker: bundle ## the colca image, with this commit's bundle baked in
+	docker build -f deploy/Dockerfile -t $(IMAGE) --build-context contracts-bundle=$(dir $(BUNDLE)) .
+
+smoke: docker ## start the four-node demo tree and assert on it
+	COLCA_IMAGE=$(IMAGE) bash demo/smoke.sh
+
+demo: docker ## the same, with narration
+	COLCA_IMAGE=$(IMAGE) bash demo/demo.sh
+
+ci: check test contracts-test smoke ## everything CI runs
+
+wheels: ## colcad platform wheels for chaski[node], VERSION=x.y.z
+	@test -n "$(VERSION)" || { echo "usage: make wheels VERSION=x.y.z"; exit 2; }
+	$(UV) run --no-project --with "setuptools>=77" --with "wheel>=0.42" \
+	  python scripts/build_colcad_wheels.py --version $(VERSION) --out build/wheels
+
+bench: ## store micro-benchmarks
+	$(GO) test ./internal/store/ -run '^$$' -bench . -benchtime 2s
+
+bench-scenarios: build ## benchmark scenarios against a real edge and hub pair
+	$(GO) run ./cmd/colca-bench all --colcad bin/colcad
+
+bench-check: ## compare the newest results with bench/thresholds.json
+	$(GO) run ./cmd/colca-bench check --thresholds bench/thresholds.json
+
+clean: ## remove build output
+	rm -rf bin build
