@@ -23,7 +23,9 @@ itself. Commands travel down the same tree and are acknowledged back up.
 ## Try it
 
 You need Go 1.25, Docker with Compose v2, [uv](https://docs.astral.sh/uv/),
-curl and python3.
+python3 and a curl built with OpenSSL. The curl that ships with macOS cannot
+complete a TLS handshake with the nodes' ed25519 certificates; install curl
+with Homebrew and put `$(brew --prefix curl)/bin` first on your `PATH`.
 
 ```bash
 make smoke    # builds the image, starts four nodes and two machines, checks the tree, cleans up
