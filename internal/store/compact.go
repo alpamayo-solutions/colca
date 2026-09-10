@@ -79,7 +79,10 @@ func (s *Store) Compact(stream string) (CompactStats, error) {
 		// sees the newer state.
 		return st, fmt.Errorf("concurrent write on stream %q during compaction", stream)
 	}
-	floor := s.cursorFloorLocked(stream, next)
+	floor, err := s.cursorFloorLocked(stream, next)
+	if err != nil {
+		return st, err
+	}
 
 	b := s.db.NewBatch()
 	defer b.Close()
@@ -125,14 +128,14 @@ func (s *Store) Compact(stream string) (CompactStats, error) {
 
 // cursorFloorLocked is the lowest position of any cursor on the stream, or next
 // when the stream has none. The caller holds the mutex.
-func (s *Store) cursorFloorLocked(stream string, next uint64) uint64 {
+func (s *Store) cursorFloorLocked(stream string, next uint64) (uint64, error) {
 	floor := next
-	s.scanU64Pairs('c', func(_, cstream string, pos uint64) {
+	err := s.scanU64Pairs('c', func(_, cstream string, pos uint64) {
 		if cstream == stream && pos < floor {
 			floor = pos
 		}
 	})
-	return floor
+	return floor, err
 }
 
 // scanRecords walks [from, upTo) of a stream, decoding each record. fn is called

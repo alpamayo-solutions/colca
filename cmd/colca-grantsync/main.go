@@ -144,18 +144,22 @@ func sortStrings(s []string) {
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(log)
 
 	if err := uns.SetRootFromEnv(); err != nil {
 		log.Error("refusing to start", "error", err)
-		os.Exit(2)
+		return 2
 	}
 
 	cfg, err := loadConfig(os.Getenv)
 	if err != nil {
 		log.Error("refusing to start", "error", err)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -185,7 +189,7 @@ func main() {
 		if err != nil {
 			log.Error("could not learn the root node's ULID; set COLCA_ROOT_ULID to skip the lookup",
 				"error", err)
-			os.Exit(1)
+			return 1
 		}
 	}
 
@@ -208,10 +212,10 @@ func main() {
 		report, err := syncer.Once(ctx)
 		if err != nil {
 			log.Error("sync cycle failed, nothing written", "error", err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Println(report.Summary())
-		return
+		return 0
 	}
 
 	go serve(ctx, cfg.httpAddr, registry, log)
@@ -219,6 +223,8 @@ func main() {
 		"realm", cfg.kcRealm, "dry_run", cfg.dryRun)
 	syncer.Run(ctx, cfg.interval)
 	log.Info("stopped")
+
+	return 0
 }
 
 func serve(ctx context.Context, addr string, reg *prometheus.Registry, log *slog.Logger) {
@@ -235,7 +241,7 @@ func serve(ctx context.Context, addr string, reg *prometheus.Registry, log *slog
 	srv := httpserver.NewAt(addr, mux)
 	go func() {
 		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	}()

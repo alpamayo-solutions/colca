@@ -7,10 +7,10 @@
 package mqttsrv
 
 import (
-	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -128,7 +128,7 @@ func (h *colcaHook) auditDeniedAt(operation, reason, door string, entry *uns.Ent
 func (h *colcaHook) ID() string { return "colca" }
 
 func (h *colcaHook) Provides(b byte) bool {
-	return bytes.Contains([]byte{
+	return slices.Contains([]byte{
 		mqtt.OnConnectAuthenticate,
 		mqtt.OnACLCheck,
 		mqtt.OnPublish,
@@ -137,7 +137,7 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnSubscribe,
 		mqtt.OnSubscribed,
 		mqtt.OnPublishDropped,
-	}, []byte{b})
+	}, b)
 }
 
 // OnWillSent is mochi telling us it already broadcast a disconnecting
@@ -574,7 +574,7 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	// clear the retained-replay burst a fresh subscriber receives, or state
 	// goes missing silently. See defaultMQTTMaxPendingWritesPerClient.
 	s.Options.Capabilities.MaximumClientWritesPending = mqttLimits.EffectiveMaxPendingWritesPerClient()
-	s.Options.Capabilities.MaximumSessionExpiryInterval = uint32(mqttLimits.EffectiveMaxSessionExpiry() / time.Second)
+	s.Options.Capabilities.MaximumSessionExpiryInterval = uint32(mqttLimits.EffectiveMaxSessionExpiry() / time.Second) //nolint:gosec // validated against the MQTT maximum
 	s.Options.Capabilities.TopicAliasMaximum = mqttLimits.EffectiveMaxTopicAliasesPerClient()
 	// A fresh subscriber replaying the retained set (the bus's "current state
 	// on connect" contract) can burst thousands of QoS-1 messages to one
@@ -592,7 +592,7 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	// store stays the authority on the record itself. Left at mochi's default
 	// this is 0 — unlimited — which is how a 100 MiB publish could reach
 	// Pebble at all.
-	s.Options.Capabilities.MaximumPacketSize = uint32(maxRecordBytes + 64*1024)
+	s.Options.Capabilities.MaximumPacketSize = uint32(maxRecordBytes + 64*1024) //nolint:gosec // config caps max_record_bytes at 1 GiB
 	// Shared subscriptions are refused at the ACL door (uns.Authorize's
 	// reserved-"$" rule), so CONNACK must say so: a client told they are
 	// available would otherwise learn the truth only from a SUBACK failure.

@@ -7,7 +7,6 @@ func be64(v uint64) []byte { b := make([]byte, 8); binary.BigEndian.PutUint64(b,
 func streamKey(stream string, off uint64) []byte {
 	return append([]byte("s\x00"+stream+"\x00"), be64(off)...)
 }
-func streamPrefix(stream string) []byte { return []byte("s\x00" + stream + "\x00") }
 
 // offsetOf reads the offset back out of a stream key (the trailing big-endian
 // uint64 streamKey appended).

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -46,13 +47,17 @@ type config struct {
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 
 	cfg, err := load()
 	if err != nil {
 		log.Error("configuration", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -73,7 +78,7 @@ func main() {
 	pool, err := historian.Open(ctx, cfg.dsn, cfg.maxConns)
 	if err != nil {
 		log.Error("database", "err", err)
-		os.Exit(2)
+		return 2
 	}
 	defer pool.Close()
 
@@ -84,7 +89,7 @@ func main() {
 	// relying on a restart policy that a test harness may not have.
 	if err := ensureSchema(ctx, sink, cfg.retentionDays, log, 90*time.Second); err != nil {
 		log.Error("schema", "err", err)
-		os.Exit(2)
+		return 2
 	}
 
 	bridge := &historian.Bridge{
@@ -103,9 +108,11 @@ func main() {
 	log.Info("historian following", "node", cfg.colcaURL, "consumer", historian.Consumer)
 	if err := bridge.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("historian stopped", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	log.Info("historian stopped")
+
+	return 0
 }
 
 // ensureSchema retries until the database answers or the window closes.
@@ -139,7 +146,11 @@ func load() (config, error) {
 	if cfg.dsn == "" {
 		return cfg, errors.New("DATABASE_URL is required — the historian writes to Timescale")
 	}
-	cfg.maxConns = int32(intEnv("DB_MAX_CONNS", 4))
+	maxConns := intEnv("DB_MAX_CONNS", 4)
+	if maxConns < 1 || maxConns > math.MaxInt32 {
+		return cfg, fmt.Errorf("DB_MAX_CONNS must be between 1 and %d, got %d", math.MaxInt32, maxConns)
+	}
+	cfg.maxConns = int32(maxConns)
 	cfg.fetchMax = intEnv("FETCH_MAX", 500)
 	cfg.idleSleep = time.Duration(intEnv("IDLE_SLEEP_MS", 500)) * time.Millisecond
 	cfg.retentionDays = intEnv("HISTORIAN_RETENTION_DAYS", 0)
@@ -173,19 +184,19 @@ func serveObservability(addr string, bridge *historian.Bridge, log *slog.Logger)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"ok":true,"consumer":%q}`, historian.Consumer)
+		_, _ = fmt.Fprintf(w, `{"ok":true,"consumer":%q}`, historian.Consumer)
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		fmt.Fprintf(w,
+		_, _ = fmt.Fprintf(w,
 			"# HELP colca_historian_stream_gaps_total Pruned ranges this bridge could not historise.\n"+
 				"# TYPE colca_historian_stream_gaps_total counter\n"+
 				"colca_historian_stream_gaps_total %d\n", bridge.Gaps())
-		fmt.Fprintf(w,
+		_, _ = fmt.Fprintf(w,
 			"# HELP colca_historian_rows_rejected_total Rows the schema permanently refused and set aside, by reason — a non-zero value means a publisher is sending data this table's schema cannot hold; the rest of that page still historised and the cursor still advanced past it.\n"+
 				"# TYPE colca_historian_rows_rejected_total counter\n")
 		for _, reason := range historian.PoisonReasons() {
-			fmt.Fprintf(w, "colca_historian_rows_rejected_total{reason=%q} %d\n", reason, bridge.Rejected(reason))
+			_, _ = fmt.Fprintf(w, "colca_historian_rows_rejected_total{reason=%q} %d\n", reason, bridge.Rejected(reason))
 		}
 	})
 	server := httpserver.NewAt(addr, mux)

@@ -24,6 +24,7 @@ type GroupIndex struct {
 	store EntityStore
 }
 
+// NewGroupIndex returns an index over the _Group definitions in s.
 func NewGroupIndex(s EntityStore) *GroupIndex { return &GroupIndex{store: s} }
 
 // group is the part of a _Group record this needs.

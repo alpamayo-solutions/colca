@@ -30,6 +30,7 @@
 //     still outstanding is held for the replay rather than published ahead of
 //     it. A watermark cursor cannot express "A is owed but B was delivered",
 //     so the two decisions — publish, and record it delivered — are one.
+
 package engine
 
 import (

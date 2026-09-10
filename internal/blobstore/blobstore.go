@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,13 +117,13 @@ func (s *Store) Put(r io.Reader, expect string) (string, int64, error) {
 	// process that dies before this defer runs is what ReclaimAbandonedTemp
 	// exists for.
 	defer func() {
-		tmp.Close()
-		os.Remove(tmpName)
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 	}()
 
 	h := sha256.New()
-	var reader io.Reader = io.TeeReader(r, h)
-	if s.maxBytes > 0 {
+	reader := io.TeeReader(r, h)
+	if s.maxBytes > 0 && s.maxBytes < math.MaxInt64 {
 		// One byte past the cap is enough to know it was exceeded.
 		reader = io.LimitReader(reader, int64(s.maxBytes)+1)
 	}
@@ -130,7 +131,7 @@ func (s *Store) Put(r io.Reader, expect string) (string, int64, error) {
 	if err != nil {
 		return "", 0, fmt.Errorf("blobstore: %w", err)
 	}
-	if s.maxBytes > 0 && uint64(size) > s.maxBytes {
+	if s.maxBytes > 0 && size > 0 && uint64(size) > s.maxBytes {
 		return "", 0, fmt.Errorf("blobstore: %d bytes > %d: %w", size, s.maxBytes, ErrTooLarge)
 	}
 	sha := hex.EncodeToString(h.Sum(nil))
@@ -178,12 +179,11 @@ func (s *Store) Put(r io.Reader, expect string) (string, int64, error) {
 // CONTENT durable; the directory entry that makes the file findable again is
 // a separate write that needs its own fsync.
 func syncDir(path string) error {
-	d, err := os.Open(path)
+	d, err := os.Open(path) //nolint:gosec // a directory inside the blob store
 	if err != nil {
 		return fmt.Errorf("blobstore: %w", err)
 	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
+	if err := errors.Join(d.Sync(), d.Close()); err != nil {
 		return fmt.Errorf("blobstore: %w", err)
 	}
 	return nil
@@ -202,7 +202,7 @@ func (s *Store) Get(sha string) (io.ReadCloser, int64, error) {
 	}
 	info, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, 0, fmt.Errorf("blobstore: %w", err)
 	}
 	return f, info.Size(), nil

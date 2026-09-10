@@ -51,14 +51,14 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 	sha := r.PathValue("sha")
-	max := int64(s.cfg.Limits.EffectiveMaxBlobBytes())
-	r.Body = http.MaxBytesReader(w, r.Body, max)
+	limit := int64(s.cfg.Limits.EffectiveMaxBlobBytes()) //nolint:gosec // config caps max_blob_bytes
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 
 	if _, _, putErr := s.blobs.Put(r.Body, sha); putErr != nil {
 		// One classification, one counting site, one response write: a new
 		// error case added later cannot land counted on one branch and silent
 		// on another, which is exactly how the 413 path went uncounted before.
-		status, reason, message := blobPutOutcome(putErr, max)
+		status, reason, message := blobPutOutcome(putErr, limit)
 		if reason != "" {
 			s.metrics.BlobRejected(reason)
 		}
@@ -86,11 +86,11 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 // its own check regardless: that is the store's unconditional guarantee, not
 // this door's, and it still holds for any other caller of Put that does not
 // wrap its reader the same way.
-func blobPutOutcome(err error, max int64) (status int, reason, message string) {
+func blobPutOutcome(err error, limit int64) (status int, reason, message string) {
 	var tooLarge *http.MaxBytesError
 	switch {
 	case errors.As(err, &tooLarge):
-		return http.StatusRequestEntityTooLarge, "too_large", fmt.Sprintf("blob exceeds %d bytes", max)
+		return http.StatusRequestEntityTooLarge, "too_large", fmt.Sprintf("blob exceeds %d bytes", limit)
 	case errors.Is(err, blobstore.ErrDigestMismatch):
 		return http.StatusBadRequest, "digest_mismatch", err.Error()
 	case errors.Is(err, blobstore.ErrBadDigest):

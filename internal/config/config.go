@@ -434,6 +434,10 @@ const defaultMaxBlobBytes = 32 << 20
 // ceiling anyone should ever hit.
 const maxMaxRecordBytes = 1 << 30
 
+// maxMaxBlobBytes bounds max_blob_bytes so the blob doors can hold it in an
+// int64. 1 TiB is far beyond any resource file.
+const maxMaxBlobBytes = 1 << 40
+
 func (l Limits) EffectiveMaxRecordBytes() uint64 {
 	if l.MaxRecordBytes == 0 {
 		return defaultMaxRecordBytes
@@ -452,13 +456,15 @@ func (l Limits) EffectiveMaxBlobBytes() uint64 {
 // as large a thing as a record, and the inversion is far more likely to be a
 // typo than an intent. It also refuses a record cap above maxMaxRecordBytes,
 // which exists purely to keep mqttsrv's uint32 packet-size cast from silently
-// overflowing (see maxMaxRecordBytes). max_blob_bytes carries no equivalent
-// bound: nothing downstream narrows it into a smaller integer type, so there
-// is no cast for a large value to overflow.
+// overflowing (see maxMaxRecordBytes), and a blob cap above maxMaxBlobBytes.
 func (l Limits) validate() error {
 	if l.EffectiveMaxRecordBytes() > maxMaxRecordBytes {
 		return fmt.Errorf("limits: max_record_bytes (%d) exceeds the maximum of %d",
 			l.EffectiveMaxRecordBytes(), uint64(maxMaxRecordBytes))
+	}
+	if l.EffectiveMaxBlobBytes() > maxMaxBlobBytes {
+		return fmt.Errorf("limits: max_blob_bytes (%d) exceeds the maximum of %d",
+			l.EffectiveMaxBlobBytes(), uint64(maxMaxBlobBytes))
 	}
 	if l.EffectiveMaxBlobBytes() < l.EffectiveMaxRecordBytes() {
 		return fmt.Errorf("limits: max_blob_bytes (%d) is below max_record_bytes (%d)",
@@ -717,7 +723,7 @@ func (t TimeSync) validate() error {
 
 // Load reads a YAML config from path and validates it.
 func Load(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // the config file the operator named
 	if err != nil {
 		return nil, err
 	}

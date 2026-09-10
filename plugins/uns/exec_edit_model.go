@@ -9,6 +9,7 @@
 // model — and answers 409 the moment two slots want the same thing. Like the
 // other composers it never writes: it either returns the whole subtree's
 // records or none of them, which is what makes a recursive assign atomic.
+
 package uns
 
 import (

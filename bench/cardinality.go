@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,7 +51,7 @@ func RunCardinality(p Params) (*Report, error) {
 	var bestScan time.Duration
 	for run := 0; run < 5; run++ {
 		t0 := time.Now()
-		req, _ := http.NewRequest("GET", "https://"+pair.Edge.APIAddr+"/kv?prefix=", nil)
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://"+pair.Edge.APIAddr+"/kv?prefix=", nil)
 		req.Header.Set("X-Colca-Token", BenchToken)
 		resp, err := client.Do(req)
 		if err != nil {
@@ -80,7 +81,7 @@ func RunCardinality(p Params) (*Report, error) {
 	// silently eat the budget the replay-wait phase needs, which would surface
 	// as a misleading "retained replay delivered X of Y" error.
 	replicationDeadline := time.Now().Add(5 * time.Minute)
-	for NextOffset(pair.Hub, "metrics") < uint64(p.Paths)+1 {
+	for NextOffset(pair.Hub, "metrics") < uint64(p.Paths)+1 { //nolint:gosec // Paths is a positive flag value
 		if time.Now().After(replicationDeadline) {
 			return nil, fmt.Errorf("hub never received all %d paths (offset %d)", p.Paths, NextOffset(pair.Hub, "metrics"))
 		}

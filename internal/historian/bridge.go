@@ -39,7 +39,7 @@ type Store interface {
 
 // Fetcher is the half of the door the bridge uses.
 type Fetcher interface {
-	Fetch(ctx context.Context, stream, cursor string, max int) (door.Page, error)
+	Fetch(ctx context.Context, stream, cursor string, limit int) (door.Page, error)
 	Ack(ctx context.Context, stream, cursor string, offset int64) (bool, error)
 }
 
@@ -230,11 +230,11 @@ func (b *Bridge) Once(ctx context.Context) (int, error) {
 // it lands in a log line — the concrete incident here is a signal_id long
 // enough to overflow a varchar(26) column, and nothing stops it from being
 // long enough to be a log-flooding vector too.
-func truncateForLog(s string, max int) string {
-	if len(s) <= max {
+func truncateForLog(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	return s[:max] + "…"
+	return s[:limit] + "…"
 }
 
 // Run follows until ctx ends.

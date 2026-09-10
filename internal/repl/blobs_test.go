@@ -90,8 +90,8 @@ func TestParentRefusesAnUnenrolledChild(t *testing.T) {
 // silently-never-firing metric cannot pass by looking unchanged), then the
 // rejected push, then a check that the "ok" counter did NOT also move.
 func TestParentRefusesAnOversizeBlobAndCountsIt(t *testing.T) {
-	const cap = 16 // bytes
-	parent, child, pm := newReplPairWithCap(t, cap)
+	const limit = 16 // bytes
+	parent, child, pm := newReplPairWithCap(t, limit)
 
 	good := []byte("small enough") // 12 bytes, under cap
 	sum := sha256.Sum256(good)
@@ -106,7 +106,7 @@ func TestParentRefusesAnOversizeBlobAndCountsIt(t *testing.T) {
 		t.Fatalf(`colca_blob_transfers_total{direction="receive",result="ok"} = %v, want 1`, got)
 	}
 
-	big := bytes.Repeat([]byte("x"), cap*4)
+	big := bytes.Repeat([]byte("x"), limit*4)
 	sumBig := sha256.Sum256(big)
 	bigSHA := hex.EncodeToString(sumBig[:])
 	err := child.BlobPut(bigSHA, bytes.NewReader(big), int64(len(big)))
@@ -317,8 +317,8 @@ func TestSyncSurvivesAnUnreachableParent(t *testing.T) {
 // blob's, so this test actually exercises "rejected first, valid second" —
 // not an order the old code happened to get lucky on.
 func TestSyncSkipsAPersistentlyRejectedBlobAndContinues(t *testing.T) {
-	const cap = 16 // bytes — deliberately tiny so an over-cap push is realistic
-	parent, child, pm := newReplPairWithCap(t, cap)
+	const limit = 16 // bytes — deliberately tiny so an over-cap push is realistic
+	parent, child, pm := newReplPairWithCap(t, limit)
 	childBlobs := newBlobStore(t)
 
 	valid := []byte("small enough") // 12 bytes, under cap

@@ -43,7 +43,10 @@ func TestRegistryPutScanAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scan := s.RegistryScan()
+	scan, err := s.RegistryScan()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(scan) != 2 || string(scan["01M1"]) != string(testEntryJSON("01M1")) {
 		t.Fatalf("RegistryScan = %v entries, want 2 with intact JSON", len(scan))
 	}
@@ -69,7 +72,7 @@ func TestRegistryPutScanAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	if got := s2.RegistryScan(); len(got) != 2 {
+	if got, err := s2.RegistryScan(); err != nil || len(got) != 2 {
 		t.Fatalf("after reopen RegistryScan = %d entries, want 2", len(got))
 	}
 	if s2.NextOffset("entities") != nextBefore || s2.StreamBytes("entities") != bytesBefore {
@@ -112,7 +115,7 @@ func TestRegistryDelete(t *testing.T) {
 	if off != 2 {
 		t.Fatalf("tombstone offset = %d, want 2", off)
 	}
-	if got := s.RegistryScan(); len(got) != 0 {
+	if got, err := s.RegistryScan(); err != nil || len(got) != 0 {
 		t.Fatalf("registry entry survived delete: %v", got)
 	}
 	// The identity's KV projection is retired in the same batch — a restart's
@@ -134,7 +137,7 @@ func TestRegistryDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	if got := s2.RegistryScan(); len(got) != 0 {
+	if got, err := s2.RegistryScan(); err != nil || len(got) != 0 {
 		t.Fatalf("registry entry resurrected after reopen: %v", got)
 	}
 }

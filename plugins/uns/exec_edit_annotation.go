@@ -30,6 +30,7 @@
 // producing two different ids for what should be the same annotation; see
 // exec_edit_annotation_test.go on this side and
 // colca-data-contracts/tests/test_annotation_payload.py on the other.
+
 package uns
 
 import (

@@ -94,9 +94,7 @@ func main() {
 		if !ok {
 			usage()
 		}
-		p.WorkDir = must(os.MkdirTemp("", "colca-bench-"+name+"-"))
-		defer os.RemoveAll(p.WorkDir)
-		r, err := run(p)
+		r, err := runScenario(name, run, p)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
 			os.Exit(1)
@@ -111,12 +109,15 @@ func main() {
 	fmt.Printf("recorded %d report(s) → %s\n", len(reports), *out)
 }
 
-func must(s string, err error) string {
+// runScenario runs one scenario in a work directory of its own and removes it afterwards.
+func runScenario(name string, run func(bench.Params) (*bench.Report, error), p bench.Params) (*bench.Report, error) {
+	dir, err := os.MkdirTemp("", "colca-bench-"+name+"-")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return nil, err
 	}
-	return s
+	defer func() { _ = os.RemoveAll(dir) }() //nolint:gosec // the directory MkdirTemp just created
+	p.WorkDir = dir
+	return run(p)
 }
 
 func usage() {

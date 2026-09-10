@@ -101,7 +101,7 @@ func TestAuthRejectionsAtEveryDoor(t *testing.T) {
 		return newRequest("GET", "https://"+tp.edge1.APIAddr+"/fetch?stream=metrics&cursor=stranger/c&max=1", "", "")
 	})
 	resp.Body.Close()
-	if resp.StatusCode != 401 {
+	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("stranger fetch: want 401, got %d", resp.StatusCode)
 	}
 }

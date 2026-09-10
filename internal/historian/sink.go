@@ -212,7 +212,7 @@ func (s *Sink) Applied(ctx context.Context, consumer string) (int64, error) {
 	var offset int64
 	err := s.Pool.QueryRow(ctx,
 		`SELECT "offset" FROM colca_applied_offset WHERE consumer = $1`, consumer).Scan(&offset)
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
 	if err != nil {

@@ -6,6 +6,7 @@
 // already bound — so both must read the snapshot's occupancy before deciding,
 // and both answer 409 rather than overwrite. Like the entity verbs, they
 // compose records and never write.
+
 package uns
 
 import (

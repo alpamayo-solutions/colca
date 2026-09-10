@@ -1206,15 +1206,11 @@ func jumpFullyExplainedByDroppedTimeSync(last, childOffset uint64, dropped map[u
 // re-deliver stale commands to every new subscriber.
 func retainFor(c uns.Class) bool { return uns.IsState(c) }
 
-func (e *Engine) persist(class uns.Class, p uns.Parsed, topic string, payload []byte) (Result, error) {
-	return e.persistAttributed(class, p, topic, payload, Attribution{})
-}
-
 func (e *Engine) persistAttributed(class uns.Class, p uns.Parsed, topic string, payload []byte, attribution Attribution) (Result, error) {
 	return e.persistTSAttributed(class, p, topic, payload, time.Now().UnixMilli(), attribution)
 }
 
-// persistTS writes the record (plus, for data/entity, its KV projection) in one
+// persistTSAttributed writes the record (plus, for data/entity, its KV projection) in one
 // atomic batch and then mirrors it onto the local MQTT bus under the STORED
 // topic. p must be the parse of topic exactly as it will be persisted — for a
 // client publish that is the topic unchanged, for a replicated record it is
@@ -1226,10 +1222,6 @@ func (e *Engine) persistAttributed(class uns.Class, p uns.Parsed, topic string, 
 // the single place that guarantees the rule "everything appended to a node's
 // stream is also published on that node's bus" for client, admin and downlink
 // ingest alike.
-func (e *Engine) persistTS(class uns.Class, p uns.Parsed, topic string, payload []byte, ts int64) (Result, error) {
-	return e.persistTSAttributed(class, p, topic, payload, ts, Attribution{})
-}
-
 func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string, payload []byte, ts int64, attribution Attribution) (Result, error) {
 	streamName := uns.StreamFor(class)
 	rec := store.Record{

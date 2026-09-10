@@ -142,8 +142,8 @@ type SecretWrite struct {
 // Fetch reads one page. It does NOT move the cursor: reading is side-effect
 // free, which is what lets a consumer that dies mid-batch re-read exactly what
 // it had not acked.
-func (c *Client) Fetch(ctx context.Context, stream, cursor string, max int) (Page, error) {
-	return c.FetchWithOptions(ctx, FetchOptions{Stream: stream, Cursor: cursor, Max: max})
+func (c *Client) Fetch(ctx context.Context, stream, cursor string, limit int) (Page, error) {
+	return c.FetchWithOptions(ctx, FetchOptions{Stream: stream, Cursor: cursor, Max: limit})
 }
 
 // FetchWithOptions reads one page using optional hierarchy and metric signal

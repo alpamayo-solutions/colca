@@ -5,6 +5,7 @@
 // which this package already owns for the /downlink door itself. registry
 // stays the identity/lifecycle authority (status "draining", persisted) and
 // never reaches into stream contents (registry package doc comment).
+
 package repl
 
 import (

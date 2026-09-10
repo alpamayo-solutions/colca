@@ -16,6 +16,7 @@
 package repl
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -259,7 +260,7 @@ func (s *Server) Start() (addr string, err error) {
 	mux.HandleFunc("PUT /blobs/{sha}", s.handleBlobPut)
 	mux.HandleFunc("GET /blobs/{sha}", s.handleBlobGet)
 
-	ln, err := net.Listen("tcp", s.cfg.Repl.Addr)
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", s.cfg.Repl.Addr)
 	if err != nil {
 		return "", err
 	}
@@ -267,7 +268,7 @@ func (s *Server) Start() (addr string, err error) {
 	// Outermost, so a request is counted for the whole time it exists at this
 	// door — including the rate limiter's own accounting and the TLS/registry
 	// lookups before it, all of which read node state.
-	var h http.Handler = s.limitBeforeAuth(mux)
+	h := s.limitBeforeAuth(mux)
 	if s.inflight != nil {
 		h = s.inflight(h)
 	}

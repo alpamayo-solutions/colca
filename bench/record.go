@@ -9,6 +9,7 @@ package bench
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -62,7 +63,7 @@ func vcsFromBuildInfo() (commit string, dirty bool, ok bool) {
 // vcsFromGitCLI shells out to git as a fallback for `go test`/`go run`,
 // where build info carries no VCS stamp.
 func vcsFromGitCLI() (commit string, dirty bool, ok bool) {
-	out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output()
+	out, err := exec.CommandContext(context.Background(), "git", "rev-parse", "--short", "HEAD").Output()
 	if err != nil {
 		return "", false, false
 	}
@@ -70,7 +71,7 @@ func vcsFromGitCLI() (commit string, dirty bool, ok bool) {
 	if commit == "" {
 		return "", false, false
 	}
-	if statusOut, err := exec.Command("git", "status", "--porcelain").Output(); err == nil {
+	if statusOut, err := exec.CommandContext(context.Background(), "git", "status", "--porcelain").Output(); err == nil {
 		dirty = strings.TrimSpace(string(statusOut)) != ""
 	}
 	return commit, dirty, true
@@ -80,17 +81,21 @@ func vcsFromGitCLI() (commit string, dirty bool, ok bool) {
 // creating the parent directory if needed. It never reads or rewrites
 // existing content — one os.Write call per line, so concurrent appenders
 // (and interrupted runs) never corrupt earlier records.
-func AppendRecords(path string, reports []*Report) error {
+func AppendRecords(path string, reports []*Report) (err error) {
 	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return fmt.Errorf("create records dir: %w", err)
 		}
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open records file: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close records file: %w", closeErr)
+		}
+	}()
 	for _, r := range reports {
 		line, err := json.Marshal(r)
 		if err != nil {
@@ -112,7 +117,7 @@ func ReadRecords(path string) ([]Report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open records file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var records []Report
 	scanner := bufio.NewScanner(f)

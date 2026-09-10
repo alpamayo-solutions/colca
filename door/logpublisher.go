@@ -15,34 +15,6 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// LogPublisher is an slog.Handler that also writes each record to the tree's
-// `logs` stream, so a Go service appears in the editor's log view.
-//
-// Every Colca service is meant to be visible there. The Python services get
-// this from colca_data_contracts (over MQTT) or from the api's own handler
-// (over this same door); the Go services had no path at all, so the node's
-// historian, its grant convergence and its notification delivery were absent
-// from the log the product shows -- a four-hour window of the deployed demo
-// contained 1000 records, every one of them from dataops.
-//
-// It WRAPS another handler rather than replacing it: the service's existing
-// console output is untouched, and publishing is added to it. A record that
-// cannot be published is still on stdout.
-//
-// The three ways a log publisher takes a service down, and what is done here:
-//
-//   - Blocking: Handle never waits on the network. Records go to a buffered
-//     channel that one goroutine drains.
-//   - Unbounded growth: that channel is capped and drops the OLDEST record
-//     when full, because during an outage the newest lines are the ones
-//     describing it.
-//   - Recursion: publishing makes an HTTP call, and the node serving it logs.
-//     Cross-process that is not a loop, but a service publishing to its OWN
-//     door would feed itself. Such a caller passes a MinLevel above what its
-//     serving path logs at (see colcad's note in the design), and the
-//     publisher never logs through slog itself -- a publish that fails is
-//     dropped, silently, on purpose.
-//
 // LogSink is where a finished record is handed over. There are two: a door
 // Client, for a service that reaches its node over HTTP, and colcad's own
 // in-process sink -- the node cannot post to its own door, because the door
@@ -81,6 +53,33 @@ func (c *Client) PublishLog(ctx context.Context, topic string, payload map[strin
 	return c.Publish(ctx, topic, payload)
 }
 
+// LogPublisher is an slog.Handler that also writes each record to the tree's
+// `logs` stream, so a Go service appears in the editor's log view.
+//
+// Every Colca service is meant to be visible there. The Python services get
+// this from colca_data_contracts (over MQTT) or from the api's own handler
+// (over this same door); the Go services had no path at all, so the node's
+// historian, its grant convergence and its notification delivery were absent
+// from the log the product shows -- a four-hour window of the deployed demo
+// contained 1000 records, every one of them from dataops.
+//
+// It WRAPS another handler rather than replacing it: the service's existing
+// console output is untouched, and publishing is added to it. A record that
+// cannot be published is still on stdout.
+//
+// The three ways a log publisher takes a service down, and what is done here:
+//
+//   - Blocking: Handle never waits on the network. Records go to a buffered
+//     channel that one goroutine drains.
+//   - Unbounded growth: that channel is capped and drops the OLDEST record
+//     when full, because during an outage the newest lines are the ones
+//     describing it.
+//   - Recursion: publishing makes an HTTP call, and the node serving it logs.
+//     Cross-process that is not a loop, but a service publishing to its OWN
+//     door would feed itself. Such a caller passes a MinLevel above what its
+//     serving path logs at (see colcad's note in the design), and the
+//     publisher never logs through slog itself -- a publish that fails is
+//     dropped, silently, on purpose.
 type LogPublisher struct {
 	inner    slog.Handler
 	sink     LogSink
@@ -188,6 +187,7 @@ func (p *LogPublisher) Enabled(ctx context.Context, level slog.Level) bool {
 	return p.inner.Enabled(ctx, level)
 }
 
+// Handle passes the record to the wrapped handler and queues it for publishing.
 func (p *LogPublisher) Handle(ctx context.Context, record slog.Record) error {
 	err := p.inner.Handle(ctx, record)
 	if record.Level >= p.minLevel && (p.skip == nil || !p.skip(record)) {
@@ -212,6 +212,7 @@ func (p *LogPublisher) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return derived
 }
 
+// WithGroup returns a handler that shares this publisher's queue.
 func (p *LogPublisher) WithGroup(name string) slog.Handler {
 	return p.derive(p.inner.WithGroup(name))
 }

@@ -35,6 +35,7 @@ type ElementIndex struct {
 
 var _ Namespace = (*ElementIndex)(nil)
 
+// NewElementIndex returns an index over the elements in s. Observe keeps it current.
 func NewElementIndex(s EntityStore) *ElementIndex {
 	return &ElementIndex{store: s, byID: map[string]string{}, byPath: map[string]string{}}
 }

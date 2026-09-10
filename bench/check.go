@@ -61,16 +61,17 @@ func Check(resultsPath, thresholdsPath string, w io.Writer) error {
 				continue
 			}
 			status := "ok (ungated)"
-			if b.Min != nil && v < *b.Min {
+			switch {
+			case b.Min != nil && v < *b.Min:
 				violations = append(violations, fmt.Sprintf("%s: %s = %.1f < min %.1f", scenario, metric, v, *b.Min))
 				status = "VIOLATION"
-			} else if b.Max != nil && v > *b.Max {
+			case b.Max != nil && v > *b.Max:
 				violations = append(violations, fmt.Sprintf("%s: %s = %.1f > max %.1f", scenario, metric, v, *b.Max))
 				status = "VIOLATION"
-			} else if b.Min != nil || b.Max != nil {
+			case b.Min != nil || b.Max != nil:
 				status = "ok"
 			}
-			fmt.Fprintf(w, "check %-11s %-32s %12.1f  %s\n", scenario, metric, v, status)
+			_, _ = fmt.Fprintf(w, "check %-11s %-32s %12.1f  %s\n", scenario, metric, v, status)
 		}
 	}
 	if len(violations) > 0 {

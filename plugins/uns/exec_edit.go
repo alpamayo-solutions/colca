@@ -24,6 +24,7 @@
 //
 // What stays here is what all of them share: the envelope and intent types,
 // the executor struct, and the small helpers more than one composer needs.
+
 package uns
 
 import (
@@ -186,6 +187,7 @@ type editCatalogueSnapshot struct {
 	Catalogue editCatalogue
 }
 
+// NewEditExec returns the _CmdEdit executor. The attachment writer is optional.
 func NewEditExec(
 	store EntityStore, bound Bindings, attachmentWriters ...NodeAttachmentWriter,
 ) *EditExec {
@@ -205,13 +207,16 @@ func NewEditExec(
 // no blob store.
 func (w *EditExec) SetBlobs(blobs Blobs) { w.blobs = blobs }
 
+// Handles reports whether this executor runs the given contract.
 func (w *EditExec) Handles(contract string) bool { return contract == "_CmdEdit" }
 
+// Execute runs one _CmdEdit command and returns its status, message and result.
 func (w *EditExec) Execute(ctx CommandContext, contract, verb string, payload []byte) (int, string, string) {
 	code, message, result, _ := w.ExecuteWithWrites(ctx, contract, verb, payload)
 	return code, message, result
 }
 
+// ExecuteWithWrites is Execute that also returns the state writes it committed.
 func (w *EditExec) ExecuteWithWrites(
 	ctx CommandContext,
 	contract, verb string,

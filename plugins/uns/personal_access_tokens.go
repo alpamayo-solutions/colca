@@ -11,6 +11,7 @@ import (
 	"time"
 )
 
+// PersonalAccessTokenContract is the contract of personal access token definitions.
 const PersonalAccessTokenContract = "_PersonalAccessToken"
 
 // PersonalAccessToken is the hash-only credential definition that descends
@@ -32,6 +33,7 @@ type PersonalAccessTokenIndex struct {
 	store EntityStore
 }
 
+// NewPersonalAccessTokenIndex returns an index over the tokens in store.
 func NewPersonalAccessTokenIndex(store EntityStore) *PersonalAccessTokenIndex {
 	return &PersonalAccessTokenIndex{store: store}
 }

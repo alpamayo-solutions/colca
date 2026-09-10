@@ -4,6 +4,7 @@
 // username must equal the token's sub, and the session lives exactly as long
 // as the token: per-delivery ACL checks evaluate grants AND exp, and a 10s
 // sweeper kicks expired sessions with the same mechanism revocation uses.
+
 package mqttsrv
 
 import (
@@ -152,9 +153,10 @@ func (h *colcaHook) OnDisconnect(cl *mqtt.Client, _ error, _ bool) {
 func (s *Server) sweepInvalidHumanSessions(now time.Time) {
 	for id, session := range s.hook.humans.snapshot() {
 		reason := ""
-		if !now.Before(session.exp) {
+		switch {
+		case !now.Before(session.exp):
 			reason = tokenauth.ReasonExpired
-		} else if session.credential == "pat" {
+		case session.credential == "pat":
 			var err error
 			reason, err = s.hook.ver.VerifyPersonalAccessTokenSession(
 				session.credentialID, session.credentialDigest, uns.ScopeBrokerMQTT, now,
@@ -162,7 +164,7 @@ func (s *Server) sweepInvalidHumanSessions(now time.Time) {
 			if err == nil {
 				continue
 			}
-		} else {
+		default:
 			continue
 		}
 		if cl, ok := s.S.Clients.Get(id); ok {

@@ -77,10 +77,10 @@ func sameNetworkInventory(held any, current []map[string]any) bool {
 		if !ok {
 			return false
 		}
-		copy := map[string]any{}
+		heldCopy := map[string]any{}
 		for key, value := range heldItem {
 			if key != "observed_at" {
-				copy[key] = value
+				heldCopy[key] = value
 			}
 		}
 		currentCopy := map[string]any{}
@@ -89,7 +89,7 @@ func sameNetworkInventory(held any, current []map[string]any) bool {
 				currentCopy[key] = value
 			}
 		}
-		heldJSON, heldErr := json.Marshal(copy)
+		heldJSON, heldErr := json.Marshal(heldCopy)
 		currentJSON, currentErr := json.Marshal(currentCopy)
 		if heldErr != nil || currentErr != nil || string(heldJSON) != string(currentJSON) {
 			return false

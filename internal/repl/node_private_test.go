@@ -68,7 +68,7 @@ func TestANodePrivateReceiptNeverLeavesTheNodeButItsNeighboursDo(t *testing.T) {
 			got, want)
 	}
 	for _, r := range recs {
-		if r.Payload == nil || len(r.Payload) == 0 {
+		if len(r.Payload) == 0 {
 			t.Fatalf("a tombstone reached the parent at %q — the receipt's retirement must stay home with the receipt", r.Topic)
 		}
 	}

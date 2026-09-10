@@ -12,9 +12,9 @@ import (
 	"time"
 )
 
-func open(t *testing.T, max uint64) *Store {
+func open(t *testing.T, limit uint64) *Store {
 	t.Helper()
-	s, err := Open(t.TempDir(), max)
+	s, err := Open(t.TempDir(), limit)
 	if err != nil {
 		t.Fatal(err)
 	}

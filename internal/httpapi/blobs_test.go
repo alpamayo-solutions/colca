@@ -30,14 +30,14 @@ func newLocalTestHandler(t *testing.T) http.Handler {
 
 // newLocalTestHandlerWithBlobCap builds a local-door Handler whose blob store
 // is capped at max bytes, for the oversize-rejection test.
-func newLocalTestHandlerWithBlobCap(t *testing.T, max uint64) http.Handler {
+func newLocalTestHandlerWithBlobCap(t *testing.T, limit uint64) http.Handler {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	cfg := &config.Config{ULID: "n-test", Limits: config.Limits{MaxBlobBytes: config.ByteSize(max)}}
+	cfg := &config.Config{ULID: "n-test", Limits: config.Limits{MaxBlobBytes: config.ByteSize(limit)}}
 	reg, err := registry.New(s, cfg.ULID)
 	if err != nil {
 		t.Fatal(err)

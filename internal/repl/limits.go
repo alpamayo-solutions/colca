@@ -51,7 +51,7 @@ func (s *Server) limitBeforeAuth(next http.Handler) http.Handler {
 // ensuring an operator-approved single record still fits. The 2x factor
 // covers base64 JSON encoding and metadata around one record.
 func replicateBodyLimit(cfg *config.Config) int64 {
-	forOneRecord := int64(cfg.Limits.EffectiveMaxRecordBytes())*2 + 64<<10
+	forOneRecord := int64(cfg.Limits.EffectiveMaxRecordBytes())*2 + 64<<10 //nolint:gosec // config caps max_record_bytes at 1 GiB
 	if forOneRecord > defaultReplicateBodyBytes {
 		return forOneRecord
 	}

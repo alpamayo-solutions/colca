@@ -2,6 +2,7 @@
 // and the Authorize decision (the infra auth design
 // §2.1, §5). This file answers every semantic auth question; the core owns
 // doors, sessions and persistence and never re-implements grant logic (§8).
+
 package uns
 
 import (
@@ -22,7 +23,8 @@ const (
 	// gives it a read zone only; every write it may perform is an explicit
 	// grant (local-service-trust design §3.1).
 	KindExternal Kind = "external"
-	KindNode     Kind = "node"
+	// KindNode is another node of the tree; nodes use the replication door.
+	KindNode Kind = "node"
 	// KindLocal is a service inside the node's own deployment. It is the one
 	// kind with no pubkey: it presents itself at a door that is unreachable
 	// from outside the deployment, and reaching that door is the proof
@@ -178,6 +180,7 @@ func (e *Entry) CatalogueName() string {
 // rather than re-derived from Kind at each listener.
 type Door int
 
+// Doors an identity can arrive through.
 const (
 	DoorMQTT Door = iota // the machine-facing broker door
 	DoorHTTP             // the machine-facing HTTP door
@@ -716,13 +719,13 @@ func CmdClass(contract string) string {
 // Action selects which §5.3 rule Authorize applies.
 type Action int
 
+// Actions Authorize decides about.
 const (
 	ActSub        Action = iota // MQTT subscription filter (may contain wildcards)
 	ActReadRecord               // one concrete stored record / KV entry
 	ActCmd                      // publishing a _Cmd* contract
-	// ActPub: publishing owned state. It returned when writing stopped being an
-	// identity rule — level 4 is the node for every publisher now, so nothing
-	// about the topic says who may write it (local-service-trust design §5).
+	// ActPub is publishing owned state. Who may write it follows from the
+	// identity's write scope, not from the topic.
 	ActPub
 )
 

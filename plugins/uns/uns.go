@@ -32,6 +32,7 @@ import (
 // lands in and the direction it flows between nodes.
 type Class int
 
+// Routing classes; ClassNone is the zero value.
 const (
 	ClassNone       Class = iota
 	ClassData             // _Metric …    node-owned state, authorized by write scope
@@ -458,6 +459,7 @@ var manifestClasses = map[string]Class{
 	"log":        ClassLog,
 }
 
+// ClassFromManifest returns the class a bundle manifest names, and whether the name is known.
 func ClassFromManifest(name string) (Class, bool) {
 	c, ok := manifestClasses[name]
 	return c, ok
@@ -552,24 +554,18 @@ const DownlinkCursorPrefix = "downlink:"
 // once every child has read past it.
 const DownlinkDefCursorPrefix = "downlink-def:"
 
-// The CHILD-side replication cursors. Each names a position in one specific
-// parent's stream, so the parent's pinned pubkey is part of the name: a node
-// that changes parents must not resume against the new one at the old one's
-// offsets (parent-scoped-cursors design §3.1). Scoping by pubkey rather than
-// by the parent's ULID is deliberate — the pubkey is the config pin, known
-// before first contact and verified on every connection, while the ULID is
-// only learned after connecting.
-//
-// These use their own "up:"/"down:"/"down-def:" prefixes, deliberately
-// distinct from DownlinkCursorPrefix/DownlinkDefCursorPrefix above, which are
-// the PARENT-side cursors keyed by CHILD ulid. A child pubkey and a parent
-// ulid are different-length strings today, but the name must not depend on
-// that arithmetic to stay collision-free — different node, different fact,
-// so the prefix itself carries the distinction.
+// UplinkCursor names this node's uplink replication cursor against one parent.
+// The parent's pinned pubkey is part of the name, so a node that changes
+// parents never resumes at the old parent's offsets; unlike the parent's ULID,
+// the pubkey is known before first contact. The "up:", "down:" and "down-def:"
+// prefixes keep these cursors apart from the parent-side ones above, which are
+// keyed by child ULID.
 func UplinkCursor(parentPubkey string) string { return "up:" + parentPubkey }
 
+// DownlinkCursor is the commands-side counterpart of UplinkCursor.
 func DownlinkCursor(parentPubkey string) string { return "down:" + parentPubkey }
 
+// DownlinkDefCursor is the definitions-side counterpart of UplinkCursor.
 func DownlinkDefCursor(parentPubkey string) string { return "down-def:" + parentPubkey }
 
 // MountInsert inserts the mount name directly after segment 4 (node-id), i.e.
@@ -702,11 +698,11 @@ func Validate(contract string, payload []byte) error {
 				return fmt.Errorf("%s: field %q must be an object", contract, "metadata")
 			}
 			for key, value := range metadata {
-				switch value.(type) {
+				switch v := value.(type) {
 				case nil, string, float64, bool:
 					// Safe scalar; source-specific allow-lists are producer-side.
 				case []any:
-					for _, item := range value.([]any) {
+					for _, item := range v {
 						switch item.(type) {
 						case nil, string, float64, bool:
 						default:

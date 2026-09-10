@@ -325,7 +325,7 @@ func TestSimClockConstantSkewCancelsInSubtraction(t *testing.T) {
 		t.Fatalf("b.Sub(a) = %v, want a small positive duration close to the real elapsed time (skew must cancel)", d)
 	}
 	// The skew itself must still be present in the absolute reading.
-	if b.Sub(time.Now()) < 9*time.Minute {
+	if time.Until(b) < 9*time.Minute {
 		t.Fatalf("clock does not appear skewed by ~10 minutes: b=%v now=%v", b, time.Now())
 	}
 }

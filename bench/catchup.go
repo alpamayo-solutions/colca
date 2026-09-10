@@ -27,7 +27,7 @@ func RunCatchup(p Params) (*Report, error) {
 
 	r := NewReport("catchup", p.Storage, map[string]any{"records": p.Records})
 
-	hubTarget := NextOffset(pair.Hub, "metrics") + uint64(p.Records)
+	hubTarget := NextOffset(pair.Hub, "metrics") + uint64(p.Records) //nolint:gosec // Records is a positive flag value
 	pair.StopHub()
 
 	client := &http.Client{Timeout: 10 * time.Second, Transport: apiTransport()}

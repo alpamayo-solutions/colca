@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -217,11 +218,7 @@ func start(
 }
 
 func asRejected(err error, into *rejected) bool {
-	r, ok := err.(rejected)
-	if ok {
-		*into = r
-	}
-	return ok
+	return errors.As(err, into)
 }
 
 func self(
@@ -241,7 +238,7 @@ func self(
 }
 
 func selfOnce(client *http.Client, baseURL, name, mount string) (localIdentity, error) {
-	req, err := http.NewRequest(http.MethodGet, baseURL+"/self", nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, baseURL+"/self", nil)
 	if err != nil {
 		return localIdentity{}, err
 	}
@@ -277,7 +274,7 @@ func postJSON(client *http.Client, url, name, mount string, body any) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(encoded))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(encoded))
 	if err != nil {
 		return err
 	}

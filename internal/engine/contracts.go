@@ -5,6 +5,7 @@
 // contracts (_StreamGap, _EnrolledIdentity, _TimeSync) are ALWAYS answered by the
 // binary: their producers live in this process, so their rules evolve with
 // it (§10.2) and a bundle may not redeclare them (loader-enforced).
+
 package engine
 
 import (

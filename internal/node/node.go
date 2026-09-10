@@ -530,7 +530,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		if err != nil {
 			return fail(fmt.Errorf("node %s: api tls: %w", cfg.ULID, err))
 		}
-		ln, err := net.Listen("tcp", cfg.API.Addr)
+		ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", cfg.API.Addr)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: api listen %s: %w", cfg.ULID, cfg.API.Addr, err))
 		}
@@ -551,7 +551,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	//     Prometheus (itself a local service) scrapes over plain HTTP and
 	//     never needs the insecure_skip_verify a self-signed door required.
 	if cfg.API.LocalAddr != "" {
-		ln, err := net.Listen("tcp", cfg.API.LocalAddr)
+		ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", cfg.API.LocalAddr)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: local api listen %s: %w", cfg.ULID, cfg.API.LocalAddr, err))
 		}

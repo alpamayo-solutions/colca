@@ -2,6 +2,7 @@ package historian
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -94,7 +95,7 @@ func TestGoldenVectorsThatAreNotMeasurements(t *testing.T) {
 	vectors := loadVectors(t)
 	for _, tc := range vectors.NotMeasurements {
 		t.Run(tc.Why, func(t *testing.T) {
-			if _, err := RowFrom("colca/v1/_Metric/m1/t", tc.Payload, 1); err != ErrNotAMeasurement {
+			if _, err := RowFrom("colca/v1/_Metric/m1/t", tc.Payload, 1); !errors.Is(err, ErrNotAMeasurement) {
 				t.Fatalf("err = %v, want ErrNotAMeasurement", err)
 			}
 		})

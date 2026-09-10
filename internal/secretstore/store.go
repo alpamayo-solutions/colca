@@ -75,7 +75,7 @@ func (s *Store) Put(owner, name string, envelope secrets.Envelope, expiresAt *ti
 		return Record{}, err
 	}
 	if err := envelope.Validate(); err != nil {
-		return Record{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+		return Record{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	if expiresAt != nil {
 		utc := expiresAt.UTC()
@@ -168,11 +168,11 @@ func (s *Store) List(owner string) ([]Metadata, error) {
 
 // ListPage returns a bounded, stable page of one owner's secret metadata.
 // The continuation token is opaque and scoped to that owner.
-func (s *Store) ListPage(owner, after string, max int) ([]Metadata, string, error) {
+func (s *Store) ListPage(owner, after string, limit int) ([]Metadata, string, error) {
 	if err := validateOwner(owner); err != nil {
 		return nil, "", err
 	}
-	if max <= 0 {
+	if limit <= 0 {
 		return nil, "", fmt.Errorf("secretstore: page size must be positive")
 	}
 	prefix := secretPrefix(owner)
@@ -195,9 +195,9 @@ func (s *Store) ListPage(owner, after string, max int) ([]Metadata, string, erro
 		}
 	}
 
-	out := make([]Metadata, 0, max)
+	out := make([]Metadata, 0, limit)
 	var lastKey []byte
-	for ; valid && len(out) < max; valid = iter.Next() {
+	for ; valid && len(out) < limit; valid = iter.Next() {
 		lastKey = append(lastKey[:0], iter.Key()...)
 		var record Record
 		if err := json.Unmarshal(iter.Value(), &record); err != nil {
@@ -248,7 +248,7 @@ func validateIdentity(owner, name string) error {
 	}
 	for _, segment := range strings.Split(name, "/") {
 		if err := validateSegment(segment); err != nil {
-			return fmt.Errorf("%w: invalid secret name: %v", ErrInvalid, err)
+			return fmt.Errorf("%w: invalid secret name: %w", ErrInvalid, err)
 		}
 	}
 	return nil
@@ -259,7 +259,7 @@ func validateOwner(owner string) error {
 		return fmt.Errorf("%w: owner exceeds 128 characters", ErrInvalid)
 	}
 	if err := validateSegment(owner); err != nil {
-		return fmt.Errorf("%w: invalid owner: %v", ErrInvalid, err)
+		return fmt.Errorf("%w: invalid owner: %w", ErrInvalid, err)
 	}
 	return nil
 }

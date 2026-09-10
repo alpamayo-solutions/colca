@@ -137,7 +137,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// 4/3 inflation with room for the envelope's fields. Store.Append remains
 	// the authority on the record; this only stops a huge body being read
 	// into memory before that check can run.
-	maxPublishBody := int64(cfg.Limits.EffectiveMaxRecordBytes())*2 + 4096
+	maxPublishBody := int64(cfg.Limits.EffectiveMaxRecordBytes())*2 + 4096 //nolint:gosec // config caps max_record_bytes at 1 GiB
 
 	// writeJSON encodes to a buffer FIRST and only then touches the
 	// ResponseWriter. The alternative — encode straight to w after

@@ -37,7 +37,7 @@ func mountResourceRoutes(
 	if blobs == nil {
 		return
 	}
-	var es uns.EntityStore = e.EntityStore()
+	es := e.EntityStore()
 
 	mux.HandleFunc("GET /resources/{id}/file", auth(limitClassTransfer, transferPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		id := r.PathValue("id")

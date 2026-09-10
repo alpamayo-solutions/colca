@@ -68,6 +68,7 @@ func NewConfigExec(s EntityStore, bound Bindings, elements Namespace, blobs Blob
 	}
 }
 
+// Handles reports whether this executor runs the given contract.
 func (c *ConfigExec) Handles(contract string) bool { return contract == "_CmdConfigure" }
 
 // Observe reacts to a record the node just persisted.
@@ -322,6 +323,7 @@ type boundSignal struct {
 	Element string `json:"system_element_id"`
 }
 
+// Execute runs one _CmdConfigure command and returns its status, message and result.
 func (c *ConfigExec) Execute(ctx CommandContext, contract, verb string, payload []byte) (int, string, string) {
 	code, message, result, _ := c.ExecuteWithWrites(ctx, contract, verb, payload)
 	return code, message, result
@@ -855,7 +857,7 @@ func (c *ConfigExec) checkCommandEntityIdentity(contract, id string, raw []byte)
 		TargetNodeID string `json:"target_node_id"`
 	}
 	if err := json.Unmarshal(raw, &config); err != nil {
-		return fmt.Errorf("_AlarmNotificationConfig is unreadable: %v", err)
+		return fmt.Errorf("_AlarmNotificationConfig is unreadable: %w", err)
 	}
 	if config.TargetNodeID == "" {
 		return fmt.Errorf("_AlarmNotificationConfig target_node_id is required")
@@ -934,7 +936,7 @@ func (c *ConfigExec) preserveBinding(path string, incoming json.RawMessage) (jso
 	}
 	var stored, next map[string]any
 	if err := json.Unmarshal(existing, &stored); err != nil {
-		return incoming, nil // an unreadable stored record cannot constrain the new one
+		return incoming, nil //nolint:nilerr // an unreadable stored record cannot constrain the new one
 	}
 	if err := json.Unmarshal(incoming, &next); err != nil {
 		return nil, err

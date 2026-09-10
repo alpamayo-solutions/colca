@@ -321,9 +321,9 @@ func kvAt(t *testing.T, n *node.Node, prefix string) []any {
 // fetchRecords reads a stream through a named cursor. /fetch never advances a
 // cursor, so re-reading with the same cursor name always yields the full set
 // from its position and two different cursor names are independent.
-func fetchRecords(t *testing.T, n *node.Node, stream, cursor, prefix string, max int) []any {
+func fetchRecords(t *testing.T, n *node.Node, stream, cursor, prefix string, limit int) []any {
 	t.Helper()
-	path := fmt.Sprintf("/fetch?stream=%s&cursor=%s&max=%d", stream, cursor, max)
+	path := fmt.Sprintf("/fetch?stream=%s&cursor=%s&max=%d", stream, cursor, limit)
 	if prefix != "" {
 		// prefix filters the uns hierarchy path, not the raw topic.
 		path += "&prefix=" + prefix

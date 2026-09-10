@@ -89,7 +89,7 @@ func (i *Issuer) Rotate(t *testing.T) {
 		t.Fatal(err)
 	}
 	i.key = key
-	i.kid = i.kid + "r"
+	i.kid += "r"
 }
 
 // Mint issues a correctly signed token.

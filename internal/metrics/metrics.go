@@ -15,6 +15,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"log/slog"
 	"math"
 	"net/http"
 	"time"
@@ -627,7 +628,11 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	// every construction is what keeps it correct across a restart instead
 	// of silently resetting to 0 while children are still mid-drain.
 	draining := 0
-	for _, raw := range st.RegistryScan() {
+	persisted, err := st.RegistryScan()
+	if err != nil {
+		slog.Warn("metrics: cannot count draining entries", "err", err)
+	}
+	for _, raw := range persisted {
 		// Decoded as the real entry rather than a local struct carrying just
 		// the status field: the entry's JSON shape has one owner, and asking
 		// it whether it drains keeps that rule out of here entirely.

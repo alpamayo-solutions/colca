@@ -129,7 +129,7 @@ func TestGrantEvaluationMatchesTheGoldenVectors(t *testing.T) {
 	idx := NewGroupIndex(store)
 
 	for _, c := range vectors.Cases {
-		c := c
+
 		t.Run(c.Name, func(t *testing.T) {
 			if c.Disputed != "" {
 				t.Skipf("disputed vector, not pinned here: %s", c.Disputed)

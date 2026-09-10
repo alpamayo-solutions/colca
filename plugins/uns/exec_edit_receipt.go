@@ -10,12 +10,14 @@
 // it describes: the durable copy is what makes the guarantee survive the
 // process, and committing it with the state is what stops a receipt from ever
 // claiming a write that did not land.
+
 package uns
 
 import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -87,7 +89,7 @@ func canonicalJSONDigest(payload []byte) ([sha256.Size]byte, error) {
 	if err := decoder.Decode(&value); err != nil {
 		return [sha256.Size]byte{}, err
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if err == nil {
 			err = fmt.Errorf("multiple JSON values")
 		}

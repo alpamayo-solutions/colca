@@ -8,6 +8,7 @@
 // own: a remount that already landed is recognised from the attachment snapshot
 // rather than from a receipt, because the registry write is not part of the
 // entity batch and cannot be replayed from one.
+
 package uns
 
 import (

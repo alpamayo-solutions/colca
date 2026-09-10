@@ -13,7 +13,7 @@ type entityStore struct{ e *Engine }
 
 // EntityStore returns the plugin-facing record surface of this node. Wiring
 // hands it to the executors that need it.
-func (e *Engine) EntityStore() *entityStore { return &entityStore{e: e} }
+func (e *Engine) EntityStore() uns.EntityStore { return &entityStore{e: e} }
 
 func (s *entityStore) NodeID() string { return s.e.cfg.ULID }
 

@@ -81,11 +81,11 @@ func (s *Store) registryBatch(stream string, rec Record, mut func(*pebble.Batch)
 
 // RegistryScan returns every locally enrolled entry (ulid → entry JSON) — the
 // startup load for the in-memory registry map.
-func (s *Store) RegistryScan() map[string][]byte {
+func (s *Store) RegistryScan() (map[string][]byte, error) {
 	lb, ub := regBounds()
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer iter.Close()
 	out := map[string][]byte{}
@@ -93,5 +93,5 @@ func (s *Store) RegistryScan() map[string][]byte {
 		ulid := string(iter.Key()[len(lb):])
 		out[ulid] = append([]byte(nil), iter.Value()...)
 	}
-	return out
+	return out, iter.Error()
 }

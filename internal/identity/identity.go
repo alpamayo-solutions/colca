@@ -69,7 +69,7 @@ func LoadOrGenerate(path string) (*Identity, bool, error) {
 }
 
 func Load(path string) (*Identity, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // the key file named in the node config
 	if err != nil {
 		return nil, err
 	}

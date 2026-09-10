@@ -2,6 +2,7 @@ package bench
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -30,7 +31,7 @@ func postAdmin(hc *http.Client, apiAddr, path string, body []byte) error {
 	const retryBudget = 60 * time.Second
 	deadline := time.Now().Add(retryBudget)
 	for {
-		req, err := http.NewRequest("POST", "https://"+apiAddr+path, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://"+apiAddr+path, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
@@ -78,7 +79,7 @@ mqtt:
 		return nil, err
 	}
 
-	cmd := exec.Command(p.ColcadPath, cfgPath)
+	cmd := exec.CommandContext(context.Background(), p.ColcadPath, cfgPath)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start colcad: %w", err)
@@ -92,12 +93,16 @@ mqtt:
 	// A per-request timeout keeps a stalled connection from blocking past the
 	// overall deadline — http.DefaultClient has no timeout of its own.
 	hc := &http.Client{Timeout: 2 * time.Second, Transport: apiTransport()}
+	healthz, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://"+apiAddr+"/healthz", nil)
+	if err != nil {
+		return nil, err
+	}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		resp, err := hc.Get("https://" + apiAddr + "/healthz")
+		resp, err := hc.Do(healthz)
 		if err == nil {
 			resp.Body.Close()
-			if resp.StatusCode == 200 {
+			if resp.StatusCode == http.StatusOK {
 				break
 			}
 		}
@@ -148,7 +153,7 @@ mqtt:
 	defer m.Disconnect(100)
 	stopAt := time.Now().Add(p.Duration)
 	seq := 0
-	var peak uint64 = idle
+	peak := idle
 	for time.Now().Before(stopAt) {
 		seq++
 		payload, _ := json.Marshal(map[string]any{"v": float64(seq), "value": float64(seq), "signal_id": "bench", "timestamp": float64(time.Now().UnixNano()) / 1e9})

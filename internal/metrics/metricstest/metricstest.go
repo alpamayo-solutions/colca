@@ -28,7 +28,7 @@ import (
 func Value(t testing.TB, m *metrics.Metrics, line string) float64 {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	m.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil))
 	for _, l := range strings.Split(rec.Body.String(), "\n") {
 		if rest, ok := strings.CutPrefix(l, line+" "); ok {
 			v, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)

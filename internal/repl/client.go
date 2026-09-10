@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -109,13 +108,14 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 	}
 	tlsCfg := &tls.Config{
 		Certificates:       []tls.Certificate{cert},
-		InsecureSkipVerify: true, // trust = key pinning below, not CAs
+		InsecureSkipVerify: true, //nolint:gosec // trust is the pinned parent key, checked below
 		MinVersion:         tls.VersionTLS13,
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
+		// Unlike VerifyPeerCertificate, VerifyConnection also runs on resumed sessions.
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
 				return fmt.Errorf("parent presented no certificate")
 			}
-			pub, err := identity.PeerPubHex(rawCerts[0])
+			pub, err := identity.PeerPubHex(cs.PeerCertificates[0].Raw)
 			if err != nil {
 				return err
 			}
@@ -279,8 +279,8 @@ type downResult struct {
 // Downlink polls the parent once. gap is non-nil when the poll position lies
 // inside a hole the parent's retention pruned (spec §6.2) — next then already
 // points past it.
-func (c *Client) Downlink(after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, error) {
-	res, err := c.downlink(context.Background(), after, 1, max, timeout)
+func (c *Client) Downlink(after uint64, limit int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, error) {
+	res, err := c.downlink(context.Background(), after, 1, limit, timeout)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -289,8 +289,8 @@ func (c *Client) Downlink(after uint64, max int, timeout time.Duration) ([]DownR
 
 // DownlinkWithAncestry is Downlink plus the parent-taught position (id-grants
 // design §4); ancestry is nil when the parent did not hand one down.
-func (c *Client) DownlinkWithAncestry(after uint64, max int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, *uns.Ancestry, error) {
-	res, err := c.downlink(context.Background(), after, 1, max, timeout)
+func (c *Client) DownlinkWithAncestry(after uint64, limit int, timeout time.Duration) ([]DownRec, uint64, *store.GapSpan, *uns.Ancestry, error) {
+	res, err := c.downlink(context.Background(), after, 1, limit, timeout)
 	if err != nil {
 		return nil, 0, nil, nil, err
 	}
@@ -300,8 +300,8 @@ func (c *Client) DownlinkWithAncestry(after uint64, max int, timeout time.Durati
 // DownlinkDefinitions is Downlink from the definitions side: the records the
 // parent handed down and the next position on that stream
 // (definition-stream design §5).
-func (c *Client) DownlinkDefinitions(defAfter uint64, max int, timeout time.Duration) ([]DownRec, uint64, error) {
-	res, err := c.downlink(context.Background(), 1, defAfter, max, timeout)
+func (c *Client) DownlinkDefinitions(defAfter uint64, limit int, timeout time.Duration) ([]DownRec, uint64, error) {
+	res, err := c.downlink(context.Background(), 1, defAfter, limit, timeout)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -322,9 +322,9 @@ func (c *Client) hello(ctx context.Context, defAfter uint64) (downResult, error)
 // design §2.1) — RunDownlink applies it via engine.ApplyClockSample before
 // ingesting anything (design §2.3 rule 4). Ancestry is the parent-taught
 // position (id-grants design §4), nil when the parent did not hand one down.
-func (c *Client) downlink(ctx context.Context, after, defAfter uint64, max int, timeout time.Duration) (downResult, error) {
+func (c *Client) downlink(ctx context.Context, after, defAfter uint64, limit int, timeout time.Duration) (downResult, error) {
 	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d",
-		c.base, after, defAfter, max), timeout)
+		c.base, after, defAfter, limit), timeout)
 }
 
 func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Duration) (downResult, error) {

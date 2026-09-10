@@ -134,7 +134,7 @@ func TestATombstoneIsNotARow(t *testing.T) {
 	// _Metric is tombstone-capable (contracts bundle). A tombstone deletes the
 	// retained value; it is not a measurement and must not become one.
 	row, err := RowFrom("colca/v1/_Metric/m1/t", []byte(`{"signal_id":"s","deleted":true}`), 1)
-	if err != ErrNotAMeasurement {
+	if !errors.Is(err, ErrNotAMeasurement) {
 		t.Fatalf("err = %v (row %+v), want ErrNotAMeasurement", err, row)
 	}
 }

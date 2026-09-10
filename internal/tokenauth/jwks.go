@@ -1,6 +1,8 @@
 package tokenauth
 
 import (
+	"bytes"
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -93,8 +95,17 @@ func ecKey(k jwk) (*ecdsa.PublicKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bad y: %w", err)
 	}
-	pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
-	if !pub.Curve.IsOnCurve(pub.X, pub.Y) {
+	x, y = bytes.TrimLeft(x, "\x00"), bytes.TrimLeft(y, "\x00")
+	if len(x) > 32 || len(y) > 32 {
+		return nil, fmt.Errorf("point not on P-256")
+	}
+	// An uncompressed SEC 1 point: 0x04, then X and Y, each left-padded to 32 bytes.
+	point := make([]byte, 65)
+	point[0] = 4
+	copy(point[33-len(x):33], x)
+	copy(point[65-len(y):], y)
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
+	if err != nil {
 		return nil, fmt.Errorf("point not on P-256")
 	}
 	return pub, nil
@@ -102,7 +113,11 @@ func ecKey(k jwk) (*ecdsa.PublicKey, error) {
 
 // fetchJWKS GETs the document with a bounded timeout.
 func fetchJWKS(client *http.Client, url string) ([]byte, error) {
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

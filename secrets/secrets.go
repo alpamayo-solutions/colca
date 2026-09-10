@@ -101,11 +101,11 @@ func OpenKeyring(directory string) (*Keyring, error) {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, fmt.Errorf("create secret key directory: %w", err)
 	}
-	if err := os.Chmod(directory, 0o700); err != nil {
+	if err := os.Chmod(directory, 0o700); err != nil { //nolint:gosec // a directory needs its execute bit
 		return nil, fmt.Errorf("secure secret key directory: %w", err)
 	}
 	path := filepath.Join(directory, "keyring.json")
-	encoded, err := os.ReadFile(path)
+	encoded, err := os.ReadFile(path) //nolint:gosec // the keyring in the configured directory
 	if os.IsNotExist(err) {
 		ring := &Keyring{path: path, data: diskKeyring{Version: keyringVersion, Keys: map[string]storedKey{}}}
 		if _, err := ring.rotateLocked(time.Now().UTC()); err != nil {
@@ -136,6 +136,7 @@ func OpenKeyring(directory string) (*Keyring, error) {
 	return &Keyring{path: path, data: data}, nil
 }
 
+// ActiveKeyID returns the id of the keyring's active key.
 func (ring *Keyring) ActiveKeyID() string {
 	ring.mu.RLock()
 	defer ring.mu.RUnlock()
@@ -293,17 +294,17 @@ func (ring *Keyring) persist(data diskKeyring) error {
 		return err
 	}
 	name := temp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return err
 	}
 	if _, err := temp.Write(encoded); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return err
 	}
 	if err := temp.Sync(); err != nil {
-		temp.Close()
+		_ = temp.Close()
 		return err
 	}
 	if err := temp.Close(); err != nil {

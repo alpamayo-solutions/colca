@@ -235,7 +235,7 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 		"written_by": "api", "actor_id": "user-anna",
 		"actor_label": "anna@example.com", "actor_kind": "human",
 	})
-	if resp.StatusCode != 200 || out["stream"] != "metrics" {
+	if resp.StatusCode != http.StatusOK || out["stream"] != "metrics" {
 		t.Fatalf("%d %v", resp.StatusCode, out)
 	}
 
@@ -261,16 +261,16 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 		t.Fatalf("%v", out)
 	}
 	resp, _ = req(t, admin, "GET", a.url+"/debug/state", "tok", nil)
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("debug/state: %d", resp.StatusCode)
 	}
 	// healthz and metrics are open
 	resp, _ = req(t, admin, "GET", a.url+"/healthz", "", nil)
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("healthz: %d", resp.StatusCode)
 	}
 	r2, err := client(nil).Get(a.url + "/metrics")
-	if err != nil || r2.StatusCode != 200 {
+	if err != nil || r2.StatusCode != http.StatusOK {
 		t.Fatalf("metrics: %v %d", err, r2.StatusCode)
 	}
 	r2.Body.Close()
@@ -393,14 +393,14 @@ func TestMachineRouteMatrix(t *testing.T) {
 	// Seed: one record in m1's zone, one outside (admin publish).
 	for _, tp := range []string{"colca/v1/_Metric/m1/m1/temp", "colca/v1/_Metric/other/elsewhere/temp"} {
 		resp, out := req(t, admin, "POST", a.url+"/publish", "tok", map[string]any{"topic": tp, "payload": map[string]any{"v": 1.0}})
-		if resp.StatusCode != 200 {
+		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("seed %s: %d %v", tp, resp.StatusCode, out)
 		}
 	}
 
 	// machine publish: own zone OK (engine rules apply)
 	resp, _ := req(t, mc, "POST", a.url+"/publish", "", map[string]any{"topic": "colca/v1/_Metric/n-test/m1/rpm", "payload": map[string]any{"v": 2.0}})
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("machine publish: %d", resp.StatusCode)
 	}
 	// machine publish with the wrong level-4 → 422 (engine level-4 rule, not
@@ -437,7 +437,7 @@ func TestMachineRouteMatrix(t *testing.T) {
 
 	// machine ack on its own cursor OK; foreign cursor 403
 	resp, _ = req(t, mc, "POST", a.url+"/ack", "", map[string]any{"cursor": "m1/c", "stream": "metrics", "offset": 1})
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("machine ack own cursor: %d", resp.StatusCode)
 	}
 	resp, _ = req(t, mc, "POST", a.url+"/ack", "", map[string]any{"cursor": "other/c", "stream": "metrics", "offset": 1})
@@ -476,12 +476,12 @@ func TestEnrollmentRoutes(t *testing.T) {
 
 	m2 := authtest.NewMachine(t, "m2")
 	resp, out := req(t, admin, "POST", a.url+"/enroll", "tok", m2.EntryJSON(t, "external", a.place(t, "m2")))
-	if resp.StatusCode != 200 || out["ulid"] != "m2" {
+	if resp.StatusCode != http.StatusOK || out["ulid"] != "m2" {
 		t.Fatalf("enroll: %d %v", resp.StatusCode, out)
 	}
 	// the new identity works immediately
 	resp, _ = req(t, client(m2), "GET", a.url+"/fetch?stream=metrics&cursor=m2/c&max=1", "", nil)
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("enrolled machine fetch: %d", resp.StatusCode)
 	}
 
@@ -505,7 +505,7 @@ func TestEnrollmentRoutes(t *testing.T) {
 
 	// revoke; the key stops working
 	resp, _ = req(t, admin, "DELETE", a.url+"/enroll/m2", "tok", nil)
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("revoke: %d", resp.StatusCode)
 	}
 	resp, _ = req(t, client(m2), "GET", a.url+"/fetch?stream=metrics&cursor=m2/c&max=1", "", nil)
@@ -645,7 +645,7 @@ func TestFetchWireShape(t *testing.T) {
 	a := newAPI(t)
 	admin := client(nil)
 	if resp, out := req(t, admin, "POST", a.url+"/publish", "tok",
-		map[string]any{"topic": "colca/v1/_Metric/n-test/x", "payload": map[string]any{"v": 7.5}}); resp.StatusCode != 200 {
+		map[string]any{"topic": "colca/v1/_Metric/n-test/x", "payload": map[string]any{"v": 7.5}}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("%v", out)
 	}
 	_, out := req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=w/c&max=10", "tok", nil)
@@ -891,7 +891,7 @@ func TestPayloadStaysRawJSON(t *testing.T) {
 	if resp, out := req(t, admin, "POST", a.url+"/publish", "tok", map[string]any{
 		"topic":   "colca/v1/_Metric/n-test/line1/temp",
 		"payload": json.RawMessage(`{"v":1,"seq":9007199254740993}`),
-	}); resp.StatusCode != 200 {
+	}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("publish: %d %v", resp.StatusCode, out)
 	}
 
@@ -923,7 +923,7 @@ func TestFetchPrefixAndMax(t *testing.T) {
 	admin := client(nil)
 	for i, tp := range []string{"colca/v1/_Metric/n-test/line1/temp", "colca/v1/_Metric/n-test/line2/temp"} {
 		if resp, out := req(t, admin, "POST", a.url+"/publish", "tok",
-			map[string]any{"topic": tp, "payload": map[string]any{"v": float64(i)}}); resp.StatusCode != 200 {
+			map[string]any{"topic": tp, "payload": map[string]any{"v": float64(i)}}); resp.StatusCode != http.StatusOK {
 			t.Fatalf("seed %s: %d %v", tp, resp.StatusCode, out)
 		}
 	}
@@ -976,7 +976,7 @@ func TestFetchServesATombstoneAsJSONNull(t *testing.T) {
 
 	publish := func(body string) {
 		t.Helper()
-		r := httptest.NewRequest("POST", "/publish", strings.NewReader(body))
+		r := httptest.NewRequest(http.MethodPost, "/publish", strings.NewReader(body))
 		r.Header.Set("X-Colca-Service", "svc1")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, r)
@@ -998,7 +998,7 @@ func TestFetchServesATombstoneAsJSONNull(t *testing.T) {
 		t.Fatalf("tombstone ingest: %v", err)
 	}
 
-	fetchReq := httptest.NewRequest("GET", "/fetch?stream=entities&cursor="+uns.LocalCursorPrefix+"svc1/tomb1&max=10", nil)
+	fetchReq := httptest.NewRequest(http.MethodGet, "/fetch?stream=entities&cursor="+uns.LocalCursorPrefix+"svc1/tomb1&max=10", nil)
 	fetchReq.Header.Set("X-Colca-Service", "svc1")
 	fetchRec := httptest.NewRecorder()
 	h.ServeHTTP(fetchRec, fetchReq)
@@ -1051,7 +1051,7 @@ func TestDebugStateFieldCorrectness(t *testing.T) {
 
 	if resp, pub := req(t, admin, "POST", a.url+"/publish", "tok", map[string]any{
 		"topic": "colca/v1/_Metric/n-test/line1/temp", "payload": map[string]any{"v": 1.0},
-	}); resp.StatusCode != 200 {
+	}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("publish: %d %v", resp.StatusCode, pub)
 	}
 
@@ -1085,7 +1085,7 @@ func TestAdminTokenComparisonRejectsSameLengthMismatch(t *testing.T) {
 	srv := plainHandler(t, cfg, metrics.New(st, config.Retention{}, nil))
 
 	resp, _ := req(t, srv.Client(), "GET", srv.URL+"/kv", "tok", nil)
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("correct token: want 200, got %d", resp.StatusCode)
 	}
 
@@ -1335,7 +1335,7 @@ func TestEmptyConfiguredTokenDeniesEveryone(t *testing.T) {
 		}
 	}
 	resp, _ := req(t, srv.Client(), "GET", srv.URL+"/healthz", "", nil)
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatal("healthz must stay tokenless")
 	}
 }
@@ -1371,7 +1371,7 @@ func TestFetchGapServedToScopedMachine(t *testing.T) {
 
 	// Acking past the LWM clears the gap for the machine exactly as for the
 	// admin — the gap lifecycle is cursor-driven, not grant-driven.
-	if resp, _ := req(t, mc, "POST", a.url+"/ack", "", map[string]any{"cursor": "m1/c", "stream": "metrics", "offset": 4}); resp.StatusCode != 200 {
+	if resp, _ := req(t, mc, "POST", a.url+"/ack", "", map[string]any{"cursor": "m1/c", "stream": "metrics", "offset": 4}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("machine ack: %d", resp.StatusCode)
 	}
 	_, body = raw(t, mc, "GET", a.url+"/fetch?stream=metrics&cursor=m1/c", "", "")
@@ -1392,7 +1392,7 @@ func TestHumanRouteMatrix(t *testing.T) {
 	// Seed: one record in the granted zone, one outside.
 	for _, tp := range []string{"colca/v1/_Metric/m1/m1/temp", "colca/v1/_Metric/x/elsewhere/temp"} {
 		if resp, out := req(t, admin, "POST", a.url+"/publish", "tok",
-			map[string]any{"topic": tp, "payload": map[string]any{"v": 1.0}}); resp.StatusCode != 200 {
+			map[string]any{"topic": tp, "payload": map[string]any{"v": 1.0}}); resp.StatusCode != http.StatusOK {
 			t.Fatalf("seed %s: %d %v", tp, resp.StatusCode, out)
 		}
 	}
@@ -1411,7 +1411,7 @@ func TestHumanRouteMatrix(t *testing.T) {
 
 	// ack: own cursor moves, foreign cursor 403.
 	if resp, _ := bearerReq(t, hc, "POST", a.url+"/ack", tok,
-		map[string]any{"cursor": "anna/c", "stream": "metrics", "offset": 1}); resp.StatusCode != 200 {
+		map[string]any{"cursor": "anna/c", "stream": "metrics", "offset": 1}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("human ack own cursor: %d", resp.StatusCode)
 	}
 	if resp, _ := bearerReq(t, hc, "POST", a.url+"/ack", tok,
@@ -1433,7 +1433,7 @@ func TestHumanRouteMatrix(t *testing.T) {
 	if resp, out := bearerReq(t, hc, "POST", a.url+"/publish", tok, map[string]any{
 		"topic":   "colca/v1/_CmdParam/m1/m1/set-speed",
 		"payload": map[string]any{"correlation_id": "h1", "expires_at": float64(99999999999999)},
-	}); resp.StatusCode != 200 || out["stream"] != "commands" {
+	}); resp.StatusCode != http.StatusOK || out["stream"] != "commands" {
 		t.Fatalf("human command publish: %d %v", resp.StatusCode, out)
 	}
 	if resp, out := bearerReq(t, hc, "POST", a.url+"/publish", tok, map[string]any{
@@ -1469,19 +1469,19 @@ func TestHumanAdminGrant(t *testing.T) {
 
 	m2 := authtest.NewMachine(t, "m2")
 	resp, out := bearerReq(t, hc, "POST", a.url+"/enroll", adminTok, m2.EntryJSON(t, "external", a.place(t, "m2")))
-	if resp.StatusCode != 200 || out["ulid"] != "m2" {
+	if resp.StatusCode != http.StatusOK || out["ulid"] != "m2" {
 		t.Fatalf("human admin enroll: %d %v", resp.StatusCode, out)
 	}
-	if resp, _ := bearerReq(t, hc, "GET", a.url+"/enroll", adminTok, nil); resp.StatusCode != 200 {
+	if resp, _ := bearerReq(t, hc, "GET", a.url+"/enroll", adminTok, nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("human admin list: %d", resp.StatusCode)
 	}
-	if resp, _ := bearerReq(t, hc, "DELETE", a.url+"/enroll/m2", adminTok, nil); resp.StatusCode != 200 {
+	if resp, _ := bearerReq(t, hc, "DELETE", a.url+"/enroll/m2", adminTok, nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("human admin revoke: %d", resp.StatusCode)
 	}
 	// admin does NOT widen reads: fetch returns only what read grants cover
 	// (boss has none → zero records despite seeded data).
 	if resp, out := req(t, client(nil), "POST", a.url+"/publish", "tok",
-		map[string]any{"topic": "colca/v1/_Metric/m1/m1/t", "payload": map[string]any{"v": 1.0}}); resp.StatusCode != 200 {
+		map[string]any{"topic": "colca/v1/_Metric/m1/m1/t", "payload": map[string]any{"v": 1.0}}); resp.StatusCode != http.StatusOK {
 		t.Fatalf("seed: %v", out)
 	}
 	_, out = bearerReq(t, hc, "GET", a.url+"/fetch?stream=metrics&cursor=boss/c&max=10", adminTok, nil)
@@ -1504,7 +1504,7 @@ func TestBearerFailuresAreTerminal(t *testing.T) {
 
 	// Bad bearer + VALID admin token in the same request: still 401 (mutation
 	// guard for the no-fallthrough rule).
-	r, err := http.NewRequest("GET", a.url+"/debug/state", nil)
+	r, err := http.NewRequest(http.MethodGet, a.url+"/debug/state", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1692,7 +1692,7 @@ func testRegistry(t *testing.T, h *localAPI) *registry.Manager {
 
 func TestTheLocalHandlerIdentifiesByHeaderAndRegisters(t *testing.T) {
 	h := newLocalHandler(t)
-	req := httptest.NewRequest("GET", "/kv", nil)
+	req := httptest.NewRequest(http.MethodGet, "/kv", nil)
 	req.Header.Set("X-Colca-Service", "connector-opcua")
 	req.Header.Set("X-Colca-Mount", "line1/press3")
 
@@ -1907,7 +1907,7 @@ func TestLocalSelfReturnsTheMintedIdentityAndAuthoritativeMount(t *testing.T) {
 	// /self must resolve the caller's registry binding directly.
 	authtest.Place(t, h.eng, "unrelated")
 
-	req := httptest.NewRequest("GET", "/self", nil)
+	req := httptest.NewRequest(http.MethodGet, "/self", nil)
 	req.Header.Set("X-Colca-Service", "connector-opcua")
 	req.Header.Set("X-Colca-Mount", "line1/press3")
 	rec := httptest.NewRecorder()
@@ -1952,7 +1952,7 @@ func TestLocalSelfReturnsTheMintedIdentityAndAuthoritativeMount(t *testing.T) {
 
 func TestLocalSelfRegistersAnUndeclaredServiceAtTheNode(t *testing.T) {
 	h := newLocalHandler(t)
-	req := httptest.NewRequest("GET", "/self", nil)
+	req := httptest.NewRequest(http.MethodGet, "/self", nil)
 	req.Header.Set("X-Colca-Service", "dataops")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -1985,7 +1985,7 @@ func TestLocalConfigureResponseNamesProducedStateOffset(t *testing.T) {
 			}]
 		}
 	}`)
-	req := httptest.NewRequest("POST", "/publish", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/publish", bytes.NewReader(body))
 	req.Header.Set("X-Colca-Service", "api")
 	rec := httptest.NewRecorder()
 
@@ -2030,7 +2030,7 @@ func TestLocalSelfReflectsOperatorRepositionInsteadOfTheDeclaration(t *testing.T
 	// The container still declares its original startup mount. Register must
 	// treat that declaration as a seed only, and /self must return the current
 	// registry position chosen by the operator.
-	req := httptest.NewRequest("GET", "/self", nil)
+	req := httptest.NewRequest(http.MethodGet, "/self", nil)
 	req.Header.Set("X-Colca-Service", "connector-opcua")
 	req.Header.Set("X-Colca-Mount", "line1/press3")
 	rec := httptest.NewRecorder()
@@ -2078,7 +2078,7 @@ func TestTheLocalHandlerServesHealthAndMetrics(t *testing.T) {
 	h := newLocalHandler(t)
 	for _, path := range []string{"/healthz", "/metrics"} {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != 200 {
 			t.Fatalf("GET %s on the local door = %d; Prometheus is itself a local service", path, rec.Code)
 		}
@@ -2092,7 +2092,7 @@ func TestTheLocalHandlerRequiresAName(t *testing.T) {
 		t.Fatalf("%s = %v before any request, want 0", line, v)
 	}
 
-	req := httptest.NewRequest("GET", "/kv", nil)
+	req := httptest.NewRequest(http.MethodGet, "/kv", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -2141,7 +2141,7 @@ func TestTheLocalHandlerRefusesAKeyedIdentityFoundByName(t *testing.T) {
 		t.Fatalf("%s = %v before any request, want 0", line, v)
 	}
 
-	req := httptest.NewRequest("GET", "/kv", nil)
+	req := httptest.NewRequest(http.MethodGet, "/kv", nil)
 	req.Header.Set("X-Colca-Service", "friendly-name")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -2183,7 +2183,7 @@ func TestTheLocalHandlerRefusesANameThatCollidesWithAnotherEntrysULID(t *testing
 		t.Fatalf("%s = %v before any request, want 0", line, v)
 	}
 
-	req := httptest.NewRequest("GET", "/kv", nil)
+	req := httptest.NewRequest(http.MethodGet, "/kv", nil)
 	req.Header.Set("X-Colca-Service", "01JMACHINE")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -2207,7 +2207,7 @@ func TestTheLocalHandlerRefusesANameThatCollidesWithAnotherEntrysULID(t *testing
 // the test merely intends to use.
 func registerLocal(t *testing.T, h *localAPI, name, mount string) {
 	t.Helper()
-	req := httptest.NewRequest("GET", "/kv", nil)
+	req := httptest.NewRequest(http.MethodGet, "/kv", nil)
 	req.Header.Set("X-Colca-Service", name)
 	if mount != "" {
 		req.Header.Set("X-Colca-Mount", mount)
@@ -2237,7 +2237,7 @@ func TestTheLocalHandlerFetchAndAckWorkWithANameNamespacedCursor(t *testing.T) {
 	}
 
 	cursor := uns.LocalCursorPrefix + "connector-opcua/c1"
-	fetchReq := httptest.NewRequest("GET", "/fetch?stream=metrics&cursor="+cursor+"&max=10", nil)
+	fetchReq := httptest.NewRequest(http.MethodGet, "/fetch?stream=metrics&cursor="+cursor+"&max=10", nil)
 	fetchReq.Header.Set("X-Colca-Service", "connector-opcua")
 	fetchRec := httptest.NewRecorder()
 	h.ServeHTTP(fetchRec, fetchReq)
@@ -2259,7 +2259,7 @@ func TestTheLocalHandlerFetchAndAckWorkWithANameNamespacedCursor(t *testing.T) {
 	}
 
 	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":%d}`, cursor, int64(offset))
-	ackReq := httptest.NewRequest("POST", "/ack", strings.NewReader(ackBody))
+	ackReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(ackBody))
 	ackReq.Header.Set("X-Colca-Service", "connector-opcua")
 	ackRec := httptest.NewRecorder()
 	h.ServeHTTP(ackRec, ackReq)
@@ -2278,7 +2278,7 @@ func TestTheLocalHandlerFetchAndAckWorkWithANameNamespacedCursor(t *testing.T) {
 
 	// And the cursor genuinely moved: fetching again from the same cursor now
 	// returns nothing left to read.
-	fetchReq2 := httptest.NewRequest("GET", "/fetch?stream=metrics&cursor="+cursor+"&max=10", nil)
+	fetchReq2 := httptest.NewRequest(http.MethodGet, "/fetch?stream=metrics&cursor="+cursor+"&max=10", nil)
 	fetchReq2.Header.Set("X-Colca-Service", "connector-opcua")
 	fetchRec2 := httptest.NewRecorder()
 	h.ServeHTTP(fetchRec2, fetchReq2)
@@ -2302,7 +2302,7 @@ func TestTheLocalHandlerRefusesToAckAnotherServicesCursor(t *testing.T) {
 	registerLocal(t, h, "connector-b", "")
 
 	body := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":0}`, uns.LocalCursorPrefix+"connector-a/c1")
-	req := httptest.NewRequest("POST", "/ack", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(body))
 	req.Header.Set("X-Colca-Service", "connector-b")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -2329,7 +2329,7 @@ func TestTheLocalHandlerDeletesItsOwnCursor(t *testing.T) {
 	// sitting at the default — proving the later "back to default" read
 	// really observed the delete, not a cursor that was never touched.
 	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":5}`, cursor)
-	ackReq := httptest.NewRequest("POST", "/ack", strings.NewReader(ackBody))
+	ackReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(ackBody))
 	ackReq.Header.Set("X-Colca-Service", "connector-opcua")
 	ackRec := httptest.NewRecorder()
 	h.ServeHTTP(ackRec, ackReq)
@@ -2341,7 +2341,7 @@ func TestTheLocalHandlerDeletesItsOwnCursor(t *testing.T) {
 	}
 
 	delBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","delete":true}`, cursor)
-	delReq := httptest.NewRequest("POST", "/ack", strings.NewReader(delBody))
+	delReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(delBody))
 	delReq.Header.Set("X-Colca-Service", "connector-opcua")
 	delRec := httptest.NewRecorder()
 	h.ServeHTTP(delRec, delReq)
@@ -2377,7 +2377,7 @@ func TestTheLocalHandlerRefusesToDeleteAnotherServicesCursor(t *testing.T) {
 	// that silently succeeded would be observable — the presence this test's
 	// "still there" assertion depends on.
 	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":2}`, cursor)
-	ackReq := httptest.NewRequest("POST", "/ack", strings.NewReader(ackBody))
+	ackReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(ackBody))
 	ackReq.Header.Set("X-Colca-Service", "connector-a")
 	ackRec := httptest.NewRecorder()
 	h.ServeHTTP(ackRec, ackReq)
@@ -2391,7 +2391,7 @@ func TestTheLocalHandlerRefusesToDeleteAnotherServicesCursor(t *testing.T) {
 	}
 
 	body := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","delete":true}`, cursor)
-	req := httptest.NewRequest("POST", "/ack", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(body))
 	req.Header.Set("X-Colca-Service", "connector-b")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -2429,7 +2429,7 @@ func TestTheLocalHandlerAcksFreshAfterDeletingACursor(t *testing.T) {
 	cursor := uns.LocalCursorPrefix + "connector-opcua/gen1"
 
 	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":9}`, cursor)
-	ackReq := httptest.NewRequest("POST", "/ack", strings.NewReader(ackBody))
+	ackReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(ackBody))
 	ackReq.Header.Set("X-Colca-Service", "connector-opcua")
 	ackRec := httptest.NewRecorder()
 	h.ServeHTTP(ackRec, ackReq)
@@ -2441,7 +2441,7 @@ func TestTheLocalHandlerAcksFreshAfterDeletingACursor(t *testing.T) {
 	}
 
 	delBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","delete":true}`, cursor)
-	delReq := httptest.NewRequest("POST", "/ack", strings.NewReader(delBody))
+	delReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(delBody))
 	delReq.Header.Set("X-Colca-Service", "connector-opcua")
 	delRec := httptest.NewRecorder()
 	h.ServeHTTP(delRec, delReq)
@@ -2453,7 +2453,7 @@ func TestTheLocalHandlerAcksFreshAfterDeletingACursor(t *testing.T) {
 	// name had never been used: it moves (CursorAck's monotonic guard compares
 	// against the default of 1, not against the erased position of 10).
 	reAckBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":1}`, cursor)
-	reAckReq := httptest.NewRequest("POST", "/ack", strings.NewReader(reAckBody))
+	reAckReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(reAckBody))
 	reAckReq.Header.Set("X-Colca-Service", "connector-opcua")
 	reAckRec := httptest.NewRecorder()
 	h.ServeHTTP(reAckRec, reAckReq)
@@ -2580,7 +2580,7 @@ func localPublish(t *testing.T, h *localAPI, headers map[string]string, body map
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest("POST", "/publish", bytes.NewReader(raw))
+	req := httptest.NewRequest(http.MethodPost, "/publish", bytes.NewReader(raw))
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}

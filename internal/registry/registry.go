@@ -83,7 +83,11 @@ func New(st *store.Store, nodeULID string) (*Manager, error) {
 		byPK:   map[string]string{},
 		byName: map[string]string{},
 	}
-	for ulid, raw := range st.RegistryScan() {
+	persisted, err := st.RegistryScan()
+	if err != nil {
+		return nil, fmt.Errorf("registry: load persisted entries: %w", err)
+	}
+	for ulid, raw := range persisted {
 		var e uns.Entry
 		if err := json.Unmarshal(raw, &e); err != nil {
 			return nil, fmt.Errorf("registry: corrupt persisted entry %s: %w", ulid, err)
@@ -674,13 +678,13 @@ func (m *Manager) List() []*uns.Entry {
 
 // ListPage returns a stable ULID-ordered page. after is the last ULID from the
 // preceding page; an empty next value means the registry is exhausted.
-func (m *Manager) ListPage(after string, max int) (entries []*uns.Entry, next string) {
-	if max <= 0 {
+func (m *Manager) ListPage(after string, limit int) (entries []*uns.Entry, next string) {
+	if limit <= 0 {
 		return nil, ""
 	}
 	all := m.List()
 	start := sort.Search(len(all), func(i int) bool { return all[i].ULID > after })
-	end := start + max
+	end := start + limit
 	if end > len(all) {
 		end = len(all)
 	}

@@ -2,6 +2,7 @@
 // one responsibility (the lifecycle of enrolled entries) and this one carries
 // the other: how an unprovisioned local service becomes an entry
 // (local-service-trust design §3.2).
+
 package registry
 
 import (

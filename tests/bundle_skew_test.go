@@ -144,7 +144,7 @@ func TestBundleRolloutSkewAcrossTheTree(t *testing.T) {
 		return newRequest("POST", "https://"+parent.APIAddr+"/publish", tok, string(body))
 	})
 	defer resp.Body.Close()
-	if resp.StatusCode != 422 {
+	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("the N-pinned parent must reject the unknown contract, got %d", resp.StatusCode)
 	}
 }

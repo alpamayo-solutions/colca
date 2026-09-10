@@ -12,6 +12,7 @@
 // what a verb does lives behind the CommandExecutor port. That is what keeps
 // domain knowledge — the Colca data model in particular — out of the broker
 // core and inside the plugin that owns it.
+
 package engine
 
 import (

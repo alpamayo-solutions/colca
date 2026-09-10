@@ -91,9 +91,9 @@ func TestADownlinkPollWithNoProgressIsNotRepeatedImmediately(t *testing.T) {
 			polls, window)
 	}
 	// One hello plus one poll per retryAfter, with slack for scheduling.
-	if max := int64(window/retryAfter) + 5; polls > max {
+	if limit := int64(window/retryAfter) + 5; polls > limit {
 		t.Fatalf("the child polled %d times in %s (at most %d expected) — a fruitless poll is repeated at once, "+
-			"which is a busy loop at the parent's rate limit", polls, window, max)
+			"which is a busy loop at the parent's rate limit", polls, window, limit)
 	}
 }
 

@@ -8,6 +8,7 @@
 // and it never existed at all for a command issued before the machine's first
 // connect. Those two cases are what this selection rule serves: the durable
 // copy on the commands stream is replayed to the machine when it subscribes.
+
 package uns
 
 import "strings"

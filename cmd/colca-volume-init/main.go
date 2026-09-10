@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -160,13 +161,18 @@ func positiveID(name, raw string) (int, error) {
 	return id, nil
 }
 
-func chownTree(root string, uid, gid int) error {
-	return filepath.WalkDir(root, func(path string, _ os.DirEntry, walkErr error) error {
+func chownTree(dir string, uid, gid int) error {
+	// Walking through os.Root keeps a symlink from leading out of the volume.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return fs.WalkDir(root.FS(), ".", func(path string, _ fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		// Lchown never follows a symlink out of the named volume.
-		return os.Lchown(path, uid, gid)
+		return root.Lchown(path, uid, gid)
 	})
 }
 
@@ -184,11 +190,11 @@ func stageTLS(certSource, keySource, targetDir string, uid, gid int) error {
 }
 
 func copyAtomic(source, target string, mode os.FileMode, uid, gid int) (returnErr error) {
-	src, err := os.Open(source)
+	src, err := os.Open(source) //nolint:gosec // the file named in the container arguments
 	if err != nil {
 		return err
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".colca-volume-init-")
 	if err != nil {

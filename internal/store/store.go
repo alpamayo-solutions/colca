@@ -125,17 +125,17 @@ func Open(dir string) (*Store, error) {
 	for _, stream := range streams {
 		next, err := readCounter(db, metaKey(stream), 1, "meta", stream)
 		if err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 		lwm, err := readCounter(db, lwmKey(stream), 1, "low-water mark", stream)
 		if err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 		liveBytes, err := readCounter(db, bytesKey(stream), 0, "byte counter", stream)
 		if err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 		s.next[stream] = next
@@ -144,14 +144,14 @@ func Open(dir string) (*Store, error) {
 		// Validate the prune journal with the same fail-loud discipline: a
 		// corrupt entry would misreport gap spans for as long as it lived.
 		if _, err := s.readJournal(stream); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 		// Same for the pending-refresh range: a corrupt rp/ silently read as
 		// "nothing pending" would drop a crash-persisted refresh obligation —
 		// exactly the loss the key exists to prevent.
 		if err := validateRefreshPending(db, stream); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 	}
@@ -384,19 +384,19 @@ func (s *Store) NextOffset(stream string) uint64 {
 // Read returns up to max records with Offset >= from, optionally topic-filtered.
 // It is the compatibility wrapper for callers whose view depends only on the
 // topic. New payload-aware views use ReadRecords.
-func (s *Store) Read(stream string, from uint64, max int, filter func(string) bool) (out []StoredRecord, next uint64, err error) {
+func (s *Store) Read(stream string, from uint64, limit int, filter func(string) bool) (out []StoredRecord, next uint64, err error) {
 	var recordFilter func(StoredRecord) bool
 	if filter != nil {
 		recordFilter = func(record StoredRecord) bool { return filter(record.Topic) }
 	}
-	return s.ReadRecords(stream, from, max, recordFilter)
+	return s.ReadRecords(stream, from, limit, recordFilter)
 }
 
 // ReadRecords returns up to max matching records with Offset >= from.
 // next is the scanned position + 1, including filtered-out records. A consumer
 // can therefore advance through a sparse server-side view without rereading
 // unrelated records forever.
-func (s *Store) ReadRecords(stream string, from uint64, max int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
+func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: streamKey(stream, from),
 		UpperBound: streamKey(stream, ^uint64(0)),
@@ -406,7 +406,7 @@ func (s *Store) ReadRecords(stream string, from uint64, max int, filter func(Sto
 	}
 	defer iter.Close()
 	next = from
-	for iter.First(); iter.Valid() && len(out) < max; iter.Next() {
+	for iter.First(); iter.Valid() && len(out) < limit; iter.Next() {
 		key := iter.Key()
 		off := binary.BigEndian.Uint64(key[len(key)-8:])
 		var e recEnc
@@ -424,6 +424,9 @@ func (s *Store) ReadRecords(stream string, from uint64, max int, filter func(Sto
 			continue
 		}
 		out = append(out, record)
+	}
+	if err := iter.Error(); err != nil {
+		return nil, next, err
 	}
 	return out, next, nil
 }
@@ -547,7 +550,7 @@ func (s *Store) CursorMarkSeen(name, stream string, ts int64) {
 	if s.readU64(ctKey(name, stream), 0) != 0 {
 		return
 	}
-	if err := s.db.Set(ctKey(name, stream), be64(uint64(ts)), pebble.Sync); err != nil {
+	if err := s.db.Set(ctKey(name, stream), be64(uint64(ts)), pebble.Sync); err != nil { //nolint:gosec // an int64 timestamp stored bit for bit
 		// Non-fatal by design (the caller treats the cursor as fresh either
 		// way), but never silent: an unpersisted sighting rewinds the
 		// staleness clock on the next restart.
@@ -587,13 +590,13 @@ type HWMInfo struct {
 // {prefix, 0xFF}: only keys whose SECOND byte is the \x00 separator belong to
 // the family — a wider bound would sweep up multi-byte prefixes sharing the
 // first byte (concretely: ct/ cursor timestamps inside the c/ cursor scan).
-func (s *Store) scanU64Pairs(prefix byte, fn func(first, second string, v uint64)) {
+func (s *Store) scanU64Pairs(prefix byte, fn func(first, second string, v uint64)) error {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: []byte{prefix, 0x00},
 		UpperBound: []byte{prefix, 0x01},
 	})
 	if err != nil {
-		return
+		return err
 	}
 	defer iter.Close()
 	for iter.First(); iter.Valid(); iter.Next() {
@@ -608,17 +611,21 @@ func (s *Store) scanU64Pairs(prefix byte, fn func(first, second string, v uint64
 		}
 		fn(key[:sep], key[sep+1:], binary.BigEndian.Uint64(v))
 	}
+	return iter.Error()
 }
 
 // Cursors returns every persisted cursor. Read-only.
 func (s *Store) Cursors() []CursorInfo {
 	var out []CursorInfo
-	s.scanU64Pairs('c', func(name, stream string, v uint64) {
+	err := s.scanU64Pairs('c', func(name, stream string, v uint64) {
 		out = append(out, CursorInfo{
 			Name: name, Stream: stream, Position: v,
-			LastAdvanceMS: int64(s.readU64(ctKey(name, stream), 0)),
+			LastAdvanceMS: int64(s.readU64(ctKey(name, stream), 0)), //nolint:gosec // stored bit for bit
 		})
 	})
+	if err != nil {
+		slog.Warn("store: cursor scan stopped early", "err", err)
+	}
 	return out
 }
 
@@ -663,9 +670,12 @@ func (s *Store) ProtectedCursors(stream string, now time.Time, window time.Durat
 // HWMs returns every persisted replication high-water mark. Read-only.
 func (s *Store) HWMs() []HWMInfo {
 	var out []HWMInfo
-	s.scanU64Pairs('h', func(child, stream string, v uint64) {
+	err := s.scanU64Pairs('h', func(child, stream string, v uint64) {
 		out = append(out, HWMInfo{Child: child, Stream: stream, HWM: v})
 	})
+	if err != nil {
+		slog.Warn("store: high-water mark scan stopped early", "err", err)
+	}
 	return out
 }
 
@@ -897,6 +907,9 @@ func (s *Store) readJournal(stream string) ([]PruneSpan, error) {
 			Coalesced: e.Coalesced,
 		})
 	}
+	if err := iter.Error(); err != nil {
+		return nil, fmt.Errorf("read prune journal for stream %q: %w", stream, err)
+	}
 	return out, nil
 }
 
@@ -912,11 +925,11 @@ func setJournal(b *pebble.Batch, stream string, span PruneSpan) error {
 // entries (union range, min/max ts, marked Coalesced) while the journal would
 // exceed journalCap. Called under s.mu.
 func (s *Store) writeJournal(b *pebble.Batch, stream string, span PruneSpan) error {
-	existing, err := s.readJournal(stream)
+	entries, err := s.readJournal(stream)
 	if err != nil {
 		return err
 	}
-	entries := append(existing, span)
+	entries = append(entries, span)
 	merged := false
 	for len(entries) > journalCap {
 		next := entries[1]
@@ -1055,14 +1068,16 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	for _, name := range overridden {
 		ov[name] = true
 	}
-	s.scanU64Pairs('c', func(name, cstream string, pos uint64) {
+	if err := s.scanU64Pairs('c', func(name, cstream string, pos uint64) {
 		if cstream != stream || ov[name] {
 			return
 		}
 		if pos < upTo {
 			upTo = pos
 		}
-	})
+	}); err != nil {
+		return 0, err
+	}
 	if upTo <= lwm {
 		return 0, nil // a live cursor moved into the doomed range: nothing may go
 	}
@@ -1211,7 +1226,7 @@ func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64
 			break
 		}
 	}
-	return nil
+	return iter.Error()
 }
 
 // DefaultPolicyScanCap bounds how many records a single PolicyPruneTarget
@@ -1350,8 +1365,8 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 // topic`), so a non-matching entry is skipped WITHOUT ever JSON-decoding its
 // payload — the whole point of filtering in the scan, not after it. A nil or
 // empty contracts matches everything, same as before this parameter existed.
-func (s *Store) KVScanPage(prefix, after string, max int, contracts []string) ([]KVEntry, string, error) {
-	if max <= 0 {
+func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) ([]KVEntry, string, error) {
+	if limit <= 0 {
 		return nil, "", fmt.Errorf("store: KV page size must be positive")
 	}
 	var want map[string]bool
@@ -1381,10 +1396,10 @@ func (s *Store) KVScanPage(prefix, after string, max int, contracts []string) ([
 		}
 	}
 
-	out := make([]KVEntry, 0, max)
+	out := make([]KVEntry, 0, limit)
 	matched := 0
 	var lastKey []byte
-	for valid && matched < max {
+	for valid && matched < limit {
 		lastKey = append(lastKey[:0], iter.Key()...)
 		key := string(iter.Key()[2:]) // strip "k\x00"
 		if pathSep := strings.IndexByte(key, 0); pathSep >= 0 {
@@ -1451,10 +1466,10 @@ func (s *Store) DiskMetrics() DiskMetrics {
 	m := s.db.Metrics()
 	var level uint64
 	for i := range m.Levels {
-		level += uint64(m.Levels[i].TableBytesFlushed) + uint64(m.Levels[i].TableBytesCompacted)
+		level += m.Levels[i].TableBytesFlushed + m.Levels[i].TableBytesCompacted
 	}
 	return DiskMetrics{
-		WALBytesWritten:   uint64(m.WAL.BytesWritten),
+		WALBytesWritten:   m.WAL.BytesWritten,
 		LevelBytesWritten: level,
 		DiskUsageBytes:    m.DiskSpaceUsage(),
 	}

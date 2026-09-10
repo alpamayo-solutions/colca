@@ -1,6 +1,8 @@
+// Command colca-healthcheck exits 0 when a URL answers 200 OK, for container health checks.
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,15 +17,25 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: colca-healthcheck [url]")
 		os.Exit(2)
 	}
-	client := &http.Client{Timeout: 2 * time.Second}
-	response, err := client.Get(url)
-	if err != nil {
+	if err := check(url); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func check(url string) error {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	response, err := client.Do(req)
+	if err != nil {
+		return err
+	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		fmt.Fprintf(os.Stderr, "HTTP %d\n", response.StatusCode)
-		os.Exit(1)
+		return fmt.Errorf("HTTP %d", response.StatusCode)
 	}
+	return nil
 }

@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -33,7 +34,7 @@ func RSSBytes(pid int) (uint64, error) {
 		}
 		return 0, fmt.Errorf("no VmRSS line in /proc/%d/status", pid)
 	}
-	out, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(pid)).Output()
+	out, err := exec.CommandContext(context.Background(), "ps", "-o", "rss=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return 0, err
 	}

@@ -31,7 +31,7 @@ func mountBlobRoutes(
 	}
 
 	mux.HandleFunc("POST /blobs", auth(limitClassTransfer, transferPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
-		r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes))
+		r.Body = http.MaxBytesReader(w, r.Body, int64(maxBytes)) //nolint:gosec // config caps max_blob_bytes
 		sha, size, err := blobs.Put(r.Body, r.Header.Get("X-Colca-Blob-SHA256"))
 		// BlobTransfer is deliberately NOT counted on this door, unlike the
 		// repl door's handleBlobPut/handleBlobGet. That metric family means

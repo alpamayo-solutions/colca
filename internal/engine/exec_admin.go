@@ -3,6 +3,7 @@
 // registry is colca's own tree membership, not domain data. It reaches the
 // engine through the same CommandExecutor port as every other executor, so the
 // dispatch has no special case for it.
+
 package engine
 
 import (

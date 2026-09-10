@@ -137,7 +137,7 @@ func batchTxFailingAt(failAt int, failErr error) *fakeTx {
 			n := b.Len()
 			execs := make([]func() (pgconn.CommandTag, error), n)
 			for i := range execs {
-				i := i
+
 				execs[i] = func() (pgconn.CommandTag, error) {
 					if i == failAt {
 						return pgconn.CommandTag{}, failErr

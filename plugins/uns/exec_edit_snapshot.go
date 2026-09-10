@@ -6,6 +6,7 @@
 // what makes a edit apply atomic in the sense the UI needs: the versions a
 // browser saw are the versions the command is judged against, and a concurrent
 // edit is a 409 rather than a lost update.
+
 package uns
 
 import (

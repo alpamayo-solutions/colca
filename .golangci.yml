@@ -1,0 +1,58 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - copyloopvar
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - revive
+    - unconvert
+    - usestdlibvars
+  settings:
+    errcheck:
+      exclude-functions:
+        # Closing something that was only read loses nothing: response bodies,
+        # blob readers and Pebble value handles.
+        - (io.ReadCloser).Close
+        - (io.Closer).Close
+        # Closing a batch or an iterator releases it. Commit and iterator
+        # errors are checked where they happen.
+        - (*github.com/cockroachdb/pebble/v2.Batch).Close
+        - (*github.com/cockroachdb/pebble/v2.Iterator).Close
+    gosec:
+      excludes:
+        # Unchecked errors are errcheck's job; G104 would report them twice.
+        - G104
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: redefines-builtin-id
+        - name: var-declaration
+        - name: unexported-return
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [errcheck, bodyclose, noctx, gosec]
+      # Doc comments are required on the public packages only.
+      - path: (^|/)(internal|cmd|bench)/|_test\.go
+        linters: [revive]
+        text: "^exported:"
+      # The benchmark runs the binary and reads the files named on its command line.
+      - path: (^|/)bench/
+        linters: [gosec]
+        text: "G204|G304"
+      # These clients only call the node or parent URL from their own configuration.
+      - path: (^|/)(cmd/colca-healthcheck|cmd/colca-service|internal/repl)/
+        linters: [gosec]
+        text: "G704"
+
+formatters:
+  enable:
+    - gofmt
