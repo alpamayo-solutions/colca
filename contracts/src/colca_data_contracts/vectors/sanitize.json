@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden `sanitize` vectors (path-collision parity). plugins/uns/exec_configure.go's sanitize is the one owner of this fact (architecture principle 4); a client that validates before submitting keeps a native copy so it can predict Go's model-slot path collisions BEFORE execute. Necessary duplication (architecture principle 2, tier 2): one checked-in dataset judged by colca's Go suite (plugins/uns/sanitize_test.go) and by the suite of every native copy, so the copies can never drift apart silently. sanitize replaces '/', '+', '#', ' ' and any control character (codepoint < 0x20) with '_', trims leading/trailing '_' runs, and falls back to \"tag\" when nothing is left.",
+  "_comment": "Golden `sanitize` vectors. sanitize in plugins/uns/exec_configure.go owns this rule; a client that validates before submitting keeps a native copy to predict model-slot path collisions before execution. One dataset judged by colca's Go suite (plugins/uns/sanitize_test.go) and by every native copy, so the copies cannot drift apart. sanitize replaces '/', '+', '#', ' ' and any control character (codepoint < 0x20) with '_', trims leading and trailing '_' runs, and falls back to \"tag\" when nothing is left.",
   "cases": [
     {
       "name": "temperature",

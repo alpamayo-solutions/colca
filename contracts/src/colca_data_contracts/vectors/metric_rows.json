@@ -70,7 +70,7 @@
     }
   ],
   "timestamps": {
-    "_comment": "Pins the wire unit for Metric.timestamp: unix seconds, float, fractional part allowed (franzmq's default `datetime.now(UTC).timestamp()`; connector/src/reader.py and dataops/src/dataops/outputs.py agree). Only colca-historian (Go) decodes this field from the wire, so these vectors are judged by vectors_test.go alone -- the Python suite reads timestamps back out of Postgres, already decoded, and never re-parses the wire value.",
+    "_comment": "Pins the wire unit of Metric.timestamp: unix seconds as a float, fractional part allowed, which is franzmq's default `datetime.now(UTC).timestamp()`. Only colca-historian decodes this field from the wire, so only vectors_test.go judges these vectors; the Python suite reads timestamps back from Postgres, already decoded.",
     "store_ts_ms": 1755600000000,
     "cases": [
       {

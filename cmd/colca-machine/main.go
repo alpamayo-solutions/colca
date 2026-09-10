@@ -199,7 +199,7 @@ func run() int {
 	// machine's own. There is no default: a guessed node would refuse the traffic.
 	nodeULID := env("NODE_ULID", "")
 	if nodeULID == "" {
-		log.Error("NODE_ULID is required — colca-machine publishes under the node's own identity now, not its own (local-service-trust design §2)")
+		log.Error("NODE_ULID is required: colca-machine publishes under the node's identity")
 		return 1
 	}
 	interval := publishInterval(log)
@@ -425,7 +425,7 @@ func handleCommand(ctx context.Context, log *slog.Logger, c pahomqtt.Client, uli
 	}
 	syncedNow, offsetMS, deadlineHit := ts.Await(ctx)
 	if deadlineHit {
-		log.Warn("time-sync hold deadline reached with no post-connect beacon — proceeding on last-known offset (design §2.3 rule 2)",
+		log.Warn("time-sync hold deadline reached with no post-connect beacon; proceeding on the last known offset",
 			"offset_ms", offsetMS)
 	}
 	code, message := result(cmd, syncedNow.UnixMilli())

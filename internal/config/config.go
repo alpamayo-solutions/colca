@@ -672,7 +672,7 @@ func (r Retention) validate() error {
 	}
 	commands := r.EffectiveStream("commands")
 	if time.Duration(commands.MaxAge) < minCommandsMaxAge {
-		return fmt.Errorf("config: retention.streams.commands.max_age must be >= %s (build-time command-TTL floor, design §3.4), got %s",
+		return fmt.Errorf("config: retention.streams.commands.max_age must be >= %s (the command TTL floor), got %s",
 			minCommandsMaxAge, time.Duration(commands.MaxAge))
 	}
 	return nil

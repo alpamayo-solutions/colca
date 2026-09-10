@@ -106,13 +106,13 @@ func Load(path, wantSHA string) (*Table, error) {
 		return nil, fmt.Errorf("contracts bundle %s: internal digest %s does not match content %s — artifact edited after generation", path, short(f.Digest), short(digest))
 	}
 	if wantSHA != "" && wantSHA != digest {
-		return nil, fmt.Errorf("contracts bundle %s: digest %s does not match the pinned sha256 %s (design §6.1: a drifted file must not silently validate with the wrong rules)", path, short(digest), short(wantSHA))
+		return nil, fmt.Errorf("contracts bundle %s: digest %s does not match the pinned sha256 %s", path, short(digest), short(wantSHA))
 	}
 
 	rules := make(map[string]Rule, len(f.Contracts))
 	for name, rawEntry := range f.Contracts {
 		if builtinOnly[name] {
-			return nil, fmt.Errorf("contracts bundle %s: %s is builtin-only (design §10.2) — its producer and validator are this binary", path, name)
+			return nil, fmt.Errorf("contracts bundle %s: %s is builtin-only; colcad itself produces and validates it", path, name)
 		}
 		var e contractEntry
 		if err := json.Unmarshal(rawEntry, &e); err != nil {
@@ -190,7 +190,7 @@ func lintSubset(raw json.RawMessage, path string) error {
 	}
 	for k, v := range node {
 		if !allowedKeywords[k] {
-			return fmt.Errorf("contract %s: schema keyword %q is outside the §4.1 subset", path, k)
+			return fmt.Errorf("contract %s: schema keyword %q is outside the supported subset", path, k)
 		}
 		switch k {
 		case "properties":

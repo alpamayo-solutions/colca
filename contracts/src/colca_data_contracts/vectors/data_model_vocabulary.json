@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden vocabulary vectors for the Data Model authoring surface (schema-bundle design §2, tier 2). One checked-in dataset judged by BOTH the Python suite (tests/test_data_models_vocabulary.py, against CANONICAL_DATA_TYPES) and colca's Go suite (plugins/uns/exec_edit_model_test.go, against slotDataTypes), so the two native copies of the slot data_type vocabulary can never drift apart silently.",
+  "_comment": "Golden vocabulary vectors for the Data Model authoring surface. One dataset judged by the Python suite (tests/test_data_models_vocabulary.py, against CANONICAL_DATA_TYPES) and by colca's Go suite (plugins/uns/exec_edit_model_test.go, against slotDataTypes), so the two copies of the slot data_type vocabulary cannot drift apart.",
   "canonical_data_types": [
     "boolean",
     "integer",

@@ -401,7 +401,7 @@ func TestEntitiesRefreshExactlyAffectedPathsAfterMarker(t *testing.T) {
 			}
 		case "line1/m":
 			if e.Offset != 3 {
-				t.Fatalf("metric KV line1/m Offset = %d, want untouched 3 — §6.5 refreshes entity-class entries only", e.Offset)
+				t.Fatalf("metric KV line1/m Offset = %d, want untouched 3: the state refresh covers entity-class entries only", e.Offset)
 			}
 		}
 	}
@@ -444,12 +444,12 @@ func TestMetricsOverrideRefreshesNothing(t *testing.T) {
 	// The metric KV entries stay untouched, with offsets below the LWM.
 	for _, e := range mustKVScan(t, st, "line1/") {
 		if e.Offset > 2 {
-			t.Fatalf("metric KV %s was re-appended (Offset %d) — §6.5 refreshes entities only", e.Path, e.Offset)
+			t.Fatalf("metric KV %s was re-appended (Offset %d); the state refresh covers entities only", e.Path, e.Offset)
 		}
 	}
 	// A metrics override persists no refresh obligation at all.
 	if r, ok := st.RefreshPending("metrics"); ok {
-		t.Fatalf("metrics override persisted a refresh obligation %+v — §6.5 is entities-only", r)
+		t.Fatalf("metrics override persisted a refresh obligation %+v; the state refresh is entities-only", r)
 	}
 }
 

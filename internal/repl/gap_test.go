@@ -141,7 +141,7 @@ func stripNowMS(t *testing.T, body []byte) (rest string, nowMS int64) {
 	}
 	raw, ok := m["now_ms"]
 	if !ok {
-		t.Fatalf("response missing now_ms (time-sync design §2.1): %s", body)
+		t.Fatalf("response missing now_ms: %s", body)
 	}
 	if err := json.Unmarshal(raw, &nowMS); err != nil {
 		t.Fatalf("now_ms not an int64: %v", err)
@@ -434,7 +434,7 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 	waitForClosed(t, "RunUplink to return after stop", done, 5*time.Second)
 
 	if !strings.Contains(logs.String(), "uplink cursor below the stream LWM") {
-		t.Fatalf("the §6.3 ERROR surface must fire on a jump:\n%s", logs.String())
+		t.Fatalf("the ERROR log must fire on a jump:\n%s", logs.String())
 	}
 }
 
@@ -499,7 +499,7 @@ func TestDownlinkPollPersistsChildCursorAndClampsPrune(t *testing.T) {
 	})
 	c, _ := find()
 	if c.LastAdvanceMS == 0 {
-		t.Fatal("the downlink cursor must carry the ct/ last-advance stamp (spec §5.2 staleness input)")
+		t.Fatal("the downlink cursor must carry the ct/ last-advance stamp that staleness is measured from")
 	}
 
 	// A later poll with a lower after must not move it back.

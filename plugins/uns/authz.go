@@ -210,7 +210,7 @@ func (e *Entry) Validate() error {
 		return fmt.Errorf("entry %s: status must be %q or %q, got %q", e.ULID, StatusActive, StatusDraining, e.Status)
 	}
 	if e.Status == StatusDraining && e.Kind != KindNode {
-		return fmt.Errorf("entry %s: only kind=%q entries may drain — external services are out of scope (move-drain design §3.2)", e.ULID, KindNode)
+		return fmt.Errorf("entry %s: only kind=%q entries may drain", e.ULID, KindNode)
 	}
 	for _, g := range e.Grants {
 		pg, err := ParseGrant(g)

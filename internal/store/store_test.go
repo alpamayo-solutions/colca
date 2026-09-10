@@ -832,7 +832,7 @@ func TestCursorSetIfAbsentRecordsThePositionOnlyOnce(t *testing.T) {
 		for _, c := range s.Cursors() {
 			if c.Name == name && c.Stream == "metrics" {
 				if c.LastAdvanceMS == 0 {
-					t.Fatalf("%s has no ct/ timestamp — the staleness input of §5.2 must never be "+
+					t.Fatalf("%s has no ct/ timestamp; staleness is measured from it, so it must never be "+
 						"missing for a cursor that exists", name)
 				}
 				return true

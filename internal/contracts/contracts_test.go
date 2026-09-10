@@ -174,7 +174,7 @@ func TestFailStartConditions(t *testing.T) {
 			e := metricEntry()
 			e["schema"].(map[string]any)["patternProperties"] = map[string]any{}
 			return fixture(t, map[string]any{"_Metric": e}, "")
-		}, "outside the §4.1 subset"},
+		}, "outside the supported subset"},
 		{"unknown class", func(t *testing.T) string {
 			e := metricEntry()
 			e["class"] = "telemetry"

@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden vocabulary vector for a Signal's data_type. One checked-in dataset judged by the Python suite (contracts/tests/test_signal_data_type.py) and by every editor that offers a data type picker. The two native copies drifted once already: the browser modelled a Signal with the CONSTANT vocabulary ('Float64', 'Int64'), the read path translated the difference away, and the write path sent 'float64' -- which a Signal cannot hold, so saving one with a semantic type that declares a data type was refused outright.",
+  "_comment": "Golden vocabulary vector for a Signal's data_type. One dataset judged by the Python suite (contracts/tests/test_signal_data_type.py) and by every editor that offers a data type picker. A Signal takes these lowercase names, not the Constant vocabulary ('Float64', 'Int64') and not 'float64'; a write with any other name is refused.",
   "scalar_data_types": [
     "boolean",
     "datetime",

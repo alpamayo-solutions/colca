@@ -230,7 +230,7 @@ func (p *Pruner) pruneStream(stream string) {
 		return
 	}
 	if clamped {
-		p.log.Warn("retention policy cursor-clamped: policy wants to prune further but a live cursor forbids it (spec §5.2)",
+		p.log.Warn("retention policy cursor-clamped: policy wants to prune further but a live cursor forbids it",
 			"stream", stream, "cursor", blocking, "clamp", clamp, "lwm", lwm)
 	}
 	if capped {
@@ -328,7 +328,7 @@ func (p *Pruner) pruneStream(stream string) {
 		p.m.RetentionGapRecorded(stream) // exactly one _StreamGap marker per overriding run
 	}
 	for _, c := range applied {
-		p.log.Error("retention staleness override: pruned past a stale cursor (spec §5.2) — the consumer will see a gap",
+		p.log.Error("retention staleness override: pruned past a stale cursor; the consumer will see a gap",
 			"stream", stream, "cursor", c.name, "position", c.pos,
 			"stale_for", c.staleFor, "window", window)
 	}
@@ -397,7 +397,7 @@ func (p *Pruner) refreshEntities(from, to uint64) bool {
 			continue
 		}
 		if !applied {
-			p.log.Warn("entities state refresh skipped: path retired or superseded since the snapshot (guard, spec §6.5/§7.1)",
+			p.log.Warn("entities state refresh skipped: path retired or superseded since the snapshot",
 				"topic", e.Topic, "snapshot_offset", e.Offset)
 			skipped++
 			p.m.StateRefreshSkipped()

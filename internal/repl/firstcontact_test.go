@@ -74,7 +74,7 @@ func TestFirstContactUplinkStartsAtTheLWMWithoutReportingAGap(t *testing.T) {
 	if v := scrapeMetric(t, cm, gapReceived); v != 0 {
 		t.Fatalf("%s = %v — first contact reported a gap it never observed: this parent held no "+
 			"position to lose records against, so the cursor must be seeded at the LWM instead of "+
-			"being clamped there by the §6.3 jump", gapReceived, v)
+			"being clamped there by the gap jump", gapReceived, v)
 	}
 }
 

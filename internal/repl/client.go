@@ -523,7 +523,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		// was gone longer than the staleness window. The gap marker already tells the
 		// parent, so jump to the LWM instead of stalling.
 		if lwm := eng.Store().LWM(stream); from < lwm {
-			c.log.Error("uplink cursor below the stream LWM — local retention pruned past it (spec §6.3): jumping to the LWM",
+			c.log.Error("uplink cursor below the stream LWM: local retention pruned past it, jumping to the LWM",
 				"stream", stream, "position", from, "lwm", lwm)
 			m.GapReceived(stream)
 			eng.Store().CursorAck(uns.UplinkCursor(c.parentPub), stream, lwm)
@@ -675,8 +675,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			if res.Head == 0 {
 				c.log.Warn("parent answered hello without a command head — it predates parent-scoped "+
 					"cursors; if this node has no commands cursor for it yet, that cursor starts at 1 "+
-					"and it may execute commands issued under its mount before it attached "+
-					"(design §3.2/§3.3)",
+					"and it may execute commands issued under its mount before it attached",
 					"parent", c.base, "parent_key", short(c.parentPub))
 				m.DownlinkHeadAbsent()
 			}
@@ -750,7 +749,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			// The parent pruned commands this node never got. Log, count and continue; next
 			// already points past the gap. Commands are retained past their TTL, so these
 			// had expired anyway.
-			c.log.Error("downlink gap: the parent pruned commands this node never received (spec §6.3) — continuing past the hole",
+			c.log.Error("downlink gap: the parent pruned commands this node never received; continuing past the hole",
 				"from_offset", gap.FromOffset, "to_offset", gap.ToOffset,
 				"first_ts", gap.FirstTS, "last_ts", gap.LastTS, "approx", gap.Approx)
 			m.GapReceived("commands")

@@ -96,11 +96,11 @@ say "   global answers /healthz: $(curl -skf "$G/healthz")"
 echo "── enrolling the tree: children at their parents, machines at their edges…"
 say "   the registry is runtime state: an identity exists at a node only after"
 say "   POST /enroll (entry-before-connect); everything below retries until then."
-# An identity binds to a system element, not to a path (id-grants design §4),
+# An identity binds to a system element, not to a path,
 # so the element is authored first and the entry names it. The mount is then
 # wherever that element sits, now and after any later rename.
 place() { # $1 = base url, $2 = node ulid, $3 = path -> echoes the element id
-  # An entity id is a ULID by contract (schema-bundle design §4.1) and the baked bundle refuses anything else: "0" + 25 uppercase
+  # An entity id must be a ULID, and the baked bundle refuses anything else: "0" + 25 uppercase
   # hex chars of sha256("element:<path>"), the same derivation the level-3/4
   # worlds and the bench use, so a path always maps to the same ULID.
   element="0$(printf 'element:%s' "$3" | shasum -a 256 | cut -c1-25 | tr 'a-f' 'A-F')"
@@ -135,7 +135,7 @@ enroll() { # $1 = base url, $2 = ulid, $3 = kind, $4 = mount, $5 = pubkey file, 
   say "   enrolled $2 ($3) at $1 on element $element, which sits at '$4'"
 }
 # Groups are definitions, authored once at the root and descending to every
-# node below it (definition-stream design §8). Keycloak carries who is in which
+# node below it. Keycloak carries who is in which
 # group; what a group MAY do lives here.
 define_group() { # $1 = base url, $2 = node ulid, $3 = group id, $4 = grants JSON array
   ok=0

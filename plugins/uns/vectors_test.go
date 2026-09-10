@@ -44,7 +44,7 @@ func loadVectors(t *testing.T) vectorFile {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Clean(vectorPath))
 	if err != nil {
-		t.Fatalf("golden vectors missing (schema-bundle design §2): %v", err)
+		t.Fatalf("golden vectors missing: %v", err)
 	}
 	var v vectorFile
 	if err := json.Unmarshal(raw, &v); err != nil {

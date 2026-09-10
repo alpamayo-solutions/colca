@@ -827,7 +827,7 @@ func TestTimeSyncBeaconOnSubscribe(t *testing.T) {
 				t.Fatalf("%s: beacon topic = %q, want %q", who, m.Topic(), want)
 			}
 			if m.Retained() {
-				t.Fatalf("%s: beacon must never be retained (design §2.2: a retained time message is by definition stale)", who)
+				t.Fatalf("%s: beacon must never be retained: a retained time message is stale by definition", who)
 			}
 			var p struct {
 				NowMS int64 `json:"now_ms"`

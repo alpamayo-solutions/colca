@@ -275,7 +275,7 @@ func (e *Engine) AuthoritativeNow() time.Time {
 func (e *Engine) ApplyClockSample(nowMS int64) (offsetMS int64) {
 	offsetMS = e.clk.ApplySample(nowMS)
 	if warn := e.cfg.TimeSync.EffectiveDriftWarnMS(); abs64(offsetMS) > warn {
-		e.log.Warn("clock drift exceeds warn threshold (time-sync design §2.4)",
+		e.log.Warn("clock drift exceeds warn threshold",
 			"offset_ms", offsetMS, "drift_warn_ms", warn)
 	}
 	return offsetMS
@@ -443,13 +443,13 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 	if uns.IsNodeLocal(class) {
 		// _TimeSync is published only by this node's beacon. A client attempting it is
 		// rejected with its own reason rather than the generic grammar reason.
-		return e.reject(metrics.ReasonTimeSync, "client %s may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)", identity)
+		return e.reject(metrics.ReasonTimeSync, "client %s may not publish _TimeSync: it is node-local and never replicated", identity)
 	}
 	if uns.IsCommand(class) {
 		// A mount under an active drain accepts no new commands, whatever the caller's
 		// grants. Checked first so the rejection gives the real reason.
 		if e.ids.DrainingMount(p.Path) {
-			return e.reject(metrics.ReasonDraining, "client %s: %s is draining — no new commands admitted (move-drain design §3.2)", identity, p.Path)
+			return e.reject(metrics.ReasonDraining, "client %s: %s is draining, no new commands admitted", identity, p.Path)
 		}
 		// A command needs a covering cmd grant. Commands target absolute node-local
 		// paths: no mount rewrite and no level-4 rule, since the author does not own the
@@ -568,7 +568,7 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 		// _TimeSync is node-local only, as at the other doors. Checked before the
 		// human-write rule so the rejection gives the real reason.
 		e.metrics.RejectPublish(metrics.ReasonTimeSync)
-		return Result{}, fmt.Errorf("human %s may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)", entry.ULID)
+		return Result{}, fmt.Errorf("human %s may not publish _TimeSync: it is node-local and never replicated", entry.ULID)
 	}
 	if uns.IsAudit(class) {
 		return e.rejectDenied(metrics.ReasonWriteDenied, attributionForEntry(entry), "publish", &p,
@@ -580,12 +580,12 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 	}
 	if !entry.MayPublishContract(p.Contract) {
 		return e.rejectDenied(metrics.ReasonHumanWrite, attributionForEntry(entry), "publish", &p,
-			"human %s may not publish %s — a person configures through _CmdEdit, where each write is authorized as them (node-side command authorization design §3F)", entry.ULID, p.Contract)
+			"human %s may not publish %s: people configure through _CmdEdit, where each write is authorized as them", entry.ULID, p.Contract)
 	}
 	if e.ids.DrainingMount(p.Path) {
 		// A draining mount refuses commands at every door, a human's grants
 		// notwithstanding. Checked first, as in IngestClient.
-		return e.reject(metrics.ReasonDraining, "human %s: %s is draining — no new commands admitted (move-drain design §3.2)", entry.ULID, p.Path)
+		return e.reject(metrics.ReasonDraining, "human %s: %s is draining, no new commands admitted", entry.ULID, p.Path)
 	}
 	if !uns.Authorize(e.Scope(), entry, uns.ActCmd, topic) {
 		return e.rejectDenied(metrics.ReasonCmdDenied, attributionForEntry(entry), "execute", &p,
@@ -637,7 +637,7 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 		// Same rule as IngestClient: _TimeSync is node-local-publish-only,
 		// not even the admin token may author it through /publish.
 		e.metrics.RejectPublish(metrics.ReasonTimeSync)
-		return Result{}, fmt.Errorf("admin may not publish _TimeSync: ephemeral, node-local-publish-only (time-sync design §2.2)")
+		return Result{}, fmt.Errorf("admin may not publish _TimeSync: it is node-local and never replicated")
 	}
 	if uns.IsAudit(class) {
 		return e.rejectDenied(metrics.ReasonWriteDenied, attribution, "publish", &p,
@@ -647,7 +647,7 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 		// Same admission rule as IngestClient: not even the admin token may command a
 		// draining mount.
 		e.metrics.RejectPublish(metrics.ReasonDraining)
-		return Result{}, fmt.Errorf("admin: %s is draining — no new commands admitted (move-drain design §3.2)", p.Path)
+		return Result{}, fmt.Errorf("admin: %s is draining, no new commands admitted", p.Path)
 	}
 	if !uns.IsKnown(class) {
 		e.metrics.RejectPublish(metrics.ReasonGrammar)
@@ -909,7 +909,7 @@ func (e *Engine) IngestDownlinkAttributed(topic string, payload []byte, ts int64
 		// skips a record refused this way, since offering it again gives the same answer;
 		// only a store failure holds its cursor.
 		return e.reject(metrics.ReasonDraining,
-			"downlink: %s is draining — no new commands admitted (move-drain design §3.2)", p.Path)
+			"downlink: %s is draining, no new commands admitted", p.Path)
 	}
 	res, err := e.persistTSAttributed(class, p, topic, payload, ts, attribution)
 	if err == nil {
@@ -992,7 +992,7 @@ func (e *Engine) rejectTimeSync(child string, recs []store.ReplRecord) (filtered
 	for _, r := range recs {
 		if p, err := uns.Parse(r.Topic); err == nil && uns.IsNodeLocal(uns.ClassOf(p.Contract)) {
 			e.metrics.RejectPublish(metrics.ReasonTimeSync)
-			e.log.Warn("rejected _TimeSync record from replication: ephemeral, node-local-publish-only (time-sync design §2.2)",
+			e.log.Warn("rejected _TimeSync record from replication: it is node-local and never replicated",
 				"child", child, "topic", r.Topic)
 			if dropped == nil {
 				dropped = make(map[uint64]bool)
@@ -1019,7 +1019,7 @@ func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []sto
 	last := prev
 	for _, r := range applied {
 		if r.ChildOffset > last+1 && !jumpFullyExplainedByDroppedTimeSync(last, r.ChildOffset, droppedTimeSync) {
-			e.log.Error("replication offset jump: this node never received the child offsets between have and got — likely pruned at the child before replication (spec §6.4 second net)",
+			e.log.Error("replication offset jump: this node never received the child offsets between have and got, most likely pruned at the child before replication",
 				"child", child, "stream", stream, "have", last, "got", r.ChildOffset)
 			e.metrics.GapApplied(child, stream)
 		}

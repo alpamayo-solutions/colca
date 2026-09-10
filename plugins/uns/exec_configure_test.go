@@ -1295,7 +1295,7 @@ func TestResourceUpsertRefusesWhenTheBlobCannotBePulled(t *testing.T) {
 	}
 	if result != "blob_unreachable" {
 		t.Fatalf("result = %q, want blob_unreachable — a failed pull is its own outcome, "+
-			"not a malformed command (resources design §9.1)", result)
+			"not a malformed command", result)
 	}
 	if !strings.HasPrefix(msg, "blob_unreachable: ") {
 		t.Fatalf("the message must lead with its machine-readable code, the way every other "+

@@ -202,7 +202,7 @@ func TestAuditEventIsAnUpwardAppendOnlyEvent(t *testing.T) {
 // retainFor itself.
 func TestStreamGapNeverRetainedOrKVProjected(t *testing.T) {
 	if ClassGap == ClassData || ClassGap == ClassEntity {
-		t.Fatal("ClassGap must not be ClassData or ClassEntity — it is an event, not state (design §6.4)")
+		t.Fatal("ClassGap must not be ClassData or ClassEntity: it is an event, not state")
 	}
 }
 

@@ -5,7 +5,7 @@
   "clientScopes": [
     {
       "name": "colca-grants",
-      "description": "The groups a human belongs to, as ids in the groups claim. Grants themselves live in _Group definitions in the tree (definition-stream design §8), so Keycloak carries membership and nothing else.",
+      "description": "The groups a human belongs to, as ids in the groups claim. Grants themselves live in _Group definitions in the tree, so Keycloak carries membership and nothing else.",
       "protocol": "openid-connect",
       "attributes": {
         "include.in.token.scope": "true",

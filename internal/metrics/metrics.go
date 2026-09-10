@@ -383,15 +383,15 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}, []string{"stream"}),
 		gapRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_retention_gap_records_total",
-			Help: "Durable _StreamGap records emitted by the pruner (design §6.4), by stream. Resets on restart.",
+			Help: "Durable _StreamGap records emitted by the pruner, by stream. Resets on restart.",
 		}, []string{"stream"}),
 		refreshRecords: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_retention_state_refresh_records_total",
-			Help: "KV entries re-appended to entities by the §6.5 state refresh. Resets on restart.",
+			Help: "KV entries re-appended to entities by the state refresh. Resets on restart.",
 		}),
 		refreshSkipped: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_retention_state_refresh_skipped_total",
-			Help: "State-refresh appends skipped because the snapshot was superseded (tombstone or newer write, spec §6.5/§7.1). Resets on restart.",
+			Help: "State-refresh appends skipped because the snapshot was superseded by a tombstone or a newer write. Resets on restart.",
 		}),
 		refreshFailures: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_retention_state_refresh_failures_total",
@@ -407,7 +407,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}, []string{"stream"}),
 		replGapApplied: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_repl_gap_applied_total",
-			Help: "Child-offset jumps observed in ApplyReplicated (design §6.4 second net), by child and stream. Resets on restart.",
+			Help: "Child-offset jumps observed in ApplyReplicated, by child and stream. Resets on restart.",
 		}, []string{"child", "stream"}),
 		replIntegrityFailures: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_replication_integrity_failures_total",
@@ -415,11 +415,11 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}),
 		drainsActive: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_drains_active",
-			Help: "Enrolled kind=node children currently in a move-drain decommission (move-drain design §3.1/§3.4).",
+			Help: "Enrolled kind=node children currently draining before a move.",
 		}),
 		drainPendingCommands: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "colca_drain_pending_commands",
-			Help: "Live, undelivered ClassCmd records still blocking a draining child's completion, by child (move-drain design §3.2 item 3/§3.4).",
+			Help: "Live, undelivered ClassCmd records still blocking a draining child's completion, by child.",
 		}, []string{"child"}),
 		drainsCompleted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_drains_completed_total",
@@ -427,7 +427,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}, []string{"outcome"}),
 		definitionsApplied: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_definitions_applied_total",
-			Help: "Definitions handed down by the parent and applied here as state (definition-stream design §5). Resets on restart; the current SET is the KV view, not this counter.",
+			Help: "Definitions handed down by the parent and applied here as state. Resets on restart; the current set is the KV view, not this counter.",
 		}),
 		definitionsRejected: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_definitions_rejected_total",
@@ -459,11 +459,11 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}, []string{"door", "class"}),
 		blobsSwept: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_blobs_swept_total",
-			Help: "Blobs deleted by the background sweeper because no live _Resource referenced them and they were older than the configured grace period (resources design §8). Resets on restart.",
+			Help: "Blobs deleted by the background sweeper because no live _Resource referenced them and they were older than the configured grace period. Resets on restart.",
 		}),
 		metricsUnbound: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_metrics_unbound_total",
-			Help: "_Metric records accepted on a path with no _Signal at that path (SDK design §7 gap 6) — a valid, authorized write that will never appear as a signal in the Edit because nothing has bound that path yet. Accompanied by a rate-limited log line naming the path. Resets on restart.",
+			Help: "_Metric records accepted on a path with no _Signal at that path: a valid, authorized write that does not appear as a signal until something binds that path. Accompanied by a rate-limited log line naming the path. Resets on restart.",
 		}),
 	}
 	m.ingestBy = counterChildren(m.ingest, streams)
@@ -527,7 +527,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	// last sample, now, which no write path could push ahead of time.
 	clockOffset := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "colca_clock_offset_ms",
-		Help: "Current authoritative-time offset estimate in milliseconds (design §2.1/§2.4): offset_ms = now_ms - wall_receipt from the most recent /downlink or /replicate response. Always 0 on the root and on a node that has never synced.",
+		Help: "Current authoritative-time offset estimate in milliseconds: offset_ms = now_ms - wall_receipt from the most recent /downlink or /replicate response. Always 0 on the root and on a node that has never synced.",
 	}, func() float64 {
 		if clk == nil {
 			return 0
@@ -536,7 +536,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	})
 	clockSyncAge := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "colca_clock_sync_age_seconds",
-		Help: "Seconds since the last accepted offset sample (design §2.4). The root exports 0 by definition. +Inf means never synced.",
+		Help: "Seconds since the last accepted offset sample. The root exports 0 by definition. +Inf means never synced.",
 	}, func() float64 {
 		if clk == nil {
 			return math.Inf(1)
@@ -1091,10 +1091,10 @@ var (
 		"Records the cursor has not read yet: next_offset - position, floored at 0.",
 		[]string{"cursor", "stream"}, nil)
 	descCursorAdvanceAge = prometheus.NewDesc("colca_cursor_last_advance_age_seconds",
-		"Seconds since the cursor last advanced (staleness input of design §5.2); 0 for a cursor never seen advancing.",
+		"Seconds since the cursor last advanced, which is what staleness is measured from; 0 for a cursor never seen advancing.",
 		[]string{"cursor", "stream"}, nil)
 	descRetentionPressure = prometheus.NewDesc("colca_retention_pressure",
-		"max(age_used/max_age, live_bytes/max_bytes) for the stream's currently retained window; >1 means policy wants to prune further but is cursor-clamped (design §5.2).",
+		"max(age_used/max_age, live_bytes/max_bytes) for the stream's currently retained window; >1 means policy wants to prune further but is cursor-clamped.",
 		[]string{"stream"}, nil)
 	descBlockedByCursor = prometheus.NewDesc("colca_retention_blocked_by_cursor",
 		"Count of cursors currently clamping the stream below where the age/size policy would otherwise prune to. "+

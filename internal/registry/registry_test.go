@@ -759,7 +759,7 @@ func TestEnrollSeatsTheDownlinkFloorAtTheCommandsHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := st.CursorGet(cursor, "commands"); got != 1 {
-		t.Fatalf("revoke left the floor at %d, want it deleted (CursorGet's default 1) — §3.4's own claim", got)
+		t.Fatalf("revoke left the floor at %d, want it deleted (CursorGet's default 1)", got)
 	}
 
 	// Without the seat this is 1, and every command before headAfter is pending again.

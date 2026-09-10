@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden vectors for the Keycloak Authorization Services objects a colca grant is made of (grant-sync design §4). Every tool that writes these objects implements this vocabulary natively, and so does colca (internal/grantsync/keycloak.go, the reader that compiles them into _Group definitions); none can import the others. This file is the one definition; each suite judges its own copy against it, so a scope added on one side cannot land without the others moving (schema-bundle design §2, tier 2).",
+  "_comment": "Golden vectors for the Keycloak Authorization Services objects a colca grant is made of. Every tool that writes these objects implements this vocabulary natively, and so does colca in internal/grantsync/keycloak.go, which compiles them into _Group definitions; none of them can import the others. This file is the one definition and each suite judges its own copy against it, so a scope added on one side cannot land without the others.",
   "scopes": [
     "read",
     "param",

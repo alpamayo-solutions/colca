@@ -2,7 +2,7 @@
 # seed.semantic_types; these ship with the package, like the built-in data
 # models do.
 tags:
-  # -- System elements (spec 11.1) --
+  # -- System elements --
   - name: enterprise
     i18n_name: Enterprise
     applies_to: [system_element]
@@ -32,7 +32,7 @@ tags:
     applies_to: [system_element]
     icon: account_tree
 
-  # -- Signals and constants (spec 11.2). Every measurement row is
+  # -- Signals and constants. Every measurement row is
   #    data_type: number; the quantity_kind is what constrains its unit.
   - {name: temperature, i18n_name: Temperature, applies_to: [signal, constant], icon: thermostat, quantity_kind: temperature, data_type: number}
   - {name: pressure, i18n_name: Pressure, applies_to: [signal, constant], icon: compress, quantity_kind: pressure, data_type: number}
@@ -54,7 +54,7 @@ tags:
   - {name: volume, i18n_name: Volume, applies_to: [signal, constant], icon: inventory_2, quantity_kind: volume, data_type: number}
   - {name: frequency, i18n_name: Frequency, applies_to: [signal, constant], icon: graphic_eq, quantity_kind: frequency, data_type: number}
 
-  # -- Signals only (spec 11.3) --
+  # -- Signals only --
   - {name: part-count, i18n_name: Part count, applies_to: [signal], icon: numbers, quantity_kind: count, data_type: integer}
   - {name: cycle-time, i18n_name: Cycle time, applies_to: [signal], icon: timer, quantity_kind: time, data_type: number}
   - {name: runtime, i18n_name: Runtime, applies_to: [signal], icon: schedule, quantity_kind: time, data_type: number}
@@ -66,7 +66,7 @@ tags:
   - {name: edge-execution-context, i18n_name: Edge execution context, applies_to: [signal], icon: data_object, data_type: json}
   - {name: execution-event-correction, i18n_name: Execution event correction, applies_to: [signal], icon: edit_note, data_type: json}
 
-  # -- Constants only (spec 11.4). Nameplate facts: a unit and a quantity,
+  # -- Constants only. Nameplate facts: a unit and a quantity,
   #    no acquisition binding. This is what Constant exists for.
   - {name: rated-power, i18n_name: Rated power, applies_to: [constant], icon: offline_bolt, quantity_kind: power, data_type: number}
   - {name: rated-current, i18n_name: Rated current, applies_to: [constant], icon: electric_bolt, quantity_kind: electric-current, data_type: number}
