@@ -53,7 +53,7 @@ Acknowledge `gap.to_offset` to move past it.
 
 | Method and path | Request | Response |
 |---|---|---|
-| `POST /enroll` | `{"ulid","pubkey","kind":"external"\|"node","element" or "mount","grants":[…]}` | `{"ulid":"…","offset":N}`; `409` on a key or mount conflict, `422` on an invalid entry |
+| `POST /enroll` | `{"ulid","pubkey","kind":"external"\|"node","element","grants":[…]}` | `{"ulid":"…","offset":N}`; `409` when the key or the element is already taken, `422` on an invalid entry or an element this node does not hold |
 | `GET /enroll` | `?max=1000&after=TOKEN` | the locally enrolled entries, public keys only |
 | `DELETE /enroll/{ulid}` | | `{"revoked":true,"offset":N}` |
 | `GET /debug/state` | | the next offset of every stream |

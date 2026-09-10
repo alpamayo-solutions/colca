@@ -45,8 +45,8 @@ live session at once.
 
 | Kind | How it gets in | What it may do by default |
 |---|---|---|
-| node | enrolled at its parent with its public key and a mount | replicate its subtree |
-| external | enrolled with its public key and the system element it belongs to | read its element's subtree; writing needs explicit grants |
+| node | enrolled at its parent with its public key, bound to an element the parent holds | replicate its subtree |
+| external | enrolled with its public key, bound to the element it belongs to | read its element's subtree; writing needs explicit grants |
 | local | creates its own entry on first use of a local door, by name | read and write its element's subtree, or the whole node when unplaced |
 | human | OIDC token; grants come from the groups the token names | nothing without grants; never writes data, only commands |
 

@@ -36,15 +36,25 @@ parent:
   pubkey: 3f1c…            # printed by colca-keygen for the parent's key
 ```
 
-The edge is then enrolled at its parent once:
+The edge is then placed and enrolled at its parent once. An identity binds to a
+system element, not to a path, so the element comes first; its id is a ULID.
+The child's mount is wherever that element sits, now and after any rename:
 
 ```bash
-curl -sk -H "X-Colca-Token: change-me" -X POST https://global.example.com/enroll \
-  -d '{"ulid":"n-edge1","kind":"node","mount":"edge1","pubkey":"<edge1 public key>"}'
+# 1. the element the child hangs from
+curl -sk -H "X-Colca-Token: change-me" -H "Content-Type: application/json" \
+  -X POST https://global.example.com/publish \
+  -d '{"topic":"colca/v1/_SystemElement/n-global/edge1","payload":{"id":"01J8Z3Y8S5ZC0KQ9M2F5T7W4XB","name":"edge1"}}'
+
+# 2. the child's key, bound to that element
+curl -sk -H "X-Colca-Token: change-me" -H "Content-Type: application/json" \
+  -X POST https://global.example.com/enroll \
+  -d '{"ulid":"n-edge1","kind":"node","element":"01J8Z3Y8S5ZC0KQ9M2F5T7W4XB","pubkey":"<edge1 public key>"}'
 ```
 
-There are no lists of children or clients in the file. Identities are enrolled
-at runtime and stored by the node.
+Machines and external services are enrolled the same way, with
+`"kind":"external"` and the grants they need. There are no lists of children
+or clients in the file: identities are runtime state, stored by the node.
 
 ## Node
 
@@ -71,7 +81,7 @@ at runtime and stored by the node.
 | `mqtt_human.tcp_addr` | MQTT over TLS for people, token in the password. |
 | `mqtt_human.ws_addr` | MQTT over WebSocket for browsers. |
 | `repl.addr` | Replication door for child nodes. |
-| `tls.cert_file`, `tls.key_file` | Optional certificate for the doors people use. Without it, those doors present the node's self-signed certificate. |
+| `tls.cert_file`, `tls.key_file` | Optional certificate for the HTTP API and the doors people use, for clients that expect one from a CA. Replication and the machine door always present the node's own key. |
 | `parent.url` | `https://host:port` of the parent's replication door. Absent means this node is a root. |
 | `parent.pubkey` | Hex public key of the parent, checked on every connection. |
 
@@ -100,7 +110,7 @@ retention:
 | `…streams.<name>.max_age` | see below | Records older than this may be pruned. Go duration syntax; there is no `d` unit. |
 | `…streams.<name>.max_bytes` | none | Size limit, `KiB`/`MiB`/`GiB`/`TiB` or bytes. Applies in addition to the age. |
 | `…streams.<name>.ignore_cursors_after` | `0` | After how long a cursor that stopped moving no longer protects the stream. `0` means never. |
-| `…streams.<name>.keep_forever` | `false` | Never prune this stream. |
+| `…streams.<name>.keep_forever` | `false` | Never prune this stream. Cannot be combined with `max_age`. |
 
 Default ages: `metrics` and `logs` 14 days (`336h`); `entities`, `alarms`,
 `annotations` and `audit` 365 days (`8760h`); `commands` 90 days (`2160h`).
