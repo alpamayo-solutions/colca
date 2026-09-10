@@ -896,7 +896,7 @@ func TestModelAssignInheritedComputedSlotIsNotAConflict(t *testing.T) {
 // atomic batch, and unassign releases them recursively.
 // ---------------------------------------------------------------------------
 
-// Task-2 brief test 1: assigning a two-level model creates the mandated
+// Assigning a two-level model creates the mandated
 // child element (correct parent path, name from entity_name, "implements"
 // carrying the child model), then recurses to create the child model's own
 // signal under the CHILD, all in one batch — plus the root's own implements
@@ -982,7 +982,7 @@ func TestModelAssignRecursesIntoChildModel(t *testing.T) {
 	}
 }
 
-// Task-2 brief test 2: adopt — a pre-existing child element matching
+// Adopt — a pre-existing child element matching
 // entity_name (a name= override) is adopted, not duplicated; it gains the
 // child model in its own implements, and its pre-existing compatible signal
 // adopts too.
@@ -1068,7 +1068,7 @@ func TestModelAssignAdoptsExistingChildByName(t *testing.T) {
 	}
 }
 
-// Task-2 brief test 3: a wrong-kind name match — a SIGNAL named like the
+// A wrong-kind name match — a SIGNAL named like the
 // mandated child — is a 409 conflict, with zero writes (atomicity).
 func TestModelAssignChildSlotWrongKindNameConflict(t *testing.T) {
 	f := newStore("n-edge1")
@@ -1111,7 +1111,7 @@ func TestModelAssignChildSlotWrongKindNameConflict(t *testing.T) {
 	}
 }
 
-// Task-2 brief test 4: a child slot referencing a child_model with no live
+// A child slot referencing a child_model with no live
 // _DataModel definition is a 409 naming the missing model.
 func TestModelAssignChildSlotUnknownChildModel(t *testing.T) {
 	f := newStore("n-edge1")
@@ -1147,7 +1147,7 @@ func TestModelAssignChildSlotUnknownChildModel(t *testing.T) {
 	}
 }
 
-// Task-2 brief test 5: a required missing child with no supplied creates id
+// A required missing child with no supplied creates id
 // is a 422 naming the slot path.
 func TestModelAssignChildSlotMissingCreatesID(t *testing.T) {
 	f := newStore("n-edge1")
@@ -1186,7 +1186,7 @@ func TestModelAssignChildSlotMissingCreatesID(t *testing.T) {
 	}
 }
 
-// Task-2 brief test 6: unassign recomputes what the removed model mandated
+// Unassign recomputes what the removed model mandated
 // and recursively strips just those model names from the mandated
 // children's implements — the child element and its signal always stay
 // (presence-pinned). Because implements has no stored provenance, this is
@@ -1282,7 +1282,7 @@ func TestModelUnassignReleasesRecursively(t *testing.T) {
 	}
 }
 
-// Task-2 brief test 7: a model tree whose pending records exceed the
+// A model tree whose pending records exceed the
 // 200-entity mutation limit is rejected atomically, exactly as a flat
 // over-the-limit assign already was.
 func TestModelAssignChildTreeRejectsOverTheMutationLimit(t *testing.T) {
@@ -1320,7 +1320,7 @@ func TestModelAssignChildTreeRejectsOverTheMutationLimit(t *testing.T) {
 	}
 }
 
-// Task-2 brief test 8: the vocabulary/kind pin — a "child" slot's empty
+// The vocabulary/kind pin — a "child" slot's empty
 // data_type is legal (it is not a canonical type at all), while a non-child
 // slot still must name one of the canonical types. Both claims are pinned
 // in the SAME test so a change that accidentally exempts every slot, or
@@ -1697,7 +1697,7 @@ func TestModelUnassignPreservesStillMandatedChild(t *testing.T) {
 	}
 }
 
-// Task-5 parked item 1: the release-side stale-copy. releaseModelSlots built
+// The release-side stale-copy. releaseModelSlots built
 // childrenByName ONCE and never refreshed it, so two REMOVED models whose
 // child slots resolve to the SAME entity_name (via different slot keys —
 // ModelP's "primary_bearing" and ModelQ's "secondary_bearing" both name

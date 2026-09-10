@@ -63,7 +63,7 @@ func replicationStatusMeaning(status int) string {
 	case http.StatusUnauthorized:
 		return fmt.Sprintf(
 			"http %d — the parent did not accept this node's key: it has not enrolled this node yet, "+
-				"or the key it pinned is not ours (place the node with `colca node enroll`)",
+				"or the key it pinned is not ours (enroll the node at the parent)",
 			status)
 	case http.StatusForbidden:
 		return fmt.Sprintf(

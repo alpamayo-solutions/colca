@@ -134,8 +134,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	slog.SetDefault(slog.New(logPublisher).With("service", nodelog.ServiceName))
 
 	// First boot mints this node's identity; every later boot loads it. The key
-	// must not come from the generated deployment directory — that directory is
-	// tarred, signed and published as a revision (design §5).
+	// must not come from anything distributed to install the node.
 	id, minted, err := identity.LoadOrGenerate(cfg.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("node %s: key %s: %w", cfg.ULID, cfg.KeyFile, err)

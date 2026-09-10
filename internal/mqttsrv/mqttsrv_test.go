@@ -1527,8 +1527,7 @@ func TestASuppliedCertificateServesTheHumanDoorAndNotTheMachineDoor(t *testing.T
 }
 
 // A retained DeliverLocal racing a wildcard SUBSCRIBE's retained scan is the
-// data race the level-1 suite hit on CI (TestPairUplinkAndHubRestart, run
-// 33677835965): mochi v2.7.9 wrote particle.retainPath under the particle
+// data race the Go suite hit on CI (TestPairUplinkAndHubRestart): mochi v2.7.9 wrote particle.retainPath under the particle
 // lock in RetainMessage and read it with no lock in scanMessages
 // (mochi-mqtt/server#200, closed upstream as not reproducible). colca pins a
 // fork with the read locked; this test is what fails, under -race, the day

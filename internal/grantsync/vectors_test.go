@@ -8,12 +8,11 @@ import (
 )
 
 // authzVectorPath is the golden dataset for the Keycloak authorization objects
-// a grant is made of (schema-bundle design §2, tier 2 -- the same mechanism
-// plugins/uns uses for the topic grammar and the slot vocabulary). One
-// checked-in file that all three native copies of this vocabulary answer to:
-// this package (the reader), api/src/authentication/authz_client.py (the
-// editor's runtime writer) and node-manager's auth_apply.py (`colca auth
-// apply`).
+// a grant is made of (architecture principle 2, necessary duplication -- the
+// same mechanism plugins/uns uses for the topic grammar and the slot
+// vocabulary). One checked-in file that every native copy of this vocabulary
+// answers to: this package reads it, and every tool that writes grants into
+// Keycloak must agree with it.
 const authzVectorPath = "../../contracts/src/colca_data_contracts/vectors/authz_objects.json"
 
 type authzVectors struct {

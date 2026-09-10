@@ -1,10 +1,8 @@
 // Package historian turns `_Metric` records into hypertable rows.
 //
-// The sink is the table the deleted Kafka pipeline used to fill —
-// `historian_metric`, with its unique index on (signal_id, timestamp) — so
-// Grafana and the API's history endpoints read what they always read. What
-// changed is where the records come from: colca's `metrics` stream, followed
-// with a cursor, instead of a topic on a broker nobody runs any more.
+// The sink is `historian_metric`, with its unique index on (signal_id,
+// timestamp). The records come from a node's `metrics` stream, followed with a
+// cursor.
 package historian
 
 import (

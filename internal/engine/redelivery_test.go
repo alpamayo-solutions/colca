@@ -123,7 +123,7 @@ func TestExpiredCommandNotCountedAsUndelivered(t *testing.T) {
 // (IngestDownlink → persistTSAttributed), and reaches zero subscribers at
 // each of them — the target is fed over the replication door, not this bus.
 // That is the healthy path, not a delivery failure, so nothing may be
-// counted here. Reproduces tests/system/test_tree_contract.py's root publish
+// counted here. Reproduces a root publish
 // (colca/v1/_CmdParam/m1/site1/edge1/m1/...) at a node where m1 is not
 // enrolled.
 func TestTransitingCommandNotCountedAsUndelivered(t *testing.T) {

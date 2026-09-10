@@ -14,8 +14,8 @@ service that never calls ``compile_models()`` never needs PyYAML installed.
 under ``source_dir`` (default: this package's own ``data_models/``
 directory, i.e. the four builtin platform models), resolves ``extends``,
 validates, and emits a deterministic list of manifests. Manifests are
-generated, never hand-edited -- ids are NOT assigned here (the seeder
-derives them; see node-manager's ``stable_id``).
+generated, never hand-edited -- ids are NOT assigned here (whoever seeds
+the definitions derives them).
 
 YAML schema (one file per model)::
 

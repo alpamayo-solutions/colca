@@ -1,19 +1,10 @@
 // Command colca-historian carries measurements from a node's `metrics` stream
-// into the Timescale hypertables the edit and Grafana read.
-//
-// It is the last piece of the pipeline the colca cutover deleted: metrics have
-// been ingested, stored and replicated since, but nothing has written them into
-// `historian_metric`, so every history view has been empty. The table and its
-// unique index on (signal_id, timestamp) are unchanged — this fills the same
-// table the Kafka writer did, from a cursor instead of a topic.
+// into a TimescaleDB hypertable, `historian_metric`, with a unique index on
+// (signal_id, timestamp), following the stream with a cursor.
 //
 // A sibling of colcad, never part of it: historisation is a rate path with its
 // own database connection, its own failure modes and its own restart cadence,
 // and a node must stay ingesting whether or not anything is writing history.
-//
-// Go rather than Python (projector design §9) because this is a rate
-// path — two columns and a marker — not a schema path. The cache projector,
-// whose sink IS the Django schema, stays in the api image.
 //
 // Configuration is environment only:
 //

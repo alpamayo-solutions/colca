@@ -17,8 +17,7 @@ import (
 //
 // This is the exact production shape: one writer calling Once, one reader
 // scraping, no synchronisation between them. It only ever fails under -race,
-// which is how the suite runs (`go test -race ./...`, scripts/dev.py test
-// core) — mutation-checked by putting the field back to a plain int64, which
+// which is how the suite runs (`make test`) — mutation-checked by putting the field back to a plain int64, which
 // makes it fail there.
 func TestTheGapCounterIsSafeToScrapeWhileTheBridgeRuns(t *testing.T) {
 	const pages = 200

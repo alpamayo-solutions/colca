@@ -10,11 +10,8 @@ The names are READ from the YAML, never re-typed beside it. A hand-kept copy
 cannot see the seed file grow, so a tag added to `platform.yaml` would ship
 unprotected while the copy stayed green -- a check that cannot go red.
 
-PyYAML is imported here rather than added to this package's dependencies. The
-shipped `interfaces/*.yaml` and `semantic_tags/*.yaml` have always been parsed
-by whoever reads them (every container installs this package `--no-deps`, so a
-declaration would install nothing anyway), so each consumer declares the parser
-itself -- `api` and `node-manager` both list `pyyaml` outright. `__init__` does
+PyYAML is imported here rather than added to this package's dependencies: each
+consumer that reads the shipped YAML declares the parser itself. `__init__` does
 not import this module, so a service that never asks about platform tags never
 pays for it.
 """
@@ -23,9 +20,8 @@ from pathlib import Path
 
 import yaml
 
-#: The seed files this module reads. The same files `node_manager`'s
-#: `platform_semantic_tags()` and `platform_metadata_types()` render into
-#: bootstrap definitions.
+#: The seed files this module reads, the same files a bootstrap renders into
+#: definitions.
 PLATFORM_SEMANTIC_TAG_SEED = Path(__file__).parent / "semantic_tags" / "platform.yaml"
 PLATFORM_METADATA_TYPE_SEED = Path(__file__).parent / "metadata_types" / "platform.yaml"
 PLATFORM_ANNOTATION_TYPE_SEED = Path(__file__).parent / "annotation_types" / "platform.yaml"
@@ -40,8 +36,8 @@ def _seeded_names(seed: Path, section: str) -> frozenset[str]:
 
 
 #: The `name` of every tag shipped in `semantic_tags/platform.yaml`. A tag
-#: carrying one of these names is platform-owned: read-only in the editor,
-#: re-asserted by every `colca node bootstrap`.
+#: carrying one of these names is platform-owned: read-only in an editor,
+#: re-asserted by every bootstrap.
 PLATFORM_SEMANTIC_TAG_NAMES: frozenset[str] = _seeded_names(PLATFORM_SEMANTIC_TAG_SEED, "tags")
 
 #: The `name` of every metadata type shipped in `metadata_types/platform.yaml`.

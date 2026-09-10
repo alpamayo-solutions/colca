@@ -1,10 +1,8 @@
 """The canonical slot data_type vocabulary, pinned across the language boundary.
 
-`CANONICAL_DATA_TYPES` (data_models/loader.py) is the one definition. Three
-places need it natively: this package, the API
-(`edge.edit.model_rules.MODEL_SLOT_DATA_TYPES`, pinned by
-api/src/edge/tests/test_model_rules.py) and colca's Go door
-(`plugins/uns.slotDataTypes`). Go cannot import Python, so the two sides meet
+`CANONICAL_DATA_TYPES` (data_models/loader.py) is the one definition. Colca's
+Go door needs it natively too (`plugins/uns.slotDataTypes`), and so does any
+client that validates models before submitting. Go cannot import Python, so the sides meet
 at `vectors/data_model_vocabulary.json` -- the same tier-2 golden-vector
 mechanism `topic_transformations.json` uses for the topic grammar.
 

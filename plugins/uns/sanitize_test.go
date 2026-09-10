@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// sanitizeVectorPath is the golden `sanitize` dataset (task-3, path-collision
+// sanitizeVectorPath is the golden `sanitize` dataset (path-collision
 // parity), the same mechanism vectors_test.go and
 // exec_edit_model_test.go's vocabulary pin use: one checked-in file both
 // native copies of `sanitize` answer to -- this Go suite, and the api

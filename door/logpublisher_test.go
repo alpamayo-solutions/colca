@@ -224,7 +224,7 @@ func TestTheBuiltinDefaultHandlerIsRefused(t *testing.T) {
 	// infinite loop: that handler writes through the `log` package, and
 	// SetDefault redirects `log` back into slog. It does not crash -- the
 	// first log call simply never returns, so the service prints nothing and
-	// never reaches its HTTP listener. That is what took the level-4 suite
+	// never reaches its HTTP listener. That is what took the container tests
 	// red: a healthcheck that never passed and an empty container log.
 	//
 	// This also pins the name the guard matches on. slog does not export the

@@ -7,10 +7,9 @@ import (
 	"time"
 )
 
-// The Go half of the shared metric-row vectors (the Python half is
-// api/src/historian/tests/test_metric_row_vectors.py). Which column a
-// measurement lands in is decided here and read back there, in another
-// language: a value written to value_number and read from value_text simply
+// The Go half of the shared metric-row vectors. Which column a
+// measurement lands in is decided here and read back by readers in other
+// languages: a value written to value_number and read from value_text simply
 // disappears from a chart, and nothing would fail. One dataset, judged twice.
 const vectorPath = "../../contracts/src/colca_data_contracts/vectors/metric_rows.json"
 

@@ -15,12 +15,12 @@ import (
 // index is the second, and the second is what still holds when the first is
 // somehow lost — a restored backup, a truncated marker table, a bug.
 //
-// Runs against the world in colca/tests/docker-compose.historian.yaml
+// Runs against the world in tests/docker-compose.historian.yaml
 // (`go test -tags boundary ./internal/historian/`). Skipped without a DSN so a
 // plain `go test ./...` stays hermetic.
 
 // boundaryRunID makes every signal_id this suite writes unique to THIS process
-// invocation. `scripts/dev.py test core --boundary` never wipes the Timescale
+// invocation. A boundary run never wipes the Timescale
 // volume between an up and a down (it tears the whole world down on the way
 // out, but two `up`/`down`-free invocations against a container left running
 // share it) — a rerun that reused the same literal "sig-boundary-1" would find

@@ -1,11 +1,10 @@
 """The vocabularies a `_SemanticTag` definition may use.
 
-One owner, two consumers that cannot import each other: the API's command
-boundary refuses a definition outside these sets, and node-manager validates
-the same fields in an edge YAML's `seed.semantic_types` before it ever
-generates a bootstrap manifest. Written twice, they disagreed -- node-manager
-refused `data_type: "float"` while the live write endpoint accepted it and
-then made every entity using the tag unwritable.
+One owner for every consumer: a command boundary refuses a definition outside
+these sets, and a tool that seeds definitions validates the same fields before
+it writes them. Written twice, they disagreed: one side refused
+`data_type: "float"` while the other accepted it and then made every entity
+using the tag unwritable.
 
 `data_type` is one canonical vocabulary because `Signal.data_type` and
 `ConstantDataType` deliberately differ; the API maps canonical -> each model's

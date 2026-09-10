@@ -69,9 +69,7 @@ func (w *EditExec) composeAlarm(intent editIntent) (int, string, string, []State
 // — one contract, one reserved path, one set of identity rules — but it is a
 // different act. An `alarm` command is ABOUT one signal and is authorized
 // there; this one is about nothing narrower than the node, names no signal,
-// and so has no position below the node to be checked at. It was the last
-// human write still leaving the api as `_CmdConfigure` under the api's own
-// identity, gated by api-side visibility alone.
+// and so has no position below the node to be checked at.
 //
 // A node is a participant bound to a position like everything else
 // (architecture principle 6): the element its parent enrolled it at. In the

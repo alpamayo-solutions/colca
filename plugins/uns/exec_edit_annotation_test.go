@@ -313,7 +313,7 @@ func TestComposeAnnotationUpdateAndDeleteUseTheSuppliedIDVerbatim(t *testing.T) 
 
 // annotationWireIntent renders an annotation intent as the JSON shape the
 // Edit envelope carries (editBody's "intent" map), mirroring how
-// the Django side will actually serialize one.
+// a client serializes one.
 func annotationWireIntent(overrides map[string]any) map[string]any {
 	intent := map[string]any{
 		"type": "annotation", "action": "create",
@@ -332,7 +332,7 @@ func annotationWireIntent(overrides map[string]any) map[string]any {
 // through the real _CmdEdit envelope, not composeAnnotation directly.
 //
 // The KV-absence claim is paired with a presence claim on the SAME KVGet
-// query (testing.md: an absence assertion is only as strong as the presence
+// query (an absence assertion is only as strong as the presence
 // assertion pinning its denominator) — seeding an ordinary entity first
 // proves KVGet actually finds something when it should, in this same test.
 func TestEditAnnotationCommitsThroughTheEventDoorNeverKV(t *testing.T) {

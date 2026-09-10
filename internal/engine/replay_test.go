@@ -429,7 +429,7 @@ func TestConcurrentReplaysForOneIdentityPublishOnce(t *testing.T) {
 }
 
 // The delivery floor legitimately lags head, and live delivery must survive
-// that. Found by the level-3 suite, which is the first place the commands
+// that. Found by the container tests, the first place the commands
 // stream is long enough for it to show.
 //
 // The floor advances only over records concerning ONE machine, while the

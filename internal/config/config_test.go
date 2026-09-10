@@ -290,7 +290,7 @@ func TestRetentionRejectsKeepForeverWithAnAgeBound(t *testing.T) {
 // A stream entry that sets only max_bytes leaves max_age at its Go zero
 // value; EffectiveStream must still apply that stream's default max_age
 // (spec-silent decision: "zero-value = defaults" applies per field, not only
-// when the whole block/entry is absent — see task-2 report).
+// when the whole block/entry is absent).
 func TestRetentionDefaultsApplyPerFieldNotOnlyWhenStreamEntryAbsent(t *testing.T) {
 	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
 		Retention: Retention{Streams: map[string]StreamRetention{

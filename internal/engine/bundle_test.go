@@ -269,8 +269,8 @@ func TestRealBundleRefusesNonULIDEntityIDsAtTheDoor(t *testing.T) {
 	e := New(s, &config.Config{ULID: "n-edge1"}, testIDs(), nil, nil, nil)
 	e.SetContracts(tbl)
 
-	// The admin door (POST /publish — what the api, `colca node enroll` and
-	// the test worlds use to author elements) hands the schema error back
+	// The admin door (POST /publish — what administrators and the test worlds
+	// use to author elements) hands the schema error back
 	// verbatim, so the publisher reads which field violated which pattern.
 	const pattern = "^[0-9A-HJKMNP-TV-Z]{26}$"
 	topic := "colca/v1/_SystemElement/n-edge1/site1"

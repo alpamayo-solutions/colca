@@ -952,9 +952,8 @@ func TestFetchPrefixAndMax(t *testing.T) {
 // TestFetchServesATombstoneAsJSONNull pins the empty-payload tombstone
 // (retention design §7.1) through GET /fetch. A KV-projecting state contract
 // accepts an empty payload as a deliberate delete (plugins/uns.Validate), and
-// every projector consumer already expects to see that as JSON `payload:
-// null` (api/src/projector/cache.py's `_is_tombstone` treats `payload in
-// (None, {})` as one). Before this test existed, /fetch instead answered a
+// consumers expect to see that as JSON `payload:
+// null`. Before this test existed, /fetch instead answered a
 // clean HTTP 200 with a completely empty body the moment ANY page it served
 // contained a tombstone — json.RawMessage passed the zero-length payload
 // bytes straight through, encoding/json's compact() rejected them as
@@ -1772,11 +1771,9 @@ func TestTheLocalKVRoutePaginatesAndRejectsBadTokens(t *testing.T) {
 
 // TestTheLocalKVRouteFiltersByContractAndRejectsUnknownOnes seeds two
 // contracts at the SAME path and proves ?contract= selects only the one
-// asked for over HTTP, end to end through the /kv door — the retired
-// api-side kludge ("Element-Scoped Authorization") needed exactly
-// this and could not have it, so it fetched and filtered a full snapshot
-// itself instead. The presence assertion (an unfiltered fetch sees both) is
-// checked before either absence assertion, per testing.md.
+// asked for over HTTP, end to end through the /kv door, so a client never has
+// to fetch and filter a full snapshot itself. The presence assertion (an unfiltered fetch sees both) is
+// checked before either absence assertion.
 func TestTheLocalKVRouteFiltersByContractAndRejectsUnknownOnes(t *testing.T) {
 	h := newLocalHandler(t)
 	if _, _, err := h.eng.Store().Append("definitions", []store.Record{

@@ -37,7 +37,7 @@ func TestMetricWithNoSignalIsCountedAndOncePerReminderLogged(t *testing.T) {
 		t.Fatalf("%s = %v before any publish, want 0", line, v)
 	}
 
-	// Deny denominator (testing.md): prove the query finds a bound path
+	// Deny denominator: prove the query finds a bound path
 	// before trusting it to report an unbound one as absent — otherwise a
 	// broken KVGet lookup would pass this test by finding nothing either way.
 	if _, err := e.IngestAdmin("colca/v1/_Signal/n-edge1/m1/bound", []byte(`{"id":"01SIGBOUND"}`)); err != nil {

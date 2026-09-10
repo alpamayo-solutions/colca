@@ -355,7 +355,7 @@ func TestClientLevel4MustBeThisNode(t *testing.T) {
 }
 
 // metricPayload is a valid _Metric body, shared by the write-rule tests below
-// (task-7/8, local-service-trust design §2/§5) — none of them care about the
+// (local-service-trust design §2/§5) — none of them care about the
 // payload's content, only about whether the publish is admitted.
 var metricPayload = []byte(`{"v":1}`)
 
@@ -444,7 +444,7 @@ func assertRejectReason(t *testing.T, err error, want string) {
 }
 
 // A local service publishes inside its own scope: no rewrite, level 4 is the
-// node's own ULID (local-service-trust design §2, §5, task-8 brief).
+// node's own ULID (local-service-trust design §2, §5).
 func TestAClientPublishesUnderTheNodesULID(t *testing.T) {
 	e := newTestEngine(t, "n1")
 	res, err := e.IngestClient("01JSVC", "colca/v1/_Metric/n1/line1/temp", metricPayload)
@@ -539,9 +539,7 @@ func TestLevel4MustBeThisNode(t *testing.T) {
 	assertRejectReason(t, err, metrics.ReasonNodeID)
 }
 
-// A service scoped to one subtree cannot write outside it — the level-3 proof
-// of this task's write rule (task-7/8 brief; un-quarantines
-// tests/node/test_node_contract.py::test_a_publish_outside_the_write_scope_is_rejected).
+// A service scoped to one subtree cannot write outside it.
 func TestAPublishOutsideTheWriteScopeIsRejected(t *testing.T) {
 	e := newTestEngineScoped(t, "n1", "el-press3", "line1/press3")
 

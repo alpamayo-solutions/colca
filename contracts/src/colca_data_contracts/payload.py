@@ -170,7 +170,7 @@ class Pattern:
 
 
 #: The one ULID grammar: 26 Crockford-base32 characters (no I, L, O, U).
-#: Django's ``ULIDConverter`` and ``is_ulid`` spell the same expression; the
+#: Every consumer that checks an id spells the same expression; the
 #: bundle carries it to the door so a 31-character id is refused where it is
 #: published rather than where the projector's 26-character column meets it.
 ULID_PATTERN = r"^[0-9A-HJKMNP-TV-Z]{26}$"
@@ -912,14 +912,9 @@ class Constant(Payload):
     id: ULID
     name: str
     data_type: ConstantDataType
-    #: The Django model's ``value`` column is ``JSONField(null=True)`` — a
-    #: JSON constant may explicitly be ``null`` (resource.py's own comment on
-    #: the model field says so). No default here meant an omitted ``value``
-    #: on create left it out of ``validated_data`` (DRF: a nullable field with
-    #: no explicit default is ``required=False``) and the bundle schema then
-    #: rejected the published record for missing a required property — same
-    #: shape as the ``ExternalReference.external_column`` bug this default
-    #: fixes alongside it.
+    #: A JSON constant may explicitly be ``null``, and a writer may leave
+    #: ``value`` out entirely. Without a default the bundle schema would reject
+    #: such a record for missing a required property.
     value: Any = None
     description: str = ""
     system_element_id: Optional[ULID] = None
@@ -961,13 +956,8 @@ class Resource(Payload):
     id: ULID
     system_element_id: ULID
     filename: str
-    #: Both ``blank=True, default=""`` on the Django model
-    #: (``edge/models/resource.py``): the only current writer
-    #: (``edge/edit/resource_files.py``) always supplies both, but a
-    #: payload field with no default was stricter than the model it carries
-    #: — the same drift class as ``ExternalReference.external_column``, which
-    #: this default (and the enforcement test in
-    #: ``projector/tests/test_model_payload_field_optionality.py``) closes.
+    #: Optional for a writer, so the payload is no stricter than the data it
+    #: carries: a missing value is the empty string.
     content_type: str = ""
     sha256: str = ""
     display_name: str = ""

@@ -1,7 +1,6 @@
-"""``colcad``: the colcad binary, packaged for ``chaski[node]``
-(colca-node design §6/§7 gap 5).
+"""``colcad``: the colcad binary, packaged for ``chaski[node]``.
 
-Carries no logic of its own — ``chaski.Node`` (in the ``colca`` package)
+Carries no logic of its own — ``chaski.Node``
 resolves the binary through ``BINARY_PATH`` when the caller has not set
 ``COLCAD_BINARY`` and no ``colcad`` is on PATH.
 """
@@ -13,7 +12,7 @@ BINARY_PATH = Path(__file__).resolve().parent / "bin" / "colcad"
 # The contracts bundle generated from the same commit as the binary
 # (scripts/build_colcad_wheels.py): ``chaski.Node`` points colcad at it, since
 # a host has no /etc/colca/contracts-bundle.json and a colcad without a bundle
-# rejects every Colca contract.
+# only applies its minimal built-in checks.
 BUNDLE_PATH = Path(__file__).resolve().parent / "contracts-bundle.json"
 
 # Wheel packaging preserves *nix executable bits (wheel>=0.42), but this is

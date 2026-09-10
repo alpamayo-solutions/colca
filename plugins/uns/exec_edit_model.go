@@ -95,10 +95,8 @@ type modelPlanState struct {
 	// construction: `entities` (see below) comes from snapshot(), which scans
 	// `w.store.KVScan(contract, w.store.NodeID())` -- this node's own records
 	// only. A create id that names an entity at ANOTHER node is invisible to
-	// this map and reaches compose unrefused; only the Django preflight's
-	// node-agnostic `EditEntityIndex` query (`_require_free_create_ids`)
-	// covers that case, which is why preflight is what actually closes this
-	// hole rather than this map alone.
+	// this map and reaches compose unrefused; a client that checks ids across
+	// nodes before submitting is what closes that case.
 	takenIDs map[string]bool
 	// visiting is the cycle guard shared by resolveModelSlots and
 	// releaseModelSlots: keyed by elementID+"\x00"+modelName, an entry is

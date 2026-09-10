@@ -464,7 +464,7 @@ func TestKVScanPageIsBoundedAndTokensArePrefixScoped(t *testing.T) {
 // requiring the caller to page past entries it asked to exclude. The
 // presence assertion (a filtered page finds the requested contract) comes
 // before the absence assertion (the same page contains none of the other
-// one) in every case, per testing.md: an absence check is only as strong as
+// one) in every case: an absence check is only as strong as
 // the presence check that pins its denominator.
 func TestKVScanPageFiltersByContractDuringTheScan(t *testing.T) {
 	s := mustOpen(t)

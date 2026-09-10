@@ -114,14 +114,10 @@ def test_constant_contract_is_positioned_retractable_and_value_typed():
         "data_type",
     }
     # `value` is declared (so a value a caller DOES send is still schema
-    # validated) but is deliberately NOT required: the Django model's `value`
-    # column is `JSONField(null=True)` — "JSON constants may explicitly be
-    # null" per the model's own comment — and DRF therefore omits an
-    # unsupplied `value` from `validated_data` on create. Requiring it here
-    # made every such create publish a payload the schema itself then
-    # rejected with 598 for missing a required property — the same drift
-    # class as `ExternalReference.external_column` (see
-    # `api/src/projector/tests/test_model_payload_field_optionality.py`).
+    # validated) but is deliberately NOT required: a JSON constant may be
+    # null, and a writer may leave it out. Requiring it made every such
+    # create publish a payload the schema itself then rejected for missing a
+    # required property.
     assert "value" not in constant["schema"]["required"]
     assert "value" in constant["schema"]["properties"]
     assert constant["schema"]["properties"]["data_type"]["enum"] == [

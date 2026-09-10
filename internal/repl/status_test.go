@@ -47,7 +47,7 @@ func TestUplinkStatusTransitionsThroughConnectingUnauthorizedConnected(t *testin
 	waitFor(t, "the client to report unauthorized against a parent that has not enrolled it",
 		20*time.Second, func() bool { return cl.Status().State == UplinkUnauthorized })
 
-	// Enroll the child at runtime — exactly what `colca node enroll` does —
+	// Enroll the child at runtime — exactly what an operator does —
 	// while the SAME loop keeps retrying. It must observe the transition on
 	// its own, with no restart.
 	element := placeElement(t, peng, "child1")

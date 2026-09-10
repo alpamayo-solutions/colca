@@ -40,12 +40,10 @@ func Generate(path string) (*Identity, error) {
 // LoadOrGenerate returns the identity at path, minting one if the file does not
 // exist yet. The bool reports whether it minted.
 //
-// First boot mints; every later boot loads. That is what keeps a node's private
-// key out of the generated deployment directory: `colca revision` tars, signs
-// and publishes that directory, so a key placed there would become a
-// distributed artifact — and one bundle installed on several devices would give
-// them all the same identity. Neither `colca deploy` nor the OTA agent removes
-// volumes, so a key minted on the device survives every update.
+// First boot mints; every later boot loads. That keeps a node's private key
+// out of whatever is distributed to install it: a key shipped with a
+// deployment would give every device installed from it the same identity. A
+// key minted on the device lives in its volume and survives every update.
 //
 // A file that exists but cannot be parsed is an ERROR, never a reason to mint.
 // Replacing it would silently change the node's identity and orphan it from the

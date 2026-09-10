@@ -369,7 +369,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		defer release()
-		// The ULID and pubkey are what `colca node enroll` reads. Enrollment
+		// The ULID and pubkey are what enrolling this node at a parent needs. Enrollment
 		// happens BEFORE this node is trusted by anything, so both have to be
 		// readable at the one unauthenticated door.
 		payload := map[string]any{"ok": true, "ulid": cfg.ULID, "pubkey": pubkey}

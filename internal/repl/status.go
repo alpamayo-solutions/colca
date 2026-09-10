@@ -22,7 +22,7 @@ const (
 	UplinkConnecting UplinkState = "connecting"
 	// UplinkUnauthorized: the parent answered but refused this node's key
 	// (HTTP 401) — it has not enrolled this node yet, or pinned a different
-	// key. `colca node enroll` is the fix either way.
+	// key. Enrolling the node at the parent is the fix either way.
 	UplinkUnauthorized UplinkState = "unauthorized"
 	// UplinkConnected: the last hello or downlink poll succeeded.
 	UplinkConnected UplinkState = "connected"

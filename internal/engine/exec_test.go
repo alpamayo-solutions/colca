@@ -234,9 +234,8 @@ func TestForeignTargetsNeverExecute(t *testing.T) {
 // A command an ancestor addresses to a DESCENDANT is accepted and persisted,
 // and answers with no execution outcome at all — that absence IS how "queued"
 // is carried (resources design §9.1: the command rides the commands downlink
-// and the target executes it). The API's transport reads exactly this: an
-// outcome of None becomes HTTP 202 `status: "queued"`
-// (api/src/edge/edit/command_transport.py `_queued`).
+// and the target executes it). A client reads exactly this absence as
+// "queued".
 //
 // The node must also stay silent: acking here would tell the operator a
 // command succeeded that has not run yet, and would put a second ack on the

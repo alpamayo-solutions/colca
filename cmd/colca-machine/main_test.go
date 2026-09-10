@@ -41,7 +41,7 @@ var _ pahomqtt.Message = fakeBeaconMessage{}
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // fakeClock is a manually-advanced wall clock (no real time.Sleep anywhere in
-// this file — testing.md's "poll with deadlines / fake clocks preferred"):
+// this file — poll with deadlines, prefer fake clocks):
 // every decision below is driven by explicit Advance calls, not wall-clock
 // waits.
 type fakeClock struct {

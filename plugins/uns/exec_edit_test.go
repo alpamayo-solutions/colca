@@ -617,7 +617,7 @@ func TestEditNodeAttachmentRejectsStaleVersionAndStartsDrain(t *testing.T) {
 // Edit create door: an element id becomes a grant zone once grantsync
 // registers it, and FormatGrant reads "#" as the whole namespace, so an
 // element created with that id turns every grant given against it into the
-// entire tree. The Django preflight requires a ULID, but the node must not
+// entire tree. A well-behaved client sends a ULID, but the node must not
 // depend on a caller it does not control for this.
 //
 // The last row is the denominator: an ordinary id through the identical

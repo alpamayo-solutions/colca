@@ -10,8 +10,7 @@ import (
 
 // grantEvaluationVectorPath is the shared human-authorization dataset (see
 // the vector file's own "description" field for the full rationale): ONE
-// checked-in file, judged by both this Go suite and the Python suite
-// (api/src/authentication/tests/test_grant_evaluation_vectors.py). Same
+// checked-in file that every implementation of these rules is judged by. Same
 // shared-file mechanism annotation_id.json and authz_objects.json already
 // use — never a colca-local copy, which would just be the drift the vector
 // exists to prevent.
@@ -59,10 +58,9 @@ func loadGrantEvaluationVectors(t *testing.T) grantEvaluationVectorFile {
 // Scope Authorize/AuthorizeCmdAt need: every element's local path is the
 // chain of ids from its topmost ancestor down to itself, joined by "/". The
 // exact string is this test's own affair — Authorize only ever compares two
-// paths built the same way — so it need not (and does not) match the path
-// convention api/src/edge/utils/topic_context.py computes from element
-// NAMES; the two languages are pinned on subtree membership, not on string
-// equality of an internal path.
+// paths built the same way — so it need not match a path convention built
+// from element NAMES; implementations are pinned on subtree membership, not
+// on string equality of an internal path.
 type grantEvaluationScope struct {
 	paths map[string]string
 }
