@@ -17,8 +17,12 @@ YAMLLINT      ?= $(UV) tool run yamllint@1.38.0
 GITLEAKS      ?= docker run --rm -v "$(CURDIR):/repo" -w /repo -e GIT_CONFIG_COUNT=1 \
                  -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' zricethezav/gitleaks:v8.30.1
 
+# The documentation site generator.
+ZENSICAL      ?= $(UV) tool run --from zensical==0.0.60 --with mkdocstrings-python==2.0.8 zensical
+
 .PHONY: help test contracts-test check lint lint-go lint-python lint-docker lint-shell lint-actions \
-        lint-yaml lint-secrets bundle build docker smoke demo ci wheels bench bench-scenarios bench-check clean
+        lint-yaml lint-secrets bundle build docker smoke demo ci wheels bench bench-scenarios bench-check \
+        docs docs-serve clean
 
 help: ## list the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -98,5 +102,11 @@ bench-scenarios: build ## benchmark scenarios against a real edge and hub pair
 bench-check: ## compare the newest results with bench/thresholds.json
 	$(GO) run ./cmd/colca-bench check --thresholds bench/thresholds.json
 
+docs: ## the documentation site into site/ (reads the chaski checkout next to this one)
+	$(ZENSICAL) build --strict
+
+docs-serve: ## preview the documentation at http://localhost:8000
+	$(ZENSICAL) serve
+
 clean: ## remove build output
-	rm -rf bin build
+	rm -rf bin build site

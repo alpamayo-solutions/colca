@@ -2,6 +2,8 @@
 /bin/
 /build/
 /bench/results/
+/site/
+/.cache/
 
 # Python
 __pycache__/

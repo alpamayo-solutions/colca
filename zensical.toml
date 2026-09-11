@@ -1,0 +1,107 @@
+# The documentation site. `make docs-serve` previews it locally, `make docs`
+# builds it into site/. The chaski pages read a chaski checkout next to this one.
+
+[project]
+site_name = "Colca"
+site_description = "An MQTT broker for plants organised as a tree"
+site_url = "https://alpamayo-solutions.github.io/colca/"
+repo_url = "https://github.com/alpamayo-solutions/colca"
+repo_name = "alpamayo-solutions/colca"
+edit_uri = "edit/main/docs/"
+docs_dir = "docs"
+site_dir = "site"
+
+nav = [
+  { "Home" = "index.md" },
+  { "Get started" = [
+    { "Try the demo" = "get-started/demo.md" },
+    { "Install" = "get-started/install.md" },
+    { "Run a node" = "get-started/single-node.md" },
+  ] },
+  { "Concepts" = [
+    { "How Colca works" = "concepts.md" },
+    { "Topics" = "topics.md" },
+    { "Contracts" = "contracts.md" },
+  ] },
+  { "Operate" = [
+    { "Configuration" = "configuration.md" },
+    { "Security" = "security.md" },
+    { "Operations" = "operations.md" },
+    { "HTTP API" = "http-api.md" },
+  ] },
+  { "Python SDK" = [
+    { "chaski" = "chaski/index.md" },
+    { "API reference" = "chaski/api.md" },
+  ] },
+  { "Architecture" = "architecture.md" },
+  { "Contributing" = "https://github.com/alpamayo-solutions/colca/blob/main/CONTRIBUTING.md" },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.action.edit",
+  "content.action.view",
+  "content.code.copy",
+  "navigation.footer",
+  "navigation.instant",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+# Snippet paths start at the directory above this repository, so the chaski
+# page can include chaski/README.md from the checkout next to it.
+pymdownx.snippets.base_path = [".."]
+pymdownx.snippets.check_paths = true
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["../chaski/src", "contracts/src"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "google"
+filters = "public"
+heading_level = 2
+members_order = "source"
+merge_init_into_class = true
+separate_signature = true
+show_root_heading = true
+show_root_full_path = false
+show_signature_annotations = true
+show_source = false

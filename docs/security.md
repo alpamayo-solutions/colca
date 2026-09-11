@@ -116,4 +116,4 @@ never replicated and not part of `data_dir`. See the `secrets` Go package.
 
 ## Reporting a vulnerability
 
-See [SECURITY.md](../SECURITY.md).
+See [SECURITY.md](https://github.com/alpamayo-solutions/colca/blob/main/SECURITY.md).
