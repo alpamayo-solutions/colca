@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1044,5 +1045,49 @@ func TestAddrFileNamesEveryResolvedDoor(t *testing.T) {
 	}
 	if _, err := os.Stat(addrFile + ".tmp"); err == nil {
 		t.Errorf("temp file left behind: the write must finish with a rename")
+	}
+}
+
+// Requests that arrive while Stop runs must finish before the store closes or be
+// turned away; none may reach a closed store.
+func TestStopWhileRequestsArrive(t *testing.T) {
+	for round := 0; round < 5; round++ {
+		base := t.TempDir()
+		keyFile := filepath.Join(base, "n1.key")
+		genKey(t, keyFile)
+		n := mustStart(t, &config.Config{
+			ULID:    "n1",
+			DataDir: filepath.Join(base, "data"),
+			KeyFile: keyFile,
+			API:     config.API{Addr: "127.0.0.1:0", Token: tok},
+			MQTT:    config.Endpoint{Addr: "127.0.0.1:0"},
+		})
+
+		done := make(chan struct{})
+		var clients sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			clients.Add(1)
+			go func() {
+				defer clients.Done()
+				client := &http.Client{Timeout: 2 * time.Second, Transport: httpsClient.Transport}
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
+					req, _ := http.NewRequest(http.MethodGet, "https://"+n.APIAddr+"/debug/state", nil)
+					req.Header.Set("X-Colca-Token", tok)
+					if resp, err := client.Do(req); err == nil {
+						_, _ = io.Copy(io.Discard, resp.Body)
+						_ = resp.Body.Close()
+					}
+				}
+			}()
+		}
+		time.Sleep(50 * time.Millisecond)
+		n.Stop()
+		close(done)
+		clients.Wait()
 	}
 }

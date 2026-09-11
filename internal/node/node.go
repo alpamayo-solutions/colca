@@ -72,7 +72,11 @@ type Node struct {
 	// wg tracks everything that touches the store outside of a listener the
 	// server packages own: the repl loops and in-flight API handlers. Stop waits
 	// for it before closing the store — Pebble panics on use after Close.
-	wg          sync.WaitGroup
+	wg sync.WaitGroup
+	// inflightMu guards stopping, so a request that is just arriving and Stop
+	// agree on whether the request may still use the store.
+	inflightMu  sync.RWMutex
+	stopping    bool
 	httpSrv     *http.Server
 	apiLn       net.Listener
 	localAPISrv *http.Server
@@ -566,16 +570,35 @@ func (n *Node) writeAddrFile(path string) error {
 // running handler.
 func (n *Node) trackInflight(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n.wg.Add(1)
+		if !n.enter() {
+			http.Error(w, "node is stopping", http.StatusServiceUnavailable)
+			return
+		}
 		defer n.wg.Done()
 		h.ServeHTTP(w, r)
 	})
+}
+
+// enter counts a request in wg unless Stop has begun. A WaitGroup must not get an
+// Add once Wait may have returned, so the check and the Add share the lock Stop
+// takes before it waits.
+func (n *Node) enter() bool {
+	n.inflightMu.RLock()
+	defer n.inflightMu.RUnlock()
+	if n.stopping {
+		return false
+	}
+	n.wg.Add(1)
+	return true
 }
 
 // Stop shuts the node down and releases everything: afterwards the ports can be
 // bound and the data directory opened again. It is safe to call more than once.
 func (n *Node) Stop() {
 	n.stopOnce.Do(func() {
+		n.inflightMu.Lock()
+		n.stopping = true
+		n.inflightMu.Unlock()
 		close(n.stop)
 		// Close, never Shutdown: Shutdown waits for in-flight requests and keeps
 		// the port bound meanwhile, which breaks an immediate restart.
