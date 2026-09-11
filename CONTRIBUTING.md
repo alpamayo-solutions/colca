@@ -70,9 +70,12 @@ notes built from the commit subjects. Every push to `main` also publishes the im
 
 ## Contributor License Agreement
 
-Before your first pull request can be merged you sign the
-[Contributor License Agreement](CLA.md). A bot asks for it on the pull
-request; signing takes one comment. You keep the copyright in your work.
+Unless you belong to the organisation that owns this repository, tick the box
+"I agree to the Contributor License Agreement" in each pull request's
+description; a check blocks the merge until it is ticked. The agreement is in
+[CLA.md](CLA.md). For larger contributions, or when you contribute for your
+employer, we may also ask for a signed copy by email. You keep the copyright in
+your work.
 
 The project is licensed under the Functional Source License with an Apache 2.0
 future grant (see [LICENSE.md](LICENSE.md)). The agreement lets the licensor
