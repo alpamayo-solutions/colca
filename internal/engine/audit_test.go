@@ -51,6 +51,25 @@ func TestRecordDenialAppendsExactlyOneSafeEventWithoutPublicIngest(t *testing.T)
 	}
 }
 
+// The MQTT door audits a retained publish it refuses outside the UNS with the topic.
+func TestRecordDenialAcceptsTheRefusedTopic(t *testing.T) {
+	e := newEngine(t)
+	err := e.RecordDenial(AuditDenial{
+		Operation: "publish", ReasonCode: "retained_non_uns_denied", ActorID: "m1",
+		Metadata: map[string]any{"door": "mqtt", "topic": "factory/raw/retained"},
+	})
+	if err != nil {
+		t.Fatalf("topic metadata refused: %v", err)
+	}
+	recs, _, err := e.Store().Read("audit", 1, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("audit records = %d, want 1", len(recs))
+	}
+}
+
 func TestRecordDenialRejectsUnsafeMetadataWithoutRecursiveAppend(t *testing.T) {
 	e := newEngine(t)
 	e.SetAuditIDSource(func(time.Time) string { return "01KTESTAUDIT00000000000000" })

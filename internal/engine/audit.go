@@ -91,7 +91,7 @@ func (e *Engine) RecordDenial(d AuditDenial) error {
 
 var auditMetadataKey = map[string]bool{
 	"door": true, "route": true, "method": true, "stream": true,
-	"contract": true, "filter": true, "cursor": true,
+	"contract": true, "filter": true, "cursor": true, "topic": true,
 }
 
 func flatAuditMetadata(value any) bool {
