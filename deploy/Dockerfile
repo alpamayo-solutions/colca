@@ -20,7 +20,7 @@ RUN for cmd in colcad colca-grantsync colca-historian colca-machine colca-keygen
  && install -d -m 0750 -o 65532 -g 65532 /runtime/data /runtime/secrets /runtime/keys
 
 # distroless has no version tags for static-debian12, so the base is pinned by digest.
-FROM gcr.io/distroless/static-debian12@sha256:6447365a6337c3732f412d1b74357b30a633831955b2bc45552b0086be907687
+FROM gcr.io/distroless/static-debian12@sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2
 COPY --from=build /out/ /usr/local/bin/
 COPY --from=build --chown=65532:65532 /runtime/ /
 # The contracts bundle from the same commit. colcad uses it unless its config names another.
