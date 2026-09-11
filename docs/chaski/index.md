@@ -1,10 +1,6 @@
 # chaski
 
-<!-- The text below is lines 7 to 141 of chaski's README: all of it except the
-     title, the badges and the repository links. Adjust the range when that
-     README changes. -->
-
---8<-- "chaski/README.md:7:141"
+--8<-- "chaski/README.md:site"
 
 ## Source
 
