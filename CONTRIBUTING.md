@@ -66,7 +66,7 @@ pull request open that proposes the next version and the changelog, both taken
 from the commit subjects: `fix` bumps the patch version, `feat` and breaking
 changes bump the minor version. The major version never changes on its own;
 1.0 and later are set by hand. Merging that pull request tags the release, and
-CI then publishes the image to `ghcr.io/alpamayo-solutions/colca` and attaches
+CI then publishes the image to `ghcr.io/alpamayo-solutions/colca`, signs it, and attaches
 the `colca-data-contracts` packages, the `colcad` wheels, SBOMs and checksums
 to the GitHub release. Every push to `main` also publishes the image as `main`
 and `sha-<commit>`.

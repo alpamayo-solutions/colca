@@ -27,6 +27,15 @@ make build    # every binary into bin/
 
 ## Checking a release
 
-Releases come with SBOMs and signed build attestations;
+From 0.1.1 on, release images are signed with cosign. To check that an image was
+built by this repository's CI from a version tag (cosign 3 or later):
+
+```bash
+cosign verify ghcr.io/alpamayo-solutions/colca:<version> \
+  --certificate-identity-regexp '^https://github\.com/alpamayo-solutions/colca/\.github/workflows/ci\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Releases also come with SBOMs and signed build attestations;
 [SECURITY.md](https://github.com/alpamayo-solutions/colca/blob/main/SECURITY.md#supply-chain)
-shows how to verify them.
+shows how to verify those.

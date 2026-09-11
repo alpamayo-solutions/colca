@@ -31,5 +31,20 @@ release packages come with signed build provenance and SBOM attestations:
 gh attestation verify oci://ghcr.io/alpamayo-solutions/colca:<version> --repo alpamayo-solutions/colca
 ```
 
+From 0.1.1 on, images are also signed with
+[cosign](https://github.com/sigstore/cosign). There is no long-lived key: the
+signature is bound to the CI workflow that built the image and recorded in the
+public Sigstore transparency log. To check that an image is a release built by
+this repository's CI, with cosign 3 or later:
+
+```bash
+cosign verify ghcr.io/alpamayo-solutions/colca:<version> \
+  --certificate-identity-regexp '^https://github\.com/alpamayo-solutions/colca/\.github/workflows/ci\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Images built from `main` are signed too; their identity ends in
+`@refs/heads/main` instead.
+
 Every night, CI builds fresh SBOMs of the `latest` and `main` images, of the
 latest release and of `main`, and scans them for known vulnerabilities.

@@ -46,8 +46,9 @@ make demo     # the same, explained as it goes
 Every release publishes:
 
 - the image `ghcr.io/alpamayo-solutions/colca:<version>` for linux/amd64 and
-  linux/arm64, with every binary and the contracts bundle of that release. The
-  `main` tag follows the main branch.
+  linux/arm64, with every binary and the contracts bundle of that release,
+  signed with cosign ([how to verify](SECURITY.md#supply-chain)). The `main` tag
+  follows the main branch.
 - `colca-data-contracts` as wheel and sdist, and `colcad` wheels for Linux and
   macOS, on the [releases page](https://github.com/alpamayo-solutions/colca/releases).
 
