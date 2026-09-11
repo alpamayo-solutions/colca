@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.2](https://github.com/alpamayo-solutions/colca/compare/v0.1.1...v0.1.2) (2026-09-11)
+
+
+### Fixes
+
+* **historian:** publish logs under the configured topic root ([8d44a42](https://github.com/alpamayo-solutions/colca/commit/8d44a42a6b79ec9f5d31b26e17d48fbdc34bda36))
+
+
+### Documentation
+
+* install the Python packages from PyPI ([00a0bb2](https://github.com/alpamayo-solutions/colca/commit/00a0bb2ecccdaafc86885fb77ada62fc24e6a09d))
+
 ## [0.1.1](https://github.com/alpamayo-solutions/colca/compare/v0.1.0...v0.1.1) (2026-09-11)
 
 
