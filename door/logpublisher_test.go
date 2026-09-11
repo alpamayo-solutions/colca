@@ -3,6 +3,7 @@ package door
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -471,4 +472,33 @@ func TestARecordWithoutAProgramCounterStillSatisfiesTheContract(t *testing.T) {
 				"minLength 1 and the node refuses the whole record (payload %v)", field, payload)
 		}
 	}
+}
+
+// quietSink knows its position and accepts every record.
+type quietSink struct{}
+
+func (quietSink) LogPosition(context.Context) (string, []string, error) {
+	return "n1", []string{"svc"}, nil
+}
+
+func (quietSink) PublishLog(context.Context, string, map[string]any) error { return nil }
+
+// Clones that slog makes while the worker resolves the node must not race with it.
+func TestWithWhilePublishingDoesNotRace(t *testing.T) {
+	p := NewLogPublisher(slog.NewTextHandler(io.Discard, nil), quietSink{}, LogPublisherOptions{})
+	p.Start(context.Background())
+	defer p.Stop()
+	logger := slog.New(p)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			logger.With("request", i).Info("handled")
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		logger.Info("tick")
+	}
+	<-done
 }

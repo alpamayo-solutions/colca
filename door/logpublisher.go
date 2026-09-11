@@ -176,6 +176,9 @@ func (p *LogPublisher) WithGroup(name string) slog.Handler {
 // derive keeps ONE queue and one worker across every handler slog clones off
 // this one. A per-clone queue would mean a per-clone goroutine, and a service
 // that calls With() per request would grow one publisher per request.
+//
+// A clone only queues records. It does not copy node or position: the root's
+// worker sets them while clones are being made, and only the root publishes.
 func (p *LogPublisher) derive(inner slog.Handler) *LogPublisher {
 	return &LogPublisher{
 		inner:    inner,
@@ -184,10 +187,7 @@ func (p *LogPublisher) derive(inner slog.Handler) *LogPublisher {
 		records:  p.records,
 		skip:     p.skip,
 		name:     p.name,
-		node:     p.node,
-		position: p.position,
 		failures: p.failures,
-		// nodeOnce and started are per clone, but only the root publisher is started.
 	}
 }
 
