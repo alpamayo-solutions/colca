@@ -8,6 +8,7 @@
 //
 //	COLCA_URL         node's local API base URL          (default http://colca)
 //	COLCA_SERVICE     service name for the local door    (default historian)
+//	COLCA_TOPIC_ROOT  topic root of the tree             (default colca)
 //	DATABASE_URL      Postgres/Timescale DSN             (required)
 //	DB_MAX_CONNS      pool size                          (default 4)
 //	FETCH_MAX         records per page                   (default 500)
@@ -31,6 +32,7 @@ import (
 	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/historian"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 type config struct {
@@ -51,6 +53,12 @@ func main() {
 func run() int {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
+
+	// The log records below are published under the root, so it must be set first.
+	if err := uns.SetRootFromEnv(); err != nil {
+		log.Error("refusing to start", "err", err)
+		return 2
+	}
 
 	cfg, err := load()
 	if err != nil {
