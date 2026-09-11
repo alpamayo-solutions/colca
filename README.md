@@ -25,6 +25,9 @@ itself. Commands travel down the same tree and are acknowledged back up.
   keys that are enrolled once. People sign in with a token from any OIDC
   provider.
 
+For Python there is [chaski](https://github.com/alpamayo-solutions/chaski): publish
+data as a service, compute from a node's streams, or embed a node in a process.
+
 ## Try it
 
 You need Go 1.26, Docker with Compose v2, [uv](https://docs.astral.sh/uv/),
@@ -103,10 +106,6 @@ and enrolled machines.
 | `cmd/colca-bench` | benchmark scenarios |
 | `contracts/` | `colca-data-contracts`, the payload contracts as a Python package |
 | `door/`, `secrets/` | Go packages for services that run next to a node |
-
-For Python, [chaski](https://github.com/alpamayo-solutions/chaski) publishes
-data as a service, runs data processing on a node's streams, or embeds a node
-in a process.
 
 ## Contributing
 
