@@ -50,7 +50,7 @@ Every release publishes:
   signed with cosign ([how to verify](SECURITY.md#supply-chain)). The `main` tag
   follows the main branch.
 - `colca-data-contracts` as wheel and sdist, and `colcad` wheels for Linux and
-  macOS, on the [releases page](https://github.com/alpamayo-solutions/colca/releases).
+  macOS, on PyPI and on the [releases page](https://github.com/alpamayo-solutions/colca/releases).
 
 From source, `make build` puts the binaries in `bin/`.
 

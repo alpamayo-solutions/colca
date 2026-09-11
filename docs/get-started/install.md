@@ -12,10 +12,16 @@ the main branch.
 
 ## Python packages
 
-Each [release](https://github.com/alpamayo-solutions/colca/releases) carries
-`colca-data-contracts` as wheel and sdist, and `colcad` wheels for Linux and
-macOS. [chaski](../chaski/index.md) uses the `colcad` wheel to run a node inside
-a Python process.
+`colca-data-contracts` and the `colcad` wheels for Linux and macOS are on PyPI
+and attached to each [release](https://github.com/alpamayo-solutions/colca/releases):
+
+```bash
+pip install colca-data-contracts
+pip install colcad
+```
+
+[chaski](../chaski/index.md) uses the `colcad` wheel to run a node inside a
+Python process.
 
 ## From source
 
