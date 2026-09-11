@@ -347,31 +347,34 @@ func (h *colcaHook) publishTimeSync() {
 	}
 }
 
-// rejectCode maps an engine rejection to an MQTT 5 PUBACK reason code. MQTT 3.1.1
-// clients and QoS 0 publishes have no negative ack; for them the packet is dropped
-// and the metric is the only trace.
-func rejectCode(cl *mqtt.Client, err error) error {
-	if cl.Properties.ProtocolVersion < 5 {
-		// MQTT 3.1.1 has no PUBACK reason code, so dropping the packet is the only honest
-		// answer for v3 sessions.
+// refuse answers a publish the hook refused. mochi acts on a reason code only for an
+// MQTT 5 client at QoS 1 or 2; any other publish it would still retain and fan out,
+// so those are dropped and the metric and audit are the only trace.
+func refuse(cl *mqtt.Client, pk packets.Packet, code error) error {
+	if cl.Properties.ProtocolVersion < 5 || pk.FixedHeader.Qos == 0 {
 		return packets.ErrRejectPacket
 	}
+	return code
+}
+
+// rejectCode maps an engine rejection to an MQTT 5 PUBACK reason code.
+func rejectCode(cl *mqtt.Client, pk packets.Packet, err error) error {
 	switch engine.ReasonOf(err) {
 	case metrics.ReasonGrammar:
 		// The topic itself is not a valid uns coordinate — includes
 		// "unknown contract", which lives in the topic.
-		return packets.ErrTopicNameInvalid
+		return refuse(cl, pk, packets.ErrTopicNameInvalid)
 	case metrics.ReasonValidation:
-		return packets.ErrPayloadFormatInvalid
+		return refuse(cl, pk, packets.ErrPayloadFormatInvalid)
 	case metrics.ReasonNodeID, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract,
 		metrics.ReasonWriteDenied, metrics.ReasonHumanWrite, metrics.ReasonTimeSync:
 		// Authorization verdicts, write_denied included: the identity has no write
 		// standing at that topic.
-		return packets.ErrNotAuthorized
+		return refuse(cl, pk, packets.ErrNotAuthorized)
 	case metrics.ReasonDraining:
 		// Temporarily refused: the destination is being decommissioned. Wait or retarget;
 		// this is not an authorization verdict.
-		return packets.ErrServerBusy
+		return refuse(cl, pk, packets.ErrServerBusy)
 	default:
 		return packets.ErrRejectPacket // untyped: keep the silent-drop behavior
 	}
@@ -399,7 +402,7 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 			"identity", ident, "topic", pk.TopicName)
 		h.auditDenied("publish", "retained_non_uns_denied", metrics.DoorMQTT,
 			h.entryForClient(cl), map[string]any{"topic": pk.TopicName})
-		return pk, packets.ErrRetainNotSupported
+		return pk, refuse(cl, pk, packets.ErrRetainNotSupported)
 	}
 	eng := h.engine()
 	if eng == nil {
@@ -423,7 +426,7 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		res, err := eng.IngestHumanAttributed(s.entry, actor, pk.TopicName, pk.Payload)
 		if err != nil {
 			h.log.Warn("human publish rejected", "sub", s.sub, "topic", pk.TopicName, "err", err)
-			return pk, rejectCode(cl, err)
+			return pk, rejectCode(cl, pk, err)
 		}
 		h.log.Debug("human ingest", "sub", s.sub, "topic", res.Topic, "stream", res.Stream, "offset", res.Offset)
 		return pk, packets.CodeSuccessIgnore
@@ -431,7 +434,7 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 	res, err := eng.IngestClient(ident, pk.TopicName, pk.Payload)
 	if err != nil {
 		h.log.Warn("publish rejected", "identity", ident, "topic", pk.TopicName, "err", err)
-		return pk, rejectCode(cl, err)
+		return pk, rejectCode(cl, pk, err)
 	}
 	if res.Persisted {
 		h.log.Debug("mqtt ingest", "identity", ident, "topic_in", pk.TopicName,
