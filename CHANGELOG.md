@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/alpamayo-solutions/colca/compare/v0.1.2...v0.1.3) (2026-09-11)
+
+
+### Fixes
+
+* **engine:** audit a refused retained publish with its topic ([19eec5b](https://github.com/alpamayo-solutions/colca/commit/19eec5b0626beb041724a7f6dcff4363db7a5d0b))
+* **mqttsrv:** drop refused publishes instead of passing them on ([1e8eaa7](https://github.com/alpamayo-solutions/colca/commit/1e8eaa7fd2549a8be5cbf23c1387d779d8d2510c))
+
 ## [0.1.2](https://github.com/alpamayo-solutions/colca/compare/v0.1.1...v0.1.2) (2026-09-11)
 
 
