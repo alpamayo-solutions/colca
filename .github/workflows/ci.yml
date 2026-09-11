@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # release-please starts this on the tag it creates; such a tag starts nothing by itself.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -116,7 +118,7 @@ jobs:
   # check above has passed.
 
   version:
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -141,7 +143,7 @@ jobs:
 
   image:
     needs: [version, go-lint, python-lint, repo-lint, go-test, contracts-test, smoke]
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -234,7 +236,7 @@ jobs:
 
   packages:
     needs: [version, go-lint, python-lint, repo-lint, go-test, contracts-test, smoke]
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -309,11 +311,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
-        with:
-          version: "0.11.17"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: python-packages
@@ -323,30 +320,32 @@ jobs:
           pattern: sbom-*
           path: dist
           merge-multiple: true
-      - name: Release notes
+      - name: Publish the release
         env:
+          GH_TOKEN: ${{ github.token }}
           IMAGE: ghcr.io/${{ github.repository }}:${{ needs.version.outputs.semver }}
         run: |
+          (cd dist && sha256sum -- * > SHA256SUMS)
           {
             echo "Container image: \`$IMAGE\` (linux/amd64, linux/arm64)"
             echo
             echo "Attached: \`colca-data-contracts\` as wheel and sdist, and \`colcad\` wheels for \`chaski[node]\`."
             echo "SBOMs in SPDX and CycloneDX: the image per platform, and \`colca-data-contracts\`."
-            echo
-            if git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" > /dev/null 2>&1; then
-              uvx git-cliff@2.13.1 --latest --strip header
-            else
-              echo "First public release."
+          } > assets.md
+          # release-please normally created the release with its changelog; a tag pushed
+          # by hand gets a new release with generated notes.
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            body=$(gh release view "$GITHUB_REF_NAME" --json body --jq .body)
+            if ! grep -q "Container image:" <<< "$body"; then
+              printf '%s\n\n%s\n' "$body" "$(cat assets.md)" > notes.md
+              gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
             fi
-          } > notes.md
-      - name: Publish the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          (cd dist && sha256sum -- * > SHA256SUMS)
-          prerelease=()
-          if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then
-            prerelease=(--prerelease)
+          else
+            prerelease=()
+            if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then
+              prerelease=(--prerelease)
+            fi
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Colca $GITHUB_REF_NAME" \
+              --notes-file assets.md --generate-notes "${prerelease[@]}"
           fi
-          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Colca $GITHUB_REF_NAME" \
-            --notes-file notes.md "${prerelease[@]}"

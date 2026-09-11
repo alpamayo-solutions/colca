@@ -61,12 +61,15 @@ was planned.
 
 ## Releases
 
-Maintainers release by pushing a tag `vX.Y.Z`, or `vX.Y.Z-rc.N` for a release
-candidate, on `main`. Once every check has passed, CI publishes the image to
-`ghcr.io/alpamayo-solutions/colca` and creates a GitHub release with the
-`colca-data-contracts` packages, the `colcad` wheels, SBOMs, checksums, and
-notes built from the commit subjects. Every push to `main` also publishes the image as
-`main` and `sha-<commit>`.
+[release-please](https://github.com/googleapis/release-please) keeps a release
+pull request open that proposes the next version and the changelog, both taken
+from the commit subjects: `fix` bumps the patch version, `feat` and breaking
+changes bump the minor version. The major version never changes on its own;
+1.0 and later are set by hand. Merging that pull request tags the release, and
+CI then publishes the image to `ghcr.io/alpamayo-solutions/colca` and attaches
+the `colca-data-contracts` packages, the `colcad` wheels, SBOMs and checksums
+to the GitHub release. Every push to `main` also publishes the image as `main`
+and `sha-<commit>`.
 
 ## Contributor License Agreement
 
