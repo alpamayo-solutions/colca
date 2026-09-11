@@ -191,3 +191,94 @@ func TestPlanningIsStableAcrossRuns(t *testing.T) {
 		}
 	}
 }
+
+// ---- direction three: membership follows a realm role ----------------------
+
+func user(id, name string, roles ...string) User {
+	u := User{ID: id, Username: name, Roles: map[string]bool{}}
+	for _, r := range roles {
+		u.Roles[r] = true
+	}
+	return u
+}
+
+var admins = RoleGroup{ID: "g-admins", Name: "Administrators", Roles: []string{"colca_admin"}}
+
+func TestARoleHolderJoinsAndSomebodyWithoutTheRoleLeaves(t *testing.T) {
+	// A user granted the role joins, however it reached them; a user added by
+	// hand without it leaves.
+	plan := PlanMemberships(
+		[]RoleGroup{admins},
+		[]User{
+			user("u-boss", "boss", "colca_admin"),
+			user("u-anna", "anna", "colca_viewer"),
+			user("u-lena", "lena", "colca_admin"),
+		},
+		map[string][]string{"g-admins": {"u-anna", "u-lena"}},
+	)
+	if len(plan.Add) != 1 || plan.Add[0].UserID != "u-boss" || plan.Add[0].GroupID != "g-admins" {
+		t.Fatalf("add planned as %+v", plan.Add)
+	}
+	if len(plan.Remove) != 1 || plan.Remove[0].UserID != "u-anna" || plan.Remove[0].Username != "anna" {
+		t.Fatalf("remove planned as %+v", plan.Remove)
+	}
+	if len(plan.Unaccounted) != 0 {
+		t.Fatalf("unaccounted: %+v", plan.Unaccounted)
+	}
+}
+
+func TestNobodyWithoutTheFollowedRoleIsEverAdded(t *testing.T) {
+	// Other roles add nobody. What editors and viewers reach comes from grants
+	// on elements.
+	plan := PlanMemberships(
+		[]RoleGroup{admins},
+		[]User{
+			user("u-ed", "editor", "colca_editor"),
+			user("u-vi", "viewer", "colca_viewer"),
+			user("u-none", "nobody"),
+		},
+		map[string][]string{},
+	)
+	if len(plan.Add)+len(plan.Remove) != 0 {
+		t.Fatalf("plan should be empty: %+v", plan)
+	}
+}
+
+func TestAConvergedMembershipPlansNothing(t *testing.T) {
+	plan := PlanMemberships(
+		[]RoleGroup{admins},
+		[]User{user("u-boss", "boss", "colca_admin"), user("u-anna", "anna")},
+		map[string][]string{"g-admins": {"u-boss"}},
+	)
+	if len(plan.Add)+len(plan.Remove)+len(plan.Unaccounted) != 0 {
+		t.Fatalf("plan should be empty: %+v", plan)
+	}
+}
+
+func TestAMemberTheUserListingDoesNotShowIsReportedNeverRemoved(t *testing.T) {
+	// Keycloak leaves service accounts out of the user listing. Missing from it
+	// means unknown, and unknown never removes.
+	plan := PlanMemberships(
+		[]RoleGroup{admins},
+		[]User{user("u-boss", "boss", "colca_admin")},
+		map[string][]string{"g-admins": {"u-boss", "u-hidden"}},
+	)
+	if len(plan.Remove) != 0 {
+		t.Fatalf("removed a member whose roles are unknown: %+v", plan.Remove)
+	}
+	if len(plan.Unaccounted) != 1 || plan.Unaccounted[0].UserID != "u-hidden" {
+		t.Fatalf("unaccounted: %+v", plan.Unaccounted)
+	}
+}
+
+func TestAGroupMayFollowMoreThanOneRole(t *testing.T) {
+	both := RoleGroup{ID: "g", Name: "Ops", Roles: []string{"role_a", "role_b"}}
+	plan := PlanMemberships(
+		[]RoleGroup{both},
+		[]User{user("u-a", "a", "role_a"), user("u-b", "b", "role_b"), user("u-c", "c", "role_c")},
+		map[string][]string{},
+	)
+	if len(plan.Add) != 2 || plan.Add[0].Username != "a" || plan.Add[1].Username != "b" {
+		t.Fatalf("add planned as %+v", plan.Add)
+	}
+}

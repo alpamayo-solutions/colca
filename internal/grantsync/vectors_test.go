@@ -16,6 +16,9 @@ type authzVectors struct {
 	Scopes              []string `json:"scopes"`
 	ElementResourceType string   `json:"element_resource_type"`
 	ManagedByAttr       string   `json:"managed_by_attr"`
+	FollowsRoleAttr     string   `json:"follows_realm_role_attr"`
+	RealmAdminRole      string   `json:"realm_admin_role"`
+	RealmAdminBundle    []string `json:"realm_admin_bundle"`
 }
 
 func loadAuthzVectors(t *testing.T) authzVectors {
@@ -54,6 +57,12 @@ func TestTheAuthzVocabularyMatchesTheGoldenVectors(t *testing.T) {
 	}
 	if ManagedByAttr != vectors.ManagedByAttr {
 		t.Errorf("ManagedByAttr is %q, vectors say %q", ManagedByAttr, vectors.ManagedByAttr)
+	}
+	if FollowsRoleAttr != vectors.FollowsRoleAttr {
+		t.Errorf("FollowsRoleAttr is %q, vectors say %q", FollowsRoleAttr, vectors.FollowsRoleAttr)
+	}
+	if len(vectors.RealmAdminBundle) == 0 || vectors.RealmAdminRole == "" {
+		t.Fatal("authz vectors carry no realm admin bundle")
 	}
 }
 

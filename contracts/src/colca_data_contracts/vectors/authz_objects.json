@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden vectors for the Keycloak Authorization Services objects a colca grant is made of. Every tool that writes these objects implements this vocabulary natively, and so does colca in internal/grantsync/keycloak.go, which compiles them into _Group definitions; none of them can import the others. This file is the one definition and each suite judges its own copy against it, so a scope added on one side cannot land without the others.",
+  "_comment": "Golden vectors for the Keycloak Authorization Services objects a colca grant is made of. Every tool that writes these objects implements this vocabulary natively, and so does colca in internal/grantsync/keycloak.go, which compiles them into _Group definitions; none of them can import the others. This file is the one definition and each suite judges its own copy against it, so a scope added on one side cannot land without the others. The realm admin bundle is what a holder of the realm admin role gets at every node, carried by the group that follows that role.",
   "scopes": [
     "read",
     "param",
@@ -15,5 +15,12 @@
   "scope_permission_name_pattern": "grant:{group_id}:{element_id}",
   "logic": "POSITIVE",
   "decision_strategy": "UNANIMOUS",
-  "_permission_name_note": "Older authoring tools name the permissions they author `{group}@{element}`. Both names are read by the same reader because OWNERSHIP is decided by what a permission BINDS (one single-group policy, one element resource), never by its name — a name match would let one pair carry two permissions with different scopes, which grantsync unions. So the pattern above is pinned on the authoring side that uses it and the legacy spelling is recorded here rather than made a second rule."
+  "_permission_name_note": "Older authoring tools name the permissions they author `{group}@{element}`. Both names are read by the same reader because OWNERSHIP is decided by what a permission BINDS (one single-group policy, one element resource), never by its name — a name match would let one pair carry two permissions with different scopes, which grantsync unions. So the pattern above is pinned on the authoring side that uses it and the legacy spelling is recorded here rather than made a second rule.",
+  "follows_realm_role_attr": "colca.follows-realm-role",
+  "realm_admin_role": "colca_admin",
+  "realm_admin_bundle": [
+    "admin:#",
+    "cmd:#:admin,configure,maintain,operate,param",
+    "read:#"
+  ]
 }

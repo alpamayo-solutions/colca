@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // published records what the fake node was asked to write.
@@ -329,5 +332,139 @@ func TestRunStopsPromptlyOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run waited for the tick instead of the cancel")
+	}
+}
+
+// ---- direction three: membership follows a realm role ----------------------
+
+func realmWithAdminGroup(t *testing.T, members []string, writes *deletions) *Keycloak {
+	t.Helper()
+	return fakeRealm(t, realmFixture{
+		Groups: []fakeGroup{{ID: "g-admins", Name: "Administrators",
+			Hatch: []string{"admin:#", "read:#"}, Follows: []string{"colca_admin"}}},
+		Roles: []string{"colca_admin", "colca_viewer"},
+		Users: []fakeUser{
+			{ID: "u-boss", Username: "boss", Roles: []string{"colca_admin"}},
+			{ID: "u-anna", Username: "anna", Roles: []string{"colca_viewer"}},
+		},
+		Members:     map[string][]string{"g-admins": members},
+		Memberships: writes,
+	})
+}
+
+func TestAFullCycleConvergesMembershipOfARoleFollowingGroup(t *testing.T) {
+	// boss holds the role and is not a member; anna is a member without it.
+	writes := &deletions{}
+	node, _ := fakeNode(t, `{"entries":[]}`, http.StatusOK)
+	report, err := syncer(node, realmWithAdminGroup(t, []string{"u-anna"}, writes)).Once(context.Background())
+	if err != nil {
+		t.Fatalf("Once: %v", err)
+	}
+	got := writes.all()
+	if len(got) != 2 || got[0] != "PUT u-boss g-admins" || got[1] != "DELETE u-anna g-admins" {
+		t.Fatalf("membership writes were %v", got)
+	}
+	if len(report.Changes) < 2 {
+		t.Fatalf("a cycle that moved two memberships reported %v", report.Changes)
+	}
+}
+
+func TestAConvergedMembershipIsNotRewritten(t *testing.T) {
+	writes := &deletions{}
+	node, _ := fakeNode(t, `{"entries":[
+		{"topic":"colca/v1/_Group/01HROOT/Administrators","node_id":"01HROOT","payload":{"id":"Administrators","grants":["admin:#","read:#"]}}
+	]}`, http.StatusOK)
+	report, err := syncer(node, realmWithAdminGroup(t, []string{"u-boss"}, writes)).Once(context.Background())
+	if err != nil {
+		t.Fatalf("Once: %v", err)
+	}
+	if got := writes.all(); len(got) != 0 {
+		t.Fatalf("rewrote a converged membership: %v", got)
+	}
+	if len(report.Changes) != 0 {
+		t.Fatalf("changes reported with nothing to do: %v", report.Changes)
+	}
+}
+
+func TestDryRunMovesNoMembership(t *testing.T) {
+	writes := &deletions{}
+	node, _ := fakeNode(t, `{"entries":[]}`, http.StatusOK)
+	s := syncer(node, realmWithAdminGroup(t, []string{"u-anna"}, writes))
+	s.DryRun = true
+	report, err := s.Once(context.Background())
+	if err != nil {
+		t.Fatalf("Once: %v", err)
+	}
+	if got := writes.all(); len(got) != 0 {
+		t.Fatalf("dry run wrote %v", got)
+	}
+	if len(report.Changes) == 0 {
+		t.Fatal("dry run reported nothing")
+	}
+}
+
+// stubScope is a node that holds no elements, so only realm-wide grants
+// resolve. Those are all the realm admin bundle has.
+type stubScope struct{}
+
+func (stubScope) PathOf(string) (string, bool) { return "", false }
+func (stubScope) Reaches(string) bool          { return false }
+
+func TestTheRealmAdminBundleReachesTheTreeAndOpensEveryDoor(t *testing.T) {
+	// The role holder joins the group, the group's grants become the _Group
+	// definition written at the root, and an entry holding that definition's
+	// grants passes the admin routes, every command class and a read.
+	vectors := loadAuthzVectors(t)
+	writes := &deletions{}
+	kc := fakeRealm(t, realmFixture{
+		Groups: []fakeGroup{{ID: "g-admins", Name: "Administrators",
+			Hatch: vectors.RealmAdminBundle, Follows: []string{vectors.RealmAdminRole}}},
+		Roles:       []string{vectors.RealmAdminRole},
+		Users:       []fakeUser{{ID: "u-boss", Username: "boss", Roles: []string{vectors.RealmAdminRole}}},
+		Members:     map[string][]string{},
+		Memberships: writes,
+	})
+	node, seen := fakeNode(t, `{"entries":[]}`, http.StatusOK)
+	report, err := syncer(node, kc).Once(context.Background())
+	if err != nil {
+		t.Fatalf("Once: %v", err)
+	}
+	if len(report.Problems) != 0 {
+		t.Fatalf("the bundle raised problems: %v", report.Problems)
+	}
+	if got := writes.all(); len(got) != 1 || got[0] != "PUT u-boss g-admins" {
+		t.Fatalf("the role holder was not put in the group: %v", got)
+	}
+	rows := seen.all()
+	if len(rows) != 1 {
+		t.Fatalf("published %d records: %v", len(rows), rows)
+	}
+	def := rows[0]["payload"].(map[string]any)["definitions"].([]any)[0].(map[string]any)
+	published := def["definition"].(map[string]any)["grants"].([]any)
+	var grants []string
+	for _, g := range published {
+		grants = append(grants, g.(string))
+	}
+	if !reflect.DeepEqual(grants, vectors.RealmAdminBundle) {
+		t.Fatalf("the definition carries %v, the bundle is %v", grants, vectors.RealmAdminBundle)
+	}
+
+	entry, err := uns.TokenEntry("u-boss", grants)
+	if err != nil {
+		t.Fatalf("a node refused the bundle: %v", err)
+	}
+	if !entry.IsAdmin() {
+		t.Fatal("the bundle does not open the admin routes")
+	}
+	if !entry.MayPublishContract("_CmdEdit") || !entry.HoldsCmdClass("configure") {
+		t.Fatal("the bundle does not pass the door's check for an Edit command")
+	}
+	for _, class := range uns.CmdClasses() {
+		if !uns.AuthorizeCmdAt(stubScope{}, entry, class, "site1/edge1/m6") {
+			t.Fatalf("the bundle does not authorize class %q at a position", class)
+		}
+	}
+	if !uns.Authorize(stubScope{}, entry, uns.ActReadRecord, uns.Prefix()+"_Metric/01HROOT/site1/m6/temp") {
+		t.Fatal("the bundle does not authorize a read")
 	}
 }

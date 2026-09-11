@@ -167,3 +167,81 @@ func sortedKeys[V any](m map[string]V) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// MembershipChange is one user joining or leaving one role group.
+type MembershipChange struct {
+	UserID, Username   string
+	GroupID, GroupName string
+}
+
+// MembershipPlan is direction three: who joins and who leaves each group that
+// follows a realm role.
+type MembershipPlan struct {
+	Add    []MembershipChange
+	Remove []MembershipChange
+	// Unaccounted names members the user listing does not show, such as service
+	// accounts. Whether they hold the role is unknown, so they are reported and
+	// never removed.
+	Unaccounted []MembershipChange
+}
+
+// PlanMemberships diffs each role group's members against the users holding
+// one of its roles. Removal is part of it: a user whose role is withdrawn
+// leaves, and so does anyone added by hand without the role, or the group's
+// grants would outlive the role.
+func PlanMemberships(groups []RoleGroup, users []User, members map[string][]string) MembershipPlan {
+	var plan MembershipPlan
+	byID := map[string]User{}
+	for _, u := range users {
+		byID[u.ID] = u
+	}
+	sorted := append([]RoleGroup(nil), groups...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	for _, g := range sorted {
+		current := map[string]bool{}
+		for _, id := range members[g.ID] {
+			current[id] = true
+		}
+		var holders []User
+		for _, u := range users {
+			if holdsAny(u, g.Roles) {
+				holders = append(holders, u)
+			}
+		}
+		sort.Slice(holders, func(i, j int) bool { return holders[i].Username < holders[j].Username })
+		desired := map[string]bool{}
+		for _, u := range holders {
+			desired[u.ID] = true
+			if !current[u.ID] {
+				plan.Add = append(plan.Add, MembershipChange{
+					UserID: u.ID, Username: u.Username, GroupID: g.ID, GroupName: g.Name})
+			}
+		}
+		ids := append([]string(nil), members[g.ID]...)
+		sort.Strings(ids)
+		for _, id := range ids {
+			if desired[id] {
+				continue
+			}
+			change := MembershipChange{UserID: id, GroupID: g.ID, GroupName: g.Name}
+			u, listed := byID[id]
+			if !listed {
+				plan.Unaccounted = append(plan.Unaccounted, change)
+				continue
+			}
+			change.Username = u.Username
+			plan.Remove = append(plan.Remove, change)
+		}
+	}
+	return plan
+}
+
+func holdsAny(u User, roles []string) bool {
+	for _, r := range roles {
+		if u.Roles[r] {
+			return true
+		}
+	}
+	return false
+}

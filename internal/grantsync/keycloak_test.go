@@ -27,9 +27,25 @@ type realmFixture struct {
 	FailPath    string // any request path containing this substring 500s
 	// Deleted, when set, records the id of every resource the service retires.
 	Deleted *deletions
+	// Roles are the realm roles that exist; GET /roles/{name} is 404 for any other.
+	Roles []string
+	// Users is the user listing, each with the realm roles Keycloak reports as
+	// effective for them.
+	Users []fakeUser
+	// Members maps a group id to the ids of its direct members.
+	Members map[string][]string
+	// Memberships, when set, records every membership write as "PUT uid gid" or
+	// "DELETE uid gid".
+	Memberships *deletions
 }
 
-// deletions records the resource ids a fake realm was asked to delete.
+type fakeUser struct {
+	ID, Username string
+	Roles        []string
+}
+
+// deletions records the writes a fake realm was asked to make: retired
+// resource ids, or membership changes.
 type deletions struct {
 	mu  sync.Mutex
 	ids []string
@@ -50,6 +66,7 @@ func (d *deletions) all() []string {
 type fakeGroup struct {
 	ID, Name      string
 	Hatch         []string // colca_grants attribute
+	Follows       []string // colca.follows-realm-role attribute
 	SubGroupCount int      // triggers a GET .../children fetch when > 0
 }
 
@@ -92,8 +109,15 @@ func fakeRealm(t *testing.T, f realmFixture) *Keycloak {
 	})
 	groupRow := func(g fakeGroup) map[string]any {
 		row := map[string]any{"id": g.ID, "name": g.Name, "subGroupCount": g.SubGroupCount}
+		attributes := map[string][]string{}
 		if len(g.Hatch) > 0 {
-			row["attributes"] = map[string][]string{ColcaGrantsAttr: g.Hatch}
+			attributes[ColcaGrantsAttr] = g.Hatch
+		}
+		if len(g.Follows) > 0 {
+			attributes[FollowsRoleAttr] = g.Follows
+		}
+		if len(attributes) > 0 {
+			row["attributes"] = attributes
 		}
 		return row
 	}
@@ -106,21 +130,72 @@ func fakeRealm(t *testing.T, f realmFixture) *Keycloak {
 		write(w, r, string(body))
 	})
 	mux.HandleFunc("/admin/realms/colca/groups/", func(w http.ResponseWriter, r *http.Request) {
-		// Only .../{id}/children is real Keycloak 23+ shape; nothing else in
-		// this package fetches under /groups/{id}.
+		// This package fetches only .../{id}/children, the Keycloak 23+ shape, and
+		// .../{id}/members under /groups/{id}.
 		rest := strings.TrimPrefix(r.URL.Path, "/admin/realms/colca/groups/")
 		id, part, _ := strings.Cut(rest, "/")
-		if part != "children" {
+		switch part {
+		case "children":
+			children := f.Children[id]
+			rows := make([]map[string]any, 0, len(children))
+			for _, g := range children {
+				rows = append(rows, groupRow(g))
+			}
+			body, _ := json.Marshal(rows)
+			write(w, r, string(body))
+		case "members":
+			rows := make([]map[string]string, 0, len(f.Members[id]))
+			for _, uid := range f.Members[id] {
+				rows = append(rows, map[string]string{"id": uid})
+			}
+			body, _ := json.Marshal(rows)
+			write(w, r, string(body))
+		default:
 			write(w, r, "[]")
-			return
 		}
-		children := f.Children[id]
-		rows := make([]map[string]any, 0, len(children))
-		for _, g := range children {
-			rows = append(rows, groupRow(g))
+	})
+	mux.HandleFunc("/admin/realms/colca/roles/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/admin/realms/colca/roles/")
+		for _, have := range f.Roles {
+			if have == name {
+				write(w, r, `{"name":"`+name+`"}`)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/admin/realms/colca/users", func(w http.ResponseWriter, r *http.Request) {
+		rows := make([]map[string]string, 0, len(f.Users))
+		for _, u := range f.Users {
+			rows = append(rows, map[string]string{"id": u.ID, "username": u.Username})
 		}
 		body, _ := json.Marshal(rows)
 		write(w, r, string(body))
+	})
+	mux.HandleFunc("/admin/realms/colca/users/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/admin/realms/colca/users/")
+		id, part, _ := strings.Cut(rest, "/")
+		switch {
+		case part == "role-mappings/realm/composite":
+			rows := []map[string]string{}
+			for _, u := range f.Users {
+				if u.ID != id {
+					continue
+				}
+				for _, role := range u.Roles {
+					rows = append(rows, map[string]string{"name": role})
+				}
+			}
+			body, _ := json.Marshal(rows)
+			write(w, r, string(body))
+		case strings.HasPrefix(part, "groups/"):
+			if f.Memberships != nil {
+				f.Memberships.add(r.Method + " " + id + " " + strings.TrimPrefix(part, "groups/"))
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			write(w, r, "[]")
+		}
 	})
 
 	base := "/admin/realms/colca/clients/u1/authz/resource-server"
@@ -444,5 +519,108 @@ func TestAMissingResourceServerClientSaysSo(t *testing.T) {
 	_, err := k.View(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "colca-authz") {
 		t.Fatalf("error should name the missing client, got %v", err)
+	}
+}
+
+func TestViewReadsAGroupThatFollowsARealmRoleAndWhoHoldsIt(t *testing.T) {
+	// The attribute names the role, each user's composite role mappings say who
+	// holds it, and the group's member list is what that is diffed against.
+	k := fakeRealm(t, realmFixture{
+		Groups: []fakeGroup{{ID: "g-admins", Name: "Administrators", Follows: []string{"colca_admin"}}},
+		Roles:  []string{"colca_admin", "colca_viewer"},
+		Users: []fakeUser{
+			{ID: "u-boss", Username: "boss", Roles: []string{"colca_admin", "colca_viewer"}},
+			{ID: "u-anna", Username: "anna", Roles: []string{"colca_viewer"}},
+		},
+		Members: map[string][]string{"g-admins": {"u-anna"}},
+	})
+	view, err := k.View(context.Background())
+	if err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	if len(view.Problems) != 0 {
+		t.Fatalf("unexpected problems: %v", view.Problems)
+	}
+	if len(view.RoleGroups) != 1 || view.RoleGroups[0].ID != "g-admins" || view.RoleGroups[0].Roles[0] != "colca_admin" {
+		t.Fatalf("role groups read as %+v", view.RoleGroups)
+	}
+	if got := view.Members["g-admins"]; len(got) != 1 || got[0] != "u-anna" {
+		t.Fatalf("members read as %v", got)
+	}
+	holders := map[string]bool{}
+	for _, u := range view.Users {
+		holders[u.Username] = u.Roles["colca_admin"]
+	}
+	if !holders["boss"] || holders["anna"] {
+		t.Fatalf("role holders read as %v", holders)
+	}
+}
+
+func TestAGroupFollowingARoleTheRealmDoesNotHaveIsReportedAndLeftAlone(t *testing.T) {
+	// A misspelled role has no holders, so following it would empty the group.
+	k := fakeRealm(t, realmFixture{
+		Groups:  []fakeGroup{{ID: "g-admins", Name: "Administrators", Follows: []string{"colca_admn"}}},
+		Roles:   []string{"colca_admin"},
+		Users:   []fakeUser{{ID: "u-boss", Username: "boss", Roles: []string{"colca_admin"}}},
+		Members: map[string][]string{"g-admins": {"u-boss"}},
+	})
+	view, err := k.View(context.Background())
+	if err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	if len(view.RoleGroups) != 0 {
+		t.Fatalf("a group following an unknown role was followed anyway: %+v", view.RoleGroups)
+	}
+	if len(view.Problems) != 1 || !strings.Contains(view.Problems[0].Error(), "colca_admn") {
+		t.Fatalf("problems = %v, want exactly one naming the missing role", view.Problems)
+	}
+	if len(view.Users) != 0 {
+		t.Fatal("users were read although no group is followed")
+	}
+}
+
+func TestNothingAboutUsersIsReadWhenNoGroupFollowsARole(t *testing.T) {
+	var touched []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/token") {
+			_, _ = w.Write([]byte(`{"access_token":"t","expires_in":60}`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/clients") {
+			_, _ = w.Write([]byte(`[{"id":"u1","clientId":"colca-authz"}]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/users") || strings.Contains(r.URL.Path, "/roles/") {
+			touched = append(touched, r.URL.Path)
+		}
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	k := &Keycloak{BaseURL: srv.URL, Realm: "colca", ClientID: "c", ClientSecret: "s",
+		AuthzClient: "colca-authz"}
+	if _, err := k.View(context.Background()); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	if len(touched) != 0 {
+		t.Fatalf("read %v with no group following a role", touched)
+	}
+}
+
+func TestViewFailsWhenAMembershipReadFails(t *testing.T) {
+	// A short membership read would look like fewer holders and remove the rest.
+	for _, failing := range []string{"/members", "/composite", "/roles/"} {
+		t.Run(failing, func(t *testing.T) {
+			k := fakeRealm(t, realmFixture{
+				Groups:   []fakeGroup{{ID: "g-admins", Name: "Administrators", Follows: []string{"colca_admin"}}},
+				Roles:    []string{"colca_admin"},
+				Users:    []fakeUser{{ID: "u-boss", Username: "boss", Roles: []string{"colca_admin"}}},
+				Members:  map[string][]string{"g-admins": {"u-boss"}},
+				FailPath: failing,
+			})
+			if _, err := k.View(context.Background()); err == nil {
+				t.Fatalf("a failure on %s returned a view anyway", failing)
+			}
+		})
 	}
 }

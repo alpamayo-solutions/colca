@@ -1,7 +1,10 @@
 // Command colca-grantsync keeps authorization in step between Keycloak and a
 // Colca tree. It registers every system element as a Keycloak authz resource, so
 // administrators can grant on it, and compiles the resulting permissions into
-// _Group definitions at the root node, which pass them down the tree.
+// _Group definitions at the root node, which pass them down the tree. A group
+// with the colca.follows-realm-role attribute gets exactly the users who hold
+// one of the named realm roles as members; for that the service account needs
+// manage-users and view-realm.
 //
 // It runs beside colcad, never inside it, so Keycloak stays out of the node. It
 // keeps no state: two instances write the same thing, and losing it only costs

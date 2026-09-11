@@ -9,6 +9,7 @@ type Metrics struct {
 	cycles      *prometheus.CounterVec
 	resources   *prometheus.CounterVec
 	definitions *prometheus.CounterVec
+	memberships *prometheus.CounterVec
 	problems    prometheus.Gauge
 }
 
@@ -26,6 +27,10 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "colca_grantsync_definitions_total",
 			Help: "_Group definitions authored into the tree, by action.",
 		}, []string{"action"}),
+		memberships: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_grantsync_memberships_total",
+			Help: "Memberships written to Keycloak for groups that follow a realm role, by action.",
+		}, []string{"action"}),
 		problems: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_grantsync_problems",
 			Help: "States seen in the last cycle that a human must resolve: " +
@@ -33,7 +38,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		}),
 	}
 	if reg != nil {
-		reg.MustRegister(m.cycles, m.resources, m.definitions, m.problems)
+		reg.MustRegister(m.cycles, m.resources, m.definitions, m.memberships, m.problems)
 	}
 	return m
 }
@@ -65,6 +70,18 @@ func (m *Metrics) definitionWritten() {
 func (m *Metrics) definitionRetracted() {
 	if m != nil {
 		m.definitions.WithLabelValues("retracted").Inc()
+	}
+}
+
+func (m *Metrics) memberAdded() {
+	if m != nil {
+		m.memberships.WithLabelValues("added").Inc()
+	}
+}
+
+func (m *Metrics) memberRemoved() {
+	if m != nil {
+		m.memberships.WithLabelValues("removed").Inc()
 	}
 }
 

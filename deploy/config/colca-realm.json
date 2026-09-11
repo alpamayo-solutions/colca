@@ -90,12 +90,27 @@
       "fullScopeAllowed": true
     }
   ],
+  "roles": {
+    "realm": [
+      {
+        "name": "colca_admin",
+        "description": "Held by the realm's administrators. 01HGRP-ADMINS follows it.",
+        "composite": false,
+        "clientRole": false
+      }
+    ]
+  },
   "groups": [
     {
       "name": "01HGRP-SITE1-OPERATORS"
     },
     {
-      "name": "01HGRP-ADMINS"
+      "name": "01HGRP-ADMINS",
+      "attributes": {
+        "colca.follows-realm-role": [
+          "colca_admin"
+        ]
+      }
     }
   ],
   "users": [
@@ -108,7 +123,9 @@
           "view-clients",
           "manage-authorization",
           "query-groups",
-          "view-users"
+          "view-users",
+          "manage-users",
+          "view-realm"
         ]
       }
     },
@@ -142,6 +159,9 @@
           "value": "boss-demo-password",
           "temporary": false
         }
+      ],
+      "realmRoles": [
+        "colca_admin"
       ],
       "groups": [
         "/01HGRP-ADMINS"

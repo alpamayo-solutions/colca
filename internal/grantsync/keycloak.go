@@ -24,6 +24,10 @@ const (
 	// ElementResourceType distinguishes an element resource from anything else
 	// somebody may have created on the same resource server.
 	ElementResourceType = "colca:element"
+	// FollowsRoleAttr marks a group whose membership is derived: every user
+	// holding one of the named realm roles is a member, and nobody else. The
+	// group carries the grants; the role decides who is in it.
+	FollowsRoleAttr = "colca.follows-realm-role"
 )
 
 // Resource is one authz resource — an element, made assignable.
@@ -55,6 +59,21 @@ type Permission struct {
 	Scopes   []string
 }
 
+// RoleGroup is a group whose membership follows realm roles.
+type RoleGroup struct {
+	ID    string
+	Name  string
+	Roles []string
+}
+
+// User is one realm user with the followed realm roles Keycloak reports as
+// effective for them: direct, inherited through a group, or composited.
+type User struct {
+	ID       string
+	Username string
+	Roles    map[string]bool
+}
+
 // KeycloakView is one consistent read of the resource server.
 type KeycloakView struct {
 	Resources   []Resource
@@ -62,6 +81,14 @@ type KeycloakView struct {
 	// Attributes are colca_grants set directly on a group, passed through as is,
 	// such as admin:#.
 	Attributes map[string][]string
+	// RoleGroups are the groups carrying FollowsRoleAttr. A group naming a role
+	// the realm does not have is left out, so a typo empties no group.
+	RoleGroups []RoleGroup
+	// Users is every listed user with the followed roles they hold. It is read
+	// only when some group follows a role.
+	Users []User
+	// Members is the direct membership of each role group, by group id.
+	Members map[string][]string
 	// Problems are data seen but not fixed, such as a group policy naming a deleted
 	// group. They are reported rather than dropped.
 	Problems []error
@@ -138,37 +165,73 @@ func (k *Keycloak) accessToken(ctx context.Context) (string, error) {
 	return k.token, nil
 }
 
-func (k *Keycloak) get(ctx context.Context, path string, out any) error {
+// request performs one admin API call and returns its status and body.
+func (k *Keycloak) request(ctx context.Context, method, path string, body any) (int, []byte, error) {
 	token, err := k.accessToken(ctx)
 	if err != nil {
-		return err
+		return 0, nil, err
+	}
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return 0, nil, err
+		}
+		reader = strings.NewReader(string(encoded))
 	}
 	endpoint := fmt.Sprintf("%s/admin/realms/%s%s",
 		strings.TrimRight(k.BaseURL, "/"), url.PathEscape(k.Realm), path)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := k.client().Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	return resp.StatusCode, payload, nil
+}
+
+func (k *Keycloak) get(ctx context.Context, path string, out any) error {
+	found, err := k.lookup(ctx, path, out)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := k.client().Do(req)
-	if err != nil {
-		return fmt.Errorf("GET %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("GET %s: %w", path, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: HTTP %d: %s", path, resp.StatusCode, truncate(body, 300))
-	}
-	if len(body) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("GET %s: %w", path, err)
+	if !found {
+		return fmt.Errorf("GET %s: HTTP 404", path)
 	}
 	return nil
+}
+
+// lookup is a GET that reports a 404 as not found instead of failing, for
+// callers to whom a missing object is an answer.
+func (k *Keycloak) lookup(ctx context.Context, path string, out any) (bool, error) {
+	status, body, err := k.request(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return false, err
+	}
+	if status == http.StatusNotFound {
+		return false, nil
+	}
+	if status != http.StatusOK {
+		return false, fmt.Errorf("GET %s: HTTP %d: %s", path, status, truncate(body, 300))
+	}
+	if len(body) == 0 {
+		return true, nil
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return false, fmt.Errorf("GET %s: %w", path, err)
+	}
+	return true, nil
 }
 
 func (k *Keycloak) authzPath(clientUUID, suffix string) string {
@@ -225,6 +288,7 @@ func (k *Keycloak) View(ctx context.Context) (KeycloakView, error) {
 	}
 	groupNames := map[string]string{}
 	attributes := map[string][]string{}
+	var roleGroups []RoleGroup
 	// Keycloak 23+ lists only subGroupCount; children come from
 	// GET /groups/{id}/children. A count of 0, or none, means no children.
 	var walk func(context.Context, []kcGroup) error
@@ -233,6 +297,9 @@ func (k *Keycloak) View(ctx context.Context) (KeycloakView, error) {
 			groupNames[g.ID] = g.Name
 			if hatch := g.Attributes[ColcaGrantsAttr]; len(hatch) > 0 {
 				attributes[g.Name] = append(attributes[g.Name], hatch...)
+			}
+			if roles := g.Attributes[FollowsRoleAttr]; len(roles) > 0 {
+				roleGroups = append(roleGroups, RoleGroup{ID: g.ID, Name: g.Name, Roles: roles})
 			}
 			if g.SubGroupCount == 0 {
 				continue
@@ -279,6 +346,9 @@ func (k *Keycloak) View(ctx context.Context) (KeycloakView, error) {
 	}
 
 	view := KeycloakView{Resources: resources, Attributes: attributes}
+	if err := k.readMemberships(ctx, roleGroups, &view); err != nil {
+		return KeycloakView{}, err
+	}
 	for _, perm := range perms {
 		// Three reads per permission is Keycloak's shape, not a choice: the
 		// list row carries none of its resources, scopes or policies.
@@ -337,39 +407,90 @@ func (k *Keycloak) View(ctx context.Context) (KeycloakView, error) {
 	return view, nil
 }
 
+// readMemberships fills the view's RoleGroups, Users and Members. A group
+// following a missing role is reported and skipped, or a typo would empty it.
+// Roles are read per user because only that view counts groups and composites.
+func (k *Keycloak) readMemberships(ctx context.Context, groups []RoleGroup, view *KeycloakView) error {
+	view.Members = map[string][]string{}
+	if len(groups) == 0 {
+		return nil
+	}
+	known := map[string]bool{}
+	for _, g := range groups {
+		followed := true
+		for _, role := range g.Roles {
+			exists, seen := known[role]
+			if !seen {
+				var probe struct{}
+				found, err := k.lookup(ctx, "/roles/"+url.PathEscape(role), &probe)
+				if err != nil {
+					return err
+				}
+				known[role], exists = found, found
+			}
+			if !exists {
+				view.Problems = append(view.Problems, fmt.Errorf(
+					"group %s follows realm role %q, which this realm does not have — its membership is left alone",
+					g.Name, role))
+				followed = false
+			}
+		}
+		if !followed {
+			continue
+		}
+		view.RoleGroups = append(view.RoleGroups, g)
+		var members []struct {
+			ID string `json:"id"`
+		}
+		if err := k.get(ctx, "/groups/"+url.PathEscape(g.ID)+"/members?briefRepresentation=true&max=-1",
+			&members); err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(members))
+		for _, m := range members {
+			ids = append(ids, m.ID)
+		}
+		view.Members[g.ID] = ids
+	}
+	if len(view.RoleGroups) == 0 {
+		return nil
+	}
+
+	var rows []struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+	}
+	if err := k.get(ctx, "/users?briefRepresentation=true&max=-1", &rows); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		var held []struct {
+			Name string `json:"name"`
+		}
+		if err := k.get(ctx, "/users/"+url.PathEscape(row.ID)+"/role-mappings/realm/composite?briefRepresentation=true",
+			&held); err != nil {
+			return err
+		}
+		user := User{ID: row.ID, Username: row.Username, Roles: map[string]bool{}}
+		for _, r := range held {
+			if known[r.Name] {
+				user.Roles[r.Name] = true
+			}
+		}
+		view.Users = append(view.Users, user)
+	}
+	return nil
+}
+
 // --- writes (direction one: elements become assignable) --------------------
 
 func (k *Keycloak) write(ctx context.Context, method, path string, body any) error {
-	token, err := k.accessToken(ctx)
+	status, reason, err := k.request(ctx, method, path, body)
 	if err != nil {
 		return err
 	}
-	var reader io.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = strings.NewReader(string(encoded))
-	}
-	endpoint := fmt.Sprintf("%s/admin/realms/%s%s",
-		strings.TrimRight(k.BaseURL, "/"), url.PathEscape(k.Realm), path)
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := k.client().Do(req)
-	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		reason, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s %s: HTTP %d: %s", method, path, resp.StatusCode, truncate(reason, 300))
+	if status >= 300 {
+		return fmt.Errorf("%s %s: HTTP %d: %s", method, path, status, truncate(reason, 300))
 	}
 	return nil
 }
@@ -408,6 +529,18 @@ func (k *Keycloak) UpdateResource(ctx context.Context, clientUUID string, r Reso
 
 func (k *Keycloak) DeleteResource(ctx context.Context, clientUUID, resourceID string) error {
 	return k.write(ctx, http.MethodDelete, k.authzPath(clientUUID, "/resource/"+resourceID), nil)
+}
+
+// --- writes (direction three: membership follows a realm role) -------------
+
+func (k *Keycloak) AddMember(ctx context.Context, userID, groupID string) error {
+	return k.write(ctx, http.MethodPut,
+		"/users/"+url.PathEscape(userID)+"/groups/"+url.PathEscape(groupID), nil)
+}
+
+func (k *Keycloak) RemoveMember(ctx context.Context, userID, groupID string) error {
+	return k.write(ctx, http.MethodDelete,
+		"/users/"+url.PathEscape(userID)+"/groups/"+url.PathEscape(groupID), nil)
 }
 
 func resourceBody(r Resource) map[string]any {

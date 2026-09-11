@@ -81,6 +81,9 @@ func (s *Syncer) Once(ctx context.Context) (Report, error) {
 	if err := s.applyResources(ctx, clientUUID, tree, view.Resources, &report); err != nil {
 		return report, err
 	}
+	if err := s.applyMemberships(ctx, view, &report); err != nil {
+		return report, err
+	}
 	if err := s.applyDefinitions(ctx, grants, tree, &report); err != nil {
 		return report, err
 	}
@@ -129,6 +132,37 @@ func (s *Syncer) applyResources(
 			return err
 		}
 		s.Metrics.resourceRemoved()
+	}
+	return nil
+}
+
+// applyMemberships is direction three: a group that follows a realm role holds
+// exactly the users holding that role.
+func (s *Syncer) applyMemberships(ctx context.Context, view KeycloakView, report *Report) error {
+	plan := PlanMemberships(view.RoleGroups, view.Users, view.Members)
+	for _, c := range plan.Add {
+		report.change("keycloak: add %s to group %s (holds a role it follows)", c.Username, c.GroupName)
+		if s.DryRun {
+			continue
+		}
+		if err := s.KC.AddMember(ctx, c.UserID, c.GroupID); err != nil {
+			return err
+		}
+		s.Metrics.memberAdded()
+	}
+	for _, c := range plan.Remove {
+		report.change("keycloak: remove %s from group %s (holds no role it follows)", c.Username, c.GroupName)
+		if s.DryRun {
+			continue
+		}
+		if err := s.KC.RemoveMember(ctx, c.UserID, c.GroupID); err != nil {
+			return err
+		}
+		s.Metrics.memberRemoved()
+	}
+	for _, c := range plan.Unaccounted {
+		report.problem("group %s has member %s, which the user listing does not show — left alone",
+			c.GroupName, c.UserID)
 	}
 	return nil
 }
