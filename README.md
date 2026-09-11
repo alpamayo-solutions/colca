@@ -2,6 +2,7 @@
 
 [![ci](https://github.com/alpamayo-solutions/colca/actions/workflows/ci.yml/badge.svg)](https://github.com/alpamayo-solutions/colca/actions/workflows/ci.yml)
 [![codeql](https://github.com/alpamayo-solutions/colca/actions/workflows/codeql.yml/badge.svg)](https://github.com/alpamayo-solutions/colca/actions/workflows/codeql.yml)
+[![docs](https://github.com/alpamayo-solutions/colca/actions/workflows/docs.yml/badge.svg)](https://alpamayo-solutions.github.io/colca/)
 [![Go Reference](https://pkg.go.dev/badge/github.com/alpamayo-solutions/colca.svg)](https://pkg.go.dev/github.com/alpamayo-solutions/colca)
 [![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](LICENSE.md)
 
@@ -84,6 +85,8 @@ The local door has no credential, which is why it listens on `127.0.0.1` here.
 and enrolled machines.
 
 ## Documentation
+
+Read it at [alpamayo-solutions.github.io/colca](https://alpamayo-solutions.github.io/colca/), or here in `docs/`:
 
 - [How Colca works](docs/concepts.md)
 - [Topics](docs/topics.md), including how to choose your own topic root

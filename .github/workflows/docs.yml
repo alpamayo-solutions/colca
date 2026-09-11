@@ -1,0 +1,57 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths: ["docs/**", "zensical.toml", "Makefile", ".github/workflows/docs.yml"]
+  pull_request:
+    paths: ["docs/**", "zensical.toml", "Makefile", ".github/workflows/docs.yml"]
+  schedule:
+    # The chaski pages come from the chaski repository; a daily build picks up its changes.
+    - cron: "29 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: colca
+      # The chaski pages include chaski's README and API from a checkout next to colca.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: alpamayo-solutions/chaski
+          path: chaski
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.11.17"
+      - name: Build
+        working-directory: colca
+        run: make docs
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: colca/site
+
+  deploy:
+    needs: [build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
