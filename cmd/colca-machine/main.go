@@ -7,13 +7,19 @@
 // from the node's _TimeSync beacon; after a reconnect, decisions wait for a
 // beacon or TIME_SYNC_HOLD_MS. SIM_CLOCK_OFFSET_MS skews its clock for tests.
 //
+// It only talks to the node whose public key it pins: NODE_PUBKEY holds the hex
+// key, or NODE_PUBKEY_FILE names the file colca-keygen printed it to.
+// INSECURE_ANY_NODE_KEY=1 turns the check off for local tests.
+//
 // It survives broker restarts and malformed messages and exits cleanly on
 // SIGTERM.
 package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -54,6 +60,58 @@ func env(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// nodeKeyPin returns the node's public key from NODE_PUBKEY or NODE_PUBKEY_FILE,
+// or "" when neither is set.
+func nodeKeyPin() (string, error) {
+	if v := strings.TrimSpace(os.Getenv("NODE_PUBKEY")); v != "" {
+		return parsePubHex(v)
+	}
+	path := os.Getenv("NODE_PUBKEY_FILE")
+	if path == "" {
+		return "", nil
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // a path from the machine's own environment
+	if err != nil {
+		return "", fmt.Errorf("NODE_PUBKEY_FILE: %w", err)
+	}
+	return parsePubHex(strings.TrimSpace(string(raw)))
+}
+
+func parsePubHex(v string) (string, error) {
+	key, err := hex.DecodeString(v)
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return "", fmt.Errorf("%q is not a hex ed25519 public key", v)
+	}
+	return hex.EncodeToString(key), nil
+}
+
+// tlsConfig presents the machine's certificate and accepts only the node whose key
+// is nodePub; an empty nodePub accepts any node. Certificates are self-signed, so
+// the pinned key is the trust, not a CA.
+func tlsConfig(cert tls.Certificate, nodePub string) *tls.Config {
+	return &tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		InsecureSkipVerify: true, //nolint:gosec // trust is the pinned node key, checked in VerifyConnection
+		MinVersion:         tls.VersionTLS13,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if nodePub == "" {
+				return nil
+			}
+			if len(cs.PeerCertificates) == 0 {
+				return fmt.Errorf("node presented no certificate")
+			}
+			pub, err := identity.PeerPubHex(cs.PeerCertificates[0].Raw)
+			if err != nil {
+				return err
+			}
+			if pub != nodePub {
+				return fmt.Errorf("node key mismatch: got %s, want %s", pub, nodePub)
+			}
+			return nil
+		},
+	}
 }
 
 // envInt64 reads k as a signed integer; anything unparseable or absent falls
@@ -227,6 +285,19 @@ func run() int {
 		return 1
 	}
 
+	nodePub, err := nodeKeyPin()
+	if err != nil {
+		log.Error("cannot read the node's public key", "err", err)
+		return 1
+	}
+	if nodePub == "" {
+		if env("INSECURE_ANY_NODE_KEY", "") != "1" {
+			log.Error("NODE_PUBKEY or NODE_PUBKEY_FILE is required: the machine only talks to the node whose key it pins")
+			return 1
+		}
+		log.Warn("INSECURE_ANY_NODE_KEY=1: accepting any node key, use this only for local tests")
+	}
+
 	metricTopic := uns.Prefix() + "_Metric/" + nodeULID + "/" + ulid + "/temp"
 	// Path-anchored (node-id level is a wildcard for readers): the machine's
 	// default read grant covers its own zone, which is where its commands land.
@@ -246,11 +317,7 @@ func run() int {
 
 	opts := pahomqtt.NewClientOptions().
 		AddBroker("ssl://" + broker).
-		SetTLSConfig(&tls.Config{
-			Certificates:       []tls.Certificate{cert},
-			InsecureSkipVerify: true, // #nosec G402 -- pinning model: the node's registry pins THIS key; no CA exists
-			MinVersion:         tls.VersionTLS13,
-		}).
+		SetTLSConfig(tlsConfig(cert, nodePub)).
 		SetClientID(ulid).SetUsername(ulid).
 		// Clean session on purpose. A kept session would queue commands in mochi's
 		// memory, which a broker restart loses. With a clean session the node records

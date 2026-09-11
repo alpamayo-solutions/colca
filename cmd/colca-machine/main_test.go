@@ -2,17 +2,24 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
+
+	"github.com/alpamayo-solutions/colca/internal/identity"
 )
 
 // fakeBeaconMessage is a minimal pahomqtt.Message for driving handleBeacon.
@@ -499,4 +506,77 @@ func TestSeqPublishesAreSerialized(t *testing.T) {
 			tok.complete() // let the background confirm() goroutines finish instead of leaking past the test
 		}
 	})
+}
+
+func TestTLSConfigAcceptsOnlyThePinnedNode(t *testing.T) {
+	node := newTestIdentity(t, "node")
+	other := newTestIdentity(t, "other")
+	state := func(id *identity.Identity) tls.ConnectionState {
+		cert, err := id.SelfSignedCert("peer")
+		if err != nil {
+			t.Fatal(err)
+		}
+		leaf, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}
+	}
+	machineCert, err := newTestIdentity(t, "machine").SelfSignedCert("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pinned := tlsConfig(machineCert, node.PublicHex())
+	if err := pinned.VerifyConnection(state(node)); err != nil {
+		t.Fatalf("the pinned node was rejected: %v", err)
+	}
+	if err := pinned.VerifyConnection(state(other)); err == nil {
+		t.Fatal("a node with another key was accepted")
+	}
+	if err := pinned.VerifyConnection(tls.ConnectionState{}); err == nil {
+		t.Fatal("a node without a certificate was accepted")
+	}
+	if err := tlsConfig(machineCert, "").VerifyConnection(state(other)); err != nil {
+		t.Fatalf("without a pin any node is accepted, got %v", err)
+	}
+}
+
+func TestNodeKeyPin(t *testing.T) {
+	key := newTestIdentity(t, "node").PublicHex()
+
+	t.Setenv("NODE_PUBKEY", strings.ToUpper(key))
+	if got, err := nodeKeyPin(); err != nil || got != key {
+		t.Fatalf("NODE_PUBKEY: got %q, %v", got, err)
+	}
+
+	t.Setenv("NODE_PUBKEY", "")
+	path := filepath.Join(t.TempDir(), "node.pub")
+	if err := os.WriteFile(path, []byte(key+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NODE_PUBKEY_FILE", path)
+	if got, err := nodeKeyPin(); err != nil || got != key {
+		t.Fatalf("NODE_PUBKEY_FILE: got %q, %v", got, err)
+	}
+
+	t.Setenv("NODE_PUBKEY", "not-a-key")
+	if _, err := nodeKeyPin(); err == nil {
+		t.Fatal("a malformed key was accepted")
+	}
+
+	t.Setenv("NODE_PUBKEY", "")
+	t.Setenv("NODE_PUBKEY_FILE", "")
+	if got, err := nodeKeyPin(); err != nil || got != "" {
+		t.Fatalf("with nothing set: got %q, %v", got, err)
+	}
+}
+
+func newTestIdentity(t *testing.T, name string) *identity.Identity {
+	t.Helper()
+	id, err := identity.Generate(filepath.Join(t.TempDir(), name+".key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }

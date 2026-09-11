@@ -447,8 +447,7 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 // record cap, from which New derives the packet-size limit.
 func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *tokenauth.Verifier, eng *engine.Engine, m *metrics.Metrics, maxRecordBytes uint64) (*Server, error) {
 	// The machine door always uses the key container: the node pins the client's key,
-	// colca-machine never verifies the server, and replication depends on the same
-	// symmetry.
+	// and machines and child nodes pin the node's key from this certificate.
 	cert, err := id.SelfSignedCert(cfg.ULID)
 	if err != nil {
 		return nil, err
