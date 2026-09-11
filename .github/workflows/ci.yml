@@ -193,6 +193,25 @@ jobs:
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        if: github.event.repository.visibility == 'public'
+        with:
+          cosign-release: v3.1.3
+      # Keyless: the certificate names this workflow and ref, and the signature is
+      # recorded in the public transparency log. --recursive signs each platform too.
+      - name: Sign the image
+        if: github.event.repository.visibility == 'public'
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes --recursive "$IMAGE"
+      - name: Verify the signature
+        if: github.event.repository.visibility == 'public'
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+          IDENTITY: https://github.com/${{ github.workflow_ref }}
+        run: |
+          cosign verify "$IMAGE" --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         if: github.event.repository.visibility == 'public'
         with:
@@ -327,7 +346,8 @@ jobs:
         run: |
           (cd dist && sha256sum -- * > SHA256SUMS)
           {
-            echo "Container image: \`$IMAGE\` (linux/amd64, linux/arm64)"
+            echo "Container image: \`$IMAGE\` (linux/amd64, linux/arm64)."
+            echo "It is signed with cosign; SECURITY.md shows how to verify it."
             echo
             echo "Attached: \`colca-data-contracts\` as wheel and sdist, and \`colcad\` wheels for \`chaski[node]\`."
             echo "SBOMs in SPDX and CycloneDX: the image per platform, and \`colca-data-contracts\`."
