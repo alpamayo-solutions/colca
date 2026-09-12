@@ -65,8 +65,13 @@ type colcaHook struct {
 	// hook uses it to publish the time-sync beacon.
 	broker *mqtt.Server
 	// closing is set by Server.Close before it disconnects anyone. While set, the door
-	// refuses new connections, so shutdown is not chasing arrivals. See Server.Close.
+	// refuses new connections and publishes, so shutdown is not chasing arrivals. See
+	// Server.Close.
 	closing atomic.Bool
+	// publishing counts client publishes admitted before closing whose PUBACK is not
+	// written yet; admitted holds the client of each. Close waits for them.
+	publishing atomic.Int64
+	admitted   sync.Map // *mqtt.Client -> struct{}
 }
 
 func (h *colcaHook) engine() *engine.Engine {
@@ -126,6 +131,7 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnSubscribe,
 		mqtt.OnSubscribed,
 		mqtt.OnPublishDropped,
+		mqtt.OnPacketProcessed,
 	}, b)
 }
 
@@ -380,6 +386,42 @@ func rejectCode(cl *mqtt.Client, pk packets.Packet, err error) error {
 	}
 }
 
+// admitPublish counts a client publish unless Close has begun. It counts before it
+// checks, so awaitPublishes sees every publish that passed the check.
+func (h *colcaHook) admitPublish(cl *mqtt.Client) bool {
+	h.publishing.Add(1)
+	if h.closing.Load() {
+		h.publishing.Add(-1)
+		return false
+	}
+	h.admitted.Store(cl, struct{}{})
+	return true
+}
+
+// OnPacketProcessed ends an admitted publish. mochi calls it after processPublish
+// returned, so after the PUBACK was written or failed, whichever way it returned.
+func (h *colcaHook) OnPacketProcessed(cl *mqtt.Client, pk packets.Packet, _ error) {
+	if pk.FixedHeader.Type != packets.Publish {
+		return
+	}
+	if _, ok := h.admitted.LoadAndDelete(cl); ok {
+		h.publishing.Add(-1)
+	}
+}
+
+// awaitPublishes waits until every admitted publish was answered, or until timeout.
+func (h *colcaHook) awaitPublishes(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for h.publishing.Load() > 0 {
+		if time.Now().After(deadline) {
+			h.log.Warn("shutdown: disconnecting with publishes still unanswered",
+				"publishes", h.publishing.Load(), "waited", timeout)
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // OnPublish sends every authenticated client publish through the engine; a
 // rejected packet is dropped and nothing is persisted. Publishes from the inline
 // client (DeliverLocal) pass through.
@@ -389,6 +431,11 @@ func rejectCode(cl *mqtt.Client, pk packets.Packet, err error) error {
 // mirror of the stored record, so each record arrives once. Non-UNS topics are
 // not persisted and are delivered normally.
 func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
+	// Once closing, drop the publish unanswered: the client keeps it unacked and
+	// resends it after the restart. A reason code would be final for MQTT 5.
+	if !cl.Net.Inline && !h.admitPublish(cl) {
+		return pk, packets.ErrRejectPacket
+	}
 	ident := string(cl.Properties.Username)
 	if ident == "" {
 		return pk, nil
@@ -625,6 +672,11 @@ func (s *Server) HumanWSAddr() string {
 
 func (s *Server) Serve() error { return s.S.Serve() }
 
+// publishDrainTimeout bounds how long Close waits for publishes being stored to get
+// their PUBACK. It stays well under Docker's 10 s stop grace, which the rest of
+// Node.Stop needs too.
+const publishDrainTimeout = 2 * time.Second
+
 // Close shuts the broker down without letting mochi walk its client map while a
 // client is disconnecting.
 //
@@ -633,15 +685,19 @@ func (s *Server) Serve() error { return s.S.Serve() }
 // Clients.Delete, run by every disconnecting client. Close reaches GetByListener
 // through closeListenerClients, so it could deadlock.
 //
-// So Close refuses new connections, disconnects a copy of the client list without
-// holding the lock, and closes the listeners with a no-op closer, which waits for
-// every attachClient without walking the map. It is idempotent, because mochi's
-// Close panics when called twice.
+// So Close refuses new connections and publishes, disconnects a copy of the client
+// list without holding the lock, and closes the listeners with a no-op closer, which
+// waits for every attachClient without walking the map. It is idempotent, because
+// mochi's Close panics when called twice.
+//
+// Before disconnecting, it lets publishes already being stored write their PUBACK.
+// Cut between the two, a publish is resent after the restart and stored twice.
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.sweepOnce.Do(func() { close(s.sweepStop) })
 
 		s.hook.closing.Store(true)
+		s.hook.awaitPublishes(publishDrainTimeout)
 		for _, cl := range s.S.Clients.GetAll() {
 			_ = s.S.DisconnectClient(cl, packets.ErrServerShuttingDown)
 		}
