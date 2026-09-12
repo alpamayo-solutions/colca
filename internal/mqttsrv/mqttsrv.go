@@ -373,8 +373,8 @@ func rejectCode(cl *mqtt.Client, pk packets.Packet, err error) error {
 		return refuse(cl, pk, packets.ErrNotAuthorized)
 	case metrics.ReasonDraining:
 		// Temporarily refused: the destination is being decommissioned. Wait or retarget;
-		// this is not an authorization verdict.
-		return refuse(cl, pk, packets.ErrServerBusy)
+		// this is not an authorization verdict. Server busy (0x89) is not a PUBACK code.
+		return refuse(cl, pk, packets.ErrImplementationSpecificError)
 	default:
 		return packets.ErrRejectPacket // untyped: keep the silent-drop behavior
 	}
@@ -402,7 +402,8 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 			"identity", ident, "topic", pk.TopicName)
 		h.auditDenied("publish", "retained_non_uns_denied", metrics.DoorMQTT,
 			h.entryForClient(cl), map[string]any{"topic": pk.TopicName})
-		return pk, refuse(cl, pk, packets.ErrRetainNotSupported)
+		// Retain not supported (0x9A) exists only in CONNACK and DISCONNECT.
+		return pk, refuse(cl, pk, packets.ErrImplementationSpecificError)
 	}
 	eng := h.engine()
 	if eng == nil {

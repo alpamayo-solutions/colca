@@ -128,8 +128,8 @@ func TestExternalNonUnsRetainedMessagesAreRefused(t *testing.T) {
 	c := connect5(t, w.srv.Addr(), w.m1)
 	before := w.srv.S.Info.Retained
 
-	if got := publishRetained5(t, c, "factory/raw/retained", []byte("value")); got != 0x9A {
-		t.Fatalf("retained non-UNS PUBACK = 0x%02x, want retain-not-supported 0x9A", got)
+	if got := publishRetained5(t, c, "factory/raw/retained", []byte("value")); got != 0x83 {
+		t.Fatalf("retained non-UNS PUBACK = 0x%02x, want implementation specific error 0x83", got)
 	}
 	if got := w.srv.S.Info.Retained; got != before {
 		t.Fatalf("retained set grew from %d to %d after rejected publish", before, got)
