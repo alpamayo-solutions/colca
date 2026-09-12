@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/alpamayo-solutions/colca/compare/v0.1.3...v0.1.4) (2026-09-12)
+
+
+### Fixes
+
+* **mqttsrv:** answer refusals with codes a PUBACK may carry ([2541eb0](https://github.com/alpamayo-solutions/colca/commit/2541eb074ad564e84028a51b53da0b69b20e004f))
+
 ## [0.1.3](https://github.com/alpamayo-solutions/colca/compare/v0.1.2...v0.1.3) (2026-09-11)
 
 
