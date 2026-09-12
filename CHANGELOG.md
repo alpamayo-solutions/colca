@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/alpamayo-solutions/colca/compare/v0.1.4...v0.1.5) (2026-09-12)
+
+
+### Fixes
+
+* **mqttsrv:** let in-flight publishes finish before shutdown disconnects clients ([#8](https://github.com/alpamayo-solutions/colca/issues/8)) ([fd0e476](https://github.com/alpamayo-solutions/colca/commit/fd0e4767c11579c374033d1e73051285dd4df099))
+
 ## [0.1.4](https://github.com/alpamayo-solutions/colca/compare/v0.1.3...v0.1.4) (2026-09-12)
 
 
