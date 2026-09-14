@@ -64,4 +64,7 @@ require (
 // Drop this replace once a released mochi version contains both PRs;
 // internal/mqttsrv's TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace
 // goes red under -race if it is dropped early.
-replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260904132341-919d8eb9e65e
+//
+// Temporarily the local fork checkout, which also flushes buffered writes before a
+// connection closes; replace with its pseudo-version once the fork branch is pushed.
+replace github.com/mochi-mqtt/server/v2 => ../mochi-server
