@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/alpamayo-solutions/colca/compare/v0.1.5...v0.1.6) (2026-09-14)
+
+
+### Fixes
+
+* **mqttsrv:** flush PUBACKs mochi buffered before shutdown closes the connection ([#10](https://github.com/alpamayo-solutions/colca/issues/10)) ([3aa1767](https://github.com/alpamayo-solutions/colca/commit/3aa17671c931acc3460df78cea7302666acbb3d8))
+
 ## [0.1.5](https://github.com/alpamayo-solutions/colca/compare/v0.1.4...v0.1.5) (2026-09-12)
 
 
