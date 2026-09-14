@@ -57,11 +57,15 @@ require (
 
 // Pinned to the org fork until upstream ships the retained-scan race fix:
 // https://github.com/mochi-mqtt/server/pull/539 (mochi-mqtt/server#200).
-// The same fork branch (fix/websocket-binds-at-init, 919d8eb9e65e) also makes
-// the Websocket listener bind at Init and report its bound address, so a
-// ":0" door is held from the moment it is reported — upstream as
-// https://github.com/mochi-mqtt/server/pull/542, beside #539.
-// Drop this replace once a released mochi version contains both PRs;
-// internal/mqttsrv's TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace
-// goes red under -race if it is dropped early.
-replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260904132341-919d8eb9e65e
+// The fork also makes the Websocket listener bind at Init and report its bound
+// address, so a ":0" door is held from the moment it is reported — upstream as
+// https://github.com/mochi-mqtt/server/pull/542, beside #539. Its branch
+// fix/flush-outbuf-before-close adds a flush of buffered writes before a client
+// connection closes, so a PUBACK written behind queued deliveries is not lost at
+// shutdown; upstream does not have that yet.
+// Drop this replace once a released mochi version contains all three;
+// internal/mqttsrv's TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace goes
+// red under -race if it is dropped early, and
+// TestAPubackBufferedBehindQueuedDeliveriesReachesTheClientBeforeShutdown fails
+// without the flush.
+replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260914070953-4d586594fc32
