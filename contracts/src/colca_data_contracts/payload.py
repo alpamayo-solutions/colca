@@ -599,6 +599,8 @@ class AnnotationType(Payload):
     unit: str | None = None
     create_option_on_input_new: bool = False
     options: list[dict[str, Any]] = field(default_factory=list)
+    #: Keyed by metadata type, the same map elements and signals carry.
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "AnnotationType":
