@@ -96,3 +96,17 @@ def test_annotation_type_is_positionless_and_owns_options():
 
     assert "system_element" not in annotation_type.__dataclass_fields__
     assert AnnotationTypePayload.decode(annotation_type.encode(), timestamp=0) == annotation_type
+
+
+def test_annotation_type_carries_metadata():
+    annotation_type = AnnotationTypePayload(
+        id="01JANNOTATION",
+        name="maintenance",
+        data_type="string",
+        metadata={"owner": "quality-app"},
+    )
+
+    assert AnnotationTypePayload.decode(annotation_type.encode(), timestamp=0) == annotation_type
+    # Types written before the field existed still decode.
+    older = AnnotationTypePayload.decode('{"id": "01JOLD", "name": "downtime", "data_type": "string"}', timestamp=0)
+    assert older.metadata == {}
