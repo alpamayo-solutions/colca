@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/alpamayo-solutions/colca/compare/v0.1.6...v0.1.7) (2026-09-15)
+
+
+### Features
+
+* **contracts:** let annotation types carry metadata ([#12](https://github.com/alpamayo-solutions/colca/issues/12)) ([95e4739](https://github.com/alpamayo-solutions/colca/commit/95e4739ad79d100b5d07a3223fa466d3655679b2))
+
 ## [0.1.6](https://github.com/alpamayo-solutions/colca/compare/v0.1.5...v0.1.6) (2026-09-14)
 
 
