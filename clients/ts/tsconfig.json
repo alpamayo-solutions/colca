@@ -1,0 +1,23 @@
+{
+  // The editor's and the type checker's view: sources, tests and config
+  // together, nothing emitted. tsconfig.build.json is what produces dist/.
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023", "dom"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    // Deliberately off: every index here follows a length check, and the flag's
+    // ceremony would land mostly in the tests.
+    "noUncheckedIndexedAccess": false,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "test", "*.ts"]
+}

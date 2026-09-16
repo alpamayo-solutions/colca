@@ -94,6 +94,7 @@ Read it at [alpamayo-solutions.github.io/colca](https://alpamayo-solutions.githu
 - [Configuration](docs/configuration.md)
 - [Security model](docs/security.md)
 - [HTTP API](docs/http-api.md)
+- [TypeScript SDK](docs/typescript.md)
 - [Operating Colca](docs/operations.md)
 - [Contracts](docs/contracts.md)
 - [Architecture](docs/architecture.md)
@@ -109,6 +110,8 @@ Read it at [alpamayo-solutions.github.io/colca](https://alpamayo-solutions.githu
 | `cmd/colca-historian` | writes a node's metrics stream into TimescaleDB |
 | `cmd/colca-bench` | benchmark scenarios |
 | `contracts/` | `colca-data-contracts`, the payload contracts as a Python package |
+| `clients/ts` | `@alpamayo-solutions/colca-client`, the door in TypeScript |
+| `clients/spec` | conformance vectors every client is held to |
 | `door/`, `secrets/` | Go packages for services that run next to a node |
 
 ## Contributing

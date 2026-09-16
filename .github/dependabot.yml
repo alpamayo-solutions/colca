@@ -16,6 +16,14 @@ updates:
       python:
         patterns: ["*"]
 
+  - package-ecosystem: npm
+    directory: /clients/ts
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ["*"]
+
   - package-ecosystem: docker
     directory: /deploy
     schedule:
