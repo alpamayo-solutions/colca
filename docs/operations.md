@@ -91,6 +91,41 @@ the scenarios on the hardware you deploy to before setting thresholds.
 - **Without a schema bundle only minimal checks apply.** Run nodes with the
   bundle generated from `contracts/`.
 - **Node administration uses one token per node** besides `admin:#` grants.
-- **A deadlock in mochi-mqtt 2.7.9 is avoided, not fixed.** Colca pins a fork
-  and stops its clients before closing listeners; the workaround goes once the
-  fix is released upstream.
+- **MochiMQTT needs dependency patches and shutdown handling.** The fork and
+  the shutdown workaround have separate removal conditions, described below.
+
+## MQTT dependency
+
+`go.mod` declares MochiMQTT v2.7.9 but replaces it with the Alpamayo fork at
+`4d586594fc32`. The fork adds three fixes:
+
+| Fix | Why Colca needs it |
+| --- | --- |
+| [Retained-message scan locking](https://github.com/mochi-mqtt/server/pull/539) | Concurrent retained delivery and wildcard subscriptions otherwise race. |
+| [WebSocket binding during Init](https://github.com/mochi-mqtt/server/pull/542) | A listener configured with `:0` must hold and report its actual port before serving. |
+| [Flush buffered writes before closing](https://github.com/alpamayo-solutions/mochi-server/commit/4d586594fc32e38544b769f9972f10d8f3f78cd9) | A buffered PUBACK must reach the publisher before shutdown, or reconnect can store the same publish twice. |
+
+The proposed [MochiMQTT v2.8.0](https://github.com/mochi-mqtt/server/pull/543)
+includes the first two fixes. Its reviewed commit `3b7c3e6` does **not** include
+the buffered-write flush. Removing the replacement requires all three fixes;
+a version number alone is insufficient. Run `make test`, including the MQTT
+retained-delivery, WebSocket-door, shutdown-drain and buffered-PUBACK regressions,
+against any replacement, then run `make smoke` to verify the node tree.
+
+Colca also handles limitations outside the fork:
+
+- `mqttsrv.Server.Close` avoids MochiMQTT's recursive read lock in
+  `Clients.GetByListener`. An upstream fix permits simplifying that part of
+  shutdown; the admission gate, publish drain and idempotent close still serve
+  Colca's own shutdown contract.
+- Subscription quotas substitute a reserved denied filter because v2.7.9
+  ignores per-filter reason codes returned by `OnSubscribe`. An upstream version
+  that honours those codes permits returning MQTT 5's quota-exceeded code
+  directly, while retaining MQTT 3's failed-SUBACK response and the audit event.
+- The log wrapper names empty transport errors and suppresses repeated messages.
+  Upstream naming fixes can replace the first behavior; they do not replace
+  repeated-message suppression.
+
+The shutdown-drain regression pauses a PUBACK in `OnPacketEncode`. It must not
+rely on `OnQosPublish`: the proposed v2.8.0 no longer calls that hook for inbound
+QoS 1 publishes.

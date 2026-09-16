@@ -21,8 +21,8 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
-// holdPuback holds one PUBACK between the store and the write: mochi calls
-// OnQosPublish after OnPublish returned and before it writes the acknowledgement.
+// holdPuback holds one PUBACK between the store and the write, at packet encoding.
+// It does not depend on an inbound QoS 1 publish entering mochi's inflight store.
 // It lets go once Close has begun and the client is gone, or after 200 ms.
 type holdPuback struct {
 	mqtt.HookBase
@@ -33,11 +33,11 @@ type holdPuback struct {
 }
 
 func (h *holdPuback) ID() string           { return "hold-puback" }
-func (h *holdPuback) Provides(b byte) bool { return b == mqtt.OnQosPublish }
+func (h *holdPuback) Provides(b byte) bool { return b == mqtt.OnPacketEncode }
 
-func (h *holdPuback) OnQosPublish(cl *mqtt.Client, pk packets.Packet, _ int64, _ int) {
+func (h *holdPuback) OnPacketEncode(cl *mqtt.Client, pk packets.Packet) packets.Packet {
 	if cl.ID != h.clientID || pk.FixedHeader.Type != packets.Puback || !h.armed.CompareAndSwap(true, false) {
-		return
+		return pk
 	}
 	close(h.held)
 	for deadline := time.Now().Add(5 * time.Second); !h.closing() && time.Now().Before(deadline); {
@@ -46,6 +46,7 @@ func (h *holdPuback) OnQosPublish(cl *mqtt.Client, pk packets.Packet, _ int64, _
 	for deadline := time.Now().Add(200 * time.Millisecond); !cl.Closed() && time.Now().Before(deadline); {
 		time.Sleep(time.Millisecond)
 	}
+	return pk
 }
 
 // connectResuming connects with a kept session, so paho resends a publish that got
