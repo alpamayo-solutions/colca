@@ -1,6 +1,23 @@
 import { describe, expect, it } from "vitest";
 
-import { parseTopic, topic, topicPrefix } from "../src/topics.js";
+import { parseTopic, topic, topicMatches, topicPrefix } from "../src/topics.js";
+
+describe("matching", () => {
+  it.each([
+    ["a/b/c", "a/b/c", true],
+    ["a/+/c", "a/b/c", true],
+    ["a/+/c", "a/b/d", false],
+    ["a/#", "a/b/c", true],
+    ["a/#", "a", true],
+    ["#", "a/b", true],
+    ["a/b", "a/b/c", false],
+    ["a/b/c", "a/b", false],
+    ["+/b", "$SYS/b", false],
+    ["#", "$SYS/b", false],
+  ])("%s covers %s: %s", (filter, name, expected) => {
+    expect(topicMatches(filter, name)).toBe(expected);
+  });
+});
 
 describe("building", () => {
   it("takes the path as segments or pre-joined", () => {

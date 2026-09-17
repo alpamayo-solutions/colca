@@ -1,8 +1,8 @@
 # @alpamayo-solutions/colca-client
 
-A Colca node's door, in TypeScript. Reads and writes records over HTTP —
-`fetch`, `ack`, `publish`, `kv`, `self` — and nothing else: no runtime
-dependencies, no framework, no opinion about how your service is built.
+A Colca node's door, in TypeScript: records over HTTP — `fetch`, `ack`,
+`publish`, `kv`, `self` — and live values over MQTT. No runtime dependencies
+for the door, no framework, no opinion about how your service is built.
 
 ```sh
 npm install @alpamayo-solutions/colca-client
@@ -32,6 +32,48 @@ await door.publishTo(
   { signal_id: "01M2AB…", timestamp: Date.now() / 1000, value: 60 },
 );
 ```
+
+## Live values
+
+`@alpamayo-solutions/colca-client/live` keeps one MQTT connection to the node's
+WebSocket door for people and applications, and hands out values as they change.
+
+```sh
+npm install mqtt
+```
+
+```ts
+import { Live } from "@alpamayo-solutions/colca-client/live";
+
+const live = new Live({
+  url: "wss://node:8885",
+  // Asked before every connection, so hand back a token that is valid now.
+  token: () => auth.freshToken(),
+});
+
+const stop = live.subscribe("steine/v1/_Metric/n-technikum/wisewoods/#", (value) => {
+  show(value.topic, value.payload);
+});
+live.onState((state) => showOffline(state !== "online"));
+```
+
+Data and entity paths are retained at the node, so a subscription starts with
+the current values and continues with the changes; nothing has to be fetched
+first. Around that the client does what a page left open all day needs:
+
+- **One connection for the whole page.** `subscribe` returns the function that
+  ends that subscription and no other; the node's subscription goes when the
+  last listener on a filter does.
+- **A second subscriber gets the value at once.** The client keeps the last value
+  of every topic, and `latest()` and `values()` read it.
+- **A fresh token before the old one runs out.** The node ends a session when its
+  token expires. The client reconnects shortly before, with a new token and every
+  subscription sent again, and stays `online` while doing so.
+- **Waits that grow after a drop**, jittered, each attempt with a fresh token.
+
+These are values, not a log. A change during a reconnect is superseded by the
+retained value that follows it. Whatever must see every record reads a stream
+through the door.
 
 ## Which door, which credential
 

@@ -24,6 +24,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./live": {
+      "types": "./dist/live.d.ts",
+      "default": "./dist/live.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -43,11 +47,20 @@
     "package-check": "publint --strict && attw --pack . --profile esm-only",
     "generate:types": "node scripts/generate-types.mjs ../../build/bundle/contracts-bundle.json"
   },
+  "peerDependencies": {
+    "mqtt": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "mqtt": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
     "@eslint/js": "10.0.1",
     "@types/node": "22.20.3",
     "eslint": "10.10.0",
+    "mqtt": "5.16.0",
     "prettier": "3.9.7",
     "publint": "0.3.24",
     "typescript": "6.0.3",

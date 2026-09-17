@@ -64,6 +64,23 @@ export function parseTopic(value: string): TopicParts | undefined {
   return { root, version, contract, node, path: rest.join("/") };
 }
 
+/**
+ * Whether a subscription filter covers a topic. `+` is one level, `#` the rest
+ * including the level above it (`a/#` covers `a`), and neither reaches into a
+ * `$` topic, as MQTT has it.
+ */
+export function topicMatches(filter: string, topic: string): boolean {
+  const wanted = filter.split("/");
+  const levels = topic.split("/");
+  if (topic.startsWith("$") && (wanted[0] === "+" || wanted[0] === "#")) return false;
+  for (let i = 0; i < wanted.length; i += 1) {
+    if (wanted[i] === "#") return true;
+    if (i >= levels.length) return false;
+    if (wanted[i] !== "+" && wanted[i] !== levels[i]) return false;
+  }
+  return wanted.length === levels.length;
+}
+
 function check(what: string, value: string): void {
   if (!SEGMENT.test(value)) {
     throw new Error(`${what} must be one topic level without + or #, got ${JSON.stringify(value)}`);

@@ -1,9 +1,10 @@
 # TypeScript SDK
 
-`@alpamayo-solutions/colca-client` talks to a node's door from TypeScript: read
-records, ack them, publish, scan the retained values, ask who you are. It has no
-runtime dependencies — the platform's `fetch` does the work — and ships as ESM
-for Node 22.12 and newer, and for browsers.
+`@alpamayo-solutions/colca-client` talks to a node from TypeScript: read records,
+ack them, publish, scan the retained values, ask who you are, and follow values
+live. The door needs no runtime dependencies — the platform's `fetch` does the
+work; live values use mqtt.js. It ships as ESM for Node 22.12 and newer, and for
+browsers.
 
 ```sh
 npm install @alpamayo-solutions/colca-client
@@ -44,6 +45,48 @@ await door.publishTo(
 The node judges a publish by the caller's zone, identity and grants, exactly as
 it judges an MQTT publish. A refusal is a `DoorError` carrying the node's own
 reason.
+
+## Live values
+
+`@alpamayo-solutions/colca-client/live` keeps one MQTT connection to the node's
+WebSocket door for people and applications, and hands out values as they change.
+
+```sh
+npm install mqtt
+```
+
+```ts
+import { Live } from "@alpamayo-solutions/colca-client/live";
+
+const live = new Live({
+  url: "wss://node:8885",
+  // Asked before every connection, so hand back a token that is valid now.
+  token: () => auth.freshToken(),
+});
+
+const stop = live.subscribe("steine/v1/_Metric/n-technikum/wisewoods/#", (value) => {
+  show(value.topic, value.payload);
+});
+live.onState((state) => showOffline(state !== "online"));
+```
+
+Data and entity paths are retained at the node, so a subscription starts with
+the current values and continues with the changes; nothing has to be fetched
+first. Around that the client does what a page left open all day needs:
+
+- **One connection for the whole page.** `subscribe` returns the function that
+  ends that subscription and no other; the node's subscription goes when the
+  last listener on a filter does.
+- **A second subscriber gets the value at once.** The client keeps the last value
+  of every topic, and `latest()` and `values()` read it.
+- **A fresh token before the old one runs out.** The node ends a session when its
+  token expires. The client reconnects shortly before, with a new token and every
+  subscription sent again, and stays `online` while doing so.
+- **Waits that grow after a drop**, jittered, each attempt with a fresh token.
+
+These are values, not a log. A change during a reconnect is superseded by the
+retained value that follows it. Whatever must see every record reads a stream
+through the door.
 
 ## Which door, which credential
 
