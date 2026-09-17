@@ -172,6 +172,9 @@ func Start(cfg *config.Config) (*Node, error) {
 		return fail(fmt.Errorf("node %s: registry: %w", cfg.ULID, err))
 	}
 	n.Registry = reg
+	if err := prepareStandalone(cfg, st, reg); err != nil {
+		return fail(fmt.Errorf("standalone: %w", err))
+	}
 	// The registry updates colca_drains_active itself.
 	reg.SetMetrics(n.Metrics)
 
@@ -180,10 +183,11 @@ func Start(cfg *config.Config) (*Node, error) {
 	var ver *tokenauth.Verifier
 	if cfg.Auth != nil {
 		ver, err = tokenauth.New(tokenauth.Config{
-			Issuer:   cfg.Auth.Issuer,
-			Audience: cfg.Auth.Audience,
-			JWKSURL:  cfg.Auth.JWKSURL,
-			Refresh:  cfg.Auth.EffectiveRefresh(),
+			Issuer:    cfg.Auth.Issuer,
+			Audience:  cfg.Auth.Audience,
+			JWKSURL:   cfg.Auth.JWKSURL,
+			Refresh:   cfg.Auth.EffectiveRefresh(),
+			NotBefore: cfg.StandaloneSince,
 		}, st, n.Metrics)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: tokenauth: %w", cfg.ULID, err))
@@ -348,7 +352,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		ver.SetGroupIndex(n.Engine.Groups())
 		ver.SetPersonalAccessTokenIndex(uns.NewPersonalAccessTokenIndex(
 			n.Engine.EntityStore(),
-		))
+		).WithAuthority(cfg.ULID, cfg.Standalone, cfg.RetiredPATs))
 	}
 	// Contracts bundle: the configured path, the baked one if present, or the
 	// built-in rules. A configured bundle that fails to load stops startup rather

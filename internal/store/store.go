@@ -87,11 +87,12 @@ type KVEntry struct {
 }
 
 type Store struct {
-	db    *pebble.DB
-	mu    sync.Mutex
-	next  map[string]uint64 // next offset per stream
-	lwm   map[string]uint64 // low-water mark per stream: lowest retained offset
-	bytes map[string]uint64 // live logical bytes per stream (stream key + encoded value)
+	db           *pebble.DB
+	standaloneMu sync.Mutex
+	mu           sync.Mutex
+	next         map[string]uint64 // next offset per stream
+	lwm          map[string]uint64 // low-water mark per stream: lowest retained offset
+	bytes        map[string]uint64 // live logical bytes per stream (stream key + encoded value)
 	// appendApply is Pebble's atomic apply boundary. Keeping the bound method
 	// injectable lets tests prove an apply failure changes neither stream nor KV.
 	appendApply func(*pebble.Batch, *pebble.WriteOptions) error

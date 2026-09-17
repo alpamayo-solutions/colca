@@ -131,3 +131,35 @@ reject the progress entries and the child holds its cursor for retry instead of
 silently discarding data. Upgrade the contracts package and consumers together;
 older Python signal decoders do not recognize the new field. Downgrading a source
 to a binary that does not understand its persisted upload decisions is unsupported.
+
+## Permanent standalone handover
+
+`standalone: true` is a permanent trust transition, distinct from an offline
+parent. Remove `parent` in the same configuration and restart the node. Before
+opening any door the node journals the transition, retires the old parent
+cursors and existing externally enrolled identities, and disables the static
+administration token. Local services, node identity and process history remain.
+External machine clients must be enrolled again by the new local owner.
+
+Human authentication stays closed until a trusted local identity controller has
+preserved operators, disabled fleet accounts and transferred administration. The
+controller then calls `POST /standalone/complete` on the **local** HTTP door.
+Completion persists a token issuance cutoff; retries and restarts retain it.
+`GET /self` exposes `standalone_since` (Unix seconds) and `standalone_ready` so
+other local authentication services enforce the same boundary.
+
+Pre-handover JWTs and personal access tokens are rejected. Only locally authored
+group definitions and newly created local PATs authorize subsequent access.
+Cached fleet definitions remain available as data, so an identity controller can
+copy the last applied operator grants into new, locally owned groups. It must
+not reuse the fleet group's identity for a competing local definition.
+
+Removing the standalone flag or restoring an old parent configuration against
+this data directory refuses startup. Rejoining a fleet requires an explicit
+migration and enrollment plan, including a decision about retained history; a
+configuration rollback cannot export history or restore the former owner.
+
+This broker transition does not administer an external identity provider, host
+VPN, SSH access or separate update agents. The deployment's handover controller
+must retire those connections and credentials before reporting the machine as
+handed over. Ordinary parent outages do not trigger any of these actions.

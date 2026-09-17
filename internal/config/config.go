@@ -97,6 +97,10 @@ type Config struct {
 	MQTT       Endpoint `yaml:"mqtt"`
 	Repl       Endpoint `yaml:"repl"`
 	Parent     *Parent  `yaml:"parent"`
+	// Standalone permanently retires fleet trust in this data directory.
+	Standalone      bool            `yaml:"standalone"`
+	StandaloneSince int64           `yaml:"-"` // persisted activation, populated before serving
+	RetiredPATs     map[string]bool `yaml:"-"`
 
 	// MQTTLocal is the plaintext local MQTT door, conventionally ":1883". Being
 	// inside the deployment's network is the credential, and the door is never
@@ -612,6 +616,9 @@ func (c *Config) EffectiveTopicRoot() string {
 
 // Validate checks the required fields and every block.
 func (c *Config) Validate() error {
+	if c.Standalone && c.Parent != nil {
+		return fmt.Errorf("config: standalone cannot have a parent")
+	}
 	if c.ULID == "" || c.DataDir == "" || c.KeyFile == "" {
 		return fmt.Errorf("config: ulid, data_dir, key_file are required")
 	}

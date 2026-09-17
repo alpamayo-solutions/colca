@@ -23,6 +23,7 @@ type MintOpts struct {
 	Sub      string
 	Grants   []string
 	Exp      time.Time
+	Iat      time.Time
 	Nbf      time.Time
 	Iss      string   // override issuer
 	Aud      string   // override audience
@@ -116,6 +117,9 @@ func (i *Issuer) MintOpt(o MintOpts) string {
 		"sub": o.Sub,
 		"exp": exp.Unix(),
 		"iat": time.Now().Add(-time.Minute).Unix(),
+	}
+	if !o.Iat.IsZero() {
+		claims["iat"] = o.Iat.Unix()
 	}
 	if !o.Nbf.IsZero() {
 		claims["nbf"] = o.Nbf.Unix()

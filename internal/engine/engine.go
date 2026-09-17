@@ -309,7 +309,13 @@ func (e *Engine) Scope() uns.Scope { return scope{e} }
 
 // Groups resolves a token's group ids against the _Group definitions this node
 // holds.
-func (e *Engine) Groups() *uns.GroupIndex { return uns.NewGroupIndex(e.EntityStore()) }
+func (e *Engine) Groups() *uns.GroupIndex {
+	idx := uns.NewGroupIndex(e.EntityStore())
+	if e.cfg.Standalone {
+		idx.WithAuthority(e.cfg.ULID)
+	}
+	return idx
+}
 
 // NodeID is the identity this node publishes under.
 func (e *Engine) NodeID() string { return e.cfg.ULID }

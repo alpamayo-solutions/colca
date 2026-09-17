@@ -40,10 +40,11 @@ const (
 // Config mirrors config.Auth (the config package stays yaml-only; the
 // caller maps fields).
 type Config struct {
-	Issuer   string
-	Audience string
-	JWKSURL  string
-	Refresh  time.Duration // 0 → 1h
+	NotBefore int64 // reject tokens issued before a permanent trust handover
+	Issuer    string
+	Audience  string
+	JWKSURL   string
+	Refresh   time.Duration // 0 → 1h
 }
 
 // Verified is a successfully verified token.
@@ -253,6 +254,14 @@ func (v *Verifier) VerifyPersonalAccessTokenSession(
 // VerifyForScope verifies OIDC JWTs as before and additionally accepts a
 // replicated personal access token when it explicitly grants requiredScope.
 func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, string, error) {
+	cutoff := v.cfg.NotBefore
+	if cutoff > 0 {
+		state, err := v.st.StandaloneGet()
+		if err != nil || state == nil || !state.Ready {
+			return nil, ReasonBadToken, fmt.Errorf("standalone identity handover is incomplete")
+		}
+		cutoff = state.Since
+	}
 	if strings.HasPrefix(token, "pk_pat_") {
 		idx := v.personalAccessTokens()
 		if idx == nil {
@@ -292,6 +301,12 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		return nil, reasonFor(err), fmt.Errorf("token rejected: %w", err)
 	}
 
+	if cutoff > 0 {
+		issued, err := claims.GetIssuedAt()
+		if err != nil || issued == nil || issued.Unix() < cutoff {
+			return nil, ReasonBadToken, fmt.Errorf("token predates standalone handover")
+		}
+	}
 	sub, _ := claims["sub"].(string)
 	exp, expErr := claims.GetExpirationTime()
 	if expErr != nil || exp == nil {
