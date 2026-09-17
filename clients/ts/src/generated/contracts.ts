@@ -467,6 +467,7 @@ export type Signal = {
   min_value?: null | number;
   name: string;
   precision?: null | number;
+  replication_policy?: "replicate_to_parents" | "source_local_only";
   semantic_type_id?: null | string;
   system_element_id?: null | string;
   unit?: null | string;
