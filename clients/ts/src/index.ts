@@ -26,10 +26,10 @@ export type {
 export { Stream } from "./stream.js";
 export type { FollowOptions, StreamOptions } from "./stream.js";
 
-export { DEFAULT_ROOT, TOPIC_VERSION, parseTopic, topic, topicPrefix } from "./topics.js";
+export { DEFAULT_ROOT, TOPIC_VERSION, parseTopic, topic, topicMatches, topicPrefix } from "./topics.js";
 export type { TopicOptions, TopicParts } from "./topics.js";
 
-export { annotationIdMaterial, deriveAnnotationId, ulidFromBytes } from "./ids.js";
+export { annotationIdMaterial, deriveAnnotationId, newUlid, ulidFromBytes } from "./ids.js";
 export type { AnnotationIdInput } from "./ids.js";
 
 // The 32 contracts, straight from the bundle the node validates against.
