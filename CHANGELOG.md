@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/alpamayo-solutions/colca/compare/v0.2.0...v0.2.1) (2026-09-17)
+
+
+### Fixes
+
+* **standalone:** retire commands accepted before ownership transfer ([#25](https://github.com/alpamayo-solutions/colca/issues/25)) ([5f13d18](https://github.com/alpamayo-solutions/colca/commit/5f13d18411d7b5fdade131cc98fce63c35539193))
+
 ## [0.2.0](https://github.com/alpamayo-solutions/colca/compare/v0.1.9...v0.2.0) (2026-09-17)
 
 
