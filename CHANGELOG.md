@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.9](https://github.com/alpamayo-solutions/colca/compare/v0.1.8...v0.1.9) (2026-09-17)
+
+
+### Fixes
+
+* **ci:** publish the npm tarball by its path, not as a GitHub shorthand ([#21](https://github.com/alpamayo-solutions/colca/issues/21)) ([0167dd2](https://github.com/alpamayo-solutions/colca/commit/0167dd2803281cec73546a66b2d5f66bfa0ada93))
+
+## [0.1.8](https://github.com/alpamayo-solutions/colca/compare/v0.1.7...v0.1.8) (2026-09-17)
+
+
+### Features
+
+* **clients:** a TypeScript client for the door and live values ([#14](https://github.com/alpamayo-solutions/colca/issues/14)) ([f5f5de7](https://github.com/alpamayo-solutions/colca/commit/f5f5de7513a430e2a31ebf03e470be24f44addb1))
+* **clients:** commands that wait for their acknowledgement ([#20](https://github.com/alpamayo-solutions/colca/issues/20)) ([f028f63](https://github.com/alpamayo-solutions/colca/commit/f028f636831ca5240e06ae72b58a2280e4b22763))
+
+
+### Fixes
+
+* **contracts:** type optional fields in the bundle on every Python ([f5f5de7](https://github.com/alpamayo-solutions/colca/commit/f5f5de7513a430e2a31ebf03e470be24f44addb1))
+
 ## [0.1.7](https://github.com/alpamayo-solutions/colca/compare/v0.1.6...v0.1.7) (2026-09-15)
 
 

@@ -1,0 +1,4 @@
+dist/
+node_modules/
+# Machine-made from the contracts bundle; CI regenerates it and diffs.
+src/generated/

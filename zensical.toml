@@ -33,6 +33,7 @@ nav = [
     { "chaski" = "chaski/index.md" },
     { "API reference" = "chaski/api.md" },
   ] },
+  { "TypeScript SDK" = "typescript.md" },
   { "Architecture" = "architecture.md" },
   { "Contributing" = "https://github.com/alpamayo-solutions/colca/blob/main/CONTRIBUTING.md" },
 ]

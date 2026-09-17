@@ -11,6 +11,8 @@ repos:
       - id: check-case-conflict
       - id: check-merge-conflict
       - id: check-json
+        # TypeScript reads its own config as JSONC, comments and all.
+        exclude: ^clients/ts/tsconfig(\.build)?\.json$
       - id: check-toml
       - id: end-of-file-fixer
       - id: mixed-line-ending
@@ -91,5 +93,12 @@ repos:
         entry: uv run --project contracts --group lint mypy --config-file contracts/pyproject.toml contracts/src
         language: system
         files: ^contracts/.*\.py$
+        pass_filenames: false
+        stages: [pre-push]
+      - id: lint-ts
+        name: eslint, prettier and tsc (clients/ts)
+        entry: make lint-ts
+        language: system
+        files: ^clients/ts/
         pass_filenames: false
         stages: [pre-push]

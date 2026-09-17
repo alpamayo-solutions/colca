@@ -1,6 +1,8 @@
 # Build, test and run Colca. `make help` lists the targets.
 GO       ?= go
 UV       ?= uv
+NPM      ?= npm
+TS       := clients/ts
 IMAGE    ?= colca:dev
 BUNDLE   := build/bundle/contracts-bundle.json
 COMMIT   := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -20,9 +22,9 @@ GITLEAKS      ?= docker run --rm -v "$(CURDIR):/repo" -w /repo -e GIT_CONFIG_COU
 # The documentation site generator.
 ZENSICAL      ?= $(UV) tool run --from zensical==0.0.60 --with mkdocstrings-python==2.0.8 zensical
 
-.PHONY: help test contracts-test check lint lint-go lint-python lint-docker lint-shell lint-actions \
-        lint-yaml lint-secrets bundle build docker smoke demo ci wheels bench bench-scenarios bench-check \
-        docs docs-serve clean
+.PHONY: help test contracts-test check lint lint-go lint-python lint-ts lint-docker lint-shell lint-actions \
+        lint-yaml lint-secrets ts-install ts-test ts-types ts-build bundle build docker smoke demo ci wheels \
+        bench bench-scenarios bench-check docs docs-serve clean
 
 help: ## list the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -33,13 +35,32 @@ test: ## Go tests, with the race detector
 contracts-test: ## tests of the Python data contracts
 	$(UV) run --project contracts --extra test pytest contracts/tests
 
+ts-install: $(TS)/node_modules ## the TypeScript client's dependencies, exactly as the lockfile has them
+
+# Reinstalled only when the lockfile moved, so the git hooks do not wipe
+# node_modules on every push.
+$(TS)/node_modules: $(TS)/package-lock.json
+	cd $(TS) && $(NPM) ci
+	@touch $@
+
+ts-test: ts-install ## tests of the TypeScript client, conformance vectors included
+	cd $(TS) && $(NPM) test
+
+ts-types: bundle ## regenerate the client's contract types from this commit's bundle
+	cd $(TS) && $(NPM) run generate:types
+	@test -z "$$(git status --porcelain -- $(TS)/src/generated)" || \
+	  { echo "clients/ts/src/generated is stale: commit the regenerated types"; exit 1; }
+
+ts-build: ts-install ## the npm package into clients/ts/dist
+	cd $(TS) && $(NPM) run build && $(NPM) run package-check
+
 check: ## formatting, vet and repository hygiene
 	@unformatted="$$(gofmt -l $$(git ls-files '*.go'))"; \
 	  if [ -n "$$unformatted" ]; then echo "gofmt needed:"; echo "$$unformatted"; exit 1; fi
 	$(GO) vet ./...
 	scripts/check-no-working-notes.sh
 
-lint: lint-go lint-python lint-docker lint-shell lint-actions lint-yaml lint-secrets ## every linter CI runs
+lint: lint-go lint-python lint-ts lint-docker lint-shell lint-actions lint-yaml lint-secrets ## every linter CI runs
 
 lint-go: ## golangci-lint and govulncheck
 	$(GOLANGCI_LINT) run ./...
@@ -50,6 +71,9 @@ lint-python: ## ruff, bandit and mypy on the data contracts
 	$(UV) run --project contracts --group lint ruff format --check contracts
 	$(UV) run --project contracts --group lint bandit -q -c contracts/pyproject.toml -r contracts/src
 	$(UV) run --project contracts --group lint mypy --config-file contracts/pyproject.toml contracts/src
+
+lint-ts: ts-install ## eslint, prettier and tsc on the TypeScript client
+	cd $(TS) && $(NPM) run lint && $(NPM) run typecheck
 
 lint-docker: ## hadolint
 	$(HADOLINT) - < deploy/Dockerfile
@@ -86,7 +110,7 @@ smoke: docker ## start the four-node demo tree and assert on it
 demo: docker ## the same, with narration
 	COLCA_IMAGE=$(IMAGE) bash demo/demo.sh
 
-ci: check lint test contracts-test smoke ## everything CI runs
+ci: check lint test contracts-test ts-test ts-types smoke ## everything CI runs
 
 wheels: ## colcad platform wheels for chaski[node], VERSION=x.y.z
 	@test "$(origin VERSION)" = "command line" || { echo "usage: make wheels VERSION=x.y.z"; exit 2; }
