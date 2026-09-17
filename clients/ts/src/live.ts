@@ -548,13 +548,17 @@ export class Live {
 class MissingMqtt extends Error {}
 
 async function connectWithMqttJs(url: string, options: MqttConnectOptions): Promise<MqttLike> {
-  let mqtt: typeof import("mqtt");
+  let mqtt: Partial<typeof import("mqtt")>;
   try {
     mqtt = await import("mqtt");
   } catch (cause) {
     throw new MissingMqtt("colca-client/live needs the mqtt package: npm install mqtt", { cause });
   }
-  return mqtt.connect(url, options);
+  // A bundler hands a browser mqtt.js's ESM build, which exports only a default;
+  // Node gets the CommonJS build, where connect is also a named export.
+  const connect = mqtt.connect ?? mqtt.default?.connect;
+  if (connect === undefined) throw new MissingMqtt("the mqtt package in use has no connect()");
+  return connect(url, options);
 }
 
 /** `sub` and `exp` from a JWT, without checking it — the node does that. */
