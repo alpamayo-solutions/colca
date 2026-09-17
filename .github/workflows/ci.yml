@@ -450,7 +450,8 @@ jobs:
           name: npm-package
           path: dist
       - run: npm install -g npm@12.0.2
-      - run: npm publish dist/*.tgz --provenance --access public
+      # ./ matters: npm reads dist/name.tgz as the GitHub shorthand owner/repo.
+      - run: npm publish ./dist/*.tgz --provenance --access public
 
   # Trusted publishing: PyPI accepts uploads from this workflow in the pypi
   # environment, so no token is stored anywhere.
