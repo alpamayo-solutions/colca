@@ -215,3 +215,28 @@ func TestVerifyRejectsAPathShapedGrant(t *testing.T) {
 		t.Fatalf("Verify = (%q, %v), want a bad-token rejection", reason, err)
 	}
 }
+
+func TestStandaloneRejectsAllTokensUntilReadyAndThenOldSessions(t *testing.T) {
+	iss, v := world(t)
+	v.cfg.NotBefore = time.Now().Unix()
+	state := &store.StandaloneState{Since: v.cfg.NotBefore, PATs: map[string]bool{}}
+	if err := v.st.StandalonePut(state); err != nil {
+		t.Fatal(err)
+	}
+	fresh := iss.MintOpt(tokentest.MintOpts{Sub: "operator", Iat: time.Now().Add(time.Second)})
+	if _, _, err := v.Verify(fresh); err == nil {
+		t.Fatal("human authentication opened before identity retirement")
+	}
+	completed, err := v.st.CompleteStandalone()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := iss.MintOpt(tokentest.MintOpts{Sub: "oem", Iat: time.Unix(completed.Since-1, 0)})
+	if _, _, err := v.Verify(old); err == nil {
+		t.Fatal("old fleet session survived cutoff")
+	}
+	fresh = iss.MintOpt(tokentest.MintOpts{Sub: "operator", Iat: time.Unix(completed.Since, 0)})
+	if _, _, err := v.Verify(fresh); err != nil {
+		t.Fatal(err)
+	}
+}

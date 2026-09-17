@@ -1,0 +1,8 @@
+[
+  {"policy": "replicate_to_parents", "valid": true},
+  {"policy": "source_local_only", "valid": true},
+  {"policy": "local_only", "valid": false},
+  {"policy": "", "valid": false},
+  {"policy": null, "valid": false},
+  {"policy": 1, "valid": false}
+]

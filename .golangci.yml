@@ -37,6 +37,8 @@ linters:
         - name: var-declaration
         - name: unexported-return
   exclusions:
+    paths:
+      - (^|/)node_modules/
     rules:
       - path: _test\.go
         linters: [errcheck, bodyclose, noctx, gosec]

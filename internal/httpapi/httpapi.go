@@ -682,6 +682,19 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			mountLocalSecretRoutes(mux, secretDB, writeJSON, authFor)
 		}
 
+		// Local deployment controller only; the local door is the trust boundary.
+		mux.HandleFunc("POST /standalone/complete", authFor(limitClassWrite, writePolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+			if !cfg.Standalone || !c.entry.IsLocal() {
+				writeJSON(w, http.StatusForbidden, map[string]any{"error": "local standalone controller only"})
+				return
+			}
+			state, err := e.Store().CompleteStandalone()
+			if err != nil {
+				writeJSON(w, http.StatusConflict, map[string]any{"error": "standalone retirement is incomplete"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"standalone_since": state.Since, "standalone_ready": state.Ready})
+		}))
 		mux.HandleFunc("GET /self", authFor(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 			mount := ""
 			if c.entry.Element != "" {
@@ -696,12 +709,26 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 					return
 				}
 			}
+			since, ready := int64(0), false
+			var formerAncestors []string
+			if cfg.Standalone {
+				state, err := e.Store().StandaloneGet()
+				if err != nil || state == nil {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "standalone journal unavailable"})
+					return
+				}
+				since, ready = state.Since, state.Ready
+				formerAncestors = state.FormerAncestors
+			}
 			writeJSON(w, http.StatusOK, map[string]any{
-				"ulid":    c.entry.ULID,
-				"name":    c.entry.Name,
-				"node":    e.NodeID(),
-				"element": c.entry.Element,
-				"mount":   mount,
+				"ulid":                        c.entry.ULID,
+				"name":                        c.entry.Name,
+				"node":                        e.NodeID(),
+				"standalone_since":            since,
+				"standalone_ready":            ready,
+				"standalone_former_ancestors": formerAncestors,
+				"element":                     c.entry.Element,
+				"mount":                       mount,
 				// The upload caps a local service must respect, read here instead of copying the
 				// config.
 				"limits": map[string]any{

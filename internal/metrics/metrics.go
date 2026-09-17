@@ -1093,6 +1093,9 @@ var (
 	descCursorAdvanceAge = prometheus.NewDesc("colca_cursor_last_advance_age_seconds",
 		"Seconds since the cursor last advanced, which is what staleness is measured from; 0 for a cursor never seen advancing.",
 		[]string{"cursor", "stream"}, nil)
+	descCursorNextRecordAge = prometheus.NewDesc("colca_cursor_next_record_age_seconds",
+		"Age of the next retained record awaiting this cursor, floored at zero; zero when caught up. Includes local-only records awaiting uplink progress, not only uploadable samples.",
+		[]string{"cursor", "stream"}, nil)
 	descRetentionPressure = prometheus.NewDesc("colca_retention_pressure",
 		"max(age_used/max_age, live_bytes/max_bytes) for the stream's currently retained window; >1 means policy wants to prune further but is cursor-clamped.",
 		[]string{"stream"}, nil)
@@ -1116,6 +1119,7 @@ func (c *storeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descCursorPos
 	ch <- descCursorLag
 	ch <- descCursorAdvanceAge
+	ch <- descCursorNextRecordAge
 	ch <- descRetentionPressure
 	ch <- descBlockedByCursor
 	ch <- descChildHWM
@@ -1146,6 +1150,22 @@ func (c *storeCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		ch <- prometheus.MustNewConstMetric(descCursorAdvanceAge, prometheus.GaugeValue,
 			age, cur.Name, cur.Stream)
+		// A point lookup stays bounded even when a node has months of backlog.
+		// Cursor inactivity and queued-record age are different observations.
+		pos := max(cur.Position, c.st.LWM(cur.Stream))
+		var recordAge float64
+		if pos < c.st.NextOffset(cur.Stream) {
+			err := c.st.ScanRecords(cur.Stream, pos, pos+1, func(_ uint64, ts int64, _ uint64) bool {
+				recordAge = math.Max(0, now.Sub(time.UnixMilli(ts)).Seconds())
+				return false
+			})
+			if err != nil {
+				ch <- prometheus.NewInvalidMetric(descCursorNextRecordAge, err)
+				continue
+			}
+		}
+		ch <- prometheus.MustNewConstMetric(descCursorNextRecordAge, prometheus.GaugeValue,
+			recordAge, cur.Name, cur.Stream)
 	}
 	for _, s := range retentionStreams {
 		ch <- prometheus.MustNewConstMetric(descRetentionPressure, prometheus.GaugeValue,

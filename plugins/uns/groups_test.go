@@ -154,3 +154,16 @@ func TestAMalformedGrantInsideAGroupIsDroppedNotFatal(t *testing.T) {
 		t.Fatalf("problems = %v, want the malformed grant named", problems)
 	}
 }
+
+func TestStandaloneGroupsIgnoreCachedFleetAuthority(t *testing.T) {
+	f := newStore("n-machine")
+	withGroup(f, "n-hub", "fleet-admin", "admin:#")
+	withGroup(f, "n-machine", "local-operator", "read:#")
+	idx := NewGroupIndex(f).WithAuthority("n-machine")
+	if _, ok, _ := idx.GrantsOf("fleet-admin"); ok {
+		t.Fatal("cached fleet group still authorizes")
+	}
+	if grants, ok, _ := idx.GrantsOf("local-operator"); !ok || len(grants) != 1 {
+		t.Fatal("local operator lost access")
+	}
+}

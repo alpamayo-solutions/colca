@@ -102,3 +102,23 @@ func TestPersonalAccessTokenDefinitionValidation(t *testing.T) {
 		t.Fatal("unknown integration scope accepted")
 	}
 }
+
+func TestStandalonePATsRequireLocalAuthorAndFreshIdentity(t *testing.T) {
+	f := newStore("n-machine")
+	token := "pk_pat_01M0ZPAT000000000000000099_secret"
+	topic := putPersonalAccessToken(f, token, []string{"broker-http"}, "")
+	idx := NewPersonalAccessTokenIndex(f).WithAuthority("n-machine", true, map[string]bool{})
+	if _, _, err := idx.Authenticate(token, "broker-http", time.Now()); err == nil {
+		t.Fatal("foreign PAT survived handover")
+	}
+	local := strings.Replace(topic, "/n-root/", "/n-machine/", 1)
+	f.records[local] = f.records[topic]
+	delete(f.records, topic)
+	if _, _, err := idx.Authenticate(token, "broker-http", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	idx.WithAuthority("n-machine", true, map[string]bool{"01M0ZPAT000000000000000099": true})
+	if _, _, err := idx.Authenticate(token, "broker-http", time.Now()); err == nil {
+		t.Fatal("retired PAT survived under local author")
+	}
+}

@@ -172,6 +172,9 @@ func Start(cfg *config.Config) (*Node, error) {
 		return fail(fmt.Errorf("node %s: registry: %w", cfg.ULID, err))
 	}
 	n.Registry = reg
+	if err := prepareStandalone(cfg, st, reg); err != nil {
+		return fail(fmt.Errorf("standalone: %w", err))
+	}
 	// The registry updates colca_drains_active itself.
 	reg.SetMetrics(n.Metrics)
 
@@ -180,10 +183,11 @@ func Start(cfg *config.Config) (*Node, error) {
 	var ver *tokenauth.Verifier
 	if cfg.Auth != nil {
 		ver, err = tokenauth.New(tokenauth.Config{
-			Issuer:   cfg.Auth.Issuer,
-			Audience: cfg.Auth.Audience,
-			JWKSURL:  cfg.Auth.JWKSURL,
-			Refresh:  cfg.Auth.EffectiveRefresh(),
+			Issuer:    cfg.Auth.Issuer,
+			Audience:  cfg.Auth.Audience,
+			JWKSURL:   cfg.Auth.JWKSURL,
+			Refresh:   cfg.Auth.EffectiveRefresh(),
+			NotBefore: cfg.StandaloneSince,
 		}, st, n.Metrics)
 		if err != nil {
 			return fail(fmt.Errorf("node %s: tokenauth: %w", cfg.ULID, err))
@@ -348,7 +352,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		ver.SetGroupIndex(n.Engine.Groups())
 		ver.SetPersonalAccessTokenIndex(uns.NewPersonalAccessTokenIndex(
 			n.Engine.EntityStore(),
-		))
+		).WithAuthority(cfg.ULID, cfg.Standalone, cfg.RetiredPATs))
 	}
 	// Contracts bundle: the configured path, the baked one if present, or the
 	// built-in rules. A configured bundle that fails to load stops startup rather
@@ -374,6 +378,20 @@ func Start(cfg *config.Config) (*Node, error) {
 	// Children learn theirs from the downlink.
 	if cfg.Parent == nil {
 		n.Engine.SetAncestry(uns.Ancestry{})
+	}
+
+	// Protect every uplink lane before opening ingest doors or starting pruning.
+	// This includes a fresh node whose parent has never been reachable: retention
+	// must see a persisted cursor even while its position is still 1.
+	var replClient *repl.Client
+	if cfg.Parent != nil {
+		replClient, err = repl.NewClient(cfg.Parent.URL, cfg.Parent.Pubkey, id, cfg.Limits.EffectiveMaxRecordBytes())
+		if err != nil {
+			return fail(fmt.Errorf("node %s: repl client for %s: %w", cfg.ULID, cfg.Parent.URL, err))
+		}
+		if err := repl.PrepareUplink(replClient, st); err != nil {
+			return fail(fmt.Errorf("node %s: %w", cfg.ULID, err))
+		}
 	}
 
 	if n.MQTT != nil {
@@ -410,16 +428,6 @@ func Start(cfg *config.Config) (*Node, error) {
 			defer n.wg.Done()
 			mq.RunBeacon(cfg.TimeSync.EffectiveBeaconInterval(), n.stop)
 		}(n.MQTT)
-	}
-
-	// The uplink client is built before the HTTP doors so /healthz can report its
-	// status from the start. Its loops start in step 6.
-	var replClient *repl.Client
-	if cfg.Parent != nil {
-		replClient, err = repl.NewClient(cfg.Parent.URL, cfg.Parent.Pubkey, id, cfg.Limits.EffectiveMaxRecordBytes())
-		if err != nil {
-			return fail(fmt.Errorf("node %s: repl client for %s: %w", cfg.ULID, cfg.Parent.URL, err))
-		}
 	}
 
 	// 4. HTTPS API with the node's key: machines present their pinned key, admin

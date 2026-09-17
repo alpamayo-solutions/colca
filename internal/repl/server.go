@@ -262,16 +262,17 @@ func (s *Server) Stop() {
 }
 
 type wireRec struct {
-	O   uint64   `json:"o"`
-	OO  uint64   `json:"oo,omitempty"`
-	T   string   `json:"t"`
-	P   []byte   `json:"p"`
-	TS  int64    `json:"ts"`
-	WB  string   `json:"wb,omitempty"`
-	AID string   `json:"aid,omitempty"`
-	AL  string   `json:"al,omitempty"`
-	AK  string   `json:"ak,omitempty"`
-	AG  []string `json:"ag,omitempty"`
+	SkipFrom uint64   `json:"skip_from,omitempty"`
+	O        uint64   `json:"o"`
+	OO       uint64   `json:"oo,omitempty"`
+	T        string   `json:"t"`
+	P        []byte   `json:"p"`
+	TS       int64    `json:"ts"`
+	WB       string   `json:"wb,omitempty"`
+	AID      string   `json:"aid,omitempty"`
+	AL       string   `json:"al,omitempty"`
+	AK       string   `json:"ak,omitempty"`
+	AG       []string `json:"ag,omitempty"`
 }
 
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
@@ -316,7 +317,22 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	repl := make([]store.ReplRecord, 0, len(in.Records))
+	var previous uint64
 	for _, rec := range in.Records {
+		if rec.O == 0 || rec.O <= previous {
+			http.Error(w, "replication offsets must be positive and increasing", http.StatusBadRequest)
+			return
+		}
+		if rec.SkipFrom != 0 {
+			if in.Stream != "metrics" || rec.SkipFrom > rec.O || rec.SkipFrom <= previous || rec.T != "" || len(rec.P) != 0 || rec.OO != 0 || rec.TS != 0 || rec.WB != "" || rec.AID != "" || rec.AL != "" || rec.AK != "" || len(rec.AG) != 0 {
+				http.Error(w, "invalid metric skip range", http.StatusBadRequest)
+				return
+			}
+			repl = append(repl, store.ReplRecord{ChildOffset: rec.O, SkipFrom: rec.SkipFrom})
+			previous = rec.O
+			continue
+		}
+		previous = rec.O
 		childParsed, parseErr := uns.Parse(rec.T)
 		if parseErr != nil {
 			http.Error(w, parseErr.Error(), http.StatusBadRequest)

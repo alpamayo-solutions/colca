@@ -30,12 +30,22 @@ type PersonalAccessToken struct {
 // PersonalAccessTokenIndex resolves a presented opaque token against the
 // replicated definitions held locally by this node.
 type PersonalAccessTokenIndex struct {
-	store EntityStore
+	store   EntityStore
+	author  string
+	retired map[string]bool
 }
 
 // NewPersonalAccessTokenIndex returns an index over the tokens in store.
 func NewPersonalAccessTokenIndex(store EntityStore) *PersonalAccessTokenIndex {
 	return &PersonalAccessTokenIndex{store: store}
+}
+
+// WithAuthority excludes foreign and pre-handover credentials permanently.
+func (p *PersonalAccessTokenIndex) WithAuthority(node string, standalone bool, retired map[string]bool) *PersonalAccessTokenIndex {
+	if standalone {
+		p.author, p.retired = node, retired
+	}
+	return p
 }
 
 func personalAccessTokenID(token string) (string, bool) {
@@ -47,10 +57,13 @@ func personalAccessTokenID(token string) (string, bool) {
 }
 
 func (p *PersonalAccessTokenIndex) lookup(id string) (*PersonalAccessToken, error) {
+	if p.retired[id] {
+		return nil, fmt.Errorf("personal access token retired at handover")
+	}
 	var matches []PersonalAccessToken
 	var authors []string
 	for _, rec := range p.store.KVScanAll(PersonalAccessTokenContract) {
-		if rec.Path != id {
+		if rec.Path != id || (p.author != "" && rec.NodeID != p.author) {
 			continue
 		}
 		var candidate PersonalAccessToken
