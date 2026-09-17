@@ -79,11 +79,12 @@ function renderObject(schema, indent) {
 
 const contracts = Object.entries(bundle.contracts).sort(([a], [b]) => a.localeCompare(b));
 
+// Nothing that names the commit goes in here: the file is committed and compared
+// in CI, and the bundle's sha and digest change with every commit whether a
+// contract changed or not.
 const header = `// Generated from the contracts bundle — do not edit.
 //
-// Source:  ${bundle.source?.package ?? "colca-data-contracts"} @ ${bundle.source?.git_sha ?? "unknown"}
-// Bundle:  version ${bundle.bundle_version}, digest ${String(bundle.digest).slice(0, 16)}…
-// Command: make bundle && npm run generate:types
+// make bundle && npm run generate:types
 `;
 
 const types = contracts.map(([contract, entry]) => {

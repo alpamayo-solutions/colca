@@ -1,8 +1,6 @@
 // Generated from the contracts bundle — do not edit.
 //
-// Source:  colca-data-contracts @ d8c8a69
-// Bundle:  version 0.0.0, digest a5400f9bc970e09c…
-// Command: make bundle && npm run generate:types
+// make bundle && npm run generate:types
 
 /** `_Ack` — stream class `ack`. */
 export type Ack = {
