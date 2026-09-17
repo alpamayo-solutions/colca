@@ -321,7 +321,8 @@ export class Live {
     this.#setState("closed");
   }
 
-  async #open(): Promise<void> {
+  /** Connect, with `token` when the renewal already fetched one. */
+  async #open(token?: string): Promise<void> {
     const generation = ++this.#generation;
     const current = (): boolean => generation === this.#generation && this.#state !== "closed";
     // A planned renewal keeps saying online; the page has nothing to show for it.
@@ -330,7 +331,7 @@ export class Live {
     let client: MqttLike;
     let expiresAt: number | undefined;
     try {
-      const token = await this.#options.token();
+      token ??= await this.#options.token();
       const claims = readClaims(token);
       const username = this.#options.username ?? claims?.sub;
       if (!username) {
@@ -390,13 +391,13 @@ export class Live {
   }
 
   /** End the connection in hand and open the next one. */
-  #replace(): void {
+  #replace(token?: string): void {
     clearTimeout(this.#renewTimer);
     this.#renewTimer = undefined;
     this.#generation += 1;
     this.#client?.end(true);
     this.#client = undefined;
-    void this.#open();
+    void this.#open(token);
   }
 
   #retry(): void {
@@ -421,10 +422,39 @@ export class Live {
     this.#renewTimer = setTimeout(
       () => {
         this.#renewTimer = undefined;
-        this.#replace();
+        void this.#renew(expiresAt);
       },
       Math.max(MIN_RENEW_MS, due),
     );
+  }
+
+  /**
+   * Replace the connection only with a token that outlives it. An identity proxy
+   * can keep handing out the token it holds until its own refresh is due, and
+   * reconnecting with that one gains nothing and costs a gap in the values.
+   */
+  async #renew(expiresAt: number): Promise<void> {
+    const generation = this.#generation;
+    let token: string | undefined;
+    try {
+      token = await this.#options.token();
+    } catch (error) {
+      if (generation === this.#generation) this.#report(error);
+    }
+    if (generation !== this.#generation || this.#state === "closed") return;
+
+    const exp = token === undefined ? undefined : readClaims(token)?.exp;
+    if (token !== undefined && (exp === undefined || exp * 1000 > expiresAt)) {
+      this.#replace(token);
+      return;
+    }
+    // Ask again shortly; once the token has run out, the node ends the session and
+    // reconnecting takes over.
+    if (Date.now() + MIN_RENEW_MS >= expiresAt) return;
+    this.#renewTimer = setTimeout(() => {
+      this.#renewTimer = undefined;
+      void this.#renew(expiresAt);
+    }, MIN_RENEW_MS);
   }
 
   #subscribe(filters: string[]): void {

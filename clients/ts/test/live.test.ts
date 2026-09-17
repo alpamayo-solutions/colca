@@ -332,6 +332,35 @@ describe("keeping the connection", () => {
     expect(states).toEqual([]);
   });
 
+  it("keeps the connection while the token on offer is no newer than the one in use", async () => {
+    // A proxy that goes on handing out the token it holds until its own refresh is due.
+    const exp = Math.floor(Date.now() / 1000) + 300;
+    const stale = jwt({ sub: "till", exp });
+    const fresh = jwt({ sub: "till", exp: exp + 300 });
+    let fetches = 0;
+    const { live, clients } = setup({
+      token: () => {
+        fetches += 1;
+        return fetches < 4 ? stale : fresh;
+      },
+    });
+    live.subscribe(T, () => undefined);
+    await settle();
+    clients[0].emit("connect");
+
+    // Due 30 s before expiry: twice the same token, five seconds apart, and no new connection.
+    await vi.advanceTimersByTimeAsync(270_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetches).toBe(3);
+    expect(clients).toHaveLength(1);
+    expect(clients[0].ended).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fetches).toBe(4);
+    expect(clients).toHaveLength(2);
+    expect(clients[1].options.password).toBe(fresh);
+  });
+
   it("ignores what the replaced connection still says", async () => {
     const { live, clients } = setup();
     await settle();
