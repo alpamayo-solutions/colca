@@ -18,6 +18,7 @@ import enum
 import hashlib
 import json
 import sys
+import types
 import typing
 from dataclasses import MISSING, fields, is_dataclass
 
@@ -124,7 +125,7 @@ def _schema_for_type(t: object, *, required: bool) -> dict:
         return inner
 
     # Optional[X] / X | None → nullable schema of X
-    if origin is typing.Union or str(origin) == "types.UnionType":
+    if origin is typing.Union or origin is types.UnionType:
         non_none = [a for a in args if a is not type(None)]
         nullable = len(non_none) != len(args)
         if len(non_none) != 1:

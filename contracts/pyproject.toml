@@ -25,6 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = [
+    "jsonschema>=4.26,<5",
     "pytest>=8.4,<10",
     "pyyaml>=6.0",
     "paho-mqtt>=2.1,<3",
