@@ -11,6 +11,7 @@ import (
 // StandaloneState is a one-way trust transition. Pending makes retirement
 // resumable if startup stops after journaling but before revoking every entry.
 type StandaloneState struct {
+	CommandsBefore  uint64          `json:"commands_before,omitempty"`
 	FormerAncestors []string        `json:"former_ancestors,omitempty"`
 	Since           int64           `json:"since"`
 	PATs            map[string]bool `json:"pats"`

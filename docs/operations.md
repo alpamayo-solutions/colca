@@ -141,6 +141,12 @@ cursors and existing externally enrolled identities, and disables the static
 administration token. Local services, node identity and process history remain.
 External machine clients must be enrolled again by the new local owner.
 
+Commands accepted before handover are retired from HTTP fetch and MQTT replay,
+including pending local commands. Their stored history and acknowledgements are
+preserved; new commands remain executable. The retirement boundary survives
+restarts. Upgrading an existing standalone data directory from 0.2.0 records this
+boundary once at the first startup, retiring any commands pending at that time.
+
 Human authentication stays closed until a trusted local identity controller has
 preserved operators, disabled fleet accounts and transferred administration. The
 controller then calls `POST /standalone/complete` on the **local** HTTP door.
