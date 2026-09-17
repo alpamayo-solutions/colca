@@ -102,6 +102,48 @@ jobs:
       - name: Contract tests
         run: uv run --project contracts --python ${{ matrix.python-version }} --extra test pytest contracts/tests
 
+  # The Node jobs carry no `needs`, so they run beside the long Go and container
+  # tests instead of after them. Publishing still waits for them: they are in the
+  # `needs` of image and packages below.
+  ts-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: clients/ts/package-lock.json
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: "0.11.17"
+      - name: eslint, prettier and tsc
+        run: make lint-ts
+      # Regenerated from this commit's bundle and diffed, so the committed types
+      # cannot fall behind the contracts.
+      - name: The generated contract types are current
+        run: make ts-types
+      - name: The package as npm would publish it
+        run: make ts-build
+
+  ts-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["22", "24", "26"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: clients/ts/package-lock.json
+      - name: Tests, conformance vectors included
+        run: make ts-test
+
   smoke:
     needs: [go-test]
     runs-on: ubuntu-latest
@@ -142,7 +184,7 @@ jobs:
           echo "python=$python" >> "$GITHUB_OUTPUT"
 
   image:
-    needs: [version, go-lint, python-lint, repo-lint, go-test, contracts-test, smoke]
+    needs: [version, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -254,7 +296,7 @@ jobs:
           if-no-files-found: error
 
   packages:
-    needs: [version, go-lint, python-lint, repo-lint, go-test, contracts-test, smoke]
+    needs: [version, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -320,6 +362,95 @@ jobs:
           name: sbom-contracts
           path: sbom/
           if-no-files-found: error
+
+  # The npm package, built the same way as the Python one: version from the tag,
+  # SBOM, attestations, and an artifact the publish job takes as it is.
+  npm-package:
+    needs: [version, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.semver }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: clients/ts/package-lock.json
+      - name: Dependencies
+        run: cd clients/ts && npm ci
+      # Build metadata (+sha) is dropped: npm has no use for it, and a dev build
+      # is packed for the artifact only, never published.
+      - name: Version
+        run: cd clients/ts && npm version --no-git-tag-version --allow-same-version "${VERSION%%+*}"
+      - name: Build and check
+        run: cd clients/ts && npm run build && npm run package-check
+      - name: Tarball
+        run: |
+          mkdir -p dist
+          cd clients/ts && npm pack --pack-destination ../../dist
+      - id: syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
+        with:
+          syft-version: v1.51.1
+      # The client has no runtime dependencies, so this SBOM is mostly the
+      # package itself — which is the point: it says so in a form a consumer can check.
+      - name: SBOM of colca-client
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+        run: |
+          mkdir -p sbom
+          npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --omit dev --output-format JSON \
+            --output-file sbom/colca-client.cdx.json clients/ts/package.json
+          "$SYFT" convert sbom/colca-client.cdx.json -o spdx-json=sbom/colca-client.spdx.json
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.visibility == 'public'
+        with:
+          subject-path: dist/*.tgz
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
+        if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.visibility == 'public'
+        with:
+          subject-path: dist/*.tgz
+          sbom-path: sbom/colca-client.spdx.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: npm-package
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom-client
+          path: sbom/
+          if-no-files-found: error
+
+  # Trusted publishing again: npm accepts uploads from this workflow in the npm
+  # environment, so no token is stored anywhere. The OIDC exchange needs npm
+  # 11.5.1 or newer, hence the explicit install.
+  npm:
+    needs: [npm-package]
+    if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.visibility == 'public'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: npm-package
+          path: dist
+      - run: npm install -g npm@12.0.2
+      - run: npm publish dist/*.tgz --provenance --access public
 
   # Trusted publishing: PyPI accepts uploads from this workflow in the pypi
   # environment, so no token is stored anywhere.

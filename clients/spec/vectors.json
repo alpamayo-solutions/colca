@@ -1,0 +1,79 @@
+{
+  "produced_by": "clients/spec/generate_vectors.py from colca-data-contracts",
+  "annotation_id": [
+    {
+      "note": "a panel from the Wisewoods line",
+      "annotation_type_id": "01M2M9N2GBFMRCEKT4DVJC671A",
+      "source": "dataops/paneltracking-wisewoods/line1",
+      "time_start": 1789535138.047,
+      "signal_ids": [
+        "01M2AB5YWM56SH9B2EQ3S5VNXF"
+      ],
+      "expected": "2M4XSRFDX4NA57B5QCKP0R7WJC"
+    },
+    {
+      "note": "no signals at all, and the epoch",
+      "annotation_type_id": "01M2M9N2GBVGQVEBJ7KADQY9M2",
+      "source": "a",
+      "time_start": 0.0,
+      "signal_ids": [],
+      "expected": "6B9JW1ZVC3DDBC8MJSCRGK7ETT"
+    },
+    {
+      "note": "microseconds are part of the identity; six decimals, no more",
+      "annotation_type_id": "01M2M9N2GBN747S8858N3TXMN7",
+      "source": "svc/x",
+      "time_start": 1.0000005,
+      "signal_ids": [
+        "01BX5ZZKBKACTAV9WEVGEMMVRZ",
+        "01M2AB5YWSZTAFBKYYYA5C0TE7"
+      ],
+      "expected": "69QYD0YQR2ZN4NRNCG115DHCKM"
+    },
+    {
+      "note": "the same two signals in the other order \u2014 the set is sorted, so same id",
+      "annotation_type_id": "01M2M9N2GBN747S8858N3TXMN7",
+      "source": "svc/x",
+      "time_start": 1.0000005,
+      "signal_ids": [
+        "01M2AB5YWSZTAFBKYYYA5C0TE7",
+        "01BX5ZZKBKACTAV9WEVGEMMVRZ"
+      ],
+      "expected": "69QYD0YQR2ZN4NRNCG115DHCKM"
+    }
+  ],
+  "topic": [
+    {
+      "note": "a metric on a node",
+      "root": "steine",
+      "contract": "_Metric",
+      "node": "n-technikum",
+      "path": "wisewoods/line1/mas2/sta1/aggos/grit",
+      "expected": "steine/v1/_Metric/n-technikum/wisewoods/line1/mas2/sta1/aggos/grit"
+    },
+    {
+      "note": "an annotation",
+      "root": "steine",
+      "contract": "_Annotation",
+      "node": "n-technikum",
+      "path": "panel/01M2M9",
+      "expected": "steine/v1/_Annotation/n-technikum/panel/01M2M9"
+    },
+    {
+      "note": "a definition carries the node too",
+      "root": "steine",
+      "contract": "_AnnotationType",
+      "node": "n-technikum",
+      "path": "01M2M9N2GBFMRCEKT4DVJC671A",
+      "expected": "steine/v1/_AnnotationType/n-technikum/01M2M9N2GBFMRCEKT4DVJC671A"
+    },
+    {
+      "note": "a command names its verb under the node, and the root is configurable",
+      "root": "alp",
+      "contract": "_CmdConfigure",
+      "node": "n-technikum",
+      "path": "element/upsert",
+      "expected": "alp/v1/_CmdConfigure/n-technikum/element/upsert"
+    }
+  ]
+}

@@ -6,14 +6,15 @@ Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Build and test
 
-You need Go 1.26, [uv](https://docs.astral.sh/uv/) for the Python side, and
-Docker for the end-to-end demo.
+You need Go 1.26, [uv](https://docs.astral.sh/uv/) for the Python side, Node
+22.12 or newer for the TypeScript client, and Docker for the end-to-end demo.
 
 ```bash
 make test            # Go unit and in-process integration tests, with -race
 make contracts-test  # the data contracts package (Python)
+make ts-test         # the TypeScript client, conformance vectors included
 make check           # gofmt, go vet, and the repository hygiene checks
-make lint            # golangci-lint, govulncheck, ruff, bandit, mypy, hadolint, shellcheck, actionlint, yamllint
+make lint            # golangci-lint, govulncheck, ruff, bandit, mypy, eslint, prettier, tsc, hadolint, shellcheck, actionlint, yamllint
 make smoke           # builds the image, starts a four-node tree, asserts on it
 ```
 
@@ -24,8 +25,9 @@ them on every pull request; `make lint` needs Docker for hadolint and gitleaks.
 ## Git hooks
 
 The repository ships [pre-commit](https://pre-commit.com) hooks: gitleaks,
-formatting and the fast linters on every commit, golangci-lint and mypy before
-a push, and a check that the commit subject follows the convention below.
+formatting and the fast linters on every commit, golangci-lint, mypy and the
+TypeScript checks before a push, and a check that the commit subject follows the
+convention below.
 
 ```bash
 uv tool install pre-commit
@@ -38,6 +40,18 @@ A contract has two sides: its shape in `contracts/` (Python) and the rules the
 node applies in Go. Where both sides must agree, a golden vector in
 `contracts/src/colca_data_contracts/vectors/` pins the answer and both test
 suites read it. Change the vector, then make both suites pass.
+
+The TypeScript client is a third reader. What it has to compute identically —
+annotation ids, topics — is pinned in `clients/spec/vectors.json`, which is
+generated from the Python package rather than written by hand:
+
+```bash
+uv run --project contracts python clients/spec/generate_vectors.py
+make ts-types  # regenerates the client's contract types from the bundle
+```
+
+Both outputs are committed, so a contract change that moves them shows up in
+the diff instead of surfacing later as a refused record.
 
 ## Pull requests
 

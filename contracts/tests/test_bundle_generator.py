@@ -10,6 +10,7 @@ import datetime
 import enum
 import json
 import sys
+import types
 import typing
 from pathlib import Path
 
@@ -21,6 +22,14 @@ import generate_bundle as gb
 from franzmq.data_contracts import PAYLOAD_CLASSES
 
 jsonschema = pytest.importorskip("jsonschema", reason="parity gate needs the jsonschema test dep")
+
+
+def test_optional_fields_are_typed_on_every_python():
+    # Python 3.14 made `X | None` a typing.Union; before it, the two spellings had
+    # different origins. A check that caught only one of them left every
+    # `X | None` field unvalidated in bundles built on 3.11 to 3.13.
+    assert gb._schema_for_type(str | None, required=False) == {"type": ["null", "string"]}
+    assert gb._schema_for_type(typing.Optional[float], required=False) == {"type": ["null", "number"]}  # noqa: UP045
 
 
 def test_determinism_two_runs_one_digest():
@@ -175,7 +184,7 @@ def _dummy(t):
         if any(isinstance(m, gb.Pattern) for m in args[1:]):
             return GOLDEN_ULID
         return _dummy(args[0])
-    if origin is typing.Union or str(origin) == "types.UnionType":
+    if origin is typing.Union or origin is types.UnionType:
         non_none = [a for a in args if a is not type(None)]
         return _dummy(non_none[0]) if non_none else None
     if t is typing.Any:

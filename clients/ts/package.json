@@ -1,0 +1,75 @@
+{
+  "name": "@alpamayo-solutions/colca-client",
+  "version": "0.1.7",
+  "description": "Client for a Colca node's door: fetch, ack, publish, kv, self.",
+  "keywords": [
+    "colca",
+    "mqtt",
+    "uns",
+    "unified-namespace",
+    "industrial"
+  ],
+  "license": "SEE LICENSE IN LICENSE.md",
+  "author": "Alpamayo Solutions",
+  "homepage": "https://alpamayo-solutions.github.io/colca/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alpamayo-solutions/colca.git",
+    "directory": "clients/ts"
+  },
+  "bugs": "https://github.com/alpamayo-solutions/colca/issues",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./live": {
+      "types": "./dist/live.d.ts",
+      "default": "./dist/live.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "package-check": "publint --strict && attw --pack . --profile esm-only",
+    "generate:types": "node scripts/generate-types.mjs ../../build/bundle/contracts-bundle.json"
+  },
+  "peerDependencies": {
+    "mqtt": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "mqtt": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.20.3",
+    "eslint": "10.10.0",
+    "mqtt": "5.16.0",
+    "prettier": "3.9.7",
+    "publint": "0.3.24",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.0",
+    "vite": "8.3.0",
+    "vitest": "5.0.1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
