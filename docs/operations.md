@@ -15,6 +15,7 @@ alert first:
 | `colca_cursor_lag_records` | a consumer falls behind |
 | `colca_retention_pressure` | above `1`: the pruner wants to remove more than a cursor allows, and the disk grows |
 | `colca_stream_live_bytes` | a stream grows past what the disk holds |
+| `colca_cursor_next_record_age_seconds` | age of the next retained record waiting for a consumer; unlike cursor inactivity, this is zero when caught up |
 | `colca_rejected_publishes_total` | rises: clients send what the node refuses; `reason` says why |
 | `colca_auth_rejections_total` | rises: unknown keys or bad tokens at a door |
 | `colca_replication_integrity_failures_total` | above `0`: a child pruned records before its parent received them |
@@ -34,6 +35,14 @@ forms a child's offline buffer. If the age or size limit wants to remove
 records a cursor has not read, nothing happens: the stream stays as it is,
 `colca_retention_pressure` goes above `1`, and a warning names the cursor.
 Disk keeps growing until someone acts.
+
+A configured parent's uplink cursors are persisted during startup, before
+retention runs, even when the streams are empty or the parent has never been
+reachable. This protects the first accepted records through an initial outage
+and restart. Startup fails if this protection cannot be written. Reconnecting
+advances the cursors only after successful upload; ordinary retention can then
+reclaim the acknowledged history. This protection is not a disk-capacity limit:
+size storage for the expected outage, ingestion rate and other local consumers.
 
 To let the pruner give up on a consumer that stopped, set
 `ignore_cursors_after` for that stream. When a run removes records a cursor
@@ -94,3 +103,31 @@ the scenarios on the hardware you deploy to before setting thresholds.
 - **A deadlock in mochi-mqtt 2.7.9 is avoided, not fixed.** Colca pins a fork
   and stops its clients before closing listeners; the workaround goes once the
   fix is released upstream.
+
+
+## Per-signal metric replication
+
+A `_Signal` accepts `replication_policy` with two values:
+
+- `replicate_to_parents` (default, including older signals without the field):
+  newly accepted samples are eligible for upward replication.
+- `source_local_only`: newly accepted samples remain at their source node.
+
+The decision is stored with each sample, under the same storage lock as signal
+updates. Changing the policy does not cancel already queued uploads. Re-enabling
+replication does not backfill samples accepted while local-only. Restarts and
+later signal edits do not change these decisions. Local MQTT delivery, retained
+values and historian consumers continue to read the original samples.
+
+Signal descriptors still replicate. The uplink sends compact offset ranges for
+intentionally omitted samples, without their topics, payloads or timestamps.
+The parent acknowledges those ranges durably without appending metric records.
+This preserves real offset-gap detection and replay deduplication; an entirely
+local-only page still exchanges progress with the parent. Reads are bounded by
+physical records scanned, including excluded samples.
+
+Deploy receivers before enabling the policy at their children. Older receivers
+reject the progress entries and the child holds its cursor for retry instead of
+silently discarding data. Upgrade the contracts package and consumers together;
+older Python signal decoders do not recognize the new field. Downgrading a source
+to a binary that does not understand its persisted upload decisions is unsupported.

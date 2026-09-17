@@ -376,6 +376,20 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.Engine.SetAncestry(uns.Ancestry{})
 	}
 
+	// Protect every uplink lane before opening ingest doors or starting pruning.
+	// This includes a fresh node whose parent has never been reachable: retention
+	// must see a persisted cursor even while its position is still 1.
+	var replClient *repl.Client
+	if cfg.Parent != nil {
+		replClient, err = repl.NewClient(cfg.Parent.URL, cfg.Parent.Pubkey, id, cfg.Limits.EffectiveMaxRecordBytes())
+		if err != nil {
+			return fail(fmt.Errorf("node %s: repl client for %s: %w", cfg.ULID, cfg.Parent.URL, err))
+		}
+		if err := repl.PrepareUplink(replClient, st); err != nil {
+			return fail(fmt.Errorf("node %s: %w", cfg.ULID, err))
+		}
+	}
+
 	if n.MQTT != nil {
 		n.MQTT.SetEngine(n.Engine)
 		// Revocation kicks the live session, and registry changes appear on the local
@@ -410,16 +424,6 @@ func Start(cfg *config.Config) (*Node, error) {
 			defer n.wg.Done()
 			mq.RunBeacon(cfg.TimeSync.EffectiveBeaconInterval(), n.stop)
 		}(n.MQTT)
-	}
-
-	// The uplink client is built before the HTTP doors so /healthz can report its
-	// status from the start. Its loops start in step 6.
-	var replClient *repl.Client
-	if cfg.Parent != nil {
-		replClient, err = repl.NewClient(cfg.Parent.URL, cfg.Parent.Pubkey, id, cfg.Limits.EffectiveMaxRecordBytes())
-		if err != nil {
-			return fail(fmt.Errorf("node %s: repl client for %s: %w", cfg.ULID, cfg.Parent.URL, err))
-		}
 	}
 
 	// 4. HTTPS API with the node's key: machines present their pinned key, admin

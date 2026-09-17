@@ -960,10 +960,16 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 	e.logOffsetJumps(child, stream, prev, got, droppedTimeSync)
 	// Replicated records count toward colca_ingest_records_total like the other entry
 	// paths.
-	for range got {
-		e.metrics.IngestRecord(stream)
+	for _, r := range got {
+		if r.SkipFrom == 0 {
+			e.metrics.IngestRecord(stream)
+			applied++
+		}
 	}
 	for _, r := range got {
+		if r.SkipFrom != 0 {
+			continue
+		}
 		p, perr := uns.Parse(r.Topic)
 		if perr != nil {
 			// The record is already durable; only the bus mirror is skipped.
@@ -978,7 +984,7 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 			e.deliver(r.Topic, r.Payload, retainFor(e.ClassOf(p.Contract)))
 		}
 	}
-	return len(got), hwm, nil
+	return applied, hwm, nil
 }
 
 // rejectTimeSync drops _TimeSync records from a replicated batch before they
@@ -1018,7 +1024,11 @@ func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []sto
 	}
 	last := prev
 	for _, r := range applied {
-		if r.ChildOffset > last+1 && !jumpFullyExplainedByDroppedTimeSync(last, r.ChildOffset, droppedTimeSync) {
+		first := r.ChildOffset
+		if r.SkipFrom != 0 {
+			first = r.SkipFrom
+		}
+		if first > last+1 && !jumpFullyExplainedByDroppedTimeSync(last, first, droppedTimeSync) {
 			e.log.Error("replication offset jump: this node never received the child offsets between have and got, most likely pruned at the child before replication",
 				"child", child, "stream", stream, "have", last, "got", r.ChildOffset)
 			e.metrics.GapApplied(child, stream)

@@ -378,7 +378,7 @@ func TestReDeclaringABoundSignalKeepsItsBinding(t *testing.T) {
 	place(t, c, "01HLINE1", "line1")
 	bindEntry(t, c, "01JCONN", "opcua-1", "01HLINE1")
 	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", map[string]any{
-		"unit": "°C", "description": "Drum temperature",
+		"unit": "°C", "description": "Drum temperature", "replication_policy": "source_local_only",
 	})
 	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", tags("t1"))
 	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
@@ -396,6 +396,9 @@ func TestReDeclaringABoundSignalKeepsItsBinding(t *testing.T) {
 	})
 
 	after := signalRecordAt(t, c, "line1/tag-t1")
+	if after["replication_policy"] != "source_local_only" {
+		t.Fatalf("re-declaration or autobind lost replication policy: %+v", after)
+	}
 	if after["data_tag"] != "t1" {
 		t.Fatalf("re-declaration unbound the signal: data_tag=%v (want t1): %+v", after["data_tag"], after)
 	}
