@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/alpamayo-solutions/colca/compare/v0.1.9...v0.2.0) (2026-09-17)
+
+
+### Features
+
+* **fleet:** support durable offline replication and standalone handover ([#23](https://github.com/alpamayo-solutions/colca/issues/23)) ([b5b3eee](https://github.com/alpamayo-solutions/colca/commit/b5b3eee7d6b3393205b71831bbfd2742977651c6))
+
 ## [0.1.9](https://github.com/alpamayo-solutions/colca/compare/v0.1.8...v0.1.9) (2026-09-17)
 
 
