@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/alpamayo-solutions/colca/compare/v0.1.8...v0.1.9) (2026-09-17)
+
+
+### Fixes
+
+* **ci:** publish the npm tarball by its path, not as a GitHub shorthand ([#21](https://github.com/alpamayo-solutions/colca/issues/21)) ([0167dd2](https://github.com/alpamayo-solutions/colca/commit/0167dd2803281cec73546a66b2d5f66bfa0ada93))
+
 ## [0.1.8](https://github.com/alpamayo-solutions/colca/compare/v0.1.7...v0.1.8) (2026-09-17)
 
 
