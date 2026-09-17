@@ -486,6 +486,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 		}
 		filter := func(record store.StoredRecord) bool {
+			if stream == uns.StreamFor(uns.ClassCmd) && e.CommandRetired(record) {
+				return false
+			}
 			topic := record.Topic
 			var parsed uns.Parsed
 			var parseErr error

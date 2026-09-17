@@ -29,7 +29,8 @@ func prepareStandalone(cfg *config.Config, st *store.Store, reg *registry.Manage
 		return fmt.Errorf("standalone cannot have a parent")
 	}
 	if state == nil {
-		state = &store.StandaloneState{Since: time.Now().Unix() + 1, PATs: map[string]bool{}, Pending: true}
+		state = &store.StandaloneState{Since: time.Now().Unix() + 1, PATs: map[string]bool{}, Pending: true,
+			CommandsBefore: st.NextOffset(uns.StreamFor(uns.ClassCmd))}
 		if raw, known := st.AncestryGet(); known {
 			var ancestry uns.Ancestry
 			if err := json.Unmarshal(raw, &ancestry); err != nil {
@@ -59,6 +60,14 @@ func prepareStandalone(cfg *config.Config, st *store.Store, reg *registry.Manage
 				state.Identities = append(state.Identities, entry.ULID)
 			}
 		}
+		if err := st.StandalonePut(state); err != nil {
+			return err
+		}
+	}
+	// Upgrade an existing journal once. Old pending physical actions cannot
+	// become executable again merely because their caller's trust was retired.
+	if state.CommandsBefore == 0 {
+		state.CommandsBefore = st.NextOffset(uns.StreamFor(uns.ClassCmd))
 		if err := st.StandalonePut(state); err != nil {
 			return err
 		}
