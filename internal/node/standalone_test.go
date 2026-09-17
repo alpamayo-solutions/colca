@@ -25,6 +25,17 @@ func TestStandaloneRetiresParentTrustBeforeServingAndSurvivesRestart(t *testing.
 		t.Fatal(err)
 	}
 	n.Stop()
+	// Restore a learned position as a managed child would retain it offline.
+	st, err := store.Open(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AncestryPut([]byte(`[{"element":"fleet-machine","name":"machine"}]`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
 	cfg.Standalone = true
 	n = mustStart(t, cfg)
 	if cfg.API.Token != "" {
@@ -41,6 +52,9 @@ func TestStandaloneRetiresParentTrustBeforeServingAndSurvivesRestart(t *testing.
 	state, err := n.Store.StandaloneGet()
 	if err != nil || state == nil || state.Ready {
 		t.Fatalf("handover not fenced: %+v %v", state, err)
+	}
+	if len(state.FormerAncestors) != 1 || state.FormerAncestors[0] != "fleet-machine" {
+		t.Fatal("lost old grant scope")
 	}
 	request := func(method, path string) map[string]any {
 		t.Helper()

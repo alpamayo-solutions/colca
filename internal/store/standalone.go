@@ -11,11 +11,12 @@ import (
 // StandaloneState is a one-way trust transition. Pending makes retirement
 // resumable if startup stops after journaling but before revoking every entry.
 type StandaloneState struct {
-	Since      int64           `json:"since"`
-	PATs       map[string]bool `json:"pats"`
-	Identities []string        `json:"identities"`
-	Ready      bool            `json:"ready"`
-	Pending    bool            `json:"pending"`
+	FormerAncestors []string        `json:"former_ancestors,omitempty"`
+	Since           int64           `json:"since"`
+	PATs            map[string]bool `json:"pats"`
+	Identities      []string        `json:"identities"`
+	Ready           bool            `json:"ready"`
+	Pending         bool            `json:"pending"`
 }
 
 var standaloneKey = []byte("j\x00standalone")

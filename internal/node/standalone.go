@@ -1,6 +1,7 @@
 package node
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/alpamayo-solutions/colca/internal/config"
@@ -29,6 +30,17 @@ func prepareStandalone(cfg *config.Config, st *store.Store, reg *registry.Manage
 	}
 	if state == nil {
 		state = &store.StandaloneState{Since: time.Now().Unix() + 1, PATs: map[string]bool{}, Pending: true}
+		if raw, known := st.AncestryGet(); known {
+			var ancestry uns.Ancestry
+			if err := json.Unmarshal(raw, &ancestry); err != nil {
+				return fmt.Errorf("cannot preserve operator scope from corrupt ancestry: %w", err)
+			}
+			for _, ancestor := range ancestry {
+				if ancestor.Element != "" {
+					state.FormerAncestors = append(state.FormerAncestors, ancestor.Element)
+				}
+			}
+		}
 		for after := ""; ; {
 			rows, next, err := st.KVScanPage("", after, 1000, []string{uns.PersonalAccessTokenContract})
 			if err != nil {

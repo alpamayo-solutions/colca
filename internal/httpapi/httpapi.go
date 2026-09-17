@@ -710,6 +710,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				}
 			}
 			since, ready := int64(0), false
+			var formerAncestors []string
 			if cfg.Standalone {
 				state, err := e.Store().StandaloneGet()
 				if err != nil || state == nil {
@@ -717,15 +718,17 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 					return
 				}
 				since, ready = state.Since, state.Ready
+				formerAncestors = state.FormerAncestors
 			}
 			writeJSON(w, http.StatusOK, map[string]any{
-				"ulid":             c.entry.ULID,
-				"name":             c.entry.Name,
-				"node":             e.NodeID(),
-				"standalone_since": since,
-				"standalone_ready": ready,
-				"element":          c.entry.Element,
-				"mount":            mount,
+				"ulid":                        c.entry.ULID,
+				"name":                        c.entry.Name,
+				"node":                        e.NodeID(),
+				"standalone_since":            since,
+				"standalone_ready":            ready,
+				"standalone_former_ancestors": formerAncestors,
+				"element":                     c.entry.Element,
+				"mount":                       mount,
 				// The upload caps a local service must respect, read here instead of copying the
 				// config.
 				"limits": map[string]any{
