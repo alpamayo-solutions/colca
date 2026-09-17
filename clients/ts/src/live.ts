@@ -13,7 +13,8 @@
  * - a fresh token before the old one runs out — the node ends a session when
  *   its token expires — and every subscription sent again on the new connection;
  * - growing, jittered waits between attempts after a drop, each with a fresh
- *   token.
+ *   token;
+ * - commands that wait for their acknowledgement.
  *
  * These are values, not a log: a change that happens while the connection is
  * being replaced is superseded by the retained value that follows. Anything that
@@ -22,9 +23,12 @@
  * mqtt.js is loaded on first use and is an optional dependency of this package.
  */
 
-import { topicMatches } from "./topics.js";
+import { newUlid } from "./ids.js";
+import { parseTopic, topicMatches } from "./topics.js";
 
 export type LiveState = "connecting" | "online" | "offline" | "closed";
+
+export type Qos = 0 | 1;
 
 export interface LiveValue<T = unknown> {
   topic: string;
@@ -34,6 +38,38 @@ export interface LiveValue<T = unknown> {
   retained: boolean;
   /** Local clock, unix milliseconds — for showing age, not for ordering records. */
   receivedAt: number;
+}
+
+export interface SubscribeOptions {
+  /** 1 for records that must not get lost in flight, acknowledgements for instance. */
+  qos?: Qos;
+}
+
+/** A command's answer, `_Ack`. `result_code` reads like HTTP: 200 means done. */
+export interface CommandAck {
+  correlation_id: string;
+  result_code: number;
+  message?: string;
+  performed_at?: number | null;
+  [field: string]: unknown;
+}
+
+export interface CommandOptions {
+  /** How long the command stays valid at the node, and how long to wait for its answer. */
+  timeoutMs?: number;
+  /** Where the answer arrives: every `_Ack` under the command's root, unless given. */
+  ackFilter?: string;
+}
+
+/** Nobody answered a command before it expired. */
+export class CommandTimeout extends Error {
+  constructor(
+    readonly topic: string,
+    readonly correlationId: string,
+  ) {
+    super(`nobody acknowledged ${topic} (${correlationId}) before it expired`);
+    this.name = "CommandTimeout";
+  }
 }
 
 /** What is handed to the MQTT client for each connection. */
@@ -60,10 +96,16 @@ export interface MqttLike {
   ): unknown;
   subscribe(
     filters: string[],
-    options: { qos: 0 },
+    options: { qos: Qos },
     callback?: (error: Error | null, granted?: { topic: string; qos: number }[]) => void,
   ): unknown;
   unsubscribe(filters: string[]): unknown;
+  publish(
+    topic: string,
+    message: string,
+    options: { qos: Qos; retain: false },
+    callback?: (error?: Error) => void,
+  ): unknown;
   end(force?: boolean): unknown;
 }
 
@@ -90,15 +132,27 @@ export interface LiveOptions {
 
 type Listener = (value: LiveValue) => void;
 
+interface Pending {
+  resolve: (ack: CommandAck) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 /** A token lifetime shorter than this does not make the client reconnect any faster. */
 const MIN_RENEW_MS = 5_000;
 
 export class Live {
   readonly #options: LiveOptions;
   readonly #filters = new Map<string, Set<Listener>>();
+  readonly #qos = new Map<string, Qos>();
   readonly #values = new Map<string, LiveValue>();
   /** Per filter, the topics whose retained value its listeners already have on this connection. */
   readonly #retainedSent = new Map<string, Set<string>>();
+  /** Filters the node has confirmed on this connection, and who waits for that. */
+  readonly #granted = new Set<string>();
+  readonly #grantWaiters = new Map<string, (() => void)[]>();
+  readonly #ackFilters = new Set<string>();
+  readonly #pending = new Map<string, Pending>();
   readonly #stateListeners = new Set<(state: LiveState) => void>();
   #state: LiveState = "connecting";
   #client: MqttLike | undefined;
@@ -120,8 +174,13 @@ export class Live {
    * Values under `filter` (MQTT wildcards allowed), the current ones first. Returns
    * the function that ends this subscription and no other.
    */
-  subscribe<T = unknown>(filter: string, listener: (value: LiveValue<T>) => void): () => void {
+  subscribe<T = unknown>(
+    filter: string,
+    listener: (value: LiveValue<T>) => void,
+    options: SubscribeOptions = {},
+  ): () => void {
     if (this.#state === "closed") throw new Error("this Live client is closed");
+    const qos = options.qos ?? 0;
 
     // A wrapper per call, so the same function subscribed twice is two subscriptions.
     const own: Listener = (value) => {
@@ -131,10 +190,16 @@ export class Live {
     if (listeners === undefined) {
       listeners = new Set([own]);
       this.#filters.set(filter, listeners);
+      this.#qos.set(filter, qos);
       // Offline, the filter goes out with the others once the connection is up.
       if (this.#state === "online") this.#subscribe([filter]);
     } else {
       listeners.add(own);
+      if (qos > (this.#qos.get(filter) ?? 0)) {
+        // Subscribing again replaces the node's subscription with the stronger one.
+        this.#qos.set(filter, qos);
+        if (this.#state === "online") this.#subscribe([filter]);
+      }
       // The node sends retained values once per subscription, and this filter's
       // went to whoever subscribed first. The newcomer gets them from here.
       const current = this.values(filter);
@@ -148,7 +213,9 @@ export class Live {
       const set = this.#filters.get(filter);
       if (!set?.delete(own) || set.size > 0) return;
       this.#filters.delete(filter);
+      this.#qos.delete(filter);
       this.#retainedSent.delete(filter);
+      this.#granted.delete(filter);
       if (this.#state === "online") this.#client?.unsubscribe([filter]);
       this.#forget(filter);
     };
@@ -162,6 +229,69 @@ export class Live {
   /** Every last value under a filter. */
   values<T = unknown>(filter: string): LiveValue<T>[] {
     return [...this.#values.values()].filter((value) => topicMatches(filter, value.topic)) as LiveValue<T>[];
+  }
+
+  /**
+   * One record, as JSON, under this caller's identity. Nothing is queued: offline
+   * it fails at once, because a command sent minutes later is a different command.
+   * A person's session may only send commands; the node refuses anything else.
+   */
+  publish(topic: string, payload: unknown, options: { qos?: Qos } = {}): Promise<void> {
+    const client = this.#client;
+    if (this.#state !== "online" || client === undefined) {
+      return Promise.reject(new Error(`not connected: ${topic} was not sent`));
+    }
+    return new Promise((resolve, reject) => {
+      client.publish(topic, JSON.stringify(payload), { qos: options.qos ?? 1, retain: false }, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+  }
+
+  /**
+   * Send a command and wait for its acknowledgement.
+   *
+   * `body` is the command's own fields — `params` for a `_CmdParam`, say. The
+   * correlation id and the expiry are added here, and the answer is matched by
+   * the id, wherever in the tree the executor publishes it. The promise settles
+   * with the `_Ack`, whatever its `result_code`; it rejects when nothing answers
+   * in `timeoutMs`, when the node refuses the publish, or when the client closes.
+   */
+  command(
+    topic: string,
+    body: Record<string, unknown> = {},
+    options: CommandOptions = {},
+  ): Promise<CommandAck> {
+    const parts = parseTopic(topic);
+    if (!parts?.contract.startsWith("_Cmd")) {
+      return Promise.reject(new Error(`a command goes to a _Cmd… topic, got ${topic}`));
+    }
+    const timeoutMs = options.timeoutMs ?? 30_000;
+    const ackFilter = options.ackFilter ?? `${parts.root}/${parts.version}/_Ack/#`;
+    const correlationId = typeof body.correlation_id === "string" ? body.correlation_id : newUlid();
+    this.#listenForAcks(ackFilter);
+
+    return new Promise<CommandAck>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.#pending.delete(correlationId)) reject(new CommandTimeout(topic, correlationId));
+      }, timeoutMs);
+      this.#pending.set(correlationId, { resolve, reject, timer });
+
+      // Only once the node confirmed the subscription to the answers: an executor
+      // that answers at once must not answer into nothing.
+      this.#whenGranted(ackFilter)
+        .then(() =>
+          this.publish(topic, { ...body, correlation_id: correlationId, expires_at: Date.now() + timeoutMs }),
+        )
+        .catch((error: unknown) => {
+          const pending = this.#pending.get(correlationId);
+          if (!pending) return;
+          this.#pending.delete(correlationId);
+          clearTimeout(pending.timer);
+          pending.reject(error instanceof Error ? error : new Error(String(error)));
+        });
+    });
   }
 
   /** Called on every change of the connection state; returns the function that stops it. */
@@ -178,7 +308,16 @@ export class Live {
     this.#client?.end();
     this.#client = undefined;
     this.#filters.clear();
+    this.#qos.clear();
     this.#values.clear();
+    this.#granted.clear();
+    this.#grantWaiters.clear();
+    this.#ackFilters.clear();
+    for (const [id, pending] of this.#pending) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(`this Live client closed before ${id} was acknowledged`));
+    }
+    this.#pending.clear();
     this.#setState("closed");
   }
 
@@ -233,6 +372,7 @@ export class Live {
       this.#attempt = 0;
       this.#setState("online");
       this.#retainedSent.clear();
+      this.#granted.clear();
       this.#subscribe([...this.#filters.keys()]);
       this.#scheduleRenewal(expiresAt);
     });
@@ -288,17 +428,56 @@ export class Live {
   }
 
   #subscribe(filters: string[]): void {
-    if (filters.length === 0) return;
-    this.#client?.subscribe(filters, { qos: 0 }, (error, granted) => {
-      if (error) {
-        this.#report(error);
-        return;
-      }
-      for (const grant of granted ?? []) {
-        // 128 and up is a refusal: MQTT 3's failure code, or an MQTT 5 reason code.
-        if (grant.qos >= 128) this.#report(new Error(`the node refused the subscription to ${grant.topic}`));
-      }
+    const generation = this.#generation;
+    for (const qos of [0, 1] as const) {
+      const group = filters.filter((filter) => (this.#qos.get(filter) ?? 0) === qos);
+      if (group.length === 0) continue;
+      this.#client?.subscribe(group, { qos }, (error, granted) => {
+        if (generation !== this.#generation) return;
+        if (error) {
+          this.#report(error);
+          return;
+        }
+        for (const grant of granted ?? []) {
+          // 128 and up is a refusal: MQTT 3's failure code, or an MQTT 5 reason code.
+          if (grant.qos >= 128) {
+            this.#report(new Error(`the node refused the subscription to ${grant.topic}`));
+            continue;
+          }
+          this.#granted.add(grant.topic);
+          for (const wake of this.#grantWaiters.get(grant.topic) ?? []) wake();
+          this.#grantWaiters.delete(grant.topic);
+        }
+      });
+    }
+  }
+
+  #whenGranted(filter: string): Promise<void> {
+    if (this.#granted.has(filter)) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.#grantWaiters.set(filter, [...(this.#grantWaiters.get(filter) ?? []), resolve]);
     });
+  }
+
+  /** One subscription per acknowledgement filter, kept for as long as the client lives. */
+  #listenForAcks(filter: string): void {
+    if (this.#ackFilters.has(filter)) return;
+    this.#ackFilters.add(filter);
+    this.subscribe(
+      filter,
+      (value) => {
+        const ack = value.payload;
+        if (typeof ack !== "object" || ack === null) return;
+        const id = (ack as { correlation_id?: unknown }).correlation_id;
+        const pending = typeof id === "string" ? this.#pending.get(id) : undefined;
+        // Somebody else's command, or one that already timed out.
+        if (pending === undefined || typeof id !== "string") return;
+        this.#pending.delete(id);
+        clearTimeout(pending.timer);
+        pending.resolve(ack as CommandAck);
+      },
+      { qos: 1 },
+    );
   }
 
   #receive(topic: string, payload: Uint8Array, retained: boolean): void {

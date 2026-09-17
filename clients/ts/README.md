@@ -75,6 +75,29 @@ These are values, not a log. A change during a reconnect is superseded by the
 retained value that follows it. Whatever must see every record reads a stream
 through the door.
 
+### Commands
+
+A person's session sends commands, not values. `command()` sends one and waits
+for the executor's `_Ack`:
+
+```ts
+const ack = await live.command("steine/v1/_CmdParam/n-technikum/wisewoods/line1/mas2/sta1/aggos/setGrit", {
+  params: { signal: "grit", value: 120 },
+});
+if (ack.result_code !== 200) showRefusal(ack.message);
+```
+
+It adds the correlation id and the expiry, subscribes to the acknowledgements
+before it sends, so an executor that answers at once is not missed, and matches
+the answer by its id wherever in the tree it arrives. The promise settles with
+the `_Ack` whatever its result code, and rejects with `CommandTimeout` when
+nobody answers in time (30 s by default, which is also the command's expiry).
+Offline, nothing is queued: a setpoint sent minutes late is a different
+setpoint.
+
+`publish()` sends a single record without waiting, and `newUlid()` makes ids
+that sort by the time they were made, as the node's own do.
+
 ## Which door, which credential
 
 | Door      | URL                                                     | Credential                                                        |

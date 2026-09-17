@@ -46,6 +46,25 @@ export function annotationIdMaterial({
   return `${annotationTypeId}|${source}|${timeStart.toFixed(6)}|${signals}`;
 }
 
+/**
+ * A new ULID: 48 bits of unix milliseconds, then 80 random bits. Ids made later
+ * sort later, which is the shape the node's own ids have — use it for command ids
+ * and correlation ids.
+ */
+export function newUlid(now: number = Date.now()): string {
+  if (!Number.isInteger(now) || now < 0 || now >= 2 ** 48) {
+    throw new Error(`a ULID time is whole milliseconds between 0 and 2^48, got ${String(now)}`);
+  }
+  const bytes = new Uint8Array(16);
+  let time = now;
+  for (let i = 5; i >= 0; i -= 1) {
+    bytes[i] = time % 256;
+    time = Math.floor(time / 256);
+  }
+  crypto.getRandomValues(bytes.subarray(6));
+  return ulidFromBytes(bytes);
+}
+
 /** Crockford base32 over 128 bits, the 26-character ULID text. */
 export function ulidFromBytes(bytes: Uint8Array): string {
   if (bytes.length !== 16) {

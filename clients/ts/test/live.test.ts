@@ -1,15 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { Live, type LiveOptions, type LiveValue, type MqttConnectOptions } from "../src/live.js";
+import {
+  CommandTimeout,
+  Live,
+  type LiveOptions,
+  type LiveValue,
+  type MqttConnectOptions,
+} from "../src/live.js";
 
 type Handler = (...args: unknown[]) => void;
 
 /** Stands in for mqtt.js: records what it is asked and lets a test play the broker. */
 class FakeClient {
   readonly subscribed: string[] = [];
+  readonly subscribedQos: [string, number][] = [];
   readonly unsubscribed: string[] = [];
+  readonly sent: { topic: string; body: Record<string, unknown>; qos: number }[] = [];
+  /** Set to hold SUBACKs back until `grant()`. */
+  holdSubacks = false;
+  /** Set to make the node refuse publishes. */
+  refusePublish: Error | undefined;
   ended = false;
   readonly #handlers = new Map<string, Handler[]>();
+  readonly #held: (() => void)[] = [];
 
   constructor(readonly options: MqttConnectOptions) {}
 
@@ -20,18 +33,36 @@ class FakeClient {
 
   subscribe(
     filters: string[],
-    _options: unknown,
+    options: { qos: number },
     callback?: (error: Error | null, granted: { topic: string; qos: number }[]) => void,
   ): void {
     this.subscribed.push(...filters);
-    callback?.(
-      null,
-      filters.map((topic) => ({ topic, qos: 0 })),
-    );
+    for (const filter of filters) this.subscribedQos.push([filter, options.qos]);
+    const answer = (): void =>
+      callback?.(
+        null,
+        filters.map((topic) => ({ topic, qos: options.qos })),
+      );
+    if (this.holdSubacks) this.#held.push(answer);
+    else answer();
+  }
+
+  grant(): void {
+    for (const answer of this.#held.splice(0)) answer();
   }
 
   unsubscribe(filters: string[]): void {
     this.unsubscribed.push(...filters);
+  }
+
+  publish(
+    topic: string,
+    message: string,
+    options: { qos: number },
+    callback?: (error?: Error) => void,
+  ): void {
+    this.sent.push({ topic, body: JSON.parse(message) as Record<string, unknown>, qos: options.qos });
+    callback?.(this.refusePublish);
   }
 
   end(): void {
@@ -42,7 +73,8 @@ class FakeClient {
     for (const handler of this.#handlers.get(event) ?? []) handler(...args);
   }
 
-  publish(topic: string, payload: unknown, retain = false): void {
+  /** The broker delivering a message to this client. */
+  deliver(topic: string, payload: unknown, retain = false): void {
     const bytes =
       payload === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(payload));
     this.emit("message", topic, bytes, { retain });
@@ -138,7 +170,7 @@ describe("values", () => {
 
     const first: LiveValue[] = [];
     live.subscribe(T, (value) => first.push(value));
-    clients[0].publish(T, { value: 60, timestamp: 1 }, true);
+    clients[0].deliver(T, { value: 60, timestamp: 1 }, true);
 
     const second: LiveValue[] = [];
     live.subscribe(T, (value) => second.push(value));
@@ -157,12 +189,12 @@ describe("values", () => {
 
     const wide: unknown[] = [];
     live.subscribe("steine/v1/_Metric/n-technikum/#", (value) => wide.push(value.payload));
-    clients[0].publish(T, { value: 60 }, true);
+    clients[0].deliver(T, { value: 60 }, true);
 
     const narrow: unknown[] = [];
     live.subscribe(T, (value) => narrow.push(value.payload));
     // The node answers the new subscription with the same retained value again.
-    clients[0].publish(T, { value: 60 }, true);
+    clients[0].deliver(T, { value: 60 }, true);
 
     expect(wide).toEqual([{ value: 60 }]);
     expect(narrow).toEqual([{ value: 60 }]);
@@ -174,12 +206,12 @@ describe("values", () => {
     clients[0].emit("connect");
 
     const stop = live.subscribe(T, () => undefined);
-    clients[0].publish(T, { value: 60 }, true);
+    clients[0].deliver(T, { value: 60 }, true);
     stop();
 
     const again: unknown[] = [];
     live.subscribe(T, (value) => again.push(value.payload));
-    clients[0].publish(T, { value: 60 }, true);
+    clients[0].deliver(T, { value: 60 }, true);
 
     expect(again).toEqual([{ value: 60 }]);
   });
@@ -193,8 +225,8 @@ describe("values", () => {
     const wide: unknown[] = [];
     live.subscribe(T, (value) => exact.push(value.payload));
     live.subscribe("steine/v1/_Metric/+/wisewoods/#", (value) => wide.push(value.payload));
-    clients[0].publish(T, { value: 80 });
-    clients[0].publish("steine/v1/_Metric/n-technikum/other/x", { value: 1 });
+    clients[0].deliver(T, { value: 80 });
+    clients[0].deliver("steine/v1/_Metric/n-technikum/other/x", { value: 1 });
 
     expect(exact).toEqual([{ value: 80 }]);
     expect(wide).toEqual([{ value: 80 }]);
@@ -208,8 +240,8 @@ describe("values", () => {
 
     const seen: unknown[] = [];
     live.subscribe(T, (value) => seen.push(value.payload));
-    clients[0].publish(T, { value: 60 }, true);
-    clients[0].publish(T, undefined);
+    clients[0].deliver(T, { value: 60 }, true);
+    clients[0].deliver(T, undefined);
 
     expect(seen).toEqual([{ value: 60 }, undefined]);
     expect(live.latest(T)).toBeUndefined();
@@ -226,7 +258,7 @@ describe("values", () => {
     });
     live.subscribe(T, (value) => seen.push(value.payload));
     clients[0].emit("message", T, new TextEncoder().encode("{not json"), { retain: false });
-    clients[0].publish(T, { value: 1 });
+    clients[0].deliver(T, { value: 1 });
 
     expect(errors.map((e) => e.message)).toEqual([`unreadable payload on ${T}`, "a broken widget"]);
     expect(seen).toEqual([{ value: 1 }]);
@@ -246,7 +278,7 @@ describe("unsubscribing", () => {
 
     stopA();
     stopA();
-    clients[0].publish(T, { value: 2 });
+    clients[0].deliver(T, { value: 2 });
     expect(a).toEqual([]);
     expect(b).toEqual([{ value: 2 }]);
     expect(clients[0].unsubscribed).toEqual([]);
@@ -268,7 +300,7 @@ describe("unsubscribing", () => {
     const stop = live.subscribe(T, listener);
     live.subscribe(T, listener);
     stop();
-    clients[0].publish(T, { value: 3 });
+    clients[0].deliver(T, { value: 3 });
 
     expect(seen).toEqual([{ value: 3 }]);
   });
@@ -308,7 +340,7 @@ describe("keeping the connection", () => {
     live.subscribe(T, (value) => seen.push(value.payload));
 
     await vi.advanceTimersByTimeAsync(270_000);
-    clients[0].publish(T, { value: "late" });
+    clients[0].deliver(T, { value: "late" });
     clients[0].emit("close");
 
     expect(seen).toEqual([]);
@@ -356,5 +388,122 @@ describe("keeping the connection", () => {
     expect(clients[0].ended).toBe(true);
     expect(live.state).toBe("closed");
     expect(() => live.subscribe(T, () => undefined)).toThrow(/closed/);
+  });
+});
+
+describe("publishing", () => {
+  it("sends JSON at QoS 1 and does not keep anything for later", async () => {
+    const { live, clients } = setup();
+    await expect(live.publish("steine/v1/_CmdParam/n1/x/setGrit", { a: 1 })).rejects.toThrow(/not connected/);
+
+    await settle();
+    clients[0].emit("connect");
+    await live.publish("steine/v1/_CmdParam/n1/x/setGrit", { a: 1 });
+
+    expect(clients[0].sent).toEqual([{ topic: "steine/v1/_CmdParam/n1/x/setGrit", body: { a: 1 }, qos: 1 }]);
+  });
+
+  it("passes the node's refusal on", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].emit("connect");
+    clients[0].refusePublish = new Error("Not authorized");
+
+    await expect(live.publish("steine/v1/_Metric/n1/x", { value: 1 })).rejects.toThrow("Not authorized");
+  });
+
+  it("subscribes at the strongest QoS anyone asked for", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].emit("connect");
+
+    live.subscribe("steine/v1/_Ack/#", () => undefined);
+    live.subscribe("steine/v1/_Ack/#", () => undefined, { qos: 1 });
+
+    expect(clients[0].subscribedQos).toEqual([
+      ["steine/v1/_Ack/#", 0],
+      ["steine/v1/_Ack/#", 1],
+    ]);
+  });
+});
+
+describe("commands", () => {
+  const COMMAND = "steine/v1/_CmdParam/n-technikum/wisewoods/line1/mas2/sta1/aggos/setGrit";
+
+  it("waits for the node to confirm the answers' subscription, then sends", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].holdSubacks = true;
+    clients[0].emit("connect");
+
+    const answer = live.command(COMMAND, { params: { signal: "grit", value: 120 } });
+    await settle();
+    expect(clients[0].subscribedQos).toEqual([["steine/v1/_Ack/#", 1]]);
+    expect(clients[0].sent).toEqual([]);
+
+    clients[0].grant();
+    await settle();
+    expect(clients[0].sent).toHaveLength(1);
+    const sent = clients[0].sent[0];
+    expect(sent.topic).toBe(COMMAND);
+    expect(sent.body.params).toEqual({ signal: "grit", value: 120 });
+    expect(sent.body.correlation_id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+    // Unix milliseconds, 30 s ahead by default.
+    expect(sent.body.expires_at).toBe(Date.now() + 30_000);
+
+    // Somebody else's answer first, then ours from wherever the executor sits.
+    clients[0].deliver("steine/v1/_Ack/n-edge/x/setGrit", { correlation_id: "01OTHER", result_code: 200 });
+    clients[0].deliver("steine/v1/_Ack/n-edge/wisewoods/line1/mas2/sta1/aggos/setGrit", {
+      correlation_id: sent.body.correlation_id,
+      result_code: 200,
+      message: "written",
+    });
+
+    await expect(answer).resolves.toMatchObject({ result_code: 200, message: "written" });
+  });
+
+  it("settles with a refusal too, and rejects only when nobody answers", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].emit("connect");
+
+    const refused = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    const silent = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    await settle();
+    const [first] = clients[0].sent;
+    clients[0].deliver("steine/v1/_Ack/n-edge/x", {
+      correlation_id: first.body.correlation_id,
+      result_code: 403,
+    });
+
+    await expect(refused).resolves.toMatchObject({ result_code: 403 });
+    const late = expect(silent).rejects.toBeInstanceOf(CommandTimeout);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await late;
+    // One subscription to the answers for both.
+    expect(clients[0].subscribed).toEqual(["steine/v1/_Ack/#"]);
+  });
+
+  it("refuses a topic that is not a command, and fails when the publish is refused", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].emit("connect");
+
+    await expect(live.command("steine/v1/_Metric/n1/x")).rejects.toThrow(/_Cmd/);
+
+    clients[0].refusePublish = new Error("Not authorized");
+    await expect(live.command(COMMAND)).rejects.toThrow("Not authorized");
+  });
+
+  it("gives up on open commands when closed", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].emit("connect");
+
+    const answer = live.command(COMMAND);
+    await settle();
+    live.close();
+
+    await expect(answer).rejects.toThrow(/closed/);
   });
 });
