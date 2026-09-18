@@ -18,35 +18,17 @@
  * path is where a view jumps; neither belongs in the payload.
  */
 
+import type { AlarmState } from "./generated/contracts.js";
 import type { CommandAck, Live, LiveValue } from "./live.js";
 import { DEFAULT_ROOT, parseTopic, topic as buildTopic } from "./topics.js";
 
-export type AlarmSeverity = "info" | "warning" | "critical";
+// The record itself comes from the contract bundle, and the two vocabularies
+// with it, so a status the node stops accepting stops compiling here.
+export type { AlarmState };
 
-export type AlarmStatus = "pending" | "firing" | "unknown";
+export type AlarmSeverity = AlarmState["severity"];
 
-/** An `_AlarmState` record: the alarm as the node holds it while it stands. */
-export interface AlarmState {
-  alarm_id: string;
-  status: AlarmStatus;
-  severity: AlarmSeverity;
-  /** Unix seconds: when it started standing. */
-  since: number;
-  signal_id: string;
-  reason: string;
-  value?: unknown;
-  op?: string;
-  threshold?: number;
-  event_id?: string;
-  /** The node's word for who quit it. A client never sends an identity. */
-  acknowledged_by?: string;
-  acknowledged_at?: number;
-  note?: string;
-  silenced_by?: string;
-  /** Unix seconds: when the silence runs out. */
-  silenced_until?: number;
-  [field: string]: unknown;
-}
+export type AlarmStatus = AlarmState["status"];
 
 /** A standing alarm and where it sits. */
 export interface Alarm {
