@@ -97,7 +97,10 @@ func ClassOf(contract string) Class {
 		contract == "_Signal" || contract == "_Constant" || contract == "_ExternalReference" ||
 		contract == "_Resource" ||
 		contract == "_EditOperation" || contract == "_AlarmNotificationConfig" ||
-		contract == "_NotificationConfigStatus":
+		contract == "_NotificationConfigStatus" ||
+		// The standing alarm is state: one record per definition, which
+		// overwrites itself. _AlarmStateChange, the transition, stays an event.
+		contract == "_AlarmState":
 		return ClassEntity
 	case contract == "_Group" || contract == "_MetadataType" ||
 		contract == "_AnnotationType" || contract == "_DataModel" ||

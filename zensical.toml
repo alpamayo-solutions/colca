@@ -22,6 +22,7 @@ nav = [
     { "How Colca works" = "concepts.md" },
     { "Topics" = "topics.md" },
     { "Contracts" = "contracts.md" },
+    { "Alarms" = "alarms.md" },
   ] },
   { "Operate" = [
     { "Configuration" = "configuration.md" },

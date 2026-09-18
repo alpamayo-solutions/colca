@@ -70,7 +70,10 @@ from colca_data_contracts.payload import (
     ActorKind,
     AlarmNotificationConfigSnapshot,
     AlarmNotificationSummary,
+    AlarmSeverity,
+    AlarmState,
     AlarmStateChange,
+    AlarmStatus,
     AuditAction,
     AuditEvent,
     AuditOutcome,
@@ -202,6 +205,10 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "AlarmNotificationSummary",
     "AlarmStateChange",
     "NotificationDispatched",
+    # The standing alarm, one retained record per alarm definition
+    "AlarmState",
+    "AlarmStatus",
+    "AlarmSeverity",
     # Annotation instances, on their own stream like alarms
     "AnnotationPayload",
     "derive_annotation_id",

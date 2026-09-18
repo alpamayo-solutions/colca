@@ -27,6 +27,7 @@ func TestParseAndClass(t *testing.T) {
 		"_Log":                      {ClassLog, "logs"},
 		"_AlarmNotificationConfig":  {ClassEntity, "entities"},
 		"_NotificationConfigStatus": {ClassEntity, "entities"},
+		"_AlarmState":               {ClassEntity, "entities"},
 		"_Node":                     {ClassEntity, "entities"}, "_ServiceDetails": {ClassEntity, "entities"},
 		"_ExternalReference": {ClassEntity, "entities"},
 		"_SystemElement":     {ClassEntity, "entities"}, "_CmdParam": {ClassCmd, "commands"},
@@ -391,6 +392,44 @@ func TestAlarmIsAnEventNotState(t *testing.T) {
 	}
 	if !IsKnown(ClassAlarm) {
 		t.Fatal("IsKnown(ClassAlarm) = false: the validated namespace would reject every alarm")
+	}
+}
+
+// The standing alarm is the other half: one record per definition, so it
+// overwrites itself and a tombstone says it has gone. The transition next to
+// it stays an event, and the two names must not be confused for each other.
+func TestStandingAlarmIsStateAndTheTransitionStaysAnEvent(t *testing.T) {
+	const standing = "_AlarmState"
+	class := ClassOf(standing)
+	if class != ClassEntity {
+		t.Fatalf("ClassOf(%s) = %v, want ClassEntity", standing, class)
+	}
+	if got := StreamFor(class); got != "entities" {
+		t.Fatalf("StreamFor(ClassOf(%s)) = %q, want %q", standing, got, "entities")
+	}
+	if !IsState(class) || !IsOwnedState(class) || !NeedsStateRefresh(class) {
+		t.Fatalf("%s must be KV-projected, retained state (state=%v owned=%v refreshed=%v)",
+			standing, IsState(class), IsOwnedState(class), NeedsStateRefresh(class))
+	}
+	// "The alarm has gone" is the empty payload; there is no normal status.
+	if err := Validate(standing, nil); err != nil {
+		t.Fatalf("a tombstone must retire a standing alarm: %v", err)
+	}
+	// The two names share a prefix; only the whole name decides.
+	if got := ClassOf("_AlarmStateChange"); got != ClassAlarm {
+		t.Fatalf("ClassOf(_AlarmStateChange) = %v, want ClassAlarm — the transition is still an event", got)
+	}
+	// It lives at the alarm's element path, not under _colca, so read grants
+	// and zones reach it like a signal, and it rises with the entities.
+	p, err := Parse("colca/v1/_AlarmState/n-edge1/line1/press3/overheat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !MatchesUplinkStream(class, p, "entities") {
+		t.Fatal("a standing alarm was refused on the entities stream")
+	}
+	if MatchesUplinkStream(class, p, "alarms") {
+		t.Fatal("a standing alarm replicated upward on alarms was accepted")
 	}
 }
 
