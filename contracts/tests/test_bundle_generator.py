@@ -305,6 +305,48 @@ def test_alarm_notification_contracts_have_revised_direction_and_shape():
     assert {"revision", "notification"} <= set(event["schema"]["required"])
 
 
+def test_standing_alarm_is_retained_state_with_a_closed_status_vocabulary():
+    body, _ = gb.build_bundle()
+    standing = body["contracts"]["_AlarmState"]
+    schema = standing["schema"]
+
+    # One record per alarm definition: it overwrites itself, and the tombstone
+    # is how an alarm goes away.
+    assert standing["class"] == "entity"
+    assert standing["tombstone"] is True
+    assert set(schema["required"]) == {
+        "alarm_id",
+        "status",
+        "severity",
+        "since",
+        "signal_id",
+        "reason",
+    }
+    # Status and severity are closed; reason stays open so a derived diagnosis
+    # can name its own.
+    assert schema["properties"]["status"]["enum"] == ["pending", "firing", "unknown"]
+    assert schema["properties"]["severity"]["enum"] == ["info", "warning", "critical"]
+    assert "enum" not in schema["properties"]["reason"]
+
+    validator = jsonschema.Draft202012Validator(schema)
+    standing_now = {
+        "alarm_id": "01H0000000000000000000ARM1",
+        "status": "firing",
+        "severity": "critical",
+        "since": 1710000000.0,
+        "signal_id": "01H0000000000000000000SGN2",
+        "reason": "threshold",
+        "value": 82.4,
+        "op": ">",
+        "threshold": 80.0,
+    }
+    validator.validate(standing_now)
+    # There is no "normal": an alarm that no longer stands is deleted.
+    assert not validator.is_valid({**standing_now, "status": "normal"})
+    assert not validator.is_valid({**standing_now, "status": "recovered"})
+    assert validator.is_valid({**standing_now, "reason": "compressor_stall"})
+
+
 def test_alarm_channel_schema_requires_sealed_secret_and_rejects_cleartext_fields():
     body, _ = gb.build_bundle()
     channel = body["contracts"]["_AlarmNotificationConfig"]["schema"]["properties"]["channels"]["items"]
@@ -405,6 +447,7 @@ ULID_CONSTRAINED_FIELDS = {
     "_Constant": ["id", "system_element_id", "semantic_type_id"],
     "_Resource": ["id", "system_element_id"],
     "_ExternalReference": ["id", "external_system_id"],
+    "_AlarmState": ["alarm_id", "signal_id"],
     # annotation_type_id stays unconstrained until the golden annotation-id
     # vectors derive from ULID type ids — see payload.Annotation.
     "_Annotation": ["annotation_id", "signal_ids/items"],

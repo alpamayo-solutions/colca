@@ -40,6 +40,26 @@ export type AlarmNotificationConfig = {
   [key: string]: unknown;
 };
 
+/** `_AlarmState` — stream class `entity`. */
+export type AlarmState = {
+  acknowledged_at?: null | number;
+  acknowledged_by?: null | string;
+  alarm_id: string;
+  event_id?: null | string;
+  note?: null | string;
+  op?: null | string;
+  reason: string;
+  severity: "info" | "warning" | "critical";
+  signal_id: string;
+  silenced_by?: null | string;
+  silenced_until?: null | number;
+  since: number;
+  status: "pending" | "firing" | "unknown";
+  threshold?: null | number;
+  value?: unknown;
+  [key: string]: unknown;
+};
+
 /** `_AlarmStateChange` — stream class `alarm`. */
 export type AlarmStateChange = {
   alarm_id: string;
@@ -495,6 +515,7 @@ export type SystemElement = {
 export const CONTRACTS = {
   "_Ack": { class: "ack", tombstone: false },
   "_AlarmNotificationConfig": { class: "entity", tombstone: true },
+  "_AlarmState": { class: "entity", tombstone: true },
   "_AlarmStateChange": { class: "alarm", tombstone: false },
   "_Annotation": { class: "annotation", tombstone: false },
   "_AnnotationType": { class: "definition", tombstone: true },
@@ -534,6 +555,7 @@ export type ContractName = keyof typeof CONTRACTS;
 export interface PayloadByContract {
   "_Ack": Ack;
   "_AlarmNotificationConfig": AlarmNotificationConfig;
+  "_AlarmState": AlarmState;
   "_AlarmStateChange": AlarmStateChange;
   "_Annotation": Annotation;
   "_AnnotationType": AnnotationType;

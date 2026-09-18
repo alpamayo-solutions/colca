@@ -83,7 +83,7 @@ The contract decides which stream a record lands in and which way it flows.
 | Class | Contracts | Stream | Flows |
 |---|---|---|---|
 | data | `_Metric` | `metrics` | up |
-| entity | `_Node`, `_SystemElement`, `_Signal`, `_Constant`, `_Resource`, `_ServiceDetails`, `_EnrolledIdentity` | `entities` | up |
+| entity | `_Node`, `_SystemElement`, `_Signal`, `_Constant`, `_Resource`, `_ServiceDetails`, `_EnrolledIdentity`, `_AlarmState` | `entities` | up |
 | definition | `_Group`, `_MetadataType`, `_AnnotationType`, `_DataModel`, `_SemanticTag` | `definitions` | down to every node |
 | command | `_CmdParam`, `_CmdConfigure`, `_CmdAdmin`, `_CmdEdit`, … | `commands` | down to the target |
 | acknowledgement | `_Ack` | `commands` | up |
@@ -100,6 +100,10 @@ new subscriber.
 A definition has no position in the plant. Its topic is
 `colca/v1/_Group/{authoring-node}/{definition-id}`, nothing rewrites it on the
 way down, and it looks the same on every node that holds it.
+
+The two alarm classes are the same subject in two shapes: `_AlarmState` is the
+alarm that stands right now, one retained record per alarm definition, and
+`_AlarmStateChange` is the transition it went through. See [Alarms](alarms.md).
 
 ## Removing a value
 

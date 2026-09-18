@@ -26,6 +26,20 @@
 import { newUlid } from "./ids.js";
 import { parseTopic, topicMatches } from "./topics.js";
 
+// Standing alarms are retained values read and commanded over this connection,
+// so they come out of this entry point rather than one of their own.
+export { AlarmRefused, Alarms } from "./alarms.js";
+export type {
+  AcknowledgeOptions,
+  Alarm,
+  AlarmSeverity,
+  AlarmsOptions,
+  AlarmState,
+  AlarmStatus,
+  SilenceOptions,
+  StandingOptions,
+} from "./alarms.js";
+
 export type LiveState = "connecting" | "online" | "offline" | "closed";
 
 export type Qos = 0 | 1;
@@ -154,6 +168,7 @@ export class Live {
   readonly #ackFilters = new Set<string>();
   readonly #pending = new Map<string, Pending>();
   readonly #stateListeners = new Set<(state: LiveState) => void>();
+  readonly #resubscribeListeners = new Set<() => void>();
   #state: LiveState = "connecting";
   #client: MqttLike | undefined;
   #generation = 0;
@@ -300,6 +315,17 @@ export class Live {
     return () => this.#stateListeners.delete(listener);
   }
 
+  /**
+   * Called once every subscription has gone out on a new connection, the first
+   * one included — where the node's retained delivery starts over. A view that
+   * has to notice what disappeared while the client was away reconciles from
+   * here; a planned renewal reaches it too, and says nothing about the state.
+   */
+  onResubscribe(listener: () => void): () => void {
+    this.#resubscribeListeners.add(listener);
+    return () => this.#resubscribeListeners.delete(listener);
+  }
+
   close(): void {
     if (this.#state === "closed") return;
     this.#generation += 1;
@@ -375,6 +401,7 @@ export class Live {
       this.#retainedSent.clear();
       this.#granted.clear();
       this.#subscribe([...this.#filters.keys()]);
+      for (const listener of this.#resubscribeListeners) listener();
       this.#scheduleRenewal(expiresAt);
     });
     client.on("message", (topic, payload, packet) => {

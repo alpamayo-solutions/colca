@@ -33,6 +33,9 @@ CLASS_TABLE: dict[str, str] = {
     "_ExternalReference": "entity",
     "_AlarmNotificationConfig": "entity",
     "_NotificationConfigStatus": "entity",
+    # The standing alarm, one record per definition: it overwrites itself and
+    # a tombstone retires it, so a new subscriber sees what stands.
+    "_AlarmState": "entity",
     # Alarm events: append-only, not in KV, not retained, and on their own
     # stream so they never queue behind a metrics backlog.
     "_AlarmStateChange": "alarm",

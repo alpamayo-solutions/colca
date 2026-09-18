@@ -131,6 +131,21 @@ class ActorKind(BaseStrEnum):
     ANONYMOUS = "anonymous"
 
 
+class AlarmStatus(BaseStrEnum):
+    """What a standing alarm is doing. No ``normal`` and no ``recovered``: an
+    alarm that no longer stands is deleted, not set to a quiet status."""
+
+    PENDING = "pending"
+    FIRING = "firing"
+    UNKNOWN = "unknown"
+
+
+class AlarmSeverity(BaseStrEnum):
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
 class CustomEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(
@@ -144,6 +159,8 @@ class CustomEncoder(json.JSONEncoder):
                 AuditAction,
                 AuditOutcome,
                 ActorKind,
+                AlarmStatus,
+                AlarmSeverity,
             ),
         ):
             return str(obj)
@@ -478,6 +495,55 @@ class NotificationDispatched(Payload):
     provider_message_id: str | None = None
     retryable: bool = False
     terminal: bool = True
+
+
+@dataclass
+class AlarmState(Payload):
+    """The alarm that stands right now: one record per alarm definition.
+
+    State, not an event. A new record replaces the one before it, and an empty
+    payload retires the path — that tombstone is "the alarm has gone". Nothing
+    else says so: there is no ``normal`` status, because what is not in the
+    key-value view is not standing. The transitions themselves stay events, on
+    the ``alarms`` stream as ``_AlarmStateChange``.
+
+    The record sits at the alarm's own element path,
+    ``{root}/v1/_AlarmState/{node}/{element-path}/{alarm-name}``, so read
+    grants and zones reach it like any signal. ``_Alarm`` stays reserved for
+    the definition, which has another writer.
+
+    Recipients are deliberately absent: another writer owns them, they are
+    personal data that does not belong in the retained view, and a policy
+    change must never rewrite an alarm's state. Who was reached and when is in
+    ``_NotificationDispatched``. No title or message either: the name comes
+    from the alarm's ``_SystemElement``, and the topic path is the link.
+    """
+
+    alarm_id: ULID
+    status: AlarmStatus
+    severity: AlarmSeverity
+    #: Unix seconds this status has held since.
+    since: float
+    signal_id: ULID
+    #: Why it stands. ``threshold``, ``no_data`` and ``stream_gap`` are the
+    #: known values, but the vocabulary stays open so a derived diagnosis can
+    #: name its own reason.
+    reason: str
+    #: The measurement that brought it here, with the rule's operator and
+    #: threshold, so a reader can render "82.4 > 80" without the definition.
+    value: Any | None = None
+    op: str | None = None
+    threshold: float | None = None
+    #: The `_AlarmStateChange` this state came out of.
+    event_id: str | None = None
+    #: ``sub`` of the person, as the node witnessed it (the command's
+    #: actor_id), never self-asserted.
+    acknowledged_by: str | None = None
+    acknowledged_at: float | None = None
+    note: str | None = None
+    silenced_by: str | None = None
+    #: Unix seconds.
+    silenced_until: float | None = None
 
 
 def derive_annotation_id(

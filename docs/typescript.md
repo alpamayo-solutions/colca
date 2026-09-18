@@ -83,6 +83,9 @@ first. Around that the client does what a page left open all day needs:
   token expires. The client reconnects shortly before, with a new token and every
   subscription sent again, and stays `online` while doing so.
 - **Waits that grow after a drop**, jittered, each attempt with a fresh token.
+- **A word when the subscriptions go out again.** `onResubscribe()` fires once
+  they have, on every new connection — where the node's retained delivery starts
+  over, and where a view reconciles a retained set from.
 
 These are values, not a log. A change during a reconnect is superseded by the
 retained value that follows it. Whatever must see every record reads a stream
@@ -111,6 +114,45 @@ setpoint.
 
 `publish()` sends a single record without waiting, and `newUlid()` makes ids
 that sort by the time they were made, as the node's own do.
+
+### Standing alarms
+
+`_AlarmState` is retained, one record per alarm and an empty payload when the
+alarm goes. What the node holds is therefore what stands: nothing to fetch
+first, no history to fold, and no `normal` records to read past.
+
+```ts
+import { Alarms } from "@alpamayo-solutions/colca-client/live";
+
+const alarms = new Alarms({ live, node: "n-technikum", root: "steine" });
+
+const stop = alarms.onChange((standing) => showBanner(standing), { minSeverity: "warning" });
+
+// Throws when the node refuses it, and when nobody answers.
+await alarms.acknowledge("wisewoods/line1/mas2/gritLow", { note: "Korn getauscht" });
+```
+
+`standing()` reads the set at any time — worst first, and the oldest first
+within a severity. `onChange()` is told what stands now and again on every
+change, and returns the function that ends that watch and no other. An alarm's
+name comes from the `_SystemElement` it hangs on, and its path is where a view
+jumps to.
+
+When the connection comes back — after a drop, and after the routine token
+renewal too — the node starts its retained delivery over, and an alarm that went
+while the client was away leaves nothing behind to say so. `Alarms` therefore
+gives the set 750 ms to arrive again (`resyncMs`) and drops what did not come
+back: a view can be that much behind the node, but it never goes on showing an
+alarm that is over. It is a window, and a guess, because the node does not say
+where its retained delivery ends; `resyncMs: 0` turns the reconciliation off.
+
+`acknowledge()`, `silence(path, { minutes: 30 })` and `unsilence()` are
+`_CmdOperate` commands on the alarm's own path, each waiting for its `_Ack`. The
+note and the deadline ride in the payload's `command` object, where the contract
+keeps a verb's arguments. The client sends no identity: who quit an alarm is the
+node's word on the record, and the caller adds the note. A refusal — 300 and up — throws `AlarmRefused`
+instead of resolving, because an acknowledgement that was swallowed is worse
+than one that was never sent.
 
 ## Which door, which credential
 

@@ -3,7 +3,10 @@ from franzmq import Topic
 from colca_data_contracts import (
     AlarmNotificationConfigSnapshot,
     AlarmNotificationSummary,
+    AlarmSeverity,
+    AlarmState,
     AlarmStateChange,
+    AlarmStatus,
     NotificationChannelConfig,
     NotificationChannelOutcome,
     NotificationConfigStatus,
@@ -245,3 +248,76 @@ def test_dispatch_round_trip_includes_provider_delivery_result():
 
 def test_service_types_include_notifications():
     assert ServiceType.NOTIFICATIONS == "notifications"
+
+
+def test_standing_alarm_is_one_retained_record_at_the_alarm_element():
+    state = AlarmState(
+        alarm_id="01H0000000000000000000ARM1",
+        status=AlarmStatus.FIRING,
+        severity=AlarmSeverity.CRITICAL,
+        since=1710000000.0,
+        signal_id="01H0000000000000000000SGN2",
+        reason="threshold",
+        value=82.4,
+        op=">",
+        threshold=80.0,
+        event_id="evt-1",
+    )
+    topic = Topic(payload_type=AlarmState, node_id="n-edge1", context=("line1", "press3", "overheat"))
+
+    assert str(topic) == "colca/v1/_AlarmState/n-edge1/line1/press3/overheat"
+    assert AlarmState.get_identifier() == "_AlarmState"
+    # The alarm is an element in the tree, not a reserved _colca path, so read
+    # grants and zones reach it like any signal.
+    assert "_colca" not in str(topic)
+
+    decoded = AlarmState.decode(state.encode(), timestamp=0)
+
+    assert decoded.status == "firing"
+    assert decoded.severity == "critical"
+    assert decoded.value == 82.4
+    assert decoded.op == ">"
+    assert decoded.threshold == 80.0
+    assert decoded.event_id == "evt-1"
+
+
+def test_standing_alarm_carries_no_recipients_and_no_presentation():
+    fields = set(AlarmState.__dataclass_fields__)
+
+    # Recipients have another writer, are personal data, and a policy change
+    # must not rewrite an alarm's state; who was reached is _NotificationDispatched.
+    assert not fields & {"recipients", "channels", "policies", "policy_id", "recipient_id"}
+    # The name comes from the alarm's _SystemElement, the link is the topic.
+    assert not fields & {"title", "message", "deepLink", "deep_link"}
+
+
+def test_standing_alarm_has_no_normal_status():
+    # "Gone" is the tombstone, not a status: what is not in the KV view is not
+    # standing.
+    assert {str(member) for member in AlarmStatus} == {"pending", "firing", "unknown"}
+    assert {str(member) for member in AlarmSeverity} == {"info", "warning", "critical"}
+
+
+def test_acknowledgement_is_witnessed_by_the_node():
+    state = AlarmState(
+        alarm_id="01H0000000000000000000ARM1",
+        status=AlarmStatus.FIRING,
+        severity=AlarmSeverity.WARNING,
+        since=1710000000.0,
+        signal_id="01H0000000000000000000SGN2",
+        reason="no_data",
+        acknowledged_by="keycloak-sub-1",
+        acknowledged_at=1710000060.0,
+        note="Sensor wird getauscht",
+        silenced_by="keycloak-sub-1",
+        silenced_until=1710003600.0,
+    )
+
+    decoded = AlarmState.decode(state.encode(), timestamp=0)
+
+    # The evaluator writes the actor_id the node witnessed, never a claim the
+    # payload made about itself.
+    assert decoded.acknowledged_by == "keycloak-sub-1"
+    assert decoded.acknowledged_at == 1710000060.0
+    assert decoded.note == "Sensor wird getauscht"
+    assert decoded.silenced_until == 1710003600.0

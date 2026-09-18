@@ -107,7 +107,8 @@ func TestTheEditReceiptIsNodePrivateStateAndNothingElseIs(t *testing.T) {
 	for _, contract := range []string{
 		"_Metric", "_Node", "_ServiceDetails", "_SystemElement", "_Signal", "_Constant",
 		"_ExternalReference", "_Resource", "_EnrolledIdentity", "_AlarmNotificationConfig",
-		"_NotificationConfigStatus", "_Group", "_MetadataType", "_AnnotationType", "_DataModel",
+		"_NotificationConfigStatus", "_AlarmState", "_Group", "_MetadataType", "_AnnotationType",
+		"_DataModel",
 		"_Ack", "_StreamGap", "_AuditEvent", "_AlarmStateChange", "_Annotation", "_Log", "_CmdParam",
 	} {
 		if IsNodePrivate(contract) {
