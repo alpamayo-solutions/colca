@@ -109,12 +109,18 @@ func TestTheDoorAdmitsAEditCommandOnTheClassAlone(t *testing.T) {
 		t.Fatal("a routed _CmdParam lost its prefix check")
 	}
 	for name, e := range map[string]*Entry{
-		"param only": {ULID: "p", Kind: KindHuman, Grants: []string{"cmd:#:param"}},
-		"read only":  {ULID: "r", Kind: KindHuman, Grants: []string{"read:#"}},
-		"nobody":     nil,
+		"read only": {ULID: "r", Kind: KindHuman, Grants: []string{"read:#"}},
+		"nobody":    nil,
 	} {
 		if Authorize(nil, e, ActCmd, "colca/v1/_CmdEdit/n-edge1/apply") {
-			t.Fatalf("%s was admitted to _CmdEdit without the configure class", name)
+			t.Fatalf("%s was admitted to _CmdEdit without the configure, operate or param class", name)
 		}
+	}
+	// A param-only person is admitted at the door — the same coarse gate as
+	// operate for annotations — but the executor still refuses any position
+	// param does not cover (constantParamEligible, AuthorizeCmdAt).
+	paramOnly := &Entry{ULID: "p", Kind: KindHuman, Grants: []string{"cmd:#:param"}}
+	if !Authorize(nil, paramOnly, ActCmd, "colca/v1/_CmdEdit/n-edge1/apply") {
+		t.Fatal("a person holding only param was refused _CmdEdit at the door")
 	}
 }

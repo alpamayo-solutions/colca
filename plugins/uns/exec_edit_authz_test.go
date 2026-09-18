@@ -205,6 +205,95 @@ func TestAnOperatorAnnotatesAndEditsOnlyTheirOwn(t *testing.T) {
 	}
 }
 
+// An operator (param on line1, no configure) may set the value and metadata of
+// an existing constant there — an operator-input like a station's sandoff —
+// but not create one, not touch its other attributes, not reach a constant on
+// another line, and not rebind a signal. A person with configure keeps working
+// exactly as before.
+func TestAnOperatorWithParamSetsOnlyAConstantsValueAndMetadata(t *testing.T) {
+	f, exec, versions := twoLines(t)
+	versions["constant:const-sandoff-1"] = seedEditEntity(t, f, "_Constant", "line1/sta1/operator/sandoffMm", map[string]any{
+		"id": "const-sandoff-1", "name": "Sandoff", "data_type": "float64", "value": 5.0,
+		"system_element_id": "el-line1", "metadata": map[string]any{"source": "catalog"},
+	})
+	versions["constant:const-sandoff-2"] = seedEditEntity(t, f, "_Constant", "line2/sta1/operator/sandoffMm", map[string]any{
+		"id": "const-sandoff-2", "name": "Sandoff", "data_type": "float64", "value": 5.0,
+		"system_element_id": "el-line2", "metadata": map[string]any{"source": "catalog"},
+	})
+	operator := CommandContext{Actor: &Entry{
+		ULID: "kc-sub-op", Kind: KindHuman, Grants: []string{"cmd:el-line1/#:param"},
+	}}
+	setValue := func(op, constantID string, attributes map[string]any) []byte {
+		return editBody(t, op, map[string]uint64{"constant:" + constantID: versions["constant:"+constantID]}, map[string]any{
+			"type": "update", "entity": map[string]any{"kind": "constant", "id": constantID},
+			"attributes": attributes,
+		})
+	}
+
+	// Inside the grant, value and metadata only: allowed.
+	code, message, _, writes := exec.ExecuteWithWrites(operator, "_CmdEdit", "apply", setValue("op-set", "const-sandoff-1", map[string]any{
+		"value": 6.5, "metadata": map[string]any{"source": "operator", "set_by": "kc-sub-op", "set_at": "2026-09-18T00:00:00Z"},
+	}))
+	if code != 200 || len(writes) != 1 {
+		t.Fatalf("operator set inside the grant = %d %q writes=%d", code, message, len(writes))
+	}
+	versions["constant:const-sandoff-1"] = writes[0].Offset
+	updated, _ := f.KVGet("colca/v1/_Constant/n-edge1/line1/sta1/operator/sandoffMm")
+	var constant map[string]any
+	if err := json.Unmarshal(updated, &constant); err != nil {
+		t.Fatal(err)
+	}
+	if constant["value"] != 6.5 || constant["name"] != "Sandoff" {
+		t.Fatalf("param update changed more than value: %+v", constant)
+	}
+
+	// Outside the grant: refused, nothing written.
+	code, message, _, writes = exec.ExecuteWithWrites(operator, "_CmdEdit", "apply", setValue("op-out", "const-sandoff-2", map[string]any{"value": 9.0}))
+	if code != 409 || message != "entity_not_found: constant:const-sandoff-2" || len(writes) != 0 {
+		t.Fatalf("operator set outside the grant = %d %q writes=%d, want the not-found shape and nothing written", code, message, len(writes))
+	}
+
+	// Any other attribute (renaming, retyping) needs configure, which the
+	// operator does not hold — refused even inside their zone.
+	code, message, _, writes = exec.ExecuteWithWrites(operator, "_CmdEdit", "apply", setValue("op-rename", "const-sandoff-1", map[string]any{
+		"value": 7.0, "name": "Renamed",
+	}))
+	if code != 409 || len(writes) != 0 {
+		t.Fatalf("operator changing a non-value attribute = %d %q writes=%d, want refused", code, message, len(writes))
+	}
+
+	// Creating a constant is configure-only; param never reaches it.
+	code, message, _, writes = exec.ExecuteWithWrites(operator, "_CmdEdit", "apply", createUnder(t, "op-create", "el-line1", versions))
+	if code != 409 || len(writes) != 0 {
+		t.Fatalf("operator creating a constant = %d %q writes=%d, want refused", code, message, len(writes))
+	}
+
+	// Rebinding a signal is configure-only; param never reaches it either.
+	rebind := editBody(t, "op-rebind", map[string]uint64{"signal:sig-1": versions["signal:sig-1"]}, map[string]any{
+		"type": "update", "entity": map[string]any{"kind": "signal", "id": "sig-1"},
+		"attributes": map[string]any{"name": "Renamed"},
+	})
+	code, message, _, writes = exec.ExecuteWithWrites(operator, "_CmdEdit", "apply", rebind)
+	if code != 409 || len(writes) != 0 {
+		t.Fatalf("operator updating a signal = %d %q writes=%d, want refused", code, message, len(writes))
+	}
+
+	// A person with configure keeps setting anything on the constant, as
+	// before param existed.
+	code, message, _, writes = exec.ExecuteWithWrites(scopedTo("el-line1"), "_CmdEdit", "apply", setValue("op-cfg", "const-sandoff-1", map[string]any{
+		"value": 8.0, "name": "Sandoff (renamed)",
+	}))
+	if code != 200 || len(writes) != 1 {
+		t.Fatalf("configure set = %d %q writes=%d", code, message, len(writes))
+	}
+
+	// A param-only person still cannot reach _CmdConfigure at all — Colca
+	// routes every human write through _CmdEdit, whatever they hold.
+	if operator.Actor.MayPublishContract("_CmdConfigure") {
+		t.Fatal("a person may not publish _CmdConfigure, whatever they hold")
+	}
+}
+
 // The source rule exists in the api and here; the shared vectors keep them
 // equal.
 func TestAnnotationSourceMatchesTheGoldenVectors(t *testing.T) {
