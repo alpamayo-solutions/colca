@@ -291,6 +291,31 @@ describe("keeping the connection", () => {
     expect(live.state).toBe("online");
   });
 
+  it("says when every subscription has gone out on a new connection", async () => {
+    const { live, clients } = setup();
+    live.subscribe(T, () => undefined);
+    let rounds = 0;
+    const stop = live.onResubscribe(() => {
+      rounds += 1;
+    });
+    await settle();
+
+    clients[0].emit("connect");
+    expect(rounds).toBe(1);
+
+    // A planned renewal starts the node's retained delivery over as well.
+    await vi.advanceTimersByTimeAsync(270_000);
+    clients[1].emit("connect");
+    expect(rounds).toBe(2);
+    expect(clients[1].subscribed).toEqual([T]);
+
+    stop();
+    clients[1].emit("close");
+    await vi.advanceTimersByTimeAsync(1_000);
+    clients[2].emit("connect");
+    expect(rounds).toBe(2);
+  });
+
   it("stops for good when closed", async () => {
     const { live, clients } = setup();
     await settle();

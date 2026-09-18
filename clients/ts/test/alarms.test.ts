@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AlarmRefused, Alarms, type AlarmState } from "../src/alarms.js";
+import { AlarmRefused, Alarms, type AlarmsOptions, type AlarmState } from "../src/alarms.js";
 import { CommandTimeout, type Live } from "../src/live.js";
 import { FakeClient, settle, setup } from "./fake-mqtt.js";
 
@@ -11,8 +11,8 @@ const GRIT = "wisewoods/line1/mas2/gritLow";
 const DOOR = "wisewoods/line1/mas2/doorOpen";
 const TEMP = "wisewoods/line1/mas3/tempHigh";
 
-function view(live: Live): Alarms {
-  return new Alarms({ live, node: NODE, root: ROOT });
+function view(live: Live, over: Partial<AlarmsOptions> = {}): Alarms {
+  return new Alarms({ live, node: NODE, root: ROOT, ...over });
 }
 
 function state(over: Partial<AlarmState> = {}): AlarmState {
@@ -38,11 +38,26 @@ function withdraw(client: FakeClient, path: string): void {
 }
 
 /** A connected client with its alarms subscribed. */
-async function opened(): Promise<{ live: Live; client: FakeClient; alarms: Alarms }> {
+async function opened(over: Partial<AlarmsOptions> = {}): Promise<{
+  live: Live;
+  clients: FakeClient[];
+  client: FakeClient;
+  alarms: Alarms;
+}> {
   const { live, clients } = setup();
   await settle();
   clients[0].emit("connect");
-  return { live, client: clients[0], alarms: view(live) };
+  return { live, clients, client: clients[0], alarms: view(live, over) };
+}
+
+/** The connection drops and the client comes back on a new one. */
+async function reconnect(clients: FakeClient[]): Promise<FakeClient> {
+  clients[clients.length - 1].emit("close");
+  // The first wait after a drop is at most retryMs, jittered.
+  await vi.advanceTimersByTimeAsync(1_000);
+  const next = clients[clients.length - 1];
+  next.emit("connect");
+  return next;
 }
 
 beforeEach(() => {
@@ -226,5 +241,59 @@ describe("silencing", () => {
     await settle();
 
     expect(client.sent[0].topic).toBe(`${ROOT}/v1/_CmdOperate/${NODE}/${GRIT}/unsilenceAlarm`);
+  });
+});
+
+describe("coming back", () => {
+  it("drops what the node does not repeat on the new connection", async () => {
+    const { clients, client, alarms } = await opened();
+    raise(client, GRIT, { severity: "critical" });
+    raise(client, DOOR);
+    const seen: string[][] = [];
+    alarms.onChange((standing) => seen.push(standing.map((alarm) => alarm.path)));
+    await settle();
+
+    // While the client is away, the grit alarm goes. Its record is withdrawn at
+    // the broker, so the new connection simply never mentions it.
+    const next = await reconnect(clients);
+    raise(next, DOOR);
+
+    // Still both while the window is open: the one that came back must not flicker.
+    expect(alarms.standing().map((alarm) => alarm.path)).toEqual([GRIT, DOOR]);
+    await vi.advanceTimersByTimeAsync(750);
+
+    expect(alarms.standing().map((alarm) => alarm.path)).toEqual([DOOR]);
+    expect(seen.at(-1)).toEqual([DOOR]);
+  });
+
+  it("keeps what the node repeats, and says nothing about the reconnection itself", async () => {
+    const { clients, client, alarms } = await opened();
+    raise(client, GRIT, { severity: "critical" });
+    raise(client, DOOR);
+    const seen: string[][] = [];
+    alarms.onChange((standing) => seen.push(standing.map((alarm) => alarm.path)));
+    await settle();
+
+    const next = await reconnect(clients);
+    raise(next, GRIT, { severity: "critical" });
+    raise(next, DOOR);
+    const told = seen.length;
+    await vi.advanceTimersByTimeAsync(750);
+
+    expect(alarms.standing()).toHaveLength(2);
+    // Nothing went, so the window closing was not worth telling anyone about.
+    expect(seen).toHaveLength(told);
+    expect(seen.every((standing) => standing.length === 2)).toBe(true);
+  });
+
+  it("leaves the view alone when the window is switched off", async () => {
+    const { clients, client, alarms } = await opened({ resyncMs: 0 });
+    raise(client, GRIT);
+
+    const next = await reconnect(clients);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(next.subscribed).toEqual([FILTER]);
+    expect(alarms.standing().map((alarm) => alarm.path)).toEqual([GRIT]);
   });
 });

@@ -83,6 +83,9 @@ first. Around that the client does what a page left open all day needs:
   token expires. The client reconnects shortly before, with a new token and every
   subscription sent again, and stays `online` while doing so.
 - **Waits that grow after a drop**, jittered, each attempt with a fresh token.
+- **A word when the subscriptions go out again.** `onResubscribe()` fires once
+  they have, on every new connection — where the node's retained delivery starts
+  over, and where a view reconciles a retained set from.
 
 These are values, not a log. A change during a reconnect is superseded by the
 retained value that follows it. Whatever must see every record reads a stream
@@ -134,6 +137,14 @@ within a severity. `onChange()` is told what stands now and again on every
 change, and returns the function that ends that watch and no other. An alarm's
 name comes from the `_SystemElement` it hangs on, and its path is where a view
 jumps to.
+
+When the connection comes back — after a drop, and after the routine token
+renewal too — the node starts its retained delivery over, and an alarm that went
+while the client was away leaves nothing behind to say so. `Alarms` therefore
+gives the set 750 ms to arrive again (`resyncMs`) and drops what did not come
+back: a view can be that much behind the node, but it never goes on showing an
+alarm that is over. It is a window, and a guess, because the node does not say
+where its retained delivery ends; `resyncMs: 0` turns the reconciliation off.
 
 `acknowledge()`, `silence(path, { minutes: 30 })` and `unsilence()` are
 `_CmdOperate` commands on the alarm's own path, each waiting for its `_Ack`. The

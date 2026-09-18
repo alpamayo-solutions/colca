@@ -5,7 +5,9 @@
  * that raised it. An alarm that goes is withdrawn with an empty payload, so
  * what is not in the node's KV is not standing — there is no `normal` record to
  * read past and no history to fold. A subscription therefore arrives with the
- * complete set and stays complete by itself.
+ * complete set. The one thing it cannot see by itself is an alarm that went
+ * while the client hung between two connections: nothing is left to deliver for
+ * it. `#resync` is what settles that.
  *
  * Quitting and silencing are `_CmdOperate` commands on the alarm's own path,
  * answered with an `_Ack`. The client never says who is quitting: the node
@@ -61,6 +63,11 @@ export interface AlarmsOptions {
   root?: string;
   /** How long a command waits for its `_Ack`. */
   timeoutMs?: number;
+  /**
+   * How long the retained set has to arrive again after a reconnection before
+   * what did not arrive counts as gone. 0 leaves the view as it stood.
+   */
+  resyncMs?: number;
 }
 
 export interface StandingOptions {
@@ -103,21 +110,29 @@ export class Alarms {
   readonly #node: string;
   readonly #root: string;
   readonly #timeoutMs: number;
+  readonly #resyncMs: number;
   readonly #filter: string;
+  readonly #standing = new Map<string, Alarm>();
   readonly #watchers = new Set<Watcher>();
   readonly #stop: () => void;
+  readonly #stopResync: () => void;
+  /** The topics the node has repeated since the last resubscription, while a window is open. */
+  #seen: Set<string> | undefined;
+  #resyncTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: AlarmsOptions) {
     this.#live = options.live;
     this.#node = options.node;
     this.#root = options.root ?? DEFAULT_ROOT;
     this.#timeoutMs = options.timeoutMs ?? 30_000;
+    this.#resyncMs = options.resyncMs ?? 750;
     // topic() refuses a wildcard segment, and rightly: the `#` goes on afterwards.
     this.#filter = `${buildTopic({ contract: "_AlarmState", node: this.#node, root: this.#root })}/#`;
-    // The one subscription: it holds the set in the Live client's values, whether
-    // or not anybody is watching yet.
-    this.#stop = this.#live.subscribe<AlarmState>(this.#filter, () => {
-      for (const watcher of this.#watchers) watcher.listener(this.standing(watcher.options));
+    this.#stop = this.#live.subscribe<AlarmState>(this.#filter, (value) => {
+      this.#receive(value);
+    });
+    this.#stopResync = this.#live.onResubscribe(() => {
+      this.#resync();
     });
   }
 
@@ -125,11 +140,7 @@ export class Alarms {
   standing(options: StandingOptions = {}): Alarm[] {
     // No floor means no floor: a severity this client does not know still shows.
     const floor = options.minSeverity === undefined ? 0 : rank(options.minSeverity);
-    const alarms: Alarm[] = [];
-    for (const value of this.#live.values<AlarmState>(this.#filter)) {
-      const alarm = read(value);
-      if (alarm !== undefined && rank(alarm.state.severity) >= floor) alarms.push(alarm);
-    }
+    const alarms = [...this.#standing.values()].filter((alarm) => rank(alarm.state.severity) >= floor);
     return alarms.sort(
       (a, b) =>
         rank(b.state.severity) - rank(a.state.severity) ||
@@ -180,8 +191,65 @@ export class Alarms {
 
   /** End the subscription. The Live client goes on. */
   close(): void {
+    clearTimeout(this.#resyncTimer);
+    this.#resyncTimer = undefined;
+    this.#seen = undefined;
     this.#watchers.clear();
+    this.#standing.clear();
+    this.#stopResync();
     this.#stop();
+  }
+
+  #receive(value: LiveValue<AlarmState>): void {
+    const parts = parseTopic(value.topic);
+    if (parts === undefined || parts.path === "") return;
+    this.#seen?.add(value.topic);
+    // An empty payload is the alarm going: what is not in the node's KV is not standing.
+    if (value.payload === undefined) this.#standing.delete(value.topic);
+    else this.#standing.set(value.topic, { path: parts.path, topic: value.topic, state: value.payload });
+    this.#announce();
+  }
+
+  /**
+   * A new connection starts the node's retained delivery over, and an alarm that
+   * went while the client was away leaves nothing behind to say so: its record
+   * was withdrawn at the broker, so nothing arrives for it ever again. What the
+   * node does not repeat within the window is therefore taken as gone.
+   *
+   * It is a window, and a guess, because the node does not say where its retained
+   * delivery ends. It runs from the resubscription rather than from the first
+   * record, since an empty set sends nothing at all.
+   */
+  #resync(): void {
+    if (this.#resyncMs === 0) return;
+    clearTimeout(this.#resyncTimer);
+    this.#seen = new Set();
+    this.#resyncTimer = setTimeout(() => {
+      const repeated = this.#seen ?? new Set<string>();
+      this.#seen = undefined;
+      this.#resyncTimer = undefined;
+      let gone = false;
+      for (const topic of [...this.#standing.keys()]) {
+        if (repeated.has(topic)) continue;
+        this.#standing.delete(topic);
+        gone = true;
+      }
+      // Silence when nothing went: a reconnection on its own is not a change.
+      if (gone) this.#announce();
+    }, this.#resyncMs);
+  }
+
+  /** Every watcher hears it, and one that throws does not silence the others. */
+  #announce(): void {
+    let failure: Error | undefined;
+    for (const watcher of this.#watchers) {
+      try {
+        watcher.listener(this.standing(watcher.options));
+      } catch (error) {
+        failure ??= error instanceof Error ? error : new Error(String(error));
+      }
+    }
+    if (failure !== undefined) throw failure;
   }
 
   async #operate(
@@ -201,13 +269,6 @@ export class Alarms {
     if (ack.result_code >= 300) throw new AlarmRefused(target, ack);
     return ack;
   }
-}
-
-/** A cached value as an alarm, or nothing when it is neither. */
-function read(value: LiveValue<AlarmState>): Alarm | undefined {
-  const parts = parseTopic(value.topic);
-  if (parts === undefined || parts.path === "" || value.payload === undefined) return undefined;
-  return { path: parts.path, topic: value.topic, state: value.payload };
 }
 
 function rank(severity: string): number {
