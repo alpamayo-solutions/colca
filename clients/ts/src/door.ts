@@ -59,6 +59,13 @@ export interface KvEntry {
   payload: unknown;
   ts: number;
   offset: number;
+  /** Attribution of the record currently retained at this entry — the same
+   *  facts `DoorRecord` carries on `/fetch`, empty when the write that
+   *  produced it carried none. */
+  writtenBy: string;
+  actorId: string;
+  actorLabel: string;
+  actorKind: string;
 }
 
 export interface SelfInfo {
@@ -238,6 +245,10 @@ export class Door {
           payload: entry.payload,
           ts: entry.ts,
           offset: entry.offset,
+          writtenBy: entry.written_by ?? "",
+          actorId: entry.actor_id ?? "",
+          actorLabel: entry.actor_label ?? "",
+          actorKind: entry.actor_kind ?? "",
         });
       }
       const next = body.next ?? "";
@@ -311,7 +322,18 @@ interface WirePage {
 }
 
 interface WireKvPage {
-  entries?: { path: string; node_id: string; topic: string; payload: unknown; ts: number; offset: number }[];
+  entries?: {
+    path: string;
+    node_id: string;
+    topic: string;
+    payload: unknown;
+    ts: number;
+    offset: number;
+    written_by?: string;
+    actor_id?: string;
+    actor_label?: string;
+    actor_kind?: string;
+  }[];
   next?: string;
 }
 

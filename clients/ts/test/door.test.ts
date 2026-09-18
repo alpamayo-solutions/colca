@@ -121,8 +121,36 @@ describe("kv", () => {
 
     expect(entries).toHaveLength(2);
     expect(entries[0].nodeId).toBe("n");
+    expect(entries[0].writtenBy).toBe("");
+    expect(entries[0].actorId).toBe("");
     expect(new URL(calls[0].url).searchParams.getAll("contract")).toEqual(["_Signal", "_Group"]);
     expect(new URL(calls[1].url).searchParams.get("after")).toBe("page2");
+  });
+
+  it("carries the same attribution /fetch's records carry", async () => {
+    const entry = {
+      path: "a",
+      node_id: "n",
+      topic: "t",
+      payload: {},
+      ts: 1,
+      offset: 1,
+      written_by: "operator-ui",
+      actor_id: "kc-sub-anna",
+      actor_label: "anna",
+      actor_kind: "human",
+    };
+    const { fetch } = stub([{ body: { entries: [entry], next: "" } }]);
+    const door = new Door({ baseUrl: "http://colca", service: "my-app", fetch });
+
+    const entries = await door.kv();
+
+    expect(entries[0]).toMatchObject({
+      writtenBy: "operator-ui",
+      actorId: "kc-sub-anna",
+      actorLabel: "anna",
+      actorKind: "human",
+    });
   });
 
   it("refuses a node that keeps handing back the same page", async () => {

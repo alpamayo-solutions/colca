@@ -255,6 +255,9 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 	_, out = req(t, admin, "GET", a.url+"/kv?prefix=x", "tok", nil)
 	if entries := out["entries"].([]any); len(entries) != 1 {
 		t.Fatalf("%v", out)
+	} else if entry := entries[0].(map[string]any); entry["written_by"] != "api" ||
+		entry["actor_id"] != "user-anna" || entry["actor_label"] != "anna@example.com" || entry["actor_kind"] != "human" {
+		t.Fatalf("/kv dropped the attribution /fetch already carries: %v", entry)
 	}
 	resp, _ = req(t, admin, "GET", a.url+"/debug/state", "tok", nil)
 	if resp.StatusCode != http.StatusOK {

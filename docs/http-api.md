@@ -34,6 +34,11 @@ A caller is one of:
 - Payloads are passed through as raw JSON; numbers keep the exact form the
   publisher sent.
 - `records` and `entries` are always arrays.
+- A record or entry carries `written_by`, `actor_id`, `actor_label` and
+  `actor_kind` when the write that produced it named them (a person's token,
+  or a service acting for one); a write that carried none omits all four.
+  `/kv`'s entry is the retained projection of the same write `/fetch` returns
+  on the stream, so both carry the same four fields.
 
 When a cursor stands below what retention has already removed, the response
 carries a `gap` object that names the missing offsets and times, and `records`

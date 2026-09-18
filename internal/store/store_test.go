@@ -427,6 +427,53 @@ func TestKVScan(t *testing.T) {
 	}
 }
 
+// TestKVCarriesTheWritingRecordsAttribution checks that /kv's projection keeps
+// the same actor facts /fetch already carries on the record that produced it
+// (KVScan and KVScanPage both project from the same kvEnc), and that a write
+// with no attribution leaves the KV entry's fields empty rather than stale.
+func TestKVCarriesTheWritingRecordsAttribution(t *testing.T) {
+	s := mustOpen(t)
+	if _, _, err := s.Append("entities", []Record{
+		{
+			Topic: "colca/v1/_Constant/n1/line1/operator/sandoffMm", Payload: []byte(`{"v":1}`), TS: 1,
+			KVPath: "line1/operator/sandoffMm", KVNode: "n1",
+			WrittenBy: "operator-ui", ActorID: "kc-sub-anna", ActorLabel: "anna", ActorKind: "human",
+		},
+		{Topic: "colca/v1/_Metric/n1/line1/temp", Payload: []byte(`{"v":2}`), TS: 2, KVPath: "line1/temp", KVNode: "n1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scanned := mustKVScan(t, s, "line1/operator/")
+	if len(scanned) != 1 || scanned[0].WrittenBy != "operator-ui" || scanned[0].ActorID != "kc-sub-anna" ||
+		scanned[0].ActorLabel != "anna" || scanned[0].ActorKind != "human" {
+		t.Fatalf("KVScan dropped attribution: %+v", scanned)
+	}
+
+	paged, _, err := s.KVScanPage("line1/", "", 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var withActor, withoutActor int
+	for _, e := range paged {
+		switch e.Path {
+		case "line1/operator/sandoffMm":
+			withActor++
+			if e.WrittenBy != "operator-ui" || e.ActorID != "kc-sub-anna" || e.ActorLabel != "anna" || e.ActorKind != "human" {
+				t.Fatalf("KVScanPage dropped attribution: %+v", e)
+			}
+		case "line1/temp":
+			withoutActor++
+			if e.WrittenBy != "" || e.ActorID != "" || e.ActorLabel != "" || e.ActorKind != "" {
+				t.Fatalf("KVScanPage invented attribution for an unattributed write: %+v", e)
+			}
+		}
+	}
+	if withActor != 1 || withoutActor != 1 {
+		t.Fatalf("expected one attributed and one unattributed entry, got %d/%d in %+v", withActor, withoutActor, paged)
+	}
+}
+
 func TestKVScanPageIsBoundedAndTokensArePrefixScoped(t *testing.T) {
 	s := mustOpen(t)
 	if _, _, err := s.Append("entities", []Record{
