@@ -37,6 +37,11 @@ linters:
         - name: var-declaration
         - name: unexported-return
   exclusions:
+    paths:
+      # npm packages ship Go sources of their own; they are not ours to lint,
+      # and without this the pre-push hook fails on any machine that has run
+      # `make ts-install`.
+      - clients/ts/node_modules
     rules:
       - path: _test\.go
         linters: [errcheck, bodyclose, noctx, gosec]
