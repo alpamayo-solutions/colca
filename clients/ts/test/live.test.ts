@@ -1,122 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  CommandTimeout,
-  Live,
-  type LiveOptions,
-  type LiveValue,
-  type MqttConnectOptions,
-} from "../src/live.js";
-
-type Handler = (...args: unknown[]) => void;
-
-/** Stands in for mqtt.js: records what it is asked and lets a test play the broker. */
-class FakeClient {
-  readonly subscribed: string[] = [];
-  readonly subscribedQos: [string, number][] = [];
-  readonly unsubscribed: string[] = [];
-  readonly sent: { topic: string; body: Record<string, unknown>; qos: number }[] = [];
-  /** Set to hold SUBACKs back until `grant()`. */
-  holdSubacks = false;
-  /** Set to make the node refuse publishes. */
-  refusePublish: Error | undefined;
-  ended = false;
-  readonly #handlers = new Map<string, Handler[]>();
-  readonly #held: (() => void)[] = [];
-
-  constructor(readonly options: MqttConnectOptions) {}
-
-  on(event: string, handler: Handler): this {
-    this.#handlers.set(event, [...(this.#handlers.get(event) ?? []), handler]);
-    return this;
-  }
-
-  subscribe(
-    filters: string[],
-    options: { qos: number },
-    callback?: (error: Error | null, granted: { topic: string; qos: number }[]) => void,
-  ): void {
-    this.subscribed.push(...filters);
-    for (const filter of filters) this.subscribedQos.push([filter, options.qos]);
-    const answer = (): void =>
-      callback?.(
-        null,
-        filters.map((topic) => ({ topic, qos: options.qos })),
-      );
-    if (this.holdSubacks) this.#held.push(answer);
-    else answer();
-  }
-
-  grant(): void {
-    for (const answer of this.#held.splice(0)) answer();
-  }
-
-  unsubscribe(filters: string[]): void {
-    this.unsubscribed.push(...filters);
-  }
-
-  publish(
-    topic: string,
-    message: string,
-    options: { qos: number },
-    callback?: (error?: Error) => void,
-  ): void {
-    this.sent.push({ topic, body: JSON.parse(message) as Record<string, unknown>, qos: options.qos });
-    callback?.(this.refusePublish);
-  }
-
-  end(): void {
-    this.ended = true;
-  }
-
-  emit(event: string, ...args: unknown[]): void {
-    for (const handler of this.#handlers.get(event) ?? []) handler(...args);
-  }
-
-  /** The broker delivering a message to this client. */
-  deliver(topic: string, payload: unknown, retain = false): void {
-    const bytes =
-      payload === undefined ? new Uint8Array() : new TextEncoder().encode(JSON.stringify(payload));
-    this.emit("message", topic, bytes, { retain });
-  }
-}
-
-function jwt(claims: Record<string, unknown>): string {
-  const part = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString("base64url");
-  return `${part({ alg: "none" })}.${part(claims)}.signature`;
-}
+import { CommandTimeout, type LiveValue } from "../src/live.js";
+import { jwt, settle, setup } from "./fake-mqtt.js";
 
 const T = "steine/v1/_Metric/n-technikum/wisewoods/line1/mas2/grit";
-
-function setup(options: Partial<LiveOptions> = {}): {
-  live: Live;
-  clients: FakeClient[];
-  tokens: string[];
-  errors: Error[];
-} {
-  const clients: FakeClient[] = [];
-  const tokens: string[] = [];
-  const errors: Error[] = [];
-  const live = new Live({
-    url: "wss://node:8885",
-    token: () => {
-      const token = jwt({ sub: "till", exp: Math.floor(Date.now() / 1000) + 300, n: tokens.length });
-      tokens.push(token);
-      return token;
-    },
-    connect: (_url, connectOptions) => {
-      const client = new FakeClient(connectOptions);
-      clients.push(client);
-      return client as never;
-    },
-    onError: (error) => errors.push(error),
-    ...options,
-  });
-  return { live, clients, tokens, errors };
-}
-
-/** Let the token and connect promises settle. */
-const settle = (): Promise<void> => vi.advanceTimersByTimeAsync(0).then(() => undefined);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -402,6 +289,31 @@ describe("keeping the connection", () => {
 
     clients[3].emit("connect");
     expect(live.state).toBe("online");
+  });
+
+  it("says when every subscription has gone out on a new connection", async () => {
+    const { live, clients } = setup();
+    live.subscribe(T, () => undefined);
+    let rounds = 0;
+    const stop = live.onResubscribe(() => {
+      rounds += 1;
+    });
+    await settle();
+
+    clients[0].emit("connect");
+    expect(rounds).toBe(1);
+
+    // A planned renewal starts the node's retained delivery over as well.
+    await vi.advanceTimersByTimeAsync(270_000);
+    clients[1].emit("connect");
+    expect(rounds).toBe(2);
+    expect(clients[1].subscribed).toEqual([T]);
+
+    stop();
+    clients[1].emit("close");
+    await vi.advanceTimersByTimeAsync(1_000);
+    clients[2].emit("connect");
+    expect(rounds).toBe(2);
   });
 
   it("stops for good when closed", async () => {
