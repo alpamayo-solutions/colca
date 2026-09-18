@@ -112,6 +112,36 @@ setpoint.
 `publish()` sends a single record without waiting, and `newUlid()` makes ids
 that sort by the time they were made, as the node's own do.
 
+### Standing alarms
+
+`_AlarmState` is retained, one record per alarm and an empty payload when the
+alarm goes. What the node holds is therefore what stands: nothing to fetch
+first, no history to fold, and no `normal` records to read past.
+
+```ts
+import { Alarms } from "@alpamayo-solutions/colca-client/live";
+
+const alarms = new Alarms({ live, node: "n-technikum", root: "steine" });
+
+const stop = alarms.onChange((standing) => showBanner(standing), { minSeverity: "warning" });
+
+// Throws when the node refuses it, and when nobody answers.
+await alarms.acknowledge("wisewoods/line1/mas2/gritLow", { note: "Korn getauscht" });
+```
+
+`standing()` reads the set at any time — worst first, and the oldest first
+within a severity. `onChange()` is told what stands now and again on every
+change, and returns the function that ends that watch and no other. An alarm's
+name comes from the `_SystemElement` it hangs on, and its path is where a view
+jumps to.
+
+`acknowledge()`, `silence(path, { minutes: 30 })` and `unsilence()` are
+`_CmdOperate` commands on the alarm's own path, each waiting for its `_Ack`. The
+client sends no identity: who quit an alarm is the node's word on the record,
+and the caller adds the note. A refusal — 300 and up — throws `AlarmRefused`
+instead of resolving, because an acknowledgement that was swallowed is worse
+than one that was never sent.
+
 ## Which door, which credential
 
 | Door | URL | Credential |

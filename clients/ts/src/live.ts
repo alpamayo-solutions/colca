@@ -26,6 +26,20 @@
 import { newUlid } from "./ids.js";
 import { parseTopic, topicMatches } from "./topics.js";
 
+// Standing alarms are retained values read and commanded over this connection,
+// so they come out of this entry point rather than one of their own.
+export { AlarmRefused, Alarms } from "./alarms.js";
+export type {
+  AcknowledgeOptions,
+  Alarm,
+  AlarmSeverity,
+  AlarmsOptions,
+  AlarmState,
+  AlarmStatus,
+  SilenceOptions,
+  StandingOptions,
+} from "./alarms.js";
+
 export type LiveState = "connecting" | "online" | "offline" | "closed";
 
 export type Qos = 0 | 1;
