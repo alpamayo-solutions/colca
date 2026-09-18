@@ -96,7 +96,7 @@ func (e *Engine) owedBelow(stream string, floor, offset uint64, ulid string) boo
 	}
 	now := e.AuthoritativeNow().UnixMilli()
 	recs, _, err := e.store.ReadRecords(stream, floor, 1, func(r store.StoredRecord) bool {
-		return uns.OwedCommand(r.Topic, r.Payload, ulid, now)
+		return !e.CommandRetired(r) && uns.OwedCommand(r.Topic, r.Payload, ulid, now)
 	})
 	if err != nil {
 		e.log.Warn("command held: could not read the commands stream to check for older owed commands",
@@ -137,7 +137,7 @@ func (e *Engine) ReplayOwedCommands(entry *uns.Entry) int {
 	published := 0
 	for from < head && published < replayCap {
 		recs, next, err := e.store.ReadRecords(stream, from, replayBatch, func(r store.StoredRecord) bool {
-			return uns.OwedCommand(r.Topic, r.Payload, entry.ULID, now)
+			return !e.CommandRetired(r) && uns.OwedCommand(r.Topic, r.Payload, entry.ULID, now)
 		})
 		if err != nil {
 			e.log.Warn("command replay stopped: stream read failed",

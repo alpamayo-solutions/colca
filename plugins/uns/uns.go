@@ -608,8 +608,18 @@ func Validate(contract string, payload []byte) error {
 			}
 		}
 		return nil
+	case contract == "_Signal":
+		if err := reqStr("id"); err != nil {
+			return err
+		}
+		if value, present := m["replication_policy"]; present {
+			if value != "replicate_to_parents" && value != "source_local_only" {
+				return fmt.Errorf("_Signal: replication_policy must be replicate_to_parents or source_local_only")
+			}
+		}
+		return nil
 	case contract == "_Node" || contract == "_ServiceDetails" ||
-		contract == "_SystemElement" || contract == "_Signal" ||
+		contract == "_SystemElement" ||
 		contract == "_ExternalReference" || contract == "_Group" ||
 		contract == "_MetadataType" || contract == "_AnnotationType" ||
 		contract == "_DataModel" || contract == "_ExternalSystem" ||

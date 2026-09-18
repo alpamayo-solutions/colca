@@ -798,8 +798,8 @@ func (c *ConfigExec) upsert(payload []byte) (int, string, string, []StateWrite) 
 	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
 }
 
-// preserveBinding keeps the stored binding (data_tag, is_published, and the
-// data_type autobind learned) when an upsert does not set it. Declarations
+// preserveBinding keeps the stored binding, learned data type and replication
+// policy when an upsert does not set them. Declarations
 // carry data_tag: null, and replacing the record whole would unbind every
 // declared signal on each reconcile. A non-empty data_tag or an explicit
 // is_published or data_type still wins.
@@ -822,7 +822,7 @@ func (c *ConfigExec) preserveBinding(path string, incoming json.RawMessage) (jso
 			delete(next, "data_tag") // never persist an explicit null
 		}
 	}
-	for _, field := range []string{"is_published", "data_type"} {
+	for _, field := range []string{"is_published", "data_type", "replication_policy"} {
 		if _, spoken := next[field]; !spoken {
 			if value, has := stored[field]; has {
 				next[field] = value

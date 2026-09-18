@@ -76,6 +76,11 @@ SignalDataType = BaseStrEnum(  # type: ignore[misc]
 )
 
 
+class ReplicationPolicy(BaseStrEnum):
+    REPLICATE_TO_PARENTS = "replicate_to_parents"
+    SOURCE_LOCAL_ONLY = "source_local_only"
+
+
 class ConstantDataType(BaseStrEnum):
     """Value types of Colca configuration constants.
 
@@ -878,6 +883,8 @@ class Signal(Payload):
     is_published: bool = False
     #: The read side historises it (consumed by the historian bridge).
     is_logged: bool = False
+    #: Upload eligibility for new samples; queued samples retain their decision.
+    replication_policy: ReplicationPolicy = ReplicationPolicy.REPLICATE_TO_PARENTS
     data_type: DataType | None = None
     index_type: IndexType | None = None
     unit: str | None = None
@@ -905,6 +912,8 @@ class Signal(Payload):
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "Signal":
         data = json.loads(json_str)
+        if "replication_policy" in data:
+            data["replication_policy"] = ReplicationPolicy(data["replication_policy"])
         if data.get("data_type") is not None:
             # SignalDataType, because a _Signal may be json and franzmq's
             # DataType has no such member.

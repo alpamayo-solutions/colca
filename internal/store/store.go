@@ -41,14 +41,16 @@ var ErrRecordTooLarge = errors.New("record payload exceeds the configured limit"
 var ErrInvalidPageToken = errors.New("invalid KV page token")
 
 type Record struct {
-	Topic        string `json:"t"`
-	Payload      []byte `json:"p"`
-	TS           int64  `json:"ts"`
-	WrittenBy    string `json:"wb,omitempty"`
-	OriginOffset uint64 `json:"oo,omitempty"`
-	ActorID      string `json:"aid,omitempty"`
-	ActorLabel   string `json:"al,omitempty"`
-	ActorKind    string `json:"ak,omitempty"`
+	// SourceLocalOnly is decided under the append lock from the current signal.
+	SourceLocalOnly bool   `json:"slo,omitempty"`
+	Topic           string `json:"t"`
+	Payload         []byte `json:"p"`
+	TS              int64  `json:"ts"`
+	WrittenBy       string `json:"wb,omitempty"`
+	OriginOffset    uint64 `json:"oo,omitempty"`
+	ActorID         string `json:"aid,omitempty"`
+	ActorLabel      string `json:"al,omitempty"`
+	ActorKind       string `json:"ak,omitempty"`
 	// ActorGroups are the groups a person's grants came from, kept so a replicated
 	// command can be authorized again where it executes.
 	ActorGroups []string `json:"ag,omitempty"`
@@ -63,16 +65,17 @@ type Record struct {
 }
 
 type StoredRecord struct {
-	Offset       uint64
-	OriginOffset uint64
-	Topic        string
-	Payload      []byte
-	TS           int64
-	WrittenBy    string
-	ActorID      string
-	ActorLabel   string
-	ActorKind    string
-	ActorGroups  []string
+	SourceLocalOnly bool
+	Offset          uint64
+	OriginOffset    uint64
+	Topic           string
+	Payload         []byte
+	TS              int64
+	WrittenBy       string
+	ActorID         string
+	ActorLabel      string
+	ActorKind       string
+	ActorGroups     []string
 }
 
 type KVEntry struct {
@@ -84,11 +87,12 @@ type KVEntry struct {
 }
 
 type Store struct {
-	db    *pebble.DB
-	mu    sync.Mutex
-	next  map[string]uint64 // next offset per stream
-	lwm   map[string]uint64 // low-water mark per stream: lowest retained offset
-	bytes map[string]uint64 // live logical bytes per stream (stream key + encoded value)
+	db           *pebble.DB
+	standaloneMu sync.Mutex
+	mu           sync.Mutex
+	next         map[string]uint64 // next offset per stream
+	lwm          map[string]uint64 // low-water mark per stream: lowest retained offset
+	bytes        map[string]uint64 // live logical bytes per stream (stream key + encoded value)
 	// appendApply is Pebble's atomic apply boundary. Keeping the bound method
 	// injectable lets tests prove an apply failure changes neither stream nor KV.
 	appendApply func(*pebble.Batch, *pebble.WriteOptions) error
@@ -188,15 +192,16 @@ func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (u
 func (s *Store) Close() error { return s.db.Close() }
 
 type recEnc struct {
-	Topic        string   `json:"t"`
-	Payload      []byte   `json:"p"`
-	TS           int64    `json:"ts"`
-	WrittenBy    string   `json:"wb,omitempty"`
-	OriginOffset uint64   `json:"oo,omitempty"`
-	ActorID      string   `json:"aid,omitempty"`
-	ActorLabel   string   `json:"al,omitempty"`
-	ActorKind    string   `json:"ak,omitempty"`
-	ActorGroups  []string `json:"ag,omitempty"`
+	SourceLocalOnly bool     `json:"slo,omitempty"`
+	Topic           string   `json:"t"`
+	Payload         []byte   `json:"p"`
+	TS              int64    `json:"ts"`
+	WrittenBy       string   `json:"wb,omitempty"`
+	OriginOffset    uint64   `json:"oo,omitempty"`
+	ActorID         string   `json:"aid,omitempty"`
+	ActorLabel      string   `json:"al,omitempty"`
+	ActorKind       string   `json:"ak,omitempty"`
+	ActorGroups     []string `json:"ag,omitempty"`
 	// size is the encoded length of this record as stored, set by scanRecords for
 	// the byte accounting. Not serialized.
 	size uint64 `json:"-"`
@@ -219,7 +224,8 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 		originOffset = off
 	}
 	val, err := json.Marshal(recEnc{
-		Topic: rec.Topic, Payload: rec.Payload, TS: rec.TS,
+		SourceLocalOnly: rec.SourceLocalOnly,
+		Topic:           rec.Topic, Payload: rec.Payload, TS: rec.TS,
 		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
 		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, OriginOffset: originOffset,
 	})
@@ -281,6 +287,13 @@ func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, 
 	defer b.Close()
 	liveBytes := s.bytes[stream]
 	for _, r := range recs {
+		if stream == "metrics" {
+			var err error
+			r.SourceLocalOnly, err = s.metricSourceLocalOnly(r)
+			if err != nil {
+				return 0, 0, err
+			}
+		}
 		n, err := addRecord(b, stream, off, r)
 		if err != nil {
 			return 0, 0, err
@@ -387,7 +400,8 @@ func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(S
 		}
 		next = off + 1
 		record := StoredRecord{
-			Offset: off, OriginOffset: originOffset(e.OriginOffset, off),
+			SourceLocalOnly: e.SourceLocalOnly,
+			Offset:          off, OriginOffset: originOffset(e.OriginOffset, off),
 			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
 			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
@@ -608,6 +622,9 @@ func (s *Store) HWMs() []HWMInfo {
 // ReplRecord is a record as it travels from a child node to its parent. The
 // json tags are the wire format — do not rename them.
 type ReplRecord struct {
+	// SkipFrom marks an inclusive intentionally omitted metric range ending at ChildOffset.
+	// Such entries advance the child HWM but never create a local stream record.
+	SkipFrom     uint64   `json:"skip_from,omitempty"`
 	ChildOffset  uint64   `json:"o"`
 	OriginOffset uint64   `json:"oo,omitempty"`
 	Topic        string   `json:"t"`
@@ -628,8 +645,8 @@ type ReplRecord struct {
 
 // ApplyReplicated appends records with ChildOffset > HWM(child, stream) under
 // local offsets and updates KV and the HWM in one atomic batch, so replays are
-// harmless. It returns exactly the records it wrote, or nil on error, so the
-// caller mirrors only durable records onto the local MQTT bus.
+// harmless. It returns newly applied records and skip ranges, or nil on error.
+// The caller mirrors only data records onto the local MQTT bus.
 func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applied []ReplRecord, hwm uint64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -643,7 +660,15 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 	defer b.Close()
 	liveBytes := s.bytes[stream]
 	for _, r := range recs {
+		if r.SkipFrom != 0 && (stream != "metrics" || r.SkipFrom > r.ChildOffset || r.Topic != "" || len(r.Payload) != 0) {
+			return nil, prev, fmt.Errorf("invalid metric skip range")
+		}
 		if r.ChildOffset <= hwm {
+			continue
+		}
+		if r.SkipFrom != 0 {
+			applied = append(applied, r)
+			hwm = r.ChildOffset
 			continue
 		}
 		if r.OriginOffset == 0 {

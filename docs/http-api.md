@@ -22,7 +22,8 @@ A caller is one of:
 | `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N}` |
 | `POST /ack` | owner of the cursor, admin | `{"cursor":"NAME","stream":"S","offset":N}` | `{"moved":true}` |
 | `GET /kv` | machine, service, person, admin | `?prefix=P&max=1000&after=TOKEN&contract=_Signal` | `{"entries":[{"path":"…","node_id":"…","topic":"…","payload":{…},"ts":T,"offset":N}],"next":"TOKEN"}` |
-| `GET /self` | local service | | the service's own registry entry and limits |
+| `GET /self` | local service | | the service's registry entry, limits, `standalone_since` and `standalone_ready` |
+| `POST /standalone/complete` | local service on a standalone node | | finish the identity handover; returns its durable issuance cutoff |
 
 - `/fetch` never moves a cursor. `/ack` takes the last offset you processed and
   only moves forward.

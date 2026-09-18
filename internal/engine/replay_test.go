@@ -198,6 +198,36 @@ func TestExpiredCommandIsSkippedAndLeftBehind(t *testing.T) {
 	}
 }
 
+func TestStandaloneRetiresOwedCommandsWithoutHoldingNewOnes(t *testing.T) {
+	ids := testIDs()
+	h := newReplayHarness(t, ids)
+	old := "colca/v1/_CmdParam/m1/temp/old"
+	fresh := "colca/v1/_CmdParam/m1/temp/new"
+	if _, err := h.e.IngestAdmin(old, cmdPayload("old-owner")); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.e.Store().StandalonePut(&store.StandaloneState{
+		Since: time.Now().Unix(), PATs: map[string]bool{},
+		CommandsBefore: h.e.Store().NextOffset("commands"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.e.IngestAdmin(fresh, cmdPayload("new-owner")); err != nil {
+		t.Fatal(err)
+	}
+	h.resetPublished()
+	h.listen("m1", old, fresh)
+	if count := h.e.ReplayOwedCommands(machine(t, ids, "m1")); count != 1 {
+		t.Fatalf("replayed %d commands, want only the new owner's one", count)
+	}
+	if got := h.published(); len(got) != 1 || got[0] != fresh {
+		t.Fatalf("retired command replayed: %v", got)
+	}
+	if h.e.owedBelow("commands", 1, 2, "m1") {
+		t.Fatal("retired command still blocks immediate delivery of new commands")
+	}
+}
+
 // A replay stops at the first record nobody is listening on, so commands never
 // arrive out of order.
 func TestReplayStopsAtTheFirstRecordWithNoSubscriber(t *testing.T) {

@@ -13,11 +13,15 @@ import (
 // one id resolve to nothing, since picking one could let a node shadow a group
 // authored above it; the collision is reported.
 type GroupIndex struct {
-	store EntityStore
+	store  EntityStore
+	author string
 }
 
 // NewGroupIndex returns an index over the _Group definitions in s.
 func NewGroupIndex(s EntityStore) *GroupIndex { return &GroupIndex{store: s} }
+
+// WithAuthority restricts grants to locally authored groups after handover.
+func (g *GroupIndex) WithAuthority(author string) *GroupIndex { g.author = author; return g }
 
 // group is the part of a _Group record this needs.
 type group struct {
@@ -35,7 +39,7 @@ func (g *GroupIndex) GrantsOf(id string) (grants []string, ok bool, err error) {
 	var found []string // authoring nodes claiming the id
 	var match group
 	for _, rec := range g.store.KVScanAll("_Group") {
-		if rec.Path != id {
+		if rec.Path != id || (g.author != "" && rec.NodeID != g.author) {
 			continue
 		}
 		var candidate group

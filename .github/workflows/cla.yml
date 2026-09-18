@@ -19,6 +19,8 @@ jobs:
           AUTHOR: ${{ github.event.pull_request.user.login }}
           ASSOCIATION: ${{ github.event.pull_request.author_association }}
           BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           case "$ASSOCIATION" in
             OWNER | MEMBER | COLLABORATOR)
@@ -26,6 +28,18 @@ jobs:
               exit 0
               ;;
           esac
+          # Event author_association can say NONE for a private organisation
+          # member even when the live repository permission is admin. Verify
+          # the existing collaborator exemption against GitHub, not the body.
+          # A denied/unavailable lookup falls through to the ordinary CLA check.
+          if permission=$(gh api "repos/$GH_REPO/collaborators/$AUTHOR/permission" --jq .permission 2>/dev/null); then
+            case "$permission" in
+              admin | maintain | write)
+                echo "$AUTHOR is a repository collaborator ($permission), no confirmation needed."
+                exit 0
+                ;;
+            esac
+          fi
           if [[ "$AUTHOR" == *"[bot]" ]]; then
             echo "$AUTHOR is a bot, no confirmation needed."
             exit 0

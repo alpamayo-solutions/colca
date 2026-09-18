@@ -182,7 +182,8 @@ func marshalReplication(stream string, recs []store.ReplRecord) ([]byte, error) 
 	wire := make([]wireRec, len(recs))
 	for i, r := range recs {
 		wire[i] = wireRec{
-			O: r.ChildOffset, OO: r.OriginOffset, T: r.Topic, P: r.Payload, TS: r.TS,
+			SkipFrom: r.SkipFrom,
+			O:        r.ChildOffset, OO: r.OriginOffset, T: r.Topic, P: r.Payload, TS: r.TS,
 			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups,
 		}
 	}
@@ -419,23 +420,19 @@ func adoptLegacy(c *Client, st *store.Store, legacyName, scopedName, stream stri
 	return true
 }
 
-// initCursors settles this child's cursors against the configured parent before
-// either loop reads them. For each cursor:
+// PrepareUplink persists retention protection for the configured parent before
+// any pruning can run. It needs no connection to the parent. For each stream:
 //
 //  1. A scoped cursor exists: keep it (every normal start, or a return to a
 //     former parent).
 //  2. Only a legacy cursor exists: adopt its value under the scoped name.
-//  3. Neither exists, so this is first contact. Uplink starts at each stream's
-//     LWM and the parent's HWM drops duplicates; definitions start at 1;
-//     commands start at the parent's head, since commands issued before this
-//     child attached were not meant for it.
+//  3. Neither exists: persist the stream's LWM, including position 1 on an empty
+//     stream. CursorGet's implicit 1 alone does not protect anything from pruning.
 //
-// head is the parent's commands head from hello, or 0 without one. Every write
-// moves a cursor forward or claims a missing one, so the two loops calling this
-// concurrently converge. m may be nil.
-func initCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64) {
-	st := eng.Store()
-
+// Node startup calls this synchronously before starting retention; RunUplink also
+// calls it for users of the replication loop outside that lifecycle. Repeating
+// it never rewinds a cursor or refreshes an existing cursor's staleness timestamp.
+func PrepareUplink(c *Client, st *store.Store) error {
 	up := uns.UplinkCursor(c.parentPub)
 	for _, stream := range uplinkStreams() {
 		if st.CursorGet(up, stream) > 1 {
@@ -444,10 +441,19 @@ func initCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64)
 		if adoptLegacy(c, st, legacyUplinkCursor, up, stream) { // case 2
 			continue
 		}
-		if lwm := st.LWM(stream); lwm > 1 { // case 3
-			st.CursorAck(up, stream, lwm)
+		if _, err := st.CursorSetIfAbsent(up, stream, st.LWM(stream)); err != nil { // case 3
+			return fmt.Errorf("persist uplink cursor %s for %s: %w", up, stream, err)
 		}
 	}
+	return nil
+}
+
+// initDownlinkCursors settles definitions and commands after hello. Definitions
+// start at 1; first-contact commands start at the parent's head because earlier
+// commands were not meant for this attachment. Existing scoped positions and
+// legacy positions are preserved. m may be nil.
+func initDownlinkCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64) {
+	st := eng.Store()
 
 	// Definitions: case 3 IS the default position, so there is nothing to write
 	// unless a legacy cursor has a position to hand over.
@@ -495,9 +501,10 @@ func initCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64)
 func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
-	// Settle the position before the first cursor read. Neither a head nor metrics
-	// are needed here; RunDownlink's hello supplies the head for commands.
-	initCursors(c, eng, nil, 0)
+	if err := PrepareUplink(c, eng.Store()); err != nil {
+		c.log.Error("uplink retention protection could not be persisted", "err", err)
+		return
+	}
 
 	// Blobs this parent confirmed, keyed by digest, with the local blob's
 	// modification time so a swept and recreated blob is pushed again.
@@ -529,7 +536,8 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			eng.Store().CursorAck(uns.UplinkCursor(c.parentPub), stream, lwm)
 			from = lwm
 		}
-		recs, next, err := eng.Store().Read(stream, from, replBatch, pushable(filter))
+		// Read a bounded physical page before filtering, including local-only records.
+		recs, next, err := eng.Store().Read(stream, from, replBatch, nil)
 		if err != nil {
 			c.log.Error("uplink read", "stream", stream, "err", err)
 			return false, false
@@ -538,26 +546,42 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			return false, false // nothing scanned: this lane is empty
 		}
 		pushed := false
-		if len(recs) > 0 {
-			batch := make([]store.ReplRecord, len(recs))
-			for i, r := range recs {
-				batch[i] = store.ReplRecord{
-					ChildOffset: r.Offset, OriginOffset: r.OriginOffset,
-					Topic: r.Topic, Payload: r.Payload, TS: r.TS,
-					WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-					ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
-				}
+		batch := make([]store.ReplRecord, 0, len(recs))
+		allowed := pushable(filter)
+		for _, r := range recs {
+			if !allowed(r.Topic) {
+				continue
 			}
+			if stream == "metrics" && r.SourceLocalOnly {
+				if n := len(batch); n > 0 && batch[n-1].SkipFrom != 0 && batch[n-1].ChildOffset+1 == r.Offset {
+					batch[n-1].ChildOffset = r.Offset
+				} else {
+					batch = append(batch, store.ReplRecord{ChildOffset: r.Offset, SkipFrom: r.Offset})
+				}
+				continue
+			}
+			batch = append(batch, store.ReplRecord{
+				ChildOffset: r.Offset, OriginOffset: r.OriginOffset,
+				Topic: r.Topic, Payload: r.Payload, TS: r.TS,
+				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
+				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
+			})
+		}
+		if len(batch) > 0 {
+			fullBatchLen := len(batch)
 			batch, err = fitReplicationBatch(stream, batch, c.maxReplicateBody)
 			if err != nil {
 				c.log.Error("uplink batch cannot fit the replication request bound", "stream", stream, "err", err)
 				m.UplinkPushFailed(stream)
 				return false, false
 			}
-			if len(batch) < len(recs) {
+			if len(batch) < fullBatchLen {
 				next = batch[len(batch)-1].ChildOffset + 1
 			}
-			_, nowMS, err := c.replicate(ctx, stream, batch)
+			hwm, nowMS, err := c.replicate(ctx, stream, batch)
+			if err == nil && hwm < batch[len(batch)-1].ChildOffset {
+				err = fmt.Errorf("parent acknowledged offset %d below batch end %d", hwm, batch[len(batch)-1].ChildOffset)
+			}
 			if err != nil {
 				if stopped() {
 					return false, true // aborted by our own shutdown, not a failure
@@ -681,7 +705,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			}
 			// Before anything is applied, settle first-contact cursors, including adopting
 			// the head from this response before the poll reads commands.
-			initCursors(c, eng, m, res.Head)
+			initDownlinkCursors(c, eng, m, res.Head)
 			if res.Ancestry != nil {
 				eng.SetAncestry(*res.Ancestry)
 			}

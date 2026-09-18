@@ -46,6 +46,37 @@ func seedRecordsAt(t *testing.T, s *store.Store, stream string, n int, base, ste
 	}
 }
 
+func TestCursorNextRecordAgeTracksBacklogNotCursorInactivity(t *testing.T) {
+	s := mustStore(t)
+	old := time.Now().Add(-30 * 24 * time.Hour).UnixMilli()
+	seedRecordsAt(t, s, "metrics", 2, old, int64(time.Hour/time.Millisecond))
+	if _, err := s.CursorSetIfAbsent("up:parent", "metrics", 1); err != nil {
+		t.Fatal(err)
+	}
+	m := New(s, config.Retention{}, nil)
+	labels := map[string]string{"cursor": "up:parent", "stream": "metrics"}
+	for pos := uint64(1); pos <= 3; pos++ {
+		if pos > 1 {
+			s.CursorAck("up:parent", "metrics", pos)
+		}
+		got := gaugeValue(t, m, "colca_cursor_next_record_age_seconds", labels)
+		if pos == 3 {
+			if got != 0 {
+				t.Fatalf("caught-up cursor reports queued age: %v", got)
+			}
+		} else {
+			want := (30*24*time.Hour - time.Duration(pos-1)*time.Hour).Seconds()
+			if got < want || got > want+10 {
+				t.Fatalf("offset %d: backlog age=%v, want about %v", pos, got, want)
+			}
+		}
+	}
+	seedRecordsAt(t, s, "metrics", 1, time.Now().Add(time.Hour).UnixMilli(), 0)
+	if got := gaugeValue(t, m, "colca_cursor_next_record_age_seconds", labels); got != 0 {
+		t.Fatalf("future sample timestamp produced invalid age: %v", got)
+	}
+}
+
 // gaugeValue finds one family and label set in a scrape. The collector emits
 // many metrics per Collect, so testutil.ToFloat64 does not apply.
 func gaugeValue(t *testing.T, m *Metrics, family string, labels map[string]string) float64 {

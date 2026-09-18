@@ -445,6 +445,9 @@ func (e *Entry) IsAdmin() bool {
 	return false
 }
 
+// IsLocal identifies services inside this deployment trust boundary.
+func (e *Entry) IsLocal() bool { return e != nil && e.Kind == KindLocal }
+
 // MayPublishAudit reports whether the entry may publish _AuditEvent. Only
 // local services may; no grant gives it to anyone else.
 func (e *Entry) MayPublishAudit() bool { return e != nil && e.Kind == KindLocal }
