@@ -161,6 +161,118 @@ func TestEditCommandCommitsStateAndDurableReplayReceiptTogether(t *testing.T) {
 	}
 }
 
+// A _CmdEdit an operator sends through their param grant writes the constant
+// as the node in node-local coordinates (EntityStore.PublishBatch is the
+// only way an executor writes), but the commanding operator must still be
+// recoverable from the result: /kv projects this same record, and Unity
+// needs to show "set by <operator> at <time>" for an operator-input
+// constant. written_by names the node — it is still what physically
+// appended the record, exactly as an _Ack already does for the same
+// command — while actor_id/actor_label/actor_kind name the operator.
+func TestCmdEditByAHumanAttributesTheResultingWriteToThatHuman(t *testing.T) {
+	e := execEngine(t, nil)
+	if _, err := e.IngestAdmin(
+		"colca/v1/_SystemElement/n-edge1/line1",
+		[]byte(`{"id":"el-line1","name":"Line 1"}`),
+	); err != nil {
+		t.Fatal(err)
+	}
+	constant, err := e.IngestAdmin(
+		"colca/v1/_Constant/n-edge1/line1/sta1/operator/sandoffMm",
+		[]byte(`{"id":"const-sandoff","name":"Sandoff","data_type":"float64","value":5.0,"system_element_id":"el-line1"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit := uns.NewEditExec(e.EntityStore(), nil)
+	edit.SetScope(e.Scope())
+	e.SetExecutor(edit)
+
+	payload, err := json.Marshal(map[string]any{
+		"operation_id":   "operation-param",
+		"correlation_id": "correlation-param",
+		"expires_at":     futureMS(),
+		"expected_versions": map[string]string{
+			"constant:const-sandoff": fmt.Sprint(constant.Offset),
+		},
+		"intent": map[string]any{
+			"type":       "update",
+			"entity":     map[string]any{"kind": "constant", "id": "const-sandoff"},
+			"attributes": map[string]any{"value": 6.5},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	operator, err := uns.TokenEntry("kc-sub-anna", []string{"cmd:el-line1/#:param"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := e.IngestHumanAttributed(operator, "anna@example.com", "colca/v1/_CmdEdit/n-edge1/apply", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Command == nil || result.Command.ResultCode != 200 || len(result.Command.StateWrites) != 1 {
+		t.Fatalf("operator param edit = %+v", result.Command)
+	}
+
+	got := mustKVScan(t, e.Store(), "line1/sta1/operator/")
+	if len(got) != 1 {
+		t.Fatalf("kv entries = %+v, want 1", got)
+	}
+	if entry := got[0]; entry.WrittenBy != "n-edge1" {
+		t.Fatalf("written_by = %q, want the node itself", entry.WrittenBy)
+	} else if entry.ActorID != "kc-sub-anna" || entry.ActorLabel != "anna@example.com" || entry.ActorKind != "human" {
+		t.Fatalf("actor = %+v, want the operator who set it", entry)
+	}
+}
+
+// A service's own _CmdConfigure write is attributed to that service the same
+// way: node-written, actor-attributed to the caller that commanded it.
+func TestCmdConfigureByAServiceAttributesTheResultingWriteToThatService(t *testing.T) {
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	ids := fakeIDs{entries: map[string]*uns.Entry{
+		"svc-plc": {ULID: "svc-plc", Kind: uns.KindExternal, Grants: []string{"cmd:#:configure"}},
+	}}
+	e := New(s, &config.Config{ULID: "n-edge1"}, ids, nil, nil, nil)
+	cfg := uns.NewConfigExec(e.EntityStore(), nil, e.Elements(), nil, func() string { return "sig-new" }, nil)
+	e.SetExecutor(cfg)
+
+	payload, err := json.Marshal(map[string]any{
+		"correlation_id": "correlation-svc",
+		"expires_at":     futureMS(),
+		"constants": []map[string]any{{
+			"path":     "panel/target",
+			"constant": map[string]any{"id": "const-panel", "name": "Panel", "data_type": "float64", "value": 1.0},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := e.IngestClient("svc-plc", "colca/v1/_CmdConfigure/n-edge1/constant/upsert", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Command == nil || result.Command.ResultCode != 200 || len(result.Command.StateWrites) != 1 {
+		t.Fatalf("service configure = %+v", result.Command)
+	}
+
+	got := mustKVScan(t, e.Store(), "panel/")
+	if len(got) != 1 {
+		t.Fatalf("kv entries = %+v, want 1", got)
+	}
+	if entry := got[0]; entry.WrittenBy != "n-edge1" {
+		t.Fatalf("written_by = %q, want the node itself", entry.WrittenBy)
+	} else if entry.ActorID != "svc-plc" || entry.ActorKind != "service" {
+		t.Fatalf("actor = %+v, want the commanding service", entry)
+	}
+}
+
 // A command for a machine passes through untouched: no execution and no ack,
 // which would answer on the machine's behalf.
 func TestUnclaimedContractsAreLeftAlone(t *testing.T) {

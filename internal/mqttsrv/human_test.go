@@ -147,7 +147,7 @@ func installPersonalAccessToken(
 		t.Fatal(err)
 	}
 	topic := "colca/v1/" + uns.PersonalAccessTokenContract + "/n1/" + id
-	if _, err := w.srv.hook.engine().EntityStore().PublishBatch([]uns.StateRecord{{
+	if _, err := w.srv.hook.engine().EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{{
 		Topic: topic, Payload: payload,
 	}}); err != nil {
 		t.Fatalf("publish PAT definition: %v", err)
@@ -316,7 +316,7 @@ func TestHumanPATRevocationAndScopeRemovalKickLiveSessions(t *testing.T) {
 	}
 	defer downscoped.Disconnect(100)
 
-	if _, err := w.srv.hook.engine().EntityStore().PublishBatch([]uns.StateRecord{{
+	if _, err := w.srv.hook.engine().EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{{
 		Topic: revokedTopic,
 	}}); err != nil {
 		t.Fatalf("publish PAT tombstone: %v", err)

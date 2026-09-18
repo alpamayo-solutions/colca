@@ -2477,7 +2477,7 @@ func TestTheLocalDoorNeverFallsBackFromABadBearerToTheServiceName(t *testing.T) 
 // reason. Without one it is refused; with one the record carries the groups.
 func TestTheLocalDoorRequiresAReasonToAttestAPersonsGroups(t *testing.T) {
 	h := newLocalHandler(t)
-	if _, err := h.eng.EntityStore().PublishBatch([]uns.StateRecord{{
+	if _, err := h.eng.EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{{
 		Topic: "colca/v1/_Group/n-test/operators", Payload: []byte(`{"id":"operators","grants":["cmd:#:configure"]}`),
 	}}); err != nil {
 		t.Fatal(err)
@@ -2522,7 +2522,7 @@ func installPersonalAccessToken(t *testing.T, h *localAPI, ver *tokenauth.Verifi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.eng.EntityStore().PublishBatch([]uns.StateRecord{{
+	if _, err := h.eng.EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{{
 		Topic: "colca/v1/" + uns.PersonalAccessTokenContract + "/n-test/" + id, Payload: payload,
 	}}); err != nil {
 		t.Fatalf("publish PAT definition: %v", err)

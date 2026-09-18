@@ -80,7 +80,10 @@ and metadata of an existing constant — an operator input such as a station's
 sandoff or grit — never creating or deleting a constant, never its other
 attributes, and never a signal's binding. Both are scoped by the grant's
 element exactly as `configure` is: `cmd:<element>/#:param` reaches only the
-constants under that element.
+constants under that element. The write itself is still made by the node —
+`_CmdEdit` never lets a person publish state directly — but it carries the
+operator's own verified identity as `actor_id`/`actor_label`/`actor_kind`, so
+`/kv` can show who set it (see [http-api.md](http-api.md)).
 
 `#` in place of an element means the whole node. A grant on an element the node
 has never heard of covers nothing, and a node that has never reached its parent

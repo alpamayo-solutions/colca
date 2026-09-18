@@ -19,11 +19,19 @@ type EntityStore interface {
 	// becomes KV state, or none does. The returned positions go into the ack.
 	// It is the only way an executor writes state, and it refuses anything that
 	// is not command-authored state; annotations go through PublishEvent.
-	PublishBatch(records []StateRecord) ([]StateWrite, error)
+	//
+	// ctx carries the executing command's own attribution (its zero value
+	// outside command execution, such as the lifecycle trigger's autobind).
+	// The node stays the write's written_by — it is still what physically
+	// appends the record — but a non-empty ctx.ActorID/ActorLabel/ActorKind
+	// travels onto the write's actor_* fields, so a consumer such as /kv can
+	// show who commanded it, not only that the node wrote it.
+	PublishBatch(ctx CommandContext, records []StateRecord) ([]StateWrite, error)
 	// PublishEvent commits one event record authored by a command executor, for
 	// classes that are never KV-projected (uns.IsCommandAuthoredEvent). An event
 	// has no current value to compare, so there is nothing to batch it with.
-	PublishEvent(record StateRecord) (StateWrite, error)
+	// ctx carries attribution exactly as PublishBatch's does.
+	PublishEvent(ctx CommandContext, record StateRecord) (StateWrite, error)
 	// NodeID is the identity this node publishes under.
 	NodeID() string
 }
@@ -60,8 +68,18 @@ type StateWrite struct {
 // an ancestor, from the group ids recorded with it, resolved against this
 // node's _Group definitions. Actor is nil only for the admin door. Executors
 // authorize against Actor, never against whoever carried the command.
+//
+// ActorID, ActorLabel and ActorKind are the same command's door-verified
+// attribution, carried separately from Actor: a downlinked command's Actor is
+// only ever reconstituted from attested group ids, which cannot recover the
+// original display label, while these three travel with the record verbatim.
+// An executor's entity writes made on this command's behalf pass them to
+// EntityStore.PublishBatch/PublishEvent so the write is attributed to the
+// commanding actor, not left to read as the node's own. Empty at the admin
+// door and for any call outside command execution.
 type CommandContext struct {
-	Actor *Entry
+	Actor                          *Entry
+	ActorID, ActorLabel, ActorKind string
 }
 
 // EntryRef is the part of a registry entry the domain needs to compute where

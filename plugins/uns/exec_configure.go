@@ -93,7 +93,7 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 				return // already bound: a republish, not a new connector
 			}
 		}
-		c.bindCatalogue(mount, element, payload)
+		c.bindCatalogue(CommandContext{}, mount, element, payload)
 		return
 	}
 	var grown catalogue
@@ -109,7 +109,7 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	if err != nil {
 		return
 	}
-	c.bindCatalogue(mount, element, encoded)
+	c.bindCatalogue(CommandContext{}, mount, element, encoded)
 }
 
 // owningEntry finds the enrolled identity whose computed catalogue topic is
@@ -274,45 +274,45 @@ func (c *ConfigExec) Execute(ctx CommandContext, contract, verb string, payload 
 // its records in one PublishBatch, and the returned writes (stream, offset,
 // topic) go into the command's ack.
 func (c *ConfigExec) ExecuteWithWrites(
-	_ CommandContext,
+	ctx CommandContext,
 	contract, verb string,
 	payload []byte,
 ) (int, string, string, []StateWrite) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.execute(contract, verb, payload)
+	return c.execute(ctx, contract, verb, payload)
 }
 
-func (c *ConfigExec) execute(contract, verb string, payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) execute(ctx CommandContext, contract, verb string, payload []byte) (int, string, string, []StateWrite) {
 	switch verb {
 	case "signal/upsert":
-		return c.upsert(payload)
+		return c.upsert(ctx, payload)
 	case "signal/delete":
-		return c.delete(payload)
+		return c.delete(ctx, payload)
 	case "signal/autobind":
-		return c.autobind(payload)
+		return c.autobind(ctx, payload)
 	case "constant/upsert":
-		return c.constantUpsert(payload)
+		return c.constantUpsert(ctx, payload)
 	case "constant/delete":
-		return c.constantDelete(payload)
+		return c.constantDelete(ctx, payload)
 	case "element/upsert":
-		return c.elementUpsert(payload)
+		return c.elementUpsert(ctx, payload)
 	case "element/author":
-		return c.elementAuthor(payload)
+		return c.elementAuthor(ctx, payload)
 	case "element/delete":
-		return c.elementDelete(payload)
+		return c.elementDelete(ctx, payload)
 	case "entity/upsert":
-		return c.entityUpsert(payload)
+		return c.entityUpsert(ctx, payload)
 	case "entity/delete":
-		return c.entityDelete(payload)
+		return c.entityDelete(ctx, payload)
 	case "definition/upsert":
-		return c.definitionUpsert(payload)
+		return c.definitionUpsert(ctx, payload)
 	case "definition/delete":
-		return c.definitionDelete(payload)
+		return c.definitionDelete(ctx, payload)
 	case "resource/upsert":
-		return c.resourceUpsert(payload)
+		return c.resourceUpsert(ctx, payload)
 	case "resource/delete":
-		return c.resourceDelete(payload)
+		return c.resourceDelete(ctx, payload)
 	default:
 		return 422, fmt.Sprintf("unknown configure verb %q", verb), "invalid", nil
 	}
@@ -321,11 +321,11 @@ func (c *ConfigExec) execute(contract, verb string, payload []byte) (int, string
 // commit writes a verb's record set as one transition: every record is stored
 // or none is, so a refused record never leaves the node half configured. An
 // empty set is a successful no-op.
-func (c *ConfigExec) commit(records []StateRecord) ([]StateWrite, error) {
+func (c *ConfigExec) commit(ctx CommandContext, records []StateRecord) ([]StateWrite, error) {
 	if len(records) == 0 {
 		return nil, nil
 	}
-	return c.store.PublishBatch(records)
+	return c.store.PublishBatch(ctx, records)
 }
 
 // positionsByID maps each id of a contract to the path holding it at this
@@ -361,7 +361,7 @@ func (claims *idClaims) claim(id, path string) (held string, ok bool) {
 	return "", true
 }
 
-func (c *ConfigExec) constantUpsert(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) constantUpsert(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body constantUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "constant/upsert: unreadable payload: " + err.Error(), "invalid", nil
@@ -407,14 +407,14 @@ func (c *ConfigExec) constantUpsert(payload []byte) (int, string, string, []Stat
 		records = append(records, StateRecord{Topic: topic, Payload: ref.Constant})
 	}
 
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 422, "constant/upsert: rejected: " + err.Error(), "invalid", nil
 	}
 	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
 }
 
-func (c *ConfigExec) constantDelete(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) constantDelete(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body deleteBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "constant/delete: unreadable payload: " + err.Error(), "invalid", nil
@@ -442,7 +442,7 @@ func (c *ConfigExec) constantDelete(payload []byte) (int, string, string, []Stat
 	if len(missing) > 0 {
 		return 404, "constant/delete: no constant at " + strings.Join(missing, ", "), "invalid", nil
 	}
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 500, "constant/delete: failed: " + err.Error(), "error", nil
 	}
@@ -464,7 +464,7 @@ func (c *ConfigExec) resourceTopic(path string) string {
 	return Prefix() + "_Resource/" + c.store.NodeID() + "/" + path
 }
 
-func (c *ConfigExec) resourceUpsert(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) resourceUpsert(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body resourceUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "resource/upsert: unreadable payload: " + err.Error(), "invalid", nil
@@ -513,7 +513,7 @@ func (c *ConfigExec) resourceUpsert(payload []byte) (int, string, string, []Stat
 		records = append(records, StateRecord{Topic: topic, Payload: ref.Resource})
 	}
 
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 422, "resource/upsert: rejected: " + err.Error(), "invalid", nil
 	}
@@ -537,7 +537,7 @@ func (c *ConfigExec) ensureBlob(sha string) error {
 	return nil
 }
 
-func (c *ConfigExec) resourceDelete(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) resourceDelete(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body deleteBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "resource/delete: unreadable payload: " + err.Error(), "invalid", nil
@@ -567,7 +567,7 @@ func (c *ConfigExec) resourceDelete(payload []byte) (int, string, string, []Stat
 	}
 	// The blob stays; the sweep removes it once nothing references it, which
 	// keeps content shared by two resources safe.
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 500, "resource/delete: failed: " + err.Error(), "error", nil
 	}
@@ -594,7 +594,7 @@ func validatePositionPath(path string) error {
 	return nil
 }
 
-func (c *ConfigExec) entityUpsert(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) entityUpsert(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body entityUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "entity/upsert: unreadable payload: " + err.Error(), "invalid", nil
@@ -623,7 +623,7 @@ func (c *ConfigExec) entityUpsert(payload []byte) (int, string, string, []StateW
 			Payload: entity,
 		})
 	}
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 422, "entity/upsert: rejected: " + err.Error(), "invalid", nil
 	}
@@ -668,7 +668,7 @@ func (c *ConfigExec) keepOwnPosition(entity []byte) []byte {
 	return merged
 }
 
-func (c *ConfigExec) entityDelete(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) entityDelete(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body entityDeleteBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "entity/delete: unreadable payload: " + err.Error(), "invalid", nil
@@ -706,7 +706,7 @@ func (c *ConfigExec) entityDelete(payload []byte) (int, string, string, []StateW
 	if len(missing) > 0 {
 		return 404, "entity/delete: no entity at " + strings.Join(missing, ", "), "invalid", nil
 	}
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 500, "entity/delete: failed: " + err.Error(), "error", nil
 	}
@@ -759,7 +759,7 @@ func (c *ConfigExec) commandEntityTopic(contract, id string) string {
 	return Prefix() + contract + "/" + c.store.NodeID() + "/_colca/" + leaf + "/" + id
 }
 
-func (c *ConfigExec) upsert(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) upsert(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body upsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "signal/upsert: unreadable payload: " + err.Error(), "invalid", nil
@@ -790,7 +790,7 @@ func (c *ConfigExec) upsert(payload []byte) (int, string, string, []StateWrite) 
 		}
 		records = append(records, StateRecord{Topic: c.signalTopic(ref.Path), Payload: payload})
 	}
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		// Nothing was written; the error names the refused record.
 		return 422, "signal/upsert: rejected: " + err.Error(), "invalid", nil
@@ -832,7 +832,7 @@ func (c *ConfigExec) preserveBinding(path string, incoming json.RawMessage) (jso
 	return json.Marshal(next)
 }
 
-func (c *ConfigExec) delete(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) delete(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body deleteBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "signal/delete: unreadable payload: " + err.Error(), "invalid", nil
@@ -859,7 +859,7 @@ func (c *ConfigExec) delete(payload []byte) (int, string, string, []StateWrite) 
 	if len(missing) > 0 {
 		return 404, "signal/delete: no signal at " + strings.Join(missing, ", "), "invalid", nil
 	}
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 500, "signal/delete: failed: " + err.Error(), "error", nil
 	}
@@ -869,7 +869,7 @@ func (c *ConfigExec) delete(payload []byte) (int, string, string, []StateWrite) 
 // autobind creates one signal per unbound tag of a connector's catalogue. It
 // is idempotent: existing bindings are skipped, never overwritten, so a person,
 // a replay or the lifecycle trigger can all run it.
-func (c *ConfigExec) autobind(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) autobind(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body autobindBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "signal/autobind: unreadable payload: " + err.Error(), "invalid", nil
@@ -911,7 +911,7 @@ func (c *ConfigExec) autobind(payload []byte) (int, string, string, []StateWrite
 		}
 		under, at = body.Under, id
 	}
-	return c.bindCatalogue(under, at, raw)
+	return c.bindCatalogue(ctx, under, at, raw)
 }
 
 // elementAt returns the element this node holds at a local path, if any.
@@ -932,7 +932,7 @@ func (c *ConfigExec) elementAt(path string) (string, bool) {
 // calls it directly and registry.Manager.Register reaches it via
 // "element/author". It calls elementUpsert directly because c.mu is already
 // held and not reentrant. Each segment commits so the next one can see it.
-func (c *ConfigExec) authorElementAt(path string) (string, error) {
+func (c *ConfigExec) authorElementAt(ctx CommandContext, path string) (string, error) {
 	var local, leaf string
 	for _, seg := range strings.Split(path, "/") {
 		if seg == "" {
@@ -955,7 +955,7 @@ func (c *ConfigExec) authorElementAt(path string) (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("author element at %s: %w", local, err)
 			}
-			code, msg, _, _ := c.elementUpsert(payload)
+			code, msg, _, _ := c.elementUpsert(ctx, payload)
 			if code != 200 {
 				return "", fmt.Errorf("author element at %s: %s", local, msg)
 			}
@@ -972,7 +972,7 @@ type elementAuthorBody struct {
 
 // elementAuthor exposes authorElementAt as a _CmdConfigure verb for
 // registry.Manager.Register. The message carries the leaf element's id.
-func (c *ConfigExec) elementAuthor(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) elementAuthor(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body elementAuthorBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "element/author: unreadable payload: " + err.Error(), "invalid", nil
@@ -980,7 +980,7 @@ func (c *ConfigExec) elementAuthor(payload []byte) (int, string, string, []State
 	if body.Path == "" {
 		return 422, "element/author: no path given", "invalid", nil
 	}
-	id, err := c.authorElementAt(body.Path)
+	id, err := c.authorElementAt(ctx, body.Path)
 	if err != nil {
 		return 500, "element/author: " + err.Error(), "error", nil
 	}
@@ -992,7 +992,7 @@ func (c *ConfigExec) elementAuthor(payload []byte) (int, string, string, []State
 // trigger both use it, and it is idempotent. Bound tags and taken paths are
 // tracked while the set is composed. A path that holds an unbound declared
 // signal gets that signal bound instead of a new "<name>-2" beside it.
-func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, raw []byte) (int, string, string, []StateWrite) {
 	var cat catalogue
 	if err := json.Unmarshal(raw, &cat); err != nil {
 		return 422, "signal/autobind: unreadable catalogue: " + err.Error(), "invalid", nil
@@ -1016,7 +1016,7 @@ func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, stri
 			// The lock is already held, so call authorElementAt directly.
 			id, ok := c.elementAt(tag.Meta.Element)
 			if !ok {
-				authored, err := c.authorElementAt(tag.Meta.Element)
+				authored, err := c.authorElementAt(ctx, tag.Meta.Element)
 				if err != nil {
 					return 500, "signal/autobind: " + err.Error(), "error", nil
 				}
@@ -1079,7 +1079,7 @@ func (c *ConfigExec) bindCatalogue(under, element string, raw []byte) (int, stri
 		bindings.bind(tag.ID, id)
 		taken[path] = true
 	}
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 422, "signal/autobind: rejected: " + err.Error(), "invalid", nil
 	}
@@ -1188,7 +1188,7 @@ func uniquePath(leaf, under string, taken map[string]bool) string {
 // elementUpsert writes elements at their positions. The path is the position,
 // so two elements cannot share one; the owning node checks this because only
 // it authors the parent.
-func (c *ConfigExec) elementUpsert(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) elementUpsert(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body elementUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "element/upsert: unreadable payload: " + err.Error(), "invalid", nil
@@ -1238,7 +1238,7 @@ func (c *ConfigExec) elementUpsert(payload []byte) (int, string, string, []State
 		claimed[topic] = incoming.ID
 		records = append(records, StateRecord{Topic: topic, Payload: ref.Element})
 	}
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 422, "element/upsert: rejected: " + err.Error(), "invalid", nil
 	}
@@ -1247,7 +1247,7 @@ func (c *ConfigExec) elementUpsert(payload []byte) (int, string, string, []State
 
 // elementDelete retires positions, but not while child elements or bound
 // identities still stand on them. The refusal names what is in the way.
-func (c *ConfigExec) elementDelete(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) elementDelete(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body deleteBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "element/delete: unreadable payload: " + err.Error(), "invalid", nil
@@ -1302,7 +1302,7 @@ func (c *ConfigExec) elementDelete(payload []byte) (int, string, string, []State
 		}
 		records = append(records, StateRecord{Topic: p.topic})
 	}
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 500, "element/delete: failed: " + err.Error(), "error", nil
 	}
@@ -1322,7 +1322,7 @@ func (c *ConfigExec) boundIdentities(raw []byte) []string {
 // definitionUpsert writes definitions under this node's identity. Definitions
 // descend to every node below; their id is their address, they have no
 // position.
-func (c *ConfigExec) definitionUpsert(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) definitionUpsert(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body definitionUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "definition/upsert: unreadable payload: " + err.Error(), "invalid", nil
@@ -1355,7 +1355,7 @@ func (c *ConfigExec) definitionUpsert(payload []byte) (int, string, string, []St
 			Payload: ref.Definition,
 		})
 	}
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 422, "definition/upsert: rejected: " + err.Error(), "invalid", nil
 	}
@@ -1364,7 +1364,7 @@ func (c *ConfigExec) definitionUpsert(payload []byte) (int, string, string, []St
 
 // definitionDelete retracts definitions with a tombstone, which propagates down
 // the same way the definition itself did.
-func (c *ConfigExec) definitionDelete(payload []byte) (int, string, string, []StateWrite) {
+func (c *ConfigExec) definitionDelete(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body definitionDeleteBody
 	if err := json.Unmarshal(payload, &body); err != nil {
 		return 422, "definition/delete: unreadable payload: " + err.Error(), "invalid", nil
@@ -1397,7 +1397,7 @@ func (c *ConfigExec) definitionDelete(payload []byte) (int, string, string, []St
 	if len(missing) > 0 {
 		return 404, "definition/delete: no definition at " + strings.Join(missing, ", "), "invalid", nil
 	}
-	writes, err := c.commit(records)
+	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 500, "definition/delete: failed: " + err.Error(), "error", nil
 	}

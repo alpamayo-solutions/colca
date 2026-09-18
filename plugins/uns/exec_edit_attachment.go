@@ -53,6 +53,7 @@ func nodeAttachmentAlreadyApplied(
 }
 
 func (w *EditExec) rememberAttachmentReplay(
+	ctx CommandContext,
 	operationID string,
 	digest [sha256.Size]byte,
 	intent editIntent,
@@ -64,7 +65,7 @@ func (w *EditExec) rememberAttachmentReplay(
 	}
 	message := fmt.Sprintf("node attachment %s already applied", intent.Action)
 	if err := w.persistStandaloneReceipt(
-		operationID, digest, message, "ok", []StateWrite{write},
+		ctx, operationID, digest, message, "ok", []StateWrite{write},
 	); err != nil {
 		return 500, "edit receipt failed: " + err.Error(), "error", nil
 	}
@@ -179,7 +180,7 @@ func (w *EditExec) executeNodeAttachment(
 	}
 	write := StateWrite{Stream: "entities", Offset: offset, Topic: attachment.Record.Topic}
 	if err := w.persistStandaloneReceipt(
-		operationID, digest, message, "ok", []StateWrite{write},
+		ctx, operationID, digest, message, "ok", []StateWrite{write},
 	); err != nil {
 		return 500, "edit receipt failed: " + err.Error(), "error", nil
 	}

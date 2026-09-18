@@ -294,6 +294,39 @@ func TestAnOperatorWithParamSetsOnlyAConstantsValueAndMetadata(t *testing.T) {
 	}
 }
 
+// A param grant's constant write carries the operator's own attribution
+// (ActorID/ActorLabel/ActorKind) to PublishBatch, not just their authorizing
+// Actor: the engine's (*entityStore).PublishBatch reads these onto the
+// write's actor_* fields, which is how an operator-set constant ends up
+// attributed to them on /kv rather than to the node alone.
+func TestParamSetForwardsTheOperatorsAttributionToTheStore(t *testing.T) {
+	f, exec, versions := twoLines(t)
+	versions["constant:const-sandoff-1"] = seedEditEntity(t, f, "_Constant", "line1/sta1/operator/sandoffMm", map[string]any{
+		"id": "const-sandoff-1", "name": "Sandoff", "data_type": "float64", "value": 5.0,
+		"system_element_id": "el-line1",
+	})
+	operator := CommandContext{
+		Actor:      &Entry{ULID: "kc-sub-op", Kind: KindHuman, Grants: []string{"cmd:el-line1/#:param"}},
+		ActorID:    "kc-sub-op",
+		ActorLabel: "op@example.com",
+		ActorKind:  "human",
+	}
+	setValue := editBody(t, "op-attrib", map[string]uint64{
+		"constant:const-sandoff-1": versions["constant:const-sandoff-1"],
+	}, map[string]any{
+		"type": "update", "entity": map[string]any{"kind": "constant", "id": "const-sandoff-1"},
+		"attributes": map[string]any{"value": 6.5},
+	})
+
+	code, message, _, writes := exec.ExecuteWithWrites(operator, "_CmdEdit", "apply", setValue)
+	if code != 200 || len(writes) != 1 {
+		t.Fatalf("operator param set = %d %q writes=%d", code, message, len(writes))
+	}
+	if got := f.lastBatchCtx; got.ActorID != "kc-sub-op" || got.ActorLabel != "op@example.com" || got.ActorKind != "human" {
+		t.Fatalf("PublishBatch ctx = %+v, want the operator's own attribution", got)
+	}
+}
+
 // The source rule exists in the api and here; the shared vectors keep them
 // equal.
 func TestAnnotationSourceMatchesTheGoldenVectors(t *testing.T) {

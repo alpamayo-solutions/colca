@@ -40,7 +40,7 @@ func TestExecutorReceivesTheActingEntry(t *testing.T) {
 
 	// Downlink: this node holds an `operators` group definition of its own;
 	// the record carries anna's sub and group ids, never her grants.
-	if _, err := e.EntityStore().PublishBatch([]uns.StateRecord{{
+	if _, err := e.EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{{
 		Topic: "colca/v1/_Group/n-edge1/operators", Payload: []byte(`{"id":"operators","grants":["cmd:#:configure"]}`),
 	}}); err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestALocalServiceAttestingAPersonIsJudgedAsThatPerson(t *testing.T) {
 	e := newEngineWithIDs(t, ids)
 	rec := &recordingExec{contract: "_CmdEdit"}
 	e.SetExecutor(Executors(rec))
-	if _, err := e.EntityStore().PublishBatch([]uns.StateRecord{{
+	if _, err := e.EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{{
 		Topic: "colca/v1/_Group/n-edge1/operators", Payload: []byte(`{"id":"operators","grants":["cmd:#:configure"]}`),
 	}}); err != nil {
 		t.Fatal(err)
