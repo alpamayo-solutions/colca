@@ -257,4 +257,55 @@ if narrating; then
   echo
 fi
 
-echo "SMOKE PASSED ✔ — full 3-level topology works: uplink, mounts, cmd/ack, offline catch-up"
+echo "── 4) standing alarm: retained state at the edge, visible at the top, gone when retired"
+ALARM_PATH="m1/beltWorn"
+ALARM_TOPIC="colca/v1/_AlarmState/n-edge1/$ALARM_PATH"
+place "$E1" n-edge1 "$ALARM_PATH" >/dev/null
+say "   an alarm is an element in the tree, so its grants and its zone are the element's."
+say "   _AlarmState is an entity: one record per alarm, retained, overwritten by the next"
+say "   transition — unlike _AlarmStateChange, which is appended to the alarms stream."
+curl -skf -H "$TOK" -H "Content-Type: application/json" -X POST "$E1/publish" \
+  -d "{\"topic\":\"$ALARM_TOPIC\",\"payload\":{\"alarm_id\":\"01JAAAAAAAAAAAAAAAAAAAAAAA\",\"status\":\"firing\",\"severity\":\"critical\",\"since\":$(date +%s),\"signal_id\":\"01JBBBBBBBBBBBBBBBBBBBBBBB\",\"reason\":\"threshold\",\"value\":82.4,\"op\":\"gt\",\"threshold\":80}}" \
+  >/dev/null || fail "publishing the standing alarm at edge1 failed"
+for probe in "$E1|$ALARM_PATH|edge1" "$G|site1/edge1/$ALARM_PATH|global"; do
+  url=${probe%%|*}
+  rest=${probe#*|}
+  path=${rest%%|*}
+  where=${rest##*|}
+  ok=0
+  n=""
+  for _ in $(seq 1 60); do
+    n=$(json_int "$url/kv?prefix=$path&contract=_AlarmState" 'len(d["entries"])')
+    if [ "$n" = "1" ]; then
+      ok=1
+      echo "   OK: the alarm stands in $where's KV at $path"
+      break
+    fi
+    sleep 1
+  done
+  [ "$ok" = 1 ] || fail "standing alarm never reached $where at $path (last entry count: '${n:-none}')"
+done
+
+say "   retiring it: a body without a payload. A JSON null is a value; the schema refuses it."
+curl -skf -H "$TOK" -H "Content-Type: application/json" -X POST "$E1/publish" \
+  -d "{\"topic\":\"$ALARM_TOPIC\"}" >/dev/null || fail "retiring the standing alarm failed"
+for probe in "$E1|$ALARM_PATH|edge1" "$G|site1/edge1/$ALARM_PATH|global"; do
+  url=${probe%%|*}
+  rest=${probe#*|}
+  path=${rest%%|*}
+  where=${rest##*|}
+  ok=0
+  n=""
+  for _ in $(seq 1 60); do
+    n=$(json_int "$url/kv?prefix=$path&contract=_AlarmState" 'len(d["entries"])')
+    if [ "$n" = "0" ]; then
+      ok=1
+      echo "   OK: it is gone from $where's KV — what is not there is not standing"
+      break
+    fi
+    sleep 1
+  done
+  [ "$ok" = 1 ] || fail "the tombstone never took effect at $where (last entry count: '${n:-none}')"
+done
+
+echo "SMOKE PASSED ✔ — full 3-level topology works: uplink, mounts, cmd/ack, offline catch-up, standing alarms"

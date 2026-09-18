@@ -45,6 +45,10 @@ stands is retired with a tombstone, the empty payload that retires any entity
 path: the key-value entry is deleted and the retained message is cleared. What
 is not in the key-value view is not standing.
 
+Over MQTT that is a zero-length message. Over `POST /publish` it is a body that
+leaves `payload` out altogether — a JSON `null` is a value, and the schema
+refuses it.
+
 That is also why the standing alarm has to be one record per definition. A
 transition cannot be state — as a state class, every transition would leave a
 key-value entry at a path nothing ever writes again, on every ancestor node
