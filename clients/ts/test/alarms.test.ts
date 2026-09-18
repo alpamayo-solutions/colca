@@ -157,8 +157,8 @@ describe("acknowledging", () => {
     const sent = client.sent[0];
     expect(sent.topic).toBe(`${ROOT}/v1/_CmdOperate/${NODE}/${GRIT}/ackAlarm`);
     // Who quit it is the node's word; the client says only why.
-    expect(Object.keys(sent.body).sort()).toEqual(["correlation_id", "expires_at", "note"]);
-    expect(sent.body.note).toBe("Korn getauscht");
+    expect(Object.keys(sent.body).sort()).toEqual(["command", "correlation_id", "expires_at"]);
+    expect(sent.body.command).toEqual({ note: "Korn getauscht" });
     expect(sent.body.expires_at).toBe(Date.now() + 30_000);
 
     client.deliver(ACK, { correlation_id: sent.body.correlation_id, result_code: 200, message: "quit" });
@@ -201,7 +201,7 @@ describe("silencing", () => {
     await settle();
 
     expect(client.sent[0].topic).toBe(`${ROOT}/v1/_CmdOperate/${NODE}/${GRIT}/silenceAlarm`);
-    expect(client.sent[0].body).toMatchObject({ until: 1_700_003_600, note: "Wartung" });
+    expect(client.sent[0].body.command).toEqual({ until: 1_700_003_600, note: "Wartung" });
   });
 
   it("turns minutes into a deadline in unix seconds", async () => {
@@ -210,8 +210,7 @@ describe("silencing", () => {
     void alarms.silence(GRIT, { minutes: 30 });
     await settle();
 
-    expect(client.sent[0].body.until).toBe(Math.round(Date.now() / 1000) + 1_800);
-    expect(client.sent[0].body.note).toBeUndefined();
+    expect(client.sent[0].body.command).toEqual({ until: Math.round(Date.now() / 1000) + 1_800 });
   });
 
   it("wants one of the two", async () => {

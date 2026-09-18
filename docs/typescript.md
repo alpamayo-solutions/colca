@@ -137,8 +137,9 @@ jumps to.
 
 `acknowledge()`, `silence(path, { minutes: 30 })` and `unsilence()` are
 `_CmdOperate` commands on the alarm's own path, each waiting for its `_Ack`. The
-client sends no identity: who quit an alarm is the node's word on the record,
-and the caller adds the note. A refusal — 300 and up — throws `AlarmRefused`
+note and the deadline ride in the payload's `command` object, where the contract
+keeps a verb's arguments. The client sends no identity: who quit an alarm is the
+node's word on the record, and the caller adds the note. A refusal — 300 and up — throws `AlarmRefused`
 instead of resolving, because an acknowledgement that was swallowed is worse
 than one that was never sent.
 

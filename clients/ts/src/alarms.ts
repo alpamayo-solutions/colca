@@ -187,7 +187,7 @@ export class Alarms {
   async #operate(
     path: string,
     verb: string,
-    body: Record<string, unknown>,
+    command: Record<string, unknown>,
     timeoutMs: number | undefined,
   ): Promise<CommandAck> {
     const target = buildTopic({
@@ -196,7 +196,8 @@ export class Alarms {
       path: `${path}/${verb}`,
       root: this.#root,
     });
-    const ack = await this.#live.command(target, body, { timeoutMs: timeoutMs ?? this.#timeoutMs });
+    // A verb's arguments go in `command`, which is where the Cmd contract keeps them.
+    const ack = await this.#live.command(target, { command }, { timeoutMs: timeoutMs ?? this.#timeoutMs });
     if (ack.result_code >= 300) throw new AlarmRefused(target, ack);
     return ack;
   }
