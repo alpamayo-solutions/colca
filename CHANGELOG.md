@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/alpamayo-solutions/colca/compare/v0.2.1...v0.3.0) (2026-09-18)
+
+
+### Features
+
+* _AlarmState, the standing alarm as retained state ([#27](https://github.com/alpamayo-solutions/colca/issues/27)) ([79943d7](https://github.com/alpamayo-solutions/colca/commit/79943d7cffecb501209edb350452258817be3e30))
+
 ## [0.2.1](https://github.com/alpamayo-solutions/colca/compare/v0.2.0...v0.2.1) (2026-09-17)
 
 
