@@ -652,14 +652,29 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				denied++
 				continue
 			}
-			out = append(out, map[string]any{
+			entry := map[string]any{
 				"path":    en.Path,
 				"node_id": en.NodeID,
 				"topic":   en.Topic,
 				"payload": rawPayload(en.Payload),
 				"ts":      en.TS,
 				"offset":  en.Offset,
-			})
+			}
+			// Attribution mirrors /fetch's Record: omitted when this entry's
+			// write carried none, rather than sent as empty strings.
+			if en.WrittenBy != "" {
+				entry["written_by"] = en.WrittenBy
+			}
+			if en.ActorID != "" {
+				entry["actor_id"] = en.ActorID
+			}
+			if en.ActorLabel != "" {
+				entry["actor_label"] = en.ActorLabel
+			}
+			if en.ActorKind != "" {
+				entry["actor_kind"] = en.ActorKind
+			}
+			out = append(out, entry)
 		}
 		if denied > 0 {
 			m.ACLDeny(metrics.ACLRead)

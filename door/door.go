@@ -83,14 +83,21 @@ type FetchOptions struct {
 	SignalIDs []string
 }
 
-// KVEntry is one retained record returned by /kv.
+// KVEntry is one retained record returned by /kv. WrittenBy, ActorID,
+// ActorLabel and ActorKind are the same attribution /fetch's Record carries
+// for the record that currently holds this entry; they are omitted when the
+// write that produced it carried none.
 type KVEntry struct {
-	Path    string          `json:"path"`
-	NodeID  string          `json:"node_id"`
-	Topic   string          `json:"topic"`
-	Payload json.RawMessage `json:"payload"`
-	TS      int64           `json:"ts"`
-	Offset  int64           `json:"offset"`
+	Path       string          `json:"path"`
+	NodeID     string          `json:"node_id"`
+	Topic      string          `json:"topic"`
+	Payload    json.RawMessage `json:"payload"`
+	TS         int64           `json:"ts"`
+	Offset     int64           `json:"offset"`
+	WrittenBy  string          `json:"written_by,omitempty"`
+	ActorID    string          `json:"actor_id,omitempty"`
+	ActorLabel string          `json:"actor_label,omitempty"`
+	ActorKind  string          `json:"actor_kind,omitempty"`
 }
 
 // Self describes the registry identity resolved for a local service request.

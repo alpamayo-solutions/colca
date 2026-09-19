@@ -183,7 +183,16 @@ func (e *Engine) maybeExec(
 	var code int
 	var msg, result string
 	var writes []uns.StateWrite
-	ctx := uns.CommandContext{Actor: actor}
+	// attribution is the command record's own door-verified attribution — the
+	// same fact ack() below stamps onto this command's outcome. Carrying it
+	// into ctx lets EntityStore.PublishBatch/PublishEvent attribute an
+	// executor's entity writes to the commanding actor, not just to the node.
+	ctx := uns.CommandContext{
+		Actor:      actor,
+		ActorID:    attribution.ActorID,
+		ActorLabel: attribution.ActorLabel,
+		ActorKind:  attribution.ActorKind,
+	}
 	if writer, ok := e.exec.(stateWritingCommandExecutor); ok {
 		code, msg, result, writes = writer.ExecuteWithWrites(ctx, p.Contract, verb, payload)
 	} else {

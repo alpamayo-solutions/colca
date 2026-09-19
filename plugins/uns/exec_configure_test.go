@@ -19,6 +19,11 @@ type fakeStore struct {
 	batchCalls    int
 	// eventCalls counts PublishEvent calls, the path annotation records take.
 	eventCalls int
+	// lastBatchCtx and lastEventCtx are the CommandContext the most recent
+	// PublishBatch/PublishEvent call carried, so a test can assert an
+	// executor forwarded the commanding actor's attribution onward.
+	lastBatchCtx CommandContext
+	lastEventCtx CommandContext
 }
 
 func newStore(node string) *fakeStore {
@@ -93,7 +98,8 @@ func (f *fakeStore) put(topic string, payload []byte) (StateWrite, error) {
 
 // PublishBatch mirrors the engine's commit: every record is validated before
 // any is applied, and a refusal names the refused record.
-func (f *fakeStore) PublishBatch(records []StateRecord) ([]StateWrite, error) {
+func (f *fakeStore) PublishBatch(ctx CommandContext, records []StateRecord) ([]StateWrite, error) {
+	f.lastBatchCtx = ctx
 	for i, record := range records {
 		if msg, bad := f.fail[record.Topic]; bad {
 			return nil, errString(fmt.Sprintf("state batch record %d (%s): %s", i, record.Topic, msg))
@@ -114,7 +120,8 @@ func (f *fakeStore) PublishBatch(records []StateRecord) ([]StateWrite, error) {
 // PublishEvent mirrors the engine's event door: one record, never written to
 // f.records, because events are never KV-projected. A KVGet miss after it is
 // the real behaviour, not a quirk of the fake.
-func (f *fakeStore) PublishEvent(record StateRecord) (StateWrite, error) {
+func (f *fakeStore) PublishEvent(ctx CommandContext, record StateRecord) (StateWrite, error) {
+	f.lastEventCtx = ctx
 	if msg, bad := f.fail[record.Topic]; bad {
 		return StateWrite{}, errString(msg)
 	}
@@ -856,6 +863,43 @@ func TestAutobindMakesTagNamesAddressable(t *testing.T) {
 		if !bound[id] {
 			t.Fatalf("tag %s was left unbound, so its name is reachable from no signal", id)
 		}
+	}
+}
+
+// A verb a command executes carries the command's own attribution to
+// PublishBatch, so the entity store can attribute the write to the
+// commanding actor rather than just the node (see (*entityStore).PublishBatch
+// in the core adapter). The lifecycle trigger runs the same write path with
+// no command behind it and must carry none, even right after a command left
+// the executor's fakeStore holding one — there is no shared mutable state to
+// leak from one call to the next.
+func TestAutobindCarriesTheCommandingActorButTheLifecycleTriggerCarriesNone(t *testing.T) {
+	c := newTriggerConfigExec(t)
+	bindEntry(t, c, "01JCONN", "opcua-1", "")
+	f, ok := c.store.(*fakeStore)
+	if !ok {
+		t.Fatalf("%T is not a fakeStore", c.store)
+	}
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/opcua-1", tags("t1"))
+
+	operator := CommandContext{
+		Actor:   &Entry{ULID: "kc-sub-anna", Kind: KindHuman, Grants: []string{"cmd:#:configure"}},
+		ActorID: "kc-sub-anna", ActorLabel: "anna@example.com", ActorKind: "human",
+	}
+	code, msg, _ := c.Execute(operator, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	if code != 200 {
+		t.Fatalf("autobind = %d %q", code, msg)
+	}
+	if f.lastBatchCtx.ActorID != "kc-sub-anna" || f.lastBatchCtx.ActorLabel != "anna@example.com" || f.lastBatchCtx.ActorKind != "human" {
+		t.Fatalf("autobind's PublishBatch ctx = %+v, want the commanding operator", f.lastBatchCtx)
+	}
+
+	// The same write path, run by the lifecycle trigger instead of a
+	// command: a second connector's first catalogue publish.
+	bindEntry(t, c, "01JCONN2", "opcua-2", "")
+	c.Observe("_DataTags", "colca/v1/_DataTags/n1/opcua-2", mustJSON(map[string]any{"data_tags": tags("t2")}))
+	if got := f.lastBatchCtx; got.ActorID != "" || got.ActorLabel != "" || got.ActorKind != "" {
+		t.Fatalf("lifecycle trigger's PublishBatch ctx = %+v, want none — it leaked the previous command's actor", got)
 	}
 }
 

@@ -255,6 +255,9 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 	_, out = req(t, admin, "GET", a.url+"/kv?prefix=x", "tok", nil)
 	if entries := out["entries"].([]any); len(entries) != 1 {
 		t.Fatalf("%v", out)
+	} else if entry := entries[0].(map[string]any); entry["written_by"] != "api" ||
+		entry["actor_id"] != "user-anna" || entry["actor_label"] != "anna@example.com" || entry["actor_kind"] != "human" {
+		t.Fatalf("/kv dropped the attribution /fetch already carries: %v", entry)
 	}
 	resp, _ = req(t, admin, "GET", a.url+"/debug/state", "tok", nil)
 	if resp.StatusCode != http.StatusOK {
@@ -2474,7 +2477,7 @@ func TestTheLocalDoorNeverFallsBackFromABadBearerToTheServiceName(t *testing.T) 
 // reason. Without one it is refused; with one the record carries the groups.
 func TestTheLocalDoorRequiresAReasonToAttestAPersonsGroups(t *testing.T) {
 	h := newLocalHandler(t)
-	if _, err := h.eng.EntityStore().PublishBatch([]uns.StateRecord{{
+	if _, err := h.eng.EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{{
 		Topic: "colca/v1/_Group/n-test/operators", Payload: []byte(`{"id":"operators","grants":["cmd:#:configure"]}`),
 	}}); err != nil {
 		t.Fatal(err)
@@ -2519,7 +2522,7 @@ func installPersonalAccessToken(t *testing.T, h *localAPI, ver *tokenauth.Verifi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.eng.EntityStore().PublishBatch([]uns.StateRecord{{
+	if _, err := h.eng.EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{{
 		Topic: "colca/v1/" + uns.PersonalAccessTokenContract + "/n-test/" + id, Payload: payload,
 	}}); err != nil {
 		t.Fatalf("publish PAT definition: %v", err)

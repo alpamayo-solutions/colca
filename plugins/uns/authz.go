@@ -712,9 +712,10 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 			// The topic path routes the command to the owning node and names
 			// no element, so a prefix check would refuse anyone with a
 			// narrower grant. The door only checks that the person holds a
-			// class the editor honours (configure, or operate for annotations);
-			// the executor authorizes each position with AuthorizeCmdAt.
-			return e.HoldsCmdClass(class) || e.HoldsCmdClass("operate")
+			// class the editor honours (configure, operate for annotations, or
+			// param for an operator-input constant's value); the executor
+			// authorizes each position with AuthorizeCmdAt.
+			return e.HoldsCmdClass(class) || e.HoldsCmdClass("operate") || e.HoldsCmdClass("param")
 		}
 		return AuthorizeCmdAt(sc, e, class, p.Path)
 

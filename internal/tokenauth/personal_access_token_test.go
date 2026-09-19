@@ -22,10 +22,10 @@ func (p *patStore) KVScanAll(contract string) []uns.KVRecord {
 	}
 	return nil
 }
-func (p *patStore) PublishBatch([]uns.StateRecord) ([]uns.StateWrite, error) {
+func (p *patStore) PublishBatch(uns.CommandContext, []uns.StateRecord) ([]uns.StateWrite, error) {
 	return nil, nil
 }
-func (p *patStore) PublishEvent(uns.StateRecord) (uns.StateWrite, error) {
+func (p *patStore) PublishEvent(uns.CommandContext, uns.StateRecord) (uns.StateWrite, error) {
 	return uns.StateWrite{}, nil
 }
 func (p *patStore) NodeID() string { return "n-edge" }

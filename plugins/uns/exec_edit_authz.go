@@ -26,23 +26,52 @@ type editTouched struct {
 	// operate marks a position an operate grant also covers: an annotation
 	// the person creates or authored. Editing someone else's needs configure.
 	operate bool
+	// param marks a position a param grant also covers: updating the value
+	// and metadata of an existing constant (an operator input), never its
+	// creation, deletion or any other attribute. See constantParamEligible.
+	param bool
 }
 
 // authorizeTouched refuses the command unless every touched position is
-// covered by the actor's grants — configure always, operate where the
-// position allows it. code 0 means covered.
+// covered by the actor's grants — configure always, operate or param where
+// the position allows it. code 0 means covered.
 func (w *EditExec) authorizeTouched(ctx CommandContext, touched []editTouched) (int, string, string) {
 	for _, t := range touched {
 		// Only a "#" zone covers the node root (empty path): a realm-wide
 		// grant, or a grant on the node's own element or an ancestor, which
 		// zoneOf resolves to "#". A grant on an element below the node does not.
 		covered := AuthorizeCmdAt(w.scope, ctx.Actor, "configure", t.path) ||
-			(t.operate && AuthorizeCmdAt(w.scope, ctx.Actor, "operate", t.path))
+			(t.operate && AuthorizeCmdAt(w.scope, ctx.Actor, "operate", t.path)) ||
+			(t.param && AuthorizeCmdAt(w.scope, ctx.Actor, "param", t.path))
 		if !covered {
 			return 409, "entity_not_found: " + t.key, "conflict"
 		}
 	}
 	return 0, "", ""
+}
+
+// constantParamEligible reports whether an update intent may be carried by a
+// param grant instead of configure: it must target a constant and change
+// nothing but its value and metadata. id and system_element_id can never move
+// through an update regardless (composeUpdate restores them unconditionally);
+// this additionally keeps a param-only actor off every other attribute — name,
+// data_type, position — and off external references, which configure owns.
+// Creating or deleting a constant is never param-eligible: an operator sets
+// the value of a constant that commissioning or the catalog connector already
+// created, never authors a new one.
+func constantParamEligible(intent editIntent) bool {
+	if intent.Type != "update" || intent.Entity.Kind != "constant" || intent.ExternalReferences != nil {
+		return false
+	}
+	if len(intent.Attributes) == 0 {
+		return false
+	}
+	for name := range intent.Attributes {
+		if name != "value" && name != "metadata" {
+			return false
+		}
+	}
+	return true
 }
 
 // keycloakServiceAccountPrefix starts the preferred_username of a Keycloak
@@ -220,7 +249,16 @@ func (w *EditExec) planFor(
 		// A resource is not in the entity snapshot, so check the positions of
 		// its records: one for a create or update, two for a move.
 		return w.resourcePositions(intent, records)
-	default: // update, delete, model
+	case "update":
+		anchor := entityVersionKey(intent.Entity.Kind, intent.Entity.ID)
+		touched := touchedByRecords(records, entities, anchor)
+		if constantParamEligible(intent) {
+			for i := range touched {
+				touched[i].param = true
+			}
+		}
+		return touched
+	default: // delete, model
 		anchor := entityVersionKey(intent.Entity.Kind, intent.Entity.ID)
 		return touchedByRecords(records, entities, anchor)
 	}

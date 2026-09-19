@@ -174,7 +174,7 @@ func TestEntityStorePublishBatchCommitsValidatedEntityStateAtomically(t *testing
 		},
 	}
 
-	writes, err := e.EntityStore().PublishBatch(records)
+	writes, err := e.EntityStore().PublishBatch(uns.CommandContext{}, records)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,11 +197,37 @@ func TestEntityStorePublishBatchCommitsValidatedEntityStateAtomically(t *testing
 	}
 }
 
+// A write with no commanding actor — the zero CommandContext, as the
+// lifecycle trigger's autobind and every other caller outside command
+// execution passes — keeps today's plain administrative attribution:
+// written_by "admin", no actor_* fields. Only a command's own attribution
+// (see exec_test.go's TestCmdEditByAHumanAttributesTheResultingWriteToThatHuman)
+// changes that.
+func TestEntityStorePublishBatchWithNoCommandKeepsPlainAdminAttribution(t *testing.T) {
+	e, _ := newRecordingEngine(t)
+
+	if _, err := e.EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{
+		{Topic: "colca/v1/_Signal/n-edge1/line1/pressure", Payload: []byte(`{"id":"sig-pressure","name":"Pressure"}`)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := mustKVScan(t, e.Store(), "line1/pressure")
+	if len(got) != 1 {
+		t.Fatalf("kv entries = %+v, want 1", got)
+	}
+	if entry := got[0]; entry.WrittenBy != "admin" {
+		t.Fatalf("written_by = %q, want the unchanged plain admin attribution", entry.WrittenBy)
+	} else if entry.ActorID != "" || entry.ActorLabel != "" || entry.ActorKind != "" {
+		t.Fatalf("actor = %+v, want none: a node-internal write names no actor", entry)
+	}
+}
+
 func TestEntityStorePublishBatchRejectsLateInvalidRecordWithoutWrites(t *testing.T) {
 	e, delivered := newRecordingEngine(t)
 	before := e.Store().NextOffset("entities")
 
-	_, err := e.EntityStore().PublishBatch([]uns.StateRecord{
+	_, err := e.EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{
 		{
 			Topic:   "colca/v1/_Signal/n-edge1/line1/temp",
 			Payload: []byte(`{"id":"sig-temp","name":"Temperature"}`),
@@ -232,7 +258,7 @@ func TestEntityStorePublishBatchCommitsDefinitionsOnTheirOwnStream(t *testing.T)
 	entitiesBefore := e.Store().NextOffset("entities")
 	before := e.Store().NextOffset("definitions")
 
-	writes, err := e.EntityStore().PublishBatch([]uns.StateRecord{
+	writes, err := e.EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{
 		{Topic: "colca/v1/_Group/n-edge1/operators", Payload: []byte(`{"id":"operators"}`)},
 		{Topic: "colca/v1/_Group/n-edge1/maintainers", Payload: []byte(`{"id":"maintainers"}`)},
 	})
@@ -256,7 +282,7 @@ func TestEntityStorePublishBatchRefusesRecordsFromTwoStreams(t *testing.T) {
 	entitiesBefore := e.Store().NextOffset("entities")
 	definitionsBefore := e.Store().NextOffset("definitions")
 
-	_, err := e.EntityStore().PublishBatch([]uns.StateRecord{
+	_, err := e.EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{
 		{Topic: "colca/v1/_Signal/n-edge1/line1/temp", Payload: []byte(`{"id":"sig-temp","name":"Temperature"}`)},
 		{Topic: "colca/v1/_Group/n-edge1/operators", Payload: []byte(`{"id":"operators"}`)},
 	})

@@ -268,7 +268,7 @@ func (w *EditExec) ExecuteWithWrites(
 		intent, expectedVersions, attachments, versions,
 	) {
 		return w.rememberAttachmentReplay(
-			envelope.OperationID, digest, intent, attachments,
+			ctx, envelope.OperationID, digest, intent, attachments,
 		)
 	}
 	if message := validateSuppliedVersions(expectedVersions, versions); message != "" {
@@ -292,7 +292,7 @@ func (w *EditExec) ExecuteWithWrites(
 		return w.remember(envelope.OperationID, digest, code, message, result, nil)
 	}
 	if intent.Type == "annotation" {
-		return w.executeAnnotationWrite(envelope.OperationID, digest, message, records)
+		return w.executeAnnotationWrite(ctx, envelope.OperationID, digest, message, records)
 	}
 	batch, stateStart, err := w.withDurableReceipt(
 		envelope.OperationID, digest, message, "ok", records,
@@ -300,7 +300,7 @@ func (w *EditExec) ExecuteWithWrites(
 	if err != nil {
 		return 500, "edit receipt failed: " + err.Error(), "error", nil
 	}
-	batchWrites, err := w.store.PublishBatch(batch)
+	batchWrites, err := w.store.PublishBatch(ctx, batch)
 	if err != nil {
 		return 500, "edit commit failed: " + err.Error(), "error", nil
 	}

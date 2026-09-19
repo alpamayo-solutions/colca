@@ -102,8 +102,15 @@ func (e *Engine) ScanContractAll(contract string) ([]uns.KVRecord, error) {
 // domain command. It writes as the node in node-local coordinates and validates
 // like any other write. The engine validates the whole set before opening one
 // Pebble batch.
-func (s *entityStore) PublishBatch(records []uns.StateRecord) ([]uns.StateWrite, error) {
-	results, err := s.e.ingestAdminStateBatch(records, Attribution{WrittenBy: "admin"})
+//
+// The node is always written_by, but ctx carries the executing command's own
+// attribution onward as actor_id/actor_label/actor_kind (see attribution),
+// so a write a _CmdEdit or _CmdConfigure makes on a caller's behalf — a
+// person setting an operator-input constant, a service upserting its
+// signals — reads as written by the node, on behalf of that actor, exactly
+// as this node's own _Ack records already do (see (*Engine).ack).
+func (s *entityStore) PublishBatch(ctx uns.CommandContext, records []uns.StateRecord) ([]uns.StateWrite, error) {
+	results, err := s.e.ingestAdminStateBatch(records, s.attribution(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -120,10 +127,30 @@ func (s *entityStore) PublishBatch(records []uns.StateRecord) ([]uns.StateWrite,
 
 // PublishEvent is PublishBatch for a class an executor may append but never
 // author as state, such as an annotation: one record, no KV projection.
-func (s *entityStore) PublishEvent(record uns.StateRecord) (uns.StateWrite, error) {
-	result, err := s.e.ingestAdminEvent(record, Attribution{WrittenBy: "admin"})
+func (s *entityStore) PublishEvent(ctx uns.CommandContext, record uns.StateRecord) (uns.StateWrite, error) {
+	result, err := s.e.ingestAdminEvent(record, s.attribution(ctx))
 	if err != nil {
 		return uns.StateWrite{}, err
 	}
 	return uns.StateWrite{Stream: result.Stream, Offset: result.Offset, Topic: result.Topic}, nil
+}
+
+// attribution builds the Attribution an executor's write carries. With no
+// commanding actor (ctx.ActorID == "", the lifecycle trigger's autobind being
+// the only such caller) it is today's plain administrative attribution,
+// unchanged. With one, WrittenBy switches from that literal "admin" to this
+// node's own ULID — the node is what actually appended the record, the same
+// fact ack() already states for the outcome of the same command — and the
+// commanding actor's own door-verified identity travels as actor_id,
+// actor_label and actor_kind.
+func (s *entityStore) attribution(ctx uns.CommandContext) Attribution {
+	if ctx.ActorID == "" {
+		return Attribution{WrittenBy: "admin"}
+	}
+	return Attribution{
+		WrittenBy:  s.e.cfg.ULID,
+		ActorID:    ctx.ActorID,
+		ActorLabel: ctx.ActorLabel,
+		ActorKind:  ctx.ActorKind,
+	}
 }

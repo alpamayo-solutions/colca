@@ -39,6 +39,7 @@ func (w *EditExec) remember(
 }
 
 func (w *EditExec) persistStandaloneReceipt(
+	ctx CommandContext,
 	operationID string,
 	digest [sha256.Size]byte,
 	message, result string,
@@ -67,7 +68,7 @@ func (w *EditExec) persistStandaloneReceipt(
 	batch = append(batch, StateRecord{
 		Topic: editOperationTopic(w.store.NodeID(), operationID), Payload: payload,
 	})
-	_, err = w.store.PublishBatch(batch)
+	_, err = w.store.PublishBatch(ctx, batch)
 	return err
 }
 

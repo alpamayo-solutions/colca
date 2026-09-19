@@ -78,7 +78,7 @@ func TestKVReturnsRetainedPayloadsVerbatim(t *testing.T) {
 			_, _ = w.Write([]byte(`{"entries":[{"path":"_colca/config/c2","node_id":"n1","topic":"colca/v1/_AlarmNotificationConfig/n1/_colca/config/c2","payload":{"integer":2},"ts":8,"offset":4}],"next":""}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"entries":[{"path":"_colca/config/c1","node_id":"n1","topic":"colca/v1/_AlarmNotificationConfig/n1/_colca/config/c1","payload":{"integer":9007199254740993},"ts":7,"offset":3}],"next":"page-1"}`))
+		_, _ = w.Write([]byte(`{"entries":[{"path":"_colca/config/c1","node_id":"n1","topic":"colca/v1/_AlarmNotificationConfig/n1/_colca/config/c1","payload":{"integer":9007199254740993},"ts":7,"offset":3,"written_by":"operator-ui","actor_id":"kc-sub-anna","actor_label":"anna","actor_kind":"human"}],"next":"page-1"}`))
 	}))
 	defer srv.Close()
 
@@ -92,6 +92,16 @@ func TestKVReturnsRetainedPayloadsVerbatim(t *testing.T) {
 	}
 	if len(entries) != 2 || string(entries[0].Payload) != `{"integer":9007199254740993}` {
 		t.Fatalf("entries = %+v", entries)
+	}
+	// The first entry's write was attributed; the /fetch-style actor fields
+	// survive onto the KV entry. The second carries none, and stays empty
+	// rather than inventing a value.
+	if entries[0].WrittenBy != "operator-ui" || entries[0].ActorID != "kc-sub-anna" ||
+		entries[0].ActorLabel != "anna" || entries[0].ActorKind != "human" {
+		t.Fatalf("entries[0] attribution = %+v", entries[0])
+	}
+	if entries[1].WrittenBy != "" || entries[1].ActorID != "" || entries[1].ActorLabel != "" || entries[1].ActorKind != "" {
+		t.Fatalf("entries[1] should carry no attribution: %+v", entries[1])
 	}
 }
 

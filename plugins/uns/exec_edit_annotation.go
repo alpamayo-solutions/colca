@@ -88,6 +88,7 @@ func (w *EditExec) composeAnnotation(intent editIntent) (int, string, string, []
 // live on different streams, so they cannot be one transition, but the
 // operation_id replay guarantee is the same as for every other intent.
 func (w *EditExec) executeAnnotationWrite(
+	ctx CommandContext,
 	operationID string,
 	digest [sha256.Size]byte,
 	message string,
@@ -96,12 +97,12 @@ func (w *EditExec) executeAnnotationWrite(
 	if len(records) != 1 {
 		return 500, "annotation: composer must produce exactly one record", "error", nil
 	}
-	write, err := w.store.PublishEvent(records[0])
+	write, err := w.store.PublishEvent(ctx, records[0])
 	if err != nil {
 		return 500, "edit commit failed: " + err.Error(), "error", nil
 	}
 	if err := w.persistStandaloneReceipt(
-		operationID, digest, message, "ok", []StateWrite{write},
+		ctx, operationID, digest, message, "ok", []StateWrite{write},
 	); err != nil {
 		return 500, "edit receipt failed: " + err.Error(), "error", nil
 	}

@@ -84,6 +84,14 @@ type KVEntry struct {
 	TS                  int64
 	Offset              uint64
 	OriginOffset        uint64
+	// Attribution of the record currently retained at this entry, carried
+	// over from the write that produced it (see recEnc/StoredRecord). Empty
+	// when the write that produced this entry predates attribution, or came
+	// from a kind that carries none.
+	WrittenBy  string
+	ActorID    string
+	ActorLabel string
+	ActorKind  string
 }
 
 type Store struct {
@@ -212,6 +220,10 @@ type kvEnc struct {
 	TS           int64  `json:"ts"`
 	Offset       uint64 `json:"o"`
 	OriginOffset uint64 `json:"oo,omitempty"`
+	WrittenBy    string `json:"wb,omitempty"`
+	ActorID      string `json:"aid,omitempty"`
+	ActorLabel   string `json:"al,omitempty"`
+	ActorKind    string `json:"ak,omitempty"`
 }
 
 // addRecord writes one stream record and its optional KV projection into the
@@ -245,6 +257,8 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 			kval, err := json.Marshal(kvEnc{
 				Topic: rec.Topic, Payload: rec.Payload, TS: rec.TS,
 				Offset: off, OriginOffset: originOffset,
+				WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
+				ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind,
 			})
 			if err != nil {
 				return 0, err
@@ -1199,6 +1213,8 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 			TS:           e.TS,
 			Offset:       e.Offset,
 			OriginOffset: originOffset(e.OriginOffset, e.Offset),
+			WrittenBy:    e.WrittenBy, ActorID: e.ActorID,
+			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind,
 		})
 	}
 	if err := iter.Error(); err != nil {
@@ -1266,6 +1282,8 @@ func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) 
 							Path: key[:pathSep], NodeID: rest[:nodeSep], Topic: e.Topic,
 							Payload: e.Payload, TS: e.TS, Offset: e.Offset,
 							OriginOffset: originOffset(e.OriginOffset, e.Offset),
+							WrittenBy:    e.WrittenBy, ActorID: e.ActorID,
+							ActorLabel: e.ActorLabel, ActorKind: e.ActorKind,
 						})
 						matched++
 					}
