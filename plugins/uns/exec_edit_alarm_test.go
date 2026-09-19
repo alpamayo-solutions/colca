@@ -58,9 +58,10 @@ func TestEditAlarmIsAuthorizedAtItsSignal(t *testing.T) {
 	}
 }
 
-// An operator with operate and no configure may acknowledge but not
-// configure.
-func TestEditAlarmAcknowledgementTakesTheOperateClass(t *testing.T) {
+// An operator's act is a _CmdOperate the alarm's evaluator applies, not an
+// edit: the executor knows no alarm_acknowledgement intent, and operate is
+// not configure for an alarm edit.
+func TestEditAlarmIsConfigurationOnly(t *testing.T) {
 	_, exec, _ := twoLines(t)
 	operator := CommandContext{Actor: &Entry{
 		ULID: "kc-sub-operator", Kind: KindHuman,
@@ -70,8 +71,8 @@ func TestEditAlarmAcknowledgementTakesTheOperateClass(t *testing.T) {
 	silence := alarmIntent(t, "op-silence", "alarm_acknowledgement", "silence", "sig-1", map[string]any{
 		"snapshot": alarmSnapshot("n-edge1"),
 	})
-	if code, message, _, writes := exec.ExecuteWithWrites(operator, "_CmdEdit", "apply", silence); code != 200 || len(writes) != 1 {
-		t.Fatalf("operator silencing = %d %q writes=%d, want it applied", code, message, len(writes))
+	if code, message, _, writes := exec.ExecuteWithWrites(operator, "_CmdEdit", "apply", silence); code != 422 || len(writes) != 0 {
+		t.Fatalf("an alarm_acknowledgement edit = %d %q writes=%d, want it refused as unknown", code, message, len(writes))
 	}
 
 	configure := alarmIntent(t, "op-ack-cfg", "alarm", "update", "sig-1", map[string]any{

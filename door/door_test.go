@@ -202,3 +202,54 @@ func TestULIDRefusesANodeThatNamesNoone(t *testing.T) {
 		t.Fatal("a /healthz without a ulid was accepted")
 	}
 }
+
+// A tombstone is a body with no payload at all: that is what empties a path.
+// Publish(topic, nil) sends `"payload": null`, which the schema refuses as a
+// value, so the two must differ in exactly that key.
+func TestTombstoneLeavesThePayloadOutAndPublishDoesNot(t *testing.T) {
+	var bodies []map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/publish" || r.Method != http.MethodPost {
+			t.Errorf("%s %s, want POST /publish", r.Method, r.URL.Path)
+		}
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("body: %v", err)
+		}
+		bodies = append(bodies, body)
+	}))
+	defer srv.Close()
+	client := &Client{BaseURL: srv.URL}
+	topic := "colca/v1/_AlarmState/n1/line1/press3/temperature-high"
+
+	if err := client.Publish(context.Background(), topic, map[string]any{"status": "firing"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if err := client.Tombstone(context.Background(), topic); err != nil {
+		t.Fatalf("Tombstone: %v", err)
+	}
+
+	if len(bodies) != 2 {
+		t.Fatalf("got %d requests, want 2", len(bodies))
+	}
+	if _, ok := bodies[0]["payload"]; !ok {
+		t.Fatalf("Publish sent no payload: %v", bodies[0])
+	}
+	if _, ok := bodies[1]["payload"]; ok {
+		t.Fatalf("Tombstone sent a payload key (%s); a tombstone leaves it out", bodies[1]["payload"])
+	}
+	if string(bodies[1]["topic"]) != `"`+topic+`"` {
+		t.Fatalf("Tombstone topic = %s, want %q", bodies[1]["topic"], topic)
+	}
+}
+
+func TestATombstoneTheNodeRefusesIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "denied", http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	if err := (&Client{BaseURL: srv.URL}).Tombstone(context.Background(), "colca/v1/_AlarmState/n1/a"); err == nil {
+		t.Fatal("a refused tombstone must be an error, not a silent success")
+	}
+}

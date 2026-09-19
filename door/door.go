@@ -487,7 +487,21 @@ func (c *Client) CursorDelete(ctx context.Context, stream, cursor string) error 
 
 // Publish posts one record through the node's publish door.
 func (c *Client) Publish(ctx context.Context, topic string, payload any) error {
-	body, err := json.Marshal(map[string]any{"topic": topic, "payload": payload})
+	return c.publish(ctx, topic, map[string]any{"topic": topic, "payload": payload})
+}
+
+// Tombstone retires the record at topic: the key-value entry is deleted and
+// the retained message is cleared. Over POST /publish that is a body with no
+// payload at all — a JSON null is a value, and the schema refuses it — so
+// Publish(ctx, topic, nil) cannot say it. An entity-class record that no
+// longer stands, such as an _AlarmState whose alarm has gone, is retired
+// this way.
+func (c *Client) Tombstone(ctx context.Context, topic string) error {
+	return c.publish(ctx, topic, map[string]any{"topic": topic})
+}
+
+func (c *Client) publish(ctx context.Context, topic string, record map[string]any) error {
+	body, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}

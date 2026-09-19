@@ -9,38 +9,22 @@ import (
 // record is a node's single alarm configuration, not one row per alarm.
 const alarmConfigID = "alarm-notification-config"
 
-// composeAlarm composes the _AlarmNotificationConfig record an alarm or
-// alarm_acknowledgement intent writes. The record lives at a reserved path no
-// element owns, so the person is authorized at the signal the alarm is about,
-// the same way annotations are.
+// composeAlarm composes the _AlarmNotificationConfig record an alarm intent
+// writes. The record lives at a reserved path no element owns, so the person
+// is authorized at the signal the alarm is about, the same way annotations
+// are. An operator's act on an alarm is not an edit: it is a _CmdOperate the
+// alarm's evaluator applies (docs/alarms.md).
 func (w *EditExec) composeAlarm(intent editIntent) (int, string, string, []StateRecord) {
-	configuring := intent.Type == "alarm"
-	switch {
-	case configuring:
-		switch intent.Action {
-		case "create", "update", "delete":
-		default:
-			return 422, fmt.Sprintf(
-				"alarm: action must be create, update or delete, got %q", intent.Action,
-			), "invalid", nil
-		}
+	switch intent.Action {
+	case "create", "update", "delete":
 	default:
-		switch intent.Action {
-		case "acknowledge", "silence", "unsilence":
-		default:
-			return 422, fmt.Sprintf(
-				"alarm_acknowledgement: action must be acknowledge, silence or unsilence, got %q",
-				intent.Action,
-			), "invalid", nil
-		}
+		return 422, fmt.Sprintf(
+			"alarm: action must be create, update or delete, got %q", intent.Action,
+		), "invalid", nil
 	}
 	if intent.Entity.Kind != "signal" || intent.Entity.ID == "" {
 		return 422, "alarm: entity must name the signal the alarm is about", "invalid", nil
 	}
-
-	// A bare acknowledge is settled at the api and never reaches the node.
-	// What arrives under alarm_acknowledgement is a silence or unsilence,
-	// which changes the config and is an operator's act (operate).
 	return w.alarmConfigRecord(intent.Type, intent.Snapshot)
 }
 
@@ -97,14 +81,12 @@ func (w *EditExec) alarmConfigRecord(intentType string, snapshot json.RawMessage
 	return 200, "upserted 1", "ok", []StateRecord{{Topic: topic, Payload: snapshot}}
 }
 
-// alarmPositions is the alarm family's write-set: the signal the alarm is
-// about. Acknowledging or silencing is an operator's act, so operate covers it.
+// alarmPositions is the alarm intent's write-set: the signal the alarm is
+// about.
 func (w *EditExec) alarmPositions(
 	intent editIntent, entities map[string]editSnapshot,
 ) []editTouched {
-	touched := touchedEntity(entities, "signal", intent.Entity.ID)
-	touched.operate = intent.Type == "alarm_acknowledgement"
-	return []editTouched{touched}
+	return []editTouched{touchedEntity(entities, "signal", intent.Entity.ID)}
 }
 
 // notificationConfigPositions is the whole-node apply's write-set: the node's

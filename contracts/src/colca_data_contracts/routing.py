@@ -16,6 +16,19 @@ from pathlib import Path
 
 _VECTOR = Path(__file__).parent / "vectors" / "manifest_streams.json"
 
+#: Every command contract. Each lands on the commands stream; the class
+#: hierarchy decides that, and ``test_routing`` pins this list to it, because a
+#: command missing here was a command ``streams_by_contract`` did not know --
+#: a test double then put a ``_CmdOperate`` on the entities stream.
+COMMAND_CONTRACTS: tuple[str, ...] = (
+    "_CmdParam",
+    "_CmdOperate",
+    "_CmdMaintain",
+    "_CmdConfigure",
+    "_CmdEdit",
+    "_CmdAdmin",
+)
+
 # Routing class for everything not derivable from the class hierarchy
 # (Cmd subclasses -> "cmd", Ack subclasses -> "ack" — derived, not listed).
 CLASS_TABLE: dict[str, str] = {
@@ -85,5 +98,5 @@ def stream_of_contract(contract: str) -> str:
 
 def streams_by_contract() -> dict[str, str]:
     """Every classified contract mapped to its stream, omitting the streamless."""
-    contracts = [*CLASS_TABLE, "_Ack", "_CmdConfigure", "_CmdEdit", "_CmdAdmin"]
+    contracts = [*CLASS_TABLE, "_Ack", *COMMAND_CONTRACTS]
     return {contract: stream_of_contract(contract) for contract in contracts if stream_of_contract(contract)}
