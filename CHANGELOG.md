@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/alpamayo-solutions/colca/compare/v0.5.0...v0.6.0) (2026-09-19)
+
+
+### Features
+
+* **uns:** operator-input constants and actor attribution on commanded writes ([#33](https://github.com/alpamayo-solutions/colca/issues/33)) ([2869873](https://github.com/alpamayo-solutions/colca/commit/2869873ae3710f9862f7ce68321545a987d404a9))
+
 ## [0.5.0](https://github.com/alpamayo-solutions/colca/compare/v0.4.0...v0.5.0) (2026-09-19)
 
 
