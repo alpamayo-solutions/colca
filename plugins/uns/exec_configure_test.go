@@ -1735,7 +1735,7 @@ func TestAlarmNotificationConfigCommandWritesOneNodeScopedSnapshot(t *testing.T)
 		"id": "alarm-notification-config", "schema_version": 2,
 		"target_node_id": "n-leaf", "revision_id": "revision-1", "issued_at": 1,
 		"alarms": []any{}, "channels": []any{}, "recipients": []any{},
-		"policies": []any{}, "policy_targets": []any{}, "active_silences": []any{},
+		"policies": []any{}, "policy_targets": []any{},
 	}
 	payload := body(t, map[string]any{"entities": []map[string]any{{
 		"contract": "_AlarmNotificationConfig", "entity": entity,

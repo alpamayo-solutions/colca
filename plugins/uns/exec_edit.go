@@ -105,7 +105,7 @@ type editIntent struct {
 	FromPath string          `json:"from_path"`
 	Resource json.RawMessage `json:"resource"`
 	// The alarm intents' field (see exec_edit_alarm.go): the
-	// _AlarmNotificationConfig record. Acknowledgements carry none.
+	// _AlarmNotificationConfig record.
 	Snapshot json.RawMessage `json:"snapshot"`
 }
 
