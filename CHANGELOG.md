@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/alpamayo-solutions/colca/compare/v0.3.0...v0.4.0) (2026-09-19)
+
+
+### Features
+
+* **door:** Tombstone retires a record at a topic ([#29](https://github.com/alpamayo-solutions/colca/issues/29)) ([3e1fc72](https://github.com/alpamayo-solutions/colca/commit/3e1fc72a144c86b1af6ee8f04a18c83364e91322))
+
 ## [0.3.0](https://github.com/alpamayo-solutions/colca/compare/v0.2.1...v0.3.0) (2026-09-18)
 
 
