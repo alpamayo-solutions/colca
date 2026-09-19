@@ -38,7 +38,7 @@ func (w *EditExec) compose(
 		return w.composeAnnotation(intent)
 	case "resource":
 		return w.composeResource(intent)
-	case "alarm", "alarm_acknowledgement":
+	case "alarm":
 		return w.composeAlarm(intent)
 	case "notification_config":
 		return w.composeNotificationConfig(intent)

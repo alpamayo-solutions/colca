@@ -13,7 +13,6 @@ export type Ack = {
 
 /** `_AlarmNotificationConfig` — stream class `entity`. */
 export type AlarmNotificationConfig = {
-  active_silences: Record<string, unknown>[];
   alarms: Record<string, unknown>[];
   channels: {
     enabled?: boolean;

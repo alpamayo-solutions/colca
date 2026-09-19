@@ -208,7 +208,7 @@ func (w *EditExec) planFor(
 			touched = append(touched, t)
 		}
 		return touched
-	case "alarm", "alarm_acknowledgement":
+	case "alarm":
 		// The signal the alarm is about — never the config record's own
 		// reserved path, which no element owns.
 		return w.alarmPositions(intent, entities)

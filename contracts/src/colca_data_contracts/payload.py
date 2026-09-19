@@ -362,7 +362,8 @@ class AlarmNotificationConfigSnapshot(Payload):
     recipients: list[dict[str, Any]]
     policies: list[dict[str, Any]]
     policy_targets: list[dict[str, Any]]
-    active_silences: list[dict[str, Any]]
+    # No silences: a silence is an operator's act the alarm's evaluator
+    # applies and holds (docs/alarms.md), not configuration.
 
     def __init__(
         self,
@@ -375,7 +376,6 @@ class AlarmNotificationConfigSnapshot(Payload):
         recipients: list[dict[str, Any]],
         policies: list[dict[str, Any]],
         policy_targets: list[dict[str, Any]],
-        active_silences: list[dict[str, Any]] | None = None,
         id: str = "alarm-notification-config",
         target_node_id: str = "",
         revision_id: str | None = None,
@@ -392,7 +392,6 @@ class AlarmNotificationConfigSnapshot(Payload):
         self.recipients = recipients
         self.policies = policies
         self.policy_targets = policy_targets
-        self.active_silences = active_silences or []
         self.revision_id = revision_id or self.compute_revision_id()
 
     @classmethod
@@ -411,7 +410,6 @@ class AlarmNotificationConfigSnapshot(Payload):
             "recipients": _sorted_items(self.recipients),
             "policies": _sorted_items(self.policies),
             "policy_targets": _sorted_items(self.policy_targets),
-            "active_silences": _sorted_items(self.active_silences),
         }
         return hashlib.sha256(json.dumps(data, cls=CustomEncoder, sort_keys=True).encode()).hexdigest()
 
