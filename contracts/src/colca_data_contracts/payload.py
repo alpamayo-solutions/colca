@@ -907,7 +907,10 @@ class Signal(ToleratesUnknownFields, Payload):
     is_logged: bool = False
     #: Upload eligibility for new samples; queued samples retain their decision.
     replication_policy: ReplicationPolicy = ReplicationPolicy.REPLICATE_TO_PARENTS
-    data_type: DataType | None = None
+    #: ``SignalDataType``, not franzmq's ``DataType``: a signal may be ``json``.
+    #: The bundle reads this annotation, so the door accepts exactly the values
+    #: that enum has and decoding resolves.
+    data_type: SignalDataType | None = None
     index_type: IndexType | None = None
     unit: str | None = None
     precision: int | None = None
