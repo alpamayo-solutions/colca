@@ -582,8 +582,6 @@ export type Signal = {
 export type SystemElement = {
   created_at?: null | string;
   description?: string;
-  external_asset_id?: null | string;
-  external_asset_id_type?: null | string;
   id: string;
   implements?: string[];
   metadata?: Record<string, unknown>;
