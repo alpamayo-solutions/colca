@@ -873,8 +873,6 @@ class SystemElement(ToleratesUnknownFields, Payload):
     #: ULID of the enclosing element; None for a root.
     parent_id: ULID | None = None
     implements: list[str] = field(default_factory=list)  # DataModel names this SE fulfils
-    external_asset_id: str | None = None
-    external_asset_id_type: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     #: ULID of the `_SemanticTag` definition saying what this entity is; None
     #: means unclassified.

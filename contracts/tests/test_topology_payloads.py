@@ -94,8 +94,6 @@ def test_system_element_roundtrip_full():
         description="Main mixer on line 1",
         parent_id="01HPARENT",
         implements=["PackMLMachine"],
-        external_asset_id="WO-1234",
-        external_asset_id_type="string",
         metadata={"location": "Halle A", "owner": "Production"},
         created_at="2026-05-11T10:00:00+00:00",
         updated_at="2026-05-11T10:05:00+00:00",
@@ -107,11 +105,32 @@ def test_system_element_roundtrip_full():
     assert decoded.description == original.description
     assert decoded.parent_id == original.parent_id
     assert decoded.implements == original.implements
-    assert decoded.external_asset_id == original.external_asset_id
-    assert decoded.external_asset_id_type == original.external_asset_id_type
     assert decoded.metadata == original.metadata
     assert decoded.created_at == original.created_at
     assert decoded.updated_at == original.updated_at
+
+
+def test_a_system_element_retained_before_the_external_asset_fields_were_retired_still_decodes():
+    """The retired fields left the contract; the records that carry them did not.
+
+    An element written before the cutover stays retained at every node in the
+    tree, so dropping the fields may not make it undecodable.
+    """
+
+    retained = json.dumps(
+        {
+            "id": "01HKABC",
+            "name": "M6",
+            "external_asset_id": "WO-1234",
+            "external_asset_id_type": "string",
+        }
+    )
+
+    decoded = SystemElementPayload.decode(retained, timestamp=0)
+
+    assert decoded.id == "01HKABC"
+    assert decoded.name == "M6"
+    assert not hasattr(decoded, "external_asset_id")
 
 
 def test_signal_roundtrip_minimal():
