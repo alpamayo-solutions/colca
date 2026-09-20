@@ -1,8 +1,9 @@
 import datetime
 import hashlib
+import inspect
 import json
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import TYPE_CHECKING, Annotated, Any
 
 import ulid
@@ -201,8 +202,73 @@ ULID_PATTERN = r"^[0-9A-HJKMNP-TV-Z]{26}$"
 ULID = Annotated[str, Pattern(ULID_PATTERN)]
 
 
+# ---------------------------------------------------------------------------
+# Decoding
+# ---------------------------------------------------------------------------
+
+
+#: Resolved once per class: metrics decode often enough that reading the
+#: signature on every record would show up.
+_ACCEPTED_KEYS: dict[type, frozenset[str] | None] = {}
+
+
+def _accepted_keys(cls: type) -> frozenset[str] | None:
+    """The keyword names ``cls`` can be constructed with.
+
+    ``None`` when the constructor takes ``**kwargs`` and so accepts anything.
+    Read from the constructor rather than from the dataclass fields, because a
+    payload whose ``__init__`` is written by hand accepts names no field has.
+    """
+
+    if cls not in _ACCEPTED_KEYS:
+        parameters = list(inspect.signature(cls).parameters.values())
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters):
+            _ACCEPTED_KEYS[cls] = None
+        else:
+            _ACCEPTED_KEYS[cls] = frozenset(
+                p.name
+                for p in parameters
+                if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            )
+    return _ACCEPTED_KEYS[cls]
+
+
+class ToleratesUnknownFields:
+    """Decoding keeps the fields this version knows and ignores the rest.
+
+    The nodes of one tree run their own versions and replicate state to each
+    other, so a record written by a newer node routinely carries a field an
+    older one has never heard of. Ignoring it is what makes a contract
+    extensible at all: a decode that refused it would break every older node
+    above the author, and silently — a consumer sets the record aside as
+    poison and moves on, so the entity goes missing while everything reports
+    healthy. It is equally what lets a field be retired, because the retained
+    records that still carry it stay readable.
+
+    This is a property of the wire contract, not a compatibility shim for one
+    migration: without it no field can be added or removed without upgrading a
+    whole fleet at once. There is one rule and one place it lives. Mix this in
+    ahead of the payload base; a class that has its own ``decode`` — a
+    timestamp to convert, nested objects to rebuild — does that work on the
+    decoded record and then hands it to ``from_wire``.
+    """
+
+    @classmethod
+    def decode(cls, json_str: str, timestamp: int) -> Any:
+        return cls.from_wire(json.loads(json_str))
+
+    @classmethod
+    def from_wire(cls, data: dict[str, Any]) -> Any:
+        """Construct from a decoded record, dropping keys ``cls`` cannot take."""
+
+        accepted = _accepted_keys(cls)
+        if accepted is not None:
+            data = {key: value for key, value in data.items() if key in accepted}
+        return cls(**data)
+
+
 @dataclass
-class Metric(BaseMetric):
+class Metric(ToleratesUnknownFields, BaseMetric):
     signal_id: str = ""
     error: str | None = None
     colca_node_id: str | None = None
@@ -220,11 +286,11 @@ class Metric(BaseMetric):
     @classmethod
     def decode(cls, json_str, timestamp: int):
         data = json.loads(json_str)
+        # A metric is a value at a time, so a record without a timestamp is
+        # refused; an ISO string is accepted for the seconds it means.
         if isinstance(data["timestamp"], str):
             data["timestamp"] = datetime.datetime.fromisoformat(data["timestamp"]).timestamp()
-        allowed_fields = {field.name for field in fields(cls)}
-        data = {key: value for key, value in data.items() if key in allowed_fields}
-        return cls(**data)
+        return cls.from_wire(data)
 
 
 @dataclass
@@ -262,7 +328,7 @@ class NetworkInterface:
 
 
 @dataclass
-class Node(Payload):
+class Node(ToleratesUnknownFields, Payload):
     """A Colca node, authored by the node it describes.
 
     ``root_system_element_id`` is the element the node is bound to, the root
@@ -281,7 +347,7 @@ class Node(Payload):
 
 
 @dataclass
-class ServiceDetails(Payload):
+class ServiceDetails(ToleratesUnknownFields, Payload):
     """Observed service registration authored by the service identity."""
 
     id: str
@@ -299,7 +365,7 @@ class ServiceDetails(Payload):
 
 
 @dataclass
-class AuditEvent(Payload):
+class AuditEvent(ToleratesUnknownFields, Payload):
     """A non-state security event that travels only toward ancestor nodes."""
 
     event_id: str
@@ -351,7 +417,7 @@ class NotificationChannelConfig:
 
 
 @dataclass
-class AlarmNotificationConfigSnapshot(Payload):
+class AlarmNotificationConfigSnapshot(ToleratesUnknownFields, Payload):
     id: str
     schema_version: int
     issued_at: float
@@ -421,7 +487,7 @@ class AlarmNotificationConfigSnapshot(Payload):
 
 
 @dataclass
-class NotificationConfigStatus(Payload):
+class NotificationConfigStatus(ToleratesUnknownFields, Payload):
     id: str
     config_id: str
     revision_id: str
@@ -454,7 +520,7 @@ class AlarmNotificationSummary:
 
 
 @dataclass
-class AlarmStateChange(Payload):
+class AlarmStateChange(ToleratesUnknownFields, Payload):
     event_id: str
     alarm_id: str
     from_status: str | None
@@ -476,7 +542,7 @@ class AlarmStateChange(Payload):
 
 
 @dataclass
-class NotificationDispatched(Payload):
+class NotificationDispatched(ToleratesUnknownFields, Payload):
     idempotency_key: str
     policy_id: str | None
     channel_id: str
@@ -496,7 +562,7 @@ class NotificationDispatched(Payload):
 
 
 @dataclass
-class AlarmState(Payload):
+class AlarmState(ToleratesUnknownFields, Payload):
     """The alarm that stands right now: one record per alarm definition.
 
     State, not an event. A new record replaces the one before it, and an empty
@@ -568,7 +634,7 @@ def derive_annotation_id(
 
 
 @dataclass
-class Annotation(Payload):
+class Annotation(ToleratesUnknownFields, Payload):
     """A time-based annotation.
 
     Lives on the append-only ``annotations`` stream and is never kept in KV or
@@ -592,7 +658,7 @@ class Annotation(Payload):
 
 
 @dataclass
-class DataTag(Payload):
+class DataTag(ToleratesUnknownFields, Payload):
     """One entry of a connector's catalogue; the catalogue is published as a whole.
 
     ``id`` is a ULID the connector mints at discovery and keeps across
@@ -626,7 +692,7 @@ class Result:
 
 
 @dataclass
-class DataTags(Payload):
+class DataTags(ToleratesUnknownFields, Payload):
     data_tags: list[DataTag]
     connector: str
 
@@ -641,10 +707,12 @@ class DataTags(Payload):
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "DataTags":
         data = json.loads(json_str)
-        data_tags = [DataTag(**tag) for tag in data["data_tags"]]
-        data["data_tags"] = data_tags
-        data.pop("version", None)
-        return cls(**data)
+        # The catalogue's entries are objects, not dicts, so rebuild them —
+        # each one as tolerantly as the record around it. ``version`` is a
+        # content hash the property recomputes, so the wire value is dropped
+        # like any other key the constructor does not take.
+        data["data_tags"] = [DataTag.from_wire(tag) for tag in data["data_tags"]]
+        return cls.from_wire(data)
 
     @property
     def __dict__(self):
@@ -655,7 +723,7 @@ class DataTags(Payload):
 
 
 @dataclass
-class AnnotationType(Payload):
+class AnnotationType(ToleratesUnknownFields, Payload):
     """A global annotation definition projected at every descendant node."""
 
     id: ULID
@@ -671,14 +739,9 @@ class AnnotationType(Payload):
     #: Keyed by metadata type, the same map elements and signals carry.
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "AnnotationType":
-        data = json.loads(json_str)
-        return cls(**data)
-
 
 @dataclass
-class MetadataType(Payload):
+class MetadataType(ToleratesUnknownFields, Payload):
     """A global metadata definition projected at every descendant node."""
 
     id: ULID
@@ -689,14 +752,9 @@ class MetadataType(Payload):
     is_mandatory: bool = False
     allowed_content_type_keys: list[str] = field(default_factory=list)
 
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "MetadataType":
-        data = json.loads(json_str)
-        return cls(**data)
-
 
 @dataclass
-class SemanticTag(Payload):
+class SemanticTag(ToleratesUnknownFields, Payload):
     """A global semantic-type definition projected at every descendant node."""
 
     id: ULID
@@ -708,14 +766,9 @@ class SemanticTag(Payload):
     quantity_kind: str | None = None
     data_type: str | None = None
 
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "SemanticTag":
-        data = json.loads(json_str)
-        return cls(**data)
-
 
 @dataclass
-class Group(Payload):
+class Group(ToleratesUnknownFields, Payload):
     """A group of people and the grants its members hold.
 
     Topic: ``colca/v1/_Group/{authoring-node}/{id}``. A definition, the same at
@@ -732,14 +785,9 @@ class Group(Payload):
     grants: list[str] = field(default_factory=list)
     description: str = ""
 
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "Group":
-        data = json.loads(json_str)
-        return cls(**data)
-
 
 @dataclass
-class PersonalAccessToken(Payload):
+class PersonalAccessToken(ToleratesUnknownFields, Payload):
     """Hash-only personal access token record replicated to child nodes.
 
     The plaintext token is never stored. Nodes compare the SHA-256 digest
@@ -758,13 +806,9 @@ class PersonalAccessToken(Payload):
     namespace_write_permissions: list[str] = field(default_factory=list)
     expires_at: str | None = None
 
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "PersonalAccessToken":
-        return cls(**json.loads(json_str))
-
 
 @dataclass
-class DataModel(Payload):
+class DataModel(ToleratesUnknownFields, Payload):
     """A data-model definition: the compiled shape a system element can claim
     to implement.
 
@@ -782,14 +826,9 @@ class DataModel(Payload):
     extends: list[str] = field(default_factory=list)
     slots: list[dict[str, Any]] = field(default_factory=list)
 
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "DataModel":
-        data = json.loads(json_str)
-        return cls(**data)
-
 
 @dataclass
-class ExternalSystem(Payload):
+class ExternalSystem(ToleratesUnknownFields, Payload):
     """A non-secret global definition for an external integration system."""
 
     id: ULID
@@ -799,13 +838,9 @@ class ExternalSystem(Payload):
     description: str = ""
     properties: dict[str, Any] = field(default_factory=dict)
 
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "ExternalSystem":
-        return cls(**json.loads(json_str))
-
 
 @dataclass
-class ExternalReference(Payload):
+class ExternalReference(ToleratesUnknownFields, Payload):
     """An upward reference from a Colca object to an external-system row."""
 
     id: ULID
@@ -818,13 +853,9 @@ class ExternalReference(Payload):
     external_column: str = ""
     description: str = ""
 
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "ExternalReference":
-        return cls(**json.loads(json_str))
-
 
 @dataclass
-class SystemElement(Payload):
+class SystemElement(ToleratesUnknownFields, Payload):
     """A position in the plant, and therefore in the namespace.
 
     Topic: ``colca/v1/_SystemElement/{node-id}/{path…}``. Elements nest;
@@ -851,14 +882,9 @@ class SystemElement(Payload):
     created_at: str | None = None
     updated_at: str | None = None
 
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "SystemElement":
-        data = json.loads(json_str)
-        return cls(**data)
-
 
 @dataclass
-class Signal(Payload):
+class Signal(ToleratesUnknownFields, Payload):
     """A signal, authored by the node.
 
     Topic: ``colca/v1/_Signal/{node-id}/{path…}``; the topic is the position, so
@@ -918,11 +944,11 @@ class Signal(Payload):
             data["data_type"] = SignalDataType(data["data_type"])
         if data.get("index_type") is not None:
             data["index_type"] = IndexType(data["index_type"])
-        return cls(**data)
+        return cls.from_wire(data)
 
 
 @dataclass
-class Constant(Payload):
+class Constant(ToleratesUnknownFields, Payload):
     """A typed, retained configuration value positioned in the namespace.
 
     Topic: ``colca/v1/_Constant/{node-id}/{path…}``. A Constant is not a Signal:
@@ -956,11 +982,11 @@ class Constant(Payload):
     def decode(cls, json_str: str, timestamp: int) -> "Constant":
         data = json.loads(json_str)
         data["data_type"] = ConstantDataType(data["data_type"])
-        return cls(**data)
+        return cls.from_wire(data)
 
 
 @dataclass
-class Resource(Payload):
+class Resource(ToleratesUnknownFields, Payload):
     """A file-backed entity attached to a system element.
 
     Topic: ``colca/v1/_Resource/{node-id}/{element-path…}/{resource-id}``.
@@ -987,14 +1013,9 @@ class Resource(Payload):
     created_at: str | None = None
     updated_at: str | None = None
 
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "Resource":
-        data = json.loads(json_str)
-        return cls(**data)
-
 
 @dataclass
-class EditOperation(Payload):
+class EditOperation(ToleratesUnknownFields, Payload):
     """Bounded, node-local success receipt for atomic Edit replay.
 
     The receipt is committed after its state records in the same entity batch.
@@ -1008,10 +1029,6 @@ class EditOperation(Payload):
     result: str
     topics: list[str]
 
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "EditOperation":
-        return cls(**json.loads(json_str))
-
 
 # ---------------------------------------------------------------------------
 # Colca command classes.
@@ -1024,22 +1041,22 @@ class EditOperation(Payload):
 
 
 @dataclass
-class CmdParam(Cmd):
+class CmdParam(ToleratesUnknownFields, Cmd):
     """Parameters & setpoints (reversible)."""
 
 
 @dataclass
-class CmdOperate(Cmd):
+class CmdOperate(ToleratesUnknownFields, Cmd):
     """Start/stop, job control."""
 
 
 @dataclass
-class CmdMaintain(Cmd):
+class CmdMaintain(ToleratesUnknownFields, Cmd):
     """Calibration, config updates."""
 
 
 @dataclass
-class CmdConfigure(Cmd):
+class CmdConfigure(ToleratesUnknownFields, Cmd):
     """Data-model editing: signal bindings and the elements that hold them.
 
     Verbs (the path at the target node): ``signal/upsert``, ``signal/delete``,
@@ -1051,7 +1068,7 @@ class CmdConfigure(Cmd):
 
 
 @dataclass
-class CmdEdit(Cmd):
+class CmdEdit(ToleratesUnknownFields, Cmd):
     """One versioned, idempotent Edit mutation intent.
 
     ``intent`` stays an open object at the schema-bundle boundary because its
@@ -1067,7 +1084,7 @@ class CmdEdit(Cmd):
 
 
 @dataclass
-class CmdAdmin(Cmd):
+class CmdAdmin(ToleratesUnknownFields, Cmd):
     """Node administration: provisioning (enroll/revoke), restart, firmware.
 
     Executed by the target node, not a machine; verb-specific fields (entry,
