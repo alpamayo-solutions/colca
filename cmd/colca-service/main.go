@@ -4,6 +4,13 @@
 //
 // One process serves the whole node; each record is still published under its
 // service's own identity and topic.
+//
+// Configuration is environment only:
+//
+//	SERVICE_REGISTRATIONS  the services to speak for, a JSON array (required)
+//	COLCA_URL              local API base URL                 (default http://colca)
+//	COLCA_TOPIC_ROOT       the tree's topic root              (default colca)
+//	HTTP_ADDR              /healthz                           (default :9092)
 package main
 
 import (
@@ -20,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/httpserver"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -109,6 +117,11 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	httpAddr := os.Getenv("HTTP_ADDR")
+	if httpAddr == "" {
+		httpAddr = ":9092"
+	}
+	go serve(ctx, httpAddr)
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for {
@@ -125,6 +138,37 @@ func run() error {
 			}
 			return nil
 		}
+	}
+}
+
+// healthMux answers /healthz while this process runs.
+//
+// Liveness only, like colca-grantsync's: it does not report unhealthy because
+// the door is unreachable or a publish was refused. This one process speaks for
+// every service on the node, and a node outage must not be the reason it is
+// restarted — that is when the records it holds are most worth keeping.
+func healthMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	return mux
+}
+
+// serve runs the health endpoint until the context is done. The image is
+// distroless, so an HTTP endpoint is the only thing a container healthcheck can
+// ask; without one the container reports "Up" whether or not the loop turns.
+func serve(ctx context.Context, addr string) {
+	srv := httpserver.NewAt(addr, healthMux())
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdown)
+	}()
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		fmt.Fprintf(os.Stderr, "colca-service: health server stopped: %v\n", err)
 	}
 }
 
