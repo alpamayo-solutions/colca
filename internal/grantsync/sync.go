@@ -103,13 +103,32 @@ func (s *Syncer) applyResources(
 			return err
 		}
 	}
+	// One element Keycloak will not accept costs that element, and nothing
+	// else.
+	//
+	// These two loops returned on the first failure, which aborted the cycle
+	// before any _Group definition was written. A single system element whose
+	// path exceeded Keycloak's varchar(255) display_name was therefore enough
+	// to stop access-control sync for a whole deployment: every cycle failed
+	// on the same element, forever, no group's grants ever reached the tree,
+	// grants made in the Admin app stayed inert with `converged_at` null, and
+	// the Workbench went on reporting the node healthy. The only evidence was
+	// a line in the raw service log.
+	//
+	// Retiring on a failed READ is the dangerous direction — a short tree read
+	// must never delete permissions, which is what
+	// TestAShortTreeReadRetiresNoResourceAndWritesNothing pins. Skipping an
+	// element that could not be REGISTERED removes nothing: it leaves that one
+	// element ungranted and lets every other group converge. The failure stays
+	// visible in the report.
 	for _, r := range plan.Create {
 		report.change("keycloak: register resource %s (%s)", r.Name, r.DisplayName)
 		if s.DryRun {
 			continue
 		}
 		if err := s.KC.CreateResource(ctx, clientUUID, r); err != nil {
-			return err
+			report.problem("authz resource %s could not be registered, so it grants nothing this cycle: %v", r.Name, err)
+			continue
 		}
 		s.Metrics.resourceRegistered()
 	}
@@ -119,7 +138,8 @@ func (s *Syncer) applyResources(
 			continue
 		}
 		if err := s.KC.UpdateResource(ctx, clientUUID, r); err != nil {
-			return err
+			report.problem("authz resource %s could not be relabelled, so it keeps its previous label: %v", r.Name, err)
+			continue
 		}
 		s.Metrics.resourceRegistered()
 	}
