@@ -1111,11 +1111,24 @@ class EditOperation(Payload):
 # ---------------------------------------------------------------------------
 # Colca command classes.
 # The class decides the routing: a Cmd subclass lands on the commands stream
-# under the hazard class its name carries (_CmdParam -> param, _CmdOperate ->
-# operate, _CmdMaintain -> maintain, _CmdConfigure -> configure, _CmdAdmin ->
-# admin). The door requires correlation_id and expires_at (unix milliseconds);
+# under the hazard class its name carries (_CmdAcknowledge -> acknowledge,
+# _CmdParam -> param, _CmdOperate -> operate, _CmdMaintain -> maintain,
+# _CmdConfigure -> configure, _CmdAdmin -> admin). The door requires correlation_id and expires_at (unix milliseconds);
 # created_at is not required.
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class CmdAcknowledge(Cmd):
+    """Acknowledge (quit) what the target stands for, such as a standing alarm.
+
+    Sent on the alarm's own path, verb last (``.../ackAlarm``); ``command``
+    carries the optional ``note``. The executor records who acknowledged from
+    the node's witnessed actor, never from the payload.
+
+    It has its own hazard class so that everyone who watches a line may quit
+    an alarm without being able to start or stop the line. Silencing stays
+    ``_CmdOperate``: it withholds notifications from other people."""
 
 
 @dataclass

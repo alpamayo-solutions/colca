@@ -35,6 +35,7 @@ func TestParseAndClass(t *testing.T) {
 		"_CmdAdmin": {ClassCmd, "commands"}, "_Ack": {ClassAck, "commands"},
 		// demo topology: every _Cmd* contract is a command, never ClassNone
 		"_CmdOperate": {ClassCmd, "commands"}, "_CmdMaintain": {ClassCmd, "commands"},
+		"_CmdAcknowledge": {ClassCmd, "commands"},
 		"_Signal":         {ClassEntity, "entities"},
 		"_Constant":       {ClassEntity, "entities"},
 		"_EditOperation":  {ClassEntity, "entities"},

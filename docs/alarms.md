@@ -106,7 +106,9 @@ channel and when, is in `_NotificationDispatched` on the `alarms` stream.
 A person cannot write the state record: acknowledging is an act, and the
 payload must not assert who performed it.
 
-1. The person sends a `_CmdOperate` for the alarm.
+1. The person sends a `_CmdAcknowledge` for the alarm, on the alarm's own
+   path with the verb `ackAlarm` last. It needs an `acknowledge` grant that
+   covers the alarm's element, not `operate` (see [security.md](security.md)).
 2. The door authenticates them and stores the command with its authorship
    envelope. The node witnesses the actor; `GET /fetch` hands `actor_id`,
    `actor_label` and `actor_kind` to the consumer.
@@ -115,4 +117,6 @@ payload must not assert who performed it.
    `acknowledged_at` and, if there was one, the `note`.
 
 So `acknowledged_by` is always a subject the node vouched for, never one the
-writer claimed for itself. A silence works the same way.
+writer claimed for itself. A silence works the same way, but as a `_CmdOperate`
+(`silenceAlarm`, `unsilenceAlarm`): keeping an alarm from notifying anyone is
+more than confirming one has seen it, so it needs `operate`.

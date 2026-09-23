@@ -9,8 +9,11 @@
  * while the client hung between two connections: nothing is left to deliver for
  * it. `#resync` is what settles that.
  *
- * Quitting and silencing are `_CmdOperate` commands on the alarm's own path,
- * answered with an `_Ack`. The client never says who is quitting: the node
+ * Quitting is a `_CmdAcknowledge` and silencing an `_CmdOperate`, each on the
+ * alarm's own path and answered with an `_Ack`. They are two contracts so that
+ * a grant for `acknowledge` lets someone quit an alarm without being allowed to
+ * operate the line, while silencing, which keeps a notification from other
+ * people, stays with `operate`. The client never says who is quitting: the node
  * writes the session's identity onto the record, and the caller sends the note
  * and nothing else.
  *
@@ -152,7 +155,7 @@ export class Alarms {
    * Who quit it is the node's word — only the note goes out.
    */
   acknowledge(path: string, options: AcknowledgeOptions = {}): Promise<CommandAck> {
-    return this.#operate(path, "ackAlarm", note(options.note), options.timeoutMs);
+    return this.#command("_CmdAcknowledge", path, "ackAlarm", note(options.note), options.timeoutMs);
   }
 
   /** Stop an alarm from notifying until `until` (unix seconds) or for `minutes`. */
@@ -163,12 +166,18 @@ export class Alarms {
     if (until === undefined) {
       return Promise.reject(new Error("silence needs `until` in unix seconds or `minutes`"));
     }
-    return this.#operate(path, "silenceAlarm", { until, ...note(options.note) }, options.timeoutMs);
+    return this.#command(
+      "_CmdOperate",
+      path,
+      "silenceAlarm",
+      { until, ...note(options.note) },
+      options.timeoutMs,
+    );
   }
 
   /** Let it notify again. */
   unsilence(path: string, options: AcknowledgeOptions = {}): Promise<CommandAck> {
-    return this.#operate(path, "unsilenceAlarm", note(options.note), options.timeoutMs);
+    return this.#command("_CmdOperate", path, "unsilenceAlarm", note(options.note), options.timeoutMs);
   }
 
   /** End the subscription. The Live client goes on. */
@@ -234,14 +243,15 @@ export class Alarms {
     if (failure !== undefined) throw failure;
   }
 
-  async #operate(
+  async #command(
+    contract: "_CmdAcknowledge" | "_CmdOperate",
     path: string,
     verb: string,
     command: Record<string, unknown>,
     timeoutMs: number | undefined,
   ): Promise<CommandAck> {
     const target = buildTopic({
-      contract: "_CmdOperate",
+      contract,
       node: this.#node,
       path: `${path}/${verb}`,
       root: this.#root,

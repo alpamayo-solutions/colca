@@ -21,3 +21,10 @@ def test_every_command_contract_is_routed_to_the_commands_stream():
     streams = streams_by_contract()
     for contract in defined:
         assert streams.get(contract) == "commands", contract
+
+
+def test_acknowledging_is_its_own_command_contract():
+    """Quitting an alarm has a contract of its own, so it is granted apart from
+    ``operate``: the node derives the hazard class from the contract's name."""
+    assert "_CmdAcknowledge" in _command_contracts()
+    assert streams_by_contract()["_CmdAcknowledge"] == "commands"
