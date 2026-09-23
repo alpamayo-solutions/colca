@@ -62,10 +62,15 @@ require (
 // https://github.com/mochi-mqtt/server/pull/542, beside #539. Its branch
 // fix/flush-outbuf-before-close adds a flush of buffered writes before a client
 // connection closes, so a PUBACK written behind queued deliveries is not lost at
-// shutdown; upstream does not have that yet.
-// Drop this replace once a released mochi version contains all three;
+// shutdown; upstream does not have that yet. Its branch
+// fix/subscribe-packet-id-per-direction stops refusing a SUBSCRIBE or UNSUBSCRIBE
+// whose packet id matches one of the broker's own in-flight deliveries (ids are
+// per direction), so a subscription made during a retained burst is not lost —
+// upstream as https://github.com/mochi-mqtt/server/pull/546.
+// Drop this replace once a released mochi version contains all four;
 // internal/mqttsrv's TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace goes
-// red under -race if it is dropped early, and
+// red under -race if it is dropped early,
 // TestAPubackBufferedBehindQueuedDeliveriesReachesTheClientBeforeShutdown fails
-// without the flush.
-replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260914070953-4d586594fc32
+// without the flush, and TestASubscribeReusingAnInflightDeliveryIDStillSubscribes
+// fails without the packet-id fix.
+replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260923232233-3b31c000daf1
