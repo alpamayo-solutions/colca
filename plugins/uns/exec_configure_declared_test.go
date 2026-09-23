@@ -270,6 +270,57 @@ func TestATagNamingAMissingElementAuthorsItAndBinds(t *testing.T) {
 	}
 }
 
+// elementRecordAt returns the raw _SystemElement record at a local path.
+func elementRecordAt(t *testing.T, c *ConfigExec, path string) map[string]any {
+	t.Helper()
+	raw, ok := c.store.KVGet(c.elementTopic(path))
+	if !ok {
+		t.Fatalf("no element at %s", path)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatalf("element at %s is not a record: %v", path, err)
+	}
+	return record
+}
+
+// An element autobind authors names its parent by id, and a top-level one
+// carries no parent_id at all. The schema types parent_id as a ULID or
+// absent, so the empty string the walk used to write was refused and every
+// tag naming a new element lost its binding.
+func TestAnAuthoredElementNamesItsParent(t *testing.T) {
+	c := newConfigExec(t)
+	bindEntry(t, c, "01JDATAOPS", "dataops", "")
+	placeElement(t, c, "line1", "01HLINE1")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/dataops", []map[string]any{
+		// Under an element the node already holds.
+		{"id": "t-m9", "name": "oee", "data_type": "float", "meta": map[string]any{"element": "line1/m9"}},
+		// A chain the node holds none of.
+		{"id": "t-p", "name": "oee", "data_type": "float", "meta": map[string]any{"element": "line2/cell1/m1"}},
+	})
+
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JDATAOPS"})); code != 200 {
+		t.Fatalf("autobind = %d %q", code, msg)
+	}
+
+	elements := elementsUnder(c.store.(*fakeStore), "n1")
+	for path, parent := range map[string]string{
+		"line1/m9":       "01HLINE1",
+		"line2/cell1":    elements["line2"],
+		"line2/cell1/m1": elements["line2/cell1"],
+	} {
+		if parent == "" {
+			t.Fatalf("elements = %+v, want every segment of %s authored", elements, path)
+		}
+		if got := elementRecordAt(t, c, path)["parent_id"]; got != parent {
+			t.Fatalf("%s parent_id = %#v, want its parent's id %q", path, got, parent)
+		}
+	}
+	if got, present := elementRecordAt(t, c, "line2")["parent_id"]; present {
+		t.Fatalf("top-level line2 parent_id = %#v, want the field absent", got)
+	}
+}
+
 // A catalogue can grow after its first publish. Tags a later publish adds
 // are bound; tags already bound stay as they were.
 func TestACatalogueThatGrowsBindsItsNewTagsOnArrival(t *testing.T) {

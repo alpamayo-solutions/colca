@@ -186,7 +186,7 @@ type elementUpsertBody struct {
 type placedElement struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
-	ParentID string `json:"parent_id"`
+	ParentID string `json:"parent_id,omitempty"`
 }
 
 // definitionRef is one definition to write. It has no path on purpose: a
@@ -1018,7 +1018,7 @@ func (c *ConfigExec) elementAt(path string) (string, bool) {
 // "element/author". It calls elementUpsert directly because c.mu is already
 // held and not reentrant. Each segment commits so the next one can see it.
 func (c *ConfigExec) authorElementAt(ctx CommandContext, path string) (string, error) {
-	var local, leaf string
+	var local, leaf, parent string
 	for _, seg := range strings.Split(path, "/") {
 		if seg == "" {
 			continue
@@ -1032,7 +1032,7 @@ func (c *ConfigExec) authorElementAt(ctx CommandContext, path string) (string, e
 		if !ok {
 			// Minted, not derived from the path, so a rename keeps the id.
 			id = c.newID()
-			elem, err := json.Marshal(placedElement{ID: id, Name: seg})
+			elem, err := json.Marshal(placedElement{ID: id, Name: seg, ParentID: parent})
 			if err != nil {
 				return "", fmt.Errorf("author element at %s: %w", local, err)
 			}
@@ -1045,7 +1045,7 @@ func (c *ConfigExec) authorElementAt(ctx CommandContext, path string) (string, e
 				return "", fmt.Errorf("author element at %s: %s", local, msg)
 			}
 		}
-		leaf = id
+		leaf, parent = id, id
 	}
 	return leaf, nil
 }
