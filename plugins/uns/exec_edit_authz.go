@@ -228,7 +228,7 @@ func (w *EditExec) planFor(
 		// realm-wide grant covers it. An operate grant also covers a create or
 		// the person's own annotation.
 		operable := annotationOperable(intent, ctx.Actor)
-		touched := make([]editTouched, 0, len(intent.SignalIDs)+1)
+		touched := make([]editTouched, 0, len(intent.SignalIDs))
 		if intent.SystemElementID != "" {
 			t := touchedEntity(entities, "system-element", intent.SystemElementID)
 			t.operate = operable
