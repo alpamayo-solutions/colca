@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/alpamayo-solutions/colca/compare/v0.8.0...v0.8.1) (2026-09-23)
+
+
+### Fixes
+
+* **uns:** name the parent of an element the walk authors ([22d3aa9](https://github.com/alpamayo-solutions/colca/commit/22d3aa929f9c14f441f2c22283212cb07b0cc897))
+* **uns:** name the parent of an element the walk authors ([9ffe06d](https://github.com/alpamayo-solutions/colca/commit/9ffe06d268b3b4bb4590406119eaa346ae13d1a9))
+
 ## [0.8.0](https://github.com/alpamayo-solutions/colca/compare/v0.7.0...v0.8.0) (2026-09-23)
 
 
