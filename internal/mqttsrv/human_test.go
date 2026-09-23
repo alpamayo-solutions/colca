@@ -55,7 +55,7 @@ func newHumanWorld(t *testing.T) *humanWorld {
 	iss := tokentest.NewIssuer(t)
 	m := metrics.New(st, config.Retention{}, nil)
 	ver, err := tokenauth.New(tokenauth.Config{
-		Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL(),
+		Issuers: []tokenauth.Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud(),
 	}, st, m)
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func newHumanWorld(t *testing.T) *humanWorld {
 	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
 		MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
 		MQTTHuman: config.MQTTHuman{TCPAddr: "127.0.0.1:0", WSAddr: "127.0.0.1:0"},
-		Auth:      &config.Auth{Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL()},
+		Auth:      &config.Auth{Issuers: []config.AuthIssuer{{URL: iss.Iss()}}, Audience: iss.Aud(), JWKSURL: iss.JWKSURL()},
 	}
 	s, err := New(cfg, nodeID, reg, ver, nil, m, config.Limits{}.EffectiveMaxRecordBytes())
 	if err != nil {

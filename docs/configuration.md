@@ -92,9 +92,10 @@ or clients in the file: identities are runtime state, stored by the node.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `auth.issuer` | | Expected `iss` of tokens. |
-| `auth.audience` | | Expected `aud`. |
-| `auth.jwks_url` | | Where the issuer's signing keys are fetched from. |
+| `auth.issuers[].url` | | An accepted `iss` of tokens. At least one is required. |
+| `auth.issuers[].jwks_url` | `auth.jwks_url` | Where this issuer's signing keys are fetched from. |
+| `auth.audience` | | Expected `aud`, the same for every issuer. |
+| `auth.jwks_url` | | Signing keys shared by every issuer without its own `jwks_url`. |
 | `auth.jwks_refresh` | `1h` | How often keys are refreshed in the background. |
 
 ## Retention

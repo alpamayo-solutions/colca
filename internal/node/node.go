@@ -182,10 +182,13 @@ func Start(cfg *config.Config) (*Node, error) {
 	//     refresh loop joins wg so Stop never closes the store mid-write.
 	var ver *tokenauth.Verifier
 	if cfg.Auth != nil {
+		issuers := make([]tokenauth.Issuer, 0, len(cfg.Auth.Issuers))
+		for _, is := range cfg.Auth.EffectiveIssuers() {
+			issuers = append(issuers, tokenauth.Issuer{ID: is.URL, JWKSURL: is.JWKSURL})
+		}
 		ver, err = tokenauth.New(tokenauth.Config{
-			Issuer:    cfg.Auth.Issuer,
+			Issuers:   issuers,
 			Audience:  cfg.Auth.Audience,
-			JWKSURL:   cfg.Auth.JWKSURL,
 			Refresh:   cfg.Auth.EffectiveRefresh(),
 			NotBefore: cfg.StandaloneSince,
 		}, st, n.Metrics)

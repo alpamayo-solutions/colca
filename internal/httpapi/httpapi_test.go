@@ -123,7 +123,7 @@ func newAPI(t *testing.T) *api {
 
 	iss := tokentest.NewIssuer(t)
 	ver, err := tokenauth.New(tokenauth.Config{
-		Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL(),
+		Issuers: []tokenauth.Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud(),
 	}, s, m)
 	if err != nil {
 		t.Fatal(err)
@@ -2401,7 +2401,7 @@ func newLocalHandlerWithVerifier(t *testing.T) (*localAPI, *tokentest.Issuer) {
 	h := newLocalHandler(t)
 	iss := tokentest.NewIssuer(t)
 	ver, err := tokenauth.New(tokenauth.Config{
-		Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL(),
+		Issuers: []tokenauth.Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud(),
 	}, h.eng.Store(), h.m)
 	if err != nil {
 		t.Fatal(err)
@@ -2536,7 +2536,7 @@ func newLocalHandlerWithPersonalAccessToken(t *testing.T, id string, scopes []st
 	h := newLocalHandler(t)
 	iss := tokentest.NewIssuer(t)
 	ver, err := tokenauth.New(tokenauth.Config{
-		Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL(),
+		Issuers: []tokenauth.Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud(),
 	}, h.eng.Store(), h.m)
 	if err != nil {
 		t.Fatal(err)

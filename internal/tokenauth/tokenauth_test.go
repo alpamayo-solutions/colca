@@ -24,7 +24,7 @@ func openStore(t *testing.T) *store.Store {
 func world(t *testing.T) (*tokentest.Issuer, *Verifier) {
 	t.Helper()
 	iss := tokentest.NewIssuer(t)
-	v, err := New(Config{Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL()}, openStore(t), nil)
+	v, err := New(Config{Issuers: []Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud()}, openStore(t), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestUnknownKidOfflineFailsClosed(t *testing.T) {
 func TestJWKSPersistsAcrossRestartOffline(t *testing.T) {
 	iss := tokentest.NewIssuer(t)
 	st := openStore(t)
-	v1, err := New(Config{Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL()}, st, nil)
+	v1, err := New(Config{Issuers: []Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud()}, st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestJWKSPersistsAcrossRestartOffline(t *testing.T) {
 	tok := iss.Mint("anna", []string{"read:01HZ/#"}, time.Now().Add(5*time.Minute))
 	iss.CloseServer()
 
-	v2, err := New(Config{Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL()}, st, nil)
+	v2, err := New(Config{Issuers: []Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud()}, st, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,5 +238,88 @@ func TestStandaloneRejectsAllTokensUntilReadyAndThenOldSessions(t *testing.T) {
 	fresh = iss.MintOpt(tokentest.MintOpts{Sub: "operator", Iat: time.Unix(completed.Since, 0)})
 	if _, _, err := v.Verify(fresh); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// One identity provider reached under two host names signs with the same keys
+// but writes the host the browser used into `iss`. Both are accepted when both
+// are listed, and only the listed ones.
+func TestSharedJWKSAcceptsEveryListedIssuer(t *testing.T) {
+	idp := tokentest.NewIssuer(t)
+	red, green := "https://red.plant/realms/unity", "https://green.plant/realms/unity"
+	future := time.Now().Add(5 * time.Minute)
+	viaGreen := idp.MintOpt(tokentest.MintOpts{Sub: "anna", Exp: future, Iss: green})
+
+	redOnly, err := New(Config{Issuers: []Issuer{{ID: red, JWKSURL: idp.JWKSURL()}}, Audience: idp.Aud()}, openStore(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redOnly.refresh()
+	if got, reason, err := redOnly.Verify(viaGreen); got != nil || reason != ReasonIssuer {
+		t.Fatalf("an unlisted issuer must be rejected with reason issuer: %v %q %v", got, reason, err)
+	}
+
+	both, err := New(Config{Issuers: []Issuer{
+		{ID: red, JWKSURL: idp.JWKSURL()}, {ID: green, JWKSURL: idp.JWKSURL()},
+	}, Audience: idp.Aud()}, openStore(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := idp.Requests()
+	both.refresh()
+	if idp.Requests() != before+1 {
+		t.Fatalf("issuers sharing a JWKS URL must share one fetch, server saw %d", idp.Requests()-before)
+	}
+	for _, iss := range []string{red, green} {
+		tok := idp.MintOpt(tokentest.MintOpts{Sub: "anna", Exp: future, Iss: iss})
+		if got, reason, err := both.Verify(tok); err != nil || got.Sub != "anna" {
+			t.Fatalf("listed issuer %s rejected: %q %v", iss, reason, err)
+		}
+	}
+	if got, reason, _ := both.Verify(idp.MintOpt(tokentest.MintOpts{Sub: "s", Exp: future, Iss: "https://evil.test"})); got != nil || reason != ReasonIssuer {
+		t.Fatalf("unlisted issuer: %v %q", got, reason)
+	}
+	if got, reason, _ := both.Verify(idp.MintOpt(tokentest.MintOpts{Sub: "s", Exp: future, Iss: green, Aud: "other"})); got != nil || reason != ReasonIssuer {
+		t.Fatalf("audience is still checked for every issuer: %v %q", got, reason)
+	}
+}
+
+// Issuers with their own JWKS: a token is checked against its issuer's keys
+// only, so a token signed by A cannot pass by claiming to be from B.
+func TestPerIssuerJWKSChecksTheClaimedIssuersKeys(t *testing.T) {
+	a, b := tokentest.NewIssuer(t), tokentest.NewIssuer(t)
+	issA, issB := "https://a.test/realms/x", "https://b.test/realms/x"
+	st := openStore(t)
+	cfg := Config{Issuers: []Issuer{{ID: issA, JWKSURL: a.JWKSURL()}, {ID: issB, JWKSURL: b.JWKSURL()}}, Audience: a.Aud()}
+	v, err := New(cfg, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.refresh()
+	future := time.Now().Add(5 * time.Minute)
+	fromA := a.MintOpt(tokentest.MintOpts{Sub: "anna", Exp: future, Iss: issA})
+	fromB := b.MintOpt(tokentest.MintOpts{Sub: "ben", Exp: future, Iss: issB})
+	for tok, sub := range map[string]string{fromA: "anna", fromB: "ben"} {
+		if got, reason, err := v.Verify(tok); err != nil || got.Sub != sub {
+			t.Fatalf("%s: %q %v", sub, reason, err)
+		}
+	}
+	forged := a.MintOpt(tokentest.MintOpts{Sub: "mallory", Exp: future, Iss: issB})
+	if got, reason, _ := v.Verify(forged); got != nil || reason != ReasonBadToken {
+		t.Fatalf("A-signed token claiming issuer B must fail the signature: %v %q", got, reason)
+	}
+
+	// Each JWKS is persisted on its own: a restarted verifier with both
+	// issuers offline still validates tokens from both.
+	a.CloseServer()
+	b.CloseServer()
+	v2, err := New(cfg, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tok := range []string{fromA, fromB} {
+		if _, reason, err := v2.Verify(tok); err != nil {
+			t.Fatalf("persisted per-issuer JWKS must validate offline: %q %v", reason, err)
+		}
 	}
 }
