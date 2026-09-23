@@ -3,6 +3,7 @@ package registry
 import (
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 
@@ -886,5 +887,117 @@ func TestRoutesUnderCoversEveryChildNodeAndOnlyChildNodes(t *testing.T) {
 	m.SetNamespace(n)
 	if m.RoutesUnder("site1/edge1/press3/resource/upsert") {
 		t.Fatal("the old path must stop being routable once the element moved")
+	}
+}
+
+// seedServiceRecord writes the retained _ServiceDetails a service publishes
+// about itself, exactly as the engine projects it: the record on the entities
+// stream and its KV entry under the topic's path.
+func seedServiceRecord(t *testing.T, st *store.Store, nodeID, mount, ulid string) string {
+	t.Helper()
+	path := mount + "/_service"
+	topic := "colca/v1/_ServiceDetails/" + nodeID + "/" + path
+	if _, _, err := st.Append("entities", []store.Record{{
+		Topic: topic, Payload: []byte(`{"id":"` + ulid + `","name":"svc"}`), TS: 1,
+		KVPath: path, KVNode: nodeID,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	return topic
+}
+
+// serviceTopics lists the _ServiceDetails records the node still holds.
+func serviceTopics(t *testing.T, st *store.Store) []string {
+	t.Helper()
+	var out []string
+	for _, kv := range mustKVScan(t, st, "") {
+		if strings.Contains(kv.Topic, "/_ServiceDetails/") {
+			out = append(out, kv.Topic)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// A _ServiceDetails record is observed state only its own service may write, so
+// a revoke that leaves one behind leaves it forever: the admin door refuses the
+// contract and the author is gone. Revoke therefore retires every record the
+// identity authored, including the ones standing at mounts it has since left —
+// a live node had three for one service, two under elements deleted since.
+func TestRevokeRetiresEveryRecordTheIdentityAuthored(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "events")
+	mustEnroll(t, m, `{"ulid":"01JSVC","kind":"local","name":"tcdb-api","element":"el-events"}`)
+	mustEnroll(t, m, `{"ulid":"01JOTHER","kind":"local","name":"other"}`)
+	here := seedServiceRecord(t, st, "01NODE", "events/tcdb-api", "01JSVC")
+	stale := seedServiceRecord(t, st, "01NODE", "traceability/events/tcdb-api", "01JSVC")
+	neighbour := seedServiceRecord(t, st, "01NODE", "events/other", "01JOTHER")
+	if got := serviceTopics(t, st); len(got) != 3 {
+		t.Fatalf("seeded records = %v, want all three present before the revoke", got)
+	}
+
+	off, _, err := m.Revoke("01JSVC")
+	if err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	if got := serviceTopics(t, st); len(got) != 1 || got[0] != neighbour {
+		t.Fatalf("after the revoke the node holds %v, want only %s — the revoked identity's "+
+			"records at every mount it ever had must go with it", got, neighbour)
+	}
+	// The retirement travels: an ancestor holds its own copy and only a tombstone
+	// on the entities stream retires it there.
+	recs, _, err := st.Read("entities", off, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired := map[string]bool{}
+	for _, rec := range recs {
+		if len(rec.Payload) == 0 {
+			retired[rec.Topic] = true
+		}
+	}
+	if !retired[here] || !retired[stale] {
+		t.Fatalf("tombstones appended from %d = %v, want empty-payload records at %s and %s",
+			off, recs, here, stale)
+	}
+	if retired[neighbour] {
+		t.Fatalf("the revoke retired %s, which another identity authored", neighbour)
+	}
+}
+
+// Revoking an identity that published nothing is an ordinary operator act and
+// must not be turned into a failure by having nothing to retire.
+func TestRevokeOfAnIdentityThatAuthoredNothingSucceeds(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "events")
+	mustEnroll(t, m, `{"ulid":"01JSVC","kind":"local","name":"tcdb-api","element":"el-events"}`)
+
+	if _, _, err := m.Revoke("01JSVC"); err != nil {
+		t.Fatalf("Revoke of an identity that never registered: %v", err)
+	}
+	if _, ok := m.Get("01JSVC"); ok {
+		t.Fatal("entry survived a revoke that had nothing to retire")
+	}
+}
+
+// A record this node holds under another node's authorship is a child's own
+// state, replicated up. The child owns it and retires it; revoking an identity
+// here must not touch it, however the ulids happen to compare.
+func TestRevokeLeavesRecordsAuthoredAtAnotherNodeAlone(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "site1/edge1")
+	if _, _, err := m.Enroll(entryJSON(t, node("01NCHILD", "site1/edge1", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	belowChild := seedServiceRecord(t, st, "01NCHILD", "press3/conn", "01NCHILD")
+
+	if _, _, err := m.Revoke("01NCHILD"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	if got := serviceTopics(t, st); len(got) != 1 || got[0] != belowChild {
+		t.Fatalf("after revoking the child the node holds %v, want its replicated record %s "+
+			"untouched — this node does not author or retire it", got, belowChild)
 	}
 }

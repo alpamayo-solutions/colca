@@ -2579,3 +2579,66 @@ func TestTheLocalDoorRefusesAPersonalAccessTokenWithoutTheApiScope(t *testing.T)
 		t.Fatalf("broker-only PAT on the local door = %d, want 401: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// adminHandlerFor mounts the admin door over the engine and registry a local
+// handler already holds, so one test can register a service the way a service
+// registers and then revoke it the way an operator revokes it.
+func adminHandlerFor(t *testing.T, h *localAPI) http.Handler {
+	t.Helper()
+	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
+	return Handler(h.eng, cfg, h.reg, nil, h.m, testBlobs(t, cfg), "deadbeef", false, nil)
+}
+
+// serviceRecords returns the _ServiceDetails records this node holds, so a test
+// can name what survived a revoke instead of asserting on a count alone.
+func serviceRecords(t *testing.T, h *localAPI) []string {
+	t.Helper()
+	entries, err := h.eng.Store().KVScan("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var topics []string
+	for _, kv := range entries {
+		if strings.Contains(kv.Topic, "/_ServiceDetails/") {
+			topics = append(topics, kv.Topic)
+		}
+	}
+	return topics
+}
+
+// Revoking an identity takes the records that identity authored with it. A
+// _ServiceDetails record is observed state only its own service may write — the
+// admin door refuses that contract outright — so one left behind by a revoke can
+// never be retired by anyone again. A live node had three for one service after
+// its mount was moved twice, two of them under elements that had since been
+// deleted, and the hub above it folded them by name and showed the service as
+// inactive while it was running and publishing.
+func TestRevokingAnIdentityRetiresTheServiceRecordItAuthored(t *testing.T) {
+	h := newLocalHandler(t)
+	registerLocal(t, h, "tcdb-api", "events")
+	entry, ok := h.reg.ByName("tcdb-api")
+	if !ok {
+		t.Fatal("the local door did not register tcdb-api")
+	}
+	topic := "colca/v1/_ServiceDetails/n-test/events/tcdb-api/_service"
+	if rec := localPublish(t, h, map[string]string{"X-Colca-Service": "tcdb-api"},
+		map[string]any{"topic": topic, "payload": map[string]any{"id": entry.ULID, "name": "tcdb-api"}},
+	); rec.Code != http.StatusOK {
+		t.Fatalf("the service publishing its own record = %d: %s", rec.Code, rec.Body.String())
+	}
+	// The denominator for the absence assertion below: the record is there to
+	// retire, and this is the topic it sits at.
+	if got := serviceRecords(t, h); len(got) != 1 || got[0] != topic {
+		t.Fatalf("after registration the node holds %v, want exactly %s", got, topic)
+	}
+
+	admin := adminHandlerFor(t, h)
+	if rec := doAdmin(t, admin, http.MethodDelete, "/enroll/"+entry.ULID, nil); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE /enroll/%s = %d: %s", entry.ULID, rec.Code, rec.Body.String())
+	}
+
+	if got := serviceRecords(t, h); len(got) != 0 {
+		t.Fatalf("the revoke left %v standing — nothing can retire a _ServiceDetails "+
+			"record once the identity that authored it is gone", got)
+	}
+}

@@ -70,7 +70,7 @@ Acknowledge `gap.to_offset` to move past it.
 |---|---|---|
 | `POST /enroll` | `{"ulid","pubkey","kind":"external"\|"node","element","grants":[…]}` | `{"ulid":"…","offset":N}`; `409` when the key or the element is already taken, `422` on an invalid entry or an element this node does not hold |
 | `GET /enroll` | `?max=1000&after=TOKEN` | the locally enrolled entries, public keys only |
-| `DELETE /enroll/{ulid}` | | `{"revoked":true,"offset":N}` |
+| `DELETE /enroll/{ulid}` | | `{"revoked":true,"offset":N}`; the same batch retires the records the identity authored about itself — its `_ServiceDetails`, at every mount it published one at. Only that identity may write them, so one left behind could never be retired by anyone |
 | `GET /debug/state` | | the next offset of every stream |
 
 ## Secrets
