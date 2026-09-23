@@ -274,6 +274,23 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 		return 0, false, fmt.Errorf("revoke %s: %w", ulid, ErrNotEnrolled)
 	}
 	wasDraining = e.IsDraining()
+
+	// What the identity authored goes with the identity. A service's
+	// _ServiceDetails is observed state only that service may write, so one left
+	// behind by a revoke can never be retired by anyone: the admin door refuses
+	// the contract and the author no longer exists. A live node accumulated three
+	// records for one service across two mount moves, two of them under elements
+	// deleted since, and the hub above it folded them by name and showed a
+	// running service as inactive.
+	authored, err := m.authoredBy(ulid)
+	if err != nil {
+		m.mu.Unlock()
+		// Reading nothing is not the same as there being nothing. Revoking on a
+		// failed scan would leave exactly the record this retirement exists to
+		// remove, with no second chance at it; the operator can retry instead.
+		return 0, false, fmt.Errorf("revoke %s: %w", ulid, err)
+	}
+
 	// Revoke does not depend on the element still resolving: the inventory record has
 	// a fixed address.
 	topic, kvPath := m.topicFor(e)
@@ -282,7 +299,7 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 		TS:     time.Now().UnixMilli(),
 		KVPath: kvPath,
 		KVNode: m.nodeID,
-	})
+	}, authored...)
 	if err != nil {
 		m.mu.Unlock()
 		return 0, false, err
@@ -323,9 +340,50 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 	}
 	if deliver != nil {
 		deliver(topic, nil, true) // empty retained payload clears the retained copy
+		for _, rec := range authored {
+			deliver(rec.Topic, nil, true)
+		}
 	}
-	m.log.Info("identity revoked", "ulid", ulid)
+	m.log.Info("identity revoked", "ulid", ulid, "records_retired", len(authored))
 	return off, wasDraining, nil
+}
+
+// authoredBy builds a retirement tombstone for every record this node holds
+// that ulid authored about itself. The caller holds at least the read lock.
+//
+// It asks each record who wrote it (uns.ServiceRecordAuthor) rather than
+// computing the topic the identity would publish to now: a service leaves a
+// record standing at every mount it has ever had, and a computed topic finds
+// only the last one. Records this node holds for another node's author are a
+// child's own state replicated up and are not this node's to retire, so the
+// scan keeps only the ones written here.
+func (m *Manager) authoredBy(ulid string) ([]store.Record, error) {
+	entries, err := m.st.KVScan("")
+	if err != nil {
+		return nil, fmt.Errorf("scan for the records %s authored: %w", ulid, err)
+	}
+	ts := time.Now().UnixMilli()
+	var out []store.Record
+	for _, kv := range entries {
+		if kv.NodeID != m.nodeID {
+			continue
+		}
+		p, err := uns.Parse(kv.Topic)
+		if err != nil {
+			continue
+		}
+		if uns.ServiceRecordAuthor(p.Contract, kv.Payload) != ulid {
+			continue
+		}
+		out = append(out, store.Record{
+			Topic:  kv.Topic,
+			TS:     ts,
+			KVPath: kv.Path,
+			KVNode: kv.NodeID,
+			Delete: true,
+		})
+	}
+	return out, nil
 }
 
 // Drain starts decommissioning a child node: its entry is persisted as draining
