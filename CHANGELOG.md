@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.8.0](https://github.com/alpamayo-solutions/colca/compare/v0.7.0...v0.8.0) (2026-09-23)
+
+
+### Features
+
+* **contracts:** place annotations on an element and relate them to each other ([867eefa](https://github.com/alpamayo-solutions/colca/commit/867eefa2e1cf050f01deab4bc3baf3a3888cdd48))
+* **contracts:** place annotations on an element and relate them to each other ([8f388e2](https://github.com/alpamayo-solutions/colca/commit/8f388e2e8e60386e2942a6ca1e77f5db05fe701b))
+
+
+### Fixes
+
+* **uns:** size the annotation position list without arithmetic on the signal count ([d73ca01](https://github.com/alpamayo-solutions/colca/commit/d73ca010a268d9756ed640eec63c899582ac9a81))
+
 ## [0.7.0](https://github.com/alpamayo-solutions/colca/compare/v0.6.0...v0.7.0) (2026-09-23)
 
 
