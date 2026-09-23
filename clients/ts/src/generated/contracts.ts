@@ -45,11 +45,13 @@ export type AlarmState = {
   acknowledged_by?: null | string;
   alarm_id: string;
   event_id?: null | string;
+  finding_path?: null | string;
+  finding_seen_at?: null | number;
   note?: null | string;
   op?: null | string;
   reason: string;
   severity: "info" | "warning" | "critical";
-  signal_id: string;
+  signal_id?: null | string;
   silenced_by?: null | string;
   silenced_until?: null | number;
   since: number;
@@ -282,6 +284,25 @@ export type ExternalSystem = {
   name: string;
   properties?: Record<string, unknown>;
   system_type: string;
+  [key: string]: unknown;
+};
+
+/** `_Finding` — stream class `entity`. */
+export type Finding = {
+  detail?: null | Record<string, unknown>;
+  dwell_off_s?: number;
+  dwell_on_s?: number;
+  min_repeat_s?: null | number;
+  observed_at: number;
+  op?: null | string;
+  reason: string;
+  remedy?: null | string;
+  signal_id?: null | string;
+  silenceable?: boolean;
+  suggested_severity: "info" | "warning" | "critical";
+  summary: string;
+  threshold?: null | number;
+  value?: unknown;
   [key: string]: unknown;
 };
 
@@ -532,6 +553,7 @@ export const CONTRACTS = {
   "_EditOperation": { class: "entity", tombstone: true },
   "_ExternalReference": { class: "entity", tombstone: true },
   "_ExternalSystem": { class: "definition", tombstone: true },
+  "_Finding": { class: "entity", tombstone: true },
   "_Group": { class: "definition", tombstone: true },
   "_Log": { class: "log", tombstone: false },
   "_MetadataType": { class: "definition", tombstone: true },
@@ -572,6 +594,7 @@ export interface PayloadByContract {
   "_EditOperation": EditOperation;
   "_ExternalReference": ExternalReference;
   "_ExternalSystem": ExternalSystem;
+  "_Finding": Finding;
   "_Group": Group;
   "_Log": Log;
   "_MetadataType": MetadataType;

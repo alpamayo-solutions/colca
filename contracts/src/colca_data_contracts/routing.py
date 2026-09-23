@@ -46,6 +46,11 @@ CLASS_TABLE: dict[str, str] = {
     "_ExternalReference": "entity",
     "_AlarmNotificationConfig": "entity",
     "_NotificationConfigStatus": "entity",
+    # What a service found, republished for as long as it holds and retired by
+    # tombstone: same retained shape as the alarm below, one writer earlier in
+    # the chain. The service that ran the check writes this; the manager reads
+    # findings and owns the alarm.
+    "_Finding": "entity",
     # The standing alarm, one record per definition: it overwrites itself and
     # a tombstone retires it, so a new subscriber sees what stands.
     "_AlarmState": "entity",

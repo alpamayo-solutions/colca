@@ -83,7 +83,7 @@ The contract decides which stream a record lands in and which way it flows.
 | Class | Contracts | Stream | Flows |
 |---|---|---|---|
 | data | `_Metric` | `metrics` | up |
-| entity | `_Node`, `_SystemElement`, `_Signal`, `_Constant`, `_Resource`, `_ServiceDetails`, `_EnrolledIdentity`, `_AlarmState` | `entities` | up |
+| entity | `_Node`, `_SystemElement`, `_Signal`, `_Constant`, `_Resource`, `_ServiceDetails`, `_EnrolledIdentity`, `_Finding`, `_AlarmState` | `entities` | up |
 | definition | `_Group`, `_MetadataType`, `_AnnotationType`, `_DataModel`, `_SemanticTag` | `definitions` | down to every node |
 | command | `_CmdParam`, `_CmdConfigure`, `_CmdAdmin`, `_CmdEdit`, … | `commands` | down to the target |
 | acknowledgement | `_Ack` | `commands` | up |

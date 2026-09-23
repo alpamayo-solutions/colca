@@ -305,6 +305,52 @@ def test_alarm_notification_contracts_have_revised_direction_and_shape():
     assert {"revision", "notification"} <= set(event["schema"]["required"])
 
 
+def test_a_finding_is_retained_and_carries_its_own_handling():
+    """`_Finding` is what a service stands behind, with the handling attached.
+
+    Two properties make the model work, and both are asserted here because
+    losing either turns it back into the thing it replaces:
+
+      * retained with a tombstone, so "still broken" is a cheap republish and
+        "gone" is a deletion. A service needs no memory of what it said.
+      * the handling travels WITH the observation. The service that wrote the
+        check is the only one that knows whether its condition flaps or whether
+        an operator may silence it; a rule kept elsewhere has to be matched to
+        the finding, and the matching is what drifts.
+
+    What is deliberately absent: everything about the lifecycle. No
+    acknowledgement, no silence, no status. A service republishing its
+    observation must never be able to overwrite an operator's acknowledgement,
+    and the only way to guarantee that is to give it nowhere to write it.
+    """
+    body, _ = gb.build_bundle()
+    finding = body["contracts"]["_Finding"]
+    schema = finding["schema"]
+
+    assert finding["class"] == "entity"
+    assert finding["tombstone"] is True
+    assert set(schema["required"]) == {
+        "reason",
+        "summary",
+        "observed_at",
+        "suggested_severity",
+    }
+    # The handling the finder attaches, all optional: a check that cannot flap
+    # and may always be silenced carries none of it.
+    for knob in ("silenceable", "dwell_on_s", "dwell_off_s", "min_repeat_s", "remedy"):
+        assert knob in schema["properties"], knob
+        assert knob not in schema["required"], knob
+    # Severity is a proposal here and a decision in `_AlarmState`; the names
+    # differ so nobody reads one for the other.
+    assert schema["properties"]["suggested_severity"]["enum"] == ["info", "warning", "critical"]
+    assert "severity" not in schema["properties"]
+    # Open, like the alarm's: a service that diagnoses something new names it.
+    assert "enum" not in schema["properties"]["reason"]
+    # The lifecycle belongs to the manager, and a writer cannot reach it.
+    for owned_by_the_manager in ("status", "acknowledged_by", "silenced_by", "silenced_until", "since"):
+        assert owned_by_the_manager not in schema["properties"], owned_by_the_manager
+
+
 def test_standing_alarm_is_retained_state_with_a_closed_status_vocabulary():
     body, _ = gb.build_bundle()
     standing = body["contracts"]["_AlarmState"]
@@ -314,12 +360,15 @@ def test_standing_alarm_is_retained_state_with_a_closed_status_vocabulary():
     # is how an alarm goes away.
     assert standing["class"] == "entity"
     assert standing["tombstone"] is True
+    # `signal_id` is NOT required: an alarm can stand on a finding about an
+    # element -- a station commissioned that the line definition does not know,
+    # a stale configuration -- and there is no signal to name. Relaxed
+    # deliberately; a manager inventing one would be worse than its absence.
     assert set(schema["required"]) == {
         "alarm_id",
         "status",
         "severity",
         "since",
-        "signal_id",
         "reason",
     }
     # Status and severity are closed; reason stays open so a derived diagnosis
@@ -447,6 +496,7 @@ ULID_CONSTRAINED_FIELDS = {
     "_Constant": ["id", "system_element_id", "semantic_type_id"],
     "_Resource": ["id", "system_element_id"],
     "_ExternalReference": ["id", "external_system_id"],
+    "_Finding": ["signal_id"],
     "_AlarmState": ["alarm_id", "signal_id"],
     # annotation_type_id stays unconstrained until the golden annotation-id
     # vectors derive from ULID type ids — see payload.Annotation.

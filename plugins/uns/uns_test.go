@@ -27,6 +27,7 @@ func TestParseAndClass(t *testing.T) {
 		"_Log":                      {ClassLog, "logs"},
 		"_AlarmNotificationConfig":  {ClassEntity, "entities"},
 		"_NotificationConfigStatus": {ClassEntity, "entities"},
+		"_Finding":                  {ClassEntity, "entities"},
 		"_AlarmState":               {ClassEntity, "entities"},
 		"_Node":                     {ClassEntity, "entities"}, "_ServiceDetails": {ClassEntity, "entities"},
 		"_ExternalReference": {ClassEntity, "entities"},

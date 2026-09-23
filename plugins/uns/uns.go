@@ -98,6 +98,11 @@ func ClassOf(contract string) Class {
 		contract == "_Resource" ||
 		contract == "_EditOperation" || contract == "_AlarmNotificationConfig" ||
 		contract == "_NotificationConfigStatus" ||
+		// What a service found: retained and republished for as long as it
+		// holds, retired by tombstone. Same shape as the standing alarm, one
+		// writer earlier -- the service that ran the check writes this, the
+		// manager reads findings and owns the alarm.
+		contract == "_Finding" ||
 		// The standing alarm is state: one record per definition, which
 		// overwrites itself. _AlarmStateChange, the transition, stays an event.
 		contract == "_AlarmState":

@@ -496,6 +496,79 @@ class NotificationDispatched(Payload):
 
 
 @dataclass
+class Finding(Payload):
+    """What a service found and stands behind. Not an alarm yet.
+
+    The writer is the service that ran the check, and it is deliberately
+    ignorant: it republishes this record for as long as the finding holds and
+    retires the path when it no longer does. It does not know, and must not
+    need to know, whether anybody acknowledged or silenced anything. "Still
+    broken" is the whole of its job.
+
+    That is why the HANDLING travels with the observation instead of living in
+    a separate rule: the service that invented the check is the only one that
+    knows whether its condition flaps, how long it must hold to mean anything,
+    or whether an operator may reasonably silence it. A rule kept somewhere
+    else has to be matched to the finding, and the matching is what drifts.
+
+    Why this is not ``_AlarmState``: that record carries the lifecycle
+    (``acknowledged_by``, ``silenced_until``) and a record replaces the one
+    before it, so a service republishing its observation would wipe the
+    operator's acknowledgement every cycle. One writer per record. The manager
+    reads findings and owns ``_AlarmState``; ``_Alarm`` stays reserved for an
+    operator-authored definition, which this model does not need.
+
+    The record sits at the finding's own element path,
+    ``{root}/v1/_Finding/{node}/{element-path}/{finding-name}``, so read grants
+    and zones reach it like any signal.
+    """
+
+    #: Why it stands. Open vocabulary -- ``config_mismatch``, ``stream_gap``,
+    #: ``no_data``, ``threshold`` are the ones in use, and a service that
+    #: diagnoses something new names it rather than forcing it into one of
+    #: these.
+    reason: str
+    #: One sentence, phrased by the finder. The only place it can be phrased:
+    #: nothing downstream knows that "mas2/sta3 is commissioned but not in the
+    #: line definition" is what this is about. `_AlarmState` deliberately has
+    #: no message for the opposite reason -- there the element's own name is
+    #: the subject.
+    summary: str
+    #: Unix seconds this record was written. NOT "since": how long something
+    #: has stood is an observation over time, which the manager owns. The
+    #: service only ever says "now".
+    observed_at: float
+    #: What the finder proposes. A proposal, not a decision -- an operator may
+    #: hold a different view of how bad this is, and the manager keeps that.
+    suggested_severity: AlarmSeverity
+    #: Structured evidence, shape free. Rendered by whoever understands the
+    #: ``reason``; nothing generic reads inside it.
+    detail: dict[str, Any] | None = None
+    #: The signal this is about, where there is one. A finding about an
+    #: element -- a missing station, a stale configuration -- has none.
+    signal_id: ULID | None = None
+    #: The measurement that brought it here, with the check's operator and
+    #: threshold, so a reader can render "82.4 > 80" without the check.
+    value: Any | None = None
+    op: str | None = None
+    threshold: float | None = None
+    #: Whether an operator may silence this. Some findings must not be
+    #: silenceable -- a safety interlock, a licence about to expire -- and the
+    #: service that raised it is the one that knows.
+    silenceable: bool = True
+    #: How long the finding must hold before it counts, and how long it must be
+    #: gone before it is gone. The knobs a flapping check needs; both default to
+    #: "immediately", which is right for a check that cannot flap.
+    dwell_on_s: float = 0.0
+    dwell_off_s: float = 0.0
+    #: Earliest the manager should tell anybody again, in seconds. ``None``
+    #: leaves the decision to the manager's own policy.
+    min_repeat_s: float | None = None
+    #: What to do about it, for the person who reads the alarm at 3am.
+    remedy: str | None = None
+
+
+@dataclass
 class AlarmState(Payload):
     """The alarm that stands right now: one record per alarm definition.
 
@@ -522,11 +595,22 @@ class AlarmState(Payload):
     severity: AlarmSeverity
     #: Unix seconds this status has held since.
     since: float
-    signal_id: ULID
     #: Why it stands. ``threshold``, ``no_data`` and ``stream_gap`` are the
     #: known values, but the vocabulary stays open so a derived diagnosis can
     #: name its own reason.
     reason: str
+    #: The `_Finding` this alarm stands on, as a node-local path. Empty for an
+    #: alarm raised some other way.
+    finding_path: str | None = None
+    #: Unix seconds the manager last saw that finding. A service that stops
+    #: writing without retiring its path -- it crashed, the network went --
+    #: leaves this behind, and the manager can move the alarm to ``unknown``
+    #: instead of showing ``firing`` forever. That "forever" is the failure
+    #: mode a manager holding its state in memory cannot escape.
+    finding_seen_at: float | None = None
+    #: The signal this is about, where there is one. An alarm about an element
+    #: -- a missing station, a stale configuration -- has none.
+    signal_id: ULID | None = None
     #: The measurement that brought it here, with the rule's operator and
     #: threshold, so a reader can render "82.4 > 80" without the definition.
     value: Any | None = None

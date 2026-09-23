@@ -1,8 +1,43 @@
 # Alarms
 
-An alarm shows up in two shapes. `_AlarmState` is the alarm that stands right
-now; `_AlarmStateChange` is a transition it went through. They answer different
-questions and are kept apart on purpose.
+An alarm shows up in three shapes. `_Finding` is what a service found and stands
+behind; `_AlarmState` is the alarm that stands right now; `_AlarmStateChange` is
+a transition it went through. They answer different questions, have different
+writers, and are kept apart on purpose.
+
+## What a service found
+
+`_Finding` is entity-class state written by the service that ran the check. It
+republishes the record for as long as the finding holds and retires the path
+when it no longer does. It has no memory of what it said and no way to learn
+whether anybody acknowledged anything — "still broken" is the whole of its job.
+
+```
+colca/v1/_Finding/{node}/{element-path}/{finding-name}
+```
+
+The unusual part is that the HANDLING travels with the observation:
+`silenceable`, `dwell_on_s`/`dwell_off_s`, `min_repeat_s`, `remedy`. The service
+that invented the check is the only one that knows whether its condition flaps,
+how long it must hold to mean anything, or whether an operator may reasonably
+silence it. A rule kept somewhere else has to be matched back to the finding,
+and the matching is what drifts.
+
+`suggested_severity` is named as a proposal because that is what it is. The
+manager decides, and an operator may decide differently.
+
+### Why it is not the alarm
+
+`_AlarmState` carries the lifecycle — `acknowledged_by`, `silenced_until` — and
+a record replaces the one before it. A service republishing its observation into
+that record would wipe the operator's acknowledgement on every cycle. One writer
+per record: the service writes findings, the manager reads them and owns the
+alarm.
+
+`finding_seen_at` on the alarm is the other half of that split. A service that
+stops writing without retiring its path — it crashed, the network went — leaves
+a timestamp that stops advancing, and the manager can move the alarm to
+`unknown` rather than showing `firing` forever.
 
 ## The standing alarm
 
