@@ -329,36 +329,91 @@ func (c *ConfigExec) commit(ctx CommandContext, records []StateRecord) ([]StateW
 }
 
 // positionsByID maps each id of a contract to the path holding it at this
-// node. The upsert verbs keep one entity per path; this keeps one path per id.
-// An id at two paths breaks snapshot() and every _CmdEdit at the node, and a
-// later tombstone would drop the grants and bindings of the survivor. Only this
-// node's own records count; a child's records are not ours to claim.
-func (c *ConfigExec) positionsByID(contract string) *idClaims {
-	claims := &idClaims{at: map[string]string{}}
+// node, and each path back to the id standing on it. The upsert verbs keep one
+// entity per path; this keeps one path per id. An id at two paths breaks
+// snapshot() and every _CmdEdit at the node, and a later tombstone would drop
+// the grants and bindings of the survivor. Only this node's own records count;
+// a child's records are not ours to claim. noun names the thing in a refusal.
+func (c *ConfigExec) positionsByID(contract, noun string) *idClaims {
+	claims := &idClaims{
+		noun: noun, at: map[string]string{}, by: map[string]string{}, placed: map[string]bool{},
+	}
 	for _, rec := range c.store.KVScan(contract, c.store.NodeID()) {
 		var held identified
 		if json.Unmarshal(rec.Payload, &held) == nil && held.ID != "" {
 			claims.at[held.ID] = rec.Path
+			claims.by[rec.Path] = held.ID
 		}
 	}
 	return claims
 }
 
-// idClaims tracks where each id sits, growing as a command claims positions.
-type idClaims struct{ at map[string]string }
+// idClaims tracks where each id sits and who sits at each path, growing as a
+// command claims positions. placed remembers the ids this command has already
+// put somewhere, which the store cannot yet show.
+type idClaims struct {
+	noun   string
+	at     map[string]string // id → path
+	by     map[string]string // path → id
+	placed map[string]bool
+}
 
-// claim takes path for id, or returns the path already holding it. The store
-// catches a second command; the map catches a duplicate within one command.
+// claim takes path for id. An identity the node already holds elsewhere MOVES:
+// claim answers with the path it leaves, which the caller must retire in the
+// same batch. Refusing the move instead — which this did until a live
+// deployment ran into it — leaves a declarative apply no way to rename or
+// reparent anything, because either changes the path and _CmdConfigure has no
+// move verb. Relocating upholds the same invariant the refusal did: one
+// identity, one position.
+//
+// Two answers are still refusals, returned as the sentence to report:
+// a second entry of the SAME command claiming an id an earlier entry already
+// placed (no order of writes satisfies it), and a move onto a path another
+// identity holds (the move would retire the mover's only record and overwrite
+// the sitting one, losing an identity outright).
+//
 // An empty id claims nothing.
-func (claims *idClaims) claim(id, path string) (held string, ok bool) {
+func (claims *idClaims) claim(id, path string) (vacated, refusal string) {
 	if id == "" {
-		return "", true
+		return "", ""
 	}
-	if at, taken := claims.at[id]; taken && at != path {
-		return at, false
+	at, known := claims.at[id]
+	if !known || at == path {
+		claims.take(id, path)
+		return "", ""
 	}
+	if claims.placed[id] {
+		return "", fmt.Sprintf("one command puts %s %s at %s and at %s — one identity "+
+			"cannot sit at two positions", claims.noun, id, at, path)
+	}
+	if held, taken := claims.by[path]; taken && held != id {
+		return "", fmt.Sprintf("%s is already %s %s — two %ss cannot share one position",
+			path, claims.noun, held, claims.noun)
+	}
+	delete(claims.by, at)
+	claims.take(id, path)
+	return at, ""
+}
+
+func (claims *idClaims) take(id, path string) {
 	claims.at[id] = path
-	return "", true
+	claims.by[path] = id
+	claims.placed[id] = true
+}
+
+// retire composes the tombstones for the positions relocated identities left
+// behind, skipping any position another entry of the same command filled: the
+// mover is gone from there either way, and a tombstone would erase that
+// entry's write depending on where the batch put it.
+func retire(vacated []string, written map[string]bool) []StateRecord {
+	records := make([]StateRecord, 0, len(vacated))
+	for _, topic := range vacated {
+		if written[topic] {
+			continue
+		}
+		records = append(records, StateRecord{Topic: topic})
+	}
+	return records
 }
 
 func (c *ConfigExec) constantUpsert(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
@@ -372,7 +427,8 @@ func (c *ConfigExec) constantUpsert(ctx CommandContext, payload []byte) (int, st
 
 	records := make([]StateRecord, 0, len(body.Constants))
 	seen := make(map[string]bool, len(body.Constants))
-	claims := c.positionsByID("_Constant")
+	var vacated []string
+	claims := c.positionsByID("_Constant", "constant")
 	for i, ref := range body.Constants {
 		if err := validatePositionPath(ref.Path); err != nil {
 			return 422, fmt.Sprintf("constant/upsert: entry %d: %v", i, err), "invalid", nil
@@ -400,18 +456,23 @@ func (c *ConfigExec) constantUpsert(ctx CommandContext, payload []byte) (int, st
 					"cannot share one position", ref.Path, heldID), "conflict", nil
 			}
 		}
-		if at, free := claims.claim(incoming.ID, ref.Path); !free {
-			return 409, fmt.Sprintf("constant/upsert: constant %s is already at %s — one identity "+
-				"cannot sit at two positions", incoming.ID, at), "conflict", nil
+		left, refusal := claims.claim(incoming.ID, ref.Path)
+		if refusal != "" {
+			return 409, "constant/upsert: " + refusal, "conflict", nil
+		}
+		if left != "" {
+			vacated = append(vacated, c.constantTopic(left))
 		}
 		records = append(records, StateRecord{Topic: topic, Payload: ref.Constant})
 	}
 
+	upserted := len(records)
+	records = append(records, retire(vacated, seen)...)
 	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 422, "constant/upsert: rejected: " + err.Error(), "invalid", nil
 	}
-	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
+	return 200, fmt.Sprintf("upserted %d", upserted), "ok", writes
 }
 
 func (c *ConfigExec) constantDelete(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
@@ -768,7 +829,9 @@ func (c *ConfigExec) upsert(ctx CommandContext, payload []byte) (int, string, st
 		return 422, "signal/upsert: no signals given", "invalid", nil
 	}
 	records := make([]StateRecord, 0, len(body.Signals))
-	claims := c.positionsByID("_Signal")
+	written := make(map[string]bool, len(body.Signals))
+	var vacated []string
+	claims := c.positionsByID("_Signal", "signal")
 	for i, ref := range body.Signals {
 		if ref.Path == "" {
 			return 422, fmt.Sprintf("signal/upsert: entry %d has no path", i), "invalid", nil
@@ -780,22 +843,35 @@ func (c *ConfigExec) upsert(ctx CommandContext, payload []byte) (int, string, st
 		if err := json.Unmarshal(ref.Signal, &incoming); err != nil {
 			return 422, fmt.Sprintf("signal/upsert: entry %d unreadable: %v", i, err), "invalid", nil
 		}
-		if at, free := claims.claim(incoming.ID, ref.Path); !free {
-			return 409, fmt.Sprintf("signal/upsert: signal %s is already at %s — one identity "+
-				"cannot sit at two positions", incoming.ID, at), "conflict", nil
+		left, refusal := claims.claim(incoming.ID, ref.Path)
+		if refusal != "" {
+			return 409, "signal/upsert: " + refusal, "conflict", nil
 		}
-		payload, err := c.preserveBinding(ref.Path, ref.Signal)
+		// A moving signal carries its binding with it: the record to preserve
+		// from is the one it is leaving, not the empty position it arrives at.
+		// Reading the destination would unbind every declared signal a rename
+		// moves, since a declaration carries data_tag: null.
+		from := ref.Path
+		if left != "" {
+			from = left
+			vacated = append(vacated, c.signalTopic(left))
+		}
+		payload, err := c.preserveBinding(from, ref.Signal)
 		if err != nil {
 			return 422, fmt.Sprintf("signal/upsert: entry %d unreadable: %v", i, err), "invalid", nil
 		}
-		records = append(records, StateRecord{Topic: c.signalTopic(ref.Path), Payload: payload})
+		topic := c.signalTopic(ref.Path)
+		written[topic] = true
+		records = append(records, StateRecord{Topic: topic, Payload: payload})
 	}
+	upserted := len(records)
+	records = append(records, retire(vacated, written)...)
 	writes, err := c.commit(ctx, records)
 	if err != nil {
 		// Nothing was written; the error names the refused record.
 		return 422, "signal/upsert: rejected: " + err.Error(), "invalid", nil
 	}
-	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
+	return 200, fmt.Sprintf("upserted %d", upserted), "ok", writes
 }
 
 // preserveBinding keeps the stored binding, learned data type and replication
@@ -1187,7 +1263,9 @@ func uniquePath(leaf, under string, taken map[string]bool) string {
 
 // elementUpsert writes elements at their positions. The path is the position,
 // so two elements cannot share one; the owning node checks this because only
-// it authors the parent.
+// it authors the parent. An element named at a position other than the one it
+// holds moves there — a rename or a reparent is an upsert, not a delete and a
+// recreate, which would lose everything standing on the element.
 func (c *ConfigExec) elementUpsert(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body elementUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
@@ -1200,8 +1278,10 @@ func (c *ConfigExec) elementUpsert(ctx CommandContext, payload []byte) (int, str
 	// claimed guards positions taken within this command; nothing is written
 	// until the whole set is decided, so the store cannot show them yet.
 	claimed := make(map[string]string, len(body.Elements))
-	// The reverse check: claims says where an id already sits.
-	claims := c.positionsByID("_SystemElement")
+	// The reverse check: claims says where an id already sits, and moves it
+	// here when that is somewhere else.
+	var vacated []string
+	claims := c.positionsByID("_SystemElement", "element")
 	for i, ref := range body.Elements {
 		if ref.Path == "" {
 			return 422, fmt.Sprintf("element/upsert: entry %d has no path", i), "invalid", nil
@@ -1231,18 +1311,27 @@ func (c *ConfigExec) elementUpsert(ctx CommandContext, payload []byte) (int, str
 					"cannot share one position", ref.Path, held.ID), "conflict", nil
 			}
 		}
-		if at, free := claims.claim(incoming.ID, ref.Path); !free {
-			return 409, fmt.Sprintf("element/upsert: element %s is already at %s — one identity "+
-				"cannot sit at two positions", incoming.ID, at), "conflict", nil
+		left, refusal := claims.claim(incoming.ID, ref.Path)
+		if refusal != "" {
+			return 409, "element/upsert: " + refusal, "conflict", nil
+		}
+		if left != "" {
+			vacated = append(vacated, c.elementTopic(left))
 		}
 		claimed[topic] = incoming.ID
 		records = append(records, StateRecord{Topic: topic, Payload: ref.Element})
 	}
+	upserted := len(records)
+	written := make(map[string]bool, len(claimed))
+	for topic := range claimed {
+		written[topic] = true
+	}
+	records = append(records, retire(vacated, written)...)
 	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 422, "element/upsert: rejected: " + err.Error(), "invalid", nil
 	}
-	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
+	return 200, fmt.Sprintf("upserted %d", upserted), "ok", writes
 }
 
 // elementDelete retires positions, but not while child elements or bound

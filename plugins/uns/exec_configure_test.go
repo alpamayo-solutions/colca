@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -1548,123 +1549,300 @@ func TestElementUpsertRefusesAnIdThatIsNotAnIdentity(t *testing.T) {
 	}
 }
 
-// A position holds one entity and an entity sits at one position. Every
-// upsert verb must refuse the same id at a second path. Each case first
-// re-upserts at the same path, which must stay a 200.
-func TestUpsertRefusesOneIdentityAtTwoPositions(t *testing.T) {
-	cases := []struct {
-		name         string
-		verb         string
-		first        func(t *testing.T) []byte
-		sameID       func(t *testing.T) []byte // same id, same path: an update
-		secondPath   func(t *testing.T) []byte // same id, different path
-		oneCommand   func(t *testing.T) []byte // both positions in one command
-		heldAt       string
-		strandedPath string
-		contract     string
-	}{
+// placingVerb is one of the three verbs that put an identity at a path. The
+// rules below hold for every one of them, so each test walks all three.
+type placingVerb struct {
+	name     string
+	verb     string
+	contract string
+	// at builds a command putting id at path, with label somewhere in the
+	// payload so a rewrite of the same position is visible.
+	at func(t *testing.T, path, id, label string) []byte
+	// twice builds ONE command putting id at both paths.
+	twice func(t *testing.T, first, second, id string) []byte
+}
+
+func placingVerbs() []placingVerb {
+	return []placingVerb{
 		{
-			name: "element",
-			verb: "element/upsert",
-			first: func(t *testing.T) []byte {
-				return elementBody(t, element("a/x", "01HDUP", "X"))
+			name: "element", verb: "element/upsert", contract: "_SystemElement",
+			at: func(t *testing.T, path, id, label string) []byte {
+				return elementBody(t, element(path, id, label))
 			},
-			sameID: func(t *testing.T) []byte {
-				return elementBody(t, element("a/x", "01HDUP", "X renamed"))
+			twice: func(t *testing.T, first, second, id string) []byte {
+				return elementBody(t, element(first, id, "X"), element(second, id, "X"))
 			},
-			secondPath: func(t *testing.T) []byte {
-				return elementBody(t, element("b/x", "01HDUP", "X"))
-			},
-			oneCommand: func(t *testing.T) []byte {
-				return elementBody(t, element("c/x", "01HFRESH", "X"), element("d/x", "01HFRESH", "X"))
-			},
-			heldAt:       "a/x",
-			strandedPath: "b/x",
-			contract:     "_SystemElement",
 		},
 		{
-			name: "signal",
-			verb: "signal/upsert",
-			first: func(t *testing.T) []byte {
+			name: "signal", verb: "signal/upsert", contract: "_Signal",
+			at: func(t *testing.T, path, id, label string) []byte {
+				return body(t, map[string]any{"signals": []any{signalAt(path, id, label)}})
+			},
+			twice: func(t *testing.T, first, second, id string) []byte {
 				return body(t, map[string]any{"signals": []any{
-					map[string]any{"path": "a/temp", "signal": map[string]any{"id": "01HDUP", "name": "temp"}},
+					signalAt(first, id, "temp"), signalAt(second, id, "temp"),
 				}})
 			},
-			sameID: func(t *testing.T) []byte {
-				return body(t, map[string]any{"signals": []any{
-					map[string]any{"path": "a/temp", "signal": map[string]any{"id": "01HDUP", "name": "temperature"}},
-				}})
-			},
-			secondPath: func(t *testing.T) []byte {
-				return body(t, map[string]any{"signals": []any{
-					map[string]any{"path": "b/temp", "signal": map[string]any{"id": "01HDUP", "name": "temp"}},
-				}})
-			},
-			oneCommand: func(t *testing.T) []byte {
-				return body(t, map[string]any{"signals": []any{
-					map[string]any{"path": "c/temp", "signal": map[string]any{"id": "01HFRESH", "name": "temp"}},
-					map[string]any{"path": "d/temp", "signal": map[string]any{"id": "01HFRESH", "name": "temp"}},
-				}})
-			},
-			heldAt:       "a/temp",
-			strandedPath: "b/temp",
-			contract:     "_Signal",
 		},
 		{
-			name: "constant",
-			verb: "constant/upsert",
-			first: func(t *testing.T) []byte {
-				return constantBody(t, constant("a/speed", "01HDUP", "int64", 1))
+			name: "constant", verb: "constant/upsert", contract: "_Constant",
+			at: func(t *testing.T, path, id, label string) []byte {
+				return constantBody(t, constant(path, id, "string", label))
 			},
-			sameID: func(t *testing.T) []byte {
-				return constantBody(t, constant("a/speed", "01HDUP", "int64", 2))
-			},
-			secondPath: func(t *testing.T) []byte {
-				return constantBody(t, constant("b/speed", "01HDUP", "int64", 1))
-			},
-			oneCommand: func(t *testing.T) []byte {
+			twice: func(t *testing.T, first, second, id string) []byte {
 				return constantBody(t,
-					constant("c/speed", "01HFRESH", "int64", 1),
-					constant("d/speed", "01HFRESH", "int64", 1),
+					constant(first, id, "string", "x"), constant(second, id, "string", "x"),
 				)
 			},
-			heldAt:       "a/speed",
-			strandedPath: "b/speed",
-			contract:     "_Constant",
 		},
 	}
+}
 
-	for _, tc := range cases {
+func signalAt(path, id, name string) map[string]any {
+	return map[string]any{"path": path, "signal": map[string]any{"id": id, "name": name}}
+}
+
+func topicsOf(writes []StateWrite) map[string]bool {
+	out := map[string]bool{}
+	for _, w := range writes {
+		out[w.Topic] = true
+	}
+	return out
+}
+
+// An upsert naming an identity the node already holds somewhere else MOVES
+// it. Refusing the move — which every upsert verb did until a live deployment
+// ran into it — leaves a declarative apply no way to rename or reparent
+// anything, because either changes the path and _CmdConfigure has no move
+// verb. The invariant the refusal guarded, one identity at one position, is
+// what relocating upholds: the record appears at the new position and the old
+// one is retired in the same batch.
+func TestUpsertRelocatesAnIdentityThatMoved(t *testing.T) {
+	for _, tc := range placingVerbs() {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStore("n-edge1")
+			c := NewConfigExec(f, nil, nil, nil, nil, nil)
+			from := "colca/v1/" + tc.contract + "/n-edge1/a/x"
+			to := "colca/v1/" + tc.contract + "/n-edge1/b/x"
+
+			if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.at(t, "a/x", "01HDUP", "X")); code != 200 {
+				t.Fatalf("first upsert = %d %q, want 200", code, msg)
+			}
+
+			batches := f.batchCalls
+			code, msg, result, writes := c.ExecuteWithWrites(asHuman, "_CmdConfigure", tc.verb,
+				tc.at(t, "b/x", "01HDUP", "X"))
+
+			if code != 200 || result != "ok" {
+				t.Fatalf("moving 01HDUP from a/x to b/x = %d %q result %q, want 200", code, msg, result)
+			}
+			if _, ok := f.KVGet(to); !ok {
+				t.Fatalf("the move wrote nothing at the new position %s", to)
+			}
+			if _, ok := f.KVGet(from); ok {
+				t.Fatalf("01HDUP is still readable at %s — it now sits at two positions", from)
+			}
+			if f.batchCalls != batches+1 {
+				t.Fatalf("the move took %d batches, want 1 — between two batches a reader sees "+
+					"the identity twice, or nowhere", f.batchCalls-batches)
+			}
+			if got := topicsOf(writes); len(got) != 2 || !got[to] || !got[from] {
+				t.Fatalf("the move reported %v, want the write at %s and the retirement of %s", got, to, from)
+			}
+		})
+	}
+}
+
+// The two halves of a move are one transition. A refused destination must
+// leave the old record standing: half a move loses the identity outright.
+func TestARefusedMoveLeavesTheIdentityWhereItWas(t *testing.T) {
+	for _, tc := range placingVerbs() {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStore("n-edge1")
+			c := NewConfigExec(f, nil, nil, nil, nil, nil)
+			from := "colca/v1/" + tc.contract + "/n-edge1/a/x"
+			to := "colca/v1/" + tc.contract + "/n-edge1/b/x"
+			c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.at(t, "a/x", "01HDUP", "X"))
+			f.fail[to] = "the door refused this record"
+
+			code, msg, _ := c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.at(t, "b/x", "01HDUP", "X"))
+
+			if code == 200 {
+				t.Fatalf("a refused destination reported %d %q, want a failure", code, msg)
+			}
+			if _, ok := f.KVGet(from); !ok {
+				t.Fatalf("the refused move retired %s anyway — 01HDUP is now nowhere", from)
+			}
+		})
+	}
+}
+
+// Two entries of ONE command claiming the same id is not a move: no order of
+// writes leaves the identity at both. It stays a refusal, and the batch that
+// carried it writes nothing at all.
+func TestUpsertRefusesOneCommandThatClaimsOneIdentityTwice(t *testing.T) {
+	for _, tc := range placingVerbs() {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newStore("n-edge1")
 			c := NewConfigExec(f, nil, nil, nil, nil, nil)
 
-			if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.first(t)); code != 200 {
-				t.Fatalf("first upsert = %d %q, want 200", code, msg)
-			}
-			if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.sameID(t)); code != 200 {
-				t.Fatalf("re-upsert at the same path = %d %q, want 200 — the guard refuses updates", code, msg)
-			}
-
-			code, msg, result := c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.secondPath(t))
-			if code != 409 || result != "conflict" || !strings.Contains(msg, tc.heldAt) {
-				t.Fatalf("second position = %d %q result %q, want 409 naming %s", code, msg, result, tc.heldAt)
-			}
-			if _, ok := f.KVGet("colca/v1/" + tc.contract + "/n-edge1/" + tc.strandedPath); ok {
-				t.Fatalf("the refused upsert wrote %s anyway", tc.strandedPath)
-			}
-
-			// Two positions for one id in one command: the store shows neither
-			// yet, so only the claim map can catch it.
 			before := f.offset
-			code, msg, result = c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.oneCommand(t))
-			if code != 409 || result != "conflict" {
-				t.Fatalf("one command, two positions = %d %q result %q, want 409", code, msg, result)
+			code, msg, result := c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.twice(t, "c/x", "d/x", "01HFRESH"))
+
+			if code != 409 || result != "conflict" || !strings.Contains(msg, "01HFRESH") {
+				t.Fatalf("one command, two positions = %d %q result %q, want 409 naming 01HFRESH",
+					code, msg, result)
 			}
 			if f.offset != before {
 				t.Fatalf("the refused batch wrote %d records", f.offset-before)
 			}
 		})
+	}
+}
+
+// Naming one identity twice at the SAME position is redundant, not
+// contradictory — a bundle repeating an element is a 200, as it was before
+// relocation existed. Only the element verb can say it: signal and constant
+// refuse a repeated path before the claim is reached.
+func TestOneCommandMayNameAnIdentityTwiceAtOnePosition(t *testing.T) {
+	f := newStore("n-edge1")
+	c := NewConfigExec(f, nil, nil, nil, nil, nil)
+
+	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "element/upsert",
+		elementBody(t, element("a/x", "01HTWICE", "X"), element("a/x", "01HTWICE", "X")))
+
+	if code != 200 || result != "ok" {
+		t.Fatalf("one element named twice at one position = %d %q result %q, want 200", code, msg, result)
+	}
+	if _, ok := f.KVGet("colca/v1/_SystemElement/n-edge1/a/x"); !ok {
+		t.Fatal("a/x holds nothing")
+	}
+}
+
+// The denominator for the three tests above: an upsert that moves nothing
+// writes exactly its own record. A relocation that fired when the identity
+// had not moved would tombstone the position it was just written at.
+func TestAnUpsertThatMovesNothingRetiresNothing(t *testing.T) {
+	for _, tc := range placingVerbs() {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStore("n-edge1")
+			c := NewConfigExec(f, nil, nil, nil, nil, nil)
+			at := "colca/v1/" + tc.contract + "/n-edge1/a/x"
+
+			_, msg, _, first := c.ExecuteWithWrites(asHuman, "_CmdConfigure", tc.verb, tc.at(t, "a/x", "01HDUP", "X"))
+			if got := topicsOf(first); len(got) != 1 || !got[at] {
+				t.Fatalf("placing a new identity wrote %v (%q), want only %s", got, msg, at)
+			}
+
+			code, msg, result, again := c.ExecuteWithWrites(asHuman, "_CmdConfigure", tc.verb,
+				tc.at(t, "a/x", "01HDUP", "X renamed"))
+
+			if code != 200 || result != "ok" {
+				t.Fatalf("re-upsert at the same position = %d %q result %q, want 200", code, msg, result)
+			}
+			if got := topicsOf(again); len(got) != 1 || !got[at] {
+				t.Fatalf("re-upsert at the same position wrote %v, want only %s", got, at)
+			}
+			if _, ok := f.KVGet(at); !ok {
+				t.Fatalf("the re-upsert retired %s", at)
+			}
+		})
+	}
+}
+
+// Relocation frees the position the identity leaves, never the one it is
+// moving into. A move onto an occupied position is refused in the same words
+// a colliding placement always was, and the mover stays where it was.
+func TestAMoveOntoAnOccupiedPositionIsRefused(t *testing.T) {
+	for _, tc := range placingVerbs() {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStore("n-edge1")
+			c := NewConfigExec(f, nil, nil, nil, nil, nil)
+			c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.at(t, "a/x", "01HMOVER", "X"))
+			c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.at(t, "b/x", "01HSITTING", "Y"))
+
+			code, msg, result := c.Execute(asHuman, "_CmdConfigure", tc.verb, tc.at(t, "b/x", "01HMOVER", "X"))
+
+			if code != 409 || result != "conflict" || !strings.Contains(msg, "01HSITTING") {
+				t.Fatalf("moving onto an occupied position = %d %q result %q, want 409 naming 01HSITTING",
+					code, msg, result)
+			}
+			if !strings.Contains(msg, "cannot share one position") {
+				t.Fatalf("refusal reads %q, want the wording a collision always had", msg)
+			}
+			if _, ok := f.KVGet("colca/v1/" + tc.contract + "/n-edge1/a/x"); !ok {
+				t.Fatalf("the refused move retired a/x anyway")
+			}
+		})
+	}
+}
+
+// The shape a declarative apply actually sends: an element and everything
+// under it, each entry naming its own new position. Relocation does not
+// cascade — it does not have to, because the bundle carries every descendant.
+func TestReparentingASubtreeIsOneCommand(t *testing.T) {
+	f := newStore("n-edge1")
+	c := NewConfigExec(f, nil, nil, nil, nil, nil)
+	c.Execute(asHuman, "_CmdConfigure", "element/upsert", elementBody(t,
+		element("site1", "01HSITE", "Site 1"),
+		element("site1/line1", "01HLINE", "Line 1"),
+		element("site1/line1/press3", "01HPRESS", "Press 3"),
+	))
+
+	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "element/upsert", elementBody(t,
+		element("site1/hall2/line1", "01HLINE", "Line 1"),
+		element("site1/hall2/line1/press3", "01HPRESS", "Press 3"),
+	))
+
+	if code != 200 || result != "ok" {
+		t.Fatalf("reparenting line1 under hall2 = %d %q result %q, want 200", code, msg, result)
+	}
+	want := map[string]string{
+		"site1":                    "01HSITE",
+		"site1/hall2/line1":        "01HLINE",
+		"site1/hall2/line1/press3": "01HPRESS",
+	}
+	if got := elementsUnder(f, "n-edge1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the tree reads %v, want %v", got, want)
+	}
+}
+
+// A signal keeps what hangs off it when it moves. preserveBinding reads the
+// record the signal is LEAVING, because the position it arrives at is empty
+// and a declaration carries data_tag: null — reading the destination would
+// unbind every declared signal a rename moves.
+func TestAMovedSignalKeepsItsBinding(t *testing.T) {
+	f := newStore("n-edge1")
+	c := NewConfigExec(f, nil, nil, nil, nil, nil)
+	c.Execute(asHuman, "_CmdConfigure", "signal/upsert", body(t, map[string]any{"signals": []any{
+		map[string]any{"path": "a/temp", "signal": map[string]any{
+			"id": "01HDUP", "name": "temp", "data_tag": "01HTAG", "is_published": true,
+		}},
+	}}))
+
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/upsert", body(t, map[string]any{"signals": []any{
+		map[string]any{"path": "b/temp", "signal": map[string]any{
+			"id": "01HDUP", "name": "temp", "data_tag": nil,
+		}},
+	}}))
+
+	if code != 200 {
+		t.Fatalf("moving a bound signal = %d %q, want 200", code, msg)
+	}
+	raw, ok := f.KVGet("colca/v1/_Signal/n-edge1/b/temp")
+	if !ok {
+		t.Fatal("the moved signal is not at b/temp")
+	}
+	var moved struct {
+		Tag       string `json:"data_tag"`
+		Published bool   `json:"is_published"`
+	}
+	if err := json.Unmarshal(raw, &moved); err != nil {
+		t.Fatalf("unreadable moved signal: %v", err)
+	}
+	if moved.Tag != "01HTAG" || !moved.Published {
+		t.Fatalf("the moved signal reads data_tag %q is_published %v, want 01HTAG true — "+
+			"the move unbound it", moved.Tag, moved.Published)
 	}
 }
 
