@@ -659,6 +659,12 @@ class Annotation(Payload):
     retained: a part-cycle producer writes about a million a year per machine.
     ``annotation_id`` comes from ``derive_annotation_id``. A delete is a record
     with ``deleted=True``, so it replicates and replays like any other change.
+
+    ``system_element_id`` is where the annotation belongs; ``signal_ids`` are
+    what it was computed from. Every listed signal lies in that element's
+    subtree. ``related_annotation_ids`` names the annotations this one belongs
+    to, such as a head pass and the panel it is part of. Of the three, only
+    ``signal_ids`` is part of the id.
     """
 
     annotation_id: ULID
@@ -673,6 +679,11 @@ class Annotation(Payload):
     source: str = ""
     deleted: bool = False
     revision: int = 1
+    #: The element the annotation belongs to. Optional: a producer that only
+    #: knows signals leaves it unset.
+    system_element_id: ULID | None = None
+    #: Annotations this one belongs to, e.g. a head pass -> its panel.
+    related_annotation_ids: list[ULID] = field(default_factory=list)
 
 
 @dataclass

@@ -479,6 +479,31 @@ def test_annotation_contract_is_its_own_class_and_never_tombstoned():
     }
 
 
+def test_annotation_schema_takes_placement_and_relations():
+    """`system_element_id` and `related_annotation_ids` are optional ULIDs: a
+    record without them is valid, one with a malformed id is not."""
+    body, _ = gb.build_bundle()
+    validator = jsonschema.Draft202012Validator(body["contracts"]["_Annotation"]["schema"])
+    head_pass = {
+        "annotation_id": "01M2AB5YWM56SH9B2EQ3S5VNXF",
+        "annotation_type_id": "01M2AB5YWSZTAFBKYYYA5C0TE7",
+        "time_start": 1710000000.0,
+        "signal_ids": ["01BX5ZZKBKACTAV9WEVGEMMVRZ"],
+    }
+    validator.validate(head_pass)
+    validator.validate(
+        {
+            **head_pass,
+            "system_element_id": "01BX5ZZKBKACTAV9WEVGEMMVRA",
+            "related_annotation_ids": ["01M2AB5YWM56SH9B2EQ3S5VNXG"],
+        }
+    )
+    validator.validate({**head_pass, "system_element_id": None})
+    assert not validator.is_valid({**head_pass, "system_element_id": "line-1"})
+    assert not validator.is_valid({**head_pass, "related_annotation_ids": ["panel-1"]})
+    assert not validator.is_valid({**head_pass, "related_annotation_ids": "01M2AB5YWM56SH9B2EQ3S5VNXG"})
+
+
 def test_every_definition_is_addressable_by_id():
     """A definition's path is its id, so every definition needs one."""
     body, _ = gb.build_bundle()
@@ -500,7 +525,12 @@ ULID_CONSTRAINED_FIELDS = {
     "_AlarmState": ["alarm_id", "signal_id"],
     # annotation_type_id stays unconstrained until the golden annotation-id
     # vectors derive from ULID type ids — see payload.Annotation.
-    "_Annotation": ["annotation_id", "signal_ids/items"],
+    "_Annotation": [
+        "annotation_id",
+        "signal_ids/items",
+        "system_element_id",
+        "related_annotation_ids/items",
+    ],
     "_AnnotationType": ["id"],
     "_MetadataType": ["id"],
     "_SemanticTag": ["id"],

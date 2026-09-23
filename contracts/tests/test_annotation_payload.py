@@ -61,6 +61,36 @@ def test_annotation_encode_decode_round_trip():
     assert decoded.revision == 1
 
 
+def test_annotation_carries_its_element_and_related_annotations():
+    """Placement and relations round-trip and stay out of the id."""
+    panel_id = derive_annotation_id("panel", "dataops/panels", 1710000000.0, ["signal-1", "signal-2"])
+    head_pass_id = derive_annotation_id("head-pass", "dataops/panels", 1710000001.0, ["signal-1"])
+    head_pass = AnnotationPayload(
+        annotation_id=head_pass_id,
+        annotation_type_id="head-pass",
+        time_start=1710000001.0,
+        signal_ids=["signal-1"],
+        source="dataops/panels",
+        system_element_id="element-head-1",
+        related_annotation_ids=[panel_id],
+    )
+
+    decoded = AnnotationPayload.decode(head_pass.encode(), timestamp=0)
+
+    assert decoded.system_element_id == "element-head-1"
+    assert decoded.related_annotation_ids == [panel_id]
+    assert decoded.annotation_id == derive_annotation_id("head-pass", "dataops/panels", 1710000001.0, ["signal-1"])
+
+
+def test_annotation_without_placement_or_relations_encodes_the_defaults():
+    annotation = AnnotationPayload(annotation_id="a", annotation_type_id="t", time_start=0.0)
+
+    encoded = json.loads(annotation.encode())
+
+    assert encoded["system_element_id"] is None
+    assert encoded["related_annotation_ids"] == []
+
+
 def test_annotation_delete_is_an_append_carrying_a_marker():
     """A delete is a record with `deleted=True` and the id of the annotation it deletes."""
     created_id = derive_annotation_id("annotation-type-1", "dataops/part-cycle", 1710000000.0, ["signal-1"])

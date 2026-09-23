@@ -325,3 +325,55 @@ func TestAlarmClassRoutesToAlarmsAndProjectsNoKV(t *testing.T) {
 			"sample lane, where it would queue behind every buffered metric", n)
 	}
 }
+
+// Under the real generated bundle a producer's annotation carries its element
+// and the annotations it belongs to: the record is stored as published, and a
+// malformed id in either field is refused at the door.
+func TestRealBundleStoresAnnotationPlacementAndRelations(t *testing.T) {
+	tbl, err := contracts.Load(contractstest.GeneratedBundlePath(t), "")
+	if err != nil {
+		t.Fatalf("real generated bundle failed to load: %v", err)
+	}
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	e := New(s, &config.Config{ULID: "n-edge1"}, testIDs(), nil, nil, nil)
+	e.SetContracts(tbl)
+
+	const id = "01M2AB5YWM56SH9B2EQ3S5VNXF"
+	topic := "colca/v1/_Annotation/n-edge1/production/line1/" + id
+	headPass := `{"annotation_id":"` + id + `","annotation_type_id":"01M2AB5YWSZTAFBKYYYA5C0TE7",` +
+		`"time_start":1710000000.0,"signal_ids":["01BX5ZZKBKACTAV9WEVGEMMVRZ"],` +
+		`"system_element_id":"01BX5ZZKBKACTAV9WEVGEMMVRA","related_annotation_ids":["01M2AB5YWM56SH9B2EQ3S5VNXG"]}`
+	res, err := e.IngestAdmin(topic, []byte(headPass))
+	if err != nil {
+		t.Fatalf("an annotation with placement and relations must be accepted: %v", err)
+	}
+	stored, _, err := s.Read("annotations", res.Offset, 1, nil)
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("read back = %d records, %v", len(stored), err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stored[0].Payload, &got); err != nil {
+		t.Fatal(err)
+	}
+	related, _ := got["related_annotation_ids"].([]any)
+	if got["system_element_id"] != "01BX5ZZKBKACTAV9WEVGEMMVRA" || len(related) != 1 || related[0] != "01M2AB5YWM56SH9B2EQ3S5VNXG" {
+		t.Fatalf("stored annotation lost its placement or relations: %s", stored[0].Payload)
+	}
+
+	for field, bad := range map[string]string{
+		"system_element_id":      `"line1"`,
+		"related_annotation_ids": `["panel-1"]`,
+	} {
+		var payload map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(headPass), &payload)
+		payload[field] = json.RawMessage(bad)
+		raw, _ := json.Marshal(payload)
+		if _, err := e.IngestAdmin(topic, raw); err == nil || !strings.Contains(err.Error(), "/"+field) {
+			t.Fatalf("a malformed %s must be refused naming the field, got: %v", field, err)
+		}
+	}
+}

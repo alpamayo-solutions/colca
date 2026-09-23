@@ -72,6 +72,19 @@ func (w *EditExec) composeAnnotation(intent editIntent) (int, string, string, []
 		signalIDs = []string{}
 	}
 	payload["signal_ids"] = rawJSON(signalIDs)
+	if intent.SystemElementID != "" {
+		payload["system_element_id"] = rawJSON(intent.SystemElementID)
+	}
+	related := intent.RelatedAnnotationIDs
+	if related == nil {
+		related = []string{}
+	}
+	for _, other := range related {
+		if other == id {
+			return 422, "annotation: related_annotation_ids names the annotation itself: " + id, "invalid", nil
+		}
+	}
+	payload["related_annotation_ids"] = rawJSON(related)
 
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -81,6 +94,37 @@ func (w *EditExec) composeAnnotation(intent editIntent) (int, string, string, []
 	// cover several signals, so it has no natural position in the tree.
 	topic := editTopic("_Annotation", w.store.NodeID(), "_colca/annotations/"+id)
 	return 200, fmt.Sprintf("annotation %sd: %s", intent.Action, id), "ok", []StateRecord{{Topic: topic, Payload: encoded}}
+}
+
+// annotationPlacement enforces the placement rule: an annotation that names
+// its element must name signals that lie in that element's subtree. The
+// element and every signal must exist; code 0 means the placement holds.
+func annotationPlacement(intent editIntent, entities map[string]editSnapshot) (int, string) {
+	if intent.SystemElementID == "" {
+		return 0, ""
+	}
+	elementKey := entityVersionKey("system-element", intent.SystemElementID)
+	element, ok := entities[elementKey]
+	if !ok {
+		return 409, "entity_not_found: " + elementKey
+	}
+	for _, id := range intent.SignalIDs {
+		signalKey := entityVersionKey("signal", id)
+		signal, ok := entities[signalKey]
+		if !ok {
+			return 409, "entity_not_found: " + signalKey
+		}
+		if !pathWithin(signal.Record.Path, element.Record.Path) {
+			return 422, fmt.Sprintf("annotation: signal %s is not below system element %s", id, intent.SystemElementID)
+		}
+	}
+	return 0, ""
+}
+
+// pathWithin reports whether path lies strictly below root. The node root
+// (empty path) contains everything.
+func pathWithin(path, root string) bool {
+	return root == "" || strings.HasPrefix(path, root+"/")
 }
 
 // executeAnnotationWrite commits composeAnnotation's record through
