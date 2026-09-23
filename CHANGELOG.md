@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.1](https://github.com/alpamayo-solutions/colca/compare/v0.9.0...v0.9.1) (2026-09-23)
+
+
+### Fixes
+
+* **mqtt:** keep subscriptions whose packet id matches an in-flight delivery ([98ccf4d](https://github.com/alpamayo-solutions/colca/commit/98ccf4dea7b3771fcb14980635aa11542e7439e3))
+* **mqtt:** keep subscriptions whose packet id matches an in-flight delivery ([a525bd5](https://github.com/alpamayo-solutions/colca/commit/a525bd5aa1e59e0459f6d067e5fdd35508808981))
+
 ## [0.9.0](https://github.com/alpamayo-solutions/colca/compare/v0.8.1...v0.9.0) (2026-09-23)
 
 
