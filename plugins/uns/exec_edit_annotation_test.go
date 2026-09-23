@@ -421,3 +421,111 @@ func TestEditAnnotationDeleteAppendsAtAnExistingIDThroughTheEventDoor(t *testing
 		t.Fatalf("%s appeared in KV after a delete append — must never be KV-projected", deleteWrites[0].Topic)
 	}
 }
+
+// The element and the related annotations reach the record as given, and
+// neither moves the derived id.
+func TestComposeAnnotationCarriesItsElementAndRelatedAnnotations(t *testing.T) {
+	intent := annotationCreateIntent()
+	intent.SystemElementID = "el-line1"
+	intent.RelatedAnnotationIDs = []string{"panel-1", "panel-2"}
+	code, msg, _, records := NewEditExec(newStore("n-edge1"), nil).composeAnnotation(intent)
+	if code != 200 {
+		t.Fatalf("create = %d %q", code, msg)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(records[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["system_element_id"] != "el-line1" {
+		t.Fatalf("system_element_id = %+v, want el-line1", payload["system_element_id"])
+	}
+	related, ok := payload["related_annotation_ids"].([]any)
+	if !ok || len(related) != 2 || related[0] != "panel-1" || related[1] != "panel-2" {
+		t.Fatalf("related_annotation_ids did not round-trip: %+v", payload["related_annotation_ids"])
+	}
+	wantID := deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0, []string{"sig-1", "sig-2"})
+	if payload["annotation_id"] != wantID {
+		t.Fatalf("annotation_id = %v, want %q: placement and relations are not part of the id", payload["annotation_id"], wantID)
+	}
+}
+
+func TestComposeAnnotationWithoutElementOrRelationsWritesTheDefaults(t *testing.T) {
+	_, _, _, records := NewEditExec(newStore("n-edge1"), nil).composeAnnotation(annotationCreateIntent())
+	var payload map[string]any
+	if err := json.Unmarshal(records[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := payload["system_element_id"]; present {
+		t.Fatalf("system_element_id must be omitted when the intent names none, got %+v", payload["system_element_id"])
+	}
+	if related, ok := payload["related_annotation_ids"].([]any); !ok || len(related) != 0 {
+		t.Fatalf("related_annotation_ids = %+v, want []", payload["related_annotation_ids"])
+	}
+}
+
+func TestComposeAnnotationRefusesToRelateToItself(t *testing.T) {
+	intent := annotationCreateIntent()
+	own := deriveAnnotationID("annotation-type-1", "dataops/part-cycle", 1710000000.0, []string{"sig-1", "sig-2"})
+	intent.RelatedAnnotationIDs = []string{own}
+	code, msg, _, records := NewEditExec(newStore("n-edge1"), nil).composeAnnotation(intent)
+	if code != 422 || records != nil || !strings.Contains(msg, own) {
+		t.Fatalf("self-relation = %d %q records=%d, want 422 naming the id and nothing queued", code, msg, len(records))
+	}
+}
+
+// Every signal an annotation names must lie below the element it names; the
+// element and those signals must exist.
+func TestEditAnnotationSignalsMustLieBelowItsElement(t *testing.T) {
+	f, exec, _ := twoLines(t)
+	annotate := func(op, element string, signals []string) (int, string) {
+		intent := annotationWireIntent(map[string]any{"system_element_id": element, "signal_ids": signals})
+		code, message, _, _ := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(t, op, map[string]uint64{}, intent))
+		return code, message
+	}
+	if code, message := annotate("op-in", "el-line1", []string{"sig-1"}); code != 200 {
+		t.Fatalf("signal below its element = %d %q", code, message)
+	}
+	if code, message := annotate("op-element-only", "el-line2", nil); code != 200 {
+		t.Fatalf("element without signals = %d %q", code, message)
+	}
+	if code, message := annotate("op-out", "el-line1", []string{"sig-1", "sig-2"}); code != 422 ||
+		message != "annotation: signal sig-2 is not below system element el-line1" {
+		t.Fatalf("signal outside its element = %d %q, want 422 naming it", code, message)
+	}
+	if code, message := annotate("op-no-element", "el-nowhere", []string{"sig-1"}); code != 409 ||
+		message != "entity_not_found: system-element:el-nowhere" {
+		t.Fatalf("unknown element = %d %q", code, message)
+	}
+	if code, message := annotate("op-no-signal", "el-line1", []string{"sig-unknown"}); code != 409 ||
+		message != "entity_not_found: signal:sig-unknown" {
+		t.Fatalf("unknown signal under an element = %d %q", code, message)
+	}
+	if f.eventCalls != 2 {
+		t.Fatalf("PublishEvent called %d times, want 2: refused placements must write nothing", f.eventCalls)
+	}
+}
+
+// The element is a position like the signals: a person scoped to line1 may
+// place an annotation on line1 without naming a signal, not on line2, and a
+// signal outside their grants is refused as not found before the placement
+// rule could say where it sits.
+func TestEditAnnotationIsAuthorizedOnItsElement(t *testing.T) {
+	_, exec, _ := twoLines(t)
+	anna := scopedTo("el-line1")
+	annotate := func(op, element string, signals []string) (int, string) {
+		intent := annotationWireIntent(map[string]any{"system_element_id": element, "signal_ids": signals})
+		code, message, _, _ := exec.ExecuteWithWrites(anna, "_CmdEdit", "apply", editBody(t, op, map[string]uint64{}, intent))
+		return code, message
+	}
+	if code, message := annotate("op-own-line", "el-line1", nil); code != 200 {
+		t.Fatalf("element inside the grant = %d %q", code, message)
+	}
+	if code, message := annotate("op-other-line", "el-line2", nil); code != 409 ||
+		message != "entity_not_found: system-element:el-line2" {
+		t.Fatalf("element outside the grant = %d %q", code, message)
+	}
+	if code, message := annotate("op-foreign-signal", "el-line1", []string{"sig-2"}); code != 409 ||
+		message != "entity_not_found: signal:sig-2" {
+		t.Fatalf("signal outside the grant = %d %q, want refused as not found", code, message)
+	}
+}

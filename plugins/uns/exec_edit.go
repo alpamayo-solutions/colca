@@ -98,6 +98,11 @@ type editIntent struct {
 	Value            json.RawMessage `json:"value"`
 	SignalIDs        []string        `json:"signal_ids"`
 	Source           string          `json:"source"`
+	// SystemElementID is where the annotation belongs; every signal it names
+	// must lie below it. RelatedAnnotationIDs are the annotations it belongs
+	// to. Neither is part of the derived id.
+	SystemElementID      string   `json:"system_element_id"`
+	RelatedAnnotationIDs []string `json:"related_annotation_ids"`
 	// The resource intent's fields (see exec_edit_resource.go). Path is
 	// where the resource sits; FromPath is set only by a move, which makes
 	// the old position part of the same batch and authorization.
@@ -292,6 +297,11 @@ func (w *EditExec) ExecuteWithWrites(
 		return w.remember(envelope.OperationID, digest, code, message, result, nil)
 	}
 	if intent.Type == "annotation" {
+		// Checked only once the plan is authorized, so a refusal here cannot
+		// tell a person where an element or signal outside their grants sits.
+		if code, message := annotationPlacement(intent, entities); code != 0 {
+			return w.remember(envelope.OperationID, digest, code, message, resultFor(code), nil)
+		}
 		return w.executeAnnotationWrite(ctx, envelope.OperationID, digest, message, records)
 	}
 	batch, stateStart, err := w.withDurableReceipt(

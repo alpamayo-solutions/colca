@@ -223,14 +223,20 @@ func (w *EditExec) planFor(
 		}
 		return append(touched, touchedByRecords(records, entities, anchor)...)
 	case "annotation":
-		// The record sits at a reserved path, so the positions are the signals
-		// the annotation names; with none, only a realm-wide grant covers it.
-		// An operate grant also covers a create or the person's own annotation.
+		// The record sits at a reserved path, so the positions are the element
+		// and the signals the annotation names; with neither, only a
+		// realm-wide grant covers it. An operate grant also covers a create or
+		// the person's own annotation.
 		operable := annotationOperable(intent, ctx.Actor)
-		if len(intent.SignalIDs) == 0 {
+		touched := make([]editTouched, 0, len(intent.SignalIDs))
+		if intent.SystemElementID != "" {
+			t := touchedEntity(entities, "system-element", intent.SystemElementID)
+			t.operate = operable
+			touched = append(touched, t)
+		}
+		if len(touched) == 0 && len(intent.SignalIDs) == 0 {
 			return []editTouched{{path: "", key: "signal:", operate: operable}}
 		}
-		touched := make([]editTouched, 0, len(intent.SignalIDs))
 		for _, id := range intent.SignalIDs {
 			t := touchedEntity(entities, "signal", id)
 			t.operate = operable

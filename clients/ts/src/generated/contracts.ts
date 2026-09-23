@@ -96,9 +96,11 @@ export type Annotation = {
   annotation_id: string;
   annotation_type_id: string;
   deleted?: boolean;
+  related_annotation_ids?: string[];
   revision?: number;
   signal_ids?: string[];
   source?: string;
+  system_element_id?: null | string;
   time_end?: null | number;
   time_start: number;
   value?: unknown;
