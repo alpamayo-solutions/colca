@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.0](https://github.com/alpamayo-solutions/colca/compare/v0.8.1...v0.9.0) (2026-09-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** auth.issuer is refused at load with the replacement spelled out; write `issuers: [{ url: <issuer> }]`. Persisted JWKS are now stored per URL, so a node upgraded while its issuer is unreachable has no cached keys until the first successful fetch.
+
+### Features
+
+* **auth:** accept tokens from several issuers ([2f53e43](https://github.com/alpamayo-solutions/colca/commit/2f53e4331281643988b56d0ac87071413550ed5f))
+* **uns:** acknowledge alarms under their own command class ([25c3eb1](https://github.com/alpamayo-solutions/colca/commit/25c3eb17ba07d602b8a57e58b4750aa7026e474f))
+* **uns:** acknowledge alarms under their own command class ([670a0ee](https://github.com/alpamayo-solutions/colca/commit/670a0eed095fc5a8538c0fb077bdc3b907000092))
+
 ## [0.8.1](https://github.com/alpamayo-solutions/colca/compare/v0.8.0...v0.8.1) (2026-09-23)
 
 
