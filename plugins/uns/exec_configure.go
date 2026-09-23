@@ -174,10 +174,19 @@ type elementUpsertBody struct {
 }
 
 // placedElement is the part of a _SystemElement record this needs: the identity
-// that grants and bindings name it by.
+// that grants and bindings name it by, and the parent it declares.
+//
+// The parent is not the same question as the position. A record's path says
+// where the element sits, and for most elements the path of its parent is a
+// prefix of its own — but not for a ROOT's direct children: the publisher
+// leaves the root out of the path it writes, so an element whose parent is a
+// root is stored at its own segment alone. `parent_id` is then the only place
+// that relationship survives, and a delete that looked only at paths could
+// not see it.
 type placedElement struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	ParentID string `json:"parent_id"`
 }
 
 // definitionRef is one definition to write. It has no path on purpose: a
@@ -1491,13 +1500,39 @@ func (c *ConfigExec) elementTopic(path string) string {
 
 // occupantsBelow lists the element paths under path, skipping those the same
 // command retires.
+// occupantsBelow lists the elements that would be orphaned by retiring the
+// element at path: the ones stored under it, AND the ones that name it as
+// their parent wherever they are stored.
+//
+// The second half is not belt-and-braces. A root's direct children are stored
+// at their own segment alone — the publisher leaves the root out of the path —
+// so by path a root has no children at all, and a delete judged on paths
+// retired it happily. Seen on a live deployment: `prekit dm deploy --prune`
+// removed a root, this check found nothing in the way, and the one tombstone
+// went out. The projection, which knows the parent relationship because the
+// payload carries it, then cascaded: four elements the node still held
+// vanished from the read model, and the two disagreed permanently. The node
+// is the authority, so the node is where this has to be seen.
 func (c *ConfigExec) occupantsBelow(path string, retiring map[string]bool) []string {
+	var target placedElement
+	if raw, ok := c.store.KVGet(c.elementTopic(path)); ok {
+		_ = json.Unmarshal(raw, &target)
+	}
+	seen := make(map[string]bool)
 	var out []string
 	for _, rec := range c.store.KVScan("_SystemElement", c.store.NodeID()) {
-		if retiring[rec.Path] {
+		if retiring[rec.Path] || seen[rec.Path] {
 			continue
 		}
-		if strings.HasPrefix(rec.Path, path+"/") {
+		child := strings.HasPrefix(rec.Path, path+"/")
+		if !child && target.ID != "" {
+			var held placedElement
+			if json.Unmarshal(rec.Payload, &held) == nil && held.ParentID == target.ID {
+				child = true
+			}
+		}
+		if child {
+			seen[rec.Path] = true
 			out = append(out, rec.Path)
 		}
 	}
