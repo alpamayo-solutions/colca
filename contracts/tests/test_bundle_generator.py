@@ -250,7 +250,16 @@ def test_cmd_contracts_carry_the_door_contract():
     """The colca command door needs correlation_id + expires_at; created_at is
     dropped from required (publishers do not stamp it)."""
     body, _ = gb.build_bundle()
-    for ident in ("_CmdParam", "_CmdOperate", "_CmdMaintain", "_CmdConfigure", "_CmdEdit", "_CmdAdmin", "_Cmd"):
+    for ident in (
+        "_CmdAcknowledge",
+        "_CmdParam",
+        "_CmdOperate",
+        "_CmdMaintain",
+        "_CmdConfigure",
+        "_CmdEdit",
+        "_CmdAdmin",
+        "_Cmd",
+    ):
         entry = body["contracts"][ident]
         assert entry["class"] == "cmd", ident
         req = entry["schema"].get("required", [])

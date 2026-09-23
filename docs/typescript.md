@@ -146,8 +146,10 @@ back: a view can be that much behind the node, but it never goes on showing an
 alarm that is over. It is a window, and a guess, because the node does not say
 where its retained delivery ends; `resyncMs: 0` turns the reconciliation off.
 
-`acknowledge()`, `silence(path, { minutes: 30 })` and `unsilence()` are
-`_CmdOperate` commands on the alarm's own path, each waiting for its `_Ack`. The
+`acknowledge()` sends a `_CmdAcknowledge`, and `silence(path, { minutes: 30 })`
+and `unsilence()` send `_CmdOperate`, each on the alarm's own path and each
+waiting for its `_Ack`. Quitting an alarm therefore needs an `acknowledge` grant,
+silencing an `operate` grant (see [security.md](security.md)). The
 note and the deadline ride in the payload's `command` object, where the contract
 keeps a verb's arguments. The client sends no identity: who quit an alarm is the
 node's word on the record, and the caller adds the note. A refusal — 300 and up — throws `AlarmRefused`

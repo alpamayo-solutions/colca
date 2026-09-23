@@ -68,9 +68,14 @@ Grants use one grammar for machines and people:
 | `cmd:<element>/#:<classes>` | send commands of the listed classes below the element |
 | `admin:#` | use the administrative routes; does not widen reads or commands |
 
-Command classes are `param`, `operate`, `maintain`, `configure` and `admin`.
-`configure` is separate on purpose: someone who may rename a signal must not
-thereby be able to send maintenance commands to a PLC.
+Command classes are `acknowledge`, `param`, `operate`, `maintain`, `configure`
+and `admin`. `configure` is separate on purpose: someone who may rename a signal
+must not thereby be able to send maintenance commands to a PLC. `acknowledge`
+is separate for the opposite reason: quitting an alarm moves nothing, so
+everyone who watches a line may hold it, and holding it must not let them start
+or stop the line. It covers `_CmdAcknowledge` and nothing else; silencing an
+alarm keeps notifications from other people and stays `operate`. No class
+implies another: someone who may both operate and acknowledge holds both.
 
 `_CmdEdit` is a person's tool for the node's data model, and the door admits
 anyone holding `configure` on it. Two narrower classes are also admitted, each

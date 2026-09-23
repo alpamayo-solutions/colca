@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-// The six things a grant can allow: uns's read verb and its five command
+// The seven things a grant can allow: uns's read verb and its six command
 // classes. These are the only scope names the resource server declares, and the
 // only ones CompileGrants understands.
-var AuthzScopes = [...]string{"read", "param", "operate", "maintain", "configure", "admin"}
+var AuthzScopes = [...]string{"read", "acknowledge", "param", "operate", "maintain", "configure", "admin"}
 
 const (
 	// ManagedByAttr marks a resource this tooling owns. Policies and
@@ -495,7 +495,7 @@ func (k *Keycloak) write(ctx context.Context, method, path string, body any) err
 	return nil
 }
 
-// EnsureScopes declares the six authz scopes, so a permission can name them.
+// EnsureScopes declares the seven authz scopes, so a permission can name them.
 func (k *Keycloak) EnsureScopes(ctx context.Context, clientUUID string) error {
 	var have []struct {
 		Name string `json:"name"`

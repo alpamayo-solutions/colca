@@ -21,6 +21,7 @@ _VECTOR = Path(__file__).parent / "vectors" / "manifest_streams.json"
 #: command missing here was a command ``streams_by_contract`` did not know --
 #: a test double then put a ``_CmdOperate`` on the entities stream.
 COMMAND_CONTRACTS: tuple[str, ...] = (
+    "_CmdAcknowledge",
     "_CmdParam",
     "_CmdOperate",
     "_CmdMaintain",

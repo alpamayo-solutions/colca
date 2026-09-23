@@ -170,7 +170,8 @@ describe("acknowledging", () => {
     await settle();
 
     const sent = client.sent[0];
-    expect(sent.topic).toBe(`${ROOT}/v1/_CmdOperate/${NODE}/${GRIT}/ackAlarm`);
+    // Its own contract, so a grant for `acknowledge` is enough and `operate` is not needed.
+    expect(sent.topic).toBe(`${ROOT}/v1/_CmdAcknowledge/${NODE}/${GRIT}/ackAlarm`);
     // Who quit it is the node's word; the client says only why.
     expect(Object.keys(sent.body).sort()).toEqual(["command", "correlation_id", "expires_at"]);
     expect(sent.body.command).toEqual({ note: "Korn getauscht" });

@@ -152,6 +152,15 @@ export type Cmd = {
   [key: string]: unknown;
 };
 
+/** `_CmdAcknowledge` — stream class `cmd`. */
+export type CmdAcknowledge = {
+  command?: Record<string, unknown>;
+  correlation_id: string;
+  created_at?: number;
+  expires_at: number;
+  [key: string]: unknown;
+};
+
 /** `_CmdAdmin` — stream class `cmd`. */
 export type CmdAdmin = {
   command?: Record<string, unknown>;
@@ -543,6 +552,7 @@ export const CONTRACTS = {
   "_AnnotationType": { class: "definition", tombstone: true },
   "_AuditEvent": { class: "audit", tombstone: false },
   "_Cmd": { class: "cmd", tombstone: false },
+  "_CmdAcknowledge": { class: "cmd", tombstone: false },
   "_CmdAdmin": { class: "cmd", tombstone: false },
   "_CmdConfigure": { class: "cmd", tombstone: false },
   "_CmdEdit": { class: "cmd", tombstone: false },
@@ -584,6 +594,7 @@ export interface PayloadByContract {
   "_AnnotationType": AnnotationType;
   "_AuditEvent": AuditEvent;
   "_Cmd": Cmd;
+  "_CmdAcknowledge": CmdAcknowledge;
   "_CmdAdmin": CmdAdmin;
   "_CmdConfigure": CmdConfigure;
   "_CmdEdit": CmdEdit;

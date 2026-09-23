@@ -269,9 +269,11 @@ type Grant struct {
 // Hazard classes. param, operate, maintain and admin rank how dangerous a
 // command is to equipment. configure is not on that ladder: it edits the data
 // model, so an editor can bind signals without being able to send maintenance
-// commands to a PLC.
+// commands to a PLC. acknowledge is not on it either: quitting an alarm moves
+// nothing, so everyone who watches a line may be granted it without being able
+// to start or stop the line.
 var cmdClasses = map[string]bool{
-	"param": true, "operate": true, "maintain": true, "configure": true, "admin": true,
+	"acknowledge": true, "param": true, "operate": true, "maintain": true, "configure": true, "admin": true,
 }
 
 // CmdClasses lists the hazard classes a cmd grant may name, sorted.
@@ -378,7 +380,7 @@ func ParseGrant(s string) (Grant, error) {
 		}
 		for _, c := range classes {
 			if !cmdClasses[c] {
-				return Grant{}, fmt.Errorf("grant %q: unknown cmd class %q (param|operate|maintain|configure|admin)", s, c)
+				return Grant{}, fmt.Errorf("grant %q: unknown cmd class %q (acknowledge|param|operate|maintain|configure|admin)", s, c)
 			}
 		}
 		return Grant{Verb: "cmd", Element: z, Classes: classes}, nil
@@ -557,6 +559,8 @@ func parseZone(grant, z string) (string, error) {
 // contracts get the highest class.
 func CmdClass(contract string) string {
 	switch contract {
+	case "_CmdAcknowledge":
+		return "acknowledge"
 	case "_CmdParam":
 		return "param"
 	case "_CmdOperate":

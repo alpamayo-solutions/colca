@@ -1,5 +1,5 @@
 {
-  "description": "Golden human-authorization vectors (architecture principle 2, tier 2 'necessary duplication'). Human authorization can be evaluated by more than one native implementation of the SAME rules: Go in plugins/uns (authz.go: Authorize, AuthorizeCmdAt, HoldsCmdClass, Ancestry/Scope), and any client or API that resolves a token's group ids against the `_Group` definitions a node holds and expands a granted element to its descendants. They cannot import each other, so this file is the one place the rule they must agree on is written down; plugins/uns/grant_evaluation_test.go judges the Go side.\n\nShape: `elements` is a small tree, `id -> parent id or null`, written parent-first. `groups` maps a group id to the list of DEFINITIONS this node holds for it -- each definition is a list of grant strings from one authoring node. A group with exactly one definition resolves to that definition's grants. A group with more than one definition is a COLLISION (two nodes claiming the same group id) and resolves to nothing, per colca's GroupIndex.GrantsOf. A group id referenced by a case's `principal_groups` but absent from `groups` altogether is a MISSING definition and likewise contributes nothing -- the fail-closed default for a group a node has never heard of, or has lost the definition for.\n\nEach case is one authorization question against a fresh token naming exactly `principal_groups` (no grants carried directly on the token, no admin role, no service-account scope): a scoped human resolving strictly through `_Group` definitions, the case both implementations must agree on. `question.type` is one of:\n  - \"read\": may this principal read the record at `question.element`?\n  - \"cmd\": may this principal issue a command of hazard class `question.class` (`configure` or `operate` -- the only two classes an HTTP resolver needs; `param`/`maintain`/`admin` are MQTT-only and have no HTTP equivalent to pin here) at `question.element`?\n  - \"read_all\": may this principal subscribe to the realm-wide wildcard (colca's `colca/#`)? Carries no `element`.\n`allowed` is the expected answer. An optional `disputed` field on a case names a vector where two implementations disagree; every consuming test must skip such a case loudly rather than bend it to pass, and report the disagreement.",
+  "description": "Golden human-authorization vectors (architecture principle 2, tier 2 'necessary duplication'). Human authorization can be evaluated by more than one native implementation of the SAME rules: Go in plugins/uns (authz.go: Authorize, AuthorizeCmdAt, HoldsCmdClass, Ancestry/Scope), and any client or API that resolves a token's group ids against the `_Group` definitions a node holds and expands a granted element to its descendants. They cannot import each other, so this file is the one place the rule they must agree on is written down; plugins/uns/grant_evaluation_test.go judges the Go side.\n\nShape: `elements` is a small tree, `id -> parent id or null`, written parent-first. `groups` maps a group id to the list of DEFINITIONS this node holds for it -- each definition is a list of grant strings from one authoring node. A group with exactly one definition resolves to that definition's grants. A group with more than one definition is a COLLISION (two nodes claiming the same group id) and resolves to nothing, per colca's GroupIndex.GrantsOf. A group id referenced by a case's `principal_groups` but absent from `groups` altogether is a MISSING definition and likewise contributes nothing -- the fail-closed default for a group a node has never heard of, or has lost the definition for.\n\nEach case is one authorization question against a fresh token naming exactly `principal_groups` (no grants carried directly on the token, no admin role, no service-account scope): a scoped human resolving strictly through `_Group` definitions, the case both implementations must agree on. `question.type` is one of:\n  - \"read\": may this principal read the record at `question.element`?\n  - \"cmd\": may this principal issue a command of hazard class `question.class` (`configure`, `operate` or `acknowledge` -- `configure` and `operate` are what an HTTP resolver needs, `acknowledge` is pinned against `operate` because a UI decides from it whether to offer quitting an alarm; `param`/`maintain`/`admin` are MQTT-only and have no HTTP equivalent to pin here) at `question.element`?\n  - \"read_all\": may this principal subscribe to the realm-wide wildcard (colca's `colca/#`)? Carries no `element`.\n`allowed` is the expected answer. An optional `disputed` field on a case names a vector where two implementations disagree; every consuming test must skip such a case loudly rather than bend it to pass, and report the disagreement.",
   "elements": {
     "site1": null,
     "line1": "site1",
@@ -15,6 +15,7 @@
     "g-line3-read": [["read:line3/#"]],
     "g-line1-configure": [["cmd:line1/#:configure"]],
     "g-line1-operate": [["cmd:line1/#:operate"]],
+    "g-line1-acknowledge": [["cmd:line1/#:acknowledge"]],
     "g-site1-write": [["write:site1/#"]],
     "g-admin-verb": [["admin:#"]],
     "g-unknown-read": [["read:ghost/#"]],
@@ -105,6 +106,24 @@
       "principal_groups": ["g-line1-operate"],
       "question": {"type": "cmd", "class": "operate", "element": "line1"},
       "allowed": true
+    },
+    {
+      "name": "cmd_acknowledge_grant_covers_acknowledge_below_the_element",
+      "principal_groups": ["g-line1-acknowledge"],
+      "question": {"type": "cmd", "class": "acknowledge", "element": "press1"},
+      "allowed": true
+    },
+    {
+      "name": "cmd_acknowledge_grant_does_not_cover_operate",
+      "principal_groups": ["g-line1-acknowledge"],
+      "question": {"type": "cmd", "class": "operate", "element": "line1"},
+      "allowed": false
+    },
+    {
+      "name": "cmd_operate_grant_does_not_cover_acknowledge",
+      "principal_groups": ["g-line1-operate"],
+      "question": {"type": "cmd", "class": "acknowledge", "element": "line1"},
+      "allowed": false
     },
     {
       "name": "write_grant_does_not_authorize_a_human_read",
