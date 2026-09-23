@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -65,7 +66,11 @@ ulid: n-edge1
 data_dir: /tmp/colca-test
 key_file: /keys/edge1.key
 auth:
-  issuer: https://kc.example/realms/colca
+  issuers:
+    - url: https://red.example/realms/colca
+    - url: https://green.example/realms/colca
+    - url: https://other.example
+      jwks_url: https://other.example/keys
   audience: colca
   jwks_url: https://kc.example/realms/colca/protocol/openid-connect/certs
   jwks_refresh: 30m
@@ -81,9 +86,17 @@ mqtt_human:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Auth == nil || c.Auth.Issuer != "https://kc.example/realms/colca" ||
-		c.Auth.Audience != "colca" || time.Duration(c.Auth.JWKSRefresh) != 30*time.Minute {
+	if c.Auth == nil || c.Auth.Audience != "colca" || time.Duration(c.Auth.JWKSRefresh) != 30*time.Minute {
 		t.Fatalf("auth block: %+v", c.Auth)
+	}
+	shared := "https://kc.example/realms/colca/protocol/openid-connect/certs"
+	want := []AuthIssuer{
+		{URL: "https://red.example/realms/colca", JWKSURL: shared},
+		{URL: "https://green.example/realms/colca", JWKSURL: shared},
+		{URL: "https://other.example", JWKSURL: "https://other.example/keys"},
+	}
+	if got := c.Auth.EffectiveIssuers(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("effective issuers:\n got %+v\nwant %+v", got, want)
 	}
 	if c.MQTTHuman.TCPAddr != ":8884" || c.MQTTHuman.WSAddr != ":8885" {
 		t.Fatalf("mqtt_human block: %+v", c.MQTTHuman)
@@ -91,7 +104,7 @@ mqtt_human:
 
 	// refresh absent → 1h effective default
 	base := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
-		Auth: &Auth{Issuer: "i", Audience: "a", JWKSURL: "j"}}
+		Auth: &Auth{Issuers: []AuthIssuer{{URL: "i"}}, Audience: "a", JWKSURL: "j"}}
 	if err := base.Validate(); err != nil {
 		t.Fatalf("auth without mqtt_human must validate: %v", err)
 	}
@@ -104,18 +117,47 @@ mqtt_human:
 			MQTTHuman: MQTTHuman{TCPAddr: ":8884"}},
 		"ws without auth": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
 			MQTTHuman: MQTTHuman{WSAddr: ":8885"}},
-		"auth missing issuer": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		"auth missing issuers": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
 			Auth: &Auth{Audience: "a", JWKSURL: "j"}},
+		"auth issuer without url": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+			Auth: &Auth{Issuers: []AuthIssuer{{JWKSURL: "j"}}, Audience: "a"}},
+		"auth issuer listed twice": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+			Auth: &Auth{Issuers: []AuthIssuer{{URL: "i"}, {URL: "i"}}, Audience: "a", JWKSURL: "j"}},
 		"auth missing audience": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
-			Auth: &Auth{Issuer: "i", JWKSURL: "j"}},
+			Auth: &Auth{Issuers: []AuthIssuer{{URL: "i"}}, JWKSURL: "j"}},
 		"auth missing jwks_url": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
-			Auth: &Auth{Issuer: "i", Audience: "a"}},
+			Auth: &Auth{Issuers: []AuthIssuer{{URL: "i"}}, Audience: "a"}},
+		"one issuer without any jwks_url": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+			Auth: &Auth{Issuers: []AuthIssuer{{URL: "i", JWKSURL: "j"}, {URL: "k"}}, Audience: "a"}},
 		"negative refresh": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
-			Auth: &Auth{Issuer: "i", Audience: "a", JWKSURL: "j", JWKSRefresh: Duration(-time.Hour)}},
+			Auth: &Auth{Issuers: []AuthIssuer{{URL: "i"}}, Audience: "a", JWKSURL: "j", JWKSRefresh: Duration(-time.Hour)}},
 	} {
 		if err := c.Validate(); err == nil {
 			t.Errorf("%s: want validation error", name)
 		}
+	}
+}
+
+// The single-issuer form is refused with the replacement spelled out, rather
+// than ignored: an unknown key would leave the node accepting no issuer.
+func TestAuthSingleIssuerKeyIsRefused(t *testing.T) {
+	doc := `
+ulid: n-edge1
+data_dir: /tmp/colca-test
+key_file: /keys/edge1.key
+auth:
+  issuer: https://kc.example/realms/colca
+  audience: colca
+  jwks_url: https://kc.example/realms/colca/protocol/openid-connect/certs
+`
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(p)
+	if err == nil || !strings.Contains(err.Error(), "auth.issuers") ||
+		!strings.Contains(err.Error(), "https://kc.example/realms/colca") {
+		t.Fatalf("auth.issuer must be refused with the replacement named, got %v", err)
 	}
 }
 

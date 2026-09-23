@@ -276,7 +276,7 @@ func newLocalResourceAPI(t *testing.T) (*localResourceAPI, *tokentest.Issuer) {
 
 	iss := tokentest.NewIssuer(t)
 	ver, err := tokenauth.New(tokenauth.Config{
-		Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL(),
+		Issuers: []tokenauth.Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud(),
 	}, e.Store(), m)
 	if err != nil {
 		t.Fatal(err)

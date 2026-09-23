@@ -91,19 +91,50 @@ cannot resolve elements above itself, so scoped grants fail closed there.
 
 ## People
 
-People authenticate with tokens from any OIDC issuer. The node validates them
-offline:
+People authenticate with tokens from OIDC issuers the node lists. The node
+validates them offline:
 
 ```yaml
 auth:
-  issuer: https://login.example.com/realms/plant
+  issuers:
+    - url: https://login.example.com/realms/plant
   audience: colca
   jwks_url: https://login.example.com/realms/plant/protocol/openid-connect/certs
 mqtt_human: { tcp_addr: ":8884", ws_addr: ":8885" }
 ```
 
-Signing keys are fetched in the background, stored, and refreshed when a token
-names an unknown key. The issuer is never called while a request waits, and a
+A token's `iss` must be one of `issuers`, and its `aud` must be `audience`.
+The issuer also decides which keys the signature is checked against: its own
+`jwks_url`, or the shared `auth.jwks_url` when it has none. A token that names
+an issuer but was signed with another issuer's keys is rejected.
+
+Several issuers are normal when one identity provider is reached under more
+than one host name. Keycloak, for example, writes the host the browser used
+into `iss`, so a site with two networks gets two issuers with the same keys:
+
+```yaml
+auth:
+  issuers:
+    - url: https://red.plant.example/realms/plant
+    - url: https://green.plant.example/realms/plant
+  audience: colca
+  jwks_url: http://keycloak:8080/realms/plant/protocol/openid-connect/certs
+```
+
+Issuers from different identity providers each name their own keys:
+
+```yaml
+auth:
+  issuers:
+    - url: https://login.example.com/realms/plant
+      jwks_url: https://login.example.com/realms/plant/protocol/openid-connect/certs
+    - url: https://idp.partner.example
+      jwks_url: https://idp.partner.example/.well-known/jwks.json
+  audience: colca
+```
+
+Signing keys are fetched in the background from each distinct JWKS URL,
+stored, and refreshed when a token names an unknown key. The issuer is never called while a request waits, and a
 node that restarts without network keeps validating until the tokens expire. A
 session ends when its token expires; the token lifetime is therefore the
 revocation delay.
