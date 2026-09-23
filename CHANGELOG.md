@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0](https://github.com/alpamayo-solutions/colca/compare/v0.6.0...v0.7.0) (2026-09-23)
+
+
+### Features
+
+* **contracts:** _Finding — what a service found, with its handling attached ([0fb678f](https://github.com/alpamayo-solutions/colca/commit/0fb678ff39768b07cb7576157d1bf96b7d638e4f))
+
+
+### Fixes
+
+* **grantsync:** one element Keycloak refuses costs that element, not every group ([a8d7e7b](https://github.com/alpamayo-solutions/colca/commit/a8d7e7b7b3798b57c41fc87a4d06e89ae501c4f1))
+* **grantsync:** one element Keycloak refuses costs that element, not every group ([1ca17bc](https://github.com/alpamayo-solutions/colca/commit/1ca17bc5a26d50b5aa2f78fe597cbc0168da0fef))
+* **registry:** a revoke retires the records the identity authored ([9671d16](https://github.com/alpamayo-solutions/colca/commit/9671d16c2a664a4f438ea239ea7b69ea3f95c250))
+* **registry:** a revoke retires the records the identity authored ([c4a4b03](https://github.com/alpamayo-solutions/colca/commit/c4a4b03328e4a24eac9a82d802f530d45a3602f2))
+* **uns:** a document's supplied version resolves, so its element can be deleted ([dd501f9](https://github.com/alpamayo-solutions/colca/commit/dd501f9a0b8234f9781881a2683ffa31295d688d))
+* **uns:** a document's supplied version resolves, so its element can be deleted ([b644879](https://github.com/alpamayo-solutions/colca/commit/b64487964adfae8a16641b5b8ed910c4b01af2d0))
+* **uns:** a root's children are children, so deleting it is refused ([0b06da3](https://github.com/alpamayo-solutions/colca/commit/0b06da3207bb646a8a24244dcda1618f02d22e6f))
+* **uns:** a root's children are children, so deleting it is refused ([b582d85](https://github.com/alpamayo-solutions/colca/commit/b582d851dc46333c854407ae404402ffbe44c18c))
+* **uns:** an upsert moves an identity instead of refusing it ([7a0370a](https://github.com/alpamayo-solutions/colca/commit/7a0370a55048b84cb80d40b53948491dcc1a40b3))
+* **uns:** an upsert moves an identity instead of refusing it ([34e1947](https://github.com/alpamayo-solutions/colca/commit/34e194763614e368416b63dce9403f8bd1c8263d))
+
 ## [0.6.0](https://github.com/alpamayo-solutions/colca/compare/v0.5.0...v0.6.0) (2026-09-19)
 
 
