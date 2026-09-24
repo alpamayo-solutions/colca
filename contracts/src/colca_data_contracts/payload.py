@@ -245,6 +245,7 @@ class ClockProgress(Payload):
     ServiceDetails carries liveness; this marker proves the preceding samples
     and priority-lane events arrived before consumers acknowledge a window.
     """
+
     run_id: str
     processed_at: float
 
