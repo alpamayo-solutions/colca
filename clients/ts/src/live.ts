@@ -75,7 +75,26 @@ export interface CommandOptions {
   ackFilter?: string;
 }
 
-/** Nobody answered a command before it expired. */
+/**
+ * A command that never reached the node's executor: the client was offline, or
+ * the node refused the publish. Nothing was carried out.
+ */
+export class CommandNotSent extends Error {
+  constructor(
+    readonly topic: string,
+    readonly correlationId: string,
+    options?: { cause?: unknown },
+  ) {
+    super(`${topic} (${correlationId}) was not sent`, options);
+    this.name = "CommandNotSent";
+  }
+}
+
+/**
+ * Nobody answered a command before it expired. It may still have been carried
+ * out: the connection can drop after the command went out and before its answer
+ * came back.
+ */
 export class CommandTimeout extends Error {
   constructor(
     readonly topic: string,
@@ -270,8 +289,10 @@ export class Live {
    * `body` is the command's own fields — `params` for a `_CmdParam`, say. The
    * correlation id and the expiry are added here, and the answer is matched by
    * the id, wherever in the tree the executor publishes it. The promise settles
-   * with the `_Ack`, whatever its `result_code`; it rejects when nothing answers
-   * in `timeoutMs`, when the node refuses the publish, or when the client closes.
+   * with the `_Ack`, whatever its `result_code`. It rejects with `CommandNotSent`
+   * when the command never went out or the node refused it, with `CommandTimeout`
+   * when nothing answers in `timeoutMs`, and when the client closes. A connection
+   * lost after the command went out is not a refusal: its answer may still come.
    */
   command(
     topic: string,
@@ -287,25 +308,42 @@ export class Live {
     const correlationId = typeof body.correlation_id === "string" ? body.correlation_id : newUlid();
     this.#listenForAcks(ackFilter);
 
+    // Expires when the wait ends, however long the subscription below takes: the
+    // executor must not carry out a command its sender has given up on.
+    const expiresAt = Date.now() + timeoutMs;
+
     return new Promise<CommandAck>((resolve, reject) => {
+      let sent = false;
       const timer = setTimeout(() => {
-        if (this.#pending.delete(correlationId)) reject(new CommandTimeout(topic, correlationId));
+        if (!this.#pending.delete(correlationId)) return;
+        reject(sent ? new CommandTimeout(topic, correlationId) : new CommandNotSent(topic, correlationId));
       }, timeoutMs);
       this.#pending.set(correlationId, { resolve, reject, timer });
+      const notSent = (cause?: unknown): void => {
+        const pending = this.#pending.get(correlationId);
+        if (!pending) return;
+        this.#pending.delete(correlationId);
+        clearTimeout(pending.timer);
+        pending.reject(new CommandNotSent(topic, correlationId, { cause }));
+      };
 
       // Only once the node confirmed the subscription to the answers: an executor
       // that answers at once must not answer into nothing.
-      this.#whenGranted(ackFilter)
-        .then(() =>
-          this.publish(topic, { ...body, correlation_id: correlationId, expires_at: Date.now() + timeoutMs }),
-        )
-        .catch((error: unknown) => {
-          const pending = this.#pending.get(correlationId);
-          if (!pending) return;
-          this.#pending.delete(correlationId);
-          clearTimeout(pending.timer);
-          pending.reject(error instanceof Error ? error : new Error(String(error)));
+      void this.#whenGranted(ackFilter).then(() => {
+        if (!this.#pending.has(correlationId)) return;
+        const client = this.#client;
+        if (this.#state !== "online" || client === undefined) {
+          notSent();
+          return;
+        }
+        const payload = JSON.stringify({ ...body, correlation_id: correlationId, expires_at: expiresAt });
+        sent = true;
+        client.publish(topic, payload, { qos: 1, retain: false }, (error) => {
+          // The node's refusal carries its reason code. Any other error is the
+          // connection going, and the command may have reached the node first.
+          if (error && typeof (error as { code?: unknown }).code === "number") notSent(error);
         });
+      });
     });
   }
 

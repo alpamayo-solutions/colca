@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CommandTimeout, type LiveValue } from "../src/live.js";
+import { CommandNotSent, CommandTimeout, type LiveValue } from "../src/live.js";
 import { jwt, settle, setup } from "./fake-mqtt.js";
 
 const T = "steine/v1/_Metric/n-technikum/wisewoods/line1/mas2/grit";
@@ -432,8 +432,84 @@ describe("commands", () => {
 
     await expect(live.command("steine/v1/_Metric/n1/x")).rejects.toThrow(/_Cmd/);
 
-    clients[0].refusePublish = new Error("Not authorized");
-    await expect(live.command(COMMAND)).rejects.toThrow("Not authorized");
+    // mqtt.js hands over the node's refusal with its reason code.
+    clients[0].refusePublish = Object.assign(new Error("Publish error: Not authorized"), { code: 135 });
+    const refused = live.command(COMMAND);
+    await expect(refused).rejects.toBeInstanceOf(CommandNotSent);
+    await expect(refused).rejects.toMatchObject({ cause: { message: "Publish error: Not authorized" } });
+  });
+
+  it("says a command was not sent when it never went out", async () => {
+    const { live } = setup();
+    await settle();
+
+    const offline = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    const outcome = expect(offline).rejects.toBeInstanceOf(CommandNotSent);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await outcome;
+  });
+
+  it("keeps waiting for the answer when the connection drops after the command went out", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].emit("connect");
+    clients[0].refusePublish = new Error("Connection closed");
+
+    const answer = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    await settle();
+    const [sent] = clients[0].sent;
+    clients[0].emit("close");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await settle();
+    const again = clients[clients.length - 1];
+    again.emit("connect");
+    again.deliver("steine/v1/_Ack/n-edge/x", { correlation_id: sent.body.correlation_id, result_code: 200 });
+
+    await expect(answer).resolves.toMatchObject({ result_code: 200 });
+  });
+
+  it("times out, not 'not sent', when a command went out and its answer never came", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].emit("connect");
+    clients[0].refusePublish = new Error("Connection closed");
+
+    const answer = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    const outcome = expect(answer).rejects.toBeInstanceOf(CommandTimeout);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await outcome;
+  });
+
+  it("expires when its wait ends, however late the node confirms the answers' subscription", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].holdSubacks = true;
+    clients[0].emit("connect");
+
+    const asked = Date.now();
+    const answer = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    void answer.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(2_000);
+    clients[0].grant();
+    await settle();
+
+    expect(clients[0].sent[0].body.expires_at).toBe(asked + 5_000);
+  });
+
+  it("is not sent once its wait has ended", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].holdSubacks = true;
+    clients[0].emit("connect");
+
+    const answer = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    const outcome = expect(answer).rejects.toBeInstanceOf(CommandNotSent);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await outcome;
+    clients[0].grant();
+    await settle();
+
+    expect(clients[0].sent).toEqual([]);
   });
 
   it("gives up on open commands when closed", async () => {
