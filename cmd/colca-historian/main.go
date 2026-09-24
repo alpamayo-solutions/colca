@@ -12,7 +12,7 @@
 //	DATABASE_URL      Postgres/Timescale DSN             (required)
 //	DB_MAX_CONNS      pool size                          (default 4)
 //	FETCH_MAX         records per page                   (default 500)
-//	IDLE_SLEEP_MS     pause when the stream is quiet     (default 500)
+//	IDLE_SLEEP_MS     pause after a page that was not full (default 500)
 //	HTTP_ADDR         /healthz + /metrics                (default :9091)
 package main
 
