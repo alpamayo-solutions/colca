@@ -228,6 +228,50 @@ class Metric(BaseMetric):
 
 
 @dataclass
+class TimeSync(Payload):
+    """Colca's live, broker-authored clock beacon. Never retained or persisted.
+
+    This built-in contract is decoded by clients but is not part of the
+    publishable schema bundle: the broker refuses client-authored beacons.
+    """
+
+    now_ms: int
+
+
+@dataclass
+class ClockSegment:
+    """The preceding segment carried with a future-effective clock change."""
+
+    real_anchor: float
+    factory_anchor: float
+    rate: float
+    stop_at: float | None = None
+    catch_up: bool = False
+
+
+@dataclass
+class ClockDefinition(Payload):
+    """An opt-in application timeline, distributed down the node tree.
+
+    Epochs are UTC seconds. ``rate=0`` pauses, ``rate=1`` runs in real time.
+    Consumers select one exact authority/topic; this never changes OS time,
+    authentication, command deadlines or Colca's operational clock. A new
+    run requires explicit consumer reset; revisions within a run cannot rewind.
+    """
+
+    id: str
+    run_id: str
+    revision: int
+    real_anchor: float
+    factory_anchor: float
+    rate: float
+    stop_at: float | None = None
+    catch_up: bool = False
+    previous: ClockSegment | None = None
+    start_at: float | None = None
+
+
+@dataclass
 class HealthMetricDeclaration:
     """One bounded, self-described Prometheus health signal.
 

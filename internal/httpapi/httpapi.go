@@ -559,7 +559,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				"actor_kind":    rec.ActorKind,
 			})
 		}
-		resp := map[string]any{"records": out, "next": next}
+		resp := map[string]any{"records": out, "next": next, "now_ms": e.AuthoritativeNow().UnixMilli()}
 		if gap, ok := e.Store().Gap(stream, from); ok {
 			resp["gap"] = gap
 			m.GapServed(stream, "fetch")

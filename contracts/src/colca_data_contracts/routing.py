@@ -62,6 +62,7 @@ CLASS_TABLE: dict[str, str] = {
     "_Annotation": "annotation",
     "_EnrolledIdentity": "entity",
     "_Group": "definition",
+    "_ClockDefinition": "definition",
     "_MetadataType": "definition",
     "_AnnotationType": "definition",
     "_DataModel": "definition",
