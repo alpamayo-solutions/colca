@@ -87,6 +87,8 @@ type Verifier struct {
 	groupsMu  sync.RWMutex
 	groupsIdx *uns.GroupIndex
 	patIdx    *uns.PersonalAccessTokenIndex
+
+	unknownGroups uns.GroupNotices
 }
 
 // SetGroupIndex wires the group resolver (node startup).
@@ -372,6 +374,14 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 	for _, problem := range problems {
 		// Not fatal, and deliberately: one stale membership must cost the human
 		// that group, not everything they hold.
+		var unknown *uns.UnknownGroupError
+		if errors.As(problem, &unknown) {
+			if v.unknownGroups.First(unknown.ID) {
+				v.log.Info("token names a group this node does not define; it grants nothing here "+
+					"(logged once per group)", "group", unknown.ID)
+			}
+			continue
+		}
 		v.log.Warn("token: a group contributed no grants", "sub", sub, "err", problem)
 	}
 	username, _ := claims["preferred_username"].(string)

@@ -93,6 +93,14 @@ func (e *Engine) actorForAttested(attribution Attribution) *uns.Entry {
 		return nil
 	}
 	for _, problem := range problems {
+		var unknown *uns.UnknownGroupError
+		if errors.As(problem, &unknown) {
+			if e.unknownGroups.First(unknown.ID) {
+				e.log.Info("attested actor names a group this node does not define; it grants nothing here "+
+					"(logged once per group)", "group", unknown.ID)
+			}
+			continue
+		}
 		e.log.Warn("attested actor: group unresolved for the acting human", "actor", attribution.ActorID, "err", problem)
 	}
 	if attribution.ActorLabel != "" && attribution.ActorLabel != attribution.ActorID {
@@ -127,7 +135,9 @@ type Engine struct {
 	ids     Mounts
 	log     *slog.Logger
 	metrics *metrics.Metrics // nil-safe: every method on a nil receiver is a no-op
-	clk     *clock.Clock
+	// unknownGroups keeps an attested group this node does not define to one log line.
+	unknownGroups uns.GroupNotices
+	clk           *clock.Clock
 
 	// hasSubscriber is nil until SetSubscriberCheck; without it no command counts as
 	// undelivered and nothing is replayed. It is wired late because the broker is
