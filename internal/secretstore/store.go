@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/pebblelog"
 	"github.com/alpamayo-solutions/colca/secrets"
 	"github.com/cockroachdb/pebble/v2"
 )
@@ -59,7 +60,7 @@ func Open(dir string) (*Store, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("secretstore: empty directory")
 	}
-	db, err := pebble.Open(dir, &pebble.Options{})
+	db, err := pebble.Open(dir, pebblelog.New("secrets").Options())
 	if err != nil {
 		return nil, fmt.Errorf("secretstore: open: %w", err)
 	}

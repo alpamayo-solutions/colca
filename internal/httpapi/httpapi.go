@@ -311,6 +311,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				"since": st.Since.Format(time.RFC3339),
 			}
 		}
+		// storage stays 200 like uplink: restarting does not free a full disk, the
+		// operator has to, and the state tells them to look.
+		payload["storage"] = e.Store().Health()
 		writeJSON(w, http.StatusOK, payload)
 	})
 

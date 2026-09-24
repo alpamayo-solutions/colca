@@ -17,6 +17,7 @@ import (
 
 	"github.com/cockroachdb/pebble/v2"
 
+	"github.com/alpamayo-solutions/colca/internal/pebblelog"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -96,6 +97,7 @@ type KVEntry struct {
 
 type Store struct {
 	db           *pebble.DB
+	health       *pebblelog.Monitor
 	standaloneMu sync.Mutex
 	mu           sync.Mutex
 	next         map[string]uint64 // next offset per stream
@@ -116,12 +118,13 @@ func (s *Store) SetMaxRecordBytes(limit uint64) { s.maxRecordBytes = limit }
 // Open opens or creates the store at dir and restores each stream's next offset,
 // low-water mark and byte counter, so offsets stay gapless across restarts.
 func Open(dir string) (*Store, error) {
-	db, err := pebble.Open(dir, &pebble.Options{})
+	health := pebblelog.New("store")
+	db, err := pebble.Open(dir, health.Options())
 	if err != nil {
 		return nil, err
 	}
 	s := &Store{
-		db: db, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{},
+		db: db, health: health, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{},
 		appendApply: db.Apply,
 	}
 	for _, stream := range streams {
@@ -198,6 +201,9 @@ func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (u
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// Health reports whether Pebble's background flushes and compactions are failing.
+func (s *Store) Health() pebblelog.Status { return s.health.Status() }
 
 type recEnc struct {
 	SourceLocalOnly bool     `json:"slo,omitempty"`
