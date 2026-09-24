@@ -107,7 +107,7 @@ func ClassOf(contract string) Class {
 		// overwrites itself. _AlarmStateChange, the transition, stays an event.
 		contract == "_AlarmState":
 		return ClassEntity
-	case contract == "_Group" || contract == "_MetadataType" ||
+	case contract == "_ClockDefinition" || contract == "_Group" || contract == "_MetadataType" ||
 		contract == "_AnnotationType" || contract == "_DataModel" ||
 		contract == "_ExternalSystem" || contract == "_SemanticTag" ||
 		contract == PersonalAccessTokenContract:
@@ -632,6 +632,9 @@ func Validate(contract string, payload []byte) error {
 		// Data-model records name themselves by "id", which grants and
 		// bindings reference.
 		return reqStr("id")
+	case contract == "_ClockDefinition":
+		_, err := DecodeClockDefinition(payload)
+		return err
 	case contract == "_TimeSync":
 		// Only direct callers reach this: the engine rejects _TimeSync by
 		// class first, and the node's own beacon bypasses Validate.

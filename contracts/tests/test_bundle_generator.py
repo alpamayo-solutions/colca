@@ -41,7 +41,7 @@ def test_determinism_two_runs_one_digest():
 
 def test_inventory_every_registered_class_exactly_once():
     body, _ = gb.build_bundle()
-    assert set(body["contracts"]) == set(PAYLOAD_CLASSES) - set(gb.NOT_ON_THE_WIRE), (
+    assert set(body["contracts"]) == set(PAYLOAD_CLASSES) - set(gb.NOT_ON_THE_WIRE) - gb.DECODE_ONLY, (
         "bundle inventory must equal the payload registry minus the contracts deliberately kept off the wire"
     )
 
@@ -78,6 +78,18 @@ def test_builtin_only_contracts_absent():
     body, _ = gb.build_bundle()
     for c in gb.BUILTIN_ONLY:
         assert c not in body["contracts"], f"{c} is builtin-only"
+
+
+def test_time_sync_decodes_without_becoming_publishable():
+    from franzmq import Topic
+
+    from colca_data_contracts.payload import TimeSync
+
+    topic = Topic.from_str("colca/v1/_TimeSync/hub")
+    assert topic.payload_type is TimeSync
+    assert topic.payload_type.decode('{"now_ms":123456}', 0).now_ms == 123456
+    body, _ = gb.build_bundle()
+    assert "_TimeSync" not in body["contracts"]
 
 
 def test_projected_contract_catalogue_has_the_approved_direction():
@@ -211,7 +223,7 @@ def _dummy(t):
 def test_parity_golden_encodes_validate_and_mutants_reject():
     body, _ = gb.build_bundle()
     for ident, cls in sorted(PAYLOAD_CLASSES.items()):
-        if ident in gb.NOT_ON_THE_WIRE:
+        if ident in gb.NOT_ON_THE_WIRE or ident in gb.DECODE_ONLY:
             continue  # no schema to be parity-checked against
         entry = body["contracts"][ident]
         schema = entry["schema"]

@@ -1572,6 +1572,18 @@ func (c *ConfigExec) definitionUpsert(ctx CommandContext, payload []byte) (int, 
 			return 422, fmt.Sprintf("definition/upsert: %s %s: %v",
 				ref.Contract, incoming.ID, err), "invalid", nil
 		}
+		if ref.Contract == "_ClockDefinition" {
+			topic := c.definitionTopic(ref.Contract, incoming.ID)
+			for _, record := range records {
+				if record.Topic == topic {
+					return 422, "clock definition repeated in batch", "invalid", nil
+				}
+			}
+			previous, _ := c.store.KVGet(topic)
+			if err := checkClockRevision(ref.Definition, previous); err != nil {
+				return 409, err.Error(), "conflict", nil
+			}
+		}
 		records = append(records, StateRecord{
 			Topic:   c.definitionTopic(ref.Contract, incoming.ID),
 			Payload: ref.Definition,
@@ -1644,6 +1656,10 @@ func (c *ConfigExec) checkDefinitionContract(i int, contract string) (int, strin
 // bundle's shape check. A malformed grant in a group is refused here, once,
 // instead of being dropped and logged at every node below.
 func checkDefinitionContents(contract string, raw []byte) error {
+	if contract == "_ClockDefinition" {
+		_, err := DecodeClockDefinition(raw)
+		return err
+	}
 	if contract == PersonalAccessTokenContract {
 		var token PersonalAccessToken
 		if err := json.Unmarshal(raw, &token); err != nil {

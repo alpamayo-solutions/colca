@@ -46,6 +46,9 @@ enforces.
 
 ## Golden vectors
 
+For the optional virtual clock definition and its continuity rules, see
+[application time](application-time.md).
+
 Where Go and Python both need a rule natively, a vector file in
 `contracts/src/colca_data_contracts/vectors/` holds the cases and the expected
 answers, and the tests on both sides read the same file:
@@ -58,6 +61,7 @@ answers, and the tests on both sides read the same file:
 | `annotation_id.json` | how an annotation's id is derived |
 | `data_model_vocabulary.json`, `signal_data_types.json` | the data type vocabularies |
 | `metric_rows.json` | which historian column a metric value lands in |
+| `application_time.json` | real-to-application clock projection in Go and Chaski |
 | `sanitize.json` | how names become path segments |
 | `service_context.json`, `log_payload.json`, `manifest_streams.json` | service identity, log records, stream manifest |
 
