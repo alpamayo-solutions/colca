@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/clockwork"
 	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/historian"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
@@ -88,7 +89,17 @@ func run() int {
 	}
 	defer pool.Close()
 
-	sink := &historian.Sink{Pool: pool}
+	deps, err := clockwork.Dependencies(os.Getenv("FACTORY_STEP_DEPENDENCIES"), os.Getenv("FACTORY_CLOCK_TOPIC"))
+	if err != nil {
+		log.Error("clock configuration", "err", err)
+		return 2
+	}
+	source := env("APPLICATION_TIME_SOURCE", "local")
+	if source != "local" && source != "mqtt" {
+		log.Error("invalid APPLICATION_TIME_SOURCE")
+		return 2
+	}
+	sink := &historian.Sink{Pool: pool, Strict: deps != nil}
 	// Postgres may still be starting, so retry for a bounded time instead of relying
 	// on a restart policy.
 	if err := ensureSchema(ctx, sink, cfg.retentionDays, log, 90*time.Second); err != nil {
@@ -102,9 +113,40 @@ func run() int {
 			Service: cfg.colcaService,
 		},
 		Store:     sink,
+		Strict:    deps != nil,
 		Log:       log,
 		Max:       cfg.fetchMax,
 		IdleSleep: cfg.idleSleep,
+	}
+
+	if deps != nil {
+		gate := &clockwork.Gate{Door: logDoor, Name: cfg.colcaService, Topic: os.Getenv("FACTORY_CLOCK_TOPIC"), Dependencies: deps}
+		if err := gate.Register(ctx); err != nil {
+			log.Error("clock registration", "err", err)
+			return 2
+		}
+		gate.Drain = func(ctx context.Context, _ float64) (bool, error) {
+			// Check again AFTER upstream completion, so a publish racing the
+			// previous empty fetch cannot be omitted from this boundary.
+			for {
+				if _, err := bridge.Once(ctx); err != nil {
+					return false, err
+				}
+				if bridge.Drained {
+					return true, nil
+				}
+			}
+		}
+		bridge.Coordinate = func(ctx context.Context) (bool, error) {
+			now := float64(time.Now().UnixMicro()) / 1e6
+			if source == "mqtt" {
+				if bridge.NowMS == 0 || time.Since(bridge.FetchedAt) > 120*time.Second {
+					return false, nil
+				}
+				now = float64(bridge.NowMS)/1000 + time.Since(bridge.FetchedAt).Seconds()
+			}
+			return gate.Once(ctx, now)
+		}
 	}
 
 	go serveObservability(cfg.httpAddr, bridge, log)

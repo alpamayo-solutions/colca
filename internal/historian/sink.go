@@ -60,6 +60,8 @@ type dbPool interface {
 // Sink writes rows and the marker into Timescale.
 type Sink struct {
 	Pool dbPool
+	// Strict preserves the whole page on any failure during coordinated runs.
+	Strict bool
 }
 
 // Rejection is one row the schema permanently refused, set aside so the rest of
@@ -185,7 +187,7 @@ func (s *Sink) Apply(ctx context.Context, rows []Row, consumer string, offset in
 	if err == nil {
 		return nil, nil
 	}
-	if _, _, poison := poisonReason(err); !poison {
+	if _, _, poison := poisonReason(err); !poison || s.Strict {
 		return nil, err
 	}
 	return s.applyRowByRow(ctx, rows, consumer, offset)

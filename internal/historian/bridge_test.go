@@ -275,3 +275,20 @@ func TestTheCursorIsNamespacedByService(t *testing.T) {
 		t.Fatalf("fetched with %v, want [%s]", d.fetch, Cursor)
 	}
 }
+
+func TestCoordinatedHistoryDoesNotAckMalformedRowsOrGaps(t *testing.T) {
+	for _, p := range []door.Page{
+		page(2, record(1, `{broken`)),
+		{Gap: &door.Gap{FromOffset: 1, ToOffset: 10}},
+	} {
+		d := &fakeDoor{pages: []door.Page{p}}
+		s := &fakeStore{}
+		b := &Bridge{Door: d, Store: s, Strict: true}
+		if _, err := b.Once(context.Background()); err == nil {
+			t.Fatal("incomplete coordinated history accepted")
+		}
+		if len(d.acked) != 0 || s.applied != 0 || b.Drained {
+			t.Fatal("failed page acknowledged as complete")
+		}
+	}
+}

@@ -239,6 +239,18 @@ class TimeSync(Payload):
 
 
 @dataclass
+class ClockProgress(Payload):
+    """Ordered completion marker on the metrics lane, never a measurement.
+
+    ServiceDetails carries liveness; this marker proves the preceding samples
+    and priority-lane events arrived before consumers acknowledge a window.
+    """
+
+    run_id: str
+    processed_at: float
+
+
+@dataclass
 class ClockSegment:
     """The preceding segment carried with a future-effective clock change."""
 
