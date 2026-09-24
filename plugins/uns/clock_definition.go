@@ -31,6 +31,7 @@ type ClockDefinition struct {
 	StartAt       *float64      `json:"start_at"`
 }
 
+// DecodeClockDefinition decodes and validates a complete application timeline.
 func DecodeClockDefinition(raw []byte) (ClockDefinition, error) {
 	var d ClockDefinition
 	if err := json.Unmarshal(raw, &d); err != nil {
@@ -90,10 +91,12 @@ func (d ClockDefinition) At(realNow float64) float64 {
 	return d.Segment().At(realNow)
 }
 
+// Segment returns the active segment without its revision or prior segment.
 func (d ClockDefinition) Segment() ClockSegment {
 	return ClockSegment{d.RealAnchor, d.FactoryAnchor, d.Rate, d.StopAt, d.CatchUp}
 }
 
+// At projects real UTC seconds onto this segment, including end/catch-up caps.
 func (d ClockSegment) At(realNow float64) float64 {
 	result := d.FactoryAnchor + math.Max(0, realNow-d.RealAnchor)*d.Rate
 	if d.CatchUp {

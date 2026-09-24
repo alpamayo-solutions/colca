@@ -84,6 +84,7 @@ def test_time_sync_decodes_without_becoming_publishable():
     from franzmq import Topic
 
     from colca_data_contracts.payload import TimeSync
+
     topic = Topic.from_str("colca/v1/_TimeSync/hub")
     assert topic.payload_type is TimeSync
     assert topic.payload_type.decode('{"now_ms":123456}', 0).now_ms == 123456
