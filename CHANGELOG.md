@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/alpamayo-solutions/colca/compare/v0.11.0...v0.12.0) (2026-09-24)
+
+
+### Features
+
+* **clock:** add optional application time definitions ([#60](https://github.com/alpamayo-solutions/colca/issues/60)) ([075c748](https://github.com/alpamayo-solutions/colca/commit/075c748e112a19bb534bcc14f098f1413a98eb89))
+
 ## [0.11.0](https://github.com/alpamayo-solutions/colca/compare/v0.10.0...v0.11.0) (2026-09-24)
 
 
