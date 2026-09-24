@@ -201,7 +201,7 @@ func (g *Gate) report(ctx context.Context, realNow float64) error {
 		metadata["application_clock"] = map[string]any{"ready": true, "run_id": g.run, "processed_at": g.completed, "observed_at": realNow}
 	}
 	hierarchy := uns.ServiceContext(g.self.Mount, g.Name)
-	payload := map[string]any{"id": g.self.ULID, "name": g.Name, "service_type": g.Name, "display_name": g.Name, "colca_node_id": g.self.Node, "hierarchy": hierarchy, "is_active": true, "metadata": metadata}
+	payload := map[string]any{"id": g.self.ULID, "name": g.Name, "service_type": "other", "display_name": g.Name, "colca_node_id": g.self.Node, "hierarchy": hierarchy, "is_active": true, "metadata": metadata}
 	for key, value := range g.Details {
 		if key != "metadata" {
 			payload[key] = value
