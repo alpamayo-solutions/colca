@@ -93,17 +93,25 @@ func (b *Bridge) max() int {
 // marker commit together and the ack follows; a crash in between replays the
 // page, which the marker makes a no-op.
 func (b *Bridge) Once(ctx context.Context) (int, error) {
+	_, written, err := b.pass(ctx)
+	return written, err
+}
+
+// pass is Once that also reports how many records the page held, which is what
+// decides whether the stream has more waiting.
+func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 	page, err := b.Door.Fetch(ctx, "metrics", Cursor, b.max())
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	if len(page.Records) == 0 {
-		return 0, nil
+	fetched = len(page.Records)
+	if fetched == 0 {
+		return 0, 0, nil
 	}
 
 	applied, err := b.Store.Applied(ctx, Consumer)
 	if err != nil {
-		return 0, err
+		return fetched, 0, err
 	}
 	first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
 
@@ -152,7 +160,7 @@ func (b *Bridge) Once(ctx context.Context) (int, error) {
 
 	rejections, err := b.Store.Apply(ctx, rows, Consumer, last)
 	if err != nil {
-		return 0, err
+		return fetched, 0, err
 	}
 	for _, rej := range rejections {
 		b.countRejection(rej.Reason)
@@ -167,7 +175,7 @@ func (b *Bridge) Once(ctx context.Context) (int, error) {
 		// The rows are durable; the next pass re-reads and the marker skips them.
 		b.logger().Warn("applied but could not ack", "offset", last, "err", err)
 	}
-	return len(rows) - len(rejections), nil
+	return fetched, len(rows) - len(rejections), nil
 }
 
 // truncateForLog shortens an untrusted value before it goes into a log line.
@@ -178,27 +186,33 @@ func truncateForLog(s string, limit int) string {
 	return s[:limit] + "…"
 }
 
-// Run follows until ctx ends.
+// DefaultIdleSleep is the pause after a page that was not full.
+const DefaultIdleSleep = 500 * time.Millisecond
+
+// Run follows until ctx ends. Only a full page means more is waiting, so only a
+// full page is followed at once; anything shorter waits IdleSleep. Fetching
+// again after every non-empty page would poll the node as fast as records
+// arrive and run into its per-caller fetch limit.
 func (b *Bridge) Run(ctx context.Context) error {
 	idle := b.IdleSleep
 	if idle <= 0 {
-		idle = 500 * time.Millisecond
+		idle = DefaultIdleSleep
 	}
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		written, err := b.Once(ctx)
+		fetched, _, err := b.pass(ctx)
+		pause := idle
 		switch {
 		case err != nil:
 			b.logger().Error("historian pass failed, retrying", "err", err)
-			if !sleep(ctx, 5*time.Second) {
-				return ctx.Err()
-			}
-		case written == 0:
-			if !sleep(ctx, idle) {
-				return ctx.Err()
-			}
+			pause = 5 * time.Second
+		case fetched >= b.max():
+			continue
+		}
+		if !sleep(ctx, pause) {
+			return ctx.Err()
 		}
 	}
 }

@@ -626,6 +626,12 @@ class AlarmState(Payload):
     silenced_by: str | None = None
     #: Unix seconds.
     silenced_until: float | None = None
+    #: Readable names beside ``acknowledged_by`` and ``silenced_by``, so every
+    #: reader can show who acted without resolving a ``sub``. A snapshot of the
+    #: command record's ``actor_label``, which the node sets from the token's
+    #: ``preferred_username``. For display only; the ``sub`` stays the identity.
+    acknowledged_by_name: str | None = None
+    silenced_by_name: str | None = None
 
 
 def derive_annotation_id(

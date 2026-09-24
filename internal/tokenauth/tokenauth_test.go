@@ -1,6 +1,9 @@
 package tokenauth
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -320,6 +323,37 @@ func TestPerIssuerJWKSChecksTheClaimedIssuersKeys(t *testing.T) {
 	for _, tok := range []string{fromA, fromB} {
 		if _, reason, err := v2.Verify(tok); err != nil {
 			t.Fatalf("persisted per-issuer JWKS must validate offline: %q %v", reason, err)
+		}
+	}
+}
+
+// noGroups is a node that defines no _Group at all.
+type noGroups struct{ uns.EntityStore }
+
+func (noGroups) KVScanAll(string) []uns.KVRecord { return nil }
+
+// Identity providers put their own roles into the groups claim. Each one the
+// node does not define grants nothing and is logged once, not on every request.
+func TestAnUnknownTokenGroupIsLoggedOncePerGroup(t *testing.T) {
+	iss, v := world(t)
+	var buf bytes.Buffer
+	v.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	v.SetGroupIndex(uns.NewGroupIndex(noGroups{}))
+
+	tok := iss.MintOpt(tokentest.MintOpts{Sub: "anna", Exp: time.Now().Add(5 * time.Minute),
+		Groups: []string{"offline_access", "uma_authorization"}})
+	for range 3 {
+		if _, reason, err := v.Verify(tok); err != nil {
+			t.Fatalf("verify: %s %v", reason, err)
+		}
+	}
+	out := buf.String()
+	if strings.Contains(out, "level=WARN") {
+		t.Fatalf("an unknown group must not warn:\n%s", out)
+	}
+	for _, group := range []string{"offline_access", "uma_authorization"} {
+		if got := strings.Count(out, "group="+group); got != 1 {
+			t.Fatalf("%s logged %d times, want once:\n%s", group, got, out)
 		}
 	}
 }

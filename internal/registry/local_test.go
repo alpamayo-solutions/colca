@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -180,5 +181,41 @@ func TestNewULIDIsA26CharacterStringThatDiffersAcrossCalls(t *testing.T) {
 	}
 	if a == b {
 		t.Fatalf("two successive calls minted the same id: %q", a)
+	}
+}
+
+// A service's HTTP and MQTT connections often make first contact together; both
+// must get the one entry, not one entry and a refusal.
+func TestConcurrentFirstRegistrationsShareOneEntry(t *testing.T) {
+	m := newTestManagerWithElements(t, map[string]string{})
+	const callers = 8
+	ids := make(chan string, callers)
+	errs := make(chan error, callers)
+	var start sync.WaitGroup
+	start.Add(1)
+	for range callers {
+		go func() {
+			start.Wait()
+			e, err := m.Register("historian", "")
+			if err != nil {
+				errs <- err
+				return
+			}
+			ids <- e.ULID
+		}()
+	}
+	start.Done()
+	var first string
+	for range callers {
+		select {
+		case err := <-errs:
+			t.Fatalf("Register: %v", err)
+		case id := <-ids:
+			if first == "" {
+				first = id
+			} else if id != first {
+				t.Fatalf("two entries for one name: %s and %s", first, id)
+			}
+		}
 	}
 }

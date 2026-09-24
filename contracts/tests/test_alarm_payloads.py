@@ -311,6 +311,8 @@ def test_acknowledgement_is_witnessed_by_the_node():
         note="Sensor wird getauscht",
         silenced_by="keycloak-sub-1",
         silenced_until=1710003600.0,
+        acknowledged_by_name="jdoe",
+        silenced_by_name="jdoe",
     )
 
     decoded = AlarmState.decode(state.encode(), timestamp=0)
@@ -321,3 +323,16 @@ def test_acknowledgement_is_witnessed_by_the_node():
     assert decoded.acknowledged_at == 1710000060.0
     assert decoded.note == "Sensor wird getauscht"
     assert decoded.silenced_until == 1710003600.0
+    assert decoded.acknowledged_by_name == "jdoe"
+    assert decoded.silenced_by_name == "jdoe"
+
+
+def test_a_state_without_display_names_still_decodes():
+    # Written by a manager that predates the names.
+    raw = (
+        b'{"alarm_id":"01H0000000000000000000ARM1","status":"firing","severity":"warning",'
+        b'"since":1710000000.0,"reason":"no_data","acknowledged_by":"keycloak-sub-1"}'
+    )
+    decoded = AlarmState.decode(raw, timestamp=0)
+    assert decoded.acknowledged_by == "keycloak-sub-1"
+    assert decoded.acknowledged_by_name is None

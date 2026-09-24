@@ -43,6 +43,7 @@ export type AlarmNotificationConfig = {
 export type AlarmState = {
   acknowledged_at?: null | number;
   acknowledged_by?: null | string;
+  acknowledged_by_name?: null | string;
   alarm_id: string;
   event_id?: null | string;
   finding_path?: null | string;
@@ -53,6 +54,7 @@ export type AlarmState = {
   severity: "info" | "warning" | "critical";
   signal_id?: null | string;
   silenced_by?: null | string;
+  silenced_by_name?: null | string;
   silenced_until?: null | number;
   since: number;
   status: "pending" | "firing" | "unknown";
