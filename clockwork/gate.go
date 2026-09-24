@@ -67,6 +67,17 @@ func Dependencies(raw, topic string) ([]string, error) {
 	return deps, nil
 }
 
+// Register announces a waiting consumer before a clock definition exists.
+// Deployment tools can discover its exact placed topic without guessing paths.
+func (g *Gate) Register(ctx context.Context) error {
+	self, err := g.Door.Self(ctx)
+	if err != nil {
+		return err
+	}
+	g.self = &self
+	return g.report(ctx, 0)
+}
+
 // Once checks a window, drains downstream effects, then publishes completion.
 // realNow must come from the configured real-time authority (host or the
 // broker's latest fetch response). Zero/unavailable authority holds the run.
@@ -186,7 +197,9 @@ func (g *Gate) report(ctx context.Context, realNow float64) error {
 	for k, v := range g.Metadata {
 		metadata[k] = v
 	}
-	metadata["application_clock"] = map[string]any{"ready": true, "run_id": g.run, "processed_at": g.completed, "observed_at": realNow}
+	if g.completed != nil {
+		metadata["application_clock"] = map[string]any{"ready": true, "run_id": g.run, "processed_at": g.completed, "observed_at": realNow}
+	}
 	hierarchy := uns.ServiceContext(g.self.Mount, g.Name)
 	payload := map[string]any{"id": g.self.ULID, "name": g.Name, "service_type": g.Name, "display_name": g.Name, "colca_node_id": g.self.Node, "hierarchy": hierarchy, "is_active": true, "metadata": metadata}
 	for key, value := range g.Details {
@@ -197,9 +210,11 @@ func (g *Gate) report(ctx context.Context, realNow float64) error {
 	topic := uns.Prefix() + "_ServiceDetails/" + g.self.Node + "/" + strings.Join(hierarchy, "/") + "/_service"
 	// Ordered before service liveness. Repeating the marker is idempotent;
 	// it also repairs delivery after a process or MQTT-session restart.
-	marker := map[string]any{"run_id": g.run, "processed_at": g.completed}
-	if err := g.Door.Publish(ctx, strings.Replace(topic, "/_ServiceDetails/", "/_ClockProgress/", 1), marker); err != nil {
-		return err
+	if g.completed != nil {
+		marker := map[string]any{"run_id": g.run, "processed_at": g.completed}
+		if err := g.Door.Publish(ctx, strings.Replace(topic, "/_ServiceDetails/", "/_ClockProgress/", 1), marker); err != nil {
+			return err
+		}
 	}
 	if err := g.Door.Publish(ctx, topic, payload); err != nil {
 		return err

@@ -121,6 +121,10 @@ func run() int {
 
 	if deps != nil {
 		gate := &clockwork.Gate{Door: logDoor, Name: cfg.colcaService, Topic: os.Getenv("FACTORY_CLOCK_TOPIC"), Dependencies: deps}
+		if err := gate.Register(ctx); err != nil {
+			log.Error("clock registration", "err", err)
+			return 2
+		}
 		gate.Drain = func(ctx context.Context, _ float64) (bool, error) {
 			// Check again AFTER upstream completion, so a publish racing the
 			// previous empty fetch cannot be omitted from this boundary.
