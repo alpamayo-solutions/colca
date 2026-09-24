@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.13.0](https://github.com/alpamayo-solutions/colca/compare/v0.12.0...v0.13.0) (2026-09-24)
+
+
+### Features
+
+* **clock:** order consumer completion behind replicated data ([#62](https://github.com/alpamayo-solutions/colca/issues/62)) ([e5a6c7c](https://github.com/alpamayo-solutions/colca/commit/e5a6c7c296faf1047affdd4c0ab2e9c3cd0bd034))
+
+
+### Fixes
+
+* **clock:** register historian with a declared service category ([#64](https://github.com/alpamayo-solutions/colca/issues/64)) ([7d83165](https://github.com/alpamayo-solutions/colca/commit/7d83165ec8978fb808e58e833a9f90c565402185))
+
 ## [0.12.0](https://github.com/alpamayo-solutions/colca/compare/v0.11.0...v0.12.0) (2026-09-24)
 
 
