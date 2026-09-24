@@ -264,9 +264,12 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 		t.Fatalf("debug/state: %d", resp.StatusCode)
 	}
 	// healthz and metrics are open
-	resp, _ = req(t, admin, "GET", a.url+"/healthz", "", nil)
+	resp, out = req(t, admin, "GET", a.url+"/healthz", "", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("healthz: %d", resp.StatusCode)
+	}
+	if storage, _ := out["storage"].(map[string]any); storage["state"] != "ok" {
+		t.Fatalf("healthz storage: %v", out)
 	}
 	r2, err := client(nil).Get(a.url + "/metrics")
 	if err != nil || r2.StatusCode != http.StatusOK {

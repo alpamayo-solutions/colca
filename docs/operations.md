@@ -2,7 +2,11 @@
 
 ## Health
 
-`GET /healthz` answers as soon as the node is up. `GET /metrics` serves
+`GET /healthz` answers as soon as the node is up. Its `storage.state` turns
+`failing` when the database cannot flush or compact, most often because the disk
+is full; `since` and `error` say when and why. It returns to `ok` after the next
+successful flush. The node logs the first such error at ERROR and repeats it at
+most every 30 seconds with a `repeats_suppressed` count. `GET /metrics` serves
 Prometheus metrics; scrape it over the local door so that no self-signed
 certificate is involved.
 

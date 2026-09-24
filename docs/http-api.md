@@ -16,7 +16,7 @@ A caller is one of:
 
 | Method and path | Who | Request | Response |
 |---|---|---|---|
-| `GET /healthz` | anyone | | `{"ok":true,"ulid":"…"}` |
+| `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","storage":{"state":"ok"}}` |
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}` |
 | `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N}` |
