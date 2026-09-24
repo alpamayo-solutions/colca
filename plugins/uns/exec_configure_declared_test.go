@@ -479,3 +479,132 @@ func TestAnUpsertNamingATagStillSetsIt(t *testing.T) {
 		t.Fatalf("an explicit binding in the upsert must win: %+v", after)
 	}
 }
+
+// seedSemanticTag stores a _SemanticTag definition the node can resolve by name.
+func seedSemanticTag(t *testing.T, c *ConfigExec, id, name string) {
+	t.Helper()
+	topic := "colca/v1/_SemanticTag/n1/_colca/semantic-tags/" + name
+	if _, err := c.store.(*fakeStore).seed(topic, mustJSON(map[string]any{"id": id, "name": name})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A tag's semantic type and description reach the minted signal: the type by
+// the _SemanticTag it names, the description as is.
+func TestATagsSemanticTypeAndDescriptionAreCopiedOntoTheMintedSignal(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JDATAOPS", "dataops", "01HLINE1")
+	seedSemanticTag(t, c, "01STAGAVAIL", "availability")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/dataops", []map[string]any{
+		{"id": "t1", "name": "availability", "data_type": "float", "meta": map[string]any{
+			"unit": "%", "semantic_type": "availability", "description": "Share of planned time running",
+		}},
+		{"id": "t2", "name": "mystery", "data_type": "float", "meta": map[string]any{"semantic_type": "no-such-tag"}},
+	})
+
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JDATAOPS"})); code != 200 {
+		t.Fatalf("autobind = %d %q", code, msg)
+	}
+	record := signalRecordAt(t, c, "line1/availability")
+	if record["semantic_type_id"] != "01STAGAVAIL" || record["description"] != "Share of planned time running" || record["unit"] != "%" {
+		t.Fatalf("minted signal = %+v, want the tag's semantic type, description and unit", record)
+	}
+	if got, present := signalRecordAt(t, c, "line1/mystery")["semantic_type_id"]; present {
+		t.Fatalf("an unknown semantic type was applied: %v", got)
+	}
+}
+
+// A declaration keeps what it states; the tag fills in the fields it left out.
+func TestATagsSemanticTypeFillsADeclaredSignalButKeepsItsDescription(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JCONN", "opcua-1", "01HLINE1")
+	seedSemanticTag(t, c, "01STAGTEMP", "temperature")
+	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", map[string]any{"description": "Drum temperature"})
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", []map[string]any{
+		{"id": "t1", "name": "tag-t1", "data_type": "float", "meta": map[string]any{
+			"semantic_type": "temperature", "description": "Temperature sensor 1",
+		}},
+	})
+
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"})); code != 200 {
+		t.Fatalf("autobind = %d %q", code, msg)
+	}
+	record := signalRecordAt(t, c, "line1/tag-t1")
+	if record["semantic_type_id"] != "01STAGTEMP" || record["description"] != "Drum temperature" {
+		t.Fatalf("declared signal = %+v, want the declared description and the tag's semantic type", record)
+	}
+}
+
+// A publisher owns what its tags say: a republish that changes a tag's unit,
+// semantic type or description updates the signal already bound to it, in
+// place, without a new signal.
+func TestARepublishThatChangesATagsMetaUpdatesItsBoundSignal(t *testing.T) {
+	c := newTriggerConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JDATAOPS", "dataops", "01HLINE1")
+	seedSemanticTag(t, c, "01STAGA", "availability")
+	seedSemanticTag(t, c, "01STAGP", "performance")
+	topic := "colca/v1/_DataTags/n1/line1/dataops"
+	publish := func(meta map[string]any) {
+		c.Observe("_DataTags", topic, mustJSON(map[string]any{"data_tags": []map[string]any{
+			{"id": "t1", "name": "kpi", "data_type": "float", "meta": meta},
+		}}))
+	}
+
+	publish(map[string]any{"unit": "%", "semantic_type": "availability", "description": "old"})
+	first := signalRecordAt(t, c, "line1/kpi")
+	publish(map[string]any{"unit": "1", "semantic_type": "performance", "description": "new"})
+
+	got := signalsAt(c)
+	if len(got) != 1 {
+		t.Fatalf("signals = %+v, want the one bound signal updated in place", got)
+	}
+	record := signalRecordAt(t, c, "line1/kpi")
+	if record["id"] != first["id"] || record["data_tag"] != "t1" {
+		t.Fatalf("the update replaced the signal: %+v -> %+v", first, record)
+	}
+	if record["unit"] != "1" || record["semantic_type_id"] != "01STAGP" || record["description"] != "new" {
+		t.Fatalf("signal = %+v, want the republished unit, semantic type and description", record)
+	}
+}
+
+// The first publish this process sees (after a restart) fills fields a bound
+// signal lacks, but does not overwrite ones it has: without an earlier publish
+// there is no change to follow.
+func TestAFirstPublishAfterARestartFillsButDoesNotOverwrite(t *testing.T) {
+	c := newTriggerConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JCONN", "opcua-1", "01HLINE1")
+	seedSemanticTag(t, c, "01STAGTEMP", "temperature")
+	declareSignal(t, c, "line1/tag-t1", "01SBOUND", "01HLINE1", map[string]any{"data_tag": "t1", "unit": "bar"})
+
+	c.Observe("_DataTags", "colca/v1/_DataTags/n1/line1/opcua-1", mustJSON(map[string]any{"data_tags": []map[string]any{
+		{"id": "t1", "name": "tag-t1", "data_type": "float", "meta": map[string]any{"unit": "psi", "semantic_type": "temperature"}},
+	}}))
+
+	record := signalRecordAt(t, c, "line1/tag-t1")
+	if record["unit"] != "bar" || record["semantic_type_id"] != "01STAGTEMP" {
+		t.Fatalf("signal = %+v, want unit bar kept and the semantic type filled", record)
+	}
+}
+
+// The autobind verb reports the bound signals it brought in line.
+func TestAutobindReportsTheSignalsItUpdated(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JCONN", "opcua-1", "01HLINE1")
+	declareSignal(t, c, "line1/tag-t1", "01SBOUND", "01HLINE1", map[string]any{"data_tag": "t1"})
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/opcua-1", []map[string]any{
+		{"id": "t1", "name": "tag-t1", "data_type": "float", "meta": map[string]any{"description": "Pressure"}},
+	})
+
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JCONN"}))
+	if code != 200 || msg != `{"created":0,"skipped":1,"updated":1}` {
+		t.Fatalf("autobind = %d %q, want the bound signal updated", code, msg)
+	}
+	if got := signalRecordAt(t, c, "line1/tag-t1")["description"]; got != "Pressure" {
+		t.Fatalf("description = %v, want the tag's", got)
+	}
+}
