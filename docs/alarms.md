@@ -68,6 +68,7 @@ A client that has just connected subscribes to `_AlarmState/#`, or reads `GET
 | `event_id` | optional | the `_AlarmStateChange` this state came out of |
 | `acknowledged_by`, `acknowledged_at`, `note` | optional | the receipt |
 | `silenced_by`, `silenced_until` | optional | |
+| `acknowledged_by_name`, `silenced_by_name` | optional | readable names beside the subjects, for display |
 
 `status` and `severity` are closed vocabularies in the schema bundle. `reason`
 is a free string on purpose: `threshold`, `no_data` and `stream_gap` are what
@@ -113,10 +114,12 @@ payload must not assert who performed it.
    envelope. The node witnesses the actor; `GET /fetch` hands `actor_id`,
    `actor_label` and `actor_kind` to the consumer.
 3. The evaluator consumes the command and writes the next `_AlarmState`,
-   putting the witnessed `actor_id` into `acknowledged_by`, with
-   `acknowledged_at` and, if there was one, the `note`.
+   putting the witnessed `actor_id` into `acknowledged_by` and its
+   `actor_label` into `acknowledged_by_name`, with `acknowledged_at` and, if
+   there was one, the `note`.
 
 So `acknowledged_by` is always a subject the node vouched for, never one the
-writer claimed for itself. A silence works the same way, but as a `_CmdOperate`
+writer claimed for itself. For a person, `actor_label` is the token's
+`preferred_username`; the name is for display, the subject is the identity. A silence works the same way, but as a `_CmdOperate`
 (`silenceAlarm`, `unsilenceAlarm`): keeping an alarm from notifying anyone is
 more than confirming one has seen it, so it needs `operate`.
