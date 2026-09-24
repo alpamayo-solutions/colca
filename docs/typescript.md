@@ -107,10 +107,14 @@ if (ack.result_code !== 200) showRefusal(ack.message);
 It adds the correlation id and the expiry, subscribes to the acknowledgements
 before it sends, so an executor that answers at once is not missed, and matches
 the answer by its id wherever in the tree it arrives. The promise settles with
-the `_Ack` whatever its result code, and rejects with `CommandTimeout` when
-nobody answers in time (30 s by default, which is also the command's expiry).
-Offline, nothing is queued: a setpoint sent minutes late is a different
-setpoint.
+the `_Ack` whatever its result code. It rejects with `CommandNotSent` when the
+command never went out or the node refused it: nothing was carried out. It
+rejects with `CommandTimeout` when nobody answers in time (30 s by default,
+counted from the call, which is also the command's expiry). A timeout does not
+say the command was not carried out: the connection can drop after the command
+went out, and an answer sent while the client was away is not delivered again.
+Read the state the command changes to know. Offline, nothing is queued: a
+setpoint sent minutes late is a different setpoint.
 
 `publish()` sends a single record without waiting, and `newUlid()` makes ids
 that sort by the time they were made, as the node's own do.
