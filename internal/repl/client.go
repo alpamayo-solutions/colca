@@ -524,7 +524,8 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 
 	// pushOnce pushes at most one batch of stream and reports whether it scanned
 	// anything, which is how "drained" is measured. aborted means our own shutdown.
-	pushOnce := func(stream string, filter func(string) bool) (scanned, aborted bool) {
+	var pushOnce func(string, func(string) bool) (bool, bool)
+	pushOnce = func(stream string, filter func(string) bool) (scanned, aborted bool) {
 		from := eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), stream)
 		// A cursor below the local LWM means retention pruned past it after the parent
 		// was gone longer than the staleness window. The gap marker already tells the
@@ -544,6 +545,28 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		}
 		if next == from {
 			return false, false // nothing scanned: this lane is empty
+		}
+		// A completion marker must not overtake an annotation/alarm that was
+		// written after the outer loop snapshotted its priority lanes. Capture
+		// those floors AFTER reading the marker and drain them before forwarding
+		// this metrics page. Each hop preserves this order independently.
+		if stream == "metrics" {
+			for _, record := range recs {
+				parsed, _ := uns.Parse(record.Topic)
+				if parsed.Contract != "_ClockProgress" {
+					continue
+				}
+				for _, lane := range priorityLanes {
+					target := eng.Store().NextOffset(lane.name)
+					for eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), lane.name) < target {
+						scanned, aborted := pushOnce(lane.name, lane.filter)
+						if aborted || !scanned {
+							return false, aborted
+						}
+					}
+				}
+				break
+			}
 		}
 		pushed := false
 		batch := make([]store.ReplRecord, 0, len(recs))

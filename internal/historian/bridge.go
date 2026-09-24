@@ -3,6 +3,7 @@ package historian
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -43,8 +44,13 @@ type Bridge struct {
 	Store Store
 	Log   *slog.Logger
 
-	Max       int
-	IdleSleep time.Duration
+	Max        int
+	IdleSleep  time.Duration
+	Strict     bool
+	Drained    bool
+	NowMS      int64
+	FetchedAt  time.Time
+	Coordinate func(context.Context) (bool, error)
 
 	// gaps counts pruned ranges. The bridge keeps going: the records are gone and
 	// stopping would only add a blackout. Atomic because /metrics reads it from
@@ -100,12 +106,18 @@ func (b *Bridge) Once(ctx context.Context) (int, error) {
 // pass is Once that also reports how many records the page held, which is what
 // decides whether the stream has more waiting.
 func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
+	b.Drained = false
 	page, err := b.Door.Fetch(ctx, "metrics", Cursor, b.max())
 	if err != nil {
 		return 0, 0, err
 	}
 	fetched = len(page.Records)
+	b.NowMS, b.FetchedAt = page.NowMS, time.Now()
+	if b.Strict && page.Gap != nil {
+		return fetched, 0, fmt.Errorf("coordinated history has a stream gap")
+	}
 	if fetched == 0 {
+		b.Drained = true
 		return 0, 0, nil
 	}
 
@@ -135,6 +147,9 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 			continue // already durable: a replay after a crash between commit and ack
 		}
 		if strings.Contains(record.Topic, gapContract) {
+			if b.Strict {
+				return fetched, 0, fmt.Errorf("coordinated history has a stream gap")
+			}
 			b.gaps.Add(1)
 			b.logger().Error("metrics were pruned before this bridge read them",
 				"offset", record.Offset,
@@ -146,6 +161,9 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		if err != nil {
 			if errors.Is(err, ErrNotAMeasurement) {
 				continue // a tombstone: nothing to historise
+			}
+			if b.Strict {
+				return fetched, 0, err
 			}
 			// One bad record must not wedge the stream forever, but it must not
 			// vanish either.
@@ -169,9 +187,15 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 			"signal_id", truncateForLog(rej.Row.SignalID, 40),
 			"sqlstate", rej.SQLState, "reason", rej.Reason, "err", rej.Err)
 	}
+	if b.Strict && len(rejections) > 0 {
+		return fetched, 0, fmt.Errorf("coordinated history refused %d rows", len(rejections))
+	}
 	// The marker moved past any rejected rows, so ack too, or the page would be
 	// fetched forever.
 	if _, err := b.Door.Ack(ctx, "metrics", Cursor, last); err != nil {
+		if b.Strict {
+			return fetched, 0, err
+		}
 		// The rows are durable; the next pass re-reads and the marker skips them.
 		b.logger().Warn("applied but could not ack", "offset", last, "err", err)
 	}
@@ -203,6 +227,9 @@ func (b *Bridge) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 		fetched, _, err := b.pass(ctx)
+		if err == nil && b.Coordinate != nil {
+			_, err = b.Coordinate(ctx)
+		}
 		pause := idle
 		switch {
 		case err != nil:

@@ -167,6 +167,13 @@ export type ClockDefinition = {
   [key: string]: unknown;
 };
 
+/** `_ClockProgress` — stream class `data`. */
+export type ClockProgress = {
+  processed_at: number;
+  run_id: string;
+  [key: string]: unknown;
+};
+
 /** `_Cmd` — stream class `cmd`. */
 export type Cmd = {
   command?: Record<string, unknown>;
@@ -576,6 +583,7 @@ export const CONTRACTS = {
   "_AnnotationType": { class: "definition", tombstone: true },
   "_AuditEvent": { class: "audit", tombstone: false },
   "_ClockDefinition": { class: "definition", tombstone: true },
+  "_ClockProgress": { class: "data", tombstone: true },
   "_Cmd": { class: "cmd", tombstone: false },
   "_CmdAcknowledge": { class: "cmd", tombstone: false },
   "_CmdAdmin": { class: "cmd", tombstone: false },
@@ -619,6 +627,7 @@ export interface PayloadByContract {
   "_AnnotationType": AnnotationType;
   "_AuditEvent": AuditEvent;
   "_ClockDefinition": ClockDefinition;
+  "_ClockProgress": ClockProgress;
   "_Cmd": Cmd;
   "_CmdAcknowledge": CmdAcknowledge;
   "_CmdAdmin": CmdAdmin;

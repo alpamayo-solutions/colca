@@ -80,7 +80,7 @@ func Parse(topic string) (Parsed, error) {
 // _Cmd prefix, and every _Cmd* contract is a command.
 func ClassOf(contract string) Class {
 	switch {
-	case contract == "_Metric":
+	case contract == "_Metric" || contract == "_ClockProgress":
 		return ClassData
 	// Alarms are events with a lifecycle, not samples, so they get their own
 	// stream.
@@ -632,6 +632,11 @@ func Validate(contract string, payload []byte) error {
 		// Data-model records name themselves by "id", which grants and
 		// bindings reference.
 		return reqStr("id")
+	case contract == "_ClockProgress":
+		if err := reqStr("run_id"); err != nil {
+			return err
+		}
+		return reqNum("processed_at")
 	case contract == "_ClockDefinition":
 		_, err := DecodeClockDefinition(payload)
 		return err
