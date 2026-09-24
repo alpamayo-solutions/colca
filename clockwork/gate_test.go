@@ -89,3 +89,18 @@ func TestDependencyConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func TestWaitingConsumerUsesAValidServiceCategory(t *testing.T) {
+	d := &fakeDoor{}
+	g := &Gate{Door: d, Name: "historian"}
+	if err := g.Register(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.published) != 1 {
+		t.Fatal("registration unexpectedly published clock progress")
+	}
+	row := d.published[0].(map[string]any)
+	if row["service_type"] != "other" {
+		t.Fatal("historian is not a declared ServiceType; use other")
+	}
+}
