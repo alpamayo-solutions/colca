@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.11.0](https://github.com/alpamayo-solutions/colca/compare/v0.10.0...v0.11.0) (2026-09-24)
+
+
+### Features
+
+* **contracts:** readable names beside an alarm's acknowledged_by and silenced_by ([7d1b053](https://github.com/alpamayo-solutions/colca/commit/7d1b053a0ceac5b315774c8fee3c00e458f7d3d1))
+* **historian:** publish a retained _ServiceDetails with a last will ([877fd89](https://github.com/alpamayo-solutions/colca/commit/877fd898a2b7a00975be6c97deb6ea8bbdf6c9a7))
+
+
+### Fixes
+
+* **auth:** log a token group the node does not define once, at info ([cae946e](https://github.com/alpamayo-solutions/colca/commit/cae946e9e8d071da37ef4fc8354b61d3cd1d01d9))
+* historian polling and service record, alarm actor names, quiet unknown token groups ([19d6587](https://github.com/alpamayo-solutions/colca/commit/19d6587f49c347a3a69830381ae8514209418a5e))
+* **historian:** follow at once only after a full page ([8013e8f](https://github.com/alpamayo-solutions/colca/commit/8013e8fd782d5f79b8379de8e5b400f31bbb58c4))
+* **registry:** serialise local self-registration ([ba9d8b1](https://github.com/alpamayo-solutions/colca/commit/ba9d8b161184432fc995753bf3c60beda7799dd0))
+
 ## [0.10.0](https://github.com/alpamayo-solutions/colca/compare/v0.9.1...v0.10.0) (2026-09-24)
 
 
