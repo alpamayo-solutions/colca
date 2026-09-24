@@ -33,9 +33,10 @@ type ConfigExec struct {
 	// autobindNew binds a connector's catalogue as soon as the node first sees it
 	// (setting "autobind" = "on_new_connector").
 	autobindNew bool
-	// observed holds, per catalogue topic, the tag ids of the last publish this
-	// process saw, so a republish can tell a new tag from one an operator deleted.
-	observed map[string]map[string]bool
+	// observed holds, per catalogue topic, the tags of the last publish this
+	// process saw and what each said, so a republish can tell a new tag from one
+	// an operator deleted, and a changed unit from an unchanged one.
+	observed map[string]map[string]tagMeta
 }
 
 // NewConfigExec builds the executor. Unknown settings keys are ignored, so a
@@ -44,7 +45,7 @@ func NewConfigExec(s EntityStore, bound Bindings, elements Namespace, blobs Blob
 	return &ConfigExec{
 		store: s, bound: bound, elements: elements, blobs: blobs, newID: newID,
 		autobindNew: settings["autobind"] == "on_new_connector",
-		observed:    map[string]map[string]bool{},
+		observed:    map[string]map[string]tagMeta{},
 	}
 }
 
@@ -74,12 +75,20 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	if err := json.Unmarshal(payload, &cat); err != nil {
 		return
 	}
-	ids := make(map[string]bool, len(cat.DataTags))
+	metas := make(map[string]tagMeta, len(cat.DataTags))
 	for _, tag := range cat.DataTags {
-		ids[tag.ID] = true
+		metas[tag.ID] = tag.Meta.tagMeta
 	}
 	previous, seen := c.observed[topic]
-	c.observed[topic] = ids
+	c.observed[topic] = metas
+
+	// What the tags say reaches the signals already bound to them: missing
+	// fields are filled on every publish, and a field this process saw change
+	// is updated. Runs after any binding below, whose own signals already
+	// carry the tags' fields. A refused write is left for the next publish,
+	// as a refused binding is.
+	changed := changedMeta(previous, metas)
+	defer func() { _, _, _ = c.syncCatalogueMeta(CommandContext{}, cat, changed) }()
 
 	// A catalogue can grow after its first publish (an OPC UA connector announces
 	// its heartbeat tags before browsing the server). New tags are bound, old ones
@@ -98,7 +107,7 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	}
 	var grown catalogue
 	for _, tag := range cat.DataTags {
-		if !previous[tag.ID] {
+		if _, known := previous[tag.ID]; !known {
 			grown.DataTags = append(grown.DataTags, tag)
 		}
 	}
@@ -110,6 +119,18 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 		return
 	}
 	c.bindCatalogue(CommandContext{}, mount, element, encoded)
+}
+
+// changedMeta returns the tags whose stated fields differ between two
+// publishes of one catalogue. A tag new in the later publish is not a change.
+func changedMeta(previous, current map[string]tagMeta) map[string]bool {
+	changed := map[string]bool{}
+	for id, now := range current {
+		if before, known := previous[id]; known && before != now {
+			changed[id] = true
+		}
+	}
+	return changed
 }
 
 // owningEntry finds the enrolled identity whose computed catalogue topic is
@@ -255,11 +276,23 @@ type catalogue struct {
 		// publish for several machines. Missing elements on that path are created.
 		Meta struct {
 			Element string `json:"element"`
-			// Unit becomes the new signal's unit, or fills in a declared signal that
-			// has none. It never overwrites a declared unit.
-			Unit string `json:"unit"`
+			tagMeta
 		} `json:"meta"`
 	} `json:"data_tags"`
+}
+
+// tagMeta is what a catalogue tag says about its signal beyond name and type.
+// Each field becomes the new signal's, or fills in a bound signal that has
+// none. A declared value is never overwritten when the tag is first bound; a
+// later publish that changes a field updates the bound signal, because the
+// publisher owns what its tags say. A field the tag leaves empty changes
+// nothing, so catalogues without these fields behave as before.
+type tagMeta struct {
+	Unit string `json:"unit"`
+	// SemanticType names a _SemanticTag (by name or id); it becomes the
+	// signal's semantic_type_id. A name this node does not know is ignored.
+	SemanticType string `json:"semantic_type"`
+	Description  string `json:"description"`
 }
 
 // boundSignal is the part of a _Signal record that identifies its binding.
@@ -996,7 +1029,19 @@ func (c *ConfigExec) autobind(ctx CommandContext, payload []byte) (int, string, 
 		}
 		under, at = body.Under, id
 	}
-	return c.bindCatalogue(ctx, under, at, raw)
+	code, msg, status, writes := c.bindCatalogue(ctx, under, at, raw)
+	if code != 200 {
+		return code, msg, status, writes
+	}
+	var cat catalogue
+	if err := json.Unmarshal(raw, &cat); err != nil {
+		return 422, "signal/autobind: unreadable catalogue: " + err.Error(), "invalid", writes
+	}
+	updated, synced, err := c.syncCatalogueMeta(ctx, cat, nil)
+	if err != nil {
+		return 422, "signal/autobind: rejected: " + err.Error(), "invalid", writes
+	}
+	return 200, strings.TrimSuffix(msg, "}") + fmt.Sprintf(`,"updated":%d}`, updated), "ok", append(writes, synced...)
 }
 
 // elementAt returns the element this node holds at a local path, if any.
@@ -1085,6 +1130,7 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 
 	bindings := c.bindings()
 	taken := c.takenPaths()
+	semantic := c.semanticTags()
 
 	records := make([]StateRecord, 0, len(cat.DataTags))
 	skipped := 0
@@ -1117,9 +1163,7 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 				if _, typed := existing["data_type"]; !typed && tag.DataType != "" {
 					existing["data_type"] = tag.DataType
 				}
-				if _, hasUnit := existing["unit"]; !hasUnit && tag.Meta.Unit != "" {
-					existing["unit"] = tag.Meta.Unit
-				}
+				applyTagMeta(existing, tag.Meta.tagMeta, semantic, false)
 				if _, published := existing["is_published"]; !published {
 					existing["is_published"] = true
 				}
@@ -1153,9 +1197,7 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 		if tag.DataType != "" {
 			signal["data_type"] = tag.DataType
 		}
-		if tag.Meta.Unit != "" {
-			signal["unit"] = tag.Meta.Unit
-		}
+		applyTagMeta(signal, tag.Meta.tagMeta, semantic, false)
 		encoded, err := json.Marshal(signal)
 		if err != nil {
 			return 500, "signal/autobind: encode failed: " + err.Error(), "error", nil
@@ -1169,6 +1211,88 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 		return 422, "signal/autobind: rejected: " + err.Error(), "invalid", nil
 	}
 	return 200, fmt.Sprintf(`{"created":%d,"skipped":%d}`, len(records), skipped), "ok", writes
+}
+
+// applyTagMeta writes what a tag states onto a signal record: into empty
+// fields only, or over any other value when overwrite is set. semantic maps a
+// _SemanticTag name or id to its id. It reports whether the record changed.
+func applyTagMeta(signal map[string]any, meta tagMeta, semantic map[string]string, overwrite bool) bool {
+	changed := false
+	set := func(field, value string) {
+		if value == "" {
+			return
+		}
+		current, _ := signal[field].(string)
+		if current == value || (current != "" && !overwrite) {
+			return
+		}
+		signal[field] = value
+		changed = true
+	}
+	set("unit", meta.Unit)
+	set("description", meta.Description)
+	// A name this node does not know leaves the signal unclassified.
+	set("semantic_type_id", semantic[meta.SemanticType])
+	return changed
+}
+
+// semanticTags maps every _SemanticTag this node holds, by name and by id, to
+// its id.
+func (c *ConfigExec) semanticTags() map[string]string {
+	index := map[string]string{}
+	for _, rec := range c.store.KVScanAll("_SemanticTag") {
+		var tag struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(rec.Payload, &tag) != nil || tag.ID == "" {
+			continue
+		}
+		index[tag.ID] = tag.ID
+		if tag.Name != "" {
+			index[tag.Name] = tag.ID
+		}
+	}
+	return index
+}
+
+// syncCatalogueMeta brings the signals bound to a catalogue's tags in line with
+// what the tags state: empty fields are filled, and the fields of the tags in
+// overwrite are replaced. Only records that change are written. It returns how
+// many signals changed and the writes.
+func (c *ConfigExec) syncCatalogueMeta(ctx CommandContext, cat catalogue, overwrite map[string]bool) (int, []StateWrite, error) {
+	metas := make(map[string]tagMeta, len(cat.DataTags))
+	for _, tag := range cat.DataTags {
+		if tag.Meta.tagMeta != (tagMeta{}) {
+			metas[tag.ID] = tag.Meta.tagMeta
+		}
+	}
+	if len(metas) == 0 {
+		return 0, nil, nil
+	}
+	semantic := c.semanticTags()
+	var records []StateRecord
+	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
+		var signal map[string]any
+		if json.Unmarshal(rec.Payload, &signal) != nil {
+			continue
+		}
+		tagID, _ := signal["data_tag"].(string)
+		meta, ok := metas[tagID]
+		if !ok || !applyTagMeta(signal, meta, semantic, overwrite[tagID]) {
+			continue
+		}
+		encoded, err := json.Marshal(signal)
+		if err != nil {
+			return 0, nil, err
+		}
+		records = append(records, StateRecord{Topic: rec.Topic, Payload: encoded})
+	}
+	writes, err := c.commit(ctx, records)
+	if err != nil {
+		return 0, nil, err
+	}
+	return len(records), writes, nil
 }
 
 // unboundSignalAt returns the signal record at a local path if it exists and
