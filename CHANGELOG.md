@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.2](https://github.com/alpamayo-solutions/colca/compare/v0.13.1...v0.13.2) (2026-09-24)
+
+
+### Fixes
+
+* **clients:** tell a command that was not sent from one not yet answered ([#67](https://github.com/alpamayo-solutions/colca/issues/67)) ([a0d7776](https://github.com/alpamayo-solutions/colca/commit/a0d777699ae2a7778fe566b3e5dedc484c07b632))
+
 ## [0.13.1](https://github.com/alpamayo-solutions/colca/compare/v0.13.0...v0.13.1) (2026-09-24)
 
 
