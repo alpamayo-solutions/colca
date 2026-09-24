@@ -8,6 +8,7 @@
 //
 //	COLCA_URL         node's local API base URL          (default http://colca)
 //	COLCA_SERVICE     service name for the local door    (default historian)
+//	COLCA_MQTT_URL    node's local MQTT door, for the service record (default tcp://colca:1883)
 //	COLCA_TOPIC_ROOT  topic root of the tree             (default colca)
 //	DATABASE_URL      Postgres/Timescale DSN             (required)
 //	DB_MAX_CONNS      pool size                          (default 4)
@@ -38,6 +39,7 @@ import (
 type config struct {
 	colcaURL      string
 	colcaService  string
+	colcaMQTTURL  string
 	dsn           string
 	maxConns      int32
 	fetchMax      int
@@ -107,8 +109,22 @@ func run() int {
 
 	go serveObservability(cfg.httpAddr, bridge, log)
 
+	announcer := &historian.Announcer{
+		Door:    &door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService},
+		MQTTURL: cfg.colcaMQTTURL,
+		Log:     log,
+	}
+	announced := make(chan struct{})
+	go func() {
+		defer close(announced)
+		announcer.Run(ctx)
+	}()
+
 	log.Info("historian following", "node", cfg.colcaURL, "consumer", historian.Consumer)
-	if err := bridge.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	err = bridge.Run(ctx)
+	stop()
+	<-announced // the record says inactive before the process goes
+	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("historian stopped", "err", err)
 		return 1
 	}
@@ -142,6 +158,7 @@ func load() (config, error) {
 	cfg := config{
 		colcaURL:     env("COLCA_URL", "http://colca"),
 		colcaService: env("COLCA_SERVICE", "historian"),
+		colcaMQTTURL: env("COLCA_MQTT_URL", "tcp://colca:1883"),
 		dsn:          os.Getenv("DATABASE_URL"),
 		httpAddr:     env("HTTP_ADDR", ":9091"),
 	}
