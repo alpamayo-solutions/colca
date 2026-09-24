@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/alpamayo-solutions/colca/compare/v0.13.0...v0.13.1) (2026-09-24)
+
+
+### Fixes
+
+* **store:** log Pebble background errors at ERROR, once per window ([#65](https://github.com/alpamayo-solutions/colca/issues/65)) ([298d11e](https://github.com/alpamayo-solutions/colca/commit/298d11e72b98a195c4ba53d55bb921689b645fb2))
+
 ## [0.13.0](https://github.com/alpamayo-solutions/colca/compare/v0.12.0...v0.13.0) (2026-09-24)
 
 
