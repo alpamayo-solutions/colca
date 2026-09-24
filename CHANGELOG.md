@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/alpamayo-solutions/colca/compare/v0.9.1...v0.10.0) (2026-09-24)
+
+
+### Features
+
+* **uns:** autobind applies a tag's semantic type and description ([#52](https://github.com/alpamayo-solutions/colca/issues/52)) ([b654a73](https://github.com/alpamayo-solutions/colca/commit/b654a73156490f3c4a939bea451a37c5e234623c))
+
 ## [0.9.1](https://github.com/alpamayo-solutions/colca/compare/v0.9.0...v0.9.1) (2026-09-23)
 
 
