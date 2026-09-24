@@ -39,16 +39,19 @@ var ErrNotNode = errors.New("move-drain applies only to kind=node entries")
 var ErrAlreadyDraining = errors.New("already draining")
 
 type Manager struct {
-	st      *store.Store
-	log     *slog.Logger
-	nodeID  string
-	mu      sync.RWMutex
-	byID    uns.Registry      // ulid → entry
-	byPK    map[string]string // pubkey hex → ulid; KindLocal holds none, so "" is never indexed here
-	byName  map[string]string // name → ulid (KindLocal only; a second index, same shape as byPK)
-	kick    func(ulid string)
-	deliver func(topic string, payload []byte, retain bool)
-	m       *metrics.Metrics // late-bound; every Metrics method is nil-safe, so this may stay unset
+	st     *store.Store
+	log    *slog.Logger
+	nodeID string
+	mu     sync.RWMutex
+	// registerMu serialises Register, so two first requests under one name
+	// (a service's HTTP and MQTT connections starting together) share one entry.
+	registerMu sync.Mutex
+	byID       uns.Registry      // ulid → entry
+	byPK       map[string]string // pubkey hex → ulid; KindLocal holds none, so "" is never indexed here
+	byName     map[string]string // name → ulid (KindLocal only; a second index, same shape as byPK)
+	kick       func(ulid string)
+	deliver    func(topic string, payload []byte, retain bool)
+	m          *metrics.Metrics // late-bound; every Metrics method is nil-safe, so this may stay unset
 	// ns resolves an entry's element to a local path. It is wired once the engine
 	// exists; until then nothing resolves, which fails closed.
 	ns uns.Namespace

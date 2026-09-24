@@ -23,6 +23,8 @@ func (m *Manager) Register(name, declaredMount string) (*uns.Entry, error) {
 	if name == "" {
 		return nil, fmt.Errorf("register: a local service needs a name")
 	}
+	m.registerMu.Lock()
+	defer m.registerMu.Unlock()
 	if e, ok := m.ByName(name); ok {
 		if declaredMount != "" {
 			m.mu.RLock()
