@@ -84,6 +84,33 @@ func TestAnnouncerPublishesActiveThenInactiveOnShutdown(t *testing.T) {
 	waitActive(t, client, false)
 }
 
+func TestAnnouncerDeclaresTheHistorianACoreService(t *testing.T) {
+	n := startLocalNode(t)
+	client := &door.Client{BaseURL: "http://" + n.LocalAPIAddr, Service: "historian"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go (&Announcer{Door: client, MQTTURL: "tcp://" + n.MQTTLocalAddr}).Run(ctx)
+
+	waitActive(t, client, true)
+	entries, err := client.KV(context.Background(), "", "_ServiceDetails")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		var d serviceDetails
+		if err := json.Unmarshal(e.Payload, &d); err != nil {
+			t.Fatal(err)
+		}
+		if d.Name == "historian" {
+			if got := d.Metadata["app_class"]; got != "core" {
+				t.Fatalf("metadata.app_class = %v, want core", got)
+			}
+			return
+		}
+	}
+	t.Fatal("no historian _ServiceDetails")
+}
+
 func TestAnnouncerLastWillMarksACrashedServiceInactive(t *testing.T) {
 	n := startLocalNode(t)
 	client := &door.Client{BaseURL: "http://" + n.LocalAPIAddr, Service: "historian"}

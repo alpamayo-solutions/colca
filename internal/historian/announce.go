@@ -211,6 +211,7 @@ func (a *Announcer) resolve(ctx context.Context) (door.Self, bool) {
 }
 
 // record returns the service record without its status, and its topic.
+// app_class "core" marks it as the node's own service, not an app.
 func (a *Announcer) record(self door.Self) (serviceDetails, string) {
 	context := uns.ServiceContext(self.Mount, self.Name)
 	details := serviceDetails{
@@ -223,7 +224,7 @@ func (a *Announcer) record(self door.Self) (serviceDetails, string) {
 		SystemElementID:      self.Element,
 		Hierarchy:            context,
 		IsActive:             true,
-		Metadata:             map[string]any{"consumer": Consumer},
+		Metadata:             map[string]any{"consumer": Consumer, "app_class": "core"},
 		ArchitectureMetadata: map[string]any{},
 		HealthMetrics:        []map[string]any{},
 	}
