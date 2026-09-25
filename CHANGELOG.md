@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.15.0](https://github.com/alpamayo-solutions/colca/compare/v0.14.1...v0.15.0) (2026-09-25)
+
+
+### Features
+
+* **historian:** declare metadata.app_class core in _ServiceDetails ([#76](https://github.com/alpamayo-solutions/colca/issues/76)) ([4e20f3e](https://github.com/alpamayo-solutions/colca/commit/4e20f3ef199de25edffa29db2961bc13506d96b8))
+
+
+### Fixes
+
+* **mqtt:** back-channel logout ends a session that took over its client id ([#78](https://github.com/alpamayo-solutions/colca/issues/78)) ([38aad7c](https://github.com/alpamayo-solutions/colca/commit/38aad7c39db3b9906c08c6267fdefd1cb0a3c901))
+
 ## [0.14.1](https://github.com/alpamayo-solutions/colca/compare/v0.14.0...v0.14.1) (2026-09-25)
 
 
