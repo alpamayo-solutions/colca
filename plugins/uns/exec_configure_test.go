@@ -2137,3 +2137,52 @@ func TestDefinitionUpsertRefusesAGroupGrantNamingAPath(t *testing.T) {
 		t.Fatalf("code %d msg %q — want 422 explaining that a grant names an element", code, msg)
 	}
 }
+
+func TestConstantUpsertWritesOnlyWhileTheExpectedValueIsHeld(t *testing.T) {
+	f := newStore("n-edge1")
+	c := NewConfigExec(f, nil, nil, nil, nil, nil)
+	c.Execute(asHuman, "_CmdConfigure", "constant/upsert", constantBody(t,
+		constant("line1/m2/outlet", "01HOUT", "float64", -0.44),
+	))
+	expecting := func(value, expected any) map[string]any {
+		entry := constant("line1/m2/outlet", "01HOUT", "float64", value)
+		entry["expected"] = expected
+		return entry
+	}
+
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "constant/upsert", constantBody(t, expecting(-0.317, -0.44)))
+	if code != 200 {
+		t.Fatalf("first write = %d %q, want 200", code, msg)
+	}
+	code, msg, result := c.Execute(asHuman, "_CmdConfigure", "constant/upsert", constantBody(t, expecting(-0.4125, -0.44)))
+	if code != 409 || result != "conflict" || !strings.Contains(msg, "-0.317") {
+		t.Fatalf("second write = %d %q %q, want 409 naming the held -0.317", code, result, msg)
+	}
+	if got := string(constantsUnder(f, "n-edge1")["line1/m2/outlet"].Value); got != "-0.317" {
+		t.Fatalf("held value = %s, want the first write's -0.317", got)
+	}
+}
+
+func TestConstantUpsertRefusesTheWholeBatchWhenOneExpectedValueChanged(t *testing.T) {
+	f := newStore("n-edge1")
+	c := NewConfigExec(f, nil, nil, nil, nil, nil)
+	c.Execute(asHuman, "_CmdConfigure", "constant/upsert", constantBody(t,
+		constant("line1/a", "01HA", "float64", 1),
+		constant("line1/b", "01HB", "int64", 9007199254740993),
+	))
+	a := constant("line1/a", "01HA", "float64", 2)
+	a["expected"] = 1.0
+	b := constant("line1/b", "01HB", "int64", 3)
+	b["expected"] = json.Number("9007199254740992")
+	missing := constant("line1/c", "01HC", "float64", 3)
+	missing["expected"] = 1
+
+	for _, entries := range [][]map[string]any{{a, b}, {a, missing}} {
+		if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "constant/upsert", constantBody(t, entries...)); code != 409 {
+			t.Fatalf("write = %d %q, want 409", code, msg)
+		}
+	}
+	if got := string(constantsUnder(f, "n-edge1")["line1/a"].Value); got != "1" {
+		t.Fatalf("line1/a = %s, a refused batch wrote part of itself", got)
+	}
+}
