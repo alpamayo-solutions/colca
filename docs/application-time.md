@@ -49,5 +49,14 @@ instead of silently switching timelines. A requested rate is a time mapping,
 not a throughput guarantee: applications must measure execution progress and
 handle backpressure before claiming complete accelerated history.
 
+Local services can read `_ClockDefinition`, `_ClockProgress` and
+`_ServiceDetails` across asset mounts on the broker they are attached to.
+This lets a mounted connector consume the factory clock and the completion
+reports of its configured upstream workers. These contract-specific reads do
+not grant access to other assets' measurements or annotations, do not grant
+publication rights, and do not widen access for human or external identities.
+Subscriptions must name the contract explicitly; a wildcard contract still
+uses the usual namespace grants.
+
 See [contracts](contracts.md), [HTTP API](http-api.md) and
 [operations](operations.md) for the underlying publication and transport paths.

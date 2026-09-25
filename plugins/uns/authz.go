@@ -676,6 +676,9 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		if err != nil {
 			return false // only uns records exist in the store: fail closed
 		}
+		if localClockRead(e, topic) {
+			return true
+		}
 		for _, z := range readZones(sc, e) {
 			if coverPath(z, p.Path) {
 				return true
@@ -690,6 +693,9 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		if isTimeSyncFilter(topic) {
 			// Every authenticated machine session may subscribe to _TimeSync,
 			// whatever its zone: the beacon is per node, not per path.
+			return true
+		}
+		if localClockRead(e, topic) {
 			return true
 		}
 		fixed, isUns := fixedPathPrefix(topic)
@@ -734,6 +740,26 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 			}
 		}
 		return false
+	}
+	return false
+}
+
+// localClockRead admits only the clock coordination contracts to services
+// inside the deployment. Placement scopes process data, but a connector must
+// still read the shared clock and completion reports from workers at other
+// mounts. This gives no publication rights and does not widen human or keyed
+// external identities. A wildcard contract never qualifies.
+func localClockRead(e *Entry, topic string) bool {
+	if !e.IsLocal() {
+		return false
+	}
+	parts := strings.Split(topic, "/")
+	if len(parts) < 4 || parts[0] != Root() || parts[1] != Version {
+		return false
+	}
+	switch parts[2] {
+	case "_ClockDefinition", "_ClockProgress", "_ServiceDetails":
+		return true
 	}
 	return false
 }
