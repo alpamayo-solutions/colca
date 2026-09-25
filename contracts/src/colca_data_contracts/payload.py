@@ -622,6 +622,13 @@ class Finding(Payload):
     min_repeat_s: float | None = None
     #: What to do about it, for the person who reads the alarm at 3am.
     remedy: str | None = None
+    #: How long a notification list keeps it, in seconds: in "not acknowledged"
+    #: after it was read, listed at all after it was read (``None``: for as long
+    #: as it stands), and listed after its condition went. ``None`` for the first
+    #: and last leaves them to the manager's default for the severity.
+    keep_after_read_s: float | None = None
+    keep_listed_after_read_s: float | None = None
+    keep_after_clear_s: float | None = None
 
 
 @dataclass
@@ -688,6 +695,39 @@ class AlarmState(Payload):
     #: ``preferred_username``. For display only; the ``sub`` stays the identity.
     acknowledged_by_name: str | None = None
     silenced_by_name: str | None = None
+    #: The finding's retention as the manager resolved it, so every reader
+    #: applies the same windows (see ``Finding``).
+    keep_after_read_s: float | None = None
+    keep_listed_after_read_s: float | None = None
+    keep_after_clear_s: float | None = None
+
+
+@dataclass
+class AlarmSilence(Payload):
+    """Nobody is told about one alarm type at an element until ``until``.
+
+    Keyed like the alarm itself, by the element and the alarm's name there
+    (``beltChangeDue``), not by its generic ``reason`` (``threshold``): two
+    checks that share a reason on one element stay apart. Its own record
+    rather than a field of the alarm, because it outlives the alarm clearing
+    and firing again. The manager writes it on a person's silence command,
+    copies ``until`` onto the alarm as ``silenced_until`` so that readers need
+    not join the two, and retires it with a tombstone when it runs out or is
+    ended. Alarms still fire and are recorded while silenced.
+
+    ``{root}/v1/_AlarmSilence/{node}/{element-path}/{alarm-name}``.
+    """
+
+    #: The alarm's reason when it was silenced, for the reader.
+    reason: str
+    #: Unix seconds.
+    until: float
+    #: ``sub`` of the person, as the node witnessed it on the command.
+    silenced_by: str
+    #: Unix seconds.
+    silenced_at: float
+    silenced_by_name: str | None = None
+    note: str | None = None
 
 
 def derive_annotation_id(

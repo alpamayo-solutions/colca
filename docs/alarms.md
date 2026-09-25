@@ -67,7 +67,8 @@ A client that has just connected subscribes to `_AlarmState/#`, or reads `GET
 | `value`, `op`, `threshold` | optional | the measurement and the rule, so a reader can render "82.4 > 80" |
 | `event_id` | optional | the `_AlarmStateChange` this state came out of |
 | `acknowledged_by`, `acknowledged_at`, `note` | optional | the receipt |
-| `silenced_by`, `silenced_until` | optional | |
+| `silenced_by`, `silenced_until` | optional | copied from the `_AlarmSilence` that covers it |
+| `keep_after_read_s`, `keep_listed_after_read_s`, `keep_after_clear_s` | optional | how long a notification list keeps it, as the manager resolved it from the finding |
 | `acknowledged_by_name`, `silenced_by_name` | optional | readable names beside the subjects, for display |
 
 `status` and `severity` are closed vocabularies in the schema bundle. `reason`
@@ -90,6 +91,24 @@ transition cannot be state — as a state class, every transition would leave a
 key-value entry at a path nothing ever writes again, on every ancestor node
 too. The history of transitions stays where it belongs, appended to the
 `alarms` stream, and is read with a cursor over `GET /fetch`.
+
+## Silences
+
+A silence is its own record, not a field of one alarm:
+
+```
+colca/v1/_AlarmSilence/{node}/{element-path}/{alarm-name}
+```
+
+One per element and alarm type, keyed like the alarm (`…/beltChangeDue`), not
+by its generic `reason` (`threshold`), so two checks that share a reason on one
+element stay apart. It carries `reason`, `until`, `silenced_by`, `silenced_at`
+and optionally `silenced_by_name` and `note`. The manager writes it on a
+person's silence command, copies `until` onto the alarm as `silenced_until`,
+and retires it with a tombstone when it runs out
+or is ended. It outlives the alarm: one that clears and fires again while the
+silence runs is silenced from its first record. Alarms still fire and are
+recorded while silenced.
 
 ## What is not in the payload
 

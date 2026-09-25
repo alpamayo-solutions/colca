@@ -372,6 +372,28 @@ def test_a_finding_is_retained_and_carries_its_own_handling():
         assert owned_by_the_manager not in schema["properties"], owned_by_the_manager
 
 
+def test_retention_travels_with_the_finding_onto_the_alarm():
+    """How long a list keeps an alarm is handling, like the dwell: the finder may
+    declare it, the manager resolves it, every reader applies the same windows."""
+    body, _ = gb.build_bundle()
+    for contract in ("_Finding", "_AlarmState"):
+        schema = body["contracts"][contract]["schema"]
+        for field in ("keep_after_read_s", "keep_listed_after_read_s", "keep_after_clear_s"):
+            assert field in schema["properties"], (contract, field)
+            assert field not in schema["required"], (contract, field)
+
+
+def test_a_silence_is_retained_state_of_its_own():
+    """`_AlarmSilence` outlives the alarms it covers, so it cannot be a field of
+    one: retained, retired by tombstone when it runs out, and saying who set it."""
+    body, _ = gb.build_bundle()
+    silence = body["contracts"]["_AlarmSilence"]
+
+    assert silence["class"] == "entity"
+    assert silence["tombstone"] is True
+    assert set(silence["schema"]["required"]) == {"reason", "until", "silenced_by", "silenced_at"}
+
+
 def test_standing_alarm_is_retained_state_with_a_closed_status_vocabulary():
     body, _ = gb.build_bundle()
     standing = body["contracts"]["_AlarmState"]
