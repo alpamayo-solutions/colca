@@ -389,7 +389,7 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_stream_next_offset":       len(streams), // one per stream
 		"colca_ingest_records_total":     len(streams),
 		"colca_rejected_publishes_total": 10, // one per reason
-		"colca_auth_rejections_total":    24, // door × reason
+		"colca_auth_rejections_total":    32, // door × reason
 		"colca_acl_denials_total":        2,  // one per action
 		"colca_session_kicks_total":      1,
 		"colca_security_changes_total":   len(securityChangeKinds),

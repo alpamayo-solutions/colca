@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,7 @@ type MintOpts struct {
 	WrongKey bool     // sign with a key the JWKS does not serve
 	Username string   // preferred_username
 	Groups   []string // groups claim: the group ids a node resolves against its _Group definitions
+	Sid      string   // the identity provider's session id
 }
 
 type Issuer struct {
@@ -133,6 +135,9 @@ func (i *Issuer) MintOpt(o MintOpts) string {
 	if o.Groups != nil {
 		claims["groups"] = o.Groups
 	}
+	if o.Sid != "" {
+		claims["sid"] = o.Sid
+	}
 
 	switch o.Alg {
 	case "none":
@@ -155,6 +160,38 @@ func (i *Issuer) MintOpt(o MintOpts) string {
 		s, _ := tok.SignedString(key)
 		return s
 	}
+}
+
+// Claims issues a token carrying exactly these claims, signed with the issuer's
+// key. iss and aud default to the issuer's own when absent.
+func (i *Issuer) Claims(claims map[string]any) string {
+	c := jwt.MapClaims{"iss": i.iss, "aud": i.aud}
+	for k, v := range claims {
+		c[k] = v
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, c)
+	tok.Header["kid"] = i.kid
+	s, _ := tok.SignedString(i.key)
+	return s
+}
+
+// Logout issues a back-channel logout token for a session, a person, or both, as
+// Keycloak sends it.
+func (i *Issuer) Logout(sid, sub string) string {
+	claims := map[string]any{
+		"iat":    time.Now().Unix(),
+		"exp":    time.Now().Add(2 * time.Minute).Unix(),
+		"jti":    fmt.Sprintf("logout-%d", time.Now().UnixNano()),
+		"typ":    "Logout",
+		"events": map[string]any{"http://schemas.openid.net/event/backchannel-logout": map[string]any{}},
+	}
+	if sid != "" {
+		claims["sid"] = sid
+	}
+	if sub != "" {
+		claims["sub"] = sub
+	}
+	return i.Claims(claims)
 }
 
 // jwksJSON renders the current key as a JWKS document (RSA, base64url-raw).

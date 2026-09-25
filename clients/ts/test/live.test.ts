@@ -384,6 +384,97 @@ describe("keeping the connection", () => {
   });
 });
 
+describe("renewing the token in place", () => {
+  const renews = { properties: { authenticationMethod: "colca-token" } };
+
+  it("asks every connection to renew in place", async () => {
+    const { clients } = setup({ mqttOptions: { properties: { sessionExpiryInterval: 0 } } });
+    await settle();
+    expect(clients[0].options.properties).toEqual({
+      sessionExpiryInterval: 0,
+      authenticationMethod: "colca-token",
+    });
+  });
+
+  it("hands the node the new token on the open connection when it says it can", async () => {
+    const { live, clients, tokens } = setup();
+    const renewed: string[] = [];
+    const states: string[] = [];
+    const resubscribed: number[] = [];
+    live.subscribe(T, () => undefined);
+    await settle();
+    clients[0].reauthenticate = (token) => {
+      renewed.push(token);
+      return Promise.resolve();
+    };
+    clients[0].emit("connect", renews);
+    live.onState((state) => states.push(state));
+    live.onResubscribe(() => resubscribed.push(1));
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    expect(renewed).toEqual([tokens[1]]);
+    expect(clients).toHaveLength(1);
+    expect(clients[0].ended).toBe(false);
+    expect(clients[0].subscribed).toEqual([T]);
+
+    // The next renewal follows the new token's expiry: 270 s after this one.
+    await vi.advanceTimersByTimeAsync(269_000);
+    expect(renewed).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(renewed).toEqual([tokens[1], tokens[2]]);
+    expect(clients).toHaveLength(1);
+    expect(states).toEqual([]);
+    expect(resubscribed).toEqual([]);
+  });
+
+  it("reconnects as before when the node does not say it renews in place", async () => {
+    const { live, clients } = setup();
+    live.subscribe(T, () => undefined);
+    await settle();
+    const reauthenticate = vi.fn(() => Promise.resolve());
+    clients[0].reauthenticate = reauthenticate;
+    clients[0].emit("connect");
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    expect(reauthenticate).not.toHaveBeenCalled();
+    expect(clients).toHaveLength(2);
+  });
+
+  it("reconnects with the new token when the node does not answer the renewal", async () => {
+    const { live, clients, tokens, errors } = setup();
+    live.subscribe(T, () => undefined);
+    await settle();
+    clients[0].reauthenticate = () => new Promise(() => undefined);
+    clients[0].emit("connect", renews);
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    expect(clients).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(clients).toHaveLength(2);
+    expect(clients[1].options.password).toBe(tokens[1]);
+    expect(errors.map((error) => error.message)).toEqual(["the node did not answer the token renewal"]);
+  });
+
+  it("leaves a refused renewal to the retry, because the node ends the connection", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { live, clients } = setup();
+    live.subscribe(T, () => undefined);
+    await settle();
+    clients[0].reauthenticate = () => {
+      clients[0].emit("close");
+      return Promise.reject(new Error("the connection closed during the token renewal"));
+    };
+    clients[0].emit("connect", renews);
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    // One retry, not a retry and a renewal's replacement on top.
+    expect(clients).toHaveLength(2);
+    clients[1].emit("connect", renews);
+    expect(live.state).toBe("online");
+  });
+});
+
 describe("publishing", () => {
   it("sends JSON at QoS 1 and does not keep anything for later", async () => {
     const { live, clients } = setup();

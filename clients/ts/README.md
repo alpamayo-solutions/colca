@@ -67,8 +67,10 @@ first. Around that the client does what a page left open all day needs:
 - **A second subscriber gets the value at once.** The client keeps the last value
   of every topic, and `latest()` and `values()` read it.
 - **A fresh token before the old one runs out.** The node ends a session when its
-  token expires. The client reconnects shortly before, with a new token and every
-  subscription sent again, and stays `online` while doing so.
+  token expires. Shortly before, the client hands the node a new token on the
+  open connection (MQTT 5 re-authentication), so nothing is subscribed again. A
+  node that does not offer that gets a new connection with the new token and
+  every subscription sent again. Either way the client stays `online`.
 - **Waits that grow after a drop**, jittered, each attempt with a fresh token.
 - **A word when the subscriptions go out again.** `onResubscribe()` fires once
   they have, on every new connection — where the node's retained delivery starts
@@ -124,8 +126,8 @@ change, and returns the function that ends that watch and no other. An alarm's
 name comes from the `_SystemElement` it hangs on, and its path is where a view
 jumps to.
 
-When the connection comes back — after a drop, and after the routine token
-renewal too — the node starts its retained delivery over, and an alarm that went
+When the connection comes back — after a drop, and after a token renewal that
+had to reconnect — the node starts its retained delivery over, and an alarm that went
 while the client was away leaves nothing behind to say so. `Alarms` therefore
 gives the set 750 ms to arrive again (`resyncMs`) and drops what did not come
 back: a view can be that much behind the node, but it never goes on showing an

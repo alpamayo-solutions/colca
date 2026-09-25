@@ -17,6 +17,8 @@ export class FakeClient {
   ended = false;
   /** How it was ended: true drops the connection, false sends a DISCONNECT first. */
   endedForce: boolean | undefined;
+  /** Set to play a node that renews tokens in place. */
+  reauthenticate?: (token: string) => Promise<void>;
   readonly #handlers = new Map<string, Handler[]>();
   readonly #held: (() => void)[] = [];
 

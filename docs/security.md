@@ -141,8 +141,31 @@ auth:
 Signing keys are fetched in the background from each distinct JWKS URL,
 stored, and refreshed when a token names an unknown key. The issuer is never called while a request waits, and a
 node that restarts without network keeps validating until the tokens expire. A
-session ends when its token expires; the token lifetime is therefore the
-revocation delay.
+session ends when its token expires, unless the client renews it first.
+
+An MQTT 5 client renews on the open connection: it sends the authentication
+method `colca-token` in its CONNECT (the token stays the password), and the node
+names the method in the CONNACK. Before the token runs out, the client sends an
+AUTH packet with reason `0x19`, the same method, and the new token as
+authentication data. The node checks it as at CONNECT, requires the same `sub`,
+and moves the session's grants and expiry to it; the subscriptions stay. A
+refused token ends the connection with `0x87` (not authorized), a different
+method with `0x8C`. A client without the method reconnects with a new token
+instead.
+
+A logout at the identity provider reaches the node by OIDC back-channel logout.
+The node serves `POST /auth/backchannel-logout` on its API door and its local
+door; the identity provider posts a signed `logout_token` there. The node checks
+the signature against the issuer's keys, `iss`, `aud` (the `audience` above),
+`iat`, `exp` if present, the back-channel logout event in `events`, that there
+is no `nonce`, and that the `jti` was not used before, and answers 400 to a token
+that fails. A valid one is answered 200: every connection of that session (the
+token's `sid`) is closed with `0x98` (administrative action), and tokens of the
+session are refused from then on, on every door. A logout token with a `sub` and
+no `sid` ends everything issued to that person before it. In Keycloak, set the
+client's back-channel logout URL to the node's local door, for example
+`http://colca/auth/backchannel-logout`. Without back-channel logout, the token
+lifetime is the revocation delay.
 
 A token names groups, not grants. The node resolves the groups against
 `_Group` definitions that its ancestors pushed down. Membership lives in the

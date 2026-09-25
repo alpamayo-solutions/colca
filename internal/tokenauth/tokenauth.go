@@ -23,10 +23,11 @@ import (
 
 // Reject reasons, used verbatim as metric labels.
 const (
-	ReasonBadToken = "bad_token" // malformed, bad signature, wrong alg, unknown kid after re-fetch
-	ReasonExpired  = "expired"   // exp passed or nbf in the future (±60s skew)
-	ReasonIssuer   = "issuer"    // iss not in the list, or aud mismatch
-	ReasonScope    = "scope"     // valid PAT, but not for this integration door
+	ReasonBadToken  = "bad_token"  // malformed, bad signature, wrong alg, unknown kid after re-fetch
+	ReasonExpired   = "expired"    // exp passed or nbf in the future (±60s skew)
+	ReasonIssuer    = "issuer"     // iss not in the list, or aud mismatch
+	ReasonScope     = "scope"      // valid PAT, but not for this integration door
+	ReasonLoggedOut = "logged_out" // the identity provider ended the token's session
 )
 
 const (
@@ -63,6 +64,8 @@ type Verified struct {
 	Credential       string   // "oidc" or "pat"
 	CredentialID     string   // PAT lookup id; empty for OIDC JWTs
 	CredentialDigest string   // hash-only PAT verifier at CONNECT; empty for OIDC JWTs
+	SessionID        string   // the identity provider's session (`sid`); empty if absent
+	IssuedAt         time.Time
 }
 
 // Metrics is the nil-safe observer surface (implemented by *metrics.Metrics
@@ -89,6 +92,8 @@ type Verifier struct {
 	patIdx    *uns.PersonalAccessTokenIndex
 
 	unknownGroups uns.GroupNotices
+
+	logouts logouts
 }
 
 // SetGroupIndex wires the group resolver (node startup).
@@ -333,21 +338,7 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		jwt.WithAudience(v.cfg.Audience),
 	)
 	claims := jwt.MapClaims{}
-	_, err := parser.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
-		// The issuer picks the key set; the signature check that follows is what
-		// makes the unverified `iss` read here trustworthy.
-		iss, _ := t.Claims.GetIssuer()
-		src, ok := v.byIssuer[iss]
-		if !ok {
-			return nil, fmt.Errorf("%w: %q is not an accepted issuer", jwt.ErrTokenInvalidIssuer, iss)
-		}
-		kid, _ := t.Header["kid"].(string)
-		key, ok := v.keyFor(src, kid)
-		if !ok {
-			return nil, fmt.Errorf("no key for kid %q", kid)
-		}
-		return key, nil
-	})
+	_, err := parser.ParseWithClaims(token, claims, v.signingKey)
 	if err != nil {
 		return nil, reasonFor(err), fmt.Errorf("token rejected: %w", err)
 	}
@@ -384,9 +375,37 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		}
 		v.log.Warn("token: a group contributed no grants", "sub", sub, "err", problem)
 	}
+	sid, _ := claims["sid"].(string)
+	var issuedAt time.Time
+	if iat, err := claims.GetIssuedAt(); err == nil && iat != nil {
+		issuedAt = iat.Time
+	}
+	if v.logouts.covers(sid, sub, issuedAt, time.Now()) {
+		return nil, ReasonLoggedOut, fmt.Errorf("token rejected: its session was logged out")
+	}
 	username, _ := claims["preferred_username"].(string)
 	entry.Username = username
-	return &Verified{Entry: entry, Sub: sub, Username: username, Exp: exp.Time, Credential: "oidc"}, "", nil
+	return &Verified{
+		Entry: entry, Sub: sub, Username: username, Exp: exp.Time, Credential: "oidc",
+		SessionID: sid, IssuedAt: issuedAt,
+	}, "", nil
+}
+
+// signingKey is the jwt.Keyfunc for every token this verifier accepts. The issuer
+// picks the key set; the signature check that follows is what makes the
+// unverified `iss` read here trustworthy.
+func (v *Verifier) signingKey(t *jwt.Token) (interface{}, error) {
+	iss, _ := t.Claims.GetIssuer()
+	src, ok := v.byIssuer[iss]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q is not an accepted issuer", jwt.ErrTokenInvalidIssuer, iss)
+	}
+	kid, _ := t.Header["kid"].(string)
+	key, ok := v.keyFor(src, kid)
+	if !ok {
+		return nil, fmt.Errorf("no key for kid %q", kid)
+	}
+	return key, nil
 }
 
 // reasonFor maps golang-jwt validation errors onto the metric vocabulary.
