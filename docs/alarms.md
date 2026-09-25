@@ -97,13 +97,15 @@ too. The history of transitions stays where it belongs, appended to the
 A silence is its own record, not a field of one alarm:
 
 ```
-colca/v1/_AlarmSilence/{node}/{element-path}/{reason}
+colca/v1/_AlarmSilence/{node}/{element-path}/{alarm-name}
 ```
 
-One per element and reason, with `until`, `silenced_by`, `silenced_at` and
-optionally `silenced_by_name` and `note`. The manager writes it on a person's
-silence command, copies `until` onto every alarm at that element with that
-reason as `silenced_until`, and retires it with a tombstone when it runs out
+One per element and alarm type, keyed like the alarm (`…/beltChangeDue`), not
+by its generic `reason` (`threshold`), so two checks that share a reason on one
+element stay apart. It carries `reason`, `until`, `silenced_by`, `silenced_at`
+and optionally `silenced_by_name` and `note`. The manager writes it on a
+person's silence command, copies `until` onto the alarm as `silenced_until`,
+and retires it with a tombstone when it runs out
 or is ended. It outlives the alarm: one that clears and fires again while the
 silence runs is silenced from its first record. Alarms still fire and are
 recorded while silenced.

@@ -106,7 +106,7 @@ func ClassOf(contract string) Class {
 		// The standing alarm is state: one record per definition, which
 		// overwrites itself. _AlarmStateChange, the transition, stays an event.
 		contract == "_AlarmState" ||
-		// A silence per element and reason: retained until it runs out, then
+		// A silence per element and alarm type: retained until it runs out, then
 		// retired by tombstone. It outlives the alarms it covers.
 		contract == "_AlarmSilence":
 		return ClassEntity

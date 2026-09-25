@@ -704,18 +704,21 @@ class AlarmState(Payload):
 
 @dataclass
 class AlarmSilence(Payload):
-    """Nobody is told about ``reason`` at an element until ``until``.
+    """Nobody is told about one alarm type at an element until ``until``.
 
-    Its own record rather than a field of one alarm: a silence outlives the
-    alarm clearing and firing again, and covers every alarm at that element
-    with that reason. The manager writes it on a person's silence command,
-    copies ``until`` onto each alarm it covers as ``silenced_until`` so that
-    readers need not join the two, and retires it with a tombstone when it
-    runs out or is ended. Alarms still fire and are recorded while silenced.
+    Keyed like the alarm itself, by the element and the alarm's name there
+    (``beltChangeDue``), not by its generic ``reason`` (``threshold``): two
+    checks that share a reason on one element stay apart. Its own record
+    rather than a field of the alarm, because it outlives the alarm clearing
+    and firing again. The manager writes it on a person's silence command,
+    copies ``until`` onto the alarm as ``silenced_until`` so that readers need
+    not join the two, and retires it with a tombstone when it runs out or is
+    ended. Alarms still fire and are recorded while silenced.
 
-    ``{root}/v1/_AlarmSilence/{node}/{element-path}/{reason}``.
+    ``{root}/v1/_AlarmSilence/{node}/{element-path}/{alarm-name}``.
     """
 
+    #: The alarm's reason when it was silenced, for the reader.
     reason: str
     #: Unix seconds.
     until: float
