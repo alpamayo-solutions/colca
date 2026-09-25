@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/alpamayo-solutions/colca/compare/v0.16.0...v0.17.0) (2026-09-25)
+
+
+### Features
+
+* **contracts:** catalog product and recipe records (batch 2026-09-25b) ([#81](https://github.com/alpamayo-solutions/colca/issues/81)) ([c8546c1](https://github.com/alpamayo-solutions/colca/commit/c8546c1d4cfd309f0679fd60fa405eddbcabb4a0))
+
 ## [0.16.0](https://github.com/alpamayo-solutions/colca/compare/v0.15.0...v0.16.0) (2026-09-25)
 
 
