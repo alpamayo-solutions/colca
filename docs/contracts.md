@@ -44,6 +44,38 @@ enforces.
 2. `make contracts-test`, then `make bundle`.
 3. `make test`. The Go tests that judge the doors read the generated bundle.
 
+## Catalog records
+
+A catalog is master data kept in `_Constant` records of data type `json`: one
+product per `catalog/products/{sku}`, one recipe per `catalog/recipes/{id}`. The
+node checks only that such a value is JSON, and no bundle applies to it; the
+record's shape is its own contract, `colca_data_contracts.catalog` (dataclasses
+plus `PRODUCT_SCHEMA` and `RECIPE_SCHEMA`), and `CatalogProduct` and
+`CatalogRecipe` in the TypeScript client.
+
+```json
+{
+  "sku": "AMALQ301H6", "name": "MDF 18 mm", "substrate": "MDF",
+  "thickness_mm": 18.7, "length_mm": 4100, "width_mm": 2070, "sandoff_mm": 0.7,
+  "density_kg_m3": 745, "final_grit": 150, "recipe_id": "recipe-60-80-100-120-150",
+  "is_default": true,
+  "attributes": {"sap_plant": "BSK1"},
+  "provenance": {"source": "erp", "set_by": "sap-bridge", "set_at": "2026-09-25T08:00:00Z"},
+  "field_provenance": {"density_kg_m3": {"source": "manual", "set_by": "Admin A", "set_at": "2026-09-25T09:12:00Z"}}
+}
+```
+
+- A product names its recipe by `recipe_id`: recipes are shared, and one edit
+  changes one record.
+- Anything beyond the standard fields goes in `attributes`; an unknown top-level
+  field is refused.
+- `provenance` is the record's writer. `field_provenance` names the fields that
+  are not simply its: a placeholder marked `default`, and a value someone else
+  set, such as a density entered by hand (`manual`).
+- What the writer supplies wins. A hand entry fills only a field the writer
+  leaves empty or gives a default for; a re-sync restores a supplied value and
+  keeps a hand entry over a default.
+
 ## Golden vectors
 
 For the optional virtual clock definition and its continuity rules, see
@@ -64,5 +96,6 @@ answers, and the tests on both sides read the same file:
 | `application_time.json` | real-to-application clock projection in Go and Chaski |
 | `sanitize.json` | how names become path segments |
 | `service_context.json`, `log_payload.json`, `manifest_streams.json` | service identity, log records, stream manifest |
+| `catalog_records.json` | product and recipe records, Python and TypeScript |
 
 Change a rule by changing its vector first, then make both sides pass.

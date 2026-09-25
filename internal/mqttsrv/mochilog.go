@@ -3,9 +3,33 @@ package mqttsrv
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
+
+// wsClosedNormally are the close codes a browser sends when a tab closes or
+// navigates away (1001) or when it closes without a status (1005), and a
+// normal close (1000): a client leaving, not a transport fault.
+var wsClosedNormally = []string{"websocket: close 1000 ", "websocket: close 1001 ", "websocket: close 1005 "}
+
+// closedNormally says whether the record's error is a websocket closed by its client.
+func closedNormally(record slog.Record) bool {
+	normal := false
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key != "error" {
+			return true
+		}
+		text := attr.Value.String()
+		for _, code := range wsClosedNormally {
+			if strings.Contains(text+" ", code) {
+				normal = true
+			}
+		}
+		return false
+	})
+	return normal
+}
 
 // mochiLogWindow is how long one repeated mochi log line stays suppressed
 // before the next occurrence is let through (carrying the suppressed count).
@@ -61,6 +85,13 @@ func (h *mochiLogHandler) WithGroup(name string) slog.Handler {
 }
 
 func (h *mochiLogHandler) Handle(ctx context.Context, record slog.Record) error {
+	if record.Level > slog.LevelDebug && closedNormally(record) {
+		record.Level = slog.LevelDebug
+		record.Message = "mqtt client closed its websocket"
+		if !h.inner.Enabled(ctx, record.Level) {
+			return nil
+		}
+	}
 	if record.Message == "" {
 		record.Message = "mqtt transport error"
 	}

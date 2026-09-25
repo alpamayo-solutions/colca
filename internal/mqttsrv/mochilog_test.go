@@ -9,6 +9,7 @@ import (
 )
 
 type capturedRecord struct {
+	level   slog.Level
 	message string
 	attrs   map[string]slog.Value
 }
@@ -22,7 +23,7 @@ func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return tr
 func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler       { return h }
 func (h *capturingHandler) WithGroup(string) slog.Handler            { return h }
 func (h *capturingHandler) Handle(_ context.Context, record slog.Record) error {
-	captured := capturedRecord{message: record.Message, attrs: map[string]slog.Value{}}
+	captured := capturedRecord{level: record.Level, message: record.Message, attrs: map[string]slog.Value{}}
 	record.Attrs(func(attr slog.Attr) bool {
 		captured.attrs[attr.Key] = attr.Value
 		return true
@@ -102,3 +103,52 @@ func TestAnEmptyMochiMessageGetsAName(t *testing.T) {
 		t.Fatalf("expected the empty message to be named, got %+v", sink.records)
 	}
 }
+
+type infoLevel struct{ *capturingHandler }
+
+func (infoLevel) Enabled(_ context.Context, level slog.Level) bool { return level >= slog.LevelInfo }
+
+// A browser tab that closes or navigates away ends its websocket with 1001, or
+// with 1005 when it sends no status: a client leaving, logged at debug.
+func TestAWebsocketTheBrowserClosedIsDebugNotAWarning(t *testing.T) {
+	sink := &capturingHandler{}
+	for _, text := range []string{"websocket: close 1001 (going away)", "websocket: close 1005 (no status)"} {
+		record := mochiRecord(time.Now(), "", slog.String("listener", "human-ws"), slog.String("error", text))
+		if err := newMochiLogHandler(sink).Handle(context.Background(), record); err != nil {
+			t.Fatalf("handle: %v", err)
+		}
+	}
+	if len(sink.records) != 2 {
+		t.Fatalf("expected both closes at debug, got %+v", sink.records)
+	}
+	for _, record := range sink.records {
+		if record.level != slog.LevelDebug || record.message != "mqtt client closed its websocket" {
+			t.Fatalf("expected a debug line, got %+v", record)
+		}
+	}
+
+	quiet := &capturingHandler{}
+	closed := mochiRecord(time.Now(), "", slog.Any("error", errString("websocket: close 1001 (going away)")))
+	if err := newMochiLogHandler(infoLevel{quiet}).Handle(context.Background(), closed); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(quiet.records) != 0 {
+		t.Fatalf("expected nothing at info level, got %+v", quiet.records)
+	}
+}
+
+// An abnormal closure is still a transport fault.
+func TestAnAbnormalWebsocketCloseStaysAWarning(t *testing.T) {
+	sink := &capturingHandler{}
+	record := mochiRecord(time.Now(), "", slog.String("error", "websocket: close 1006 (abnormal closure): unexpected EOF"))
+	if err := newMochiLogHandler(sink).Handle(context.Background(), record); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sink.records) != 1 || sink.records[0].level != slog.LevelWarn || sink.records[0].message != "mqtt transport error" {
+		t.Fatalf("expected a warning, got %+v", sink.records)
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
