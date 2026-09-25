@@ -39,6 +39,17 @@ export type AlarmNotificationConfig = {
   [key: string]: unknown;
 };
 
+/** `_AlarmSilence` — stream class `entity`. */
+export type AlarmSilence = {
+  note?: null | string;
+  reason: string;
+  silenced_at: number;
+  silenced_by: string;
+  silenced_by_name?: null | string;
+  until: number;
+  [key: string]: unknown;
+};
+
 /** `_AlarmState` — stream class `entity`. */
 export type AlarmState = {
   acknowledged_at?: null | number;
@@ -48,6 +59,9 @@ export type AlarmState = {
   event_id?: null | string;
   finding_path?: null | string;
   finding_seen_at?: null | number;
+  keep_after_clear_s?: null | number;
+  keep_after_read_s?: null | number;
+  keep_listed_after_read_s?: null | number;
   note?: null | string;
   op?: null | string;
   reason: string;
@@ -334,6 +348,9 @@ export type Finding = {
   detail?: null | Record<string, unknown>;
   dwell_off_s?: number;
   dwell_on_s?: number;
+  keep_after_clear_s?: null | number;
+  keep_after_read_s?: null | number;
+  keep_listed_after_read_s?: null | number;
   min_repeat_s?: null | number;
   observed_at: number;
   op?: null | string;
@@ -577,6 +594,7 @@ export type SystemElement = {
 export const CONTRACTS = {
   "_Ack": { class: "ack", tombstone: false },
   "_AlarmNotificationConfig": { class: "entity", tombstone: true },
+  "_AlarmSilence": { class: "entity", tombstone: true },
   "_AlarmState": { class: "entity", tombstone: true },
   "_AlarmStateChange": { class: "alarm", tombstone: false },
   "_Annotation": { class: "annotation", tombstone: false },
@@ -621,6 +639,7 @@ export type ContractName = keyof typeof CONTRACTS;
 export interface PayloadByContract {
   "_Ack": Ack;
   "_AlarmNotificationConfig": AlarmNotificationConfig;
+  "_AlarmSilence": AlarmSilence;
   "_AlarmState": AlarmState;
   "_AlarmStateChange": AlarmStateChange;
   "_Annotation": Annotation;

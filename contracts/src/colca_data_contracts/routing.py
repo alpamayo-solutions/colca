@@ -56,6 +56,9 @@ CLASS_TABLE: dict[str, str] = {
     # The standing alarm, one record per definition: it overwrites itself and
     # a tombstone retires it, so a new subscriber sees what stands.
     "_AlarmState": "entity",
+    # A silence per element and reason, retained until it runs out and then
+    # retired by tombstone; it outlives the alarms it covers.
+    "_AlarmSilence": "entity",
     # Alarm events: append-only, not in KV, not retained, and on their own
     # stream so they never queue behind a metrics backlog.
     "_AlarmStateChange": "alarm",

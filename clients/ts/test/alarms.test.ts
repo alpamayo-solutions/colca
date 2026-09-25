@@ -181,6 +181,23 @@ describe("acknowledging", () => {
     await expect(quit).resolves.toMatchObject({ result_code: 200, message: "quit" });
   });
 
+  it("puts a notice back to unread under the same contract", async () => {
+    const { client, alarms } = await opened();
+
+    const unread = alarms.unacknowledge(GRIT);
+    await settle();
+
+    const sent = client.sent[0];
+    expect(sent.topic).toBe(`${ROOT}/v1/_CmdAcknowledge/${NODE}/${GRIT}/unackAlarm`);
+    expect(sent.body.command).toEqual({});
+    client.deliver(`${ROOT}/v1/_Ack/${NODE}/${GRIT}/unackAlarm`, {
+      correlation_id: sent.body.correlation_id,
+      result_code: 200,
+      message: "unacknowledged",
+    });
+    await expect(unread).resolves.toMatchObject({ result_code: 200 });
+  });
+
   it("throws what the node refused rather than looking quit", async () => {
     const { client, alarms } = await opened();
 

@@ -71,6 +71,7 @@ from colca_data_contracts.payload import (
     AlarmNotificationConfigSnapshot,
     AlarmNotificationSummary,
     AlarmSeverity,
+    AlarmSilence,
     AlarmState,
     AlarmStateChange,
     AlarmStatus,
@@ -207,6 +208,7 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "AlarmStateChange",
     "NotificationDispatched",
     # The standing alarm, one retained record per alarm definition
+    "AlarmSilence",
     "AlarmState",
     "AlarmStatus",
     "AlarmSeverity",

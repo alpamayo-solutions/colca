@@ -158,6 +158,11 @@ export class Alarms {
     return this.#command("_CmdAcknowledge", path, "ackAlarm", note(options.note), options.timeoutMs);
   }
 
+  /** Put a read notice back to unread. The manager refuses it for anything above `info`. */
+  unacknowledge(path: string, options: Omit<AcknowledgeOptions, "note"> = {}): Promise<CommandAck> {
+    return this.#command("_CmdAcknowledge", path, "unackAlarm", {}, options.timeoutMs);
+  }
+
   /** Stop an alarm from notifying until `until` (unix seconds) or for `minutes`. */
   silence(path: string, options: SilenceOptions): Promise<CommandAck> {
     const until =
