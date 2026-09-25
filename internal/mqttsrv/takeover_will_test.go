@@ -17,9 +17,10 @@ import (
 // holdFirstPublish holds the first PUBLISH read from a connection until release
 // closes, the way a write stuck until its deadline holds a connection's goroutine
 // in the middle of a packet. done closes when that connection has disconnected.
+// The hooks run on each connection's own goroutine, so mu guards held.
 type holdFirstPublish struct {
 	mqtt.HookBase
-	once    sync.Once
+	mu      sync.Mutex
 	held    *mqtt.Client
 	holding chan struct{}
 	release chan struct{}
@@ -36,8 +37,12 @@ func (h *holdFirstPublish) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (pac
 	if pk.FixedHeader.Type != packets.Publish {
 		return pk, nil
 	}
-	first := false
-	h.once.Do(func() { first = true; h.held = cl })
+	h.mu.Lock()
+	first := h.held == nil
+	if first {
+		h.held = cl
+	}
+	h.mu.Unlock()
 	if first {
 		close(h.holding)
 		<-h.release
@@ -46,7 +51,10 @@ func (h *holdFirstPublish) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (pac
 }
 
 func (h *holdFirstPublish) OnDisconnect(cl *mqtt.Client, _ error, _ bool) {
-	if cl == h.held {
+	h.mu.Lock()
+	held := h.held
+	h.mu.Unlock()
+	if cl == held {
 		close(h.done)
 	}
 }
