@@ -66,11 +66,15 @@ require (
 // fix/subscribe-packet-id-per-direction stops refusing a SUBSCRIBE or UNSUBSCRIBE
 // whose packet id matches one of the broker's own in-flight deliveries (ids are
 // per direction), so a subscription made during a retained burst is not lost —
-// upstream as https://github.com/mochi-mqtt/server/pull/546.
-// Drop this replace once a released mochi version contains all four;
+// upstream as https://github.com/mochi-mqtt/server/pull/546. Its branch
+// fix/will-on-takeover publishes a taken-over client's will during the takeover,
+// once, so it cannot land after what the new connection publishes.
+// Drop this replace once a released mochi version contains all five;
 // internal/mqttsrv's TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace goes
 // red under -race if it is dropped early,
 // TestAPubackBufferedBehindQueuedDeliveriesReachesTheClientBeforeShutdown fails
-// without the flush, and TestASubscribeReusingAnInflightDeliveryIDStillSubscribes
-// fails without the packet-id fix.
-replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260923232233-3b31c000daf1
+// without the flush, TestASubscribeReusingAnInflightDeliveryIDStillSubscribes
+// fails without the packet-id fix, and
+// TestATakenOverConnectionsWillDoesNotOverwriteTheNewAnnounce fails without the
+// takeover fix.
+replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260925155455-d14e90cb2db6
