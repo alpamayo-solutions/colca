@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,12 +33,19 @@ type v5Session struct {
 
 func dialV5(t *testing.T, w *humanWorld, username, token, method string) (*v5Session, error) {
 	t.Helper()
+	return dialV5As(t, w, fmt.Sprintf("h-v5-%d", time.Now().UnixNano()), username, token, method)
+}
+
+// dialV5As connects under a chosen client id, so a second connection can take
+// over the first one's session.
+func dialV5As(t *testing.T, w *humanWorld, id, username, token, method string) (*v5Session, error) {
+	t.Helper()
 	conn, err := tls.Dial("tcp", w.srv.HumanTCPAddr(), insecureTLS())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	s := &v5Session{
-		id:           fmt.Sprintf("h-v5-%d", time.Now().UnixNano()),
+		id:           id,
 		messages:     make(chan *pahov5.Publish, 16),
 		disconnected: make(chan *pahov5.Disconnect, 1),
 	}
@@ -288,5 +296,60 @@ func TestHumanBackchannelLogoutEndsThatLoginsSessions(t *testing.T) {
 	resp := other.reauth(t, AuthMethodToken, w.iss.MintOpt(tokentest.MintOpts{Sub: "anna", Sid: "sid-a"}))
 	if resp.Success {
 		t.Fatal("a token of the logged-out session renewed a connection")
+	}
+}
+
+// A connection that took over a client id is ended by a logout of its login.
+// The connection it replaced disconnects after the new one authenticated, and
+// that disconnect must not erase the new connection's session.
+func TestHumanBackchannelLogoutEndsATakenOverSession(t *testing.T) {
+	w := newHumanWorld(t)
+	token := func() string { return w.iss.MintOpt(tokentest.MintOpts{Sub: "anna", Sid: "sid-a"}) }
+	first, err := dialV5As(t, w, "tab", "anna", token(), AuthMethodToken)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	second, err := dialV5As(t, w, "tab", "anna", token(), AuthMethodToken)
+	if err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	first.expectDisconnect(t, 0x8E)
+	// Let the replaced connection finish disconnecting on the node.
+	time.Sleep(300 * time.Millisecond)
+
+	if _, err := w.ver.BackchannelLogout(w.iss.Logout("sid-a", "anna")); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	second.expectDisconnect(t, 0x98)
+}
+
+// Connections that authenticate while a logout of their login arrives are all
+// ended: none slips in between its token check and the kick.
+func TestHumanBackchannelLogoutRacingConnects(t *testing.T) {
+	w := newHumanWorld(t)
+	const n = 24
+	sessions := make(chan *v5Session, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			s, err := dialV5(t, w, "anna", w.iss.MintOpt(tokentest.MintOpts{Sub: "anna", Sid: "sid-r"}), AuthMethodToken)
+			if err == nil {
+				sessions <- s
+			}
+		}()
+	}
+	close(start)
+	time.Sleep(2 * time.Millisecond)
+	if _, err := w.ver.BackchannelLogout(w.iss.Logout("sid-r", "anna")); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	wg.Wait()
+	close(sessions)
+	for s := range sessions {
+		s.expectDisconnect(t, 0x98)
 	}
 }
