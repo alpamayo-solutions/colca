@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/alpamayo-solutions/colca/compare/v0.15.0...v0.16.0) (2026-09-25)
+
+
+### Features
+
+* **contracts:** _AlarmSilence per element and alarm type, retention on findings and alarms ([#79](https://github.com/alpamayo-solutions/colca/issues/79)) ([ca80f52](https://github.com/alpamayo-solutions/colca/commit/ca80f52e3c8207bf2d4fa217c47f54013c9a190e))
+
 ## [0.15.0](https://github.com/alpamayo-solutions/colca/compare/v0.14.1...v0.15.0) (2026-09-25)
 
 
