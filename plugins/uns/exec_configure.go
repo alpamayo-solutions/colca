@@ -1,6 +1,7 @@
 package uns
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -170,10 +171,14 @@ type upsertBody struct {
 }
 
 // constantRef is one typed authored value and its position. Constants are not
-// signals: they have no acquisition binding or metric topic.
+// signals: they have no acquisition binding or metric topic. Expected, when
+// given, is the value the writer read: the write goes through only while the
+// node still holds that value, so two writers that read the same value cannot
+// both succeed.
 type constantRef struct {
 	Path     string          `json:"path"`
 	Constant json.RawMessage `json:"constant"`
+	Expected json.RawMessage `json:"expected,omitempty"`
 }
 
 type constantUpsertBody struct {
@@ -487,16 +492,24 @@ func (c *ConfigExec) constantUpsert(ctx CommandContext, payload []byte) (int, st
 			return 422, fmt.Sprintf("constant/upsert: entry %d repeats path %s", i, ref.Path), "invalid", nil
 		}
 		seen[topic] = true
-		if existing, ok := c.store.KVGet(topic); ok {
-			held, err := validateConstantPayload(existing)
-			if err != nil || held.ID != incoming.ID {
-				heldID := held.ID
+		existing, held := c.store.KVGet(topic)
+		if held {
+			record, err := validateConstantPayload(existing)
+			if err != nil || record.ID != incoming.ID {
+				heldID := record.ID
 				if heldID == "" {
 					heldID = "an unreadable retained record"
 				}
 				return 409, fmt.Sprintf("constant/upsert: %s is already constant %s — two constants "+
 					"cannot share one position", ref.Path, heldID), "conflict", nil
 			}
+			if len(ref.Expected) > 0 && !sameJSON(record.Value, ref.Expected) {
+				return 409, fmt.Sprintf("constant/upsert: %s holds %s, not the expected %s",
+					ref.Path, record.Value, ref.Expected), "conflict", nil
+			}
+		} else if len(ref.Expected) > 0 {
+			return 409, fmt.Sprintf("constant/upsert: %s holds no constant, expected %s",
+				ref.Path, ref.Expected), "conflict", nil
 		}
 		left, refusal := claims.claim(incoming.ID, ref.Path)
 		if refusal != "" {
@@ -515,6 +528,63 @@ func (c *ConfigExec) constantUpsert(ctx CommandContext, payload []byte) (int, st
 		return 422, "constant/upsert: rejected: " + err.Error(), "invalid", nil
 	}
 	return 200, fmt.Sprintf("upserted %d", upserted), "ok", writes
+}
+
+// sameJSON reports whether two JSON values are equal, numbers by value, so
+// 0.5 and 5e-1 match and int64 values compare without float rounding.
+func sameJSON(a, b json.RawMessage) bool {
+	decode := func(raw json.RawMessage) (any, bool) {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var v any
+		return v, decoder.Decode(&v) == nil
+	}
+	x, okX := decode(a)
+	y, okY := decode(b)
+	return okX && okY && equalJSON(x, y)
+}
+
+func equalJSON(x, y any) bool {
+	switch x := x.(type) {
+	case json.Number:
+		n, ok := y.(json.Number)
+		if !ok {
+			return false
+		}
+		i, errI := x.Int64()
+		j, errJ := n.Int64()
+		if errI == nil && errJ == nil {
+			return i == j
+		}
+		f, errX := x.Float64()
+		g, errY := n.Float64()
+		return errX == nil && errY == nil && f == g
+	case map[string]any:
+		m, ok := y.(map[string]any)
+		if !ok || len(m) != len(x) {
+			return false
+		}
+		for k, v := range x {
+			w, ok := m[k]
+			if !ok || !equalJSON(v, w) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		l, ok := y.([]any)
+		if !ok || len(l) != len(x) {
+			return false
+		}
+		for i := range x {
+			if !equalJSON(x[i], l[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return x == y
+	}
 }
 
 func (c *ConfigExec) constantDelete(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
