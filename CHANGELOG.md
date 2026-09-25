@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.14.0](https://github.com/alpamayo-solutions/colca/compare/v0.13.2...v0.14.0) (2026-09-25)
+
+
+### Features
+
+* **auth:** renew a person's token on the open connection, end sessions on logout ([#73](https://github.com/alpamayo-solutions/colca/issues/73)) ([3e3f6fa](https://github.com/alpamayo-solutions/colca/commit/3e3f6fadf043dc693e61e5e9d4b4c1c88aa66df7))
+* **uns:** write a constant only while it holds the writer's expected value ([#72](https://github.com/alpamayo-solutions/colca/issues/72)) ([c1f8aec](https://github.com/alpamayo-solutions/colca/commit/c1f8aeca66aa986d4fae784d96550b8dad059263))
+
+
+### Fixes
+
+* **clients:** end a renewed live connection with a DISCONNECT ([#70](https://github.com/alpamayo-solutions/colca/issues/70)) ([7e49170](https://github.com/alpamayo-solutions/colca/commit/7e491706641cff536b4356718103d47dab774c61))
+* **historian:** report its status in _ServiceDetails ([#69](https://github.com/alpamayo-solutions/colca/issues/69)) ([0bb38ea](https://github.com/alpamayo-solutions/colca/commit/0bb38ea96a581c397957b0c3eb95c8af011f40ab))
+
 ## [0.13.2](https://github.com/alpamayo-solutions/colca/compare/v0.13.1...v0.13.2) (2026-09-24)
 
 
