@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.3](https://github.com/alpamayo-solutions/colca/compare/v0.17.2...v0.17.3) (2026-09-25)
+
+
+### Fixes
+
+* **mqtt:** guard the takeover test hook's held client with a mutex ([#87](https://github.com/alpamayo-solutions/colca/issues/87)) ([dafd45e](https://github.com/alpamayo-solutions/colca/commit/dafd45ebe08b270d1177a45aabbc25e0a12ca01e))
+
 ## [0.17.2](https://github.com/alpamayo-solutions/colca/compare/v0.17.1...v0.17.2) (2026-09-25)
 
 
