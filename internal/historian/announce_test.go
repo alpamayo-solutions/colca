@@ -89,7 +89,7 @@ func TestAnnouncerDeclaresTheHistorianACoreService(t *testing.T) {
 	client := &door.Client{BaseURL: "http://" + n.LocalAPIAddr, Service: "historian"}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go (&Announcer{Door: client, MQTTURL: "tcp://" + n.MQTTLocalAddr}).Run(ctx)
+	go (&Announcer{Door: client, MQTTURL: "tcp://" + n.MQTTLocalAddr, Version: "0.17.2"}).Run(ctx)
 
 	waitActive(t, client, true)
 	entries, err := client.KV(context.Background(), "", "_ServiceDetails")
@@ -104,6 +104,9 @@ func TestAnnouncerDeclaresTheHistorianACoreService(t *testing.T) {
 		if d.Name == "historian" {
 			if got := d.Metadata["app_class"]; got != "core" {
 				t.Fatalf("metadata.app_class = %v, want core", got)
+			}
+			if got := d.Metadata["version"]; got != "0.17.2" {
+				t.Fatalf("metadata.version = %v, want 0.17.2", got)
 			}
 			return
 		}

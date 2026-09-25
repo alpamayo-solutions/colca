@@ -33,6 +33,7 @@ const (
 type Announcer struct {
 	Door    *door.Client // resolves the identity through /self
 	MQTTURL string       // the local MQTT door, e.g. tcp://colca:1883
+	Version string       // the release, announced as metadata.version; empty announces none
 	Log     *slog.Logger
 
 	// Dial replaces the network dial; tests use it to cut the connection.
@@ -214,6 +215,10 @@ func (a *Announcer) resolve(ctx context.Context) (door.Self, bool) {
 // app_class "core" marks it as the node's own service, not an app.
 func (a *Announcer) record(self door.Self) (serviceDetails, string) {
 	context := uns.ServiceContext(self.Mount, self.Name)
+	metadata := map[string]any{"consumer": Consumer, "app_class": "core"}
+	if a.Version != "" {
+		metadata["version"] = a.Version
+	}
 	details := serviceDetails{
 		ID:                   self.ULID,
 		Name:                 self.Name,
@@ -224,7 +229,7 @@ func (a *Announcer) record(self door.Self) (serviceDetails, string) {
 		SystemElementID:      self.Element,
 		Hierarchy:            context,
 		IsActive:             true,
-		Metadata:             map[string]any{"consumer": Consumer, "app_class": "core"},
+		Metadata:             metadata,
 		ArchitectureMetadata: map[string]any{},
 		HealthMetrics:        []map[string]any{},
 	}

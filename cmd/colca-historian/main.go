@@ -37,6 +37,9 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
+// version is set by release builds with -ldflags "-X main.version=...".
+var version string
+
 type config struct {
 	colcaURL      string
 	colcaService  string
@@ -154,6 +157,7 @@ func run() int {
 	announcer := &historian.Announcer{
 		Door:    &door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService},
 		MQTTURL: cfg.colcaMQTTURL,
+		Version: version,
 		Log:     log,
 	}
 	bridge.Health = announcer.Report
