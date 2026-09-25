@@ -368,6 +368,19 @@ describe("keeping the connection", () => {
     expect(rounds).toBe(2);
   });
 
+  it("drops a connection that is still being set up when closed, and disconnects one that is up", async () => {
+    const opening = setup();
+    await settle();
+    opening.live.close();
+    expect(opening.clients[0].endedForce).toBe(true);
+
+    const online = setup();
+    await settle();
+    online.clients[0].emit("connect");
+    online.live.close();
+    expect(online.clients[0].endedForce).toBe(false);
+  });
+
   it("stops for good when closed", async () => {
     const { live, clients } = setup();
     await settle();
