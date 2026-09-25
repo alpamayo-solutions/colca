@@ -4,7 +4,8 @@
  * the value is JSON; `colca_data_contracts.catalog` holds the rules and the JSON Schema.
  */
 
-/** Who wrote a record or a field: an external system's key, or `manual` for a person. */
+/** Who wrote a record or a field: an external system's key, `manual` for a person, `default` for
+ * a placeholder. */
 export interface CatalogProvenance {
   source: string;
   set_by?: string | null;
@@ -31,7 +32,7 @@ export interface CatalogProduct {
   /** Whatever the plant keeps beyond the standard fields. */
   attributes?: Record<string, unknown>;
   provenance?: CatalogProvenance;
-  /** The fields someone other than `provenance.source` set, and who. */
+  /** Placeholders (`default`) and fields someone other than `provenance.source` set. */
   field_provenance?: Partial<Record<CatalogProductField, CatalogProvenance>>;
 }
 

@@ -69,9 +69,12 @@ plus `PRODUCT_SCHEMA` and `RECIPE_SCHEMA`), and `CatalogProduct` and
   changes one record.
 - Anything beyond the standard fields goes in `attributes`; an unknown top-level
   field is refused.
-- `provenance` is the record's writer. `field_provenance` names the fields
-  someone else set on top of it, such as a density entered by hand. A writer
-  that replaces the whole record keeps those fields.
+- `provenance` is the record's writer. `field_provenance` names the fields that
+  are not simply its: a placeholder marked `default`, and a value someone else
+  set, such as a density entered by hand (`manual`).
+- What the writer supplies wins. A hand entry fills only a field the writer
+  leaves empty or gives a default for; a re-sync restores a supplied value and
+  keeps a hand entry over a default.
 
 ## Golden vectors
 

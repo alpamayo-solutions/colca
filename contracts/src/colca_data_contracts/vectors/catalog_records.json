@@ -20,6 +20,7 @@
         }
       },
       {"sku": "BARE"},
+      {"sku": "PLACEHOLDER", "density_kg_m3": 750, "field_provenance": {"density_kg_m3": {"source": "default"}}},
       {"sku": "NO-DATA", "name": null, "thickness_mm": null, "final_grit": null, "recipe_id": null}
     ],
     "invalid": [

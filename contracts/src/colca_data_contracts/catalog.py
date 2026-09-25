@@ -10,9 +10,11 @@ A product names its recipe by ``recipe_id`` instead of carrying it: many product
 share one recipe, and editing that recipe then changes one record.
 
 ``provenance`` says who wrote the record. ``field_provenance`` names the fields
-someone else set on top of it, typically a value entered by hand where the
-upstream system has none or a wrong one. Whoever writes the whole record again
-keeps those fields, so a re-sync does not undo a hand entry.
+that are not simply the writer's: a placeholder the writer marks ``default``
+(a typical value until the real one is known), and a value someone else set,
+such as a density entered by hand. What the writer supplies wins: a hand entry
+fills only a field the writer leaves empty or gives a default for, and a
+re-sync restores a supplied value but keeps a hand entry over a default.
 
 `PRODUCT_SCHEMA` and `RECIPE_SCHEMA` state the same rules as JSON Schema for
 consumers that are not written in Python.
@@ -49,7 +51,8 @@ def _key(value: Any, name: str) -> str:
 @dataclass(frozen=True)
 class Provenance:
     """Who wrote a record or a field. ``source`` is the writer: an external
-    system's key for a connector, ``manual`` for a person."""
+    system's key for a connector, ``manual`` for a person, ``default`` for a
+    placeholder."""
 
     source: str
     set_by: str | None = None
