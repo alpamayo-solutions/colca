@@ -112,3 +112,80 @@ func TestAnnouncerLastWillMarksACrashedServiceInactive(t *testing.T) {
 	mu.Unlock()
 	waitActive(t, client, false)
 }
+
+// serviceStatus reads architecture_metadata.status and detail from the
+// historian's _ServiceDetails.
+func serviceStatus(t *testing.T, client *door.Client) (status, detail string) {
+	t.Helper()
+	entries, err := client.KV(context.Background(), "", "_ServiceDetails")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		var d serviceDetails
+		if err := json.Unmarshal(e.Payload, &d); err != nil {
+			t.Fatal(err)
+		}
+		if d.Name == "historian" {
+			status, _ = d.ArchitectureMetadata["status"].(string)
+			detail, _ = d.ArchitectureMetadata["detail"].(string)
+			return status, detail
+		}
+	}
+	return "", ""
+}
+
+func waitStatus(t *testing.T, client *door.Client, want, wantDetail string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var status, detail string
+	for time.Now().Before(deadline) {
+		if status, detail = serviceStatus(t, client); status == want && detail == wantDetail {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("historian status = %q (%q), want %q (%q)", status, detail, want, wantDetail)
+}
+
+func TestAnnouncerPublishesItsStatusOnChangeOnly(t *testing.T) {
+	n := startLocalNode(t)
+	client := &door.Client{BaseURL: "http://" + n.LocalAPIAddr, Service: "historian"}
+	a := &Announcer{Door: client, MQTTURL: "tcp://" + n.MQTTLocalAddr}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.Run(ctx)
+	}()
+
+	waitStatus(t, client, StatusStarting, "")
+	a.Report(true, "")
+	waitStatus(t, client, StatusHealthy, "")
+	a.Report(false, "database unreachable")
+	waitStatus(t, client, StatusUnhealthy, "database unreachable")
+	a.Report(true, "")
+	waitStatus(t, client, StatusHealthy, "")
+
+	cancel()
+	<-done
+	waitActive(t, client, false)
+	waitStatus(t, client, StatusHealthy, "") // a clean stop keeps the last status
+}
+
+func TestAnnouncerRepeatedStatusIsNotRepublished(t *testing.T) {
+	n := startLocalNode(t)
+	client := &door.Client{BaseURL: "http://" + n.LocalAPIAddr, Service: "historian"}
+	a := &Announcer{Door: client, MQTTURL: "tcp://" + n.MQTTLocalAddr}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.Run(ctx)
+
+	a.Report(false, "first reason")
+	waitStatus(t, client, StatusUnhealthy, "first reason")
+	a.Report(false, "second reason")
+	time.Sleep(500 * time.Millisecond)
+	if status, detail := serviceStatus(t, client); status != StatusUnhealthy || detail != "first reason" {
+		t.Fatalf("a repeated status was republished: %q (%q)", status, detail)
+	}
+}

@@ -156,6 +156,7 @@ func run() int {
 		MQTTURL: cfg.colcaMQTTURL,
 		Log:     log,
 	}
+	bridge.Health = announcer.Report
 	announced := make(chan struct{})
 	go func() {
 		defer close(announced)

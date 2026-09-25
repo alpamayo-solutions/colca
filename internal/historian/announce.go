@@ -8,12 +8,21 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
+)
+
+// Service statuses as a health view reads them from
+// architecture_metadata.status.
+const (
+	StatusStarting  = "starting"
+	StatusHealthy   = "healthy"
+	StatusUnhealthy = "unhealthy"
 )
 
 // Announcer keeps this service's retained _ServiceDetails current over the
@@ -28,6 +37,13 @@ type Announcer struct {
 
 	// Dial replaces the network dial; tests use it to cut the connection.
 	Dial func(ctx context.Context, addr string) (net.Conn, error)
+
+	mu      sync.Mutex
+	status  string
+	detail  string
+	details *serviceDetails // nil until the identity is resolved
+	topic   string
+	client  pahomqtt.Client
 }
 
 type serviceDetails struct {
@@ -60,7 +76,14 @@ func (a *Announcer) Run(ctx context.Context) {
 	if !ok {
 		return
 	}
-	up, down, topic, err := a.records(self)
+	details, topic := a.record(self)
+	a.mu.Lock()
+	a.details, a.topic = &details, topic
+	a.mu.Unlock()
+	// The will is fixed at connect time: a process that dies unannounced is down.
+	details.IsActive = false
+	details.ArchitectureMetadata = map[string]any{"status": StatusUnhealthy}
+	down, err := json.Marshal(details)
 	if err != nil {
 		a.logger().Error("cannot build the service record", "err", err)
 		return
@@ -78,10 +101,7 @@ func (a *Announcer) Run(ctx context.Context) {
 		SetBinaryWill(topic, down, 1, true).
 		SetOnConnectHandler(func(c pahomqtt.Client) {
 			// A reconnect follows a drop, after which the will said inactive.
-			tok := c.Publish(topic, 1, true, up)
-			if tok.WaitTimeout(10*time.Second) && tok.Error() != nil {
-				a.logger().Warn("could not publish the service record", "topic", topic, "err", tok.Error())
-			}
+			a.publish(c, true)
 		}).
 		SetConnectionLostHandler(func(_ pahomqtt.Client, err error) {
 			a.logger().Warn("local MQTT connection lost, reconnecting", "err", err)
@@ -94,15 +114,85 @@ func (a *Announcer) Run(ctx context.Context) {
 	}
 
 	client := pahomqtt.NewClient(opts)
+	a.mu.Lock()
+	a.client = client
+	a.mu.Unlock()
 	client.Connect()
 
 	<-ctx.Done()
+	a.mu.Lock()
+	a.client = nil
+	a.mu.Unlock()
 	if client.IsConnectionOpen() {
 		// A clean DISCONNECT does not send the will, so say it ourselves.
-		tok := client.Publish(topic, 1, true, down)
-		tok.WaitTimeout(5 * time.Second)
+		a.publish(client, false)
 	}
 	client.Disconnect(250)
+}
+
+// Report sets the status the record carries: healthy, or unhealthy with the
+// reason. Only a change of status is published; a repeat of the same status
+// is not, and its detail stays the one that came with the change.
+func (a *Announcer) Report(ok bool, detail string) {
+	status := StatusHealthy
+	if !ok {
+		status = StatusUnhealthy
+	} else {
+		detail = ""
+	}
+	a.mu.Lock()
+	if a.current() == status {
+		a.mu.Unlock()
+		return
+	}
+	a.status, a.detail = status, detail
+	client := a.client
+	a.mu.Unlock()
+	if status == StatusUnhealthy {
+		a.logger().Warn("reporting the historian unhealthy", "detail", detail)
+	} else {
+		a.logger().Info("reporting the historian healthy")
+	}
+	if client != nil && client.IsConnectionOpen() {
+		a.publish(client, true)
+	}
+}
+
+// current is the status to publish; the caller holds mu.
+func (a *Announcer) current() string {
+	if a.status == "" {
+		return StatusStarting
+	}
+	return a.status
+}
+
+// publish writes the record with the current status. The payload is built and
+// handed to the client under mu, so two publishes leave in the order their
+// statuses were set.
+func (a *Announcer) publish(c pahomqtt.Client, active bool) {
+	a.mu.Lock()
+	if a.details == nil {
+		a.mu.Unlock()
+		return
+	}
+	details := *a.details
+	details.IsActive = active
+	details.ArchitectureMetadata = map[string]any{"status": a.current()}
+	if a.detail != "" {
+		details.ArchitectureMetadata["detail"] = a.detail
+	}
+	topic := a.topic
+	payload, err := json.Marshal(details)
+	if err != nil {
+		a.mu.Unlock()
+		a.logger().Error("cannot build the service record", "err", err)
+		return
+	}
+	tok := c.Publish(topic, 1, true, payload)
+	a.mu.Unlock()
+	if tok.WaitTimeout(10*time.Second) && tok.Error() != nil {
+		a.logger().Warn("could not publish the service record", "topic", topic, "err", tok.Error())
+	}
 }
 
 func (a *Announcer) resolve(ctx context.Context) (door.Self, bool) {
@@ -120,8 +210,8 @@ func (a *Announcer) resolve(ctx context.Context) (door.Self, bool) {
 	}
 }
 
-// records returns the active and inactive payloads and their topic.
-func (a *Announcer) records(self door.Self) (up, down []byte, topic string, err error) {
+// record returns the service record without its status, and its topic.
+func (a *Announcer) record(self door.Self) (serviceDetails, string) {
 	context := uns.ServiceContext(self.Mount, self.Name)
 	details := serviceDetails{
 		ID:                   self.ULID,
@@ -137,13 +227,6 @@ func (a *Announcer) records(self door.Self) (up, down []byte, topic string, err 
 		ArchitectureMetadata: map[string]any{},
 		HealthMetrics:        []map[string]any{},
 	}
-	if up, err = json.Marshal(details); err != nil {
-		return nil, nil, "", err
-	}
-	details.IsActive = false
-	if down, err = json.Marshal(details); err != nil {
-		return nil, nil, "", err
-	}
-	topic = fmt.Sprintf("%s_ServiceDetails/%s/%s/_service", uns.Prefix(), self.Node, strings.Join(context, "/"))
-	return up, down, topic, nil
+	topic := fmt.Sprintf("%s_ServiceDetails/%s/%s/_service", uns.Prefix(), self.Node, strings.Join(context, "/"))
+	return details, topic
 }
