@@ -190,6 +190,8 @@ export class Live {
   readonly #resubscribeListeners = new Set<() => void>();
   #state: LiveState = "connecting";
   #client: MqttLike | undefined;
+  /** The connection a renewal replaces, kept until the new one has its subscriptions. */
+  #retiring: MqttLike | undefined;
   #generation = 0;
   #attempt = 0;
   #renewTimer: ReturnType<typeof setTimeout> | undefined;
@@ -226,13 +228,13 @@ export class Live {
       this.#filters.set(filter, listeners);
       this.#qos.set(filter, qos);
       // Offline, the filter goes out with the others once the connection is up.
-      if (this.#state === "online") this.#subscribe([filter]);
+      if (this.#state === "online") void this.#subscribe([filter]);
     } else {
       listeners.add(own);
       if (qos > (this.#qos.get(filter) ?? 0)) {
         // Subscribing again replaces the node's subscription with the stronger one.
         this.#qos.set(filter, qos);
-        if (this.#state === "online") this.#subscribe([filter]);
+        if (this.#state === "online") void this.#subscribe([filter]);
       }
       // The node sends retained values once per subscription, and this filter's
       // went to whoever subscribed first. The newcomer gets them from here.
@@ -371,6 +373,7 @@ export class Live {
     clearTimeout(this.#retryTimer);
     this.#client?.end();
     this.#client = undefined;
+    this.#retire();
     this.#filters.clear();
     this.#qos.clear();
     this.#values.clear();
@@ -438,12 +441,15 @@ export class Live {
       this.#setState("online");
       this.#retainedSent.clear();
       this.#granted.clear();
-      this.#subscribe([...this.#filters.keys()]);
+      void this.#subscribe([...this.#filters.keys()]).then(() => {
+        if (current()) this.#retire();
+      });
       for (const listener of this.#resubscribeListeners) listener();
       this.#scheduleRenewal(expiresAt);
     });
     client.on("message", (topic, payload, packet) => {
-      if (current()) this.#receive(topic, payload, packet.retain);
+      // The connection being renewed away from goes on delivering until it is ended.
+      if (current() || client === this.#retiring) this.#receive(topic, payload, packet.retain);
     });
     client.on("error", (error) => {
       if (current()) this.#report(error);
@@ -455,14 +461,25 @@ export class Live {
     });
   }
 
-  /** End the connection in hand and open the next one. */
-  #replace(token?: string): void {
+  /**
+   * Open the next connection. A renewal keeps the one in hand until the next one
+   * has its subscriptions, so no value falls between them; anything else ends it.
+   */
+  #replace(token?: string, renewal = false): void {
     clearTimeout(this.#renewTimer);
     this.#renewTimer = undefined;
     this.#generation += 1;
-    this.#client?.end(true);
+    this.#retire();
+    if (renewal) this.#retiring = this.#client;
+    else this.#client?.end(true);
     this.#client = undefined;
     void this.#open(token);
+  }
+
+  /** End a renewed connection with a DISCONNECT, so the node does not log a dropped one. */
+  #retire(): void {
+    this.#retiring?.end(false);
+    this.#retiring = undefined;
   }
 
   #retry(): void {
@@ -510,7 +527,7 @@ export class Live {
 
     const exp = token === undefined ? undefined : readClaims(token)?.exp;
     if (token !== undefined && (exp === undefined || exp * 1000 > expiresAt)) {
-      this.#replace(token);
+      this.#replace(token, true);
       return;
     }
     // Ask again shortly; once the token has run out, the node ends the session and
@@ -522,12 +539,19 @@ export class Live {
     }, MIN_RENEW_MS);
   }
 
-  #subscribe(filters: string[]): void {
+  /** Settles once the node has answered every subscription, granted or not. */
+  #subscribe(filters: string[]): Promise<void> {
     const generation = this.#generation;
+    const answers: Promise<void>[] = [];
     for (const qos of [0, 1] as const) {
       const group = filters.filter((filter) => (this.#qos.get(filter) ?? 0) === qos);
       if (group.length === 0) continue;
-      this.#client?.subscribe(group, { qos }, (error, granted) => {
+      const client = this.#client;
+      if (client === undefined) continue;
+      let answered!: () => void;
+      answers.push(new Promise((resolve) => (answered = resolve)));
+      client.subscribe(group, { qos }, (error, granted) => {
+        answered();
         if (generation !== this.#generation) return;
         if (error) {
           this.#report(error);
@@ -545,6 +569,7 @@ export class Live {
         }
       });
     }
+    return Promise.all(answers).then(() => undefined);
   }
 
   #whenGranted(filter: string): Promise<void> {

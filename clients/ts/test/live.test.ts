@@ -209,7 +209,6 @@ describe("keeping the connection", () => {
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(clients).toHaveLength(2);
-    expect(clients[0].ended).toBe(true);
     expect(clients[1].options.password).toBe(tokens[1]);
     expect(clients[1].options.clientId).not.toBe(clients[0].options.clientId);
 
@@ -217,6 +216,55 @@ describe("keeping the connection", () => {
     expect(clients[1].subscribed).toEqual([T]);
     // A planned renewal is not an outage.
     expect(states).toEqual([]);
+  });
+
+  it("ends the renewed connection with a DISCONNECT once the new one has its subscriptions", async () => {
+    const { live, clients } = setup();
+    const seen: unknown[] = [];
+    live.subscribe(T, (value) => seen.push(value.payload));
+    await settle();
+    clients[0].emit("connect");
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    expect(clients).toHaveLength(2);
+    // Until the new connection is up, the old one still carries the values.
+    expect(clients[0].ended).toBe(false);
+    clients[0].deliver(T, { value: 1 });
+
+    clients[1].holdSubacks = true;
+    clients[1].emit("connect");
+    await settle();
+    expect(clients[0].ended).toBe(false);
+    clients[0].deliver(T, { value: 2 });
+
+    clients[1].grant();
+    await settle();
+    expect(clients[0].ended).toBe(true);
+    expect(clients[0].endedForce).toBe(false);
+
+    // From here only the new connection counts.
+    clients[0].deliver(T, { value: "late" });
+    clients[0].emit("close");
+    clients[1].deliver(T, { value: 3 });
+    expect(seen).toEqual([{ value: 1 }, { value: 2 }, { value: 3 }]);
+    expect(live.state).toBe("online");
+  });
+
+  it("ends the renewed connection when the new one fails and a retry takes over", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { live, clients } = setup();
+    live.subscribe(T, () => undefined);
+    await settle();
+    clients[0].emit("connect");
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    clients[1].emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(clients).toHaveLength(3);
+    expect(clients[0].endedForce).toBe(false);
+    clients[2].emit("connect");
+    expect(live.state).toBe("online");
   });
 
   it("keeps the connection while the token on offer is no newer than the one in use", async () => {
@@ -248,19 +296,23 @@ describe("keeping the connection", () => {
     expect(clients[1].options.password).toBe(fresh);
   });
 
-  it("ignores what the replaced connection still says", async () => {
+  it("ignores what a connection dropped for a retry still says", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
     const { live, clients } = setup();
     await settle();
     clients[0].emit("connect");
     const seen: unknown[] = [];
     live.subscribe(T, (value) => seen.push(value.payload));
 
-    await vi.advanceTimersByTimeAsync(270_000);
+    clients[0].emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(clients).toHaveLength(2);
+    expect(clients[0].endedForce).toBe(true);
     clients[0].deliver(T, { value: "late" });
     clients[0].emit("close");
 
     expect(seen).toEqual([]);
-    expect(live.state).toBe("online");
+    expect(live.state).toBe("connecting");
   });
 
   it("waits longer after each failed attempt, with a fresh token every time", async () => {
