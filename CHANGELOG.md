@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/alpamayo-solutions/colca/compare/v0.14.0...v0.14.1) (2026-09-25)
+
+
+### Fixes
+
+* **clock:** allow mounted local workers to read coordination records ([#74](https://github.com/alpamayo-solutions/colca/issues/74)) ([d46d81c](https://github.com/alpamayo-solutions/colca/commit/d46d81c2be6352c5c2bdc551bbbec2cf43a633e8))
+
 ## [0.14.0](https://github.com/alpamayo-solutions/colca/compare/v0.13.2...v0.14.0) (2026-09-25)
 
 
