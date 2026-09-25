@@ -1,0 +1,62 @@
+{
+  "products": {
+    "valid": [
+      {
+        "sku": "AMALQ301H6",
+        "name": "MDF 18 mm · 4100 × 2070",
+        "substrate": "MDF",
+        "thickness_mm": 18.7,
+        "length_mm": 4100,
+        "width_mm": 2070,
+        "sandoff_mm": 0.7,
+        "density_kg_m3": 745,
+        "final_grit": 150,
+        "recipe_id": "recipe-60-80-100-120-150",
+        "is_default": true,
+        "attributes": {"sap_plant": "BSK1", "colour": null},
+        "provenance": {"source": "erp", "set_by": "sap-bridge", "set_at": "2026-09-25T08:00:00Z"},
+        "field_provenance": {
+          "density_kg_m3": {"source": "manual", "set_by": "Admin A", "set_at": "2026-09-25T09:12:00Z"}
+        }
+      },
+      {"sku": "BARE"},
+      {"sku": "NO-DATA", "name": null, "thickness_mm": null, "final_grit": null, "recipe_id": null}
+    ],
+    "invalid": [
+      {"name": "no sku"},
+      {"sku": ""},
+      {"sku": "A/B"},
+      {"sku": "X", "densityKgM3": 745},
+      {"sku": "X", "thickness_mm": -1},
+      {"sku": "X", "thickness_mm": "18"},
+      {"sku": "X", "final_grit": 0},
+      {"sku": "X", "final_grit": 1.5},
+      {"sku": "X", "is_default": "yes"},
+      {"sku": "X", "attributes": []},
+      {"sku": "X", "provenance": {"set_by": "no source"}},
+      {"sku": "X", "field_provenance": {"density_kg_m3": {"source": ""}}},
+      {"sku": "X", "field_provenance": {"colour": {"source": "manual"}}}
+    ]
+  },
+  "recipes": {
+    "valid": [
+      {
+        "id": "recipe-60-80-100-120-150",
+        "name": "P60 · P80 · P100 · P120 · P150",
+        "is_default": true,
+        "grits": {"mas2/sta1/aggos": 60, "mas2/sta1/aggus": 60, "mas3/sta3/aggos": null},
+        "attributes": {},
+        "provenance": {"source": "erp"}
+      },
+      {"id": "empty"}
+    ],
+    "invalid": [
+      {"name": "no id"},
+      {"id": "x/y"},
+      {"id": "x", "grits": {"mas2/sta1/aggos": 0}},
+      {"id": "x", "grits": {"mas2/sta1/aggos": "P60"}},
+      {"id": "x", "grits": []},
+      {"id": "x", "steps": []}
+    ]
+  }
+}
