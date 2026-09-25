@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/alpamayo-solutions/colca/compare/v0.17.0...v0.17.1) (2026-09-25)
+
+
+### Fixes
+
+* **mqtt:** a replaced connection's last will no longer overwrites the new connection's state ([#83](https://github.com/alpamayo-solutions/colca/issues/83)) ([4050252](https://github.com/alpamayo-solutions/colca/commit/4050252abd23adc451c5aec3478bf55268ba822d))
+
 ## [0.17.0](https://github.com/alpamayo-solutions/colca/compare/v0.16.0...v0.17.0) (2026-09-25)
 
 
