@@ -15,6 +15,8 @@ export class FakeClient {
   /** Set to make the node refuse publishes. */
   refusePublish: Error | undefined;
   ended = false;
+  /** How it was ended: true drops the connection, false sends a DISCONNECT first. */
+  endedForce: boolean | undefined;
   readonly #handlers = new Map<string, Handler[]>();
   readonly #held: (() => void)[] = [];
 
@@ -59,8 +61,9 @@ export class FakeClient {
     callback?.(this.refusePublish);
   }
 
-  end(): void {
+  end(force = false): void {
     this.ended = true;
+    this.endedForce = force;
   }
 
   emit(event: string, ...args: unknown[]): void {
