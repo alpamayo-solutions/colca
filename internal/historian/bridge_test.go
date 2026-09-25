@@ -292,3 +292,36 @@ func TestCoordinatedHistoryDoesNotAckMalformedRowsOrGaps(t *testing.T) {
 		}
 	}
 }
+
+func TestRunReportsEachPassToHealth(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail error
+		ok   bool
+	}{
+		{"a pass that applies is healthy", nil, true},
+		{"a pass the store refuses is unhealthy with the reason", errors.New("database unreachable"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var gotOK bool
+			var gotDetail string
+			b := &Bridge{
+				Door:  &fakeDoor{pages: []door.Page{page(2, record(1, `{"value":1}`))}},
+				Store: &fakeStore{fail: tc.fail},
+				Health: func(ok bool, detail string) {
+					gotOK, gotDetail = ok, detail
+					cancel()
+				},
+			}
+			_ = b.Run(ctx)
+			if gotOK != tc.ok {
+				t.Fatalf("health ok = %v, want %v", gotOK, tc.ok)
+			}
+			if !tc.ok && gotDetail != tc.fail.Error() {
+				t.Fatalf("health detail = %q, want %q", gotDetail, tc.fail.Error())
+			}
+		})
+	}
+}

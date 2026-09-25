@@ -52,6 +52,10 @@ type Bridge struct {
 	FetchedAt  time.Time
 	Coordinate func(context.Context) (bool, error)
 
+	// Health, when set, hears after every pass whether it succeeded and, when
+	// not, why. It is called on every pass; the receiver decides what changed.
+	Health func(ok bool, detail string)
+
 	// gaps counts pruned ranges. The bridge keeps going: the records are gone and
 	// stopping would only add a blackout. Atomic because /metrics reads it from
 	// another goroutine.
@@ -229,6 +233,13 @@ func (b *Bridge) Run(ctx context.Context) error {
 		fetched, _, err := b.pass(ctx)
 		if err == nil && b.Coordinate != nil {
 			_, err = b.Coordinate(ctx)
+		}
+		if b.Health != nil {
+			if err != nil {
+				b.Health(false, err.Error())
+			} else {
+				b.Health(true, "")
+			}
 		}
 		pause := idle
 		switch {
