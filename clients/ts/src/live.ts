@@ -398,7 +398,9 @@ export class Live {
     this.#generation += 1;
     clearTimeout(this.#renewTimer);
     clearTimeout(this.#retryTimer);
-    this.#client?.end();
+    // A DISCONNECT only over a connection that is up: a half-open socket would
+    // wait for it and stay open.
+    this.#client?.end(this.#state !== "online");
     this.#client = undefined;
     this.#retire();
     this.#filters.clear();

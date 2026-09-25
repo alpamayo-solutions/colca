@@ -97,6 +97,13 @@ func (l *logouts) record(logout Logout, jtiKey string, jtiUntil, now time.Time) 
 	return slices.Clone(l.listeners), nil
 }
 
+// LoggedOut reports whether a logout now in force ended the session this token
+// belongs to. A door that stores a session after verifying its token asks again
+// once it is stored, so a logout arriving in between is not missed.
+func (v *Verifier) LoggedOut(t *Verified) bool {
+	return t.Credential == "oidc" && v.logouts.covers(t.SessionID, t.Sub, t.IssuedAt, time.Now())
+}
+
 // OnLogout registers fn to run after every accepted back-channel logout, for the
 // doors to end the sessions it covers.
 func (v *Verifier) OnLogout(fn func(Logout)) {

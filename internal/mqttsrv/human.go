@@ -28,6 +28,7 @@ const (
 
 // humanSession is one live token-authenticated session.
 type humanSession struct {
+	client           *mqtt.Client // the connection holding the session
 	entry            *uns.Entry
 	sub              string
 	username         string
@@ -63,10 +64,14 @@ func (h *humanSessions) get(clientID string) (humanSession, bool) {
 	return s, ok
 }
 
-func (h *humanSessions) drop(clientID string) int {
+// drop removes the session of this connection. A connection that took over the
+// client id owns the entry by then, and the replaced one's disconnect leaves it.
+func (h *humanSessions) drop(clientID string, cl *mqtt.Client) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.m, clientID)
+	if s, ok := h.m[clientID]; ok && s.client == cl {
+		delete(h.m, clientID)
+	}
 	return len(h.m)
 }
 
@@ -119,17 +124,26 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 		h.auditDenied("authenticate", metrics.AuthMethod, metrics.DoorMQTT, v.Entry, nil)
 		return false
 	}
-	n := h.humans.put(cl.ID, sessionFor(v))
+	n := h.humans.put(cl.ID, sessionFor(cl, v))
 	h.metrics.SetHumanSessions(n)
+	// A logout that arrived after the token check and before the put found no
+	// session to end; it is in force by now, so it is seen here.
+	if h.ver.LoggedOut(v) {
+		h.metrics.SetHumanSessions(h.humans.drop(cl.ID, cl))
+		h.log.Warn("human auth rejected", "user", user, "reason", tokenauth.ReasonLoggedOut)
+		h.metrics.AuthReject(metrics.DoorMQTT, tokenauth.ReasonLoggedOut)
+		h.auditDenied("authenticate", tokenauth.ReasonLoggedOut, metrics.DoorMQTT, v.Entry, nil)
+		return false
+	}
 	h.log.Debug("human authenticated", "sub", v.Sub, "username", v.Username,
 		"exp", v.Exp, "listener", cl.Net.Listener)
 	return true
 }
 
 // sessionFor is the session a verified token opens or renews.
-func sessionFor(v *tokenauth.Verified) humanSession {
+func sessionFor(cl *mqtt.Client, v *tokenauth.Verified) humanSession {
 	return humanSession{
-		entry: v.Entry, sub: v.Sub, username: v.Username, exp: v.Exp,
+		client: cl, entry: v.Entry, sub: v.Sub, username: v.Username, exp: v.Exp,
 		credential: v.Credential, credentialID: v.CredentialID,
 		credentialDigest: v.CredentialDigest,
 		sid:              v.SessionID, issuedAt: v.IssuedAt,
@@ -158,7 +172,7 @@ func (h *colcaHook) humanACL(cl *mqtt.Client, topic string) bool {
 // OnDisconnect drops the session table entry (nil-op for machine clients).
 func (h *colcaHook) OnDisconnect(cl *mqtt.Client, _ error, _ bool) {
 	if isHumanListener(cl) {
-		h.metrics.SetHumanSessions(h.humans.drop(cl.ID))
+		h.metrics.SetHumanSessions(h.humans.drop(cl.ID, cl))
 	}
 }
 
@@ -182,14 +196,12 @@ func (s *Server) sweepInvalidHumanSessions(now time.Time) {
 		default:
 			continue
 		}
-		if cl, ok := s.S.Clients.Get(id); ok {
-			_ = s.S.DisconnectClient(cl, packets.ErrNotAuthorized)
-			s.metrics.SessionKick()
-			s.hook.log.Info("human session invalid — kicked", "client", id, "reason", reason)
-		}
+		_ = s.S.DisconnectClient(session.client, packets.ErrNotAuthorized)
+		s.metrics.SessionKick()
+		s.hook.log.Info("human session invalid — kicked", "client", id, "reason", reason)
 		// The OnDisconnect hook removes the table entry; drop defensively in
 		// case the client vanished without a disconnect event.
-		s.hook.metrics.SetHumanSessions(s.hook.humans.drop(id))
+		s.hook.metrics.SetHumanSessions(s.hook.humans.drop(id, session.client))
 	}
 }
 
@@ -200,12 +212,12 @@ func (s *Server) endLoggedOutSessions(logout tokenauth.Logout) {
 		if session.credential != "oidc" || !logout.Ends(session.sid, session.sub, session.issuedAt) {
 			continue
 		}
-		if cl, ok := s.S.Clients.Get(id); ok {
-			_ = s.S.DisconnectClient(cl, packets.ErrAdministrativeAction)
-			s.metrics.SessionKick()
-			s.hook.log.Info("human session logged out — kicked", "client", id, "sub", session.sub)
-		}
-		s.hook.metrics.SetHumanSessions(s.hook.humans.drop(id))
+		// The session's own connection, not a lookup by id: one still completing
+		// its CONNECT is not in the broker's client list yet.
+		_ = s.S.DisconnectClient(session.client, packets.ErrAdministrativeAction)
+		s.metrics.SessionKick()
+		s.hook.log.Info("human session logged out — kicked", "client", id, "sub", session.sub)
+		s.hook.metrics.SetHumanSessions(s.hook.humans.drop(id, session.client))
 	}
 }
 

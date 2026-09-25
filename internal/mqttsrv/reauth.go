@@ -14,6 +14,7 @@ import (
 	"github.com/mochi-mqtt/server/v2/packets"
 
 	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/internal/tokenauth"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -64,7 +65,13 @@ func (h *colcaHook) OnAuthPacket(cl *mqtt.Client, pk packets.Packet) (packets.Pa
 		h.auditDenied("reauthenticate", metrics.AuthSubjectChanged, metrics.DoorMQTT, v.Entry, nil)
 		return pk, packets.ErrNotAuthorized
 	}
-	h.humans.put(cl.ID, sessionFor(v))
+	h.humans.put(cl.ID, sessionFor(cl, v))
+	if h.ver.LoggedOut(v) {
+		// A logout that ran between the check and the put; see authenticateHuman.
+		h.humans.put(cl.ID, current)
+		h.metrics.AuthReject(metrics.DoorMQTT, tokenauth.ReasonLoggedOut)
+		return pk, packets.ErrNotAuthorized
+	}
 	h.log.Debug("human re-authenticated", "sub", v.Sub, "exp", v.Exp, "listener", cl.Net.Listener)
 	err = cl.WritePacket(packets.Packet{
 		FixedHeader: packets.FixedHeader{Type: packets.Auth},
