@@ -11,7 +11,9 @@
  * - the last value of every topic, so a second subscriber to a topic gets it at
  *   once instead of waiting for the next change;
  * - a fresh token before the old one runs out — the node ends a session when
- *   its token expires — and every subscription sent again on the new connection;
+ *   its token expires. A node that renews tokens in place (MQTT 5
+ *   re-authentication) takes it on the open connection; with any other, the
+ *   client opens a new connection and sends every subscription again;
  * - growing, jittered waits between attempts after a drop, each with a fresh
  *   token;
  * - commands that wait for their acknowledgement.
@@ -105,6 +107,20 @@ export class CommandTimeout extends Error {
   }
 }
 
+/**
+ * The MQTT 5 authentication method under which a Colca node renews a token on
+ * an open connection. The node names it in the CONNACK when it can.
+ */
+const REAUTH_METHOD = "colca-token";
+
+/** How long a renewal on the open connection may take before the client reconnects instead. */
+const REAUTH_TIMEOUT_MS = 10_000;
+
+/** The part of a CONNACK this module reads. */
+export interface Connack {
+  properties?: { authenticationMethod?: string };
+}
+
 /** What is handed to the MQTT client for each connection. */
 export interface MqttConnectOptions {
   clientId: string;
@@ -116,12 +132,15 @@ export interface MqttConnectOptions {
   /** Zero: reconnecting is this module's job, because every attempt needs a fresh token. */
   reconnectPeriod: 0;
   connectTimeout: number;
+  /** Asks the node to renew tokens on this connection; the token itself stays the password. */
+  properties: { authenticationMethod: string; [property: string]: unknown };
   [option: string]: unknown;
 }
 
 /** The part of an MQTT client this module uses; mqtt.js's client fits. */
 export interface MqttLike {
-  on(event: "connect" | "close", listener: () => void): unknown;
+  on(event: "connect", listener: (connack?: Connack) => void): unknown;
+  on(event: "close", listener: () => void): unknown;
   on(event: "error", listener: (error: Error) => void): unknown;
   on(
     event: "message",
@@ -140,6 +159,12 @@ export interface MqttLike {
     callback?: (error?: Error) => void,
   ): unknown;
   end(force?: boolean): unknown;
+  /**
+   * Hand the node a new token on this connection (an MQTT 5 AUTH packet, reason
+   * 0x19). Resolves when the node accepted it. A node that refuses ends the
+   * connection. Without it, a renewal always reconnects.
+   */
+  reauthenticate?(token: string): Promise<void>;
 }
 
 export interface LiveOptions {
@@ -149,7 +174,7 @@ export interface LiveOptions {
   token: () => string | Promise<string>;
   /** The node requires the token's `sub` here, which is the default. Set it for a token that is not a JWT. */
   username?: string;
-  /** Reconnect with a new token this long before the current one expires. */
+  /** Renew the token this long before the current one expires. */
   renewBeforeMs?: number;
   /** The first wait after a failed attempt. It doubles up to `maxRetryMs`. */
   retryMs?: number;
@@ -196,6 +221,8 @@ export class Live {
   #attempt = 0;
   #renewTimer: ReturnType<typeof setTimeout> | undefined;
   #retryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The node said, in this connection's CONNACK, that it renews tokens in place. */
+  #renewsInPlace = false;
 
   constructor(options: LiveOptions) {
     this.#options = options;
@@ -359,7 +386,7 @@ export class Live {
    * Called once every subscription has gone out on a new connection, the first
    * one included — where the node's retained delivery starts over. A view that
    * has to notice what disappeared while the client was away reconciles from
-   * here; a planned renewal reaches it too, and says nothing about the state.
+   * here; a renewal that reconnects reaches it too, and says nothing about the state.
    */
   onResubscribe(listener: () => void): () => void {
     this.#resubscribeListeners.add(listener);
@@ -416,6 +443,10 @@ export class Live {
         keepalive: 30,
         reconnectPeriod: 0,
         connectTimeout: 10_000,
+        properties: {
+          ...(this.#options.mqttOptions?.properties as Record<string, unknown> | undefined),
+          authenticationMethod: REAUTH_METHOD,
+        },
       });
     } catch (error) {
       if (!current()) return;
@@ -435,9 +466,11 @@ export class Live {
     }
     this.#client = client;
 
-    client.on("connect", () => {
+    client.on("connect", (connack) => {
       if (!current()) return;
       this.#attempt = 0;
+      this.#renewsInPlace =
+        connack?.properties?.authenticationMethod === REAUTH_METHOD && client.reauthenticate !== undefined;
       this.#setState("online");
       this.#retainedSent.clear();
       this.#granted.clear();
@@ -511,9 +544,9 @@ export class Live {
   }
 
   /**
-   * Replace the connection only with a token that outlives it. An identity proxy
-   * can keep handing out the token it holds until its own refresh is due, and
-   * reconnecting with that one gains nothing and costs a gap in the values.
+   * Renew only with a token that outlives the one in use. An identity proxy can
+   * keep handing out the token it holds until its own refresh is due, and
+   * renewing with that one gains nothing.
    */
   async #renew(expiresAt: number): Promise<void> {
     const generation = this.#generation;
@@ -527,7 +560,8 @@ export class Live {
 
     const exp = token === undefined ? undefined : readClaims(token)?.exp;
     if (token !== undefined && (exp === undefined || exp * 1000 > expiresAt)) {
-      this.#replace(token, true);
+      if (this.#renewsInPlace) await this.#renewInPlace(token, exp);
+      else this.#replace(token, true);
       return;
     }
     // Ask again shortly; once the token has run out, the node ends the session and
@@ -537,6 +571,41 @@ export class Live {
       this.#renewTimer = undefined;
       void this.#renew(expiresAt);
     }, MIN_RENEW_MS);
+  }
+
+  /**
+   * Hand the new token to the node on the open connection, so nothing is
+   * subscribed again and no value is missed. When the node does not answer in
+   * time the client reconnects with the token instead; when it refuses, it ends
+   * the connection and the retry takes over.
+   */
+  async #renewInPlace(token: string, exp: number | undefined): Promise<void> {
+    const generation = this.#generation;
+    const client = this.#client;
+    if (client?.reauthenticate === undefined) {
+      this.#replace(token, true);
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        client.reauthenticate(token),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error("the node did not answer the token renewal"));
+          }, REAUTH_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (error) {
+      if (generation !== this.#generation || this.#state !== "online") return;
+      this.#report(error);
+      this.#replace(token, true);
+      return;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (generation !== this.#generation || this.#state === "closed") return;
+    this.#scheduleRenewal(exp === undefined ? undefined : exp * 1000);
   }
 
   /** Settles once the node has answered every subscription, granted or not. */
@@ -678,7 +747,64 @@ async function connectWithMqttJs(url: string, options: MqttConnectOptions): Prom
   // Node gets the CommonJS build, where connect is also a named export.
   const connect = mqtt.connect ?? mqtt.default?.connect;
   if (connect === undefined) throw new MissingMqtt("the mqtt package in use has no connect()");
-  return connect(url, options);
+  return withReauthentication(connect(url, options));
+}
+
+/** The parts of an mqtt.js client that its public API does not expose. */
+interface MqttJsInternals {
+  _sendPacket?: (packet: Record<string, unknown>, callback?: (error?: Error) => void) => void;
+  handleAuth?: (
+    packet: { reasonCode?: number },
+    callback: (error?: Error | null, packet?: unknown) => void,
+  ) => void;
+}
+
+/**
+ * Give an mqtt.js client `reauthenticate`. mqtt.js reads AUTH packets from the
+ * broker but has no call to send one, so this uses its packet writer, and it
+ * leaves the client as it is when that writer is missing.
+ */
+function withReauthentication(client: MqttLike): MqttLike {
+  const internals = client as MqttLike & MqttJsInternals;
+  const send = internals._sendPacket;
+  const handleAuth = internals.handleAuth;
+  if (typeof send !== "function" || typeof handleAuth !== "function") return client;
+
+  let waiting: { resolve: () => void; reject: (error: Error) => void } | undefined;
+  const settle = (error?: Error): void => {
+    const current = waiting;
+    waiting = undefined;
+    if (error) current?.reject(error);
+    else current?.resolve();
+  };
+  internals.handleAuth = (packet, callback) => {
+    // Reason 0: the node accepted the token. It never asks to continue.
+    if (packet.reasonCode === 0) settle();
+    handleAuth.call(client, packet, callback);
+  };
+  client.on("close", () => {
+    settle(new Error("the connection closed during the token renewal"));
+  });
+  internals.reauthenticate = (token: string) =>
+    new Promise<void>((resolve, reject) => {
+      if (waiting !== undefined) {
+        reject(new Error("a token renewal is already under way"));
+        return;
+      }
+      waiting = { resolve, reject };
+      send.call(
+        client,
+        {
+          cmd: "auth",
+          reasonCode: 0x19,
+          properties: { authenticationMethod: REAUTH_METHOD, authenticationData: token },
+        },
+        (error) => {
+          if (error) settle(error);
+        },
+      );
+    });
+  return client;
 }
 
 /** `sub` and `exp` from a JWT, without checking it — the node does that. */

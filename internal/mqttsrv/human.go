@@ -2,7 +2,9 @@
 // WebSocket (human-ws), with no client certificate. The CONNECT password carries a
 // JWT or PAT and the username must equal its sub. A session lasts as long as the
 // token: every delivery checks grants and expiry, and a sweeper kicks expired
-// sessions every 10 seconds.
+// sessions every 10 seconds. A client that connected with the authentication
+// method AuthMethodToken renews its token on the open connection (reauth.go), and
+// a back-channel logout from the identity provider ends the sessions it names.
 
 package mqttsrv
 
@@ -33,6 +35,8 @@ type humanSession struct {
 	credential       string
 	credentialID     string
 	credentialDigest string
+	sid              string    // the identity provider's session; empty for PATs
+	issuedAt         time.Time // of the token in force
 }
 
 // humanSessions is the session table keyed by MQTT client id. Client ids are
@@ -108,15 +112,28 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 		h.auditDenied("authenticate", metrics.AuthUsernameMismatch, metrics.DoorMQTT, v.Entry, nil)
 		return false
 	}
-	n := h.humans.put(cl.ID, humanSession{
-		entry: v.Entry, sub: v.Sub, username: v.Username, exp: v.Exp,
-		credential: v.Credential, credentialID: v.CredentialID,
-		credentialDigest: v.CredentialDigest,
-	})
+	if method := cl.Properties.Props.AuthenticationMethod; method != "" && method != AuthMethodToken {
+		// MQTT 5 requires refusing an authentication method the server does not know.
+		h.log.Warn("human auth rejected: unknown authentication method", "user", user, "method", method)
+		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthMethod)
+		h.auditDenied("authenticate", metrics.AuthMethod, metrics.DoorMQTT, v.Entry, nil)
+		return false
+	}
+	n := h.humans.put(cl.ID, sessionFor(v))
 	h.metrics.SetHumanSessions(n)
 	h.log.Debug("human authenticated", "sub", v.Sub, "username", v.Username,
 		"exp", v.Exp, "listener", cl.Net.Listener)
 	return true
+}
+
+// sessionFor is the session a verified token opens or renews.
+func sessionFor(v *tokenauth.Verified) humanSession {
+	return humanSession{
+		entry: v.Entry, sub: v.Sub, username: v.Username, exp: v.Exp,
+		credential: v.Credential, credentialID: v.CredentialID,
+		credentialDigest: v.CredentialDigest,
+		sid:              v.SessionID, issuedAt: v.IssuedAt,
+	}
 }
 
 // humanACL is the human branch of OnACLCheck: the session must exist and not be
@@ -172,6 +189,22 @@ func (s *Server) sweepInvalidHumanSessions(now time.Time) {
 		}
 		// The OnDisconnect hook removes the table entry; drop defensively in
 		// case the client vanished without a disconnect event.
+		s.hook.metrics.SetHumanSessions(s.hook.humans.drop(id))
+	}
+}
+
+// endLoggedOutSessions disconnects every token session a back-channel logout
+// covers. PAT sessions are not a login at the identity provider and stay.
+func (s *Server) endLoggedOutSessions(logout tokenauth.Logout) {
+	for id, session := range s.hook.humans.snapshot() {
+		if session.credential != "oidc" || !logout.Ends(session.sid, session.sub, session.issuedAt) {
+			continue
+		}
+		if cl, ok := s.S.Clients.Get(id); ok {
+			_ = s.S.DisconnectClient(cl, packets.ErrAdministrativeAction)
+			s.metrics.SessionKick()
+			s.hook.log.Info("human session logged out — kicked", "client", id, "sub", session.sub)
+		}
 		s.hook.metrics.SetHumanSessions(s.hook.humans.drop(id))
 	}
 }

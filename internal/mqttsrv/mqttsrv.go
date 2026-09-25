@@ -132,6 +132,8 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnSubscribed,
 		mqtt.OnPublishDropped,
 		mqtt.OnPacketProcessed,
+		mqtt.OnAuthPacket,
+		mqtt.OnPacketEncode,
 	}, b)
 }
 
@@ -584,6 +586,9 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	}
 	if srv.humanTCP != nil || srv.humanWS != nil {
 		go srv.runSweeper(srv.sweepStop)
+		if ver != nil {
+			ver.OnLogout(srv.endLoggedOutSessions)
+		}
 	}
 	return srv, nil
 }

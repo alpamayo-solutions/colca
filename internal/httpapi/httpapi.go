@@ -51,6 +51,9 @@ func rawPayload(payload []byte) json.RawMessage {
 	return json.RawMessage(payload)
 }
 
+// maxLogoutBody bounds a back-channel logout request: one signed JWT in a form.
+const maxLogoutBody = 64 << 10
+
 // defaultMax / maxMax bound how many records one /fetch may return.
 const (
 	defaultMax = 100
@@ -316,6 +319,45 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		payload["storage"] = e.Store().Health()
 		writeJSON(w, http.StatusOK, payload)
 	})
+
+	// Back-channel logout (OpenID Connect Back-Channel Logout 1.0). The identity
+	// provider calls it server to server when a login ends; the signed logout token is
+	// the credential, so it is open on both doors. Every session and token of the
+	// named login stops working here at once.
+	if ver != nil {
+		mux.HandleFunc("POST /auth/backchannel-logout", func(w http.ResponseWriter, r *http.Request) {
+			release, ok := acquireRequest(w, r, requestLimiter, m, door, limitClassAuth, sourceLimitKey(r), authPolicy)
+			if !ok {
+				return
+			}
+			defer release()
+			// The specification forbids caching either answer.
+			w.Header().Set("Cache-Control", "no-store")
+			refuse := func(reason string) {
+				m.AuthReject(door, tokenauth.ReasonBadToken)
+				auditDenied(r, door, "logout_token_invalid", nil)
+				slog.Default().Warn("back-channel logout refused", "reason", reason)
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"error": "invalid_request", "error_description": reason,
+				})
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, maxLogoutBody)
+			if err := r.ParseForm(); err != nil {
+				refuse("the body is not a form: " + err.Error())
+				return
+			}
+			token := r.PostForm.Get("logout_token")
+			if token == "" {
+				refuse("no logout_token")
+				return
+			}
+			if _, err := ver.BackchannelLogout(token); err != nil {
+				refuse(err.Error())
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		})
+	}
 
 	// /metrics is certless/tokenless like /healthz: Prometheus scrape targets
 	// carry no admin tokens (they must accept the self-signed server cert).

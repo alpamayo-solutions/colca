@@ -78,10 +78,13 @@ const (
 	AuthToken            = "token"             // admin token missing or wrong
 	AuthNoName           = "no_name"           // local door CONNECT carried no username
 	AuthRegister         = "register"          // local door self-registration failed
+	AuthMethod           = "auth_method"       // MQTT 5 authentication method this node does not speak
+	AuthSubjectChanged   = "subject_changed"   // a re-authentication presented another person's token
 )
 
 var authDoors = []string{DoorMQTT, DoorHTTP, DoorRepl, DoorLocal}
-var authReasons = []string{AuthUnknownKey, AuthKind, AuthUsernameMismatch, AuthToken, AuthNoName, AuthRegister}
+var authReasons = []string{AuthUnknownKey, AuthKind, AuthUsernameMismatch, AuthToken, AuthNoName, AuthRegister,
+	AuthMethod, AuthSubjectChanged}
 
 // ACL denial actions: the labels of colca_acl_denials_total{action}. Only
 // read-side denials are counted here (sub: MQTT subscribe, read: HTTP scope).
