@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.2](https://github.com/alpamayo-solutions/colca/compare/v0.17.1...v0.17.2) (2026-09-25)
+
+
+### Fixes
+
+* **historian:** announce the release version in its service details ([#85](https://github.com/alpamayo-solutions/colca/issues/85)) ([3295c7b](https://github.com/alpamayo-solutions/colca/commit/3295c7b08861690079956674ac25e0d92ac44ce2))
+
 ## [0.17.1](https://github.com/alpamayo-solutions/colca/compare/v0.17.0...v0.17.1) (2026-09-25)
 
 
