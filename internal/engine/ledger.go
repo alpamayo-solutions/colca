@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
 	"sync"
 	"time"
@@ -33,7 +34,19 @@ type ledgerEntry struct {
 	at       time.Time
 	ackTopic string
 	ack      []byte
+	// refused are the refusals owed to other senders who reused the id, each
+	// taken by the first delivery of its exact bytes.
+	refused []refusal
 }
+
+type refusal struct {
+	actor string
+	ack   []byte
+}
+
+// refusalLimit bounds the refusals one id holds while no person is connected
+// to take them.
+const refusalLimit = 16
 
 type ledgerKey struct {
 	id string
@@ -99,6 +112,36 @@ func (l *commandLedger) acked(id, topic string, payload []byte) {
 	}
 }
 
+// refuse notes that actor is owed ack, the refusal of its reuse of id.
+func (l *commandLedger) refuse(id, actor string, ack []byte) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if held, ok := l.entries[id]; ok {
+		if len(held.refused) >= refusalLimit {
+			held.refused = held.refused[1:]
+		}
+		held.refused = append(held.refused, refusal{actor: actor, ack: ack})
+	}
+}
+
+// recipient is who an ack with id and these bytes goes to: the sender a
+// refusal is owed to, else the command's own sender.
+func (l *commandLedger) recipient(id string, payload []byte) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	held, ok := l.entries[id]
+	if !ok {
+		return ""
+	}
+	for i, r := range held.refused {
+		if bytes.Equal(r.ack, payload) {
+			held.refused = append(held.refused[:i], held.refused[i+1:]...)
+			return r.actor
+		}
+	}
+	return held.actor
+}
+
 // lookup is what the ledger holds for id.
 func (l *commandLedger) lookup(id string) (string, string, []byte) {
 	l.mu.Lock()
@@ -129,8 +172,9 @@ func (l *commandLedger) expire(now time.Time) {
 // admitCommand applies the ledger to a command a door is about to accept, as
 // sent by actor. A repeat is answered here: its stored ack goes out again and
 // nothing runs. The returned id is the one to forget if the command is not
-// accepted after all.
-func (e *Engine) admitCommand(payload []byte, actor string) (string, bool, error) {
+// accepted after all. Another sender's reuse of the id is refused, with a 422
+// ack that reaches only that sender.
+func (e *Engine) admitCommand(p uns.Parsed, payload []byte, actor string) (string, bool, error) {
 	id := correlationID(payload)
 	if id == "" {
 		return "", false, nil
@@ -139,6 +183,7 @@ func (e *Engine) admitCommand(payload []byte, actor string) (string, bool, error
 	switch verdict {
 	case ledgerForeignUse:
 		_, err := e.reject(metrics.ReasonValidation, "correlation id %q already names another sender's command", id)
+		e.refuseForeignUse(p, id, actor)
 		return "", false, err
 	case ledgerRepeat:
 		e.log.Info("command repeated: not run again", "correlation_id", id, "ack_resent", ack != nil)
@@ -148,6 +193,22 @@ func (e *Engine) admitCommand(payload []byte, actor string) (string, bool, error
 		return "", true, nil
 	}
 	return id, false, nil
+}
+
+// refuseForeignUse sends actor the 422 ack of a command whose correlation id
+// already names another sender's command. It is delivered, not stored: the
+// commands stream keeps the first sender's ack for that id.
+func (e *Engine) refuseForeignUse(p uns.Parsed, id, actor string) {
+	if e.deliver == nil {
+		return
+	}
+	ack, err := json.Marshal(CommandOutcome{CorrelationID: id, ResultCode: 422,
+		Message: "correlation id already used by another sender's command"})
+	if err != nil {
+		return
+	}
+	e.ledger.refuse(id, actor, ack)
+	e.deliver(uns.Prefix()+"_Ack/"+p.NodeID+"/"+p.Path, ack, false)
 }
 
 // repeated is the Result a door answers a repeated command with: nothing stored,
@@ -175,6 +236,5 @@ func (e *Engine) AckRecipient(topic string, payload []byte) (string, bool) {
 	if id == "" {
 		return "", true
 	}
-	sender, _, _ := e.ledger.lookup(id)
-	return sender, true
+	return e.ledger.recipient(id, payload), true
 }

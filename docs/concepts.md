@@ -78,7 +78,7 @@ A person receives only the acks of their own commands; services and machines
 receive every ack their read grants cover. A command's `correlation_id` names
 it for ten minutes: sent again by the same sender, it is not stored or run a
 second time, and the sender gets the first one's ack again. Another sender's
-command with that id is refused.
+command with that id is refused, and that sender gets an `_Ack` with `422`.
 
 Some commands are executed by the node itself rather than a machine:
 
