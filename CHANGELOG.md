@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.5](https://github.com/alpamayo-solutions/colca/compare/v0.17.4...v0.17.5) (2026-09-26)
+
+
+### Fixes
+
+* acks only to their sender, a correlation id runs once, short refusal logs ([#91](https://github.com/alpamayo-solutions/colca/issues/91)) ([f04ee0a](https://github.com/alpamayo-solutions/colca/commit/f04ee0ae3f8817b6e5a6442c29f3ed905b17a4d8))
+
 ## [0.17.4](https://github.com/alpamayo-solutions/colca/compare/v0.17.3...v0.17.4) (2026-09-26)
 
 
