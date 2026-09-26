@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mochi-mqtt/server/v2/packets"
 )
 
 type capturedRecord struct {
@@ -152,3 +154,40 @@ func TestAnAbnormalWebsocketCloseStaysAWarning(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// A refused publish is one short debug line with its topic and size, never the
+// packet with its payload bytes.
+func TestARefusedPublishLogsItsTopicAndSizeNotThePacket(t *testing.T) {
+	sink := &capturingHandler{}
+	handler := newMochiLogHandler(sink)
+	pk := packets.Packet{TopicName: "colca/v1/_CmdParam/n1/line1/setDensity", Payload: make([]byte, 3000)}
+
+	record := slog.NewRecord(time.Now(), slog.LevelError, "publish packet error", 0)
+	record.AddAttrs(slog.Any("error", packets.ErrPayloadFormatInvalid), slog.String("hook", "colca"), slog.Any("packet", pk))
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sink.records) != 1 {
+		t.Fatalf("records = %+v", sink.records)
+	}
+	got := sink.records[0]
+	if got.level != slog.LevelDebug || got.attrs["topic"].String() != pk.TopicName || got.attrs["bytes"].Int64() != 3000 {
+		t.Fatalf("refused publish logged as %+v", got)
+	}
+	if _, ok := got.attrs["packet"]; ok {
+		t.Fatal("the packet was logged")
+	}
+}
+
+// One sender's repeated refusals log once per window; another sender's still log.
+func TestRefusalsAreLimitedPerSender(t *testing.T) {
+	sink := &capturingHandler{}
+	log := slog.New(newMochiLogHandler(sink))
+	for range 50 {
+		log.Warn("human publish rejected", "sub", "anna", "topic", "t", "bytes", 3000)
+	}
+	log.Warn("human publish rejected", "sub", "bert", "topic", "t", "bytes", 3000)
+	if len(sink.records) != 2 {
+		t.Fatalf("expected one line per sender, got %d", len(sink.records))
+	}
+}
