@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/alpamayo-solutions/colca/compare/v0.18.3...v0.19.0) (2026-09-26)
+
+
+### Features
+
+* cursor watchdog instead of timed catch-up, historian wakes on /watch, POST /publish/batch ([#106](https://github.com/alpamayo-solutions/colca/issues/106)) ([3802225](https://github.com/alpamayo-solutions/colca/commit/38022255eb040a5cea97c21118816a1902ce6efc))
+
 ## [0.18.3](https://github.com/alpamayo-solutions/colca/compare/v0.18.2...v0.18.3) (2026-09-26)
 
 
