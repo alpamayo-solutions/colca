@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.3](https://github.com/alpamayo-solutions/colca/compare/v0.18.2...v0.18.3) (2026-09-26)
+
+
+### Fixes
+
+* **historian:** store a null sample as a retraction row ([#104](https://github.com/alpamayo-solutions/colca/issues/104)) ([309bf30](https://github.com/alpamayo-solutions/colca/commit/309bf3085137af87759ee519aaa709357ebc793d))
+
 ## [0.18.2](https://github.com/alpamayo-solutions/colca/compare/v0.18.1...v0.18.2) (2026-09-26)
 
 
