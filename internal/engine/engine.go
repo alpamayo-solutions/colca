@@ -550,31 +550,13 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		}
 		return e.persistAttributed(class, p, topic, payload, actorFor(entry))
 	}
-	if !uns.IsKnown(class) {
-		return e.reject(metrics.ReasonGrammar, "client %s may not publish %s", identity, p.Contract)
-	}
-	// Level 4 is this node's ULID for every publisher. A service's identity decides
-	// whether a write is allowed but never appears in the topic.
-	if p.NodeID != e.cfg.ULID {
-		return e.reject(metrics.ReasonNodeID, "level-4 %q is not this node (%q)", p.NodeID, e.cfg.ULID)
-	}
-	if err := e.validateContract(p.Contract, payload); err != nil {
-		return e.reject(metrics.ReasonValidation, "%w", err)
-	}
-	if err := e.validateClientStateAuthor(identity, p, payload); err != nil {
-		return e.reject(metrics.ReasonIdentity, "%w", err)
-	}
-	entry, ok := e.ids.Get(identity)
-	if !ok || !uns.Authorize(e.Scope(), entry, uns.ActPub, topic) {
-		actor := Attribution{ActorID: identity, ActorLabel: identity, ActorKind: "service"}
-		if ok {
-			actor = actorFor(entry)
-		}
-		return e.rejectDenied(metrics.ReasonWriteDenied, actor, "publish", &p, "client %s: no write scope covers %s", identity, topic)
+	attribution, err := e.admitClientData(identity, p, class, topic, payload, actorFor)
+	if err != nil {
+		return Result{}, err
 	}
 	// The client already publishes the canonical node-local topic; only the
 	// attribution is added.
-	res, err := e.persistAttributed(class, p, topic, payload, actorFor(entry))
+	res, err := e.persistAttributed(class, p, topic, payload, attribution)
 	if err == nil {
 		// Offer state a machine published to the domain plugin; the core does not
 		// interpret it.
@@ -584,6 +566,41 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		e.checkMetricBinding(p)
 	}
 	return res, err
+}
+
+// admitClientData checks a client's data, state or ack record (not a command,
+// not audit): known contract, level 4 is this node, schema, author, write
+// scope. It returns the attribution the record is stored with.
+func (e *Engine) admitClientData(identity string, p uns.Parsed, class uns.Class, topic string, payload []byte,
+	actorFor func(*uns.Entry) Attribution) (Attribution, error) {
+	if !uns.IsKnown(class) {
+		_, err := e.reject(metrics.ReasonGrammar, "client %s may not publish %s", identity, p.Contract)
+		return Attribution{}, err
+	}
+	// Level 4 is this node's ULID for every publisher. A service's identity decides
+	// whether a write is allowed but never appears in the topic.
+	if p.NodeID != e.cfg.ULID {
+		_, err := e.reject(metrics.ReasonNodeID, "level-4 %q is not this node (%q)", p.NodeID, e.cfg.ULID)
+		return Attribution{}, err
+	}
+	if err := e.validateContract(p.Contract, payload); err != nil {
+		_, err = e.reject(metrics.ReasonValidation, "%w", err)
+		return Attribution{}, err
+	}
+	if err := e.validateClientStateAuthor(identity, p, payload); err != nil {
+		_, err = e.reject(metrics.ReasonIdentity, "%w", err)
+		return Attribution{}, err
+	}
+	entry, ok := e.ids.Get(identity)
+	if !ok || !uns.Authorize(e.Scope(), entry, uns.ActPub, topic) {
+		actor := Attribution{ActorID: identity, ActorLabel: identity, ActorKind: "service"}
+		if ok {
+			actor = actorFor(entry)
+		}
+		_, err := e.rejectDenied(metrics.ReasonWriteDenied, actor, "publish", &p, "client %s: no write scope covers %s", identity, topic)
+		return Attribution{}, err
+	}
+	return actorFor(entry), nil
 }
 
 // IngestHuman ingests a publish from a verified human. Humans only send commands,

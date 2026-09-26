@@ -2807,3 +2807,49 @@ func TestACursorLagFindingIsAcceptedAndRetiredThroughTheAdminDoor(t *testing.T) 
 		}
 	}
 }
+
+func TestABatchPublishJudgesEachRecordAndAppendsTheAdmittedOnesTogether(t *testing.T) {
+	h := newLocalHandler(t)
+	body := `{"records":[
+		{"topic":"colca/v1/_Metric/n-test/line/a","payload":{"v":1}},
+		{"topic":"colca/v1/_Metric/n-other/line/b","payload":{"v":2}},
+		{"topic":"colca/v1/_CmdParam/n-test/line/c","payload":{"correlation_id":"x"}},
+		{"topic":"colca/v1/_Metric/n-test/line/d","payload":{"v":3}}
+	]}`
+	req := httptest.NewRequest(http.MethodPost, "/publish/batch", strings.NewReader(body))
+	req.Header.Set("X-Colca-Service", "bridge")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /publish/batch = %d: %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Accepted int              `json:"accepted"`
+		Results  []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Accepted != 2 || len(out.Results) != 4 {
+		t.Fatalf("accepted %d of %d results: %s", out.Accepted, len(out.Results), rec.Body)
+	}
+	if out.Results[0]["offset"] == nil || out.Results[3]["offset"] == nil {
+		t.Fatalf("records 0 and 3 must be stored: %v", out.Results)
+	}
+	if out.Results[3]["offset"].(float64) != out.Results[0]["offset"].(float64)+1 {
+		t.Fatalf("admitted records are appended together, in order: %v", out.Results)
+	}
+	for _, i := range []int{1, 2} {
+		if out.Results[i]["error"] == nil {
+			t.Fatalf("record %d must be refused on its own: %v", i, out.Results[i])
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/publish/batch", strings.NewReader(`{"records":[]}`))
+	req.Header.Set("X-Colca-Service", "bridge")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("an empty batch = %d, want 400", rec.Code)
+	}
+}

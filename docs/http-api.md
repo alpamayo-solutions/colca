@@ -19,6 +19,7 @@ A caller is one of:
 | `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","storage":{"state":"ok"}}` |
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}` |
+| `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"error":"…"},…]}` |
 | `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N}` |
 | `GET /watch` | machine, service, person, admin | `?stream=S&stream=S2&interval_ms=100` | NDJSON, one line per change: `{"streams":["S"],"next":{"S":N}}` |
 | `POST /ack` | owner of the cursor, admin | `{"cursor":"NAME","stream":"S","offset":N}` | `{"moved":true}` |
@@ -26,6 +27,11 @@ A caller is one of:
 | `GET /self` | local service | | the service's registry entry, limits, `standalone_since` and `standalone_ready` |
 | `POST /standalone/complete` | local service on a standalone node | | finish the identity handover; returns its durable issuance cutoff |
 
+- `/publish/batch` judges every record as `/publish` would and writes the
+  admitted ones with one append per stream, in order; a refused record does
+  not stop the others. Commands and audit records are refused in a batch. For
+  a high-rate publisher, such as a bridge relaying a plant: one request per
+  batch instead of one per sample.
 - `/fetch` never moves a cursor. `/ack` takes the last offset you processed and
   only moves forward.
 - `from=N` reads ahead of the cursor, starting at offset `N`, so a consumer can
