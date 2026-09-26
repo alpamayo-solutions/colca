@@ -492,7 +492,9 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 			"bytes", len(pk.Payload), "err", err)
 		return pk, rejectCode(cl, pk, err)
 	}
-	if res.Duplicate {
+	if res.Duplicate || res.Answered {
+		// Nothing stored, nothing to fan out: a repeat, or a command the node
+		// answered itself.
 		return pk, packets.CodeSuccessIgnore
 	}
 	if res.Persisted {

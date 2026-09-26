@@ -126,3 +126,37 @@ func BenchmarkReadSequential(b *testing.B) {
 	}
 	b.ReportMetric(float64(total)/(b.Elapsed().Seconds()/float64(b.N)), "rec/s")
 }
+
+// BenchmarkKVScanContract reads the 200 _Signal entries of a node that also
+// retains 20 000 metrics, through the contract index and by walking the prefix.
+func BenchmarkKVScanContract(b *testing.B) {
+	s, err := Open(b.TempDir())
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer s.Close()
+	var recs []Record
+	for i := 0; i < 20000; i++ {
+		path := fmt.Sprintf("plant/line%d/m%d/sig%d", i%4, i%50, i)
+		recs = append(recs, Record{Topic: "colca/v1/_Metric/n1/" + path, Payload: benchPayload(i), TS: 1, KVPath: path, KVNode: "n1"})
+		if i%100 == 0 {
+			recs = append(recs, Record{Topic: "colca/v1/_Signal/n1/" + path, Payload: []byte(`{"id":"s"}`), TS: 1, KVPath: path, KVNode: "n1"})
+		}
+	}
+	if _, _, err := s.Append("entities", recs); err != nil {
+		b.Fatal(err)
+	}
+	for _, mode := range []struct {
+		name  string
+		depth int
+	}{{"indexed", 0}, {"walk", 100}} {
+		b.Run(mode.name, func(b *testing.B) {
+			for n := 0; n < b.N; n++ {
+				entries, _, err := s.KVScanPageDepth("", "", 10000, []string{"_Signal"}, mode.depth)
+				if err != nil || len(entries) != 200 {
+					b.Fatalf("%d entries, %v", len(entries), err)
+				}
+			}
+		})
+	}
+}

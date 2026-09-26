@@ -481,6 +481,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusOK, map[string]any{"duplicate": true})
 			return
 		}
+		if res.Answered {
+			// No service executes this command; the _Ack says so too.
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": res.Command.Message, "command": res.Command})
+			return
+		}
 		if !res.Persisted {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "topic outside " + uns.Root() + "/# is not persisted"})
 			return
@@ -502,6 +507,12 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// is stream-wide, so a consumer must learn it is in a hole even if every surviving
 	// record is outside its view. The gap only carries offsets, which "next" already
 	// exposes.
+	// GET /watch replaces polling /fetch on an idle stream: one held connection
+	// that names the selected streams whenever they grow (see serveWatch).
+	mux.HandleFunc("GET /watch", authFor(limitClassWatch, watchPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+		serveWatch(w, r, e.Store(), writeJSON)
+	}))
+
 	mux.HandleFunc("GET /fetch", authFor(limitClassFetch, fetchPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		q := r.URL.Query()
 		stream, cursor := q.Get("stream"), q.Get("cursor")
@@ -516,6 +527,19 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			limit = defaultMax
 		}
 		prefix := q.Get("prefix")
+		// contract narrows the page to the given contracts (repeatable), like /kv's.
+		// Records of other contracts are skipped in the scan and next moves past them.
+		var contractSet map[string]bool
+		if contracts := q["contract"]; len(contracts) > 0 {
+			contractSet = make(map[string]bool, len(contracts))
+			for _, ct := range contracts {
+				if !uns.IsKnown(e.ClassOf(ct)) {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("unknown contract: %q", ct)})
+					return
+				}
+				contractSet[ct] = true
+			}
+		}
 		signalIDs, hasSignalFilter := q["signal_id"]
 		signalSet := make(map[string]struct{}, len(signalIDs))
 		if hasSignalFilter {
@@ -542,12 +566,18 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			topic := record.Topic
 			var parsed uns.Parsed
 			var parseErr error
-			if prefix != "" {
-				// prefix filters on the uns hierarchy path, not on the raw topic.
+			if contractSet != nil {
 				parsed, parseErr = uns.Parse(topic)
-				if parseErr != nil || !strings.HasPrefix(parsed.Path, prefix) {
+				if parseErr != nil || !contractSet[parsed.Contract] {
 					return false
 				}
+			}
+			if prefix != "" && parsed.Contract == "" {
+				// prefix filters on the uns hierarchy path, not on the raw topic.
+				parsed, parseErr = uns.Parse(topic)
+			}
+			if prefix != "" && (parseErr != nil || !strings.HasPrefix(parsed.Path, prefix)) {
+				return false
 			}
 			if !c.admin && !uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic) {
 				return false
@@ -683,7 +713,17 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				return
 			}
 		}
-		entries, next, err := e.Store().KVScanPage(prefix, after, pageSize, contracts)
+		// depth=N keeps entries at most N path segments below prefix and skips deeper
+		// subtrees without walking them: a tree view reads one level at a time.
+		depth := 0
+		if raw := r.URL.Query().Get("depth"); raw != "" {
+			depth, err = strconv.Atoi(raw)
+			if err != nil || depth < 1 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "depth must be a positive number of path segments"})
+				return
+			}
+		}
+		entries, next, err := e.Store().KVScanPageDepth(prefix, after, pageSize, contracts, depth)
 		if err != nil {
 			if errors.Is(err, store.ErrInvalidPageToken) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid page token"})

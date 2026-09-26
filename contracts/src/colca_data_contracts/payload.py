@@ -337,8 +337,27 @@ class Node(Payload):
 
 
 @dataclass
+class CommandRoute:
+    """One command a service executes: its contract and the node-local path
+    it is sent to, verb included (``line1/operator/setProduct``). ``path`` may
+    use MQTT wildcards: ``+`` for one segment, a trailing ``#`` for the rest.
+
+    The node answers a command nobody announced with a 404 ``_Ack`` when
+    another command is announced at the same element (see the HTTP API
+    documentation), so a removed or misspelt verb is not left unanswered.
+    """
+
+    contract: str
+    path: str
+
+
+@dataclass
 class ServiceDetails(Payload):
-    """Observed service registration authored by the service identity."""
+    """Observed service registration authored by the service identity.
+
+    ``commands`` are the commands this service executes; it announces them
+    here so the node can answer a command no service executes.
+    """
 
     id: str
     name: str
@@ -352,6 +371,7 @@ class ServiceDetails(Payload):
     metadata: dict[str, Any] = field(default_factory=dict)
     architecture_metadata: dict[str, Any] = field(default_factory=dict)
     health_metrics: list[HealthMetricDeclaration] = field(default_factory=list)
+    commands: list[CommandRoute] = field(default_factory=list)
 
 
 @dataclass

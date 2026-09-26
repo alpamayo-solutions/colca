@@ -80,6 +80,32 @@ it for ten minutes: sent again by the same sender, it is not stored or run a
 second time, and the sender gets the first one's ack again. Another sender's
 command with that id is refused, and that sender gets an `_Ack` with `422`.
 
+The node answers a command itself, instead of leaving the sender waiting for
+the whole lifetime, in two cases:
+
+- **Nobody executes it: `404`.** A service announces the commands it executes
+  in its `_ServiceDetails` record:
+
+  ```json
+  "commands": [{"contract": "_CmdParam", "path": "line1/operator/setDensity"},
+               {"contract": "_CmdParam", "path": "line1/bqc/+"}]
+  ```
+
+  `path` is node-local and names the verb; `+` stands for one segment and a
+  trailing `#` for the rest. A command at an element where some service
+  announced a command, but none announced this one, is answered `404`
+  ("no service executes _CmdParam line1/operator/setProduct;
+  line1/operator takes setDensity, setSandoff") and not stored. A removed or
+  misspelt verb, or a verb sent to the wrong element, is caught this way. A
+  service that is down keeps its announcements, so its commands still wait
+  for it. Commands at an element nobody announces for pass on as before: their
+  executor may not announce. chaski services announce their `@on_command`
+  handlers themselves.
+- **Its payload is refused: `400`.** A command the node cannot accept (its
+  `command` is not an object, it carries `NaN` or `Infinity`) is refused as
+  before, and when a `correlation_id` can be read from it the sender also gets
+  an `_Ack` with `400` naming why.
+
 Some commands are executed by the node itself rather than a machine:
 
 | Contract | Purpose |

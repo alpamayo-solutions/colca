@@ -100,9 +100,10 @@ type Store struct {
 	health       *pebblelog.Monitor
 	standaloneMu sync.Mutex
 	mu           sync.Mutex
-	next         map[string]uint64 // next offset per stream
-	lwm          map[string]uint64 // low-water mark per stream: lowest retained offset
-	bytes        map[string]uint64 // live logical bytes per stream (stream key + encoded value)
+	changed      map[string]chan struct{} // closed on the stream's next append; see changes.go
+	next         map[string]uint64        // next offset per stream
+	lwm          map[string]uint64        // low-water mark per stream: lowest retained offset
+	bytes        map[string]uint64        // live logical bytes per stream (stream key + encoded value)
 	// appendApply is Pebble's atomic apply boundary. Keeping the bound method
 	// injectable lets tests prove an apply failure changes neither stream nor KV.
 	appendApply func(*pebble.Batch, *pebble.WriteOptions) error
@@ -159,6 +160,14 @@ func Open(dir string) (*Store, error) {
 			return nil, err
 		}
 	}
+	added, removed, err := s.openKVIndex()
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("reconcile the KV contract index: %w", err)
+	}
+	if added > 0 || removed > 0 {
+		slog.Info("store: KV contract index reconciled", "added", added, "removed", removed)
+	}
 	return s, nil
 }
 
@@ -200,7 +209,18 @@ func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (u
 	return binary.BigEndian.Uint64(v), nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+// Close marks the contract index complete (see kvIndexCleanKey) and closes the
+// database.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	clean := s.kvIndexCleanValue()
+	s.mu.Unlock()
+	if err := s.db.Set(kvIndexCleanKey, clean, pebble.Sync); err != nil {
+		_ = s.db.Close()
+		return err
+	}
+	return s.db.Close()
+}
 
 // Health reports whether Pebble's background flushes and compactions are failing.
 func (s *Store) Health() pebblelog.Status { return s.health.Status() }
@@ -256,7 +276,7 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 	}
 	if rec.KVPath != "" {
 		if rec.Delete {
-			if err := b.Delete(kvKey(rec.KVPath, rec.KVNode, rec.Topic), nil); err != nil {
+			if err := deleteKV(b, rec.KVPath, rec.KVNode, rec.Topic); err != nil {
 				return 0, err
 			}
 		} else {
@@ -269,7 +289,7 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 			if err != nil {
 				return 0, err
 			}
-			if err := b.Set(kvKey(rec.KVPath, rec.KVNode, rec.Topic), kval, nil); err != nil {
+			if err := setKV(b, rec.KVPath, rec.KVNode, rec.Topic, kval); err != nil {
 				return 0, err
 			}
 		}
@@ -333,6 +353,7 @@ func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, 
 	}
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
+	s.streamGrewLocked(stream)
 	return first, last, nil
 }
 
@@ -728,6 +749,7 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 	}
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
+	s.streamGrewLocked(stream)
 	return applied, hwm, nil
 }
 
@@ -1070,9 +1092,14 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return 0, err
 	}
+	grew := off != s.next[stream]
 	s.next[stream] = off
 	s.lwm[stream] = upTo
 	s.bytes[stream] = liveBytes
+	if grew {
+		// Gap markers are records a consumer reads.
+		s.streamGrewLocked(stream)
+	}
 	return stats.pruned, nil
 }
 
@@ -1232,11 +1259,24 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 // KVScanPage returns at most limit KV entries and an opaque continuation token.
 // The limit applies before authorization filtering, so a sparse grant cannot
 // turn one request into a full walk. A non-empty contracts keeps only those
-// contracts; the check reads the topic from the key, so other entries are
-// skipped without decoding their payload.
+// contracts and walks the contract index, so the work is proportional to the
+// entries that match rather than to everything under the prefix.
 func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) ([]KVEntry, string, error) {
+	return s.KVScanPageDepth(prefix, after, limit, contracts, 0)
+}
+
+// KVScanPageDepth is KVScanPage limited to entries at most depth path segments
+// below prefix (0: no limit). Deeper subtrees are skipped with a seek, not
+// walked, so a tree view reading one level pays for that level only.
+func (s *Store) KVScanPageDepth(prefix, after string, limit int, contracts []string, depth int) ([]KVEntry, string, error) {
 	if limit <= 0 {
 		return nil, "", fmt.Errorf("store: KV page size must be positive")
+	}
+	if depth < 0 {
+		return nil, "", fmt.Errorf("store: KV depth must not be negative")
+	}
+	if len(contracts) > 0 && depth == 0 {
+		return s.kvScanPageIndexed(prefix, after, limit, contracts)
 	}
 	var want map[string]bool
 	if len(contracts) > 0 {
@@ -1255,9 +1295,9 @@ func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) 
 
 	valid := iter.First()
 	if after != "" {
-		raw, decodeErr := base64.RawURLEncoding.DecodeString(after)
-		if decodeErr != nil || bytes.Compare(raw, lb) < 0 || bytes.Compare(raw, ub) >= 0 {
-			return nil, "", ErrInvalidPageToken
+		raw, tokenErr := kvPageToken(after, lb, ub)
+		if tokenErr != nil {
+			return nil, "", tokenErr
 		}
 		valid = iter.SeekGE(raw)
 		if valid && bytes.Equal(iter.Key(), raw) {
@@ -1276,24 +1316,17 @@ func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) 
 	var lastKey []byte
 	for valid && matched < limit {
 		lastKey = append(lastKey[:0], iter.Key()...)
-		key := string(iter.Key()[2:]) // strip "k\x00"
-		if pathSep := strings.IndexByte(key, 0); pathSep >= 0 {
-			rest := key[pathSep+1:]
-			if nodeSep := strings.IndexByte(rest, 0); nodeSep >= 0 {
-				topic := rest[nodeSep+1:]
-				if kvContractMatches(topic, want) {
-					var e kvEnc
-					if json.Unmarshal(iter.Value(), &e) == nil {
-						out = append(out, KVEntry{
-							Path: key[:pathSep], NodeID: rest[:nodeSep], Topic: e.Topic,
-							Payload: e.Payload, TS: e.TS, Offset: e.Offset,
-							OriginOffset: originOffset(e.OriginOffset, e.Offset),
-							WrittenBy:    e.WrittenBy, ActorID: e.ActorID,
-							ActorLabel: e.ActorLabel, ActorKind: e.ActorKind,
-						})
-						matched++
-					}
-				}
+		path, node, topic, ok := splitKVKey(string(iter.Key()[2:])) // strip "k\x00"
+		if ok && depth > 0 {
+			if d, lead := kvRelativeDepth(prefix, path); d > depth {
+				valid = iter.SeekGE(kvSkipBelow(prefix, path, depth, lead))
+				continue
+			}
+		}
+		if ok && kvContractMatches(topic, want) {
+			if entry, decoded := decodeKVEntry(path, node, iter.Value()); decoded {
+				out = append(out, entry)
+				matched++
 			}
 		}
 		valid = iter.Next()
@@ -1305,6 +1338,21 @@ func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) 
 		return out, base64.RawURLEncoding.EncodeToString(lastKey), nil
 	}
 	return out, "", nil
+}
+
+// decodeKVEntry decodes a stored KV value; ok is false when it does not decode.
+func decodeKVEntry(path, node string, value []byte) (KVEntry, bool) {
+	var e kvEnc
+	if json.Unmarshal(value, &e) != nil {
+		return KVEntry{}, false
+	}
+	return KVEntry{
+		Path: path, NodeID: node, Topic: e.Topic,
+		Payload: e.Payload, TS: e.TS, Offset: e.Offset,
+		OriginOffset: originOffset(e.OriginOffset, e.Offset),
+		WrittenBy:    e.WrittenBy, ActorID: e.ActorID,
+		ActorLabel: e.ActorLabel, ActorKind: e.ActorKind,
+	}, true
 }
 
 // kvContractMatches reports whether topic's contract is in want; a nil want

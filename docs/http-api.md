@@ -19,9 +19,10 @@ A caller is one of:
 | `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","storage":{"state":"ok"}}` |
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}` |
-| `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N}` |
+| `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N}` |
+| `GET /watch` | machine, service, person, admin | `?stream=S&stream=S2&interval_ms=100` | NDJSON, one line per change: `{"streams":["S"],"next":{"S":N}}` |
 | `POST /ack` | owner of the cursor, admin | `{"cursor":"NAME","stream":"S","offset":N}` | `{"moved":true}` |
-| `GET /kv` | machine, service, person, admin | `?prefix=P&max=1000&after=TOKEN&contract=_Signal` | `{"entries":[{"path":"…","node_id":"…","topic":"…","payload":{…},"ts":T,"offset":N}],"next":"TOKEN"}` |
+| `GET /kv` | machine, service, person, admin | `?prefix=P&max=1000&after=TOKEN&contract=_Signal&depth=1` | `{"entries":[{"path":"…","node_id":"…","topic":"…","payload":{…},"ts":T,"offset":N}],"next":"TOKEN"}` |
 | `GET /self` | local service | | the service's registry entry, limits, `standalone_since` and `standalone_ready` |
 | `POST /standalone/complete` | local service on a standalone node | | finish the identity handover; returns its durable issuance cutoff |
 
@@ -30,7 +31,13 @@ A caller is one of:
 - `prefix` filters on the path part of the topic, not the raw topic.
 - `max` defaults to 100 for `/fetch` (at most 1000) and to 1000 for `/kv`
   (at most 10000). Pass `next` back as `after` until it is empty.
-- `contract` on `/kv` may be repeated. An unknown name is a `400`.
+- `contract` on `/kv` and `/fetch` may be repeated. An unknown name is a `400`.
+  On `/kv` the node keeps an index by contract, so a filtered read costs what
+  it returns, not what lies under the prefix. On `/fetch` the other records
+  are skipped and `next` moves past them.
+- `depth=N` on `/kv` keeps entries at most `N` path segments below `prefix`
+  (`prefix=plant/&depth=1` is the level below `plant`); deeper subtrees are
+  skipped, not read.
 - Payloads are passed through as raw JSON; numbers keep the exact form the
   publisher sent.
 - `records` and `entries` are always arrays.
@@ -63,6 +70,30 @@ continue after the gap:
 ```
 
 Acknowledge `gap.to_offset` to move past it.
+
+### Waiting for new records
+
+A consumer that follows a stream does not need to poll `/fetch` while the
+stream is idle. `GET /watch?stream=entities&stream=annotations` holds the
+connection open and writes one JSON line whenever a selected stream grows:
+
+```json
+{"streams":["entities","annotations"],"next":{"entities":1201,"annotations":88}}
+{"streams":["annotations"],"next":{"annotations":91}}
+{"streams":[]}
+```
+
+- The first line names every selected stream: drain them all after each
+  (re)connect, and a hint missed while disconnected costs nothing.
+- `next` is the stream's next offset. A consumer whose cursor already stands
+  there can skip the fetch.
+- Lines are at least `interval_ms` apart (default 100, at most 10000); streams
+  that grow in between are merged into one line and named once. A busy stream
+  therefore costs at most one line per interval.
+- A line with no streams is a heartbeat, written after 5 s of silence. Treat
+  15 s without a line as a dead connection and reconnect.
+- A hint carries no records and moves no cursor; read with `/fetch` and `/ack`
+  as before. Keep a slow fallback poll (tens of seconds) only as a safety net.
 
 ## Administration
 
@@ -101,7 +132,8 @@ compare-and-swap.
 
 Every route belongs to a rate class. Authenticated callers get their own
 quota; the local door and unauthenticated traffic are limited per source
-address.
+address. Per caller: `/kv` 5 requests a second (burst 10), `/fetch` 25 (burst
+50), `/watch` 2 new connections a second (burst 8) and 8 open at a time.
 
 ## MQTT reason codes
 
