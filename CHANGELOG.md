@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.6](https://github.com/alpamayo-solutions/colca/compare/v0.17.5...v0.17.6) (2026-09-26)
+
+
+### Fixes
+
+* refused publishes log one short line; a reused correlation id gets a 422 ack ([#93](https://github.com/alpamayo-solutions/colca/issues/93)) ([65bad1f](https://github.com/alpamayo-solutions/colca/commit/65bad1f48d40cd4b1e542d4dc5c9cc0e9a83296b))
+
 ## [0.17.5](https://github.com/alpamayo-solutions/colca/compare/v0.17.4...v0.17.5) (2026-09-26)
 
 
