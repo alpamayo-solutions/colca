@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
@@ -270,6 +271,44 @@ func TestCmdConfigureByAServiceAttributesTheResultingWriteToThatService(t *testi
 		t.Fatalf("written_by = %q, want the node itself", entry.WrittenBy)
 	} else if entry.ActorID != "svc-plc" || entry.ActorKind != "service" {
 		t.Fatalf("actor = %+v, want the commanding service", entry)
+	}
+}
+
+// A constant whose topic MQTT cannot carry is refused and never stored: its
+// retained record would misframe every subscriber's stream.
+func TestAConstantWhoseTopicExceedsTheMQTTLimitIsRefused(t *testing.T) {
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	ids := fakeIDs{entries: map[string]*uns.Entry{
+		"svc-plc": {ULID: "svc-plc", Kind: uns.KindExternal, Grants: []string{"cmd:#:configure"}},
+	}}
+	e := New(s, &config.Config{ULID: "n-edge1"}, ids, nil, nil, nil)
+	e.SetExecutor(uns.NewConfigExec(e.EntityStore(), nil, e.Elements(), nil, func() string { return "sig-new" }, nil))
+
+	payload, err := json.Marshal(map[string]any{
+		"correlation_id": "correlation-long",
+		"expires_at":     futureMS(),
+		"constants": []map[string]any{{
+			"path":     "catalog/local/products/" + strings.Repeat("X", 70000),
+			"constant": map[string]any{"id": "const-long", "name": "Long", "data_type": "string", "value": "x"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := e.IngestClient("svc-plc", "colca/v1/_CmdConfigure/n-edge1/constant/upsert", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Command == nil || result.Command.ResultCode != 422 ||
+		!strings.Contains(result.Command.Message, "MQTT carries at most 65535") {
+		t.Fatalf("oversized constant = %+v", result.Command)
+	}
+	if got := mustKVScan(t, e.Store(), "catalog/"); len(got) != 0 {
+		t.Fatalf("an oversized constant was stored: %d entries", len(got))
 	}
 }
 

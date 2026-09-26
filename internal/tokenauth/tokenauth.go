@@ -33,8 +33,10 @@ const (
 const (
 	defaultRefresh = time.Hour
 	// unknownKidMinInterval rate-limits the refetch an unknown kid triggers, so a
-	// flood of bad tokens cannot turn into a flood of requests.
-	unknownKidMinInterval = 5 * time.Minute
+	// flood of bad tokens cannot turn into a flood of requests. It stays short:
+	// after an identity provider restarts with new keys, every login fails until
+	// the next refetch.
+	unknownKidMinInterval = 10 * time.Second
 	clockSkew             = 60 * time.Second
 )
 
@@ -81,6 +83,8 @@ type Verifier struct {
 	client *http.Client
 	log    *slog.Logger
 	m      Metrics
+
+	refetchAfter time.Duration // unknownKidMinInterval, shortened in tests
 
 	sources  []*jwksSource          // one per distinct JWKS URL, in config order
 	byIssuer map[string]*jwksSource // iss → the key set its tokens are signed with
@@ -148,6 +152,8 @@ func New(cfg Config, st *store.Store, m Metrics) (*Verifier, error) {
 		log:      slog.Default().With("comp", "tokenauth"),
 		m:        m,
 		byIssuer: make(map[string]*jwksSource, len(cfg.Issuers)),
+
+		refetchAfter: unknownKidMinInterval,
 	}
 	byURL := make(map[string]*jwksSource)
 	for _, is := range cfg.Issuers {
@@ -253,7 +259,7 @@ func (v *Verifier) keyFor(src *jwksSource, kid string) (crypto.PublicKey, bool) 
 		return k, true
 	}
 	src.mu.Lock()
-	limited := time.Since(src.lastFetch) < unknownKidMinInterval
+	limited := time.Since(src.lastFetch) < v.refetchAfter
 	if !limited {
 		src.lastFetch = time.Now()
 	}

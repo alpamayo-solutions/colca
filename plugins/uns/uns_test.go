@@ -709,3 +709,14 @@ func TestUnderMount(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRefusesATopicMQTTCannotCarry(t *testing.T) {
+	head := "colca/v1/_Constant/n1/"
+	if _, err := Parse(head + strings.Repeat("x", MaxTopicBytes-len(head))); err != nil {
+		t.Fatalf("a topic of exactly %d bytes must parse: %v", MaxTopicBytes, err)
+	}
+	_, err := Parse(head + strings.Repeat("x", MaxTopicBytes-len(head)+1))
+	if err == nil || !strings.Contains(err.Error(), "MQTT carries at most 65535") {
+		t.Fatalf("a topic one byte over the limit must be refused, got %v", err)
+	}
+}

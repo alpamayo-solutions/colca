@@ -142,6 +142,26 @@ func TestUnknownKidRespectsRateLimit(t *testing.T) {
 	}
 }
 
+// An identity provider that restarts with new keys: the refetch the first login
+// triggers finds it still down, and a login after the rate limit heals.
+func TestRotationWhileTheIssuerRestartsHealsOnALaterLogin(t *testing.T) {
+	iss, v := world(t)
+	v.refetchAfter = 50 * time.Millisecond
+
+	iss.SetDown(true)
+	iss.Rotate(t)
+	tok := iss.Mint("anna", nil, time.Now().Add(5*time.Minute))
+	if got, reason, _ := v.Verify(tok); got != nil || reason != ReasonBadToken {
+		t.Fatalf("while the issuer is down: %v %s", got, reason)
+	}
+
+	iss.SetDown(false)
+	time.Sleep(60 * time.Millisecond)
+	if got, reason, err := v.Verify(tok); err != nil || got.Sub != "anna" {
+		t.Fatalf("after the restart the new key must be fetched: %s %v", reason, err)
+	}
+}
+
 // Fail closed: unknown kid with the issuer unreachable rejects.
 func TestUnknownKidOfflineFailsClosed(t *testing.T) {
 	iss, v := world(t)
