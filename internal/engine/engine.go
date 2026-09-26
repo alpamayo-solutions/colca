@@ -46,10 +46,13 @@ type Result struct {
 	// the same sender: nothing was stored or run, and its ack, if there is one yet,
 	// went out again.
 	Duplicate bool
-	Stream    string
-	Offset    uint64
-	Topic     string // as persisted, with the mount inserted for replicated records
-	Command   *CommandOutcome
+	// Answered is a command the node answered itself instead of storing it: no
+	// service announced it (see routes.go). Command holds the answer.
+	Answered bool
+	Stream   string
+	Offset   uint64
+	Topic    string // as persisted, with the mount inserted for replicated records
+	Command  *CommandOutcome
 }
 
 // Attribution is the immutable authorship envelope stored with a record.
@@ -498,7 +501,11 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 			return e.rejectDenied(metrics.ReasonCmdDenied, attribution, "execute", &p, "client %s: no cmd grant covers %s", identity, topic)
 		}
 		if err := e.validateContract(p.Contract, payload); err != nil {
+			e.refuseCommandPayload(p, payload, attribution.ActorID, err)
 			return e.reject(metrics.ReasonValidation, "%w", err)
+		}
+		if message, ok := e.unannounced(p); ok {
+			return e.answeredUnannounced(p, payload, attribution.ActorID, message), nil
 		}
 		id, repeat, err := e.admitCommand(p, payload, attribution.ActorID)
 		if err != nil {
@@ -625,7 +632,11 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 			"human %s: no cmd grant covers %s", entry.ULID, topic)
 	}
 	if err := e.validateContract(p.Contract, payload); err != nil {
+		e.refuseCommandPayload(p, payload, entry.ULID, err)
 		return e.reject(metrics.ReasonValidation, "%w", err)
+	}
+	if message, ok := e.unannounced(p); ok {
+		return e.answeredUnannounced(p, payload, entry.ULID, message), nil
 	}
 	attribution := Attribution{
 		WrittenBy: entry.ULID, ActorID: entry.ULID,
@@ -697,6 +708,9 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 	}
 	if err := e.validateContract(p.Contract, payload); err != nil {
 		e.metrics.RejectPublish(metrics.ReasonValidation)
+		if uns.IsCommand(class) {
+			e.refuseCommandPayload(p, payload, attribution.ActorID, err)
+		}
 		return Result{}, err
 	}
 	if err := e.validateAdminStateAuthor(p, payload); err != nil {
@@ -705,6 +719,9 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 	}
 	var id string
 	if uns.IsCommand(class) {
+		if message, ok := e.unannounced(p); ok {
+			return e.answeredUnannounced(p, payload, attribution.ActorID, message), nil
+		}
 		var repeat bool
 		if id, repeat, err = e.admitCommand(p, payload, attribution.ActorID); err != nil {
 			return Result{}, err

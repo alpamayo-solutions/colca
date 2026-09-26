@@ -481,6 +481,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusOK, map[string]any{"duplicate": true})
 			return
 		}
+		if res.Answered {
+			// No service executes this command; the _Ack says so too.
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": res.Command.Message, "command": res.Command})
+			return
+		}
 		if !res.Persisted {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "topic outside " + uns.Root() + "/# is not persisted"})
 			return

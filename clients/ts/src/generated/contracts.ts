@@ -524,6 +524,10 @@ export type SemanticTag = {
 export type ServiceDetails = {
   architecture_metadata?: Record<string, unknown>;
   colca_node_id: string;
+  commands?: {
+    contract: string;
+    path: string;
+  }[];
   description?: string;
   display_name?: string;
   health_metrics?: {

@@ -100,6 +100,7 @@ ALLOWED_KEYWORDS = {
 # Nested value objects that refuse unknown keys, so no extra field can smuggle
 # in a cleartext password or an outcome consumers read differently.
 STRICT_NESTED_DATACLASSES = {
+    "CommandRoute",
     "HealthMetricDeclaration",
     "NetworkInterface",
     "SealedSecretEnvelope",
