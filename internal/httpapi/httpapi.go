@@ -725,7 +725,28 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				return
 			}
 		}
-		entries, next, err := e.Store().KVScanPageDepth(prefix, after, pageSize, contracts, depth)
+		// folders=true (with depth) also names the paths at the cut that have deeper
+		// entries, record or not, so a tree view learns which rows expand.
+		withFolders := false
+		if raw := r.URL.Query().Get("folders"); raw != "" {
+			withFolders, err = strconv.ParseBool(raw)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "folders must be true or false"})
+				return
+			}
+			if withFolders && depth == 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "folders needs depth"})
+				return
+			}
+		}
+		var entries []store.KVEntry
+		var folders []string
+		var next string
+		if withFolders {
+			entries, folders, next, err = e.Store().KVScanLevel(prefix, after, pageSize, contracts, depth)
+		} else {
+			entries, next, err = e.Store().KVScanPageDepth(prefix, after, pageSize, contracts, depth)
+		}
 		if err != nil {
 			if errors.Is(err, store.ErrInvalidPageToken) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid page token"})
@@ -772,7 +793,17 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			m.ACLDeny(metrics.ACLRead)
 		}
 		m.HTTPKVRead(callerLabel(c), contractLabel(contracts), prefixDepthLabel(prefix), len(out))
-		writeJSON(w, http.StatusOK, map[string]any{"entries": out, "next": next})
+		if !withFolders {
+			writeJSON(w, http.StatusOK, map[string]any{"entries": out, "next": next})
+			return
+		}
+		visible := make([]string, 0, len(folders))
+		for _, f := range folders {
+			if c.admin || uns.AuthorizeBrowse(e.Scope(), c.entry, f) {
+				visible = append(visible, f)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"entries": out, "folders": visible, "next": next})
 	}))
 
 	// GET /self is a local service's view of its own registry entry: the ULID minted

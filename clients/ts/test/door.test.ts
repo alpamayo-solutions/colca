@@ -63,6 +63,17 @@ describe("fetch", () => {
     expect(page.next).toBe(8);
   });
 
+  it("names each contract to narrow to", async () => {
+    const { fetch, calls } = stub([{ body: { records: [], next: 0 } }, { body: { records: [], next: 0 } }]);
+    const door = new Door({ baseUrl: "http://colca", service: "my-app", fetch });
+
+    await door.fetchPage("entities", "c/my-app/e", { contract: ["_Signal", "_Group"] });
+    await door.fetchPage("entities", "c/my-app/e", { contract: "_Annotation" });
+
+    expect(new URL(calls[0].url).searchParams.getAll("contract")).toEqual(["_Signal", "_Group"]);
+    expect(new URL(calls[1].url).searchParams.getAll("contract")).toEqual(["_Annotation"]);
+  });
+
   it("carries a gap through", async () => {
     const { fetch } = stub([
       {
@@ -151,6 +162,45 @@ describe("kv", () => {
       actorLabel: "anna",
       actorKind: "human",
     });
+  });
+
+  it("asks the node for one level when given a depth", async () => {
+    const { fetch, calls } = stub([{ body: { entries: [], next: "" } }]);
+    const door = new Door({ baseUrl: "http://colca", service: "my-app", fetch });
+
+    await door.kv("plant/", { depth: 2, contract: "_Signal" });
+
+    const query = new URL(calls[0].url).searchParams;
+    expect(query.get("depth")).toBe("2");
+    expect(query.getAll("contract")).toEqual(["_Signal"]);
+    expect(query.has("folders")).toBe(false);
+  });
+
+  it("refuses a depth the node would reject", async () => {
+    const { fetch, calls } = stub([]);
+    const door = new Door({ baseUrl: "http://colca", service: "my-app", fetch });
+
+    await expect(door.kv("plant/", { depth: 0 })).rejects.toThrow(RangeError);
+    await expect(door.kvLevel("plant/", { depth: 1.5 })).rejects.toThrow(RangeError);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("reads one level with its folders across pages", async () => {
+    const entry = { path: "plant/l1", node_id: "n", topic: "t", payload: {}, ts: 1, offset: 1 };
+    const { fetch, calls } = stub([
+      { body: { entries: [entry], folders: ["plant/l1"], next: "page2" } },
+      { body: { entries: [], folders: ["plant/l2"], next: "" } },
+    ]);
+    const door = new Door({ baseUrl: "http://colca", service: "my-app", fetch });
+
+    const level = await door.kvLevel("plant/");
+
+    expect(level.entries.map((e) => e.path)).toEqual(["plant/l1"]);
+    expect(level.folders).toEqual(["plant/l1", "plant/l2"]);
+    const first = new URL(calls[0].url).searchParams;
+    expect(first.get("depth")).toBe("1");
+    expect(first.get("folders")).toBe("true");
+    expect(new URL(calls[1].url).searchParams.get("after")).toBe("page2");
   });
 
   it("refuses a node that keeps handing back the same page", async () => {

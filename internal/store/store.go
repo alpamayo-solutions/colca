@@ -1269,14 +1269,33 @@ func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) 
 // below prefix (0: no limit). Deeper subtrees are skipped with a seek, not
 // walked, so a tree view reading one level pays for that level only.
 func (s *Store) KVScanPageDepth(prefix, after string, limit int, contracts []string, depth int) ([]KVEntry, string, error) {
+	entries, _, next, err := s.kvScanPage(prefix, after, limit, contracts, depth, false)
+	return entries, next, err
+}
+
+// KVScanLevel is KVScanPageDepth that also names the folders at the cut: every
+// path at most depth segments below prefix that has entries deeper than depth,
+// whether or not it holds a record itself. A tree view reads one level in one
+// call and learns which rows expand. Each folder is reported once, on the page
+// where the scan skips its subtree, and counts towards limit like an entry.
+// Folders ignore the contract filter: they describe the tree, not a contract.
+func (s *Store) KVScanLevel(prefix, after string, limit int, contracts []string, depth int) ([]KVEntry, []string, string, error) {
+	if depth < 1 {
+		return nil, nil, "", fmt.Errorf("store: KV level scan needs a positive depth")
+	}
+	return s.kvScanPage(prefix, after, limit, contracts, depth, true)
+}
+
+func (s *Store) kvScanPage(prefix, after string, limit int, contracts []string, depth int, withFolders bool) ([]KVEntry, []string, string, error) {
 	if limit <= 0 {
-		return nil, "", fmt.Errorf("store: KV page size must be positive")
+		return nil, nil, "", fmt.Errorf("store: KV page size must be positive")
 	}
 	if depth < 0 {
-		return nil, "", fmt.Errorf("store: KV depth must not be negative")
+		return nil, nil, "", fmt.Errorf("store: KV depth must not be negative")
 	}
 	if len(contracts) > 0 && depth == 0 {
-		return s.kvScanPageIndexed(prefix, after, limit, contracts)
+		entries, next, err := s.kvScanPageIndexed(prefix, after, limit, contracts)
+		return entries, nil, next, err
 	}
 	var want map[string]bool
 	if len(contracts) > 0 {
@@ -1289,7 +1308,7 @@ func (s *Store) KVScanPageDepth(prefix, after string, limit int, contracts []str
 	ub := append(append([]byte{}, lb...), 0xFF)
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
 	if err != nil {
-		return nil, "", fmt.Errorf("store: kv page %q: open iterator: %w", prefix, err)
+		return nil, nil, "", fmt.Errorf("store: kv page %q: open iterator: %w", prefix, err)
 	}
 	defer iter.Close()
 
@@ -1297,7 +1316,7 @@ func (s *Store) KVScanPageDepth(prefix, after string, limit int, contracts []str
 	if after != "" {
 		raw, tokenErr := kvPageToken(after, lb, ub)
 		if tokenErr != nil {
-			return nil, "", tokenErr
+			return nil, nil, "", tokenErr
 		}
 		valid = iter.SeekGE(raw)
 		if valid && bytes.Equal(iter.Key(), raw) {
@@ -1314,12 +1333,21 @@ func (s *Store) KVScanPageDepth(prefix, after string, limit int, contracts []str
 	out := make([]KVEntry, 0, capacity)
 	matched := 0
 	var lastKey []byte
+	var folders []string
 	for valid && matched < limit {
 		lastKey = append(lastKey[:0], iter.Key()...)
 		path, node, topic, ok := splitKVKey(string(iter.Key()[2:])) // strip "k\x00"
 		if ok && depth > 0 {
 			if d, lead := kvRelativeDepth(prefix, path); d > depth {
-				valid = iter.SeekGE(kvSkipBelow(prefix, path, depth, lead))
+				skip := kvSkipBelow(prefix, path, depth, lead)
+				if withFolders {
+					// The skip target sorts after the whole subtree and is no stored
+					// key, so as a page token it resumes past the folder, not in it.
+					folders = append(folders, string(skip[2:len(skip)-1]))
+					lastKey = append(lastKey[:0], skip...)
+					matched++
+				}
+				valid = iter.SeekGE(skip)
 				continue
 			}
 		}
@@ -1332,12 +1360,12 @@ func (s *Store) KVScanPageDepth(prefix, after string, limit int, contracts []str
 		valid = iter.Next()
 	}
 	if err := iter.Error(); err != nil {
-		return nil, "", fmt.Errorf("store: kv page %q: %w", prefix, err)
+		return nil, nil, "", fmt.Errorf("store: kv page %q: %w", prefix, err)
 	}
 	if valid && len(lastKey) > 0 {
-		return out, base64.RawURLEncoding.EncodeToString(lastKey), nil
+		return out, folders, base64.RawURLEncoding.EncodeToString(lastKey), nil
 	}
-	return out, "", nil
+	return out, folders, "", nil
 }
 
 // decodeKVEntry decodes a stored KV value; ok is false when it does not decode.

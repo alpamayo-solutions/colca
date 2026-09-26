@@ -33,6 +33,15 @@ await door.publishTo(
 );
 ```
 
+## Browsing the tree
+
+```ts
+// One level below "wisewoods/": its records, plus the paths that expand.
+const { entries, folders } = await door.kvLevel("wisewoods/");
+// The same scan without folders, narrowed to one contract.
+const signals = await door.kv("wisewoods/line1/", { depth: 2, contract: "_Signal" });
+```
+
 ## Live values
 
 `@alpamayo-solutions/colca-client/live` keeps one MQTT connection to the node's

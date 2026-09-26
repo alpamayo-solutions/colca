@@ -18,6 +18,8 @@ export type {
   FetchOptions,
   Gap,
   KvEntry,
+  KvLevel,
+  KvOptions,
   Page,
   PublishResult,
   SelfInfo,

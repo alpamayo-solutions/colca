@@ -744,6 +744,18 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 	return false
 }
 
+// AuthorizeBrowse reports whether e may see that path exists as a folder in a
+// tree view: a read zone covers it, or it is an ancestor of a read zone, which
+// the caller must pass through to reach what it may read.
+func AuthorizeBrowse(sc Scope, e *Entry, path string) bool {
+	for _, z := range readZones(sc, e) {
+		if coverPath(z, path) || strings.HasPrefix(z, path+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // localClockRead admits only the clock coordination contracts to services
 // inside the deployment. Placement scopes process data, but a connector must
 // still read the shared clock and completion reports from workers at other

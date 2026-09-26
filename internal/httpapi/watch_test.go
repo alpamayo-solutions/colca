@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -204,4 +205,35 @@ func TestKVDepth(t *testing.T) {
 	if bad := request("/kv?prefix=plant%2F&depth=0"); bad.Code != http.StatusBadRequest {
 		t.Fatalf("depth 0 = %d, want 400", bad.Code)
 	}
+	if _, ok := decodeRaw(t, rr)["folders"]; ok {
+		t.Fatal("folders sent without folders=true")
+	}
+	var level struct {
+		Entries []struct {
+			Path string `json:"path"`
+		} `json:"entries"`
+		Folders []string `json:"folders"`
+	}
+	withFolders := request("/kv?prefix=plant%2F&depth=1&folders=true")
+	if err := json.Unmarshal(withFolders.Body.Bytes(), &level); err != nil || withFolders.Code != http.StatusOK {
+		t.Fatalf("kv folders = %d %s", withFolders.Code, withFolders.Body.String())
+	}
+	if len(level.Entries) != 1 || level.Entries[0].Path != "plant/l1" || fmt.Sprint(level.Folders) != "[plant/l1]" {
+		t.Fatalf("folders page = %+v", level)
+	}
+	if bad := request("/kv?prefix=plant%2F&folders=true"); bad.Code != http.StatusBadRequest {
+		t.Fatalf("folders without depth = %d, want 400", bad.Code)
+	}
+	if bad := request("/kv?prefix=plant%2F&depth=1&folders=maybe"); bad.Code != http.StatusBadRequest {
+		t.Fatalf("folders=maybe = %d, want 400", bad.Code)
+	}
+}
+
+func decodeRaw(t *testing.T, rr *httptest.ResponseRecorder) map[string]json.RawMessage {
+	t.Helper()
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
