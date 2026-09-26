@@ -160,3 +160,31 @@ func TestRouteMatches(t *testing.T) {
 		}
 	}
 }
+
+// With commands.strict, a command at an element where nobody announced anything
+// is answered 404 as well; announced commands still pass.
+func TestStrictCommandsAnswerEveryUnannouncedCommand(t *testing.T) {
+	e, delivered := ledgerEngine(t)
+	e.cfg.Commands.Strict = true
+	announce(t, e, "dataops-line", true, commandRoute{"_CmdParam", "line1/operator/setDensity"})
+	anna := humanEntry(t, "cmd:#:param")
+	stored := e.Store().NextOffset("commands")
+
+	for _, path := range []string{"line1/m2/head3/setHeight", "unknown-site/x/setY", "setZ"} {
+		res, err := e.IngestHuman(anna, param(path), cmdPayload("c-"+path))
+		if err != nil || !res.Answered || res.Persisted || res.Command == nil || res.Command.ResultCode != 404 {
+			t.Fatalf("%s: %+v, %v", path, res, err)
+		}
+		if ack := lastAck(t, delivered); ack.ResultCode != 404 || !strings.Contains(ack.Message, "nothing is announced at") {
+			t.Fatalf("%s: ack %+v", path, ack)
+		}
+	}
+	if got := e.Store().NextOffset("commands"); got != stored {
+		t.Fatalf("an unannounced command was stored: next %d, want %d", got, stored)
+	}
+
+	res, err := e.IngestHuman(anna, param("line1/operator/setDensity"), cmdPayload("c-ok"))
+	if err != nil || res.Answered || !res.Persisted {
+		t.Fatalf("an announced command did not pass: %+v, %v", res, err)
+	}
+}

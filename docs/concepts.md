@@ -99,8 +99,10 @@ the whole lifetime, in two cases:
   misspelt verb, or a verb sent to the wrong element, is caught this way. A
   service that is down keeps its announcements, so its commands still wait
   for it. Commands at an element nobody announces for pass on as before: their
-  executor may not announce. chaski services announce their `@on_command`
-  handlers themselves.
+  executor may not announce. With `commands.strict: true` in the node
+  configuration they are answered `404` too, for deployments whose executors
+  all announce. chaski services announce their `@on_command` handlers
+  themselves.
 - **Its payload is refused: `400`.** A command the node cannot accept (its
   `command` is not an object, it carries `NaN` or `Infinity`) is refused as
   before, and when a `correlation_id` can be read from it the sender also gets

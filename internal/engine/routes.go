@@ -9,7 +9,8 @@
 // catches a removed verb, a misspelt or wrong-case verb, and a verb sent to the
 // wrong element that takes others. Commands at elements where nobody announces
 // anything still pass through untouched: their executor may simply not announce
-// (a machine, or a service built before announcements).
+// (a machine, or a service built before announcements). With commands.strict,
+// they are answered 404 too.
 //
 // A payload the node refuses (a command that is not an object, NaN or Infinity)
 // is answered with a 400 _Ack when a correlation id can be read from it.
@@ -67,8 +68,9 @@ func (e *Engine) announcedRoutes() ([]commandRoute, error) {
 }
 
 // unannounced says whether a command to this node goes unanswered by any
-// service, and if so the 404 message. Commands the node executes itself, and
-// commands at an element where nobody announced anything, are not its concern.
+// service, and if so the 404 message. Commands the node executes itself are not
+// its concern, and neither are commands at an element where nobody announced
+// anything, unless commands.strict is set.
 func (e *Engine) unannounced(p uns.Parsed) (string, bool) {
 	if p.NodeID != e.cfg.ULID || (e.exec != nil && e.exec.Handles(p.Contract)) {
 		return "", false
@@ -96,7 +98,11 @@ func (e *Engine) unannounced(p uns.Parsed) (string, bool) {
 		siblings = append(siblings, verb)
 	}
 	if !claimed {
-		return "", false
+		if !e.cfg.Commands.Strict {
+			return "", false
+		}
+		return fmt.Sprintf("no service executes %s %s; nothing is announced at %s",
+			p.Contract, p.Path, orRoot(element)), true
 	}
 	sort.Strings(siblings)
 	return fmt.Sprintf("no service executes %s %s; %s takes %s",

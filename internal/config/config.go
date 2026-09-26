@@ -176,9 +176,23 @@ type Config struct {
 	// a mismatching digest refuses to start.
 	Contracts Contracts `yaml:"contracts"`
 
+	// Commands sets how the node answers commands no service executes.
+	Commands Commands `yaml:"commands"`
+
 	// Plugin holds settings for the domain plugin. The core never reads them,
 	// which keeps domain vocabulary out of the broker's configuration.
 	Plugin map[string]string `yaml:"plugin"`
+}
+
+// Commands is the commands: block.
+//
+// Without Strict, a command at an element where no service announced any
+// command passes on to its executor, which may not announce (a machine, or a
+// service built before announcements). With Strict, every command to this node
+// that no service announced is answered 404, for a deployment whose executors
+// all announce.
+type Commands struct {
+	Strict bool `yaml:"strict"`
 }
 
 // Contracts is the contracts: block.

@@ -26,6 +26,8 @@ repl:
 parent:
   url: https://127.0.0.1:9443
   pubkey: aabbcc
+commands:
+  strict: true
 `
 
 func TestLoad(t *testing.T) {
@@ -56,6 +58,9 @@ func TestLoad(t *testing.T) {
 	}
 	if c.Parent.URL != "https://127.0.0.1:9443" {
 		t.Fatalf("parent url: %+v", c.Parent)
+	}
+	if !c.Commands.Strict {
+		t.Fatalf("commands: %+v", c.Commands)
 	}
 }
 
