@@ -337,6 +337,29 @@ func TestAuthorizeReadRecord(t *testing.T) {
 	}
 }
 
+// A folder shows when a read zone covers it or lies below it, never a sibling.
+func TestAuthorizeBrowse(t *testing.T) {
+	cases := []struct {
+		name string
+		e    *Entry
+		path string
+		want bool
+	}{
+		{"inside own zone", entry("werk1/linie3"), "werk1/linie3/cnc5", true},
+		{"own zone itself", entry("werk1/linie3"), "werk1/linie3", true},
+		{"ancestor leading to own zone", entry("werk1/linie3"), "werk1", true},
+		{"sibling of own zone", entry("werk1/linie3"), "werk1/linie4", false},
+		{"prefix is not a segment boundary", entry("werk1/linie3"), "werk1/lin", false},
+		{"read all", entry("", "read:#"), "anything", true},
+		{"observer without grants", entry(""), "werk1", false},
+	}
+	for _, c := range cases {
+		if got := AuthorizeBrowse(ns, c.e, c.path); got != c.want {
+			t.Errorf("%s: AuthorizeBrowse(%q) = %v, want %v", c.name, c.path, got, c.want)
+		}
+	}
+}
+
 func TestUnplacedLocalServiceReadsAndSubscribesAcrossItsNode(t *testing.T) {
 	local := &Entry{ULID: "svc-projector", Kind: KindLocal, Name: "projector"}
 	topic := "colca/v1/_AuditEvent/n-edge1/_colca/audit/evt-1"

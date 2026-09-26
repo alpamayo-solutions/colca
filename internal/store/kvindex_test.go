@@ -284,3 +284,56 @@ func TestStreamChangesWakeOnlyForTheirStream(t *testing.T) {
 		t.Fatalf("metrics next = %d, want 2", now["metrics"])
 	}
 }
+
+// KVScanLevel names each path at the cut that has deeper entries once, record
+// or not, across pages of any size, and the page token resumes past the folder.
+func TestLevelScanNamesFolders(t *testing.T) {
+	s := mustOpen(t)
+	if _, _, err := s.Append("entities", []Record{
+		kvRec("_SystemElement", "plant/l1", `{}`),
+		kvRec("_SystemElement", "plant/l1/m1", `{}`),
+		kvRec("_Signal", "plant/l1/m1/speed", `{}`),
+		kvRec("_Signal", "plant/l2/temp", `{}`),
+		kvRec("_Signal", "plant/l2/x/deep", `{}`),
+		kvRec("_Signal", "plant/l3", `{}`),
+		kvRec("_Signal", "plant/l30/a", `{}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	level := func(prefix string, depth, limit int, contracts ...string) (string, string) {
+		var entries, folders []string
+		after := ""
+		for {
+			page, fs, next, err := s.KVScanLevel(prefix, after, limit, contracts, depth)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page)+len(fs) > limit {
+				t.Fatalf("page of %d entries and %d folders exceeds limit %d", len(page), len(fs), limit)
+			}
+			for _, e := range page {
+				entries = append(entries, e.Path)
+			}
+			folders = append(folders, fs...)
+			if next == "" {
+				return fmt.Sprint(entries), fmt.Sprint(folders)
+			}
+			after = next
+		}
+	}
+	for _, limit := range []int{1, 2, 1000} {
+		entries, folders := level("plant/", 1, limit)
+		if entries != "[plant/l1 plant/l3]" || folders != "[plant/l1 plant/l2 plant/l30]" {
+			t.Errorf("limit %d: entries %s folders %s", limit, entries, folders)
+		}
+	}
+	if entries, folders := level("plant/", 2, 1); entries != "[plant/l1 plant/l1/m1 plant/l2/temp plant/l3 plant/l30/a]" || folders != "[plant/l1/m1 plant/l2/x]" {
+		t.Errorf("depth 2: entries %s folders %s", entries, folders)
+	}
+	if entries, folders := level("plant/", 1, 1, "_Signal"); entries != "[plant/l3]" || folders != "[plant/l1 plant/l2 plant/l30]" {
+		t.Errorf("contract: entries %s folders %s", entries, folders)
+	}
+	if _, _, _, err := s.KVScanLevel("plant/", "", 10, nil, 0); err == nil {
+		t.Error("depth 0 must be refused")
+	}
+}

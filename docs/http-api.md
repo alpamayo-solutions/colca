@@ -38,6 +38,12 @@ A caller is one of:
 - `depth=N` on `/kv` keeps entries at most `N` path segments below `prefix`
   (`prefix=plant/&depth=1` is the level below `plant`); deeper subtrees are
   skipped, not read.
+- `folders=true` (needs `depth`) adds `"folders":["plant/l1",…]` to the `/kv`
+  page: the paths at the cut that have deeper entries, whether or not they hold
+  a record themselves, so a tree view reads one level per call and knows which
+  rows expand. Each folder appears once, on the page where its subtree is
+  skipped, counts towards `max`, and ignores `contract`. A caller sees a folder
+  its read zones cover or lead to.
 - Payloads are passed through as raw JSON; numbers keep the exact form the
   publisher sent.
 - `records` and `entries` are always arrays.
