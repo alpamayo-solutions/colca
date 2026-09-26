@@ -160,7 +160,7 @@ func Open(dir string) (*Store, error) {
 			return nil, err
 		}
 	}
-	added, removed, err := s.reconcileKVIndex()
+	added, removed, err := s.openKVIndex()
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("reconcile the KV contract index: %w", err)
@@ -209,7 +209,18 @@ func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (u
 	return binary.BigEndian.Uint64(v), nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+// Close marks the contract index complete (see kvIndexCleanKey) and closes the
+// database.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	clean := s.kvIndexCleanValue()
+	s.mu.Unlock()
+	if err := s.db.Set(kvIndexCleanKey, clean, pebble.Sync); err != nil {
+		_ = s.db.Close()
+		return err
+	}
+	return s.db.Close()
+}
 
 // Health reports whether Pebble's background flushes and compactions are failing.
 func (s *Store) Health() pebblelog.Status { return s.health.Status() }

@@ -78,12 +78,72 @@ func splitKVKey(key string) (path, nodeID, topic string, ok bool) {
 	return key[:pathSep], rest[:nodeSep], rest[nodeSep+1:], true
 }
 
+// kvIndexCleanKey records, at a clean Close, every stream's next offset. KV
+// entries are only ever set together with an append, so if the offsets still
+// match at the next Open, nothing wrote KV in between without the index (an older
+// version, or a crash mid-write), and the reconcile can be skipped. Open deletes
+// it, so a crash leaves it absent.
+var kvIndexCleanKey = []byte("xc\x00")
+
+// kvIndexCleanValue is every stream's next offset in stream order.
+func (s *Store) kvIndexCleanValue() []byte {
+	var v []byte
+	for _, stream := range streams {
+		v = append(v, be64(s.next[stream])...)
+	}
+	return v
+}
+
+// openKVIndex runs at Open: it reconciles the contract index unless the last
+// Close left it known to be complete, then clears that mark for this run.
+func (s *Store) openKVIndex() (added, removed int, err error) {
+	clean, closer, err := s.db.Get(kvIndexCleanKey)
+	switch {
+	case err == nil:
+		matches := bytes.Equal(clean, s.kvIndexCleanValue())
+		closer.Close()
+		if matches {
+			return 0, 0, s.db.Delete(kvIndexCleanKey, pebble.Sync)
+		}
+	case !errors.Is(err, pebble.ErrNotFound):
+		return 0, 0, err
+	}
+	added, removed, err = s.reconcileKVIndex()
+	if err != nil {
+		return added, removed, err
+	}
+	return added, removed, s.db.Delete(kvIndexCleanKey, pebble.Sync)
+}
+
 // reconcileKVIndex makes the contract index list exactly the KV entries: it adds
 // the index key of every entry that lacks one and deletes index keys whose entry
-// is gone. Open runs it, so a store written by a version without the index (a
-// first start after the upgrade, or after a downgrade and upgrade) is indexed
-// before the first read. It returns how many keys it added and removed.
+// is gone, so a store written by a version without the index (a first start
+// after the upgrade, or after a downgrade and upgrade) is indexed before the
+// first read. It holds the indexed KV keys in memory for one pass over each
+// range. It returns how many keys it added and removed.
 func (s *Store) reconcileKVIndex() (added, removed int, err error) {
+	indexed := map[string][]byte{} // KV key suffix -> its index key
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte("x\x00"), UpperBound: []byte("x\x01")})
+	if err != nil {
+		return 0, 0, err
+	}
+	var stale [][]byte
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := append([]byte(nil), iter.Key()...)
+		rest := key[2:]
+		sep := bytes.IndexByte(rest, 0)
+		if sep < 0 {
+			stale = append(stale, key)
+			continue
+		}
+		indexed[string(rest[sep+1:])] = key
+	}
+	err = iter.Error()
+	iter.Close()
+	if err != nil {
+		return 0, 0, err
+	}
+
 	b := s.db.NewBatch()
 	defer func() { b.Close() }()
 	flush := func() error {
@@ -100,27 +160,23 @@ func (s *Store) reconcileKVIndex() (added, removed int, err error) {
 
 	kvLB := kvPrefix("")
 	kvUB := append(append([]byte{}, kvLB...), 0xFF)
-	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: kvLB, UpperBound: kvUB})
+	iter, err = s.db.NewIter(&pebble.IterOptions{LowerBound: kvLB, UpperBound: kvUB})
 	if err != nil {
 		return 0, 0, err
 	}
 	for iter.First(); iter.Valid(); iter.Next() {
-		path, node, topic, ok := splitKVKey(string(iter.Key()[2:]))
+		suffix := string(iter.Key()[2:])
+		if _, ok := indexed[suffix]; ok {
+			delete(indexed, suffix)
+			continue
+		}
+		path, node, topic, ok := splitKVKey(suffix)
 		if !ok {
 			continue
 		}
 		ik := kvIndexKey(path, node, topic)
 		if ik == nil {
 			continue
-		}
-		_, closer, getErr := s.db.Get(ik)
-		if getErr == nil {
-			closer.Close()
-			continue
-		}
-		if !errors.Is(getErr, pebble.ErrNotFound) {
-			iter.Close()
-			return added, removed, getErr
 		}
 		if err := b.Set(ik, nil, nil); err != nil {
 			iter.Close()
@@ -137,46 +193,18 @@ func (s *Store) reconcileKVIndex() (added, removed int, err error) {
 	if err != nil {
 		return added, removed, err
 	}
-
-	ixLB := []byte("x\x00")
-	ixUB := []byte("x\x01")
-	iter, err = s.db.NewIter(&pebble.IterOptions{LowerBound: ixLB, UpperBound: ixUB})
-	if err != nil {
-		return added, removed, err
+	// What is left names entries that are gone.
+	for _, key := range indexed {
+		stale = append(stale, key)
 	}
-	for iter.First(); iter.Valid(); iter.Next() {
-		rest := string(iter.Key()[2:])
-		sep := strings.IndexByte(rest, 0)
-		stale := sep < 0
-		if !stale {
-			_, closer, getErr := s.db.Get(kvPrefix(rest[sep+1:]))
-			switch {
-			case getErr == nil:
-				closer.Close()
-			case errors.Is(getErr, pebble.ErrNotFound):
-				stale = true
-			default:
-				iter.Close()
-				return added, removed, getErr
-			}
-		}
-		if !stale {
-			continue
-		}
-		if err := b.Delete(append([]byte(nil), iter.Key()...), nil); err != nil {
-			iter.Close()
+	for _, key := range stale {
+		if err := b.Delete(key, nil); err != nil {
 			return added, removed, err
 		}
 		removed++
 		if err := flush(); err != nil {
-			iter.Close()
 			return added, removed, err
 		}
-	}
-	err = iter.Error()
-	iter.Close()
-	if err != nil {
-		return added, removed, err
 	}
 	return added, removed, b.Commit(pebble.Sync)
 }

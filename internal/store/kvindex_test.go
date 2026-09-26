@@ -111,22 +111,10 @@ func TestTheIndexFollowsDeletes(t *testing.T) {
 	}
 }
 
-// A store written without the index (a version before it) is indexed when it
-// opens, and an index key whose entry is gone is dropped.
-func TestOpenReconcilesTheIndex(t *testing.T) {
-	dir := t.TempDir()
-	s, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.Append("entities", []Record{
-		kvRec("_Signal", "a", `{"id":"a"}`),
-		kvRec("_SystemElement", "a", `{"id":"e"}`),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// What an older version leaves: an entry without an index key, and an index
-	// key for an entry it deleted.
+// breakIndex leaves what an older version leaves: an entry without an index
+// key, and an index key for an entry it deleted.
+func breakIndex(t *testing.T, s *Store) {
+	t.Helper()
 	b := s.db.NewBatch()
 	if err := b.Delete(kvIndexKey("a", "n1", "colca/v1/_Signal/n1/a"), nil); err != nil {
 		t.Fatal(err)
@@ -137,11 +125,26 @@ func TestOpenReconcilesTheIndex(t *testing.T) {
 	if err := b.Commit(pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Close(); err != nil {
+}
+
+func openWithSignal(t *testing.T, dir string) *Store {
+	t.Helper()
+	s, err := Open(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := s.Append("entities", []Record{
+		kvRec("_Signal", "a", `{"id":"a"}`),
+		kvRec("_SystemElement", "a", `{"id":"e"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
 
-	s, err = Open(dir)
+func assertReconciled(t *testing.T, dir string) {
+	t.Helper()
+	s, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +156,40 @@ func TestOpenReconcilesTheIndex(t *testing.T) {
 	if n := countIndexKeys(t, s); n != 2 {
 		t.Fatalf("index keys = %d, want 2", n)
 	}
+}
+
+// A store that did not close cleanly (a crash, or a version without the index)
+// is reconciled when it opens: missing index keys are added, stale ones dropped.
+func TestOpenReconcilesAfterAnUncleanClose(t *testing.T) {
+	dir := t.TempDir()
+	s := openWithSignal(t, dir)
+	breakIndex(t, s)
+	if err := s.db.Close(); err != nil { // no clean mark
+		t.Fatal(err)
+	}
+	assertReconciled(t, dir)
+}
+
+// A clean mark whose offsets no longer match (another version appended since)
+// does not skip the reconcile.
+func TestOpenReconcilesWhenTheOffsetsMoved(t *testing.T) {
+	dir := t.TempDir()
+	s := openWithSignal(t, dir)
+	breakIndex(t, s)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Set(kvIndexCleanKey, []byte("older offsets"), pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertReconciled(t, dir)
 }
 
 func countIndexKeys(t *testing.T, s *Store) int {
