@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 // Level 4 of the topic is the publishing node, never the signal's owner, so the
@@ -127,6 +128,20 @@ func TestATombstoneIsNotARow(t *testing.T) {
 	row, err := RowFrom("colca/v1/_Metric/m1/t", []byte(`{"signal_id":"s","deleted":true}`), 1)
 	if !errors.Is(err, ErrNotAMeasurement) {
 		t.Fatalf("err = %v (row %+v), want ErrNotAMeasurement", err, row)
+	}
+}
+
+func TestANullValueIsARetraction(t *testing.T) {
+	row, err := RowFrom("colca/v1/_Metric/n1/m1/t",
+		[]byte(`{"signal_id":"s","colca_node_id":"n1","timestamp":1755600000.5,"value":null}`), 1)
+	if err != nil {
+		t.Fatalf("RowFrom: %v — a null value says the value went missing, history must keep that", err)
+	}
+	if !row.Missing() || row.SignalID != "s" || row.NodeID != "n1" {
+		t.Fatalf("row = %+v, want a retraction of s on n1", row)
+	}
+	if want := time.Unix(1755600000, 5e8).UTC(); !row.Timestamp.Equal(want) {
+		t.Fatalf("Timestamp = %s, want %s", row.Timestamp, want)
 	}
 }
 

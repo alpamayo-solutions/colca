@@ -35,6 +35,31 @@ WHERE (historian_metric.value_json, historian_metric.value_number, historian_met
       (EXCLUDED.value_json, EXCLUDED.value_number, EXCLUDED.value_text,
        EXCLUDED.value_bool, EXCLUDED.colca_node_id)`
 
+// insertRetraction writes a row with every value column NULL: the value went
+// missing at this timestamp. Report by exception applies to missing too: the row
+// is written only when the latest row at or before it still holds a value, so a
+// repeated null writes nothing, and a signal with no history gets no row. At the
+// same key it replaces a stored value, like insertMetric.
+const insertRetraction = `
+INSERT INTO historian_metric
+    (timestamp, value_json, value_number, value_text, value_bool, colca_node_id, signal_id)
+SELECT $1::timestamptz, NULL::jsonb, NULL::double precision, NULL::text, NULL::boolean, $2::text, $3::text
+WHERE EXISTS (
+    SELECT 1
+    FROM (SELECT value_json, value_number, value_text, value_bool
+          FROM historian_metric
+          WHERE signal_id = $3::text AND timestamp <= $1::timestamptz
+          ORDER BY timestamp DESC
+          LIMIT 1) AS latest
+    WHERE latest.value_json IS NOT NULL OR latest.value_number IS NOT NULL
+       OR latest.value_text IS NOT NULL OR latest.value_bool IS NOT NULL)
+ON CONFLICT (signal_id, timestamp) DO UPDATE SET
+    value_json = NULL,
+    value_number = NULL,
+    value_text = NULL,
+    value_bool = NULL,
+    colca_node_id = EXCLUDED.colca_node_id`
+
 // upsertOffset moves the marker in the same transaction as the rows it
 // describes.
 const upsertOffset = `
@@ -203,9 +228,8 @@ func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offs
 
 	batch := &pgx.Batch{}
 	for _, row := range rows {
-		batch.Queue(insertMetric,
-			row.Timestamp, nullableJSON(row.JSON), row.Number, row.Text, row.Bool,
-			nullable(row.NodeID), row.SignalID)
+		sql, args := statementFor(row)
+		batch.Queue(sql, args...)
 	}
 	batch.Queue(upsertOffset, consumer, offset)
 
@@ -240,9 +264,8 @@ func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, o
 			return nil, fmt.Errorf("historian: opening a savepoint for row %d at offset %d: %w", i, offset, err)
 		}
 
-		_, execErr := tx.Exec(ctx, insertMetric,
-			row.Timestamp, nullableJSON(row.JSON), row.Number, row.Text, row.Bool,
-			nullable(row.NodeID), row.SignalID)
+		sql, args := statementFor(row)
+		_, execErr := tx.Exec(ctx, sql, args...)
 		if execErr == nil {
 			if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+savepoint); err != nil {
 				return nil, fmt.Errorf("historian: releasing the savepoint for row %d at offset %d: %w", i, offset, err)
@@ -269,6 +292,15 @@ func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, o
 		return nil, fmt.Errorf("historian: committing a row-by-row apply at offset %d: %w", offset, err)
 	}
 	return rejections, nil
+}
+
+// statementFor picks the insert for a row: a value, or a retraction.
+func statementFor(row Row) (string, []any) {
+	if row.Missing() {
+		return insertRetraction, []any{row.Timestamp, nullable(row.NodeID), row.SignalID}
+	}
+	return insertMetric, []any{row.Timestamp, nullableJSON(row.JSON), row.Number, row.Text, row.Bool,
+		nullable(row.NodeID), row.SignalID}
 }
 
 func nullable(s string) any {
