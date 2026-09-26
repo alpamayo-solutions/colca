@@ -49,6 +49,8 @@ export interface Page {
   records: DoorRecord[];
   /** Where a following read starts. Fetching never moves the cursor; acking does. */
   next: number;
+  /** Where this page started reading; absent from nodes before 0.18.2. */
+  start?: number;
   gap?: Gap;
 }
 
@@ -116,6 +118,8 @@ export interface FetchOptions {
   signalIds?: readonly string[];
   /** Keeps only records of these contracts; `next` still moves past the others. */
   contract?: string | readonly string[];
+  /** MQTT topic filters; keeps records whose topic matches one (colca 0.19+). */
+  topics?: readonly string[];
   /**
    * Read the *end* of the stream instead of the cursor's position, without
    * moving it. What a view wants when it opens: the last `max` records.
@@ -200,11 +204,13 @@ export class Door {
     if (options.tail) query.set("tail", "1");
     for (const id of options.signalIds ?? []) query.append("signal_id", id);
     for (const name of contractList(options.contract)) query.append("contract", name);
+    for (const filter of options.topics ?? []) query.append("topic", filter);
 
     const body = await this.#call<WirePage>("GET", `/fetch?${query.toString()}`, undefined, options.signal);
     return {
       records: (body.records ?? []).map(toRecord),
       next: body.next,
+      start: body.from,
       gap: body.gap ? toGap(body.gap) : undefined,
     };
   }
@@ -361,6 +367,7 @@ interface WireGap {
 interface WirePage {
   records?: WireRecord[];
   next: number;
+  from?: number;
   gap?: WireGap;
 }
 

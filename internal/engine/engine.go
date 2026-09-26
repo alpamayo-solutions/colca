@@ -17,6 +17,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/contracts"
+	"github.com/alpamayo-solutions/colca/internal/cursorwatch"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -195,6 +196,10 @@ type Engine struct {
 	// unboundLog rate-limits the "_Metric with no _Signal" log line per path
 	// (unbound.go).
 	unboundLog *unboundMetricLog
+
+	// cursorFilters remembers what each cursor's consumer reads, from its last
+	// fetch, so the cursor watchdog counts only records it would be woken for.
+	cursorFilters *cursorwatch.Filters
 }
 
 // New builds an engine. ids is the identity registry: a publish is admitted when
@@ -209,7 +214,7 @@ func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m
 		clk = clock.New(cfg.Parent == nil, time.Now)
 	}
 	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk, auditID: newAuditID, unboundLog: newUnboundMetricLog(),
-		ledger: newCommandLedger()}
+		ledger: newCommandLedger(), cursorFilters: cursorwatch.NewFilters()}
 	e.elements = uns.NewElementIndex(e.EntityStore())
 	if raw, ok := s.AncestryGet(); ok {
 		var a uns.Ancestry
@@ -281,6 +286,9 @@ func (e *Engine) SetAncestry(a uns.Ancestry) {
 func (e *Engine) SetOnPosition(fn func(uns.Ancestry)) { e.onPosition = fn }
 
 func (e *Engine) Store() *store.Store { return e.store }
+
+// CursorFilters is what each cursor's consumer reads, as its last fetch said.
+func (e *Engine) CursorFilters() *cursorwatch.Filters { return e.cursorFilters }
 
 // AuthoritativeNow is this node's estimate of the root's clock: wall time plus
 // the offset from the latest parent response, or raw wall time on the root and
@@ -542,31 +550,13 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		}
 		return e.persistAttributed(class, p, topic, payload, actorFor(entry))
 	}
-	if !uns.IsKnown(class) {
-		return e.reject(metrics.ReasonGrammar, "client %s may not publish %s", identity, p.Contract)
-	}
-	// Level 4 is this node's ULID for every publisher. A service's identity decides
-	// whether a write is allowed but never appears in the topic.
-	if p.NodeID != e.cfg.ULID {
-		return e.reject(metrics.ReasonNodeID, "level-4 %q is not this node (%q)", p.NodeID, e.cfg.ULID)
-	}
-	if err := e.validateContract(p.Contract, payload); err != nil {
-		return e.reject(metrics.ReasonValidation, "%w", err)
-	}
-	if err := e.validateClientStateAuthor(identity, p, payload); err != nil {
-		return e.reject(metrics.ReasonIdentity, "%w", err)
-	}
-	entry, ok := e.ids.Get(identity)
-	if !ok || !uns.Authorize(e.Scope(), entry, uns.ActPub, topic) {
-		actor := Attribution{ActorID: identity, ActorLabel: identity, ActorKind: "service"}
-		if ok {
-			actor = actorFor(entry)
-		}
-		return e.rejectDenied(metrics.ReasonWriteDenied, actor, "publish", &p, "client %s: no write scope covers %s", identity, topic)
+	attribution, err := e.admitClientData(identity, p, class, topic, payload, actorFor)
+	if err != nil {
+		return Result{}, err
 	}
 	// The client already publishes the canonical node-local topic; only the
 	// attribution is added.
-	res, err := e.persistAttributed(class, p, topic, payload, actorFor(entry))
+	res, err := e.persistAttributed(class, p, topic, payload, attribution)
 	if err == nil {
 		// Offer state a machine published to the domain plugin; the core does not
 		// interpret it.
@@ -576,6 +566,41 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		e.checkMetricBinding(p)
 	}
 	return res, err
+}
+
+// admitClientData checks a client's data, state or ack record (not a command,
+// not audit): known contract, level 4 is this node, schema, author, write
+// scope. It returns the attribution the record is stored with.
+func (e *Engine) admitClientData(identity string, p uns.Parsed, class uns.Class, topic string, payload []byte,
+	actorFor func(*uns.Entry) Attribution) (Attribution, error) {
+	if !uns.IsKnown(class) {
+		_, err := e.reject(metrics.ReasonGrammar, "client %s may not publish %s", identity, p.Contract)
+		return Attribution{}, err
+	}
+	// Level 4 is this node's ULID for every publisher. A service's identity decides
+	// whether a write is allowed but never appears in the topic.
+	if p.NodeID != e.cfg.ULID {
+		_, err := e.reject(metrics.ReasonNodeID, "level-4 %q is not this node (%q)", p.NodeID, e.cfg.ULID)
+		return Attribution{}, err
+	}
+	if err := e.validateContract(p.Contract, payload); err != nil {
+		_, err = e.reject(metrics.ReasonValidation, "%w", err)
+		return Attribution{}, err
+	}
+	if err := e.validateClientStateAuthor(identity, p, payload); err != nil {
+		_, err = e.reject(metrics.ReasonIdentity, "%w", err)
+		return Attribution{}, err
+	}
+	entry, ok := e.ids.Get(identity)
+	if !ok || !uns.Authorize(e.Scope(), entry, uns.ActPub, topic) {
+		actor := Attribution{ActorID: identity, ActorLabel: identity, ActorKind: "service"}
+		if ok {
+			actor = actorFor(entry)
+		}
+		_, err := e.rejectDenied(metrics.ReasonWriteDenied, actor, "publish", &p, "client %s: no write scope covers %s", identity, topic)
+		return Attribution{}, err
+	}
+	return actorFor(entry), nil
 }
 
 // IngestHuman ingests a publish from a verified human. Humans only send commands,

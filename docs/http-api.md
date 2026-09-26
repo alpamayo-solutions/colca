@@ -19,6 +19,7 @@ A caller is one of:
 | `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","storage":{"state":"ok"}}` |
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}` |
+| `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"error":"…"},…]}` |
 | `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N}` |
 | `GET /watch` | machine, service, person, admin | `?stream=S&stream=S2&interval_ms=100` | NDJSON, one line per change: `{"streams":["S"],"next":{"S":N}}` |
 | `POST /ack` | owner of the cursor, admin | `{"cursor":"NAME","stream":"S","offset":N}` | `{"moved":true}` |
@@ -26,6 +27,11 @@ A caller is one of:
 | `GET /self` | local service | | the service's registry entry, limits, `standalone_since` and `standalone_ready` |
 | `POST /standalone/complete` | local service on a standalone node | | finish the identity handover; returns its durable issuance cutoff |
 
+- `/publish/batch` judges every record as `/publish` would and writes the
+  admitted ones with one append per stream, in order; a refused record does
+  not stop the others. Commands and audit records are refused in a batch. For
+  a high-rate publisher, such as a bridge relaying a plant: one request per
+  batch instead of one per sample.
 - `/fetch` never moves a cursor. `/ack` takes the last offset you processed and
   only moves forward.
 - `from=N` reads ahead of the cursor, starting at offset `N`, so a consumer can
@@ -34,6 +40,11 @@ A caller is one of:
   response's `from` is where the page started; nodes before 0.18.2 ignore the
   parameter and do not send it.
 - `prefix` filters on the path part of the topic, not the raw topic.
+- `topic` on `/fetch` (repeatable, colca 0.19+) keeps records whose raw topic
+  matches one of the MQTT filters (`+`, `#`). A consumer woken by a set of
+  topics passes the same set, so it reads exactly what wakes it. Skipped
+  records move `next` like `contract` does; ack `next - 1` after an empty or
+  short page so they do not stay unread on your cursor.
 - `max` defaults to 100 for `/fetch` (at most 1000) and to 1000 for `/kv`
   (at most 10000). Pass `next` back as `after` until it is empty.
 - `contract` on `/kv` and `/fetch` may be repeated. An unknown name is a `400`.
@@ -104,7 +115,28 @@ connection open and writes one JSON line whenever a selected stream grows:
 - A line with no streams is a heartbeat, written after 5 s of silence. Treat
   15 s without a line as a dead connection and reconnect.
 - A hint carries no records and moves no cursor; read with `/fetch` and `/ack`
-  as before. Keep a slow fallback poll (tens of seconds) only as a safety net.
+  as before. Take no timed fallback poll: a consumer that stops reading is
+  caught by the cursor watchdog below, not hidden by a poll.
+
+### Consumers that stop reading
+
+A consumer reads when woken: an MQTT message on its topics, a `/watch` hint, a
+reconnect. Nothing reads on a timer, so a lost wake or a stuck loop would leave
+records waiting unseen. The node watches every cursor instead:
+
+- Every few seconds it takes the oldest record past the cursor that the
+  consumer reads (its last `/fetch` filter applied) and reports its age as
+  `colca_cursor_unread_age_seconds{cursor,stream}`. An idle stream reads `0`:
+  only records that wait count, not how old the last one is.
+- When that age passes `cursors.lag_alarm_after` (default 60 s) it writes a
+  retained `_Finding` with reason `cursor_lag` next to the service's own record,
+  `_Finding/{node}/{mount}/{service}/cursor_lag`, and retires it once the cursor
+  has caught up. The alarm path raises it like any other finding.
+- Only a cursor fetched since the node started raises a finding. A cursor
+  nobody fetches is abandoned (an old buffer generation, a renamed consumer):
+  the gauge and `colca_retention_blocked_by_cursor` show it. Retire it.
+- A service subscribes to its own finding and fails its health check while it
+  stands. chaski and `colca-historian` do so.
 
 ## Administration
 

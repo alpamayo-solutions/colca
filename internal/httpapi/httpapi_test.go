@@ -22,6 +22,8 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/contracts"
+	"github.com/alpamayo-solutions/colca/internal/contracts/contractstest"
+	"github.com/alpamayo-solutions/colca/internal/cursorwatch"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/httplimit"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -2705,5 +2707,149 @@ func TestFetchFromReadsAheadOfTheCursor(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("from=%s = %d, want 400", bad, resp.StatusCode)
 		}
+	}
+}
+
+func TestFetchFiltersByTopicAndRemembersTheFilterForTheCursor(t *testing.T) {
+	a := newAPI(t)
+	_, _, err := a.st.Append("metrics", []store.Record{
+		{Topic: "colca/v1/_Metric/n-test/line1/s1", Payload: []byte(`{"signal_id":"s1","value":1}`), TS: 1},
+		{Topic: "colca/v1/_Metric/n-test/line2/s2", Payload: []byte(`{"signal_id":"s2","value":2}`), TS: 2},
+		{Topic: "colca/v1/_Metric/n-test/line1/deep/s3", Payload: []byte(`{"signal_id":"s3","value":3}`), TS: 3},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, out := req(t, client(nil), "GET",
+		a.url+"/fetch?stream=metrics&cursor=topics&max=10&topic=colca/v1/_Metric/%2B/line1/%2B&topic=colca/v1/_Metric/n-test/line2/%23",
+		"tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fetch = %d: %v", resp.StatusCode, out)
+	}
+	records := out["records"].([]any)
+	if len(records) != 2 || records[0].(map[string]any)["offset"] != float64(1) || records[1].(map[string]any)["offset"] != float64(2) {
+		t.Fatalf("records = %v, want offsets 1 and 2", records)
+	}
+	if out["next"] != float64(4) {
+		t.Fatalf("next = %v, want 4 past the skipped record", out["next"])
+	}
+
+	// The watchdog applies what the cursor fetched with.
+	w := &cursorwatch.Watchdog{Store: a.st, Filters: a.eng.CursorFilters(), Owners: a.reg, Elements: a.eng.Elements(),
+		NodeID: "n-test", After: time.Minute, Publish: func(string, []byte) error { return nil }}
+	gauges := map[string]float64{}
+	w.Gauges = gaugeMap(gauges)
+	a.st.CursorAck("topics", "metrics", 3)
+	w.Check(time.UnixMilli(3).Add(time.Hour))
+	if got := gauges["topics"]; got != 0 {
+		t.Fatalf("unread age = %v, want 0: the one record left is outside the topic filter", got)
+	}
+
+	resp, _ = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=c&topic=a/%23/b", "tok", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid topic filter = %d, want 400", resp.StatusCode)
+	}
+}
+
+type gaugeMap map[string]float64
+
+func (g gaugeMap) CursorUnreadAge(cursor, _ string, seconds float64) { g[cursor] = seconds }
+func (g gaugeMap) ForgetCursorUnreadAge(cursor, _ string)            { delete(g, cursor) }
+
+func TestACursorLagFindingIsAcceptedAndRetiredThroughTheAdminDoor(t *testing.T) {
+	a := newAPI(t)
+	// The finding must pass the schema the node really runs.
+	tbl, err := contracts.Load(contractstest.GeneratedBundlePath(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.eng.SetContracts(tbl)
+	w := &cursorwatch.Watchdog{Store: a.st, Filters: a.eng.CursorFilters(), Owners: a.reg, Elements: a.eng.Elements(),
+		NodeID: "n-test", After: time.Minute, Publish: func(topic string, payload []byte) error {
+			_, err := a.eng.IngestAdminAttributed(topic, payload, engine.Attribution{
+				WrittenBy: cursorwatch.Author, ActorID: cursorwatch.Author, ActorLabel: cursorwatch.Author, ActorKind: "system"})
+			return err
+		}}
+	cursor := a.m1.ULID + "/ingest"
+	a.eng.CursorFilters().Remember(cursor, "metrics", nil) // its consumer fetched since start
+	var last uint64
+	_, last, err = a.st.Append("metrics", []store.Record{{Topic: "colca/v1/_Metric/n-test/m1/s1", Payload: []byte(`{"signal_id":"s1","value":1}`), TS: 1000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.st.CursorAck(cursor, "metrics", last+1)
+	if _, _, err := a.st.Append("metrics", []store.Record{{Topic: "colca/v1/_Metric/n-test/m1/s1", Payload: []byte(`{"signal_id":"s1","value":2}`), TS: 2000}}); err != nil {
+		t.Fatal(err)
+	}
+	w.Check(time.UnixMilli(2000).Add(2 * time.Minute))
+	entries, err := a.st.KVScan("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var topic string
+	for _, e := range entries {
+		if strings.Contains(e.Topic, "/_Finding/") {
+			topic = e.Topic
+		}
+	}
+	if want := "colca/v1/_Finding/n-test/m1/" + a.m1.ULID + "/cursor_lag"; topic != want {
+		t.Fatalf("finding at %q, want %q", topic, want)
+	}
+	a.st.CursorAck(cursor, "metrics", last+2)
+	w.Check(time.UnixMilli(2000).Add(3 * time.Minute))
+	entries, err = a.st.KVScan("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Topic, "/_Finding/") {
+			t.Fatalf("finding still standing after the cursor caught up: %s", e.Topic)
+		}
+	}
+}
+
+func TestABatchPublishJudgesEachRecordAndAppendsTheAdmittedOnesTogether(t *testing.T) {
+	h := newLocalHandler(t)
+	body := `{"records":[
+		{"topic":"colca/v1/_Metric/n-test/line/a","payload":{"v":1}},
+		{"topic":"colca/v1/_Metric/n-other/line/b","payload":{"v":2}},
+		{"topic":"colca/v1/_CmdParam/n-test/line/c","payload":{"correlation_id":"x"}},
+		{"topic":"colca/v1/_Metric/n-test/line/d","payload":{"v":3}}
+	]}`
+	req := httptest.NewRequest(http.MethodPost, "/publish/batch", strings.NewReader(body))
+	req.Header.Set("X-Colca-Service", "bridge")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /publish/batch = %d: %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Accepted int              `json:"accepted"`
+		Results  []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Accepted != 2 || len(out.Results) != 4 {
+		t.Fatalf("accepted %d of %d results: %s", out.Accepted, len(out.Results), rec.Body)
+	}
+	if out.Results[0]["offset"] == nil || out.Results[3]["offset"] == nil {
+		t.Fatalf("records 0 and 3 must be stored: %v", out.Results)
+	}
+	if out.Results[3]["offset"].(float64) != out.Results[0]["offset"].(float64)+1 {
+		t.Fatalf("admitted records are appended together, in order: %v", out.Results)
+	}
+	for _, i := range []int{1, 2} {
+		if out.Results[i]["error"] == nil {
+			t.Fatalf("record %d must be refused on its own: %v", i, out.Results[i])
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/publish/batch", strings.NewReader(`{"records":[]}`))
+	req.Header.Set("X-Colca-Service", "bridge")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("an empty batch = %d, want 400", rec.Code)
 	}
 }

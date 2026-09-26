@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -108,6 +109,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// record cap. Store.Append still enforces the record cap; this only keeps a huge
 	// body out of memory.
 	maxPublishBody := int64(cfg.Limits.EffectiveMaxRecordBytes())*2 + 4096 //nolint:gosec // config caps max_record_bytes at 1 GiB
+	// A batch carries at most maxBatchRecords records and at most 16 MiB, or one
+	// record at its cap, whichever is larger.
+	const maxBatchRecords = 5000
+	maxBatchBody := max(maxPublishBody, 16<<20)
 
 	// writeJSON encodes into a buffer before touching the ResponseWriter, so an
 	// encoding failure becomes a 500 instead of a 200 with an empty body.
@@ -499,6 +504,57 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		writeJSON(w, http.StatusOK, body)
 	}))
 
+	// POST /publish/batch takes many records from one machine or service in one
+	// request: {"records":[{"topic":…,"payload":…},…]}. Each is judged exactly as
+	// POST /publish judges it; the admitted ones are written in one append per
+	// stream. The answer lists one result per record, in order: {"offset":N} or
+	// {"error":…}. Commands and audit records are refused here.
+	mux.HandleFunc("POST /publish/batch", authFor(limitClassWrite, writePolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+		if c.admin || c.human != nil || c.entry == nil {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "a batch is published by a machine or service identity"})
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBatchBody)
+		var in struct {
+			Records []struct {
+				Topic   string          `json:"topic"`
+				Payload json.RawMessage `json:"payload"`
+			} `json:"records"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				m.RecordRejected("too_large")
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+					"error": fmt.Sprintf("request body exceeds %d bytes", maxBatchBody)})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if len(in.Records) == 0 || len(in.Records) > maxBatchRecords {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": fmt.Sprintf("a batch holds 1 to %d records", maxBatchRecords)})
+			return
+		}
+		batch := make([]engine.BatchRecord, len(in.Records))
+		for i, rec := range in.Records {
+			batch[i] = engine.BatchRecord{Topic: rec.Topic, Payload: rec.Payload}
+		}
+		results := e.IngestClientBatch(c.entry.ULID, batch)
+		out := make([]map[string]any, len(results))
+		accepted := 0
+		for i, res := range results {
+			if res.Err != nil {
+				out[i] = map[string]any{"error": res.Err.Error()}
+				continue
+			}
+			accepted++
+			out[i] = map[string]any{"stream": res.Stream, "offset": res.Offset}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"accepted": accepted, "results": out})
+	}))
+
 	// GET /fetch reads from the cursor's position and never moves it; only /ack does.
 	//
 	// If the cursor is below the stream's LWM the response carries a gap object and
@@ -542,6 +598,20 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				contractSet[ct] = true
 			}
 		}
+		// topic keeps records whose topic matches one of the MQTT filters
+		// (repeatable): a consumer that is woken by a set of topics reads exactly
+		// that set, and the cursor watchdog counts only those records as unread.
+		topicFilters := q["topic"]
+		for _, f := range topicFilters {
+			if !uns.ValidFilter(f) {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("invalid topic filter: %q", f)})
+				return
+			}
+		}
+		if len(topicFilters) > 1000 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "at most 1000 topic filters are allowed"})
+			return
+		}
 		signalIDs, hasSignalFilter := q["signal_id"]
 		signalSet := make(map[string]struct{}, len(signalIDs))
 		if hasSignalFilter {
@@ -566,6 +636,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				return false
 			}
 			topic := record.Topic
+			if len(topicFilters) > 0 && !slices.ContainsFunc(topicFilters, func(f string) bool { return uns.MatchFilter(f, topic) }) {
+				return false
+			}
 			var parsed uns.Parsed
 			var parseErr error
 			if contractSet != nil {
@@ -632,6 +705,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			} else {
 				from = 1
 			}
+		}
+		if q.Get("tail") == "" {
+			e.CursorFilters().Remember(cursor, stream, filter)
 		}
 		recs, next, err := e.Store().ReadRecords(stream, from, limit, filter)
 		if err != nil {

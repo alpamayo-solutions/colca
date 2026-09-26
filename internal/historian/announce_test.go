@@ -11,6 +11,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/contracts/contractstest"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/node"
 )
@@ -218,4 +219,70 @@ func TestAnnouncerRepeatedStatusIsNotRepublished(t *testing.T) {
 	if status, detail := serviceStatus(t, client); status != StatusUnhealthy || detail != "first reason" {
 		t.Fatalf("a repeated status was republished: %q (%q)", status, detail)
 	}
+}
+
+func TestTheHealthDoorFollowsTheNodesCursorLagFinding(t *testing.T) {
+	base := t.TempDir()
+	keyFile := filepath.Join(base, "n.key")
+	if _, err := identity.Generate(keyFile); err != nil {
+		t.Fatal(err)
+	}
+	after := config.Duration(time.Second)
+	n, err := node.Start(&config.Config{
+		ULID:      "n-hist",
+		DataDir:   filepath.Join(base, "data"),
+		KeyFile:   keyFile,
+		API:       config.API{LocalAddr: "127.0.0.1:0"},
+		MQTTLocal: config.Endpoint{Addr: "127.0.0.1:0"},
+		Contracts: config.Contracts{Bundle: contractstest.GeneratedBundlePath(t)},
+		Cursors:   config.Cursors{LagAlarmAfter: &after},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(n.Stop)
+	client := &door.Client{BaseURL: "http://" + n.LocalAPIAddr, Service: "historian"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := &Announcer{Door: client, MQTTURL: "tcp://" + n.MQTTLocalAddr}
+	go a.Run(ctx)
+	waitActive(t, client, true)
+
+	publish := func(value int) {
+		t.Helper()
+		body := map[string]any{"signal_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "value": value, "timestamp": float64(time.Now().UnixMilli()) / 1000}
+		if err := client.Publish(ctx, "colca/v1/_Metric/n-hist/line/s1", body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readAll := func() {
+		t.Helper()
+		page, err := client.Fetch(ctx, "metrics", Cursor, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Records) > 0 {
+			if _, err := client.Ack(ctx, "metrics", Cursor, page.Records[len(page.Records)-1].Offset); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	waitLag := func(standing bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if (a.CursorLag() != "") == standing {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("cursor lag standing never became %v", standing)
+	}
+
+	publish(1)
+	readAll() // the cursor exists from here on
+	publish(2)
+	waitLag(true)
+	readAll()
+	waitLag(false)
 }

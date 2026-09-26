@@ -33,7 +33,8 @@ func (d *countingDoor) Ack(context.Context, string, string, int64) (bool, error)
 func runCadence(t *testing.T, pages []door.Page, wantImmediate int) {
 	t.Helper()
 	d := &countingDoor{pages: pages, fetches: make(chan struct{}, 16)}
-	bridge := &Bridge{Door: d, Store: &fakeStore{}, Max: 2, IdleSleep: time.Hour}
+	wake := make(chan struct{}, 1)
+	bridge := &Bridge{Door: d, Store: &fakeStore{}, Max: 2, Wake: wake}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- bridge.Run(ctx) }()
@@ -47,8 +48,14 @@ func runCadence(t *testing.T, pages []door.Page, wantImmediate int) {
 	}
 	select {
 	case <-d.fetches:
-		t.Fatalf("fetched again after a page that was not full")
+		t.Fatalf("fetched again after a page that was not full, without a wake")
 	case <-time.After(100 * time.Millisecond):
+	}
+	wake <- struct{}{}
+	select {
+	case <-d.fetches:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("a wake did not start a fetch")
 	}
 	cancel()
 	<-done
