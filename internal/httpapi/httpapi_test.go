@@ -2771,6 +2771,7 @@ func TestACursorLagFindingIsAcceptedAndRetiredThroughTheAdminDoor(t *testing.T) 
 			return err
 		}}
 	cursor := a.m1.ULID + "/ingest"
+	a.eng.CursorFilters().Remember(cursor, "metrics", nil) // its consumer fetched since start
 	var last uint64
 	_, last, err = a.st.Append("metrics", []store.Record{{Topic: "colca/v1/_Metric/n-test/m1/s1", Payload: []byte(`{"signal_id":"s1","value":1}`), TS: 1000}})
 	if err != nil {

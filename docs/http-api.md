@@ -126,6 +126,9 @@ records waiting unseen. The node watches every cursor instead:
   retained `_Finding` with reason `cursor_lag` next to the service's own record,
   `_Finding/{node}/{mount}/{service}/cursor_lag`, and retires it once the cursor
   has caught up. The alarm path raises it like any other finding.
+- Only a cursor fetched since the node started raises a finding. A cursor
+  nobody fetches is abandoned (an old buffer generation, a renamed consumer):
+  the gauge and `colca_retention_blocked_by_cursor` show it. Retire it.
 - A service subscribes to its own finding and fails its health check while it
   stands. chaski and `colca-historian` do so.
 

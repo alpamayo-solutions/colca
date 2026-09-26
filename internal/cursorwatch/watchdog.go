@@ -122,6 +122,14 @@ func (w *Watchdog) Check(now time.Time) {
 		if w.After <= 0 || age < w.After.Seconds() {
 			continue
 		}
+		if _, gen := w.Filters.get(cur.Name, cur.Stream); gen == 0 {
+			// Nobody fetched it since the node started: an abandoned cursor (a
+			// previous buffer generation, a renamed consumer). Every live
+			// consumer drains on reconnect, which fetches. The gauge and
+			// colca_retention_blocked_by_cursor show it; a finding would fail
+			// the health of a service that is reading fine on its current cursor.
+			continue
+		}
 		topic, owner, ok := w.findingTopic(cur.Name)
 		if !ok {
 			continue

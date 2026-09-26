@@ -80,9 +80,11 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
-// read makes cursor exist, past one record it already read.
+// read makes cursor exist, past one record it already read, fetched without
+// a filter since the node started.
 func (f *fixture) read(t *testing.T, cursor, stream string) {
 	t.Helper()
+	f.w.Filters.Remember(cursor, stream, nil)
 	last := f.append(t, stream, "colca/v1/_Metric/NODE/read")
 	if !f.st.CursorAck(cursor, stream, last+1) {
 		t.Fatalf("cursor %s did not move", cursor)
@@ -207,5 +209,19 @@ func TestAFindingLeftByTheLastRunIsRetiredOnceCaughtUp(t *testing.T) {
 	f.w.Check(f.now)
 	if len(f.writes) != 1 || f.writes[0].topic != lineTopic || f.writes[0].payload != nil {
 		t.Fatalf("want the old finding retired, got %v", f.writes)
+	}
+}
+
+func TestACursorNobodyFetchedSinceStartOnlyGetsTheGauge(t *testing.T) {
+	f := newFixture(t)
+	last := f.append(t, "metrics", "colca/v1/_Metric/NODE/read")
+	f.st.CursorAck("c/dataops-line/ingest-OLDGEN", "metrics", last+1) // a previous buffer generation
+	f.append(t, "metrics", "colca/v1/_Metric/NODE/x")
+	f.w.Check(f.now.Add(5 * time.Minute))
+	if len(f.writes) != 0 {
+		t.Fatalf("an abandoned cursor raised a finding: %v", f.writes)
+	}
+	if got := f.gauges["metrics:c/dataops-line/ingest-OLDGEN"]; got != 300 {
+		t.Fatalf("unread age = %v, want 300", got)
 	}
 }

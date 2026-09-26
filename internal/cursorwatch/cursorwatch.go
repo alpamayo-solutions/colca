@@ -15,7 +15,10 @@
 // list, contracts, topics) is only woken for records that pass it, so records
 // it filters out wait forever by design. The door remembers each cursor's last
 // fetch filter (Filters) and the watchdog applies it; until a cursor fetches,
-// every record counts.
+// every record counts for the gauge. Only a cursor fetched since the node
+// started can raise a finding: one nobody fetches is abandoned (a previous
+// buffer generation, a renamed consumer), and every live consumer fetches when
+// it drains on reconnect.
 package cursorwatch
 
 import (
