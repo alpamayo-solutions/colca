@@ -325,3 +325,26 @@ func TestRunReportsEachPassToHealth(t *testing.T) {
 		})
 	}
 }
+
+func TestANullValueReachesTheStoreAsARetraction(t *testing.T) {
+	// The value went missing between two readings. The sink decides whether the
+	// retraction is new; the bridge must hand it over, or history draws a line
+	// across the gap.
+	d := &fakeDoor{pages: []door.Page{page(4,
+		record(1, `{"signal_id":"s1","value":1}`),
+		record(2, `{"signal_id":"s1","value":null}`),
+		record(3, `{"signal_id":"s1","value":3}`),
+	)}}
+	store := &fakeStore{}
+	bridge := &Bridge{Door: d, Store: store}
+
+	if _, err := bridge.Once(context.Background()); err != nil {
+		t.Fatalf("Once: %v", err)
+	}
+	if len(store.batches) != 1 || len(store.batches[0]) != 3 {
+		t.Fatalf("batches = %+v, want one batch of 3 rows", store.batches)
+	}
+	if got := store.batches[0]; got[0].Missing() || !got[1].Missing() || got[2].Missing() {
+		t.Fatalf("rows = %+v, want value, retraction, value", got)
+	}
+}

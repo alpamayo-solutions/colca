@@ -23,6 +23,10 @@ type metricVectors struct {
 		Why     string          `json:"why"`
 		Payload json.RawMessage `json:"payload"`
 	} `json:"not_measurements"`
+	Retractions []struct {
+		Why     string          `json:"why"`
+		Payload json.RawMessage `json:"payload"`
+	} `json:"retractions"`
 	Refused []struct {
 		Why     string          `json:"why"`
 		Payload json.RawMessage `json:"payload"`
@@ -95,6 +99,25 @@ func TestGoldenVectorsThatAreNotMeasurements(t *testing.T) {
 		t.Run(tc.Why, func(t *testing.T) {
 			if _, err := RowFrom("colca/v1/_Metric/m1/t", tc.Payload, 1); !errors.Is(err, ErrNotAMeasurement) {
 				t.Fatalf("err = %v, want ErrNotAMeasurement", err)
+			}
+		})
+	}
+}
+
+func TestGoldenVectorsThatAreRetractions(t *testing.T) {
+	vectors := loadVectors(t)
+	if len(vectors.Retractions) == 0 {
+		t.Fatalf("%s carries no retractions — a null value would go unpinned", vectorPath)
+	}
+	for _, tc := range vectors.Retractions {
+		t.Run(tc.Why, func(t *testing.T) {
+			row, err := RowFrom("colca/v1/_Metric/m1/t", tc.Payload, 1)
+			if err != nil {
+				t.Fatalf("RowFrom: %v", err)
+			}
+			if !row.Missing() {
+				column, value := columnOf(row)
+				t.Fatalf("landed in %s = %v, want no value column", column, value)
 			}
 		})
 	}
