@@ -270,6 +270,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 			release, ok := acquireRequest(w, r, requestLimiter, m, door, class, key, policy)
 			if !ok {
+				m.HTTPLimitedCaller(r.Pattern, callerLabel(c))
 				return
 			}
 			defer release()
@@ -639,6 +640,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				"actor_kind":    rec.ActorKind,
 			})
 		}
+		m.HTTPFetch(callerLabel(c), stream)
 		resp := map[string]any{"records": out, "next": next, "now_ms": e.AuthoritativeNow().UnixMilli()}
 		if gap, ok := e.Store().Gap(stream, from); ok {
 			resp["gap"] = gap
@@ -769,6 +771,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if denied > 0 {
 			m.ACLDeny(metrics.ACLRead)
 		}
+		m.HTTPKVRead(callerLabel(c), contractLabel(contracts), prefixDepthLabel(prefix), len(out))
 		writeJSON(w, http.StatusOK, map[string]any{"entries": out, "next": next})
 	}))
 

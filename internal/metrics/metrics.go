@@ -242,6 +242,15 @@ type Metrics struct {
 	// never paths or identities.
 	httpRequestLimited *prometheus.CounterVec // colca_http_request_limited_total{door,class}
 
+	// Per-caller read load, to see who spends the scan and fetch budgets. The
+	// caller label is a registered identity (kind:name), "human" for every
+	// person, or "admin"; route, contract, stream and depth labels come from
+	// fixed sets, never from raw paths.
+	httpKVRequests      *prometheus.CounterVec   // colca_http_kv_requests_total{caller,contract,prefix_depth}
+	httpKVEntries       *prometheus.HistogramVec // colca_http_kv_entries{caller}
+	httpFetchRequests   *prometheus.CounterVec   // colca_http_fetch_requests_total{caller,stream}
+	httpLimitedByCaller *prometheus.CounterVec   // colca_http_request_limited_by_caller_total{route,caller}
+
 	// Blob sweeper: unreferenced blobs reclaimed after their grace period.
 	blobsSwept prometheus.Counter // colca_blobs_swept_total
 
@@ -460,6 +469,23 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_http_request_limited_total",
 			Help: "HTTP requests refused by Colca's rate or concurrency controls, by bounded door and route class. Resets on restart.",
 		}, []string{"door", "class"}),
+		httpKVRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_http_kv_requests_total",
+			Help: "GET /kv pages served, by caller, contract filter (one contract, \"multiple\" or \"all\") and the number of segments in the prefix (0 is the whole node, capped at \"5+\"). Resets on restart.",
+		}, []string{"caller", "contract", "prefix_depth"}),
+		httpKVEntries: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "colca_http_kv_entries",
+			Help:    "Entries returned by one GET /kv page, by caller.",
+			Buckets: []float64{0, 1, 10, 100, 1000, 10000},
+		}, []string{"caller"}),
+		httpFetchRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_http_fetch_requests_total",
+			Help: "GET /fetch pages served, by caller and stream. Resets on restart.",
+		}, []string{"caller", "stream"}),
+		httpLimitedByCaller: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_http_request_limited_by_caller_total",
+			Help: "HTTP requests answered 429 by the per-caller limits, by route pattern and caller. Resets on restart.",
+		}, []string{"route", "caller"}),
 		blobsSwept: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_blobs_swept_total",
 			Help: "Blobs deleted by the background sweeper because no live _Resource referenced them and they were older than the configured grace period. Resets on restart.",
@@ -560,6 +586,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
 		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
 		m.blobTransfers, m.blobRejects, m.recordRejects, m.resourceReads, m.httpRequestLimited, m.blobsSwept,
+		m.httpKVRequests, m.httpKVEntries, m.httpFetchRequests, m.httpLimitedByCaller,
 		m.metricsUnbound,
 		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
@@ -1030,6 +1057,30 @@ func (m *Metrics) RecordRejected(reason string) {
 func (m *Metrics) HTTPRequestLimited(door, class string) {
 	if m != nil {
 		m.httpRequestLimited.WithLabelValues(door, class).Inc()
+	}
+}
+
+// HTTPKVRead counts one GET /kv page and the entries it returned. contract is
+// one contract name, "multiple" or "all"; prefixDepth is already bounded.
+func (m *Metrics) HTTPKVRead(caller, contract, prefixDepth string, entries int) {
+	if m != nil {
+		m.httpKVRequests.WithLabelValues(caller, contract, prefixDepth).Inc()
+		m.httpKVEntries.WithLabelValues(caller).Observe(float64(entries))
+	}
+}
+
+// HTTPFetch counts one GET /fetch page. stream is a known stream.
+func (m *Metrics) HTTPFetch(caller, stream string) {
+	if m != nil {
+		m.httpFetchRequests.WithLabelValues(caller, stream).Inc()
+	}
+}
+
+// HTTPLimitedCaller counts one 429 by route pattern (the mux pattern, a fixed
+// set) and caller.
+func (m *Metrics) HTTPLimitedCaller(route, caller string) {
+	if m != nil {
+		m.httpLimitedByCaller.WithLabelValues(route, caller).Inc()
 	}
 }
 

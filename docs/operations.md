@@ -29,6 +29,22 @@ alert first:
 Counters reset when a node restarts. Gauges are read from the database at
 scrape time and survive restarts.
 
+### Who spends the read budgets
+
+The door limits each caller to 5 `/kv` and 25 `/fetch` requests a second. These
+say who uses them:
+
+| Metric | Labels | Shows |
+|---|---|---|
+| `colca_http_kv_requests_total` | `caller`, `contract` (one contract, `multiple` or `all`), `prefix_depth` (`0` is the whole node, up to `5+`) | whole-node reads (`contract="all",prefix_depth="0"`) are the ones to remove first |
+| `colca_http_kv_entries` | `caller` | histogram of entries per `/kv` page |
+| `colca_http_fetch_requests_total` | `caller`, `stream` | a follower polling an idle stream shows a steady rate; `/watch` removes it |
+| `colca_http_request_limited_by_caller_total` | `route` (the route pattern, such as `GET /kv`), `caller` | 429s per caller; `colca_http_request_limited_total` has them by door and class |
+
+`caller` is a registered identity as `kind:name` (`local:dataops-line`), every
+person as `human`, and the admin token as `admin`. No label carries a path.
+
+
 ## Retention
 
 The pruner removes the oldest records of a stream in one atomic step and never
