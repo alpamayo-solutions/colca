@@ -2,7 +2,7 @@
 // configured list, the signature against that issuer's JWKS cached in the store
 // (so restarts work while the issuer is down), audience and lifetime with 60s
 // skew, then the grants claim into a uns.Entry. The only network calls are the
-// periodic refresh and a rate-limited refresh on an unknown kid.
+// periodic refresh and the refresh an unknown kid triggers.
 package tokenauth
 
 import (
@@ -32,12 +32,14 @@ const (
 
 const (
 	defaultRefresh = time.Hour
-	// unknownKidMinInterval rate-limits the refetch an unknown kid triggers, so a
-	// flood of bad tokens cannot turn into a flood of requests. It stays short:
-	// after an identity provider restarts with new keys, every login fails until
-	// the next refetch.
-	unknownKidMinInterval = 10 * time.Second
-	clockSkew             = 60 * time.Second
+	// unknownKidMinInterval is the minimum time between an unknown-kid refetch
+	// and the last one that succeeded, so a flood of bad tokens against a healthy
+	// issuer cannot turn into a flood of requests. Failed fetches do not count:
+	// while the key set is missing or stale, an unknown kid fetches at once
+	// (one fetch in flight, short timeout).
+	unknownKidMinInterval  = 10 * time.Second
+	unknownKidFetchTimeout = 3 * time.Second
+	clockSkew              = 60 * time.Second
 )
 
 // Config mirrors config.Auth (the config package stays yaml-only; the
@@ -81,6 +83,7 @@ type Verifier struct {
 	cfg    Config
 	st     *store.Store
 	client *http.Client
+	quick  *http.Client // unknown-kid fetches, which a login waits for
 	log    *slog.Logger
 	m      Metrics
 
@@ -131,9 +134,11 @@ func (v *Verifier) personalAccessTokens() *uns.PersonalAccessTokenIndex {
 type jwksSource struct {
 	url string
 
-	mu        sync.RWMutex
-	keys      map[string]crypto.PublicKey
-	lastFetch time.Time // last unknown-kid-triggered fetch attempt (rate limit)
+	mu       sync.RWMutex
+	keys     map[string]crypto.PublicKey
+	lastKid  time.Time     // last successful unknown-kid refetch (rate limit)
+	failed   bool          // the last fetch of any kind failed
+	inflight chan struct{} // closed when the running unknown-kid fetch ends
 }
 
 // New builds a verifier and loads the persisted JWKS documents, without network
@@ -149,6 +154,7 @@ func New(cfg Config, st *store.Store, m Metrics) (*Verifier, error) {
 		cfg:      cfg,
 		st:       st,
 		client:   &http.Client{Timeout: fetchTimeout},
+		quick:    &http.Client{Timeout: unknownKidFetchTimeout},
 		log:      slog.Default().With("comp", "tokenauth"),
 		m:        m,
 		byIssuer: make(map[string]*jwksSource, len(cfg.Issuers)),
@@ -202,37 +208,41 @@ func (v *Verifier) Run(stop <-chan struct{}) {
 // refresh fetches every JWKS source.
 func (v *Verifier) refresh() {
 	for _, src := range v.sources {
-		v.refreshSource(src)
+		v.fetchSource(src, v.client)
 	}
 }
 
-// refreshSource fetches, parses, persists and swaps one key set. On failure the
-// current keys stay.
-func (v *Verifier) refreshSource(src *jwksSource) {
-	raw, err := fetchJWKS(v.client, src.url)
-	if err != nil {
-		v.log.Warn("jwks refresh failed — keeping cached keys", "url", src.url, "err", err)
+// fetchSource fetches, parses, persists and swaps one key set. On failure the
+// current keys stay. It reports whether the fetch succeeded.
+func (v *Verifier) fetchSource(src *jwksSource, client *http.Client) bool {
+	fail := func(msg string, err error) bool {
+		v.log.Warn(msg, "url", src.url, "err", err)
 		if v.m != nil {
 			v.m.JWKSRefreshFailed()
 		}
-		return
+		src.mu.Lock()
+		src.failed = true
+		src.mu.Unlock()
+		return false
+	}
+	raw, err := fetchJWKS(client, src.url)
+	if err != nil {
+		return fail("jwks refresh failed — keeping cached keys", err)
 	}
 	keys, err := parseJWKS(raw)
 	if err != nil {
-		v.log.Warn("jwks refresh returned an unusable document — keeping cached keys", "url", src.url, "err", err)
-		if v.m != nil {
-			v.m.JWKSRefreshFailed()
-		}
-		return
+		return fail("jwks refresh returned an unusable document — keeping cached keys", err)
 	}
 	if err := v.st.JWKSPut(src.url, raw); err != nil {
 		v.log.Warn("jwks persistence failed — keys active in-memory only", "url", src.url, "err", err)
 	}
 	src.mu.Lock()
 	src.keys = keys
+	src.failed = false
 	src.mu.Unlock()
 	v.notifyKeyCount()
 	v.log.Debug("jwks refreshed", "url", src.url, "keys", len(keys))
+	return true
 }
 
 // notifyKeyCount reports the keys cached across all sources.
@@ -249,28 +259,48 @@ func (v *Verifier) notifyKeyCount() {
 	v.m.SetJWKSKeys(n)
 }
 
-// keyFor resolves a kid in one source. On a miss it refetches that source
-// once, rate-limited, since an unknown kid usually means the keys were rotated.
+// keyFor resolves a kid in one source. On a miss it refetches that source and
+// looks again, since an unknown kid usually means the keys were rotated or not
+// loaded yet. Against a healthy key set the refetch is rate-limited by the last
+// successful one; while no key set has loaded or the last fetch failed (the
+// identity provider is starting or restarting), it fetches at once. Either way
+// at most one fetch runs, and concurrent misses wait for it.
 func (v *Verifier) keyFor(src *jwksSource, kid string) (crypto.PublicKey, bool) {
-	src.mu.RLock()
-	k, ok := src.keys[kid]
-	src.mu.RUnlock()
-	if ok {
+	src.mu.Lock()
+	if k, ok := src.keys[kid]; ok {
+		src.mu.Unlock()
 		return k, true
 	}
-	src.mu.Lock()
-	limited := time.Since(src.lastFetch) < v.refetchAfter
-	if !limited {
-		src.lastFetch = time.Now()
+	if wait := src.inflight; wait != nil {
+		src.mu.Unlock()
+		<-wait
+		return src.lookup(kid)
 	}
-	src.mu.Unlock()
-	if limited {
+	healthy := src.keys != nil && !src.failed
+	if healthy && time.Since(src.lastKid) < v.refetchAfter {
+		src.mu.Unlock()
 		return nil, false
 	}
-	v.refreshSource(src)
+	done := make(chan struct{})
+	src.inflight = done
+	src.mu.Unlock()
+
+	ok := v.fetchSource(src, v.quick)
+
+	src.mu.Lock()
+	if ok {
+		src.lastKid = time.Now()
+	}
+	src.inflight = nil
+	src.mu.Unlock()
+	close(done)
+	return src.lookup(kid)
+}
+
+func (src *jwksSource) lookup(kid string) (crypto.PublicKey, bool) {
 	src.mu.RLock()
-	k, ok = src.keys[kid]
-	src.mu.RUnlock()
+	defer src.mu.RUnlock()
+	k, ok := src.keys[kid]
 	return k, ok
 }
 

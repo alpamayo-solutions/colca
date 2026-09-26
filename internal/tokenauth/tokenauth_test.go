@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -159,6 +160,57 @@ func TestRotationWhileTheIssuerRestartsHealsOnALaterLogin(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if got, reason, err := v.Verify(tok); err != nil || got.Sub != "anna" {
 		t.Fatalf("after the restart the new key must be fetched: %s %v", reason, err)
+	}
+}
+
+// The identity provider starts after the node: every fetch fails, including the
+// one a login triggers. The first login once it answers succeeds, because failed
+// fetches do not count against the unknown-kid rate limit.
+func TestFirstLoginAfterTheIssuerComesUpSucceeds(t *testing.T) {
+	iss := tokentest.NewIssuer(t)
+	v, err := New(Config{Issuers: []Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud()}, openStore(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iss.SetDown(true)
+	v.refresh() // startup refresh: the issuer is unreachable
+	tok := iss.Mint("anna", nil, time.Now().Add(5*time.Minute))
+	if got, reason, _ := v.Verify(tok); got != nil || reason != ReasonBadToken {
+		t.Fatalf("while the issuer is down: %v %s", got, reason)
+	}
+
+	iss.SetDown(false)
+	if got, reason, err := v.Verify(tok); err != nil || got.Sub != "anna" {
+		t.Fatalf("first login after the issuer came up: %s %v", reason, err)
+	}
+}
+
+// Concurrent logins with an unknown kid share one fetch.
+func TestConcurrentUnknownKidsShareOneFetch(t *testing.T) {
+	iss := tokentest.NewIssuer(t)
+	v, err := New(Config{Issuers: []Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud()}, openStore(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := iss.Mint("anna", nil, time.Now().Add(5*time.Minute))
+	var wg sync.WaitGroup
+	failed := make(chan string, 16)
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, reason, err := v.Verify(tok); err != nil {
+				failed <- reason
+			}
+		}()
+	}
+	wg.Wait()
+	close(failed)
+	for reason := range failed {
+		t.Fatalf("a concurrent login was refused: %s", reason)
+	}
+	if n := iss.Requests(); n > 2 {
+		t.Fatalf("concurrent unknown kids must share fetches, server saw %d", n)
 	}
 }
 
