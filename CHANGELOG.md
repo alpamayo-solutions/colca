@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.2](https://github.com/alpamayo-solutions/colca/compare/v0.18.1...v0.18.2) (2026-09-26)
+
+
+### Features
+
+* MQTT delivery counters, limited-by-caller series at 0, /fetch read-ahead, commands.strict ([#102](https://github.com/alpamayo-solutions/colca/issues/102)) ([cc08463](https://github.com/alpamayo-solutions/colca/commit/cc0846360b31e483dd8b89cc4134626a847d92e4))
+
 ## [0.18.1](https://github.com/alpamayo-solutions/colca/compare/v0.18.0...v0.18.1) (2026-09-26)
 
 
