@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.0](https://github.com/alpamayo-solutions/colca/compare/v0.17.7...v0.18.0) (2026-09-26)
+
+
+### Features
+
+* per-caller HTTP read metrics ([#99](https://github.com/alpamayo-solutions/colca/issues/99)) ([c9f07bb](https://github.com/alpamayo-solutions/colca/commit/c9f07bb5d3751ed22d4316433100831e394eefb0))
+* stream watch, KV index by contract, and answers for commands nobody executes ([#97](https://github.com/alpamayo-solutions/colca/issues/97)) ([9a52a04](https://github.com/alpamayo-solutions/colca/commit/9a52a041f7e3aeb52537e95913d7b47006980329))
+
 ## [0.17.7](https://github.com/alpamayo-solutions/colca/compare/v0.17.6...v0.17.7) (2026-09-26)
 
 
