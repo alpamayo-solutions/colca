@@ -43,6 +43,7 @@ type Issuer struct {
 	iss, aud string
 	srv      *httptest.Server
 	requests atomic.Int64
+	down     atomic.Bool
 }
 
 // NewIssuer generates a keypair and serves its JWKS on a loopback httptest
@@ -61,6 +62,10 @@ func NewIssuer(t *testing.T) *Issuer {
 		iss: "https://issuer.test/realms/colca", aud: "colca"}
 	i.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		i.requests.Add(1)
+		if i.down.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(i.jwksJSON())
 	}))
@@ -80,6 +85,10 @@ func (i *Issuer) Requests() int64 { return i.requests.Load() }
 
 // CloseServer stops serving the JWKS (offline-issuer tests). Safe to call once.
 func (i *Issuer) CloseServer() { i.srv.Close() }
+
+// SetDown makes the JWKS answer 503 until called with false, as an identity
+// provider does while it restarts.
+func (i *Issuer) SetDown(down bool) { i.down.Store(down) }
 
 // Rotate replaces the signing key and kid. The JWKS serves only the new key.
 func (i *Issuer) Rotate(t *testing.T) {
