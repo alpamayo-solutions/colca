@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/alpamayo-solutions/colca/internal/httplimit"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -57,6 +58,48 @@ func callerLimitKey(c caller) string {
 	default:
 		return "admin"
 	}
+}
+
+// callerLabel names a caller for the per-caller metrics with bounded
+// cardinality: a registered identity by kind and name, every person as
+// "human", the token as "admin".
+func callerLabel(c caller) string {
+	switch {
+	case c.human != nil:
+		return "human"
+	case c.entry != nil:
+		name := c.entry.Name
+		if name == "" {
+			name = c.entry.ULID
+		}
+		return string(c.entry.Kind) + ":" + name
+	default:
+		return "admin"
+	}
+}
+
+// contractLabel is the contract filter of a read as one metric label value.
+func contractLabel(contracts []string) string {
+	switch len(contracts) {
+	case 0:
+		return "all"
+	case 1:
+		return contracts[0]
+	default:
+		return "multiple"
+	}
+}
+
+// prefixDepthLabel is how many path segments a prefix names, capped at "5+".
+func prefixDepthLabel(prefix string) string {
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "" {
+		return "0"
+	}
+	if depth := strings.Count(prefix, "/") + 1; depth < 5 {
+		return strconv.Itoa(depth)
+	}
+	return "5+"
 }
 
 func sourceLimitKey(r *http.Request) string {
