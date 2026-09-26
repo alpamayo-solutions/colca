@@ -13,20 +13,24 @@ npm install @alpamayo-solutions/colca-client
 ## Reading
 
 ```ts
-import { Door, Stream } from "@alpamayo-solutions/colca-client";
+import { Door, Doorbell, Stream } from "@alpamayo-solutions/colca-client";
 
 const door = new Door({ baseUrl: "http://colca", service: "my-app" });
 const panels = new Stream(door, "annotations", door.cursorName("panels"), {
   prefix: "wisewoods/line1",
 });
 
-for await (const record of panels.follow()) {
+// Ring the bell whenever the stream may have grown: an MQTT message on the
+// topics this stream reads, a /watch hint, a reconnect.
+const bell = new Doorbell();
+for await (const record of panels.follow({ bell })) {
   console.log(record.topic, record.payload);
 }
 ```
 
 `follow()` drains the stream and acks each page once its records have been
-consumed, then waits and drains again. A handler that throws sees its page
+consumed, then waits for the bell and drains again. It reads nothing on a
+timer; a ring during a drain leads to one more drain. A handler that throws sees its page
 again, so handlers must survive running twice on the same record.
 
 For a view that wants the newest records rather than the next ones, `tail()`

@@ -17,6 +17,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/contracts"
+	"github.com/alpamayo-solutions/colca/internal/cursorwatch"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -195,6 +196,10 @@ type Engine struct {
 	// unboundLog rate-limits the "_Metric with no _Signal" log line per path
 	// (unbound.go).
 	unboundLog *unboundMetricLog
+
+	// cursorFilters remembers what each cursor's consumer reads, from its last
+	// fetch, so the cursor watchdog counts only records it would be woken for.
+	cursorFilters *cursorwatch.Filters
 }
 
 // New builds an engine. ids is the identity registry: a publish is admitted when
@@ -209,7 +214,7 @@ func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m
 		clk = clock.New(cfg.Parent == nil, time.Now)
 	}
 	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk, auditID: newAuditID, unboundLog: newUnboundMetricLog(),
-		ledger: newCommandLedger()}
+		ledger: newCommandLedger(), cursorFilters: cursorwatch.NewFilters()}
 	e.elements = uns.NewElementIndex(e.EntityStore())
 	if raw, ok := s.AncestryGet(); ok {
 		var a uns.Ancestry
@@ -281,6 +286,9 @@ func (e *Engine) SetAncestry(a uns.Ancestry) {
 func (e *Engine) SetOnPosition(fn func(uns.Ancestry)) { e.onPosition = fn }
 
 func (e *Engine) Store() *store.Store { return e.store }
+
+// CursorFilters is what each cursor's consumer reads, as its last fetch said.
+func (e *Engine) CursorFilters() *cursorwatch.Filters { return e.cursorFilters }
 
 // AuthoritativeNow is this node's estimate of the root's clock: wall time plus
 // the offset from the latest parent response, or raw wall time on the root and

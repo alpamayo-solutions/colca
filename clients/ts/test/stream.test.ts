@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { Door, type Gap } from "../src/door.js";
+import { Doorbell } from "../src/doorbell.js";
 import { Stream } from "../src/stream.js";
 
 interface Ack {
@@ -69,6 +70,61 @@ describe("drain", () => {
     expect(seen).toEqual([]);
     expect(gaps.map((g) => g.toOffset)).toEqual([97]);
     expect(acks.map((a) => a.offset)).toEqual([97]);
+  });
+});
+
+describe("drain past filtered records", () => {
+  it("acks up to next, so records the filter skipped do not wait on the cursor", async () => {
+    const { door, acks, fetches } = node([
+      { records: [record(3)], next: 9, from: 1 },
+      { records: [], next: 9, from: 9 },
+    ]);
+    const stream = new Stream(door, "commands", door.cursorName("commands"), {
+      topics: ["colca/v1/_CmdSet/n/mine/#"],
+    });
+
+    const seen: number[] = [];
+    for await (const item of stream.drain()) seen.push(item.offset);
+
+    expect(seen).toEqual([3]);
+    expect(acks.map((a) => a.offset)).toEqual([8]);
+    expect(fetches[0].searchParams.getAll("topic")).toEqual(["colca/v1/_CmdSet/n/mine/#"]);
+  });
+});
+
+describe("follow", () => {
+  it("drains at once, then only after a ring, and a ring during a drain is not lost", async () => {
+    const { door, fetches } = node([{ records: [], next: 1, from: 1 }]);
+    const stream = new Stream(door, "annotations", door.cursorName("panels"));
+    const bell = new Doorbell();
+    const stop = new AbortController();
+
+    const run = (async () => {
+      for await (const item of stream.follow({ bell, signal: stop.signal })) expect(item).toBeDefined();
+    })();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetches).toHaveLength(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fetches).toHaveLength(1); // nothing on a timer
+
+    bell.ring();
+    bell.ring();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetches).toHaveLength(2); // two rings, one drain
+
+    stop.abort();
+    await run;
+  });
+});
+
+describe("Doorbell", () => {
+  it("resolves at once for a ring after the generation was taken", async () => {
+    const bell = new Doorbell();
+    const seen = bell.generation;
+    bell.ring();
+    await bell.after(seen);
+    expect(bell.generation).toBe(seen + 1);
   });
 });
 

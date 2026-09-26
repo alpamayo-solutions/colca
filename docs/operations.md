@@ -20,6 +20,7 @@ alert first:
 | `colca_retention_pressure` | above `1`: the pruner wants to remove more than a cursor allows, and the disk grows |
 | `colca_stream_live_bytes` | a stream grows past what the disk holds |
 | `colca_cursor_next_record_age_seconds` | age of the next retained record waiting for a consumer; unlike cursor inactivity, this is zero when caught up |
+| `colca_cursor_unread_age_seconds` | age of the oldest record waiting that the consumer actually reads (its fetch filter applied); `0` on an idle stream. Past `cursors.lag_alarm_after` (default `60s`, `0` writes no finding) the node also writes a `cursor_lag` finding about the service |
 | `colca_rejected_publishes_total` | rises: clients send what the node refuses; `reason` says why |
 | `colca_auth_rejections_total` | rises: unknown keys or bad tokens at a door |
 | `colca_replication_integrity_failures_total` | above `0`: a child pruned records before its parent received them |

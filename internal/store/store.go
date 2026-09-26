@@ -458,6 +458,42 @@ func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(S
 	return out, next, nil
 }
 
+// FirstMatch returns the first record in [from, upTo) that filter keeps (every
+// record when filter is nil). The scan stops at upTo, so a caller bounds the
+// work per call; found is false when nothing in the range matched.
+func (s *Store) FirstMatch(stream string, from, upTo uint64, filter func(StoredRecord) bool) (rec StoredRecord, found bool, err error) {
+	if upTo <= from {
+		return StoredRecord{}, false, nil
+	}
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: streamKey(stream, from),
+		UpperBound: streamKey(stream, upTo),
+	})
+	if err != nil {
+		return StoredRecord{}, false, err
+	}
+	defer iter.Close()
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := iter.Key()
+		off := binary.BigEndian.Uint64(key[len(key)-8:])
+		var e recEnc
+		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+			return StoredRecord{}, false, err
+		}
+		record := StoredRecord{
+			SourceLocalOnly: e.SourceLocalOnly,
+			Offset:          off, OriginOffset: originOffset(e.OriginOffset, off),
+			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
+			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
+			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
+		}
+		if filter == nil || filter(record) {
+			return record, true, nil
+		}
+	}
+	return StoredRecord{}, false, iter.Error()
+}
+
 // readU64 returns the big-endian counter stored at key, or dflt when the key is
 // absent or does not hold exactly 8 bytes.
 func (s *Store) readU64(key []byte, dflt uint64) uint64 {

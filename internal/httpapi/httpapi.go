@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -542,6 +543,20 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				contractSet[ct] = true
 			}
 		}
+		// topic keeps records whose topic matches one of the MQTT filters
+		// (repeatable): a consumer that is woken by a set of topics reads exactly
+		// that set, and the cursor watchdog counts only those records as unread.
+		topicFilters := q["topic"]
+		for _, f := range topicFilters {
+			if !uns.ValidFilter(f) {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("invalid topic filter: %q", f)})
+				return
+			}
+		}
+		if len(topicFilters) > 1000 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "at most 1000 topic filters are allowed"})
+			return
+		}
 		signalIDs, hasSignalFilter := q["signal_id"]
 		signalSet := make(map[string]struct{}, len(signalIDs))
 		if hasSignalFilter {
@@ -566,6 +581,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				return false
 			}
 			topic := record.Topic
+			if len(topicFilters) > 0 && !slices.ContainsFunc(topicFilters, func(f string) bool { return uns.MatchFilter(f, topic) }) {
+				return false
+			}
 			var parsed uns.Parsed
 			var parseErr error
 			if contractSet != nil {
@@ -632,6 +650,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			} else {
 				from = 1
 			}
+		}
+		if q.Get("tail") == "" {
+			e.CursorFilters().Remember(cursor, stream, filter)
 		}
 		recs, next, err := e.Store().ReadRecords(stream, from, limit, filter)
 		if err != nil {

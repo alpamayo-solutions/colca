@@ -26,6 +26,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/contracts"
+	"github.com/alpamayo-solutions/colca/internal/cursorwatch"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/httpapi"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
@@ -532,6 +533,30 @@ func Start(cfg *config.Config) (*Node, error) {
 	go func() {
 		defer n.wg.Done()
 		sweeper.Run(n.stop)
+	}()
+
+	// 9. Cursor watchdog: a consumer whose unread records grow old gets a
+	//    cursor_lag finding instead of a timed catch-up hiding it.
+	watchdog := &cursorwatch.Watchdog{
+		Store:    st,
+		Filters:  n.Engine.CursorFilters(),
+		Owners:   reg,
+		Elements: n.Engine.Elements(),
+		Gauges:   n.Metrics,
+		NodeID:   cfg.ULID,
+		After:    cfg.Cursors.EffectiveLagAlarmAfter(),
+		Publish: func(topic string, payload []byte) error {
+			_, err := n.Engine.IngestAdminAttributed(topic, payload, engine.Attribution{
+				WrittenBy: cursorwatch.Author, ActorID: cursorwatch.Author,
+				ActorLabel: cursorwatch.Author, ActorKind: "system",
+			})
+			return err
+		},
+	}
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		watchdog.Run(n.stop)
 	}()
 
 	// The node's own log is delivered only now: the engine is fully configured (a

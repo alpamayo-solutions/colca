@@ -34,6 +34,11 @@ A caller is one of:
   response's `from` is where the page started; nodes before 0.18.2 ignore the
   parameter and do not send it.
 - `prefix` filters on the path part of the topic, not the raw topic.
+- `topic` on `/fetch` (repeatable, colca 0.19+) keeps records whose raw topic
+  matches one of the MQTT filters (`+`, `#`). A consumer woken by a set of
+  topics passes the same set, so it reads exactly what wakes it. Skipped
+  records move `next` like `contract` does; ack `next - 1` after an empty or
+  short page so they do not stay unread on your cursor.
 - `max` defaults to 100 for `/fetch` (at most 1000) and to 1000 for `/kv`
   (at most 10000). Pass `next` back as `after` until it is empty.
 - `contract` on `/kv` and `/fetch` may be repeated. An unknown name is a `400`.
@@ -104,7 +109,25 @@ connection open and writes one JSON line whenever a selected stream grows:
 - A line with no streams is a heartbeat, written after 5 s of silence. Treat
   15 s without a line as a dead connection and reconnect.
 - A hint carries no records and moves no cursor; read with `/fetch` and `/ack`
-  as before. Keep a slow fallback poll (tens of seconds) only as a safety net.
+  as before. Take no timed fallback poll: a consumer that stops reading is
+  caught by the cursor watchdog below, not hidden by a poll.
+
+### Consumers that stop reading
+
+A consumer reads when woken: an MQTT message on its topics, a `/watch` hint, a
+reconnect. Nothing reads on a timer, so a lost wake or a stuck loop would leave
+records waiting unseen. The node watches every cursor instead:
+
+- Every few seconds it takes the oldest record past the cursor that the
+  consumer reads (its last `/fetch` filter applied) and reports its age as
+  `colca_cursor_unread_age_seconds{cursor,stream}`. An idle stream reads `0`:
+  only records that wait count, not how old the last one is.
+- When that age passes `cursors.lag_alarm_after` (default 60 s) it writes a
+  retained `_Finding` with reason `cursor_lag` next to the service's own record,
+  `_Finding/{node}/{mount}/{service}/cursor_lag`, and retires it once the cursor
+  has caught up. The alarm path raises it like any other finding.
+- A service subscribes to its own finding and fails its health check while it
+  stands. chaski and `colca-historian` do so.
 
 ## Administration
 

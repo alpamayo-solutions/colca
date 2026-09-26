@@ -25,6 +25,7 @@ export type {
   SelfInfo,
 } from "./door.js";
 
+export { Doorbell } from "./doorbell.js";
 export { Stream } from "./stream.js";
 export type { FollowOptions, StreamOptions } from "./stream.js";
 

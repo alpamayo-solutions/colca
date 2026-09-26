@@ -179,6 +179,10 @@ type Config struct {
 	// Commands sets how the node answers commands no service executes.
 	Commands Commands `yaml:"commands"`
 
+	// Cursors configures the cursor watchdog: how long a record a consumer
+	// reads may wait unread before the node writes a cursor_lag finding.
+	Cursors Cursors `yaml:"cursors"`
+
 	// Plugin holds settings for the domain plugin. The core never reads them,
 	// which keeps domain vocabulary out of the broker's configuration.
 	Plugin map[string]string `yaml:"plugin"`
@@ -193,6 +197,33 @@ type Config struct {
 // all announce.
 type Commands struct {
 	Strict bool `yaml:"strict"`
+}
+
+// Cursors is the cursors: block.
+type Cursors struct {
+	// LagAlarmAfter is how old the oldest unread record a consumer reads may
+	// get before the node writes a cursor_lag finding about its service. 60s
+	// when absent; 0 keeps the colca_cursor_unread_age_seconds gauge and writes
+	// no finding.
+	LagAlarmAfter *Duration `yaml:"lag_alarm_after"`
+}
+
+// defaultLagAlarmAfter is cursors.lag_alarm_after when absent.
+const defaultLagAlarmAfter = time.Minute
+
+// EffectiveLagAlarmAfter returns the threshold: 60s when absent.
+func (c Cursors) EffectiveLagAlarmAfter() time.Duration {
+	if c.LagAlarmAfter == nil {
+		return defaultLagAlarmAfter
+	}
+	return time.Duration(*c.LagAlarmAfter)
+}
+
+func (c Cursors) validate() error {
+	if c.LagAlarmAfter != nil && time.Duration(*c.LagAlarmAfter) < 0 {
+		return fmt.Errorf("config: cursors.lag_alarm_after must not be negative, got %s", time.Duration(*c.LagAlarmAfter))
+	}
+	return nil
 }
 
 // Contracts is the contracts: block.
@@ -698,6 +729,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.MQTTLimits.validate(); err != nil {
+		return err
+	}
+	if err := c.Cursors.validate(); err != nil {
 		return err
 	}
 	if err := c.BlobGC.validate(); err != nil {

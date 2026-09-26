@@ -44,8 +44,12 @@ type Bridge struct {
 	Store Store
 	Log   *slog.Logger
 
-	Max        int
-	IdleSleep  time.Duration
+	Max int
+	// Wake receives whenever the metrics stream may have grown (a /watch hint).
+	// After a page that was not full the bridge waits for it, and reads nothing
+	// on a timer: the first hint of every watch connection names the stream, so
+	// a reconnect drains too.
+	Wake       <-chan struct{}
 	Strict     bool
 	Drained    bool
 	NowMS      int64
@@ -214,18 +218,18 @@ func truncateForLog(s string, limit int) string {
 	return s[:limit] + "…"
 }
 
-// DefaultIdleSleep is the pause after a page that was not full.
-const DefaultIdleSleep = 500 * time.Millisecond
+// CoordinateEvery is how often a coordinated bridge (factory clock steps)
+// checks the clock gate while no records arrive. It is the gate's cadence, not
+// a read of the stream: the stream is read on a wake.
+const CoordinateEvery = 500 * time.Millisecond
 
-// Run follows until ctx ends. Only a full page means more is waiting, so only a
-// full page is followed at once; anything shorter waits IdleSleep. Fetching
-// again after every non-empty page would poll the node as fast as records
-// arrive and run into its per-caller fetch limit.
+// errorPause is the wait after a failed pass before the page is read again.
+const errorPause = 5 * time.Second
+
+// Run follows until ctx ends. A full page means more is waiting and is followed
+// at once; after anything shorter the bridge waits for the next wake. How often
+// wakes come (the watch interval) is what batches a steady trickle into pages.
 func (b *Bridge) Run(ctx context.Context) error {
-	idle := b.IdleSleep
-	if idle <= 0 {
-		idle = DefaultIdleSleep
-	}
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -241,18 +245,37 @@ func (b *Bridge) Run(ctx context.Context) error {
 				b.Health(true, "")
 			}
 		}
-		pause := idle
 		switch {
 		case err != nil:
 			b.logger().Error("historian pass failed, retrying", "err", err)
-			pause = 5 * time.Second
+			if !sleep(ctx, errorPause) {
+				return ctx.Err()
+			}
+			continue
 		case fetched >= b.max():
 			continue
 		}
-		if !sleep(ctx, pause) {
+		if !b.wait(ctx) {
 			return ctx.Err()
 		}
 	}
+}
+
+// wait blocks until the next wake, or the next gate check when coordinated.
+func (b *Bridge) wait(ctx context.Context) bool {
+	var gate <-chan time.Time
+	if b.Coordinate != nil {
+		timer := time.NewTimer(CoordinateEvery)
+		defer timer.Stop()
+		gate = timer.C
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-b.Wake:
+	case <-gate:
+	}
+	return true
 }
 
 func sleep(ctx context.Context, d time.Duration) bool {

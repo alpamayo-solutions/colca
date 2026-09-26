@@ -14,6 +14,7 @@ import (
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/alpamayo-solutions/colca/door"
+	"github.com/alpamayo-solutions/colca/internal/cursorwatch"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -45,6 +46,40 @@ type Announcer struct {
 	details *serviceDetails // nil until the identity is resolved
 	topic   string
 	client  pahomqtt.Client
+	// lag is the summary of the node's cursor_lag finding about this service
+	// while it stands, "" otherwise.
+	lag string
+}
+
+// CursorLag is the summary of the cursor_lag finding the node wrote about this
+// service, "" while there is none: records wait on its cursor that it has not
+// read. The health door fails while it stands.
+func (a *Announcer) CursorLag() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lag
+}
+
+func (a *Announcer) onFinding(_ pahomqtt.Client, msg pahomqtt.Message) {
+	summary := ""
+	if len(msg.Payload()) > 0 {
+		var finding struct {
+			Summary string `json:"summary"`
+		}
+		if json.Unmarshal(msg.Payload(), &finding) != nil || finding.Summary == "" {
+			finding.Summary = "records are waiting unread on the historian's cursor"
+		}
+		summary = finding.Summary
+	}
+	a.mu.Lock()
+	changed := a.lag != summary
+	a.lag = summary
+	a.mu.Unlock()
+	if changed && summary != "" {
+		a.logger().Warn("the node reports records waiting unread on this cursor", "finding", summary)
+	} else if changed {
+		a.logger().Info("the node reports this cursor caught up")
+	}
 }
 
 type serviceDetails struct {
@@ -78,6 +113,7 @@ func (a *Announcer) Run(ctx context.Context) {
 		return
 	}
 	details, topic := a.record(self)
+	findingTopic := cursorwatch.FindingTopic(self.Node, uns.ServiceContext(self.Mount, self.Name))
 	a.mu.Lock()
 	a.details, a.topic = &details, topic
 	a.mu.Unlock()
@@ -103,6 +139,9 @@ func (a *Announcer) Run(ctx context.Context) {
 		SetOnConnectHandler(func(c pahomqtt.Client) {
 			// A reconnect follows a drop, after which the will said inactive.
 			a.publish(c, true)
+			// A clean session forgets subscriptions; the retained finding comes
+			// back on subscribe.
+			c.Subscribe(findingTopic, 1, a.onFinding)
 		}).
 		SetConnectionLostHandler(func(_ pahomqtt.Client, err error) {
 			a.logger().Warn("local MQTT connection lost, reconnecting", "err", err)

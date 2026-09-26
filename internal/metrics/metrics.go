@@ -263,6 +263,7 @@ type Metrics struct {
 	httpKVEntries       *prometheus.HistogramVec // colca_http_kv_entries{caller}
 	httpFetchRequests   *prometheus.CounterVec   // colca_http_fetch_requests_total{caller,stream}
 	httpLimitedByCaller *prometheus.CounterVec   // colca_http_request_limited_by_caller_total{route,caller}
+	cursorUnreadAge     *prometheus.GaugeVec     // colca_cursor_unread_age_seconds{cursor,stream}
 	// The (route, caller) pairs whose limited series already exists, so a
 	// dashboard sees 0 before the first 429.
 	httpCallersSeen sync.Map
@@ -510,6 +511,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_http_request_limited_by_caller_total",
 			Help: "HTTP requests answered 429 by the per-caller limits, by route pattern and caller. Resets on restart.",
 		}, []string{"route", "caller"}),
+		cursorUnreadAge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "colca_cursor_unread_age_seconds",
+			Help: "Age of the oldest record past the cursor that its consumer reads (its last fetch filter applied); 0 when nothing it reads is waiting. Set by the cursor watchdog.",
+		}, []string{"cursor", "stream"}),
 		blobsSwept: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_blobs_swept_total",
 			Help: "Blobs deleted by the background sweeper because no live _Resource referenced them and they were older than the configured grace period. Resets on restart.",
@@ -613,6 +618,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
 		m.blobTransfers, m.blobRejects, m.recordRejects, m.resourceReads, m.httpRequestLimited, m.blobsSwept,
 		m.httpKVRequests, m.httpKVEntries, m.httpFetchRequests, m.httpLimitedByCaller,
+		m.cursorUnreadAge,
 		m.metricsUnbound,
 		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
@@ -1350,4 +1356,20 @@ func (c *storeCollector) blockedByCursor(stream string, now time.Time) int {
 		}
 	}
 	return blocked
+}
+
+// CursorUnreadAge sets the unread age of one cursor (see the cursor watchdog).
+func (m *Metrics) CursorUnreadAge(cursor, stream string, seconds float64) {
+	if m == nil {
+		return
+	}
+	m.cursorUnreadAge.WithLabelValues(cursor, stream).Set(seconds)
+}
+
+// ForgetCursorUnreadAge drops the series of a cursor that no longer exists.
+func (m *Metrics) ForgetCursorUnreadAge(cursor, stream string) {
+	if m == nil {
+		return
+	}
+	m.cursorUnreadAge.DeleteLabelValues(cursor, stream)
 }

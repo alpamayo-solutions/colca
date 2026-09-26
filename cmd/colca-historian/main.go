@@ -13,12 +13,14 @@
 //	DATABASE_URL      Postgres/Timescale DSN             (required)
 //	DB_MAX_CONNS      pool size                          (default 4)
 //	FETCH_MAX         records per page                   (default 500)
-//	IDLE_SLEEP_MS     pause after a page that was not full (default 500)
+//	WATCH_INTERVAL_MS least time between two wake-ups from the node's /watch;
+//	                  records arriving in between are read as one page (default 500)
 //	HTTP_ADDR         /healthz + /metrics                (default :9091)
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,6 +29,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -47,7 +50,7 @@ type config struct {
 	dsn           string
 	maxConns      int32
 	fetchMax      int
-	idleSleep     time.Duration
+	watchInterval time.Duration
 	httpAddr      string
 	retentionDays int
 }
@@ -110,16 +113,35 @@ func run() int {
 		return 2
 	}
 
+	// The node says when the stream grew; nothing is read on a timer. The
+	// first hint of every watch connection names the stream, so a reconnect
+	// drains whatever arrived while it was away.
+	watcher := &door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService}
+	wake := make(chan struct{}, 1)
+	link := &watchLink{}
+	go watcher.WatchForever(ctx, []string{"metrics"}, cfg.watchInterval, 5*time.Second,
+		func(door.Hint) {
+			link.up()
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		},
+		func(err error) {
+			link.down(time.Now())
+			log.Warn("watching the metrics stream failed, reconnecting", "err", err)
+		})
+
 	bridge := &historian.Bridge{
 		Door: &door.Client{
 			BaseURL: cfg.colcaURL,
 			Service: cfg.colcaService,
 		},
-		Store:     sink,
-		Strict:    deps != nil,
-		Log:       log,
-		Max:       cfg.fetchMax,
-		IdleSleep: cfg.idleSleep,
+		Store:  sink,
+		Strict: deps != nil,
+		Log:    log,
+		Max:    cfg.fetchMax,
+		Wake:   wake,
 	}
 
 	if deps != nil {
@@ -152,14 +174,13 @@ func run() int {
 		}
 	}
 
-	go serveObservability(cfg.httpAddr, bridge, log)
-
 	announcer := &historian.Announcer{
 		Door:    &door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService},
 		MQTTURL: cfg.colcaMQTTURL,
 		Version: version,
 		Log:     log,
 	}
+	go serveObservability(cfg.httpAddr, bridge, announcer, link, log)
 	bridge.Health = announcer.Report
 	announced := make(chan struct{})
 	go func() {
@@ -218,7 +239,7 @@ func load() (config, error) {
 	}
 	cfg.maxConns = int32(maxConns)
 	cfg.fetchMax = intEnv("FETCH_MAX", 500)
-	cfg.idleSleep = time.Duration(intEnv("IDLE_SLEEP_MS", 500)) * time.Millisecond
+	cfg.watchInterval = time.Duration(intEnv("WATCH_INTERVAL_MS", 500)) * time.Millisecond
 	cfg.retentionDays = intEnv("HISTORIAN_RETENTION_DAYS", 0)
 	if cfg.retentionDays < 0 {
 		return cfg, errors.New("HISTORIAN_RETENTION_DAYS must be zero (unlimited) or positive")
@@ -244,10 +265,60 @@ func intEnv(key string, fallback int) int {
 
 // serveObservability exposes liveness and the historian's counters. A gap is a
 // hole in history that cannot be filled, so it belongs on a dashboard.
-func serveObservability(addr string, bridge *historian.Bridge, log *slog.Logger) {
+// watchGrace is how long the watch on the metrics stream may stay down before
+// the health door fails: without it no wake arrives, and nothing reads on a
+// timer.
+const watchGrace = time.Minute
+
+// watchLink remembers since when the watch has been down; zero while it is up.
+type watchLink struct {
+	mu        sync.Mutex
+	downSince time.Time
+}
+
+func (l *watchLink) up() {
+	l.mu.Lock()
+	l.downSince = time.Time{}
+	l.mu.Unlock()
+}
+
+func (l *watchLink) down(now time.Time) {
+	l.mu.Lock()
+	if l.downSince.IsZero() {
+		l.downSince = now
+	}
+	l.mu.Unlock()
+}
+
+// downFor is how long the watch has been down, 0 while it is up.
+func (l *watchLink) downFor(now time.Time) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.downSince.IsZero() {
+		return 0
+	}
+	return now.Sub(l.downSince)
+}
+
+func serveObservability(addr string, bridge *historian.Bridge, announcer *historian.Announcer, link *watchLink,
+	log *slog.Logger) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		unhealthy := map[string]any{}
+		// The node's cursor watchdog says when records wait unread on this cursor.
+		if lag := announcer.CursorLag(); lag != "" {
+			unhealthy["cursor_lag"] = lag
+		}
+		if down := link.downFor(time.Now()); down > watchGrace {
+			unhealthy["watch_down_s"] = int(down.Seconds())
+		}
+		if len(unhealthy) > 0 {
+			unhealthy["ok"], unhealthy["consumer"] = false, historian.Consumer
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(unhealthy)
+			return
+		}
 		_, _ = fmt.Fprintf(w, `{"ok":true,"consumer":%q}`, historian.Consumer)
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {

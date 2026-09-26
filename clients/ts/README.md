@@ -11,14 +11,17 @@ npm install @alpamayo-solutions/colca-client
 ## A consumer
 
 ```ts
-import { Door, Stream } from "@alpamayo-solutions/colca-client";
+import { Door, Doorbell, Stream } from "@alpamayo-solutions/colca-client";
 
 const door = new Door({ baseUrl: "http://colca", service: "my-app" });
 const panels = new Stream(door, "annotations", door.cursorName("panels"), {
   prefix: "wisewoods/line1",
 });
 
-for await (const record of panels.follow()) {
+// Ring the bell whenever the stream may have grown: an MQTT message on the
+// topics this stream reads, a /watch hint, a reconnect.
+const bell = new Doorbell();
+for await (const record of panels.follow({ bell })) {
   // Acked page by page: a handler that throws sees its page again.
   console.log(record.topic, record.payload);
 }
