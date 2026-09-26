@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/alpamayo-solutions/colca/compare/v0.18.0...v0.18.1) (2026-09-26)
+
+
+### Features
+
+* kv depth and folders, fetch contract filter in the TypeScript client ([#100](https://github.com/alpamayo-solutions/colca/issues/100)) ([467833e](https://github.com/alpamayo-solutions/colca/commit/467833ee1f36f767dd42f46afccd3b0cfbd813e4))
+
 ## [0.18.0](https://github.com/alpamayo-solutions/colca/compare/v0.17.7...v0.18.0) (2026-09-26)
 
 
