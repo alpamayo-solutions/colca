@@ -1,6 +1,7 @@
 package mqttsrv
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -69,5 +70,42 @@ func TestAnAckReachesOnlyThePersonWhoSentTheCommand(t *testing.T) {
 	}
 	if got := bertSaw(); len(got) != 0 {
 		t.Fatalf("bert received another person's acks: %v", got)
+	}
+}
+
+// Another person reusing a correlation id gets a 422 ack, and the first sender
+// does not see it.
+func TestAReusedCorrelationIDIsRefusedToTheSecondSender(t *testing.T) {
+	w := newHumanWorld(t)
+	future := time.Now().Add(5 * time.Minute)
+	grants := []string{"cmd:" + authtest.ElementID("m1") + "/#:param", "read:#"}
+	connect := func(name string) paho.Client {
+		c, err := humanConnect(t, w.srv.HumanTCPAddr(), "ssl", name, w.iss.Mint(name, grants, future))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Disconnect(100) })
+		return c
+	}
+	anna, bert := connect("anna"), connect("bert")
+	annaSaw, bertSaw := acksSeen(t, anna), acksSeen(t, bert)
+
+	command := `{"correlation_id":"anna-1","expires_at":99999999999999}`
+	if tk := anna.Publish("colca/v1/_CmdParam/m1/m1/set-speed", 1, false, command); !tk.WaitTimeout(5 * time.Second) {
+		t.Fatal("anna's command: no PUBACK")
+	}
+	// A refused MQTT 3 publish gets no PUBACK; the ack is the answer.
+	bert.Publish("colca/v1/_CmdParam/m1/m1/set-speed", 1, false, command)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for len(bertSaw()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := bertSaw(); len(got) != 1 || !strings.Contains(got[0], `"result_code":422`) || !strings.Contains(got[0], `"anna-1"`) {
+		t.Fatalf("bert received %v, want one 422 ack", got)
+	}
+	if got := annaSaw(); len(got) != 0 {
+		t.Fatalf("anna received the refusal meant for bert: %v", got)
 	}
 }

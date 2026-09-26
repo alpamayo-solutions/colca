@@ -500,7 +500,7 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		if err := e.validateContract(p.Contract, payload); err != nil {
 			return e.reject(metrics.ReasonValidation, "%w", err)
 		}
-		id, repeat, err := e.admitCommand(payload, attribution.ActorID)
+		id, repeat, err := e.admitCommand(p, payload, attribution.ActorID)
 		if err != nil {
 			return Result{}, err
 		}
@@ -632,7 +632,7 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 		ActorLabel: actorLabel, ActorKind: "human",
 		ActorGroups: append([]string(nil), entry.Groups...),
 	}
-	id, repeat, err := e.admitCommand(payload, attribution.ActorID)
+	id, repeat, err := e.admitCommand(p, payload, attribution.ActorID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -706,7 +706,7 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 	var id string
 	if uns.IsCommand(class) {
 		var repeat bool
-		if id, repeat, err = e.admitCommand(payload, attribution.ActorID); err != nil {
+		if id, repeat, err = e.admitCommand(p, payload, attribution.ActorID); err != nil {
 			return Result{}, err
 		}
 		if repeat {

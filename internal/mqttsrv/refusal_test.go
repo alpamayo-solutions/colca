@@ -2,6 +2,8 @@ package mqttsrv
 
 import (
 	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -90,5 +92,38 @@ func TestARefusedPublishReachesNoSubscriberAtAnyVersionOrQoS(t *testing.T) {
 		if _, ok := w.srv.S.Topics.Retained.Get(topic); ok {
 			t.Errorf("refused publish on %s was retained", topic)
 		}
+	}
+}
+
+// mochi's line for a publish the hook refused goes through the node's logging
+// as one short debug line, not as an ERROR carrying the packet's payload bytes.
+func TestARefusedPublishIsOneShortDebugLineInTheNodeLog(t *testing.T) {
+	sink := &capturingHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(sink))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	w := newWorld(t)
+	c5 := connect5(t, w.srv.Addr(), w.m1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	payload := `{"nope": "` + strings.Repeat("x", 3000) + `"}`
+	if _, err := c5.Publish(ctx, &paho5.Publish{Topic: "colca/v1/_Metric/n1/m1/pressure", QoS: 1, Payload: []byte(payload)}); err == nil {
+		t.Fatal("an invalid payload was accepted")
+	}
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	var refused []capturedRecord
+	for _, record := range sink.records {
+		if _, ok := record.attrs["packet"]; ok || record.level >= slog.LevelError {
+			t.Fatalf("logged %q at %v with %d attrs", record.message, record.level, len(record.attrs))
+		}
+		if record.message == mochiPublishError {
+			refused = append(refused, record)
+		}
+	}
+	if len(refused) != 1 || refused[0].level != slog.LevelDebug || refused[0].attrs["topic"].String() != "colca/v1/_Metric/n1/m1/pressure" {
+		t.Fatalf("the refused publish logged as %+v", refused)
 	}
 }

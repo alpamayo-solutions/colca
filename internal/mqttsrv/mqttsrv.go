@@ -563,9 +563,9 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 
 	// Every listener gets its own *tls.Config: crypto/tls and net/http mutate a Config
 	// while other handshakes read it, so sharing one across listeners is a data race.
-	s := mqtt.New(&mqtt.Options{InlineClient: true})
-	// The library's own logging, bounded and named — see mochiLogHandler.
-	s.Log = slog.New(newMochiLogHandler(slog.Default().Handler()))
+	// The library's own logging, bounded and named — see mochiLogHandler. It goes in
+	// through Options: mochi gives its hooks the logger New was called with.
+	s := mqtt.New(&mqtt.Options{InlineClient: true, Logger: slog.New(newMochiLogHandler(slog.Default().Handler()))})
 	mqttLimits := cfg.MQTTLimits
 	s.Options.Capabilities.MaximumClients = mqttLimits.EffectiveMaxClients()
 	s.Options.Capabilities.ReceiveMaximum = mqttLimits.EffectiveReceiveMaximum()
