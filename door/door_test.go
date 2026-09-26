@@ -253,3 +253,25 @@ func TestATombstoneTheNodeRefusesIsAnError(t *testing.T) {
 		t.Fatal("a refused tombstone must be an error, not a silent success")
 	}
 }
+
+func TestFetchFromReadsAheadAndReportsWhereThePageStarted(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"records":[],"next":12,"from":12}`))
+	}))
+	defer srv.Close()
+
+	page, err := (&Client{BaseURL: srv.URL}).FetchWithOptions(context.Background(), FetchOptions{
+		Stream: "metrics", Cursor: "c/x/y", Max: 10, From: 12,
+	})
+	if err != nil {
+		t.Fatalf("FetchWithOptions: %v", err)
+	}
+	if want := "cursor=c%2Fx%2Fy&from=12&max=10&stream=metrics"; gotQuery != want {
+		t.Fatalf("query = %q, want %q", gotQuery, want)
+	}
+	if page.From != 12 {
+		t.Fatalf("from = %d, want 12", page.From)
+	}
+}

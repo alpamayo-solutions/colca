@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -71,6 +72,9 @@ const (
 	// rejections are rare (no name, or a name that collides with a keyed
 	// identity), but they are counted like any other.
 	DoorLocal = "local"
+	// DoorHuman is the token door for people, over TCP or WebSocket. It labels
+	// MQTT deliveries; its auth rejections count under DoorMQTT.
+	DoorHuman = "human"
 
 	AuthUnknownKey       = "unknown_key"       // TLS peer key not in the local registry (incl. revoked)
 	AuthKind             = "kind"              // entry exists but its kind may not use this door
@@ -113,6 +117,10 @@ var securityChangeKinds = []string{
 // streams is every persistent stream, taken from the store so the families
 // below cannot miss a stream added later.
 var streams = store.Streams()
+
+// deliveryDoors label colca_mqtt_delivered_*: the MQTT listeners a subscriber
+// can use.
+var deliveryDoors = []string{DoorMQTT, DoorLocal, DoorHuman}
 
 // uplinkStreams are the streams that replicate upward. definitions only flow
 // down, so an uplink gauge for it would look like a broken uplink.
@@ -165,6 +173,11 @@ type Metrics struct {
 	// outbound queue was full. A retained replay on subscribe is the usual burst;
 	// a non-zero value means delivered state went missing.
 	publishDropped prometheus.Counter
+	// Publishes the broker wrote to subscribers, by door, pre-created per door.
+	deliveredMessages   *prometheus.CounterVec // colca_mqtt_delivered_messages_total{door}
+	deliveredBytes      *prometheus.CounterVec // colca_mqtt_delivered_payload_bytes_total{door}
+	deliveredMessagesBy map[string]prometheus.Counter
+	deliveredBytesBy    map[string]prometheus.Counter
 	// People on the token doors.
 	humanSessions prometheus.Gauge   // colca_human_sessions
 	jwksKeys      prometheus.Gauge   // colca_jwks_keys
@@ -250,6 +263,9 @@ type Metrics struct {
 	httpKVEntries       *prometheus.HistogramVec // colca_http_kv_entries{caller}
 	httpFetchRequests   *prometheus.CounterVec   // colca_http_fetch_requests_total{caller,stream}
 	httpLimitedByCaller *prometheus.CounterVec   // colca_http_request_limited_by_caller_total{route,caller}
+	// The (route, caller) pairs whose limited series already exists, so a
+	// dashboard sees 0 before the first 429.
+	httpCallersSeen sync.Map
 
 	// Blob sweeper: unreferenced blobs reclaimed after their grace period.
 	blobsSwept prometheus.Counter // colca_blobs_swept_total
@@ -337,6 +353,14 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_mqtt_publish_dropped_total",
 			Help: "Publishes the broker dropped because a client's outbound queue was full (MaximumClientWritesPending). Resets on restart.",
 		}),
+		deliveredMessages: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_mqtt_delivered_messages_total",
+			Help: "PUBLISH packets the broker wrote to subscribers, by door (mqtt, local, human). Resets on restart.",
+		}, []string{"door"}),
+		deliveredBytes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_mqtt_delivered_payload_bytes_total",
+			Help: "Payload bytes of the PUBLISH packets the broker wrote to subscribers, by door (mqtt, local, human). Resets on restart.",
+		}, []string{"door"}),
 		humanSessions: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_human_sessions",
 			Help: "Live token-authenticated MQTT sessions on the human doors.",
@@ -496,6 +520,8 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}),
 	}
 	m.ingestBy = counterChildren(m.ingest, streams)
+	m.deliveredMessagesBy = counterChildren(m.deliveredMessages, deliveryDoors)
+	m.deliveredBytesBy = counterChildren(m.deliveredBytes, deliveryDoors)
 	m.rejectedBy = counterChildren(m.rejected, reasons)
 	m.uplinkFailBy = counterChildren(m.uplinkFail, uplinkStreams)
 	m.uplinkRefusedBy = counterChildren(m.uplinkRefused, uplinkStreams)
@@ -576,7 +602,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
-		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.humanSessions, m.jwksKeys, m.jwksFailures,
+		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.deliveredMessages, m.deliveredBytes, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.securityChanges, m.nodePrefix,
 		m.commandUndelivered, m.commandUnroutable, m.commandRedelivered,
 		m.bundleInfo, m.bundleContracts,
@@ -730,6 +756,18 @@ func (m *Metrics) PublishDropped() {
 		return
 	}
 	m.publishDropped.Inc()
+}
+
+// MQTTDelivered counts one PUBLISH written to a subscriber on door and its
+// payload size. door is one of DoorMQTT, DoorLocal and DoorHuman.
+func (m *Metrics) MQTTDelivered(door string, payloadBytes int) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.deliveredMessagesBy[door]; ok {
+		c.Inc()
+		m.deliveredBytesBy[door].Add(float64(payloadBytes))
+	}
 }
 
 // counterChildren pre-resolves one child per known label value, so incrementing
@@ -1082,6 +1120,21 @@ func (m *Metrics) HTTPLimitedCaller(route, caller string) {
 	if m != nil {
 		m.httpLimitedByCaller.WithLabelValues(route, caller).Inc()
 	}
+}
+
+// HTTPCallerSeen creates the caller's limited series for route at 0 the first
+// time the pair is admitted. It has the cardinality the counter reaches anyway
+// once that caller is limited on that route.
+func (m *Metrics) HTTPCallerSeen(route, caller string) {
+	if m == nil {
+		return
+	}
+	key := route + "\x00" + caller
+	if _, seen := m.httpCallersSeen.Load(key); seen {
+		return
+	}
+	m.httpLimitedByCaller.WithLabelValues(route, caller)
+	m.httpCallersSeen.Store(key, struct{}{})
 }
 
 // ResourceRead counts one read of GET /resources/{id}/file, by result.

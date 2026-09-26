@@ -41,8 +41,20 @@ say who uses them:
 | `colca_http_fetch_requests_total` | `caller`, `stream` | a follower polling an idle stream shows a steady rate; `/watch` removes it |
 | `colca_http_request_limited_by_caller_total` | `route` (the route pattern, such as `GET /kv`), `caller` | 429s per caller; `colca_http_request_limited_total` has them by door and class |
 
+A caller's `colca_http_request_limited_by_caller_total` series exists at `0`
+from its first request on a route, so "never limited" reads as `0`, not as a
+missing series.
+
 `caller` is a registered identity as `kind:name` (`local:dataops-line`), every
 person as `human`, and the admin token as `admin`. No label carries a path.
+
+### What the broker delivers
+
+| Metric | Labels | Shows |
+|---|---|---|
+| `colca_mqtt_delivered_messages_total` | `door` (`mqtt`, `local`, `human`) | PUBLISH packets written to subscribers; with `colca_ingest_records_total` it gives the node's MQTT in and out |
+| `colca_mqtt_delivered_payload_bytes_total` | `door` | their payload bytes |
+| `colca_mqtt_publish_dropped_total` | | publishes dropped because a subscriber's queue was full |
 
 
 ## Retention

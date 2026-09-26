@@ -19,7 +19,7 @@ A caller is one of:
 | `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","storage":{"state":"ok"}}` |
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}` |
-| `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N}` |
+| `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N}` |
 | `GET /watch` | machine, service, person, admin | `?stream=S&stream=S2&interval_ms=100` | NDJSON, one line per change: `{"streams":["S"],"next":{"S":N}}` |
 | `POST /ack` | owner of the cursor, admin | `{"cursor":"NAME","stream":"S","offset":N}` | `{"moved":true}` |
 | `GET /kv` | machine, service, person, admin | `?prefix=P&max=1000&after=TOKEN&contract=_Signal&depth=1` | `{"entries":[{"path":"…","node_id":"…","topic":"…","payload":{…},"ts":T,"offset":N}],"next":"TOKEN"}` |
@@ -28,6 +28,11 @@ A caller is one of:
 
 - `/fetch` never moves a cursor. `/ack` takes the last offset you processed and
   only moves forward.
+- `from=N` reads ahead of the cursor, starting at offset `N`, so a consumer can
+  fetch its next page (`from` = the previous page's `next`) while it still
+  processes and acks the previous one. It never reads behind the cursor. The
+  response's `from` is where the page started; nodes before 0.18.2 ignore the
+  parameter and do not send it.
 - `prefix` filters on the path part of the topic, not the raw topic.
 - `max` defaults to 100 for `/fetch` (at most 1000) and to 1000 for `/kv`
   (at most 10000). Pass `next` back as `after` until it is empty.

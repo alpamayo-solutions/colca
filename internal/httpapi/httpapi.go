@@ -273,6 +273,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				m.HTTPLimitedCaller(r.Pattern, callerLabel(c))
 				return
 			}
+			m.HTTPCallerSeen(r.Pattern, callerLabel(c))
 			defer release()
 			next(w, r, c)
 		}
@@ -609,6 +610,17 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		from := e.Store().CursorGet(cursor, stream)
+		// from=N reads ahead of the cursor: a consumer that processed up to N-1 but
+		// has not acked yet fetches its next page without waiting for the ack. It
+		// never reads behind the cursor, and the cursor still moves only on /ack.
+		if v := q.Get("from"); v != "" {
+			ahead, err := strconv.ParseUint(v, 10, 64)
+			if err != nil || ahead == 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "from must be a positive offset"})
+				return
+			}
+			from = max(from, ahead)
+		}
 		// tail=1 reads the end of the stream instead of from the cursor. A viewer asks what
 		// happened most recently, which a forward read from an unacked cursor cannot
 		// answer. The cursor does not move, so a viewer and a consumer can share a cursor
@@ -641,7 +653,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			})
 		}
 		m.HTTPFetch(callerLabel(c), stream)
-		resp := map[string]any{"records": out, "next": next, "now_ms": e.AuthoritativeNow().UnixMilli()}
+		// "from" is where this page started, so a client can tell a node that read
+		// ahead from one that ignored the parameter.
+		resp := map[string]any{"records": out, "next": next, "from": from, "now_ms": e.AuthoritativeNow().UnixMilli()}
 		if gap, ok := e.Store().Gap(stream, from); ok {
 			resp["gap"] = gap
 			m.GapServed(stream, "fetch")

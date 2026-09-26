@@ -149,6 +149,12 @@ replication link and tells its machines on `<root>/v1/_TimeSync/<node>`.
 | `time_sync.hold_ms` | `10000` | Clock difference above which a machine holds commands. |
 | `time_sync.drift_warn_ms` | `5000` | Clock difference above which a warning is logged. |
 
+## Commands
+
+| Key | Default | Meaning |
+|---|---|---|
+| `commands.strict` | `false` | Answer every command to this node that no service announced with a `404` `_Ack`, also at elements where nobody announces anything. Turn it on where every executor announces its commands. |
+
 ## Contracts
 
 | Key | Default | Meaning |

@@ -73,7 +73,9 @@ type Page struct {
 	NowMS   int64    `json:"now_ms,omitempty"`
 	Records []Record `json:"records"`
 	Next    int64    `json:"next"`
-	Gap     *Gap     `json:"gap,omitempty"`
+	// From is the offset the page started at (colca 0.18.2+; 0 from older nodes).
+	From int64 `json:"from,omitempty"`
+	Gap  *Gap  `json:"gap,omitempty"`
 }
 
 // FetchOptions are the server-side view applied to one side-effect-free read.
@@ -86,6 +88,10 @@ type FetchOptions struct {
 	// Contracts keeps only records of these contracts; next still moves past the
 	// others.
 	Contracts []string
+	// From reads ahead of the cursor, from this offset (colca 0.18.2+), so the
+	// next page can be fetched before the previous one is acked. 0 reads from
+	// the cursor.
+	From uint64
 }
 
 // KVEntry is one retained record returned by /kv. WrittenBy, ActorID,
@@ -166,6 +172,9 @@ func (c *Client) FetchWithOptions(ctx context.Context, options FetchOptions) (Pa
 	}
 	for _, contract := range options.Contracts {
 		q.Add("contract", contract)
+	}
+	if options.From > 0 {
+		q.Set("from", strconv.FormatUint(options.From, 10))
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/fetch?"+q.Encode(), nil)
 	if err != nil {

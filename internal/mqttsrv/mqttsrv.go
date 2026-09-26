@@ -134,6 +134,7 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnSubscribe,
 		mqtt.OnSubscribed,
 		mqtt.OnPublishDropped,
+		mqtt.OnPacketSent,
 		mqtt.OnPacketProcessed,
 		mqtt.OnAuthPacket,
 		mqtt.OnPacketEncode,
@@ -166,6 +167,23 @@ func (h *colcaHook) OnWillSent(cl *mqtt.Client, pk packets.Packet) {
 func (h *colcaHook) OnPublishDropped(cl *mqtt.Client, pk packets.Packet) {
 	h.metrics.PublishDropped()
 	h.log.Warn("publish dropped: client outbound queue full", "client", cl.ID, "topic", pk.TopicName)
+}
+
+// OnPacketSent counts each PUBLISH written to a subscriber by the door it
+// connected through. mochi calls it after the write, so a dropped publish is
+// not counted.
+func (h *colcaHook) OnPacketSent(cl *mqtt.Client, pk packets.Packet, _ []byte) {
+	if pk.FixedHeader.Type != packets.Publish {
+		return
+	}
+	door := metrics.DoorMQTT
+	switch {
+	case isLocalListener(cl):
+		door = metrics.DoorLocal
+	case isHumanListener(cl):
+		door = metrics.DoorHuman
+	}
+	h.metrics.MQTTDelivered(door, len(pk.Payload))
 }
 
 const quotaDeniedSubscription = "$COLCA/quota-exceeded"
