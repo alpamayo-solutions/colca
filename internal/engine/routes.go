@@ -165,12 +165,13 @@ func lenientCorrelationID(payload []byte) string {
 	if id := correlationID(payload); id != "" {
 		return id
 	}
-	match := correlationIDPattern.FindSubmatch(payload)
+	match := correlationIDPattern.FindSubmatchIndex(payload)
 	if match == nil {
 		return ""
 	}
+	// The string literal as the sender wrote it, its own quotes included.
 	var id string
-	if json.Unmarshal([]byte(`"`+string(match[1])+`"`), &id) != nil {
+	if json.Unmarshal(payload[match[2]-1:match[3]+1], &id) != nil {
 		return ""
 	}
 	return id
