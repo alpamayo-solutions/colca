@@ -244,12 +244,8 @@ func (s *Store) kvScanPageIndexed(prefix, after string, limit int, contracts []s
 		}
 	}
 
-	const maxPrealloc = 1000
-	capacity := limit
-	if capacity > maxPrealloc {
-		capacity = maxPrealloc
-	}
-	out := make([]KVEntry, 0, capacity)
+	// A filtered page is usually small; append grows it past this.
+	out := make([]KVEntry, 0, 64)
 	var lastKey []byte
 	for len(out) < limit {
 		var next *cursor
