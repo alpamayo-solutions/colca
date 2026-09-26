@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.4](https://github.com/alpamayo-solutions/colca/compare/v0.17.3...v0.17.4) (2026-09-26)
+
+
+### Fixes
+
+* refuse topics MQTT cannot carry; refetch the JWKS sooner on an unknown kid ([#89](https://github.com/alpamayo-solutions/colca/issues/89)) ([e931446](https://github.com/alpamayo-solutions/colca/commit/e93144612e4b8f5f8f40d576c22621f2842e3636))
+
 ## [0.17.3](https://github.com/alpamayo-solutions/colca/compare/v0.17.2...v0.17.3) (2026-09-25)
 
 
