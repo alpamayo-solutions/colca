@@ -717,7 +717,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		return string(normalized) + "\n"
 	}
 	body = withoutClock(body)
-	want := `{"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
+	want := `{"from":2,"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
 		`"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fetch gap wire shape:\n got %s\nwant %s", body, want)
@@ -734,7 +734,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	// A new cursor on a pruned stream gets the gap too.
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh", "tok", "")
 	body = withoutClock(body)
-	want = `{"gap":{"stream":"metrics","from_offset":1,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
+	want = `{"from":1,"gap":{"stream":"metrics","from_offset":1,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
 		`"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fresh-cursor gap wire shape:\n got %s\nwant %s", body, want)
@@ -748,7 +748,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	}
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
 	body = withoutClock(body)
-	want = `{"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
+	want = `{"from":5,"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
 	if body != want {
 		t.Fatalf("after ack past LWM the gap object must disappear:\n got %s\nwant %s", body, want)
 	}
@@ -2664,5 +2664,46 @@ func TestRevokingAnIdentityRetiresTheServiceRecordItAuthored(t *testing.T) {
 	if got := serviceRecords(t, h); len(got) != 0 {
 		t.Fatalf("the revoke left %v standing — nothing can retire a _ServiceDetails "+
 			"record once the identity that authored it is gone", got)
+	}
+}
+
+// from=N reads ahead of an unacked cursor, never behind an acked one, and the
+// response says where the page started. The cursor still moves only on /ack.
+func TestFetchFromReadsAheadOfTheCursor(t *testing.T) {
+	a := newAPI(t)
+	admin := client(nil)
+	seedMetrics(t, a.eng.Store(), 5, "colca/v1/_Metric/n-test/x")
+	offsets := func(out map[string]any) []float64 {
+		var got []float64
+		for _, r := range out["records"].([]any) {
+			got = append(got, r.(map[string]any)["offset"].(float64))
+		}
+		return got
+	}
+
+	_, out := req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=ra&max=2", "tok", nil)
+	if got := offsets(out); fmt.Sprint(got) != "[1 2]" || out["from"] != 1.0 || out["next"] != 3.0 {
+		t.Fatalf("first page = %v from=%v next=%v", got, out["from"], out["next"])
+	}
+	_, out = req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=ra&max=2&from=3", "tok", nil)
+	if got := offsets(out); fmt.Sprint(got) != "[3 4]" || out["from"] != 3.0 {
+		t.Fatalf("read-ahead page = %v from=%v", got, out["from"])
+	}
+	// Reading ahead did not move the cursor.
+	_, out = req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=ra&max=1", "tok", nil)
+	if got := offsets(out); fmt.Sprint(got) != "[1]" {
+		t.Fatalf("the cursor moved without an ack: %v", got)
+	}
+	// Behind the acked position, the cursor wins.
+	req(t, admin, "POST", a.url+"/ack", "tok", map[string]any{"cursor": "ra", "stream": "metrics", "offset": 4})
+	_, out = req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=ra&from=2", "tok", nil)
+	if got := offsets(out); fmt.Sprint(got) != "[5]" || out["from"] != 5.0 {
+		t.Fatalf("from behind the cursor = %v from=%v", got, out["from"])
+	}
+	for _, bad := range []string{"0", "-1", "x"} {
+		resp, _ := req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=ra&from="+bad, "tok", nil)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("from=%s = %d, want 400", bad, resp.StatusCode)
+		}
 	}
 }

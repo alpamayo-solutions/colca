@@ -82,3 +82,20 @@ func TestLimitedRequestsAreCountedPerCaller(t *testing.T) {
 		t.Fatalf("%s = %v, want %d", line, got, limited)
 	}
 }
+
+// A caller's limited series exists at 0 from its first admitted request, so a
+// dashboard tells "never limited" from "metric missing".
+func TestLimitedSeriesExistsBeforeTheFirst429(t *testing.T) {
+	h := newLocalHandler(t)
+	r := httptest.NewRequest(http.MethodGet, "/fetch?stream=entities&cursor=c/calm/x", nil)
+	r.Header.Set("X-Colca-Service", "calm")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("fetch = %d %s", rr.Code, rr.Body.String())
+	}
+	line := `colca_http_request_limited_by_caller_total{caller="local:calm",route="GET /fetch"}`
+	if got := metricstest.Value(t, h.m, line); got != 0 {
+		t.Fatalf("%s = %v, want 0", line, got)
+	}
+}
