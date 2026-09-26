@@ -175,6 +175,10 @@ func CommandStillLive(payload []byte, authoritativeNowMS int64) bool {
 	return int64(body.ExpiresAt) >= authoritativeNowMS
 }
 
+// IsAck reports whether a record answers a command. It belongs to whoever sent
+// the command: a person receives only the acks of their own commands.
+func IsAck(c Class) bool { return c == ClassAck }
+
 // IsNodeLocal reports whether only the node itself may produce a class. No
 // door accepts one; the beacon loop publishes it to the local bus, and it is
 // never stored or retained.

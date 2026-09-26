@@ -53,14 +53,17 @@ type Server struct {
 // New accepts a nil engine and SetEngine fills it in. mu guards that swap.
 type colcaHook struct {
 	mqtt.HookBase
-	mu      sync.RWMutex
-	eng     *engine.Engine
-	reg     *registry.Manager
-	ver     *tokenauth.Verifier // nil when the node has no auth: block
-	humans  *humanSessions
-	cfg     *config.Config
-	log     *slog.Logger
-	metrics *metrics.Metrics // nil-safe: every Metrics method is a no-op on nil
+	mu     sync.RWMutex
+	eng    *engine.Engine
+	reg    *registry.Manager
+	ver    *tokenauth.Verifier // nil when the node has no auth: block
+	humans *humanSessions
+	cfg    *config.Config
+	log    *slog.Logger
+	// refusals logs refused publishes once per sender and minute: a client can
+	// repeat one as fast as it likes.
+	refusals *slog.Logger
+	metrics  *metrics.Metrics // nil-safe: every Metrics method is a no-op on nil
 	// broker is the server New builds around this hook, never nil in practice. The
 	// hook uses it to publish the time-sync beacon.
 	broker *mqtt.Server
@@ -134,6 +137,7 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnPacketProcessed,
 		mqtt.OnAuthPacket,
 		mqtt.OnPacketEncode,
+		mqtt.OnSelectSubscribers,
 	}, b)
 }
 
@@ -475,7 +479,8 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		}
 		res, err := eng.IngestHumanAttributed(s.entry, actor, pk.TopicName, pk.Payload)
 		if err != nil {
-			h.log.Warn("human publish rejected", "sub", s.sub, "topic", pk.TopicName, "err", err)
+			h.refusals.Warn("human publish rejected", "sub", s.sub, "topic", pk.TopicName,
+				"bytes", len(pk.Payload), "err", err)
 			return pk, rejectCode(cl, pk, err)
 		}
 		h.log.Debug("human ingest", "sub", s.sub, "topic", res.Topic, "stream", res.Stream, "offset", res.Offset)
@@ -483,8 +488,12 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 	}
 	res, err := eng.IngestClient(ident, pk.TopicName, pk.Payload)
 	if err != nil {
-		h.log.Warn("publish rejected", "identity", ident, "topic", pk.TopicName, "err", err)
+		h.refusals.Warn("publish rejected", "identity", ident, "topic", pk.TopicName,
+			"bytes", len(pk.Payload), "err", err)
 		return pk, rejectCode(cl, pk, err)
+	}
+	if res.Duplicate {
+		return pk, packets.CodeSuccessIgnore
 	}
 	if res.Persisted {
 		h.log.Debug("mqtt ingest", "identity", ident, "topic_in", pk.TopicName,
@@ -492,6 +501,37 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		return pk, packets.CodeSuccessIgnore
 	}
 	return pk, nil
+}
+
+// OnSelectSubscribers keeps an ack from every person except the one who sent its
+// command; an ack whose sender the node does not know reaches no person.
+// Services and machines keep every ack their read grants cover.
+func (h *colcaHook) OnSelectSubscribers(subs *mqtt.Subscribers, pk packets.Packet) *mqtt.Subscribers {
+	eng := h.engine()
+	if eng == nil || h.humans.empty() {
+		return subs
+	}
+	recipient, isAck := eng.AckRecipient(pk.TopicName, pk.Payload)
+	if !isAck {
+		return subs
+	}
+	keep := func(clientID string) bool {
+		s, human := h.humans.get(clientID)
+		return !human || (recipient != "" && s.entry.ULID == recipient)
+	}
+	for id := range subs.Subscriptions {
+		if !keep(id) {
+			delete(subs.Subscriptions, id)
+		}
+	}
+	for _, group := range subs.Shared {
+		for id := range group {
+			if !keep(id) {
+				delete(group, id)
+			}
+		}
+	}
+	return subs
 }
 
 // New builds the broker with the TLS listener bound immediately, so Addr works
@@ -547,7 +587,8 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	// unavailable. mochi never reads this field; the door enforces it.
 	s.Options.Capabilities.SharedSubAvailable = 0
 	hook := &colcaHook{eng: eng, reg: reg, ver: ver, humans: newHumanSessions(),
-		cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s}
+		cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s,
+		refusals: slog.New(newMochiLogHandler(slog.Default().Handler())).With("node", cfg.ULID, "comp", "mqtt")}
 	if err := s.AddHook(hook, nil); err != nil {
 		return nil, err
 	}
