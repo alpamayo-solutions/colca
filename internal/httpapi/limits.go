@@ -25,18 +25,22 @@ const (
 	limitClassWrite    = "write"
 	limitClassFetch    = "fetch"
 	limitClassScan     = "scan"
+	limitClassWatch    = "watch"
 	limitClassAdmin    = "admin"
 	limitClassTransfer = "transfer"
 )
 
 var (
-	healthPolicy   = httplimit.Policy{RatePerSecond: 20, Burst: 40, PerCallerConcurrent: 8, GlobalConcurrent: 256}
-	metricsPolicy  = httplimit.Policy{RatePerSecond: 10, Burst: 30, PerCallerConcurrent: 4, GlobalConcurrent: 4}
-	authPolicy     = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 64, GlobalConcurrent: 512}
-	cheapPolicy    = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 32, GlobalConcurrent: 256}
-	writePolicy    = httplimit.Policy{RatePerSecond: 100, Burst: 250, PerCallerConcurrent: 32, GlobalConcurrent: 128}
-	fetchPolicy    = httplimit.Policy{RatePerSecond: 25, Burst: 50, PerCallerConcurrent: 16, GlobalConcurrent: 128}
-	scanPolicy     = httplimit.Policy{RatePerSecond: 5, Burst: 10, PerCallerConcurrent: 4, GlobalConcurrent: 32}
+	healthPolicy  = httplimit.Policy{RatePerSecond: 20, Burst: 40, PerCallerConcurrent: 8, GlobalConcurrent: 256}
+	metricsPolicy = httplimit.Policy{RatePerSecond: 10, Burst: 30, PerCallerConcurrent: 4, GlobalConcurrent: 4}
+	authPolicy    = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 64, GlobalConcurrent: 512}
+	cheapPolicy   = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 32, GlobalConcurrent: 256}
+	writePolicy   = httplimit.Policy{RatePerSecond: 100, Burst: 250, PerCallerConcurrent: 32, GlobalConcurrent: 128}
+	fetchPolicy   = httplimit.Policy{RatePerSecond: 25, Burst: 50, PerCallerConcurrent: 16, GlobalConcurrent: 128}
+	scanPolicy    = httplimit.Policy{RatePerSecond: 5, Burst: 10, PerCallerConcurrent: 4, GlobalConcurrent: 32}
+	// A watch is one long-lived connection per consumer, reopened only after it
+	// drops: few new ones a second, several held open at a time.
+	watchPolicy    = httplimit.Policy{RatePerSecond: 2, Burst: 8, PerCallerConcurrent: 8, GlobalConcurrent: 256}
 	adminPolicy    = httplimit.Policy{RatePerSecond: 10, Burst: 50, PerCallerConcurrent: 4, GlobalConcurrent: 16}
 	transferPolicy = httplimit.Policy{RatePerSecond: 10, Burst: 20, PerCallerConcurrent: 4, GlobalConcurrent: 32}
 )

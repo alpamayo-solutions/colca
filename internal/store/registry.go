@@ -41,7 +41,7 @@ func (s *Store) RegistryDelete(ulid string, stream string, rec Record, also ...R
 	rec.KVPath, rec.KVNode = "", ""
 	return s.registryBatch(stream, append([]Record{rec}, also...), func(b *pebble.Batch) error {
 		if kvPath != "" {
-			if err := b.Delete(kvKey(kvPath, kvNode, kvTopic), nil); err != nil {
+			if err := deleteKV(b, kvPath, kvNode, kvTopic); err != nil {
 				return err
 			}
 		}
@@ -85,6 +85,7 @@ func (s *Store) registryBatch(stream string, recs []Record, mut func(*pebble.Bat
 	}
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
+	s.streamGrewLocked(stream)
 	return first, nil
 }
 

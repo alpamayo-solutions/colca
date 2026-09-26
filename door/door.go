@@ -83,6 +83,9 @@ type FetchOptions struct {
 	Max       int
 	Prefix    string
 	SignalIDs []string
+	// Contracts keeps only records of these contracts; next still moves past the
+	// others.
+	Contracts []string
 }
 
 // KVEntry is one retained record returned by /kv. WrittenBy, ActorID,
@@ -160,6 +163,9 @@ func (c *Client) FetchWithOptions(ctx context.Context, options FetchOptions) (Pa
 	}
 	for _, signalID := range options.SignalIDs {
 		q.Add("signal_id", signalID)
+	}
+	for _, contract := range options.Contracts {
+		q.Add("contract", contract)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/fetch?"+q.Encode(), nil)
 	if err != nil {
