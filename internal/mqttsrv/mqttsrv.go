@@ -716,6 +716,13 @@ func (s *Server) Close() error {
 // appended record reaches the bus this way under its stored topic; state is
 // retained so new subscribers get the current value.
 func (s *Server) DeliverLocal(topic string, payload []byte, retain bool) {
+	if len(topic) > uns.MaxTopicBytes {
+		// A record stored before Parse refused such topics; delivered, it would
+		// misframe the stream of every subscriber.
+		slog.Default().Warn("local delivery refused: topic longer than MQTT allows",
+			"topic_prefix", topic[:256], "bytes", len(topic))
+		return
+	}
 	if err := s.S.Publish(topic, payload, retain, 1); err != nil {
 		slog.Default().Warn("local delivery failed", "topic", topic, "retain", retain, "err", err)
 	}

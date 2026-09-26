@@ -48,6 +48,11 @@ type Parsed struct {
 	Prefix, Version, Contract, NodeID, Path string
 }
 
+// MaxTopicBytes is the longest topic MQTT can carry: a topic's length travels
+// as a 16-bit integer, and a longer one wraps and misframes the packet for every
+// subscriber that receives it.
+const MaxTopicBytes = 65535
+
 // IsUns reports whether the topic is under the topic root.
 func IsUns(topic string) bool { return strings.HasPrefix(topic, Root()+"/") }
 
@@ -57,6 +62,9 @@ func IsUns(topic string) bool { return strings.HasPrefix(topic, Root()+"/") }
 // its own reason. The exception is tied to the contract, so MountInsert and
 // MountStrip never silently skip a short topic of another contract.
 func Parse(topic string) (Parsed, error) {
+	if len(topic) > MaxTopicBytes {
+		return Parsed{}, fmt.Errorf("uns grammar: topic is %d bytes, MQTT carries at most %d", len(topic), MaxTopicBytes)
+	}
 	seg := strings.Split(topic, "/")
 	if len(seg) == 4 && seg[2] == "_TimeSync" {
 		return Parsed{Prefix: seg[0], Version: seg[1], Contract: seg[2], NodeID: seg[3]}, nil
