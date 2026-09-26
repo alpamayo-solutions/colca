@@ -57,6 +57,13 @@ func (h *humanSessions) put(clientID string, s humanSession) int {
 	return len(h.m)
 }
 
+// empty says whether no person is connected, so per-publish work for people can be skipped.
+func (h *humanSessions) empty() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.m) == 0
+}
+
 func (h *humanSessions) get(clientID string) (humanSession, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

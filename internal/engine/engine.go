@@ -42,6 +42,10 @@ type HasSubscriberFor func(topic, ulid string) bool
 // a client's own publish, with the child's mount inserted for a replicated record.
 type Result struct {
 	Persisted bool
+	// Duplicate is a command whose correlation id the node already accepted from
+	// the same sender: nothing was stored or run, and its ack, if there is one yet,
+	// went out again.
+	Duplicate bool
 	Stream    string
 	Offset    uint64
 	Topic     string // as persisted, with the mount inserted for replicated records
@@ -156,6 +160,9 @@ type Engine struct {
 	ancestry      uns.Ancestry
 	ancestryKnown bool
 
+	// ledger remembers each command's sender and ack by correlation id.
+	ledger *commandLedger
+
 	// exec executes commands addressed to this node. The engine owns the mechanism,
 	// the executor what a verb means. Nil until SetExecutor, and then nothing
 	// executes.
@@ -198,7 +205,8 @@ func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m
 	if clk == nil {
 		clk = clock.New(cfg.Parent == nil, time.Now)
 	}
-	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk, auditID: newAuditID, unboundLog: newUnboundMetricLog()}
+	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk, auditID: newAuditID, unboundLog: newUnboundMetricLog(),
+		ledger: newCommandLedger()}
 	e.elements = uns.NewElementIndex(e.EntityStore())
 	if raw, ok := s.AncestryGet(); ok {
 		var a uns.Ancestry
@@ -492,11 +500,20 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		if err := e.validateContract(p.Contract, payload); err != nil {
 			return e.reject(metrics.ReasonValidation, "%w", err)
 		}
-		res, err := e.persistAttributed(class, p, topic, payload, attribution)
-		if err == nil {
-			res.Command = e.maybeExec(p, payload, attribution, actor) // return the synchronous outcome to local API callers
+		id, repeat, err := e.admitCommand(payload, attribution.ActorID)
+		if err != nil {
+			return Result{}, err
 		}
-		return res, err
+		if repeat {
+			return e.repeated(payload), nil
+		}
+		res, err := e.persistAttributed(class, p, topic, payload, attribution)
+		if err != nil {
+			e.ledger.forget(id)
+			return res, err
+		}
+		res.Command = e.maybeExec(p, payload, attribution, actor) // return the synchronous outcome to local API callers
+		return res, nil
 	}
 	if uns.IsAudit(class) {
 		entry, ok := e.ids.Get(identity)
@@ -615,11 +632,20 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 		ActorLabel: actorLabel, ActorKind: "human",
 		ActorGroups: append([]string(nil), entry.Groups...),
 	}
-	res, err := e.persistAttributed(class, p, topic, payload, attribution)
-	if err == nil {
-		res.Command = e.maybeExec(p, payload, attribution, entry) // commands addressed to this node execute here
+	id, repeat, err := e.admitCommand(payload, attribution.ActorID)
+	if err != nil {
+		return Result{}, err
 	}
-	return res, err
+	if repeat {
+		return e.repeated(payload), nil
+	}
+	res, err := e.persistAttributed(class, p, topic, payload, attribution)
+	if err != nil {
+		e.ledger.forget(id)
+		return res, err
+	}
+	res.Command = e.maybeExec(p, payload, attribution, entry) // commands addressed to this node execute here
+	return res, nil
 }
 
 // IngestAdmin ingests a publish through the admin-token HTTP API: node-local
@@ -677,11 +703,23 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 		e.metrics.RejectPublish(metrics.ReasonIdentity)
 		return Result{}, err
 	}
-	res, err := e.persistAttributed(class, p, topic, payload, attribution)
-	if err == nil {
-		res.Command = e.maybeExec(p, payload, attribution, nil) // the admin door presents a token, not an identity
+	var id string
+	if uns.IsCommand(class) {
+		var repeat bool
+		if id, repeat, err = e.admitCommand(payload, attribution.ActorID); err != nil {
+			return Result{}, err
+		}
+		if repeat {
+			return e.repeated(payload), nil
+		}
 	}
-	return res, err
+	res, err := e.persistAttributed(class, p, topic, payload, attribution)
+	if err != nil {
+		e.ledger.forget(id)
+		return res, err
+	}
+	res.Command = e.maybeExec(p, payload, attribution, nil) // the admin door presents a token, not an identity
+	return res, nil
 }
 
 // ingestAdminStateBatch commits the complete state result of one domain command.
@@ -1108,6 +1146,11 @@ func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string
 	}
 	e.metrics.IngestRecord(streamName)
 	e.log.Debug("ingest", "stream", streamName, "offset", first, "topic", topic)
+	if uns.IsAck(class) {
+		if id := correlationID(payload); id != "" {
+			e.ledger.acked(id, topic, payload)
+		}
+	}
 	// The element index tracks every persisted record, not just machine publishes:
 	// an element authored through IngestAdmin must be visible too. The plugin
 	// observer, by contrast, only sees what machines published.

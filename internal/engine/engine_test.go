@@ -907,7 +907,9 @@ func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
 	if v := metricstest.Value(t, m, rejectedLine); v != 4 {
 		t.Fatalf("%s = %v after 4 rejected attempts (client+admin+downlink+human), want 4", rejectedLine, v)
 	}
-	if _, err := e.IngestHuman(humanEntry(t, "cmd:el-hmi/#:param"), "colca/v1/_CmdParam/hmi/hmi/ping", payload); err != nil {
+	// Its own correlation id: the admin's is taken, and a person may not reuse it.
+	ownPayload := []byte(`{"correlation_id":"c-human","expires_at":99999999999}`)
+	if _, err := e.IngestHuman(humanEntry(t, "cmd:el-hmi/#:param"), "colca/v1/_CmdParam/hmi/hmi/ping", ownPayload); err != nil {
 		t.Fatalf("cmd outside the draining mount must still be admitted (human): %v", err)
 	}
 }

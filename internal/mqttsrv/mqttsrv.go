@@ -134,6 +134,7 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnPacketProcessed,
 		mqtt.OnAuthPacket,
 		mqtt.OnPacketEncode,
+		mqtt.OnSelectSubscribers,
 	}, b)
 }
 
@@ -486,12 +487,46 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		h.log.Warn("publish rejected", "identity", ident, "topic", pk.TopicName, "err", err)
 		return pk, rejectCode(cl, pk, err)
 	}
+	if res.Duplicate {
+		return pk, packets.CodeSuccessIgnore
+	}
 	if res.Persisted {
 		h.log.Debug("mqtt ingest", "identity", ident, "topic_in", pk.TopicName,
 			"topic_stored", res.Topic, "stream", res.Stream, "offset", res.Offset)
 		return pk, packets.CodeSuccessIgnore
 	}
 	return pk, nil
+}
+
+// OnSelectSubscribers keeps an ack from every person except the one who sent its
+// command; an ack whose sender the node does not know reaches no person.
+// Services and machines keep every ack their read grants cover.
+func (h *colcaHook) OnSelectSubscribers(subs *mqtt.Subscribers, pk packets.Packet) *mqtt.Subscribers {
+	eng := h.engine()
+	if eng == nil || h.humans.empty() {
+		return subs
+	}
+	recipient, isAck := eng.AckRecipient(pk.TopicName, pk.Payload)
+	if !isAck {
+		return subs
+	}
+	keep := func(clientID string) bool {
+		s, human := h.humans.get(clientID)
+		return !human || (recipient != "" && s.entry.ULID == recipient)
+	}
+	for id := range subs.Subscriptions {
+		if !keep(id) {
+			delete(subs.Subscriptions, id)
+		}
+	}
+	for _, group := range subs.Shared {
+		for id := range group {
+			if !keep(id) {
+				delete(group, id)
+			}
+		}
+	}
+	return subs
 }
 
 // New builds the broker with the TLS listener bound immediately, so Addr works
