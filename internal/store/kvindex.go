@@ -245,7 +245,11 @@ func (s *Store) kvScanPageIndexed(prefix, after string, limit int, contracts []s
 	}
 
 	const maxPrealloc = 1000
-	out := make([]KVEntry, 0, min(limit, maxPrealloc))
+	capacity := limit
+	if capacity > maxPrealloc {
+		capacity = maxPrealloc
+	}
+	out := make([]KVEntry, 0, capacity)
 	var lastKey []byte
 	for len(out) < limit {
 		var next *cursor
