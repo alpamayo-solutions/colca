@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.7](https://github.com/alpamayo-solutions/colca/compare/v0.17.6...v0.17.7) (2026-09-26)
+
+
+### Fixes
+
+* a login right after the identity provider comes up is no longer refused ([cbd7514](https://github.com/alpamayo-solutions/colca/commit/cbd75147f2e6531fcee3f7ccecddc49a7dea666f))
+* a login right after the identity provider comes up is no longer refused ([4d95457](https://github.com/alpamayo-solutions/colca/commit/4d9545798fc6a7ee2d88814daf02d22ef556c285))
+
 ## [0.17.6](https://github.com/alpamayo-solutions/colca/compare/v0.17.5...v0.17.6) (2026-09-26)
 
 
