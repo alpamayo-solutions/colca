@@ -24,6 +24,10 @@ different bundle does not start.
 - **A bundle replaces the built-in checks.** It never merges with them. A contract
   that is not in the bundle is refused. A node without a bundle applies small
   built-in checks for its core contracts only.
+- **Nesting is limited.** With or without a bundle, a payload that nests objects
+  and arrays more than 32 levels deep is refused with `400`; a command gets a
+  `400` ack. The contracts need a few levels; readers of the stored records
+  stop at 64 levels including their own envelope.
 - **The bundle carries the routing class** of each contract, so a new contract
   can be introduced by shipping a bundle, without a new broker. A new command
   contract counts as an `admin` command until the domain package names its class.
