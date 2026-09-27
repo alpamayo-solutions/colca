@@ -1,12 +1,16 @@
 package mqttsrv
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"sync"
 	"testing"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
+	"github.com/mochi-mqtt/server/v2/packets"
 )
 
 // closeBudget is how long shutdown may take before the test calls it hung. The
@@ -134,5 +138,28 @@ func TestCloseRacesDisconnectingClients(t *testing.T) {
 				"shutdown deadlocked (see mqttsrv.Server.Close)", round)
 		}
 		wg.Wait()
+	}
+}
+
+// A socket accepted before listener closure may reach EstablishConnection after
+// CloseAll returned. It must never register a new wait-group member or read MQTT.
+func TestClosedBrokerRejectsLateAcceptedSocket(t *testing.T) {
+	w := newWorld(t)
+	if err := w.srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server, peer := net.Pipe()
+	defer server.Close()
+	defer peer.Close()
+	result := make(chan error, 1)
+	go func() { result <- w.srv.S.EstablishConnection(listenerLocal, server) }()
+	if err := peer.SetReadDeadline(time.Now().Add(promptCloseBudget)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("late socket was not closed: %v", err)
+	}
+	if err := <-result; !errors.Is(err, packets.ErrServerShuttingDown) {
+		t.Fatalf("late connection: %v", err)
 	}
 }
