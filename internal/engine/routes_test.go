@@ -188,3 +188,34 @@ func TestStrictCommandsAnswerEveryUnannouncedCommand(t *testing.T) {
 		t.Fatalf("an announced command did not pass: %+v, %v", res, err)
 	}
 }
+
+// A command no grant of its sender covers is refused, answered with a 403 ack that
+// reaches the sender, and not stored.
+func TestADeniedCommandIsAnswered403(t *testing.T) {
+	e, delivered := ledgerEngine(t)
+	anna := humanEntry(t, "cmd:#:operate")
+	stored := e.Store().NextOffset("commands")
+
+	if _, err := e.IngestHuman(anna, "colca/v1/_CmdMaintain/n-edge1/line1/bqc/reset", cmdPayload("c-denied")); err == nil {
+		t.Fatal("a command without a covering grant was accepted")
+	}
+	var acks []delivery
+	for _, d := range *delivered {
+		if strings.Contains(d.Topic, "/_Ack/") {
+			acks = append(acks, d)
+		}
+	}
+	if len(acks) != 1 || acks[0].Topic != "colca/v1/_Ack/n-edge1/line1/bqc/reset" {
+		t.Fatalf("acks %v", acks)
+	}
+	ack := lastAck(t, &acks)
+	if ack.ResultCode != 403 || ack.CorrelationID != "c-denied" || !strings.Contains(ack.Message, "_CmdMaintain line1/bqc/reset") {
+		t.Fatalf("ack %+v", ack)
+	}
+	if recipient, _ := e.AckRecipient(acks[0].Topic, []byte(acks[0].Payload)); recipient != anna.ULID {
+		t.Fatalf("ack goes to %q", recipient)
+	}
+	if got := e.Store().NextOffset("commands"); got != stored {
+		t.Fatalf("a denied command was stored: next %d, want %d", got, stored)
+	}
+}
