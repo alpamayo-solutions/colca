@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.2](https://github.com/alpamayo-solutions/colca/compare/v0.19.1...v0.19.2) (2026-09-27)
+
+
+### Fixes
+
+* **engine:** refuse payloads nested deeper than 32 levels ([#110](https://github.com/alpamayo-solutions/colca/issues/110)) ([fc6e8bf](https://github.com/alpamayo-solutions/colca/commit/fc6e8bf407087afa416b1af2c8eaba60e53e1e3a))
+
 ## [0.19.1](https://github.com/alpamayo-solutions/colca/compare/v0.19.0...v0.19.1) (2026-09-27)
 
 
