@@ -72,7 +72,9 @@ require (
 // fix/select-subscribers-always runs OnSelectSubscribers for every publish, not
 // only for topics with a shared subscription, so the hook can keep one person's
 // acks from another.
-// Drop this replace once a released mochi version contains all six;
+// The connection-admission fix also serializes WaitGroup registration with
+// shutdown, refusing sockets accepted just before the listeners close.
+// Drop this replace once a released mochi version contains all seven;
 // internal/mqttsrv's TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace goes
 // red under -race if it is dropped early,
 // TestAPubackBufferedBehindQueuedDeliveriesReachesTheClientBeforeShutdown fails
@@ -81,4 +83,4 @@ require (
 // TestATakenOverConnectionsWillDoesNotOverwriteTheNewAnnounce fails without the
 // takeover fix, and TestAnAckReachesOnlyThePersonWhoSentTheCommand without the
 // subscriber-selection fix.
-replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260926022004-d78f97036dab
+replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260927083005-067d3b1ae6e4
