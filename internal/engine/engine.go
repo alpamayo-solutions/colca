@@ -506,6 +506,7 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		}
 		implicitLocalConfigure := actor == entry && p.NodeID == e.cfg.ULID && entry.MayImplicitlyConfigure(p.Contract)
 		if !implicitLocalConfigure && !uns.Authorize(e.Scope(), actor, uns.ActCmd, topic) {
+			e.refuseDeniedCommand(p, payload, attribution.ActorID)
 			return e.rejectDenied(metrics.ReasonCmdDenied, attribution, "execute", &p, "client %s: no cmd grant covers %s", identity, topic)
 		}
 		if err := e.validateContract(p.Contract, payload); err != nil {
@@ -653,6 +654,7 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 		return e.reject(metrics.ReasonDraining, "human %s: %s is draining, no new commands admitted", entry.ULID, p.Path)
 	}
 	if !uns.Authorize(e.Scope(), entry, uns.ActCmd, topic) {
+		e.refuseDeniedCommand(p, payload, entry.ULID)
 		return e.rejectDenied(metrics.ReasonCmdDenied, attributionForEntry(entry), "execute", &p,
 			"human %s: no cmd grant covers %s", entry.ULID, topic)
 	}
