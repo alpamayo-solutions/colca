@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -295,6 +296,23 @@ func (e *Engine) CursorFilters() *cursorwatch.Filters { return e.cursorFilters }
 // before the first sync.
 func (e *Engine) AuthoritativeNow() time.Time {
 	return e.clk.AuthoritativeNow()
+}
+
+// ClockStatus reports the same clock that powers _TimeSync and replication.
+// Unknown synchronization age is null, never an invented successful sync.
+func (e *Engine) ClockStatus() map[string]any {
+	now := e.clk.Now()
+	age := e.clk.SyncAgeSeconds(now)
+	var syncAge any
+	if !math.IsInf(age, 0) && !math.IsNaN(age) {
+		syncAge = age
+	}
+	return map[string]any{
+		"now_ms":  e.clk.AuthoritativeNow().UnixMilli(),
+		"is_root": e.clk.IsRoot(), "offset_ms": e.clk.OffsetMS(),
+		"sync_age_seconds":        syncAge,
+		"beacon_interval_seconds": e.cfg.TimeSync.EffectiveBeaconInterval().Seconds(),
+	}
 }
 
 // ApplyClockSample records the offset from a parent's now_ms and warns when drift

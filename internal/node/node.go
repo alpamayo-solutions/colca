@@ -494,7 +494,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.wg.Add(1)
 		go func() {
 			defer n.wg.Done()
-			rs.RunDrainTicker(n.stop)
+			rs.RunDrainCompletion(n.stop)
 		}()
 	}
 

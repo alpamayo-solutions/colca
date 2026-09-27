@@ -44,17 +44,16 @@ type Bridge struct {
 	Store Store
 	Log   *slog.Logger
 
-	Max int
-	// Wake receives whenever the metrics stream may have grown (a /watch hint).
-	// After a page that was not full the bridge waits for it, and reads nothing
-	// on a timer: the first hint of every watch connection names the stream, so
-	// a reconnect drains too.
-	Wake       <-chan struct{}
-	Strict     bool
-	Drained    bool
-	NowMS      int64
-	FetchedAt  time.Time
-	Coordinate func(context.Context) (bool, error)
+	Max            int
+	Strict         bool
+	Drained        bool
+	Acknowledged   int64
+	NowMS          int64
+	FetchedAt      time.Time
+	Coordinate     func(context.Context) (bool, error)
+	WaitCoordinate func(context.Context)
+	Changes        func() <-chan struct{}
+	BatchInterval  time.Duration
 
 	// Health, when set, hears after every pass whether it succeeded and, when
 	// not, why. It is called on every pass; the receiver decides what changed.
@@ -126,6 +125,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 	}
 	if fetched == 0 {
 		b.Drained = true
+		b.Acknowledged = page.Next - 1
 		return 0, 0, nil
 	}
 
@@ -206,6 +206,8 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		}
 		// The rows are durable; the next pass re-reads and the marker skips them.
 		b.logger().Warn("applied but could not ack", "offset", last, "err", err)
+	} else {
+		b.Acknowledged = last
 	}
 	return fetched, len(rows) - len(rejections), nil
 }
@@ -218,26 +220,28 @@ func truncateForLog(s string, limit int) string {
 	return s[:limit] + "…"
 }
 
-// CoordinateEvery is how often a coordinated bridge (factory clock steps)
-// checks the clock gate while no records arrive. It is the gate's cadence, not
-// a read of the stream: the stream is read on a wake.
-const CoordinateEvery = 500 * time.Millisecond
-
-// errorPause is the wait after a failed pass before the page is read again.
-const errorPause = 5 * time.Second
-
-// Run follows until ctx ends. A full page means more is waiting and is followed
-// at once; after anything shorter the bridge waits for the next wake. How often
-// wakes come (the watch interval) is what batches a steady trickle into pages.
+// Run drains all available pages, then waits for a stream hint. Backpressure
+// batches drain starts; a short page never delays the rest of the queue.
 func (b *Bridge) Run(ctx context.Context) error {
+	if b.Coordinate != nil {
+		return b.runCoordinated(ctx)
+	}
+	if b.Changes == nil {
+		return fmt.Errorf("historian requires a stream subscription")
+	}
+	started := time.Now()
+	var changed <-chan struct{}
+	retry := time.Second
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		fetched, _, err := b.pass(ctx)
-		if err == nil && b.Coordinate != nil {
-			_, err = b.Coordinate(ctx)
+		// Keep the version captured before the FIRST page through the final
+		// empty read. Updates arriving during a drain remain owed.
+		if changed == nil && b.Changes != nil {
+			changed = b.Changes()
 		}
+		fetched, _, err := b.pass(ctx)
 		if b.Health != nil {
 			if err != nil {
 				b.Health(false, err.Error())
@@ -245,37 +249,26 @@ func (b *Bridge) Run(ctx context.Context) error {
 				b.Health(true, "")
 			}
 		}
-		switch {
-		case err != nil:
+		if err != nil {
 			b.logger().Error("historian pass failed, retrying", "err", err)
-			if !sleep(ctx, errorPause) {
+			if !sleep(ctx, door.RetryDelay(err, retry)) {
 				return ctx.Err()
 			}
-			continue
-		case fetched >= b.max():
+			retry = min(30*time.Second, retry*2)
 			continue
 		}
-		if !b.wait(ctx) {
-			return ctx.Err()
+		retry = time.Second
+		if fetched > 0 {
+			continue
+		}
+		if err == nil && b.Changes != nil {
+			if !door.WaitChange(ctx, changed, -1, started.Add(b.BatchInterval)) {
+				return ctx.Err()
+			}
+			started, changed = time.Now(), nil
+			continue
 		}
 	}
-}
-
-// wait blocks until the next wake, or the next gate check when coordinated.
-func (b *Bridge) wait(ctx context.Context) bool {
-	var gate <-chan time.Time
-	if b.Coordinate != nil {
-		timer := time.NewTimer(CoordinateEvery)
-		defer timer.Stop()
-		gate = timer.C
-	}
-	select {
-	case <-ctx.Done():
-		return false
-	case <-b.Wake:
-	case <-gate:
-	}
-	return true
 }
 
 func sleep(ctx context.Context, d time.Duration) bool {
@@ -287,4 +280,35 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+// Coordinated acquisition has a known upstream completion marker. Fetch only
+// after that marker, instead of polling empty metrics between windows. This
+// leaves the fetch budget for durable drains (including their final empty read).
+func (b *Bridge) runCoordinated(ctx context.Context) error {
+	if b.WaitCoordinate == nil {
+		return fmt.Errorf("coordinated historian requires commit wakeups")
+	}
+	retry := time.Second
+	for ctx.Err() == nil {
+		_, err := b.Coordinate(ctx)
+		if b.Health != nil {
+			if err != nil {
+				b.Health(false, err.Error())
+			} else {
+				b.Health(true, "")
+			}
+		}
+		if err != nil {
+			b.logger().Error("coordinated historian failed, retrying", "err", err)
+			if !sleep(ctx, door.RetryDelay(err, retry)) {
+				return ctx.Err()
+			}
+			retry = min(30*time.Second, retry*2)
+			continue
+		}
+		retry = time.Second
+		b.WaitCoordinate(ctx)
+	}
+	return ctx.Err()
 }

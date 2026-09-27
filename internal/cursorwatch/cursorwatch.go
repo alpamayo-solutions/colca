@@ -4,8 +4,8 @@
 // A consumer is woken by an MQTT message and then drains its cursor. There is
 // no timed catch-up behind that, so a lost wake or a stuck loop leaves records
 // waiting with nobody reading them. The watchdog finds those cursors instead of
-// hiding them behind a poll: every few seconds it takes each cursor's oldest
-// unread record that the consumer actually reads, and when that record is older
+// hiding them behind a poll: on store/filter changes it takes each cursor's oldest
+// unread record that the consumer actually reads, and schedules its lag deadline. When it is older
 // than the threshold it writes a retained _Finding (reason cursor_lag) about
 // the service that owns the cursor. The alarm path raises it like any other
 // finding, and the service itself can subscribe to it to fail its health
@@ -24,6 +24,8 @@ package cursorwatch
 import (
 	"sync"
 
+	"github.com/alpamayo-solutions/colca/door"
+
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
@@ -40,9 +42,10 @@ type remembered struct {
 // Filters holds each cursor's last fetch filter. It is memory only: after a
 // restart a consumer drains on reconnect, which fetches and fills it again.
 type Filters struct {
-	mu  sync.Mutex
-	m   map[key]remembered
-	gen uint64
+	mu      sync.Mutex
+	m       map[key]remembered
+	gen     uint64
+	changed door.Signal
 }
 
 // NewFilters returns an empty set.
@@ -54,6 +57,7 @@ func (f *Filters) Remember(cursor, stream string, filter Filter) {
 	defer f.mu.Unlock()
 	f.gen++
 	f.m[key{cursor, stream}] = remembered{filter: filter, gen: f.gen}
+	f.changed.Notify()
 }
 
 // get returns the cursor's filter and a generation that changes whenever a new

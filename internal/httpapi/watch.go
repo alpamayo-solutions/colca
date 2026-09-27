@@ -2,9 +2,11 @@ package httpapi
 
 import (
 	"encoding/json"
+	"github.com/alpamayo-solutions/colca/internal/repl"
 	"net/http"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/store"
@@ -43,6 +45,17 @@ func serveWatch(w http.ResponseWriter, r *http.Request, s *store.Store, writeJSO
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": bad})
 		return
 	}
+	contracts := q["contract"]
+	if len(contracts) > 64 {
+		writeJSON(w, 400, map[string]any{"error": "too many contracts"})
+		return
+	}
+	for _, contract := range contracts {
+		if !strings.HasPrefix(contract, "_") || len(contract) > 128 || strings.ContainsAny(contract, "/+# ") {
+			writeJSON(w, 400, map[string]any{"error": "invalid contract"})
+			return
+		}
+	}
 	interval := watchDefaultInterval
 	if raw := q.Get("interval_ms"); raw != "" {
 		ms, err := strconv.Atoi(raw)
@@ -67,15 +80,26 @@ func serveWatch(w http.ResponseWriter, r *http.Request, s *store.Store, writeJSO
 		return control.Flush() == nil
 	}
 
-	var sent map[string]uint64 // next offsets as of the last hint; nil before the first
+	var sent map[string]store.StreamPosition // next offsets as of the last hint; nil before the first
 	var lastEmit time.Time
 	heartbeat := time.NewTimer(watchHeartbeat)
 	defer heartbeat.Stop()
 	for {
 		waits, next := s.StreamChanges(streams)
+		positions := make(map[string]store.StreamPosition, len(next))
+		for stream, offset := range next {
+			positions[stream] = store.StreamPosition{Next: offset}
+		}
+		if len(contracts) > 0 {
+			wake, scoped := s.Changes(contracts...)
+			for _, stream := range streams {
+				waits[stream] = wake
+				positions[stream] = scoped[stream]
+			}
+		}
 		hint := watchHint{Streams: []string{}, Next: map[string]uint64{}}
 		for _, stream := range streams {
-			if sent == nil || next[stream] != sent[stream] {
+			if sent == nil || positions[stream] != sent[stream] {
 				hint.Streams = append(hint.Streams, stream)
 				hint.Next[stream] = next[stream]
 			}
@@ -94,7 +118,7 @@ func serveWatch(w http.ResponseWriter, r *http.Request, s *store.Store, writeJSO
 			if !emit(hint) {
 				return
 			}
-			sent, lastEmit = next, time.Now()
+			sent, lastEmit = positions, time.Now()
 			heartbeat.Reset(watchHeartbeat)
 			continue
 		}
@@ -141,4 +165,89 @@ func watchStreams(requested []string) ([]string, string) {
 		}
 	}
 	return out, ""
+}
+
+// Queue observers receive coalesced hints, not periodic storage reads. Heartbeats
+// prove transport liveness without asking clients to refresh an unchanged queue.
+func watchBacklog(w http.ResponseWriter, r *http.Request, s *store.Store) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	control := http.NewResponseController(w)
+	emit := func(changed bool) bool {
+		_ = control.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if json.NewEncoder(w).Encode(map[string]bool{"backlog_changed": changed}) != nil {
+			return false
+		}
+		return control.Flush() == nil
+	}
+	heartbeat := time.NewTicker(5 * time.Second)
+	defer heartbeat.Stop()
+	wake := s.BacklogChanges() // capture before initial hydration hint
+	if !emit(true) {
+		return
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if !emit(false) {
+				return
+			}
+		case <-wake:
+			// Fixed window: additional commits do not postpone this deadline.
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-r.Context().Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			wake = s.BacklogChanges()
+			if !emit(true) {
+				return
+			}
+		}
+	}
+}
+
+// watchUplink streams lifecycle transitions; heartbeats carry no status read.
+func watchUplink(w http.ResponseWriter, r *http.Request, client *repl.Client) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	control := http.NewResponseController(w)
+	emit := func(value any) bool {
+		_ = control.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		return json.NewEncoder(w).Encode(value) == nil && control.Flush() == nil
+	}
+	heartbeat := time.NewTicker(5 * time.Second)
+	defer heartbeat.Stop()
+	var wake <-chan struct{}
+	for {
+		if client == nil {
+			if !emit(map[string]any{"uplink": map[string]string{"state": "none"}}) {
+				return
+			}
+		} else {
+			wake = client.StatusChanges()
+			if !emit(map[string]any{"uplink": client.Status()}) {
+				return
+			}
+		}
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-wake:
+				goto changed
+			case <-heartbeat.C:
+				if !emit(map[string]any{"heartbeat": true}) {
+					return
+				}
+			}
+		}
+	changed:
+	}
 }

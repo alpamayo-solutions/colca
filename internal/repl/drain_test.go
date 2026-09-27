@@ -136,7 +136,7 @@ func TestDrainExpiryBoundedCompletion(t *testing.T) {
 // Drain status is persisted and survives a restart, and the boot tick evaluates
 // it again. The test reopens the same store with a fresh registry, engine and
 // server in node.Start's order and runs evaluateAllDrains once like
-// RunDrainTicker; the drain with an expired command must still complete.
+// RunDrainCompletion; the drain with an expired command must still complete.
 func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -188,7 +188,7 @@ func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 		t.Fatalf("NewServer: %v", err)
 	}
 
-	// The RunDrainTicker boot behavior, without waiting out the goroutine's
+	// The RunDrainCompletion boot behavior, without waiting out the goroutine's
 	// internal timer: its own first action is exactly this call.
 	srv2.evaluateAllDrains()
 

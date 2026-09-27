@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,7 +42,7 @@ const (
 	legacyDownlinkDefCursor = "downlink-def"
 
 	replBatch    = maxReplicateRecords
-	uplinkIdle   = 150 * time.Millisecond
+	uplinkIdle   = 30 * time.Second
 	downlinkWait = 20 * time.Second
 	retryAfter   = 500 * time.Millisecond
 
@@ -75,7 +76,9 @@ type Client struct {
 	links *linkState
 	// status is the current uplink condition, read by /healthz. It is an
 	// atomic.Value so a /healthz read never contends with the loops that write it.
-	status atomic.Value
+	status        atomic.Value
+	statusMu      sync.Mutex
+	statusChanged chan struct{}
 }
 
 // NewClient returns a TLS client that presents this node's certificate and pins
@@ -524,6 +527,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 
 	// pushOnce pushes at most one batch of stream and reports whether it scanned
 	// anything, which is how "drained" is measured. aborted means our own shutdown.
+	retryPending := false
 	var pushOnce func(string, func(string) bool) (bool, bool)
 	pushOnce = func(stream string, filter func(string) bool) (scanned, aborted bool) {
 		from := eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), stream)
@@ -541,6 +545,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		recs, next, err := eng.Store().Read(stream, from, replBatch, nil)
 		if err != nil {
 			c.log.Error("uplink read", "stream", stream, "err", err)
+			retryPending = true
 			return false, false
 		}
 		if next == from {
@@ -595,6 +600,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			batch, err = fitReplicationBatch(stream, batch, c.maxReplicateBody)
 			if err != nil {
 				c.log.Error("uplink batch cannot fit the replication request bound", "stream", stream, "err", err)
+				retryPending = true
 				m.UplinkPushFailed(stream)
 				return false, false
 			}
@@ -631,6 +637,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 							"attempts", attempts, "down_for", down.Round(time.Second), "err", err)
 					}
 				}
+				retryPending = true
 				m.UplinkPushFailed(stream)
 				if refused {
 					m.UplinkRefused(stream)
@@ -660,6 +667,8 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		if stopped() {
 			return
 		}
+		wake, _ := eng.Store().Changes()
+		retryPending = false
 		idle := true
 		for _, lane := range priorityLanes {
 			// Drain only up to the lane's end at pass start. Draining until empty would
@@ -693,10 +702,16 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		// pass costs one HEAD per unconfirmed blob, which is why confirmations are kept.
 		syncBlobs(c, blobs, m, confirmedBlobs, rejectedBlobs)
 		if idle {
+			delay := uplinkIdle // recovery/blob discovery, not ordinary stream pacing
+			if retryPending {
+				delay = retryAfter
+				wake = nil // commits cannot shorten a failed-request backoff
+			}
 			select {
 			case <-stop:
 				return
-			case <-time.After(uplinkIdle):
+			case <-wake:
+			case <-time.After(delay):
 			}
 		}
 	}

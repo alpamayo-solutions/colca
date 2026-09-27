@@ -184,3 +184,28 @@ Over MQTT 5 at QoS 1 or higher, a refused publish is answered in the `PUBACK`:
 `0x90` unknown topic or contract, `0x99` invalid payload, `0x87` not
 authorized, `0x89` node is draining. MQTT 3.1.1 has no reason codes; the
 publish is dropped and counted in `colca_rejected_publishes_total`.
+
+`/healthz` includes `clock`: `now_ms`, `is_root`, `offset_ms`, nullable `sync_age_seconds`, and `beacon_interval_seconds`. These describe the existing `_TimeSync` authority; a null age means an edge has never synchronized. Host NTP status is not inferred.
+
+### Local stream wakeups and backlog telemetry
+
+Internal services may subscribe to `GET /watch?stream=metrics&stream=entities` on
+the local door with their existing service identity. The NDJSON response starts
+with a catch-up hint and then emits `{"streams":["metrics"]}` after successful
+durable commits. Five-second heartbeats contain no stream names. Hints can
+coalesce: capture the local wakeup version before fetching, drain the durable
+cursor to empty, then wait on that version. A disconnect requires reconnecting
+and draining again; a hint never acknowledges or contains records.
+
+This route is not on the published API and does not accept forwarded human bearer
+identities. Streaming clients must use the heartbeat/read deadline rather than an
+ordinary short whole-request timeout. `/fetch` and `/ack` retain their normal
+ownership rules. Fixed minimum spacing between drain starts can batch bursts;
+nonempty pages within a drain do not need an additional delay.
+
+`GET /backlog?prefix=c/projector/` on the same local door returns selected durable
+cursor positions, stream heads and `lag_records`. It is read-only. Values count
+outstanding offset distance (an upper bound after compaction), not bytes. Up to
+32 nonempty prefixes and 256 matching cursors are accepted; excess results fail
+instead of truncating away a potentially overloaded consumer. A missing expected
+cursor is not evidence of an empty queue.

@@ -9,8 +9,60 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 )
+
+// Signal coalesces notifications without losing a change between checking a
+// queue and sleeping. Capture Changes BEFORE reading the durable queue.
+type Signal struct {
+	mu      sync.Mutex
+	changed chan struct{}
+}
+
+func (s *Signal) Changes() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.changed == nil {
+		s.changed = make(chan struct{})
+	}
+	return s.changed
+}
+func (s *Signal) Notify() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.changed != nil {
+		close(s.changed)
+	}
+	s.changed = make(chan struct{})
+}
+
+// WaitChange wakes on a hint or a scheduled deadline; a negative delay waits only for hints. Cancellation interrupts
+// both the wait and the fixed batching window; new arrivals cannot extend it.
+func WaitChange(ctx context.Context, changed <-chan struct{}, recovery time.Duration, notBefore time.Time) bool {
+	var due <-chan time.Time
+	if recovery >= 0 {
+		timer := time.NewTimer(recovery)
+		defer timer.Stop()
+		due = timer.C
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-changed:
+	case <-due:
+	}
+	if delay := time.Until(notBefore); delay > 0 {
+		batch := time.NewTimer(delay)
+		defer batch.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-batch.C:
+		}
+	}
+	return ctx.Err() == nil
+}
 
 // watchSilence is how long a watch may stay silent before the client gives up on
 // the connection. The node writes a heartbeat at least every 5 s.
@@ -57,7 +109,7 @@ func (c *Client) Watch(ctx context.Context, streams []string, interval time.Dura
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		reason, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("watching %v: HTTP %d: %s", streams, resp.StatusCode, truncate(reason, 300))
+		return httpResponseError(resp, fmt.Errorf("watching %v: HTTP %d: %s", streams, resp.StatusCode, truncate(reason, 300)))
 	}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 1024), 64<<10)
@@ -83,7 +135,12 @@ func (c *Client) Watch(ctx context.Context, streams []string, interval time.Dura
 // WatchForever runs Watch until ctx ends, reconnecting after pause when the
 // connection drops; failed, if set, hears why.
 func (c *Client) WatchForever(ctx context.Context, streams []string, interval, pause time.Duration, notify func(Hint), failed func(error)) {
+	if pause <= 0 {
+		pause = time.Second
+	}
+	delay := pause
 	for {
+		started := time.Now()
 		err := c.Watch(ctx, streams, interval, notify)
 		if ctx.Err() != nil {
 			return
@@ -91,7 +148,11 @@ func (c *Client) WatchForever(ctx context.Context, streams []string, interval, p
 		if failed != nil {
 			failed(err)
 		}
-		timer := time.NewTimer(pause)
+		if time.Since(started) >= 30*time.Second {
+			delay = pause
+		}
+		timer := time.NewTimer(RetryDelay(err, delay))
+		delay = min(30*time.Second, delay*2)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

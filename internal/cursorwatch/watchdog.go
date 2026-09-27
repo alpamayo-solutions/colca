@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -44,7 +45,7 @@ type Gauges interface {
 // Publish writes a record as the node; an empty payload retires the path.
 type Publish func(topic string, payload []byte) error
 
-// Watchdog checks every cursor on a fixed cadence; see the package comment.
+// Watchdog checks on changes and schedules unread-record age deadlines.
 type Watchdog struct {
 	Store    *store.Store
 	Filters  *Filters
@@ -61,6 +62,7 @@ type Watchdog struct {
 	cursors   map[key]*cursorState
 	published map[string]string // finding topic -> which cursors it named
 	adopted   bool
+	retry     bool
 }
 
 type cursorState struct {
@@ -79,29 +81,91 @@ type lagging struct {
 	Offset   uint64  `json:"from_offset"`
 }
 
-// Every is the cadence for a threshold: a quarter of it, at most 5 s, at
-// least 1 s.
-func Every(after time.Duration) time.Duration {
-	every := min(after/4, 5*time.Second)
-	return max(every, time.Second)
-}
-
-// Run checks until stop closes.
+// Run subscribes before each check. Batch starts are bounded to one second;
+// an incomplete scan continues immediately, and an idle node does no reads.
 func (w *Watchdog) Run(stop <-chan struct{}) {
-	ticker := time.NewTicker(Every(w.After))
-	defer ticker.Stop()
+	var notBefore time.Time
+	retryDelay := time.Second
 	for {
-		w.Check(time.Now())
 		select {
 		case <-stop:
 			return
-		case <-ticker.C:
+		default:
+		}
+		changed := w.Store.BacklogChanges()
+		filters := w.Filters.changed.Changes()
+		w.Check(time.Now())
+		if w.retry || (w.After > 0 && !w.adopted) {
+			timer := time.NewTimer(door.RetryDelay(nil, retryDelay))
+			select {
+			case <-stop:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			retryDelay = min(30*time.Second, retryDelay*2)
+			continue
+		}
+		retryDelay = time.Second
+		delay := w.nextDelay(time.Now())
+		if delay == 0 {
+			continue
+		} // bounded scan has more records
+		notBefore = time.Now().Add(time.Second)
+		var timer *time.Timer
+		var due <-chan time.Time
+		if delay >= 0 {
+			timer = time.NewTimer(delay)
+			due = timer.C
+		}
+		select {
+		case <-stop:
+			if timer != nil {
+				timer.Stop()
+			}
+			return
+		case <-changed:
+		case <-filters:
+		case <-due:
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+		// New hints cannot postpone the batch indefinitely.
+		if wait := time.Until(notBefore); wait > 0 {
+			timer = time.NewTimer(wait)
+			select {
+			case <-stop:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
 		}
 	}
 }
 
+func (w *Watchdog) nextDelay(now time.Time) time.Duration {
+	delay := time.Duration(-1)
+	if w.retry || (w.After > 0 && !w.adopted) {
+		delay = time.Second
+	}
+	for k, state := range w.cursors {
+		if !w.retry && !state.found && state.scannedTo < w.Store.NextOffset(k.stream) {
+			return 0
+		}
+		if state.found && w.After > 0 {
+			due := time.UnixMilli(state.ts).Add(w.After).Sub(now)
+			if due > 0 && (delay < 0 || due < delay) {
+				delay = due
+			}
+		}
+	}
+	return delay
+}
+
 // Check takes every cursor's unread age once and updates the findings.
 func (w *Watchdog) Check(now time.Time) {
+	w.retry = false
 	if w.cursors == nil {
 		w.cursors = map[key]*cursorState{}
 		w.published = map[string]string{}
@@ -165,6 +229,7 @@ func (w *Watchdog) Check(now time.Time) {
 			continue
 		}
 		if err := w.Publish(topic, payload); err != nil {
+			w.retry = true
 			w.logger().Warn("cursor lag finding not written", "topic", topic, "err", err)
 			continue
 		}
@@ -176,6 +241,7 @@ func (w *Watchdog) Check(now time.Time) {
 			continue
 		}
 		if err := w.Publish(topic, nil); err != nil {
+			w.retry = true
 			w.logger().Warn("cursor lag finding not retired", "topic", topic, "err", err)
 			continue
 		}
@@ -210,6 +276,7 @@ func (w *Watchdog) unreadAge(k key, position uint64, now time.Time) (float64, ui
 		upTo := min(head, state.scannedTo+scanCap)
 		rec, found, err := w.Store.FirstMatch(k.stream, state.scannedTo, upTo, filter)
 		if err != nil {
+			w.retry = true
 			w.logger().Warn("cursor check could not read the stream", "cursor", k.cursor, "stream", k.stream, "err", err)
 			return 0, 0
 		}
