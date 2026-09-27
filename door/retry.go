@@ -45,5 +45,5 @@ func RetryDelay(err error, fallback time.Duration) time.Duration {
 	if fallback <= 0 {
 		fallback = time.Second
 	}
-	return fallback/2 + time.Duration(rand.Int64N(int64(fallback-fallback/2)+1))
+	return fallback/2 + time.Duration(rand.Int64N(int64(fallback-fallback/2)+1)) //nolint:gosec // Retry scheduling jitter is not a security value.
 }

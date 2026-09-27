@@ -22,6 +22,7 @@ type heartbeatReceipt struct {
 	received time.Time
 }
 
+// Subscription maintains clock state and fresh heartbeat leases from MQTT.
 type Subscription struct {
 	Now          func() time.Time
 	heartbeats   map[string]heartbeatReceipt
@@ -67,6 +68,7 @@ func (s *Subscription) Changes() <-chan struct{} {
 	return s.changed
 }
 
+// State returns the subscription snapshot used by coordinated consumers.
 func (s *Subscription) State(context.Context) ([]door.KVEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

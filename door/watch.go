@@ -20,6 +20,7 @@ type Signal struct {
 	changed chan struct{}
 }
 
+// Changes returns the next change notification, captured before a drain.
 func (s *Signal) Changes() <-chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -28,6 +29,8 @@ func (s *Signal) Changes() <-chan struct{} {
 	}
 	return s.changed
 }
+
+// Notify coalesces a wakeup for all current waiters.
 func (s *Signal) Notify() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

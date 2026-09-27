@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -15,11 +16,11 @@ func TestBacklogReadsDurableCursorWithoutAcknowledging(t *testing.T) {
 	}
 	s.CursorAck("c/projector/cache", "entities", 2)
 	s.CursorAck("c/other/cache", "entities", 2)
-	req := httptest.NewRequest("GET", "/backlog?prefix=c/projector/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/backlog?prefix=c/projector/", nil)
 	req.Header.Set("X-Colca-Service", "test-backlog")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	if w.Code != 200 {
+	if w.Code != http.StatusOK {
 		t.Fatalf("%d: %s", w.Code, w.Body.String())
 	}
 	var response struct {
@@ -48,7 +49,7 @@ func TestBacklogReadsDurableCursorWithoutAcknowledging(t *testing.T) {
 func TestBacklogRequiresNonemptyPrefix(t *testing.T) {
 	for _, url := range []string{"/backlog", "/backlog?prefix="} {
 		h := newLocalHandler(t)
-		r := httptest.NewRequest("GET", url, nil)
+		r := httptest.NewRequest(http.MethodGet, url, nil)
 		r.Header.Set("X-Colca-Service", "test-backlog")
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
@@ -61,14 +62,14 @@ func TestBacklogRequiresNonemptyPrefix(t *testing.T) {
 func TestBacklogOverlappingPrefixesDoNotDuplicateCursors(t *testing.T) {
 	h := newLocalHandler(t)
 	h.eng.Store().CursorAck("c/projector/cache", "entities", 2)
-	r := httptest.NewRequest("GET", "/backlog?prefix=c/projector/&prefix=c/projector/cache", nil)
+	r := httptest.NewRequest(http.MethodGet, "/backlog?prefix=c/projector/&prefix=c/projector/cache", nil)
 	r.Header.Set("X-Colca-Service", "test-backlog")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	var result struct {
 		Queues []map[string]any `json:"queues"`
 	}
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || len(result.Queues) != 1 {
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &result) != nil || len(result.Queues) != 1 {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 }

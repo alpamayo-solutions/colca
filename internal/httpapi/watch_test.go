@@ -18,14 +18,14 @@ func TestLocalWatchWakesAfterCommitAndDoesNotMoveCursor(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "GET", server.URL+"/watch?stream=metrics", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/watch?stream=metrics", nil)
 	req.Header.Set("X-Colca-Service", "test-watch")
 	response, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != 200 {
+	if response.StatusCode != http.StatusOK {
 		t.Fatal(response.StatusCode)
 	}
 	scanner := bufio.NewScanner(response.Body)
@@ -72,7 +72,7 @@ func TestBacklogWatchIncludesConsumerProgressWithoutWakingRecordReaders(t *testi
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "GET", server.URL+"/watch?backlog=1", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/watch?backlog=1", nil)
 	req.Header.Set("X-Colca-Service", "test-watch")
 	response, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestContractScopedWatchSuppressesUnrelatedWakeups(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "GET", server.URL+"/watch?stream=entities&contract=_Signal", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/watch?stream=entities&contract=_Signal", nil)
 	req.Header.Set("X-Colca-Service", "test-watch")
 	response, err := http.DefaultClient.Do(req)
 	if err != nil {

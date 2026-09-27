@@ -3,6 +3,7 @@ package door
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -309,7 +310,7 @@ func TestDrainToHeadStopsOnCommitFailure(t *testing.T) {
 		calls++
 		return 0, context.Canceled
 	})
-	if err != context.Canceled || calls != 1 {
+	if !errors.Is(err, context.Canceled) || calls != 1 {
 		t.Fatalf("err=%v calls=%d", err, calls)
 	}
 }

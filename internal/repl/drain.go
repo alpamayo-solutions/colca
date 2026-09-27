@@ -112,7 +112,7 @@ func (s *Server) evaluateDrain(childULID string) time.Duration {
 	return -1
 }
 
-// drainPendingCommands scans the surviving part of the commands stream under
+// scanDrain scans the surviving part of the commands stream under
 // e's mount for undelivered commands, from the cursor inclusive, since the
 // cursor is the next unread offset. total counts them and pending those still
 // live; completion is pending == 0.
@@ -121,11 +121,6 @@ func (s *Server) evaluateDrain(childULID string) time.Duration {
 // pruned something the child never consumed. It does not end the scan: a live
 // command past the LWM still blocks the drain, and gapped only labels the
 // outcome once pending reaches 0.
-func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped bool) {
-	total, pending, gapped, _ = s.scanDrain(e)
-	return
-}
-
 func (s *Server) scanDrain(e *uns.Entry) (total, pending int, gapped bool, delay time.Duration) {
 	delay = -1
 	st := s.eng.Store()

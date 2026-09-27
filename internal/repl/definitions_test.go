@@ -339,7 +339,7 @@ func (s *definitionAppendAfterRead) Read(stream string, after uint64, limit int,
 	rows, next, err := s.Store.Read(stream, after, limit, filter)
 	if !s.appended {
 		s.appended = true
-		_, _, appendErr := s.Store.Append("definitions", []store.Record{{Topic: groupTopic, Payload: []byte(`{"id":"01HGRP-OPS","name":"late"}`)}})
+		_, _, appendErr := s.Append("definitions", []store.Record{{Topic: groupTopic, Payload: []byte(`{"id":"01HGRP-OPS","name":"late"}`)}})
 		if appendErr != nil {
 			return nil, after, appendErr
 		}

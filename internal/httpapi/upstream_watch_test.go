@@ -123,6 +123,15 @@ func TestWatchMergesAppendsWithinTheInterval(t *testing.T) {
 	if len(merged.Streams) != 2 {
 		t.Fatalf("merged = %+v, want both streams once", merged)
 	}
+	// fsync can make this producer burst span multiple batch intervals on CI.
+	// Coalescing must report every committed head; it need not compress a slow
+	// producer's whole burst into a single window.
+	seen := merged.Next
+	for seen["annotations"] < h.eng.Store().NextOffset("annotations") || seen["definitions"] < h.eng.Store().NextOffset("definitions") {
+		for stream, next := range w.next().Next {
+			seen[stream] = next
+		}
+	}
 	w.none(600 * time.Millisecond)
 }
 

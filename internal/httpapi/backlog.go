@@ -13,19 +13,19 @@ import (
 func backlog(w http.ResponseWriter, r *http.Request, s *store.Store) {
 	prefixes := r.URL.Query()["prefix"]
 	if len(prefixes) == 0 || len(prefixes) > 32 {
-		http.Error(w, "select 1–32 cursor prefixes", 400)
+		http.Error(w, "select 1–32 cursor prefixes", http.StatusBadRequest)
 		return
 	}
 	for _, prefix := range prefixes {
 		if prefix == "" {
-			http.Error(w, "cursor prefixes must not be empty", 400)
+			http.Error(w, "cursor prefixes must not be empty", http.StatusBadRequest)
 			return
 		}
 	}
 	rows := []map[string]any{}
 	cursors, err := s.CursorPositions(prefixes, 256)
 	if err != nil {
-		http.Error(w, "cursor inventory unavailable", 503)
+		http.Error(w, "cursor inventory unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	for _, cursor := range cursors {
@@ -45,7 +45,7 @@ func backlog(w http.ResponseWriter, r *http.Request, s *store.Store) {
 		}
 		rows = append(rows, map[string]any{"cursor": cursor.Name, "stream": cursor.Stream, "position": cursor.Position, "head": head, "lag_records": lag})
 		if len(rows) > 256 {
-			http.Error(w, "too many consumers; narrow prefixes", 400)
+			http.Error(w, "too many consumers; narrow prefixes", http.StatusBadRequest)
 			return
 		}
 	}
