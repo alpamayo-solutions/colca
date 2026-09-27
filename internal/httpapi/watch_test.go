@@ -57,7 +57,7 @@ func TestLocalWatchWakesAfterCommitAndDoesNotMoveCursor(t *testing.T) {
 
 func TestWatchRejectsUnknownStream(t *testing.T) {
 	h := newLocalHandler(t)
-	req := httptest.NewRequest("GET", "/watch?stream=does-not-exist", nil)
+	req := httptest.NewRequest(http.MethodGet, "/watch?stream=does-not-exist", nil)
 	req.Header.Set("X-Colca-Service", "test-watch")
 	response := httptest.NewRecorder()
 	h.ServeHTTP(response, req)
