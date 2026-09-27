@@ -80,6 +80,9 @@ func (e *Engine) ClassOf(contract string) uns.Class {
 // admissibility for empty payloads, the schema otherwise. Unknown contracts are
 // rejected.
 func (e *Engine) validateContract(contract string, payload []byte) error {
+	if nestedDeeperThan(payload, MaxPayloadDepth) {
+		return fmt.Errorf("%s: payload nests objects and arrays deeper than %d levels", contract, MaxPayloadDepth)
+	}
 	if e.contracts == nil || builtinOnly[contract] {
 		return uns.Validate(contract, payload)
 	}
@@ -94,6 +97,43 @@ func (e *Engine) validateContract(contract string, payload []byte) error {
 		return fmt.Errorf("%s: empty payload (tombstone) is not admissible for this contract", contract)
 	}
 	return r.Validate(payload)
+}
+
+// MaxPayloadDepth is how deeply a payload may nest objects and arrays. The
+// contracts need a handful of levels; consumers' JSON readers stop at 64
+// including their own envelope, so a deeper record would be stored but could
+// never be read.
+const MaxPayloadDepth = 32
+
+// nestedDeeperThan reports whether payload opens more than limit objects or
+// arrays inside each other. It scans bytes, so it also bounds payloads that are
+// not valid JSON before a parser recurses into them.
+func nestedDeeperThan(payload []byte, limit int) bool {
+	depth := 0
+	inString, escaped := false, false
+	for _, c := range payload {
+		switch {
+		case inString:
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+		case c == '"':
+			inString = true
+		case c == '{' || c == '[':
+			depth++
+			if depth > limit {
+				return true
+			}
+		case c == '}' || c == ']':
+			depth--
+		}
+	}
+	return false
 }
 
 // BundleInfo reports the active authority for colca_contracts_bundle_info.
