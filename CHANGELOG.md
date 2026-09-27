@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.20.0](https://github.com/alpamayo-solutions/colca/compare/v0.19.2...v0.20.0) (2026-09-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* drive consumers and coordination from durable change events
+
+### Features
+
+* drive consumers and coordination from durable change events ([5c2019e](https://github.com/alpamayo-solutions/colca/commit/5c2019ef544298d19d943c56d8bffd4a435894f9))
+
+
+### Fixes
+
+* **mqtt:** reject late connection admission during shutdown ([#114](https://github.com/alpamayo-solutions/colca/issues/114)) ([1f7744f](https://github.com/alpamayo-solutions/colca/commit/1f7744f051b1396e6cea373e930eb4d66e424be6))
+* satisfy consumer lint and batching conformance checks ([678c98d](https://github.com/alpamayo-solutions/colca/commit/678c98d8bd5ead6e4d37f35ba9542a0b03063a98))
+
 ## [0.19.2](https://github.com/alpamayo-solutions/colca/compare/v0.19.1...v0.19.2) (2026-09-27)
 
 
