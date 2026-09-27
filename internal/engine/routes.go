@@ -13,7 +13,10 @@
 // they are answered 404 too.
 //
 // A payload the node refuses (a command that is not an object, NaN or Infinity)
-// is answered with a 400 _Ack when a correlation id can be read from it.
+// is answered with a 400 _Ack when a correlation id can be read from it, and a
+// command no grant of its sender covers with a 403 _Ack: over MQTT the refusal
+// is otherwise only a PUBACK, which a client waiting on its correlation id never
+// sees.
 
 package engine
 
@@ -150,6 +153,11 @@ func (e *Engine) answer(p uns.Parsed, payload []byte, actor string, code int, me
 // refuseCommandPayload answers a command whose payload the node refused.
 func (e *Engine) refuseCommandPayload(p uns.Parsed, payload []byte, actor string, cause error) {
 	e.answer(p, payload, actor, 400, "command refused: "+cause.Error())
+}
+
+// refuseDeniedCommand answers a command no grant of its sender covers.
+func (e *Engine) refuseDeniedCommand(p uns.Parsed, payload []byte, actor string) {
+	e.answer(p, payload, actor, 403, fmt.Sprintf("not authorized: no grant covers %s %s", p.Contract, p.Path))
 }
 
 // answeredUnannounced is the Result of a command answered with 404: nothing

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -120,6 +121,8 @@ func TestARefusedCommandPayloadIsAnswered400(t *testing.T) {
 		"null-command": `{"correlation_id":"null-command","expires_at":` + jsonNumber(futureMS()) + `,"command":null}`,
 		"not-object":   `{"correlation_id":"not-object","expires_at":` + jsonNumber(futureMS()) + `,"command":[1]}`,
 		"nan":          `{"correlation_id":"nan","expires_at":` + jsonNumber(futureMS()) + `,"command":{"value":NaN}}`,
+		"deep": `{"correlation_id":"deep","expires_at":` + jsonNumber(futureMS()) + `,"command":{"station":` +
+			strings.Repeat("[", 500) + strings.Repeat("]", 500) + `,"direction":1}}`,
 	} {
 		*delivered = nil
 		if _, err := e.IngestHuman(anna, param("line1/operator/setDensity"), []byte(payload)); err == nil {
@@ -133,6 +136,46 @@ func TestARefusedCommandPayloadIsAnswered400(t *testing.T) {
 	*delivered = nil
 	if _, err := e.IngestHuman(anna, param("line1/operator/setDensity"), []byte(`{"command":NaN}`)); err == nil || len(*delivered) != 0 {
 		t.Fatalf("no correlation id, nobody to answer: %v %v", err, *delivered)
+	}
+}
+
+// A payload nested deeper than MaxPayloadDepth is refused at publish, with the
+// floor rules as with a bundle, and the refusal names the limit.
+func TestAPayloadNestedTooDeepIsRefused(t *testing.T) {
+	nested := func(levels int) []byte {
+		return []byte(`{"correlation_id":"c` + strconv.Itoa(levels) + `","expires_at":` + jsonNumber(futureMS()) + `,"command":` +
+			strings.Repeat(`{"a":`, levels-1) + `1` + strings.Repeat("}", levels-1) + `}`)
+	}
+	e, delivered := ledgerEngine(t)
+	anna := humanEntry(t, "cmd:#:param")
+	if _, err := e.IngestHuman(anna, param("line1/operator/setDensity"), nested(MaxPayloadDepth)); err != nil {
+		t.Fatalf("%d levels refused: %v", MaxPayloadDepth, err)
+	}
+	*delivered = nil
+	_, err := e.IngestHuman(anna, param("line1/operator/setDensity"), nested(MaxPayloadDepth+1))
+	if err == nil || !strings.Contains(err.Error(), "deeper than 32 levels") {
+		t.Fatalf("%d levels: %v", MaxPayloadDepth+1, err)
+	}
+	if ack := lastAck(t, delivered); ack.ResultCode != 400 || !strings.Contains(ack.Message, "deeper than 32 levels") {
+		t.Fatalf("ack %+v", ack)
+	}
+}
+
+func TestNestedDeeperThan(t *testing.T) {
+	for _, c := range []struct {
+		payload string
+		want    bool
+	}{
+		{`{"a":[1]}`, false},
+		{`{"a":[[1]]}`, true},
+		{`{"a":"[[[[[["}`, false},
+		{`{"a":"\\\"[[[["}`, false},
+		{`[[`, false},
+		{`[[[`, true},
+	} {
+		if got := nestedDeeperThan([]byte(c.payload), 2); got != c.want {
+			t.Errorf("%s: %v", c.payload, got)
+		}
 	}
 }
 
@@ -186,5 +229,36 @@ func TestStrictCommandsAnswerEveryUnannouncedCommand(t *testing.T) {
 	res, err := e.IngestHuman(anna, param("line1/operator/setDensity"), cmdPayload("c-ok"))
 	if err != nil || res.Answered || !res.Persisted {
 		t.Fatalf("an announced command did not pass: %+v, %v", res, err)
+	}
+}
+
+// A command no grant of its sender covers is refused, answered with a 403 ack that
+// reaches the sender, and not stored.
+func TestADeniedCommandIsAnswered403(t *testing.T) {
+	e, delivered := ledgerEngine(t)
+	anna := humanEntry(t, "cmd:#:operate")
+	stored := e.Store().NextOffset("commands")
+
+	if _, err := e.IngestHuman(anna, "colca/v1/_CmdMaintain/n-edge1/line1/bqc/reset", cmdPayload("c-denied")); err == nil {
+		t.Fatal("a command without a covering grant was accepted")
+	}
+	var acks []delivery
+	for _, d := range *delivered {
+		if strings.Contains(d.Topic, "/_Ack/") {
+			acks = append(acks, d)
+		}
+	}
+	if len(acks) != 1 || acks[0].Topic != "colca/v1/_Ack/n-edge1/line1/bqc/reset" {
+		t.Fatalf("acks %v", acks)
+	}
+	ack := lastAck(t, &acks)
+	if ack.ResultCode != 403 || ack.CorrelationID != "c-denied" || !strings.Contains(ack.Message, "_CmdMaintain line1/bqc/reset") {
+		t.Fatalf("ack %+v", ack)
+	}
+	if recipient, _ := e.AckRecipient(acks[0].Topic, []byte(acks[0].Payload)); recipient != anna.ULID {
+		t.Fatalf("ack goes to %q", recipient)
+	}
+	if got := e.Store().NextOffset("commands"); got != stored {
+		t.Fatalf("a denied command was stored: next %d, want %d", got, stored)
 	}
 }

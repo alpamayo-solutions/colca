@@ -107,6 +107,11 @@ the whole lifetime, in two cases:
   `command` is not an object, it carries `NaN` or `Infinity`) is refused as
   before, and when a `correlation_id` can be read from it the sender also gets
   an `_Ack` with `400` naming why.
+- **No grant of the sender covers it: `403`.** A command whose sender holds no
+  `cmd` grant for its contract at its path is refused as before (over MQTT a
+  PUBACK with Not authorized), and when a `correlation_id` can be read from it
+  the sender also gets an `_Ack` with `403`. A client that waits on the id
+  learns the answer instead of waiting out the command's lifetime.
 
 Some commands are executed by the node itself rather than a machine:
 

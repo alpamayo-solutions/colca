@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/alpamayo-solutions/colca/compare/v0.19.0...v0.19.1) (2026-09-27)
+
+
+### Fixes
+
+* **engine:** answer a command no grant covers with a 403 ack ([#108](https://github.com/alpamayo-solutions/colca/issues/108)) ([42e6a3d](https://github.com/alpamayo-solutions/colca/commit/42e6a3dbe47ddd40cebb8535940a84a24202696a))
+
 ## [0.19.0](https://github.com/alpamayo-solutions/colca/compare/v0.18.3...v0.19.0) (2026-09-26)
 
 
