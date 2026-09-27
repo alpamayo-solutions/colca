@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -34,6 +35,10 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "start:", err)
 		os.Exit(1)
+	}
+	// The embedded SDK waits for this lifecycle event, not for file polling.
+	if cfg.AddrFile != "" {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"event": "colca.ready"})
 	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

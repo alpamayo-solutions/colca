@@ -85,3 +85,27 @@ func TestUplinkStatusSinceOnlyMovesOnATransition(t *testing.T) {
 		t.Fatalf("Since did not advance on a real transition: %v -> %v", first.Since, third.Since)
 	}
 }
+
+func TestStatusWakeupOnlyForTransitions(t *testing.T) {
+	c := &Client{}
+	wake := c.StatusChanges()
+	c.setStatus(UplinkConnecting)
+	select {
+	case <-wake:
+	default:
+		t.Fatal("transition did not wake observer")
+	}
+	wake = c.StatusChanges()
+	c.setStatus(UplinkConnecting)
+	select {
+	case <-wake:
+		t.Fatal("unchanged status woke observer")
+	default:
+	}
+	c.setStatus(UplinkConnected)
+	select {
+	case <-wake:
+	default:
+		t.Fatal("enrollment did not wake observer")
+	}
+}

@@ -33,8 +33,8 @@ func (d *countingDoor) Ack(context.Context, string, string, int64) (bool, error)
 func runCadence(t *testing.T, pages []door.Page, wantImmediate int) {
 	t.Helper()
 	d := &countingDoor{pages: pages, fetches: make(chan struct{}, 16)}
-	wake := make(chan struct{}, 1)
-	bridge := &Bridge{Door: d, Store: &fakeStore{}, Max: 2, Wake: wake}
+	var signal door.Signal
+	bridge := &Bridge{Door: d, Store: &fakeStore{}, Max: 2, Changes: signal.Changes}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- bridge.Run(ctx) }()
@@ -48,32 +48,26 @@ func runCadence(t *testing.T, pages []door.Page, wantImmediate int) {
 	}
 	select {
 	case <-d.fetches:
-		t.Fatalf("fetched again after a page that was not full, without a wake")
+		t.Fatalf("fetched again after a page that was not full")
 	case <-time.After(100 * time.Millisecond):
-	}
-	wake <- struct{}{}
-	select {
-	case <-d.fetches:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("a wake did not start a fetch")
 	}
 	cancel()
 	<-done
 }
 
-func TestRunFollowsOnlyAFullPageAtOnce(t *testing.T) {
+func TestRunDrainsFullAndPartialPagesWithoutWaiting(t *testing.T) {
 	runCadence(t, []door.Page{
 		page(3, record(1, `{"signal_id":"s1","value":1}`), record(2, `{"signal_id":"s1","value":2}`)),
 		page(4, record(3, `{"signal_id":"s1","value":3}`)),
 		page(5, record(4, `{"signal_id":"s1","value":4}`)),
-	}, 2)
+	}, 4)
 }
 
-func TestRunWaitsAfterAPartialPageEvenWhenRowsWereWritten(t *testing.T) {
+func TestRunDrainsPartialPagesBeforeWaiting(t *testing.T) {
 	runCadence(t, []door.Page{
 		page(2, record(1, `{"signal_id":"s1","value":1}`)),
 		page(3, record(2, `{"signal_id":"s1","value":2}`)),
-	}, 1)
+	}, 3)
 }
 
 func TestRunFollowsAFullPageOfSkippedRecordsAtOnce(t *testing.T) {
@@ -81,5 +75,39 @@ func TestRunFollowsAFullPageOfSkippedRecordsAtOnce(t *testing.T) {
 	runCadence(t, []door.Page{
 		page(3, record(1, `null`), record(2, `null`)),
 		page(4, record(3, `{"signal_id":"s1","value":3}`)),
-	}, 2)
+	}, 3)
+}
+
+func TestCoordinatedRunWaitsForWakeWithoutEmptyFetches(t *testing.T) {
+	d := &countingDoor{fetches: make(chan struct{}, 16)}
+	checks := make(chan struct{}, 16)
+	wake := make(chan struct{}, 1)
+	b := &Bridge{Door: d, Store: &fakeStore{}, Coordinate: func(context.Context) (bool, error) { checks <- struct{}{}; return false, nil },
+		WaitCoordinate: func(ctx context.Context) {
+			select {
+			case <-ctx.Done():
+			case <-wake:
+			}
+		}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- b.Run(ctx) }()
+	<-checks
+	select {
+	case <-checks:
+		t.Fatal("polled coordination without a wakeup")
+	case <-time.After(40 * time.Millisecond):
+	}
+	wake <- struct{}{}
+	select {
+	case <-checks:
+	case <-time.After(time.Second):
+		t.Fatal("missed commit wakeup")
+	}
+	cancel()
+	<-done
+	if len(d.fetches) != 0 {
+		t.Fatal("fetched ahead of upstream completion")
+	}
 }

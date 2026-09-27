@@ -27,18 +27,24 @@ type Door interface {
 // a restart it runs again; the consumer's existing durable cursor owns replay.
 // A Gate is used by one worker goroutine only.
 type Gate struct {
-	Door         Door
-	Topic        string
-	Dependencies []string
-	Name         string
-	Metadata     map[string]any
-	Details      map[string]any
-	Drain        func(context.Context, float64) (bool, error)
-	self         *door.Self
-	run          string
-	completed    *float64
-	lastCheck    time.Time
-	lastReport   time.Time
+	Fresh        func(string) bool // Live heartbeat lease owned by the subscription.
+	Asynchronous bool
+	// State supplies the live subscription; coordinated consumers require it.
+	State func(context.Context) ([]door.KVEntry, error)
+	// ReportDetails lets the service health announcer own the full record.
+	ReportDetails func(context.Context, map[string]any) error
+	definition    *uns.ClockDefinition
+	Door          Door
+	Topic         string
+	Dependencies  []string
+	Name          string
+	Metadata      map[string]any
+	Details       map[string]any
+	Drain         func(context.Context, float64) (bool, error)
+	self          *door.Self
+	run           string
+	completed     *float64
+	lastReport    time.Time
 }
 
 // Dependencies parses the shared deployment setting. An empty string disables
@@ -85,12 +91,6 @@ func (g *Gate) Once(ctx context.Context, realNow float64) (bool, error) {
 	if realNow <= 0 || math.IsNaN(realNow) || math.IsInf(realNow, 0) {
 		return false, nil
 	}
-	// KV scans are deliberately bounded, including while waiting for a slow
-	// dependency. Streaming consumers may still drain between these checks.
-	if time.Since(g.lastCheck) < time.Second {
-		return false, nil
-	}
-	g.lastCheck = time.Now()
 	if g.self == nil {
 		self, err := g.Door.Self(ctx)
 		if err != nil {
@@ -98,7 +98,7 @@ func (g *Gate) Once(ctx context.Context, realNow float64) (bool, error) {
 		}
 		g.self = &self
 	}
-	entries, err := g.Door.KV(ctx, "", "_ClockDefinition", "_ServiceDetails", "_ClockProgress")
+	entries, err := g.state(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -113,12 +113,13 @@ func (g *Gate) Once(ctx context.Context, realNow float64) (bool, error) {
 		}
 	}
 	if definition == nil {
-		return false, fmt.Errorf("clock definition unavailable")
+		return false, nil
 	}
 	if g.run != "" && definition.RunID != g.run {
 		return false, fmt.Errorf("clock run changed; use a fresh deployment")
 	}
 	g.run = definition.RunID
+	g.definition = definition
 	if g.completed != nil && definition.At(realNow) < *g.completed {
 		return false, fmt.Errorf("clock would rewind completed work")
 	}
@@ -127,10 +128,47 @@ func (g *Gate) Once(ctx context.Context, realNow float64) (bool, error) {
 			return false, err
 		}
 	}
-	if definition.StopAt == nil || definition.At(realNow) < *definition.StopAt {
+	if definition.StopAt == nil {
 		return false, nil
 	}
 	target := *definition.StopAt
+	if g.Asynchronous && len(g.Dependencies) > 0 {
+		for _, dep := range g.Dependencies {
+			found := false
+			for _, entry := range entries {
+				var row struct {
+					Name string `json:"name"`
+				}
+				if json.Unmarshal(entry.Payload, &row) != nil {
+					continue
+				}
+				matches := dep == entry.Topic || (strings.HasPrefix(dep, "./") && row.Name == dep[2:] && strings.HasPrefix(entry.Topic, uns.Prefix()+"_ServiceDetails/"+g.self.Node+"/"))
+				if !matches {
+					continue
+				}
+				topic := strings.Replace(entry.Topic, "/_ServiceDetails/", "/_ClockProgress/", 1)
+				for _, marker := range entries {
+					if marker.Topic != topic {
+						continue
+					}
+					var progress struct {
+						Run       string  `json:"run_id"`
+						Processed float64 `json:"processed_at"`
+					}
+					if json.Unmarshal(marker.Payload, &progress) == nil && progress.Run == g.run {
+						target = min(target, progress.Processed)
+						found = true
+					}
+				}
+			}
+			if !found {
+				return false, nil
+			}
+		}
+	}
+	if definition.At(realNow) < target {
+		return false, nil
+	}
 	if g.completed != nil && *g.completed >= target {
 		return false, nil
 	}
@@ -170,7 +208,7 @@ func (g *Gate) Once(ctx context.Context, realNow float64) (bool, error) {
 					}
 				}
 			}
-			if matches && barrierReady && row.Active && p.Ready && p.Run == g.run && p.Processed != nil && *p.Processed >= target && realNow-p.Observed >= 0 && realNow-p.Observed <= 15 {
+			if matches && barrierReady && row.Active && p.Ready && p.Run == g.run && g.Fresh != nil && g.Fresh(entry.Topic) {
 				found = true
 				break
 			}
@@ -216,9 +254,48 @@ func (g *Gate) report(ctx context.Context, realNow float64) error {
 			return err
 		}
 	}
-	if err := g.Door.Publish(ctx, topic, payload); err != nil {
+	// Full service records drive database projections; completion has its own
+	// ordered marker above. Keep details at a real-time heartbeat cadence.
+	if time.Since(g.lastReport) < 5*time.Second {
+		return nil
+	}
+	if g.ReportDetails != nil {
+		if err := g.ReportDetails(ctx, metadata); err != nil {
+			return err
+		}
+	} else if err := g.Door.Publish(ctx, topic, payload); err != nil {
 		return err
 	}
 	g.lastReport = time.Now()
 	return nil
+}
+
+// State must be supplied by the shared subscription.
+func (g *Gate) state(ctx context.Context) ([]door.KVEntry, error) {
+	if g.State == nil {
+		return nil, fmt.Errorf("clock coordination requires a subscription")
+	}
+	return g.State(ctx)
+}
+
+// WaitDelay schedules real deadlines; no per-window polling interval is used.
+// Five seconds is the service health heartbeat, including while paused.
+func (g *Gate) WaitDelay(realNow float64) time.Duration {
+	delay := 5.0
+	d := g.definition
+	if realNow > 0 && d != nil && d.StopAt != nil && d.At(realNow) < *d.StopAt {
+		if d.RealAnchor > realNow {
+			delay = math.Min(delay, d.RealAnchor-realNow)
+		}
+		if d.Rate > 0 {
+			due := d.RealAnchor + (*d.StopAt-d.FactoryAnchor)/d.Rate
+			if d.CatchUp {
+				due = math.Max(due, *d.StopAt)
+			}
+			if due > realNow {
+				delay = math.Min(delay, due-realNow)
+			}
+		}
+	}
+	return time.Duration(delay * float64(time.Second))
 }

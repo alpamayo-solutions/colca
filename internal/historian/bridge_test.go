@@ -307,9 +307,11 @@ func TestRunReportsEachPassToHealth(t *testing.T) {
 			defer cancel()
 			var gotOK bool
 			var gotDetail string
+			var changes door.Signal
 			b := &Bridge{
-				Door:  &fakeDoor{pages: []door.Page{page(2, record(1, `{"value":1}`))}},
-				Store: &fakeStore{fail: tc.fail},
+				Changes: changes.Changes,
+				Door:    &fakeDoor{pages: []door.Page{page(2, record(1, `{"value":1}`))}},
+				Store:   &fakeStore{fail: tc.fail},
 				Health: func(ok bool, detail string) {
 					gotOK, gotDetail = ok, detail
 					cancel()

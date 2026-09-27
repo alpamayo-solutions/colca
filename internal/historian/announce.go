@@ -32,10 +32,13 @@ const (
 // only uses HTTP, which has no will, so the record needs a connection of its
 // own.
 type Announcer struct {
-	Door    *door.Client // resolves the identity through /self
-	MQTTURL string       // the local MQTT door, e.g. tcp://colca:1883
-	Version string       // the release, announced as metadata.version; empty announces none
-	Log     *slog.Logger
+	Version      string
+	OnConnect    func(pahomqtt.Client) error
+	OnDisconnect func()
+	clock        map[string]any
+	Door         *door.Client // resolves the identity through /self
+	MQTTURL      string       // the local MQTT door, e.g. tcp://colca:1883
+	Log          *slog.Logger
 
 	// Dial replaces the network dial; tests use it to cut the connection.
 	Dial func(ctx context.Context, addr string) (net.Conn, error)
@@ -137,6 +140,11 @@ func (a *Announcer) Run(ctx context.Context) {
 		SetMaxReconnectInterval(time.Minute).
 		SetBinaryWill(topic, down, 1, true).
 		SetOnConnectHandler(func(c pahomqtt.Client) {
+			if a.OnConnect != nil {
+				if err := a.OnConnect(c); err != nil {
+					a.logger().Error("service subscriptions failed", "err", err)
+				}
+			}
 			// A reconnect follows a drop, after which the will said inactive.
 			a.publish(c, true)
 			// A clean session forgets subscriptions; the retained finding comes
@@ -144,6 +152,9 @@ func (a *Announcer) Run(ctx context.Context) {
 			c.Subscribe(findingTopic, 1, a.onFinding)
 		}).
 		SetConnectionLostHandler(func(_ pahomqtt.Client, err error) {
+			if a.OnDisconnect != nil {
+				a.OnDisconnect()
+			}
 			a.logger().Warn("local MQTT connection lost, reconnecting", "err", err)
 		})
 	if a.Dial != nil {
@@ -217,6 +228,13 @@ func (a *Announcer) publish(c pahomqtt.Client, active bool) {
 	}
 	details := *a.details
 	details.IsActive = active
+	details.Metadata = map[string]any{"consumer": Consumer, "app_class": "core"}
+	if a.Version != "" {
+		details.Metadata["version"] = a.Version
+	}
+	if a.clock != nil {
+		details.Metadata["application_clock"] = a.clock
+	}
 	details.ArchitectureMetadata = map[string]any{"status": a.current()}
 	if a.detail != "" {
 		details.ArchitectureMetadata["detail"] = a.detail
@@ -274,4 +292,19 @@ func (a *Announcer) record(self door.Self) (serviceDetails, string) {
 	}
 	topic := fmt.Sprintf("%s_ServiceDetails/%s/%s/_service", uns.Prefix(), self.Node, strings.Join(context, "/"))
 	return details, topic
+}
+
+// ReportClock merges clock progress into the one service record. Health changes
+// and reconnects therefore cannot erase the clock's completion metadata.
+func (a *Announcer) ReportClock(_ context.Context, metadata map[string]any) error {
+	a.mu.Lock()
+	if progress, ok := metadata["application_clock"].(map[string]any); ok {
+		a.clock = progress
+	}
+	client := a.client
+	a.mu.Unlock()
+	if client != nil && client.IsConnectionOpen() {
+		a.publish(client, true)
+	}
+	return nil
 }

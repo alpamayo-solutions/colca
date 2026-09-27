@@ -41,8 +41,6 @@ const (
 	// longPollFor is how long an empty /downlink request waits for new data
 	// before answering with an empty record list.
 	longPollFor = 20 * time.Second
-	// longPollEvery is the re-check interval inside that wait.
-	longPollEvery = 200 * time.Millisecond
 
 	defaultDownlinkMax = 200
 	maxDownlinkMax     = 500
@@ -158,23 +156,11 @@ func (s *Server) childFromReq(r *http.Request) (*uns.Entry, string, error) {
 // response. Unlike commands they have no position, so they are neither filtered
 // to the child's subtree nor rewritten: the child stores them byte for byte.
 func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter uint64, limit int) {
-	recs, next, err := s.eng.Store().Read("definitions", defAfter, limit, nil)
+	recs, next, err := readDefinitions(s.eng.Store(), defAfter, limit)
 	if err != nil {
-		// The child stays behind on definitions this round and asks again. Commands
-		// keep flowing either way.
 		s.log.Error("downlink: reading definitions failed — the child stays behind on them",
 			"child", childULID, "err", err)
 		return
-	}
-	if next == defAfter {
-		// Nothing survives from the child's position on: compaction removed every
-		// record in between. That is not a gap, since what remains is the current
-		// definition set, so answer "caught up, at the head". Returning def_after
-		// unchanged would make both nodes spin, because the wake condition still sees a
-		// definition waiting.
-		if head := s.eng.Store().NextOffset("definitions"); head > next {
-			next = head
-		}
 	}
 	out := make([]wireRec, 0, len(recs))
 	for _, rec := range recs {
@@ -184,6 +170,24 @@ func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter 
 		})
 	}
 	resp["definitions"], resp["def_next"] = out, next
+}
+
+// definitionReader preserves the compaction/cursor boundary independently of
+// transport. The head must precede the iterator snapshot: sampling it afterwards
+// can acknowledge a concurrent append that was never included in the response.
+type definitionReader interface {
+	NextOffset(string) uint64
+	Read(string, uint64, int, func(string) bool) ([]store.StoredRecord, uint64, error)
+}
+
+func readDefinitions(source definitionReader, after uint64, limit int) ([]store.StoredRecord, uint64, error) {
+	head := source.NextOffset("definitions")
+	rows, next, err := source.Read("definitions", after, limit, nil)
+	if err == nil && next == after && head > next {
+		// Compaction may leave no rows between the old cursor and captured head.
+		next = head
+	}
+	return rows, next, err
 }
 
 // ancestryFor builds the position a child at mount must know: this node's own
@@ -445,7 +449,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	s.eng.Store().CursorAck(uns.DownlinkDefCursorPrefix+child.ULID, "definitions", defAfter)
 
 	// Drain completion is checked on each poll by the draining child and by the
-	// periodic tick (RunDrainTicker). The status check skips that lookup in the
+	// store-change/deadline wakeup (RunDrainCompletion). The status check skips that lookup in the
 	// common case.
 	if child.IsDraining() {
 		s.evaluateDrain(child.ULID)
@@ -466,9 +470,10 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	deadline := time.Now().Add(longPollFor)
-	ticker := time.NewTicker(longPollEvery)
-	defer ticker.Stop()
+	timer := time.NewTimer(longPollFor)
+	defer timer.Stop()
 	for {
+		wake, positions := s.eng.Store().Changes()
 		// next counts filtered-out records too, so the child's cursor skips over
 		// commands addressed to its siblings instead of re-scanning them forever.
 		recs, next, err := s.eng.Store().Read("commands", after, limit, filter)
@@ -528,7 +533,25 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			// Client gone (or the server was stopped): never outlive the request.
 			return
-		case <-ticker.C:
+		case <-timer.C:
+		case <-wake:
+			// Other streams may be busy. Wait without rescanning commands until
+			// one of this child's downlink streams changes.
+		waitForDownlink:
+			for {
+				var current map[string]store.StreamPosition
+				wake, current = s.eng.Store().Changes()
+				if current["commands"] != positions["commands"] || current["definitions"] != positions["definitions"] {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-timer.C:
+					break waitForDownlink
+				case <-wake:
+				}
+			}
 		}
 	}
 }

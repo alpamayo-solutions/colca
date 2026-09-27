@@ -85,6 +85,7 @@ func (s *Store) registryBatch(stream string, recs []Record, mut func(*pebble.Bat
 	}
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
+	s.noteContractsLocked(stream, recs)
 	s.streamGrewLocked(stream)
 	return first, nil
 }

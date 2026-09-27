@@ -13,8 +13,6 @@
 //	DATABASE_URL      Postgres/Timescale DSN             (required)
 //	DB_MAX_CONNS      pool size                          (default 4)
 //	FETCH_MAX         records per page                   (default 500)
-//	WATCH_INTERVAL_MS least time between two wake-ups from the node's /watch;
-//	                  records arriving in between are read as one page (default 500)
 //	HTTP_ADDR         /healthz + /metrics                (default :9091)
 package main
 
@@ -50,7 +48,6 @@ type config struct {
 	dsn           string
 	maxConns      int32
 	fetchMax      int
-	watchInterval time.Duration
 	httpAddr      string
 	retentionDays int
 }
@@ -117,20 +114,11 @@ func run() int {
 	// first hint of every watch connection names the stream, so a reconnect
 	// drains whatever arrived while it was away.
 	watcher := &door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService}
-	wake := make(chan struct{}, 1)
+	var changes door.Signal
 	link := &watchLink{}
-	go watcher.WatchForever(ctx, []string{"metrics"}, cfg.watchInterval, 5*time.Second,
-		func(door.Hint) {
-			link.up()
-			select {
-			case wake <- struct{}{}:
-			default:
-			}
-		},
-		func(err error) {
-			link.down(time.Now())
-			log.Warn("watching the metrics stream failed, reconnecting", "err", err)
-		})
+	go watcher.WatchForever(ctx, []string{"metrics"}, 100*time.Millisecond, time.Second,
+		func(door.Hint) { link.up(); changes.Notify() },
+		func(err error) { link.down(time.Now()); log.Warn("watching metrics failed, reconnecting", "err", err) })
 
 	bridge := &historian.Bridge{
 		Door: &door.Client{
@@ -141,38 +129,14 @@ func run() int {
 		Strict: deps != nil,
 		Log:    log,
 		Max:    cfg.fetchMax,
-		Wake:   wake,
 	}
 
-	if deps != nil {
-		gate := &clockwork.Gate{Door: logDoor, Name: cfg.colcaService, Topic: os.Getenv("FACTORY_CLOCK_TOPIC"), Dependencies: deps}
-		if err := gate.Register(ctx); err != nil {
-			log.Error("clock registration", "err", err)
-			return 2
-		}
-		gate.Drain = func(ctx context.Context, _ float64) (bool, error) {
-			// Check again AFTER upstream completion, so a publish racing the
-			// previous empty fetch cannot be omitted from this boundary.
-			for {
-				if _, err := bridge.Once(ctx); err != nil {
-					return false, err
-				}
-				if bridge.Drained {
-					return true, nil
-				}
-			}
-		}
-		bridge.Coordinate = func(ctx context.Context) (bool, error) {
-			now := float64(time.Now().UnixMicro()) / 1e6
-			if source == "mqtt" {
-				if bridge.NowMS == 0 || time.Since(bridge.FetchedAt) > 120*time.Second {
-					return false, nil
-				}
-				now = float64(bridge.NowMS)/1000 + time.Since(bridge.FetchedAt).Seconds()
-			}
-			return gate.Once(ctx, now)
-		}
+	bridge.BatchInterval = time.Duration(intEnv("BATCH_INTERVAL_MS", 100)) * time.Millisecond
+	if bridge.BatchInterval < 0 || bridge.BatchInterval > 30*time.Second {
+		log.Error("BATCH_INTERVAL_MS must be in [0,30000]")
+		return 2
 	}
+	bridge.Changes = changes.Changes
 
 	announcer := &historian.Announcer{
 		Door:    &door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService},
@@ -180,7 +144,51 @@ func run() int {
 		Version: version,
 		Log:     log,
 	}
+	if deps != nil {
+		self, err := logDoor.Self(ctx)
+		if err != nil {
+			log.Error("clock identity", "err", err)
+			return 2
+		}
+		watch := &clockwork.Subscription{Node: self.Node, Topic: os.Getenv("FACTORY_CLOCK_TOPIC"), Dependencies: deps}
+		announcer.OnConnect, announcer.OnDisconnect = watch.Attach, watch.Reset
+		gate := &clockwork.Gate{Asynchronous: os.Getenv("FACTORY_ASYNC_CONSUMER") == "true", Door: logDoor, Name: cfg.colcaService, Topic: watch.Topic, Dependencies: deps, State: watch.State, Fresh: watch.Fresh, ReportDetails: announcer.ReportClock}
+		if err := gate.Register(ctx); err != nil {
+			log.Error("clock registration", "err", err)
+			return 2
+		}
+		var lastDrain time.Time
+		gate.Drain = func(ctx context.Context, _ float64) (bool, error) {
+			if gate.Asynchronous && time.Since(lastDrain) < bridge.BatchInterval {
+				return false, nil
+			}
+			lastDrain = time.Now()
+			// Capture after upstream completion; continuous arrivals must not
+			// prevent this committed boundary from being reported.
+			err := door.DrainToHead(ctx, logDoor, "metrics", historian.Cursor, func(ctx context.Context) (int64, error) {
+				_, err := bridge.Once(ctx)
+				return bridge.Acknowledged, err
+			})
+			return err == nil, err
+		}
+		var changed <-chan struct{}
+		bridge.Coordinate = func(ctx context.Context) (bool, error) {
+			changed = watch.Changes()
+			return gate.Once(ctx, watch.RealNow(source))
+		}
+		bridge.WaitCoordinate = func(ctx context.Context) {
+			delay := gate.WaitDelay(watch.RealNow(source))
+			if gate.Asynchronous {
+				if batch := time.Until(lastDrain.Add(bridge.BatchInterval)); batch > 0 && batch < delay {
+					delay = batch
+				}
+			}
+			clockwork.Wait(ctx, changed, delay)
+		}
+	}
+
 	go serveObservability(cfg.httpAddr, bridge, announcer, link, log)
+
 	bridge.Health = announcer.Report
 	announced := make(chan struct{})
 	go func() {
@@ -239,7 +247,6 @@ func load() (config, error) {
 	}
 	cfg.maxConns = int32(maxConns)
 	cfg.fetchMax = intEnv("FETCH_MAX", 500)
-	cfg.watchInterval = time.Duration(intEnv("WATCH_INTERVAL_MS", 500)) * time.Millisecond
 	cfg.retentionDays = intEnv("HISTORIAN_RETENTION_DAYS", 0)
 	if cfg.retentionDays < 0 {
 		return cfg, errors.New("HISTORIAN_RETENTION_DAYS must be zero (unlimited) or positive")

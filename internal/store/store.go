@@ -96,14 +96,17 @@ type KVEntry struct {
 }
 
 type Store struct {
-	db           *pebble.DB
-	health       *pebblelog.Monitor
-	standaloneMu sync.Mutex
-	mu           sync.Mutex
-	changed      map[string]chan struct{} // closed on the stream's next append; see changes.go
-	next         map[string]uint64        // next offset per stream
-	lwm          map[string]uint64        // low-water mark per stream: lowest retained offset
-	bytes        map[string]uint64        // live logical bytes per stream (stream key + encoded value)
+	contractHeads  map[string]map[string]uint64
+	backlogChanged chan struct{}
+	allChanged     chan struct{}
+	db             *pebble.DB
+	health         *pebblelog.Monitor
+	standaloneMu   sync.Mutex
+	mu             sync.Mutex
+	changed        map[string]chan struct{} // closed on the stream's next append; see changes.go
+	next           map[string]uint64        // next offset per stream
+	lwm            map[string]uint64        // low-water mark per stream: lowest retained offset
+	bytes          map[string]uint64        // live logical bytes per stream (stream key + encoded value)
 	// appendApply is Pebble's atomic apply boundary. Keeping the bound method
 	// injectable lets tests prove an apply failure changes neither stream nor KV.
 	appendApply func(*pebble.Batch, *pebble.WriteOptions) error
@@ -353,6 +356,7 @@ func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, 
 	}
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
+	s.noteContractsLocked(stream, recs)
 	s.streamGrewLocked(stream)
 	return first, last, nil
 }
@@ -533,6 +537,7 @@ func (s *Store) CursorAck(name, stream string, off uint64) bool {
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return false
 	}
+	s.signalBacklogChangeLocked()
 	return true
 }
 
@@ -560,6 +565,7 @@ func (s *Store) CursorSetIfAbsent(name, stream string, off uint64) (created bool
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return false, err
 	}
+	s.signalBacklogChangeLocked()
 	return true, nil
 }
 
@@ -576,7 +582,11 @@ func (s *Store) CursorDelete(name, stream string) error {
 	if err := b.Delete(ctKey(name, stream), nil); err != nil {
 		return err
 	}
-	return s.db.Apply(b, pebble.Sync)
+	if err := s.db.Apply(b, pebble.Sync); err != nil {
+		return err
+	}
+	s.signalBacklogChangeLocked()
+	return nil
 }
 
 // CursorMarkSeen sets ts (unix ms) as the last-advance time of a cursor that has
@@ -647,6 +657,15 @@ func (s *Store) scanU64Pairs(prefix byte, fn func(first, second string, v uint64
 
 // Cursors returns every persisted cursor. Read-only.
 func (s *Store) Cursors() []CursorInfo {
+	out, err := s.CursorSnapshot()
+	if err != nil {
+		slog.Warn("store: cursor scan stopped early", "err", err)
+	}
+	return out
+}
+
+// CursorSnapshot refuses a partial inventory for throughput control.
+func (s *Store) CursorSnapshot() ([]CursorInfo, error) {
 	var out []CursorInfo
 	err := s.scanU64Pairs('c', func(name, stream string, v uint64) {
 		out = append(out, CursorInfo{
@@ -654,10 +673,7 @@ func (s *Store) Cursors() []CursorInfo {
 			LastAdvanceMS: int64(s.readU64(ctKey(name, stream), 0)), //nolint:gosec // stored bit for bit
 		})
 	})
-	if err != nil {
-		slog.Warn("store: cursor scan stopped early", "err", err)
-	}
-	return out
+	return out, err
 }
 
 // ProtectedCursors splits stream's cursors at now into those still protecting
@@ -785,6 +801,9 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 	}
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
+	for _, record := range applied {
+		s.noteContractLocked(stream, record.Topic)
+	}
 	s.streamGrewLocked(stream)
 	return applied, hwm, nil
 }
@@ -1131,6 +1150,7 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	grew := off != s.next[stream]
 	s.next[stream] = off
 	s.lwm[stream] = upTo
+	s.signalChangeLocked()
 	s.bytes[stream] = liveBytes
 	if grew {
 		// Gap markers are records a consumer reads.
@@ -1459,4 +1479,38 @@ func (s *Store) DiskMetrics() DiskMetrics {
 		LevelBytesWritten: level,
 		DiskUsageBytes:    m.DiskSpaceUsage(),
 	}
+}
+
+// CursorPositions reads only selected cursor-name prefixes, without per-cursor
+// liveness lookups. Throughput control needs positions, not the full inventory.
+func (s *Store) CursorPositions(prefixes []string, limit int) ([]CursorInfo, error) {
+	var out []CursorInfo
+	seen := map[string]bool{}
+	for _, prefix := range prefixes {
+		lower := append([]byte{'c', 0}, []byte(prefix)...)
+		upper := append(append([]byte(nil), lower...), 0xff)
+		iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+		if err != nil {
+			return nil, err
+		}
+		for iter.First(); iter.Valid(); iter.Next() {
+			key := string(iter.Key()[2:])
+			sep := strings.IndexByte(key, 0)
+			if sep < 0 || seen[key] || len(iter.Value()) != 8 {
+				continue
+			}
+			seen[key] = true
+			out = append(out, CursorInfo{Name: key[:sep], Stream: key[sep+1:], Position: binary.BigEndian.Uint64(iter.Value())})
+			if len(out) > limit {
+				iter.Close()
+				return nil, fmt.Errorf("too many selected cursors")
+			}
+		}
+		err = iter.Error()
+		iter.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }

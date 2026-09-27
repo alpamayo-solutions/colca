@@ -19,6 +19,7 @@ import (
 	"github.com/mochi-mqtt/server/v2/listeners"
 	"github.com/mochi-mqtt/server/v2/packets"
 
+	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -73,6 +74,7 @@ type colcaHook struct {
 	closing atomic.Bool
 	// publishing counts client publishes admitted before closing whose PUBACK is not
 	// written yet; admitted holds the client of each. Close waits for them.
+	pubDone    door.Signal
 	publishing atomic.Int64
 	admitted   sync.Map // *mqtt.Client -> struct{}
 }
@@ -415,7 +417,9 @@ func rejectCode(cl *mqtt.Client, pk packets.Packet, err error) error {
 func (h *colcaHook) admitPublish(cl *mqtt.Client) bool {
 	h.publishing.Add(1)
 	if h.closing.Load() {
-		h.publishing.Add(-1)
+		if h.publishing.Add(-1) == 0 && h.closing.Load() {
+			h.pubDone.Notify()
+		}
 		return false
 	}
 	h.admitted.Store(cl, struct{}{})
@@ -429,20 +433,27 @@ func (h *colcaHook) OnPacketProcessed(cl *mqtt.Client, pk packets.Packet, _ erro
 		return
 	}
 	if _, ok := h.admitted.LoadAndDelete(cl); ok {
-		h.publishing.Add(-1)
+		if h.publishing.Add(-1) == 0 && h.closing.Load() {
+			h.pubDone.Notify()
+		}
 	}
 }
 
 // awaitPublishes waits until every admitted publish was answered, or until timeout.
 func (h *colcaHook) awaitPublishes(timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for h.publishing.Load() > 0 {
-		if time.Now().After(deadline) {
-			h.log.Warn("shutdown: disconnecting with publishes still unanswered",
-				"publishes", h.publishing.Load(), "waited", timeout)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		changed := h.pubDone.Changes()
+		if h.publishing.Load() == 0 {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-changed:
+		case <-timer.C:
+			h.log.Warn("shutdown: disconnecting with publishes still unanswered", "publishes", h.publishing.Load(), "waited", timeout)
+			return
+		}
 	}
 }
 

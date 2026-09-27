@@ -2,10 +2,12 @@ package engine
 
 import (
 	"bytes"
+	"github.com/alpamayo-solutions/colca/internal/clock"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -1397,5 +1399,22 @@ func TestIngestRefreshGuardAndSkipSemantics(t *testing.T) {
 	}
 	if _, _, err := e.IngestRefresh(topic, nil, 2); err == nil {
 		t.Fatal("empty refresh payload must be rejected — a refresh cannot tombstone")
+	}
+}
+
+func TestClockStatusUsesExistingAuthority(t *testing.T) {
+	e := &Engine{cfg: &config.Config{}, clk: clock.New(true, func() time.Time { return time.Unix(100, 0) })}
+	status := e.ClockStatus()
+	if status["now_ms"] != int64(100000) || status["is_root"] != true || status["sync_age_seconds"] != float64(0) {
+		t.Fatal(status)
+	}
+	e.clk = clock.New(false, func() time.Time { return time.Unix(100, 0) })
+	if e.ClockStatus()["sync_age_seconds"] != nil {
+		t.Fatal("unsynchronized edge reported a synchronization")
+	}
+	e.ApplyClockSample(101000)
+	status = e.ClockStatus()
+	if status["now_ms"] != int64(101000) || status["offset_ms"] != int64(1000) {
+		t.Fatal(status)
 	}
 }

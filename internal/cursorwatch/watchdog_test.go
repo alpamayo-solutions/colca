@@ -225,3 +225,54 @@ func TestACursorNobodyFetchedSinceStartOnlyGetsTheGauge(t *testing.T) {
 		t.Fatalf("unread age = %v, want 300", got)
 	}
 }
+
+func TestIdleWatchdogHasNoReadDeadline(t *testing.T) {
+	f := newFixture(t)
+	f.read(t, "c/dataops-line/metrics", "metrics")
+	f.w.Check(f.now)
+	if got := f.w.nextDelay(f.now); got != -1 {
+		t.Fatalf("idle deadline=%v", got)
+	}
+	f.append(t, "metrics", "colca/v1/_Metric/NODE/unread")
+	f.w.Check(f.now)
+	if got := f.w.nextDelay(f.now); got != time.Minute {
+		t.Fatalf("lag deadline=%v", got)
+	}
+	f.w.Check(f.now.Add(time.Minute))
+	if got := f.w.nextDelay(f.now.Add(time.Minute)); got != -1 {
+		t.Fatalf("completed deadline repeated=%v", got)
+	}
+}
+
+func TestWatchdogWakesOnAppendAndAck(t *testing.T) {
+	f := newFixture(t)
+	f.now = time.Now().Add(-time.Minute)
+	f.read(t, "c/dataops-line/metrics", "metrics")
+	writes := make(chan write, 8)
+	f.w.Gauges = nil
+	f.w.Publish = func(topic string, payload []byte) error { writes <- write{topic, payload}; return nil }
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() { defer close(done); f.w.Run(stop) }()
+	defer func() { close(stop); <-done }()
+	last := f.append(t, "metrics", "colca/v1/_Metric/NODE/new")
+	select {
+	case got := <-writes:
+		if len(got.payload) == 0 {
+			t.Fatal("expected finding")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("append missed")
+	}
+	if !f.st.CursorAck("c/dataops-line/metrics", "metrics", last+1) {
+		t.Fatal("ack failed")
+	}
+	select {
+	case got := <-writes:
+		if len(got.payload) != 0 {
+			t.Fatal("expected retirement")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ack missed")
+	}
+}

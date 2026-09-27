@@ -324,6 +324,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		// storage stays 200 like uplink: restarting does not free a full disk, the
 		// operator has to, and the state tells them to look.
 		payload["storage"] = e.Store().Health()
+		payload["clock"] = e.ClockStatus()
 		writeJSON(w, http.StatusOK, payload)
 	})
 
@@ -504,6 +505,18 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		writeJSON(w, http.StatusOK, body)
 	}))
 
+	// Change hints are local-service only. They carry no record payload or
+	// authority to read; consumers still fetch through their scoped cursors.
+	if local {
+		mux.HandleFunc("GET /backlog", authFor(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+			if c.human != nil {
+				writeJSON(w, 403, map[string]any{"error": "local service only"})
+				return
+			}
+			backlog(w, r, e.Store())
+		}))
+
+	}
 	// POST /publish/batch takes many records from one machine or service in one
 	// request: {"records":[{"topic":…,"payload":…},…]}. Each is judged exactly as
 	// POST /publish judges it; the admitted ones are written in one append per
@@ -568,6 +581,18 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// GET /watch replaces polling /fetch on an idle stream: one held connection
 	// that names the selected streams whenever they grow (see serveWatch).
 	mux.HandleFunc("GET /watch", authFor(limitClassWatch, watchPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+		if r.URL.Query().Get("uplink") == "1" || r.URL.Query().Get("backlog") == "1" {
+			if !local || c.human != nil {
+				writeJSON(w, 403, map[string]any{"error": "local service only"})
+				return
+			}
+			if r.URL.Query().Get("uplink") == "1" {
+				watchUplink(w, r, uplink)
+			} else {
+				watchBacklog(w, r, e.Store())
+			}
+			return
+		}
 		serveWatch(w, r, e.Store(), writeJSON)
 	}))
 

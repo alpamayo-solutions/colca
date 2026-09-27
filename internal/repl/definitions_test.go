@@ -327,3 +327,33 @@ func TestChildCannotReplicateOntoTheDefinitionsStream(t *testing.T) {
 		t.Fatalf("definitions stream grew from %d to %d — a child wrote policy for the subtree", before, got)
 	}
 }
+
+// Append immediately after an empty iterator snapshot, before the caller can
+// sample a new head. That record must remain available on the next request.
+type definitionAppendAfterRead struct {
+	*store.Store
+	appended bool
+}
+
+func (s *definitionAppendAfterRead) Read(stream string, after uint64, limit int, filter func(string) bool) ([]store.StoredRecord, uint64, error) {
+	rows, next, err := s.Store.Read(stream, after, limit, filter)
+	if !s.appended {
+		s.appended = true
+		_, _, appendErr := s.Append("definitions", []store.Record{{Topic: groupTopic, Payload: []byte(`{"id":"01HGRP-OPS","name":"late"}`)}})
+		if appendErr != nil {
+			return nil, after, appendErr
+		}
+	}
+	return rows, next, err
+}
+func TestDefinitionArrivingAfterEmptyReadIsNotAcknowledged(t *testing.T) {
+	source := &definitionAppendAfterRead{Store: mustStore(t, t.TempDir())}
+	rows, next, err := readDefinitions(source, 1, 10)
+	if err != nil || len(rows) != 0 || next != 1 {
+		t.Fatalf("empty response skipped arriving definition: rows=%v next=%d err=%v", rows, next, err)
+	}
+	rows, next, err = readDefinitions(source, next, 10)
+	if err != nil || len(rows) != 1 || next != 2 {
+		t.Fatalf("next request lost definition: rows=%v next=%d err=%v", rows, next, err)
+	}
+}
