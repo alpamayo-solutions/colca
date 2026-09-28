@@ -84,6 +84,11 @@ func (e *Entry) MarkDraining() { e.Status = StatusDraining }
 // entry cannot drain.
 func (e *Entry) CanDrain() bool { return e != nil && e.Kind == KindNode }
 
+// ReplicatesUp reports whether the entry is a child node, whose own state and
+// that of the nodes below it rise to this node by replication. Only such an
+// entry has replicated state for a parent to retire. A nil entry does not.
+func (e *Entry) ReplicatesUp() bool { return e != nil && e.Kind == KindNode }
+
 // LocalCursorPrefix namespaces a KindLocal entry's cursors by the name it
 // presented. A local caller never learns its minted ULID, and names are unique
 // in the registry, so two local services still cannot collide on /ack.

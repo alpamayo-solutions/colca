@@ -66,9 +66,9 @@ func (s *Server) evaluateAllDrains() time.Duration {
 	return next
 }
 
-// evaluateDrain checks childULID's completion and auto-revokes it through
-// registry.Manager.Revoke, recording the outcome. It is safe to call
-// concurrently: Revoke decides, and the caller that loses gets ErrNotEnrolled,
+// evaluateDrain checks childULID's completion and auto-retires it through
+// registry.Manager.Retire, recording the outcome. It is safe to call
+// concurrently: Retire decides, and the caller that loses gets ErrNotEnrolled,
 // which is not an error here. A gap never lets a drain finish early:
 // drainPendingCommands always scans the surviving range, and gapped only picks
 // the outcome label.
@@ -95,20 +95,27 @@ func (s *Server) evaluateDrain(childULID string) time.Duration {
 		outcome = metrics.DrainOutcomeExpired
 	}
 
-	if _, _, err := s.reg.Revoke(childULID); err != nil {
+	// A completed drain retires the child, not just revokes it. The child leaves
+	// this parent for good: re-parented, its state rises through its new parent
+	// at another path, or taken out of service. Either way what it replicated
+	// here would stand as ghosts that consumers read as live, and nothing else
+	// can retire them. A child that returns is a fresh enrollment and replicates
+	// from its marks' reset.
+	_, _, retired, err := s.reg.Retire(childULID)
+	if err != nil {
 		if errors.Is(err, registry.ErrNotEnrolled) {
 			return -1 // lost the race to a concurrent evaluation or a DELETE — not our error
 		}
-		s.log.Error("move-drain auto-revoke failed", "child", childULID, "err", err)
+		s.log.Error("move-drain auto-retire failed", "child", childULID, "err", err)
 		return door.RetryDelay(err, 30*time.Second)
 	}
 	s.metrics.DrainCompleted(childULID, outcome)
 	if outcome == metrics.DrainOutcomeGapped {
-		s.log.Warn("move-drain complete, auto-revoked: retention pruned undelivered commands under this mount before this child fetched or they expired — outcome recorded as gapped, never delivered",
-			"child", childULID, "commands_seen_in_surviving_range", total)
+		s.log.Warn("move-drain complete, auto-retired: retention pruned undelivered commands under this mount before this child fetched or they expired — outcome recorded as gapped, never delivered",
+			"child", childULID, "commands_seen_in_surviving_range", total, "records_retired", retired)
 		return -1
 	}
-	s.log.Info("move-drain complete, auto-revoked", "child", childULID, "outcome", outcome, "commands_seen", total)
+	s.log.Info("move-drain complete, auto-retired", "child", childULID, "outcome", outcome, "commands_seen", total, "records_retired", retired)
 	return -1
 }
 

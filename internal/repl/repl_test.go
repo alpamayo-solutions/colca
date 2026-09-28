@@ -821,3 +821,53 @@ func goroutinesIn(fn string) int {
 	}
 	return count
 }
+
+// A child whose store was rebuilt under the same identity restarts at offset 1.
+// The parent used to drop every such record against the marks it kept for the
+// old store and answer with the old mark, so the child advanced past records
+// that never landed: an edge rebuilt this way lost its whole plant model on the
+// hub without a gap or an error. The same store re-offering keeps the dedupe.
+func TestARebuiltChildStoreReplicatesFromTheStart(t *testing.T) {
+	dir := t.TempDir()
+	parentID, _ := identity.Generate(filepath.Join(dir, "p.key"))
+	childID, _ := identity.Generate(filepath.Join(dir, "c.key"))
+	ps, _ := store.Open(filepath.Join(dir, "pdata"))
+	defer ps.Close()
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
+	srv, err := NewServer(pcfg, peng, parentID, preg, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, err := srv.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	cl, err := NewClient("https://"+addr, parentID.PublicHex(), childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := func(off uint64, v string) store.ReplRecord {
+		return store.ReplRecord{ChildOffset: off, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":` + v + `}`), TS: int64(off)}
+	}
+
+	cl.SetStoreID("store-before")
+	if hwm, err := cl.Replicate("metrics", []store.ReplRecord{rec(40, "1"), rec(41, "2")}); err != nil || hwm != 41 {
+		t.Fatalf("old store: hwm=%d err=%v", hwm, err)
+	}
+	// The same store re-offering is still deduplicated.
+	if hwm, _ := cl.Replicate("metrics", []store.ReplRecord{rec(41, "2")}); hwm != 41 || ps.NextOffset("metrics") != 3 {
+		t.Fatalf("same store re-offer: hwm=%d next=%d, want 41 and nothing appended", hwm, ps.NextOffset("metrics"))
+	}
+
+	cl.SetStoreID("store-after") // rebuilt: offsets start again at 1
+	hwm, err := cl.Replicate("metrics", []store.ReplRecord{rec(1, "3")})
+	if err != nil || hwm != 1 {
+		t.Fatalf("rebuilt store: hwm=%d err=%v, want 1", hwm, err)
+	}
+	stored, _, _ := ps.Read("metrics", 3, 10, nil)
+	if len(stored) != 1 || string(stored[0].Payload) != `{"v":3}` {
+		t.Fatalf("rebuilt store's first record did not land: %+v", stored)
+	}
+}

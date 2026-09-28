@@ -294,6 +294,9 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Stream  string    `json:"stream"`
 		Records []wireRec `json:"records"`
+		// Store is the child's store incarnation; empty from a child that
+		// predates it.
+		Store string `json:"store,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		var tooLarge *http.MaxBytesError
@@ -382,6 +385,18 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	// Through the engine, never straight into the store: the engine is the single
 	// place every write converges, and it is what mirrors the newly applied
 	// records onto this node's local MQTT bus.
+	// A child whose store was rebuilt under the same identity restarts at offset
+	// 1; the marks kept for its old store would drop everything it sends and
+	// report it delivered. Adopting the new incarnation clears them first.
+	reset, err := s.eng.Store().AdoptChildStore(child.ULID, in.Store)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if reset {
+		s.log.Warn("child store rebuilt: its replication marks were reset and it replicates from the start",
+			"child", child.ULID, "store", in.Store)
+	}
 	applied, hwm, err := s.eng.IngestReplicated(child.ULID, in.Stream, repl)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

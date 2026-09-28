@@ -1031,27 +1031,58 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 
 		mux.HandleFunc("DELETE /enroll/{ulid}", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
 			ulid := r.PathValue("ulid")
+			// retire=true decommissions a child node for good: the same batch retires
+			// every record it and the nodes below it replicated up, and forgets its
+			// replication marks. Without it the DELETE only revokes, and the child may
+			// be enrolled again and resume where it stopped.
+			retire := false
+			if raw := r.URL.Query().Get("retire"); raw != "" {
+				v, err := strconv.ParseBool(raw)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": "retire must be true or false"})
+					return
+				}
+				retire = v
+			}
 			// DELETE stays an immediate kill switch with no drain precondition. Revoke reports
 			// wasDraining under its own lock, so a concurrent drain cannot slip in between a
 			// check and the revoke.
-			off, wasDraining, err := reg.Revoke(ulid)
+			var (
+				off         uint64
+				wasDraining bool
+				retired     int
+				err         error
+			)
+			if retire {
+				off, wasDraining, retired, err = reg.Retire(ulid)
+			} else {
+				off, wasDraining, err = reg.Revoke(ulid)
+			}
 			if err != nil {
-				if errors.Is(err, registry.ErrNotEnrolled) {
+				switch {
+				case errors.Is(err, registry.ErrNotEnrolled):
 					writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
-					return
+				case errors.Is(err, registry.ErrNotChildNode):
+					writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+				default:
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				}
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
 			}
 			if wasDraining {
 				m.DrainCompleted(ulid, metrics.DrainOutcomeForced)
 			}
+			if retire {
+				writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "retired": true, "offset": off, "records_retired": retired})
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "offset": off})
 		}))
 
 		// POST /enroll/{ulid}/drain decommissions a child node: it keeps working while its
-		// queue drains, and new commands under its mount are refused. The node revokes it
-		// when the drain completes, or immediately on DELETE (outcome "forced").
+		// queue drains, and new commands under its mount are refused. The node retires it,
+		// replicated state included, when the drain completes, or revokes it immediately
+		// on DELETE (outcome "forced"; add retire=true to retire it as well).
 		mux.HandleFunc("POST /enroll/{ulid}/drain", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
 			ulid := r.PathValue("ulid")
 			off, err := reg.Drain(ulid)
