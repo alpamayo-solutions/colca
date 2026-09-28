@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/alpamayo-solutions/colca/compare/v0.21.0...v0.22.0) (2026-09-28)
+
+
+### Features
+
+* **registry:** rebuilt children replicate again, decommissioned children leave no ghosts ([#117](https://github.com/alpamayo-solutions/colca/issues/117)) ([d9ac44e](https://github.com/alpamayo-solutions/colca/commit/d9ac44ebf9c94192bb3ba456826efc296ca77a3d))
+
 ## [0.21.0](https://github.com/alpamayo-solutions/colca/compare/v0.20.0...v0.21.0) (2026-09-28)
 
 
