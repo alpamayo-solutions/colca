@@ -4,6 +4,7 @@ package historian
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +13,36 @@ import (
 
 	"github.com/jackc/pgx/v5"
 )
+
+func TestOfflineImportUsesTheSameSinkAndIndependentMarker(t *testing.T) {
+	ctx := context.Background()
+	sink := testPool(t)
+	sink.Strict = true
+	// Valid ULIDs are required by the import door; each boundary invocation has
+	// its own timestamp so reruns do not conflict with another test's data.
+	ts := time.Now().Unix()
+	input := importLine(int(ts)) + importLine(int(ts+1))
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(input)))
+	before := time.Unix(ts+2, 0)
+	if _, err := sink.Apply(ctx, nil, Consumer, 123); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if count, err := Import(ctx, strings.NewReader(input), before, digest, 1, sink); err != nil || count != 2 {
+			t.Fatalf("count=%d, err=%v", count, err)
+		}
+	}
+	if live, err := sink.Applied(ctx, Consumer); err != nil || live != 123 {
+		t.Fatalf("live marker changed: %d, %v", live, err)
+	}
+	var count int
+	if err := sink.Pool.QueryRow(ctx, `SELECT count(*) FROM historian_metric WHERE signal_id=$1 AND timestamp >= $2 AND timestamp < $3`, importSignal, time.Unix(ts, 0), before).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("rows=%d", count)
+	}
+}
 
 // Only a real database can show that applying the same page twice leaves one row
 // per (signal_id, timestamp): the unique index still holds if the marker is
