@@ -202,3 +202,34 @@ This broker transition does not administer an external identity provider, host
 VPN, SSH access or separate update agents. The deployment's handover controller
 must retire those connections and credentials before reporting the machine as
 handed over. Ordinary parent outages do not trigger any of these actions.
+# Importing historical measurements
+
+`colca-historian import` is an operator tool for archived measurements. It uses
+the historian's `DATABASE_URL` and ordinary sink; no broker connection is opened.
+It does not update retained live values, dispatch events to control consumers,
+or advance the running historian's stream cursor. Applications should resolve
+their existing signal identities through their normal public API before export.
+
+Input is JSONL, one `{"topic": "colca/v1/_Metric/NODE/PATH", "payload": {...}}`
+per line. Each payload must have a signal ULID, explicit timestamp in Unix
+seconds, and a value. The topic's node must be a ULID and agree with any payload
+node identity. Use `COLCA_TOPIC_ROOT` for a deployment with another root.
+
+```sh
+colca-historian import --file archive.jsonl --sha256 EXPECTED_SHA256 \
+  --before 2026-01-01T00:00:00Z --dry-run
+# Inside the historian's trusted deployment environment:
+colca-historian import --file archive.jsonl --sha256 EXPECTED_SHA256 \
+  --before 2026-01-01T00:00:00Z
+```
+
+The complete input is validated and hashed before database access. A private
+temporary spool prevents input changes between validation and writing. Imports
+use strict transactions of up to 1000 rows by default (`--batch-size`, maximum
+5000), with a separate `historian:import:SHA256` marker. Rerunning the identical
+file resumes committed batches. Errors stop the import without acknowledging
+the failed batch. This has the normal sink's upsert semantics: the same signal
+and timestamp replaces that historical point. Choose a ceiling before existing
+live data and check for overlapping records when replacement is unintended.
+The ordinary historian schema must already exist; import does not change
+schema or retention. Ensure the configured retention covers the imported dates.
