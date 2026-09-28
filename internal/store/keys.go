@@ -32,6 +32,15 @@ func cursorKey(name, stream string) []byte { return []byte("c\x00" + name + "\x0
 // {prefix, 0x01}, and 't' sorts after that.
 func ctKey(name, stream string) []byte   { return []byte("ct\x00" + name + "\x00" + stream) }
 func hwmKey(child, stream string) []byte { return []byte("h\x00" + child + "\x00" + stream) }
+
+// hwmChildEnd bounds every hwmKey of one child, for a range delete.
+func hwmChildEnd(child string) []byte { return []byte("h\x00" + child + "\x01") }
+
+// storeIDKey holds this store's own incarnation id (see Store.StoreID).
+func storeIDKey() []byte { return []byte("i\x00") }
+
+// childStoreKey holds the incarnation id a child last replicated from.
+func childStoreKey(child string) []byte { return []byte("u\x00" + child) }
 func lwmKey(stream string) []byte        { return []byte("l\x00" + stream) }
 func bytesKey(stream string) []byte      { return []byte("b\x00" + stream) }
 

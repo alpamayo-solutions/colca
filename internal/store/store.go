@@ -5,6 +5,8 @@ package store
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -96,6 +98,9 @@ type KVEntry struct {
 }
 
 type Store struct {
+	// id names this store's incarnation. It is minted once, with the store, so a
+	// store rebuilt under the same node identity is told apart from the old one.
+	id             string
 	contractHeads  map[string]map[string]uint64
 	backlogChanged chan struct{}
 	allChanged     chan struct{}
@@ -171,7 +176,78 @@ func Open(dir string) (*Store, error) {
 	if added > 0 || removed > 0 {
 		slog.Info("store: KV contract index reconciled", "added", added, "removed", removed)
 	}
+	if s.id, err = loadOrMintStoreID(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return s, nil
+}
+
+func loadOrMintStoreID(db *pebble.DB) (string, error) {
+	v, closer, err := db.Get(storeIDKey())
+	if err == nil {
+		id := string(v)
+		_ = closer.Close()
+		return id, nil
+	}
+	if !errors.Is(err, pebble.ErrNotFound) {
+		return "", fmt.Errorf("read store id: %w", err)
+	}
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("mint store id: %w", err)
+	}
+	id := hex.EncodeToString(b)
+	if err := db.Set(storeIDKey(), []byte(id), pebble.Sync); err != nil {
+		return "", fmt.Errorf("persist store id: %w", err)
+	}
+	return id, nil
+}
+
+// StoreID is this store's incarnation: stable across restarts, new whenever the
+// store is created from nothing. A child sends it with every replication batch
+// so its parent can tell a rebuilt store from a resumed one.
+func (s *Store) StoreID() string { return s.id }
+
+// AdoptChildStore records the incarnation a child replicates from. When it
+// differs from the one recorded before, the child's store was rebuilt: its
+// offsets restarted at 1, and every high-water mark kept for the old store would
+// drop the new records as duplicates while telling the child they had landed.
+// Those marks are cleared in the same batch and reset is true. An empty id (a
+// child that predates incarnations) and the first id seen change nothing.
+func (s *Store) AdoptChildStore(child, id string) (reset bool, err error) {
+	if id == "" {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev := ""
+	v, closer, err := s.db.Get(childStoreKey(child))
+	switch {
+	case err == nil:
+		prev = string(v)
+		_ = closer.Close()
+	case !errors.Is(err, pebble.ErrNotFound):
+		return false, fmt.Errorf("read store id of child %s: %w", child, err)
+	}
+	if prev == id {
+		return false, nil
+	}
+	b := s.db.NewBatch()
+	defer b.Close()
+	if prev != "" {
+		if err := b.DeleteRange(hwmKey(child, ""), hwmChildEnd(child), nil); err != nil {
+			return false, err
+		}
+		reset = true
+	}
+	if err := b.Set(childStoreKey(child), []byte(id), nil); err != nil {
+		return false, err
+	}
+	if err := s.db.Apply(b, pebble.Sync); err != nil {
+		return false, err
+	}
+	return reset, nil
 }
 
 // validateRefreshPending checks that rp/{stream}, if present, holds a sane

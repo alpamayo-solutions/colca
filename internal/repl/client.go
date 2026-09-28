@@ -79,7 +79,14 @@ type Client struct {
 	status        atomic.Value
 	statusMu      sync.Mutex
 	statusChanged chan struct{}
+	// storeID is this node's store incarnation, sent with every replication
+	// batch so the parent can tell a rebuilt store from a resumed one.
+	storeID string
 }
+
+// SetStoreID names the store incarnation replication batches carry (see
+// store.Store.StoreID). Call it before the uplink starts.
+func (c *Client) SetStoreID(id string) { c.storeID = id }
 
 // NewClient returns a TLS client that presents this node's certificate and pins
 // the parent's public key.
@@ -149,7 +156,7 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 	if len(recs) > maxReplicateRecords {
 		return 0, 0, fmt.Errorf("replicate: batch has %d records, maximum is %d", len(recs), maxReplicateRecords)
 	}
-	body, err := marshalReplication(stream, recs)
+	body, err := marshalReplication(c.storeID, stream, recs)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -181,7 +188,7 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 	return out.HWM, out.NowMS, nil
 }
 
-func marshalReplication(stream string, recs []store.ReplRecord) ([]byte, error) {
+func marshalReplication(storeID, stream string, recs []store.ReplRecord) ([]byte, error) {
 	wire := make([]wireRec, len(recs))
 	for i, r := range recs {
 		wire[i] = wireRec{
@@ -190,14 +197,18 @@ func marshalReplication(stream string, recs []store.ReplRecord) ([]byte, error) 
 			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups,
 		}
 	}
-	return json.Marshal(map[string]any{"stream": stream, "records": wire})
+	msg := map[string]any{"stream": stream, "records": wire}
+	if storeID != "" {
+		msg["store"] = storeID
+	}
+	return json.Marshal(msg)
 }
 
 // fitReplicationBatch returns the largest non-empty prefix whose exact JSON
 // envelope fits the server contract. The normal 200-record batch needs one
 // marshal; binary search is used only for unusually large records.
-func fitReplicationBatch(stream string, batch []store.ReplRecord, maxBytes int64) ([]store.ReplRecord, error) {
-	body, err := marshalReplication(stream, batch)
+func fitReplicationBatch(storeID, stream string, batch []store.ReplRecord, maxBytes int64) ([]store.ReplRecord, error) {
+	body, err := marshalReplication(storeID, stream, batch)
 	if err != nil || int64(len(body)) <= maxBytes {
 		return batch, err
 	}
@@ -205,7 +216,7 @@ func fitReplicationBatch(stream string, batch []store.ReplRecord, maxBytes int64
 	best := 0
 	for low <= high {
 		mid := low + (high-low)/2
-		body, err := marshalReplication(stream, batch[:mid])
+		body, err := marshalReplication(storeID, stream, batch[:mid])
 		if err != nil {
 			return nil, err
 		}
@@ -597,7 +608,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		}
 		if len(batch) > 0 {
 			fullBatchLen := len(batch)
-			batch, err = fitReplicationBatch(stream, batch, c.maxReplicateBody)
+			batch, err = fitReplicationBatch(c.storeID, stream, batch, c.maxReplicateBody)
 			if err != nil {
 				c.log.Error("uplink batch cannot fit the replication request bound", "stream", stream, "err", err)
 				retryPending = true
