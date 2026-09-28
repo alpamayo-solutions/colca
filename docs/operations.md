@@ -97,6 +97,14 @@ parent stops routing new commands to it and waits until every command already
 queued has been delivered or has expired. Drains are visible in
 `colca_drains_active` and `colca_drains_completed_total`.
 
+A completed drain retires the child: the parent tombstones every current-state
+record the child and the nodes below it replicated (its elements, signals,
+last metric values, services), and the tombstones travel up, so no ancestor
+keeps showing the old node as live. To take a child out immediately, without
+draining, use `DELETE /enroll/{ulid}?retire=true`. A plain `DELETE` only
+revokes: the child's replicated state stays, for a child that will be enrolled
+again and resume where it stopped.
+
 ## Backups
 
 A node's state is its `data_dir`. Stop the node, or snapshot the filesystem,

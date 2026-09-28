@@ -144,7 +144,8 @@ records waiting unseen. The node watches every cursor instead:
 |---|---|---|
 | `POST /enroll` | `{"ulid","pubkey","kind":"external"\|"node","element","grants":[…]}` | `{"ulid":"…","offset":N}`; `409` when the key or the element is already taken, `422` on an invalid entry or an element this node does not hold |
 | `GET /enroll` | `?max=1000&after=TOKEN` | the locally enrolled entries, public keys only |
-| `DELETE /enroll/{ulid}` | | `{"revoked":true,"offset":N}`; the same batch retires the records the identity authored about itself — its `_ServiceDetails`, at every mount it published one at. Only that identity may write them, so one left behind could never be retired by anyone |
+| `DELETE /enroll/{ulid}` | `?retire=true` | `{"revoked":true,"offset":N}`; the same batch retires the records the identity authored about itself — its `_ServiceDetails`, at every mount it published one at. Only that identity may write them, so one left behind could never be retired by anyone. A plain revoke keeps what a child node replicated up: the child may be enrolled again and resumes from its own cursor. With `retire=true` (kind `node` only, `409` otherwise; `400` on a value that is not a boolean) the same batch also tombstones every current-state record the child and the nodes below it replicated, and clears its replication marks, so nothing it left stands as live and the same identity enrolled later starts clean; the response adds `"retired":true,"records_retired":N`. The tombstones replicate up, so ancestors retire their copies too |
+| `POST /enroll/{ulid}/drain` | | `{"ulid","offset","status":"draining"}`; decommissions a child node: new commands under its mount are refused, and once its queue is delivered or expired it is retired as with `DELETE ?retire=true`. `409` for an entry that is not a node or is already draining |
 | `GET /debug/state` | | the next offset of every stream |
 
 ## Secrets

@@ -336,6 +336,9 @@ func Start(cfg *config.Config) (*Node, error) {
 	// The registry resolves placements through the engine's element index. It is
 	// set here because the registry has to exist before the engine.
 	reg.SetNamespace(n.Engine.Elements())
+	// Retiring a child node tombstones what it replicated on the stream each
+	// record's class rises on, which bundle contracts decide too.
+	reg.SetClassifier(n.Engine.ClassOf)
 	// A local service registering with a mount that does not exist yet gets its
 	// elements authored through the same path as everything else. Without this,
 	// such registrations are refused.

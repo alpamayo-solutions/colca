@@ -34,6 +34,11 @@ var ErrUnknownElement = errors.New("unknown element")
 // 409.
 var ErrNotNode = errors.New("move-drain applies only to kind=node entries")
 
+// ErrNotChildNode marks a retire of an entry that is not a child node. Only a
+// node replicates state up, so only a node has any to retire. The HTTP door
+// answers 409.
+var ErrNotChildNode = errors.New("retire applies only to kind=node entries")
+
 // ErrAlreadyDraining marks a drain of an entry that is already draining. The
 // HTTP door answers 409.
 var ErrAlreadyDraining = errors.New("already draining")
@@ -59,6 +64,9 @@ type Manager struct {
 	// ConfigExec.authorElementAt behind the "element/author" verb, wired by
 	// SetAuthoring.
 	author func(path string) (string, error)
+	// classOf is the engine's bundle-aware classifier, wired by SetClassifier.
+	// Until then the built-in classes answer.
+	classOf func(contract string) uns.Class
 }
 
 // New loads every locally enrolled entry from the store. A corrupt persisted
@@ -131,6 +139,14 @@ func (m *Manager) SetNamespace(ns uns.Namespace) {
 func (m *Manager) SetAuthoring(author func(path string) (string, error)) {
 	m.mu.Lock()
 	m.author = author
+	m.mu.Unlock()
+}
+
+// SetClassifier wires the engine's contract classifier, which retirement uses
+// to find the stream each retired record's tombstone rises on.
+func (m *Manager) SetClassifier(classOf func(contract string) uns.Class) {
+	m.mu.Lock()
+	m.classOf = classOf
 	m.mu.Unlock()
 }
 
@@ -267,14 +283,45 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 // Revoke retires an enrolled identity: tombstone entity, registry delete and KV
 // retirement in one batch, then the session kick. It never waits for a drain.
 //
+// It is the kill switch, not a decommission: a child node's replicated state,
+// replication marks and store incarnation stay, because a revoked child may be
+// enrolled again and resume from its own uplink cursor. Retire takes those too.
+//
 // wasDraining reports whether the entry was draining at removal, read under the
 // same lock, so the "forced" drain outcome is counted correctly.
 func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err error) {
+	offset, wasDraining, _, err = m.revoke(ulid, false)
+	return offset, wasDraining, err
+}
+
+// Retire is Revoke for a child node taken out of service for good. In the same
+// batch it tombstones every current-state record the child and the nodes below
+// it replicated up, and clears the child's replication marks and recorded store
+// incarnation, so a later enrollment of the same identity starts clean. The
+// tombstones rise like any record, so every ancestor retires its copies too.
+//
+// Without this, a node replaced at the same mount leaves its machines and
+// signals standing, and consumers read them as live. What the child replicated
+// is the child's own state; nobody but a retiring parent can remove it once the
+// child is gone. retired counts the records retired this way.
+func (m *Manager) Retire(ulid string) (offset uint64, wasDraining bool, retired int, err error) {
+	return m.revoke(ulid, true)
+}
+
+func (m *Manager) revoke(ulid string, retire bool) (offset uint64, wasDraining bool, retiredCount int, err error) {
+	verb := "revoke"
+	if retire {
+		verb = "retire"
+	}
 	m.mu.Lock()
 	e, ok := m.byID[ulid]
 	if !ok {
 		m.mu.Unlock()
-		return 0, false, fmt.Errorf("revoke %s: %w", ulid, ErrNotEnrolled)
+		return 0, false, 0, fmt.Errorf("%s %s: %w", verb, ulid, ErrNotEnrolled)
+	}
+	if retire && !e.ReplicatesUp() {
+		m.mu.Unlock()
+		return 0, false, 0, fmt.Errorf("retire %s: kind %s: %w", ulid, e.Kind, ErrNotChildNode)
 	}
 	wasDraining = e.IsDraining()
 
@@ -291,21 +338,32 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 		// Reading nothing is not the same as there being nothing. Revoking on a
 		// failed scan would leave exactly the record this retirement exists to
 		// remove, with no second chance at it; the operator can retry instead.
-		return 0, false, fmt.Errorf("revoke %s: %w", ulid, err)
+		return 0, false, 0, fmt.Errorf("%s %s: %w", verb, ulid, err)
 	}
 
 	// Revoke does not depend on the element still resolving: the inventory record has
 	// a fixed address.
 	topic, kvPath := m.topicFor(e)
-	off, err := m.st.RegistryDelete(ulid, "entities", store.Record{
+	identity := store.Record{
 		Topic:  topic,
 		TS:     time.Now().UnixMilli(),
 		KVPath: kvPath,
 		KVNode: m.nodeID,
-	}, authored...)
+	}
+	var retired []store.Record
+	var off uint64
+	if retire {
+		off, retired, err = m.st.RegistryRetire(ulid, "entities", identity, authored, store.ChildRetirement{
+			Child:    ulid,
+			StreamOf: m.replicatedBy(e),
+			TS:       identity.TS,
+		})
+	} else {
+		off, err = m.st.RegistryDelete(ulid, "entities", identity, authored...)
+	}
 	if err != nil {
 		m.mu.Unlock()
-		return 0, false, err
+		return 0, false, 0, fmt.Errorf("%s %s: %w", verb, ulid, err)
 	}
 	delete(m.byID, ulid)
 	if e.Pubkey != "" {
@@ -332,11 +390,11 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 	}
 	for name, stream := range dead {
 		if err := m.st.CursorDelete(name, stream); err != nil {
-			m.log.Warn("revoke: cursor not deleted — it will hold a retention floor until the staleness window overrides it",
+			m.log.Warn(verb+": cursor not deleted — it will hold a retention floor until the staleness window overrides it",
 				"ulid", ulid, "cursor", name, "err", err)
 		}
 	}
-	kick, deliver := m.kick, m.deliver
+	kick, deliver, space := m.kick, m.deliver, m.ns
 	m.mu.Unlock() // callbacks outside the lock, see Enroll
 	if kick != nil {
 		kick(ulid)
@@ -346,9 +404,79 @@ func (m *Manager) Revoke(ulid string) (offset uint64, wasDraining bool, err erro
 		for _, rec := range authored {
 			deliver(rec.Topic, nil, true)
 		}
+		for _, rec := range retired {
+			deliver(rec.Topic, nil, true)
+		}
 	}
-	m.log.Info("identity revoked", "ulid", ulid, "records_retired", len(authored))
-	return off, wasDraining, nil
+	// A retired child's elements are positions in this node's namespace too; the
+	// engine's index learns of replicated ones as they arrive and must see them go.
+	if obs, ok := space.(interface {
+		Observe(contract, topic string, payload []byte)
+	}); ok {
+		for _, rec := range retired {
+			if p, err := uns.Parse(rec.Topic); err == nil {
+				obs.Observe(p.Contract, rec.Topic, nil)
+			}
+		}
+	}
+	if retire {
+		m.log.Info("identity retired", "ulid", ulid, "records_retired", len(authored), "replicated_retired", len(retired))
+	} else {
+		m.log.Info("identity revoked", "ulid", ulid, "records_retired", len(authored))
+	}
+	return off, wasDraining, len(retired), nil
+}
+
+// replicatedBy selects what child e and the nodes below it replicated to this
+// node, for Retire: owned state (the classes a parent projects from a
+// replicated record) not authored here, either authored by the child itself at
+// any path, or standing below its mount and not below the mount of another
+// enrolled child nested there. It returns the stream a record's tombstone rises
+// on. The caller holds the lock.
+func (m *Manager) replicatedBy(e *uns.Entry) func(store.KVEntry) string {
+	classOf := m.classOf
+	if classOf == nil {
+		classOf = uns.ClassOf
+	}
+	mount, placed := m.mountOf(e)
+	var nested []string
+	if placed {
+		for _, other := range m.byID {
+			if other.ULID == e.ULID || !other.ReplicatesUp() {
+				continue
+			}
+			if om, ok := m.mountOf(other); ok && uns.UnderMount(om, mount) {
+				nested = append(nested, om)
+			}
+		}
+	}
+	return func(kv store.KVEntry) string {
+		if kv.NodeID == m.nodeID {
+			return ""
+		}
+		inSubtree := kv.NodeID == e.ULID
+		if !inSubtree && placed && uns.UnderMount(kv.Path, mount) {
+			inSubtree = true
+			for _, om := range nested {
+				if kv.Path == om || uns.UnderMount(kv.Path, om) {
+					inSubtree = false
+					break
+				}
+			}
+		}
+		if !inSubtree {
+			return ""
+		}
+		p, err := uns.Parse(kv.Topic)
+		if err != nil || uns.IsNodePrivate(p.Contract) {
+			return ""
+		}
+		class := classOf(p.Contract)
+		if !uns.IsOwnedState(class) {
+			return ""
+		}
+		return uns.StreamFor(class)
+	}
 }
 
 // authoredBy builds a retirement tombstone for every record this node holds
@@ -391,8 +519,8 @@ func (m *Manager) authoredBy(ulid string) ([]store.Record, error) {
 
 // Drain starts decommissioning a child node: its entry is persisted as draining
 // and republished. The identity stays valid and the session is not kicked, since
-// the queue drains through it. Admission refusal, completion and the final revoke
-// live outside this package.
+// the queue drains through it. Admission refusal, completion and the final
+// Retire live outside this package.
 func (m *Manager) Drain(ulid string) (offset uint64, err error) {
 	m.mu.Lock()
 	e, ok := m.byID[ulid]
