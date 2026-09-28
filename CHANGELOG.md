@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/alpamayo-solutions/colca/compare/v0.20.0...v0.21.0) (2026-09-28)
+
+
+### Features
+
+* **historian:** import immutable offline metric archives ([#115](https://github.com/alpamayo-solutions/colca/issues/115)) ([2c39233](https://github.com/alpamayo-solutions/colca/commit/2c3923348aa9a21bc30ab40be1b31e7deaad163d))
+
 ## [0.20.0](https://github.com/alpamayo-solutions/colca/compare/v0.19.2...v0.20.0) (2026-09-27)
 
 
