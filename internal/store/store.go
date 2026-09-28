@@ -6,9 +6,9 @@ package store
 import (
 	"bytes"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"

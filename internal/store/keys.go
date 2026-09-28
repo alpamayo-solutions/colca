@@ -41,8 +41,8 @@ func storeIDKey() []byte { return []byte("i\x00") }
 
 // childStoreKey holds the incarnation id a child last replicated from.
 func childStoreKey(child string) []byte { return []byte("u\x00" + child) }
-func lwmKey(stream string) []byte        { return []byte("l\x00" + stream) }
-func bytesKey(stream string) []byte      { return []byte("b\x00" + stream) }
+func lwmKey(stream string) []byte       { return []byte("l\x00" + stream) }
+func bytesKey(stream string) []byte     { return []byte("b\x00" + stream) }
 
 // rpKey holds a stream's pending state-refresh range: two big-endian uint64s
 // [From, To) over KV Offsets, written in the prune batch and cleared once every
