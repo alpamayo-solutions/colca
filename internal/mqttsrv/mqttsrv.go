@@ -605,6 +605,13 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	// retained replay burst.
 	s.Options.Capabilities.MaximumClientWritesPending = mqttLimits.EffectiveMaxPendingWritesPerClient()
 	s.Options.Capabilities.MaximumSessionExpiryInterval = uint32(mqttLimits.EffectiveMaxSessionExpiry() / time.Second) //nolint:gosec // validated against the MQTT maximum
+	// The retained set is the store's KV projection, loaded at boot and kept by the
+	// engine: it must never age out on its own. mochi's default caps every message's
+	// life at a day and drops retained messages older than that, so a node running
+	// longer served its subscribers only what was written in the last day -- a
+	// browser loading afterwards got no plant structure at all. 0 is no cap; an expiry
+	// a publisher sets on its own message still applies.
+	s.Options.Capabilities.MaximumMessageExpiryInterval = 0
 	s.Options.Capabilities.TopicAliasMaximum = mqttLimits.EffectiveMaxTopicAliasesPerClient()
 	// A new subscriber's retained replay can burst thousands of QoS 1 messages, and
 	// mochi drops anything beyond MaximumInflight without retry, so raise it to the
