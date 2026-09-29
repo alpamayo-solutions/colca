@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/alpamayo-solutions/colca/compare/v0.22.0...v0.22.1) (2026-09-29)
+
+
+### Fixes
+
+* **mqtt:** retained messages no longer age out after a day ([#119](https://github.com/alpamayo-solutions/colca/issues/119)) ([3f605ac](https://github.com/alpamayo-solutions/colca/commit/3f605ace93836404f9f46a9f6504a123c7eaae7d))
+
 ## [0.22.0](https://github.com/alpamayo-solutions/colca/compare/v0.21.0...v0.22.0) (2026-09-28)
 
 
