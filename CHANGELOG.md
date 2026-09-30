@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.2](https://github.com/alpamayo-solutions/colca/compare/v0.22.1...v0.22.2) (2026-09-30)
+
+
+### Fixes
+
+* **historian:** skip samples of signals marked is_logged false ([#121](https://github.com/alpamayo-solutions/colca/issues/121)) ([456d9b2](https://github.com/alpamayo-solutions/colca/commit/456d9b25c61c24167e3c496d9216fa11786fe6d5))
+
 ## [0.22.1](https://github.com/alpamayo-solutions/colca/compare/v0.22.0...v0.22.1) (2026-09-29)
 
 
