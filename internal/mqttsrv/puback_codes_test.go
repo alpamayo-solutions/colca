@@ -26,7 +26,7 @@ func TestEveryEngineRefusalAnswersWithAValidPubackCode(t *testing.T) {
 	for _, reason := range []string{
 		metrics.ReasonNodeID, metrics.ReasonGrammar, metrics.ReasonValidation, metrics.ReasonIdentity,
 		metrics.ReasonWriteDenied, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract,
-		metrics.ReasonHumanWrite, metrics.ReasonTimeSync, metrics.ReasonDraining, "",
+		metrics.ReasonHumanWrite, metrics.ReasonTimeSync, metrics.ReasonDraining, metrics.ReasonNotProducer, "",
 	} {
 		var code packets.Code
 		if err := rejectCode(cl, pk, &engine.RejectError{Reason: reason}); !errors.As(err, &code) {

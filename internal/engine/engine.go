@@ -204,6 +204,11 @@ type Engine struct {
 	// the index current.
 	elements *uns.ElementIndex
 
+	// catalogues maps data tag ids to the connector catalogues on this node that
+	// hold them, so the metric door can tell a bound signal's producer
+	// (producer.go). Kept current the same way as elements.
+	catalogues *uns.CatalogueIndex
+
 	// auditID is injectable for deterministic event tests. Audit writes bypass
 	// the public ingest doors; see audit.go.
 	auditID func(time.Time) string
@@ -211,6 +216,10 @@ type Engine struct {
 	// unboundLog rate-limits the "_Metric with no _Signal" log line per path
 	// (unbound.go).
 	unboundLog *unboundMetricLog
+
+	// adminMetricLog rate-limits, per path, the line that says the admin token
+	// wrote a bound signal's metric (producer.go).
+	adminMetricLog *unboundMetricLog
 
 	// cursorFilters remembers what each cursor's consumer reads, from its last
 	// fetch, so the cursor watchdog counts only records it would be woken for.
@@ -228,9 +237,10 @@ func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m
 	if clk == nil {
 		clk = clock.New(cfg.Parent == nil, time.Now)
 	}
-	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk, auditID: newAuditID, unboundLog: newUnboundMetricLog(),
+	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk, auditID: newAuditID, unboundLog: newUnboundMetricLog(), adminMetricLog: newUnboundMetricLog(),
 		ledger: newCommandLedger(), cursorFilters: cursorwatch.NewFilters()}
 	e.elements = uns.NewElementIndex(e.EntityStore())
+	e.catalogues = uns.NewCatalogueIndex(e.EntityStore())
 	if raw, ok := s.AncestryGet(); ok {
 		var a uns.Ancestry
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -635,6 +645,14 @@ func (e *Engine) admitClientData(identity string, p uns.Parsed, class uns.Class,
 		_, err := e.rejectDenied(metrics.ReasonWriteDenied, actor, "publish", &p, "client %s: no write scope covers %s", identity, topic)
 		return Attribution{}, err
 	}
+	// A write zone says where a service may write, not whose values a signal
+	// shows: a bound signal's metric comes from its producer only.
+	if uns.IsMetric(p.Contract) {
+		if err := e.checkMetricProducer(entry, p); err != nil {
+			_, err = e.rejectDenied(metrics.ReasonNotProducer, actorFor(entry), "publish", &p, "client %s: %w", identity, err)
+			return Attribution{}, err
+		}
+	}
 	return actorFor(entry), nil
 }
 
@@ -786,6 +804,15 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 		e.metrics.RejectPublish(metrics.ReasonIdentity)
 		return Result{}, err
 	}
+	if uns.IsMetric(p.Contract) && p.NodeID == e.cfg.ULID {
+		// The admin token may still write a bound signal's metric (a correction, a
+		// tombstone); the record keeps the admin attribution, and the log says whose
+		// value it replaced.
+		if tag := e.boundTag(p); tag != "" && e.adminMetricLog.shouldLog(p.Path, e.clk.Now()) {
+			e.log.Warn("admin published a _Metric for a signal bound to a producer",
+				"path", p.Path, "data_tag", tag, "actor", attribution.ActorID)
+		}
+	}
 	var id string
 	if uns.IsCommand(class) {
 		if message, ok := e.unannounced(p); ok {
@@ -911,7 +938,7 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 		offset := first + uint64(i)
 		e.metrics.IngestRecord(stream)
 		e.log.Debug("atomic state ingest", "stream", stream, "offset", offset, "topic", item.record.Topic)
-		e.elements.Observe(item.parsed.Contract, item.record.Topic, item.record.Payload)
+		e.observeIndexes(item.parsed.Contract, item.record.Topic, item.record.Payload)
 		if e.deliver != nil {
 			e.deliver(item.record.Topic, item.record.Payload, retainFor(item.class))
 		}
@@ -973,7 +1000,7 @@ func (e *Engine) ingestAdminEvent(record uns.StateRecord, attribution Attributio
 	}
 	e.metrics.IngestRecord(stream)
 	e.log.Debug("atomic event ingest", "stream", stream, "offset", first, "topic", record.Topic)
-	e.elements.Observe(parsed.Contract, record.Topic, record.Payload)
+	e.observeIndexes(parsed.Contract, record.Topic, record.Payload)
 	if e.deliver != nil {
 		e.deliver(record.Topic, record.Payload, retainFor(class))
 	}
@@ -1127,7 +1154,7 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 		}
 		// An element a child published is a position in this node's namespace too, at
 		// the mount-inserted path, so an ancestor can resolve grants naming it.
-		e.elements.Observe(p.Contract, r.Topic, r.Payload)
+		e.observeIndexes(p.Contract, r.Topic, r.Payload)
 		if e.deliver != nil {
 			e.deliver(r.Topic, r.Payload, retainFor(e.ClassOf(p.Contract)))
 		}
@@ -1269,7 +1296,7 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 	// The element index tracks every persisted record, not just machine publishes:
 	// an element authored through IngestAdmin must be visible too. The plugin
 	// observer, by contrast, only sees what machines published.
-	e.elements.Observe(p.Contract, topic, payload)
+	e.observeIndexes(p.Contract, topic, payload)
 	// Routability is a question about the tree, not the local bus, so it is asked
 	// even on a node without a broker.
 	if uns.IsCommand(class) {

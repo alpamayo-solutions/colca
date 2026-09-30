@@ -399,7 +399,8 @@ func rejectCode(cl *mqtt.Client, pk packets.Packet, err error) error {
 	case metrics.ReasonValidation:
 		return refuse(cl, pk, packets.ErrPayloadFormatInvalid)
 	case metrics.ReasonNodeID, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract,
-		metrics.ReasonWriteDenied, metrics.ReasonHumanWrite, metrics.ReasonTimeSync:
+		metrics.ReasonWriteDenied, metrics.ReasonHumanWrite, metrics.ReasonTimeSync,
+		metrics.ReasonNotProducer:
 		// Authorization verdicts, write_denied included: the identity has no write
 		// standing at that topic.
 		return refuse(cl, pk, packets.ErrNotAuthorized)
