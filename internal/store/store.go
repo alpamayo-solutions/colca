@@ -58,6 +58,11 @@ type Record struct {
 	// ActorGroups are the groups a person's grants came from, kept so a replicated
 	// command can be authorized again where it executes.
 	ActorGroups []string `json:"ag,omitempty"`
+	// Door names the door that admitted a command on this node ("client" or
+	// "human"), where its sender's grants were checked. It is empty for a command
+	// that came down from the parent or through the admin door, and never leaves
+	// the node.
+	Door string `json:"-"`
 	// optional KV projection written in the same atomic batch:
 	KVPath string `json:"-"` // hierarchy path (segments after contract, post-mount)
 	KVNode string `json:"-"` // node-id (level 4)
@@ -80,6 +85,8 @@ type StoredRecord struct {
 	ActorLabel      string
 	ActorKind       string
 	ActorGroups     []string
+	// Door is Record.Door as stored.
+	Door string
 	// SignalID is the signal of a _Metric record, "" for other records and for
 	// records stored before it was kept.
 	SignalID string
@@ -319,6 +326,7 @@ type recEnc struct {
 	ActorLabel      string   `json:"al,omitempty"`
 	ActorKind       string   `json:"ak,omitempty"`
 	ActorGroups     []string `json:"ag,omitempty"`
+	Door            string   `json:"door,omitempty"`
 	SignalID        string   `json:"sid,omitempty"`
 	// size is the encoded length of this record as stored, set by scanRecords for
 	// the byte accounting. Not serialized.
@@ -350,6 +358,7 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 		Topic:           rec.Topic, Payload: rec.Payload, TS: rec.TS,
 		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
 		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, OriginOffset: originOffset,
+		Door:     rec.Door,
 		SignalID: uns.MetricSignalID(rec.Topic, rec.Payload),
 	})
 	if err != nil {
@@ -393,8 +402,42 @@ func (s *Store) Append(stream string, recs []Record) (first, last uint64, err er
 	return s.appendLocked(stream, recs)
 }
 
+// CursorAdvance moves a named cursor forward in the same batch as an append.
+type CursorAdvance struct {
+	Name   string
+	Stream string
+	To     uint64
+}
+
+// AppendAdvancing is Append plus a forward move of one cursor, in the same
+// atomic, synced batch. A node that stores what it read from somewhere else
+// (a command its parent handed down) records how far it read together with the
+// record, so a crash between the two can neither lose the record nor store it
+// twice. applied is false, and nothing is written, when the cursor already
+// stands at or past adv.To: the record was stored before.
+func (s *Store) AppendAdvancing(stream string, recs []Record, adv CursorAdvance) (first, last uint64, applied bool, err error) {
+	if len(recs) == 0 {
+		return 0, 0, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readU64(cursorKey(adv.Name, adv.Stream), 1) >= adv.To {
+		return 0, 0, false, nil
+	}
+	first, last, err = s.appendAdvancingLocked(stream, recs, &adv)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	s.signalBacklogChangeLocked()
+	return first, last, true, nil
+}
+
 // appendLocked is Append's body; the caller holds s.mu.
 func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, err error) {
+	return s.appendAdvancingLocked(stream, recs, nil)
+}
+
+func (s *Store) appendAdvancingLocked(stream string, recs []Record, adv *CursorAdvance) (first, last uint64, err error) {
 	off := s.next[stream]
 	if off == 0 {
 		return 0, 0, fmt.Errorf("unknown stream %q", stream)
@@ -432,6 +475,14 @@ func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, 
 	}
 	if err := b.Set(bytesKey(stream), be64(liveBytes), nil); err != nil {
 		return 0, 0, err
+	}
+	if adv != nil {
+		if err := b.Set(cursorKey(adv.Name, adv.Stream), be64(adv.To), nil); err != nil {
+			return 0, 0, err
+		}
+		if err := b.Set(ctKey(adv.Name, adv.Stream), be64(uint64(time.Now().UnixMilli())), nil); err != nil {
+			return 0, 0, err
+		}
 	}
 	if err := s.appendApply(b, pebble.Sync); err != nil {
 		return 0, 0, err
@@ -550,7 +601,7 @@ func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint
 			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
 			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
-			SignalID: e.SignalID,
+			Door: e.Door, SignalID: e.SignalID,
 		}
 		if filter != nil && !filter(record) {
 			continue
@@ -591,7 +642,7 @@ func (s *Store) FirstMatch(stream string, from, upTo uint64, filter func(StoredR
 			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
 			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
-			SignalID: e.SignalID,
+			Door: e.Door, SignalID: e.SignalID,
 		}
 		if filter == nil || filter(record) {
 			return record, true, nil
@@ -618,6 +669,19 @@ func (s *Store) readU64(key []byte, dflt uint64) uint64 {
 // A cursor that was never acked starts at 1, the first offset Append hands out.
 func (s *Store) CursorGet(name, stream string) uint64 {
 	return s.readU64(cursorKey(name, stream), 1)
+}
+
+// CursorLookup is CursorGet that also reports whether the cursor exists.
+func (s *Store) CursorLookup(name, stream string) (uint64, bool) {
+	v, closer, err := s.db.Get(cursorKey(name, stream))
+	if err != nil {
+		return 1, false
+	}
+	defer closer.Close()
+	if len(v) != 8 {
+		return 1, false
+	}
+	return binary.BigEndian.Uint64(v), true
 }
 
 // CursorAck moves the cursor forward only and reports whether it moved. The

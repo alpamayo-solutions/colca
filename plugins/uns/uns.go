@@ -160,19 +160,39 @@ func IsKnown(c Class) bool { return c != ClassNone }
 // travels down the tree.
 func IsCommand(c Class) bool { return c == ClassCmd }
 
-// CommandStillLive reports whether a ClassCmd record's expires_at is still
-// after authoritativeNowMS. Validate requires a numeric expires_at on every
-// _Cmd*, so a decode failure should not happen; it counts as live rather than
-// ending a drain or hiding an undelivered command. Move-drain completion and
-// the undelivered-command signal both ask this.
-func CommandStillLive(payload []byte, authoritativeNowMS int64) bool {
+// CommandDeadline returns a command's expires_at in unix milliseconds and
+// whether it has one. A command without expires_at never expires: it waits for
+// its target as long as retention keeps it. A payload that does not decode has
+// no readable deadline and is treated the same way, so it neither ends a drain
+// nor hides an undelivered command.
+func CommandDeadline(payload []byte) (int64, bool) {
 	var body struct {
-		ExpiresAt float64 `json:"expires_at"`
+		ExpiresAt *float64 `json:"expires_at"`
 	}
-	if err := json.Unmarshal(payload, &body); err != nil {
-		return true
+	if err := json.Unmarshal(payload, &body); err != nil || body.ExpiresAt == nil {
+		return 0, false
 	}
-	return int64(body.ExpiresAt) >= authoritativeNowMS
+	return int64(*body.ExpiresAt), true
+}
+
+// CommandStillLive reports whether a ClassCmd record may still execute at
+// authoritativeNowMS: it has no expires_at, or expires_at has not passed.
+// Move-drain completion and the undelivered-command signal both ask this.
+func CommandStillLive(payload []byte, authoritativeNowMS int64) bool {
+	deadline, ok := CommandDeadline(payload)
+	return !ok || deadline >= authoritativeNowMS
+}
+
+// CommandWantsProgress reports whether the sender asked for progress
+// acknowledgements ("progress": true): a 202 _Ack when the command is queued
+// for a child node and one each time a node forwards it to a child. They are
+// opt-in because a consumer that settles on the first _Ack of a correlation id
+// would take a 202 for the outcome.
+func CommandWantsProgress(payload []byte) bool {
+	var body struct {
+		Progress bool `json:"progress"`
+	}
+	return json.Unmarshal(payload, &body) == nil && body.Progress
 }
 
 // IsAck reports whether a record answers a command. It belongs to whoever sent
@@ -699,7 +719,18 @@ func Validate(contract string, payload []byte) error {
 		if err := reqStr("correlation_id"); err != nil {
 			return err
 		}
-		return reqNum("expires_at")
+		// expires_at is optional: a command without one never expires.
+		if _, present := m["expires_at"]; present {
+			if err := reqNum("expires_at"); err != nil {
+				return err
+			}
+		}
+		if v, present := m["progress"]; present {
+			if _, ok := v.(bool); !ok {
+				return fmt.Errorf("%s: field %q must be a boolean", contract, "progress")
+			}
+		}
+		return nil
 	case contract == "_Annotation":
 		// Deployed nodes validate against the schema bundle; this checks only
 		// the required fields, for a node without one.

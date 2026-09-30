@@ -5,7 +5,6 @@
 package repl
 
 import (
-	"encoding/json"
 	"errors"
 	"github.com/alpamayo-solutions/colca/door"
 	"time"
@@ -171,13 +170,13 @@ func (s *Server) scanDrain(e *uns.Entry) (total, pending int, gapped bool, delay
 			total++
 			if uns.CommandStillLive(r.Payload, nowMS) {
 				pending++
-				var body struct {
-					ExpiresAt float64 `json:"expires_at"`
+				// A command without expires_at never expires: only its delivery, or a
+				// forced DELETE, ends the drain, and no timer is due for it.
+				deadline, ok := uns.CommandDeadline(r.Payload)
+				if !ok {
+					continue
 				}
-				wait := door.RetryDelay(nil, 30*time.Second)
-				if json.Unmarshal(r.Payload, &body) == nil {
-					wait = time.Duration(max(1, int64(body.ExpiresAt)-nowMS+1)) * time.Millisecond
-				}
+				wait := time.Duration(max(1, deadline-nowMS+1)) * time.Millisecond
 				if delay < 0 || wait < delay {
 					delay = wait
 				}

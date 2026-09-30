@@ -49,7 +49,7 @@ func TestExecutorReceivesTheActingEntry(t *testing.T) {
 	if _, err := e.IngestDownlinkAttributed(topic, cmdPayload("c-down"), ts, Attribution{
 		WrittenBy: "n-hub", ActorID: "kc-sub-anna", ActorLabel: "anna", ActorKind: "human",
 		ActorGroups: []string{"operators"},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(rec.actors) != 3 {
@@ -66,7 +66,7 @@ func TestExecutorReceivesTheActingEntry(t *testing.T) {
 		"human without groups": {WrittenBy: "n-hub", ActorID: "kc-sub-bob", ActorKind: "human"},
 		"service":              {WrittenBy: "n-hub", ActorID: "api", ActorKind: "service", ActorGroups: []string{"operators"}},
 	} {
-		if _, err := e.IngestDownlinkAttributed(topic, cmdPayload("c-"+name), ts, attribution); err != nil {
+		if _, err := e.IngestDownlinkAttributed(topic, cmdPayload("c-"+name), ts, attribution, nil); err != nil {
 			t.Fatal(name, err)
 		}
 		if got := rec.actors[len(rec.actors)-1]; got != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/store"
@@ -446,6 +447,58 @@ func TestExpiryIsCheckedBeforeExecution(t *testing.T) {
 	}
 	if ack := ackFor(t, e, "signal/upsert", "c-5"); ack == nil || ack["result_code"].(float64) != 498 {
 		t.Fatalf("ack = %v, want 498", ack)
+	}
+}
+
+// A command without expires_at never expires: it executes whenever it reaches
+// its target, however long after it was written.
+func TestACommandWithoutExpiryExecutesWheneverItArrives(t *testing.T) {
+	rec := &recordingExec{contract: "_CmdConfigure"}
+	e := execEngine(t, Executors(rec))
+
+	payload := []byte(`{"correlation_id":"c-forever"}`)
+	written := time.Now().Add(-30 * 24 * time.Hour).UnixMilli() // a month in the queue
+	if _, err := e.IngestDownlink("colca/v1/_CmdConfigure/n-edge1/signal/upsert", payload, written); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("a command without expiry was not executed: %v", rec.calls)
+	}
+	if ack := ackFor(t, e, "signal/upsert", "c-forever"); ack == nil || ack["result_code"].(float64) != 200 {
+		t.Fatalf("ack = %v, want 200", ack)
+	}
+}
+
+// The parent hands a command again when the child crashed or lost the response
+// after storing it. The record and the downlink cursor are one write, so the
+// second copy is recognized: stored once, executed once, acked once.
+func TestADownlinkedCommandHandedTwiceExecutesOnce(t *testing.T) {
+	rec := &recordingExec{contract: "_CmdConfigure"}
+	e := execEngine(t, Executors(rec))
+	at := &store.CursorAdvance{Name: "downlink:parent", Stream: "commands-parent", To: 8}
+	topic := "colca/v1/_CmdConfigure/n-edge1/signal/upsert"
+
+	for i := 0; i < 2; i++ {
+		res, err := e.IngestDownlinkAttributed(topic, cmdPayload("c-twice"), 1, Attribution{}, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := i == 1; res.Duplicate != want {
+			t.Fatalf("delivery %d: Duplicate = %v, want %v", i+1, res.Duplicate, want)
+		}
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("executed %d times, want once: %v", len(rec.calls), rec.calls)
+	}
+	if got := e.Store().CursorGet("downlink:parent", "commands-parent"); got != 8 {
+		t.Fatalf("downlink cursor = %d, want 8 (moved with the record)", got)
+	}
+	recs, _, err := e.Store().Read("commands", 1, 100, func(t string) bool { return t == topic })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("stored %d copies, want 1", len(recs))
 	}
 }
 

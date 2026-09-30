@@ -13,6 +13,22 @@ import (
 
 func regKey(ulid string) []byte { return []byte("r\x00" + ulid) }
 
+// revokedKey marks an identity revoked at this node. Commands it sent that are
+// still queued for a child are refused rather than forwarded: this node admitted
+// them on grants the identity no longer holds. Enrolling the identity again
+// clears the mark.
+func revokedKey(ulid string) []byte { return []byte("rv\x00" + ulid) }
+
+// Revoked reports whether ulid was revoked at this node and not enrolled again.
+func (s *Store) Revoked(ulid string) bool {
+	v, closer, err := s.db.Get(revokedKey(ulid))
+	if err != nil {
+		return false
+	}
+	defer closer.Close()
+	return len(v) > 0
+}
+
 // regBounds covers every registry key: \x00 bumped to \x01 sorts strictly
 // after all ulid suffixes.
 func regBounds() (lb, ub []byte) { return []byte("r\x00"), []byte("r\x01") }
@@ -22,6 +38,9 @@ func regBounds() (lb, ub []byte) { return []byte("r\x00"), []byte("r\x01") }
 // without its record or the reverse. It returns the record's offset.
 func (s *Store) RegistryPut(ulid string, entry []byte, stream string, rec Record) (uint64, error) {
 	return s.registryBatch(stream, []Record{rec}, func(b *pebble.Batch) error {
+		if err := b.Delete(revokedKey(ulid), nil); err != nil {
+			return err
+		}
 		return b.Set(regKey(ulid), entry, nil)
 	})
 }
@@ -44,6 +63,9 @@ func (s *Store) RegistryDelete(ulid string, stream string, rec Record, also ...R
 			if err := deleteKV(b, kvPath, kvNode, kvTopic); err != nil {
 				return err
 			}
+		}
+		if err := b.Set(revokedKey(ulid), []byte{1}, nil); err != nil {
+			return err
 		}
 		return b.Delete(regKey(ulid), nil)
 	})
@@ -126,6 +148,9 @@ func (s *Store) RegistryRetire(ulid, stream string, rec Record, also []Record, r
 			return err
 		}
 		if err := b.Delete(childStoreKey(ret.Child), nil); err != nil {
+			return err
+		}
+		if err := b.Set(revokedKey(ulid), []byte{1}, nil); err != nil {
 			return err
 		}
 		return b.Delete(regKey(ulid), nil)

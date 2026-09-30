@@ -259,7 +259,8 @@ def test_parity_golden_encodes_validate_and_mutants_reject():
 
 
 def test_cmd_contracts_carry_the_door_contract():
-    """The colca command door needs correlation_id + expires_at; created_at is
+    """The colca command door needs correlation_id. expires_at is optional (a
+    command without it never expires) but numeric when present; created_at is
     dropped from required (publishers do not stamp it)."""
     body, _ = gb.build_bundle()
     for ident in (
@@ -275,8 +276,9 @@ def test_cmd_contracts_carry_the_door_contract():
         entry = body["contracts"][ident]
         assert entry["class"] == "cmd", ident
         req = entry["schema"].get("required", [])
-        assert "correlation_id" in req and "expires_at" in req, (ident, req)
-        assert "created_at" not in req, (ident, req)
+        assert "correlation_id" in req, (ident, req)
+        assert "expires_at" not in req and "created_at" not in req, (ident, req)
+        assert entry["schema"]["properties"]["expires_at"] == {"type": "number"}, ident
         assert entry["tombstone"] is False, ident
 
 
@@ -291,7 +293,6 @@ def test_edit_command_requires_one_versioned_idempotent_intent():
         "intent",
         "expected_versions",
         "correlation_id",
-        "expires_at",
     }
 
 

@@ -70,7 +70,17 @@ type Attribution struct {
 	// downlinked command can resolve the same person against its own _Group
 	// definitions.
 	ActorGroups []string
+	// Door is the door that admitted a command here and checked its sender's
+	// grants: doorClient or doorHuman. It is stored with the command so the grants
+	// can be checked again when the command is forwarded (ForwardRefusal).
+	Door string
 }
+
+// Doors whose grant check ForwardRefusal repeats.
+const (
+	doorClient = "client"
+	doorHuman  = "human"
+)
 
 func attributionForEntry(entry *uns.Entry) Attribution {
 	if entry == nil {
@@ -167,6 +177,10 @@ type Engine struct {
 
 	// ledger remembers each command's sender and ack by correlation id.
 	ledger *commandLedger
+
+	// answered remembers which queued commands this node answered itself
+	// (queued.go), so a repeated refusal is not written twice.
+	answered answeredHere
 
 	// exec executes commands addressed to this node. The engine owns the mechanism,
 	// the executor what a verb means. Nil until SetExecutor, and then nothing
@@ -514,6 +528,7 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 				"execute", &p, "client %s: no cmd grant covers %s", identity, topic)
 		}
 		attribution := actorFor(entry)
+		attribution.Door = doorClient
 		// A local service attesting a person is judged as that person, resolved against
 		// this node's _Group definitions: never with the service's own configure grant,
 		// never wider than the person. A service publishing as itself is judged as
@@ -546,6 +561,7 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 			e.ledger.forget(id)
 			return res, err
 		}
+		e.noteQueued(p, payload, attribution)
 		res.Command = e.maybeExec(p, payload, attribution, actor) // return the synchronous outcome to local API callers
 		return res, nil
 	}
@@ -687,6 +703,13 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 		WrittenBy: entry.ULID, ActorID: entry.ULID,
 		ActorLabel: actorLabel, ActorKind: "human",
 		ActorGroups: append([]string(nil), entry.Groups...),
+		Door:        doorHuman,
+	}
+	// Forwarding checks the person again from the groups alone, so the door is
+	// recorded only when the groups alone authorize the command. Grants carried
+	// in the token itself cannot change during its life and are not checked again.
+	if attested := e.actorForAttested(attribution); attested == nil || !uns.Authorize(e.Scope(), attested, uns.ActCmd, topic) {
+		attribution.Door = ""
 	}
 	id, repeat, err := e.admitCommand(p, payload, attribution.ActorID)
 	if err != nil {
@@ -700,6 +723,7 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 		e.ledger.forget(id)
 		return res, err
 	}
+	e.noteQueued(p, payload, attribution)
 	res.Command = e.maybeExec(p, payload, attribution, entry) // commands addressed to this node execute here
 	return res, nil
 }
@@ -779,6 +803,9 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 	if err != nil {
 		e.ledger.forget(id)
 		return res, err
+	}
+	if uns.IsCommand(class) {
+		e.noteQueued(p, payload, attribution)
 	}
 	res.Command = e.maybeExec(p, payload, attribution, nil) // the admin door presents a token, not an identity
 	return res, nil
@@ -1005,14 +1032,19 @@ func (e *Engine) IngestRefresh(topic string, payload []byte, ifKVOffset uint64) 
 // coordinates, with the parent's original timestamp so a hop does not extend its
 // expiry. persistTS mirrors it onto the bus.
 func (e *Engine) IngestDownlink(topic string, payload []byte, ts int64) (Result, error) {
-	return e.IngestDownlinkAttributed(topic, payload, ts, Attribution{})
+	return e.IngestDownlinkAttributed(topic, payload, ts, Attribution{}, nil)
 }
 
 // IngestDownlinkAttributed is IngestDownlink with the authorship stamped at the
 // command's origin. A deliberate refusal is a *RejectError and anything else is a
 // store failure; repl.RunDownlink uses that to decide whether it may ack past the
 // record.
-func (e *Engine) IngestDownlinkAttributed(topic string, payload []byte, ts int64, attribution Attribution) (Result, error) {
+//
+// at, when set, is the downlink cursor moved past this record in the same write
+// as the record itself. A record the cursor already passed was stored before (the
+// parent handed it again after a crash or a lost response): it is not stored,
+// forwarded or executed a second time, and the Result says Duplicate.
+func (e *Engine) IngestDownlinkAttributed(topic string, payload []byte, ts int64, attribution Attribution, at *store.CursorAdvance) (Result, error) {
 	p, err := uns.Parse(topic)
 	if err != nil {
 		return e.reject(metrics.ReasonGrammar, "%w", err)
@@ -1027,8 +1059,8 @@ func (e *Engine) IngestDownlinkAttributed(topic string, payload []byte, ts int64
 		return e.reject(metrics.ReasonDraining,
 			"downlink: %s is draining, no new commands admitted", p.Path)
 	}
-	res, err := e.persistTSAttributed(class, p, topic, payload, ts, attribution)
-	if err == nil {
+	res, err := e.persistRecord(class, p, topic, payload, ts, attribution, at)
+	if err == nil && res.Persisted {
 		e.maybeExec(p, payload, attribution, e.actorForAttested(attribution)) // the target executes downlinked commands
 	}
 	return res, err
@@ -1185,12 +1217,20 @@ func (e *Engine) persistAttributed(class uns.Class, p uns.Parsed, topic string, 
 // that is not durable. This is the one place that guarantees every appended
 // record is also published on the node's bus.
 func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string, payload []byte, ts int64, attribution Attribution) (Result, error) {
+	return e.persistRecord(class, p, topic, payload, ts, attribution, nil)
+}
+
+// persistRecord is persistTSAttributed with an optional cursor moved in the same
+// batch (store.AppendAdvancing). When that cursor already passed the record,
+// nothing is written or delivered and the Result says Duplicate.
+func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payload []byte, ts int64,
+	attribution Attribution, at *store.CursorAdvance) (Result, error) {
 	streamName := uns.StreamFor(class)
 	rec := store.Record{
 		Topic: topic, Payload: payload, TS: ts,
 		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-		ActorGroups: attribution.ActorGroups,
+		ActorGroups: attribution.ActorGroups, Door: attribution.Door,
 	}
 	if uns.IsState(class) {
 		rec.KVPath, rec.KVNode = p.Path, p.NodeID
@@ -1199,7 +1239,19 @@ func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string
 		// empty delivery below makes mochi clear the retained message.
 		rec.Delete = len(payload) == 0
 	}
-	first, _, err := e.store.Append(streamName, []store.Record{rec})
+	var first uint64
+	var err error
+	if at != nil {
+		var applied bool
+		first, _, applied, err = e.store.AppendAdvancing(streamName, []store.Record{rec}, *at)
+		if err == nil && !applied {
+			e.log.Info("record already stored: not stored, forwarded or executed again",
+				"topic", topic, "cursor", at.Name, "position", at.To-1)
+			return Result{Duplicate: true}, nil
+		}
+	} else {
+		first, _, err = e.store.Append(streamName, []store.Record{rec})
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrRecordTooLarge) {
 			e.metrics.RecordRejected("too_large")
@@ -1209,7 +1261,8 @@ func (e *Engine) persistTSAttributed(class uns.Class, p uns.Parsed, topic string
 	e.metrics.IngestRecord(streamName)
 	e.log.Debug("ingest", "stream", streamName, "offset", first, "topic", topic)
 	if uns.IsAck(class) {
-		if id := correlationID(payload); id != "" {
+		// A 202 progress ack is not the answer a repeated command gets.
+		if id := correlationID(payload); id != "" && !isProgressAck(payload) {
 			e.ledger.acked(id, topic, payload)
 		}
 	}

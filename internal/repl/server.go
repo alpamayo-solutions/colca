@@ -439,11 +439,18 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	// learns its position in one round trip and a fresh node does not keep refusing
 	// people until the first idle poll ends.
 	if r.URL.Query().Get("hello") == "1" {
+		head := s.eng.Store().NextOffset("commands")
+		// A child with no cursor here yet starts at head: seat its delivery floor
+		// there, so retention keeps what is queued for it from now on and its first
+		// poll can confirm what it received. An existing cursor is left alone.
+		if _, err := s.eng.Store().CursorSetIfAbsent(uns.DownlinkCursorPrefix+child.ULID, "commands", head); err != nil {
+			s.log.Warn("downlink hello: delivery floor not seated", "child", child.ULID, "err", err)
+		}
 		resp := map[string]any{
 			"records": []wireRec{}, "next": after,
 			// Where a child with no cursor for this parent starts: commands issued before
 			// it attached were meant for whatever held the mount then.
-			"head": s.eng.Store().NextOffset("commands"),
+			"head": head,
 		}
 		if a, ok := s.ancestryFor(mount); ok {
 			resp["ancestry"] = a
@@ -458,6 +465,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	// parent's commands prune would not see its slowest child. CursorAck is
 	// forward-only, writes nothing for an idle re-poll and stamps the last advance
 	// for the staleness window.
+	s.noteForwarded(child.ULID, mount, after)
 	s.eng.Store().CursorAck(uns.DownlinkCursorPrefix+child.ULID, "commands", after)
 	// The child's definitions position is a separate cursor, so neither stream
 	// holds back the other's floor.
@@ -507,6 +515,12 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		if len(recs) > 0 || hasGap || hasDefs || time.Now().After(deadline) {
 			out := make([]wireRec, 0, len(recs))
 			for _, rec := range recs {
+				// The sender's grants are checked again as the command leaves this
+				// node: one admitted days ago may no longer be authorized.
+				if refusal := s.eng.ForwardRefusal(rec); refusal != "" {
+					s.eng.RefuseForwarding(rec, refusal)
+					continue
+				}
 				stripped, ok := uns.MountStrip(rec.Topic, mount)
 				if !ok {
 					continue
@@ -568,6 +582,49 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+}
+
+// noteForwarded writes the "forwarded" progress ack for every command the child
+// confirmed receiving since its last poll: the records between its downlink
+// cursor here and after, the position it asks from now. The child stores a
+// command and its own cursor in one write before it asks past it, so the
+// position is a receipt. The ack is written before the cursor moves: a crash in
+// between repeats a progress ack rather than losing one. Nothing is scanned
+// before the child's first confirmed poll, or when the child asks for nothing
+// new.
+// maxDownlinkScan bounds one read of noteForwarded; the loop continues past it.
+const maxDownlinkScan = 4096
+
+func (s *Server) noteForwarded(child, mount string, after uint64) {
+	st := s.eng.Store()
+	from, known := st.CursorLookup(uns.DownlinkCursorPrefix+child, "commands")
+	if !known || after <= from {
+		return
+	}
+	if lwm := st.LWM("commands"); lwm > from {
+		from = lwm
+	}
+	wants := func(r store.StoredRecord) bool {
+		p, err := uns.Parse(r.Topic)
+		return err == nil && uns.IsCommand(s.eng.ClassOf(p.Contract)) && uns.UnderMount(p.Path, mount) &&
+			uns.CommandWantsProgress(r.Payload)
+	}
+	for from < after {
+		recs, next, err := st.ReadRecordsBounded(context.Background(), "commands", from, maxDownlinkMax, int(min(after-from, uint64(maxDownlinkScan))), wants)
+		if err != nil {
+			s.log.Warn("downlink: progress acks for forwarded commands not written", "child", child, "err", err)
+			return
+		}
+		for _, r := range recs {
+			if r.Offset < after {
+				s.eng.NoteForwarded(r, child)
+			}
+		}
+		if next <= from {
+			return
+		}
+		from = next
 	}
 }
 
