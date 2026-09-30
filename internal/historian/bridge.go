@@ -32,6 +32,12 @@ type Store interface {
 	Apply(ctx context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error)
 }
 
+// SignalFilter decides, per sample, whether its signal is historised.
+type SignalFilter interface {
+	Wait(ctx context.Context) error
+	Logged(signalID string) bool
+}
+
 // Fetcher is the half of the door the bridge uses.
 type Fetcher interface {
 	Fetch(ctx context.Context, stream, cursor string, limit int) (door.Page, error)
@@ -59,6 +65,15 @@ type Bridge struct {
 	// not, why. It is called on every pass; the receiver decides what changed.
 	Health func(ok bool, detail string)
 
+	// Signals, when set, says which signals are historised. A pass waits until
+	// it has loaded, and samples of a signal whose definition says
+	// "is_logged": false are consumed without a row.
+	Signals SignalFilter
+
+	// notLogged counts samples left out because their signal is not
+	// historised. Atomic because /metrics reads it from another goroutine.
+	notLogged atomic.Int64
+
 	// gaps counts pruned ranges. The bridge keeps going: the records are gone and
 	// stopping would only add a blackout. Atomic because /metrics reads it from
 	// another goroutine.
@@ -72,6 +87,10 @@ type Bridge struct {
 // Gaps returns how many pruned ranges could not be historised. Safe for
 // concurrent use.
 func (b *Bridge) Gaps() int64 { return b.gaps.Load() }
+
+// NotLogged returns how many samples were consumed without a row because their
+// signal says is_logged false. Safe for concurrent use.
+func (b *Bridge) NotLogged() int64 { return b.notLogged.Load() }
 
 // Rejected returns how many rows the schema refused for reason. Safe for
 // concurrent use.
@@ -114,6 +133,11 @@ func (b *Bridge) Once(ctx context.Context) (int, error) {
 // decides whether the stream has more waiting.
 func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 	b.Drained = false
+	if b.Signals != nil {
+		if err := b.Signals.Wait(ctx); err != nil {
+			return 0, 0, err
+		}
+	}
 	page, err := b.Door.Fetch(ctx, "metrics", Cursor, b.max())
 	if err != nil {
 		return 0, 0, err
@@ -177,6 +201,12 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 			// vanish either.
 			b.logger().Warn("skipping an unhistorisable record",
 				"offset", record.Offset, "topic", record.Topic, "err", err)
+			continue
+		}
+		// The flag in force when the sample is ingested decides. The record is
+		// still consumed: the marker and the ack move past it with the page.
+		if b.Signals != nil && !b.Signals.Logged(row.SignalID) {
+			b.notLogged.Add(1)
 			continue
 		}
 		row.Offset = record.Offset
