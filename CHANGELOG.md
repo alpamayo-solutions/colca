@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/alpamayo-solutions/colca/compare/v0.22.2...v0.23.0) (2026-09-30)
+
+
+### Features
+
+* **uns:** compare and set a single metadata key through _CmdEdit ([#123](https://github.com/alpamayo-solutions/colca/issues/123)) ([bfcc115](https://github.com/alpamayo-solutions/colca/commit/bfcc1155fb9b5d1aa75c81c81913376610ca0aa0))
+
 ## [0.22.2](https://github.com/alpamayo-solutions/colca/compare/v0.22.1...v0.22.2) (2026-09-30)
 
 
