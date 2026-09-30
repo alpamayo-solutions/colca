@@ -91,6 +91,14 @@ scoped by the grant's element exactly as `configure` is:
 operator's own verified identity as `actor_id`/`actor_label`/`actor_kind`, so
 `/kv` can show who set it (see [http-api.md](http-api.md)).
 
+An external reference is stored at the reserved path
+`_colca/external-references/<id>`, outside every element, so `_CmdEdit`
+authorizes it at the entity it belongs to: `cmd:<element>/#:configure` covers
+adding, changing and removing the references of the entities under that
+element, and deleting such an entity together with its references. A changed
+or removed reference also counts at the entity it belongs to now, so it cannot
+be moved away from an entity outside the grant.
+
 `#` in place of an element means the whole node. A grant on an element the node
 has never heard of covers nothing, and a node that has never reached its parent
 cannot resolve elements above itself, so scoped grants fail closed there.

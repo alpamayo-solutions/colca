@@ -133,6 +133,10 @@ func touchedByRecords(
 			continue
 		}
 		key, known := byTopic[record.Topic]
+		if p.Contract == "_ExternalReference" {
+			touched = append(touched, referenceSources(record, entities, key, known, anchor)...)
+			continue
+		}
 		if !known {
 			key = anchor
 			if id := recordID(record.Payload); id != "" {
@@ -142,6 +146,48 @@ func touchedByRecords(
 			}
 		}
 		touched = append(touched, editTouched{path: p.Path, key: key})
+	}
+	return touched
+}
+
+// referenceSources positions an external-reference record at the entity it
+// belongs to. Its own topic sits at the reserved _colca/external-references
+// path, which no element grant covers, so authorizing it there would refuse
+// every element-scoped person. A changed or removed reference counts at its
+// current source as well, so a reference cannot be moved away from an entity
+// outside the person's grants. A source that is not in the snapshot resolves
+// to the node root, which only a realm-wide grant covers.
+func referenceSources(
+	record StateRecord, entities map[string]editSnapshot, heldKey string, held bool, anchor string,
+) []editTouched {
+	var touched []editTouched
+	seen := map[string]bool{}
+	add := func(payload map[string]json.RawMessage) {
+		source, _ := rawString(payload["source_entity"])
+		id, _ := rawString(payload["source_object_id"])
+		kind := editKindOf("_" + source)
+		if kind == "" || id == "" {
+			touched = append(touched, editTouched{path: "", key: anchor})
+			return
+		}
+		key := entityVersionKey(kind, id)
+		if !seen[key] {
+			seen[key] = true
+			touched = append(touched, touchedEntity(entities, kind, id))
+		}
+	}
+	if held {
+		add(entities[heldKey].Payload)
+	}
+	if len(record.Payload) > 0 {
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(record.Payload, &payload); err != nil {
+			return append(touched, editTouched{path: "", key: anchor})
+		}
+		add(payload)
+	}
+	if len(touched) == 0 {
+		touched = append(touched, editTouched{path: "", key: anchor})
 	}
 	return touched
 }
