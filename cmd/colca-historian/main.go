@@ -1,5 +1,7 @@
 // Command colca-historian follows a node's metrics stream with a cursor and
-// writes measurements into the TimescaleDB table historian_metric.
+// writes measurements into the TimescaleDB table historian_metric. Samples of a
+// signal whose _Signal definition says "is_logged": false are consumed without
+// a row.
 //
 // It runs beside colcad, never inside it: history has its own database, failure
 // modes and restarts, and a node keeps ingesting whether or not it runs.
@@ -116,22 +118,51 @@ func run() int {
 	// The node says when the stream grew; nothing is read on a timer. The
 	// first hint of every watch connection names the stream, so a reconnect
 	// drains whatever arrived while it was away.
+	// The same watch wakes the signal follower when the entities stream grows,
+	// which is where a signal's is_logged flag changes.
 	watcher := &door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService}
-	var changes door.Signal
+	var changes, signalChanges door.Signal
 	link := &watchLink{}
-	go watcher.WatchForever(ctx, []string{"metrics"}, 100*time.Millisecond, time.Second,
-		func(door.Hint) { link.up(); changes.Notify() },
-		func(err error) { link.down(time.Now()); log.Warn("watching metrics failed, reconnecting", "err", err) })
+	go watcher.WatchForever(ctx, []string{"metrics", "entities"}, 100*time.Millisecond, time.Second,
+		func(hint door.Hint) {
+			link.up()
+			for _, stream := range hint.Streams {
+				switch stream {
+				case "metrics":
+					changes.Notify()
+				case "entities":
+					signalChanges.Notify()
+				}
+			}
+		},
+		func(err error) {
+			link.down(time.Now())
+			log.Warn("watching the metrics and entities streams failed, reconnecting", "err", err)
+		})
+
+	// Samples of a signal whose definition says is_logged false are consumed
+	// without a row. The bridge waits until the definitions are loaded.
+	signals := &historian.Signals{
+		Door:    &door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService},
+		Log:     log,
+		Changes: signalChanges.Changes,
+	}
+	go func() {
+		if err := signals.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("signal follower stopped", "err", err)
+		}
+	}()
 
 	bridge := &historian.Bridge{
 		Door: &door.Client{
 			BaseURL: cfg.colcaURL,
 			Service: cfg.colcaService,
 		},
-		Store:  sink,
-		Strict: deps != nil,
-		Log:    log,
-		Max:    cfg.fetchMax,
+		Store:   sink,
+		Strict:  deps != nil,
+		Log:     log,
+		Max:     cfg.fetchMax,
+		Signals: signals,
 	}
 
 	bridge.BatchInterval = time.Duration(intEnv("BATCH_INTERVAL_MS", 100)) * time.Millisecond
@@ -190,7 +221,7 @@ func run() int {
 		}
 	}
 
-	go serveObservability(cfg.httpAddr, bridge, announcer, link, log)
+	go serveObservability(cfg.httpAddr, bridge, signals, announcer, link, log)
 
 	bridge.Health = announcer.Report
 	announced := make(chan struct{})
@@ -310,8 +341,8 @@ func (l *watchLink) downFor(now time.Time) time.Duration {
 	return now.Sub(l.downSince)
 }
 
-func serveObservability(addr string, bridge *historian.Bridge, announcer *historian.Announcer, link *watchLink,
-	log *slog.Logger) {
+func serveObservability(addr string, bridge *historian.Bridge, signals *historian.Signals,
+	announcer *historian.Announcer, link *watchLink, log *slog.Logger) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -319,6 +350,10 @@ func serveObservability(addr string, bridge *historian.Bridge, announcer *histor
 		// The node's cursor watchdog says when records wait unread on this cursor.
 		if lag := announcer.CursorLag(); lag != "" {
 			unhealthy["cursor_lag"] = lag
+		}
+		// Without current definitions a flag change would go unnoticed.
+		if problem := signals.Problem(); problem != "" {
+			unhealthy["signal_definitions"] = problem
 		}
 		if down := link.downFor(time.Now()); down > watchGrace {
 			unhealthy["watch_down_s"] = int(down.Seconds())
@@ -343,6 +378,14 @@ func serveObservability(addr string, bridge *historian.Bridge, announcer *histor
 		for _, reason := range historian.PoisonReasons() {
 			_, _ = fmt.Fprintf(w, "colca_historian_rows_rejected_total{reason=%q} %d\n", reason, bridge.Rejected(reason))
 		}
+		_, _ = fmt.Fprintf(w,
+			"# HELP colca_historian_samples_not_logged_total Samples consumed without a row because their signal's definition says is_logged false.\n"+
+				"# TYPE colca_historian_samples_not_logged_total counter\n"+
+				"colca_historian_samples_not_logged_total %d\n", bridge.NotLogged())
+		_, _ = fmt.Fprintf(w,
+			"# HELP colca_historian_signals_not_logged Signals whose current definition says is_logged false.\n"+
+				"# TYPE colca_historian_signals_not_logged gauge\n"+
+				"colca_historian_signals_not_logged %d\n", signals.NotLogged())
 	})
 	server := httpserver.NewAt(addr, mux)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

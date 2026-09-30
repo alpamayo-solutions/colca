@@ -173,6 +173,28 @@ silently discarding data. Upgrade the contracts package and consumers together;
 older Python signal decoders do not recognize the new field. Downgrading a source
 to a binary that does not understand its persisted upload decisions is unsupported.
 
+## Signals the historian does not store
+
+`colca-historian` writes no rows for samples of a signal whose `_Signal`
+definition says `"is_logged": false`. A signal without the field, a sample whose
+signal has no definition on the node, and an undecodable definition are all
+stored: leaving history out needs an explicit `false`.
+
+The historian loads the `_Signal` records once from `/kv` and then follows the
+entities stream with its own cursor, `c/historian/signals`, woken by `/watch`.
+The flag in force when a sample is ingested decides; a later change of the
+flag does not rewrite or backfill history. Skipped samples are consumed: the
+metrics marker and cursor move past them like past written rows. On startup no
+sample is read before the definitions are loaded.
+
+`is_logged` only affects this historian. It does not change what the node
+stores, replicates (that is `replication_policy`, above) or delivers over MQTT.
+
+`/metrics` reports `colca_historian_samples_not_logged_total` (samples consumed
+without a row) and `colca_historian_signals_not_logged` (signals currently
+marked). `/healthz` fails with `signal_definitions` while the definitions
+cannot be loaded or followed.
+
 ## Permanent standalone handover
 
 `standalone: true` is a permanent trust transition, distinct from an offline
