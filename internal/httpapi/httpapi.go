@@ -55,10 +55,13 @@ func rawPayload(payload []byte) json.RawMessage {
 // maxLogoutBody bounds a back-channel logout request: one signed JWT in a form.
 const maxLogoutBody = 64 << 10
 
-// defaultMax / maxMax bound how many records one /fetch may return.
+// defaultMax / maxMax bound how many records one /fetch may return;
+// fetchScanBudget bounds how many it may scan to find them, so a filter that
+// matches nothing costs one short page instead of a walk to the head.
 const (
-	defaultMax = 100
-	maxMax     = 1000
+	defaultMax      = 100
+	maxMax          = 1000
+	fetchScanBudget = 20000
 )
 
 // TLSConfig builds the API listener's TLS config. Client certificates are
@@ -657,6 +660,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 		}
 		filter := func(record store.StoredRecord) bool {
+			// A record stored with its signal answers the signal filter without a
+			// parse or a payload decode, so the records it skips cost little.
+			if hasSignalFilter && record.SignalID != "" {
+				if _, wanted := signalSet[record.SignalID]; !wanted {
+					return false
+				}
+			}
 			if stream == uns.StreamFor(uns.ClassCmd) && e.CommandRetired(record) {
 				return false
 			}
@@ -682,7 +692,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			if !c.admin && !uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic) {
 				return false
 			}
-			if !hasSignalFilter {
+			if !hasSignalFilter || record.SignalID != "" {
 				return true
 			}
 			if parseErr != nil || parsed.Contract == "" {
@@ -734,7 +744,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if q.Get("tail") == "" {
 			e.CursorFilters().Remember(cursor, stream, filter)
 		}
-		recs, next, err := e.Store().ReadRecords(stream, from, limit, filter)
+		recs, next, err := e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, filter)
+		if r.Context().Err() != nil {
+			return // the caller is gone; nobody reads the page
+		}
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
