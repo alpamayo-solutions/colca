@@ -29,7 +29,7 @@ func (w *EditExec) compose(
 	case "delete":
 		return w.composeDelete(intent, expected, entities)
 	case "metadata":
-		return composeMetadata(intent, entities)
+		return w.composeMetadata(intent, entities)
 	case "placement":
 		return w.composePlacement(intent, expected, entities)
 	case "binding":

@@ -294,7 +294,7 @@ func (w *EditExec) ExecuteWithWrites(
 	if intent.Type == "metadata" {
 		// Authorized before the compare, so a refused caller cannot probe a
 		// key's value through stale_metadata.
-		if code, message, result := w.authorizeTouched(ctx, metadataPositions(intent, entities)); code != 0 {
+		if code, message, result := w.authorizeTouched(ctx, w.metadataPositions(intent, entities)); code != 0 {
 			return w.remember(envelope.OperationID, digest, code, message, result, nil)
 		}
 	}

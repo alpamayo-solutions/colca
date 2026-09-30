@@ -256,7 +256,7 @@ func (w *EditExec) planFor(
 		// its records: one for a create or update, two for a move.
 		return w.resourcePositions(intent, records)
 	case "metadata":
-		return metadataPositions(intent, entities)
+		return w.metadataPositions(intent, entities)
 	case "update":
 		anchor := entityVersionKey(intent.Entity.Kind, intent.Entity.ID)
 		touched := touchedByRecords(records, entities, anchor)

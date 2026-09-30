@@ -287,3 +287,34 @@ func TestMetadataIsAuthorizedBeforeTheCompare(t *testing.T) {
 		t.Fatalf("param on an element = %d %q", code, message)
 	}
 }
+
+// A resource is addressed by id and authorized at the element it sits on, as
+// the resource intent is; its other fields stay as they are.
+func TestMetadataOnAResourceIsAuthorizedAtItsElement(t *testing.T) {
+	f, exec, _ := twoLines(t)
+	const topic = "colca/v1/_Resource/n-edge1/line1/res-1"
+	seedEditEntity(t, f, "_Resource", "line1/res-1", map[string]any{
+		"id": "res-1", "system_element_id": "el-line1", "filename": "manual.pdf",
+		"content_type": "application/pdf", "sha256": strings.Repeat("a", 64), "size_bytes": 10,
+	})
+	set := func(op string) []byte {
+		return editBody(t, op, map[string]uint64{}, metadataIntent(
+			"resource", "res-1", "meta-doc-kind", map[string]any{"absent": true}, map[string]any{"value": "manual"},
+		))
+	}
+	code, message, _, _ := exec.ExecuteWithWrites(scopedTo("el-line2"), "_CmdEdit", "apply", set("op-other-line"))
+	if code != 409 || message != "entity_not_found: resource:res-1" {
+		t.Fatalf("outside the grant = %d %q", code, message)
+	}
+	code, message, _, writes := exec.ExecuteWithWrites(scopedTo("el-line1"), "_CmdEdit", "apply", set("op-own-line"))
+	if code != 200 || len(writes) != 1 {
+		t.Fatalf("inside the grant = %d %q", code, message)
+	}
+	if got := metadataOf(t, f, topic)["meta-doc-kind"]; got != "manual" {
+		t.Fatalf("resource metadata = %v", got)
+	}
+	raw, _ := f.KVGet(topic)
+	if _, err := validateResourcePayload(raw); err != nil || !strings.Contains(string(raw), "manual.pdf") {
+		t.Fatalf("resource record = %s (%v)", raw, err)
+	}
+}

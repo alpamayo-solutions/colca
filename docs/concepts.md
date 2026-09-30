@@ -138,6 +138,8 @@ compares and sets a single key instead:
 }
 ```
 
+- `entity.kind` is `colca-node`, `system-element`, `signal`, `constant` or
+  `resource`.
 - `expect` is `{"absent": true}` or `{"value": <json>}`: what the caller
   believes the key holds now. Values compare as decoded JSON, so key order and
   number spelling (`1` or `1.0`) do not matter.
@@ -151,7 +153,8 @@ compares and sets a single key instead:
 - Setting a key to the value it holds, or removing an absent key, is `200
   metadata_unchanged: <key>` with nothing written.
 - It is authorized like an `update` of the entity: `configure` over its
-  position, or `param` on a constant. A caller outside its grants gets
+  position (for a resource, the element it sits on), or `param` on a
+  constant. A caller outside its grants gets
   `entity_not_found`, whatever its `expect`.
 - It is idempotent by `operation_id` like every edit, and the written record
   replicates like any other.

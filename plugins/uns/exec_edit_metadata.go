@@ -3,7 +3,8 @@
 // different keys on one record refuse or overwrite each other. The metadata
 // intent compares and sets one key instead:
 //
-//	{"type": "metadata", "entity": {"kind": "colca-node", "id": "…"},
+//	{"type": "metadata", "entity": {"kind": "colca-node" | "system-element" |
+//	                                "signal" | "constant" | "resource", "id": "…"},
 //	 "key": "<metadata definition id>",
 //	 "expect": {"absent": true} | {"value": <json>},
 //	 "value": <json> | "remove": true}
@@ -19,7 +20,9 @@ package uns
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"strings"
 )
 
 // editMetadataExpect is what the caller believes the key holds: absent, or a
@@ -30,15 +33,15 @@ type editMetadataExpect struct {
 	Value  json.RawMessage `json:"value"`
 }
 
-func composeMetadata(
+func (w *EditExec) composeMetadata(
 	intent editIntent,
 	entities map[string]editSnapshot,
 ) (int, string, string, []StateRecord) {
-	key, err := validateEntityKeyForMetadata(intent)
+	key, err := validateMetadataIntent(intent)
 	if err != "" {
 		return 422, "metadata: " + err, "invalid", nil
 	}
-	current, ok := entities[key]
+	current, ok := w.metadataTarget(intent, entities)
 	if !ok {
 		return 409, "metadata: entity_not_found: " + key, "conflict", nil
 	}
@@ -78,15 +81,41 @@ func composeMetadata(
 		[]StateRecord{{Topic: current.Record.Topic, Payload: payload}}
 }
 
-// validateEntityKeyForMetadata checks the intent's shape and returns the
-// entity's version key, or why the intent is malformed.
-func validateEntityKeyForMetadata(intent editIntent) (string, string) {
-	_, key, err := validateEntityKey(intent.Entity)
-	if err != nil {
-		return "", err.Error()
+// metadataTarget is the record the intent names. Entities come from the
+// snapshot; a resource is found by id among this node's _Resource records,
+// since the resource intent addresses records by path instead.
+func (w *EditExec) metadataTarget(
+	intent editIntent, entities map[string]editSnapshot,
+) (editSnapshot, bool) {
+	key := entityVersionKey(intent.Entity.Kind, intent.Entity.ID)
+	if intent.Entity.Kind != "resource" {
+		entity, ok := entities[key]
+		return entity, ok
 	}
-	if intent.Entity.Kind == "external-reference" {
+	for _, record := range w.store.KVScan(ResourceContract, w.store.NodeID()) {
+		if id, ok := ResourceID(record.Payload); !ok || id != intent.Entity.ID {
+			continue
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(record.Payload, &payload); err != nil {
+			return editSnapshot{}, false
+		}
+		return editSnapshot{Key: key, Kind: "resource", Record: record, Payload: payload}, true
+	}
+	return editSnapshot{}, false
+}
+
+// validateMetadataIntent checks the intent's shape and returns the entity's
+// version key, or why the intent is malformed.
+func validateMetadataIntent(intent editIntent) (string, string) {
+	entity := intent.Entity
+	switch {
+	case entity.Kind == "" || entity.ID == "":
+		return "", "entity kind and id are required"
+	case entity.Kind == "external-reference":
 		return "", "external references carry no metadata"
+	case entity.Kind != "resource" && editContracts[entity.Kind] == "":
+		return "", fmt.Sprintf("unknown entity kind %q", entity.Kind)
 	}
 	if intent.Key == "" {
 		return "", "key is required"
@@ -105,16 +134,28 @@ func validateEntityKeyForMetadata(intent editIntent) (string, string) {
 	if setsValue && isJSONNull(intent.Value) {
 		return "", "value must not be null: remove the key instead"
 	}
-	return key, ""
+	return entityVersionKey(entity.Kind, entity.ID), ""
 }
 
 // metadataPositions is where a metadata intent writes: the entity's own
-// position. A param grant covers it on a constant, as it covers an update of
-// a constant's metadata.
-func metadataPositions(intent editIntent, entities map[string]editSnapshot) []editTouched {
-	touched := touchedEntity(entities, intent.Entity.Kind, intent.Entity.ID)
-	touched.param = intent.Entity.Kind == "constant"
-	return []editTouched{touched}
+// position, or for a resource the element it sits on, as for the resource
+// intent. A param grant covers it on a constant, as it covers an update of a
+// constant's metadata.
+func (w *EditExec) metadataPositions(intent editIntent, entities map[string]editSnapshot) []editTouched {
+	key := entityVersionKey(intent.Entity.Kind, intent.Entity.ID)
+	target, ok := w.metadataTarget(intent, entities)
+	if !ok {
+		return []editTouched{{path: "", key: key}}
+	}
+	path := target.Record.Path
+	if intent.Entity.Kind == "resource" {
+		if i := strings.LastIndex(path, "/"); i >= 0 {
+			path = path[:i]
+		} else {
+			path = ""
+		}
+	}
+	return []editTouched{{path: path, key: key, param: intent.Entity.Kind == "constant"}}
 }
 
 func jsonValuesEqual(left, right json.RawMessage) bool {
