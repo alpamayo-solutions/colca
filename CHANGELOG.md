@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.1](https://github.com/alpamayo-solutions/colca/compare/v0.24.0...v0.24.1) (2026-09-30)
+
+
+### Fixes
+
+* **uns:** authorize edit external references at their source entity ([#130](https://github.com/alpamayo-solutions/colca/issues/130)) ([82a3309](https://github.com/alpamayo-solutions/colca/commit/82a33097b7940f586a0b5df1e85dc5306781f164))
+
 ## [0.24.0](https://github.com/alpamayo-solutions/colca/compare/v0.23.1...v0.24.0) (2026-09-30)
 
 
