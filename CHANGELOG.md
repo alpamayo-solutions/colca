@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/alpamayo-solutions/colca/compare/v0.23.0...v0.23.1) (2026-09-30)
+
+
+### Fixes
+
+* **fetch:** bound a filtered scan and skip the payload decode ([#127](https://github.com/alpamayo-solutions/colca/issues/127)) ([8a3c9ab](https://github.com/alpamayo-solutions/colca/commit/8a3c9ab6be2bdf3177d7db8f2a0575c453ba8823)), closes [#125](https://github.com/alpamayo-solutions/colca/issues/125)
+
 ## [0.23.0](https://github.com/alpamayo-solutions/colca/compare/v0.22.2...v0.23.0) (2026-09-30)
 
 
