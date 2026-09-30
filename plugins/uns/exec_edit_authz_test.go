@@ -2,6 +2,7 @@ package uns
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -358,5 +359,101 @@ func TestAnnotationSourceMatchesTheGoldenVectors(t *testing.T) {
 	}
 	if checked < 2 {
 		t.Fatalf("vectors pin %d executor-side kinds, want person and service_account", checked)
+	}
+}
+
+// External references sit at a reserved path (_colca/external-references/…)
+// no element grant covers, so they are authorized where the entity that owns
+// them sits: a person with configure on line1 adds, changes and removes the
+// references of line1's entities, and deleting such an entity takes its
+// references with it. Line2's references stay refused, naming line2's entity.
+func TestEditExternalReferencesAreAuthorizedAtTheirSourceEntity(t *testing.T) {
+	f, exec, versions := twoLines(t)
+	anna := scopedTo("el-line1")
+	seedEditEntity(t, f, "_ExternalSystem", "erp", map[string]any{
+		"id": "ext-erp", "key": "erp", "name": "ERP", "system_type": "erp",
+	})
+	reference := func(id, source, row string) map[string]any {
+		return map[string]any{
+			"client_id": "c-" + id, "id": id,
+			"source_entity": "SystemElement", "source_object_id": source,
+			"relationship_type": "erp:customer", "external_system_id": "ext-erp",
+			"external_table": "res.partner", "external_column": "id", "external_row_id": row,
+		}
+	}
+	refs := func(items ...map[string]any) []map[string]any { return append([]map[string]any{}, items...) }
+	updateRefs := func(op, element string, expected map[string]uint64, items []map[string]any) []byte {
+		expected["system-element:"+element] = versions["system-element:"+element]
+		return editBody(t, op, expected, map[string]any{
+			"type": "update", "entity": map[string]any{"kind": "system-element", "id": element},
+			"external_references": items,
+		})
+	}
+	topic := func(id string) string { return "colca/v1/_ExternalReference/n-edge1/_colca/external-references/" + id }
+
+	// Add.
+	code, message, _, writes := exec.ExecuteWithWrites(anna, "_CmdEdit", "apply",
+		updateRefs("op-add", "el-line1", map[string]uint64{}, refs(reference("ref-a", "el-line1", "7"))))
+	if code != 200 || len(writes) != 1 {
+		t.Fatalf("adding a reference inside the grant = %d %q writes=%d", code, message, len(writes))
+	}
+	if _, ok := f.KVGet(topic("ref-a")); !ok {
+		t.Fatal("added reference is not retained")
+	}
+
+	// Change: the same reference, another row.
+	changed := reference("ref-a", "el-line1", "8")
+	changed["version"] = fmt.Sprint(writes[0].Offset)
+	code, message, _, writes = exec.ExecuteWithWrites(anna, "_CmdEdit", "apply",
+		updateRefs("op-change", "el-line1", map[string]uint64{"external-reference:ref-a": writes[0].Offset}, refs(changed)))
+	if code != 200 || len(writes) != 1 {
+		t.Fatalf("changing a reference inside the grant = %d %q writes=%d", code, message, len(writes))
+	}
+
+	// Remove: an empty desired set tombstones it.
+	code, message, _, _ = exec.ExecuteWithWrites(anna, "_CmdEdit", "apply",
+		updateRefs("op-remove", "el-line1", map[string]uint64{"external-reference:ref-a": writes[0].Offset}, refs()))
+	if code != 200 {
+		t.Fatalf("removing a reference inside the grant = %d %q", code, message)
+	}
+	if _, ok := f.KVGet(topic("ref-a")); ok {
+		t.Fatal("removed reference is still retained")
+	}
+
+	// Outside the grant: refused on the owning entity, nothing written.
+	before := f.offset
+	code, message, _, _ = exec.ExecuteWithWrites(anna, "_CmdEdit", "apply",
+		updateRefs("op-out", "el-line2", map[string]uint64{}, refs(reference("ref-b", "el-line2", "9"))))
+	if code != 409 || message != "entity_not_found: system-element:el-line2" || f.offset != before {
+		t.Fatalf("adding a reference outside the grant = %d %q, offset %d → %d", code, message, before, f.offset)
+	}
+
+	// A reference of line2 cannot be pulled into the grant by rewriting its
+	// source: it still counts where it sits now.
+	foreignVersion := seedEditEntity(t, f, "_ExternalReference", "_colca/external-references/ref-l2", map[string]any{
+		"id": "ref-l2", "source_entity": "SystemElement", "source_object_id": "el-line2",
+		"relationship_type": "erp:customer", "external_system_id": "ext-erp",
+		"external_table": "res.partner", "external_column": "id", "external_row_id": "5",
+	})
+	steal := editBody(t, "op-steal", map[string]uint64{"external-reference:ref-l2": foreignVersion}, map[string]any{
+		"type": "update", "entity": map[string]any{"kind": "external-reference", "id": "ref-l2"},
+		"attributes": map[string]any{"source_object_id": "el-line1"},
+	})
+	if code, message, _, _ := exec.ExecuteWithWrites(anna, "_CmdEdit", "apply", steal); code != 409 || message != "entity_not_found: system-element:el-line2" {
+		t.Fatalf("moving a reference out of line2 = %d %q, want refused on line2", code, message)
+	}
+
+	// Deleting a signal inside the grant takes its reference along.
+	referenceVersion := seedEditEntity(t, f, "_ExternalReference", "_colca/external-references/ref-sig", map[string]any{
+		"id": "ref-sig", "source_entity": "Signal", "source_object_id": "sig-1",
+		"relationship_type": "erp:meter", "external_system_id": "ext-erp",
+		"external_table": "meters", "external_column": "id", "external_row_id": "1",
+	})
+	del := editBody(t, "op-del", map[string]uint64{
+		"signal:sig-1": versions["signal:sig-1"], "external-reference:ref-sig": referenceVersion,
+	}, map[string]any{"type": "delete", "entity": map[string]any{"kind": "signal", "id": "sig-1"}})
+	code, message, _, writes = exec.ExecuteWithWrites(anna, "_CmdEdit", "apply", del)
+	if code != 200 || len(writes) != 2 {
+		t.Fatalf("deleting a referenced signal inside the grant = %d %q writes=%d", code, message, len(writes))
 	}
 }
