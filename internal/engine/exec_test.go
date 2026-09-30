@@ -229,6 +229,87 @@ func TestCmdEditByAHumanAttributesTheResultingWriteToThatHuman(t *testing.T) {
 	}
 }
 
+// Two people who read the node record at the same version each write their
+// own metadata key through the single-key intent. Against the real store and
+// payload validation, both keys survive, a stale expect writes nothing, and a
+// retry is answered from the durable receipt.
+func TestCmdEditMetadataKeysCommitIndependently(t *testing.T) {
+	e := execEngine(t, nil)
+	const nodeTopic = "colca/v1/_Node/n-edge1/_colca/nodes/n-edge1"
+	if _, err := e.IngestAdmin(nodeTopic, []byte(
+		`{"id":"n-edge1","name":"Edge 1","metadata":{"meta-site":"Basel"}}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	e.SetExecutor(uns.NewEditExec(e.EntityStore(), nil))
+	person := humanEntry(t, "cmd:#:configure")
+	metadataEdit := func(op, key string, expect, value any) []byte {
+		payload, err := json.Marshal(map[string]any{
+			"operation_id": op, "correlation_id": "c-" + op, "expires_at": futureMS(),
+			"expected_versions": map[string]string{},
+			"intent": map[string]any{
+				"type": "metadata", "entity": map[string]any{"kind": "colca-node", "id": "n-edge1"},
+				"key": key, "expect": expect, "value": value,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	apply := func(payload []byte) (int, int, string) {
+		t.Helper()
+		result, err := e.IngestHuman(person, "colca/v1/_CmdEdit/n-edge1/apply", payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Command == nil {
+			t.Fatal("no command outcome")
+		}
+		return result.Command.ResultCode, len(result.Command.StateWrites), fmt.Sprintf("%+v", result.Command)
+	}
+
+	config := metadataEdit("op-config", "meta-app-config", map[string]any{"absent": true},
+		map[string]any{"theme": "dark", "zones": []any{"a", "b"}})
+	if code, writes, outcome := apply(config); code != 200 || writes != 1 {
+		t.Fatalf("first key = %s", outcome)
+	}
+	if code, writes, outcome := apply(metadataEdit("op-owner", "meta-owner", map[string]any{"absent": true}, "ops")); code != 200 || writes != 1 {
+		t.Fatalf("second key = %s", outcome)
+	}
+	entitiesNext := e.Store().NextOffset("entities")
+	stale := metadataEdit("op-stale", "meta-owner", map[string]any{"absent": true}, "other")
+	if code, _, outcome := apply(stale); code != 409 || !strings.Contains(outcome, "stale_metadata: meta-owner") {
+		t.Fatalf("stale expect = %s", outcome)
+	}
+	if got := e.Store().NextOffset("entities"); got != entitiesNext {
+		t.Fatal("a stale expect appended entity state")
+	}
+
+	entries := mustKVScan(t, e.Store(), "_colca/nodes/n-edge1")
+	if len(entries) != 1 {
+		t.Fatalf("node records = %+v", entries)
+	}
+	var record struct {
+		Name     string         `json:"name"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal(entries[0].Payload, &record); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := record.Metadata["meta-app-config"].(map[string]any)
+	if record.Name != "Edge 1" || record.Metadata["meta-site"] != "Basel" ||
+		record.Metadata["meta-owner"] != "ops" || app["theme"] != "dark" {
+		t.Fatalf("node record = %+v", record)
+	}
+
+	e.SetExecutor(uns.NewEditExec(e.EntityStore(), nil))
+	if code, writes, outcome := apply(config); code != 200 || writes != 1 ||
+		e.Store().NextOffset("entities") != entitiesNext {
+		t.Fatalf("durable replay = %s", outcome)
+	}
+}
+
 // A service's own _CmdConfigure write is attributed to that service the same
 // way: node-written, actor-attributed to the caller that commanded it.
 func TestCmdConfigureByAServiceAttributesTheResultingWriteToThatService(t *testing.T) {

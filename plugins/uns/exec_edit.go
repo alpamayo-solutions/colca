@@ -4,6 +4,7 @@
 //	exec_edit_receipt.go     replay cache and durable receipt
 //	exec_edit_snapshot.go    consistent snapshot and version checks
 //	exec_edit_entity.go      create, update, delete, external references
+//	exec_edit_metadata.go    one metadata key, compared and set on its own
 //	exec_edit_placement.go   moving entities, binding signals to tags
 //	exec_edit_model.go       assigning data models to a subtree
 //	exec_edit_attachment.go  node attachments in the registry
@@ -112,6 +113,11 @@ type editIntent struct {
 	// The alarm intents' field (see exec_edit_alarm.go): the
 	// _AlarmNotificationConfig record.
 	Snapshot json.RawMessage `json:"snapshot"`
+	// The metadata intent's fields (see exec_edit_metadata.go). Value is
+	// shared with the annotation intent.
+	Key    string              `json:"key"`
+	Expect *editMetadataExpect `json:"expect"`
+	Remove bool                `json:"remove"`
 }
 
 type editNodeAttachment struct {
@@ -285,6 +291,13 @@ func (w *EditExec) ExecuteWithWrites(
 		)
 	}
 
+	if intent.Type == "metadata" {
+		// Authorized before the compare, so a refused caller cannot probe a
+		// key's value through stale_metadata.
+		if code, message, result := w.authorizeTouched(ctx, metadataPositions(intent, entities)); code != 0 {
+			return w.remember(envelope.OperationID, digest, code, message, result, nil)
+		}
+	}
 	code, message, result, records := w.compose(
 		intent, expectedVersions, entities, catalogues, externalSystems,
 	)
@@ -295,6 +308,12 @@ func (w *EditExec) ExecuteWithWrites(
 	// covered by the person's grants, or the whole command is refused.
 	if code, message, result := w.authorizeTouched(ctx, w.planFor(ctx, intent, records, entities, catalogues)); code != 0 {
 		return w.remember(envelope.OperationID, digest, code, message, result, nil)
+	}
+	if intent.Type == "metadata" && len(records) == 0 {
+		// The key already holds what the caller asks for. Nothing is written,
+		// so there is no receipt; a retry compares again and gets the same
+		// answer.
+		return w.remember(envelope.OperationID, digest, 200, message, "ok", nil)
 	}
 	if intent.Type == "annotation" {
 		// Checked only once the plan is authorized, so a refusal here cannot
