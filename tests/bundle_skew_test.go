@@ -39,8 +39,8 @@ func bundleFixture(t *testing.T, version string, extra map[string]any) string {
 		"_SystemElement": obj("entity", true, []string{"id"}, map[string]any{"id": str}),
 		"_Signal":        obj("entity", true, []string{"id"}, map[string]any{"id": str}),
 		"_Ack":           obj("ack", false, []string{"correlation_id", "result_code"}, map[string]any{"correlation_id": str, "result_code": numeric}),
-		"_CmdParam":      obj("cmd", false, []string{"correlation_id", "expires_at"}, map[string]any{"correlation_id": str, "expires_at": numeric}),
-		"_CmdAdmin":      obj("cmd", false, []string{"correlation_id", "expires_at"}, map[string]any{"correlation_id": str, "expires_at": numeric}),
+		"_CmdParam":      obj("cmd", false, []string{"correlation_id"}, map[string]any{"correlation_id": str, "expires_at": numeric}),
+		"_CmdAdmin":      obj("cmd", false, []string{"correlation_id"}, map[string]any{"correlation_id": str, "expires_at": numeric}),
 	}
 	for k, v := range extra {
 		contractsMap[k] = v

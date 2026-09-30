@@ -266,6 +266,8 @@ func TestValidate(t *testing.T) {
 		{"_Metric", `{"v": 3.14}`},
 		{"_Metric", `{"v": 3.14, "ts": 123}`},
 		{"_CmdParam", `{"correlation_id":"abc","expires_at": 99999999999, "params":{"speed":5}}`},
+		{"_CmdParam", `{"correlation_id":"abc","params":{"speed":5}}`}, // no expires_at: never expires
+		{"_CmdParam", `{"correlation_id":"abc","progress":true}`},
 		{"_Ack", `{"correlation_id":"abc","result_code":200,"message":"ok"}`},
 		{"_EnrolledIdentity", `{"ulid":"n-edge1","element":"01HEDGE1","kind":"node","grants":[],"status":"active","pubkey":"aa"}`},
 		// A data-model record names itself by "id", not "ulid"; grants and
@@ -286,9 +288,11 @@ func TestValidate(t *testing.T) {
 	bad := [][2]string{
 		{"_Metric", `{"v":"notanumber"}`},
 		{"_Metric", `{}`},
-		{"_CmdParam", `{"correlation_id":"abc"}`}, // missing expires_at
-		{"_Ack", `{"result_code":200}`},           // missing correlation_id
-		{"_Unknown", `{}`},                        // unknown contract
+		{"_CmdParam", `{"expires_at":99999999999}`},                   // missing correlation_id
+		{"_CmdParam", `{"correlation_id":"abc","expires_at":"soon"}`}, // expires_at not a number
+		{"_CmdParam", `{"correlation_id":"abc","progress":"yes"}`},    // progress not a boolean
+		{"_Ack", `{"result_code":200}`},                               // missing correlation_id
+		{"_Unknown", `{}`},                                            // unknown contract
 		{"_Metric", `not json`},
 		// _StreamGap: each case lacks exactly one required field.
 		{"_StreamGap", `{"from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":["uplink"]}`},              // missing stream

@@ -1067,7 +1067,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				err         error
 			)
 			if retire {
+				// A retired child never fetches what is still queued for it: its
+				// senders get a 410 _Ack for each, once the retirement stands.
+				drop := e.DropQueuedFor(ulid)
 				off, wasDraining, retired, err = reg.Retire(ulid)
+				if err == nil && drop != nil {
+					drop()
+				}
 			} else {
 				off, wasDraining, err = reg.Revoke(ulid)
 			}

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/authtest"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -947,5 +948,70 @@ func TestRunOnceEvictsForeignNodePrivateStateOnly(t *testing.T) {
 	}
 	if got := streamTopics(); fmt.Sprint(got) != fmt.Sprint(recsAfter) {
 		t.Fatalf("a second cycle changed the entities stream: %v -> %v", recsAfter, got)
+	}
+}
+
+// A command still queued for an offline child when retention prunes it past
+// the child's stale downlink cursor will never be delivered. Its sender gets a
+// 410 _Ack in the same batch, at the command's position, and the drop is
+// counted. Expired commands and commands for other targets are not answered.
+func TestPrunedQueuedCommandsAreAnsweredToTheirSenders(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	reg, err := registry.New(st, nodeULID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := engine.New(st, &config.Config{ULID: nodeULID}, reg, nil, nil, nil)
+	reg.SetNamespace(eng.Elements())
+	authtest.EnrollNodeAt(t, reg, eng, "n-child", strings.Repeat("ab", 32), "child1")
+
+	queued := time.Now()
+	old := queued.Add(-2 * time.Hour).UnixMilli()
+	cmd := func(topic, body string) store.Record {
+		return store.Record{Topic: topic, Payload: []byte(body), TS: old, WrittenBy: "svc-hub", ActorID: "svc-hub", ActorKind: "service"}
+	}
+	if _, _, err := st.Append("commands", []store.Record{
+		cmd("colca/v1/_CmdParam/n-child/child1/fleet/apply", `{"correlation_id":"c-forever","command":{}}`),
+		cmd("colca/v1/_CmdParam/n-child/child1/fleet/stop", `{"correlation_id":"c-expired","expires_at":1000}`),
+		cmd("colca/v1/_CmdParam/n-other/elsewhere/x", `{"correlation_id":"c-other"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	next := st.NextOffset("commands")
+	// The child last polled before any of them: its downlink cursor stands at 1.
+	if _, err := st.CursorSetIfAbsent("downlink:n-child", "commands", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	p, m := newPrunerWithMetrics(t, st, eng, retFor("commands", config.StreamRetention{
+		MaxAge:             config.Duration(time.Minute),
+		IgnoreCursorsAfter: config.Duration(time.Hour),
+	}))
+	p.now = func() time.Time { return queued.Add(2 * time.Hour) }
+	p.runOnce()
+
+	var acks []map[string]any
+	for _, r := range readAll(t, st, "commands", next) {
+		if !strings.Contains(r.Topic, "/_Ack/") {
+			continue
+		}
+		if r.Topic != "colca/v1/_Ack/n-child/child1/fleet/apply" || r.ActorID != "svc-hub" {
+			t.Fatalf("answer at %s for %s, want the command's own position and sender", r.Topic, r.ActorID)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(r.Payload, &body); err != nil {
+			t.Fatal(err)
+		}
+		acks = append(acks, body)
+	}
+	if len(acks) != 1 || acks[0]["correlation_id"] != "c-forever" || acks[0]["result_code"].(float64) != 410 {
+		t.Fatalf("answers = %v, want one 410 for c-forever", acks)
+	}
+	if got := scrapeMetric(t, m, `colca_command_dropped_total{reason="pruned"}`); got != 1 {
+		t.Fatalf("colca_command_dropped_total{reason=pruned} = %v, want 1", got)
 	}
 }

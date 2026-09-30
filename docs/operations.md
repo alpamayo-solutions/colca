@@ -83,25 +83,32 @@ had not read, it logs an error and writes one `_StreamGap` record into the
 stream, which replicates up like anything else. Consumers see the gap in
 `/fetch`.
 
-Two things to know:
+Things to know:
 
 - A cursor that stays dead produces one `_StreamGap` per pruner run that
   removes something, not a single one.
 - `_StreamGap` records are not shown on the node's own MQTT bus. Read them from
   the stream or at an ancestor.
+- On the `commands` stream, every live command removed before the child node
+  or machine whose delivery cursor held it received it gets a `410` `_Ack` in
+  the same write, at the command's position, and counts in
+  `colca_command_dropped_total{reason="pruned"}`. Like the gap marker, these
+  answers are read from the stream, not the bus.
 
 ## Moving a child node
 
 A child that is re-parented or taken out of service is **drained** first: the
 parent stops routing new commands to it and waits until every command already
-queued has been delivered or has expired. Drains are visible in
+queued has been delivered or has expired. A command without `expires_at`
+keeps the drain open until it is delivered. Drains are visible in
 `colca_drains_active` and `colca_drains_completed_total`.
 
 A completed drain retires the child: the parent tombstones every current-state
 record the child and the nodes below it replicated (its elements, signals,
 last metric values, services), and the tombstones travel up, so no ancestor
 keeps showing the old node as live. To take a child out immediately, without
-draining, use `DELETE /enroll/{ulid}?retire=true`. A plain `DELETE` only
+draining, use `DELETE /enroll/{ulid}?retire=true`; every command still queued
+for it is answered with a `410` `_Ack`. A plain `DELETE` only
 revokes: the child's replicated state stays, for a child that will be enrolled
 again and resume where it stopped.
 

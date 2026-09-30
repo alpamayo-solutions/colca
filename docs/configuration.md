@@ -118,8 +118,10 @@ retention:
 
 Default ages: `metrics` and `logs` 14 days (`336h`); `entities`, `alarms`,
 `annotations` and `audit` 365 days (`8760h`); `commands` 90 days (`2160h`).
-`commands` cannot be set below 7 days, so a valid command is never pruned
-before a child that was offline could fetch it. `definitions` are compacted,
+`commands` cannot be set below 7 days. A delivery cursor (a child node's
+downlink cursor, a machine's delivery cursor) protects what is queued for it
+beyond `max_age`; set `ignore_cursors_after` on `commands` to bound how long an
+absent child keeps the queue. Commands pruned that way are answered `410`. `definitions` are compacted,
 not aged.
 
 ## Limits

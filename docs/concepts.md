@@ -70,15 +70,60 @@ is the whole offline buffer.
 
 A command is a record in the `commands` stream, written at any ancestor of
 its target. It travels down hop by hop, keeps the timestamp it was written
-with, and is delivered to the machine on the edge node's bus. The machine
-decides whether it is still valid and answers with an `_Ack`; `498` means it
-arrived after it expired.
+with, and is delivered to the machine or service that executes it on the
+target node. The executor answers with an `_Ack`.
+
+### Commands wait for their target
+
+A command for a node below a child waits in the `commands` stream of each
+node on the way until the child fetches it. The child's downlink cursor on its
+parent is its place in that queue. The queue is on disk, so it survives
+restarts of the parent and of the child, and it holds for minutes, days or
+weeks: an edge that comes back after a long outage receives everything queued
+for it, in order.
+
+- **Expiry is optional.** A command without `expires_at` never expires. It
+  is delivered whenever its target comes back, for as long as retention keeps
+  it. A command that must not act late carries `expires_at` (unix
+  milliseconds); the executor answers `498` without running it once it has
+  passed. Commands to physical machines should carry a short one; the sender
+  decides.
+- **Delivered once.** A child stores a command and moves its downlink cursor
+  in one write, so a command handed again after a crash or a lost response is
+  recognized and not stored or executed twice. Executors still deduplicate by
+  `correlation_id`, and must not repeat an effect that is not idempotent.
+- **Progress, if asked.** With `"progress": true` in the command, the sender
+  also gets `_Ack` records with `result_code` `202` and a `stage`: `queued`
+  from the node that accepted it for a child, and `forwarded` from every node
+  whose child confirmed receiving it. A `202` is never the outcome. It is
+  opt-in because a consumer that settles on the first `_Ack` of a correlation
+  id would otherwise take it for one.
+- **Checked again on the way down.** The grant check of the door that accepted
+  the command is repeated when a node forwards it: a service or person whose
+  grant was withdrawn meanwhile, or a sender revoked at that node, gets a `403`
+  `_Ack` and the command is not forwarded. The admin door's token and commands
+  that came from further up are checked where they were accepted.
+- **Drops are answered.** A command that will never be delivered gets a `410`
+  `_Ack`: when its child node is retired (`DELETE /enroll/{ulid}?retire=true`)
+  and when retention prunes it past a delivery cursor that
+  `ignore_cursors_after` gave up on. `colca_command_dropped_total` counts them
+  by reason. Nothing is dropped silently while a cursor protects it.
+
+All answers land at the command's own position, `_Ack/<owner>/<path>`, where
+the executor's answer also arrives, and rise to every ancestor like any ack.
+A sender reads them from the `commands` stream with a cursor of its own.
+
+A node that becomes [standalone](operations.md#permanent-standalone-handover)
+no longer talks to its former parent, so nothing queued there reaches it;
+retiring it at the parent answers those commands with `410`.
 
 A person receives only the acks of their own commands; services and machines
 receive every ack their read grants cover. A command's `correlation_id` names
 it for ten minutes: sent again by the same sender, it is not stored or run a
 second time, and the sender gets the first one's ack again. Another sender's
 command with that id is refused, and that sender gets an `_Ack` with `422`.
+The ten minutes are the node's memory of accepted ids, not a command's
+lifetime.
 
 The node answers a command itself, instead of leaving the sender waiting for
 the whole lifetime, in two cases:
