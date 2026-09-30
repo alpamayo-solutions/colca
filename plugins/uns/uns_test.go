@@ -5,6 +5,22 @@ import (
 	"testing"
 )
 
+func TestMetricSignalIDIsReadFromMetricsOnly(t *testing.T) {
+	cases := []struct {
+		topic, payload, want string
+	}{
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","value":1}`, "01ABC"},
+		{"colca/v1/_Log/m1/svc/INFO", `{"signal_id":"01ABC"}`, ""},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":`, ""},
+		{"not-a-topic", `{"signal_id":"01ABC"}`, ""},
+	}
+	for _, c := range cases {
+		if got := MetricSignalID(c.topic, []byte(c.payload)); got != c.want {
+			t.Errorf("MetricSignalID(%q, %s) = %q, want %q", c.topic, c.payload, got, c.want)
+		}
+	}
+}
+
 func TestParseAndClass(t *testing.T) {
 	p, err := Parse("colca/v1/_Metric/m1/site1/edge1/m1/temp")
 	if err != nil {

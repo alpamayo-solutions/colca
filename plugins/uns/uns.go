@@ -442,6 +442,23 @@ func IsMetric(contract string) bool {
 	return contract == "_Metric"
 }
 
+// MetricSignalID returns the signal_id of a _Metric record, or "" for any other
+// record. The store keeps it beside the record so a signal filter does not
+// decode every payload it skips.
+func MetricSignalID(topic string, payload []byte) string {
+	p, err := Parse(topic)
+	if err != nil || !IsMetric(p.Contract) {
+		return ""
+	}
+	var metric struct {
+		SignalID string `json:"signal_id"`
+	}
+	if json.Unmarshal(payload, &metric) != nil {
+		return ""
+	}
+	return metric.SignalID
+}
+
 // SignalTopicForMetric returns the _Signal topic with p's node and path: the
 // signal a _Metric at p needs. A signal and its metrics always share node and
 // path, so p's contract is not checked.

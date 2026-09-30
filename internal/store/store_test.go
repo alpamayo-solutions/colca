@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -91,6 +93,82 @@ func TestReadRecordsFiltersOnPayloadAndAdvancesAcrossSkippedRecords(t *testing.T
 	}
 	if len(got) != 0 || next != 5 {
 		t.Fatalf("all-filtered records=%+v next=%d, want empty and next 5", got, next)
+	}
+}
+
+func TestReadRecordsBoundedStopsAtTheScanBudgetAndStillReachesTheMatch(t *testing.T) {
+	s := mustOpen(t)
+	var recs []Record
+	for i := 0; i < 2500; i++ {
+		recs = append(recs, Record{Topic: "colca/v1/_Metric/n/other", Payload: []byte(`{"signal_id":"other","value":1}`), TS: int64(i)})
+	}
+	recs = append(recs, Record{Topic: "colca/v1/_Metric/n/wanted", Payload: []byte(`{"signal_id":"wanted","value":2}`), TS: 9999})
+	if _, _, err := s.Append("metrics", recs); err != nil {
+		t.Fatal(err)
+	}
+	wanted := func(r StoredRecord) bool { return r.SignalID == "wanted" }
+
+	got, next, err := s.ReadRecordsBounded(context.Background(), "metrics", 1, 10, 1000, wanted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 || next != 1001 {
+		t.Fatalf("first bounded page: records=%d next=%d, want 0 and 1001", len(got), next)
+	}
+	pages := 1
+	for len(got) == 0 {
+		if got, next, err = s.ReadRecordsBounded(context.Background(), "metrics", next, 10, 1000, wanted); err != nil {
+			t.Fatal(err)
+		}
+		pages++
+	}
+	if len(got) != 1 || got[0].Offset != 2501 || next != 2502 || pages != 3 {
+		t.Fatalf("records=%+v next=%d pages=%d, want the match at 2501 on page 3", got, next, pages)
+	}
+}
+
+func TestReadRecordsBoundedEndsWithItsContext(t *testing.T) {
+	s := mustOpen(t)
+	var recs []Record
+	for i := 0; i < 3000; i++ {
+		recs = append(recs, Record{Topic: "colca/v1/_Metric/n/s", Payload: []byte(`{"signal_id":"s","value":1}`), TS: int64(i)})
+	}
+	if _, _, err := s.Append("metrics", recs); err != nil {
+		t.Fatal(err)
+	}
+	none := func(StoredRecord) bool { return false }
+	if _, next, err := s.ReadRecordsBounded(context.Background(), "metrics", 1, 10, 0, none); err != nil || next != 3001 {
+		t.Fatalf("live context: next=%d err=%v, want the whole stream scanned", next, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := s.ReadRecordsBounded(ctx, "metrics", 1, 10, 0, none); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled context: err=%v, want context.Canceled", err)
+	}
+}
+
+func TestMetricRecordsKeepTheirSignalAndOlderRecordsReadWithout(t *testing.T) {
+	s := mustOpen(t)
+	if _, _, err := s.Append("metrics", []Record{
+		{Topic: "colca/v1/_Metric/n/s1", Payload: []byte(`{"signal_id":"s1","value":1}`), TS: 1},
+		{Topic: "colca/v1/_Log/n/svc/INFO", Payload: []byte(`{"signal_id":"not-a-metric"}`), TS: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A record as an older version stored it: no sid.
+	old, err := json.Marshal(recEnc{Topic: "colca/v1/_Metric/n/s2", Payload: []byte(`{"signal_id":"s2","value":3}`), TS: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Set(streamKey("metrics", 3), old, pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.ReadRecords("metrics", 1, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].SignalID != "s1" || got[1].SignalID != "" || got[2].SignalID != "" {
+		t.Fatalf("signal ids = %q %q %q, want s1 and two empty", got[0].SignalID, got[1].SignalID, got[2].SignalID)
 	}
 }
 

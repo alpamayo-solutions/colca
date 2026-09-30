@@ -5,6 +5,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
@@ -79,6 +80,9 @@ type StoredRecord struct {
 	ActorLabel      string
 	ActorKind       string
 	ActorGroups     []string
+	// SignalID is the signal of a _Metric record, "" for other records and for
+	// records stored before it was kept.
+	SignalID string
 }
 
 type KVEntry struct {
@@ -315,6 +319,7 @@ type recEnc struct {
 	ActorLabel      string   `json:"al,omitempty"`
 	ActorKind       string   `json:"ak,omitempty"`
 	ActorGroups     []string `json:"ag,omitempty"`
+	SignalID        string   `json:"sid,omitempty"`
 	// size is the encoded length of this record as stored, set by scanRecords for
 	// the byte accounting. Not serialized.
 	size uint64 `json:"-"`
@@ -345,6 +350,7 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 		Topic:           rec.Topic, Payload: rec.Payload, TS: rec.TS,
 		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
 		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, OriginOffset: originOffset,
+		SignalID: uns.MetricSignalID(rec.Topic, rec.Payload),
 	})
 	if err != nil {
 		return 0, err
@@ -503,6 +509,14 @@ func (s *Store) Read(stream string, from uint64, limit int, filter func(string) 
 // the last scanned position + 1, filtered records included, so a consumer of a
 // sparse view keeps moving forward.
 func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
+	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, filter)
+}
+
+// ReadRecordsBounded is ReadRecords that also stops after maxScan scanned
+// records (0: no bound) and when ctx ends. A filter that matches little would
+// otherwise scan to the head in one call, however long the stream; a bounded
+// page may be empty while next still moves forward.
+func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: streamKey(stream, from),
 		UpperBound: streamKey(stream, ^uint64(0)),
@@ -512,7 +526,17 @@ func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(S
 	}
 	defer iter.Close()
 	next = from
+	scanned := 0
 	for iter.First(); iter.Valid() && len(out) < limit; iter.Next() {
+		if maxScan > 0 && scanned >= maxScan {
+			break
+		}
+		scanned++
+		if scanned%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, next, err
+			}
+		}
 		key := iter.Key()
 		off := binary.BigEndian.Uint64(key[len(key)-8:])
 		var e recEnc
@@ -526,6 +550,7 @@ func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(S
 			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
 			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
+			SignalID: e.SignalID,
 		}
 		if filter != nil && !filter(record) {
 			continue
@@ -566,6 +591,7 @@ func (s *Store) FirstMatch(stream string, from, upTo uint64, filter func(StoredR
 			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
 			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
+			SignalID: e.SignalID,
 		}
 		if filter == nil || filter(record) {
 			return record, true, nil
