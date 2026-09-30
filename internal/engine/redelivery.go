@@ -60,6 +60,12 @@ func (e *Engine) deliverCommand(class uns.Class, p uns.Parsed, topic string, pay
 
 	stream, cursor := uns.StreamFor(class), target.CommandCursor()
 	floor := e.store.CursorGet(cursor, stream)
+	if floor > offset {
+		// A replay for a subscribe that raced this ingest took the lock first and
+		// already published this record from the stream; publishing it again
+		// would hand the machine a second copy.
+		return
+	}
 	if e.owedBelow(stream, floor, offset, target.ULID) {
 		e.log.Info("command held for in-order replay: this machine has older commands still owed",
 			"topic", topic, "offset", offset, "floor", floor,
