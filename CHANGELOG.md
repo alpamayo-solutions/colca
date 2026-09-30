@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.25.0](https://github.com/alpamayo-solutions/colca/compare/v0.24.1...v0.25.0) (2026-09-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **uns:** a _Metric for a signal bound to a data tag is refused unless it comes from the service whose catalogue holds that tag. Services that publish values for signals they do not produce (test probes, bridges, scripts writing over a connector's signals) now get 403 / PUBACK 0x87 and must either unbind the signal, publish their own catalogue and bind to it, or use the admin token.
+
+### Fixes
+
+* **uns:** accept a bound signal's _Metric only from its producer ([#133](https://github.com/alpamayo-solutions/colca/issues/133)) ([9928492](https://github.com/alpamayo-solutions/colca/commit/99284923e859b7a66b491407a5e80a7ef4acc8e5))
+
 ## [0.24.1](https://github.com/alpamayo-solutions/colca/compare/v0.24.0...v0.24.1) (2026-09-30)
 
 
