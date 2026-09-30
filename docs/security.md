@@ -81,11 +81,12 @@ implies another: someone who may both operate and acknowledge holds both.
 anyone holding `configure` on it. Two narrower classes are also admitted, each
 covering only the part of `_CmdEdit` that matches the hazard: `operate` covers
 creating an annotation, or editing one's own; `param` covers setting the value
-and metadata of an existing constant — an operator input such as a station's
-sandoff or grit — never creating or deleting a constant, never its other
-attributes, and never a signal's binding. Both are scoped by the grant's
-element exactly as `configure` is: `cmd:<element>/#:param` reaches only the
-constants under that element. The write itself is still made by the node —
+and metadata of an existing constant, through an `update` or a single-key
+`metadata` edit (see [concepts.md](concepts.md#writing-one-metadata-key)) — an
+operator input such as a station's sandoff or grit — never creating or deleting
+a constant, never its other attributes, and never a signal's binding. Both are
+scoped by the grant's element exactly as `configure` is:
+`cmd:<element>/#:param` reaches only the constants under that element. The write itself is still made by the node —
 `_CmdEdit` never lets a person publish state directly — but it carries the
 operator's own verified identity as `actor_id`/`actor_label`/`actor_kind`, so
 `/kv` can show who set it (see [http-api.md](http-api.md)).

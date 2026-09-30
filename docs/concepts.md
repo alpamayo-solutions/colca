@@ -121,6 +121,44 @@ Some commands are executed by the node itself rather than a machine:
 | `_CmdEdit` | apply an atomic, versioned edit composed by an editor application |
 | `_CmdAdmin` | enroll or revoke an identity on a node that is only reachable through the tree |
 
+### Writing one metadata key
+
+An `update` edit replaces a record's whole `metadata` map and needs the whole
+record's version in `expected_versions`, so two writers that change different
+keys of one record refuse or overwrite each other. The `metadata` edit intent
+compares and sets a single key instead:
+
+```json
+{
+  "type": "metadata",
+  "entity": {"kind": "colca-node", "id": "<node id>"},
+  "key": "<metadata definition id>",
+  "expect": {"absent": true},
+  "value": {"theme": "dark"}
+}
+```
+
+- `entity.kind` is `colca-node`, `system-element`, `signal`, `constant` or
+  `resource`.
+- `expect` is `{"absent": true}` or `{"value": <json>}`: what the caller
+  believes the key holds now. Values compare as decoded JSON, so key order and
+  number spelling (`1` or `1.0`) do not matter.
+- Exactly one of `value` (not `null`) or `"remove": true`.
+- The node that owns the record applies it. It checks only that key; every
+  other key and attribute is taken from the record as it stands, so a
+  concurrent write of another key survives. A mismatch is `409
+  stale_metadata: <key>` with nothing written.
+- `expected_versions` may be empty. A record version the caller sends anyway
+  is still checked.
+- Setting a key to the value it holds, or removing an absent key, is `200
+  metadata_unchanged: <key>` with nothing written.
+- It is authorized like an `update` of the entity: `configure` over its
+  position (for a resource, the element it sits on), or `param` on a
+  constant. A caller outside its grants gets
+  `entity_not_found`, whatever its `expect`.
+- It is idempotent by `operation_id` like every edit, and the written record
+  replicates like any other.
+
 ## Retention
 
 A background pruner keeps each stream within an age and optional size limit.
