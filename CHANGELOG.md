@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0](https://github.com/alpamayo-solutions/colca/compare/v0.23.1...v0.24.0) (2026-09-30)
+
+
+### Features
+
+* **commands:** commands wait for an offline child node without a lifetime cap ([#129](https://github.com/alpamayo-solutions/colca/issues/129)) ([c5cbbb4](https://github.com/alpamayo-solutions/colca/commit/c5cbbb421cef7174a08b00849934c77a1f4db3d5))
+
 ## [0.23.1](https://github.com/alpamayo-solutions/colca/compare/v0.23.0...v0.23.1) (2026-09-30)
 
 
