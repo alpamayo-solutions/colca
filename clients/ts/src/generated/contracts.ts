@@ -193,7 +193,7 @@ export type Cmd = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -202,7 +202,7 @@ export type CmdAcknowledge = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -211,7 +211,7 @@ export type CmdAdmin = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -220,7 +220,7 @@ export type CmdConfigure = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -230,7 +230,7 @@ export type CmdEdit = {
   correlation_id: string;
   created_at?: number;
   expected_versions: Record<string, unknown>;
-  expires_at: number;
+  expires_at?: number;
   intent: Record<string, unknown>;
   operation_id: string;
   [key: string]: unknown;
@@ -241,7 +241,7 @@ export type CmdMaintain = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -250,7 +250,7 @@ export type CmdOperate = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -259,7 +259,7 @@ export type CmdParam = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 

@@ -54,8 +54,9 @@ REQUIRED_DROP: dict[str, list[str]] = {}
 
 
 def _required_drop_for(identifier: str, cls: type) -> list[str]:
+    # A command without expires_at never expires; one that must expire says so.
     if issubclass(cls, Cmd):
-        return ["created_at"]
+        return ["created_at", "expires_at"]
     return REQUIRED_DROP.get(identifier, [])
 
 

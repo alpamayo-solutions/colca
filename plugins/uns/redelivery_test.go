@@ -105,3 +105,33 @@ func TestOwnsCursorRefusesTheIdentitysOwnDeliveryFloor(t *testing.T) {
 		t.Fatal("a nil entry owned a cursor")
 	}
 }
+
+// A command without expires_at never expires: it is owed however late its
+// machine subscribes.
+func TestOwedCommandWithoutExpiryIsOwedForever(t *testing.T) {
+	const now = 9_000_000_000_000
+	if !OwedCommand("colca/v1/_CmdParam/m1/m1/speed", []byte(`{"correlation_id":"c1"}`), "m1", now) {
+		t.Fatal("a command without expires_at was treated as expired")
+	}
+}
+
+func TestCommandDeadline(t *testing.T) {
+	for _, c := range []struct {
+		payload string
+		want    int64
+		has     bool
+	}{
+		{`{"correlation_id":"c","expires_at":1234}`, 1234, true},
+		{`{"correlation_id":"c"}`, 0, false},
+		{`{"correlation_id":"c","expires_at":null}`, 0, false},
+		{`not json`, 0, false},
+	} {
+		got, has := CommandDeadline([]byte(c.payload))
+		if got != c.want || has != c.has {
+			t.Errorf("CommandDeadline(%s) = %d, %v; want %d, %v", c.payload, got, has, c.want, c.has)
+		}
+	}
+	if !CommandWantsProgress([]byte(`{"progress":true}`)) || CommandWantsProgress([]byte(`{}`)) {
+		t.Fatal("CommandWantsProgress reads the progress flag")
+	}
+}

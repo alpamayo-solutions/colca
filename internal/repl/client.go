@@ -834,10 +834,13 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		// the record, and acking past it would silently drop the command.
 		ackTo := next
 		for _, r := range recs {
+			// The record and the cursor past it are one write: a crash or a lost
+			// response makes the parent hand it again, and it is then recognized as
+			// stored instead of being stored and executed a second time.
 			if _, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
 				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
-			}); err != nil {
+			}, &store.CursorAdvance{Name: uns.DownlinkCursor(c.parentPub), Stream: downlinkStream, To: r.ParentOffset + 1}); err != nil {
 				var refused *engine.RejectError
 				if errors.As(err, &refused) {
 					c.log.Error("downlink command refused by this node — skipping past it",

@@ -1235,8 +1235,10 @@ class EditOperation(Payload):
 # The class decides the routing: a Cmd subclass lands on the commands stream
 # under the hazard class its name carries (_CmdAcknowledge -> acknowledge,
 # _CmdParam -> param, _CmdOperate -> operate, _CmdMaintain -> maintain,
-# _CmdConfigure -> configure, _CmdAdmin -> admin). The door requires correlation_id and expires_at (unix milliseconds);
-# created_at is not required.
+# _CmdConfigure -> configure, _CmdAdmin -> admin). The door requires correlation_id.
+# expires_at (unix milliseconds) is optional: a command without it never expires,
+# and one that must expire carries it. created_at is not required. "progress": true
+# asks for 202 _Ack records while the command is queued and forwarded.
 # ---------------------------------------------------------------------------
 
 

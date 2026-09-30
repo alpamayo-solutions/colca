@@ -136,11 +136,10 @@ func (m multiExec) ExecuteWithWrites(
 }
 
 // cmdEnvelope is the part of a command payload every class shares:
-// correlation_id routes the ack, expires_at bounds execution. The rest belongs to
-// the verb.
+// correlation_id routes the ack. expires_at, when present, bounds execution
+// (uns.CommandDeadline); the rest belongs to the verb.
 type cmdEnvelope struct {
 	CorrelationID string `json:"correlation_id"`
-	ExpiresAt     int64  `json:"expires_at"`
 }
 
 // maybeExec runs after a _Cmd* record was persisted by a path coming down. actor
@@ -169,8 +168,9 @@ func (e *Engine) maybeExec(
 	}
 
 	// Expiry is checked before the executor sees it: a command whose window
-	// closed must not take effect, whatever it would have done.
-	if env.ExpiresAt <= time.Now().UnixMilli() {
+	// closed must not take effect, whatever it would have done. A command
+	// without expires_at does not expire.
+	if deadline, ok := uns.CommandDeadline(payload); ok && deadline <= time.Now().UnixMilli() {
 		outcome := &CommandOutcome{
 			CorrelationID: env.CorrelationID,
 			ResultCode:    498,

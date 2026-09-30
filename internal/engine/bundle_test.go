@@ -62,7 +62,7 @@ func mirrorBundle(t *testing.T) *contracts.Table {
 		"_SystemElement": obj("entity", true, []string{"id"}, map[string]any{"id": str}),
 		"_Signal":        obj("entity", true, []string{"id"}, map[string]any{"id": str}),
 		"_Ack":           obj("ack", false, []string{"correlation_id", "result_code"}, map[string]any{"correlation_id": str, "result_code": numeric}),
-		"_CmdParam":      obj("cmd", false, []string{"correlation_id", "expires_at"}, map[string]any{"correlation_id": str, "expires_at": numeric}),
+		"_CmdParam":      obj("cmd", false, []string{"correlation_id"}, map[string]any{"correlation_id": str, "expires_at": numeric}),
 	})
 }
 
@@ -90,6 +90,8 @@ func TestFloorParityCorpus(t *testing.T) {
 		{"_Ack", ``}, // events: tombstone rejected
 		{"_CmdParam", `{"correlation_id": "c", "expires_at": 99}`},
 		{"_CmdParam", `{"correlation_id": "c"}`},
+		{"_CmdParam", `{"expires_at": 99}`},
+		{"_CmdParam", `{"correlation_id": "c", "expires_at": "soon"}`},
 		{"_CmdParam", ``},
 		{"_Unknown", `{"x": 1}`},
 	}
@@ -121,7 +123,7 @@ func bundleEngine(t *testing.T) *Engine {
 	str := map[string]any{"type": "string", "minLength": 1}
 	e.SetContracts(writeBundle(t, map[string]any{
 		"_Reading":  obj("data", true, []string{"value", "signal_id"}, map[string]any{"value": map[string]any{}, "signal_id": str}),
-		"_CmdWrite": obj("cmd", false, []string{"correlation_id", "expires_at"}, map[string]any{"correlation_id": str, "expires_at": numeric}),
+		"_CmdWrite": obj("cmd", false, []string{"correlation_id"}, map[string]any{"correlation_id": str, "expires_at": numeric}),
 		"_Metric":   obj("data", true, []string{"v"}, map[string]any{"v": numeric}),
 	}))
 	return e

@@ -202,6 +202,7 @@ type Metrics struct {
 	// silently forever. It only counts: refusing would break publishing before
 	// enrollment and reparenting.
 	commandUnroutable prometheus.Counter
+	commandDropped    *prometheus.CounterVec
 
 	// colca_command_redelivered_total: a stored command was replayed onto the local
 	// bus because its machine subscribed with its delivery cursor still before it.
@@ -394,6 +395,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_command_unroutable_total",
 			Help: "Commands addressed to another node and persisted at admission while no enrolled child node's mount covered their path — nothing will ever hand them down, execute them or ack them, and they never expire visibly because expiry is evaluated at the target. Excludes commands for this node (executed in-process), for a machine enrolled here (see colca_command_undelivered_total) and for a draining child (a drain delivers what is queued). Observability only: nothing is refused on this, because refusing would break publish-before-enroll and every reparent window. Resets on restart.",
 		}),
+		commandDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_command_dropped_total",
+			Help: "Queued commands this node will never hand on, each answered to its sender with an _Ack, by reason: retired (the child node they were queued for was retired, 410), pruned (retention pruned them past a stale delivery cursor, 410), revoked (their sender's identity or grant was revoked before they were forwarded, 403). Resets on restart.",
+		}, []string{"reason"}),
 		commandRedelivered: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_command_redelivered_total",
 			Help: "Commands replayed from the durable commands stream onto the local MQTT bus when the machine they address subscribed with its delivery cursor still standing before them. The recovery half of colca_command_undelivered_total: these are deliveries that a broker restart, or an issue-before-first-connect, would otherwise have dropped. Resets on restart.",
@@ -609,7 +614,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.deliveredMessages, m.deliveredBytes, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.securityChanges, m.nodePrefix,
-		m.commandUndelivered, m.commandUnroutable, m.commandRedelivered,
+		m.commandUndelivered, m.commandUnroutable, m.commandDropped, m.commandRedelivered,
 		m.bundleInfo, m.bundleContracts,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
@@ -707,6 +712,21 @@ func (m *Metrics) CommandUnroutable() {
 		return
 	}
 	m.commandUnroutable.Inc()
+}
+
+// Reasons a queued command is dropped (CommandDropped).
+const (
+	CommandDropRetired = "retired"
+	CommandDropPruned  = "pruned"
+	CommandDropRevoked = "revoked"
+)
+
+// CommandDropped counts one queued command answered instead of handed on.
+func (m *Metrics) CommandDropped(reason string) {
+	if m == nil {
+		return
+	}
+	m.commandDropped.WithLabelValues(reason).Inc()
 }
 
 // CommandRedelivered counts one command replayed from the commands stream onto

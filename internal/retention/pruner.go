@@ -6,6 +6,7 @@
 package retention
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -255,6 +256,11 @@ func (p *Pruner) pruneStream(stream string) {
 	for i, c := range candidates {
 		names[i] = c.name
 	}
+	// Commands still queued for a delivery cursor that is overridden will never be
+	// handed on: each gets a 410 _Ack in the prune batch, so its sender learns it
+	// was dropped. Collected before Prune; plan keeps those in the effective span.
+	dropped := p.droppedCommands(stream, candidates, newLWM)
+	var answeredDrops []queuedDrop // set by plan; valid only when Prune committed
 	var applied []overriddenCursor // set by plan; valid only when Prune committed
 	var effectiveShed uint64       // set by plan from the EFFECTIVE (post-recheck) span; valid only when Prune committed
 	plan := func(span store.PruneSpan) store.PruneOutcome {
@@ -299,6 +305,13 @@ func (p *Pruner) pruneStream(stream string) {
 			Payload: payload,
 			TS:      nowMS,
 		}}}
+		answeredDrops = nil
+		for _, d := range dropped {
+			if d.offset <= span.To && d.cursorPos <= span.To {
+				out.GapRecords = append(out.GapRecords, d.answer)
+				answeredDrops = append(answeredDrops, d)
+			}
+		}
 		if stream == "entities" {
 			// The refresh obligation goes into the prune batch as rp/{stream}, so a crash
 			// before the refresh leaves it owed.
@@ -327,6 +340,11 @@ func (p *Pruner) pruneStream(stream string) {
 	if len(applied) > 0 {
 		p.m.RetentionGapRecorded(stream) // exactly one _StreamGap marker per overriding run
 	}
+	for _, d := range answeredDrops {
+		p.m.CommandDropped(metrics.CommandDropPruned)
+		p.log.Error("retention pruned a command before it was delivered; its sender got a 410 _Ack",
+			"stream", stream, "offset", d.offset, "for", d.who)
+	}
 	for _, c := range applied {
 		p.log.Error("retention staleness override: pruned past a stale cursor; the consumer will see a gap",
 			"stream", stream, "cursor", c.name, "position", c.pos,
@@ -341,6 +359,59 @@ func (p *Pruner) pruneStream(stream string) {
 	if stream == "entities" && len(applied) > 0 {
 		p.completePendingRefresh()
 	}
+}
+
+// queuedDrop is a command a prune removes before the delivery cursor that held
+// it passed it, with the 410 _Ack that answers it.
+type queuedDrop struct {
+	offset    uint64
+	cursorPos uint64
+	who       string
+	answer    store.Record
+}
+
+// droppedScanBatch bounds one read of droppedCommands; the loop continues past it.
+const droppedScanBatch = 4096
+
+// droppedCommands lists the live commands in [cursor, upTo) of each overridden
+// delivery cursor (a child node's downlink cursor, a machine's delivery cursor)
+// on the commands stream, each with its answer. A command two cursors held is
+// answered once.
+func (p *Pruner) droppedCommands(stream string, overridden []overriddenCursor, upTo uint64) []queuedDrop {
+	if stream != "commands" || p.eng == nil {
+		return nil
+	}
+	var out []queuedDrop
+	seen := map[uint64]bool{}
+	for _, c := range overridden {
+		queued, who, ok := p.eng.QueuedFor(c.name)
+		if !ok {
+			continue
+		}
+		message := "dropped: retention pruned it before " + who + " received it"
+		for from := c.pos; from < upTo; {
+			recs, next, err := p.st.ReadRecordsBounded(context.Background(), stream, from, 500, int(min(upTo-from, uint64(droppedScanBatch))), queued)
+			if err != nil {
+				p.log.Error("retention: queued commands about to be pruned could not be read; their senders will not be answered",
+					"cursor", c.name, "err", err)
+				break
+			}
+			for _, r := range recs {
+				if r.Offset >= upTo || seen[r.Offset] {
+					continue
+				}
+				if answer, ok := p.eng.QueuedAnswer(r, 410, message); ok {
+					seen[r.Offset] = true
+					out = append(out, queuedDrop{offset: r.Offset, cursorPos: c.pos, who: who, answer: answer})
+				}
+			}
+			if next <= from {
+				break
+			}
+			from = next
+		}
+	}
+	return out
 }
 
 // completePendingRefresh runs the persisted entities refresh, if any: at
