@@ -143,7 +143,7 @@ func (c *ConfigExec) owningEntry(topic string) (element, mount string, ok bool) 
 		if !ok {
 			continue // cannot place this entry here: it owns nothing
 		}
-		if Prefix()+"_DataTags/"+c.store.NodeID()+"/"+joinPath(m, e.Name) == topic {
+		if CatalogueTopic(c.store.NodeID(), m, e.Name) == topic {
 			return e.Element, m, true
 		}
 	}
@@ -1078,7 +1078,7 @@ func (c *ConfigExec) autobind(ctx CommandContext, payload []byte) (int, string, 
 		// wrong catalogue topic.
 		return 409, "signal/autobind: " + name + " is bound to an element this node cannot resolve", "conflict", nil
 	}
-	catTopic := Prefix() + "_DataTags/" + c.store.NodeID() + "/" + joinPath(mount, name)
+	catTopic := CatalogueTopic(c.store.NodeID(), mount, name)
 	raw, found := c.store.KVGet(catTopic)
 	if !found {
 		// No catalogue yet. A retry after the connector publishes works, so this

@@ -57,6 +57,30 @@ Enrollment goes through `POST /enroll` with the admin token, or through a
 `_CmdAdmin` command sent down the tree to a node that is not directly
 reachable.
 
+## Who writes a signal's values
+
+A write scope says where an identity may publish. It does not make the
+identity a source for every signal there. A signal bound to a data tag
+(`_Signal.data_tag`) takes its `_Metric` only from its **producer**: the
+identity whose `_DataTags` catalogue holds that tag, at the topic that identity
+publishes its catalogue on (`_DataTags/<node>/<mount>/<name>`). That covers
+connectors, dataops outputs and signals created by autobind alike.
+
+| Publisher | A `_Metric` for a bound signal |
+|---|---|
+| the producer | accepted |
+| any other identity, local or external, whatever its grants | refused: MQTT 5 PUBACK `0x87` (not authorized), HTTP `403`, `colca_rejected_publishes_total{reason="not_producer"}`, an `_AuditEvent` denial and a log line |
+| any identity, when no catalogue on the node holds the tag or two claim it | refused until exactly one catalogue holds it |
+| the admin token (`/publish` with `X-Colca-Token`) | accepted, stored with `written_by: admin`, and logged |
+| replication from a child | accepted: the child admitted it |
+
+A signal bound to nothing, or a `_Metric` on a path with no signal, keeps the
+write-scope rule alone.
+
+The local door authenticates by reaching it, not by a secret, so this rule
+stops a misconfigured or misbehaving service. It does not stop a process that
+connects under the producer's name.
+
 ## Grants
 
 Grants use one grammar for machines and people:

@@ -114,7 +114,7 @@ func (e *Engine) IngestClientBatch(identity string, records []BatchRecord) []Bat
 					e.ledger.acked(id, topic, payload)
 				}
 			}
-			e.elements.Observe(item.parsed.Contract, topic, payload)
+			e.observeIndexes(item.parsed.Contract, topic, payload)
 			if e.deliver != nil {
 				e.deliver(topic, payload, retainFor(item.class))
 			}

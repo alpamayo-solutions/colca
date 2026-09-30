@@ -45,9 +45,13 @@ const (
 	// ReasonDraining: a command targeted a mount that is being drained. New
 	// commands are refused so the drain can finish.
 	ReasonDraining = "draining"
+	// ReasonNotProducer: a _Metric for a signal bound to a data tag came from an
+	// identity whose catalogue does not hold that tag. Only the producer writes a
+	// bound signal's values.
+	ReasonNotProducer = "not_producer"
 )
 
-var reasons = []string{ReasonNodeID, ReasonGrammar, ReasonValidation, ReasonIdentity, ReasonWriteDenied, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonTimeSync, ReasonDraining}
+var reasons = []string{ReasonNodeID, ReasonGrammar, ReasonValidation, ReasonIdentity, ReasonWriteDenied, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonTimeSync, ReasonDraining, ReasonNotProducer}
 
 // Move-drain outcomes: the label values of colca_drains_completed_total.
 const (
