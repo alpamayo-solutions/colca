@@ -134,3 +134,47 @@ func TestTheHumanDoorRefusesConfigureAndAdmitsEdit(t *testing.T) {
 		t.Fatalf("executor actors = %+v, want anna once", rec.actors)
 	}
 }
+
+// $node names the node a person signed in at. A person admitted here, at the
+// human door or attested by a local service of this deployment, holds their
+// node-relative grants here; a person rebuilt from a command that came down
+// from the parent signed in at another node, so the same group grants nothing
+// at this executor.
+func TestANodeRelativeGrantResolvesOnlyForAPersonAdmittedHere(t *testing.T) {
+	ids := fakeIDs{entries: map[string]*uns.Entry{
+		"svc-api": {ULID: "svc-api", Kind: uns.KindLocal, Name: "api"},
+	}}
+	e := newEngineWithIDs(t, ids)
+	rec := &recordingExec{contract: "_CmdEdit"}
+	e.SetExecutor(Executors(rec))
+	if _, err := e.EntityStore().PublishBatch(uns.CommandContext{}, []uns.StateRecord{{
+		Topic:   "colca/v1/_Group/n-edge1/operators",
+		Payload: []byte(`{"id":"operators","grants":["read:$node/#","cmd:$node/#:configure"]}`),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	const topic = "colca/v1/_CmdEdit/n-edge1/apply"
+	anna := Attribution{ActorID: "kc-sub-anna", ActorLabel: "anna", ActorKind: "human", ActorGroups: []string{"operators"}}
+
+	if _, err := e.IngestLocalAttributed("svc-api", topic, cmdPayload("c-here"), anna); err != nil {
+		t.Fatalf("a person attested at this node was refused: %v", err)
+	}
+	if len(rec.actors) != 1 || rec.actors[0] == nil || !rec.actors[0].SignedInHere {
+		t.Fatalf("executor actor = %+v, want anna signed in here", rec.actors)
+	}
+	if !uns.AuthorizeCmdAt(e.Scope(), rec.actors[0], "configure", "") {
+		t.Fatal("cmd:$node/#:configure must cover this node's root for a person who signed in here")
+	}
+
+	down := anna
+	down.WrittenBy = "n-hub"
+	if _, err := e.IngestDownlinkAttributed(topic, cmdPayload("c-down"), time.Now().UnixMilli(), down, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.actors) != 2 || rec.actors[1] == nil {
+		t.Fatalf("downlink did not execute: %v", rec.calls)
+	}
+	if got := rec.actors[1]; got.SignedInHere || uns.AuthorizeCmdAt(e.Scope(), got, "configure", "") {
+		t.Fatalf("downlink actor = %+v: a person who signed in at the parent must hold no $node grant here", got)
+	}
+}

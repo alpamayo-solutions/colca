@@ -170,7 +170,8 @@ func (e *Engine) ForwardRefusal(rec store.StoredRecord) string {
 	if err != nil || uns.AuthorizedAtExecutor(p.Contract) {
 		return ""
 	}
-	actor := e.actorForAttested(attributionOf(rec))
+	// rec.Door is set only by a door of this node, so the person was admitted here.
+	actor := e.actorForAttested(attributionOf(rec), true)
 	if actor == nil && rec.Door == doorClient {
 		entry, ok := e.ids.Get(rec.WrittenBy)
 		if !ok {

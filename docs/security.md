@@ -127,6 +127,40 @@ be moved away from an entity outside the grant.
 has never heard of covers nothing, and a node that has never reached its parent
 cannot resolve elements above itself, so scoped grants fail closed there.
 
+### Grants relative to the node a person signs in at
+
+A grant names an element by id, so a group that should give every edge's
+operators their own machine would need one element id per machine. A person's
+grant can instead name `$node`, the node they signed in at:
+
+| Zone | Covers, at the node the person signed in at |
+|---|---|
+| `$node/#` | everything that node holds, as `#` does there |
+| `$node/<path>/#` | the subtree at that local path, for example `$node/Line1/Press/#` |
+
+One definition, written once at the root, then works for the whole fleet:
+`read:$node/#` lets an operator signed in at edge 1 read edge 1 and one signed
+in at edge 2 read edge 2. `$node` resolves when the grant is used, at the node
+evaluating it; the `_Group` definition descends unchanged.
+
+- `$node` is the node whose door verified the person's token, or whose own
+  local service attested their groups. A command that came down from the
+  parent was admitted at another node, so its sender's `$node` grants cover
+  nothing at the node executing it. Use element grants for people who command
+  edges from the hub.
+- At the root, `$node/#` is the whole tree. Give a group with `$node` grants
+  only to people who sign in at the edges; when edges share one identity
+  provider with each other, a member who can sign in at an edge holds that
+  edge.
+- `<path>` is a path of names in the node's own frame. Unlike an element id it
+  follows a rename: renaming `Line1` moves what `$node/Line1/#` covers. A path
+  no element sits at covers nothing.
+- Only people hold `$node` grants. Enrollment refuses them for machines,
+  services and nodes, whose placement is their zone. `admin:$node` is
+  reserved like every zone-scoped `admin`.
+- Nodes released before node-relative grants refuse a definition that holds a `$node` grant.
+  Upgrade the edges before defining such a group.
+
 ## People
 
 People authenticate with tokens from OIDC issuers the node lists. The node
