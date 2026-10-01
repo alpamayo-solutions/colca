@@ -282,3 +282,16 @@ func TestAGroupMayFollowMoreThanOneRole(t *testing.T) {
 		t.Fatalf("add planned as %+v", plan.Add)
 	}
 }
+
+func TestANodeRelativeGrantIsNeverCalledUnresolvable(t *testing.T) {
+	// read:$node/# names no element: it resolves at whichever node a member
+	// signs in at, so no element of the tree has to hold it.
+	grants := []string{"cmd:$node/Machine/#:param", "read:$node/#"}
+	plan := PlanDefinitions(map[string][]string{"operators": grants}, tree(nil, nil), root)
+	if len(plan.Unresolvable) != 0 {
+		t.Fatalf("unresolvable: %+v", plan.Unresolvable)
+	}
+	if len(plan.Upsert) != 1 || len(plan.Upsert[0].Grants) != 2 {
+		t.Fatalf("the grants should be written unchanged: %+v", plan.Upsert)
+	}
+}

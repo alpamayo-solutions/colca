@@ -102,7 +102,12 @@ func attributionForEntry(entry *uns.Entry) Attribution {
 // contribute nothing, so the person may end up with no grants and be refused,
 // never widened. Without attested groups there is no actor, and the executor
 // refuses a _CmdEdit.
-func (e *Engine) actorForAttested(attribution Attribution) *uns.Entry {
+//
+// signedInHere says whether the person was admitted at this node (its human
+// door, or a local service of this deployment attesting them) rather than on a
+// command that came down from the parent. Only then do their node-relative
+// ($node) grants resolve here; see uns.Entry.SignedInHere.
+func (e *Engine) actorForAttested(attribution Attribution, signedInHere bool) *uns.Entry {
 	if attribution.ActorKind != "human" || attribution.ActorID == "" || len(attribution.ActorGroups) == 0 {
 		return nil
 	}
@@ -125,6 +130,7 @@ func (e *Engine) actorForAttested(attribution Attribution) *uns.Entry {
 	if attribution.ActorLabel != "" && attribution.ActorLabel != attribution.ActorID {
 		entry.Username = attribution.ActorLabel // the verifying door's preferred_username, kept as the label
 	}
+	entry.SignedInHere = signedInHere
 	return entry
 }
 
@@ -544,7 +550,7 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		// never wider than the person. A service publishing as itself is judged as
 		// itself.
 		actor := entry
-		if attested := e.actorForAttested(attribution); attested != nil {
+		if attested := e.actorForAttested(attribution, true); attested != nil {
 			actor = attested
 		}
 		implicitLocalConfigure := actor == entry && p.NodeID == e.cfg.ULID && entry.MayImplicitlyConfigure(p.Contract)
@@ -726,7 +732,7 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 	// Forwarding checks the person again from the groups alone, so the door is
 	// recorded only when the groups alone authorize the command. Grants carried
 	// in the token itself cannot change during its life and are not checked again.
-	if attested := e.actorForAttested(attribution); attested == nil || !uns.Authorize(e.Scope(), attested, uns.ActCmd, topic) {
+	if attested := e.actorForAttested(attribution, true); attested == nil || !uns.Authorize(e.Scope(), attested, uns.ActCmd, topic) {
 		attribution.Door = ""
 	}
 	id, repeat, err := e.admitCommand(p, payload, attribution.ActorID)
@@ -1088,7 +1094,9 @@ func (e *Engine) IngestDownlinkAttributed(topic string, payload []byte, ts int64
 	}
 	res, err := e.persistRecord(class, p, topic, payload, ts, attribution, at)
 	if err == nil && res.Persisted {
-		e.maybeExec(p, payload, attribution, e.actorForAttested(attribution)) // the target executes downlinked commands
+		// The target executes downlinked commands. The person signed in at an
+		// ancestor, so their $node grants name that node and resolve to nothing here.
+		e.maybeExec(p, payload, attribution, e.actorForAttested(attribution, false))
 	}
 	return res, err
 }
