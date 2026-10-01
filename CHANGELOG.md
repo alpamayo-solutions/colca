@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.0](https://github.com/alpamayo-solutions/colca/compare/v0.25.0...v0.26.0) (2026-10-01)
+
+
+### Features
+
+* **authz:** grants relative to the node a person signs in at ([#135](https://github.com/alpamayo-solutions/colca/issues/135)) ([243effa](https://github.com/alpamayo-solutions/colca/commit/243effaccff3b019b8a4f84444b56c5da4ab5399))
+
 ## [0.25.0](https://github.com/alpamayo-solutions/colca/compare/v0.24.1...v0.25.0) (2026-09-30)
 
 
