@@ -1015,3 +1015,35 @@ func TestPrunedQueuedCommandsAreAnsweredToTheirSenders(t *testing.T) {
 		t.Fatalf("colca_command_dropped_total{reason=pruned} = %v, want 1", got)
 	}
 }
+
+// A cursor a removed consumer left behind clamps the prune for good when no
+// ignore_cursors_after is set. Retiring it (what POST /ack {"delete":true}
+// does) lets the next run prune to the policy bound, without a gap marker,
+// since no cursor was passed.
+func TestARetiredCursorNoLongerHoldsRetention(t *testing.T) {
+	st, eng := mustParts(t)
+	old := time.Now().Add(-2 * time.Hour).UnixMilli()
+	appendAt(t, st, "commands", 10, old, 1000)
+	if !st.CursorAck("c/hygentile-app/reconcile", "commands", 3) {
+		t.Fatal("cursor ack must move")
+	}
+	ret := retFor("commands", config.StreamRetention{MaxAge: config.Duration(time.Minute)})
+	p := newPruner(t, st, eng, ret)
+	p.now = func() time.Time { return time.Now().Add(48 * time.Hour) }
+
+	p.runOnce()
+	if got := st.LWM("commands"); got != 3 {
+		t.Fatalf("LWM with the abandoned cursor = %d, want 3 (clamped, never overridden by default)", got)
+	}
+
+	if err := st.CursorDelete("c/hygentile-app/reconcile", "commands"); err != nil {
+		t.Fatal(err)
+	}
+	p.runOnce()
+	if got := st.LWM("commands"); got != 11 {
+		t.Fatalf("LWM after retiring the cursor = %d, want 11 (policy bound)", got)
+	}
+	if next := st.NextOffset("commands"); next != 11 {
+		t.Fatalf("a retired cursor must not leave a gap marker: next = %d, want 11", next)
+	}
+}

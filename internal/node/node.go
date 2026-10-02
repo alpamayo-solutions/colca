@@ -542,13 +542,14 @@ func Start(cfg *config.Config) (*Node, error) {
 	// 9. Cursor watchdog: a consumer whose unread records grow old gets a
 	//    cursor_lag finding instead of a timed catch-up hiding it.
 	watchdog := &cursorwatch.Watchdog{
-		Store:    st,
-		Filters:  n.Engine.CursorFilters(),
-		Owners:   reg,
-		Elements: n.Engine.Elements(),
-		Gauges:   n.Metrics,
-		NodeID:   cfg.ULID,
-		After:    cfg.Cursors.EffectiveLagAlarmAfter(),
+		Store:      st,
+		Filters:    n.Engine.CursorFilters(),
+		Owners:     reg,
+		Elements:   n.Engine.Elements(),
+		Gauges:     n.Metrics,
+		NodeID:     cfg.ULID,
+		After:      cfg.Cursors.EffectiveLagAlarmAfter(),
+		StaleAfter: cfg.Cursors.EffectiveStaleAfter(),
 		Publish: func(topic string, payload []byte) error {
 			_, err := n.Engine.IngestAdminAttributed(topic, payload, engine.Attribution{
 				WrittenBy: cursorwatch.Author, ActorID: cursorwatch.Author,

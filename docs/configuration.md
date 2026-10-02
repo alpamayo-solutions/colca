@@ -124,6 +124,17 @@ beyond `max_age`; set `ignore_cursors_after` on `commands` to bound how long an
 absent child keeps the queue. Commands pruned that way are answered `410`. `definitions` are compacted,
 not aged.
 
+## Cursors
+
+| Key | Default | Meaning |
+|---|---|---|
+| `cursors.lag_alarm_after` | `60s` | How old the oldest unread record a consumer reads (its fetch filter applied) may get before the node writes a `cursor_lag` finding about its service. `0` writes none. |
+| `cursors.stale_after` | `24h` | How long a cursor may stand still while records wait past it before the node's `stale_cursors` finding names it, read or not. `0` writes none. |
+
+A stale cursor is only reported. To let retention pass it, set
+`ignore_cursors_after` on the stream; to remove it, retire it (see
+[HTTP API](http-api.md#cursors-that-nobody-reads)).
+
 ## Limits
 
 | Key | Default | Meaning |

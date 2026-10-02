@@ -77,6 +77,12 @@ advances the cursors only after successful upload; ordinary retention can then
 reclaim the acknowledged history. This protection is not a disk-capacity limit:
 size storage for the expected outage, ingestion rate and other local consumers.
 
+A cursor that stood still for `cursors.stale_after` (default 24 h) while its
+stream grew is named in the node's `stale_cursors` finding. List the cursors
+with `GET /backlog` (admin token, no prefix) and retire the ones a removed
+consumer left with `POST /ack {"delete":true}`; see
+[HTTP API](http-api.md#cursors-that-nobody-reads).
+
 To let the pruner give up on a consumer that stopped, set
 `ignore_cursors_after` for that stream. When a run removes records a cursor
 had not read, it logs an error and writes one `_StreamGap` record into the
