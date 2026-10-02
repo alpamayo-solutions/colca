@@ -110,10 +110,15 @@ func (e *Engine) ScanContractAll(contract string) ([]uns.KVRecord, error) {
 // signals — reads as written by the node, on behalf of that actor, exactly
 // as this node's own _Ack records already do (see (*Engine).ack).
 func (s *entityStore) PublishBatch(ctx uns.CommandContext, records []uns.StateRecord) ([]uns.StateWrite, error) {
+	// Read before the batch commits: a move's retired record is gone after it.
+	moves := s.e.movedPositions(records)
 	results, err := s.e.ingestAdminStateBatch(records, s.attribution(ctx))
 	if err != nil {
 		return nil, err
 	}
+	// The values and catalogues standing at a moved position follow it
+	// (carry.go). They are not this command's writes, so not in its ack.
+	s.e.carryRetained(moves, s.attribution(ctx))
 	writes := make([]uns.StateWrite, len(results))
 	for i, result := range results {
 		writes[i] = uns.StateWrite{

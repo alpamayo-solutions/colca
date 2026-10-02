@@ -77,6 +77,13 @@ connectors, dataops outputs and signals created by autobind alike.
 A signal bound to nothing, or a `_Metric` on a path with no signal, keeps the
 write-scope rule alone.
 
+When a configure command moves a signal (a rename, a reparent, or a
+`_CmdEdit` placement), the node moves the signal's current `_Metric` with it:
+the same payload and timestamp at the new path, a tombstone at the old one.
+When it moves an element, the catalogue of a service placed there moves to the
+element's new path, so the service stays its signals' producer. Nothing new is
+written for the producer; a value already published at the new path is kept.
+
 The local door authenticates by reaching it, not by a secret, so this rule
 stops a misconfigured or misbehaving service. It does not stop a process that
 connects under the producer's name.
