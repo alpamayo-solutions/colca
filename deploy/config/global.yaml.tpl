@@ -18,7 +18,8 @@ mqtt_local: { addr: ":1883" }
 # doors reject every token (machines are unaffected).
 mqtt_human: { tcp_addr: ":8884", ws_addr: ":8885" }
 auth:
-  issuer: http://keycloak:8080/realms/colca
+  issuers:
+    - url: http://keycloak:8080/realms/colca
   audience: colca
   jwks_url: http://keycloak:8080/realms/colca/protocol/openid-connect/certs
 repl: { addr: ":9443" }

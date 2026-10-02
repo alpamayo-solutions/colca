@@ -12,8 +12,8 @@ const alarmConfigID = "alarm-notification-config"
 // composeAlarm composes the _AlarmNotificationConfig record an alarm intent
 // writes. The record lives at a reserved path no element owns, so the person
 // is authorized at the signal the alarm is about, the same way annotations
-// are. An operator's act on an alarm is not an edit: it is a _CmdOperate the
-// alarm's evaluator applies (docs/alarms.md).
+// are. An operator's act on an alarm is not an edit: it is a _CmdAcknowledge
+// or a _CmdOperate the alarm's evaluator applies (docs/alarms.md).
 func (w *EditExec) composeAlarm(intent editIntent) (int, string, string, []StateRecord) {
 	switch intent.Action {
 	case "create", "update", "delete":

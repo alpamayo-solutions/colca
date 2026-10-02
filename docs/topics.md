@@ -83,7 +83,7 @@ The contract decides which stream a record lands in and which way it flows.
 | Class | Contracts | Stream | Flows |
 |---|---|---|---|
 | data | `_Metric` | `metrics` | up |
-| entity | `_Node`, `_SystemElement`, `_Signal`, `_Constant`, `_Resource`, `_ServiceDetails`, `_EnrolledIdentity`, `_AlarmState` | `entities` | up |
+| entity | `_Node`, `_SystemElement`, `_Signal`, `_Constant`, `_Resource`, `_ServiceDetails`, `_EnrolledIdentity`, `_Finding`, `_AlarmState`, `_AlarmSilence` | `entities` | up |
 | definition | `_Group`, `_MetadataType`, `_AnnotationType`, `_DataModel`, `_SemanticTag` | `definitions` | down to every node |
 | command | `_CmdParam`, `_CmdConfigure`, `_CmdAdmin`, `_CmdEdit`, … | `commands` | down to the target |
 | acknowledgement | `_Ack` | `commands` | up |
@@ -104,6 +104,17 @@ way down, and it looks the same on every node that holds it.
 The two alarm classes are the same subject in two shapes: `_AlarmState` is the
 alarm that stands right now, one retained record per alarm definition, and
 `_AlarmStateChange` is the transition it went through. See [Alarms](alarms.md).
+
+An `_Annotation` marks a span of time. Three fields place it:
+`system_element_id` is the element it belongs to, `signal_ids` are the signals
+it was computed from, and `related_annotation_ids` are the annotations it
+belongs to, such as the panel a head pass is part of. Every listed signal lies
+below the element. The element is optional, because not every producer knows
+it. An annotation written through `_CmdEdit` is checked against that rule and
+authorized at the element and at each signal; a producer publishing directly is
+checked against the schema only. The id derives from the type, the source, the
+start and the signal set, so placing an annotation or relating it does not
+change its id.
 
 ## Removing a value
 

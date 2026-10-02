@@ -49,6 +49,8 @@ export interface Page {
   records: DoorRecord[];
   /** Where a following read starts. Fetching never moves the cursor; acking does. */
   next: number;
+  /** Where this page started reading; absent from nodes before 0.18.2. */
+  start?: number;
   gap?: Gap;
 }
 
@@ -66,6 +68,29 @@ export interface KvEntry {
   actorId: string;
   actorLabel: string;
   actorKind: string;
+}
+
+export interface KvOptions {
+  /** Keeps only entries of these contracts, filtered at the node. */
+  contract?: string | readonly string[];
+  /**
+   * Keeps entries at most this many path segments below `prefix`
+   * (`kv("plant/", { depth: 1 })` is the level below `plant`). The node skips
+   * deeper subtrees without reading them.
+   */
+  depth?: number;
+  signal?: AbortSignal;
+}
+
+/** One level of the tree under a prefix, as `kvLevel` reads it. */
+export interface KvLevel {
+  entries: KvEntry[];
+  /**
+   * The paths at the cut that have deeper entries, whether or not they hold a
+   * record themselves: the rows a tree view can expand. Not narrowed by
+   * `contract`.
+   */
+  folders: string[];
 }
 
 export interface SelfInfo {
@@ -91,6 +116,10 @@ export interface FetchOptions {
   prefix?: string;
   /** Only for the `metrics` stream, at most 1000 ids. */
   signalIds?: readonly string[];
+  /** Keeps only records of these contracts; `next` still moves past the others. */
+  contract?: string | readonly string[];
+  /** MQTT topic filters; keeps records whose topic matches one (colca 0.19+). */
+  topics?: readonly string[];
   /**
    * Read the *end* of the stream instead of the cursor's position, without
    * moving it. What a view wants when it opens: the last `max` records.
@@ -174,11 +203,14 @@ export class Door {
     if (options.prefix) query.set("prefix", options.prefix);
     if (options.tail) query.set("tail", "1");
     for (const id of options.signalIds ?? []) query.append("signal_id", id);
+    for (const name of contractList(options.contract)) query.append("contract", name);
+    for (const filter of options.topics ?? []) query.append("topic", filter);
 
     const body = await this.#call<WirePage>("GET", `/fetch?${query.toString()}`, undefined, options.signal);
     return {
       records: (body.records ?? []).map(toRecord),
       next: body.next,
+      start: body.from,
       gap: body.gap ? toGap(body.gap) : undefined,
     };
   }
@@ -222,23 +254,39 @@ export class Door {
 
   /**
    * `GET /kv` — the retained entries under `prefix`, every page followed.
-   * `contract` narrows the scan at the node, before payloads are decoded.
+   * `contract` narrows the scan at the node, before payloads are decoded;
+   * `depth` stops it that many segments below `prefix`.
    */
-  async kv(
-    prefix = "",
-    options: { contract?: string | readonly string[]; signal?: AbortSignal } = {},
-  ): Promise<KvEntry[]> {
-    const contracts = typeof options.contract === "string" ? [options.contract] : (options.contract ?? []);
-    const entries: KvEntry[] = [];
+  async kv(prefix = "", options: KvOptions = {}): Promise<KvEntry[]> {
+    return (await this.#kvPages(prefix, options, false)).entries;
+  }
+
+  /**
+   * `GET /kv?depth=N&folders=true` — one level of the tree under `prefix`
+   * (`depth` 1 by default): its entries plus the folders that expand, so a
+   * tree view never reads more than it shows.
+   */
+  async kvLevel(prefix = "", options: KvOptions = {}): Promise<KvLevel> {
+    return this.#kvPages(prefix, { ...options, depth: options.depth ?? 1 }, true);
+  }
+
+  async #kvPages(prefix: string, options: KvOptions, folders: boolean): Promise<KvLevel> {
+    const { depth } = options;
+    if (depth !== undefined && (!Number.isInteger(depth) || depth < 1)) {
+      throw new RangeError(`GET /kv: depth must be a positive integer, got ${String(depth)}`);
+    }
+    const level: KvLevel = { entries: [], folders: [] };
     let after = "";
     for (;;) {
       const query = new URLSearchParams({ prefix, max: "10000" });
-      for (const name of contracts) query.append("contract", name);
+      for (const name of contractList(options.contract)) query.append("contract", name);
+      if (depth !== undefined) query.set("depth", String(depth));
+      if (folders) query.set("folders", "true");
       if (after) query.set("after", after);
 
       const body = await this.#call<WireKvPage>("GET", `/kv?${query.toString()}`, undefined, options.signal);
       for (const entry of body.entries ?? []) {
-        entries.push({
+        level.entries.push({
           path: entry.path,
           nodeId: entry.node_id,
           topic: entry.topic,
@@ -251,8 +299,9 @@ export class Door {
           actorKind: entry.actor_kind ?? "",
         });
       }
+      level.folders.push(...(body.folders ?? []));
       const next = body.next ?? "";
-      if (!next) return entries;
+      if (!next) return level;
       if (next === after) throw new Error("GET /kv: the node repeated a page token");
       after = next;
     }
@@ -318,6 +367,7 @@ interface WireGap {
 interface WirePage {
   records?: WireRecord[];
   next: number;
+  from?: number;
   gap?: WireGap;
 }
 
@@ -334,6 +384,7 @@ interface WireKvPage {
     actor_label?: string;
     actor_kind?: string;
   }[];
+  folders?: string[];
   next?: string;
 }
 
@@ -369,6 +420,10 @@ function toGap(g: WireGap): Gap {
     lastTs: g.last_ts,
     approx: g.approx ?? false,
   };
+}
+
+function contractList(contract: string | readonly string[] | undefined): readonly string[] {
+  return typeof contract === "string" ? [contract] : (contract ?? []);
 }
 
 /** Attribution fields left unset must not reach the node as nulls. */

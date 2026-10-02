@@ -19,6 +19,7 @@ import (
 	"github.com/mochi-mqtt/server/v2/listeners"
 	"github.com/mochi-mqtt/server/v2/packets"
 
+	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -53,14 +54,17 @@ type Server struct {
 // New accepts a nil engine and SetEngine fills it in. mu guards that swap.
 type colcaHook struct {
 	mqtt.HookBase
-	mu      sync.RWMutex
-	eng     *engine.Engine
-	reg     *registry.Manager
-	ver     *tokenauth.Verifier // nil when the node has no auth: block
-	humans  *humanSessions
-	cfg     *config.Config
-	log     *slog.Logger
-	metrics *metrics.Metrics // nil-safe: every Metrics method is a no-op on nil
+	mu     sync.RWMutex
+	eng    *engine.Engine
+	reg    *registry.Manager
+	ver    *tokenauth.Verifier // nil when the node has no auth: block
+	humans *humanSessions
+	cfg    *config.Config
+	log    *slog.Logger
+	// refusals logs refused publishes once per sender and minute: a client can
+	// repeat one as fast as it likes.
+	refusals *slog.Logger
+	metrics  *metrics.Metrics // nil-safe: every Metrics method is a no-op on nil
 	// broker is the server New builds around this hook, never nil in practice. The
 	// hook uses it to publish the time-sync beacon.
 	broker *mqtt.Server
@@ -70,6 +74,7 @@ type colcaHook struct {
 	closing atomic.Bool
 	// publishing counts client publishes admitted before closing whose PUBACK is not
 	// written yet; admitted holds the client of each. Close waits for them.
+	pubDone    door.Signal
 	publishing atomic.Int64
 	admitted   sync.Map // *mqtt.Client -> struct{}
 }
@@ -131,7 +136,11 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnSubscribe,
 		mqtt.OnSubscribed,
 		mqtt.OnPublishDropped,
+		mqtt.OnPacketSent,
 		mqtt.OnPacketProcessed,
+		mqtt.OnAuthPacket,
+		mqtt.OnPacketEncode,
+		mqtt.OnSelectSubscribers,
 	}, b)
 }
 
@@ -160,6 +169,23 @@ func (h *colcaHook) OnWillSent(cl *mqtt.Client, pk packets.Packet) {
 func (h *colcaHook) OnPublishDropped(cl *mqtt.Client, pk packets.Packet) {
 	h.metrics.PublishDropped()
 	h.log.Warn("publish dropped: client outbound queue full", "client", cl.ID, "topic", pk.TopicName)
+}
+
+// OnPacketSent counts each PUBLISH written to a subscriber by the door it
+// connected through. mochi calls it after the write, so a dropped publish is
+// not counted.
+func (h *colcaHook) OnPacketSent(cl *mqtt.Client, pk packets.Packet, _ []byte) {
+	if pk.FixedHeader.Type != packets.Publish {
+		return
+	}
+	door := metrics.DoorMQTT
+	switch {
+	case isLocalListener(cl):
+		door = metrics.DoorLocal
+	case isHumanListener(cl):
+		door = metrics.DoorHuman
+	}
+	h.metrics.MQTTDelivered(door, len(pk.Payload))
 }
 
 const quotaDeniedSubscription = "$COLCA/quota-exceeded"
@@ -373,7 +399,8 @@ func rejectCode(cl *mqtt.Client, pk packets.Packet, err error) error {
 	case metrics.ReasonValidation:
 		return refuse(cl, pk, packets.ErrPayloadFormatInvalid)
 	case metrics.ReasonNodeID, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract,
-		metrics.ReasonWriteDenied, metrics.ReasonHumanWrite, metrics.ReasonTimeSync:
+		metrics.ReasonWriteDenied, metrics.ReasonHumanWrite, metrics.ReasonTimeSync,
+		metrics.ReasonNotProducer:
 		// Authorization verdicts, write_denied included: the identity has no write
 		// standing at that topic.
 		return refuse(cl, pk, packets.ErrNotAuthorized)
@@ -391,7 +418,9 @@ func rejectCode(cl *mqtt.Client, pk packets.Packet, err error) error {
 func (h *colcaHook) admitPublish(cl *mqtt.Client) bool {
 	h.publishing.Add(1)
 	if h.closing.Load() {
-		h.publishing.Add(-1)
+		if h.publishing.Add(-1) == 0 && h.closing.Load() {
+			h.pubDone.Notify()
+		}
 		return false
 	}
 	h.admitted.Store(cl, struct{}{})
@@ -405,20 +434,27 @@ func (h *colcaHook) OnPacketProcessed(cl *mqtt.Client, pk packets.Packet, _ erro
 		return
 	}
 	if _, ok := h.admitted.LoadAndDelete(cl); ok {
-		h.publishing.Add(-1)
+		if h.publishing.Add(-1) == 0 && h.closing.Load() {
+			h.pubDone.Notify()
+		}
 	}
 }
 
 // awaitPublishes waits until every admitted publish was answered, or until timeout.
 func (h *colcaHook) awaitPublishes(timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
-	for h.publishing.Load() > 0 {
-		if time.Now().After(deadline) {
-			h.log.Warn("shutdown: disconnecting with publishes still unanswered",
-				"publishes", h.publishing.Load(), "waited", timeout)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		changed := h.pubDone.Changes()
+		if h.publishing.Load() == 0 {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-changed:
+		case <-timer.C:
+			h.log.Warn("shutdown: disconnecting with publishes still unanswered", "publishes", h.publishing.Load(), "waited", timeout)
+			return
+		}
 	}
 }
 
@@ -473,7 +509,8 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		}
 		res, err := eng.IngestHumanAttributed(s.entry, actor, pk.TopicName, pk.Payload)
 		if err != nil {
-			h.log.Warn("human publish rejected", "sub", s.sub, "topic", pk.TopicName, "err", err)
+			h.refusals.Warn("human publish rejected", "sub", s.sub, "topic", pk.TopicName,
+				"bytes", len(pk.Payload), "err", err)
 			return pk, rejectCode(cl, pk, err)
 		}
 		h.log.Debug("human ingest", "sub", s.sub, "topic", res.Topic, "stream", res.Stream, "offset", res.Offset)
@@ -481,8 +518,14 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 	}
 	res, err := eng.IngestClient(ident, pk.TopicName, pk.Payload)
 	if err != nil {
-		h.log.Warn("publish rejected", "identity", ident, "topic", pk.TopicName, "err", err)
+		h.refusals.Warn("publish rejected", "identity", ident, "topic", pk.TopicName,
+			"bytes", len(pk.Payload), "err", err)
 		return pk, rejectCode(cl, pk, err)
+	}
+	if res.Duplicate || res.Answered {
+		// Nothing stored, nothing to fan out: a repeat, or a command the node
+		// answered itself.
+		return pk, packets.CodeSuccessIgnore
 	}
 	if res.Persisted {
 		h.log.Debug("mqtt ingest", "identity", ident, "topic_in", pk.TopicName,
@@ -490,6 +533,37 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		return pk, packets.CodeSuccessIgnore
 	}
 	return pk, nil
+}
+
+// OnSelectSubscribers keeps an ack from every person except the one who sent its
+// command; an ack whose sender the node does not know reaches no person.
+// Services and machines keep every ack their read grants cover.
+func (h *colcaHook) OnSelectSubscribers(subs *mqtt.Subscribers, pk packets.Packet) *mqtt.Subscribers {
+	eng := h.engine()
+	if eng == nil || h.humans.empty() {
+		return subs
+	}
+	recipient, isAck := eng.AckRecipient(pk.TopicName, pk.Payload)
+	if !isAck {
+		return subs
+	}
+	keep := func(clientID string) bool {
+		s, human := h.humans.get(clientID)
+		return !human || (recipient != "" && s.entry.ULID == recipient)
+	}
+	for id := range subs.Subscriptions {
+		if !keep(id) {
+			delete(subs.Subscriptions, id)
+		}
+	}
+	for _, group := range subs.Shared {
+		for id := range group {
+			if !keep(id) {
+				delete(group, id)
+			}
+		}
+	}
+	return subs
 }
 
 // New builds the broker with the TLS listener bound immediately, so Addr works
@@ -521,9 +595,9 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 
 	// Every listener gets its own *tls.Config: crypto/tls and net/http mutate a Config
 	// while other handshakes read it, so sharing one across listeners is a data race.
-	s := mqtt.New(&mqtt.Options{InlineClient: true})
-	// The library's own logging, bounded and named — see mochiLogHandler.
-	s.Log = slog.New(newMochiLogHandler(slog.Default().Handler()))
+	// The library's own logging, bounded and named — see mochiLogHandler. It goes in
+	// through Options: mochi gives its hooks the logger New was called with.
+	s := mqtt.New(&mqtt.Options{InlineClient: true, Logger: slog.New(newMochiLogHandler(slog.Default().Handler()))})
 	mqttLimits := cfg.MQTTLimits
 	s.Options.Capabilities.MaximumClients = mqttLimits.EffectiveMaxClients()
 	s.Options.Capabilities.ReceiveMaximum = mqttLimits.EffectiveReceiveMaximum()
@@ -532,6 +606,13 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	// retained replay burst.
 	s.Options.Capabilities.MaximumClientWritesPending = mqttLimits.EffectiveMaxPendingWritesPerClient()
 	s.Options.Capabilities.MaximumSessionExpiryInterval = uint32(mqttLimits.EffectiveMaxSessionExpiry() / time.Second) //nolint:gosec // validated against the MQTT maximum
+	// The retained set is the store's KV projection, loaded at boot and kept by the
+	// engine: it must never age out on its own. mochi's default caps every message's
+	// life at a day and drops retained messages older than that, so a node running
+	// longer served its subscribers only what was written in the last day -- a
+	// browser loading afterwards got no plant structure at all. 0 is no cap; an expiry
+	// a publisher sets on its own message still applies.
+	s.Options.Capabilities.MaximumMessageExpiryInterval = 0
 	s.Options.Capabilities.TopicAliasMaximum = mqttLimits.EffectiveMaxTopicAliasesPerClient()
 	// A new subscriber's retained replay can burst thousands of QoS 1 messages, and
 	// mochi drops anything beyond MaximumInflight without retry, so raise it to the
@@ -545,7 +626,8 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	// unavailable. mochi never reads this field; the door enforces it.
 	s.Options.Capabilities.SharedSubAvailable = 0
 	hook := &colcaHook{eng: eng, reg: reg, ver: ver, humans: newHumanSessions(),
-		cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s}
+		cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s,
+		refusals: slog.New(newMochiLogHandler(slog.Default().Handler())).With("node", cfg.ULID, "comp", "mqtt")}
 	if err := s.AddHook(hook, nil); err != nil {
 		return nil, err
 	}
@@ -584,6 +666,9 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	}
 	if srv.humanTCP != nil || srv.humanWS != nil {
 		go srv.runSweeper(srv.sweepStop)
+		if ver != nil {
+			ver.OnLogout(srv.endLoggedOutSessions)
+		}
 	}
 	return srv, nil
 }
@@ -711,6 +796,13 @@ func (s *Server) Close() error {
 // appended record reaches the bus this way under its stored topic; state is
 // retained so new subscribers get the current value.
 func (s *Server) DeliverLocal(topic string, payload []byte, retain bool) {
+	if len(topic) > uns.MaxTopicBytes {
+		// A record stored before Parse refused such topics; delivered, it would
+		// misframe the stream of every subscriber.
+		slog.Default().Warn("local delivery refused: topic longer than MQTT allows",
+			"topic_prefix", topic[:256], "bytes", len(topic))
+		return
+	}
 	if err := s.S.Publish(topic, payload, retain, 1); err != nil {
 		slog.Default().Warn("local delivery failed", "topic", topic, "retain", retain, "err", err)
 	}

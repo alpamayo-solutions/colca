@@ -2,10 +2,12 @@ package engine
 
 import (
 	"bytes"
+	"github.com/alpamayo-solutions/colca/internal/clock"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -907,7 +909,9 @@ func TestClassCmdRejectedUnderDrainingMount(t *testing.T) {
 	if v := metricstest.Value(t, m, rejectedLine); v != 4 {
 		t.Fatalf("%s = %v after 4 rejected attempts (client+admin+downlink+human), want 4", rejectedLine, v)
 	}
-	if _, err := e.IngestHuman(humanEntry(t, "cmd:el-hmi/#:param"), "colca/v1/_CmdParam/hmi/hmi/ping", payload); err != nil {
+	// Its own correlation id: the admin's is taken, and a person may not reuse it.
+	ownPayload := []byte(`{"correlation_id":"c-human","expires_at":99999999999}`)
+	if _, err := e.IngestHuman(humanEntry(t, "cmd:el-hmi/#:param"), "colca/v1/_CmdParam/hmi/hmi/ping", ownPayload); err != nil {
 		t.Fatalf("cmd outside the draining mount must still be admitted (human): %v", err)
 	}
 }
@@ -1395,5 +1399,22 @@ func TestIngestRefreshGuardAndSkipSemantics(t *testing.T) {
 	}
 	if _, _, err := e.IngestRefresh(topic, nil, 2); err == nil {
 		t.Fatal("empty refresh payload must be rejected — a refresh cannot tombstone")
+	}
+}
+
+func TestClockStatusUsesExistingAuthority(t *testing.T) {
+	e := &Engine{cfg: &config.Config{}, clk: clock.New(true, func() time.Time { return time.Unix(100, 0) })}
+	status := e.ClockStatus()
+	if status["now_ms"] != int64(100000) || status["is_root"] != true || status["sync_age_seconds"] != float64(0) {
+		t.Fatal(status)
+	}
+	e.clk = clock.New(false, func() time.Time { return time.Unix(100, 0) })
+	if e.ClockStatus()["sync_age_seconds"] != nil {
+		t.Fatal("unsynchronized edge reported a synchronization")
+	}
+	e.ApplyClockSample(101000)
+	status = e.ClockStatus()
+	if status["now_ms"] != int64(101000) || status["offset_ms"] != int64(1000) {
+		t.Fatal(status)
 	}
 }

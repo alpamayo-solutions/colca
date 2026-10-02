@@ -1,6 +1,7 @@
 package uns
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -33,9 +34,10 @@ type ConfigExec struct {
 	// autobindNew binds a connector's catalogue as soon as the node first sees it
 	// (setting "autobind" = "on_new_connector").
 	autobindNew bool
-	// observed holds, per catalogue topic, the tag ids of the last publish this
-	// process saw, so a republish can tell a new tag from one an operator deleted.
-	observed map[string]map[string]bool
+	// observed holds, per catalogue topic, the tags of the last publish this
+	// process saw and what each said, so a republish can tell a new tag from one
+	// an operator deleted, and a changed unit from an unchanged one.
+	observed map[string]map[string]tagMeta
 }
 
 // NewConfigExec builds the executor. Unknown settings keys are ignored, so a
@@ -44,7 +46,7 @@ func NewConfigExec(s EntityStore, bound Bindings, elements Namespace, blobs Blob
 	return &ConfigExec{
 		store: s, bound: bound, elements: elements, blobs: blobs, newID: newID,
 		autobindNew: settings["autobind"] == "on_new_connector",
-		observed:    map[string]map[string]bool{},
+		observed:    map[string]map[string]tagMeta{},
 	}
 }
 
@@ -74,12 +76,20 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	if err := json.Unmarshal(payload, &cat); err != nil {
 		return
 	}
-	ids := make(map[string]bool, len(cat.DataTags))
+	metas := make(map[string]tagMeta, len(cat.DataTags))
 	for _, tag := range cat.DataTags {
-		ids[tag.ID] = true
+		metas[tag.ID] = tag.Meta.tagMeta
 	}
 	previous, seen := c.observed[topic]
-	c.observed[topic] = ids
+	c.observed[topic] = metas
+
+	// What the tags say reaches the signals already bound to them: missing
+	// fields are filled on every publish, and a field this process saw change
+	// is updated. Runs after any binding below, whose own signals already
+	// carry the tags' fields. A refused write is left for the next publish,
+	// as a refused binding is.
+	changed := changedMeta(previous, metas)
+	defer func() { _, _, _ = c.syncCatalogueMeta(CommandContext{}, cat, changed) }()
 
 	// A catalogue can grow after its first publish (an OPC UA connector announces
 	// its heartbeat tags before browsing the server). New tags are bound, old ones
@@ -98,7 +108,7 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	}
 	var grown catalogue
 	for _, tag := range cat.DataTags {
-		if !previous[tag.ID] {
+		if _, known := previous[tag.ID]; !known {
 			grown.DataTags = append(grown.DataTags, tag)
 		}
 	}
@@ -112,6 +122,18 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	c.bindCatalogue(CommandContext{}, mount, element, encoded)
 }
 
+// changedMeta returns the tags whose stated fields differ between two
+// publishes of one catalogue. A tag new in the later publish is not a change.
+func changedMeta(previous, current map[string]tagMeta) map[string]bool {
+	changed := map[string]bool{}
+	for id, now := range current {
+		if before, known := previous[id]; known && before != now {
+			changed[id] = true
+		}
+	}
+	return changed
+}
+
 // owningEntry finds the enrolled identity whose computed catalogue topic is
 // topic, and returns the element and mount it is bound to. It compares the
 // full topic, node id included, so records from another node never match.
@@ -121,7 +143,7 @@ func (c *ConfigExec) owningEntry(topic string) (element, mount string, ok bool) 
 		if !ok {
 			continue // cannot place this entry here: it owns nothing
 		}
-		if Prefix()+"_DataTags/"+c.store.NodeID()+"/"+joinPath(m, e.Name) == topic {
+		if CatalogueTopic(c.store.NodeID(), m, e.Name) == topic {
 			return e.Element, m, true
 		}
 	}
@@ -149,10 +171,14 @@ type upsertBody struct {
 }
 
 // constantRef is one typed authored value and its position. Constants are not
-// signals: they have no acquisition binding or metric topic.
+// signals: they have no acquisition binding or metric topic. Expected, when
+// given, is the value the writer read: the write goes through only while the
+// node still holds that value, so two writers that read the same value cannot
+// both succeed.
 type constantRef struct {
 	Path     string          `json:"path"`
 	Constant json.RawMessage `json:"constant"`
+	Expected json.RawMessage `json:"expected,omitempty"`
 }
 
 type constantUpsertBody struct {
@@ -174,10 +200,19 @@ type elementUpsertBody struct {
 }
 
 // placedElement is the part of a _SystemElement record this needs: the identity
-// that grants and bindings name it by.
+// that grants and bindings name it by, and the parent it declares.
+//
+// The parent is not the same question as the position. A record's path says
+// where the element sits, and for most elements the path of its parent is a
+// prefix of its own — but not for a ROOT's direct children: the publisher
+// leaves the root out of the path it writes, so an element whose parent is a
+// root is stored at its own segment alone. `parent_id` is then the only place
+// that relationship survives, and a delete that looked only at paths could
+// not see it.
 type placedElement struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	ParentID string `json:"parent_id,omitempty"`
 }
 
 // definitionRef is one definition to write. It has no path on purpose: a
@@ -246,11 +281,23 @@ type catalogue struct {
 		// publish for several machines. Missing elements on that path are created.
 		Meta struct {
 			Element string `json:"element"`
-			// Unit becomes the new signal's unit, or fills in a declared signal that
-			// has none. It never overwrites a declared unit.
-			Unit string `json:"unit"`
+			tagMeta
 		} `json:"meta"`
 	} `json:"data_tags"`
+}
+
+// tagMeta is what a catalogue tag says about its signal beyond name and type.
+// Each field becomes the new signal's, or fills in a bound signal that has
+// none. A declared value is never overwritten when the tag is first bound; a
+// later publish that changes a field updates the bound signal, because the
+// publisher owns what its tags say. A field the tag leaves empty changes
+// nothing, so catalogues without these fields behave as before.
+type tagMeta struct {
+	Unit string `json:"unit"`
+	// SemanticType names a _SemanticTag (by name or id); it becomes the
+	// signal's semantic_type_id. A name this node does not know is ignored.
+	SemanticType string `json:"semantic_type"`
+	Description  string `json:"description"`
 }
 
 // boundSignal is the part of a _Signal record that identifies its binding.
@@ -329,36 +376,91 @@ func (c *ConfigExec) commit(ctx CommandContext, records []StateRecord) ([]StateW
 }
 
 // positionsByID maps each id of a contract to the path holding it at this
-// node. The upsert verbs keep one entity per path; this keeps one path per id.
-// An id at two paths breaks snapshot() and every _CmdEdit at the node, and a
-// later tombstone would drop the grants and bindings of the survivor. Only this
-// node's own records count; a child's records are not ours to claim.
-func (c *ConfigExec) positionsByID(contract string) *idClaims {
-	claims := &idClaims{at: map[string]string{}}
+// node, and each path back to the id standing on it. The upsert verbs keep one
+// entity per path; this keeps one path per id. An id at two paths breaks
+// snapshot() and every _CmdEdit at the node, and a later tombstone would drop
+// the grants and bindings of the survivor. Only this node's own records count;
+// a child's records are not ours to claim. noun names the thing in a refusal.
+func (c *ConfigExec) positionsByID(contract, noun string) *idClaims {
+	claims := &idClaims{
+		noun: noun, at: map[string]string{}, by: map[string]string{}, placed: map[string]bool{},
+	}
 	for _, rec := range c.store.KVScan(contract, c.store.NodeID()) {
 		var held identified
 		if json.Unmarshal(rec.Payload, &held) == nil && held.ID != "" {
 			claims.at[held.ID] = rec.Path
+			claims.by[rec.Path] = held.ID
 		}
 	}
 	return claims
 }
 
-// idClaims tracks where each id sits, growing as a command claims positions.
-type idClaims struct{ at map[string]string }
+// idClaims tracks where each id sits and who sits at each path, growing as a
+// command claims positions. placed remembers the ids this command has already
+// put somewhere, which the store cannot yet show.
+type idClaims struct {
+	noun   string
+	at     map[string]string // id → path
+	by     map[string]string // path → id
+	placed map[string]bool
+}
 
-// claim takes path for id, or returns the path already holding it. The store
-// catches a second command; the map catches a duplicate within one command.
+// claim takes path for id. An identity the node already holds elsewhere MOVES:
+// claim answers with the path it leaves, which the caller must retire in the
+// same batch. Refusing the move instead — which this did until a live
+// deployment ran into it — leaves a declarative apply no way to rename or
+// reparent anything, because either changes the path and _CmdConfigure has no
+// move verb. Relocating upholds the same invariant the refusal did: one
+// identity, one position.
+//
+// Two answers are still refusals, returned as the sentence to report:
+// a second entry of the SAME command claiming an id an earlier entry already
+// placed (no order of writes satisfies it), and a move onto a path another
+// identity holds (the move would retire the mover's only record and overwrite
+// the sitting one, losing an identity outright).
+//
 // An empty id claims nothing.
-func (claims *idClaims) claim(id, path string) (held string, ok bool) {
+func (claims *idClaims) claim(id, path string) (vacated, refusal string) {
 	if id == "" {
-		return "", true
+		return "", ""
 	}
-	if at, taken := claims.at[id]; taken && at != path {
-		return at, false
+	at, known := claims.at[id]
+	if !known || at == path {
+		claims.take(id, path)
+		return "", ""
 	}
+	if claims.placed[id] {
+		return "", fmt.Sprintf("one command puts %s %s at %s and at %s — one identity "+
+			"cannot sit at two positions", claims.noun, id, at, path)
+	}
+	if held, taken := claims.by[path]; taken && held != id {
+		return "", fmt.Sprintf("%s is already %s %s — two %ss cannot share one position",
+			path, claims.noun, held, claims.noun)
+	}
+	delete(claims.by, at)
+	claims.take(id, path)
+	return at, ""
+}
+
+func (claims *idClaims) take(id, path string) {
 	claims.at[id] = path
-	return "", true
+	claims.by[path] = id
+	claims.placed[id] = true
+}
+
+// retire composes the tombstones for the positions relocated identities left
+// behind, skipping any position another entry of the same command filled: the
+// mover is gone from there either way, and a tombstone would erase that
+// entry's write depending on where the batch put it.
+func retire(vacated []string, written map[string]bool) []StateRecord {
+	records := make([]StateRecord, 0, len(vacated))
+	for _, topic := range vacated {
+		if written[topic] {
+			continue
+		}
+		records = append(records, StateRecord{Topic: topic})
+	}
+	return records
 }
 
 func (c *ConfigExec) constantUpsert(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
@@ -372,7 +474,8 @@ func (c *ConfigExec) constantUpsert(ctx CommandContext, payload []byte) (int, st
 
 	records := make([]StateRecord, 0, len(body.Constants))
 	seen := make(map[string]bool, len(body.Constants))
-	claims := c.positionsByID("_Constant")
+	var vacated []string
+	claims := c.positionsByID("_Constant", "constant")
 	for i, ref := range body.Constants {
 		if err := validatePositionPath(ref.Path); err != nil {
 			return 422, fmt.Sprintf("constant/upsert: entry %d: %v", i, err), "invalid", nil
@@ -389,29 +492,99 @@ func (c *ConfigExec) constantUpsert(ctx CommandContext, payload []byte) (int, st
 			return 422, fmt.Sprintf("constant/upsert: entry %d repeats path %s", i, ref.Path), "invalid", nil
 		}
 		seen[topic] = true
-		if existing, ok := c.store.KVGet(topic); ok {
-			held, err := validateConstantPayload(existing)
-			if err != nil || held.ID != incoming.ID {
-				heldID := held.ID
+		existing, held := c.store.KVGet(topic)
+		if held {
+			record, err := validateConstantPayload(existing)
+			if err != nil || record.ID != incoming.ID {
+				heldID := record.ID
 				if heldID == "" {
 					heldID = "an unreadable retained record"
 				}
 				return 409, fmt.Sprintf("constant/upsert: %s is already constant %s — two constants "+
 					"cannot share one position", ref.Path, heldID), "conflict", nil
 			}
+			if len(ref.Expected) > 0 && !sameJSON(record.Value, ref.Expected) {
+				return 409, fmt.Sprintf("constant/upsert: %s holds %s, not the expected %s",
+					ref.Path, record.Value, ref.Expected), "conflict", nil
+			}
+		} else if len(ref.Expected) > 0 {
+			return 409, fmt.Sprintf("constant/upsert: %s holds no constant, expected %s",
+				ref.Path, ref.Expected), "conflict", nil
 		}
-		if at, free := claims.claim(incoming.ID, ref.Path); !free {
-			return 409, fmt.Sprintf("constant/upsert: constant %s is already at %s — one identity "+
-				"cannot sit at two positions", incoming.ID, at), "conflict", nil
+		left, refusal := claims.claim(incoming.ID, ref.Path)
+		if refusal != "" {
+			return 409, "constant/upsert: " + refusal, "conflict", nil
+		}
+		if left != "" {
+			vacated = append(vacated, c.constantTopic(left))
 		}
 		records = append(records, StateRecord{Topic: topic, Payload: ref.Constant})
 	}
 
+	upserted := len(records)
+	records = append(records, retire(vacated, seen)...)
 	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 422, "constant/upsert: rejected: " + err.Error(), "invalid", nil
 	}
-	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
+	return 200, fmt.Sprintf("upserted %d", upserted), "ok", writes
+}
+
+// sameJSON reports whether two JSON values are equal, numbers by value, so
+// 0.5 and 5e-1 match and int64 values compare without float rounding.
+func sameJSON(a, b json.RawMessage) bool {
+	decode := func(raw json.RawMessage) (any, bool) {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		var v any
+		return v, decoder.Decode(&v) == nil
+	}
+	x, okX := decode(a)
+	y, okY := decode(b)
+	return okX && okY && equalJSON(x, y)
+}
+
+func equalJSON(x, y any) bool {
+	switch x := x.(type) {
+	case json.Number:
+		n, ok := y.(json.Number)
+		if !ok {
+			return false
+		}
+		i, errI := x.Int64()
+		j, errJ := n.Int64()
+		if errI == nil && errJ == nil {
+			return i == j
+		}
+		f, errX := x.Float64()
+		g, errY := n.Float64()
+		return errX == nil && errY == nil && f == g
+	case map[string]any:
+		m, ok := y.(map[string]any)
+		if !ok || len(m) != len(x) {
+			return false
+		}
+		for k, v := range x {
+			w, ok := m[k]
+			if !ok || !equalJSON(v, w) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		l, ok := y.([]any)
+		if !ok || len(l) != len(x) {
+			return false
+		}
+		for i := range x {
+			if !equalJSON(x[i], l[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return x == y
+	}
 }
 
 func (c *ConfigExec) constantDelete(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
@@ -768,7 +941,9 @@ func (c *ConfigExec) upsert(ctx CommandContext, payload []byte) (int, string, st
 		return 422, "signal/upsert: no signals given", "invalid", nil
 	}
 	records := make([]StateRecord, 0, len(body.Signals))
-	claims := c.positionsByID("_Signal")
+	written := make(map[string]bool, len(body.Signals))
+	var vacated []string
+	claims := c.positionsByID("_Signal", "signal")
 	for i, ref := range body.Signals {
 		if ref.Path == "" {
 			return 422, fmt.Sprintf("signal/upsert: entry %d has no path", i), "invalid", nil
@@ -780,22 +955,35 @@ func (c *ConfigExec) upsert(ctx CommandContext, payload []byte) (int, string, st
 		if err := json.Unmarshal(ref.Signal, &incoming); err != nil {
 			return 422, fmt.Sprintf("signal/upsert: entry %d unreadable: %v", i, err), "invalid", nil
 		}
-		if at, free := claims.claim(incoming.ID, ref.Path); !free {
-			return 409, fmt.Sprintf("signal/upsert: signal %s is already at %s — one identity "+
-				"cannot sit at two positions", incoming.ID, at), "conflict", nil
+		left, refusal := claims.claim(incoming.ID, ref.Path)
+		if refusal != "" {
+			return 409, "signal/upsert: " + refusal, "conflict", nil
 		}
-		payload, err := c.preserveBinding(ref.Path, ref.Signal)
+		// A moving signal carries its binding with it: the record to preserve
+		// from is the one it is leaving, not the empty position it arrives at.
+		// Reading the destination would unbind every declared signal a rename
+		// moves, since a declaration carries data_tag: null.
+		from := ref.Path
+		if left != "" {
+			from = left
+			vacated = append(vacated, c.signalTopic(left))
+		}
+		payload, err := c.preserveBinding(from, ref.Signal)
 		if err != nil {
 			return 422, fmt.Sprintf("signal/upsert: entry %d unreadable: %v", i, err), "invalid", nil
 		}
-		records = append(records, StateRecord{Topic: c.signalTopic(ref.Path), Payload: payload})
+		topic := c.signalTopic(ref.Path)
+		written[topic] = true
+		records = append(records, StateRecord{Topic: topic, Payload: payload})
 	}
+	upserted := len(records)
+	records = append(records, retire(vacated, written)...)
 	writes, err := c.commit(ctx, records)
 	if err != nil {
 		// Nothing was written; the error names the refused record.
 		return 422, "signal/upsert: rejected: " + err.Error(), "invalid", nil
 	}
-	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
+	return 200, fmt.Sprintf("upserted %d", upserted), "ok", writes
 }
 
 // preserveBinding keeps the stored binding, learned data type and replication
@@ -890,7 +1078,7 @@ func (c *ConfigExec) autobind(ctx CommandContext, payload []byte) (int, string, 
 		// wrong catalogue topic.
 		return 409, "signal/autobind: " + name + " is bound to an element this node cannot resolve", "conflict", nil
 	}
-	catTopic := Prefix() + "_DataTags/" + c.store.NodeID() + "/" + joinPath(mount, name)
+	catTopic := CatalogueTopic(c.store.NodeID(), mount, name)
 	raw, found := c.store.KVGet(catTopic)
 	if !found {
 		// No catalogue yet. A retry after the connector publishes works, so this
@@ -911,7 +1099,19 @@ func (c *ConfigExec) autobind(ctx CommandContext, payload []byte) (int, string, 
 		}
 		under, at = body.Under, id
 	}
-	return c.bindCatalogue(ctx, under, at, raw)
+	code, msg, status, writes := c.bindCatalogue(ctx, under, at, raw)
+	if code != 200 {
+		return code, msg, status, writes
+	}
+	var cat catalogue
+	if err := json.Unmarshal(raw, &cat); err != nil {
+		return 422, "signal/autobind: unreadable catalogue: " + err.Error(), "invalid", writes
+	}
+	updated, synced, err := c.syncCatalogueMeta(ctx, cat, nil)
+	if err != nil {
+		return 422, "signal/autobind: rejected: " + err.Error(), "invalid", writes
+	}
+	return 200, strings.TrimSuffix(msg, "}") + fmt.Sprintf(`,"updated":%d}`, updated), "ok", append(writes, synced...)
 }
 
 // elementAt returns the element this node holds at a local path, if any.
@@ -933,7 +1133,7 @@ func (c *ConfigExec) elementAt(path string) (string, bool) {
 // "element/author". It calls elementUpsert directly because c.mu is already
 // held and not reentrant. Each segment commits so the next one can see it.
 func (c *ConfigExec) authorElementAt(ctx CommandContext, path string) (string, error) {
-	var local, leaf string
+	var local, leaf, parent string
 	for _, seg := range strings.Split(path, "/") {
 		if seg == "" {
 			continue
@@ -947,7 +1147,7 @@ func (c *ConfigExec) authorElementAt(ctx CommandContext, path string) (string, e
 		if !ok {
 			// Minted, not derived from the path, so a rename keeps the id.
 			id = c.newID()
-			elem, err := json.Marshal(placedElement{ID: id, Name: seg})
+			elem, err := json.Marshal(placedElement{ID: id, Name: seg, ParentID: parent})
 			if err != nil {
 				return "", fmt.Errorf("author element at %s: %w", local, err)
 			}
@@ -960,7 +1160,7 @@ func (c *ConfigExec) authorElementAt(ctx CommandContext, path string) (string, e
 				return "", fmt.Errorf("author element at %s: %s", local, msg)
 			}
 		}
-		leaf = id
+		leaf, parent = id, id
 	}
 	return leaf, nil
 }
@@ -1000,6 +1200,7 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 
 	bindings := c.bindings()
 	taken := c.takenPaths()
+	semantic := c.semanticTags()
 
 	records := make([]StateRecord, 0, len(cat.DataTags))
 	skipped := 0
@@ -1032,9 +1233,7 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 				if _, typed := existing["data_type"]; !typed && tag.DataType != "" {
 					existing["data_type"] = tag.DataType
 				}
-				if _, hasUnit := existing["unit"]; !hasUnit && tag.Meta.Unit != "" {
-					existing["unit"] = tag.Meta.Unit
-				}
+				applyTagMeta(existing, tag.Meta.tagMeta, semantic, false)
 				if _, published := existing["is_published"]; !published {
 					existing["is_published"] = true
 				}
@@ -1068,9 +1267,7 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 		if tag.DataType != "" {
 			signal["data_type"] = tag.DataType
 		}
-		if tag.Meta.Unit != "" {
-			signal["unit"] = tag.Meta.Unit
-		}
+		applyTagMeta(signal, tag.Meta.tagMeta, semantic, false)
 		encoded, err := json.Marshal(signal)
 		if err != nil {
 			return 500, "signal/autobind: encode failed: " + err.Error(), "error", nil
@@ -1084,6 +1281,88 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 		return 422, "signal/autobind: rejected: " + err.Error(), "invalid", nil
 	}
 	return 200, fmt.Sprintf(`{"created":%d,"skipped":%d}`, len(records), skipped), "ok", writes
+}
+
+// applyTagMeta writes what a tag states onto a signal record: into empty
+// fields only, or over any other value when overwrite is set. semantic maps a
+// _SemanticTag name or id to its id. It reports whether the record changed.
+func applyTagMeta(signal map[string]any, meta tagMeta, semantic map[string]string, overwrite bool) bool {
+	changed := false
+	set := func(field, value string) {
+		if value == "" {
+			return
+		}
+		current, _ := signal[field].(string)
+		if current == value || (current != "" && !overwrite) {
+			return
+		}
+		signal[field] = value
+		changed = true
+	}
+	set("unit", meta.Unit)
+	set("description", meta.Description)
+	// A name this node does not know leaves the signal unclassified.
+	set("semantic_type_id", semantic[meta.SemanticType])
+	return changed
+}
+
+// semanticTags maps every _SemanticTag this node holds, by name and by id, to
+// its id.
+func (c *ConfigExec) semanticTags() map[string]string {
+	index := map[string]string{}
+	for _, rec := range c.store.KVScanAll("_SemanticTag") {
+		var tag struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(rec.Payload, &tag) != nil || tag.ID == "" {
+			continue
+		}
+		index[tag.ID] = tag.ID
+		if tag.Name != "" {
+			index[tag.Name] = tag.ID
+		}
+	}
+	return index
+}
+
+// syncCatalogueMeta brings the signals bound to a catalogue's tags in line with
+// what the tags state: empty fields are filled, and the fields of the tags in
+// overwrite are replaced. Only records that change are written. It returns how
+// many signals changed and the writes.
+func (c *ConfigExec) syncCatalogueMeta(ctx CommandContext, cat catalogue, overwrite map[string]bool) (int, []StateWrite, error) {
+	metas := make(map[string]tagMeta, len(cat.DataTags))
+	for _, tag := range cat.DataTags {
+		if tag.Meta.tagMeta != (tagMeta{}) {
+			metas[tag.ID] = tag.Meta.tagMeta
+		}
+	}
+	if len(metas) == 0 {
+		return 0, nil, nil
+	}
+	semantic := c.semanticTags()
+	var records []StateRecord
+	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
+		var signal map[string]any
+		if json.Unmarshal(rec.Payload, &signal) != nil {
+			continue
+		}
+		tagID, _ := signal["data_tag"].(string)
+		meta, ok := metas[tagID]
+		if !ok || !applyTagMeta(signal, meta, semantic, overwrite[tagID]) {
+			continue
+		}
+		encoded, err := json.Marshal(signal)
+		if err != nil {
+			return 0, nil, err
+		}
+		records = append(records, StateRecord{Topic: rec.Topic, Payload: encoded})
+	}
+	writes, err := c.commit(ctx, records)
+	if err != nil {
+		return 0, nil, err
+	}
+	return len(records), writes, nil
 }
 
 // unboundSignalAt returns the signal record at a local path if it exists and
@@ -1187,7 +1466,9 @@ func uniquePath(leaf, under string, taken map[string]bool) string {
 
 // elementUpsert writes elements at their positions. The path is the position,
 // so two elements cannot share one; the owning node checks this because only
-// it authors the parent.
+// it authors the parent. An element named at a position other than the one it
+// holds moves there — a rename or a reparent is an upsert, not a delete and a
+// recreate, which would lose everything standing on the element.
 func (c *ConfigExec) elementUpsert(ctx CommandContext, payload []byte) (int, string, string, []StateWrite) {
 	var body elementUpsertBody
 	if err := json.Unmarshal(payload, &body); err != nil {
@@ -1200,8 +1481,10 @@ func (c *ConfigExec) elementUpsert(ctx CommandContext, payload []byte) (int, str
 	// claimed guards positions taken within this command; nothing is written
 	// until the whole set is decided, so the store cannot show them yet.
 	claimed := make(map[string]string, len(body.Elements))
-	// The reverse check: claims says where an id already sits.
-	claims := c.positionsByID("_SystemElement")
+	// The reverse check: claims says where an id already sits, and moves it
+	// here when that is somewhere else.
+	var vacated []string
+	claims := c.positionsByID("_SystemElement", "element")
 	for i, ref := range body.Elements {
 		if ref.Path == "" {
 			return 422, fmt.Sprintf("element/upsert: entry %d has no path", i), "invalid", nil
@@ -1231,18 +1514,27 @@ func (c *ConfigExec) elementUpsert(ctx CommandContext, payload []byte) (int, str
 					"cannot share one position", ref.Path, held.ID), "conflict", nil
 			}
 		}
-		if at, free := claims.claim(incoming.ID, ref.Path); !free {
-			return 409, fmt.Sprintf("element/upsert: element %s is already at %s — one identity "+
-				"cannot sit at two positions", incoming.ID, at), "conflict", nil
+		left, refusal := claims.claim(incoming.ID, ref.Path)
+		if refusal != "" {
+			return 409, "element/upsert: " + refusal, "conflict", nil
+		}
+		if left != "" {
+			vacated = append(vacated, c.elementTopic(left))
 		}
 		claimed[topic] = incoming.ID
 		records = append(records, StateRecord{Topic: topic, Payload: ref.Element})
 	}
+	upserted := len(records)
+	written := make(map[string]bool, len(claimed))
+	for topic := range claimed {
+		written[topic] = true
+	}
+	records = append(records, retire(vacated, written)...)
 	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 422, "element/upsert: rejected: " + err.Error(), "invalid", nil
 	}
-	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
+	return 200, fmt.Sprintf("upserted %d", upserted), "ok", writes
 }
 
 // elementDelete retires positions, but not while child elements or bound
@@ -1350,6 +1642,18 @@ func (c *ConfigExec) definitionUpsert(ctx CommandContext, payload []byte) (int, 
 			return 422, fmt.Sprintf("definition/upsert: %s %s: %v",
 				ref.Contract, incoming.ID, err), "invalid", nil
 		}
+		if ref.Contract == "_ClockDefinition" {
+			topic := c.definitionTopic(ref.Contract, incoming.ID)
+			for _, record := range records {
+				if record.Topic == topic {
+					return 422, "clock definition repeated in batch", "invalid", nil
+				}
+			}
+			previous, _ := c.store.KVGet(topic)
+			if err := checkClockRevision(ref.Definition, previous); err != nil {
+				return 409, err.Error(), "conflict", nil
+			}
+		}
 		records = append(records, StateRecord{
 			Topic:   c.definitionTopic(ref.Contract, incoming.ID),
 			Payload: ref.Definition,
@@ -1422,6 +1726,10 @@ func (c *ConfigExec) checkDefinitionContract(i int, contract string) (int, strin
 // bundle's shape check. A malformed grant in a group is refused here, once,
 // instead of being dropped and logged at every node below.
 func checkDefinitionContents(contract string, raw []byte) error {
+	if contract == "_ClockDefinition" {
+		_, err := DecodeClockDefinition(raw)
+		return err
+	}
 	if contract == PersonalAccessTokenContract {
 		var token PersonalAccessToken
 		if err := json.Unmarshal(raw, &token); err != nil {
@@ -1491,13 +1799,39 @@ func (c *ConfigExec) elementTopic(path string) string {
 
 // occupantsBelow lists the element paths under path, skipping those the same
 // command retires.
+// occupantsBelow lists the elements that would be orphaned by retiring the
+// element at path: the ones stored under it, AND the ones that name it as
+// their parent wherever they are stored.
+//
+// The second half is not belt-and-braces. A root's direct children are stored
+// at their own segment alone — the publisher leaves the root out of the path —
+// so by path a root has no children at all, and a delete judged on paths
+// retired it happily. Seen on a live deployment: `prekit dm deploy --prune`
+// removed a root, this check found nothing in the way, and the one tombstone
+// went out. The projection, which knows the parent relationship because the
+// payload carries it, then cascaded: four elements the node still held
+// vanished from the read model, and the two disagreed permanently. The node
+// is the authority, so the node is where this has to be seen.
 func (c *ConfigExec) occupantsBelow(path string, retiring map[string]bool) []string {
+	var target placedElement
+	if raw, ok := c.store.KVGet(c.elementTopic(path)); ok {
+		_ = json.Unmarshal(raw, &target)
+	}
+	seen := make(map[string]bool)
 	var out []string
 	for _, rec := range c.store.KVScan("_SystemElement", c.store.NodeID()) {
-		if retiring[rec.Path] {
+		if retiring[rec.Path] || seen[rec.Path] {
 			continue
 		}
-		if strings.HasPrefix(rec.Path, path+"/") {
+		child := strings.HasPrefix(rec.Path, path+"/")
+		if !child && target.ID != "" {
+			var held placedElement
+			if json.Unmarshal(rec.Payload, &held) == nil && held.ParentID == target.ID {
+				child = true
+			}
+		}
+		if child {
+			seen[rec.Path] = true
 			out = append(out, rec.Path)
 		}
 	}

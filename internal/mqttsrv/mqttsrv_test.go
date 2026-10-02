@@ -1377,7 +1377,7 @@ func TestASuppliedCertificateServesTheHumanDoorAndNotTheMachineDoor(t *testing.T
 		ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
 		MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
 		MQTTHuman: config.MQTTHuman{TCPAddr: "127.0.0.1:0"},
-		Auth:      &config.Auth{Issuer: "http://issuer.test", Audience: "colca", JWKSURL: "http://issuer.test/jwks"},
+		Auth:      &config.Auth{Issuers: []config.AuthIssuer{{URL: "http://issuer.test"}}, Audience: "colca", JWKSURL: "http://issuer.test/jwks"},
 		TLS:       config.TLS{CertFile: certFile, KeyFile: keyFile},
 	}
 	s, err := New(cfg, nodeID, reg, nil, nil, nil, config.Limits{}.EffectiveMaxRecordBytes())

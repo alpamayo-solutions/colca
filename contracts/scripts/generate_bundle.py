@@ -54,8 +54,9 @@ REQUIRED_DROP: dict[str, list[str]] = {}
 
 
 def _required_drop_for(identifier: str, cls: type) -> list[str]:
+    # A command without expires_at never expires; one that must expire says so.
     if issubclass(cls, Cmd):
-        return ["created_at"]
+        return ["created_at", "expires_at"]
     return REQUIRED_DROP.get(identifier, [])
 
 
@@ -65,6 +66,10 @@ TOMBSTONE_OVERRIDES: dict[str, bool] = {}
 # Contracts colcad produces and validates itself. They never appear in a
 # bundle; the loader refuses one that declares them.
 BUILTIN_ONLY = {"_StreamGap", "_EnrolledIdentity", "_TimeSync"}
+
+# Clients decode these broker-authored records. They must never turn into a
+# bundle entry granting client publication; the broker owns their wire shape.
+DECODE_ONLY = {"_TimeSync"}
 
 # Registered payload classes that nothing may publish, each with the reason it
 # still exists as a Python type. A door rejects a contract it does not know
@@ -96,6 +101,7 @@ ALLOWED_KEYWORDS = {
 # Nested value objects that refuse unknown keys, so no extra field can smuggle
 # in a cleartext password or an outcome consumers read differently.
 STRICT_NESTED_DATACLASSES = {
+    "CommandRoute",
     "HealthMetricDeclaration",
     "NetworkInterface",
     "SealedSecretEnvelope",
@@ -176,6 +182,9 @@ def _schema_for_dataclass(cls: type, *, required_extra: list[str], required_drop
         props[f.name] = _schema_for_type(hints.get(f.name, typing.Any), required=is_req)
         if is_req:
             required.append(f.name)
+    if cls.__name__ == "ClockDefinition":
+        props["revision"] = {"type": "integer", "minimum": 1}
+        props["rate"].update(minimum=0, maximum=1000)
     schema: dict = {"type": "object", "properties": props}
     if cls.__name__ in STRICT_NESTED_DATACLASSES:
         schema["additionalProperties"] = False
@@ -231,6 +240,8 @@ def build_bundle(git_sha: str = "unknown") -> tuple[dict, str]:
     contracts: dict = {}
     for identifier in sorted(PAYLOAD_CLASSES):
         cls = PAYLOAD_CLASSES[identifier]
+        if identifier in DECODE_ONLY:
+            continue
         if identifier in BUILTIN_ONLY:
             raise SystemExit(
                 f"generate_bundle: {identifier} is builtin-only and must never be a registered payload class"

@@ -22,6 +22,8 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/contracts"
+	"github.com/alpamayo-solutions/colca/internal/contracts/contractstest"
+	"github.com/alpamayo-solutions/colca/internal/cursorwatch"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/httplimit"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -123,7 +125,7 @@ func newAPI(t *testing.T) *api {
 
 	iss := tokentest.NewIssuer(t)
 	ver, err := tokenauth.New(tokenauth.Config{
-		Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL(),
+		Issuers: []tokenauth.Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud(),
 	}, s, m)
 	if err != nil {
 		t.Fatal(err)
@@ -264,9 +266,12 @@ func TestAdminPublishFetchAckKV(t *testing.T) {
 		t.Fatalf("debug/state: %d", resp.StatusCode)
 	}
 	// healthz and metrics are open
-	resp, _ = req(t, admin, "GET", a.url+"/healthz", "", nil)
+	resp, out = req(t, admin, "GET", a.url+"/healthz", "", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("healthz: %d", resp.StatusCode)
+	}
+	if storage, _ := out["storage"].(map[string]any); storage["state"] != "ok" {
+		t.Fatalf("healthz storage: %v", out)
 	}
 	r2, err := client(nil).Get(a.url + "/metrics")
 	if err != nil || r2.StatusCode != http.StatusOK {
@@ -307,6 +312,44 @@ func TestFetchFiltersMetricsByRepeatedSignalIDAndAdvancesPastSkippedRecords(t *t
 		"tok", nil)
 	if resp.StatusCode != http.StatusOK || len(out["records"].([]any)) != 0 || out["next"] != float64(6) {
 		t.Fatalf("all-filtered fetch = %d %v", resp.StatusCode, out)
+	}
+}
+
+func TestFetchWithASignalFilterScansABoundedPageAndAckingReachesTheMatch(t *testing.T) {
+	a := newAPI(t)
+	skipped := 2*fetchScanBudget + 500
+	recs := make([]store.Record, 0, skipped+1)
+	for i := 0; i < skipped; i++ {
+		recs = append(recs, store.Record{Topic: "colca/v1/_Metric/n-test/line1/other", Payload: []byte(`{"signal_id":"other","value":1}`), TS: int64(i)})
+	}
+	recs = append(recs, store.Record{Topic: "colca/v1/_Metric/n-test/line1/wanted", Payload: []byte(`{"signal_id":"wanted","value":2}`), TS: int64(skipped)})
+	if _, _, err := a.st.Append("metrics", recs); err != nil {
+		t.Fatal(err)
+	}
+
+	fetch := func() map[string]any {
+		t.Helper()
+		resp, out := req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=sparse&max=10&signal_id=wanted", "tok", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("fetch = %d: %v", resp.StatusCode, out)
+		}
+		return out
+	}
+	out := fetch()
+	if len(out["records"].([]any)) != 0 || out["next"] != float64(fetchScanBudget+1) {
+		t.Fatalf("first page = %v, want no records and next %d (one scan budget)", out, fetchScanBudget+1)
+	}
+	pages := 1
+	for len(out["records"].([]any)) == 0 {
+		req(t, client(nil), "POST", a.url+"/ack", "tok", map[string]any{"cursor": "sparse", "stream": "metrics", "offset": out["next"].(float64) - 1})
+		out = fetch()
+		if pages++; pages > 5 {
+			t.Fatalf("no match after %d pages: %v", pages, out)
+		}
+	}
+	records := out["records"].([]any)
+	if len(records) != 1 || records[0].(map[string]any)["offset"] != float64(skipped+1) || pages != 3 {
+		t.Fatalf("records = %v after %d pages, want the match at offset %d on page 3", records, pages, skipped+1)
 	}
 }
 
@@ -696,7 +739,25 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("fetch: %d %s", resp.StatusCode, body)
 	}
-	want := `{"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
+	// The broker clock is live metadata; the stream/gap shape stays stable.
+	withoutClock := func(body string) string {
+		var envelope map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		var nowMS int64
+		if err := json.Unmarshal(envelope["now_ms"], &nowMS); err != nil || nowMS <= 0 {
+			t.Fatalf("missing authoritative clock: %s", body)
+		}
+		delete(envelope, "now_ms")
+		normalized, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(normalized) + "\n"
+	}
+	body = withoutClock(body)
+	want := `{"from":2,"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
 		`"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fetch gap wire shape:\n got %s\nwant %s", body, want)
@@ -705,13 +766,15 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	// The gap is per-consumer and side-effect free: an identical second fetch
 	// sees the identical gap (no cursor movement).
 	_, body2 := raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
+	body2 = withoutClock(body2)
 	if body2 != want {
 		t.Fatalf("second fetch differs — /fetch must not move the cursor:\n%s", body2)
 	}
 
 	// A new cursor on a pruned stream gets the gap too.
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh", "tok", "")
-	want = `{"gap":{"stream":"metrics","from_offset":1,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
+	body = withoutClock(body)
+	want = `{"from":1,"gap":{"stream":"metrics","from_offset":1,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
 		`"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fresh-cursor gap wire shape:\n got %s\nwant %s", body, want)
@@ -724,7 +787,8 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		t.Fatalf("ack past the LWM must move the cursor: %v", out)
 	}
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
-	want = `{"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
+	body = withoutClock(body)
+	want = `{"from":5,"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
 	if body != want {
 		t.Fatalf("after ack past LWM the gap object must disappear:\n got %s\nwant %s", body, want)
 	}
@@ -2401,7 +2465,7 @@ func newLocalHandlerWithVerifier(t *testing.T) (*localAPI, *tokentest.Issuer) {
 	h := newLocalHandler(t)
 	iss := tokentest.NewIssuer(t)
 	ver, err := tokenauth.New(tokenauth.Config{
-		Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL(),
+		Issuers: []tokenauth.Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud(),
 	}, h.eng.Store(), h.m)
 	if err != nil {
 		t.Fatal(err)
@@ -2536,7 +2600,7 @@ func newLocalHandlerWithPersonalAccessToken(t *testing.T, id string, scopes []st
 	h := newLocalHandler(t)
 	iss := tokentest.NewIssuer(t)
 	ver, err := tokenauth.New(tokenauth.Config{
-		Issuer: iss.Iss(), Audience: iss.Aud(), JWKSURL: iss.JWKSURL(),
+		Issuers: []tokenauth.Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud(),
 	}, h.eng.Store(), h.m)
 	if err != nil {
 		t.Fatal(err)
@@ -2577,5 +2641,253 @@ func TestTheLocalDoorRefusesAPersonalAccessTokenWithoutTheApiScope(t *testing.T)
 			"payload": map[string]any{"correlation_id": "c-pat2", "expires_at": 9999999999999}})
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("broker-only PAT on the local door = %d, want 401: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// adminHandlerFor mounts the admin door over the engine and registry a local
+// handler already holds, so one test can register a service the way a service
+// registers and then revoke it the way an operator revokes it.
+func adminHandlerFor(t *testing.T, h *localAPI) http.Handler {
+	t.Helper()
+	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
+	return Handler(h.eng, cfg, h.reg, nil, h.m, testBlobs(t, cfg), "deadbeef", false, nil)
+}
+
+// serviceRecords returns the _ServiceDetails records this node holds, so a test
+// can name what survived a revoke instead of asserting on a count alone.
+func serviceRecords(t *testing.T, h *localAPI) []string {
+	t.Helper()
+	entries, err := h.eng.Store().KVScan("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var topics []string
+	for _, kv := range entries {
+		if strings.Contains(kv.Topic, "/_ServiceDetails/") {
+			topics = append(topics, kv.Topic)
+		}
+	}
+	return topics
+}
+
+// Revoking an identity takes the records that identity authored with it. A
+// _ServiceDetails record is observed state only its own service may write — the
+// admin door refuses that contract outright — so one left behind by a revoke can
+// never be retired by anyone again. A live node had three for one service after
+// its mount was moved twice, two of them under elements that had since been
+// deleted, and the hub above it folded them by name and showed the service as
+// inactive while it was running and publishing.
+func TestRevokingAnIdentityRetiresTheServiceRecordItAuthored(t *testing.T) {
+	h := newLocalHandler(t)
+	registerLocal(t, h, "tcdb-api", "events")
+	entry, ok := h.reg.ByName("tcdb-api")
+	if !ok {
+		t.Fatal("the local door did not register tcdb-api")
+	}
+	topic := "colca/v1/_ServiceDetails/n-test/events/tcdb-api/_service"
+	if rec := localPublish(t, h, map[string]string{"X-Colca-Service": "tcdb-api"},
+		map[string]any{"topic": topic, "payload": map[string]any{"id": entry.ULID, "name": "tcdb-api"}},
+	); rec.Code != http.StatusOK {
+		t.Fatalf("the service publishing its own record = %d: %s", rec.Code, rec.Body.String())
+	}
+	// The denominator for the absence assertion below: the record is there to
+	// retire, and this is the topic it sits at.
+	if got := serviceRecords(t, h); len(got) != 1 || got[0] != topic {
+		t.Fatalf("after registration the node holds %v, want exactly %s", got, topic)
+	}
+
+	admin := adminHandlerFor(t, h)
+	if rec := doAdmin(t, admin, http.MethodDelete, "/enroll/"+entry.ULID, nil); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE /enroll/%s = %d: %s", entry.ULID, rec.Code, rec.Body.String())
+	}
+
+	if got := serviceRecords(t, h); len(got) != 0 {
+		t.Fatalf("the revoke left %v standing — nothing can retire a _ServiceDetails "+
+			"record once the identity that authored it is gone", got)
+	}
+}
+
+// from=N reads ahead of an unacked cursor, never behind an acked one, and the
+// response says where the page started. The cursor still moves only on /ack.
+func TestFetchFromReadsAheadOfTheCursor(t *testing.T) {
+	a := newAPI(t)
+	admin := client(nil)
+	seedMetrics(t, a.eng.Store(), 5, "colca/v1/_Metric/n-test/x")
+	offsets := func(out map[string]any) []float64 {
+		var got []float64
+		for _, r := range out["records"].([]any) {
+			got = append(got, r.(map[string]any)["offset"].(float64))
+		}
+		return got
+	}
+
+	_, out := req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=ra&max=2", "tok", nil)
+	if got := offsets(out); fmt.Sprint(got) != "[1 2]" || out["from"] != 1.0 || out["next"] != 3.0 {
+		t.Fatalf("first page = %v from=%v next=%v", got, out["from"], out["next"])
+	}
+	_, out = req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=ra&max=2&from=3", "tok", nil)
+	if got := offsets(out); fmt.Sprint(got) != "[3 4]" || out["from"] != 3.0 {
+		t.Fatalf("read-ahead page = %v from=%v", got, out["from"])
+	}
+	// Reading ahead did not move the cursor.
+	_, out = req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=ra&max=1", "tok", nil)
+	if got := offsets(out); fmt.Sprint(got) != "[1]" {
+		t.Fatalf("the cursor moved without an ack: %v", got)
+	}
+	// Behind the acked position, the cursor wins.
+	req(t, admin, "POST", a.url+"/ack", "tok", map[string]any{"cursor": "ra", "stream": "metrics", "offset": 4})
+	_, out = req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=ra&from=2", "tok", nil)
+	if got := offsets(out); fmt.Sprint(got) != "[5]" || out["from"] != 5.0 {
+		t.Fatalf("from behind the cursor = %v from=%v", got, out["from"])
+	}
+	for _, bad := range []string{"0", "-1", "x"} {
+		resp, _ := req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=ra&from="+bad, "tok", nil)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("from=%s = %d, want 400", bad, resp.StatusCode)
+		}
+	}
+}
+
+func TestFetchFiltersByTopicAndRemembersTheFilterForTheCursor(t *testing.T) {
+	a := newAPI(t)
+	_, _, err := a.st.Append("metrics", []store.Record{
+		{Topic: "colca/v1/_Metric/n-test/line1/s1", Payload: []byte(`{"signal_id":"s1","value":1}`), TS: 1},
+		{Topic: "colca/v1/_Metric/n-test/line2/s2", Payload: []byte(`{"signal_id":"s2","value":2}`), TS: 2},
+		{Topic: "colca/v1/_Metric/n-test/line1/deep/s3", Payload: []byte(`{"signal_id":"s3","value":3}`), TS: 3},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, out := req(t, client(nil), "GET",
+		a.url+"/fetch?stream=metrics&cursor=topics&max=10&topic=colca/v1/_Metric/%2B/line1/%2B&topic=colca/v1/_Metric/n-test/line2/%23",
+		"tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fetch = %d: %v", resp.StatusCode, out)
+	}
+	records := out["records"].([]any)
+	if len(records) != 2 || records[0].(map[string]any)["offset"] != float64(1) || records[1].(map[string]any)["offset"] != float64(2) {
+		t.Fatalf("records = %v, want offsets 1 and 2", records)
+	}
+	if out["next"] != float64(4) {
+		t.Fatalf("next = %v, want 4 past the skipped record", out["next"])
+	}
+
+	// The watchdog applies what the cursor fetched with.
+	w := &cursorwatch.Watchdog{Store: a.st, Filters: a.eng.CursorFilters(), Owners: a.reg, Elements: a.eng.Elements(),
+		NodeID: "n-test", After: time.Minute, Publish: func(string, []byte) error { return nil }}
+	gauges := map[string]float64{}
+	w.Gauges = gaugeMap(gauges)
+	a.st.CursorAck("topics", "metrics", 3)
+	w.Check(time.UnixMilli(3).Add(time.Hour))
+	if got := gauges["topics"]; got != 0 {
+		t.Fatalf("unread age = %v, want 0: the one record left is outside the topic filter", got)
+	}
+
+	resp, _ = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=c&topic=a/%23/b", "tok", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid topic filter = %d, want 400", resp.StatusCode)
+	}
+}
+
+type gaugeMap map[string]float64
+
+func (g gaugeMap) CursorUnreadAge(cursor, _ string, seconds float64) { g[cursor] = seconds }
+func (g gaugeMap) ForgetCursorUnreadAge(cursor, _ string)            { delete(g, cursor) }
+
+func TestACursorLagFindingIsAcceptedAndRetiredThroughTheAdminDoor(t *testing.T) {
+	a := newAPI(t)
+	// The finding must pass the schema the node really runs.
+	tbl, err := contracts.Load(contractstest.GeneratedBundlePath(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.eng.SetContracts(tbl)
+	w := &cursorwatch.Watchdog{Store: a.st, Filters: a.eng.CursorFilters(), Owners: a.reg, Elements: a.eng.Elements(),
+		NodeID: "n-test", After: time.Minute, Publish: func(topic string, payload []byte) error {
+			_, err := a.eng.IngestAdminAttributed(topic, payload, engine.Attribution{
+				WrittenBy: cursorwatch.Author, ActorID: cursorwatch.Author, ActorLabel: cursorwatch.Author, ActorKind: "system"})
+			return err
+		}}
+	cursor := a.m1.ULID + "/ingest"
+	a.eng.CursorFilters().Remember(cursor, "metrics", nil) // its consumer fetched since start
+	var last uint64
+	_, last, err = a.st.Append("metrics", []store.Record{{Topic: "colca/v1/_Metric/n-test/m1/s1", Payload: []byte(`{"signal_id":"s1","value":1}`), TS: 1000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.st.CursorAck(cursor, "metrics", last+1)
+	if _, _, err := a.st.Append("metrics", []store.Record{{Topic: "colca/v1/_Metric/n-test/m1/s1", Payload: []byte(`{"signal_id":"s1","value":2}`), TS: 2000}}); err != nil {
+		t.Fatal(err)
+	}
+	w.Check(time.UnixMilli(2000).Add(2 * time.Minute))
+	entries, err := a.st.KVScan("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var topic string
+	for _, e := range entries {
+		if strings.Contains(e.Topic, "/_Finding/") {
+			topic = e.Topic
+		}
+	}
+	if want := "colca/v1/_Finding/n-test/m1/" + a.m1.ULID + "/cursor_lag"; topic != want {
+		t.Fatalf("finding at %q, want %q", topic, want)
+	}
+	a.st.CursorAck(cursor, "metrics", last+2)
+	w.Check(time.UnixMilli(2000).Add(3 * time.Minute))
+	entries, err = a.st.KVScan("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Topic, "/_Finding/") {
+			t.Fatalf("finding still standing after the cursor caught up: %s", e.Topic)
+		}
+	}
+}
+
+func TestABatchPublishJudgesEachRecordAndAppendsTheAdmittedOnesTogether(t *testing.T) {
+	h := newLocalHandler(t)
+	body := `{"records":[
+		{"topic":"colca/v1/_Metric/n-test/line/a","payload":{"v":1}},
+		{"topic":"colca/v1/_Metric/n-other/line/b","payload":{"v":2}},
+		{"topic":"colca/v1/_CmdParam/n-test/line/c","payload":{"correlation_id":"x"}},
+		{"topic":"colca/v1/_Metric/n-test/line/d","payload":{"v":3}}
+	]}`
+	req := httptest.NewRequest(http.MethodPost, "/publish/batch", strings.NewReader(body))
+	req.Header.Set("X-Colca-Service", "bridge")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /publish/batch = %d: %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Accepted int              `json:"accepted"`
+		Results  []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Accepted != 2 || len(out.Results) != 4 {
+		t.Fatalf("accepted %d of %d results: %s", out.Accepted, len(out.Results), rec.Body)
+	}
+	if out.Results[0]["offset"] == nil || out.Results[3]["offset"] == nil {
+		t.Fatalf("records 0 and 3 must be stored: %v", out.Results)
+	}
+	if out.Results[3]["offset"].(float64) != out.Results[0]["offset"].(float64)+1 {
+		t.Fatalf("admitted records are appended together, in order: %v", out.Results)
+	}
+	for _, i := range []int{1, 2} {
+		if out.Results[i]["error"] == nil {
+			t.Fatalf("record %d must be refused on its own: %v", i, out.Results[i])
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/publish/batch", strings.NewReader(`{"records":[]}`))
+	req.Header.Set("X-Colca-Service", "bridge")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("an empty batch = %d, want 400", rec.Code)
 	}
 }

@@ -208,13 +208,14 @@ func TestLocalIdentitiesUseOnlyTheLocalDoor(t *testing.T) {
 
 func TestCmdClass(t *testing.T) {
 	cases := map[string]string{
-		"_CmdParam":     "param",
-		"_CmdOperate":   "operate",
-		"_CmdMaintain":  "maintain",
-		"_CmdConfigure": "configure",
-		"_CmdEdit":      "configure",
-		"_CmdAdmin":     "admin",
-		"_CmdFoo":       "admin", // unknown command contracts get the highest class
+		"_CmdAcknowledge": "acknowledge",
+		"_CmdParam":       "param",
+		"_CmdOperate":     "operate",
+		"_CmdMaintain":    "maintain",
+		"_CmdConfigure":   "configure",
+		"_CmdEdit":        "configure",
+		"_CmdAdmin":       "admin",
+		"_CmdFoo":         "admin", // unknown command contracts get the highest class
 	}
 	for contract, want := range cases {
 		if got := CmdClass(contract); got != want {
@@ -244,6 +245,35 @@ func TestConfigureAndMaintainDoNotImplyEachOther(t *testing.T) {
 	}
 	if Authorize(ns, maint, ActCmd, configureCmd) {
 		t.Error("a maintain grant must not admit data-model editing")
+	}
+}
+
+// Acknowledging an alarm is its own class: everybody who watches the line may
+// quit an alarm, and that must not let them start or stop it. Nor does operate
+// carry acknowledge with it; each is granted by name.
+func TestAcknowledgeAndOperateDoNotImplyEachOther(t *testing.T) {
+	const (
+		ackCmd     = "colca/v1/_CmdAcknowledge/n1/werk1/cnc5/gritLow/ackAlarm"
+		operateCmd = "colca/v1/_CmdOperate/n1/werk1/cnc5/start"
+		silenceCmd = "colca/v1/_CmdOperate/n1/werk1/cnc5/gritLow/silenceAlarm"
+	)
+	ack := entry("", cmdAt("werk1", "acknowledge"))
+	if !Authorize(ns, ack, ActCmd, ackCmd) {
+		t.Error("an acknowledge grant must admit an acknowledgement below its element")
+	}
+	if Authorize(ns, ack, ActCmd, operateCmd) || Authorize(ns, ack, ActCmd, silenceCmd) {
+		t.Error("an acknowledge grant must not admit operate commands, silencing included")
+	}
+	if Authorize(ns, ack, ActCmd, "colca/v1/_CmdAcknowledge/n1/werk2/cnc1/gritLow/ackAlarm") {
+		t.Error("an acknowledge grant must not reach an alarm outside its element")
+	}
+
+	op := entry("", cmdAt("werk1", "operate"))
+	if !Authorize(ns, op, ActCmd, silenceCmd) {
+		t.Error("an operate grant must admit silencing an alarm")
+	}
+	if Authorize(ns, op, ActCmd, ackCmd) {
+		t.Error("an operate grant must not admit an acknowledgement")
 	}
 }
 
@@ -303,6 +333,29 @@ func TestAuthorizeReadRecord(t *testing.T) {
 	for _, c := range cases {
 		if got := Authorize(ns, c.e, ActReadRecord, c.topic); got != c.want {
 			t.Errorf("%s: Authorize(ReadRecord, %q) = %v, want %v", c.name, c.topic, got, c.want)
+		}
+	}
+}
+
+// A folder shows when a read zone covers it or lies below it, never a sibling.
+func TestAuthorizeBrowse(t *testing.T) {
+	cases := []struct {
+		name string
+		e    *Entry
+		path string
+		want bool
+	}{
+		{"inside own zone", entry("werk1/linie3"), "werk1/linie3/cnc5", true},
+		{"own zone itself", entry("werk1/linie3"), "werk1/linie3", true},
+		{"ancestor leading to own zone", entry("werk1/linie3"), "werk1", true},
+		{"sibling of own zone", entry("werk1/linie3"), "werk1/linie4", false},
+		{"prefix is not a segment boundary", entry("werk1/linie3"), "werk1/lin", false},
+		{"read all", entry("", "read:#"), "anything", true},
+		{"observer without grants", entry(""), "werk1", false},
+	}
+	for _, c := range cases {
+		if got := AuthorizeBrowse(ns, c.e, c.path); got != c.want {
+			t.Errorf("%s: AuthorizeBrowse(%q) = %v, want %v", c.name, c.path, got, c.want)
 		}
 	}
 }

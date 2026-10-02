@@ -48,6 +48,11 @@ type Parsed struct {
 	Prefix, Version, Contract, NodeID, Path string
 }
 
+// MaxTopicBytes is the longest topic MQTT can carry: a topic's length travels
+// as a 16-bit integer, and a longer one wraps and misframes the packet for every
+// subscriber that receives it.
+const MaxTopicBytes = 65535
+
 // IsUns reports whether the topic is under the topic root.
 func IsUns(topic string) bool { return strings.HasPrefix(topic, Root()+"/") }
 
@@ -57,6 +62,9 @@ func IsUns(topic string) bool { return strings.HasPrefix(topic, Root()+"/") }
 // its own reason. The exception is tied to the contract, so MountInsert and
 // MountStrip never silently skip a short topic of another contract.
 func Parse(topic string) (Parsed, error) {
+	if len(topic) > MaxTopicBytes {
+		return Parsed{}, fmt.Errorf("uns grammar: topic is %d bytes, MQTT carries at most %d", len(topic), MaxTopicBytes)
+	}
 	seg := strings.Split(topic, "/")
 	if len(seg) == 4 && seg[2] == "_TimeSync" {
 		return Parsed{Prefix: seg[0], Version: seg[1], Contract: seg[2], NodeID: seg[3]}, nil
@@ -80,7 +88,7 @@ func Parse(topic string) (Parsed, error) {
 // _Cmd prefix, and every _Cmd* contract is a command.
 func ClassOf(contract string) Class {
 	switch {
-	case contract == "_Metric":
+	case contract == "_Metric" || contract == "_ClockProgress":
 		return ClassData
 	// Alarms are events with a lifecycle, not samples, so they get their own
 	// stream.
@@ -98,11 +106,19 @@ func ClassOf(contract string) Class {
 		contract == "_Resource" ||
 		contract == "_EditOperation" || contract == "_AlarmNotificationConfig" ||
 		contract == "_NotificationConfigStatus" ||
+		// What a service found: retained and republished for as long as it
+		// holds, retired by tombstone. Same shape as the standing alarm, one
+		// writer earlier -- the service that ran the check writes this, the
+		// manager reads findings and owns the alarm.
+		contract == "_Finding" ||
 		// The standing alarm is state: one record per definition, which
 		// overwrites itself. _AlarmStateChange, the transition, stays an event.
-		contract == "_AlarmState":
+		contract == "_AlarmState" ||
+		// A silence per element and alarm type: retained until it runs out, then
+		// retired by tombstone. It outlives the alarms it covers.
+		contract == "_AlarmSilence":
 		return ClassEntity
-	case contract == "_Group" || contract == "_MetadataType" ||
+	case contract == "_ClockDefinition" || contract == "_Group" || contract == "_MetadataType" ||
 		contract == "_AnnotationType" || contract == "_DataModel" ||
 		contract == "_ExternalSystem" || contract == "_SemanticTag" ||
 		contract == PersonalAccessTokenContract:
@@ -144,20 +160,44 @@ func IsKnown(c Class) bool { return c != ClassNone }
 // travels down the tree.
 func IsCommand(c Class) bool { return c == ClassCmd }
 
-// CommandStillLive reports whether a ClassCmd record's expires_at is still
-// after authoritativeNowMS. Validate requires a numeric expires_at on every
-// _Cmd*, so a decode failure should not happen; it counts as live rather than
-// ending a drain or hiding an undelivered command. Move-drain completion and
-// the undelivered-command signal both ask this.
-func CommandStillLive(payload []byte, authoritativeNowMS int64) bool {
+// CommandDeadline returns a command's expires_at in unix milliseconds and
+// whether it has one. A command without expires_at never expires: it waits for
+// its target as long as retention keeps it. A payload that does not decode has
+// no readable deadline and is treated the same way, so it neither ends a drain
+// nor hides an undelivered command.
+func CommandDeadline(payload []byte) (int64, bool) {
 	var body struct {
-		ExpiresAt float64 `json:"expires_at"`
+		ExpiresAt *float64 `json:"expires_at"`
 	}
-	if err := json.Unmarshal(payload, &body); err != nil {
-		return true
+	if err := json.Unmarshal(payload, &body); err != nil || body.ExpiresAt == nil {
+		return 0, false
 	}
-	return int64(body.ExpiresAt) >= authoritativeNowMS
+	return int64(*body.ExpiresAt), true
 }
+
+// CommandStillLive reports whether a ClassCmd record may still execute at
+// authoritativeNowMS: it has no expires_at, or expires_at has not passed.
+// Move-drain completion and the undelivered-command signal both ask this.
+func CommandStillLive(payload []byte, authoritativeNowMS int64) bool {
+	deadline, ok := CommandDeadline(payload)
+	return !ok || deadline >= authoritativeNowMS
+}
+
+// CommandWantsProgress reports whether the sender asked for progress
+// acknowledgements ("progress": true): a 202 _Ack when the command is queued
+// for a child node and one each time a node forwards it to a child. They are
+// opt-in because a consumer that settles on the first _Ack of a correlation id
+// would take a 202 for the outcome.
+func CommandWantsProgress(payload []byte) bool {
+	var body struct {
+		Progress bool `json:"progress"`
+	}
+	return json.Unmarshal(payload, &body) == nil && body.Progress
+}
+
+// IsAck reports whether a record answers a command. It belongs to whoever sent
+// the command: a person receives only the acks of their own commands.
+func IsAck(c Class) bool { return c == ClassAck }
 
 // IsNodeLocal reports whether only the node itself may produce a class. No
 // door accepts one; the beacon loop publishes it to the local bus, and it is
@@ -422,6 +462,23 @@ func IsMetric(contract string) bool {
 	return contract == "_Metric"
 }
 
+// MetricSignalID returns the signal_id of a _Metric record, or "" for any other
+// record. The store keeps it beside the record so a signal filter does not
+// decode every payload it skips.
+func MetricSignalID(topic string, payload []byte) string {
+	p, err := Parse(topic)
+	if err != nil || !IsMetric(p.Contract) {
+		return ""
+	}
+	var metric struct {
+		SignalID string `json:"signal_id"`
+	}
+	if json.Unmarshal(payload, &metric) != nil {
+		return ""
+	}
+	return metric.SignalID
+}
+
 // SignalTopicForMetric returns the _Signal topic with p's node and path: the
 // signal a _Metric at p needs. A signal and its metrics always share node and
 // path, so p's contract is not checked.
@@ -627,6 +684,14 @@ func Validate(contract string, payload []byte) error {
 		// Data-model records name themselves by "id", which grants and
 		// bindings reference.
 		return reqStr("id")
+	case contract == "_ClockProgress":
+		if err := reqStr("run_id"); err != nil {
+			return err
+		}
+		return reqNum("processed_at")
+	case contract == "_ClockDefinition":
+		_, err := DecodeClockDefinition(payload)
+		return err
 	case contract == "_TimeSync":
 		// Only direct callers reach this: the engine rejects _TimeSync by
 		// class first, and the node's own beacon bypasses Validate.
@@ -654,7 +719,18 @@ func Validate(contract string, payload []byte) error {
 		if err := reqStr("correlation_id"); err != nil {
 			return err
 		}
-		return reqNum("expires_at")
+		// expires_at is optional: a command without one never expires.
+		if _, present := m["expires_at"]; present {
+			if err := reqNum("expires_at"); err != nil {
+				return err
+			}
+		}
+		if v, present := m["progress"]; present {
+			if _, ok := v.(bool); !ok {
+				return fmt.Errorf("%s: field %q must be a boolean", contract, "progress")
+			}
+		}
+		return nil
 	case contract == "_Annotation":
 		// Deployed nodes validate against the schema bundle; this checks only
 		// the required fields, for a node without one.

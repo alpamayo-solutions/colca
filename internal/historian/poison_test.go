@@ -48,7 +48,7 @@ type fakeTx struct {
 	pgx.Tx
 
 	sendBatch func(ctx context.Context, b *pgx.Batch) pgx.BatchResults
-	// execRow decides one insertMetric during the row-by-row retry from its
+	// execRow decides one row insert during the row-by-row retry from its
 	// arguments; the last one is the signal ID. nil means every row succeeds.
 	execRow func(args []any) error
 
@@ -61,7 +61,7 @@ func (f *fakeTx) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
 }
 
 func (f *fakeTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	if sql != insertMetric {
+	if sql != insertMetric && sql != insertRetraction {
 		// Savepoints and the marker upsert always succeed here.
 		return pgconn.CommandTag{}, nil
 	}

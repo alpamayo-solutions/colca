@@ -57,9 +57,11 @@
     {
       "why": "a tombstone deletes the retained value; it is not a reading",
       "payload": {"signal_id": "sig-1", "deleted": true}
-    },
+    }
+  ],
+  "retractions": [
     {
-      "why": "a null value has no column to land in",
+      "why": "a null value says the value went missing: a row with every value column NULL, stored only when the latest row still held a value",
       "payload": {"signal_id": "sig-1", "value": null}
     }
   ],

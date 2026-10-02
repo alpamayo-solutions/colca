@@ -228,6 +228,62 @@ class Metric(BaseMetric):
 
 
 @dataclass
+class TimeSync(Payload):
+    """Colca's live, broker-authored clock beacon. Never retained or persisted.
+
+    This built-in contract is decoded by clients but is not part of the
+    publishable schema bundle: the broker refuses client-authored beacons.
+    """
+
+    now_ms: int
+
+
+@dataclass
+class ClockProgress(Payload):
+    """Ordered completion marker on the metrics lane, never a measurement.
+
+    ServiceDetails carries liveness; this marker proves the preceding samples
+    and priority-lane events arrived before consumers acknowledge a window.
+    """
+
+    run_id: str
+    processed_at: float
+
+
+@dataclass
+class ClockSegment:
+    """The preceding segment carried with a future-effective clock change."""
+
+    real_anchor: float
+    factory_anchor: float
+    rate: float
+    stop_at: float | None = None
+    catch_up: bool = False
+
+
+@dataclass
+class ClockDefinition(Payload):
+    """An opt-in application timeline, distributed down the node tree.
+
+    Epochs are UTC seconds. ``rate=0`` pauses, ``rate=1`` runs in real time.
+    Consumers select one exact authority/topic; this never changes OS time,
+    authentication, command deadlines or Colca's operational clock. A new
+    run requires explicit consumer reset; revisions within a run cannot rewind.
+    """
+
+    id: str
+    run_id: str
+    revision: int
+    real_anchor: float
+    factory_anchor: float
+    rate: float
+    stop_at: float | None = None
+    catch_up: bool = False
+    previous: ClockSegment | None = None
+    start_at: float | None = None
+
+
+@dataclass
 class HealthMetricDeclaration:
     """One bounded, self-described Prometheus health signal.
 
@@ -281,8 +337,27 @@ class Node(Payload):
 
 
 @dataclass
+class CommandRoute:
+    """One command a service executes: its contract and the node-local path
+    it is sent to, verb included (``line1/operator/setProduct``). ``path`` may
+    use MQTT wildcards: ``+`` for one segment, a trailing ``#`` for the rest.
+
+    The node answers a command nobody announced with a 404 ``_Ack`` when
+    another command is announced at the same element (see the HTTP API
+    documentation), so a removed or misspelt verb is not left unanswered.
+    """
+
+    contract: str
+    path: str
+
+
+@dataclass
 class ServiceDetails(Payload):
-    """Observed service registration authored by the service identity."""
+    """Observed service registration authored by the service identity.
+
+    ``commands`` are the commands this service executes; it announces them
+    here so the node can answer a command no service executes.
+    """
 
     id: str
     name: str
@@ -296,6 +371,7 @@ class ServiceDetails(Payload):
     metadata: dict[str, Any] = field(default_factory=dict)
     architecture_metadata: dict[str, Any] = field(default_factory=dict)
     health_metrics: list[HealthMetricDeclaration] = field(default_factory=list)
+    commands: list[CommandRoute] = field(default_factory=list)
 
 
 @dataclass
@@ -496,6 +572,86 @@ class NotificationDispatched(Payload):
 
 
 @dataclass
+class Finding(Payload):
+    """What a service found and stands behind. Not an alarm yet.
+
+    The writer is the service that ran the check, and it is deliberately
+    ignorant: it republishes this record for as long as the finding holds and
+    retires the path when it no longer does. It does not know, and must not
+    need to know, whether anybody acknowledged or silenced anything. "Still
+    broken" is the whole of its job.
+
+    That is why the HANDLING travels with the observation instead of living in
+    a separate rule: the service that invented the check is the only one that
+    knows whether its condition flaps, how long it must hold to mean anything,
+    or whether an operator may reasonably silence it. A rule kept somewhere
+    else has to be matched to the finding, and the matching is what drifts.
+
+    Why this is not ``_AlarmState``: that record carries the lifecycle
+    (``acknowledged_by``, ``silenced_until``) and a record replaces the one
+    before it, so a service republishing its observation would wipe the
+    operator's acknowledgement every cycle. One writer per record. The manager
+    reads findings and owns ``_AlarmState``; ``_Alarm`` stays reserved for an
+    operator-authored definition, which this model does not need.
+
+    The record sits at the finding's own element path,
+    ``{root}/v1/_Finding/{node}/{element-path}/{finding-name}``, so read grants
+    and zones reach it like any signal.
+    """
+
+    #: Why it stands. Open vocabulary -- ``config_mismatch``, ``stream_gap``,
+    #: ``no_data``, ``threshold`` are the ones in use, and a service that
+    #: diagnoses something new names it rather than forcing it into one of
+    #: these.
+    reason: str
+    #: One sentence, phrased by the finder. The only place it can be phrased:
+    #: nothing downstream knows that "mas2/sta3 is commissioned but not in the
+    #: line definition" is what this is about. `_AlarmState` deliberately has
+    #: no message for the opposite reason -- there the element's own name is
+    #: the subject.
+    summary: str
+    #: Unix seconds this record was written. NOT "since": how long something
+    #: has stood is an observation over time, which the manager owns. The
+    #: service only ever says "now".
+    observed_at: float
+    #: What the finder proposes. A proposal, not a decision -- an operator may
+    #: hold a different view of how bad this is, and the manager keeps that.
+    suggested_severity: AlarmSeverity
+    #: Structured evidence, shape free. Rendered by whoever understands the
+    #: ``reason``; nothing generic reads inside it.
+    detail: dict[str, Any] | None = None
+    #: The signal this is about, where there is one. A finding about an
+    #: element -- a missing station, a stale configuration -- has none.
+    signal_id: ULID | None = None
+    #: The measurement that brought it here, with the check's operator and
+    #: threshold, so a reader can render "82.4 > 80" without the check.
+    value: Any | None = None
+    op: str | None = None
+    threshold: float | None = None
+    #: Whether an operator may silence this. Some findings must not be
+    #: silenceable -- a safety interlock, a licence about to expire -- and the
+    #: service that raised it is the one that knows.
+    silenceable: bool = True
+    #: How long the finding must hold before it counts, and how long it must be
+    #: gone before it is gone. The knobs a flapping check needs; both default to
+    #: "immediately", which is right for a check that cannot flap.
+    dwell_on_s: float = 0.0
+    dwell_off_s: float = 0.0
+    #: Earliest the manager should tell anybody again, in seconds. ``None``
+    #: leaves the decision to the manager's own policy.
+    min_repeat_s: float | None = None
+    #: What to do about it, for the person who reads the alarm at 3am.
+    remedy: str | None = None
+    #: How long a notification list keeps it, in seconds: in "not acknowledged"
+    #: after it was read, listed at all after it was read (``None``: for as long
+    #: as it stands), and listed after its condition went. ``None`` for the first
+    #: and last leaves them to the manager's default for the severity.
+    keep_after_read_s: float | None = None
+    keep_listed_after_read_s: float | None = None
+    keep_after_clear_s: float | None = None
+
+
+@dataclass
 class AlarmState(Payload):
     """The alarm that stands right now: one record per alarm definition.
 
@@ -522,11 +678,22 @@ class AlarmState(Payload):
     severity: AlarmSeverity
     #: Unix seconds this status has held since.
     since: float
-    signal_id: ULID
     #: Why it stands. ``threshold``, ``no_data`` and ``stream_gap`` are the
     #: known values, but the vocabulary stays open so a derived diagnosis can
     #: name its own reason.
     reason: str
+    #: The `_Finding` this alarm stands on, as a node-local path. Empty for an
+    #: alarm raised some other way.
+    finding_path: str | None = None
+    #: Unix seconds the manager last saw that finding. A service that stops
+    #: writing without retiring its path -- it crashed, the network went --
+    #: leaves this behind, and the manager can move the alarm to ``unknown``
+    #: instead of showing ``firing`` forever. That "forever" is the failure
+    #: mode a manager holding its state in memory cannot escape.
+    finding_seen_at: float | None = None
+    #: The signal this is about, where there is one. An alarm about an element
+    #: -- a missing station, a stale configuration -- has none.
+    signal_id: ULID | None = None
     #: The measurement that brought it here, with the rule's operator and
     #: threshold, so a reader can render "82.4 > 80" without the definition.
     value: Any | None = None
@@ -542,6 +709,45 @@ class AlarmState(Payload):
     silenced_by: str | None = None
     #: Unix seconds.
     silenced_until: float | None = None
+    #: Readable names beside ``acknowledged_by`` and ``silenced_by``, so every
+    #: reader can show who acted without resolving a ``sub``. A snapshot of the
+    #: command record's ``actor_label``, which the node sets from the token's
+    #: ``preferred_username``. For display only; the ``sub`` stays the identity.
+    acknowledged_by_name: str | None = None
+    silenced_by_name: str | None = None
+    #: The finding's retention as the manager resolved it, so every reader
+    #: applies the same windows (see ``Finding``).
+    keep_after_read_s: float | None = None
+    keep_listed_after_read_s: float | None = None
+    keep_after_clear_s: float | None = None
+
+
+@dataclass
+class AlarmSilence(Payload):
+    """Nobody is told about one alarm type at an element until ``until``.
+
+    Keyed like the alarm itself, by the element and the alarm's name there
+    (``beltChangeDue``), not by its generic ``reason`` (``threshold``): two
+    checks that share a reason on one element stay apart. Its own record
+    rather than a field of the alarm, because it outlives the alarm clearing
+    and firing again. The manager writes it on a person's silence command,
+    copies ``until`` onto the alarm as ``silenced_until`` so that readers need
+    not join the two, and retires it with a tombstone when it runs out or is
+    ended. Alarms still fire and are recorded while silenced.
+
+    ``{root}/v1/_AlarmSilence/{node}/{element-path}/{alarm-name}``.
+    """
+
+    #: The alarm's reason when it was silenced, for the reader.
+    reason: str
+    #: Unix seconds.
+    until: float
+    #: ``sub`` of the person, as the node witnessed it on the command.
+    silenced_by: str
+    #: Unix seconds.
+    silenced_at: float
+    silenced_by_name: str | None = None
+    note: str | None = None
 
 
 def derive_annotation_id(
@@ -575,6 +781,12 @@ class Annotation(Payload):
     retained: a part-cycle producer writes about a million a year per machine.
     ``annotation_id`` comes from ``derive_annotation_id``. A delete is a record
     with ``deleted=True``, so it replicates and replays like any other change.
+
+    ``system_element_id`` is where the annotation belongs; ``signal_ids`` are
+    what it was computed from. Every listed signal lies in that element's
+    subtree. ``related_annotation_ids`` names the annotations this one belongs
+    to, such as a head pass and the panel it is part of. Of the three, only
+    ``signal_ids`` is part of the id.
     """
 
     annotation_id: ULID
@@ -589,6 +801,11 @@ class Annotation(Payload):
     source: str = ""
     deleted: bool = False
     revision: int = 1
+    #: The element the annotation belongs to. Optional: a producer that only
+    #: knows signals leaves it unset.
+    system_element_id: ULID | None = None
+    #: Annotations this one belongs to, e.g. a head pass -> its panel.
+    related_annotation_ids: list[ULID] = field(default_factory=list)
 
 
 @dataclass
@@ -1016,11 +1233,26 @@ class EditOperation(Payload):
 # ---------------------------------------------------------------------------
 # Colca command classes.
 # The class decides the routing: a Cmd subclass lands on the commands stream
-# under the hazard class its name carries (_CmdParam -> param, _CmdOperate ->
-# operate, _CmdMaintain -> maintain, _CmdConfigure -> configure, _CmdAdmin ->
-# admin). The door requires correlation_id and expires_at (unix milliseconds);
-# created_at is not required.
+# under the hazard class its name carries (_CmdAcknowledge -> acknowledge,
+# _CmdParam -> param, _CmdOperate -> operate, _CmdMaintain -> maintain,
+# _CmdConfigure -> configure, _CmdAdmin -> admin). The door requires correlation_id.
+# expires_at (unix milliseconds) is optional: a command without it never expires,
+# and one that must expire carries it. created_at is not required. "progress": true
+# asks for 202 _Ack records while the command is queued and forwarded.
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class CmdAcknowledge(Cmd):
+    """Acknowledge (quit) what the target stands for, such as a standing alarm.
+
+    Sent on the alarm's own path, verb last (``.../ackAlarm``); ``command``
+    carries the optional ``note``. The executor records who acknowledged from
+    the node's witnessed actor, never from the payload.
+
+    It has its own hazard class so that everyone who watches a line may quit
+    an alarm without being able to start or stop the line. Silencing stays
+    ``_CmdOperate``: it withholds notifications from other people."""
 
 
 @dataclass

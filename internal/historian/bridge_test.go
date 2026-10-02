@@ -275,3 +275,78 @@ func TestTheCursorIsNamespacedByService(t *testing.T) {
 		t.Fatalf("fetched with %v, want [%s]", d.fetch, Cursor)
 	}
 }
+
+func TestCoordinatedHistoryDoesNotAckMalformedRowsOrGaps(t *testing.T) {
+	for _, p := range []door.Page{
+		page(2, record(1, `{broken`)),
+		{Gap: &door.Gap{FromOffset: 1, ToOffset: 10}},
+	} {
+		d := &fakeDoor{pages: []door.Page{p}}
+		s := &fakeStore{}
+		b := &Bridge{Door: d, Store: s, Strict: true}
+		if _, err := b.Once(context.Background()); err == nil {
+			t.Fatal("incomplete coordinated history accepted")
+		}
+		if len(d.acked) != 0 || s.applied != 0 || b.Drained {
+			t.Fatal("failed page acknowledged as complete")
+		}
+	}
+}
+
+func TestRunReportsEachPassToHealth(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail error
+		ok   bool
+	}{
+		{"a pass that applies is healthy", nil, true},
+		{"a pass the store refuses is unhealthy with the reason", errors.New("database unreachable"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var gotOK bool
+			var gotDetail string
+			var changes door.Signal
+			b := &Bridge{
+				Changes: changes.Changes,
+				Door:    &fakeDoor{pages: []door.Page{page(2, record(1, `{"value":1}`))}},
+				Store:   &fakeStore{fail: tc.fail},
+				Health: func(ok bool, detail string) {
+					gotOK, gotDetail = ok, detail
+					cancel()
+				},
+			}
+			_ = b.Run(ctx)
+			if gotOK != tc.ok {
+				t.Fatalf("health ok = %v, want %v", gotOK, tc.ok)
+			}
+			if !tc.ok && gotDetail != tc.fail.Error() {
+				t.Fatalf("health detail = %q, want %q", gotDetail, tc.fail.Error())
+			}
+		})
+	}
+}
+
+func TestANullValueReachesTheStoreAsARetraction(t *testing.T) {
+	// The value went missing between two readings. The sink decides whether the
+	// retraction is new; the bridge must hand it over, or history draws a line
+	// across the gap.
+	d := &fakeDoor{pages: []door.Page{page(4,
+		record(1, `{"signal_id":"s1","value":1}`),
+		record(2, `{"signal_id":"s1","value":null}`),
+		record(3, `{"signal_id":"s1","value":3}`),
+	)}}
+	store := &fakeStore{}
+	bridge := &Bridge{Door: d, Store: store}
+
+	if _, err := bridge.Once(context.Background()); err != nil {
+		t.Fatalf("Once: %v", err)
+	}
+	if len(store.batches) != 1 || len(store.batches[0]) != 3 {
+		t.Fatalf("batches = %+v, want one batch of 3 rows", store.batches)
+	}
+	if got := store.batches[0]; got[0].Missing() || !got[1].Missing() || got[2].Missing() {
+		t.Fatalf("rows = %+v, want value, retraction, value", got)
+	}
+}

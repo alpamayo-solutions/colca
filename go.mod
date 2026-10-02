@@ -62,10 +62,25 @@ require (
 // https://github.com/mochi-mqtt/server/pull/542, beside #539. Its branch
 // fix/flush-outbuf-before-close adds a flush of buffered writes before a client
 // connection closes, so a PUBACK written behind queued deliveries is not lost at
-// shutdown; upstream does not have that yet.
-// Drop this replace once a released mochi version contains all three;
+// shutdown; upstream does not have that yet. Its branch
+// fix/subscribe-packet-id-per-direction stops refusing a SUBSCRIBE or UNSUBSCRIBE
+// whose packet id matches one of the broker's own in-flight deliveries (ids are
+// per direction), so a subscription made during a retained burst is not lost —
+// upstream as https://github.com/mochi-mqtt/server/pull/546. Its branch
+// fix/will-on-takeover publishes a taken-over client's will during the takeover,
+// once, so it cannot land after what the new connection publishes. Its branch
+// fix/select-subscribers-always runs OnSelectSubscribers for every publish, not
+// only for topics with a shared subscription, so the hook can keep one person's
+// acks from another.
+// The connection-admission fix also serializes WaitGroup registration with
+// shutdown, refusing sockets accepted just before the listeners close.
+// Drop this replace once a released mochi version contains all seven;
 // internal/mqttsrv's TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace goes
-// red under -race if it is dropped early, and
+// red under -race if it is dropped early,
 // TestAPubackBufferedBehindQueuedDeliveriesReachesTheClientBeforeShutdown fails
-// without the flush.
-replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260914070953-4d586594fc32
+// without the flush, TestASubscribeReusingAnInflightDeliveryIDStillSubscribes
+// fails without the packet-id fix, and
+// TestATakenOverConnectionsWillDoesNotOverwriteTheNewAnnounce fails without the
+// takeover fix, and TestAnAckReachesOnlyThePersonWhoSentTheCommand without the
+// subscriber-selection fix.
+replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260927083005-067d3b1ae6e4

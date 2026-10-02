@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,7 +42,7 @@ const (
 	legacyDownlinkDefCursor = "downlink-def"
 
 	replBatch    = maxReplicateRecords
-	uplinkIdle   = 150 * time.Millisecond
+	uplinkIdle   = 30 * time.Second
 	downlinkWait = 20 * time.Second
 	retryAfter   = 500 * time.Millisecond
 
@@ -75,8 +76,17 @@ type Client struct {
 	links *linkState
 	// status is the current uplink condition, read by /healthz. It is an
 	// atomic.Value so a /healthz read never contends with the loops that write it.
-	status atomic.Value
+	status        atomic.Value
+	statusMu      sync.Mutex
+	statusChanged chan struct{}
+	// storeID is this node's store incarnation, sent with every replication
+	// batch so the parent can tell a rebuilt store from a resumed one.
+	storeID string
 }
+
+// SetStoreID names the store incarnation replication batches carry (see
+// store.Store.StoreID). Call it before the uplink starts.
+func (c *Client) SetStoreID(id string) { c.storeID = id }
 
 // NewClient returns a TLS client that presents this node's certificate and pins
 // the parent's public key.
@@ -146,7 +156,7 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 	if len(recs) > maxReplicateRecords {
 		return 0, 0, fmt.Errorf("replicate: batch has %d records, maximum is %d", len(recs), maxReplicateRecords)
 	}
-	body, err := marshalReplication(stream, recs)
+	body, err := marshalReplication(c.storeID, stream, recs)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -178,7 +188,7 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 	return out.HWM, out.NowMS, nil
 }
 
-func marshalReplication(stream string, recs []store.ReplRecord) ([]byte, error) {
+func marshalReplication(storeID, stream string, recs []store.ReplRecord) ([]byte, error) {
 	wire := make([]wireRec, len(recs))
 	for i, r := range recs {
 		wire[i] = wireRec{
@@ -187,14 +197,18 @@ func marshalReplication(stream string, recs []store.ReplRecord) ([]byte, error) 
 			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups,
 		}
 	}
-	return json.Marshal(map[string]any{"stream": stream, "records": wire})
+	msg := map[string]any{"stream": stream, "records": wire}
+	if storeID != "" {
+		msg["store"] = storeID
+	}
+	return json.Marshal(msg)
 }
 
 // fitReplicationBatch returns the largest non-empty prefix whose exact JSON
 // envelope fits the server contract. The normal 200-record batch needs one
 // marshal; binary search is used only for unusually large records.
-func fitReplicationBatch(stream string, batch []store.ReplRecord, maxBytes int64) ([]store.ReplRecord, error) {
-	body, err := marshalReplication(stream, batch)
+func fitReplicationBatch(storeID, stream string, batch []store.ReplRecord, maxBytes int64) ([]store.ReplRecord, error) {
+	body, err := marshalReplication(storeID, stream, batch)
 	if err != nil || int64(len(body)) <= maxBytes {
 		return batch, err
 	}
@@ -202,7 +216,7 @@ func fitReplicationBatch(stream string, batch []store.ReplRecord, maxBytes int64
 	best := 0
 	for low <= high {
 		mid := low + (high-low)/2
-		body, err := marshalReplication(stream, batch[:mid])
+		body, err := marshalReplication(storeID, stream, batch[:mid])
 		if err != nil {
 			return nil, err
 		}
@@ -524,7 +538,9 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 
 	// pushOnce pushes at most one batch of stream and reports whether it scanned
 	// anything, which is how "drained" is measured. aborted means our own shutdown.
-	pushOnce := func(stream string, filter func(string) bool) (scanned, aborted bool) {
+	retryPending := false
+	var pushOnce func(string, func(string) bool) (bool, bool)
+	pushOnce = func(stream string, filter func(string) bool) (scanned, aborted bool) {
 		from := eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), stream)
 		// A cursor below the local LWM means retention pruned past it after the parent
 		// was gone longer than the staleness window. The gap marker already tells the
@@ -540,10 +556,33 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		recs, next, err := eng.Store().Read(stream, from, replBatch, nil)
 		if err != nil {
 			c.log.Error("uplink read", "stream", stream, "err", err)
+			retryPending = true
 			return false, false
 		}
 		if next == from {
 			return false, false // nothing scanned: this lane is empty
+		}
+		// A completion marker must not overtake an annotation/alarm that was
+		// written after the outer loop snapshotted its priority lanes. Capture
+		// those floors AFTER reading the marker and drain them before forwarding
+		// this metrics page. Each hop preserves this order independently.
+		if stream == "metrics" {
+			for _, record := range recs {
+				parsed, _ := uns.Parse(record.Topic)
+				if parsed.Contract != "_ClockProgress" {
+					continue
+				}
+				for _, lane := range priorityLanes {
+					target := eng.Store().NextOffset(lane.name)
+					for eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), lane.name) < target {
+						scanned, aborted := pushOnce(lane.name, lane.filter)
+						if aborted || !scanned {
+							return false, aborted
+						}
+					}
+				}
+				break
+			}
 		}
 		pushed := false
 		batch := make([]store.ReplRecord, 0, len(recs))
@@ -569,9 +608,10 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		}
 		if len(batch) > 0 {
 			fullBatchLen := len(batch)
-			batch, err = fitReplicationBatch(stream, batch, c.maxReplicateBody)
+			batch, err = fitReplicationBatch(c.storeID, stream, batch, c.maxReplicateBody)
 			if err != nil {
 				c.log.Error("uplink batch cannot fit the replication request bound", "stream", stream, "err", err)
+				retryPending = true
 				m.UplinkPushFailed(stream)
 				return false, false
 			}
@@ -608,6 +648,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 							"attempts", attempts, "down_for", down.Round(time.Second), "err", err)
 					}
 				}
+				retryPending = true
 				m.UplinkPushFailed(stream)
 				if refused {
 					m.UplinkRefused(stream)
@@ -637,6 +678,8 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		if stopped() {
 			return
 		}
+		wake, _ := eng.Store().Changes()
+		retryPending = false
 		idle := true
 		for _, lane := range priorityLanes {
 			// Drain only up to the lane's end at pass start. Draining until empty would
@@ -670,10 +713,16 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		// pass costs one HEAD per unconfirmed blob, which is why confirmations are kept.
 		syncBlobs(c, blobs, m, confirmedBlobs, rejectedBlobs)
 		if idle {
+			delay := uplinkIdle // recovery/blob discovery, not ordinary stream pacing
+			if retryPending {
+				delay = retryAfter
+				wake = nil // commits cannot shorten a failed-request backoff
+			}
 			select {
 			case <-stop:
 				return
-			case <-time.After(uplinkIdle):
+			case <-wake:
+			case <-time.After(delay):
 			}
 		}
 	}
@@ -785,10 +834,13 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		// the record, and acking past it would silently drop the command.
 		ackTo := next
 		for _, r := range recs {
+			// The record and the cursor past it are one write: a crash or a lost
+			// response makes the parent hand it again, and it is then recognized as
+			// stored instead of being stored and executed a second time.
 			if _, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
 				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
-			}); err != nil {
+			}, &store.CursorAdvance{Name: uns.DownlinkCursor(c.parentPub), Stream: downlinkStream, To: r.ParentOffset + 1}); err != nil {
 				var refused *engine.RejectError
 				if errors.As(err, &refused) {
 					c.log.Error("downlink command refused by this node — skipping past it",

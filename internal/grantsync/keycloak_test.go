@@ -3,6 +3,7 @@ package grantsync
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,12 @@ type realmFixture struct {
 	Resources   string // raw JSON for the resource list
 	TokenStatus int    // non-200 to fail the token request
 	FailPath    string // any request path containing this substring 500s
+	// RejectResourceNamed, when set, 500s the POST that registers exactly this
+	// resource — Keycloak's own answer when an element's path exceeds the
+	// varchar(255) its display_name column holds. Narrower than FailPath,
+	// which would break the resource LISTING too and so exercise the
+	// short-read path instead of this one.
+	RejectResourceNamed string
 	// Deleted, when set, records the id of every resource the service retires.
 	Deleted *deletions
 	// Roles are the realm roles that exist; GET /roles/{name} is 404 for any other.
@@ -208,6 +215,18 @@ func fakeRealm(t *testing.T, f realmFixture) *Keycloak {
 	})
 	mux.HandleFunc(base+"/resource", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
+			if f.RejectResourceNamed != "" {
+				body, _ := io.ReadAll(r.Body)
+				var posted struct {
+					Name string `json:"name"`
+				}
+				_ = json.Unmarshal(body, &posted)
+				if posted.Name == f.RejectResourceNamed {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"error":"unknown_error"}`))
+					return
+				}
+			}
 			w.WriteHeader(http.StatusCreated)
 			return
 		}

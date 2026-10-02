@@ -1,0 +1,9 @@
+[
+  {"name":"accelerated", "clock":{"id":"factory","run_id":"r","revision":1,"real_anchor":10000,"factory_anchor":1000,"rate":100}, "real":10005,"expected":1500},
+  {"name":"before-start", "clock":{"id":"factory","run_id":"r","revision":1,"real_anchor":10000,"factory_anchor":1000,"rate":100}, "real":9990,"expected":1000},
+  {"name":"paused", "clock":{"id":"factory","run_id":"r","revision":1,"real_anchor":10000,"factory_anchor":1000,"rate":0}, "real":10050,"expected":1000},
+  {"name":"duration", "clock":{"id":"factory","run_id":"r","revision":1,"real_anchor":10000,"factory_anchor":1000,"rate":100,"stop_at":1200}, "real":10005,"expected":1200},
+  {"name":"caught-up", "clock":{"id":"factory","run_id":"r","revision":1,"real_anchor":10000,"factory_anchor":1000,"rate":1000,"catch_up":true}, "real":10020,"expected":10020},
+  {"name":"pending-pause", "clock":{"id":"factory","run_id":"r","revision":2,"real_anchor":10005,"factory_anchor":1500,"rate":0,"previous":{"real_anchor":10000,"factory_anchor":1000,"rate":100}}, "real":10002,"expected":1200},
+  {"name":"effective-pause", "clock":{"id":"factory","run_id":"r","revision":2,"real_anchor":10005,"factory_anchor":1500,"rate":0,"previous":{"real_anchor":10000,"factory_anchor":1000,"rate":100}}, "real":10006,"expected":1500}
+]

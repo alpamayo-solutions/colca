@@ -468,3 +468,41 @@ func TestTheRealmAdminBundleReachesTheTreeAndOpensEveryDoor(t *testing.T) {
 		t.Fatal("the bundle does not authorize a read")
 	}
 }
+
+func TestOneUnregisterableElementDoesNotSilenceEveryGroup(t *testing.T) {
+	// Keycloak's `resource_server_resource.display_name` is varchar(255), so an
+	// element whose path is longer is refused with a 500. The cycle used to
+	// return on that first failure, before any _Group definition was written —
+	// and since the element stays in the tree, every later cycle failed on the
+	// same one. Access control froze for the whole deployment and stayed
+	// frozen: grants made in the Admin app never converged, and the only
+	// evidence was a line in the raw service log.
+	//
+	// Observed on the Access mock hub, where one 307-character element name
+	// stopped grantsync for over an hour across five unrelated test runs.
+	elements := elementsAt("a", "toolong", "c")
+	kc := fakeRealm(t, realmFixture{
+		Groups:   []fakeGroup{{ID: "g1", Name: "ops"}},
+		Policies: []fakePolicy{{ID: "p1", Name: "group:ops", GroupUUIDs: []string{"g1"}}},
+		Permissions: []fakePerm{{
+			ID: "perm1", Name: "ops@01HA", PolicyIDs: []string{"p1"},
+			Elements: []string{"01HA"}, ScopeNames: []string{"read"},
+		}},
+		// The element registers under its id; that is the name Keycloak refuses.
+		RejectResourceNamed: "01HTOOLONG",
+	})
+
+	node := servePaged(t, elements, 10, 0)
+	report, err := syncer(node.client, kc).Once(context.Background())
+	if err != nil {
+		t.Fatalf("one refused resource failed the whole cycle: %v", err)
+	}
+	if rows := node.seen.all(); len(rows) != 1 {
+		t.Fatalf("the group's definition must still be written, published %v", rows)
+	}
+	// The refusal is not swallowed: an operator has to be able to find out
+	// that one element grants nothing.
+	if !strings.Contains(strings.Join(report.Problems, " "), "01HTOOLONG") {
+		t.Fatalf("the refused element is not named in the report: %v", report.Problems)
+	}
+}

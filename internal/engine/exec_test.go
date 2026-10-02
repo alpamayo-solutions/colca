@@ -3,7 +3,9 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/store"
@@ -228,6 +230,87 @@ func TestCmdEditByAHumanAttributesTheResultingWriteToThatHuman(t *testing.T) {
 	}
 }
 
+// Two people who read the node record at the same version each write their
+// own metadata key through the single-key intent. Against the real store and
+// payload validation, both keys survive, a stale expect writes nothing, and a
+// retry is answered from the durable receipt.
+func TestCmdEditMetadataKeysCommitIndependently(t *testing.T) {
+	e := execEngine(t, nil)
+	const nodeTopic = "colca/v1/_Node/n-edge1/_colca/nodes/n-edge1"
+	if _, err := e.IngestAdmin(nodeTopic, []byte(
+		`{"id":"n-edge1","name":"Edge 1","metadata":{"meta-site":"Basel"}}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	e.SetExecutor(uns.NewEditExec(e.EntityStore(), nil))
+	person := humanEntry(t, "cmd:#:configure")
+	metadataEdit := func(op, key string, expect, value any) []byte {
+		payload, err := json.Marshal(map[string]any{
+			"operation_id": op, "correlation_id": "c-" + op, "expires_at": futureMS(),
+			"expected_versions": map[string]string{},
+			"intent": map[string]any{
+				"type": "metadata", "entity": map[string]any{"kind": "colca-node", "id": "n-edge1"},
+				"key": key, "expect": expect, "value": value,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	apply := func(payload []byte) (int, int, string) {
+		t.Helper()
+		result, err := e.IngestHuman(person, "colca/v1/_CmdEdit/n-edge1/apply", payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Command == nil {
+			t.Fatal("no command outcome")
+		}
+		return result.Command.ResultCode, len(result.Command.StateWrites), fmt.Sprintf("%+v", result.Command)
+	}
+
+	config := metadataEdit("op-config", "meta-app-config", map[string]any{"absent": true},
+		map[string]any{"theme": "dark", "zones": []any{"a", "b"}})
+	if code, writes, outcome := apply(config); code != 200 || writes != 1 {
+		t.Fatalf("first key = %s", outcome)
+	}
+	if code, writes, outcome := apply(metadataEdit("op-owner", "meta-owner", map[string]any{"absent": true}, "ops")); code != 200 || writes != 1 {
+		t.Fatalf("second key = %s", outcome)
+	}
+	entitiesNext := e.Store().NextOffset("entities")
+	stale := metadataEdit("op-stale", "meta-owner", map[string]any{"absent": true}, "other")
+	if code, _, outcome := apply(stale); code != 409 || !strings.Contains(outcome, "stale_metadata: meta-owner") {
+		t.Fatalf("stale expect = %s", outcome)
+	}
+	if got := e.Store().NextOffset("entities"); got != entitiesNext {
+		t.Fatal("a stale expect appended entity state")
+	}
+
+	entries := mustKVScan(t, e.Store(), "_colca/nodes/n-edge1")
+	if len(entries) != 1 {
+		t.Fatalf("node records = %+v", entries)
+	}
+	var record struct {
+		Name     string         `json:"name"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal(entries[0].Payload, &record); err != nil {
+		t.Fatal(err)
+	}
+	app, _ := record.Metadata["meta-app-config"].(map[string]any)
+	if record.Name != "Edge 1" || record.Metadata["meta-site"] != "Basel" ||
+		record.Metadata["meta-owner"] != "ops" || app["theme"] != "dark" {
+		t.Fatalf("node record = %+v", record)
+	}
+
+	e.SetExecutor(uns.NewEditExec(e.EntityStore(), nil))
+	if code, writes, outcome := apply(config); code != 200 || writes != 1 ||
+		e.Store().NextOffset("entities") != entitiesNext {
+		t.Fatalf("durable replay = %s", outcome)
+	}
+}
+
 // A service's own _CmdConfigure write is attributed to that service the same
 // way: node-written, actor-attributed to the caller that commanded it.
 func TestCmdConfigureByAServiceAttributesTheResultingWriteToThatService(t *testing.T) {
@@ -270,6 +353,44 @@ func TestCmdConfigureByAServiceAttributesTheResultingWriteToThatService(t *testi
 		t.Fatalf("written_by = %q, want the node itself", entry.WrittenBy)
 	} else if entry.ActorID != "svc-plc" || entry.ActorKind != "service" {
 		t.Fatalf("actor = %+v, want the commanding service", entry)
+	}
+}
+
+// A constant whose topic MQTT cannot carry is refused and never stored: its
+// retained record would misframe every subscriber's stream.
+func TestAConstantWhoseTopicExceedsTheMQTTLimitIsRefused(t *testing.T) {
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	ids := fakeIDs{entries: map[string]*uns.Entry{
+		"svc-plc": {ULID: "svc-plc", Kind: uns.KindExternal, Grants: []string{"cmd:#:configure"}},
+	}}
+	e := New(s, &config.Config{ULID: "n-edge1"}, ids, nil, nil, nil)
+	e.SetExecutor(uns.NewConfigExec(e.EntityStore(), nil, e.Elements(), nil, func() string { return "sig-new" }, nil))
+
+	payload, err := json.Marshal(map[string]any{
+		"correlation_id": "correlation-long",
+		"expires_at":     futureMS(),
+		"constants": []map[string]any{{
+			"path":     "catalog/local/products/" + strings.Repeat("X", 70000),
+			"constant": map[string]any{"id": "const-long", "name": "Long", "data_type": "string", "value": "x"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := e.IngestClient("svc-plc", "colca/v1/_CmdConfigure/n-edge1/constant/upsert", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Command == nil || result.Command.ResultCode != 422 ||
+		!strings.Contains(result.Command.Message, "MQTT carries at most 65535") {
+		t.Fatalf("oversized constant = %+v", result.Command)
+	}
+	if got := mustKVScan(t, e.Store(), "catalog/"); len(got) != 0 {
+		t.Fatalf("an oversized constant was stored: %d entries", len(got))
 	}
 }
 
@@ -326,6 +447,58 @@ func TestExpiryIsCheckedBeforeExecution(t *testing.T) {
 	}
 	if ack := ackFor(t, e, "signal/upsert", "c-5"); ack == nil || ack["result_code"].(float64) != 498 {
 		t.Fatalf("ack = %v, want 498", ack)
+	}
+}
+
+// A command without expires_at never expires: it executes whenever it reaches
+// its target, however long after it was written.
+func TestACommandWithoutExpiryExecutesWheneverItArrives(t *testing.T) {
+	rec := &recordingExec{contract: "_CmdConfigure"}
+	e := execEngine(t, Executors(rec))
+
+	payload := []byte(`{"correlation_id":"c-forever"}`)
+	written := time.Now().Add(-30 * 24 * time.Hour).UnixMilli() // a month in the queue
+	if _, err := e.IngestDownlink("colca/v1/_CmdConfigure/n-edge1/signal/upsert", payload, written); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("a command without expiry was not executed: %v", rec.calls)
+	}
+	if ack := ackFor(t, e, "signal/upsert", "c-forever"); ack == nil || ack["result_code"].(float64) != 200 {
+		t.Fatalf("ack = %v, want 200", ack)
+	}
+}
+
+// The parent hands a command again when the child crashed or lost the response
+// after storing it. The record and the downlink cursor are one write, so the
+// second copy is recognized: stored once, executed once, acked once.
+func TestADownlinkedCommandHandedTwiceExecutesOnce(t *testing.T) {
+	rec := &recordingExec{contract: "_CmdConfigure"}
+	e := execEngine(t, Executors(rec))
+	at := &store.CursorAdvance{Name: "downlink:parent", Stream: "commands-parent", To: 8}
+	topic := "colca/v1/_CmdConfigure/n-edge1/signal/upsert"
+
+	for i := 0; i < 2; i++ {
+		res, err := e.IngestDownlinkAttributed(topic, cmdPayload("c-twice"), 1, Attribution{}, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := i == 1; res.Duplicate != want {
+			t.Fatalf("delivery %d: Duplicate = %v, want %v", i+1, res.Duplicate, want)
+		}
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("executed %d times, want once: %v", len(rec.calls), rec.calls)
+	}
+	if got := e.Store().CursorGet("downlink:parent", "commands-parent"); got != 8 {
+		t.Fatalf("downlink cursor = %d, want 8 (moved with the record)", got)
+	}
+	recs, _, err := e.Store().Read("commands", 1, 100, func(t string) bool { return t == topic })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("stored %d copies, want 1", len(recs))
 	}
 }
 

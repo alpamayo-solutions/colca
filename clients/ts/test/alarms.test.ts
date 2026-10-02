@@ -170,7 +170,8 @@ describe("acknowledging", () => {
     await settle();
 
     const sent = client.sent[0];
-    expect(sent.topic).toBe(`${ROOT}/v1/_CmdOperate/${NODE}/${GRIT}/ackAlarm`);
+    // Its own contract, so a grant for `acknowledge` is enough and `operate` is not needed.
+    expect(sent.topic).toBe(`${ROOT}/v1/_CmdAcknowledge/${NODE}/${GRIT}/ackAlarm`);
     // Who quit it is the node's word; the client says only why.
     expect(Object.keys(sent.body).sort()).toEqual(["command", "correlation_id", "expires_at"]);
     expect(sent.body.command).toEqual({ note: "Korn getauscht" });
@@ -178,6 +179,23 @@ describe("acknowledging", () => {
 
     client.deliver(ACK, { correlation_id: sent.body.correlation_id, result_code: 200, message: "quit" });
     await expect(quit).resolves.toMatchObject({ result_code: 200, message: "quit" });
+  });
+
+  it("puts a notice back to unread under the same contract", async () => {
+    const { client, alarms } = await opened();
+
+    const unread = alarms.unacknowledge(GRIT);
+    await settle();
+
+    const sent = client.sent[0];
+    expect(sent.topic).toBe(`${ROOT}/v1/_CmdAcknowledge/${NODE}/${GRIT}/unackAlarm`);
+    expect(sent.body.command).toEqual({});
+    client.deliver(`${ROOT}/v1/_Ack/${NODE}/${GRIT}/unackAlarm`, {
+      correlation_id: sent.body.correlation_id,
+      result_code: 200,
+      message: "unacknowledged",
+    });
+    await expect(unread).resolves.toMatchObject({ result_code: 200 });
   });
 
   it("throws what the node refused rather than looking quit", async () => {

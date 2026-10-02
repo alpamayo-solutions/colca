@@ -41,7 +41,7 @@ def test_determinism_two_runs_one_digest():
 
 def test_inventory_every_registered_class_exactly_once():
     body, _ = gb.build_bundle()
-    assert set(body["contracts"]) == set(PAYLOAD_CLASSES) - set(gb.NOT_ON_THE_WIRE), (
+    assert set(body["contracts"]) == set(PAYLOAD_CLASSES) - set(gb.NOT_ON_THE_WIRE) - gb.DECODE_ONLY, (
         "bundle inventory must equal the payload registry minus the contracts deliberately kept off the wire"
     )
 
@@ -78,6 +78,18 @@ def test_builtin_only_contracts_absent():
     body, _ = gb.build_bundle()
     for c in gb.BUILTIN_ONLY:
         assert c not in body["contracts"], f"{c} is builtin-only"
+
+
+def test_time_sync_decodes_without_becoming_publishable():
+    from franzmq import Topic
+
+    from colca_data_contracts.payload import TimeSync
+
+    topic = Topic.from_str("colca/v1/_TimeSync/hub")
+    assert topic.payload_type is TimeSync
+    assert topic.payload_type.decode('{"now_ms":123456}', 0).now_ms == 123456
+    body, _ = gb.build_bundle()
+    assert "_TimeSync" not in body["contracts"]
 
 
 def test_projected_contract_catalogue_has_the_approved_direction():
@@ -211,7 +223,7 @@ def _dummy(t):
 def test_parity_golden_encodes_validate_and_mutants_reject():
     body, _ = gb.build_bundle()
     for ident, cls in sorted(PAYLOAD_CLASSES.items()):
-        if ident in gb.NOT_ON_THE_WIRE:
+        if ident in gb.NOT_ON_THE_WIRE or ident in gb.DECODE_ONLY:
             continue  # no schema to be parity-checked against
         entry = body["contracts"][ident]
         schema = entry["schema"]
@@ -247,15 +259,26 @@ def test_parity_golden_encodes_validate_and_mutants_reject():
 
 
 def test_cmd_contracts_carry_the_door_contract():
-    """The colca command door needs correlation_id + expires_at; created_at is
+    """The colca command door needs correlation_id. expires_at is optional (a
+    command without it never expires) but numeric when present; created_at is
     dropped from required (publishers do not stamp it)."""
     body, _ = gb.build_bundle()
-    for ident in ("_CmdParam", "_CmdOperate", "_CmdMaintain", "_CmdConfigure", "_CmdEdit", "_CmdAdmin", "_Cmd"):
+    for ident in (
+        "_CmdAcknowledge",
+        "_CmdParam",
+        "_CmdOperate",
+        "_CmdMaintain",
+        "_CmdConfigure",
+        "_CmdEdit",
+        "_CmdAdmin",
+        "_Cmd",
+    ):
         entry = body["contracts"][ident]
         assert entry["class"] == "cmd", ident
         req = entry["schema"].get("required", [])
-        assert "correlation_id" in req and "expires_at" in req, (ident, req)
-        assert "created_at" not in req, (ident, req)
+        assert "correlation_id" in req, (ident, req)
+        assert "expires_at" not in req and "created_at" not in req, (ident, req)
+        assert entry["schema"]["properties"]["expires_at"] == {"type": "number"}, ident
         assert entry["tombstone"] is False, ident
 
 
@@ -270,7 +293,6 @@ def test_edit_command_requires_one_versioned_idempotent_intent():
         "intent",
         "expected_versions",
         "correlation_id",
-        "expires_at",
     }
 
 
@@ -305,6 +327,74 @@ def test_alarm_notification_contracts_have_revised_direction_and_shape():
     assert {"revision", "notification"} <= set(event["schema"]["required"])
 
 
+def test_a_finding_is_retained_and_carries_its_own_handling():
+    """`_Finding` is what a service stands behind, with the handling attached.
+
+    Two properties make the model work, and both are asserted here because
+    losing either turns it back into the thing it replaces:
+
+      * retained with a tombstone, so "still broken" is a cheap republish and
+        "gone" is a deletion. A service needs no memory of what it said.
+      * the handling travels WITH the observation. The service that wrote the
+        check is the only one that knows whether its condition flaps or whether
+        an operator may silence it; a rule kept elsewhere has to be matched to
+        the finding, and the matching is what drifts.
+
+    What is deliberately absent: everything about the lifecycle. No
+    acknowledgement, no silence, no status. A service republishing its
+    observation must never be able to overwrite an operator's acknowledgement,
+    and the only way to guarantee that is to give it nowhere to write it.
+    """
+    body, _ = gb.build_bundle()
+    finding = body["contracts"]["_Finding"]
+    schema = finding["schema"]
+
+    assert finding["class"] == "entity"
+    assert finding["tombstone"] is True
+    assert set(schema["required"]) == {
+        "reason",
+        "summary",
+        "observed_at",
+        "suggested_severity",
+    }
+    # The handling the finder attaches, all optional: a check that cannot flap
+    # and may always be silenced carries none of it.
+    for knob in ("silenceable", "dwell_on_s", "dwell_off_s", "min_repeat_s", "remedy"):
+        assert knob in schema["properties"], knob
+        assert knob not in schema["required"], knob
+    # Severity is a proposal here and a decision in `_AlarmState`; the names
+    # differ so nobody reads one for the other.
+    assert schema["properties"]["suggested_severity"]["enum"] == ["info", "warning", "critical"]
+    assert "severity" not in schema["properties"]
+    # Open, like the alarm's: a service that diagnoses something new names it.
+    assert "enum" not in schema["properties"]["reason"]
+    # The lifecycle belongs to the manager, and a writer cannot reach it.
+    for owned_by_the_manager in ("status", "acknowledged_by", "silenced_by", "silenced_until", "since"):
+        assert owned_by_the_manager not in schema["properties"], owned_by_the_manager
+
+
+def test_retention_travels_with_the_finding_onto_the_alarm():
+    """How long a list keeps an alarm is handling, like the dwell: the finder may
+    declare it, the manager resolves it, every reader applies the same windows."""
+    body, _ = gb.build_bundle()
+    for contract in ("_Finding", "_AlarmState"):
+        schema = body["contracts"][contract]["schema"]
+        for field in ("keep_after_read_s", "keep_listed_after_read_s", "keep_after_clear_s"):
+            assert field in schema["properties"], (contract, field)
+            assert field not in schema["required"], (contract, field)
+
+
+def test_a_silence_is_retained_state_of_its_own():
+    """`_AlarmSilence` outlives the alarms it covers, so it cannot be a field of
+    one: retained, retired by tombstone when it runs out, and saying who set it."""
+    body, _ = gb.build_bundle()
+    silence = body["contracts"]["_AlarmSilence"]
+
+    assert silence["class"] == "entity"
+    assert silence["tombstone"] is True
+    assert set(silence["schema"]["required"]) == {"reason", "until", "silenced_by", "silenced_at"}
+
+
 def test_standing_alarm_is_retained_state_with_a_closed_status_vocabulary():
     body, _ = gb.build_bundle()
     standing = body["contracts"]["_AlarmState"]
@@ -314,12 +404,15 @@ def test_standing_alarm_is_retained_state_with_a_closed_status_vocabulary():
     # is how an alarm goes away.
     assert standing["class"] == "entity"
     assert standing["tombstone"] is True
+    # `signal_id` is NOT required: an alarm can stand on a finding about an
+    # element -- a station commissioned that the line definition does not know,
+    # a stale configuration -- and there is no signal to name. Relaxed
+    # deliberately; a manager inventing one would be worse than its absence.
     assert set(schema["required"]) == {
         "alarm_id",
         "status",
         "severity",
         "since",
-        "signal_id",
         "reason",
     }
     # Status and severity are closed; reason stays open so a derived diagnosis
@@ -430,6 +523,31 @@ def test_annotation_contract_is_its_own_class_and_never_tombstoned():
     }
 
 
+def test_annotation_schema_takes_placement_and_relations():
+    """`system_element_id` and `related_annotation_ids` are optional ULIDs: a
+    record without them is valid, one with a malformed id is not."""
+    body, _ = gb.build_bundle()
+    validator = jsonschema.Draft202012Validator(body["contracts"]["_Annotation"]["schema"])
+    head_pass = {
+        "annotation_id": "01M2AB5YWM56SH9B2EQ3S5VNXF",
+        "annotation_type_id": "01M2AB5YWSZTAFBKYYYA5C0TE7",
+        "time_start": 1710000000.0,
+        "signal_ids": ["01BX5ZZKBKACTAV9WEVGEMMVRZ"],
+    }
+    validator.validate(head_pass)
+    validator.validate(
+        {
+            **head_pass,
+            "system_element_id": "01BX5ZZKBKACTAV9WEVGEMMVRA",
+            "related_annotation_ids": ["01M2AB5YWM56SH9B2EQ3S5VNXG"],
+        }
+    )
+    validator.validate({**head_pass, "system_element_id": None})
+    assert not validator.is_valid({**head_pass, "system_element_id": "line-1"})
+    assert not validator.is_valid({**head_pass, "related_annotation_ids": ["panel-1"]})
+    assert not validator.is_valid({**head_pass, "related_annotation_ids": "01M2AB5YWM56SH9B2EQ3S5VNXG"})
+
+
 def test_every_definition_is_addressable_by_id():
     """A definition's path is its id, so every definition needs one."""
     body, _ = gb.build_bundle()
@@ -447,10 +565,16 @@ ULID_CONSTRAINED_FIELDS = {
     "_Constant": ["id", "system_element_id", "semantic_type_id"],
     "_Resource": ["id", "system_element_id"],
     "_ExternalReference": ["id", "external_system_id"],
+    "_Finding": ["signal_id"],
     "_AlarmState": ["alarm_id", "signal_id"],
     # annotation_type_id stays unconstrained until the golden annotation-id
     # vectors derive from ULID type ids — see payload.Annotation.
-    "_Annotation": ["annotation_id", "signal_ids/items"],
+    "_Annotation": [
+        "annotation_id",
+        "signal_ids/items",
+        "system_element_id",
+        "related_annotation_ids/items",
+    ],
     "_AnnotationType": ["id"],
     "_MetadataType": ["id"],
     "_SemanticTag": ["id"],

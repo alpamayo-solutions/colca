@@ -2,7 +2,8 @@ package grantsync
 
 import (
 	"sort"
-	"strings"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // ResourcePlan is direction one: which elements need registering, relabelling
@@ -134,17 +135,18 @@ func PlanDefinitions(desired map[string][]string, tree TreeView, rootULID string
 }
 
 // elementOf returns the element a grant names, or "" for a grant with no
-// element (`admin:#`, `read:#`) — those are realm-wide and resolve everywhere.
+// element (`admin:#`, `read:#`) — those are realm-wide and resolve everywhere —
+// and for a node-relative grant (`read:$node/#`), which names no element and
+// resolves at whichever node a member signs in at.
 func elementOf(grant string) string {
-	parts := strings.SplitN(grant, ":", 3)
-	if len(parts) < 2 {
+	parsed, err := uns.ParseGrant(grant)
+	if err != nil || parsed.Element == "#" {
 		return ""
 	}
-	zone := strings.TrimSuffix(parts[1], "/#")
-	if zone == "#" {
+	if _, relative := uns.NodeRelative(parsed.Element); relative {
 		return ""
 	}
-	return zone
+	return parsed.Element
 }
 
 func equal(a, b []string) bool {

@@ -92,9 +92,10 @@ or clients in the file: identities are runtime state, stored by the node.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `auth.issuer` | | Expected `iss` of tokens. |
-| `auth.audience` | | Expected `aud`. |
-| `auth.jwks_url` | | Where the issuer's signing keys are fetched from. |
+| `auth.issuers[].url` | | An accepted `iss` of tokens. At least one is required. |
+| `auth.issuers[].jwks_url` | `auth.jwks_url` | Where this issuer's signing keys are fetched from. |
+| `auth.audience` | | Expected `aud`, the same for every issuer. |
+| `auth.jwks_url` | | Signing keys shared by every issuer without its own `jwks_url`. |
 | `auth.jwks_refresh` | `1h` | How often keys are refreshed in the background. |
 
 ## Retention
@@ -117,8 +118,10 @@ retention:
 
 Default ages: `metrics` and `logs` 14 days (`336h`); `entities`, `alarms`,
 `annotations` and `audit` 365 days (`8760h`); `commands` 90 days (`2160h`).
-`commands` cannot be set below 7 days, so a valid command is never pruned
-before a child that was offline could fetch it. `definitions` are compacted,
+`commands` cannot be set below 7 days. A delivery cursor (a child node's
+downlink cursor, a machine's delivery cursor) protects what is queued for it
+beyond `max_age`; set `ignore_cursors_after` on `commands` to bound how long an
+absent child keeps the queue. Commands pruned that way are answered `410`. `definitions` are compacted,
 not aged.
 
 ## Limits
@@ -147,6 +150,12 @@ replication link and tells its machines on `<root>/v1/_TimeSync/<node>`.
 | `time_sync.beacon_interval` | `30s` | How often the node publishes its time beacon. |
 | `time_sync.hold_ms` | `10000` | Clock difference above which a machine holds commands. |
 | `time_sync.drift_warn_ms` | `5000` | Clock difference above which a warning is logged. |
+
+## Commands
+
+| Key | Default | Meaning |
+|---|---|---|
+| `commands.strict` | `false` | Answer every command to this node that no service announced with a `404` `_Ack`, also at elements where nobody announces anything. Turn it on where every executor announces its commands. |
 
 ## Contracts
 

@@ -58,6 +58,12 @@ type Entry struct {
 	// verified the token. AnnotationSource uses it to tell a Keycloak service
 	// account (service-account-<client>) from a person. Never persisted.
 	Username string `json:"-"`
+	// SignedInHere marks a KindHuman entry whose token was verified, or whose
+	// groups were attested, at this node. Only such a person's node-relative
+	// grants ($node) resolve here: a person rebuilt from a command that came
+	// down from the parent signed in at another node, and $node names that
+	// node, not this one. Never persisted.
+	SignedInHere bool `json:"-"`
 	// Status is StatusActive (or empty) or StatusDraining. Only a node entry
 	// can drain; an external service's delivery lives in broker session state,
 	// so there is nothing to drain.
@@ -83,6 +89,11 @@ func (e *Entry) MarkDraining() { e.Status = StatusDraining }
 // machine's delivery lives in broker session state, not in a cursor. A nil
 // entry cannot drain.
 func (e *Entry) CanDrain() bool { return e != nil && e.Kind == KindNode }
+
+// ReplicatesUp reports whether the entry is a child node, whose own state and
+// that of the nodes below it rise to this node by replication. Only such an
+// entry has replicated state for a parent to retire. A nil entry does not.
+func (e *Entry) ReplicatesUp() bool { return e != nil && e.Kind == KindNode }
 
 // LocalCursorPrefix namespaces a KindLocal entry's cursors by the name it
 // presented. A local caller never learns its minted ULID, and names are unique
@@ -222,6 +233,11 @@ func (e *Entry) Validate() error {
 			// the (deferred) _CmdAdmin flow, human admin rides in tokens.
 			return fmt.Errorf("entry %s: %q — external services and nodes may not hold admin grants", e.ULID, g)
 		}
+		if _, relative := NodeRelative(pg.Element); relative {
+			// $node names the node a person signed in at. A registry identity
+			// signs in nowhere; its placement already is its zone.
+			return fmt.Errorf("entry %s: %q — node-relative grants are for people, not registry identities", e.ULID, g)
+		}
 	}
 	return nil
 }
@@ -255,9 +271,31 @@ type Scope interface {
 	Reaches(elementID string) bool
 }
 
+// NodeZone is the node-relative zone: the node a person signed in at. A grant
+// on "$node" covers everything that node holds, one on "$node/<path>" the
+// subtree at that path in the node's own frame. One _Group definition, written
+// at the root, then means "this machine" at every edge: an operator signed in
+// at edge 1 reads edge 1, one signed in at edge 2 reads edge 2, with no element
+// id per machine. It resolves only for a person signed in at the evaluating
+// node (Entry.SignedInHere); anywhere else it grants nothing.
+const NodeZone = "$node"
+
+// NodeRelative reports whether a grant's element is node-relative and, if so,
+// the local path below the node it names ("" for the whole node).
+func NodeRelative(element string) (path string, ok bool) {
+	if element == NodeZone {
+		return "", true
+	}
+	if rest, found := strings.CutPrefix(element, NodeZone+"/"); found {
+		return rest, true
+	}
+	return "", false
+}
+
 // Grant is one parsed grant. Verb is "read", "write", "cmd" or "admin".
 // Element names a system element without the trailing "/#" ("#" alone means
-// everything) and covers everything below it. Classes is set only for cmd
+// everything), or a node-relative zone (NodeZone), and covers everything below
+// it. Classes is set only for cmd
 // grants; write grants carry no hazard classes. Naming elements instead of
 // paths keeps a grant meaning the same subtree at every node and across renames.
 type Grant struct {
@@ -269,9 +307,11 @@ type Grant struct {
 // Hazard classes. param, operate, maintain and admin rank how dangerous a
 // command is to equipment. configure is not on that ladder: it edits the data
 // model, so an editor can bind signals without being able to send maintenance
-// commands to a PLC.
+// commands to a PLC. acknowledge is not on it either: quitting an alarm moves
+// nothing, so everyone who watches a line may be granted it without being able
+// to start or stop the line.
 var cmdClasses = map[string]bool{
-	"param": true, "operate": true, "maintain": true, "configure": true, "admin": true,
+	"acknowledge": true, "param": true, "operate": true, "maintain": true, "configure": true, "admin": true,
 }
 
 // CmdClasses lists the hazard classes a cmd grant may name, sorted.
@@ -378,7 +418,7 @@ func ParseGrant(s string) (Grant, error) {
 		}
 		for _, c := range classes {
 			if !cmdClasses[c] {
-				return Grant{}, fmt.Errorf("grant %q: unknown cmd class %q (param|operate|maintain|configure|admin)", s, c)
+				return Grant{}, fmt.Errorf("grant %q: unknown cmd class %q (acknowledge|param|operate|maintain|configure|admin)", s, c)
 			}
 		}
 		return Grant{Verb: "cmd", Element: z, Classes: classes}, nil
@@ -401,7 +441,10 @@ func TokenEntry(sub string, grants []string) (*Entry, error) {
 			return nil, fmt.Errorf("token entry %s: %w", sub, err)
 		}
 	}
-	return &Entry{ULID: sub, Kind: KindHuman, Grants: grants}, nil
+	// A token is verified by the door of the node evaluating it, so the person
+	// signed in here. A caller rebuilding a person who signed in elsewhere
+	// clears SignedInHere.
+	return &Entry{ULID: sub, Kind: KindHuman, Grants: grants, SignedInHere: true}, nil
 }
 
 // TokenEntryWithGroups is TokenEntry for a token that names groups: the grants
@@ -494,7 +537,7 @@ func AuthorizeCmdAt(sc Scope, e *Entry, class, path string) bool {
 		if err != nil || pg.Verb != "cmd" {
 			continue
 		}
-		zone, ok := zoneOf(sc, pg.Element)
+		zone, ok := grantZone(sc, e, pg.Element)
 		if !ok || !coverPath(zone, path) {
 			continue
 		}
@@ -536,9 +579,9 @@ func (e *Entry) HoldsCmdClass(class string) bool {
 // door, or a person rebuilt from attested groups on a replicated command.
 func (e *Entry) IsHuman() bool { return e != nil && e.Kind == KindHuman }
 
-// parseZone accepts "#" or one element id, with or without a trailing "/#";
-// an element grant always covers the whole subtree. Path-shaped zones are
-// refused with a message saying why.
+// parseZone accepts "#", one element id, or a node-relative zone ("$node" or
+// "$node/<path>"), with or without a trailing "/#"; a grant always covers the
+// whole subtree. Other path-shaped zones are refused with a message saying why.
 func parseZone(grant, z string) (string, error) {
 	if z == "#" {
 		return "#", nil
@@ -547,8 +590,32 @@ func parseZone(grant, z string) (string, error) {
 	if z == "" {
 		return "", fmt.Errorf("grant %q: empty zone", grant)
 	}
+	if strings.HasPrefix(z, "$") {
+		return parseNodeZone(grant, z)
+	}
 	if err := ValidElementID(z); err != nil {
 		return "", fmt.Errorf("grant %q: a grant names one system element, not a path (%w)", grant, err)
+	}
+	return z, nil
+}
+
+// parseNodeZone validates a node-relative zone. The path below $node is a
+// local path of names, resolved at the node evaluating the grant: no empty
+// segment, no wildcard, no ":" (which would split the grant).
+func parseNodeZone(grant, z string) (string, error) {
+	path, ok := NodeRelative(z)
+	if !ok {
+		return "", fmt.Errorf("grant %q: unknown zone %q (node-relative zones are %s and %s/<path>)",
+			grant, z, NodeZone, NodeZone)
+	}
+	if path == "" {
+		return NodeZone, nil
+	}
+	for _, seg := range strings.Split(path, "/") {
+		if seg == "" || strings.ContainsAny(seg, "+#:$") {
+			return "", fmt.Errorf("grant %q: %s/<path> needs a path of names, no empty segment, "+
+				"wildcard, \":\" or \"$\"", grant, NodeZone)
+		}
 	}
 	return z, nil
 }
@@ -557,6 +624,8 @@ func parseZone(grant, z string) (string, error) {
 // contracts get the highest class.
 func CmdClass(contract string) string {
 	switch contract {
+	case "_CmdAcknowledge":
+		return "acknowledge"
 	case "_CmdParam":
 		return "param"
 	case "_CmdOperate":
@@ -598,6 +667,8 @@ func coverPath(zone, path string) bool {
 //   - a local path if the element sits here;
 //   - nothing if this node does not know the element. A node that has not yet
 //     learned its position therefore honours only "#" grants.
+//
+// A node-relative zone resolves through grantZone, which knows the holder.
 func zoneOf(sc Scope, elementID string) (string, bool) {
 	if elementID == "#" {
 		return "#", true
@@ -609,6 +680,23 @@ func zoneOf(sc Scope, elementID string) (string, bool) {
 		return "#", true
 	}
 	return sc.PathOf(elementID)
+}
+
+// grantZone resolves one parsed grant of e to the local coverage it gives. A
+// node-relative grant covers this node ("#") or the local path below it, and
+// only for a person who signed in here: $node is the node they signed in at,
+// so evaluated anywhere else it names another node and grants nothing.
+func grantZone(sc Scope, e *Entry, element string) (string, bool) {
+	if path, relative := NodeRelative(element); relative {
+		if e == nil || e.Kind != KindHuman || !e.SignedInHere {
+			return "", false
+		}
+		if path == "" {
+			return "#", true
+		}
+		return path, true
+	}
+	return zoneOf(sc, element)
 }
 
 // readZones is the entry's effective read scope: its own zone plus every read
@@ -627,7 +715,7 @@ func readZones(sc Scope, e *Entry) []string {
 		if err != nil || pg.Verb != "read" {
 			continue
 		}
-		if zone, ok := zoneOf(sc, pg.Element); ok {
+		if zone, ok := grantZone(sc, e, pg.Element); ok {
 			zones = append(zones, zone)
 		}
 	}
@@ -655,7 +743,7 @@ func writeZones(sc Scope, e *Entry) []string {
 		if err != nil || pg.Verb != "write" {
 			continue
 		}
-		if zone, ok := zoneOf(sc, pg.Element); ok {
+		if zone, ok := grantZone(sc, e, pg.Element); ok {
 			zones = append(zones, zone)
 		}
 	}
@@ -672,6 +760,9 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		if err != nil {
 			return false // only uns records exist in the store: fail closed
 		}
+		if localClockRead(e, topic) {
+			return true
+		}
 		for _, z := range readZones(sc, e) {
 			if coverPath(z, p.Path) {
 				return true
@@ -686,6 +777,9 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		if isTimeSyncFilter(topic) {
 			// Every authenticated machine session may subscribe to _TimeSync,
 			// whatever its zone: the beacon is per node, not per path.
+			return true
+		}
+		if localClockRead(e, topic) {
 			return true
 		}
 		fixed, isUns := fixedPathPrefix(topic)
@@ -730,6 +824,38 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 			}
 		}
 		return false
+	}
+	return false
+}
+
+// AuthorizeBrowse reports whether e may see that path exists as a folder in a
+// tree view: a read zone covers it, or it is an ancestor of a read zone, which
+// the caller must pass through to reach what it may read.
+func AuthorizeBrowse(sc Scope, e *Entry, path string) bool {
+	for _, z := range readZones(sc, e) {
+		if coverPath(z, path) || strings.HasPrefix(z, path+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// localClockRead admits only the clock coordination contracts to services
+// inside the deployment. Placement scopes process data, but a connector must
+// still read the shared clock and completion reports from workers at other
+// mounts. This gives no publication rights and does not widen human or keyed
+// external identities. A wildcard contract never qualifies.
+func localClockRead(e *Entry, topic string) bool {
+	if !e.IsLocal() {
+		return false
+	}
+	parts := strings.Split(topic, "/")
+	if len(parts) < 4 || parts[0] != Root() || parts[1] != Version {
+		return false
+	}
+	switch parts[2] {
+	case "_ClockDefinition", "_ClockProgress", "_ServiceDetails":
+		return true
 	}
 	return false
 }

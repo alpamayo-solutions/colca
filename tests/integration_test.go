@@ -83,7 +83,7 @@ func startTopo(t *testing.T) *topo {
 			Repl:   config.Endpoint{Addr: "127.0.0.1:0"},
 			Parent: parent,
 			// Every node trusts the same fake issuer and opens both token doors.
-			Auth: &config.Auth{Issuer: tp.iss.Iss(), Audience: tp.iss.Aud(), JWKSURL: tp.iss.JWKSURL()},
+			Auth: &config.Auth{Issuers: []config.AuthIssuer{{URL: tp.iss.Iss()}}, Audience: tp.iss.Aud(), JWKSURL: tp.iss.JWKSURL()},
 			MQTTHuman: config.MQTTHuman{
 				TCPAddr: "127.0.0.1:0",
 				WSAddr:  "127.0.0.1:0",

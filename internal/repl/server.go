@@ -41,8 +41,6 @@ const (
 	// longPollFor is how long an empty /downlink request waits for new data
 	// before answering with an empty record list.
 	longPollFor = 20 * time.Second
-	// longPollEvery is the re-check interval inside that wait.
-	longPollEvery = 200 * time.Millisecond
 
 	defaultDownlinkMax = 200
 	maxDownlinkMax     = 500
@@ -158,23 +156,11 @@ func (s *Server) childFromReq(r *http.Request) (*uns.Entry, string, error) {
 // response. Unlike commands they have no position, so they are neither filtered
 // to the child's subtree nor rewritten: the child stores them byte for byte.
 func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter uint64, limit int) {
-	recs, next, err := s.eng.Store().Read("definitions", defAfter, limit, nil)
+	recs, next, err := readDefinitions(s.eng.Store(), defAfter, limit)
 	if err != nil {
-		// The child stays behind on definitions this round and asks again. Commands
-		// keep flowing either way.
 		s.log.Error("downlink: reading definitions failed — the child stays behind on them",
 			"child", childULID, "err", err)
 		return
-	}
-	if next == defAfter {
-		// Nothing survives from the child's position on: compaction removed every
-		// record in between. That is not a gap, since what remains is the current
-		// definition set, so answer "caught up, at the head". Returning def_after
-		// unchanged would make both nodes spin, because the wake condition still sees a
-		// definition waiting.
-		if head := s.eng.Store().NextOffset("definitions"); head > next {
-			next = head
-		}
 	}
 	out := make([]wireRec, 0, len(recs))
 	for _, rec := range recs {
@@ -184,6 +170,24 @@ func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter 
 		})
 	}
 	resp["definitions"], resp["def_next"] = out, next
+}
+
+// definitionReader preserves the compaction/cursor boundary independently of
+// transport. The head must precede the iterator snapshot: sampling it afterwards
+// can acknowledge a concurrent append that was never included in the response.
+type definitionReader interface {
+	NextOffset(string) uint64
+	Read(string, uint64, int, func(string) bool) ([]store.StoredRecord, uint64, error)
+}
+
+func readDefinitions(source definitionReader, after uint64, limit int) ([]store.StoredRecord, uint64, error) {
+	head := source.NextOffset("definitions")
+	rows, next, err := source.Read("definitions", after, limit, nil)
+	if err == nil && next == after && head > next {
+		// Compaction may leave no rows between the old cursor and captured head.
+		next = head
+	}
+	return rows, next, err
 }
 
 // ancestryFor builds the position a child at mount must know: this node's own
@@ -290,6 +294,9 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Stream  string    `json:"stream"`
 		Records []wireRec `json:"records"`
+		// Store is the child's store incarnation; empty from a child that
+		// predates it.
+		Store string `json:"store,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		var tooLarge *http.MaxBytesError
@@ -378,6 +385,18 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	// Through the engine, never straight into the store: the engine is the single
 	// place every write converges, and it is what mirrors the newly applied
 	// records onto this node's local MQTT bus.
+	// A child whose store was rebuilt under the same identity restarts at offset
+	// 1; the marks kept for its old store would drop everything it sends and
+	// report it delivered. Adopting the new incarnation clears them first.
+	reset, err := s.eng.Store().AdoptChildStore(child.ULID, in.Store)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if reset {
+		s.log.Warn("child store rebuilt: its replication marks were reset and it replicates from the start",
+			"child", child.ULID, "store", in.Store)
+	}
 	applied, hwm, err := s.eng.IngestReplicated(child.ULID, in.Stream, repl)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -420,11 +439,18 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	// learns its position in one round trip and a fresh node does not keep refusing
 	// people until the first idle poll ends.
 	if r.URL.Query().Get("hello") == "1" {
+		head := s.eng.Store().NextOffset("commands")
+		// A child with no cursor here yet starts at head: seat its delivery floor
+		// there, so retention keeps what is queued for it from now on and its first
+		// poll can confirm what it received. An existing cursor is left alone.
+		if _, err := s.eng.Store().CursorSetIfAbsent(uns.DownlinkCursorPrefix+child.ULID, "commands", head); err != nil {
+			s.log.Warn("downlink hello: delivery floor not seated", "child", child.ULID, "err", err)
+		}
 		resp := map[string]any{
 			"records": []wireRec{}, "next": after,
 			// Where a child with no cursor for this parent starts: commands issued before
 			// it attached were meant for whatever held the mount then.
-			"head": s.eng.Store().NextOffset("commands"),
+			"head": head,
 		}
 		if a, ok := s.ancestryFor(mount); ok {
 			resp["ancestry"] = a
@@ -439,13 +465,14 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	// parent's commands prune would not see its slowest child. CursorAck is
 	// forward-only, writes nothing for an idle re-poll and stamps the last advance
 	// for the staleness window.
+	s.noteForwarded(child.ULID, mount, after)
 	s.eng.Store().CursorAck(uns.DownlinkCursorPrefix+child.ULID, "commands", after)
 	// The child's definitions position is a separate cursor, so neither stream
 	// holds back the other's floor.
 	s.eng.Store().CursorAck(uns.DownlinkDefCursorPrefix+child.ULID, "definitions", defAfter)
 
 	// Drain completion is checked on each poll by the draining child and by the
-	// periodic tick (RunDrainTicker). The status check skips that lookup in the
+	// store-change/deadline wakeup (RunDrainCompletion). The status check skips that lookup in the
 	// common case.
 	if child.IsDraining() {
 		s.evaluateDrain(child.ULID)
@@ -466,9 +493,10 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	deadline := time.Now().Add(longPollFor)
-	ticker := time.NewTicker(longPollEvery)
-	defer ticker.Stop()
+	timer := time.NewTimer(longPollFor)
+	defer timer.Stop()
 	for {
+		wake, positions := s.eng.Store().Changes()
 		// next counts filtered-out records too, so the child's cursor skips over
 		// commands addressed to its siblings instead of re-scanning them forever.
 		recs, next, err := s.eng.Store().Read("commands", after, limit, filter)
@@ -487,6 +515,12 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		if len(recs) > 0 || hasGap || hasDefs || time.Now().After(deadline) {
 			out := make([]wireRec, 0, len(recs))
 			for _, rec := range recs {
+				// The sender's grants are checked again as the command leaves this
+				// node: one admitted days ago may no longer be authorized.
+				if refusal := s.eng.ForwardRefusal(rec); refusal != "" {
+					s.eng.RefuseForwarding(rec, refusal)
+					continue
+				}
 				stripped, ok := uns.MountStrip(rec.Topic, mount)
 				if !ok {
 					continue
@@ -528,8 +562,69 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			// Client gone (or the server was stopped): never outlive the request.
 			return
-		case <-ticker.C:
+		case <-timer.C:
+		case <-wake:
+			// Other streams may be busy. Wait without rescanning commands until
+			// one of this child's downlink streams changes.
+		waitForDownlink:
+			for {
+				var current map[string]store.StreamPosition
+				wake, current = s.eng.Store().Changes()
+				if current["commands"] != positions["commands"] || current["definitions"] != positions["definitions"] {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-timer.C:
+					break waitForDownlink
+				case <-wake:
+				}
+			}
 		}
+	}
+}
+
+// noteForwarded writes the "forwarded" progress ack for every command the child
+// confirmed receiving since its last poll: the records between its downlink
+// cursor here and after, the position it asks from now. The child stores a
+// command and its own cursor in one write before it asks past it, so the
+// position is a receipt. The ack is written before the cursor moves: a crash in
+// between repeats a progress ack rather than losing one. Nothing is scanned
+// before the child's first confirmed poll, or when the child asks for nothing
+// new.
+// maxDownlinkScan bounds one read of noteForwarded; the loop continues past it.
+const maxDownlinkScan = 4096
+
+func (s *Server) noteForwarded(child, mount string, after uint64) {
+	st := s.eng.Store()
+	from, known := st.CursorLookup(uns.DownlinkCursorPrefix+child, "commands")
+	if !known || after <= from {
+		return
+	}
+	if lwm := st.LWM("commands"); lwm > from {
+		from = lwm
+	}
+	wants := func(r store.StoredRecord) bool {
+		p, err := uns.Parse(r.Topic)
+		return err == nil && uns.IsCommand(s.eng.ClassOf(p.Contract)) && uns.UnderMount(p.Path, mount) &&
+			uns.CommandWantsProgress(r.Payload)
+	}
+	for from < after {
+		recs, next, err := st.ReadRecordsBounded(context.Background(), "commands", from, maxDownlinkMax, int(min(after-from, uint64(maxDownlinkScan))), wants)
+		if err != nil {
+			s.log.Warn("downlink: progress acks for forwarded commands not written", "child", child, "err", err)
+			return
+		}
+		for _, r := range recs {
+			if r.Offset < after {
+				s.eng.NoteForwarded(r, child)
+			}
+		}
+		if next <= from {
+			return
+		}
+		from = next
 	}
 }
 

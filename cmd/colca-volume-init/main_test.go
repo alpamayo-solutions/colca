@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 )
@@ -213,4 +214,97 @@ func TestTheCopyRootKeepsItsOwnPermissions(t *testing.T) {
 	if nested.Mode().Perm() != 0o755 {
 		t.Errorf("nested directory mode is %v, want 0755 from the source", nested.Mode().Perm())
 	}
+}
+
+// TestChownTreeToleratesFilesVanishingMidWalk: a second compose up re-runs the
+// initializer while colcad compacts the same volume, so tables disappear between
+// the walk listing them and the chown reaching them.
+func TestChownTreeToleratesFilesVanishingMidWalk(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("needs a non-root user, whose chown to another uid is refused")
+	}
+	volume := t.TempDir()
+	for _, name := range []string{"a.sst", "b.sst", "c.sst"} {
+		if err := os.WriteFile(filepath.Join(volume, name), []byte("t"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(volume, "d", "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// A uid that differs from the owner, so every entry needs a chown. The fake
+	// performs a real chown back to the current owner, so a vanished path
+	// produces the kernel's own ENOENT.
+	uid, gid := os.Getuid()+1, os.Getgid()
+	chowned := []string{}
+	setLchown(t, func(root *os.Root, path string, _, _ int) error {
+		switch path {
+		case "a.sst":
+			// Compacted away before its own chown.
+			if err := root.Remove("a.sst"); err != nil {
+				t.Fatal(err)
+			}
+		case "b.sst":
+			// Listed by the root's ReadDir, gone before the walk reaches them:
+			// a table and a whole directory.
+			if err := root.Remove("c.sst"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.RemoveAll(filepath.Join(volume, "d")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		chowned = append(chowned, path)
+		return root.Lchown(path, os.Getuid(), os.Getgid())
+	})
+
+	if err := chownTree(volume, uid, gid); err != nil {
+		t.Fatalf("a file vanishing mid-walk failed the migration: %v", err)
+	}
+	// The denominator: the walk went on past the vanished entries.
+	if !slices.Contains(chowned, ".") || !slices.Contains(chowned, "b.sst") {
+		t.Fatalf("chowned %v, want the root and b.sst among them", chowned)
+	}
+}
+
+// TestChownTreeStillFailsOnOtherErrors: only a vanished entry is forgiven; a
+// refused chown still aborts, and so does a missing volume root.
+func TestChownTreeStillFailsOnOtherErrors(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("needs a non-root user, whose chown to another uid is refused")
+	}
+	volume := t.TempDir()
+	if err := os.WriteFile(filepath.Join(volume, "state"), []byte("s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := chownTree(volume, os.Getuid()+1, os.Getgid()); err == nil {
+		t.Fatal("a refused chown was accepted")
+	}
+	if err := chownTree(filepath.Join(volume, "missing"), os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("a missing volume root was accepted")
+	}
+}
+
+// TestChownTreeLeavesCorrectlyOwnedEntriesAlone: on a volume the service already
+// runs on, a re-run must not touch files it does not need to.
+func TestChownTreeLeavesCorrectlyOwnedEntriesAlone(t *testing.T) {
+	volume := t.TempDir()
+	if err := os.WriteFile(filepath.Join(volume, "state"), []byte("s"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setLchown(t, func(_ *os.Root, path string, _, _ int) error {
+		t.Errorf("chowned %s, which already had the target owner", path)
+		return nil
+	})
+	if err := chownTree(volume, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setLchown(t *testing.T, fake func(*os.Root, string, int, int) error) {
+	t.Helper()
+	original := lchown
+	lchown = fake
+	t.Cleanup(func() { lchown = original })
 }

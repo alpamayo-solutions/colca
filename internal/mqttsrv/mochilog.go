@@ -3,9 +3,35 @@ package mqttsrv
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/mochi-mqtt/server/v2/packets"
 )
+
+// wsClosedNormally are the close codes a browser sends when a tab closes or
+// navigates away (1001) or when it closes without a status (1005), and a
+// normal close (1000): a client leaving, not a transport fault.
+var wsClosedNormally = []string{"websocket: close 1000 ", "websocket: close 1001 ", "websocket: close 1005 "}
+
+// closedNormally says whether the record's error is a websocket closed by its client.
+func closedNormally(record slog.Record) bool {
+	normal := false
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key != "error" {
+			return true
+		}
+		text := attr.Value.String()
+		for _, code := range wsClosedNormally {
+			if strings.Contains(text+" ", code) {
+				normal = true
+			}
+		}
+		return false
+	})
+	return normal
+}
 
 // mochiLogWindow is how long one repeated mochi log line stays suppressed
 // before the next occurrence is let through (carrying the suppressed count).
@@ -17,11 +43,14 @@ const mochiLogWindow = time.Minute
 // repeat logs once more.
 const mochiLogKeyLimit = 1024
 
-// mochiLogHandler wraps mochi's logging to fix two problems: some transport errors
-// are logged with an empty message, which get a name here, and mochi logs every
+// mochiLogHandler wraps mochi's logging to fix three problems: some transport errors
+// are logged with an empty message, which get a name here; mochi logs every
 // occurrence, so one slow subscriber can flood the log with "client store quota
-// reached". Identical lines log once per window, and the next one reports how many
-// were suppressed. Colca's own logging does not go through it.
+// reached"; and a refused publish comes with the whole packet, payload bytes and
+// all. Identical lines log once per window, and the next one reports how many
+// were suppressed; a refused publish is a debug line with its topic and size,
+// beside the hook's own warning. Colca's own logging goes through it only for
+// those refusals, which a sender can repeat as fast as it likes.
 type mochiLogHandler struct {
 	inner slog.Handler
 	state *mochiLogShared
@@ -61,13 +90,26 @@ func (h *mochiLogHandler) WithGroup(name string) slog.Handler {
 }
 
 func (h *mochiLogHandler) Handle(ctx context.Context, record slog.Record) error {
+	if record.Level > slog.LevelDebug && closedNormally(record) {
+		record.Level = slog.LevelDebug
+		record.Message = "mqtt client closed its websocket"
+		if !h.inner.Enabled(ctx, record.Level) {
+			return nil
+		}
+	}
 	if record.Message == "" {
 		record.Message = "mqtt transport error"
+	}
+	if record.Message == mochiPublishError {
+		record = withoutPacket(record)
+		if !h.inner.Enabled(ctx, record.Level) {
+			return nil
+		}
 	}
 
 	key := record.Level.String() + "|" + record.Message
 	record.Attrs(func(attr slog.Attr) bool {
-		if attr.Key == "client" || attr.Key == "listener" {
+		if attr.Key == "client" || attr.Key == "listener" || attr.Key == "identity" || attr.Key == "sub" {
 			key += "|" + attr.Key + "=" + attr.Value.String()
 		}
 		return true
@@ -104,4 +146,24 @@ func (h *mochiLogHandler) Handle(ctx context.Context, record slog.Record) error 
 		record.AddAttrs(slog.Int("repeats_suppressed", suppressed))
 	}
 	return h.inner.Handle(ctx, record)
+}
+
+// mochiPublishError is the line mochi writes for every publish a hook refused.
+const mochiPublishError = "publish packet error"
+
+// withoutPacket is a refused publish's line with the packet reduced to its topic
+// and size, at debug: the hook has already said why it refused.
+func withoutPacket(record slog.Record) slog.Record {
+	out := slog.NewRecord(record.Time, slog.LevelDebug, record.Message, record.PC)
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key != "packet" {
+			out.AddAttrs(attr)
+			return true
+		}
+		if pk, ok := attr.Value.Any().(packets.Packet); ok {
+			out.AddAttrs(slog.String("topic", pk.TopicName), slog.Int("bytes", len(pk.Payload)))
+		}
+		return true
+	})
+	return out
 }

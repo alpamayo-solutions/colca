@@ -11,6 +11,7 @@
  */
 
 import type { Door, DoorRecord, FetchOptions, Gap, Page } from "./door.js";
+import type { Doorbell } from "./doorbell.js";
 
 export interface StreamOptions {
   /** Records per page, 1…1000. */
@@ -20,6 +21,12 @@ export interface StreamOptions {
   /** Only for the `metrics` stream. */
   signalIds?: readonly string[];
   /**
+   * MQTT topic filters: keeps records whose topic matches one. A consumer woken
+   * by a set of topics reads exactly that set, and the node counts only those
+   * records as unread for this cursor.
+   */
+  topics?: readonly string[];
+  /**
    * Called when a page reports pruned records. Nothing else announces it — a
    * consumer that cares about completeness should say so here.
    */
@@ -27,8 +34,11 @@ export interface StreamOptions {
 }
 
 export interface FollowOptions {
-  /** How long to wait after an empty page. */
-  pollMs?: number;
+  /**
+   * Rung whenever the stream may have grown: by an MQTT subscription to the
+   * topics this stream reads, a `/watch` hint, and every reconnect.
+   */
+  bell: Doorbell;
   signal?: AbortSignal;
 }
 
@@ -75,36 +85,45 @@ export class Stream {
       if (page.gap) this.options.onGap?.(page.gap);
       yield* page.records;
 
-      // The gap's bound when the hole swallowed the whole page, so the same
-      // gap is not reported forever.
-      const offset = page.records.at(-1)?.offset ?? page.gap?.toOffset;
+      const offset = ackOffset(page);
       if (offset === undefined) return;
       await this.ack(offset);
     }
   }
 
-  /** `drain()` without an end: after an empty page, wait and drain again. */
-  async *follow({ pollMs = 1000, signal }: FollowOptions = {}): AsyncGenerator<DoorRecord> {
+  /**
+   * Drain now, then again after every ring of `bell`, until `signal` aborts.
+   * Nothing is read on a timer: a ring during a drain leads to one more drain,
+   * and a consumer rings the bell on reconnect so what arrived meanwhile is read.
+   */
+  async *follow({ bell, signal }: FollowOptions): AsyncGenerator<DoorRecord> {
     while (!signal?.aborted) {
+      const seen = bell.generation;
       yield* this.drain(signal);
-      await sleep(pollMs, signal);
+      await bell.after(seen, signal);
     }
   }
 
   #fetchOptions(signal?: AbortSignal): FetchOptions {
-    return { max: this.options.max, prefix: this.options.prefix, signalIds: this.options.signalIds, signal };
+    return {
+      max: this.options.max,
+      prefix: this.options.prefix,
+      signalIds: this.options.signalIds,
+      topics: this.options.topics,
+      signal,
+    };
   }
 }
 
-/** Resolves early when the signal aborts, so `follow()` stops within a poll. */
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(done, ms);
-    signal?.addEventListener("abort", done, { once: true });
-    function done(): void {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", done);
-      resolve();
-    }
-  });
+/**
+ * What to ack once `page` is processed: its last record; past the records the
+ * filter skipped when the node reported where the page started, so they do not
+ * count as unread; the gap's bound when a hole swallowed the whole page, so
+ * the same gap is not reported forever.
+ */
+function ackOffset(page: Page): number | undefined {
+  const candidates = [page.records.at(-1)?.offset, page.gap?.toOffset];
+  if (page.start !== undefined && page.next > page.start) candidates.push(page.next - 1);
+  const known = candidates.filter((offset): offset is number => offset !== undefined);
+  return known.length === 0 ? undefined : Math.max(...known);
 }

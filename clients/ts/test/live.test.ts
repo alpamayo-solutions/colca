@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CommandTimeout, type LiveValue } from "../src/live.js";
+import { CommandNotSent, CommandTimeout, type LiveValue } from "../src/live.js";
 import { jwt, settle, setup } from "./fake-mqtt.js";
 
 const T = "steine/v1/_Metric/n-technikum/wisewoods/line1/mas2/grit";
@@ -209,7 +209,6 @@ describe("keeping the connection", () => {
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(clients).toHaveLength(2);
-    expect(clients[0].ended).toBe(true);
     expect(clients[1].options.password).toBe(tokens[1]);
     expect(clients[1].options.clientId).not.toBe(clients[0].options.clientId);
 
@@ -217,6 +216,55 @@ describe("keeping the connection", () => {
     expect(clients[1].subscribed).toEqual([T]);
     // A planned renewal is not an outage.
     expect(states).toEqual([]);
+  });
+
+  it("ends the renewed connection with a DISCONNECT once the new one has its subscriptions", async () => {
+    const { live, clients } = setup();
+    const seen: unknown[] = [];
+    live.subscribe(T, (value) => seen.push(value.payload));
+    await settle();
+    clients[0].emit("connect");
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    expect(clients).toHaveLength(2);
+    // Until the new connection is up, the old one still carries the values.
+    expect(clients[0].ended).toBe(false);
+    clients[0].deliver(T, { value: 1 });
+
+    clients[1].holdSubacks = true;
+    clients[1].emit("connect");
+    await settle();
+    expect(clients[0].ended).toBe(false);
+    clients[0].deliver(T, { value: 2 });
+
+    clients[1].grant();
+    await settle();
+    expect(clients[0].ended).toBe(true);
+    expect(clients[0].endedForce).toBe(false);
+
+    // From here only the new connection counts.
+    clients[0].deliver(T, { value: "late" });
+    clients[0].emit("close");
+    clients[1].deliver(T, { value: 3 });
+    expect(seen).toEqual([{ value: 1 }, { value: 2 }, { value: 3 }]);
+    expect(live.state).toBe("online");
+  });
+
+  it("ends the renewed connection when the new one fails and a retry takes over", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { live, clients } = setup();
+    live.subscribe(T, () => undefined);
+    await settle();
+    clients[0].emit("connect");
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    clients[1].emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(clients).toHaveLength(3);
+    expect(clients[0].endedForce).toBe(false);
+    clients[2].emit("connect");
+    expect(live.state).toBe("online");
   });
 
   it("keeps the connection while the token on offer is no newer than the one in use", async () => {
@@ -248,19 +296,23 @@ describe("keeping the connection", () => {
     expect(clients[1].options.password).toBe(fresh);
   });
 
-  it("ignores what the replaced connection still says", async () => {
+  it("ignores what a connection dropped for a retry still says", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
     const { live, clients } = setup();
     await settle();
     clients[0].emit("connect");
     const seen: unknown[] = [];
     live.subscribe(T, (value) => seen.push(value.payload));
 
-    await vi.advanceTimersByTimeAsync(270_000);
+    clients[0].emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(clients).toHaveLength(2);
+    expect(clients[0].endedForce).toBe(true);
     clients[0].deliver(T, { value: "late" });
     clients[0].emit("close");
 
     expect(seen).toEqual([]);
-    expect(live.state).toBe("online");
+    expect(live.state).toBe("connecting");
   });
 
   it("waits longer after each failed attempt, with a fresh token every time", async () => {
@@ -316,6 +368,19 @@ describe("keeping the connection", () => {
     expect(rounds).toBe(2);
   });
 
+  it("drops a connection that is still being set up when closed, and disconnects one that is up", async () => {
+    const opening = setup();
+    await settle();
+    opening.live.close();
+    expect(opening.clients[0].endedForce).toBe(true);
+
+    const online = setup();
+    await settle();
+    online.clients[0].emit("connect");
+    online.live.close();
+    expect(online.clients[0].endedForce).toBe(false);
+  });
+
   it("stops for good when closed", async () => {
     const { live, clients } = setup();
     await settle();
@@ -329,6 +394,97 @@ describe("keeping the connection", () => {
     expect(clients[0].ended).toBe(true);
     expect(live.state).toBe("closed");
     expect(() => live.subscribe(T, () => undefined)).toThrow(/closed/);
+  });
+});
+
+describe("renewing the token in place", () => {
+  const renews = { properties: { authenticationMethod: "colca-token" } };
+
+  it("asks every connection to renew in place", async () => {
+    const { clients } = setup({ mqttOptions: { properties: { sessionExpiryInterval: 0 } } });
+    await settle();
+    expect(clients[0].options.properties).toEqual({
+      sessionExpiryInterval: 0,
+      authenticationMethod: "colca-token",
+    });
+  });
+
+  it("hands the node the new token on the open connection when it says it can", async () => {
+    const { live, clients, tokens } = setup();
+    const renewed: string[] = [];
+    const states: string[] = [];
+    const resubscribed: number[] = [];
+    live.subscribe(T, () => undefined);
+    await settle();
+    clients[0].reauthenticate = (token) => {
+      renewed.push(token);
+      return Promise.resolve();
+    };
+    clients[0].emit("connect", renews);
+    live.onState((state) => states.push(state));
+    live.onResubscribe(() => resubscribed.push(1));
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    expect(renewed).toEqual([tokens[1]]);
+    expect(clients).toHaveLength(1);
+    expect(clients[0].ended).toBe(false);
+    expect(clients[0].subscribed).toEqual([T]);
+
+    // The next renewal follows the new token's expiry: 270 s after this one.
+    await vi.advanceTimersByTimeAsync(269_000);
+    expect(renewed).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(renewed).toEqual([tokens[1], tokens[2]]);
+    expect(clients).toHaveLength(1);
+    expect(states).toEqual([]);
+    expect(resubscribed).toEqual([]);
+  });
+
+  it("reconnects as before when the node does not say it renews in place", async () => {
+    const { live, clients } = setup();
+    live.subscribe(T, () => undefined);
+    await settle();
+    const reauthenticate = vi.fn(() => Promise.resolve());
+    clients[0].reauthenticate = reauthenticate;
+    clients[0].emit("connect");
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    expect(reauthenticate).not.toHaveBeenCalled();
+    expect(clients).toHaveLength(2);
+  });
+
+  it("reconnects with the new token when the node does not answer the renewal", async () => {
+    const { live, clients, tokens, errors } = setup();
+    live.subscribe(T, () => undefined);
+    await settle();
+    clients[0].reauthenticate = () => new Promise(() => undefined);
+    clients[0].emit("connect", renews);
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    expect(clients).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(clients).toHaveLength(2);
+    expect(clients[1].options.password).toBe(tokens[1]);
+    expect(errors.map((error) => error.message)).toEqual(["the node did not answer the token renewal"]);
+  });
+
+  it("leaves a refused renewal to the retry, because the node ends the connection", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { live, clients } = setup();
+    live.subscribe(T, () => undefined);
+    await settle();
+    clients[0].reauthenticate = () => {
+      clients[0].emit("close");
+      return Promise.reject(new Error("the connection closed during the token renewal"));
+    };
+    clients[0].emit("connect", renews);
+
+    await vi.advanceTimersByTimeAsync(270_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    // One retry, not a retry and a renewal's replacement on top.
+    expect(clients).toHaveLength(2);
+    clients[1].emit("connect", renews);
+    expect(live.state).toBe("online");
   });
 });
 
@@ -432,8 +588,84 @@ describe("commands", () => {
 
     await expect(live.command("steine/v1/_Metric/n1/x")).rejects.toThrow(/_Cmd/);
 
-    clients[0].refusePublish = new Error("Not authorized");
-    await expect(live.command(COMMAND)).rejects.toThrow("Not authorized");
+    // mqtt.js hands over the node's refusal with its reason code.
+    clients[0].refusePublish = Object.assign(new Error("Publish error: Not authorized"), { code: 135 });
+    const refused = live.command(COMMAND);
+    await expect(refused).rejects.toBeInstanceOf(CommandNotSent);
+    await expect(refused).rejects.toMatchObject({ cause: { message: "Publish error: Not authorized" } });
+  });
+
+  it("says a command was not sent when it never went out", async () => {
+    const { live } = setup();
+    await settle();
+
+    const offline = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    const outcome = expect(offline).rejects.toBeInstanceOf(CommandNotSent);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await outcome;
+  });
+
+  it("keeps waiting for the answer when the connection drops after the command went out", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].emit("connect");
+    clients[0].refusePublish = new Error("Connection closed");
+
+    const answer = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    await settle();
+    const [sent] = clients[0].sent;
+    clients[0].emit("close");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await settle();
+    const again = clients[clients.length - 1];
+    again.emit("connect");
+    again.deliver("steine/v1/_Ack/n-edge/x", { correlation_id: sent.body.correlation_id, result_code: 200 });
+
+    await expect(answer).resolves.toMatchObject({ result_code: 200 });
+  });
+
+  it("times out, not 'not sent', when a command went out and its answer never came", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].emit("connect");
+    clients[0].refusePublish = new Error("Connection closed");
+
+    const answer = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    const outcome = expect(answer).rejects.toBeInstanceOf(CommandTimeout);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await outcome;
+  });
+
+  it("expires when its wait ends, however late the node confirms the answers' subscription", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].holdSubacks = true;
+    clients[0].emit("connect");
+
+    const asked = Date.now();
+    const answer = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    void answer.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(2_000);
+    clients[0].grant();
+    await settle();
+
+    expect(clients[0].sent[0].body.expires_at).toBe(asked + 5_000);
+  });
+
+  it("is not sent once its wait has ended", async () => {
+    const { live, clients } = setup();
+    await settle();
+    clients[0].holdSubacks = true;
+    clients[0].emit("connect");
+
+    const answer = live.command(COMMAND, {}, { timeoutMs: 5_000 });
+    const outcome = expect(answer).rejects.toBeInstanceOf(CommandNotSent);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await outcome;
+    clients[0].grant();
+    await settle();
+
+    expect(clients[0].sent).toEqual([]);
   });
 
   it("gives up on open commands when closed", async () => {

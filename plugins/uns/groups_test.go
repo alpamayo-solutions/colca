@@ -1,6 +1,7 @@
 package uns
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -165,5 +166,32 @@ func TestStandaloneGroupsIgnoreCachedFleetAuthority(t *testing.T) {
 	}
 	if grants, ok, _ := idx.GrantsOf("local-operator"); !ok || len(grants) != 1 {
 		t.Fatal("local operator lost access")
+	}
+}
+
+// A group the node does not define is reported as such, so callers can treat it
+// as the normal case it is rather than a fault.
+func TestAnUndefinedGroupIsReportedAsUnknown(t *testing.T) {
+	f := newStore("n-edge1")
+	withGroup(f, "n-global", "01HGRP-OPS", "read:01HLINE1/#")
+
+	e, problems, err := TokenEntryWithGroups("anna", nil,
+		[]string{"offline_access", "01HGRP-OPS"}, NewGroupIndex(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(e.Grants) != 1 {
+		t.Fatalf("grants = %v, want the defined group's only", e.Grants)
+	}
+	var unknown *UnknownGroupError
+	if len(problems) != 1 || !errors.As(problems[0], &unknown) || unknown.ID != "offline_access" {
+		t.Fatalf("problems = %v, want one UnknownGroupError for offline_access", problems)
+	}
+}
+
+func TestGroupNoticesReportsEachIDOnce(t *testing.T) {
+	var n GroupNotices
+	if !n.First("a") || n.First("a") || !n.First("b") {
+		t.Fatal("First must be true exactly once per id")
 	}
 }

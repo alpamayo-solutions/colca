@@ -21,6 +21,7 @@ _VECTOR = Path(__file__).parent / "vectors" / "manifest_streams.json"
 #: command missing here was a command ``streams_by_contract`` did not know --
 #: a test double then put a ``_CmdOperate`` on the entities stream.
 COMMAND_CONTRACTS: tuple[str, ...] = (
+    "_CmdAcknowledge",
     "_CmdParam",
     "_CmdOperate",
     "_CmdMaintain",
@@ -33,6 +34,7 @@ COMMAND_CONTRACTS: tuple[str, ...] = (
 # (Cmd subclasses -> "cmd", Ack subclasses -> "ack" — derived, not listed).
 CLASS_TABLE: dict[str, str] = {
     "_Metric": "data",
+    "_ClockProgress": "data",
     # A log line is an event: a later line does not replace an earlier one.
     "_Log": "log",
     "_SystemElement": "entity",
@@ -46,9 +48,17 @@ CLASS_TABLE: dict[str, str] = {
     "_ExternalReference": "entity",
     "_AlarmNotificationConfig": "entity",
     "_NotificationConfigStatus": "entity",
+    # What a service found, republished for as long as it holds and retired by
+    # tombstone: same retained shape as the alarm below, one writer earlier in
+    # the chain. The service that ran the check writes this; the manager reads
+    # findings and owns the alarm.
+    "_Finding": "entity",
     # The standing alarm, one record per definition: it overwrites itself and
     # a tombstone retires it, so a new subscriber sees what stands.
     "_AlarmState": "entity",
+    # A silence per element and alarm type, retained until it runs out and then
+    # retired by tombstone; it outlives the alarms it covers.
+    "_AlarmSilence": "entity",
     # Alarm events: append-only, not in KV, not retained, and on their own
     # stream so they never queue behind a metrics backlog.
     "_AlarmStateChange": "alarm",
@@ -56,6 +66,7 @@ CLASS_TABLE: dict[str, str] = {
     "_Annotation": "annotation",
     "_EnrolledIdentity": "entity",
     "_Group": "definition",
+    "_ClockDefinition": "definition",
     "_MetadataType": "definition",
     "_AnnotationType": "definition",
     "_DataModel": "definition",

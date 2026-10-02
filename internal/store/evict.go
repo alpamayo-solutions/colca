@@ -167,7 +167,8 @@ func (s *Store) EvictKV(doomed func(topic string) bool) (uint64, error) {
 	b := s.db.NewBatch()
 	defer b.Close()
 	for _, key := range keys {
-		if err := b.Delete(key, nil); err != nil {
+		path, node, topic, _ := splitKVKey(string(key[2:]))
+		if err := deleteKV(b, path, node, topic); err != nil {
 			return 0, err
 		}
 	}

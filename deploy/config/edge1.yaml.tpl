@@ -15,7 +15,8 @@ mqtt_local: { addr: ":1883" }
 mqtt_human: { tcp_addr: ":8884" }
 repl: { addr: ":9443" }
 auth:
-  issuer: http://keycloak:8080/realms/colca
+  issuers:
+    - url: http://keycloak:8080/realms/colca
   audience: colca
   jwks_url: http://keycloak:8080/realms/colca/protocol/openid-connect/certs
 parent:

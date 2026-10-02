@@ -57,6 +57,30 @@ Enrollment goes through `POST /enroll` with the admin token, or through a
 `_CmdAdmin` command sent down the tree to a node that is not directly
 reachable.
 
+## Who writes a signal's values
+
+A write scope says where an identity may publish. It does not make the
+identity a source for every signal there. A signal bound to a data tag
+(`_Signal.data_tag`) takes its `_Metric` only from its **producer**: the
+identity whose `_DataTags` catalogue holds that tag, at the topic that identity
+publishes its catalogue on (`_DataTags/<node>/<mount>/<name>`). That covers
+connectors, dataops outputs and signals created by autobind alike.
+
+| Publisher | A `_Metric` for a bound signal |
+|---|---|
+| the producer | accepted |
+| any other identity, local or external, whatever its grants | refused: MQTT 5 PUBACK `0x87` (not authorized), HTTP `403`, `colca_rejected_publishes_total{reason="not_producer"}`, an `_AuditEvent` denial and a log line |
+| any identity, when no catalogue on the node holds the tag or two claim it | refused until exactly one catalogue holds it |
+| the admin token (`/publish` with `X-Colca-Token`) | accepted, stored with `written_by: admin`, and logged |
+| replication from a child | accepted: the child admitted it |
+
+A signal bound to nothing, or a `_Metric` on a path with no signal, keeps the
+write-scope rule alone.
+
+The local door authenticates by reaching it, not by a secret, so this rule
+stops a misconfigured or misbehaving service. It does not stop a process that
+connects under the producer's name.
+
 ## Grants
 
 Grants use one grammar for machines and people:
@@ -68,45 +92,147 @@ Grants use one grammar for machines and people:
 | `cmd:<element>/#:<classes>` | send commands of the listed classes below the element |
 | `admin:#` | use the administrative routes; does not widen reads or commands |
 
-Command classes are `param`, `operate`, `maintain`, `configure` and `admin`.
-`configure` is separate on purpose: someone who may rename a signal must not
-thereby be able to send maintenance commands to a PLC.
+Command classes are `acknowledge`, `param`, `operate`, `maintain`, `configure`
+and `admin`. `configure` is separate on purpose: someone who may rename a signal
+must not thereby be able to send maintenance commands to a PLC. `acknowledge`
+is separate for the opposite reason: quitting an alarm moves nothing, so
+everyone who watches a line may hold it, and holding it must not let them start
+or stop the line. It covers `_CmdAcknowledge` and nothing else; silencing an
+alarm keeps notifications from other people and stays `operate`. No class
+implies another: someone who may both operate and acknowledge holds both.
 
 `_CmdEdit` is a person's tool for the node's data model, and the door admits
 anyone holding `configure` on it. Two narrower classes are also admitted, each
 covering only the part of `_CmdEdit` that matches the hazard: `operate` covers
 creating an annotation, or editing one's own; `param` covers setting the value
-and metadata of an existing constant — an operator input such as a station's
-sandoff or grit — never creating or deleting a constant, never its other
-attributes, and never a signal's binding. Both are scoped by the grant's
-element exactly as `configure` is: `cmd:<element>/#:param` reaches only the
-constants under that element. The write itself is still made by the node —
+and metadata of an existing constant, through an `update` or a single-key
+`metadata` edit (see [concepts.md](concepts.md#writing-one-metadata-key)) — an
+operator input such as a station's sandoff or grit — never creating or deleting
+a constant, never its other attributes, and never a signal's binding. Both are
+scoped by the grant's element exactly as `configure` is:
+`cmd:<element>/#:param` reaches only the constants under that element. The write itself is still made by the node —
 `_CmdEdit` never lets a person publish state directly — but it carries the
 operator's own verified identity as `actor_id`/`actor_label`/`actor_kind`, so
 `/kv` can show who set it (see [http-api.md](http-api.md)).
+
+An external reference is stored at the reserved path
+`_colca/external-references/<id>`, outside every element, so `_CmdEdit`
+authorizes it at the entity it belongs to: `cmd:<element>/#:configure` covers
+adding, changing and removing the references of the entities under that
+element, and deleting such an entity together with its references. A changed
+or removed reference also counts at the entity it belongs to now, so it cannot
+be moved away from an entity outside the grant.
 
 `#` in place of an element means the whole node. A grant on an element the node
 has never heard of covers nothing, and a node that has never reached its parent
 cannot resolve elements above itself, so scoped grants fail closed there.
 
+### Grants relative to the node a person signs in at
+
+A grant names an element by id, so a group that should give every edge's
+operators their own machine would need one element id per machine. A person's
+grant can instead name `$node`, the node they signed in at:
+
+| Zone | Covers, at the node the person signed in at |
+|---|---|
+| `$node/#` | everything that node holds, as `#` does there |
+| `$node/<path>/#` | the subtree at that local path, for example `$node/Line1/Press/#` |
+
+One definition, written once at the root, then works for the whole fleet:
+`read:$node/#` lets an operator signed in at edge 1 read edge 1 and one signed
+in at edge 2 read edge 2. `$node` resolves when the grant is used, at the node
+evaluating it; the `_Group` definition descends unchanged.
+
+- `$node` is the node whose door verified the person's token, or whose own
+  local service attested their groups. A command that came down from the
+  parent was admitted at another node, so its sender's `$node` grants cover
+  nothing at the node executing it. Use element grants for people who command
+  edges from the hub.
+- At the root, `$node/#` is the whole tree. Give a group with `$node` grants
+  only to people who sign in at the edges; when edges share one identity
+  provider with each other, a member who can sign in at an edge holds that
+  edge.
+- `<path>` is a path of names in the node's own frame. Unlike an element id it
+  follows a rename: renaming `Line1` moves what `$node/Line1/#` covers. A path
+  no element sits at covers nothing.
+- Only people hold `$node` grants. Enrollment refuses them for machines,
+  services and nodes, whose placement is their zone. `admin:$node` is
+  reserved like every zone-scoped `admin`.
+- Nodes released before node-relative grants refuse a definition that holds a `$node` grant.
+  Upgrade the edges before defining such a group.
+
 ## People
 
-People authenticate with tokens from any OIDC issuer. The node validates them
-offline:
+People authenticate with tokens from OIDC issuers the node lists. The node
+validates them offline:
 
 ```yaml
 auth:
-  issuer: https://login.example.com/realms/plant
+  issuers:
+    - url: https://login.example.com/realms/plant
   audience: colca
   jwks_url: https://login.example.com/realms/plant/protocol/openid-connect/certs
 mqtt_human: { tcp_addr: ":8884", ws_addr: ":8885" }
 ```
 
-Signing keys are fetched in the background, stored, and refreshed when a token
-names an unknown key. The issuer is never called while a request waits, and a
+A token's `iss` must be one of `issuers`, and its `aud` must be `audience`.
+The issuer also decides which keys the signature is checked against: its own
+`jwks_url`, or the shared `auth.jwks_url` when it has none. A token that names
+an issuer but was signed with another issuer's keys is rejected.
+
+Several issuers are normal when one identity provider is reached under more
+than one host name. Keycloak, for example, writes the host the browser used
+into `iss`, so a site with two networks gets two issuers with the same keys:
+
+```yaml
+auth:
+  issuers:
+    - url: https://red.plant.example/realms/plant
+    - url: https://green.plant.example/realms/plant
+  audience: colca
+  jwks_url: http://keycloak:8080/realms/plant/protocol/openid-connect/certs
+```
+
+Issuers from different identity providers each name their own keys:
+
+```yaml
+auth:
+  issuers:
+    - url: https://login.example.com/realms/plant
+      jwks_url: https://login.example.com/realms/plant/protocol/openid-connect/certs
+    - url: https://idp.partner.example
+      jwks_url: https://idp.partner.example/.well-known/jwks.json
+  audience: colca
+```
+
+Signing keys are fetched in the background from each distinct JWKS URL,
+stored, and refreshed when a token names an unknown key. The issuer is never called while a request waits, and a
 node that restarts without network keeps validating until the tokens expire. A
-session ends when its token expires; the token lifetime is therefore the
-revocation delay.
+session ends when its token expires, unless the client renews it first.
+
+An MQTT 5 client renews on the open connection: it sends the authentication
+method `colca-token` in its CONNECT (the token stays the password), and the node
+names the method in the CONNACK. Before the token runs out, the client sends an
+AUTH packet with reason `0x19`, the same method, and the new token as
+authentication data. The node checks it as at CONNECT, requires the same `sub`,
+and moves the session's grants and expiry to it; the subscriptions stay. A
+refused token ends the connection with `0x87` (not authorized), a different
+method with `0x8C`. A client without the method reconnects with a new token
+instead.
+
+A logout at the identity provider reaches the node by OIDC back-channel logout.
+The node serves `POST /auth/backchannel-logout` on its API door and its local
+door; the identity provider posts a signed `logout_token` there. The node checks
+the signature against the issuer's keys, `iss`, `aud` (the `audience` above),
+`iat`, `exp` if present, the back-channel logout event in `events`, that there
+is no `nonce`, and that the `jti` was not used before, and answers 400 to a token
+that fails. A valid one is answered 200: every connection of that session (the
+token's `sid`) is closed with `0x98` (administrative action), and tokens of the
+session are refused from then on, on every door. A logout token with a `sub` and
+no `sid` ends everything issued to that person before it. In Keycloak, set the
+client's back-channel logout URL to the node's local door, for example
+`http://colca/auth/backchannel-logout`. Without back-channel logout, the token
+lifetime is the revocation delay.
 
 A token names groups, not grants. The node resolves the groups against
 `_Group` definitions that its ancestors pushed down. Membership lives in the

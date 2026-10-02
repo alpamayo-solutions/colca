@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -51,10 +52,16 @@ func rawPayload(payload []byte) json.RawMessage {
 	return json.RawMessage(payload)
 }
 
-// defaultMax / maxMax bound how many records one /fetch may return.
+// maxLogoutBody bounds a back-channel logout request: one signed JWT in a form.
+const maxLogoutBody = 64 << 10
+
+// defaultMax / maxMax bound how many records one /fetch may return;
+// fetchScanBudget bounds how many it may scan to find them, so a filter that
+// matches nothing costs one short page instead of a walk to the head.
 const (
-	defaultMax = 100
-	maxMax     = 1000
+	defaultMax      = 100
+	maxMax          = 1000
+	fetchScanBudget = 20000
 )
 
 // TLSConfig builds the API listener's TLS config. Client certificates are
@@ -105,6 +112,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// record cap. Store.Append still enforces the record cap; this only keeps a huge
 	// body out of memory.
 	maxPublishBody := int64(cfg.Limits.EffectiveMaxRecordBytes())*2 + 4096 //nolint:gosec // config caps max_record_bytes at 1 GiB
+	// A batch carries at most maxBatchRecords records and at most 16 MiB, or one
+	// record at its cap, whichever is larger.
+	const maxBatchRecords = 5000
+	maxBatchBody := max(maxPublishBody, 16<<20)
 
 	// writeJSON encodes into a buffer before touching the ResponseWriter, so an
 	// encoding failure becomes a 500 instead of a 200 with an empty body.
@@ -267,8 +278,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 			release, ok := acquireRequest(w, r, requestLimiter, m, door, class, key, policy)
 			if !ok {
+				m.HTTPLimitedCaller(r.Pattern, callerLabel(c))
 				return
 			}
+			m.HTTPCallerSeen(r.Pattern, callerLabel(c))
 			defer release()
 			next(w, r, c)
 		}
@@ -311,8 +324,51 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				"since": st.Since.Format(time.RFC3339),
 			}
 		}
+		// storage stays 200 like uplink: restarting does not free a full disk, the
+		// operator has to, and the state tells them to look.
+		payload["storage"] = e.Store().Health()
+		payload["clock"] = e.ClockStatus()
 		writeJSON(w, http.StatusOK, payload)
 	})
+
+	// Back-channel logout (OpenID Connect Back-Channel Logout 1.0). The identity
+	// provider calls it server to server when a login ends; the signed logout token is
+	// the credential, so it is open on both doors. Every session and token of the
+	// named login stops working here at once.
+	if ver != nil {
+		mux.HandleFunc("POST /auth/backchannel-logout", func(w http.ResponseWriter, r *http.Request) {
+			release, ok := acquireRequest(w, r, requestLimiter, m, door, limitClassAuth, sourceLimitKey(r), authPolicy)
+			if !ok {
+				return
+			}
+			defer release()
+			// The specification forbids caching either answer.
+			w.Header().Set("Cache-Control", "no-store")
+			refuse := func(reason string) {
+				m.AuthReject(door, tokenauth.ReasonBadToken)
+				auditDenied(r, door, "logout_token_invalid", nil)
+				slog.Default().Warn("back-channel logout refused", "reason", reason)
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"error": "invalid_request", "error_description": reason,
+				})
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, maxLogoutBody)
+			if err := r.ParseForm(); err != nil {
+				refuse("the body is not a form: " + err.Error())
+				return
+			}
+			token := r.PostForm.Get("logout_token")
+			if token == "" {
+				refuse("no logout_token")
+				return
+			}
+			if _, err := ver.BackchannelLogout(token); err != nil {
+				refuse(err.Error())
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		})
+	}
 
 	// /metrics is certless/tokenless like /healthz: Prometheus scrape targets
 	// carry no admin tokens (they must accept the self-signed server cert).
@@ -431,6 +487,16 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error()})
 			return
 		}
+		if res.Duplicate {
+			// A command this sender already sent: not stored or run again.
+			writeJSON(w, http.StatusOK, map[string]any{"duplicate": true})
+			return
+		}
+		if res.Answered {
+			// No service executes this command; the _Ack says so too.
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": res.Command.Message, "command": res.Command})
+			return
+		}
 		if !res.Persisted {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "topic outside " + uns.Root() + "/# is not persisted"})
 			return
@@ -440,6 +506,69 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			body["command"] = res.Command
 		}
 		writeJSON(w, http.StatusOK, body)
+	}))
+
+	// Change hints are local-service only. They carry no record payload or
+	// authority to read; consumers still fetch through their scoped cursors.
+	if local {
+		mux.HandleFunc("GET /backlog", authFor(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+			if c.human != nil {
+				writeJSON(w, 403, map[string]any{"error": "local service only"})
+				return
+			}
+			backlog(w, r, e.Store())
+		}))
+
+	}
+	// POST /publish/batch takes many records from one machine or service in one
+	// request: {"records":[{"topic":…,"payload":…},…]}. Each is judged exactly as
+	// POST /publish judges it; the admitted ones are written in one append per
+	// stream. The answer lists one result per record, in order: {"offset":N} or
+	// {"error":…}. Commands and audit records are refused here.
+	mux.HandleFunc("POST /publish/batch", authFor(limitClassWrite, writePolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+		if c.admin || c.human != nil || c.entry == nil {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "a batch is published by a machine or service identity"})
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBatchBody)
+		var in struct {
+			Records []struct {
+				Topic   string          `json:"topic"`
+				Payload json.RawMessage `json:"payload"`
+			} `json:"records"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				m.RecordRejected("too_large")
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+					"error": fmt.Sprintf("request body exceeds %d bytes", maxBatchBody)})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if len(in.Records) == 0 || len(in.Records) > maxBatchRecords {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": fmt.Sprintf("a batch holds 1 to %d records", maxBatchRecords)})
+			return
+		}
+		batch := make([]engine.BatchRecord, len(in.Records))
+		for i, rec := range in.Records {
+			batch[i] = engine.BatchRecord{Topic: rec.Topic, Payload: rec.Payload}
+		}
+		results := e.IngestClientBatch(c.entry.ULID, batch)
+		out := make([]map[string]any, len(results))
+		accepted := 0
+		for i, res := range results {
+			if res.Err != nil {
+				out[i] = map[string]any{"error": res.Err.Error()}
+				continue
+			}
+			accepted++
+			out[i] = map[string]any{"stream": res.Stream, "offset": res.Offset}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"accepted": accepted, "results": out})
 	}))
 
 	// GET /fetch reads from the cursor's position and never moves it; only /ack does.
@@ -452,6 +581,24 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// is stream-wide, so a consumer must learn it is in a hole even if every surviving
 	// record is outside its view. The gap only carries offsets, which "next" already
 	// exposes.
+	// GET /watch replaces polling /fetch on an idle stream: one held connection
+	// that names the selected streams whenever they grow (see serveWatch).
+	mux.HandleFunc("GET /watch", authFor(limitClassWatch, watchPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+		if r.URL.Query().Get("uplink") == "1" || r.URL.Query().Get("backlog") == "1" {
+			if !local || c.human != nil {
+				writeJSON(w, 403, map[string]any{"error": "local service only"})
+				return
+			}
+			if r.URL.Query().Get("uplink") == "1" {
+				watchUplink(w, r, uplink)
+			} else {
+				watchBacklog(w, r, e.Store())
+			}
+			return
+		}
+		serveWatch(w, r, e.Store(), writeJSON)
+	}))
+
 	mux.HandleFunc("GET /fetch", authFor(limitClassFetch, fetchPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		q := r.URL.Query()
 		stream, cursor := q.Get("stream"), q.Get("cursor")
@@ -466,6 +613,33 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			limit = defaultMax
 		}
 		prefix := q.Get("prefix")
+		// contract narrows the page to the given contracts (repeatable), like /kv's.
+		// Records of other contracts are skipped in the scan and next moves past them.
+		var contractSet map[string]bool
+		if contracts := q["contract"]; len(contracts) > 0 {
+			contractSet = make(map[string]bool, len(contracts))
+			for _, ct := range contracts {
+				if !uns.IsKnown(e.ClassOf(ct)) {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("unknown contract: %q", ct)})
+					return
+				}
+				contractSet[ct] = true
+			}
+		}
+		// topic keeps records whose topic matches one of the MQTT filters
+		// (repeatable): a consumer that is woken by a set of topics reads exactly
+		// that set, and the cursor watchdog counts only those records as unread.
+		topicFilters := q["topic"]
+		for _, f := range topicFilters {
+			if !uns.ValidFilter(f) {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("invalid topic filter: %q", f)})
+				return
+			}
+		}
+		if len(topicFilters) > 1000 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "at most 1000 topic filters are allowed"})
+			return
+		}
 		signalIDs, hasSignalFilter := q["signal_id"]
 		signalSet := make(map[string]struct{}, len(signalIDs))
 		if hasSignalFilter {
@@ -486,23 +660,39 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 		}
 		filter := func(record store.StoredRecord) bool {
+			// A record stored with its signal answers the signal filter without a
+			// parse or a payload decode, so the records it skips cost little.
+			if hasSignalFilter && record.SignalID != "" {
+				if _, wanted := signalSet[record.SignalID]; !wanted {
+					return false
+				}
+			}
 			if stream == uns.StreamFor(uns.ClassCmd) && e.CommandRetired(record) {
 				return false
 			}
 			topic := record.Topic
+			if len(topicFilters) > 0 && !slices.ContainsFunc(topicFilters, func(f string) bool { return uns.MatchFilter(f, topic) }) {
+				return false
+			}
 			var parsed uns.Parsed
 			var parseErr error
-			if prefix != "" {
-				// prefix filters on the uns hierarchy path, not on the raw topic.
+			if contractSet != nil {
 				parsed, parseErr = uns.Parse(topic)
-				if parseErr != nil || !strings.HasPrefix(parsed.Path, prefix) {
+				if parseErr != nil || !contractSet[parsed.Contract] {
 					return false
 				}
+			}
+			if prefix != "" && parsed.Contract == "" {
+				// prefix filters on the uns hierarchy path, not on the raw topic.
+				parsed, parseErr = uns.Parse(topic)
+			}
+			if prefix != "" && (parseErr != nil || !strings.HasPrefix(parsed.Path, prefix)) {
+				return false
 			}
 			if !c.admin && !uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic) {
 				return false
 			}
-			if !hasSignalFilter {
+			if !hasSignalFilter || record.SignalID != "" {
 				return true
 			}
 			if parseErr != nil || parsed.Contract == "" {
@@ -528,6 +718,17 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		from := e.Store().CursorGet(cursor, stream)
+		// from=N reads ahead of the cursor: a consumer that processed up to N-1 but
+		// has not acked yet fetches its next page without waiting for the ack. It
+		// never reads behind the cursor, and the cursor still moves only on /ack.
+		if v := q.Get("from"); v != "" {
+			ahead, err := strconv.ParseUint(v, 10, 64)
+			if err != nil || ahead == 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "from must be a positive offset"})
+				return
+			}
+			from = max(from, ahead)
+		}
 		// tail=1 reads the end of the stream instead of from the cursor. A viewer asks what
 		// happened most recently, which a forward read from an unacked cursor cannot
 		// answer. The cursor does not move, so a viewer and a consumer can share a cursor
@@ -540,7 +741,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				from = 1
 			}
 		}
-		recs, next, err := e.Store().ReadRecords(stream, from, limit, filter)
+		if q.Get("tail") == "" {
+			e.CursorFilters().Remember(cursor, stream, filter)
+		}
+		recs, next, err := e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, filter)
+		if r.Context().Err() != nil {
+			return // the caller is gone; nobody reads the page
+		}
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
@@ -559,7 +766,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				"actor_kind":    rec.ActorKind,
 			})
 		}
-		resp := map[string]any{"records": out, "next": next}
+		m.HTTPFetch(callerLabel(c), stream)
+		// "from" is where this page started, so a client can tell a node that read
+		// ahead from one that ignored the parameter.
+		resp := map[string]any{"records": out, "next": next, "from": from, "now_ms": e.AuthoritativeNow().UnixMilli()}
 		if gap, ok := e.Store().Gap(stream, from); ok {
 			resp["gap"] = gap
 			m.GapServed(stream, "fetch")
@@ -633,7 +843,38 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				return
 			}
 		}
-		entries, next, err := e.Store().KVScanPage(prefix, after, pageSize, contracts)
+		// depth=N keeps entries at most N path segments below prefix and skips deeper
+		// subtrees without walking them: a tree view reads one level at a time.
+		depth := 0
+		if raw := r.URL.Query().Get("depth"); raw != "" {
+			depth, err = strconv.Atoi(raw)
+			if err != nil || depth < 1 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "depth must be a positive number of path segments"})
+				return
+			}
+		}
+		// folders=true (with depth) also names the paths at the cut that have deeper
+		// entries, record or not, so a tree view learns which rows expand.
+		withFolders := false
+		if raw := r.URL.Query().Get("folders"); raw != "" {
+			withFolders, err = strconv.ParseBool(raw)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "folders must be true or false"})
+				return
+			}
+			if withFolders && depth == 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "folders needs depth"})
+				return
+			}
+		}
+		var entries []store.KVEntry
+		var folders []string
+		var next string
+		if withFolders {
+			entries, folders, next, err = e.Store().KVScanLevel(prefix, after, pageSize, contracts, depth)
+		} else {
+			entries, next, err = e.Store().KVScanPageDepth(prefix, after, pageSize, contracts, depth)
+		}
 		if err != nil {
 			if errors.Is(err, store.ErrInvalidPageToken) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid page token"})
@@ -679,7 +920,18 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if denied > 0 {
 			m.ACLDeny(metrics.ACLRead)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"entries": out, "next": next})
+		m.HTTPKVRead(callerLabel(c), contractLabel(contracts), prefixDepthLabel(prefix), len(out))
+		if !withFolders {
+			writeJSON(w, http.StatusOK, map[string]any{"entries": out, "next": next})
+			return
+		}
+		visible := make([]string, 0, len(folders))
+		for _, f := range folders {
+			if c.admin || uns.AuthorizeBrowse(e.Scope(), c.entry, f) {
+				visible = append(visible, f)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"entries": out, "folders": visible, "next": next})
 	}))
 
 	// GET /self is a local service's view of its own registry entry: the ULID minted
@@ -792,27 +1044,64 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 
 		mux.HandleFunc("DELETE /enroll/{ulid}", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
 			ulid := r.PathValue("ulid")
+			// retire=true decommissions a child node for good: the same batch retires
+			// every record it and the nodes below it replicated up, and forgets its
+			// replication marks. Without it the DELETE only revokes, and the child may
+			// be enrolled again and resume where it stopped.
+			retire := false
+			if raw := r.URL.Query().Get("retire"); raw != "" {
+				v, err := strconv.ParseBool(raw)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": "retire must be true or false"})
+					return
+				}
+				retire = v
+			}
 			// DELETE stays an immediate kill switch with no drain precondition. Revoke reports
 			// wasDraining under its own lock, so a concurrent drain cannot slip in between a
 			// check and the revoke.
-			off, wasDraining, err := reg.Revoke(ulid)
-			if err != nil {
-				if errors.Is(err, registry.ErrNotEnrolled) {
-					writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
-					return
+			var (
+				off         uint64
+				wasDraining bool
+				retired     int
+				err         error
+			)
+			if retire {
+				// A retired child never fetches what is still queued for it: its
+				// senders get a 410 _Ack for each, once the retirement stands.
+				drop := e.DropQueuedFor(ulid)
+				off, wasDraining, retired, err = reg.Retire(ulid)
+				if err == nil && drop != nil {
+					drop()
 				}
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			} else {
+				off, wasDraining, err = reg.Revoke(ulid)
+			}
+			if err != nil {
+				switch {
+				case errors.Is(err, registry.ErrNotEnrolled):
+					writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+				case errors.Is(err, registry.ErrNotChildNode):
+					writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+				default:
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				}
 				return
 			}
 			if wasDraining {
 				m.DrainCompleted(ulid, metrics.DrainOutcomeForced)
 			}
+			if retire {
+				writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "retired": true, "offset": off, "records_retired": retired})
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"revoked": true, "offset": off})
 		}))
 
 		// POST /enroll/{ulid}/drain decommissions a child node: it keeps working while its
-		// queue drains, and new commands under its mount are refused. The node revokes it
-		// when the drain completes, or immediately on DELETE (outcome "forced").
+		// queue drains, and new commands under its mount are refused. The node retires it,
+		// replicated state included, when the drain completes, or revokes it immediately
+		// on DELETE (outcome "forced"; add retire=true to retire it as well).
 		mux.HandleFunc("POST /enroll/{ulid}/drain", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
 			ulid := r.PathValue("ulid")
 			off, err := reg.Drain(ulid)

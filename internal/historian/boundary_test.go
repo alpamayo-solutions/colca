@@ -4,11 +4,45 @@ package historian
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
+
+func TestOfflineImportUsesTheSameSinkAndIndependentMarker(t *testing.T) {
+	ctx := context.Background()
+	sink := testPool(t)
+	sink.Strict = true
+	// Valid ULIDs are required by the import door; each boundary invocation has
+	// its own timestamp so reruns do not conflict with another test's data.
+	ts := time.Now().Unix()
+	input := importLine(int(ts)) + importLine(int(ts+1))
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(input)))
+	before := time.Unix(ts+2, 0)
+	if _, err := sink.Apply(ctx, nil, Consumer, 123); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if count, err := Import(ctx, strings.NewReader(input), before, digest, 1, sink); err != nil || count != 2 {
+			t.Fatalf("count=%d, err=%v", count, err)
+		}
+	}
+	if live, err := sink.Applied(ctx, Consumer); err != nil || live != 123 {
+		t.Fatalf("live marker changed: %d, %v", live, err)
+	}
+	var count int
+	if err := sink.Pool.QueryRow(ctx, `SELECT count(*) FROM historian_metric WHERE signal_id=$1 AND timestamp >= $2 AND timestamp < $3`, importSignal, time.Unix(ts, 0), before).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("rows=%d", count)
+	}
+}
 
 // Only a real database can show that applying the same page twice leaves one row
 // per (signal_id, timestamp): the unique index still holds if the marker is
@@ -298,5 +332,93 @@ func TestEachValueKindSurvivesTheRoundTrip(t *testing.T) {
 	}
 	if gotJSON == "" {
 		t.Fatal("value_json came back empty")
+	}
+}
+
+// storedValues returns the signal's rows in time order, nil for a retraction.
+func storedValues(t *testing.T, sink *Sink, signalID string) []*float64 {
+	t.Helper()
+	rows, err := sink.Pool.(interface {
+		Query(context.Context, string, ...any) (pgx.Rows, error)
+	}).Query(context.Background(), `
+		SELECT value_number FROM historian_metric
+		WHERE signal_id = $1
+		  AND value_json IS NULL AND value_text IS NULL AND value_bool IS NULL
+		ORDER BY timestamp`, signalID)
+	if err != nil {
+		t.Fatalf("reading back: %v", err)
+	}
+	values, err := pgx.CollectRows(rows, pgx.RowTo[*float64])
+	if err != nil {
+		t.Fatalf("collecting: %v", err)
+	}
+	return values
+}
+
+func describe(values []*float64) string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		if v == nil {
+			out[i] = "null"
+		} else {
+			out[i] = fmt.Sprint(*v)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+// A null is stored when the value becomes missing, once: a repeated null, and
+// a null for a signal without history, write nothing. The next value ends the
+// gap.
+func TestARetractionIsStoredOnceWhenTheValueGoesMissing(t *testing.T) {
+	ctx := context.Background()
+	sink := testPool(t)
+
+	signalID := sigID("sig-retract")
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	at := func(s int) time.Time { return base.Add(time.Duration(s) * time.Second) }
+	one, four := 1.0, 4.0
+	page := []Row{
+		{Timestamp: at(0), SignalID: signalID, NodeID: "n1"}, // no history yet
+		{Timestamp: at(1), SignalID: signalID, NodeID: "n1", Number: &one},
+		{Timestamp: at(2), SignalID: signalID, NodeID: "n1"},
+		{Timestamp: at(3), SignalID: signalID, NodeID: "n1"}, // still missing
+		{Timestamp: at(4), SignalID: signalID, NodeID: "n1", Number: &four},
+		{Timestamp: at(5), SignalID: signalID, NodeID: "n1"},
+	}
+	if _, err := sink.Apply(ctx, page, "test:retract", 1); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	// A replay of the whole page changes nothing.
+	if _, err := sink.Apply(ctx, page, "test:retract", 1); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	// Nor does another null in a later page.
+	later := []Row{{Timestamp: at(6), SignalID: signalID, NodeID: "n1"}}
+	if _, err := sink.Apply(ctx, later, "test:retract", 2); err != nil {
+		t.Fatalf("later null: %v", err)
+	}
+
+	if got, want := describe(storedValues(t, sink, signalID)), "1,null,4,null"; got != want {
+		t.Fatalf("stored %s, want %s", got, want)
+	}
+}
+
+// A recomputed point that turned out missing clears the value at that key.
+func TestARetractionAtAStoredKeyClearsTheValue(t *testing.T) {
+	ctx := context.Background()
+	sink := testPool(t)
+
+	signalID := sigID("sig-retract-key")
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	text := "warm"
+	if _, err := sink.Apply(ctx, []Row{{Timestamp: at, SignalID: signalID, Text: &text}}, "test:retract-key", 1); err != nil {
+		t.Fatalf("apply value: %v", err)
+	}
+	if _, err := sink.Apply(ctx, []Row{{Timestamp: at, SignalID: signalID}}, "test:retract-key", 2); err != nil {
+		t.Fatalf("apply retraction: %v", err)
+	}
+	if got := describe(storedValues(t, sink, signalID)); got != "null" {
+		t.Fatalf("stored %s, want one row with every value column NULL", got)
 	}
 }

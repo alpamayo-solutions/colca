@@ -2,7 +2,11 @@
 
 ## Health
 
-`GET /healthz` answers as soon as the node is up. `GET /metrics` serves
+`GET /healthz` answers as soon as the node is up. Its `storage.state` turns
+`failing` when the database cannot flush or compact, most often because the disk
+is full; `since` and `error` say when and why. It returns to `ok` after the next
+successful flush. The node logs the first such error at ERROR and repeats it at
+most every 30 seconds with a `repeats_suppressed` count. `GET /metrics` serves
 Prometheus metrics; scrape it over the local door so that no self-signed
 certificate is involved.
 
@@ -16,6 +20,7 @@ alert first:
 | `colca_retention_pressure` | above `1`: the pruner wants to remove more than a cursor allows, and the disk grows |
 | `colca_stream_live_bytes` | a stream grows past what the disk holds |
 | `colca_cursor_next_record_age_seconds` | age of the next retained record waiting for a consumer; unlike cursor inactivity, this is zero when caught up |
+| `colca_cursor_unread_age_seconds` | age of the oldest record waiting that the consumer actually reads (its fetch filter applied); `0` on an idle stream. Past `cursors.lag_alarm_after` (default `60s`, `0` writes no finding) the node also writes a `cursor_lag` finding about the service |
 | `colca_rejected_publishes_total` | rises: clients send what the node refuses; `reason` says why |
 | `colca_auth_rejections_total` | rises: unknown keys or bad tokens at a door |
 | `colca_replication_integrity_failures_total` | above `0`: a child pruned records before its parent received them |
@@ -24,6 +29,34 @@ alert first:
 
 Counters reset when a node restarts. Gauges are read from the database at
 scrape time and survive restarts.
+
+### Who spends the read budgets
+
+The door limits each caller to 5 `/kv` and 25 `/fetch` requests a second. These
+say who uses them:
+
+| Metric | Labels | Shows |
+|---|---|---|
+| `colca_http_kv_requests_total` | `caller`, `contract` (one contract, `multiple` or `all`), `prefix_depth` (`0` is the whole node, up to `5+`) | whole-node reads (`contract="all",prefix_depth="0"`) are the ones to remove first |
+| `colca_http_kv_entries` | `caller` | histogram of entries per `/kv` page |
+| `colca_http_fetch_requests_total` | `caller`, `stream` | a follower polling an idle stream shows a steady rate; `/watch` removes it |
+| `colca_http_request_limited_by_caller_total` | `route` (the route pattern, such as `GET /kv`), `caller` | 429s per caller; `colca_http_request_limited_total` has them by door and class |
+
+A caller's `colca_http_request_limited_by_caller_total` series exists at `0`
+from its first request on a route, so "never limited" reads as `0`, not as a
+missing series.
+
+`caller` is a registered identity as `kind:name` (`local:dataops-line`), every
+person as `human`, and the admin token as `admin`. No label carries a path.
+
+### What the broker delivers
+
+| Metric | Labels | Shows |
+|---|---|---|
+| `colca_mqtt_delivered_messages_total` | `door` (`mqtt`, `local`, `human`) | PUBLISH packets written to subscribers; with `colca_ingest_records_total` it gives the node's MQTT in and out |
+| `colca_mqtt_delivered_payload_bytes_total` | `door` | their payload bytes |
+| `colca_mqtt_publish_dropped_total` | | publishes dropped because a subscriber's queue was full |
+
 
 ## Retention
 
@@ -50,19 +83,34 @@ had not read, it logs an error and writes one `_StreamGap` record into the
 stream, which replicates up like anything else. Consumers see the gap in
 `/fetch`.
 
-Two things to know:
+Things to know:
 
 - A cursor that stays dead produces one `_StreamGap` per pruner run that
   removes something, not a single one.
 - `_StreamGap` records are not shown on the node's own MQTT bus. Read them from
   the stream or at an ancestor.
+- On the `commands` stream, every live command removed before the child node
+  or machine whose delivery cursor held it received it gets a `410` `_Ack` in
+  the same write, at the command's position, and counts in
+  `colca_command_dropped_total{reason="pruned"}`. Like the gap marker, these
+  answers are read from the stream, not the bus.
 
 ## Moving a child node
 
 A child that is re-parented or taken out of service is **drained** first: the
 parent stops routing new commands to it and waits until every command already
-queued has been delivered or has expired. Drains are visible in
+queued has been delivered or has expired. A command without `expires_at`
+keeps the drain open until it is delivered. Drains are visible in
 `colca_drains_active` and `colca_drains_completed_total`.
+
+A completed drain retires the child: the parent tombstones every current-state
+record the child and the nodes below it replicated (its elements, signals,
+last metric values, services), and the tombstones travel up, so no ancestor
+keeps showing the old node as live. To take a child out immediately, without
+draining, use `DELETE /enroll/{ulid}?retire=true`; every command still queued
+for it is answered with a `410` `_Ack`. A plain `DELETE` only
+revokes: the child's replicated state stays, for a child that will be enrolled
+again and resume where it stopped.
 
 ## Backups
 
@@ -132,6 +180,28 @@ silently discarding data. Upgrade the contracts package and consumers together;
 older Python signal decoders do not recognize the new field. Downgrading a source
 to a binary that does not understand its persisted upload decisions is unsupported.
 
+## Signals the historian does not store
+
+`colca-historian` writes no rows for samples of a signal whose `_Signal`
+definition says `"is_logged": false`. A signal without the field, a sample whose
+signal has no definition on the node, and an undecodable definition are all
+stored: leaving history out needs an explicit `false`.
+
+The historian loads the `_Signal` records once from `/kv` and then follows the
+entities stream with its own cursor, `c/historian/signals`, woken by `/watch`.
+The flag in force when a sample is ingested decides; a later change of the
+flag does not rewrite or backfill history. Skipped samples are consumed: the
+metrics marker and cursor move past them like past written rows. On startup no
+sample is read before the definitions are loaded.
+
+`is_logged` only affects this historian. It does not change what the node
+stores, replicates (that is `replication_policy`, above) or delivers over MQTT.
+
+`/metrics` reports `colca_historian_samples_not_logged_total` (samples consumed
+without a row) and `colca_historian_signals_not_logged` (signals currently
+marked). `/healthz` fails with `signal_definitions` while the definitions
+cannot be loaded or followed.
+
 ## Permanent standalone handover
 
 `standalone: true` is a permanent trust transition, distinct from an offline
@@ -169,3 +239,34 @@ This broker transition does not administer an external identity provider, host
 VPN, SSH access or separate update agents. The deployment's handover controller
 must retire those connections and credentials before reporting the machine as
 handed over. Ordinary parent outages do not trigger any of these actions.
+# Importing historical measurements
+
+`colca-historian import` is an operator tool for archived measurements. It uses
+the historian's `DATABASE_URL` and ordinary sink; no broker connection is opened.
+It does not update retained live values, dispatch events to control consumers,
+or advance the running historian's stream cursor. Applications should resolve
+their existing signal identities through their normal public API before export.
+
+Input is JSONL, one `{"topic": "colca/v1/_Metric/NODE/PATH", "payload": {...}}`
+per line. Each payload must have a signal ULID, explicit timestamp in Unix
+seconds, and a value. The topic's node must be a ULID and agree with any payload
+node identity. Use `COLCA_TOPIC_ROOT` for a deployment with another root.
+
+```sh
+colca-historian import --file archive.jsonl --sha256 EXPECTED_SHA256 \
+  --before 2026-01-01T00:00:00Z --dry-run
+# Inside the historian's trusted deployment environment:
+colca-historian import --file archive.jsonl --sha256 EXPECTED_SHA256 \
+  --before 2026-01-01T00:00:00Z
+```
+
+The complete input is validated and hashed before database access. A private
+temporary spool prevents input changes between validation and writing. Imports
+use strict transactions of up to 1000 rows by default (`--batch-size`, maximum
+5000), with a separate `historian:import:SHA256` marker. Rerunning the identical
+file resumes committed batches. Errors stop the import without acknowledging
+the failed batch. This has the normal sink's upsert semantics: the same signal
+and timestamp replaces that historical point. Choose a ceiling before existing
+live data and check for overlapping records when replacement is unintended.
+The ordinary historian schema must already exist; import does not change
+schema or retention. Ensure the configured retention covers the imported dates.

@@ -14,13 +14,53 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// Auth is the OIDC issuer that people's tokens are checked against, offline
-// through its JWKS. Without it the node has no token doors.
+// Auth lists the OIDC issuers that people's tokens are checked against, offline
+// through their JWKS. Without it the node has no token doors.
+//
+// One identity provider reached under several host names (a site with two
+// networks) is several issuers sharing one JWKS: the provider puts the host the
+// browser used into `iss`. Issuers without their own jwks_url use the shared
+// one.
 type Auth struct {
-	Issuer      string   `yaml:"issuer"`
-	Audience    string   `yaml:"audience"`
-	JWKSURL     string   `yaml:"jwks_url"`
-	JWKSRefresh Duration `yaml:"jwks_refresh"` // 0 → 1h (EffectiveRefresh)
+	Issuers     []AuthIssuer `yaml:"issuers"`
+	Audience    string       `yaml:"audience"`
+	JWKSURL     string       `yaml:"jwks_url"`     // shared by every issuer without its own
+	JWKSRefresh Duration     `yaml:"jwks_refresh"` // 0 → 1h (EffectiveRefresh)
+}
+
+// AuthIssuer is one accepted `iss` value and, optionally, where its signing
+// keys come from when they differ from the shared auth.jwks_url.
+type AuthIssuer struct {
+	URL     string `yaml:"url"`
+	JWKSURL string `yaml:"jwks_url"`
+}
+
+// UnmarshalYAML rejects the single-issuer form, which would otherwise be
+// ignored silently and leave the node without any accepted issuer.
+func (a *Auth) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			if node.Content[i].Value == "issuer" {
+				return fmt.Errorf("config: auth.issuer was replaced by auth.issuers, a list: "+
+					"write `issuers: [{ url: %s }]`", node.Content[i+1].Value)
+			}
+		}
+	}
+	type plain Auth
+	return node.Decode((*plain)(a))
+}
+
+// EffectiveIssuers returns the issuers with their JWKS URL resolved: their own,
+// else the shared one.
+func (a *Auth) EffectiveIssuers() []AuthIssuer {
+	out := make([]AuthIssuer, len(a.Issuers))
+	for i, is := range a.Issuers {
+		out[i] = is
+		if out[i].JWKSURL == "" {
+			out[i].JWKSURL = a.JWKSURL
+		}
+	}
+	return out
 }
 
 // EffectiveRefresh is the JWKS refresh interval, one hour by default.
@@ -136,9 +176,54 @@ type Config struct {
 	// a mismatching digest refuses to start.
 	Contracts Contracts `yaml:"contracts"`
 
+	// Commands sets how the node answers commands no service executes.
+	Commands Commands `yaml:"commands"`
+
+	// Cursors configures the cursor watchdog: how long a record a consumer
+	// reads may wait unread before the node writes a cursor_lag finding.
+	Cursors Cursors `yaml:"cursors"`
+
 	// Plugin holds settings for the domain plugin. The core never reads them,
 	// which keeps domain vocabulary out of the broker's configuration.
 	Plugin map[string]string `yaml:"plugin"`
+}
+
+// Commands is the commands: block.
+//
+// Without Strict, a command at an element where no service announced any
+// command passes on to its executor, which may not announce (a machine, or a
+// service built before announcements). With Strict, every command to this node
+// that no service announced is answered 404, for a deployment whose executors
+// all announce.
+type Commands struct {
+	Strict bool `yaml:"strict"`
+}
+
+// Cursors is the cursors: block.
+type Cursors struct {
+	// LagAlarmAfter is how old the oldest unread record a consumer reads may
+	// get before the node writes a cursor_lag finding about its service. 60s
+	// when absent; 0 keeps the colca_cursor_unread_age_seconds gauge and writes
+	// no finding.
+	LagAlarmAfter *Duration `yaml:"lag_alarm_after"`
+}
+
+// defaultLagAlarmAfter is cursors.lag_alarm_after when absent.
+const defaultLagAlarmAfter = time.Minute
+
+// EffectiveLagAlarmAfter returns the threshold: 60s when absent.
+func (c Cursors) EffectiveLagAlarmAfter() time.Duration {
+	if c.LagAlarmAfter == nil {
+		return defaultLagAlarmAfter
+	}
+	return time.Duration(*c.LagAlarmAfter)
+}
+
+func (c Cursors) validate() error {
+	if c.LagAlarmAfter != nil && time.Duration(*c.LagAlarmAfter) < 0 {
+		return fmt.Errorf("config: cursors.lag_alarm_after must not be negative, got %s", time.Duration(*c.LagAlarmAfter))
+	}
+	return nil
 }
 
 // Contracts is the contracts: block.
@@ -633,11 +718,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: mqtt_human requires an auth: block — a token door with no verifier authenticates nobody")
 	}
 	if c.Auth != nil {
-		if c.Auth.Issuer == "" || c.Auth.Audience == "" || c.Auth.JWKSURL == "" {
-			return fmt.Errorf("config: auth needs issuer, audience and jwks_url")
-		}
-		if c.Auth.JWKSRefresh < 0 {
-			return fmt.Errorf("config: auth.jwks_refresh must not be negative")
+		if err := c.Auth.validate(); err != nil {
+			return err
 		}
 	}
 	if err := c.Retention.validate(); err != nil {
@@ -649,10 +731,41 @@ func (c *Config) Validate() error {
 	if err := c.MQTTLimits.validate(); err != nil {
 		return err
 	}
+	if err := c.Cursors.validate(); err != nil {
+		return err
+	}
 	if err := c.BlobGC.validate(); err != nil {
 		return err
 	}
 	return c.TimeSync.validate()
+}
+
+// validate checks the auth: block: an audience, at least one issuer, each named
+// once and each with a JWKS URL of its own or the shared one.
+func (a *Auth) validate() error {
+	if a.Audience == "" {
+		return fmt.Errorf("config: auth needs an audience")
+	}
+	if len(a.Issuers) == 0 {
+		return fmt.Errorf("config: auth needs at least one entry in issuers")
+	}
+	seen := make(map[string]bool, len(a.Issuers))
+	for i, is := range a.EffectiveIssuers() {
+		if is.URL == "" {
+			return fmt.Errorf("config: auth.issuers[%d] needs a url", i)
+		}
+		if seen[is.URL] {
+			return fmt.Errorf("config: auth.issuers lists %q twice", is.URL)
+		}
+		seen[is.URL] = true
+		if is.JWKSURL == "" {
+			return fmt.Errorf("config: auth.issuers[%d] (%s) has no jwks_url and auth.jwks_url is empty", i, is.URL)
+		}
+	}
+	if a.JWKSRefresh < 0 {
+		return fmt.Errorf("config: auth.jwks_refresh must not be negative")
+	}
+	return nil
 }
 
 // validate checks the retention: block: non-negative durations, known streams

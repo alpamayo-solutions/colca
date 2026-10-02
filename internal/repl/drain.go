@@ -6,6 +6,7 @@ package repl
 
 import (
 	"errors"
+	"github.com/alpamayo-solutions/colca/door"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -13,57 +14,72 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// drainTickInterval is the periodic completion sweep. Completion is also checked
-// on every poll by the draining child; the tick covers a child that never polls
-// again, whose queue then resolves by expiry.
-const drainTickInterval = 30 * time.Second
-
 // drainScanBatch bounds one store.Read in the completion scan. The scan as a
 // whole runs until the stream is exhausted.
 const drainScanBatch = 500
 
-// RunDrainTicker checks every draining child each drainTickInterval and
-// auto-revokes those that completed. It runs once before the first tick, so
-// drains that survived a restart are checked without waiting an interval.
-func (s *Server) RunDrainTicker(stop <-chan struct{}) {
-	s.evaluateAllDrains()
-	ticker := time.NewTicker(drainTickInterval)
-	defer ticker.Stop()
+// RunDrainCompletion resumes durable drains on startup, then on store/cursor
+// changes or the earliest undelivered command expiry. Idle nodes do no scans.
+func (s *Server) RunDrainCompletion(stop <-chan struct{}) {
 	for {
+		changed := s.eng.Store().BacklogChanges()
+		delay := s.evaluateAllDrains()
+		var due <-chan time.Time
+		var timer *time.Timer
+		if delay >= 0 {
+			timer = time.NewTimer(delay)
+			due = timer.C
+		}
 		select {
 		case <-stop:
+			if timer != nil {
+				timer.Stop()
+			}
 			return
-		case <-ticker.C:
-			s.evaluateAllDrains()
+		case <-changed:
+			if timer != nil {
+				timer.Stop()
+			}
+			// Coalesce busy-stream hints without extending the batching deadline.
+			timer = time.NewTimer(time.Second)
+			select {
+			case <-stop:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		case <-due:
 		}
 	}
 }
 
-// evaluateAllDrains checks every draining entry in the registry; the tick and
-// the restart path call it.
-func (s *Server) evaluateAllDrains() {
+func (s *Server) evaluateAllDrains() time.Duration {
+	next := time.Duration(-1)
 	for _, e := range s.reg.List() {
 		if e.IsDraining() {
-			s.evaluateDrain(e.ULID)
+			if delay := s.evaluateDrain(e.ULID); delay >= 0 && (next < 0 || delay < next) {
+				next = delay
+			}
 		}
 	}
+	return next
 }
 
-// evaluateDrain checks childULID's completion and auto-revokes it through
-// registry.Manager.Revoke, recording the outcome. It is safe to call
-// concurrently: Revoke decides, and the caller that loses gets ErrNotEnrolled,
+// evaluateDrain checks childULID's completion and auto-retires it through
+// registry.Manager.Retire, recording the outcome. It is safe to call
+// concurrently: Retire decides, and the caller that loses gets ErrNotEnrolled,
 // which is not an error here. A gap never lets a drain finish early:
 // drainPendingCommands always scans the surviving range, and gapped only picks
 // the outcome label.
-func (s *Server) evaluateDrain(childULID string) {
+func (s *Server) evaluateDrain(childULID string) time.Duration {
 	e, ok := s.reg.Get(childULID)
 	if !ok || !e.IsDraining() {
-		return
+		return -1
 	}
-	total, pending, gapped := s.drainPendingCommands(e)
+	total, pending, gapped, delay := s.scanDrain(e)
 	s.metrics.DrainPending(childULID, pending)
 	if pending > 0 {
-		return // still live, undelivered commands in the surviving range — not complete, gap or not
+		return delay // still live, undelivered commands in the surviving range — not complete, gap or not
 	}
 
 	// A gap outranks "delivered", which means fetched and acked on the downlink
@@ -78,23 +94,31 @@ func (s *Server) evaluateDrain(childULID string) {
 		outcome = metrics.DrainOutcomeExpired
 	}
 
-	if _, _, err := s.reg.Revoke(childULID); err != nil {
+	// A completed drain retires the child, not just revokes it. The child leaves
+	// this parent for good: re-parented, its state rises through its new parent
+	// at another path, or taken out of service. Either way what it replicated
+	// here would stand as ghosts that consumers read as live, and nothing else
+	// can retire them. A child that returns is a fresh enrollment and replicates
+	// from its marks' reset.
+	_, _, retired, err := s.reg.Retire(childULID)
+	if err != nil {
 		if errors.Is(err, registry.ErrNotEnrolled) {
-			return // lost the race to a concurrent evaluation or a DELETE — not our error
+			return -1 // lost the race to a concurrent evaluation or a DELETE — not our error
 		}
-		s.log.Error("move-drain auto-revoke failed", "child", childULID, "err", err)
-		return
+		s.log.Error("move-drain auto-retire failed", "child", childULID, "err", err)
+		return door.RetryDelay(err, 30*time.Second)
 	}
 	s.metrics.DrainCompleted(childULID, outcome)
 	if outcome == metrics.DrainOutcomeGapped {
-		s.log.Warn("move-drain complete, auto-revoked: retention pruned undelivered commands under this mount before this child fetched or they expired — outcome recorded as gapped, never delivered",
-			"child", childULID, "commands_seen_in_surviving_range", total)
-		return
+		s.log.Warn("move-drain complete, auto-retired: retention pruned undelivered commands under this mount before this child fetched or they expired — outcome recorded as gapped, never delivered",
+			"child", childULID, "commands_seen_in_surviving_range", total, "records_retired", retired)
+		return -1
 	}
-	s.log.Info("move-drain complete, auto-revoked", "child", childULID, "outcome", outcome, "commands_seen", total)
+	s.log.Info("move-drain complete, auto-retired", "child", childULID, "outcome", outcome, "commands_seen", total, "records_retired", retired)
+	return -1
 }
 
-// drainPendingCommands scans the surviving part of the commands stream under
+// scanDrain scans the surviving part of the commands stream under
 // e's mount for undelivered commands, from the cursor inclusive, since the
 // cursor is the next unread offset. total counts them and pending those still
 // live; completion is pending == 0.
@@ -103,7 +127,8 @@ func (s *Server) evaluateDrain(childULID string) {
 // pruned something the child never consumed. It does not end the scan: a live
 // command past the LWM still blocks the drain, and gapped only labels the
 // outcome once pending reaches 0.
-func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped bool) {
+func (s *Server) scanDrain(e *uns.Entry) (total, pending int, gapped bool, delay time.Duration) {
+	delay = -1
 	st := s.eng.Store()
 	mount, placed := s.eng.Elements().PathOf(e.Element)
 	if !placed {
@@ -112,7 +137,7 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped 
 		// report one pending record and wait.
 		s.log.Error("move-drain: the draining child's element does not resolve — treating as still pending",
 			"child", e.ULID, "element", e.Element)
-		return 1, 1, false
+		return 1, 1, false, door.RetryDelay(nil, 30*time.Second)
 	}
 	cursor := st.CursorGet(uns.DownlinkCursorPrefix+e.ULID, "commands")
 	_, gapped = st.Gap("commands", cursor)
@@ -139,12 +164,22 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped 
 		if err != nil {
 			s.log.Error("move-drain completion scan failed — treating as still pending (never falsely completes a drain)",
 				"child", e.ULID, "err", err)
-			return total + 1, pending + 1, gapped
+			return total + 1, pending + 1, gapped, door.RetryDelay(err, 30*time.Second)
 		}
 		for _, r := range recs {
 			total++
 			if uns.CommandStillLive(r.Payload, nowMS) {
 				pending++
+				// A command without expires_at never expires: only its delivery, or a
+				// forced DELETE, ends the drain, and no timer is due for it.
+				deadline, ok := uns.CommandDeadline(r.Payload)
+				if !ok {
+					continue
+				}
+				wait := time.Duration(max(1, deadline-nowMS+1)) * time.Millisecond
+				if delay < 0 || wait < delay {
+					delay = wait
+				}
 			}
 		}
 		if nxt <= from {
@@ -152,5 +187,5 @@ func (s *Server) drainPendingCommands(e *uns.Entry) (total, pending int, gapped 
 		}
 		from = nxt
 	}
-	return total, pending, gapped
+	return total, pending, gapped, delay
 }

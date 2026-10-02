@@ -2,7 +2,9 @@
 // WebSocket (human-ws), with no client certificate. The CONNECT password carries a
 // JWT or PAT and the username must equal its sub. A session lasts as long as the
 // token: every delivery checks grants and expiry, and a sweeper kicks expired
-// sessions every 10 seconds.
+// sessions every 10 seconds. A client that connected with the authentication
+// method AuthMethodToken renews its token on the open connection (reauth.go), and
+// a back-channel logout from the identity provider ends the sessions it names.
 
 package mqttsrv
 
@@ -26,6 +28,7 @@ const (
 
 // humanSession is one live token-authenticated session.
 type humanSession struct {
+	client           *mqtt.Client // the connection holding the session
 	entry            *uns.Entry
 	sub              string
 	username         string
@@ -33,6 +36,8 @@ type humanSession struct {
 	credential       string
 	credentialID     string
 	credentialDigest string
+	sid              string    // the identity provider's session; empty for PATs
+	issuedAt         time.Time // of the token in force
 }
 
 // humanSessions is the session table keyed by MQTT client id. Client ids are
@@ -52,6 +57,13 @@ func (h *humanSessions) put(clientID string, s humanSession) int {
 	return len(h.m)
 }
 
+// empty says whether no person is connected, so per-publish work for people can be skipped.
+func (h *humanSessions) empty() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.m) == 0
+}
+
 func (h *humanSessions) get(clientID string) (humanSession, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -59,10 +71,14 @@ func (h *humanSessions) get(clientID string) (humanSession, bool) {
 	return s, ok
 }
 
-func (h *humanSessions) drop(clientID string) int {
+// drop removes the session of this connection. A connection that took over the
+// client id owns the entry by then, and the replaced one's disconnect leaves it.
+func (h *humanSessions) drop(clientID string, cl *mqtt.Client) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.m, clientID)
+	if s, ok := h.m[clientID]; ok && s.client == cl {
+		delete(h.m, clientID)
+	}
 	return len(h.m)
 }
 
@@ -108,15 +124,37 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 		h.auditDenied("authenticate", metrics.AuthUsernameMismatch, metrics.DoorMQTT, v.Entry, nil)
 		return false
 	}
-	n := h.humans.put(cl.ID, humanSession{
-		entry: v.Entry, sub: v.Sub, username: v.Username, exp: v.Exp,
-		credential: v.Credential, credentialID: v.CredentialID,
-		credentialDigest: v.CredentialDigest,
-	})
+	if method := cl.Properties.Props.AuthenticationMethod; method != "" && method != AuthMethodToken {
+		// MQTT 5 requires refusing an authentication method the server does not know.
+		h.log.Warn("human auth rejected: unknown authentication method", "user", user, "method", method)
+		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthMethod)
+		h.auditDenied("authenticate", metrics.AuthMethod, metrics.DoorMQTT, v.Entry, nil)
+		return false
+	}
+	n := h.humans.put(cl.ID, sessionFor(cl, v))
 	h.metrics.SetHumanSessions(n)
+	// A logout that arrived after the token check and before the put found no
+	// session to end; it is in force by now, so it is seen here.
+	if h.ver.LoggedOut(v) {
+		h.metrics.SetHumanSessions(h.humans.drop(cl.ID, cl))
+		h.log.Warn("human auth rejected", "user", user, "reason", tokenauth.ReasonLoggedOut)
+		h.metrics.AuthReject(metrics.DoorMQTT, tokenauth.ReasonLoggedOut)
+		h.auditDenied("authenticate", tokenauth.ReasonLoggedOut, metrics.DoorMQTT, v.Entry, nil)
+		return false
+	}
 	h.log.Debug("human authenticated", "sub", v.Sub, "username", v.Username,
 		"exp", v.Exp, "listener", cl.Net.Listener)
 	return true
+}
+
+// sessionFor is the session a verified token opens or renews.
+func sessionFor(cl *mqtt.Client, v *tokenauth.Verified) humanSession {
+	return humanSession{
+		client: cl, entry: v.Entry, sub: v.Sub, username: v.Username, exp: v.Exp,
+		credential: v.Credential, credentialID: v.CredentialID,
+		credentialDigest: v.CredentialDigest,
+		sid:              v.SessionID, issuedAt: v.IssuedAt,
+	}
 }
 
 // humanACL is the human branch of OnACLCheck: the session must exist and not be
@@ -141,7 +179,7 @@ func (h *colcaHook) humanACL(cl *mqtt.Client, topic string) bool {
 // OnDisconnect drops the session table entry (nil-op for machine clients).
 func (h *colcaHook) OnDisconnect(cl *mqtt.Client, _ error, _ bool) {
 	if isHumanListener(cl) {
-		h.metrics.SetHumanSessions(h.humans.drop(cl.ID))
+		h.metrics.SetHumanSessions(h.humans.drop(cl.ID, cl))
 	}
 }
 
@@ -165,14 +203,28 @@ func (s *Server) sweepInvalidHumanSessions(now time.Time) {
 		default:
 			continue
 		}
-		if cl, ok := s.S.Clients.Get(id); ok {
-			_ = s.S.DisconnectClient(cl, packets.ErrNotAuthorized)
-			s.metrics.SessionKick()
-			s.hook.log.Info("human session invalid — kicked", "client", id, "reason", reason)
-		}
+		_ = s.S.DisconnectClient(session.client, packets.ErrNotAuthorized)
+		s.metrics.SessionKick()
+		s.hook.log.Info("human session invalid — kicked", "client", id, "reason", reason)
 		// The OnDisconnect hook removes the table entry; drop defensively in
 		// case the client vanished without a disconnect event.
-		s.hook.metrics.SetHumanSessions(s.hook.humans.drop(id))
+		s.hook.metrics.SetHumanSessions(s.hook.humans.drop(id, session.client))
+	}
+}
+
+// endLoggedOutSessions disconnects every token session a back-channel logout
+// covers. PAT sessions are not a login at the identity provider and stay.
+func (s *Server) endLoggedOutSessions(logout tokenauth.Logout) {
+	for id, session := range s.hook.humans.snapshot() {
+		if session.credential != "oidc" || !logout.Ends(session.sid, session.sub, session.issuedAt) {
+			continue
+		}
+		// The session's own connection, not a lookup by id: one still completing
+		// its CONNECT is not in the broker's client list yet.
+		_ = s.S.DisconnectClient(session.client, packets.ErrAdministrativeAction)
+		s.metrics.SessionKick()
+		s.hook.log.Info("human session logged out — kicked", "client", id, "sub", session.sub)
+		s.hook.metrics.SetHumanSessions(s.hook.humans.drop(id, session.client))
 	}
 }
 

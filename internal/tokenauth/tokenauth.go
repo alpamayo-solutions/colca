@@ -1,8 +1,8 @@
-// Package tokenauth verifies OIDC tokens offline: the signature against a JWKS
-// cached in the store (so restarts work while the issuer is down), issuer,
-// audience and lifetime with 60s skew, then the grants claim into a uns.Entry.
-// The only network calls are the periodic refresh and a rate-limited refresh on
-// an unknown kid.
+// Package tokenauth verifies OIDC tokens offline: the issuer against the
+// configured list, the signature against that issuer's JWKS cached in the store
+// (so restarts work while the issuer is down), audience and lifetime with 60s
+// skew, then the grants claim into a uns.Entry. The only network calls are the
+// periodic refresh and the refresh an unknown kid triggers.
 package tokenauth
 
 import (
@@ -23,28 +23,39 @@ import (
 
 // Reject reasons, used verbatim as metric labels.
 const (
-	ReasonBadToken = "bad_token" // malformed, bad signature, wrong alg, unknown kid after re-fetch
-	ReasonExpired  = "expired"   // exp passed or nbf in the future (±60s skew)
-	ReasonIssuer   = "issuer"    // iss or aud mismatch
-	ReasonScope    = "scope"     // valid PAT, but not for this integration door
+	ReasonBadToken  = "bad_token"  // malformed, bad signature, wrong alg, unknown kid after re-fetch
+	ReasonExpired   = "expired"    // exp passed or nbf in the future (±60s skew)
+	ReasonIssuer    = "issuer"     // iss not in the list, or aud mismatch
+	ReasonScope     = "scope"      // valid PAT, but not for this integration door
+	ReasonLoggedOut = "logged_out" // the identity provider ended the token's session
 )
 
 const (
 	defaultRefresh = time.Hour
-	// unknownKidMinInterval rate-limits the refetch an unknown kid triggers, so a
-	// flood of bad tokens cannot turn into a flood of requests.
-	unknownKidMinInterval = 5 * time.Minute
-	clockSkew             = 60 * time.Second
+	// unknownKidMinInterval is the minimum time between an unknown-kid refetch
+	// and the last one that succeeded, so a flood of bad tokens against a healthy
+	// issuer cannot turn into a flood of requests. Failed fetches do not count:
+	// while the key set is missing or stale, an unknown kid fetches at once
+	// (one fetch in flight, short timeout).
+	unknownKidMinInterval  = 10 * time.Second
+	unknownKidFetchTimeout = 3 * time.Second
+	clockSkew              = 60 * time.Second
 )
 
 // Config mirrors config.Auth (the config package stays yaml-only; the
 // caller maps fields).
 type Config struct {
 	NotBefore int64 // reject tokens issued before a permanent trust handover
-	Issuer    string
+	Issuers   []Issuer
 	Audience  string
-	JWKSURL   string
 	Refresh   time.Duration // 0 → 1h
+}
+
+// Issuer is one accepted `iss` value and the JWKS its keys are fetched from.
+// Issuers that share a JWKS URL share one key set and one fetch.
+type Issuer struct {
+	ID      string
+	JWKSURL string
 }
 
 // Verified is a successfully verified token.
@@ -57,6 +68,8 @@ type Verified struct {
 	Credential       string   // "oidc" or "pat"
 	CredentialID     string   // PAT lookup id; empty for OIDC JWTs
 	CredentialDigest string   // hash-only PAT verifier at CONNECT; empty for OIDC JWTs
+	SessionID        string   // the identity provider's session (`sid`); empty if absent
+	IssuedAt         time.Time
 }
 
 // Metrics is the nil-safe observer surface (implemented by *metrics.Metrics
@@ -70,18 +83,24 @@ type Verifier struct {
 	cfg    Config
 	st     *store.Store
 	client *http.Client
+	quick  *http.Client // unknown-kid fetches, which a login waits for
 	log    *slog.Logger
 	m      Metrics
 
-	mu        sync.RWMutex
-	keys      map[string]crypto.PublicKey
-	lastFetch time.Time // last unknown-kid-triggered fetch attempt (rate limit)
+	refetchAfter time.Duration // unknownKidMinInterval, shortened in tests
+
+	sources  []*jwksSource          // one per distinct JWKS URL, in config order
+	byIssuer map[string]*jwksSource // iss → the key set its tokens are signed with
 
 	// groupsIdx resolves a token's group ids to grants. It is wired once the engine
 	// exists; until then groups grant nothing.
 	groupsMu  sync.RWMutex
 	groupsIdx *uns.GroupIndex
 	patIdx    *uns.PersonalAccessTokenIndex
+
+	unknownGroups uns.GroupNotices
+
+	logouts logouts
 }
 
 // SetGroupIndex wires the group resolver (node startup).
@@ -111,36 +130,67 @@ func (v *Verifier) personalAccessTokens() *uns.PersonalAccessTokenIndex {
 	return v.patIdx
 }
 
-// New builds a verifier and loads the persisted JWKS, without network access. A
-// node that starts offline with a persisted JWKS works.
+// jwksSource is the key set served at one JWKS URL.
+type jwksSource struct {
+	url string
+
+	mu       sync.RWMutex
+	keys     map[string]crypto.PublicKey
+	lastKid  time.Time     // last successful unknown-kid refetch (rate limit)
+	failed   bool          // the last fetch of any kind failed
+	inflight chan struct{} // closed when the running unknown-kid fetch ends
+}
+
+// New builds a verifier and loads the persisted JWKS documents, without network
+// access. A node that starts offline with persisted JWKS works.
 func New(cfg Config, st *store.Store, m Metrics) (*Verifier, error) {
-	if cfg.Issuer == "" || cfg.Audience == "" || cfg.JWKSURL == "" {
-		return nil, fmt.Errorf("tokenauth: issuer, audience and jwks_url are all required")
+	if cfg.Audience == "" || len(cfg.Issuers) == 0 {
+		return nil, fmt.Errorf("tokenauth: audience and at least one issuer are required")
 	}
 	if cfg.Refresh == 0 {
 		cfg.Refresh = defaultRefresh
 	}
 	v := &Verifier{
-		cfg:    cfg,
-		st:     st,
-		client: &http.Client{Timeout: fetchTimeout},
-		log:    slog.Default().With("comp", "tokenauth"),
-		m:      m,
+		cfg:      cfg,
+		st:       st,
+		client:   &http.Client{Timeout: fetchTimeout},
+		quick:    &http.Client{Timeout: unknownKidFetchTimeout},
+		log:      slog.Default().With("comp", "tokenauth"),
+		m:        m,
+		byIssuer: make(map[string]*jwksSource, len(cfg.Issuers)),
+
+		refetchAfter: unknownKidMinInterval,
 	}
-	if raw := st.JWKSGet(); raw != nil {
-		keys, err := parseJWKS(raw)
-		if err != nil {
-			// A corrupt persisted document would silently lock every human out; fail loudly.
-			return nil, fmt.Errorf("tokenauth: persisted JWKS is corrupt: %w", err)
+	byURL := make(map[string]*jwksSource)
+	for _, is := range cfg.Issuers {
+		if is.ID == "" || is.JWKSURL == "" {
+			return nil, fmt.Errorf("tokenauth: every issuer needs an id and a jwks_url")
 		}
-		v.keys = keys
-		v.notifyKeyCount()
+		if _, dup := v.byIssuer[is.ID]; dup {
+			return nil, fmt.Errorf("tokenauth: issuer %q listed twice", is.ID)
+		}
+		src, ok := byURL[is.JWKSURL]
+		if !ok {
+			src = &jwksSource{url: is.JWKSURL}
+			if raw := st.JWKSGet(is.JWKSURL); raw != nil {
+				keys, err := parseJWKS(raw)
+				if err != nil {
+					// A corrupt persisted document would silently lock every human out; fail loudly.
+					return nil, fmt.Errorf("tokenauth: persisted JWKS for %s is corrupt: %w", is.JWKSURL, err)
+				}
+				src.keys = keys
+			}
+			byURL[is.JWKSURL] = src
+			v.sources = append(v.sources, src)
+		}
+		v.byIssuer[is.ID] = src
 	}
+	v.notifyKeyCount()
 	return v, nil
 }
 
-// Run refreshes the JWKS on the configured cadence until stop closes, starting
-// immediately.
+// Run refreshes every JWKS on the configured cadence until stop closes,
+// starting immediately.
 func (v *Verifier) Run(stop <-chan struct{}) {
 	v.refresh()
 	t := time.NewTicker(v.cfg.Refresh)
@@ -155,66 +205,102 @@ func (v *Verifier) Run(stop <-chan struct{}) {
 	}
 }
 
-// refresh fetches, parses, persists and swaps the key set. On failure the current
-// keys stay.
+// refresh fetches every JWKS source.
 func (v *Verifier) refresh() {
-	raw, err := fetchJWKS(v.client, v.cfg.JWKSURL)
-	if err != nil {
-		v.log.Warn("jwks refresh failed — keeping cached keys", "url", v.cfg.JWKSURL, "err", err)
+	for _, src := range v.sources {
+		v.fetchSource(src, v.client)
+	}
+}
+
+// fetchSource fetches, parses, persists and swaps one key set. On failure the
+// current keys stay. It reports whether the fetch succeeded.
+func (v *Verifier) fetchSource(src *jwksSource, client *http.Client) bool {
+	fail := func(msg string, err error) bool {
+		v.log.Warn(msg, "url", src.url, "err", err)
 		if v.m != nil {
 			v.m.JWKSRefreshFailed()
 		}
-		return
+		src.mu.Lock()
+		src.failed = true
+		src.mu.Unlock()
+		return false
+	}
+	raw, err := fetchJWKS(client, src.url)
+	if err != nil {
+		return fail("jwks refresh failed — keeping cached keys", err)
 	}
 	keys, err := parseJWKS(raw)
 	if err != nil {
-		v.log.Warn("jwks refresh returned an unusable document — keeping cached keys", "err", err)
-		if v.m != nil {
-			v.m.JWKSRefreshFailed()
-		}
+		return fail("jwks refresh returned an unusable document — keeping cached keys", err)
+	}
+	if err := v.st.JWKSPut(src.url, raw); err != nil {
+		v.log.Warn("jwks persistence failed — keys active in-memory only", "url", src.url, "err", err)
+	}
+	src.mu.Lock()
+	src.keys = keys
+	src.failed = false
+	src.mu.Unlock()
+	v.notifyKeyCount()
+	v.log.Debug("jwks refreshed", "url", src.url, "keys", len(keys))
+	return true
+}
+
+// notifyKeyCount reports the keys cached across all sources.
+func (v *Verifier) notifyKeyCount() {
+	if v.m == nil {
 		return
 	}
-	if err := v.st.JWKSPut(raw); err != nil {
-		v.log.Warn("jwks persistence failed — keys active in-memory only", "err", err)
+	n := 0
+	for _, src := range v.sources {
+		src.mu.RLock()
+		n += len(src.keys)
+		src.mu.RUnlock()
 	}
-	v.mu.Lock()
-	v.keys = keys
-	v.mu.Unlock()
-	v.notifyKeyCount()
-	v.log.Debug("jwks refreshed", "keys", len(keys))
+	v.m.SetJWKSKeys(n)
 }
 
-func (v *Verifier) notifyKeyCount() {
-	if v.m != nil {
-		v.mu.RLock()
-		n := len(v.keys)
-		v.mu.RUnlock()
-		v.m.SetJWKSKeys(n)
-	}
-}
-
-// keyFor resolves a kid. On a miss it refetches once, rate-limited, since an
-// unknown kid usually means the keys were rotated.
-func (v *Verifier) keyFor(kid string) (crypto.PublicKey, bool) {
-	v.mu.RLock()
-	k, ok := v.keys[kid]
-	v.mu.RUnlock()
-	if ok {
+// keyFor resolves a kid in one source. On a miss it refetches that source and
+// looks again, since an unknown kid usually means the keys were rotated or not
+// loaded yet. Against a healthy key set the refetch is rate-limited by the last
+// successful one; while no key set has loaded or the last fetch failed (the
+// identity provider is starting or restarting), it fetches at once. Either way
+// at most one fetch runs, and concurrent misses wait for it.
+func (v *Verifier) keyFor(src *jwksSource, kid string) (crypto.PublicKey, bool) {
+	src.mu.Lock()
+	if k, ok := src.keys[kid]; ok {
+		src.mu.Unlock()
 		return k, true
 	}
-	v.mu.Lock()
-	limited := time.Since(v.lastFetch) < unknownKidMinInterval
-	if !limited {
-		v.lastFetch = time.Now()
+	if wait := src.inflight; wait != nil {
+		src.mu.Unlock()
+		<-wait
+		return src.lookup(kid)
 	}
-	v.mu.Unlock()
-	if limited {
+	healthy := src.keys != nil && !src.failed
+	if healthy && time.Since(src.lastKid) < v.refetchAfter {
+		src.mu.Unlock()
 		return nil, false
 	}
-	v.refresh()
-	v.mu.RLock()
-	k, ok = v.keys[kid]
-	v.mu.RUnlock()
+	done := make(chan struct{})
+	src.inflight = done
+	src.mu.Unlock()
+
+	ok := v.fetchSource(src, v.quick)
+
+	src.mu.Lock()
+	if ok {
+		src.lastKid = time.Now()
+	}
+	src.inflight = nil
+	src.mu.Unlock()
+	close(done)
+	return src.lookup(kid)
+}
+
+func (src *jwksSource) lookup(kid string) (crypto.PublicKey, bool) {
+	src.mu.RLock()
+	defer src.mu.RUnlock()
+	k, ok := src.keys[kid]
 	return k, ok
 }
 
@@ -285,18 +371,10 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		jwt.WithValidMethods([]string{"RS256", "ES256"}), // allowlist; none/HS* die here
 		jwt.WithLeeway(clockSkew),
 		jwt.WithExpirationRequired(),
-		jwt.WithIssuer(v.cfg.Issuer),
 		jwt.WithAudience(v.cfg.Audience),
 	)
 	claims := jwt.MapClaims{}
-	_, err := parser.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
-		kid, _ := t.Header["kid"].(string)
-		key, ok := v.keyFor(kid)
-		if !ok {
-			return nil, fmt.Errorf("no key for kid %q", kid)
-		}
-		return key, nil
-	})
+	_, err := parser.ParseWithClaims(token, claims, v.signingKey)
 	if err != nil {
 		return nil, reasonFor(err), fmt.Errorf("token rejected: %w", err)
 	}
@@ -323,11 +401,47 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 	for _, problem := range problems {
 		// Not fatal, and deliberately: one stale membership must cost the human
 		// that group, not everything they hold.
+		var unknown *uns.UnknownGroupError
+		if errors.As(problem, &unknown) {
+			if v.unknownGroups.First(unknown.ID) {
+				v.log.Info("token names a group this node does not define; it grants nothing here "+
+					"(logged once per group)", "group", unknown.ID)
+			}
+			continue
+		}
 		v.log.Warn("token: a group contributed no grants", "sub", sub, "err", problem)
+	}
+	sid, _ := claims["sid"].(string)
+	var issuedAt time.Time
+	if iat, err := claims.GetIssuedAt(); err == nil && iat != nil {
+		issuedAt = iat.Time
+	}
+	if v.logouts.covers(sid, sub, issuedAt, time.Now()) {
+		return nil, ReasonLoggedOut, fmt.Errorf("token rejected: its session was logged out")
 	}
 	username, _ := claims["preferred_username"].(string)
 	entry.Username = username
-	return &Verified{Entry: entry, Sub: sub, Username: username, Exp: exp.Time, Credential: "oidc"}, "", nil
+	return &Verified{
+		Entry: entry, Sub: sub, Username: username, Exp: exp.Time, Credential: "oidc",
+		SessionID: sid, IssuedAt: issuedAt,
+	}, "", nil
+}
+
+// signingKey is the jwt.Keyfunc for every token this verifier accepts. The issuer
+// picks the key set; the signature check that follows is what makes the
+// unverified `iss` read here trustworthy.
+func (v *Verifier) signingKey(t *jwt.Token) (interface{}, error) {
+	iss, _ := t.Claims.GetIssuer()
+	src, ok := v.byIssuer[iss]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q is not an accepted issuer", jwt.ErrTokenInvalidIssuer, iss)
+	}
+	kid, _ := t.Header["kid"].(string)
+	key, ok := v.keyFor(src, kid)
+	if !ok {
+		return nil, fmt.Errorf("no key for kid %q", kid)
+	}
+	return key, nil
 }
 
 // reasonFor maps golang-jwt validation errors onto the metric vocabulary.

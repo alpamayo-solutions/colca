@@ -13,15 +13,17 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// ErrNotAMeasurement means the record carries no value to historise: a
-// tombstone, or a record that is not a _Metric.
+// ErrNotAMeasurement means the record carries nothing to historise: a
+// tombstone, or a record that is not a _Metric. A null value is not this: it
+// says the value went missing, and it is stored as a row without a value.
 var ErrNotAMeasurement = errors.New("historian: record carries no measurement")
 
 // Row is one `historian_metric` row.
 //
-// Exactly one of Number/Text/Bool/JSON is set: the table has a column per kind
+// At most one of Number/Text/Bool/JSON is set: the table has a column per kind
 // and the API reads them in that order, so putting a value in two would make
-// which one wins depend on the reader.
+// which one wins depend on the reader. None set is a retraction: the value went
+// missing at Timestamp, and history shows a gap from there to the next value.
 type Row struct {
 	Timestamp time.Time
 	SignalID  string
@@ -36,6 +38,11 @@ type Row struct {
 	// metrics.
 	Offset int64
 	Topic  string
+}
+
+// Missing reports whether the row is a retraction, with no value column set.
+func (r Row) Missing() bool {
+	return r.Number == nil && r.Text == nil && r.Bool == nil && len(r.JSON) == 0
 }
 
 // RowFrom decodes one stored record. ts, the store's ingest time, is used only
@@ -110,7 +117,7 @@ func setValue(row *Row, raw json.RawMessage) error {
 	trimmed := strings.TrimSpace(string(raw))
 	switch {
 	case trimmed == "null":
-		return ErrNotAMeasurement
+		return nil // a retraction: every value column stays NULL
 	case trimmed == "true" || trimmed == "false":
 		b := trimmed == "true"
 		row.Bool = &b

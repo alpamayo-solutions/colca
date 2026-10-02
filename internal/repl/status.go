@@ -41,11 +41,17 @@ func (c *Client) Status() Status {
 // setStatus records a transition only if the state changed, so Since marks the
 // start of the current state rather than the latest poll.
 func (c *Client) setStatus(state UplinkState) {
+	c.statusMu.Lock()
+	defer c.statusMu.Unlock()
 	current, _ := c.status.Load().(Status)
 	if current.State == state {
 		return
 	}
 	c.status.Store(Status{State: state, Since: time.Now().UTC()})
+	if c.statusChanged != nil {
+		close(c.statusChanged)
+	}
+	c.statusChanged = make(chan struct{})
 }
 
 // classifyUplinkErr maps a hello or downlink failure to a state: a 401 means the
@@ -57,4 +63,14 @@ func classifyUplinkErr(err error) UplinkState {
 		return UplinkUnauthorized
 	}
 	return UplinkConnecting
+}
+
+// StatusChanges captures the wakeup before a status read, closing the check/wait race.
+func (c *Client) StatusChanges() <-chan struct{} {
+	c.statusMu.Lock()
+	defer c.statusMu.Unlock()
+	if c.statusChanged == nil {
+		c.statusChanged = make(chan struct{})
+	}
+	return c.statusChanged
 }

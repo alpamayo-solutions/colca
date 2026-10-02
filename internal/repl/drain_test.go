@@ -136,7 +136,7 @@ func TestDrainExpiryBoundedCompletion(t *testing.T) {
 // Drain status is persisted and survives a restart, and the boot tick evaluates
 // it again. The test reopens the same store with a fresh registry, engine and
 // server in node.Start's order and runs evaluateAllDrains once like
-// RunDrainTicker; the drain with an expired command must still complete.
+// RunDrainCompletion; the drain with an expired command must still complete.
 func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
@@ -188,7 +188,7 @@ func TestDrainStatusSurvivesRestartAndBootTickReEvaluates(t *testing.T) {
 		t.Fatalf("NewServer: %v", err)
 	}
 
-	// The RunDrainTicker boot behavior, without waiting out the goroutine's
+	// The RunDrainCompletion boot behavior, without waiting out the goroutine's
 	// internal timer: its own first action is exactly this call.
 	srv2.evaluateAllDrains()
 
@@ -406,5 +406,50 @@ func TestDrainWaitsOnSurvivingRangeDespiteGapThenCompletesGapped(t *testing.T) {
 	}
 	if v := metricstest.Value(t, pm, `colca_drains_completed_total{outcome="delivered"}`); v != 0 {
 		t.Fatalf(`colca_drains_completed_total{outcome="delivered"} = %v, want 0`, v)
+	}
+}
+
+// A drain ends with the child gone from this parent for good: re-parented, its
+// state now rises through another path, or taken out of service. What it
+// replicated here would stand as ghosts, so completion retires the child and
+// its replicated state goes with it.
+func TestDrainCompletionRetiresTheChildsReplicatedState(t *testing.T) {
+	dir := t.TempDir()
+	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
+	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
+	ps := mustStore(t, filepath.Join(dir, "pdata"))
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	clk := clock.New(true, func() time.Time { return time.UnixMilli(1_000_000) })
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, clk, childSpec{"n-child", childID.PublicHex(), "child1"})
+	pm := metrics.New(ps, config.Retention{}, clk)
+	preg.SetMetrics(pm)
+	srv, _ := startServerWithMetrics(t, pcfg, peng, parentID, preg, pm)
+	t.Cleanup(srv.Stop)
+
+	signal := "colca/v1/_Signal/n-child/child1/press3/machine_state"
+	if _, _, err := peng.IngestReplicated("n-child", "entities", []store.ReplRecord{{
+		ChildOffset: 4, Topic: signal, Payload: []byte(`{"id":"sig"}`), TS: 1,
+		KVPath: "child1/press3/machine_state", KVNode: "n-child",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := preg.Drain("n-child"); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	srv.evaluateAllDrains() // nothing is queued, so this completes the drain
+	if _, ok := preg.Get("n-child"); ok {
+		t.Fatal("the drain did not complete")
+	}
+	for _, kv := range mustKVScan(t, ps, "") {
+		if kv.Topic == signal {
+			t.Fatalf("%s survived the drain's completion", signal)
+		}
+	}
+	if got := ps.HWMGet("n-child", "entities"); got != 0 {
+		t.Fatalf("HWM = %d after completion, want 0", got)
+	}
+	if v := metricstest.Value(t, pm, `colca_drains_completed_total{outcome="delivered"}`); v != 1 {
+		t.Fatalf(`colca_drains_completed_total{outcome="delivered"} = %v, want 1`, v)
 	}
 }

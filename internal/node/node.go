@@ -26,6 +26,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/contracts"
+	"github.com/alpamayo-solutions/colca/internal/cursorwatch"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/httpapi"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
@@ -182,10 +183,13 @@ func Start(cfg *config.Config) (*Node, error) {
 	//     refresh loop joins wg so Stop never closes the store mid-write.
 	var ver *tokenauth.Verifier
 	if cfg.Auth != nil {
+		issuers := make([]tokenauth.Issuer, 0, len(cfg.Auth.Issuers))
+		for _, is := range cfg.Auth.EffectiveIssuers() {
+			issuers = append(issuers, tokenauth.Issuer{ID: is.URL, JWKSURL: is.JWKSURL})
+		}
 		ver, err = tokenauth.New(tokenauth.Config{
-			Issuer:    cfg.Auth.Issuer,
+			Issuers:   issuers,
 			Audience:  cfg.Auth.Audience,
-			JWKSURL:   cfg.Auth.JWKSURL,
 			Refresh:   cfg.Auth.EffectiveRefresh(),
 			NotBefore: cfg.StandaloneSince,
 		}, st, n.Metrics)
@@ -332,6 +336,9 @@ func Start(cfg *config.Config) (*Node, error) {
 	// The registry resolves placements through the engine's element index. It is
 	// set here because the registry has to exist before the engine.
 	reg.SetNamespace(n.Engine.Elements())
+	// Retiring a child node tombstones what it replicated on the stream each
+	// record's class rises on, which bundle contracts decide too.
+	reg.SetClassifier(n.Engine.ClassOf)
 	// A local service registering with a mount that does not exist yet gets its
 	// elements authored through the same path as everything else. Without this,
 	// such registrations are refused.
@@ -389,6 +396,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		if err != nil {
 			return fail(fmt.Errorf("node %s: repl client for %s: %w", cfg.ULID, cfg.Parent.URL, err))
 		}
+		replClient.SetStoreID(st.StoreID())
 		if err := repl.PrepareUplink(replClient, st); err != nil {
 			return fail(fmt.Errorf("node %s: %w", cfg.ULID, err))
 		}
@@ -490,7 +498,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.wg.Add(1)
 		go func() {
 			defer n.wg.Done()
-			rs.RunDrainTicker(n.stop)
+			rs.RunDrainCompletion(n.stop)
 		}()
 	}
 
@@ -529,6 +537,30 @@ func Start(cfg *config.Config) (*Node, error) {
 	go func() {
 		defer n.wg.Done()
 		sweeper.Run(n.stop)
+	}()
+
+	// 9. Cursor watchdog: a consumer whose unread records grow old gets a
+	//    cursor_lag finding instead of a timed catch-up hiding it.
+	watchdog := &cursorwatch.Watchdog{
+		Store:    st,
+		Filters:  n.Engine.CursorFilters(),
+		Owners:   reg,
+		Elements: n.Engine.Elements(),
+		Gauges:   n.Metrics,
+		NodeID:   cfg.ULID,
+		After:    cfg.Cursors.EffectiveLagAlarmAfter(),
+		Publish: func(topic string, payload []byte) error {
+			_, err := n.Engine.IngestAdminAttributed(topic, payload, engine.Attribution{
+				WrittenBy: cursorwatch.Author, ActorID: cursorwatch.Author,
+				ActorLabel: cursorwatch.Author, ActorKind: "system",
+			})
+			return err
+		},
+	}
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		watchdog.Run(n.stop)
 	}()
 
 	// The node's own log is delivered only now: the engine is fully configured (a

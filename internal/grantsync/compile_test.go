@@ -184,3 +184,16 @@ func TestAResourceNameThatWidensTheGrantIsRefused(t *testing.T) {
 		})
 	}
 }
+
+func TestANodeRelativeAttributeGrantCompilesUnchanged(t *testing.T) {
+	// The grant descends unchanged; each node resolves $node for the people
+	// who sign in there.
+	got, problems := CompileGrants(nil, map[string][]string{"operators": {"read:$node/#", "read:$node/Invoices/#"}})
+	if len(problems) != 0 {
+		t.Fatalf("problems: %v", problems)
+	}
+	if want := []string{"read:$node/#", "read:$node/Invoices/#"}; len(got["operators"]) != 2 ||
+		got["operators"][0] != want[0] || got["operators"][1] != want[1] {
+		t.Fatalf("compiled %v, want %v", got["operators"], want)
+	}
+}

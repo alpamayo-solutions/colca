@@ -78,6 +78,26 @@ func (w *EditExec) snapshot() (
 		versions["node-attachment:"+attachment.ULID] = editRecordVersion(record)
 	}
 
+	// Resources carry a version like everything else a command can destroy.
+	//
+	// They are not in `editKinds`, because a resource intent addresses its
+	// record by PATH and reads the store directly rather than looking itself
+	// up here. But a caller that is about to destroy a document still sends
+	// `resource:<id>` among its expected versions — a cascade delete of an
+	// element does exactly that — and with no entry here every one of those
+	// keys failed validation as "no longer exists". A subtree holding a
+	// single document could therefore never be deleted, on any node, and the
+	// message said the opposite of what was true: the record was right there.
+	for _, record := range w.store.KVScan("_Resource", w.store.NodeID()) {
+		id, ok := ResourceID(record.Payload)
+		if !ok || id == "" {
+			return nil, nil, nil, nil, nil, fmt.Errorf(
+				"retained _Resource at %s has no identity", record.Path,
+			)
+		}
+		versions["resource:"+id] = editRecordVersion(record)
+	}
+
 	catalogues := map[string]editCatalogueSnapshot{}
 	for _, record := range w.store.KVScan("_DataTags", w.store.NodeID()) {
 		var catalogue editCatalogue

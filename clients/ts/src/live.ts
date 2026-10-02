@@ -11,7 +11,9 @@
  * - the last value of every topic, so a second subscriber to a topic gets it at
  *   once instead of waiting for the next change;
  * - a fresh token before the old one runs out — the node ends a session when
- *   its token expires — and every subscription sent again on the new connection;
+ *   its token expires. A node that renews tokens in place (MQTT 5
+ *   re-authentication) takes it on the open connection; with any other, the
+ *   client opens a new connection and sends every subscription again;
  * - growing, jittered waits between attempts after a drop, each with a fresh
  *   token;
  * - commands that wait for their acknowledgement.
@@ -75,7 +77,26 @@ export interface CommandOptions {
   ackFilter?: string;
 }
 
-/** Nobody answered a command before it expired. */
+/**
+ * A command that never reached the node's executor: the client was offline, or
+ * the node refused the publish. Nothing was carried out.
+ */
+export class CommandNotSent extends Error {
+  constructor(
+    readonly topic: string,
+    readonly correlationId: string,
+    options?: { cause?: unknown },
+  ) {
+    super(`${topic} (${correlationId}) was not sent`, options);
+    this.name = "CommandNotSent";
+  }
+}
+
+/**
+ * Nobody answered a command before it expired. It may still have been carried
+ * out: the connection can drop after the command went out and before its answer
+ * came back.
+ */
 export class CommandTimeout extends Error {
   constructor(
     readonly topic: string,
@@ -84,6 +105,20 @@ export class CommandTimeout extends Error {
     super(`nobody acknowledged ${topic} (${correlationId}) before it expired`);
     this.name = "CommandTimeout";
   }
+}
+
+/**
+ * The MQTT 5 authentication method under which a Colca node renews a token on
+ * an open connection. The node names it in the CONNACK when it can.
+ */
+const REAUTH_METHOD = "colca-token";
+
+/** How long a renewal on the open connection may take before the client reconnects instead. */
+const REAUTH_TIMEOUT_MS = 10_000;
+
+/** The part of a CONNACK this module reads. */
+export interface Connack {
+  properties?: { authenticationMethod?: string };
 }
 
 /** What is handed to the MQTT client for each connection. */
@@ -97,12 +132,15 @@ export interface MqttConnectOptions {
   /** Zero: reconnecting is this module's job, because every attempt needs a fresh token. */
   reconnectPeriod: 0;
   connectTimeout: number;
+  /** Asks the node to renew tokens on this connection; the token itself stays the password. */
+  properties: { authenticationMethod: string; [property: string]: unknown };
   [option: string]: unknown;
 }
 
 /** The part of an MQTT client this module uses; mqtt.js's client fits. */
 export interface MqttLike {
-  on(event: "connect" | "close", listener: () => void): unknown;
+  on(event: "connect", listener: (connack?: Connack) => void): unknown;
+  on(event: "close", listener: () => void): unknown;
   on(event: "error", listener: (error: Error) => void): unknown;
   on(
     event: "message",
@@ -121,6 +159,12 @@ export interface MqttLike {
     callback?: (error?: Error) => void,
   ): unknown;
   end(force?: boolean): unknown;
+  /**
+   * Hand the node a new token on this connection (an MQTT 5 AUTH packet, reason
+   * 0x19). Resolves when the node accepted it. A node that refuses ends the
+   * connection. Without it, a renewal always reconnects.
+   */
+  reauthenticate?(token: string): Promise<void>;
 }
 
 export interface LiveOptions {
@@ -130,7 +174,7 @@ export interface LiveOptions {
   token: () => string | Promise<string>;
   /** The node requires the token's `sub` here, which is the default. Set it for a token that is not a JWT. */
   username?: string;
-  /** Reconnect with a new token this long before the current one expires. */
+  /** Renew the token this long before the current one expires. */
   renewBeforeMs?: number;
   /** The first wait after a failed attempt. It doubles up to `maxRetryMs`. */
   retryMs?: number;
@@ -171,10 +215,14 @@ export class Live {
   readonly #resubscribeListeners = new Set<() => void>();
   #state: LiveState = "connecting";
   #client: MqttLike | undefined;
+  /** The connection a renewal replaces, kept until the new one has its subscriptions. */
+  #retiring: MqttLike | undefined;
   #generation = 0;
   #attempt = 0;
   #renewTimer: ReturnType<typeof setTimeout> | undefined;
   #retryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The node said, in this connection's CONNACK, that it renews tokens in place. */
+  #renewsInPlace = false;
 
   constructor(options: LiveOptions) {
     this.#options = options;
@@ -207,13 +255,13 @@ export class Live {
       this.#filters.set(filter, listeners);
       this.#qos.set(filter, qos);
       // Offline, the filter goes out with the others once the connection is up.
-      if (this.#state === "online") this.#subscribe([filter]);
+      if (this.#state === "online") void this.#subscribe([filter]);
     } else {
       listeners.add(own);
       if (qos > (this.#qos.get(filter) ?? 0)) {
         // Subscribing again replaces the node's subscription with the stronger one.
         this.#qos.set(filter, qos);
-        if (this.#state === "online") this.#subscribe([filter]);
+        if (this.#state === "online") void this.#subscribe([filter]);
       }
       // The node sends retained values once per subscription, and this filter's
       // went to whoever subscribed first. The newcomer gets them from here.
@@ -270,8 +318,10 @@ export class Live {
    * `body` is the command's own fields — `params` for a `_CmdParam`, say. The
    * correlation id and the expiry are added here, and the answer is matched by
    * the id, wherever in the tree the executor publishes it. The promise settles
-   * with the `_Ack`, whatever its `result_code`; it rejects when nothing answers
-   * in `timeoutMs`, when the node refuses the publish, or when the client closes.
+   * with the `_Ack`, whatever its `result_code`. It rejects with `CommandNotSent`
+   * when the command never went out or the node refused it, with `CommandTimeout`
+   * when nothing answers in `timeoutMs`, and when the client closes. A connection
+   * lost after the command went out is not a refusal: its answer may still come.
    */
   command(
     topic: string,
@@ -287,25 +337,42 @@ export class Live {
     const correlationId = typeof body.correlation_id === "string" ? body.correlation_id : newUlid();
     this.#listenForAcks(ackFilter);
 
+    // Expires when the wait ends, however long the subscription below takes: the
+    // executor must not carry out a command its sender has given up on.
+    const expiresAt = Date.now() + timeoutMs;
+
     return new Promise<CommandAck>((resolve, reject) => {
+      let sent = false;
       const timer = setTimeout(() => {
-        if (this.#pending.delete(correlationId)) reject(new CommandTimeout(topic, correlationId));
+        if (!this.#pending.delete(correlationId)) return;
+        reject(sent ? new CommandTimeout(topic, correlationId) : new CommandNotSent(topic, correlationId));
       }, timeoutMs);
       this.#pending.set(correlationId, { resolve, reject, timer });
+      const notSent = (cause?: unknown): void => {
+        const pending = this.#pending.get(correlationId);
+        if (!pending) return;
+        this.#pending.delete(correlationId);
+        clearTimeout(pending.timer);
+        pending.reject(new CommandNotSent(topic, correlationId, { cause }));
+      };
 
       // Only once the node confirmed the subscription to the answers: an executor
       // that answers at once must not answer into nothing.
-      this.#whenGranted(ackFilter)
-        .then(() =>
-          this.publish(topic, { ...body, correlation_id: correlationId, expires_at: Date.now() + timeoutMs }),
-        )
-        .catch((error: unknown) => {
-          const pending = this.#pending.get(correlationId);
-          if (!pending) return;
-          this.#pending.delete(correlationId);
-          clearTimeout(pending.timer);
-          pending.reject(error instanceof Error ? error : new Error(String(error)));
+      void this.#whenGranted(ackFilter).then(() => {
+        if (!this.#pending.has(correlationId)) return;
+        const client = this.#client;
+        if (this.#state !== "online" || client === undefined) {
+          notSent();
+          return;
+        }
+        const payload = JSON.stringify({ ...body, correlation_id: correlationId, expires_at: expiresAt });
+        sent = true;
+        client.publish(topic, payload, { qos: 1, retain: false }, (error) => {
+          // The node's refusal carries its reason code. Any other error is the
+          // connection going, and the command may have reached the node first.
+          if (error && typeof (error as { code?: unknown }).code === "number") notSent(error);
         });
+      });
     });
   }
 
@@ -319,7 +386,7 @@ export class Live {
    * Called once every subscription has gone out on a new connection, the first
    * one included — where the node's retained delivery starts over. A view that
    * has to notice what disappeared while the client was away reconciles from
-   * here; a planned renewal reaches it too, and says nothing about the state.
+   * here; a renewal that reconnects reaches it too, and says nothing about the state.
    */
   onResubscribe(listener: () => void): () => void {
     this.#resubscribeListeners.add(listener);
@@ -331,8 +398,11 @@ export class Live {
     this.#generation += 1;
     clearTimeout(this.#renewTimer);
     clearTimeout(this.#retryTimer);
-    this.#client?.end();
+    // A DISCONNECT only over a connection that is up: a half-open socket would
+    // wait for it and stay open.
+    this.#client?.end(this.#state !== "online");
     this.#client = undefined;
+    this.#retire();
     this.#filters.clear();
     this.#qos.clear();
     this.#values.clear();
@@ -375,6 +445,10 @@ export class Live {
         keepalive: 30,
         reconnectPeriod: 0,
         connectTimeout: 10_000,
+        properties: {
+          ...(this.#options.mqttOptions?.properties as Record<string, unknown> | undefined),
+          authenticationMethod: REAUTH_METHOD,
+        },
       });
     } catch (error) {
       if (!current()) return;
@@ -394,18 +468,23 @@ export class Live {
     }
     this.#client = client;
 
-    client.on("connect", () => {
+    client.on("connect", (connack) => {
       if (!current()) return;
       this.#attempt = 0;
+      this.#renewsInPlace =
+        connack?.properties?.authenticationMethod === REAUTH_METHOD && client.reauthenticate !== undefined;
       this.#setState("online");
       this.#retainedSent.clear();
       this.#granted.clear();
-      this.#subscribe([...this.#filters.keys()]);
+      void this.#subscribe([...this.#filters.keys()]).then(() => {
+        if (current()) this.#retire();
+      });
       for (const listener of this.#resubscribeListeners) listener();
       this.#scheduleRenewal(expiresAt);
     });
     client.on("message", (topic, payload, packet) => {
-      if (current()) this.#receive(topic, payload, packet.retain);
+      // The connection being renewed away from goes on delivering until it is ended.
+      if (current() || client === this.#retiring) this.#receive(topic, payload, packet.retain);
     });
     client.on("error", (error) => {
       if (current()) this.#report(error);
@@ -417,14 +496,25 @@ export class Live {
     });
   }
 
-  /** End the connection in hand and open the next one. */
-  #replace(token?: string): void {
+  /**
+   * Open the next connection. A renewal keeps the one in hand until the next one
+   * has its subscriptions, so no value falls between them; anything else ends it.
+   */
+  #replace(token?: string, renewal = false): void {
     clearTimeout(this.#renewTimer);
     this.#renewTimer = undefined;
     this.#generation += 1;
-    this.#client?.end(true);
+    this.#retire();
+    if (renewal) this.#retiring = this.#client;
+    else this.#client?.end(true);
     this.#client = undefined;
     void this.#open(token);
+  }
+
+  /** End a renewed connection with a DISCONNECT, so the node does not log a dropped one. */
+  #retire(): void {
+    this.#retiring?.end(false);
+    this.#retiring = undefined;
   }
 
   #retry(): void {
@@ -456,9 +546,9 @@ export class Live {
   }
 
   /**
-   * Replace the connection only with a token that outlives it. An identity proxy
-   * can keep handing out the token it holds until its own refresh is due, and
-   * reconnecting with that one gains nothing and costs a gap in the values.
+   * Renew only with a token that outlives the one in use. An identity proxy can
+   * keep handing out the token it holds until its own refresh is due, and
+   * renewing with that one gains nothing.
    */
   async #renew(expiresAt: number): Promise<void> {
     const generation = this.#generation;
@@ -472,7 +562,8 @@ export class Live {
 
     const exp = token === undefined ? undefined : readClaims(token)?.exp;
     if (token !== undefined && (exp === undefined || exp * 1000 > expiresAt)) {
-      this.#replace(token);
+      if (this.#renewsInPlace) await this.#renewInPlace(token, exp);
+      else this.#replace(token, true);
       return;
     }
     // Ask again shortly; once the token has run out, the node ends the session and
@@ -484,12 +575,54 @@ export class Live {
     }, MIN_RENEW_MS);
   }
 
-  #subscribe(filters: string[]): void {
+  /**
+   * Hand the new token to the node on the open connection, so nothing is
+   * subscribed again and no value is missed. When the node does not answer in
+   * time the client reconnects with the token instead; when it refuses, it ends
+   * the connection and the retry takes over.
+   */
+  async #renewInPlace(token: string, exp: number | undefined): Promise<void> {
     const generation = this.#generation;
+    const client = this.#client;
+    if (client?.reauthenticate === undefined) {
+      this.#replace(token, true);
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        client.reauthenticate(token),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error("the node did not answer the token renewal"));
+          }, REAUTH_TIMEOUT_MS);
+        }),
+      ]);
+    } catch (error) {
+      if (generation !== this.#generation || this.#state !== "online") return;
+      this.#report(error);
+      this.#replace(token, true);
+      return;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (generation !== this.#generation || this.#state === "closed") return;
+    this.#scheduleRenewal(exp === undefined ? undefined : exp * 1000);
+  }
+
+  /** Settles once the node has answered every subscription, granted or not. */
+  #subscribe(filters: string[]): Promise<void> {
+    const generation = this.#generation;
+    const answers: Promise<void>[] = [];
     for (const qos of [0, 1] as const) {
       const group = filters.filter((filter) => (this.#qos.get(filter) ?? 0) === qos);
       if (group.length === 0) continue;
-      this.#client?.subscribe(group, { qos }, (error, granted) => {
+      const client = this.#client;
+      if (client === undefined) continue;
+      let answered!: () => void;
+      answers.push(new Promise((resolve) => (answered = resolve)));
+      client.subscribe(group, { qos }, (error, granted) => {
+        answered();
         if (generation !== this.#generation) return;
         if (error) {
           this.#report(error);
@@ -507,6 +640,7 @@ export class Live {
         }
       });
     }
+    return Promise.all(answers).then(() => undefined);
   }
 
   #whenGranted(filter: string): Promise<void> {
@@ -615,7 +749,64 @@ async function connectWithMqttJs(url: string, options: MqttConnectOptions): Prom
   // Node gets the CommonJS build, where connect is also a named export.
   const connect = mqtt.connect ?? mqtt.default?.connect;
   if (connect === undefined) throw new MissingMqtt("the mqtt package in use has no connect()");
-  return connect(url, options);
+  return withReauthentication(connect(url, options));
+}
+
+/** The parts of an mqtt.js client that its public API does not expose. */
+interface MqttJsInternals {
+  _sendPacket?: (packet: Record<string, unknown>, callback?: (error?: Error) => void) => void;
+  handleAuth?: (
+    packet: { reasonCode?: number },
+    callback: (error?: Error | null, packet?: unknown) => void,
+  ) => void;
+}
+
+/**
+ * Give an mqtt.js client `reauthenticate`. mqtt.js reads AUTH packets from the
+ * broker but has no call to send one, so this uses its packet writer, and it
+ * leaves the client as it is when that writer is missing.
+ */
+function withReauthentication(client: MqttLike): MqttLike {
+  const internals = client as MqttLike & MqttJsInternals;
+  const send = internals._sendPacket;
+  const handleAuth = internals.handleAuth;
+  if (typeof send !== "function" || typeof handleAuth !== "function") return client;
+
+  let waiting: { resolve: () => void; reject: (error: Error) => void } | undefined;
+  const settle = (error?: Error): void => {
+    const current = waiting;
+    waiting = undefined;
+    if (error) current?.reject(error);
+    else current?.resolve();
+  };
+  internals.handleAuth = (packet, callback) => {
+    // Reason 0: the node accepted the token. It never asks to continue.
+    if (packet.reasonCode === 0) settle();
+    handleAuth.call(client, packet, callback);
+  };
+  client.on("close", () => {
+    settle(new Error("the connection closed during the token renewal"));
+  });
+  internals.reauthenticate = (token: string) =>
+    new Promise<void>((resolve, reject) => {
+      if (waiting !== undefined) {
+        reject(new Error("a token renewal is already under way"));
+        return;
+      }
+      waiting = { resolve, reject };
+      send.call(
+        client,
+        {
+          cmd: "auth",
+          reasonCode: 0x19,
+          properties: { authenticationMethod: REAUTH_METHOD, authenticationData: token },
+        },
+        (error) => {
+          if (error) settle(error);
+        },
+      );
+    });
+  return client;
 }
 
 /** `sub` and `exp` from a JWT, without checking it — the node does that. */

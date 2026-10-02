@@ -5,6 +5,22 @@ import (
 	"testing"
 )
 
+func TestMetricSignalIDIsReadFromMetricsOnly(t *testing.T) {
+	cases := []struct {
+		topic, payload, want string
+	}{
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","value":1}`, "01ABC"},
+		{"colca/v1/_Log/m1/svc/INFO", `{"signal_id":"01ABC"}`, ""},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":`, ""},
+		{"not-a-topic", `{"signal_id":"01ABC"}`, ""},
+	}
+	for _, c := range cases {
+		if got := MetricSignalID(c.topic, []byte(c.payload)); got != c.want {
+			t.Errorf("MetricSignalID(%q, %s) = %q, want %q", c.topic, c.payload, got, c.want)
+		}
+	}
+}
+
 func TestParseAndClass(t *testing.T) {
 	p, err := Parse("colca/v1/_Metric/m1/site1/edge1/m1/temp")
 	if err != nil {
@@ -27,13 +43,16 @@ func TestParseAndClass(t *testing.T) {
 		"_Log":                      {ClassLog, "logs"},
 		"_AlarmNotificationConfig":  {ClassEntity, "entities"},
 		"_NotificationConfigStatus": {ClassEntity, "entities"},
+		"_Finding":                  {ClassEntity, "entities"},
 		"_AlarmState":               {ClassEntity, "entities"},
+		"_AlarmSilence":             {ClassEntity, "entities"},
 		"_Node":                     {ClassEntity, "entities"}, "_ServiceDetails": {ClassEntity, "entities"},
 		"_ExternalReference": {ClassEntity, "entities"},
 		"_SystemElement":     {ClassEntity, "entities"}, "_CmdParam": {ClassCmd, "commands"},
 		"_CmdAdmin": {ClassCmd, "commands"}, "_Ack": {ClassAck, "commands"},
 		// demo topology: every _Cmd* contract is a command, never ClassNone
 		"_CmdOperate": {ClassCmd, "commands"}, "_CmdMaintain": {ClassCmd, "commands"},
+		"_CmdAcknowledge": {ClassCmd, "commands"},
 		"_Signal":         {ClassEntity, "entities"},
 		"_Constant":       {ClassEntity, "entities"},
 		"_EditOperation":  {ClassEntity, "entities"},
@@ -247,6 +266,8 @@ func TestValidate(t *testing.T) {
 		{"_Metric", `{"v": 3.14}`},
 		{"_Metric", `{"v": 3.14, "ts": 123}`},
 		{"_CmdParam", `{"correlation_id":"abc","expires_at": 99999999999, "params":{"speed":5}}`},
+		{"_CmdParam", `{"correlation_id":"abc","params":{"speed":5}}`}, // no expires_at: never expires
+		{"_CmdParam", `{"correlation_id":"abc","progress":true}`},
 		{"_Ack", `{"correlation_id":"abc","result_code":200,"message":"ok"}`},
 		{"_EnrolledIdentity", `{"ulid":"n-edge1","element":"01HEDGE1","kind":"node","grants":[],"status":"active","pubkey":"aa"}`},
 		// A data-model record names itself by "id", not "ulid"; grants and
@@ -267,9 +288,11 @@ func TestValidate(t *testing.T) {
 	bad := [][2]string{
 		{"_Metric", `{"v":"notanumber"}`},
 		{"_Metric", `{}`},
-		{"_CmdParam", `{"correlation_id":"abc"}`}, // missing expires_at
-		{"_Ack", `{"result_code":200}`},           // missing correlation_id
-		{"_Unknown", `{}`},                        // unknown contract
+		{"_CmdParam", `{"expires_at":99999999999}`},                   // missing correlation_id
+		{"_CmdParam", `{"correlation_id":"abc","expires_at":"soon"}`}, // expires_at not a number
+		{"_CmdParam", `{"correlation_id":"abc","progress":"yes"}`},    // progress not a boolean
+		{"_Ack", `{"result_code":200}`},                               // missing correlation_id
+		{"_Unknown", `{}`},                                            // unknown contract
 		{"_Metric", `not json`},
 		// _StreamGap: each case lacks exactly one required field.
 		{"_StreamGap", `{"from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":["uplink"]}`},              // missing stream
@@ -704,5 +727,16 @@ func TestUnderMount(t *testing.T) {
 		if got := UnderMount(c.path, c.mount); got != c.want {
 			t.Errorf("UnderMount(%q, %q) = %v, want %v", c.path, c.mount, got, c.want)
 		}
+	}
+}
+
+func TestParseRefusesATopicMQTTCannotCarry(t *testing.T) {
+	head := "colca/v1/_Constant/n1/"
+	if _, err := Parse(head + strings.Repeat("x", MaxTopicBytes-len(head))); err != nil {
+		t.Fatalf("a topic of exactly %d bytes must parse: %v", MaxTopicBytes, err)
+	}
+	_, err := Parse(head + strings.Repeat("x", MaxTopicBytes-len(head)+1))
+	if err == nil || !strings.Contains(err.Error(), "MQTT carries at most 65535") {
+		t.Fatalf("a topic one byte over the limit must be refused, got %v", err)
 	}
 }

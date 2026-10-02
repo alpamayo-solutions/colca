@@ -70,9 +70,93 @@ is the whole offline buffer.
 
 A command is a record in the `commands` stream, written at any ancestor of
 its target. It travels down hop by hop, keeps the timestamp it was written
-with, and is delivered to the machine on the edge node's bus. The machine
-decides whether it is still valid and answers with an `_Ack`; `498` means it
-arrived after it expired.
+with, and is delivered to the machine or service that executes it on the
+target node. The executor answers with an `_Ack`.
+
+### Commands wait for their target
+
+A command for a node below a child waits in the `commands` stream of each
+node on the way until the child fetches it. The child's downlink cursor on its
+parent is its place in that queue. The queue is on disk, so it survives
+restarts of the parent and of the child, and it holds for minutes, days or
+weeks: an edge that comes back after a long outage receives everything queued
+for it, in order.
+
+- **Expiry is optional.** A command without `expires_at` never expires. It
+  is delivered whenever its target comes back, for as long as retention keeps
+  it. A command that must not act late carries `expires_at` (unix
+  milliseconds); the executor answers `498` without running it once it has
+  passed. Commands to physical machines should carry a short one; the sender
+  decides.
+- **Delivered once.** A child stores a command and moves its downlink cursor
+  in one write, so a command handed again after a crash or a lost response is
+  recognized and not stored or executed twice. Executors still deduplicate by
+  `correlation_id`, and must not repeat an effect that is not idempotent.
+- **Progress, if asked.** With `"progress": true` in the command, the sender
+  also gets `_Ack` records with `result_code` `202` and a `stage`: `queued`
+  from the node that accepted it for a child, and `forwarded` from every node
+  whose child confirmed receiving it. A `202` is never the outcome. It is
+  opt-in because a consumer that settles on the first `_Ack` of a correlation
+  id would otherwise take it for one.
+- **Checked again on the way down.** The grant check of the door that accepted
+  the command is repeated when a node forwards it: a service or person whose
+  grant was withdrawn meanwhile, or a sender revoked at that node, gets a `403`
+  `_Ack` and the command is not forwarded. The admin door's token and commands
+  that came from further up are checked where they were accepted.
+- **Drops are answered.** A command that will never be delivered gets a `410`
+  `_Ack`: when its child node is retired (`DELETE /enroll/{ulid}?retire=true`)
+  and when retention prunes it past a delivery cursor that
+  `ignore_cursors_after` gave up on. `colca_command_dropped_total` counts them
+  by reason. Nothing is dropped silently while a cursor protects it.
+
+All answers land at the command's own position, `_Ack/<owner>/<path>`, where
+the executor's answer also arrives, and rise to every ancestor like any ack.
+A sender reads them from the `commands` stream with a cursor of its own.
+
+A node that becomes [standalone](operations.md#permanent-standalone-handover)
+no longer talks to its former parent, so nothing queued there reaches it;
+retiring it at the parent answers those commands with `410`.
+
+A person receives only the acks of their own commands; services and machines
+receive every ack their read grants cover. A command's `correlation_id` names
+it for ten minutes: sent again by the same sender, it is not stored or run a
+second time, and the sender gets the first one's ack again. Another sender's
+command with that id is refused, and that sender gets an `_Ack` with `422`.
+The ten minutes are the node's memory of accepted ids, not a command's
+lifetime.
+
+The node answers a command itself, instead of leaving the sender waiting for
+the whole lifetime, in two cases:
+
+- **Nobody executes it: `404`.** A service announces the commands it executes
+  in its `_ServiceDetails` record:
+
+  ```json
+  "commands": [{"contract": "_CmdParam", "path": "line1/operator/setDensity"},
+               {"contract": "_CmdParam", "path": "line1/bqc/+"}]
+  ```
+
+  `path` is node-local and names the verb; `+` stands for one segment and a
+  trailing `#` for the rest. A command at an element where some service
+  announced a command, but none announced this one, is answered `404`
+  ("no service executes _CmdParam line1/operator/setProduct;
+  line1/operator takes setDensity, setSandoff") and not stored. A removed or
+  misspelt verb, or a verb sent to the wrong element, is caught this way. A
+  service that is down keeps its announcements, so its commands still wait
+  for it. Commands at an element nobody announces for pass on as before: their
+  executor may not announce. With `commands.strict: true` in the node
+  configuration they are answered `404` too, for deployments whose executors
+  all announce. chaski services announce their `@on_command` handlers
+  themselves.
+- **Its payload is refused: `400`.** A command the node cannot accept (its
+  `command` is not an object, it carries `NaN` or `Infinity`) is refused as
+  before, and when a `correlation_id` can be read from it the sender also gets
+  an `_Ack` with `400` naming why.
+- **No grant of the sender covers it: `403`.** A command whose sender holds no
+  `cmd` grant for its contract at its path is refused as before (over MQTT a
+  PUBACK with Not authorized), and when a `correlation_id` can be read from it
+  the sender also gets an `_Ack` with `403`. A client that waits on the id
+  learns the answer instead of waiting out the command's lifetime.
 
 Some commands are executed by the node itself rather than a machine:
 
@@ -81,6 +165,44 @@ Some commands are executed by the node itself rather than a machine:
 | `_CmdConfigure` | author the namespace: elements, signals, constants, resources, definitions |
 | `_CmdEdit` | apply an atomic, versioned edit composed by an editor application |
 | `_CmdAdmin` | enroll or revoke an identity on a node that is only reachable through the tree |
+
+### Writing one metadata key
+
+An `update` edit replaces a record's whole `metadata` map and needs the whole
+record's version in `expected_versions`, so two writers that change different
+keys of one record refuse or overwrite each other. The `metadata` edit intent
+compares and sets a single key instead:
+
+```json
+{
+  "type": "metadata",
+  "entity": {"kind": "colca-node", "id": "<node id>"},
+  "key": "<metadata definition id>",
+  "expect": {"absent": true},
+  "value": {"theme": "dark"}
+}
+```
+
+- `entity.kind` is `colca-node`, `system-element`, `signal`, `constant` or
+  `resource`.
+- `expect` is `{"absent": true}` or `{"value": <json>}`: what the caller
+  believes the key holds now. Values compare as decoded JSON, so key order and
+  number spelling (`1` or `1.0`) do not matter.
+- Exactly one of `value` (not `null`) or `"remove": true`.
+- The node that owns the record applies it. It checks only that key; every
+  other key and attribute is taken from the record as it stands, so a
+  concurrent write of another key survives. A mismatch is `409
+  stale_metadata: <key>` with nothing written.
+- `expected_versions` may be empty. A record version the caller sends anyway
+  is still checked.
+- Setting a key to the value it holds, or removing an absent key, is `200
+  metadata_unchanged: <key>` with nothing written.
+- It is authorized like an `update` of the entity: `configure` over its
+  position (for a resource, the element it sits on), or `param` on a
+  constant. A caller outside its grants gets
+  `entity_not_found`, whatever its `expect`.
+- It is idempotent by `operation_id` like every edit, and the written record
+  replicates like any other.
 
 ## Retention
 

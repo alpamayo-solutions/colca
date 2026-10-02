@@ -69,18 +69,30 @@ type Gap struct {
 
 // Page is one /fetch response.
 type Page struct {
+	// Same real-time authority as _TimeSync; sampled when the response is sent.
+	NowMS   int64    `json:"now_ms,omitempty"`
 	Records []Record `json:"records"`
 	Next    int64    `json:"next"`
-	Gap     *Gap     `json:"gap,omitempty"`
+	// From is the offset the page started at (colca 0.18.2+; 0 from older nodes).
+	From int64 `json:"from,omitempty"`
+	Gap  *Gap  `json:"gap,omitempty"`
 }
 
 // FetchOptions are the server-side view applied to one side-effect-free read.
 type FetchOptions struct {
+	Tail      bool // Capture the current head without changing cursor filters.
 	Stream    string
 	Cursor    string
 	Max       int
 	Prefix    string
 	SignalIDs []string
+	// Contracts keeps only records of these contracts; next still moves past the
+	// others.
+	Contracts []string
+	// From reads ahead of the cursor, from this offset (colca 0.18.2+), so the
+	// next page can be fetched before the previous one is acked. 0 reads from
+	// the cursor.
+	From uint64
 }
 
 // KVEntry is one retained record returned by /kv. WrittenBy, ActorID,
@@ -153,11 +165,20 @@ func (c *Client) FetchWithOptions(ctx context.Context, options FetchOptions) (Pa
 		"cursor": {options.Cursor},
 		"max":    {strconv.Itoa(options.Max)},
 	}
+	if options.Tail {
+		q.Set("tail", "1")
+	}
 	if options.Prefix != "" {
 		q.Set("prefix", options.Prefix)
 	}
 	for _, signalID := range options.SignalIDs {
 		q.Add("signal_id", signalID)
+	}
+	for _, contract := range options.Contracts {
+		q.Add("contract", contract)
+	}
+	if options.From > 0 {
+		q.Set("from", strconv.FormatUint(options.From, 10))
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/fetch?"+q.Encode(), nil)
 	if err != nil {
@@ -170,7 +191,7 @@ func (c *Client) FetchWithOptions(ctx context.Context, options FetchOptions) (Pa
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		reason, _ := io.ReadAll(resp.Body)
-		return Page{}, fmt.Errorf("fetching %s: HTTP %d: %s", options.Stream, resp.StatusCode, truncate(reason, 300))
+		return Page{}, httpResponseError(resp, fmt.Errorf("fetching %s: HTTP %d: %s", options.Stream, resp.StatusCode, truncate(reason, 300)))
 	}
 	var page Page
 	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
@@ -207,7 +228,7 @@ func (c *Client) KV(ctx context.Context, prefix string, contracts ...string) ([]
 		if resp.StatusCode != http.StatusOK {
 			reason, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			return nil, fmt.Errorf("reading retained state: HTTP %d: %s", resp.StatusCode, truncate(reason, 300))
+			return nil, httpResponseError(resp, fmt.Errorf("reading retained state: HTTP %d: %s", resp.StatusCode, truncate(reason, 300)))
 		}
 		var page struct {
 			Entries []KVEntry `json:"entries"`
@@ -242,7 +263,7 @@ func (c *Client) Self(ctx context.Context) (Self, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		reason, _ := io.ReadAll(resp.Body)
-		return Self{}, fmt.Errorf("reading local identity: HTTP %d: %s", resp.StatusCode, truncate(reason, 300))
+		return Self{}, httpResponseError(resp, fmt.Errorf("reading local identity: HTTP %d: %s", resp.StatusCode, truncate(reason, 300)))
 	}
 	var self Self
 	if err := json.NewDecoder(resp.Body).Decode(&self); err != nil {
@@ -281,7 +302,7 @@ func (c *Client) putSecret(ctx context.Context, endpoint, label string, value Se
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		reason, _ := io.ReadAll(resp.Body)
-		return SecretMetadata{}, fmt.Errorf("storing secret %s: HTTP %d: %s", label, resp.StatusCode, truncate(reason, 300))
+		return SecretMetadata{}, httpResponseError(resp, fmt.Errorf("storing secret %s: HTTP %d: %s", label, resp.StatusCode, truncate(reason, 300)))
 	}
 	var out struct {
 		Secret SecretMetadata `json:"secret"`
@@ -305,7 +326,7 @@ func (c *Client) GetSecret(ctx context.Context, name string) (SecretRecord, erro
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		reason, _ := io.ReadAll(resp.Body)
-		return SecretRecord{}, fmt.Errorf("reading secret %s: HTTP %d: %s", name, resp.StatusCode, truncate(reason, 300))
+		return SecretRecord{}, httpResponseError(resp, fmt.Errorf("reading secret %s: HTTP %d: %s", name, resp.StatusCode, truncate(reason, 300)))
 	}
 	var out SecretRecord
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -328,7 +349,7 @@ func (c *Client) SecretInfoFor(ctx context.Context, owner, name string) (SecretM
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		reason, _ := io.ReadAll(resp.Body)
-		return SecretMetadata{}, fmt.Errorf("reading secret metadata %s/%s: HTTP %d: %s", owner, name, resp.StatusCode, truncate(reason, 300))
+		return SecretMetadata{}, httpResponseError(resp, fmt.Errorf("reading secret metadata %s/%s: HTTP %d: %s", owner, name, resp.StatusCode, truncate(reason, 300)))
 	}
 	var out struct {
 		Secret SecretMetadata `json:"secret"`
@@ -368,7 +389,7 @@ func (c *Client) listSecrets(ctx context.Context, endpoint, label string) ([]Sec
 		if resp.StatusCode != http.StatusOK {
 			reason, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			return nil, fmt.Errorf("listing secrets for %s: HTTP %d: %s", label, resp.StatusCode, truncate(reason, 300))
+			return nil, httpResponseError(resp, fmt.Errorf("listing secrets for %s: HTTP %d: %s", label, resp.StatusCode, truncate(reason, 300)))
 		}
 		var page struct {
 			Secrets []SecretMetadata `json:"secrets"`
@@ -415,7 +436,7 @@ func (c *Client) deleteSecret(ctx context.Context, endpoint, label string, expec
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		reason, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("deleting secret %s: HTTP %d: %s", label, resp.StatusCode, truncate(reason, 300))
+		return httpResponseError(resp, fmt.Errorf("deleting secret %s: HTTP %d: %s", label, resp.StatusCode, truncate(reason, 300)))
 	}
 	return nil
 }
@@ -447,8 +468,8 @@ func (c *Client) Ack(ctx context.Context, stream, cursor string, offset int64) (
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		reason, _ := io.ReadAll(resp.Body)
-		return false, fmt.Errorf("acking %s@%d: HTTP %d: %s", cursor, offset, resp.StatusCode,
-			truncate(reason, 300))
+		return false, httpResponseError(resp, fmt.Errorf("acking %s@%d: HTTP %d: %s", cursor, offset, resp.StatusCode,
+			truncate(reason, 300)))
 	}
 	var out struct {
 		Moved bool `json:"moved"`
@@ -479,8 +500,8 @@ func (c *Client) CursorDelete(ctx context.Context, stream, cursor string) error 
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		reason, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("deleting cursor %s@%s: HTTP %d: %s", cursor, stream, resp.StatusCode,
-			truncate(reason, 300))
+		return httpResponseError(resp, fmt.Errorf("deleting cursor %s@%s: HTTP %d: %s", cursor, stream, resp.StatusCode,
+			truncate(reason, 300)))
 	}
 	return nil
 }
@@ -517,7 +538,7 @@ func (c *Client) publish(ctx context.Context, topic string, record map[string]an
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		reason, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("publishing %s: HTTP %d: %s", topic, resp.StatusCode, truncate(reason, 300))
+		return httpResponseError(resp, fmt.Errorf("publishing %s: HTTP %d: %s", topic, resp.StatusCode, truncate(reason, 300)))
 	}
 	return nil
 }
@@ -534,7 +555,7 @@ func (c *Client) ULID(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("reading %s/healthz: HTTP %d", c.BaseURL, resp.StatusCode)
+		return "", httpResponseError(resp, fmt.Errorf("reading %s/healthz: HTTP %d", c.BaseURL, resp.StatusCode))
 	}
 	var payload struct {
 		ULID string `json:"ulid"`
@@ -553,4 +574,36 @@ func truncate(b []byte, n int) string {
 		return string(b)
 	}
 	return string(b[:n]) + "…"
+}
+
+// DrainToHead captures a finite stream boundary and commits pages through it.
+// New arrivals belong to the next drain. The caller must arrange immediate
+// continuation if its wakeup generation changed while this drain ran.
+// consume returns the last durably processed and acknowledged offset.
+func DrainToHead(ctx context.Context, reader interface {
+	FetchWithOptions(context.Context, FetchOptions) (Page, error)
+}, stream, cursor string, consume func(context.Context) (int64, error)) error {
+	page, err := reader.FetchWithOptions(ctx, FetchOptions{Stream: stream, Cursor: cursor, Max: 1, Tail: true})
+	if err != nil {
+		return err
+	}
+	head := page.Next - 1
+	var previous int64 = -1
+	for head > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		processed, err := consume(ctx)
+		if err != nil {
+			return err
+		}
+		if processed >= head {
+			return nil
+		}
+		if processed <= previous {
+			return fmt.Errorf("%s drain stalled at %d before captured head %d", stream, processed, head)
+		}
+		previous = processed
+	}
+	return nil
 }

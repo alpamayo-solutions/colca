@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -44,9 +45,13 @@ const (
 	// ReasonDraining: a command targeted a mount that is being drained. New
 	// commands are refused so the drain can finish.
 	ReasonDraining = "draining"
+	// ReasonNotProducer: a _Metric for a signal bound to a data tag came from an
+	// identity whose catalogue does not hold that tag. Only the producer writes a
+	// bound signal's values.
+	ReasonNotProducer = "not_producer"
 )
 
-var reasons = []string{ReasonNodeID, ReasonGrammar, ReasonValidation, ReasonIdentity, ReasonWriteDenied, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonTimeSync, ReasonDraining}
+var reasons = []string{ReasonNodeID, ReasonGrammar, ReasonValidation, ReasonIdentity, ReasonWriteDenied, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonTimeSync, ReasonDraining, ReasonNotProducer}
 
 // Move-drain outcomes: the label values of colca_drains_completed_total.
 const (
@@ -71,6 +76,9 @@ const (
 	// rejections are rare (no name, or a name that collides with a keyed
 	// identity), but they are counted like any other.
 	DoorLocal = "local"
+	// DoorHuman is the token door for people, over TCP or WebSocket. It labels
+	// MQTT deliveries; its auth rejections count under DoorMQTT.
+	DoorHuman = "human"
 
 	AuthUnknownKey       = "unknown_key"       // TLS peer key not in the local registry (incl. revoked)
 	AuthKind             = "kind"              // entry exists but its kind may not use this door
@@ -78,10 +86,13 @@ const (
 	AuthToken            = "token"             // admin token missing or wrong
 	AuthNoName           = "no_name"           // local door CONNECT carried no username
 	AuthRegister         = "register"          // local door self-registration failed
+	AuthMethod           = "auth_method"       // MQTT 5 authentication method this node does not speak
+	AuthSubjectChanged   = "subject_changed"   // a re-authentication presented another person's token
 )
 
 var authDoors = []string{DoorMQTT, DoorHTTP, DoorRepl, DoorLocal}
-var authReasons = []string{AuthUnknownKey, AuthKind, AuthUsernameMismatch, AuthToken, AuthNoName, AuthRegister}
+var authReasons = []string{AuthUnknownKey, AuthKind, AuthUsernameMismatch, AuthToken, AuthNoName, AuthRegister,
+	AuthMethod, AuthSubjectChanged}
 
 // ACL denial actions: the labels of colca_acl_denials_total{action}. Only
 // read-side denials are counted here (sub: MQTT subscribe, read: HTTP scope).
@@ -110,6 +121,10 @@ var securityChangeKinds = []string{
 // streams is every persistent stream, taken from the store so the families
 // below cannot miss a stream added later.
 var streams = store.Streams()
+
+// deliveryDoors label colca_mqtt_delivered_*: the MQTT listeners a subscriber
+// can use.
+var deliveryDoors = []string{DoorMQTT, DoorLocal, DoorHuman}
 
 // uplinkStreams are the streams that replicate upward. definitions only flow
 // down, so an uplink gauge for it would look like a broken uplink.
@@ -162,6 +177,11 @@ type Metrics struct {
 	// outbound queue was full. A retained replay on subscribe is the usual burst;
 	// a non-zero value means delivered state went missing.
 	publishDropped prometheus.Counter
+	// Publishes the broker wrote to subscribers, by door, pre-created per door.
+	deliveredMessages   *prometheus.CounterVec // colca_mqtt_delivered_messages_total{door}
+	deliveredBytes      *prometheus.CounterVec // colca_mqtt_delivered_payload_bytes_total{door}
+	deliveredMessagesBy map[string]prometheus.Counter
+	deliveredBytesBy    map[string]prometheus.Counter
 	// People on the token doors.
 	humanSessions prometheus.Gauge   // colca_human_sessions
 	jwksKeys      prometheus.Gauge   // colca_jwks_keys
@@ -186,6 +206,7 @@ type Metrics struct {
 	// silently forever. It only counts: refusing would break publishing before
 	// enrollment and reparenting.
 	commandUnroutable prometheus.Counter
+	commandDropped    *prometheus.CounterVec
 
 	// colca_command_redelivered_total: a stored command was replayed onto the local
 	// bus because its machine subscribed with its delivery cursor still before it.
@@ -238,6 +259,19 @@ type Metrics struct {
 	// Rate and concurrency limits. Both labels are fixed door and route classes,
 	// never paths or identities.
 	httpRequestLimited *prometheus.CounterVec // colca_http_request_limited_total{door,class}
+
+	// Per-caller read load, to see who spends the scan and fetch budgets. The
+	// caller label is a registered identity (kind:name), "human" for every
+	// person, or "admin"; route, contract, stream and depth labels come from
+	// fixed sets, never from raw paths.
+	httpKVRequests      *prometheus.CounterVec   // colca_http_kv_requests_total{caller,contract,prefix_depth}
+	httpKVEntries       *prometheus.HistogramVec // colca_http_kv_entries{caller}
+	httpFetchRequests   *prometheus.CounterVec   // colca_http_fetch_requests_total{caller,stream}
+	httpLimitedByCaller *prometheus.CounterVec   // colca_http_request_limited_by_caller_total{route,caller}
+	cursorUnreadAge     *prometheus.GaugeVec     // colca_cursor_unread_age_seconds{cursor,stream}
+	// The (route, caller) pairs whose limited series already exists, so a
+	// dashboard sees 0 before the first 429.
+	httpCallersSeen sync.Map
 
 	// Blob sweeper: unreferenced blobs reclaimed after their grace period.
 	blobsSwept prometheus.Counter // colca_blobs_swept_total
@@ -325,6 +359,14 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_mqtt_publish_dropped_total",
 			Help: "Publishes the broker dropped because a client's outbound queue was full (MaximumClientWritesPending). Resets on restart.",
 		}),
+		deliveredMessages: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_mqtt_delivered_messages_total",
+			Help: "PUBLISH packets the broker wrote to subscribers, by door (mqtt, local, human). Resets on restart.",
+		}, []string{"door"}),
+		deliveredBytes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_mqtt_delivered_payload_bytes_total",
+			Help: "Payload bytes of the PUBLISH packets the broker wrote to subscribers, by door (mqtt, local, human). Resets on restart.",
+		}, []string{"door"}),
 		humanSessions: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_human_sessions",
 			Help: "Live token-authenticated MQTT sessions on the human doors.",
@@ -357,6 +399,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_command_unroutable_total",
 			Help: "Commands addressed to another node and persisted at admission while no enrolled child node's mount covered their path — nothing will ever hand them down, execute them or ack them, and they never expire visibly because expiry is evaluated at the target. Excludes commands for this node (executed in-process), for a machine enrolled here (see colca_command_undelivered_total) and for a draining child (a drain delivers what is queued). Observability only: nothing is refused on this, because refusing would break publish-before-enroll and every reparent window. Resets on restart.",
 		}),
+		commandDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_command_dropped_total",
+			Help: "Queued commands this node will never hand on, each answered to its sender with an _Ack, by reason: retired (the child node they were queued for was retired, 410), pruned (retention pruned them past a stale delivery cursor, 410), revoked (their sender's identity or grant was revoked before they were forwarded, 403). Resets on restart.",
+		}, []string{"reason"}),
 		commandRedelivered: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_command_redelivered_total",
 			Help: "Commands replayed from the durable commands stream onto the local MQTT bus when the machine they address subscribed with its delivery cursor still standing before them. The recovery half of colca_command_undelivered_total: these are deliveries that a broker restart, or an issue-before-first-connect, would otherwise have dropped. Resets on restart.",
@@ -457,6 +503,27 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_http_request_limited_total",
 			Help: "HTTP requests refused by Colca's rate or concurrency controls, by bounded door and route class. Resets on restart.",
 		}, []string{"door", "class"}),
+		httpKVRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_http_kv_requests_total",
+			Help: "GET /kv pages served, by caller, contract filter (one contract, \"multiple\" or \"all\") and the number of segments in the prefix (0 is the whole node, capped at \"5+\"). Resets on restart.",
+		}, []string{"caller", "contract", "prefix_depth"}),
+		httpKVEntries: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "colca_http_kv_entries",
+			Help:    "Entries returned by one GET /kv page, by caller.",
+			Buckets: []float64{0, 1, 10, 100, 1000, 10000},
+		}, []string{"caller"}),
+		httpFetchRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_http_fetch_requests_total",
+			Help: "GET /fetch pages served, by caller and stream. Resets on restart.",
+		}, []string{"caller", "stream"}),
+		httpLimitedByCaller: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_http_request_limited_by_caller_total",
+			Help: "HTTP requests answered 429 by the per-caller limits, by route pattern and caller. Resets on restart.",
+		}, []string{"route", "caller"}),
+		cursorUnreadAge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "colca_cursor_unread_age_seconds",
+			Help: "Age of the oldest record past the cursor that its consumer reads (its last fetch filter applied); 0 when nothing it reads is waiting. Set by the cursor watchdog.",
+		}, []string{"cursor", "stream"}),
 		blobsSwept: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_blobs_swept_total",
 			Help: "Blobs deleted by the background sweeper because no live _Resource referenced them and they were older than the configured grace period. Resets on restart.",
@@ -467,6 +534,8 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}),
 	}
 	m.ingestBy = counterChildren(m.ingest, streams)
+	m.deliveredMessagesBy = counterChildren(m.deliveredMessages, deliveryDoors)
+	m.deliveredBytesBy = counterChildren(m.deliveredBytes, deliveryDoors)
 	m.rejectedBy = counterChildren(m.rejected, reasons)
 	m.uplinkFailBy = counterChildren(m.uplinkFail, uplinkStreams)
 	m.uplinkRefusedBy = counterChildren(m.uplinkRefused, uplinkStreams)
@@ -547,9 +616,9 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
-		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.humanSessions, m.jwksKeys, m.jwksFailures,
+		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.deliveredMessages, m.deliveredBytes, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.securityChanges, m.nodePrefix,
-		m.commandUndelivered, m.commandUnroutable, m.commandRedelivered,
+		m.commandUndelivered, m.commandUnroutable, m.commandDropped, m.commandRedelivered,
 		m.bundleInfo, m.bundleContracts,
 		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
@@ -557,6 +626,8 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
 		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
 		m.blobTransfers, m.blobRejects, m.recordRejects, m.resourceReads, m.httpRequestLimited, m.blobsSwept,
+		m.httpKVRequests, m.httpKVEntries, m.httpFetchRequests, m.httpLimitedByCaller,
+		m.cursorUnreadAge,
 		m.metricsUnbound,
 		clockOffset, clockSyncAge,
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
@@ -647,6 +718,21 @@ func (m *Metrics) CommandUnroutable() {
 	m.commandUnroutable.Inc()
 }
 
+// Reasons a queued command is dropped (CommandDropped).
+const (
+	CommandDropRetired = "retired"
+	CommandDropPruned  = "pruned"
+	CommandDropRevoked = "revoked"
+)
+
+// CommandDropped counts one queued command answered instead of handed on.
+func (m *Metrics) CommandDropped(reason string) {
+	if m == nil {
+		return
+	}
+	m.commandDropped.WithLabelValues(reason).Inc()
+}
+
 // CommandRedelivered counts one command replayed from the commands stream onto
 // the local bus.
 func (m *Metrics) CommandRedelivered() {
@@ -700,6 +786,18 @@ func (m *Metrics) PublishDropped() {
 		return
 	}
 	m.publishDropped.Inc()
+}
+
+// MQTTDelivered counts one PUBLISH written to a subscriber on door and its
+// payload size. door is one of DoorMQTT, DoorLocal and DoorHuman.
+func (m *Metrics) MQTTDelivered(door string, payloadBytes int) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.deliveredMessagesBy[door]; ok {
+		c.Inc()
+		m.deliveredBytesBy[door].Add(float64(payloadBytes))
+	}
 }
 
 // counterChildren pre-resolves one child per known label value, so incrementing
@@ -1030,6 +1128,45 @@ func (m *Metrics) HTTPRequestLimited(door, class string) {
 	}
 }
 
+// HTTPKVRead counts one GET /kv page and the entries it returned. contract is
+// one contract name, "multiple" or "all"; prefixDepth is already bounded.
+func (m *Metrics) HTTPKVRead(caller, contract, prefixDepth string, entries int) {
+	if m != nil {
+		m.httpKVRequests.WithLabelValues(caller, contract, prefixDepth).Inc()
+		m.httpKVEntries.WithLabelValues(caller).Observe(float64(entries))
+	}
+}
+
+// HTTPFetch counts one GET /fetch page. stream is a known stream.
+func (m *Metrics) HTTPFetch(caller, stream string) {
+	if m != nil {
+		m.httpFetchRequests.WithLabelValues(caller, stream).Inc()
+	}
+}
+
+// HTTPLimitedCaller counts one 429 by route pattern (the mux pattern, a fixed
+// set) and caller.
+func (m *Metrics) HTTPLimitedCaller(route, caller string) {
+	if m != nil {
+		m.httpLimitedByCaller.WithLabelValues(route, caller).Inc()
+	}
+}
+
+// HTTPCallerSeen creates the caller's limited series for route at 0 the first
+// time the pair is admitted. It has the cardinality the counter reaches anyway
+// once that caller is limited on that route.
+func (m *Metrics) HTTPCallerSeen(route, caller string) {
+	if m == nil {
+		return
+	}
+	key := route + "\x00" + caller
+	if _, seen := m.httpCallersSeen.Load(key); seen {
+		return
+	}
+	m.httpLimitedByCaller.WithLabelValues(route, caller)
+	m.httpCallersSeen.Store(key, struct{}{})
+}
+
 // ResourceRead counts one read of GET /resources/{id}/file, by result.
 func (m *Metrics) ResourceRead(result string) {
 	if m == nil {
@@ -1243,4 +1380,20 @@ func (c *storeCollector) blockedByCursor(stream string, now time.Time) int {
 		}
 	}
 	return blocked
+}
+
+// CursorUnreadAge sets the unread age of one cursor (see the cursor watchdog).
+func (m *Metrics) CursorUnreadAge(cursor, stream string, seconds float64) {
+	if m == nil {
+		return
+	}
+	m.cursorUnreadAge.WithLabelValues(cursor, stream).Set(seconds)
+}
+
+// ForgetCursorUnreadAge drops the series of a cursor that no longer exists.
+func (m *Metrics) ForgetCursorUnreadAge(cursor, stream string) {
+	if m == nil {
+		return
+	}
+	m.cursorUnreadAge.DeleteLabelValues(cursor, stream)
 }

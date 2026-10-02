@@ -39,18 +39,36 @@ export type AlarmNotificationConfig = {
   [key: string]: unknown;
 };
 
+/** `_AlarmSilence` — stream class `entity`. */
+export type AlarmSilence = {
+  note?: null | string;
+  reason: string;
+  silenced_at: number;
+  silenced_by: string;
+  silenced_by_name?: null | string;
+  until: number;
+  [key: string]: unknown;
+};
+
 /** `_AlarmState` — stream class `entity`. */
 export type AlarmState = {
   acknowledged_at?: null | number;
   acknowledged_by?: null | string;
+  acknowledged_by_name?: null | string;
   alarm_id: string;
   event_id?: null | string;
+  finding_path?: null | string;
+  finding_seen_at?: null | number;
+  keep_after_clear_s?: null | number;
+  keep_after_read_s?: null | number;
+  keep_listed_after_read_s?: null | number;
   note?: null | string;
   op?: null | string;
   reason: string;
   severity: "info" | "warning" | "critical";
-  signal_id: string;
+  signal_id?: null | string;
   silenced_by?: null | string;
+  silenced_by_name?: null | string;
   silenced_until?: null | number;
   since: number;
   status: "pending" | "firing" | "unknown";
@@ -94,9 +112,11 @@ export type Annotation = {
   annotation_id: string;
   annotation_type_id: string;
   deleted?: boolean;
+  related_annotation_ids?: string[];
   revision?: number;
   signal_ids?: string[];
   source?: string;
+  system_element_id?: null | string;
   time_end?: null | number;
   time_start: number;
   value?: unknown;
@@ -139,12 +159,50 @@ export type AuditEvent = {
   [key: string]: unknown;
 };
 
+/** `_ClockDefinition` — stream class `definition`. */
+export type ClockDefinition = {
+  catch_up?: boolean;
+  factory_anchor: number;
+  id: string;
+  previous?: null | {
+    catch_up?: boolean;
+    factory_anchor: number;
+    rate: number;
+    real_anchor: number;
+    stop_at?: null | number;
+    [key: string]: unknown;
+  };
+  rate: number;
+  real_anchor: number;
+  revision: number;
+  run_id: string;
+  start_at?: null | number;
+  stop_at?: null | number;
+  [key: string]: unknown;
+};
+
+/** `_ClockProgress` — stream class `data`. */
+export type ClockProgress = {
+  processed_at: number;
+  run_id: string;
+  [key: string]: unknown;
+};
+
 /** `_Cmd` — stream class `cmd`. */
 export type Cmd = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
+  [key: string]: unknown;
+};
+
+/** `_CmdAcknowledge` — stream class `cmd`. */
+export type CmdAcknowledge = {
+  command?: Record<string, unknown>;
+  correlation_id: string;
+  created_at?: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -153,7 +211,7 @@ export type CmdAdmin = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -162,7 +220,7 @@ export type CmdConfigure = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -172,7 +230,7 @@ export type CmdEdit = {
   correlation_id: string;
   created_at?: number;
   expected_versions: Record<string, unknown>;
-  expires_at: number;
+  expires_at?: number;
   intent: Record<string, unknown>;
   operation_id: string;
   [key: string]: unknown;
@@ -183,7 +241,7 @@ export type CmdMaintain = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -192,7 +250,7 @@ export type CmdOperate = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -201,7 +259,7 @@ export type CmdParam = {
   command?: Record<string, unknown>;
   correlation_id: string;
   created_at?: number;
-  expires_at: number;
+  expires_at?: number;
   [key: string]: unknown;
 };
 
@@ -282,6 +340,28 @@ export type ExternalSystem = {
   name: string;
   properties?: Record<string, unknown>;
   system_type: string;
+  [key: string]: unknown;
+};
+
+/** `_Finding` — stream class `entity`. */
+export type Finding = {
+  detail?: null | Record<string, unknown>;
+  dwell_off_s?: number;
+  dwell_on_s?: number;
+  keep_after_clear_s?: null | number;
+  keep_after_read_s?: null | number;
+  keep_listed_after_read_s?: null | number;
+  min_repeat_s?: null | number;
+  observed_at: number;
+  op?: null | string;
+  reason: string;
+  remedy?: null | string;
+  signal_id?: null | string;
+  silenceable?: boolean;
+  suggested_severity: "info" | "warning" | "critical";
+  summary: string;
+  threshold?: null | number;
+  value?: unknown;
   [key: string]: unknown;
 };
 
@@ -444,6 +524,10 @@ export type SemanticTag = {
 export type ServiceDetails = {
   architecture_metadata?: Record<string, unknown>;
   colca_node_id: string;
+  commands?: {
+    contract: string;
+    path: string;
+  }[];
   description?: string;
   display_name?: string;
   health_metrics?: {
@@ -514,12 +598,16 @@ export type SystemElement = {
 export const CONTRACTS = {
   "_Ack": { class: "ack", tombstone: false },
   "_AlarmNotificationConfig": { class: "entity", tombstone: true },
+  "_AlarmSilence": { class: "entity", tombstone: true },
   "_AlarmState": { class: "entity", tombstone: true },
   "_AlarmStateChange": { class: "alarm", tombstone: false },
   "_Annotation": { class: "annotation", tombstone: false },
   "_AnnotationType": { class: "definition", tombstone: true },
   "_AuditEvent": { class: "audit", tombstone: false },
+  "_ClockDefinition": { class: "definition", tombstone: true },
+  "_ClockProgress": { class: "data", tombstone: true },
   "_Cmd": { class: "cmd", tombstone: false },
+  "_CmdAcknowledge": { class: "cmd", tombstone: false },
   "_CmdAdmin": { class: "cmd", tombstone: false },
   "_CmdConfigure": { class: "cmd", tombstone: false },
   "_CmdEdit": { class: "cmd", tombstone: false },
@@ -532,6 +620,7 @@ export const CONTRACTS = {
   "_EditOperation": { class: "entity", tombstone: true },
   "_ExternalReference": { class: "entity", tombstone: true },
   "_ExternalSystem": { class: "definition", tombstone: true },
+  "_Finding": { class: "entity", tombstone: true },
   "_Group": { class: "definition", tombstone: true },
   "_Log": { class: "log", tombstone: false },
   "_MetadataType": { class: "definition", tombstone: true },
@@ -554,12 +643,16 @@ export type ContractName = keyof typeof CONTRACTS;
 export interface PayloadByContract {
   "_Ack": Ack;
   "_AlarmNotificationConfig": AlarmNotificationConfig;
+  "_AlarmSilence": AlarmSilence;
   "_AlarmState": AlarmState;
   "_AlarmStateChange": AlarmStateChange;
   "_Annotation": Annotation;
   "_AnnotationType": AnnotationType;
   "_AuditEvent": AuditEvent;
+  "_ClockDefinition": ClockDefinition;
+  "_ClockProgress": ClockProgress;
   "_Cmd": Cmd;
+  "_CmdAcknowledge": CmdAcknowledge;
   "_CmdAdmin": CmdAdmin;
   "_CmdConfigure": CmdConfigure;
   "_CmdEdit": CmdEdit;
@@ -572,6 +665,7 @@ export interface PayloadByContract {
   "_EditOperation": EditOperation;
   "_ExternalReference": ExternalReference;
   "_ExternalSystem": ExternalSystem;
+  "_Finding": Finding;
   "_Group": Group;
   "_Log": Log;
   "_MetadataType": MetadataType;

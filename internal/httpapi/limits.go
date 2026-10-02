@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/alpamayo-solutions/colca/internal/httplimit"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -25,18 +26,22 @@ const (
 	limitClassWrite    = "write"
 	limitClassFetch    = "fetch"
 	limitClassScan     = "scan"
+	limitClassWatch    = "watch"
 	limitClassAdmin    = "admin"
 	limitClassTransfer = "transfer"
 )
 
 var (
-	healthPolicy   = httplimit.Policy{RatePerSecond: 20, Burst: 40, PerCallerConcurrent: 8, GlobalConcurrent: 256}
-	metricsPolicy  = httplimit.Policy{RatePerSecond: 10, Burst: 30, PerCallerConcurrent: 4, GlobalConcurrent: 4}
-	authPolicy     = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 64, GlobalConcurrent: 512}
-	cheapPolicy    = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 32, GlobalConcurrent: 256}
-	writePolicy    = httplimit.Policy{RatePerSecond: 100, Burst: 250, PerCallerConcurrent: 32, GlobalConcurrent: 128}
-	fetchPolicy    = httplimit.Policy{RatePerSecond: 25, Burst: 50, PerCallerConcurrent: 16, GlobalConcurrent: 128}
-	scanPolicy     = httplimit.Policy{RatePerSecond: 5, Burst: 10, PerCallerConcurrent: 4, GlobalConcurrent: 32}
+	healthPolicy  = httplimit.Policy{RatePerSecond: 20, Burst: 40, PerCallerConcurrent: 8, GlobalConcurrent: 256}
+	metricsPolicy = httplimit.Policy{RatePerSecond: 10, Burst: 30, PerCallerConcurrent: 4, GlobalConcurrent: 4}
+	authPolicy    = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 64, GlobalConcurrent: 512}
+	cheapPolicy   = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 32, GlobalConcurrent: 256}
+	writePolicy   = httplimit.Policy{RatePerSecond: 100, Burst: 250, PerCallerConcurrent: 32, GlobalConcurrent: 128}
+	fetchPolicy   = httplimit.Policy{RatePerSecond: 25, Burst: 50, PerCallerConcurrent: 16, GlobalConcurrent: 128}
+	scanPolicy    = httplimit.Policy{RatePerSecond: 5, Burst: 10, PerCallerConcurrent: 4, GlobalConcurrent: 32}
+	// A watch is one long-lived connection per consumer, reopened only after it
+	// drops: few new ones a second, several held open at a time.
+	watchPolicy    = httplimit.Policy{RatePerSecond: 2, Burst: 8, PerCallerConcurrent: 8, GlobalConcurrent: 256}
 	adminPolicy    = httplimit.Policy{RatePerSecond: 10, Burst: 50, PerCallerConcurrent: 4, GlobalConcurrent: 16}
 	transferPolicy = httplimit.Policy{RatePerSecond: 10, Burst: 20, PerCallerConcurrent: 4, GlobalConcurrent: 32}
 )
@@ -53,6 +58,48 @@ func callerLimitKey(c caller) string {
 	default:
 		return "admin"
 	}
+}
+
+// callerLabel names a caller for the per-caller metrics with bounded
+// cardinality: a registered identity by kind and name, every person as
+// "human", the token as "admin".
+func callerLabel(c caller) string {
+	switch {
+	case c.human != nil:
+		return "human"
+	case c.entry != nil:
+		name := c.entry.Name
+		if name == "" {
+			name = c.entry.ULID
+		}
+		return string(c.entry.Kind) + ":" + name
+	default:
+		return "admin"
+	}
+}
+
+// contractLabel is the contract filter of a read as one metric label value.
+func contractLabel(contracts []string) string {
+	switch len(contracts) {
+	case 0:
+		return "all"
+	case 1:
+		return contracts[0]
+	default:
+		return "multiple"
+	}
+}
+
+// prefixDepthLabel is how many path segments a prefix names, capped at "5+".
+func prefixDepthLabel(prefix string) string {
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "" {
+		return "0"
+	}
+	if depth := strings.Count(prefix, "/") + 1; depth < 5 {
+		return strconv.Itoa(depth)
+	}
+	return "5+"
 }
 
 func sourceLimitKey(r *http.Request) string {

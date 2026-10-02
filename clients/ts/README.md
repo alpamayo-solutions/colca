@@ -11,14 +11,17 @@ npm install @alpamayo-solutions/colca-client
 ## A consumer
 
 ```ts
-import { Door, Stream } from "@alpamayo-solutions/colca-client";
+import { Door, Doorbell, Stream } from "@alpamayo-solutions/colca-client";
 
 const door = new Door({ baseUrl: "http://colca", service: "my-app" });
 const panels = new Stream(door, "annotations", door.cursorName("panels"), {
   prefix: "wisewoods/line1",
 });
 
-for await (const record of panels.follow()) {
+// Ring the bell whenever the stream may have grown: an MQTT message on the
+// topics this stream reads, a /watch hint, a reconnect.
+const bell = new Doorbell();
+for await (const record of panels.follow({ bell })) {
   // Acked page by page: a handler that throws sees its page again.
   console.log(record.topic, record.payload);
 }
@@ -31,6 +34,15 @@ await door.publishTo(
   { root: "steine", contract: "_Metric", node: "n-technikum", path: "wisewoods/line1/mas2/grit" },
   { signal_id: "01M2AB…", timestamp: Date.now() / 1000, value: 60 },
 );
+```
+
+## Browsing the tree
+
+```ts
+// One level below "wisewoods/": its records, plus the paths that expand.
+const { entries, folders } = await door.kvLevel("wisewoods/");
+// The same scan without folders, narrowed to one contract.
+const signals = await door.kv("wisewoods/line1/", { depth: 2, contract: "_Signal" });
 ```
 
 ## Live values
@@ -67,8 +79,10 @@ first. Around that the client does what a page left open all day needs:
 - **A second subscriber gets the value at once.** The client keeps the last value
   of every topic, and `latest()` and `values()` read it.
 - **A fresh token before the old one runs out.** The node ends a session when its
-  token expires. The client reconnects shortly before, with a new token and every
-  subscription sent again, and stays `online` while doing so.
+  token expires. Shortly before, the client hands the node a new token on the
+  open connection (MQTT 5 re-authentication), so nothing is subscribed again. A
+  node that does not offer that gets a new connection with the new token and
+  every subscription sent again. Either way the client stays `online`.
 - **Waits that grow after a drop**, jittered, each attempt with a fresh token.
 - **A word when the subscriptions go out again.** `onResubscribe()` fires once
   they have, on every new connection — where the node's retained delivery starts
@@ -124,16 +138,18 @@ change, and returns the function that ends that watch and no other. An alarm's
 name comes from the `_SystemElement` it hangs on, and its path is where a view
 jumps to.
 
-When the connection comes back — after a drop, and after the routine token
-renewal too — the node starts its retained delivery over, and an alarm that went
+When the connection comes back — after a drop, and after a token renewal that
+had to reconnect — the node starts its retained delivery over, and an alarm that went
 while the client was away leaves nothing behind to say so. `Alarms` therefore
 gives the set 750 ms to arrive again (`resyncMs`) and drops what did not come
 back: a view can be that much behind the node, but it never goes on showing an
 alarm that is over. It is a window, and a guess, because the node does not say
 where its retained delivery ends; `resyncMs: 0` turns the reconciliation off.
 
-`acknowledge()`, `silence(path, { minutes: 30 })` and `unsilence()` are
-`_CmdOperate` commands on the alarm's own path, each waiting for its `_Ack`. The
+`acknowledge()` sends a `_CmdAcknowledge`, and `silence(path, { minutes: 30 })`
+and `unsilence()` send `_CmdOperate`, each on the alarm's own path and each
+waiting for its `_Ack`. Quitting an alarm therefore needs an `acknowledge` grant,
+silencing an `operate` grant (see [security](https://alpamayo-solutions.github.io/colca/security/)). The
 note and the deadline ride in the payload's `command` object, where the contract
 keeps a verb's arguments. The client sends no identity: who quit an alarm is the
 node's word on the record, and the caller adds the note. A refusal — 300 and up — throws `AlarmRefused`

@@ -5,8 +5,11 @@ package store
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +20,7 @@ import (
 
 	"github.com/cockroachdb/pebble/v2"
 
+	"github.com/alpamayo-solutions/colca/internal/pebblelog"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -54,6 +58,11 @@ type Record struct {
 	// ActorGroups are the groups a person's grants came from, kept so a replicated
 	// command can be authorized again where it executes.
 	ActorGroups []string `json:"ag,omitempty"`
+	// Door names the door that admitted a command on this node ("client" or
+	// "human"), where its sender's grants were checked. It is empty for a command
+	// that came down from the parent or through the admin door, and never leaves
+	// the node.
+	Door string `json:"-"`
 	// optional KV projection written in the same atomic batch:
 	KVPath string `json:"-"` // hierarchy path (segments after contract, post-mount)
 	KVNode string `json:"-"` // node-id (level 4)
@@ -76,6 +85,11 @@ type StoredRecord struct {
 	ActorLabel      string
 	ActorKind       string
 	ActorGroups     []string
+	// Door is Record.Door as stored.
+	Door string
+	// SignalID is the signal of a _Metric record, "" for other records and for
+	// records stored before it was kept.
+	SignalID string
 }
 
 type KVEntry struct {
@@ -95,12 +109,20 @@ type KVEntry struct {
 }
 
 type Store struct {
-	db           *pebble.DB
-	standaloneMu sync.Mutex
-	mu           sync.Mutex
-	next         map[string]uint64 // next offset per stream
-	lwm          map[string]uint64 // low-water mark per stream: lowest retained offset
-	bytes        map[string]uint64 // live logical bytes per stream (stream key + encoded value)
+	// id names this store's incarnation. It is minted once, with the store, so a
+	// store rebuilt under the same node identity is told apart from the old one.
+	id             string
+	contractHeads  map[string]map[string]uint64
+	backlogChanged chan struct{}
+	allChanged     chan struct{}
+	db             *pebble.DB
+	health         *pebblelog.Monitor
+	standaloneMu   sync.Mutex
+	mu             sync.Mutex
+	changed        map[string]chan struct{} // closed on the stream's next append; see changes.go
+	next           map[string]uint64        // next offset per stream
+	lwm            map[string]uint64        // low-water mark per stream: lowest retained offset
+	bytes          map[string]uint64        // live logical bytes per stream (stream key + encoded value)
 	// appendApply is Pebble's atomic apply boundary. Keeping the bound method
 	// injectable lets tests prove an apply failure changes neither stream nor KV.
 	appendApply func(*pebble.Batch, *pebble.WriteOptions) error
@@ -116,12 +138,13 @@ func (s *Store) SetMaxRecordBytes(limit uint64) { s.maxRecordBytes = limit }
 // Open opens or creates the store at dir and restores each stream's next offset,
 // low-water mark and byte counter, so offsets stay gapless across restarts.
 func Open(dir string) (*Store, error) {
-	db, err := pebble.Open(dir, &pebble.Options{})
+	health := pebblelog.New("store")
+	db, err := pebble.Open(dir, health.Options())
 	if err != nil {
 		return nil, err
 	}
 	s := &Store{
-		db: db, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{},
+		db: db, health: health, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{},
 		appendApply: db.Apply,
 	}
 	for _, stream := range streams {
@@ -156,7 +179,86 @@ func Open(dir string) (*Store, error) {
 			return nil, err
 		}
 	}
+	added, removed, err := s.openKVIndex()
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("reconcile the KV contract index: %w", err)
+	}
+	if added > 0 || removed > 0 {
+		slog.Info("store: KV contract index reconciled", "added", added, "removed", removed)
+	}
+	if s.id, err = loadOrMintStoreID(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return s, nil
+}
+
+func loadOrMintStoreID(db *pebble.DB) (string, error) {
+	v, closer, err := db.Get(storeIDKey())
+	if err == nil {
+		id := string(v)
+		_ = closer.Close()
+		return id, nil
+	}
+	if !errors.Is(err, pebble.ErrNotFound) {
+		return "", fmt.Errorf("read store id: %w", err)
+	}
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("mint store id: %w", err)
+	}
+	id := hex.EncodeToString(b)
+	if err := db.Set(storeIDKey(), []byte(id), pebble.Sync); err != nil {
+		return "", fmt.Errorf("persist store id: %w", err)
+	}
+	return id, nil
+}
+
+// StoreID is this store's incarnation: stable across restarts, new whenever the
+// store is created from nothing. A child sends it with every replication batch
+// so its parent can tell a rebuilt store from a resumed one.
+func (s *Store) StoreID() string { return s.id }
+
+// AdoptChildStore records the incarnation a child replicates from. When it
+// differs from the one recorded before, the child's store was rebuilt: its
+// offsets restarted at 1, and every high-water mark kept for the old store would
+// drop the new records as duplicates while telling the child they had landed.
+// Those marks are cleared in the same batch and reset is true. An empty id (a
+// child that predates incarnations) and the first id seen change nothing.
+func (s *Store) AdoptChildStore(child, id string) (reset bool, err error) {
+	if id == "" {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev := ""
+	v, closer, err := s.db.Get(childStoreKey(child))
+	switch {
+	case err == nil:
+		prev = string(v)
+		_ = closer.Close()
+	case !errors.Is(err, pebble.ErrNotFound):
+		return false, fmt.Errorf("read store id of child %s: %w", child, err)
+	}
+	if prev == id {
+		return false, nil
+	}
+	b := s.db.NewBatch()
+	defer b.Close()
+	if prev != "" {
+		if err := b.DeleteRange(hwmKey(child, ""), hwmChildEnd(child), nil); err != nil {
+			return false, err
+		}
+		reset = true
+	}
+	if err := b.Set(childStoreKey(child), []byte(id), nil); err != nil {
+		return false, err
+	}
+	if err := s.db.Apply(b, pebble.Sync); err != nil {
+		return false, err
+	}
+	return reset, nil
 }
 
 // validateRefreshPending checks that rp/{stream}, if present, holds a sane
@@ -197,7 +299,21 @@ func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (u
 	return binary.BigEndian.Uint64(v), nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+// Close marks the contract index complete (see kvIndexCleanKey) and closes the
+// database.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	clean := s.kvIndexCleanValue()
+	s.mu.Unlock()
+	if err := s.db.Set(kvIndexCleanKey, clean, pebble.Sync); err != nil {
+		_ = s.db.Close()
+		return err
+	}
+	return s.db.Close()
+}
+
+// Health reports whether Pebble's background flushes and compactions are failing.
+func (s *Store) Health() pebblelog.Status { return s.health.Status() }
 
 type recEnc struct {
 	SourceLocalOnly bool     `json:"slo,omitempty"`
@@ -210,6 +326,8 @@ type recEnc struct {
 	ActorLabel      string   `json:"al,omitempty"`
 	ActorKind       string   `json:"ak,omitempty"`
 	ActorGroups     []string `json:"ag,omitempty"`
+	Door            string   `json:"door,omitempty"`
+	SignalID        string   `json:"sid,omitempty"`
 	// size is the encoded length of this record as stored, set by scanRecords for
 	// the byte accounting. Not serialized.
 	size uint64 `json:"-"`
@@ -240,6 +358,8 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 		Topic:           rec.Topic, Payload: rec.Payload, TS: rec.TS,
 		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
 		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, OriginOffset: originOffset,
+		Door:     rec.Door,
+		SignalID: uns.MetricSignalID(rec.Topic, rec.Payload),
 	})
 	if err != nil {
 		return 0, err
@@ -250,7 +370,7 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 	}
 	if rec.KVPath != "" {
 		if rec.Delete {
-			if err := b.Delete(kvKey(rec.KVPath, rec.KVNode, rec.Topic), nil); err != nil {
+			if err := deleteKV(b, rec.KVPath, rec.KVNode, rec.Topic); err != nil {
 				return 0, err
 			}
 		} else {
@@ -263,7 +383,7 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 			if err != nil {
 				return 0, err
 			}
-			if err := b.Set(kvKey(rec.KVPath, rec.KVNode, rec.Topic), kval, nil); err != nil {
+			if err := setKV(b, rec.KVPath, rec.KVNode, rec.Topic, kval); err != nil {
 				return 0, err
 			}
 		}
@@ -282,8 +402,42 @@ func (s *Store) Append(stream string, recs []Record) (first, last uint64, err er
 	return s.appendLocked(stream, recs)
 }
 
+// CursorAdvance moves a named cursor forward in the same batch as an append.
+type CursorAdvance struct {
+	Name   string
+	Stream string
+	To     uint64
+}
+
+// AppendAdvancing is Append plus a forward move of one cursor, in the same
+// atomic, synced batch. A node that stores what it read from somewhere else
+// (a command its parent handed down) records how far it read together with the
+// record, so a crash between the two can neither lose the record nor store it
+// twice. applied is false, and nothing is written, when the cursor already
+// stands at or past adv.To: the record was stored before.
+func (s *Store) AppendAdvancing(stream string, recs []Record, adv CursorAdvance) (first, last uint64, applied bool, err error) {
+	if len(recs) == 0 {
+		return 0, 0, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readU64(cursorKey(adv.Name, adv.Stream), 1) >= adv.To {
+		return 0, 0, false, nil
+	}
+	first, last, err = s.appendAdvancingLocked(stream, recs, &adv)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	s.signalBacklogChangeLocked()
+	return first, last, true, nil
+}
+
 // appendLocked is Append's body; the caller holds s.mu.
 func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, err error) {
+	return s.appendAdvancingLocked(stream, recs, nil)
+}
+
+func (s *Store) appendAdvancingLocked(stream string, recs []Record, adv *CursorAdvance) (first, last uint64, err error) {
 	off := s.next[stream]
 	if off == 0 {
 		return 0, 0, fmt.Errorf("unknown stream %q", stream)
@@ -322,11 +476,21 @@ func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, 
 	if err := b.Set(bytesKey(stream), be64(liveBytes), nil); err != nil {
 		return 0, 0, err
 	}
+	if adv != nil {
+		if err := b.Set(cursorKey(adv.Name, adv.Stream), be64(adv.To), nil); err != nil {
+			return 0, 0, err
+		}
+		if err := b.Set(ctKey(adv.Name, adv.Stream), be64(uint64(time.Now().UnixMilli())), nil); err != nil {
+			return 0, 0, err
+		}
+	}
 	if err := s.appendApply(b, pebble.Sync); err != nil {
 		return 0, 0, err
 	}
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
+	s.noteContractsLocked(stream, recs)
+	s.streamGrewLocked(stream)
 	return first, last, nil
 }
 
@@ -396,6 +560,14 @@ func (s *Store) Read(stream string, from uint64, limit int, filter func(string) 
 // the last scanned position + 1, filtered records included, so a consumer of a
 // sparse view keeps moving forward.
 func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
+	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, filter)
+}
+
+// ReadRecordsBounded is ReadRecords that also stops after maxScan scanned
+// records (0: no bound) and when ctx ends. A filter that matches little would
+// otherwise scan to the head in one call, however long the stream; a bounded
+// page may be empty while next still moves forward.
+func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: streamKey(stream, from),
 		UpperBound: streamKey(stream, ^uint64(0)),
@@ -405,7 +577,17 @@ func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(S
 	}
 	defer iter.Close()
 	next = from
+	scanned := 0
 	for iter.First(); iter.Valid() && len(out) < limit; iter.Next() {
+		if maxScan > 0 && scanned >= maxScan {
+			break
+		}
+		scanned++
+		if scanned%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, next, err
+			}
+		}
 		key := iter.Key()
 		off := binary.BigEndian.Uint64(key[len(key)-8:])
 		var e recEnc
@@ -419,6 +601,7 @@ func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(S
 			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
 			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
+			Door: e.Door, SignalID: e.SignalID,
 		}
 		if filter != nil && !filter(record) {
 			continue
@@ -429,6 +612,43 @@ func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(S
 		return nil, next, err
 	}
 	return out, next, nil
+}
+
+// FirstMatch returns the first record in [from, upTo) that filter keeps (every
+// record when filter is nil). The scan stops at upTo, so a caller bounds the
+// work per call; found is false when nothing in the range matched.
+func (s *Store) FirstMatch(stream string, from, upTo uint64, filter func(StoredRecord) bool) (rec StoredRecord, found bool, err error) {
+	if upTo <= from {
+		return StoredRecord{}, false, nil
+	}
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: streamKey(stream, from),
+		UpperBound: streamKey(stream, upTo),
+	})
+	if err != nil {
+		return StoredRecord{}, false, err
+	}
+	defer iter.Close()
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := iter.Key()
+		off := binary.BigEndian.Uint64(key[len(key)-8:])
+		var e recEnc
+		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+			return StoredRecord{}, false, err
+		}
+		record := StoredRecord{
+			SourceLocalOnly: e.SourceLocalOnly,
+			Offset:          off, OriginOffset: originOffset(e.OriginOffset, off),
+			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
+			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
+			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
+			Door: e.Door, SignalID: e.SignalID,
+		}
+		if filter == nil || filter(record) {
+			return record, true, nil
+		}
+	}
+	return StoredRecord{}, false, iter.Error()
 }
 
 // readU64 returns the big-endian counter stored at key, or dflt when the key is
@@ -451,6 +671,19 @@ func (s *Store) CursorGet(name, stream string) uint64 {
 	return s.readU64(cursorKey(name, stream), 1)
 }
 
+// CursorLookup is CursorGet that also reports whether the cursor exists.
+func (s *Store) CursorLookup(name, stream string) (uint64, bool) {
+	v, closer, err := s.db.Get(cursorKey(name, stream))
+	if err != nil {
+		return 1, false
+	}
+	defer closer.Close()
+	if len(v) != 8 {
+		return 1, false
+	}
+	return binary.BigEndian.Uint64(v), true
+}
+
 // CursorAck moves the cursor forward only and reports whether it moved. The
 // cursor and its last-advance timestamp (ct/) are written in one synced batch.
 func (s *Store) CursorAck(name, stream string, off uint64) bool {
@@ -470,6 +703,7 @@ func (s *Store) CursorAck(name, stream string, off uint64) bool {
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return false
 	}
+	s.signalBacklogChangeLocked()
 	return true
 }
 
@@ -497,6 +731,7 @@ func (s *Store) CursorSetIfAbsent(name, stream string, off uint64) (created bool
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return false, err
 	}
+	s.signalBacklogChangeLocked()
 	return true, nil
 }
 
@@ -513,7 +748,11 @@ func (s *Store) CursorDelete(name, stream string) error {
 	if err := b.Delete(ctKey(name, stream), nil); err != nil {
 		return err
 	}
-	return s.db.Apply(b, pebble.Sync)
+	if err := s.db.Apply(b, pebble.Sync); err != nil {
+		return err
+	}
+	s.signalBacklogChangeLocked()
+	return nil
 }
 
 // CursorMarkSeen sets ts (unix ms) as the last-advance time of a cursor that has
@@ -584,6 +823,15 @@ func (s *Store) scanU64Pairs(prefix byte, fn func(first, second string, v uint64
 
 // Cursors returns every persisted cursor. Read-only.
 func (s *Store) Cursors() []CursorInfo {
+	out, err := s.CursorSnapshot()
+	if err != nil {
+		slog.Warn("store: cursor scan stopped early", "err", err)
+	}
+	return out
+}
+
+// CursorSnapshot refuses a partial inventory for throughput control.
+func (s *Store) CursorSnapshot() ([]CursorInfo, error) {
 	var out []CursorInfo
 	err := s.scanU64Pairs('c', func(name, stream string, v uint64) {
 		out = append(out, CursorInfo{
@@ -591,10 +839,7 @@ func (s *Store) Cursors() []CursorInfo {
 			LastAdvanceMS: int64(s.readU64(ctKey(name, stream), 0)), //nolint:gosec // stored bit for bit
 		})
 	})
-	if err != nil {
-		slog.Warn("store: cursor scan stopped early", "err", err)
-	}
-	return out
+	return out, err
 }
 
 // ProtectedCursors splits stream's cursors at now into those still protecting
@@ -722,6 +967,10 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 	}
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
+	for _, record := range applied {
+		s.noteContractLocked(stream, record.Topic)
+	}
+	s.streamGrewLocked(stream)
 	return applied, hwm, nil
 }
 
@@ -1064,9 +1313,15 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return 0, err
 	}
+	grew := off != s.next[stream]
 	s.next[stream] = off
 	s.lwm[stream] = upTo
+	s.signalChangeLocked()
 	s.bytes[stream] = liveBytes
+	if grew {
+		// Gap markers are records a consumer reads.
+		s.streamGrewLocked(stream)
+	}
 	return stats.pruned, nil
 }
 
@@ -1226,11 +1481,43 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 // KVScanPage returns at most limit KV entries and an opaque continuation token.
 // The limit applies before authorization filtering, so a sparse grant cannot
 // turn one request into a full walk. A non-empty contracts keeps only those
-// contracts; the check reads the topic from the key, so other entries are
-// skipped without decoding their payload.
+// contracts and walks the contract index, so the work is proportional to the
+// entries that match rather than to everything under the prefix.
 func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) ([]KVEntry, string, error) {
+	return s.KVScanPageDepth(prefix, after, limit, contracts, 0)
+}
+
+// KVScanPageDepth is KVScanPage limited to entries at most depth path segments
+// below prefix (0: no limit). Deeper subtrees are skipped with a seek, not
+// walked, so a tree view reading one level pays for that level only.
+func (s *Store) KVScanPageDepth(prefix, after string, limit int, contracts []string, depth int) ([]KVEntry, string, error) {
+	entries, _, next, err := s.kvScanPage(prefix, after, limit, contracts, depth, false)
+	return entries, next, err
+}
+
+// KVScanLevel is KVScanPageDepth that also names the folders at the cut: every
+// path at most depth segments below prefix that has entries deeper than depth,
+// whether or not it holds a record itself. A tree view reads one level in one
+// call and learns which rows expand. Each folder is reported once, on the page
+// where the scan skips its subtree, and counts towards limit like an entry.
+// Folders ignore the contract filter: they describe the tree, not a contract.
+func (s *Store) KVScanLevel(prefix, after string, limit int, contracts []string, depth int) ([]KVEntry, []string, string, error) {
+	if depth < 1 {
+		return nil, nil, "", fmt.Errorf("store: KV level scan needs a positive depth")
+	}
+	return s.kvScanPage(prefix, after, limit, contracts, depth, true)
+}
+
+func (s *Store) kvScanPage(prefix, after string, limit int, contracts []string, depth int, withFolders bool) ([]KVEntry, []string, string, error) {
 	if limit <= 0 {
-		return nil, "", fmt.Errorf("store: KV page size must be positive")
+		return nil, nil, "", fmt.Errorf("store: KV page size must be positive")
+	}
+	if depth < 0 {
+		return nil, nil, "", fmt.Errorf("store: KV depth must not be negative")
+	}
+	if len(contracts) > 0 && depth == 0 {
+		entries, next, err := s.kvScanPageIndexed(prefix, after, limit, contracts)
+		return entries, nil, next, err
 	}
 	var want map[string]bool
 	if len(contracts) > 0 {
@@ -1243,15 +1530,15 @@ func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) 
 	ub := append(append([]byte{}, lb...), 0xFF)
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
 	if err != nil {
-		return nil, "", fmt.Errorf("store: kv page %q: open iterator: %w", prefix, err)
+		return nil, nil, "", fmt.Errorf("store: kv page %q: open iterator: %w", prefix, err)
 	}
 	defer iter.Close()
 
 	valid := iter.First()
 	if after != "" {
-		raw, decodeErr := base64.RawURLEncoding.DecodeString(after)
-		if decodeErr != nil || bytes.Compare(raw, lb) < 0 || bytes.Compare(raw, ub) >= 0 {
-			return nil, "", ErrInvalidPageToken
+		raw, tokenErr := kvPageToken(after, lb, ub)
+		if tokenErr != nil {
+			return nil, nil, "", tokenErr
 		}
 		valid = iter.SeekGE(raw)
 		if valid && bytes.Equal(iter.Key(), raw) {
@@ -1268,37 +1555,54 @@ func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) 
 	out := make([]KVEntry, 0, capacity)
 	matched := 0
 	var lastKey []byte
+	var folders []string
 	for valid && matched < limit {
 		lastKey = append(lastKey[:0], iter.Key()...)
-		key := string(iter.Key()[2:]) // strip "k\x00"
-		if pathSep := strings.IndexByte(key, 0); pathSep >= 0 {
-			rest := key[pathSep+1:]
-			if nodeSep := strings.IndexByte(rest, 0); nodeSep >= 0 {
-				topic := rest[nodeSep+1:]
-				if kvContractMatches(topic, want) {
-					var e kvEnc
-					if json.Unmarshal(iter.Value(), &e) == nil {
-						out = append(out, KVEntry{
-							Path: key[:pathSep], NodeID: rest[:nodeSep], Topic: e.Topic,
-							Payload: e.Payload, TS: e.TS, Offset: e.Offset,
-							OriginOffset: originOffset(e.OriginOffset, e.Offset),
-							WrittenBy:    e.WrittenBy, ActorID: e.ActorID,
-							ActorLabel: e.ActorLabel, ActorKind: e.ActorKind,
-						})
-						matched++
-					}
+		path, node, topic, ok := splitKVKey(string(iter.Key()[2:])) // strip "k\x00"
+		if ok && depth > 0 {
+			if d, lead := kvRelativeDepth(prefix, path); d > depth {
+				skip := kvSkipBelow(prefix, path, depth, lead)
+				if withFolders {
+					// The skip target sorts after the whole subtree and is no stored
+					// key, so as a page token it resumes past the folder, not in it.
+					folders = append(folders, string(skip[2:len(skip)-1]))
+					lastKey = append(lastKey[:0], skip...)
+					matched++
 				}
+				valid = iter.SeekGE(skip)
+				continue
+			}
+		}
+		if ok && kvContractMatches(topic, want) {
+			if entry, decoded := decodeKVEntry(path, node, iter.Value()); decoded {
+				out = append(out, entry)
+				matched++
 			}
 		}
 		valid = iter.Next()
 	}
 	if err := iter.Error(); err != nil {
-		return nil, "", fmt.Errorf("store: kv page %q: %w", prefix, err)
+		return nil, nil, "", fmt.Errorf("store: kv page %q: %w", prefix, err)
 	}
 	if valid && len(lastKey) > 0 {
-		return out, base64.RawURLEncoding.EncodeToString(lastKey), nil
+		return out, folders, base64.RawURLEncoding.EncodeToString(lastKey), nil
 	}
-	return out, "", nil
+	return out, folders, "", nil
+}
+
+// decodeKVEntry decodes a stored KV value; ok is false when it does not decode.
+func decodeKVEntry(path, node string, value []byte) (KVEntry, bool) {
+	var e kvEnc
+	if json.Unmarshal(value, &e) != nil {
+		return KVEntry{}, false
+	}
+	return KVEntry{
+		Path: path, NodeID: node, Topic: e.Topic,
+		Payload: e.Payload, TS: e.TS, Offset: e.Offset,
+		OriginOffset: originOffset(e.OriginOffset, e.Offset),
+		WrittenBy:    e.WrittenBy, ActorID: e.ActorID,
+		ActorLabel: e.ActorLabel, ActorKind: e.ActorKind,
+	}, true
 }
 
 // kvContractMatches reports whether topic's contract is in want; a nil want
@@ -1341,4 +1645,38 @@ func (s *Store) DiskMetrics() DiskMetrics {
 		LevelBytesWritten: level,
 		DiskUsageBytes:    m.DiskSpaceUsage(),
 	}
+}
+
+// CursorPositions reads only selected cursor-name prefixes, without per-cursor
+// liveness lookups. Throughput control needs positions, not the full inventory.
+func (s *Store) CursorPositions(prefixes []string, limit int) ([]CursorInfo, error) {
+	var out []CursorInfo
+	seen := map[string]bool{}
+	for _, prefix := range prefixes {
+		lower := append([]byte{'c', 0}, []byte(prefix)...)
+		upper := append(append([]byte(nil), lower...), 0xff)
+		iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+		if err != nil {
+			return nil, err
+		}
+		for iter.First(); iter.Valid(); iter.Next() {
+			key := string(iter.Key()[2:])
+			sep := strings.IndexByte(key, 0)
+			if sep < 0 || seen[key] || len(iter.Value()) != 8 {
+				continue
+			}
+			seen[key] = true
+			out = append(out, CursorInfo{Name: key[:sep], Stream: key[sep+1:], Position: binary.BigEndian.Uint64(iter.Value())})
+			if len(out) > limit {
+				iter.Close()
+				return nil, fmt.Errorf("too many selected cursors")
+			}
+		}
+		err = iter.Error()
+		iter.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }

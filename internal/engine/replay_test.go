@@ -527,3 +527,30 @@ func TestDeliveryAdvancesTheCursorSoReplayStaysCheap(t *testing.T) {
 		t.Fatalf("cursor = %d, want %d (head) — delivered commands did not move the floor", got, head)
 	}
 }
+
+// A subscribe can replay a command between its append and its live publish:
+// the replay takes the lock first and publishes the stored record. The live
+// publish that follows must then publish nothing, or the machine gets it twice.
+func TestALiveDeliveryAfterARacingReplayDoesNotPublishAgain(t *testing.T) {
+	ids := testIDs()
+	h := newReplayHarness(t, ids)
+	topic := "colca/v1/_CmdParam/m1/temp/set"
+	payload := cmdPayload("corr-race")
+	off, _, err := h.e.Store().Append("commands", []store.Record{{Topic: topic, Payload: payload, TS: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.listen("m1", topic)
+	if n := h.e.ReplayOwedCommands(machine(t, ids, "m1")); n != 1 {
+		t.Fatalf("ReplayOwedCommands = %d, want 1", n)
+	}
+	h.resetPublished()
+	p, err := uns.Parse(topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.e.deliverCommand(uns.ClassCmd, p, topic, payload, off)
+	if got := h.published(); len(got) != 0 {
+		t.Fatalf("the live delivery published %v after the replay had delivered it", got)
+	}
+}

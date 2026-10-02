@@ -13,20 +13,24 @@ npm install @alpamayo-solutions/colca-client
 ## Reading
 
 ```ts
-import { Door, Stream } from "@alpamayo-solutions/colca-client";
+import { Door, Doorbell, Stream } from "@alpamayo-solutions/colca-client";
 
 const door = new Door({ baseUrl: "http://colca", service: "my-app" });
 const panels = new Stream(door, "annotations", door.cursorName("panels"), {
   prefix: "wisewoods/line1",
 });
 
-for await (const record of panels.follow()) {
+// Ring the bell whenever the stream may have grown: an MQTT message on the
+// topics this stream reads, a /watch hint, a reconnect.
+const bell = new Doorbell();
+for await (const record of panels.follow({ bell })) {
   console.log(record.topic, record.payload);
 }
 ```
 
 `follow()` drains the stream and acks each page once its records have been
-consumed, then waits and drains again. A handler that throws sees its page
+consumed, then waits for the bell and drains again. It reads nothing on a
+timer; a ring during a drain leads to one more drain. A handler that throws sees its page
 again, so handlers must survive running twice on the same record.
 
 For a view that wants the newest records rather than the next ones, `tail()`
@@ -80,8 +84,10 @@ first. Around that the client does what a page left open all day needs:
 - **A second subscriber gets the value at once.** The client keeps the last value
   of every topic, and `latest()` and `values()` read it.
 - **A fresh token before the old one runs out.** The node ends a session when its
-  token expires. The client reconnects shortly before, with a new token and every
-  subscription sent again, and stays `online` while doing so.
+  token expires. Shortly before, the client hands the node a new token on the
+  open connection (MQTT 5 re-authentication), so nothing is subscribed again. A
+  node that does not offer that gets a new connection with the new token and
+  every subscription sent again. Either way the client stays `online`.
 - **Waits that grow after a drop**, jittered, each attempt with a fresh token.
 - **A word when the subscriptions go out again.** `onResubscribe()` fires once
   they have, on every new connection — where the node's retained delivery starts
@@ -107,10 +113,14 @@ if (ack.result_code !== 200) showRefusal(ack.message);
 It adds the correlation id and the expiry, subscribes to the acknowledgements
 before it sends, so an executor that answers at once is not missed, and matches
 the answer by its id wherever in the tree it arrives. The promise settles with
-the `_Ack` whatever its result code, and rejects with `CommandTimeout` when
-nobody answers in time (30 s by default, which is also the command's expiry).
-Offline, nothing is queued: a setpoint sent minutes late is a different
-setpoint.
+the `_Ack` whatever its result code. It rejects with `CommandNotSent` when the
+command never went out or the node refused it: nothing was carried out. It
+rejects with `CommandTimeout` when nobody answers in time (30 s by default,
+counted from the call, which is also the command's expiry). A timeout does not
+say the command was not carried out: the connection can drop after the command
+went out, and an answer sent while the client was away is not delivered again.
+Read the state the command changes to know. Offline, nothing is queued: a
+setpoint sent minutes late is a different setpoint.
 
 `publish()` sends a single record without waiting, and `newUlid()` makes ids
 that sort by the time they were made, as the node's own do.
@@ -138,16 +148,18 @@ change, and returns the function that ends that watch and no other. An alarm's
 name comes from the `_SystemElement` it hangs on, and its path is where a view
 jumps to.
 
-When the connection comes back — after a drop, and after the routine token
-renewal too — the node starts its retained delivery over, and an alarm that went
+When the connection comes back — after a drop, and after a token renewal that
+had to reconnect — the node starts its retained delivery over, and an alarm that went
 while the client was away leaves nothing behind to say so. `Alarms` therefore
 gives the set 750 ms to arrive again (`resyncMs`) and drops what did not come
 back: a view can be that much behind the node, but it never goes on showing an
 alarm that is over. It is a window, and a guess, because the node does not say
 where its retained delivery ends; `resyncMs: 0` turns the reconciliation off.
 
-`acknowledge()`, `silence(path, { minutes: 30 })` and `unsilence()` are
-`_CmdOperate` commands on the alarm's own path, each waiting for its `_Ack`. The
+`acknowledge()` sends a `_CmdAcknowledge`, and `silence(path, { minutes: 30 })`
+and `unsilence()` send `_CmdOperate`, each on the alarm's own path and each
+waiting for its `_Ack`. Quitting an alarm therefore needs an `acknowledge` grant,
+silencing an `operate` grant (see [security.md](security.md)). The
 note and the deadline ride in the payload's `command` object, where the contract
 keeps a verb's arguments. The client sends no identity: who quit an alarm is the
 node's word on the record, and the caller adds the note. A refusal — 300 and up — throws `AlarmRefused`

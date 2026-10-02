@@ -5,7 +5,45 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 )
+
+// UnknownGroupError is the problem for a group id this node holds no _Group
+// for. It is normal, not a fault: an identity provider puts its own roles
+// (offline_access, uma_authorization, default-roles-<realm>) and roles meant for
+// other systems into the same claim, and each simply grants nothing here.
+type UnknownGroupError struct{ ID string }
+
+func (e *UnknownGroupError) Error() string {
+	return fmt.Sprintf("group %s: this node holds no such group", e.ID)
+}
+
+// maxGroupNotices bounds GroupNotices' memory; past it, nothing is new.
+const maxGroupNotices = 4096
+
+// GroupNotices remembers which group ids were already reported, so a caller
+// that sees the same token on every request logs each id once.
+type GroupNotices struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+// First reports whether id has not been seen before, and remembers it.
+func (n *GroupNotices) First(id string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if _, ok := n.seen[id]; ok {
+		return false
+	}
+	if n.seen == nil {
+		n.seen = map[string]struct{}{}
+	}
+	if len(n.seen) >= maxGroupNotices {
+		return false
+	}
+	n.seen[id] = struct{}{}
+	return true
+}
 
 // GroupIndex resolves a group id to the grants its members hold. It projects
 // the _Group definitions that descended to this node, so a node can authorize a
@@ -51,7 +89,7 @@ func (g *GroupIndex) GrantsOf(id string) (grants []string, ok bool, err error) {
 	}
 	switch len(found) {
 	case 0:
-		return nil, false, fmt.Errorf("group %s: this node holds no such group", id)
+		return nil, false, &UnknownGroupError{ID: id}
 	case 1:
 		return match.Grants, true, nil
 	default:
