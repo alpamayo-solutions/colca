@@ -20,6 +20,10 @@ const Author = "colca-cursorwatch"
 // Reason is the _Finding.reason of a cursor that fell behind.
 const Reason = "cursor_lag"
 
+// StaleReason is the _Finding.reason of the node's finding about cursors that
+// stopped moving while their stream grew (see Stale).
+const StaleReason = "stale_cursors"
+
 // scanCap bounds how many records one check reads past a cursor looking for
 // the first one its consumer reads. A cursor far behind is scanned a slice per
 // check, from where the previous check stopped.
@@ -57,12 +61,44 @@ type Watchdog struct {
 	// After is how old a cursor's oldest unread record may get before the
 	// finding stands. 0 keeps the gauge but writes no finding.
 	After time.Duration
-	Log   *slog.Logger
+	// StaleAfter is how long a cursor may stand still while records wait past
+	// it before the node's stale_cursors finding names it. 0 writes none.
+	StaleAfter time.Duration
+	Log        *slog.Logger
 
 	cursors   map[key]*cursorState
 	published map[string]string // finding topic -> which cursors it named
 	adopted   bool
 	retry     bool
+	// staleDue is when the next cursor turns stale, -1 when none will.
+	staleDue time.Duration
+}
+
+// writesFindings reports whether the watchdog writes any finding at all.
+func (w *Watchdog) writesFindings() bool { return w.After > 0 || w.StaleAfter > 0 }
+
+// Stale reports whether a cursor stood still for after while its stream grew
+// past it: records wait beyond its position and its last advance is at least
+// after old. Such a cursor holds back retention whether or not anyone still
+// reads it. A cursor without a recorded advance is not stale (the pruner stamps
+// it on sight), and after <= 0 makes nothing stale.
+func Stale(c store.CursorInfo, head uint64, now time.Time, after time.Duration) bool {
+	return after > 0 && c.Position < head && c.LastAdvanceMS > 0 && now.Sub(time.UnixMilli(c.LastAdvanceMS)) >= after
+}
+
+// StaleFindingTopic is where the node's stale_cursors finding sits: on the node
+// itself, as the cursors it names may belong to nobody any more.
+func StaleFindingTopic(node string) string {
+	return uns.Prefix() + "_Finding/" + node + "/" + StaleReason
+}
+
+type staleCursor struct {
+	Cursor         string  `json:"cursor"`
+	Stream         string  `json:"stream"`
+	Position       uint64  `json:"position"`
+	LagRecords     uint64  `json:"lag_records"`
+	IdleS          float64 `json:"idle_s"`
+	ReadSinceStart bool    `json:"read_since_start"`
 }
 
 type cursorState struct {
@@ -95,7 +131,7 @@ func (w *Watchdog) Run(stop <-chan struct{}) {
 		changed := w.Store.BacklogChanges()
 		filters := w.Filters.changed.Changes()
 		w.Check(time.Now())
-		if w.retry || (w.After > 0 && !w.adopted) {
+		if w.retry || (w.writesFindings() && !w.adopted) {
 			timer := time.NewTimer(door.RetryDelay(nil, retryDelay))
 			select {
 			case <-stop:
@@ -145,8 +181,8 @@ func (w *Watchdog) Run(stop <-chan struct{}) {
 }
 
 func (w *Watchdog) nextDelay(now time.Time) time.Duration {
-	delay := time.Duration(-1)
-	if w.retry || (w.After > 0 && !w.adopted) {
+	delay := w.staleDue
+	if w.retry || (w.writesFindings() && !w.adopted) {
 		delay = time.Second
 	}
 	for k, state := range w.cursors {
@@ -170,15 +206,18 @@ func (w *Watchdog) Check(now time.Time) {
 		w.cursors = map[key]*cursorState{}
 		w.published = map[string]string{}
 	}
-	if !w.adopted && w.After > 0 {
+	if !w.adopted && w.writesFindings() {
 		w.adopted = w.adopt()
 	}
 	standing := map[string][]lagging{}
 	owners := map[string]string{}
 	seen := map[key]bool{}
+	var stale []staleCursor
+	w.staleDue = -1
 	for _, cur := range w.Store.Cursors() {
 		k := key{cur.Name, cur.Stream}
 		seen[k] = true
+		w.checkStale(cur, now, &stale)
 		age, offset := w.unreadAge(k, cur.Position, now)
 		if w.Gauges != nil {
 			w.Gauges.CursorUnreadAge(cur.Name, cur.Stream, age)
@@ -211,41 +250,61 @@ func (w *Watchdog) Check(now time.Time) {
 			}
 		}
 	}
-	if w.After <= 0 {
+	if !w.writesFindings() {
 		return
 	}
+	type wanted struct {
+		signature string
+		finding   func() map[string]any
+	}
+	findings := map[string]wanted{}
 	for topic, cursors := range standing {
 		slices.SortFunc(cursors, func(a, b lagging) int { return strings.Compare(a.Cursor+a.Stream, b.Cursor+b.Stream) })
 		names := make([]string, len(cursors))
 		for i, c := range cursors {
 			names[i] = c.Stream + ":" + c.Cursor
 		}
-		signature := strings.Join(names, ",")
-		if held, ok := w.published[topic]; ok && held == signature {
+		owner := owners[topic]
+		findings[topic] = wanted{strings.Join(names, ","), func() map[string]any { return w.finding(owner, cursors, now) }}
+	}
+	if len(stale) > 0 {
+		slices.SortFunc(stale, func(a, b staleCursor) int { return strings.Compare(a.Cursor+a.Stream, b.Cursor+b.Stream) })
+		names := make([]string, len(stale))
+		for i, c := range stale {
+			names[i] = c.Stream + ":" + c.Cursor
+		}
+		findings[StaleFindingTopic(w.NodeID)] = wanted{strings.Join(names, ","), func() map[string]any { return w.staleFinding(stale, now) }}
+	}
+	for topic, want := range findings {
+		if held, ok := w.published[topic]; ok && held == want.signature {
 			continue
 		}
-		payload, err := json.Marshal(w.finding(owners[topic], cursors, now))
+		payload, err := json.Marshal(want.finding())
 		if err != nil {
 			continue
 		}
 		if err := w.Publish(topic, payload); err != nil {
 			w.retry = true
-			w.logger().Warn("cursor lag finding not written", "topic", topic, "err", err)
+			w.logger().Warn("cursor finding not written", "topic", topic, "err", err)
 			continue
 		}
-		w.logger().Warn("a consumer stopped reading", "service", owners[topic], "cursors", signature)
-		w.published[topic] = signature
+		if topic == StaleFindingTopic(w.NodeID) {
+			w.logger().Warn("cursors stopped moving while their stream grew; they hold back retention", "cursors", want.signature)
+		} else {
+			w.logger().Warn("a consumer stopped reading", "service", owners[topic], "cursors", want.signature)
+		}
+		w.published[topic] = want.signature
 	}
 	for topic := range w.published {
-		if _, ok := standing[topic]; ok {
+		if _, ok := findings[topic]; ok {
 			continue
 		}
 		if err := w.Publish(topic, nil); err != nil {
 			w.retry = true
-			w.logger().Warn("cursor lag finding not retired", "topic", topic, "err", err)
+			w.logger().Warn("cursor finding not retired", "topic", topic, "err", err)
 			continue
 		}
-		w.logger().Info("a consumer caught up again", "topic", topic)
+		w.logger().Info("a cursor finding cleared", "topic", topic)
 		delete(w.published, topic)
 	}
 }
@@ -344,6 +403,45 @@ func (w *Watchdog) finding(owner string, cursors []lagging, now time.Time) map[s
 	}
 }
 
+// checkStale adds cur to stale when it is stale now, else moves staleDue to
+// when it would turn stale if it keeps standing still.
+func (w *Watchdog) checkStale(cur store.CursorInfo, now time.Time, stale *[]staleCursor) {
+	if w.StaleAfter <= 0 || cur.LastAdvanceMS <= 0 {
+		return
+	}
+	head := w.Store.NextOffset(cur.Stream)
+	if cur.Position >= head {
+		return
+	}
+	idle := now.Sub(time.UnixMilli(cur.LastAdvanceMS))
+	if !Stale(cur, head, now, w.StaleAfter) {
+		if due := w.StaleAfter - idle; w.staleDue < 0 || due < w.staleDue {
+			w.staleDue = due
+		}
+		return
+	}
+	_, gen := w.Filters.get(cur.Name, cur.Stream)
+	*stale = append(*stale, staleCursor{
+		Cursor: cur.Name, Stream: cur.Stream, Position: cur.Position, LagRecords: head - cur.Position,
+		IdleS: float64(int64(idle.Seconds()*10)) / 10, ReadSinceStart: gen != 0,
+	})
+}
+
+func (w *Watchdog) staleFinding(cursors []staleCursor, now time.Time) map[string]any {
+	return map[string]any{
+		"reason": StaleReason,
+		"summary": fmt.Sprintf("%d cursor(s) stood still for %s or longer while their stream grew; they hold back retention",
+			len(cursors), w.StaleAfter),
+		"observed_at":        float64(now.UnixMilli()) / 1000,
+		"suggested_severity": "warning",
+		"detail":             map[string]any{"cursors": cursors, "after_s": w.StaleAfter.Seconds()},
+		"remedy": "GET /backlog lists the cursors with their last ack. A cursor of a removed consumer is retired with " +
+			"POST /ack {\"cursor\":…,\"stream\":…,\"delete\":true}, by its owner or the admin. A live consumer that " +
+			"filters its fetch must ack the page's ack_offset also when nothing in it was its own. " +
+			"retention.streams.<stream>.ignore_cursors_after lets the pruner pass a stale cursor with a _StreamGap.",
+	}
+}
+
 // adopt takes over the findings a previous run left standing, so they are
 // retired when their cursor has caught up.
 func (w *Watchdog) adopt() bool {
@@ -355,7 +453,7 @@ func (w *Watchdog) adopt() bool {
 			return false
 		}
 		for _, entry := range entries {
-			if entry.WrittenBy == Author && strings.HasSuffix(entry.Topic, "/"+Reason) {
+			if entry.WrittenBy == Author && (strings.HasSuffix(entry.Topic, "/"+Reason) || entry.Topic == StaleFindingTopic(w.NodeID)) {
 				w.published[entry.Topic] = ""
 			}
 		}

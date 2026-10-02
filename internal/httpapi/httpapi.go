@@ -517,7 +517,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				writeJSON(w, 403, map[string]any{"error": "local service only"})
 				return
 			}
-			backlog(w, r, e.Store())
+			backlog(w, r, e, cfg.Cursors.EffectiveStaleAfter(), false)
 		}))
 
 	}
@@ -827,6 +827,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
 			}
+			by := "admin"
+			if c.entry != nil {
+				by = c.entry.Name
+			} else if c.human != nil {
+				by = c.human.Sub
+			}
+			slog.Default().Info("cursor retired", "cursor", in.Cursor, "stream", in.Stream, "by", by)
 			writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
 			return
 		}
@@ -1128,6 +1135,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 			// reg.Drain increments colca_drains_active itself.
 			writeJSON(w, http.StatusOK, map[string]any{"ulid": ulid, "offset": off, "status": uns.StatusDraining})
+		}))
+
+		// The admin's cursor inventory: every cursor without a prefix, for finding
+		// the ones a removed consumer left behind. POST /ack {"delete":true}
+		// retires one.
+		mux.HandleFunc("GET /backlog", adminFor(limitClassScan, scanPolicy, func(w http.ResponseWriter, r *http.Request) {
+			backlog(w, r, e, cfg.Cursors.EffectiveStaleAfter(), true)
 		}))
 
 		mux.HandleFunc("GET /enroll", adminFor(limitClassScan, scanPolicy, func(w http.ResponseWriter, r *http.Request) {

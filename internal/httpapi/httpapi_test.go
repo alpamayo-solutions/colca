@@ -2877,3 +2877,48 @@ func TestABatchPublishJudgesEachRecordAndAppendsTheAdmittedOnesTogether(t *testi
 		t.Fatalf("an empty batch = %d, want 400", rec.Code)
 	}
 }
+
+// The stale_cursors finding sits on the node itself and passes the schema the
+// node really runs; retiring the stale cursor retires it.
+func TestAStaleCursorsFindingIsAcceptedAndRetiredWithTheCursor(t *testing.T) {
+	a := newAPI(t)
+	tbl, err := contracts.Load(contractstest.GeneratedBundlePath(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.eng.SetContracts(tbl)
+	w := &cursorwatch.Watchdog{Store: a.st, Filters: a.eng.CursorFilters(), Owners: a.reg, Elements: a.eng.Elements(),
+		NodeID: "n-test", StaleAfter: time.Hour, Publish: func(topic string, payload []byte) error {
+			_, err := a.eng.IngestAdminAttributed(topic, payload, engine.Attribution{
+				WrittenBy: cursorwatch.Author, ActorID: cursorwatch.Author, ActorLabel: cursorwatch.Author, ActorKind: "system"})
+			return err
+		}}
+	if _, _, err := a.st.Append("commands", []store.Record{{Topic: "a", Payload: []byte(`1`)}, {Topic: "b", Payload: []byte(`2`)}}); err != nil {
+		t.Fatal(err)
+	}
+	cursor := "c/hygentile-app/reconcile"
+	a.st.CursorAck(cursor, "commands", 2)
+	w.Check(time.Now().Add(2 * time.Hour))
+	finding := func() string {
+		entries, err := a.st.KVScan("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if strings.Contains(e.Topic, "/_Finding/") {
+				return e.Topic
+			}
+		}
+		return ""
+	}
+	if got, want := finding(), "colca/v1/_Finding/n-test/"+cursorwatch.StaleReason; got != want {
+		t.Fatalf("finding at %q, want %q", got, want)
+	}
+	if err := a.st.CursorDelete(cursor, "commands"); err != nil {
+		t.Fatal(err)
+	}
+	w.Check(time.Now().Add(3 * time.Hour))
+	if got := finding(); got != "" {
+		t.Fatalf("finding still standing after the cursor was retired: %s", got)
+	}
+}
