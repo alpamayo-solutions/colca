@@ -114,7 +114,7 @@ func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, lim
 	// head and the index entries written with them.
 	snap := s.db.NewSnapshot()
 	s.mu.Unlock()
-	defer snap.Close()
+	defer func() { _ = snap.Close() }()
 	if from < covered {
 		return s.ReadRecordsBounded(ctx, stream, from, limit, maxScan, filter)
 	}
