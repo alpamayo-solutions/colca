@@ -315,7 +315,7 @@ func TestFetchFiltersMetricsByRepeatedSignalIDAndAdvancesPastSkippedRecords(t *t
 	}
 }
 
-func TestFetchWithASignalFilterScansABoundedPageAndAckingReachesTheMatch(t *testing.T) {
+func TestFetchWithASignalFilterReachesASparseMatchInOnePage(t *testing.T) {
 	a := newAPI(t)
 	skipped := 2*fetchScanBudget + 500
 	recs := make([]store.Record, 0, skipped+1)
@@ -327,29 +327,15 @@ func TestFetchWithASignalFilterScansABoundedPageAndAckingReachesTheMatch(t *test
 		t.Fatal(err)
 	}
 
-	fetch := func() map[string]any {
-		t.Helper()
-		resp, out := req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=sparse&max=10&signal_id=wanted", "tok", nil)
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("fetch = %d: %v", resp.StatusCode, out)
-		}
-		return out
-	}
-	out := fetch()
-	if len(out["records"].([]any)) != 0 || out["next"] != float64(fetchScanBudget+1) {
-		t.Fatalf("first page = %v, want no records and next %d (one scan budget)", out, fetchScanBudget+1)
-	}
-	pages := 1
-	for len(out["records"].([]any)) == 0 {
-		req(t, client(nil), "POST", a.url+"/ack", "tok", map[string]any{"cursor": "sparse", "stream": "metrics", "offset": out["next"].(float64) - 1})
-		out = fetch()
-		if pages++; pages > 5 {
-			t.Fatalf("no match after %d pages: %v", pages, out)
-		}
+	// More than two scan budgets of other records stand before the match. The
+	// signal index skips them, so the first page holds it and next is the head.
+	resp, out := req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=sparse&max=10&signal_id=wanted", "tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fetch = %d: %v", resp.StatusCode, out)
 	}
 	records := out["records"].([]any)
-	if len(records) != 1 || records[0].(map[string]any)["offset"] != float64(skipped+1) || pages != 3 {
-		t.Fatalf("records = %v after %d pages, want the match at offset %d on page 3", records, pages, skipped+1)
+	if len(records) != 1 || records[0].(map[string]any)["offset"] != float64(skipped+1) || out["next"] != float64(skipped+2) {
+		t.Fatalf("first page = %v, want the match at offset %d and next %d", out, skipped+1, skipped+2)
 	}
 }
 
