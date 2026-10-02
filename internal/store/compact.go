@@ -85,6 +85,9 @@ func (s *Store) Compact(stream string) (CompactStats, error) {
 		key := streamKey(stream, off)
 		shed += uint64(len(key)) + e.size
 		_ = b.Delete(key, nil)
+		if e.SignalID != "" {
+			_ = b.Delete(sigKey(stream, e.SignalID, off), nil)
+		}
 	}); err != nil {
 		return st, err
 	}

@@ -59,9 +59,10 @@ func (s *Store) EvictRecords(stream string, from, maxScan uint64, doomed func(to
 		return st, err
 	}
 	var (
-		keys    [][]byte
-		shed    uint64
-		scanned uint64
+		keys      [][]byte
+		indexKeys [][]byte // the signal index entries of the doomed records
+		shed      uint64
+		scanned   uint64
 	)
 	for iter.First(); iter.Valid(); iter.Next() {
 		off, ok := offsetOf(iter.Key())
@@ -83,6 +84,9 @@ func (s *Store) EvictRecords(stream string, from, maxScan uint64, doomed func(to
 			continue
 		}
 		keys = append(keys, append([]byte(nil), iter.Key()...))
+		if e.SignalID != "" {
+			indexKeys = append(indexKeys, sigKey(stream, e.SignalID, off))
+		}
 		shed += uint64(len(iter.Key())) + uint64(len(iter.Value()))
 	}
 	if err := iter.Error(); err != nil {
@@ -104,7 +108,7 @@ func (s *Store) EvictRecords(stream string, from, maxScan uint64, doomed func(to
 	}
 	b := s.db.NewBatch()
 	defer b.Close()
-	for _, key := range keys {
+	for _, key := range append(keys, indexKeys...) {
 		if err := b.Delete(key, nil); err != nil {
 			return st, err
 		}

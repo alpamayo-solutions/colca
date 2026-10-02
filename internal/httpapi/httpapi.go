@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -744,7 +745,16 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if q.Get("tail") == "" {
 			e.CursorFilters().Remember(cursor, stream, filter)
 		}
-		recs, next, err := e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, filter)
+		var recs []store.StoredRecord
+		var next uint64
+		var err error
+		if hasSignalFilter {
+			// The signal index reads only the wanted signals' records, so a
+			// consumer of a few signals does not pay for the whole stream.
+			recs, next, err = e.Store().ReadSignals(r.Context(), stream, from, limit, fetchScanBudget, slices.Collect(maps.Keys(signalSet)), filter)
+		} else {
+			recs, next, err = e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, filter)
+		}
 		if r.Context().Err() != nil {
 			return // the caller is gone; nobody reads the page
 		}

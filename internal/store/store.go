@@ -123,6 +123,7 @@ type Store struct {
 	next           map[string]uint64        // next offset per stream
 	lwm            map[string]uint64        // low-water mark per stream: lowest retained offset
 	bytes          map[string]uint64        // live logical bytes per stream (stream key + encoded value)
+	sigFrom        map[string]uint64        // first offset per stream the signal index covers (see sigindex.go)
 	// appendApply is Pebble's atomic apply boundary. Keeping the bound method
 	// injectable lets tests prove an apply failure changes neither stream nor KV.
 	appendApply func(*pebble.Batch, *pebble.WriteOptions) error
@@ -145,6 +146,7 @@ func Open(dir string) (*Store, error) {
 	}
 	s := &Store{
 		db: db, health: health, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{},
+		sigFrom:     map[string]uint64{},
 		appendApply: db.Apply,
 	}
 	for _, stream := range streams {
@@ -186,6 +188,10 @@ func Open(dir string) (*Store, error) {
 	}
 	if added > 0 || removed > 0 {
 		slog.Info("store: KV contract index reconciled", "added", added, "removed", removed)
+	}
+	if err := s.openSigIndex(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open the signal index: %w", err)
 	}
 	if s.id, err = loadOrMintStoreID(db); err != nil {
 		_ = db.Close()
@@ -299,13 +305,22 @@ func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (u
 	return binary.BigEndian.Uint64(v), nil
 }
 
-// Close marks the contract index complete (see kvIndexCleanKey) and closes the
-// database.
+// Close marks the contract index and the signal index complete (see
+// kvIndexCleanKey and sigIndexCleanKey) and closes the database.
 func (s *Store) Close() error {
 	s.mu.Lock()
-	clean := s.kvIndexCleanValue()
+	kvClean, sigClean := s.kvIndexCleanValue(), s.sigIndexCleanValue()
 	s.mu.Unlock()
-	if err := s.db.Set(kvIndexCleanKey, clean, pebble.Sync); err != nil {
+	b := s.db.NewBatch()
+	err := b.Set(kvIndexCleanKey, kvClean, nil)
+	if err == nil {
+		err = b.Set(sigIndexCleanKey, sigClean, nil)
+	}
+	if err == nil {
+		err = b.Commit(pebble.Sync)
+	}
+	_ = b.Close()
+	if err != nil {
 		_ = s.db.Close()
 		return err
 	}
@@ -353,13 +368,14 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 	if originOffset == 0 {
 		originOffset = off
 	}
+	signalID := uns.MetricSignalID(rec.Topic, rec.Payload)
 	val, err := json.Marshal(recEnc{
 		SourceLocalOnly: rec.SourceLocalOnly,
 		Topic:           rec.Topic, Payload: rec.Payload, TS: rec.TS,
 		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
 		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, OriginOffset: originOffset,
 		Door:     rec.Door,
-		SignalID: uns.MetricSignalID(rec.Topic, rec.Payload),
+		SignalID: signalID,
 	})
 	if err != nil {
 		return 0, err
@@ -367,6 +383,14 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 	key := streamKey(stream, off)
 	if err := b.Set(key, val, nil); err != nil {
 		return 0, err
+	}
+	if signalID != "" {
+		// The signal index entry is written and deleted with its record (see
+		// sigindex.go). b/{stream} does not count it: that counter is the
+		// stream's own bytes, which retention budgets against.
+		if err := b.Set(sigKey(stream, signalID, off), nil, nil); err != nil {
+			return 0, err
+		}
 	}
 	if rec.KVPath != "" {
 		if rec.Delete {
@@ -595,14 +619,7 @@ func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint
 			return nil, next, err
 		}
 		next = off + 1
-		record := StoredRecord{
-			SourceLocalOnly: e.SourceLocalOnly,
-			Offset:          off, OriginOffset: originOffset(e.OriginOffset, off),
-			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
-			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
-			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
-			Door: e.Door, SignalID: e.SignalID,
-		}
+		record := storedRecord(off, e)
 		if filter != nil && !filter(record) {
 			continue
 		}
@@ -636,14 +653,7 @@ func (s *Store) FirstMatch(stream string, from, upTo uint64, filter func(StoredR
 		if err := json.Unmarshal(iter.Value(), &e); err != nil {
 			return StoredRecord{}, false, err
 		}
-		record := StoredRecord{
-			SourceLocalOnly: e.SourceLocalOnly,
-			Offset:          off, OriginOffset: originOffset(e.OriginOffset, off),
-			Topic: e.Topic, Payload: e.Payload, TS: e.TS,
-			WrittenBy: e.WrittenBy, ActorID: e.ActorID,
-			ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
-			Door: e.Door, SignalID: e.SignalID,
-		}
+		record := storedRecord(off, e)
 		if filter == nil || filter(record) {
 			return record, true, nil
 		}
@@ -1145,6 +1155,8 @@ func (s *Store) writeJournal(b *pebble.Batch, stream string, span PruneSpan) err
 type pruneStats struct {
 	pruned, shed    uint64
 	firstTS, lastTS int64
+	// signals are the signal ids the prefix carries: their index ranges go with it.
+	signals map[string]struct{}
 }
 
 // scanDoomed accumulates the accounting stats of the prefix [from, upTo).
@@ -1171,6 +1183,12 @@ func (s *Store) scanDoomed(stream string, from, upTo uint64) (pruneStats, error)
 		}
 		st.shed += uint64(len(iter.Key()) + len(iter.Value()))
 		st.pruned++
+		if e.SignalID != "" {
+			if st.signals == nil {
+				st.signals = map[string]struct{}{}
+			}
+			st.signals[e.SignalID] = struct{}{}
+		}
 	}
 	if err := iter.Close(); err != nil {
 		return st, err
@@ -1265,6 +1283,11 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	defer b.Close()
 	if err := b.DeleteRange(streamKey(stream, lwm), streamKey(stream, upTo), nil); err != nil {
 		return 0, err
+	}
+	for signalID := range stats.signals {
+		if err := b.DeleteRange(sigKey(stream, signalID, lwm), sigKey(stream, signalID, upTo), nil); err != nil {
+			return 0, err
+		}
 	}
 	if err := b.Set(lwmKey(stream), be64(upTo), nil); err != nil {
 		return 0, err
@@ -1616,6 +1639,18 @@ func kvContractMatches(topic string, want map[string]bool) bool {
 		return false
 	}
 	return want[parsed.Contract]
+}
+
+// storedRecord is the record a reader sees: the stored encoding at its offset.
+func storedRecord(off uint64, e recEnc) StoredRecord {
+	return StoredRecord{
+		SourceLocalOnly: e.SourceLocalOnly,
+		Offset:          off, OriginOffset: originOffset(e.OriginOffset, off),
+		Topic: e.Topic, Payload: e.Payload, TS: e.TS,
+		WrittenBy: e.WrittenBy, ActorID: e.ActorID,
+		ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
+		Door: e.Door, SignalID: e.SignalID,
+	}
 }
 
 func originOffset(origin, local uint64) uint64 {
