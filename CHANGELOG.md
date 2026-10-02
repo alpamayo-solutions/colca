@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.27.0](https://github.com/alpamayo-solutions/colca/compare/v0.26.1...v0.27.0) (2026-10-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **contracts:** _SystemElement no longer carries external_asset_id or external_asset_id_type.
+
+### Features
+
+* **contracts:** decode every payload tolerantly, retire _SystemElement's external asset fields ([#140](https://github.com/alpamayo-solutions/colca/issues/140)) ([eb53db2](https://github.com/alpamayo-solutions/colca/commit/eb53db2a6071940dd909b5e57051e419a57bb656))
+* **cursors:** list cursors with their last ack and flag stale ones ([#144](https://github.com/alpamayo-solutions/colca/issues/144)) ([95fff62](https://github.com/alpamayo-solutions/colca/commit/95fff62035333a0a10c8c9d00f7cd1b0c2bdfe10))
+
+
+### Fixes
+
+* **contracts:** ship the semantic tags our own data models require ([#36](https://github.com/alpamayo-solutions/colca/issues/36)) ([fd9eeb6](https://github.com/alpamayo-solutions/colca/commit/fd9eeb62f267e496f41093e0996a683a3818d698))
+
+
+### Performance
+
+* **store:** index metric records by signal so a signal filter skips the rest ([#141](https://github.com/alpamayo-solutions/colca/issues/141)) ([9d289df](https://github.com/alpamayo-solutions/colca/commit/9d289df6de66b1701bbf0a090ba88331b8c39bcf)), closes [#126](https://github.com/alpamayo-solutions/colca/issues/126)
+
 ## [0.26.1](https://github.com/alpamayo-solutions/colca/compare/v0.26.0...v0.26.1) (2026-10-02)
 
 
