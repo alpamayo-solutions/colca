@@ -50,8 +50,12 @@ func (x *ElementIndex) Observe(contract, topic string, payload []byte) {
 func (x *ElementIndex) apply(path string, payload []byte) {
 	if old, ok := x.byPath[path]; ok {
 		// The position changed hands or was retired; keeping the old id would
-		// resolve a stale element to a live path.
-		delete(x.byID, old)
+		// resolve a stale element to a live path. An element that moved away
+		// already stands at its new path, which this must not forget: a move
+		// commits the new record before the old one's tombstone.
+		if x.byID[old] == path {
+			delete(x.byID, old)
+		}
 		delete(x.byPath, path)
 	}
 	if len(payload) == 0 {

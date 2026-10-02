@@ -49,6 +49,31 @@ func TestARenamedElementMovesInTheLoadedIndex(t *testing.T) {
 // Engine.IngestReplicated commits a batch before calling Observe, which is
 // why awaitElement in tests/integration_test.go waits on this index, not on
 // the KV. If the index ever re-scans on a miss, revisit awaitElement.
+// element/upsert commits a move as the record at its new path followed by the
+// tombstone at the old one. The tombstone retires the old position only: the
+// element still resolves, at its new path.
+func TestAMoveWhoseTombstoneArrivesLastKeepsTheElement(t *testing.T) {
+	f := newStore("n-edge1")
+	placed(f, "Craftcanfiller", "01HFILLER", "CraftCanFiller")
+	x := NewElementIndex(f)
+	if got, _ := x.PathOf("01HFILLER"); got != "Craftcanfiller" {
+		t.Fatalf("before the move PathOf = %q, want Craftcanfiller", got)
+	}
+
+	placed(f, "CraftCanFiller", "01HFILLER", "CraftCanFiller")
+	x.Observe("_SystemElement", "colca/v1/_SystemElement/n-edge1/CraftCanFiller",
+		f.records["colca/v1/_SystemElement/n-edge1/CraftCanFiller"])
+	f.records["colca/v1/_SystemElement/n-edge1/Craftcanfiller"] = nil
+	x.Observe("_SystemElement", "colca/v1/_SystemElement/n-edge1/Craftcanfiller", nil)
+
+	if got, ok := x.PathOf("01HFILLER"); !ok || got != "CraftCanFiller" {
+		t.Fatalf("after the move PathOf = %q %v, want CraftCanFiller", got, ok)
+	}
+	if _, ok := x.IDAt("Craftcanfiller"); ok {
+		t.Fatal("the old position still resolves")
+	}
+}
+
 func TestALoadedIndexDoesNotSeeAStoreWriteItWasNotToldAbout(t *testing.T) {
 	f := newStore("n-edge1")
 	placed(f, "line1", "01HLINE1", "Linie 1")
