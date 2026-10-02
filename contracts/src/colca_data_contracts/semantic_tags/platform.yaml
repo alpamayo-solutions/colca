@@ -66,6 +66,24 @@ tags:
   - {name: edge-execution-context, i18n_name: Edge execution context, applies_to: [signal], icon: data_object, data_type: json}
   - {name: execution-event-correction, i18n_name: Execution event correction, applies_to: [signal], icon: edit_note, data_type: json}
 
+  # -- Required by the data models this package ships --
+  #
+  # `machine` and the OEE models name these as the semantic type of a signal,
+  # so a deployment that assigns one of those models needs the tag to exist.
+  # They did not ship, so every deployment hand-created its own — six of them
+  # on one hub, each picking a glyph, all landing on the generic `category`,
+  # which is what an unclassified System Element wears. A signal then drew the
+  # same icon as its parent machine.
+  #
+  # `test_shipped_models_name_only_shipped_tags` keeps this list and the data
+  # models in step.
+  - {name: connectivity, i18n_name: Connectivity, applies_to: [signal], icon: link, data_type: boolean}
+  - {name: availability, i18n_name: Availability, applies_to: [signal], icon: schedule, quantity_kind: ratio, data_type: number}
+  - {name: performance, i18n_name: Performance, applies_to: [signal], icon: speed, quantity_kind: ratio, data_type: number}
+  - {name: quality-rate, i18n_name: Quality rate, applies_to: [signal], icon: check_circle, quantity_kind: ratio, data_type: number}
+  - {name: oee, i18n_name: OEE, applies_to: [signal], icon: trending_up, quantity_kind: ratio, data_type: number}
+  - {name: part-counter, i18n_name: Part counter, applies_to: [signal], icon: numbers, data_type: integer}
+
   # -- Constants only. Nameplate facts: a unit and a quantity,
   #    no acquisition binding. This is what Constant exists for.
   - {name: rated-power, i18n_name: Rated power, applies_to: [constant], icon: offline_bolt, quantity_kind: power, data_type: number}
