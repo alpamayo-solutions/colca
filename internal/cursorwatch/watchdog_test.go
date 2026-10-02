@@ -276,3 +276,115 @@ func TestWatchdogWakesOnAppendAndAck(t *testing.T) {
 		t.Fatal("ack missed")
 	}
 }
+
+var staleTopic = "colca/v1/_Finding/NODE/" + StaleReason
+
+// stale is the fixture with the stale_cursors finding on and cursor_lag off,
+// so each test sees only the finding it is about.
+func staleFixture(t *testing.T) *fixture {
+	f := newFixture(t)
+	f.w.After = 0
+	f.w.StaleAfter = 24 * time.Hour
+	return f
+}
+
+func TestACursorStandingStillWhileItsStreamGrowsIsNamedUntilRetired(t *testing.T) {
+	f := staleFixture(t)
+	// A removed consumer's cursor: nobody fetches it, its stream grows past it.
+	last := f.append(t, "commands", "colca/v1/_CmdSet/NODE/a")
+	f.st.CursorAck("c/hygentile-app/reconcile", "commands", last+1)
+	f.append(t, "commands", "colca/v1/_CmdSet/NODE/b", "colca/v1/_CmdSet/NODE/c")
+	acked := time.Now()
+
+	f.w.Check(acked.Add(23 * time.Hour))
+	if len(f.writes) != 0 {
+		t.Fatalf("finding before stale_after: %v", f.writes)
+	}
+	if got := f.w.nextDelay(acked.Add(23 * time.Hour)); got <= 0 || got > time.Hour+time.Minute {
+		t.Fatalf("stale deadline = %v, want about 1h", got)
+	}
+
+	f.w.Check(acked.Add(25 * time.Hour))
+	f.w.Check(acked.Add(26 * time.Hour))
+	if len(f.writes) != 1 || f.writes[0].topic != staleTopic {
+		t.Fatalf("want one finding at %s, got %v", staleTopic, f.writes)
+	}
+	var finding struct {
+		Reason string `json:"reason"`
+		Detail struct {
+			Cursors []staleCursor `json:"cursors"`
+		} `json:"detail"`
+	}
+	if err := json.Unmarshal(f.writes[0].payload, &finding); err != nil {
+		t.Fatal(err)
+	}
+	c := finding.Detail.Cursors
+	if finding.Reason != StaleReason || len(c) != 1 || c[0].Cursor != "c/hygentile-app/reconcile" ||
+		c[0].LagRecords != 2 || c[0].ReadSinceStart {
+		t.Fatalf("finding = %+v", finding)
+	}
+
+	if err := f.st.CursorDelete("c/hygentile-app/reconcile", "commands"); err != nil {
+		t.Fatal(err)
+	}
+	f.w.Check(acked.Add(27 * time.Hour))
+	if len(f.writes) != 2 || f.writes[1].topic != staleTopic || f.writes[1].payload != nil {
+		t.Fatalf("want the finding retired once the cursor is gone, got %v", f.writes)
+	}
+}
+
+func TestACaughtUpCursorOnAQuietStreamIsNotStale(t *testing.T) {
+	f := staleFixture(t)
+	f.read(t, "c/dataops-line/entities", "entities")
+	f.w.Check(time.Now().Add(30 * 24 * time.Hour))
+	if len(f.writes) != 0 {
+		t.Fatalf("a cursor at the head raised a finding: %v", f.writes)
+	}
+	if got := f.w.nextDelay(time.Now()); got != -1 {
+		t.Fatalf("idle deadline = %v, want none", got)
+	}
+}
+
+func TestStaleAfterZeroWritesNoStaleFinding(t *testing.T) {
+	f := staleFixture(t)
+	f.w.StaleAfter = 0
+	f.read(t, "c/dataops-line/entities", "entities")
+	f.append(t, "entities", "colca/v1/_ServiceDetails/NODE/x")
+	f.w.Check(time.Now().Add(30 * 24 * time.Hour))
+	if len(f.writes) != 0 {
+		t.Fatalf("stale_after 0 wrote a finding: %v", f.writes)
+	}
+}
+
+// A live consumer that filters out what grows its stream and never acks past
+// it is stale too: it holds retention just like a dead one.
+func TestAFilteredConsumerThatDoesNotAckPastSkippedRecordsIsStale(t *testing.T) {
+	f := staleFixture(t)
+	f.read(t, "c/dataops-line/entities", "entities")
+	f.w.Filters.Remember("c/dataops-line/entities", "entities", func(r store.StoredRecord) bool {
+		return strings.Contains(r.Topic, "/_Signal/")
+	})
+	f.append(t, "entities", "colca/v1/_ServiceDetails/NODE/x")
+	f.w.Check(time.Now().Add(25 * time.Hour))
+	if len(f.writes) != 1 || f.writes[0].topic != staleTopic {
+		t.Fatalf("want the stale finding, got %v", f.writes)
+	}
+	if !strings.Contains(string(f.writes[0].payload), `"read_since_start":true`) {
+		t.Fatalf("finding does not say the cursor is read: %s", f.writes[0].payload)
+	}
+}
+
+func TestAStaleFindingLeftByTheLastRunIsRetired(t *testing.T) {
+	f := staleFixture(t)
+	_, _, err := f.st.Append("entities", []store.Record{{
+		Topic: staleTopic, Payload: []byte(`{"reason":"stale_cursors"}`), TS: f.now.UnixMilli(),
+		WrittenBy: Author, KVPath: StaleReason, KVNode: "NODE",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.w.Check(time.Now())
+	if len(f.writes) != 1 || f.writes[0].topic != staleTopic || f.writes[0].payload != nil {
+		t.Fatalf("want the old finding retired, got %v", f.writes)
+	}
+}

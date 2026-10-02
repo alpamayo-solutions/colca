@@ -60,6 +60,14 @@ func (f *Filters) Remember(cursor, stream string, filter Filter) {
 	f.changed.Notify()
 }
 
+// ReadSinceStart reports whether the cursor fetched since the node started. One
+// that did not is likely abandoned: every live consumer fetches when it drains
+// on reconnect.
+func (f *Filters) ReadSinceStart(cursor, stream string) bool {
+	_, gen := f.get(cursor, stream)
+	return gen != 0
+}
+
 // get returns the cursor's filter and a generation that changes whenever a new
 // filter is remembered; gen 0 means the cursor never fetched since start.
 func (f *Filters) get(cursor, stream string) (Filter, uint64) {

@@ -206,6 +206,21 @@ type Cursors struct {
 	// when absent; 0 keeps the colca_cursor_unread_age_seconds gauge and writes
 	// no finding.
 	LagAlarmAfter *Duration `yaml:"lag_alarm_after"`
+	// StaleAfter is how long a cursor may stand still while records wait past
+	// it before the node's stale_cursors finding names it, whether or not
+	// anyone still reads it. 24h when absent; 0 writes no finding.
+	StaleAfter *Duration `yaml:"stale_after"`
+}
+
+// defaultStaleAfter is cursors.stale_after when absent.
+const defaultStaleAfter = 24 * time.Hour
+
+// EffectiveStaleAfter returns the threshold: 24h when absent.
+func (c Cursors) EffectiveStaleAfter() time.Duration {
+	if c.StaleAfter == nil {
+		return defaultStaleAfter
+	}
+	return time.Duration(*c.StaleAfter)
 }
 
 // defaultLagAlarmAfter is cursors.lag_alarm_after when absent.
@@ -222,6 +237,9 @@ func (c Cursors) EffectiveLagAlarmAfter() time.Duration {
 func (c Cursors) validate() error {
 	if c.LagAlarmAfter != nil && time.Duration(*c.LagAlarmAfter) < 0 {
 		return fmt.Errorf("config: cursors.lag_alarm_after must not be negative, got %s", time.Duration(*c.LagAlarmAfter))
+	}
+	if c.StaleAfter != nil && time.Duration(*c.StaleAfter) < 0 {
+		return fmt.Errorf("config: cursors.stale_after must not be negative, got %s", time.Duration(*c.StaleAfter))
 	}
 	return nil
 }

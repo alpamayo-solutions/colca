@@ -954,3 +954,32 @@ func TestBlobGCValidationRejectsNegativeDurations(t *testing.T) {
 		}
 	}
 }
+
+// cursors.stale_after: 24h when absent, an explicit 0 turns the stale_cursors
+// finding off, a negative value is refused.
+func TestCursorsStaleAfterThroughLoad(t *testing.T) {
+	load := func(body string) (*Config, error) {
+		doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nkey_file: /keys/edge1.key\n" + body
+		p := filepath.Join(t.TempDir(), "c.yaml")
+		if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(p)
+	}
+	for body, want := range map[string]time.Duration{
+		"":                              24 * time.Hour,
+		"cursors:\n  stale_after: 0\n":  0,
+		"cursors:\n  stale_after: 6h\n": 6 * time.Hour,
+	} {
+		c, err := load(body)
+		if err != nil {
+			t.Fatalf("%q: %v", body, err)
+		}
+		if got := c.Cursors.EffectiveStaleAfter(); got != want {
+			t.Fatalf("%q: stale_after = %s, want %s", body, got, want)
+		}
+	}
+	if _, err := load("cursors:\n  stale_after: -1h\n"); err == nil || !strings.Contains(err.Error(), "cursors.stale_after") {
+		t.Fatalf("negative stale_after: err = %v", err)
+	}
+}

@@ -1682,8 +1682,9 @@ func (s *Store) DiskMetrics() DiskMetrics {
 	}
 }
 
-// CursorPositions reads only selected cursor-name prefixes, without per-cursor
-// liveness lookups. Throughput control needs positions, not the full inventory.
+// CursorPositions reads only selected cursor-name prefixes, each with its
+// last-advance time (one point lookup per cursor). An empty prefix selects every
+// cursor. More than limit cursors is an error, never a truncated list.
 func (s *Store) CursorPositions(prefixes []string, limit int) ([]CursorInfo, error) {
 	var out []CursorInfo
 	seen := map[string]bool{}
@@ -1701,7 +1702,11 @@ func (s *Store) CursorPositions(prefixes []string, limit int) ([]CursorInfo, err
 				continue
 			}
 			seen[key] = true
-			out = append(out, CursorInfo{Name: key[:sep], Stream: key[sep+1:], Position: binary.BigEndian.Uint64(iter.Value())})
+			name, stream := key[:sep], key[sep+1:]
+			out = append(out, CursorInfo{
+				Name: name, Stream: stream, Position: binary.BigEndian.Uint64(iter.Value()),
+				LastAdvanceMS: int64(s.readU64(ctKey(name, stream), 0)), //nolint:gosec // stored bit for bit
+			})
 			if len(out) > limit {
 				iter.Close()
 				return nil, fmt.Errorf("too many selected cursors")

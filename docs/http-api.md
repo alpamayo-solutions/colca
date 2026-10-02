@@ -22,7 +22,8 @@ A caller is one of:
 | `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"error":"…"},…]}` |
 | `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N}` |
 | `GET /watch` | machine, service, person, admin | `?stream=S&stream=S2&interval_ms=100` | NDJSON, one line per change: `{"streams":["S"],"next":{"S":N}}` |
-| `POST /ack` | owner of the cursor, admin | `{"cursor":"NAME","stream":"S","offset":N}` | `{"moved":true}` |
+| `POST /ack` | owner of the cursor, admin | `{"cursor":"NAME","stream":"S","offset":N}`, or `{"cursor":"NAME","stream":"S","delete":true}` to retire it | `{"moved":true}` or `{"deleted":true}` |
+| `GET /backlog` | local service (`?prefix=` required), admin | `?prefix=c/projector/` | `{"queues":[{"cursor":"…","stream":"S","position":N,"head":N,"lag_records":N,"last_ack_ms":T,"stale":false,"read_since_start":true}]}` |
 | `GET /kv` | machine, service, person, admin | `?prefix=P&max=1000&after=TOKEN&contract=_Signal&depth=1` | `{"entries":[{"path":"…","node_id":"…","topic":"…","payload":{…},"ts":T,"offset":N}],"next":"TOKEN"}` |
 | `GET /self` | local service | | the service's registry entry, limits, `standalone_since` and `standalone_ready` |
 | `POST /standalone/complete` | local service on a standalone node | | finish the identity handover; returns its durable issuance cutoff |
@@ -135,6 +136,30 @@ records waiting unseen. The node watches every cursor instead:
 - Only a cursor fetched since the node started raises a finding. A cursor
   nobody fetches is abandoned (an old buffer generation, a renamed consumer):
   the gauge and `colca_retention_blocked_by_cursor` show it. Retire it.
+- A cursor that stood still for `cursors.stale_after` (default 24 h) while
+  records wait past it is named in the node's `_Finding/{node}/stale_cursors`,
+  read or not: it holds back retention either way. The finding is retired once
+  no cursor is stale.
+
+### Cursors that nobody reads
+
+A consumer that is removed leaves its cursors behind, and every cursor protects
+its stream from the pruner. Nothing removes them on its own.
+
+- **List.** `GET /backlog` with the admin token, without a prefix, lists every
+  cursor; a local service lists by `prefix`. Each row has `last_ack_ms` (when
+  it last moved, `0` when unknown), `stale` (by `cursors.stale_after`) and
+  `read_since_start` (whether anyone fetched it since the node started).
+- **Retire.** `POST /ack {"cursor":…,"stream":…,"delete":true}` as the
+  cursor's owner or the admin. The node logs who retired it. A consumer that
+  fetches the cursor again starts it over at offset 1, or below the stream's
+  low-water mark with a gap.
+- **Expire.** `retention.streams.<stream>.ignore_cursors_after` lets the pruner
+  pass a cursor that has not moved for that long, with a `_StreamGap` record a
+  returning consumer sees. Off unless configured.
+- A live consumer that filters its fetch must ack the page's last scanned
+  offset (`next - 1`) also when the page held nothing of its own, or its cursor
+  stands still and turns stale.
 - A service subscribes to its own finding and fails its health check while it
   stands. chaski and `colca-historian` do so.
 
@@ -205,7 +230,8 @@ ownership rules. Fixed minimum spacing between drain starts can batch bursts;
 nonempty pages within a drain do not need an additional delay.
 
 `GET /backlog?prefix=c/projector/` on the same local door returns selected durable
-cursor positions, stream heads and `lag_records`. It is read-only. Values count
+cursor positions, stream heads and `lag_records`, with each cursor's
+`last_ack_ms`, `stale` and `read_since_start`. It is read-only. Values count
 outstanding offset distance (an upper bound after compaction), not bytes. Up to
 32 nonempty prefixes and 256 matching cursors are accepted; excess results fail
 instead of truncating away a potentially overloaded consumer. A missing expected
