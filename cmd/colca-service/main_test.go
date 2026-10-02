@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -226,5 +229,86 @@ func TestAnEmptyOrMalformedRegistrationListIsRefusedAtStartup(t *testing.T) {
 		`[{"mount":"","details":{"name":"x","service_type":"other"}}]`,
 	); err != nil {
 		t.Errorf("a well-formed list was refused: %v", err)
+	}
+}
+
+// ── the health surface ───────────────────────────────────────────────────────
+//
+// The image is distroless, so /healthz is the only thing a container
+// healthcheck can ask. Without it the container reports "Up" for its whole
+// life whether or not the refresh loop still turns.
+
+func TestHealthzAnswersOkAndNothingElseIsServed(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(healthMux())
+	defer server.Close()
+
+	response, err := server.Client().Get(server.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("/healthz = HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var health struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(body, &health); err != nil {
+		t.Fatalf("/healthz body %q: %v", body, err)
+	}
+	if !health.OK {
+		t.Errorf("/healthz body = %q", body)
+	}
+
+	// The endpoint is the whole surface: this process publishes through the
+	// door, it does not serve one.
+	other, err := server.Client().Get(server.URL + "/publish")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Body.Close()
+	if other.StatusCode != http.StatusNotFound {
+		t.Errorf("/publish = HTTP %d, want 404", other.StatusCode)
+	}
+}
+
+func TestTheHealthEndpointBindsAndStopsWithTheProcess(t *testing.T) {
+	// Not parallel: it binds a real port, the one a healthcheck would ask.
+	t.Setenv("HTTP_ADDR", "127.0.0.1:19092")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serve(ctx, os.Getenv("HTTP_ADDR"))
+	}()
+
+	client := &http.Client{Timeout: time.Second}
+	var response *http.Response
+	var err error
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		response, err = client.Get("http://127.0.0.1:19092/healthz")
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("nothing was listening on HTTP_ADDR: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("/healthz = HTTP %d", response.StatusCode)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the health server outlived the process context")
 	}
 }
