@@ -3,12 +3,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 )
 
 const (
@@ -138,6 +140,16 @@ func positiveID(name, raw string) (int, error) {
 	return id, nil
 }
 
+// lchown is a variable so a test can delete a file between the walk seeing it
+// and the chown reaching it.
+var lchown = func(root *os.Root, path string, uid, gid int) error {
+	return root.Lchown(path, uid, gid)
+}
+
+// chownTree hands every entry below dir to uid:gid. The service may already be
+// running on the volume (a second compose up re-runs this job), so an entry that
+// vanishes mid-walk is skipped, and one that already has the right owner is not
+// touched.
 func chownTree(dir string, uid, gid int) error {
 	// Walking through os.Root keeps a symlink from leading out of the volume.
 	root, err := os.OpenRoot(dir)
@@ -145,12 +157,34 @@ func chownTree(dir string, uid, gid int) error {
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	return fs.WalkDir(root.FS(), ".", func(path string, _ fs.DirEntry, walkErr error) error {
+	return fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			return vanished(path, walkErr)
 		}
-		return root.Lchown(path, uid, gid)
+		info, err := entry.Info()
+		if err != nil {
+			return vanished(path, err)
+		}
+		if ownedBy(info, uid, gid) {
+			return nil
+		}
+		return vanished(path, lchown(root, path, uid, gid))
 	})
+}
+
+// vanished drops a not-found error below the volume root: a live service deletes
+// files (compacted tables, rotated logs) while the walk runs. The root itself
+// must exist.
+func vanished(path string, err error) error {
+	if path != "." && errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func ownedBy(info fs.FileInfo, uid, gid int) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) == uid && int(stat.Gid) == gid
 }
 
 func stageTLS(certSource, keySource, targetDir string, uid, gid int) error {
