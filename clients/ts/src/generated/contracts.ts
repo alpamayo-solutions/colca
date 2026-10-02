@@ -8,6 +8,7 @@ export type Ack = {
   message?: string;
   performed_at?: null | number;
   result_code: number;
+  state_writes?: Record<string, unknown>[];
   [key: string]: unknown;
 };
 
@@ -192,7 +193,7 @@ export type ClockProgress = {
 export type Cmd = {
   command?: Record<string, unknown>;
   correlation_id: string;
-  created_at?: number;
+  created_at?: null | number;
   expires_at?: number;
   [key: string]: unknown;
 };
@@ -201,7 +202,7 @@ export type Cmd = {
 export type CmdAcknowledge = {
   command?: Record<string, unknown>;
   correlation_id: string;
-  created_at?: number;
+  created_at?: null | number;
   expires_at?: number;
   [key: string]: unknown;
 };
@@ -210,7 +211,7 @@ export type CmdAcknowledge = {
 export type CmdAdmin = {
   command?: Record<string, unknown>;
   correlation_id: string;
-  created_at?: number;
+  created_at?: null | number;
   expires_at?: number;
   [key: string]: unknown;
 };
@@ -219,7 +220,7 @@ export type CmdAdmin = {
 export type CmdConfigure = {
   command?: Record<string, unknown>;
   correlation_id: string;
-  created_at?: number;
+  created_at?: null | number;
   expires_at?: number;
   [key: string]: unknown;
 };
@@ -228,7 +229,7 @@ export type CmdConfigure = {
 export type CmdEdit = {
   command?: Record<string, unknown>;
   correlation_id: string;
-  created_at?: number;
+  created_at?: null | number;
   expected_versions: Record<string, unknown>;
   expires_at?: number;
   intent: Record<string, unknown>;
@@ -240,7 +241,7 @@ export type CmdEdit = {
 export type CmdMaintain = {
   command?: Record<string, unknown>;
   correlation_id: string;
-  created_at?: number;
+  created_at?: null | number;
   expires_at?: number;
   [key: string]: unknown;
 };
@@ -249,7 +250,7 @@ export type CmdMaintain = {
 export type CmdOperate = {
   command?: Record<string, unknown>;
   correlation_id: string;
-  created_at?: number;
+  created_at?: null | number;
   expires_at?: number;
   [key: string]: unknown;
 };
@@ -258,7 +259,7 @@ export type CmdOperate = {
 export type CmdParam = {
   command?: Record<string, unknown>;
   correlation_id: string;
-  created_at?: number;
+  created_at?: null | number;
   expires_at?: number;
   [key: string]: unknown;
 };
