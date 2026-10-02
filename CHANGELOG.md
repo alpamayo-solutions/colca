@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.1](https://github.com/alpamayo-solutions/colca/compare/v0.26.0...v0.26.1) (2026-10-02)
+
+
+### Fixes
+
+* **volume-init:** tolerate files vanishing during the chown walk ([#138](https://github.com/alpamayo-solutions/colca/issues/138)) ([06cd4e6](https://github.com/alpamayo-solutions/colca/commit/06cd4e66e13658dab851132add1cadf16e5061ec))
+
 ## [0.26.0](https://github.com/alpamayo-solutions/colca/compare/v0.25.0...v0.26.0) (2026-10-01)
 
 
