@@ -2,7 +2,6 @@ package engine
 
 import (
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -114,7 +113,8 @@ func (e *Engine) IngestClientBatch(identity string, records []BatchRecord) []Bat
 				case limit > 0 && uint64(len(item.record.Payload)) > limit:
 					results[item.index].Err = err
 				default:
-					results[item.index].Err = &StorageError{Err: fmt.Errorf("not written: another record of its append was refused (%v)", err)}
+					// Not wrapped: this record is not the oversized one.
+					results[item.index].Err = &StorageError{Err: errors.New("not written: another record of its append was refused (" + err.Error() + ")")}
 				}
 			}
 			continue
