@@ -136,6 +136,10 @@ type Store struct {
 // before the doors are listening; 0 leaves the store uncapped.
 func (s *Store) SetMaxRecordBytes(limit uint64) { s.maxRecordBytes = limit }
 
+// MaxRecordBytes is the ingress record cap, 0 when uncapped. A door uses it to
+// say which record of a refused append was too large.
+func (s *Store) MaxRecordBytes() uint64 { return s.maxRecordBytes }
+
 // Open opens or creates the store at dir and restores each stream's next offset,
 // low-water mark and byte counter, so offsets stay gapless across restarts.
 func Open(dir string) (*Store, error) {

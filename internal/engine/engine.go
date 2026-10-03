@@ -1290,8 +1290,9 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 	if err != nil {
 		if errors.Is(err, store.ErrRecordTooLarge) {
 			e.metrics.RecordRejected("too_large")
+			return Result{}, err
 		}
-		return Result{}, err
+		return Result{}, &StorageError{Err: err}
 	}
 	e.metrics.IngestRecord(streamName)
 	e.log.Debug("ingest", "stream", streamName, "offset", first, "topic", topic)

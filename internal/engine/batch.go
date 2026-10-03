@@ -97,11 +97,25 @@ func (e *Engine) IngestClientBatch(identity string, records []BatchRecord) []Bat
 		}
 		first, _, err := e.store.Append(stream, storeRecords)
 		if err != nil {
-			if errors.Is(err, store.ErrRecordTooLarge) {
+			tooLarge := errors.Is(err, store.ErrRecordTooLarge)
+			if tooLarge {
 				e.metrics.RecordRejected("too_large")
 			}
+			// The append is one write per stream: one record over the cap, or a
+			// failed write, keeps every record of the stream out. Only the
+			// oversized record is refused; the others are not written and may be
+			// sent again (StorageError).
+			limit := e.store.MaxRecordBytes()
 			for _, item := range batch {
-				results[item.index].Err = err
+				switch {
+				case !tooLarge:
+					results[item.index].Err = &StorageError{Err: err}
+				case limit > 0 && uint64(len(item.record.Payload)) > limit:
+					results[item.index].Err = err
+				default:
+					// Not wrapped: this record is not the oversized one.
+					results[item.index].Err = &StorageError{Err: errors.New("not written: another record of its append was refused (" + err.Error() + ")")}
+				}
 			}
 			continue
 		}
