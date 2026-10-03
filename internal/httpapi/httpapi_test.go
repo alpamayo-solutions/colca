@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1278,8 +1279,8 @@ func TestPublishOversizeRecordCountsRecordRejectedOnce(t *testing.T) {
 			"shrink padBytes so only Store.Append's cap, not MaxBytesReader, can fire", len(body))
 	}
 	resp, body2 := req(t, srv.Client(), "POST", srv.URL+"/publish", "tok", body)
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversize record = %d, want 413: %v", resp.StatusCode, body2)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge || body2["reason"] != engine.ReasonTooLarge {
+		t.Fatalf("oversize record = %d, want 413 reason too_large: %v", resp.StatusCode, body2)
 	}
 
 	if got := metricstest.Value(t, m, line) - before; got != 1 {
@@ -2920,5 +2921,92 @@ func TestAStaleCursorsFindingIsAcceptedAndRetiredWithTheCursor(t *testing.T) {
 	w.Check(time.Now().Add(3 * time.Hour))
 	if got := finding(); got != "" {
 		t.Fatalf("finding still standing after the cursor was retired: %s", got)
+	}
+}
+
+func postBatch(t *testing.T, h *localAPI, body string) []map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/publish/batch", strings.NewReader(body))
+	req.Header.Set("X-Colca-Service", "bridge")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /publish/batch = %d: %s", rec.Code, rec.Body)
+	}
+	var out struct {
+		Results []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Results
+}
+
+// Each refused record of a batch names its reason, so a publisher can tell a
+// verdict on the record from a write to send again. error stays as it was.
+func TestABatchPublishNamesTheReasonOfEachRefusal(t *testing.T) {
+	h := newLocalHandler(t)
+	results := postBatch(t, h, `{"records":[
+		{"topic":"colca/v1/_Metric/n-test/line/a","payload":{"v":1}},
+		{"topic":"colca/v1/_Metric/n-other/line/b","payload":{"v":2}},
+		{"topic":"colca/v1/_Metric/n-test/line/c","payload":{"v":"not a number"}},
+		{"topic":"colca/v1/_CmdParam/n-test/line/d","payload":{"correlation_id":"x"}},
+		{"topic":"elsewhere/e","payload":{"v":3}}
+	]}`)
+	if results[0]["offset"] == nil || results[0]["reason"] != nil {
+		t.Fatalf("record 0 must be stored without a reason: %v", results[0])
+	}
+	for i, want := range map[int]string{1: "node_id", 2: "validation", 3: "validation", 4: "grammar"} {
+		if results[i]["reason"] != want || results[i]["error"] == nil || results[i]["offset"] != nil {
+			t.Fatalf("record %d: want error with reason %s, got %v", i, want, results[i])
+		}
+	}
+}
+
+// One record over the cap keeps its whole stream's append out. Only that record
+// is too_large; the others were not written and are stored when sent again.
+func TestABatchPublishBlamesOnlyTheOversizedRecord(t *testing.T) {
+	h := newLocalHandler(t)
+	h.eng.Store().SetMaxRecordBytes(64)
+	big := strings.Repeat("x", 100)
+	results := postBatch(t, h, `{"records":[
+		{"topic":"colca/v1/_Metric/n-test/line/a","payload":{"v":1}},
+		{"topic":"colca/v1/_Metric/n-test/line/b","payload":{"v":2,"pad":"`+big+`"}}
+	]}`)
+	if results[0]["reason"] != engine.ReasonNotWritten || results[0]["offset"] != nil {
+		t.Fatalf("the record beside the oversized one: want not_written, got %v", results[0])
+	}
+	if results[1]["reason"] != engine.ReasonTooLarge {
+		t.Fatalf("the oversized record: want too_large, got %v", results[1])
+	}
+	again := postBatch(t, h, `{"records":[{"topic":"colca/v1/_Metric/n-test/line/a","payload":{"v":1}}]}`)
+	if again[0]["offset"] == nil {
+		t.Fatalf("a not_written record sent again must be stored: %v", again[0])
+	}
+}
+
+// POST /publish separates a refused record from one the store did not write:
+// 503 not_written is the node's failure and is sent again; 422 names the
+// rejection reason when there is one.
+func TestPublishRefusalStatusAndReason(t *testing.T) {
+	validation := &engine.RejectError{Reason: "validation", Err: errors.New("_Metric: field \"v\" must be a number")}
+	denied := &engine.RejectError{Reason: "write_denied", Denied: true, Err: errors.New("no write scope")}
+	tooLarge := fmt.Errorf("record 0: %w", store.ErrRecordTooLarge)
+	for _, tc := range []struct {
+		name   string
+		err    error
+		code   int
+		reason any
+	}{
+		{"validation", validation, http.StatusUnprocessableEntity, "validation"},
+		{"denied", denied, http.StatusForbidden, "write_denied"},
+		{"storage", &engine.StorageError{Err: errors.New("pebble: disk full")}, http.StatusServiceUnavailable, engine.ReasonNotWritten},
+		{"too large", tooLarge, http.StatusRequestEntityTooLarge, engine.ReasonTooLarge},
+		{"untyped", errors.New("admin publish must be colca/#"), http.StatusUnprocessableEntity, nil},
+	} {
+		code, body := publishRefusal(tc.err)
+		if code != tc.code || body["reason"] != tc.reason || body["error"] != tc.err.Error() {
+			t.Errorf("%s: got %d %v, want %d reason %v", tc.name, code, body, tc.code, tc.reason)
+		}
 	}
 }

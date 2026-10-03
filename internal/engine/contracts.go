@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/alpamayo-solutions/colca/internal/contracts"
+	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -33,6 +34,45 @@ func (r *RejectError) Is(target error) bool { return target == ErrDenied && r.De
 
 // ErrDenied is the sentinel authorization denials match via errors.Is.
 var ErrDenied = errors.New("denied")
+
+// ErrNotWritten is the sentinel a StorageError matches via errors.Is.
+var ErrNotWritten = errors.New("not written")
+
+// StorageError is an admitted record the store did not write: a failed append,
+// not a verdict on the record. Sending it again may succeed. Its message is the
+// store's; errors.Is(err, ErrNotWritten) identifies it. A record over the cap
+// is a verdict on the record and stays a plain store.ErrRecordTooLarge.
+type StorageError struct{ Err error }
+
+func (s *StorageError) Error() string { return s.Err.Error() }
+func (s *StorageError) Unwrap() error { return s.Err }
+
+// Is reports whether target is ErrNotWritten.
+func (s *StorageError) Is(target error) bool { return target == ErrNotWritten }
+
+// Door reasons beside the RejectError ones, for answers that name why a record
+// was not stored: the record exceeds the record cap, or the store did not write
+// it (see StorageError).
+const (
+	ReasonTooLarge   = "too_large"
+	ReasonNotWritten = "not_written"
+)
+
+// RefusalReason names why err kept a record out of the store, for a door's
+// answer: the RejectError reason, ReasonTooLarge, ReasonNotWritten for any other
+// store failure, or "" for an error that carries no reason.
+func RefusalReason(err error) string {
+	if r := ReasonOf(err); r != "" {
+		return r
+	}
+	if errors.Is(err, ErrNotWritten) {
+		return ReasonNotWritten
+	}
+	if errors.Is(err, store.ErrRecordTooLarge) {
+		return ReasonTooLarge
+	}
+	return ""
+}
 
 // reject counts the reason and returns the typed error; every door rejection
 // that can reach the MQTT wire goes through it.

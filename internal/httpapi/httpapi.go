@@ -469,23 +469,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 		}
 		if err != nil {
-			if errors.Is(err, store.ErrRecordTooLarge) {
-				// A record that fit the JSON envelope but exceeds the record cap once decoded.
-				// Store.Append finds it and the engine counts it, for MQTT and HTTP alike; the
-				// raw-body limit above returns early, so nothing is counted twice.
-				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": err.Error()})
-				return
-			}
-			// An authorization denial is a well-formed request refused, 403, like the other
-			// ownership checks on this door. Grammar, unknown contracts and validation
-			// failures are unacceptable content, 422.
-			var re *engine.RejectError
-			if errors.Is(err, engine.ErrDenied) {
-				errors.As(err, &re)
-				writeJSON(w, http.StatusForbidden, map[string]any{"error": err.Error(), "reason": re.Reason})
-				return
-			}
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error()})
+			code, body := publishRefusal(err)
+			writeJSON(w, code, body)
 			return
 		}
 		if res.Duplicate {
@@ -525,7 +510,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// request: {"records":[{"topic":…,"payload":…},…]}. Each is judged exactly as
 	// POST /publish judges it; the admitted ones are written in one append per
 	// stream. The answer lists one result per record, in order: {"offset":N} or
-	// {"error":…}. Commands and audit records are refused here.
+	// {"error":…, "reason":…}. reason is a colca_rejected_publishes_total reason
+	// (validation, write_denied, not_producer, …: a verdict on the record),
+	// too_large, or not_written (the store did not write an admitted record,
+	// because the append failed or another record of it was too large: send it
+	// again). Commands and audit records are refused here.
 	mux.HandleFunc("POST /publish/batch", authFor(limitClassWrite, writePolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		if c.admin || c.human != nil || c.entry == nil {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "a batch is published by a machine or service identity"})
@@ -564,6 +553,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		for i, res := range results {
 			if res.Err != nil {
 				out[i] = map[string]any{"error": res.Err.Error()}
+				if reason := engine.RefusalReason(res.Err); reason != "" {
+					out[i]["reason"] = reason
+				}
 				continue
 			}
 			accepted++
@@ -1182,4 +1174,33 @@ func readBody(r *http.Request) ([]byte, error) {
 		return nil, err
 	}
 	return raw, nil
+}
+
+// publishRefusal is the answer to a POST /publish the engine did not store: the
+// status and a body with the error and, when there is one, its reason.
+//
+//   - 413 too_large: the record exceeds the record cap. Store.Append finds it and
+//     the engine counts it, for MQTT and HTTP alike; the raw-body limit returns
+//     earlier, so nothing is counted twice.
+//   - 503 not_written: the record was admitted but the store did not write it.
+//     The node failed, not the request; send it again.
+//   - 403 with the denial reason: a well-formed request refused, like the other
+//     ownership checks on this door.
+//   - 422, with the rejection reason when the engine named one: grammar, unknown
+//     contracts and validation failures are unacceptable content.
+func publishRefusal(err error) (int, map[string]any) {
+	body := map[string]any{"error": err.Error()}
+	if reason := engine.RefusalReason(err); reason != "" {
+		body["reason"] = reason
+	}
+	switch {
+	case errors.Is(err, store.ErrRecordTooLarge):
+		return http.StatusRequestEntityTooLarge, body
+	case errors.Is(err, engine.ErrNotWritten):
+		return http.StatusServiceUnavailable, body
+	case errors.Is(err, engine.ErrDenied):
+		return http.StatusForbidden, body
+	default:
+		return http.StatusUnprocessableEntity, body
+	}
 }
