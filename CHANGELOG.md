@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.27.1](https://github.com/alpamayo-solutions/colca/compare/v0.27.0...v0.27.1) (2026-10-03)
+
+
+### Fixes
+
+* **engine:** carry a moved signal's value and a placed catalogue with the move ([#145](https://github.com/alpamayo-solutions/colca/issues/145)) ([e238971](https://github.com/alpamayo-solutions/colca/commit/e23897169df2d5676056aaed51531cafdee7cd37))
+* **httpapi:** name why a publish was refused and answer 503 when it was not written ([#147](https://github.com/alpamayo-solutions/colca/issues/147)) ([931239d](https://github.com/alpamayo-solutions/colca/commit/931239d57aadc2d715e55c3018ef9aa2734a16af))
+
 ## [0.27.0](https://github.com/alpamayo-solutions/colca/compare/v0.26.1...v0.27.0) (2026-10-02)
 
 
