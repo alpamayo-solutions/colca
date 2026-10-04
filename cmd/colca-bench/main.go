@@ -42,6 +42,17 @@ func main() {
 		usage()
 	}
 	scenario := os.Args[1]
+	if scenario == "node" {
+		// The fanout scenario's parent: colcad with a pprof listener.
+		if len(os.Args) != 3 {
+			usage()
+		}
+		if err := runProfiledNode(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, "colca-bench node:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	fs := flag.NewFlagSet(scenario, flag.ExitOnError)
 	machines := fs.Int("machines", 4, "concurrent MQTT publishers")
 	rate := fs.Int("rate", 10, "per-machine publish rate in Hz (live)")
@@ -53,6 +64,12 @@ func main() {
 	out := fs.String("out", defaultRecordPath(), "run-record JSONL file to append reports to")
 	results := fs.String("results", defaultRecordPath(), "run-record JSONL file to read (check)")
 	thresholds := fs.String("thresholds", "bench/thresholds.json", "thresholds file (check)")
+	children := fs.Int("children", 50, "child nodes replicating into one parent (fanout)")
+	childRate := fs.Float64("child-rate", 3, "records per second per child (fanout)")
+	warmup := fs.Duration("warmup", 90*time.Second, "longest wait for every child's first record (fanout)")
+	profileDir := fs.String("profile-dir", "", "save the parent's pprof profiles here (fanout)")
+	childDir := fs.String("child-dir", "", "put the children's stores here, e.g. on a RAM disk (fanout)")
+	protocol := fs.Bool("protocol-children", false, "run protocol-only children in-process instead of colcad processes (fanout)")
 	_ = fs.Parse(os.Args[2:])
 
 	if scenario == "check" {
@@ -73,6 +90,14 @@ func main() {
 		"catchup":     bench.RunCatchup,
 		"cardinality": bench.RunCardinality,
 		"footprint":   bench.RunFootprint,
+		"fanout": func(p bench.Params) (*bench.Report, error) {
+			self, err := os.Executable()
+			if err != nil {
+				return nil, err
+			}
+			return bench.RunFanout(bench.FanoutParams{Params: p, Children: *children, ChildRate: *childRate,
+				Warmup: *warmup, ProfileDir: *profileDir, ChildDir: *childDir, Protocol: *protocol, Self: self})
+		},
 	}
 	order := []string{scenario}
 	if scenario == "all" {
@@ -116,6 +141,6 @@ func runScenario(name string, run func(bench.Params) (*bench.Report, error), p b
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: colca-bench <ingest|live|catchup|cardinality|footprint|all|check> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: colca-bench <ingest|live|catchup|cardinality|footprint|fanout|all|check> [flags]")
 	os.Exit(2)
 }

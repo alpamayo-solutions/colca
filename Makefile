@@ -24,7 +24,7 @@ ZENSICAL      ?= $(UV) tool run --from zensical==0.0.60 --with mkdocstrings-pyth
 
 .PHONY: help test contracts-test check lint lint-go lint-python lint-ts lint-docker lint-shell lint-actions \
         lint-yaml lint-secrets ts-install ts-test ts-types ts-build bundle build docker smoke demo ci wheels \
-        bench bench-scenarios bench-check docs docs-serve clean
+        bench bench-scenarios bench-check bench-replication docs docs-serve clean
 
 help: ## list the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-16s %s\n", $$1, $$2}'
@@ -125,6 +125,12 @@ bench-scenarios: build ## benchmark scenarios against a real edge and hub pair
 
 bench-check: ## compare the newest results with bench/thresholds.json
 	$(GO) run ./cmd/colca-bench check --thresholds bench/thresholds.json
+
+BENCH_CHILDREN ?= 200
+bench-replication: build ## one parent, many replicating children; gated by bench/replication-thresholds.json
+	bin/colca-bench fanout --protocol-children --children $(BENCH_CHILDREN) --duration 30s \
+	  --out bench/results/replication.jsonl
+	bin/colca-bench check --results bench/results/replication.jsonl --thresholds bench/replication-thresholds.json
 
 docs: ## the documentation site into site/ (reads the chaski checkout next to this one)
 	$(ZENSICAL) build --strict
