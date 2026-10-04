@@ -158,6 +158,7 @@ func (s *Store) RegistryRetire(ulid, stream string, rec Record, also []Record, r
 	if err != nil {
 		return 0, nil, err
 	}
+	s.adopted.Delete(ret.Child)
 	return off, retired, nil
 }
 
