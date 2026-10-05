@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
+	"github.com/cockroachdb/pebble/v2/sstable/block"
 
 	"github.com/alpamayo-solutions/colca/internal/pebblelog"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -147,11 +148,45 @@ func (s *Store) SetMaxRecordBytes(limit uint64) { s.maxRecordBytes = limit }
 // say which record of a refused append was too large.
 func (s *Store) MaxRecordBytes() uint64 { return s.maxRecordBytes }
 
-// Open opens or creates the store at dir and restores each stream's next offset,
-// low-water mark and byte counter, so offsets stay gapless across restarts.
-func Open(dir string) (*Store, error) {
+// Options tunes how a store is kept on disk. The zero value is the default.
+type Options struct {
+	// Compression is the block compression of newly written tables: "" or
+	// "snappy" (the default), or "zstd". Pebble records the codec per block, so
+	// a store reads tables of either kind whatever this says; existing tables
+	// change only when compaction rewrites them.
+	Compression string
+}
+
+// pebbleOptions applies o to Pebble's options.
+func (o Options) pebbleOptions(opts *pebble.Options) error {
+	var profile *block.CompressionProfile
+	switch o.Compression {
+	case "", "snappy":
+		return nil // Pebble's default: Snappy on every level
+	case "zstd":
+		profile = block.ZstdCompression
+	default:
+		return fmt.Errorf("unknown compression %q, want snappy or zstd", o.Compression)
+	}
+	opts.ApplyCompressionSettings(func() pebble.DBCompressionSettings {
+		return pebble.UniformDBCompressionSettings(profile)
+	})
+	return nil
+}
+
+// Open opens or creates the store at dir with the default options.
+func Open(dir string) (*Store, error) { return OpenWithOptions(dir, Options{}) }
+
+// OpenWithOptions opens or creates the store at dir and restores each stream's
+// next offset, low-water mark and byte counter, so offsets stay gapless across
+// restarts.
+func OpenWithOptions(dir string, o Options) (*Store, error) {
 	health := pebblelog.New("store")
-	db, err := pebble.Open(dir, health.Options())
+	opts := health.Options()
+	if err := o.pebbleOptions(opts); err != nil {
+		return nil, err
+	}
+	db, err := pebble.Open(dir, opts)
 	if err != nil {
 		return nil, err
 	}

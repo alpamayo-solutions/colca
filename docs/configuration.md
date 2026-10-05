@@ -115,6 +115,7 @@ retention:
 | `…streams.<name>.max_bytes` | none | Size limit, `KiB`/`MiB`/`GiB`/`TiB` or bytes. Applies in addition to the age. |
 | `…streams.<name>.ignore_cursors_after` | `0` | After how long a cursor that stopped moving no longer protects the stream. `0` means never. |
 | `…streams.<name>.keep_forever` | `false` | Never prune this stream. Cannot be combined with `max_age`. |
+| `…streams.metrics.signals` | none | Per-signal windows inside the stream's own, see below. |
 
 Default ages: `metrics` and `logs` 14 days (`336h`); `entities`, `alarms`,
 `annotations` and `audit` 365 days (`8760h`); `commands` 90 days (`2160h`).
@@ -123,6 +124,64 @@ downlink cursor, a machine's delivery cursor) protects what is queued for it
 beyond `max_age`; set `ignore_cursors_after` on `commands` to bound how long an
 absent child keeps the queue. Commands pruned that way are answered `410`. `definitions` are compacted,
 not aged.
+
+### Per-signal retention
+
+`signals` gives chosen metric signals a shorter window than the stream. Rules
+are tried in order; the first one that selects a signal sets its window, and a
+signal no rule selects keeps the stream's `max_age`.
+
+```yaml
+retention:
+  streams:
+    metrics:
+      max_age: 72h
+      signals:
+        - topics: ["prekit/v1/_Metric/+/+/Diagnostics/#"]
+          max_age: 6h
+        - signal_ids: ["7SMDVD5TGG1H1KHMW9XGQV4TEJ"]
+          max_age: 1h
+        - topics: ["prekit/v1/_Metric/#"]   # everything else
+          max_age: 24h
+```
+
+| Key | Meaning |
+|---|---|
+| `…signals[].topics` | MQTT filters on the signal's `_Metric` topic (`+` one level, `#` the rest). The topic carries the node and the path, so a rule can select by machine, by line or by signal name. |
+| `…signals[].signal_ids` | Signal ids, for single signals. |
+| `…signals[].max_age` | The signal's window. Must be shorter than the stream's `max_age`, which still applies to every signal. |
+
+For each selected signal the pruner removes records older than the window but
+keeps the newest of them: the value in force when the window opens. A signal
+that stopped changing keeps its last value however old it is, and `/kv` keeps
+the current value as before. The cursor rule is the stream's: nothing a
+protecting cursor has not read is removed, and a cursor that went stale under
+`ignore_cursors_after` is passed with a `_StreamGap` marker naming it. That
+marker's range is sparse: the records of other signals in it are still there.
+
+The rules are node configuration rather than a signal attribute because how
+long to keep history is a decision of the node that stores it: a hub that
+historicizes keeps hours, the edge that buffers for it keeps days, for the same
+signal. A rule covers thousands of signals without editing any of them.
+
+Per-signal retention reads the signal index, so it covers records written since
+the index existed on the node (colca 0.27). Older records leave with the
+stream's `max_age`. Its deletes are spread across the stream rather than a
+prefix, so Pebble reclaims their space as compaction reaches them.
+
+## Storage
+
+| Key | Default | Meaning |
+|---|---|---|
+| `storage.compression` | `snappy` | Block compression of the stream store: `snappy` or `zstd`. |
+
+`zstd` stores the same records in about a quarter less space than `snappy`
+(scale-test store: 10.0 MB → 7.4 MB; hub record mix: 219 → 155 bytes per
+record) for more CPU in flushes and compactions and roughly twice the
+decompression time on long scans. Pebble records the codec per block, so either
+setting reads both: switching applies to data written from then on, and older
+tables are rewritten in the new format as compaction reaches them. Switching
+back is as safe.
 
 ## Cursors
 

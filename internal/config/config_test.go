@@ -983,3 +983,85 @@ func TestCursorsStaleAfterThroughLoad(t *testing.T) {
 		t.Fatalf("negative stale_after: err = %v", err)
 	}
 }
+
+// Per-signal rules and the storage block load from YAML; the first matching
+// rule sets a signal's window.
+func TestSignalRetentionAndStorageLoad(t *testing.T) {
+	doc := "ulid: n-hub\ndata_dir: /tmp/colca-test\nkey_file: /keys/hub.key\n" +
+		"storage:\n  compression: zstd\n" +
+		"retention:\n  streams:\n    metrics:\n      max_age: 72h\n      signals:\n" +
+		"        - topics: [\"prekit/v1/_Metric/+/+/Diagnostics/#\"]\n          max_age: 6h\n" +
+		"        - signal_ids: [\"7SMDVD5TGG1H1KHMW9XGQV4TEJ\"]\n          max_age: 1h\n" +
+		"        - topics: [\"prekit/v1/_Metric/#\"]\n          max_age: 24h\n"
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Storage.Compression != "zstd" {
+		t.Fatalf("storage.compression = %q", c.Storage.Compression)
+	}
+	pol := c.Retention.EffectiveStream("metrics")
+	for _, tc := range []struct {
+		id, topic string
+		want      time.Duration
+	}{
+		{"X", "prekit/v1/_Metric/N1/Line1/Diagnostics/temp", 6 * time.Hour},
+		{"7SMDVD5TGG1H1KHMW9XGQV4TEJ", "prekit/v1/_Metric/N1/Line1/count", time.Hour},
+		{"Y", "prekit/v1/_Metric/N1/Line1/count", 24 * time.Hour},
+	} {
+		got, ok := pol.SignalMaxAge(tc.id, tc.topic)
+		if !ok || got != tc.want {
+			t.Errorf("%s %s: window %s (%v), want %s", tc.id, tc.topic, got, ok, tc.want)
+		}
+	}
+	if _, ok := pol.SignalMaxAge("Z", "other/v1/_Metric/N1/x"); ok {
+		t.Error("a signal no rule selects got a window")
+	}
+}
+
+func TestSignalRetentionValidation(t *testing.T) {
+	rule := func(r SignalRetention) StreamRetention { return StreamRetention{Signals: []SignalRetention{r}} }
+	for name, tc := range map[string]struct {
+		stream string
+		pol    StreamRetention
+		want   string
+	}{
+		"not metrics":     {"logs", rule(SignalRetention{Topics: []string{"#"}, MaxAge: Duration(time.Hour)}), "metrics stream only"},
+		"no selector":     {"metrics", rule(SignalRetention{MaxAge: Duration(time.Hour)}), "needs topics or signal_ids"},
+		"bad filter":      {"metrics", rule(SignalRetention{Topics: []string{"a/#/b"}, MaxAge: Duration(time.Hour)}), "invalid topic filter"},
+		"empty id":        {"metrics", rule(SignalRetention{SignalIDs: []string{""}, MaxAge: Duration(time.Hour)}), "empty signal id"},
+		"no max_age":      {"metrics", rule(SignalRetention{Topics: []string{"#"}}), "must be positive"},
+		"not shorter":     {"metrics", rule(SignalRetention{Topics: []string{"#"}, MaxAge: Duration(336 * time.Hour)}), "shorter than the stream"},
+		"longer than set": {"metrics", StreamRetention{MaxAge: Duration(24 * time.Hour), Signals: []SignalRetention{{Topics: []string{"#"}, MaxAge: Duration(48 * time.Hour)}}}, "shorter than the stream"},
+	} {
+		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Retention: Retention{Streams: map[string]StreamRetention{tc.stream: tc.pol}}}
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error %v, want one containing %q", name, err, tc.want)
+		}
+	}
+	// keep_forever on the stream leaves any window shorter.
+	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Retention: Retention{Streams: map[string]StreamRetention{
+		"metrics": {KeepForever: true, Signals: []SignalRetention{{Topics: []string{"#"}, MaxAge: Duration(9000 * time.Hour)}}},
+	}}}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a window under keep_forever was refused: %v", err)
+	}
+}
+
+func TestStorageCompressionValidation(t *testing.T) {
+	for _, v := range []string{"", "snappy", "zstd"} {
+		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Storage: Storage{Compression: v}}
+		if err := c.Validate(); err != nil {
+			t.Errorf("compression %q refused: %v", v, err)
+		}
+	}
+	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Storage: Storage{Compression: "lz4"}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "storage.compression") {
+		t.Fatalf("lz4 accepted or unclear error: %v", err)
+	}
+}

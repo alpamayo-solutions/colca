@@ -93,6 +93,43 @@ advances the cursors only after successful upload; ordinary retention can then
 reclaim the acknowledged history. This protection is not a disk-capacity limit:
 size storage for the expected outage, ingestion rate and other local consumers.
 
+Each cycle repeats a stream's prune while its scan stops at the record cap and
+still removes records, for up to 30 s per stream, so a hub that appends more
+than one capped scan per interval does not fall behind.
+
+### Large hubs
+
+A hub that historicizes metrics into its own historian does not need weeks of
+broker history; the historian's cursor protects whatever it has not stored yet.
+At the 2026-10 scale test the hub took about 140 MB of stream records per
+machine-day (metrics 101 MB, logs 20 MB, annotations 16 MB, entities 4 MB),
+about 1.7 TB at 1000 machines over the default 14 days, and annotations stay a
+year by default.
+
+```yaml
+storage:
+  compression: zstd          # about a quarter smaller at rest
+retention:
+  streams:
+    metrics:
+      max_age: 72h           # 1–3 days; the historian holds the history
+      signals:               # optional: shorter for chatty signals
+        - topics: ["prekit/v1/_Metric/+/+/Diagnostics/#"]
+          max_age: 12h
+    logs:        { max_age: 48h }
+    annotations: { max_age: 336h }   # once the projector has read them
+    audit:       { max_age: 2160h }
+```
+
+Every stream is pruned only below the cursors that read it, so an annotation
+leaves once every consumer with a cursor on `annotations` (the projector, a
+parent's uplink) has read it. `annotations` defaults to a year because
+`rebuild_projection` replays the stream: a shorter `max_age` is also how far
+back a rebuild can restore. `entities` are current state, kept in `/kv`
+whatever the stream holds; colca compacts only `definitions` to the latest
+record per topic, because a consumer that archives entity history reads every
+entity record, so for `entities` bound the age instead.
+
 A cursor that stood still for `cursors.stale_after` (default 24 h) while its
 stream grew is named in the node's `stale_cursors` finding. List the cursors
 with `GET /backlog` (admin token, no prefix) and retire the ones a removed
