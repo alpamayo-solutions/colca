@@ -397,6 +397,7 @@ func Start(cfg *config.Config) (*Node, error) {
 			return fail(fmt.Errorf("node %s: repl client for %s: %w", cfg.ULID, cfg.Parent.URL, err))
 		}
 		replClient.SetStoreID(st.StoreID())
+		replClient.SetLogForwarding(cfg.Parent.Logs)
 		if err := repl.PrepareUplink(replClient, st); err != nil {
 			return fail(fmt.Errorf("node %s: %w", cfg.ULID, err))
 		}

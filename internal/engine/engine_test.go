@@ -1204,11 +1204,12 @@ func TestIngestReplicatedLogsOffsetJumps(t *testing.T) {
 	})
 
 	t.Run("filtered uplinks are exempt", func(t *testing.T) {
-		// The commands and entities uplinks are filtered, so child-offset holes there are
-		// expected. The domain says which streams (uns.UplinkCarriesEveryRecord).
+		// The commands, entities and logs uplinks are filtered, so child-offset holes
+		// there are expected. The domain says which streams (uns.UplinkCarriesEveryRecord).
 		for stream, topic := range map[string]string{
 			"commands": "colca/v1/_Ack/m1/child1/m1/go",
 			"entities": "colca/v1/_SystemElement/m1/child1/m1/a",
+			"logs":     "colca/v1/_Log/m1/child1/svc/WARNING",
 		} {
 			e, buf := newCapturedEngine(t)
 			if _, _, err := e.IngestReplicated("n-child", stream, replBatchAt(topic, 3, 9)); err != nil {

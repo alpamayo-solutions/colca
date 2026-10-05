@@ -88,7 +88,7 @@ The contract decides which stream a record lands in and which way it flows.
 | command | `_CmdParam`, `_CmdConfigure`, `_CmdAdmin`, `_CmdEdit`, … | `commands` | down to the target |
 | acknowledgement | `_Ack` | `commands` | up |
 | alarm | `_AlarmStateChange`, `_NotificationDispatched` | `alarms` | up |
-| log | `_Log` | `logs` | up |
+| log | `_Log` | `logs` | up, from a minimum level ([`parent.logs`](configuration.md#log-forwarding)) |
 | annotation | `_Annotation` | `annotations` | up |
 | audit | `_AuditEvent` | `audit` | up |
 

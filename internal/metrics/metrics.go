@@ -179,8 +179,11 @@ type Metrics struct {
 	// colca_uplink_refused_total: the parent answered and refused the batch (4xx).
 	// That is a misconfiguration or a bug, not a network problem.
 	uplinkRefused *prometheus.CounterVec
-	downlinkOK    prometheus.Gauge
-	downlinkFail  prometheus.Counter
+	// colca_uplink_logs_withheld_total: _Log records parent.logs kept home, by
+	// level. Bounded: the label is one of the five log levels.
+	uplinkLogsWithheld *prometheus.CounterVec
+	downlinkOK         prometheus.Gauge
+	downlinkFail       prometheus.Counter
 	// colca_downlink_cursor_beyond_head_total: this node's command position is past
 	// the parent's stream head, so it hears nothing until the head passes it.
 	downlinkBeyondHead prometheus.Counter
@@ -306,18 +309,19 @@ type Metrics struct {
 	// Unlabeled because paths are unbounded; a rate-limited log line names them.
 	metricsUnbound prometheus.Counter // colca_metrics_unbound_total
 
-	ingestBy        map[string]prometheus.Counter
-	rejectedBy      map[string]prometheus.Counter
-	uplinkOKBy      map[string]prometheus.Gauge
-	uplinkFailBy    map[string]prometheus.Counter
-	uplinkRefusedBy map[string]prometheus.Counter
-	aclDenyBy       map[string]prometheus.Counter
-	prunedRecordsBy map[string]prometheus.Counter
-	prunedBytesBy   map[string]prometheus.Counter
-	pruneRunsBy     map[string]prometheus.Counter
-	gapRecordsBy    map[string]prometheus.Counter
-	gapServedBy     map[string]map[string]prometheus.Counter // [stream][surface]
-	gapReceivedBy   map[string]prometheus.Counter
+	ingestBy             map[string]prometheus.Counter
+	rejectedBy           map[string]prometheus.Counter
+	uplinkOKBy           map[string]prometheus.Gauge
+	uplinkFailBy         map[string]prometheus.Counter
+	uplinkRefusedBy      map[string]prometheus.Counter
+	uplinkLogsWithheldBy map[string]prometheus.Counter
+	aclDenyBy            map[string]prometheus.Counter
+	prunedRecordsBy      map[string]prometheus.Counter
+	prunedBytesBy        map[string]prometheus.Counter
+	pruneRunsBy          map[string]prometheus.Counter
+	gapRecordsBy         map[string]prometheus.Counter
+	gapServedBy          map[string]map[string]prometheus.Counter // [stream][surface]
+	gapReceivedBy        map[string]prometheus.Counter
 }
 
 // New builds the registry with every family pre-created, so all of them are
@@ -345,6 +349,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_uplink_push_failures_total",
 			Help: "Failed uplink pushes, by stream. Resets on restart.",
 		}, []string{"stream"}),
+		uplinkLogsWithheld: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_uplink_logs_withheld_total",
+			Help: "Log records kept in the local logs stream and not forwarded to the parent because their level is below parent.logs, by level. Resets on restart.",
+		}, []string{"level"}),
 		uplinkRefused: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_uplink_refused_total",
 			Help: "Uplink pushes the parent ANSWERED and refused (4xx), by stream — a misconfiguration or a bug between the two nodes, not an outage. Nothing is dropped: the batch is held and retried, so this counter rising is a lane that is not moving. Resets on restart.",
@@ -577,6 +585,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.rejectedBy = counterChildren(m.rejected, reasons)
 	m.uplinkFailBy = counterChildren(m.uplinkFail, uplinkStreams)
 	m.uplinkRefusedBy = counterChildren(m.uplinkRefused, uplinkStreams)
+	m.uplinkLogsWithheldBy = counterChildren(m.uplinkLogsWithheld, config.LogLevels)
 	m.aclDenyBy = counterChildren(m.aclDeny, aclActions)
 	m.securityChangeBy = counterChildren(m.securityChanges, securityChangeKinds)
 	m.uplinkOKBy = make(map[string]prometheus.Gauge, len(uplinkStreams))
@@ -655,7 +664,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		return clk.SyncAgeSeconds(clk.Now())
 	})
 
-	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused,
+	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused, m.uplinkLogsWithheld,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.deliveredMessages, m.deliveredBytes, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.securityChanges, m.nodePrefix,
@@ -916,6 +925,18 @@ func (m *Metrics) UplinkRefused(stream string) {
 		return
 	}
 	m.uplinkRefused.WithLabelValues(stream).Inc()
+}
+
+// UplinkLogWithheld counts one _Log record the uplink kept home because its
+// level is below this node's parent.logs minimum. Only the five known levels
+// are counted, so the label stays bounded.
+func (m *Metrics) UplinkLogWithheld(level string) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.uplinkLogsWithheldBy[level]; ok {
+		c.Inc()
+	}
 }
 
 // DownlinkFetched records a successful downlink fetch. Empty fetches count too:
