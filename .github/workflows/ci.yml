@@ -88,7 +88,6 @@ jobs:
         run: make test
 
   bench-replication:
-    needs: [go-test]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -114,9 +113,9 @@ jobs:
       - name: Contract tests
         run: uv run --project contracts --python ${{ matrix.python-version }} --extra test pytest contracts/tests
 
-  # The Node jobs carry no `needs`, so they run beside the long Go and container
-  # tests instead of after them. Publishing still waits for them: they are in the
-  # `needs` of image and packages below.
+  # No check job carries `needs`, so the container and replication tests run
+  # beside the Go tests instead of after them. Publishing still waits for the
+  # checks: they are in the `needs` of image and packages below.
   ts-lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -157,7 +156,6 @@ jobs:
         run: make ts-test
 
   smoke:
-    needs: [go-test]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
