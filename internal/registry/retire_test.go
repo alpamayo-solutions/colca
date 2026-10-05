@@ -236,3 +236,45 @@ func TestRevokeWithoutRetireKeepsTheChildsReplicatedState(t *testing.T) {
 		t.Fatalf("reset=%v err=%v: the incarnation must survive a revoke so a rebuilt store is still recognised", reset, err)
 	}
 }
+
+// A retired child starts clean: its definitions cursor and every cursor in its
+// own namespace go, so none of them holds the definitions stream back from
+// pruning. A plain revoke keeps the definitions cursor (the catch-up position),
+// see TestRevokeKeepsTheDefinitionsFloorSoARetractionSurvives; other children's
+// cursors are never touched.
+func TestRetireDropsTheChildsDefinitionsAndOwnCursors(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "z/child", "z/other")
+	child, other := "01NCHILD", "01NOTHER"
+	for _, e := range []uns.Entry{node(child, "z/child", pub("ab")), node(other, "z/other", pub("cd"))} {
+		if _, _, err := m.Enroll(entryJSON(t, e)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := st.Append("definitions", []store.Record{{Topic: "colca/v1/_Group/01NODE/g", Payload: []byte(`{}`), TS: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	seeded := []struct{ name, stream string }{
+		{uns.DownlinkDefCursorPrefix + child, "definitions"},
+		{child + "/reader", "entities"},
+		{child + "/reader", "metrics"},
+		{uns.DownlinkDefCursorPrefix + other, "definitions"},
+		{other + "/reader", "entities"},
+	}
+	for _, c := range seeded {
+		if _, err := st.CursorSetIfAbsent(c.name, c.stream, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, _, _, err := m.Retire(child); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range seeded {
+		_, held := st.CursorLookup(c.name, c.stream)
+		wantHeld := strings.HasPrefix(c.name, other) || strings.HasSuffix(c.name, other)
+		if held != wantHeld {
+			t.Fatalf("cursor %s on %s held=%v after retiring %s, want %v", c.name, c.stream, held, child, wantHeld)
+		}
+	}
+}

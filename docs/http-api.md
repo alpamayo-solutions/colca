@@ -22,7 +22,7 @@ A caller is one of:
 | `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"stream":"logs","withheld":"…"} or {"error":"…","reason":"…"},…]}` |
 | `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N}` |
 | `GET /watch` | machine, service, person, admin | `?stream=S&stream=S2&interval_ms=100` | NDJSON, one line per change: `{"streams":["S"],"next":{"S":N}}` |
-| `POST /ack` | owner of the cursor, admin | `{"cursor":"NAME","stream":"S","offset":N}`, or `{"cursor":"NAME","stream":"S","delete":true}` to retire it | `{"moved":true}` or `{"deleted":true}` |
+| `POST /ack` | owner of the cursor, admin; to retire also `cmd:<node>/#:admin` | `{"cursor":"NAME","stream":"S","offset":N}`, or `{"cursor":"NAME","stream":"S","delete":true}` to retire it | `{"moved":true}` or `{"deleted":true}` |
 | `GET /backlog` | local service (`?prefix=` required), admin | `?prefix=c/projector/` | `{"queues":[{"cursor":"…","stream":"S","position":N,"head":N,"lag_records":N,"last_ack_ms":T,"stale":false,"read_since_start":true}]}` |
 | `GET /kv` | machine, service, person, admin | `?prefix=P&max=1000&after=TOKEN&contract=_Signal&depth=1` | `{"entries":[{"path":"…","node_id":"…","topic":"…","payload":{…},"ts":T,"offset":N}],"next":"TOKEN"}` |
 | `GET /self` | local service | | the service's registry entry, limits, `standalone_since` and `standalone_ready` |
@@ -173,7 +173,11 @@ its stream from the pruner. Nothing removes them on its own.
   it last moved, `0` when unknown), `stale` (by `cursors.stale_after`) and
   `read_since_start` (whether anyone fetched it since the node started).
 - **Retire.** `POST /ack {"cursor":…,"stream":…,"delete":true}` as the
-  cursor's owner or the admin. The node logs who retired it. A consumer that
+  cursor's owner or the admin. A holder of the admin command class over the
+  whole node (`cmd:<node>/#:admin`, `cmd:$node/#:admin` or `cmd:#:admin`) may
+  retire any identity's cursor (`c/<name>/…`, `<ulid>/…`) too, but not move
+  one, and not a command delivery floor (`…/cmd`) or a node-owned cursor
+  (`downlink:…`, `down-def:…`). The node logs who retired it. A consumer that
   fetches the cursor again starts it over at the stream's oldest retained
   record, without a gap.
 - **Expire.** `retention.streams.<stream>.ignore_cursors_after` lets the pruner
@@ -191,7 +195,7 @@ its stream from the pruner. Nothing removes them on its own.
 |---|---|---|
 | `POST /enroll` | `{"ulid","pubkey","kind":"external"\|"node","element","grants":[…]}` | `{"ulid":"…","offset":N}`; `409` when the key or the element is already taken, `422` on an invalid entry or an element this node does not hold |
 | `GET /enroll` | `?max=1000&after=TOKEN` | the locally enrolled entries, public keys only |
-| `DELETE /enroll/{ulid}` | `?retire=true` | `{"revoked":true,"offset":N}`; the same batch retires the records the identity authored about itself — its `_ServiceDetails`, at every mount it published one at. Only that identity may write them, so one left behind could never be retired by anyone. A plain revoke keeps what a child node replicated up: the child may be enrolled again and resumes from its own cursor. With `retire=true` (kind `node` only, `409` otherwise; `400` on a value that is not a boolean) the same batch also tombstones every current-state record the child and the nodes below it replicated, and clears its replication marks, so nothing it left stands as live and the same identity enrolled later starts clean; the response adds `"retired":true,"records_retired":N`. The tombstones replicate up, so ancestors retire their copies too |
+| `DELETE /enroll/{ulid}` | `?retire=true` | `{"revoked":true,"offset":N}`; the same batch retires the records the identity authored about itself — its `_ServiceDetails`, at every mount it published one at. Only that identity may write them, so one left behind could never be retired by anyone. A plain revoke keeps what a child node replicated up: the child may be enrolled again and resumes from its own cursor. With `retire=true` (kind `node` only, `409` otherwise; `400` on a value that is not a boolean) the same batch also tombstones every current-state record the child and the nodes below it replicated, clears its replication marks, and deletes its definitions cursor (`downlink-def:<ulid>`) and every cursor in its own namespace (`<ulid>/...`), so nothing it left stands as live or holds retention and the same identity enrolled later starts clean (a plain revoke keeps the definitions cursor as the child's catch-up position); the response adds `"retired":true,"records_retired":N`. The tombstones replicate up, so ancestors retire their copies too |
 | `POST /enroll/{ulid}/drain` | | `{"ulid","offset","status":"draining"}`; decommissions a child node: new commands under its mount are refused, and once its queue is delivered or expired it is retired as with `DELETE ?retire=true`. `409` for an entry that is not a node or is already draining |
 | `GET /debug/state` | | the next offset of every stream |
 

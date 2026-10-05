@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -377,21 +378,37 @@ func (m *Manager) revoke(ulid string, retire bool) (offset uint64, wasDraining b
 	// reads the commands cursor. Failures are logged: a leftover cursor only holds
 	// retention.
 	//
-	// The definitions cursor stays. The child keeps the definitions it applied and
-	// resumes from its own position when enrolled again; without this floor,
-	// compaction could drop a retraction it has not read and the withdrawn group
-	// would keep its grants. To drop it for a decommissioned node, delete
-	// downlink-def:<ulid> on the definitions stream through POST /ack.
-	dead := map[string]string{
-		uns.DownlinkCursorPrefix + ulid: "commands",
-	}
+	// On a revoke the definitions cursor stays. The child keeps the definitions it
+	// applied and resumes from its own position when enrolled again; without this
+	// floor, compaction could drop a retraction it has not read and the withdrawn
+	// group would keep its grants.
+	//
+	// A retire is for good: a later enrollment of the same identity starts clean,
+	// with no applied definitions to protect. Its definitions cursor and every
+	// cursor in its own namespace go too, or each retired child keeps holding the
+	// definitions stream back from pruning.
+	type cursorKey struct{ name, stream string }
+	dead := map[cursorKey]bool{{uns.DownlinkCursorPrefix + ulid, "commands"}: true}
 	if e.MayUseDoor(uns.DoorMQTT) {
-		dead[e.CommandCursor()] = "commands"
+		dead[cursorKey{e.CommandCursor(), "commands"}] = true
 	}
-	for name, stream := range dead {
-		if err := m.st.CursorDelete(name, stream); err != nil {
+	if retire {
+		dead[cursorKey{uns.DownlinkDefCursorPrefix + ulid, "definitions"}] = true
+		cursors, err := m.st.CursorSnapshot()
+		if err != nil {
+			m.log.Warn("retire: cursors under the identity's namespace not listed — they will hold a retention floor until the staleness window overrides them",
+				"ulid", ulid, "err", err)
+		}
+		for _, c := range cursors {
+			if strings.HasPrefix(c.Name, e.CursorPrefix()) {
+				dead[cursorKey{c.Name, c.Stream}] = true
+			}
+		}
+	}
+	for key := range dead {
+		if err := m.st.CursorDelete(key.name, key.stream); err != nil {
 			m.log.Warn(verb+": cursor not deleted — it will hold a retention floor until the staleness window overrides it",
-				"ulid", ulid, "cursor", name, "err", err)
+				"ulid", ulid, "cursor", key.name, "stream", key.stream, "err", err)
 		}
 	}
 	kick, deliver, space := m.kick, m.deliver, m.ns
