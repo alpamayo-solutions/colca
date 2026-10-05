@@ -28,7 +28,7 @@ func newLogGate(cfg loggate.Config) *loggate.Gate[Attribution] {
 // The publisher sees success for a held record: an MQTT PUBACK and HTTP 202.
 // It was accepted; storing it again would only repeat what the summary says.
 func (e *Engine) gateLog(class uns.Class, p uns.Parsed, topic string, payload []byte, attribution Attribution) (res Result, held bool) {
-	if class != uns.ClassLog || p.NodeID != e.cfg.ULID || !e.logs.Enabled() {
+	if !uns.IsLog(class) || p.NodeID != e.cfg.ULID || !e.logs.Enabled() {
 		return Result{}, false
 	}
 	verdict, untracked, writes := e.logs.Admit(e.clk.Now(), topic, payload, attribution)

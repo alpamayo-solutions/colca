@@ -226,6 +226,10 @@ func IsCommandAuthoredEvent(c Class) bool { return c == ClassAnnotation }
 // state wherever it lands. Its path is its own id, so no hop rewrites it.
 func IsDefinition(c Class) bool { return c == ClassDefinition }
 
+// IsLog reports whether a record is a service's log line. A node gates the
+// ones written on it: repeats collapse and each service has a budget.
+func IsLog(c Class) bool { return c == ClassLog }
+
 // IsAudit reports whether a record is a security event. Audit events are
 // append-only, never KV-projected, and rise without being filtered.
 func IsAudit(c Class) bool { return c == ClassAudit }
