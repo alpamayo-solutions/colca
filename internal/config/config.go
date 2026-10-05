@@ -94,6 +94,70 @@ type Endpoint struct {
 type Parent struct {
 	URL    string `yaml:"url"`
 	Pubkey string `yaml:"pubkey"` // pinned parent key
+	// Logs decides which of this node's log records the uplink forwards. Every
+	// record stays in the local logs stream either way.
+	Logs ParentLogs `yaml:"logs"`
+}
+
+// LogLevels are the _Log level segments, lowest first. They match the Python
+// contracts' LOG_LEVELS and the levels door/logpublisher writes.
+var LogLevels = []string{"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+// DefaultParentLogMinLevel is the lowest level forwarded to the parent when
+// parent.logs.min_level is absent.
+const DefaultParentLogMinLevel = "WARNING"
+
+// LogLevelRank is the position of an upper-case level in LogLevels, and false
+// for anything else.
+func LogLevelRank(level string) (int, bool) {
+	for i, l := range LogLevels {
+		if l == level {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// ParentLogs is the parent.logs block: the lowest level forwarded to the
+// parent, with optional per-service overrides keyed by the service name (the
+// topic segment before the level). Level names are case-insensitive.
+type ParentLogs struct {
+	MinLevel string            `yaml:"min_level"`
+	Services map[string]string `yaml:"services"`
+}
+
+// EffectiveMinLevel is min_level in upper case, or the default when absent.
+func (l ParentLogs) EffectiveMinLevel() string {
+	if l.MinLevel == "" {
+		return DefaultParentLogMinLevel
+	}
+	return strings.ToUpper(l.MinLevel)
+}
+
+// EffectiveServices is the per-service overrides with upper-case levels.
+func (l ParentLogs) EffectiveServices() map[string]string {
+	out := make(map[string]string, len(l.Services))
+	for svc, level := range l.Services {
+		out[svc] = strings.ToUpper(level)
+	}
+	return out
+}
+
+func (l ParentLogs) validate() error {
+	if l.MinLevel != "" {
+		if _, ok := LogLevelRank(l.EffectiveMinLevel()); !ok {
+			return fmt.Errorf("config: parent.logs.min_level %q, want one of %s", l.MinLevel, strings.Join(LogLevels, ", "))
+		}
+	}
+	for svc, level := range l.Services {
+		if svc == "" || strings.Contains(svc, "/") {
+			return fmt.Errorf("config: parent.logs.services: %q is not a service name (one topic segment)", svc)
+		}
+		if _, ok := LogLevelRank(strings.ToUpper(level)); !ok {
+			return fmt.Errorf("config: parent.logs.services.%s %q, want one of %s", svc, level, strings.Join(LogLevels, ", "))
+		}
+	}
+	return nil
 }
 
 type API struct {
@@ -793,6 +857,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Auth != nil {
 		if err := c.Auth.validate(); err != nil {
+			return err
+		}
+	}
+	if c.Parent != nil {
+		if err := c.Parent.Logs.validate(); err != nil {
 			return err
 		}
 	}

@@ -337,10 +337,11 @@ func NodePrivateStreams() []string {
 
 // partialUplinkStreams are streams whose uplink carries only a subset of the
 // child's records, so gaps in child offsets are expected there: commands (only
-// acks and gap markers rise) and streams holding a node-private contract
-// (entities). Derived like uplinkStreamSet.
+// acks and gap markers rise), streams holding a node-private contract
+// (entities), and logs, whose uplink forwards only the levels the child's
+// parent.logs allows. Derived like uplinkStreamSet.
 var partialUplinkStreams = func() map[string]bool {
-	set := map[string]bool{}
+	set := map[string]bool{StreamFor(ClassLog): true}
 	for _, c := range manifestClasses {
 		if !FlowsUp(c) {
 			if stream := StreamFor(c); stream != "" {
