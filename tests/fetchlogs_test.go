@@ -38,10 +38,10 @@ func awaitAckPayload(t *testing.T, n *node.Node, ackTopic, corr string) map[stri
 	return found
 }
 
-// publishLog appends one _Log record stored at ts to n's logs stream. The tests run on the
+// appendLogAt appends one _Log record stored at ts to n's logs stream. The tests run on the
 // built-in contract floor, which has no _Log schema, so the record goes straight
 // into the store the way the node's log door would put it there.
-func publishLog(t *testing.T, n *node.Node, ts int64, service, level, message string) {
+func appendLogAt(t *testing.T, n *node.Node, ts int64, service, level, message string) {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{"level": level, "message": message, "logger_name": service})
 	if err != nil {
@@ -80,9 +80,9 @@ func TestFetchLogsFromTheHub(t *testing.T) {
 	tp := startTopo(t)
 	// A window that ended more than the skew margin ago, so the head completes it.
 	from := time.Now().Add(-3 * time.Hour).UnixMilli()
-	publishLog(t, tp.edge1, from+1, "fetchsvc", "INFO", "one")
-	publishLog(t, tp.edge1, from+2, "fetchsvc", "WARNING", "two")
-	publishLog(t, tp.edge1, from+3, "fetchsvc", "INFO", "three")
+	appendLogAt(t, tp.edge1, from+1, "fetchsvc", "INFO", "one")
+	appendLogAt(t, tp.edge1, from+2, "fetchsvc", "WARNING", "two")
+	appendLogAt(t, tp.edge1, from+3, "fetchsvc", "INFO", "three")
 	to := from + 10_000
 
 	// Page one: two records, a resume point.
@@ -125,7 +125,7 @@ func TestFetchLogsFromTheHub(t *testing.T) {
 func TestFetchLogsExecutesAfterOfflineCatchup(t *testing.T) {
 	tp := startTopo(t)
 	from := time.Now().Add(-3 * time.Hour).UnixMilli()
-	publishLog(t, tp.edge1, from+1, "fetchsvc", "INFO", "before-outage")
+	appendLogAt(t, tp.edge1, from+1, "fetchsvc", "INFO", "before-outage")
 	to := from + 10_000
 
 	tp.edge1.Stop()
