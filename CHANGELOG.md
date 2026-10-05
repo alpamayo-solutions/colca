@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.29.0](https://github.com/alpamayo-solutions/colca/compare/v0.28.0...v0.29.0) (2026-10-05)
+
+
+### Features
+
+* **commands:** answer fetchLogs from the node's own logs stream ([#152](https://github.com/alpamayo-solutions/colca/issues/152)) ([aefe089](https://github.com/alpamayo-solutions/colca/commit/aefe0894e64ffeb5b6cf766e2622a7777527187c))
+* **logs:** collapse repeated log records and cap each service's log rate ([#153](https://github.com/alpamayo-solutions/colca/issues/153)) ([e29936c](https://github.com/alpamayo-solutions/colca/commit/e29936c753ebf2dc679e4c94de3871d23c07bb66))
+* **repl:** forward logs to the parent from a minimum level ([#151](https://github.com/alpamayo-solutions/colca/issues/151)) ([1d8c16d](https://github.com/alpamayo-solutions/colca/commit/1d8c16d445a68cad5c6a9453d0b7d02a8f706a42))
+
 ## [0.28.0](https://github.com/alpamayo-solutions/colca/compare/v0.27.1...v0.28.0) (2026-10-05)
 
 
