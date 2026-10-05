@@ -840,8 +840,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		}
 		// Retiring someone else's cursor also takes the admin command class
 		// over the whole node; moving it never does.
-		if c.entry != nil && !ownsCursor(c.entry, in.Cursor) &&
-			!(in.Delete && uns.MayRetireCursor(e.Scope(), c.entry, in.Cursor)) {
+		permitted := c.entry == nil || ownsCursor(c.entry, in.Cursor) ||
+			in.Delete && uns.MayRetireCursor(e.Scope(), c.entry, in.Cursor)
+		if !permitted {
 			_ = e.RecordDenial(engine.AuditDenial{Operation: op, ReasonCode: "cursor_denied",
 				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
 				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream, "cursor": in.Cursor}})
