@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.1](https://github.com/alpamayo-solutions/colca/compare/v0.29.0...v0.29.1) (2026-10-05)
+
+
+### Fixes
+
+* **cursors:** start a cursor that was never acked at the oldest retained record ([#155](https://github.com/alpamayo-solutions/colca/issues/155)) ([3e3aa74](https://github.com/alpamayo-solutions/colca/commit/3e3aa74540736b11a71ef659dc7cb60668eacf18))
+
 ## [0.29.0](https://github.com/alpamayo-solutions/colca/compare/v0.28.0...v0.29.0) (2026-10-05)
 
 
