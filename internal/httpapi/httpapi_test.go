@@ -3102,3 +3102,118 @@ func TestFetchLogsAckReadableOnlyByRequesterAndAdmins(t *testing.T) {
 		t.Errorf("requester sees %q", got)
 	}
 }
+
+// A person holding the admin command class over the whole node retires another
+// identity's stale cursor without the node's admin token, and the retirement is
+// audited with the actor and the cursor's owner. Moving it, retiring a cursor
+// that is not stale, a command delivery floor, a node-owned cursor or a cursor
+// of a system consumer (colca-historian), and retiring with a narrower class
+// stay refused.
+func TestANodeCmdAdminRetiresAnotherIdentitysStaleCursor(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	staleAfter := config.Duration(time.Second)
+	cfg := &config.Config{ULID: "n-test", Cursors: config.Cursors{StaleAfter: &staleAfter}}
+	ver, err := tokenauth.New(tokenauth.Config{
+		Issuers: []tokenauth.Issuer{{ID: iss.Iss(), JWKSURL: iss.JWKSURL()}}, Audience: iss.Aud(),
+	}, h.eng.Store(), h.m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primeVerifier(t, ver)
+	h.Handler = Handler(h.eng, cfg, h.reg, ver, h.m, testBlobs(t, cfg), "deadbeef", true, nil)
+	registerLocal(t, h, "connector-a", "")
+
+	st := h.eng.Store()
+	reader := uns.LocalCursorPrefix + "connector-a/gen1"
+	fresh := uns.LocalCursorPrefix + "connector-a/gen2"
+	floor := uns.LocalCursorPrefix + "connector-a/cmd"
+	historian := uns.LocalCursorPrefix + "historian/metrics"
+	seed := []struct{ name, stream string }{
+		{reader, "metrics"}, {historian, "metrics"}, {floor, "commands"}, {"downlink:01NCHILD", "commands"},
+	}
+	for _, c := range seed {
+		if _, err := st.CursorSetIfAbsent(c.name, c.stream, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(1100 * time.Millisecond) // past stale_after
+	if _, err := st.CursorSetIfAbsent(fresh, "metrics", 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, stream := range []string{"metrics", "commands"} {
+		if _, _, err := st.Append(stream, []store.Record{{Topic: "x"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	post := func(grants []string, body string) int {
+		t.Helper()
+		token := iss.MintOpt(tokentest.MintOpts{Sub: "kc-sub-op", Grants: grants, Username: "op"})
+		req := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Colca-Service", "api")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	del := func(cursor, stream string) string {
+		return fmt.Sprintf(`{"cursor":%q,"stream":%q,"delete":true}`, cursor, stream)
+	}
+	admin := []string{"cmd:$node/#:admin"}
+
+	refused := []struct {
+		grants []string
+		body   string
+		want   int
+	}{
+		{[]string{"cmd:#:configure"}, del(reader, "metrics"), http.StatusForbidden},
+		{admin, fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":9}`, reader), http.StatusForbidden},
+		{admin, del(floor, "commands"), http.StatusForbidden},
+		{admin, del("downlink:01NCHILD", "commands"), http.StatusForbidden},
+		{admin, del(historian, "metrics"), http.StatusForbidden},
+		{admin, del(fresh, "metrics"), http.StatusConflict},
+	}
+	for _, r := range refused {
+		if code := post(r.grants, r.body); code != r.want {
+			t.Fatalf("%v %s = %d, want %d", r.grants, r.body, code, r.want)
+		}
+	}
+	for _, c := range append(seed, struct{ name, stream string }{fresh, "metrics"}) {
+		if _, held := st.CursorLookup(c.name, c.stream); !held {
+			t.Fatalf("a refused request removed %s on %s", c.name, c.stream)
+		}
+	}
+
+	before, _, err := st.Read("audit", 1, 1000, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := post(admin, del(reader, "metrics")); code != http.StatusOK {
+		t.Fatalf("cmd admin retiring a stale reader = %d, want 200", code)
+	}
+	if _, held := st.CursorLookup(reader, "metrics"); held {
+		t.Fatal("the reader's cursor survived its retirement")
+	}
+	after, _, err := st.Read("audit", 1, 1000, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before)+1 {
+		t.Fatalf("audit records = %d, want %d", len(after), len(before)+1)
+	}
+	var event struct {
+		Outcome   string         `json:"outcome"`
+		Operation string         `json:"operation"`
+		ActorID   string         `json:"actor_id"`
+		ActorKind string         `json:"actor_kind"`
+		EntityID  string         `json:"entity_id"`
+		Metadata  map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal(after[len(after)-1].Payload, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Outcome != "success" || event.Operation != "cursor_delete" || event.ActorID != "kc-sub-op" ||
+		event.ActorKind != "human" || event.EntityID != reader || event.Metadata["owner"] != "connector-a" {
+		t.Fatalf("audit event = %+v", event)
+	}
+}

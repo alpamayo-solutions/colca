@@ -80,3 +80,51 @@ func TestContractHintsIgnoreUnrelatedRecordsAndIncludeReplication(t *testing.T) 
 		t.Fatal("replicated tombstone omitted")
 	}
 }
+
+// A watch scoped to contracts reports the stream's next offset in its hints.
+// It must come from the same snapshot as the scoped positions: an append
+// between two separate reads paired positions that include the record with a
+// next offset that does not, so the hint understated the head and the wake
+// channel, taken after the append, never announced it.
+func TestScopedStreamChangesTakesNextWithThePositions(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	streams := []string{"commands"}
+	contracts := []string{"_Command"}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if _, _, err := s.Append("commands", []Record{{Topic: "prekit/v1/_Command/node/x"}}); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	for i := 0; i < 20000; i++ {
+		wake, next, positions := s.ScopedStreamChanges(streams, contracts)
+		if positions["commands"].Next > next["commands"] {
+			close(stop)
+			<-done
+			t.Fatalf("scoped position %d is ahead of the next offset %d", positions["commands"].Next, next["commands"])
+		}
+		select {
+		case <-wake:
+		default:
+		}
+	}
+	close(stop)
+	<-done
+	if _, next, _ := s.ScopedStreamChanges([]string{"commands", "nope"}, contracts); len(next) != 1 {
+		t.Fatalf("unknown stream reported: %v", next)
+	}
+}

@@ -54,6 +54,29 @@ type StreamPosition struct{ Next, Low uint64 }
 func (s *Store) Changes(contracts ...string) (<-chan struct{}, map[string]StreamPosition) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.changesLocked(contracts)
+}
+
+// ScopedStreamChanges is Changes for the named streams together with each
+// stream's next offset, all taken under one lock. A watch scoped to contracts
+// reports the next offset in its hints; read separately, an append between the
+// two reads could pair positions that include it with a next offset that does
+// not, and the captured channel, taken after the append, would never announce
+// it. An unknown stream is left out of next.
+func (s *Store) ScopedStreamChanges(streams []string, contracts []string) (<-chan struct{}, map[string]uint64, map[string]StreamPosition) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wake, positions := s.changesLocked(contracts)
+	next := make(map[string]uint64, len(streams))
+	for _, stream := range streams {
+		if off, ok := s.next[stream]; ok {
+			next[stream] = off
+		}
+	}
+	return wake, next, positions
+}
+
+func (s *Store) changesLocked(contracts []string) (<-chan struct{}, map[string]StreamPosition) {
 	if s.allChanged == nil {
 		s.allChanged = make(chan struct{})
 	}

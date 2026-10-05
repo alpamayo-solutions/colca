@@ -35,7 +35,15 @@ func newAuditID(now time.Time) string {
 
 // RecordDenial appends straight to the audit stream, bypassing the Ingest*
 // methods, so an audit failure cannot recurse through the path that denied.
-func (e *Engine) RecordDenial(d AuditDenial) error {
+func (e *Engine) RecordDenial(d AuditDenial) error { return e.recordAuthorization(d, "denied") }
+
+// RecordAuthorized records an authorization that succeeded only through a
+// right beyond ownership, such as an operator retiring another identity's
+// cursor, the same way RecordDenial records a refusal. The caller performs the
+// operation only when it returns nil.
+func (e *Engine) RecordAuthorized(d AuditDenial) error { return e.recordAuthorization(d, "success") }
+
+func (e *Engine) recordAuthorization(d AuditDenial, outcome string) error {
 	if d.ActorKind == "" {
 		d.ActorKind = "anonymous"
 	}
@@ -49,7 +57,7 @@ func (e *Engine) RecordDenial(d AuditDenial) error {
 	}
 	payload := map[string]any{
 		"event_id": eventID, "source": "colca", "action": "authorize",
-		"outcome": "denied", "actor_kind": d.ActorKind,
+		"outcome": outcome, "actor_kind": d.ActorKind,
 		"occurred_at": now, "operation": d.Operation, "reason_code": d.ReasonCode,
 	}
 	if d.ActorID != "" {
@@ -82,7 +90,7 @@ func (e *Engine) RecordDenial(d AuditDenial) error {
 		return e.auditFailure(d, err)
 	}
 	e.metrics.IngestRecord("audit")
-	e.log.Debug("audit denial", "offset", first, "operation", d.Operation, "reason_code", d.ReasonCode)
+	e.log.Debug("audit authorization", "outcome", outcome, "offset", first, "operation", d.Operation, "reason_code", d.ReasonCode)
 	if e.deliver != nil {
 		e.deliver(topic, raw, false)
 	}
@@ -92,6 +100,7 @@ func (e *Engine) RecordDenial(d AuditDenial) error {
 var auditMetadataKey = map[string]bool{
 	"door": true, "route": true, "method": true, "stream": true,
 	"contract": true, "filter": true, "cursor": true, "topic": true,
+	"owner": true,
 }
 
 func flatAuditMetadata(value any) bool {
