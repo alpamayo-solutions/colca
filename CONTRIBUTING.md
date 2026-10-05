@@ -22,6 +22,13 @@ make smoke           # builds the image, starts a four-node tree, asserts on it
 replication, the doors, or anything the demo topology exercises. CI runs all of
 them on every pull request; `make lint` needs Docker for hadolint and gitleaks.
 
+CI runs `make test` as parallel shards, defined in `scripts/go-test-shards.sh`;
+a new package lands in the `rest` shard by itself. The script fails the run if
+a package is in no shard or in two, and `scripts/go-test-shards.sh check` runs
+that check locally. CI keeps its Go build caches per job and saves them from
+`main` only, and a newer push to a branch or to `main` cancels the run it
+supersedes; release commits and tags are never cancelled.
+
 ## Git hooks
 
 The repository ships [pre-commit](https://pre-commit.com) hooks: gitleaks,
@@ -83,7 +90,8 @@ changes bump the minor version. The major version never changes on its own;
 CI then publishes the image to `ghcr.io/alpamayo-solutions/colca`, signs it, and attaches
 the `colca-data-contracts` packages, the `colcad` wheels, SBOMs and checksums
 to the GitHub release, and uploads the Python packages to PyPI. Every push to `main` also publishes the image as `main`
-and `sha-<commit>`.
+and `sha-<commit>`. The image is built and pushed by digest while the checks
+run; it is tagged, signed and attested only once every check has passed.
 
 ## Contributor License Agreement
 

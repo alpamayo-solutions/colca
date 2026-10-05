@@ -12,7 +12,11 @@ COPY . .
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
-RUN for cmd in colcad colca-grantsync colca-historian colca-machine colca-keygen \
+# The build cache is a cache mount, so a rebuild on the same builder compiles
+# only what changed. The modules stay in the layer above, where the registry
+# layer cache of CI can keep them.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    for cmd in colcad colca-grantsync colca-historian colca-machine colca-keygen \
       colca-healthcheck colca-service colca-volume-init; do \
       CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
         go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "/out/$cmd" "./cmd/$cmd" || exit 1; \

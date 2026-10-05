@@ -22,7 +22,7 @@ GITLEAKS      ?= docker run --rm -v "$(CURDIR):/repo" -w /repo -e GIT_CONFIG_COU
 # The documentation site generator.
 ZENSICAL      ?= $(UV) tool run --from zensical==0.0.60 --with mkdocstrings-python==2.0.8 zensical
 
-.PHONY: help test contracts-test check lint lint-go lint-python lint-ts lint-docker lint-shell lint-actions \
+.PHONY: help test contracts-test check hygiene lint lint-go lint-python lint-ts lint-docker lint-shell lint-actions \
         lint-yaml lint-secrets ts-install ts-test ts-types ts-build bundle build docker smoke demo ci wheels \
         bench bench-scenarios bench-check bench-replication docs docs-serve clean
 
@@ -54,10 +54,13 @@ ts-types: bundle ## regenerate the client's contract types from this commit's bu
 ts-build: ts-install ## the npm package into clients/ts/dist
 	cd $(TS) && $(NPM) run build && $(NPM) run package-check
 
-check: ## formatting, vet and repository hygiene
+check: hygiene ## formatting, vet and repository hygiene
+	$(GO) vet ./...
+
+# CI runs this instead of `check`: golangci-lint runs govet there anyway.
+hygiene: ## formatting and repository hygiene, `check` without go vet
 	@unformatted="$$(gofmt -l $$(git ls-files '*.go'))"; \
 	  if [ -n "$$unformatted" ]; then echo "gofmt needed:"; echo "$$unformatted"; exit 1; fi
-	$(GO) vet ./...
 	scripts/check-no-working-notes.sh
 
 lint: lint-go lint-python lint-ts lint-docker lint-shell lint-actions lint-yaml lint-secrets ## every linter CI runs

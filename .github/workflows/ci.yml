@@ -11,9 +11,14 @@ on:
 permissions:
   contents: read
 
+# A newer push to a branch, main included, cancels the run it supersedes. A
+# release-please commit gets a group of its own, so the run that publishes a
+# release is never cancelled; nor is a tag run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: >-
+    ${{ github.ref_type == 'branch' && startsWith(github.event.head_commit.message, 'chore(main): release')
+    && format('ci-release-commit-{0}', github.sha) || format('ci-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   go-lint:
@@ -21,17 +26,29 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - id: go
+        uses: ./.github/actions/setup-go
         with:
-          go-version-file: go.mod
-      - name: gofmt, go vet, working notes
-        run: make check
+          flavour: lint
+      # go vet is left to golangci-lint below, which runs govet.
+      - name: gofmt, working notes
+        run: make hygiene
+      # Downloaded up front: golangci-lint fetches missing modules one by one
+      # while it type-checks, and reports a failed fetch as a type error.
+      - name: Go modules
+        run: go mod download
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
         with:
           version: v2.13.2
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: Save the Go cache
+        if: github.ref == 'refs/heads/main' && steps.go.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.path }}
+          key: ${{ steps.go.outputs.key }}
 
   python-lint:
     runs-on: ubuntu-latest
@@ -51,9 +68,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - id: go
+        uses: ./.github/actions/setup-go
         with:
-          go-version-file: go.mod
+          flavour: tools
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: "0.11.17"
@@ -67,37 +85,100 @@ jobs:
         run: make lint-yaml
       - name: gitleaks
         run: make lint-secrets
+      - name: Save the Go cache
+        if: github.ref == 'refs/heads/main' && steps.go.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.path }}
+          key: ${{ steps.go.outputs.key }}
       - name: No working notes in the commits of this pull request
         if: github.event_name == 'pull_request'
         run: scripts/check-no-working-notes.sh "origin/${{ github.base_ref }}"
 
-  go-test:
+  # `make test` split into shards that run side by side. scripts/go-test-shards.sh
+  # defines them and checks that together they test every package exactly once.
+  go-test-plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.shards.outputs.shards }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
+      - name: Every package in exactly one shard
+        id: shards
+        run: |
+          scripts/go-test-shards.sh check
+          echo "shards=$(scripts/go-test-shards.sh matrix)" >> "$GITHUB_OUTPUT"
+
+  go-test-shard:
+    name: go-test (${{ matrix.shard }})
+    needs: [go-test-plan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.go-test-plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - id: go
+        uses: ./.github/actions/setup-go
+        with:
+          flavour: race-${{ matrix.shard }}
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: "0.11.17"
       - name: Schema bundle
         run: make bundle
       - name: Tests
-        run: make test
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mapfile -t packages < <(scripts/go-test-shards.sh packages "$SHARD")
+          go test -race -count=1 "${packages[@]}"
+      - name: Save the Go cache
+        if: github.ref == 'refs/heads/main' && steps.go.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.path }}
+          key: ${{ steps.go.outputs.key }}
+
+  # The required check `go-test`: green only when the plan and every shard passed.
+  go-test:
+    needs: [go-test-plan, go-test-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: All shards passed
+        env:
+          PLAN: ${{ needs.go-test-plan.result }}
+          SHARDS: ${{ needs.go-test-shard.result }}
+        run: |
+          echo "plan: $PLAN, shards: $SHARDS"
+          [ "$PLAN" = success ] && [ "$SHARDS" = success ]
 
   bench-replication:
-    needs: [go-test]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - id: go
+        uses: ./.github/actions/setup-go
         with:
-          go-version-file: go.mod
+          flavour: build
       - name: One parent, 200 replicating children
         run: make bench-replication
+      - name: Save the Go cache
+        if: github.ref == 'refs/heads/main' && steps.go.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.path }}
+          key: ${{ steps.go.outputs.key }}
 
   contracts-test:
     runs-on: ubuntu-latest
@@ -114,9 +195,9 @@ jobs:
       - name: Contract tests
         run: uv run --project contracts --python ${{ matrix.python-version }} --extra test pytest contracts/tests
 
-  # The Node jobs carry no `needs`, so they run beside the long Go and container
-  # tests instead of after them. Publishing still waits for them: they are in the
-  # `needs` of image and packages below.
+  # No check job carries `needs`, so the container and replication tests run
+  # beside the Go tests instead of after them. Publishing still waits for the
+  # checks: they are in the `needs` of every publishing job below.
   ts-lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -157,7 +238,6 @@ jobs:
         run: make ts-test
 
   smoke:
-    needs: [go-test]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -168,8 +248,9 @@ jobs:
       - name: Four-node tree in containers
         run: make smoke
 
-  # Everything below runs for pushes to main and for version tags, once every
-  # check above has passed.
+  # Everything below runs for pushes to main and for version tags. The builds
+  # start at once; whatever publishes (image tags, npm, PyPI, the release)
+  # waits until every check above has passed.
 
   version:
     if: github.event_name != 'pull_request'
@@ -195,16 +276,19 @@ jobs:
           echo "semver=$semver" >> "$GITHUB_OUTPUT"
           echo "python=$python" >> "$GITHUB_OUTPUT"
 
+  # The image is built and pushed by digest beside the checks, untagged. Only
+  # publish-image, once every check has passed, gives it its tags, signs it and
+  # attests it.
   image:
-    needs: [version, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
+    needs: [version]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
@@ -213,6 +297,67 @@ jobs:
       - name: Schema bundle
         run: make bundle
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The same metadata as in publish-image, for the labels and annotations;
+      # the tags are applied there.
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=colca
+            org.opencontainers.image.description=An MQTT broker for plants organised as a tree
+            org.opencontainers.image.licenses=FSL-1.1-ALv2
+      # The layer cache lives in the registry beside the image, not in the
+      # Actions cache with its 10 GB quota. Only main writes it; tags read it.
+      - id: cache
+        name: Layer cache
+        env:
+          REF: ghcr.io/${{ github.repository }}:buildcache
+        run: |
+          echo "from=type=registry,ref=$REF" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            to="type=registry,ref=$REF,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"
+            echo "to=$to" >> "$GITHUB_OUTPUT"
+          fi
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          build-contexts: contracts-bundle=build/bundle
+          build-args: VERSION=${{ needs.version.outputs.semver }}
+          platforms: linux/amd64,linux/arm64
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
+
+  publish-image:
+    needs: [version, image, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}@${{ needs.image.outputs.digest }}
+    steps:
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           registry: ghcr.io
@@ -227,26 +372,27 @@ jobs:
             type=sha
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-          labels: |
-            org.opencontainers.image.title=colca
-            org.opencontainers.image.description=An MQTT broker for plants organised as a tree
-            org.opencontainers.image.licenses=FSL-1.1-ALv2
-      - id: build
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
-        with:
-          context: .
-          file: deploy/Dockerfile
-          build-contexts: contracts-bundle=build/bundle
-          build-args: VERSION=${{ needs.version.outputs.semver }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
-          provenance: mode=max
-          sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # With one source and no annotations, imagetools copies the index as it is,
+      # so every tag names exactly the digest that is signed and attested below.
+      - name: Tag the image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          mapfile -t tags < <(grep . <<< "$TAGS")
+          args=()
+          for tag in "${tags[@]}"; do
+            args+=(--tag "$tag")
+          done
+          docker buildx imagetools create "${args[@]}" "$IMAGE"
+          for tag in "${tags[@]}"; do
+            got="sha256:$(docker buildx imagetools inspect --raw "$tag" | sha256sum | cut -d' ' -f1)"
+            if [ "$got" != "$DIGEST" ]; then
+              echo "::error::$tag is $got, not the built $DIGEST"
+              exit 1
+            fi
+            echo "$tag -> $got"
+          done
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
         if: github.event.repository.visibility == 'public'
         with:
@@ -255,13 +401,10 @@ jobs:
       # recorded in the public transparency log. --recursive signs each platform too.
       - name: Sign the image
         if: github.event.repository.visibility == 'public'
-        env:
-          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
         run: cosign sign --yes --recursive "$IMAGE"
       - name: Verify the signature
         if: github.event.repository.visibility == 'public'
         env:
-          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
           IDENTITY: https://github.com/${{ github.workflow_ref }}
         run: |
           cosign verify "$IMAGE" --certificate-identity "$IDENTITY" \
@@ -270,7 +413,7 @@ jobs:
         if: github.event.repository.visibility == 'public'
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ needs.image.outputs.digest }}
           push-to-registry: true
       - id: syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
@@ -279,7 +422,6 @@ jobs:
       - name: SBOMs of the image
         env:
           SYFT: ${{ steps.syft.outputs.cmd }}
-          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
         run: |
           mkdir -p sbom
           for platform in linux/amd64 linux/arm64; do
@@ -291,14 +433,14 @@ jobs:
         if: github.event.repository.visibility == 'public'
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ needs.image.outputs.digest }}
           sbom-path: sbom/colca-image-linux-amd64.spdx.json
           push-to-registry: true
       - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
         if: github.event.repository.visibility == 'public'
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ needs.image.outputs.digest }}
           sbom-path: sbom/colca-image-linux-arm64.spdx.json
           push-to-registry: true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -308,7 +450,7 @@ jobs:
           if-no-files-found: error
 
   packages:
-    needs: [version, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
+    needs: [version]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -320,9 +462,10 @@ jobs:
       VERSION: ${{ needs.version.outputs.python }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - id: go
+        uses: ./.github/actions/setup-go
         with:
-          go-version-file: go.mod
+          flavour: wheels
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: "0.11.17"
@@ -334,6 +477,12 @@ jobs:
         run: |
           make wheels VERSION="$VERSION"
           cp build/wheels/*.whl dist/
+      - name: Save the Go cache
+        if: github.ref == 'refs/heads/main' && steps.go.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.path }}
+          key: ${{ steps.go.outputs.key }}
       - name: Check package metadata
         run: uvx twine@7.0.0 check --strict dist/*
       - id: syft
@@ -378,7 +527,7 @@ jobs:
   # The npm package, built the same way as the Python one: version from the tag,
   # SBOM, attestations, and an artifact the publish job takes as it is.
   npm-package:
-    needs: [version, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
+    needs: [version]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -445,7 +594,7 @@ jobs:
   # environment, so no token is stored anywhere. The OIDC exchange needs npm
   # 11.5.1 or newer, hence the explicit install.
   npm:
-    needs: [npm-package]
+    needs: [npm-package, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
     if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -468,7 +617,7 @@ jobs:
   # Trusted publishing: PyPI accepts uploads from this workflow in the pypi
   # environment, so no token is stored anywhere.
   pypi:
-    needs: [packages]
+    needs: [packages, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
     if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -483,7 +632,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
 
   release:
-    needs: [version, image, packages]
+    needs: [version, publish-image, packages]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10

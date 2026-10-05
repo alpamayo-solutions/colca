@@ -1,0 +1,50 @@
+name: Go with a build cache
+description: >
+  Installs the Go version of go.mod and restores the module and build caches of
+  one flavour. Each flavour (race tests per shard, lint, build, ...) compiles
+  differently, so each keeps its own cache. Restoring is all this does: a job
+  saves with actions/cache/save, on main only, so pull requests and tags read
+  main's caches without adding their own.
+inputs:
+  flavour:
+    description: The cache flavour, for example race-bench or lint.
+    required: true
+outputs:
+  key:
+    description: The exact cache key; pass it to actions/cache/save.
+    value: ${{ steps.keys.outputs.key }}
+  path:
+    description: The cached directories; pass them to actions/cache/save.
+    value: ${{ steps.keys.outputs.path }}
+  cache-hit:
+    description: "'true' when the exact key was restored, so there is nothing new to save."
+    value: ${{ steps.restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - id: go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache: false
+    - id: keys
+      shell: bash
+      env:
+        FLAVOUR: ${{ inputs.flavour }}
+        GO_VERSION: ${{ steps.go.outputs.go-version }}
+        GO_SUM: ${{ hashFiles('go.sum') }}
+      run: |
+        prefix="go-$FLAVOUR-$RUNNER_OS-$RUNNER_ARCH-go$GO_VERSION-"
+        {
+          echo "prefix=$prefix"
+          echo "key=$prefix$GO_SUM"
+          echo "path<<EOF"
+          go env GOMODCACHE GOCACHE
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+    - id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ${{ steps.keys.outputs.path }}
+        key: ${{ steps.keys.outputs.key }}
+        restore-keys: ${{ steps.keys.outputs.prefix }}
