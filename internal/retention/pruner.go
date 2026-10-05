@@ -28,6 +28,9 @@ var streams = []string{"metrics", "entities", "commands", "audit", "alarms", "an
 // definitionsStream is reclaimed by compaction instead (compactDefinitions).
 const definitionsStream = "definitions"
 
+// commandsStream carries the built-in per-signal rule for fetchLogs acks.
+const commandsStream = "commands"
+
 // Pruner is the per-node background pruner. One instance per node; Run is its
 // only goroutine entry point.
 type Pruner struct {
@@ -407,9 +410,21 @@ func (p *Pruner) cursorFloor(stream string, next uint64, now time.Time, window t
 // prune. The pass goes signal by signal, so its deletes are spread over the
 // whole range it may thin: the marker names that range, from the cursor to the
 // floor, and is sparse, since other signals' records in it stay.
+//
+// The commands stream has one built-in rule: fetchLogs acks, filed under
+// uns.FetchLogsAckKey, keep engine.FetchLogsAckMaxAge. Their pages of log
+// records must not stay for the stream's months.
 func (p *Pruner) pruneSignals(stream string) {
 	pol := p.cfg.EffectiveStream(stream)
-	if len(pol.Signals) == 0 {
+	rule := pol.SignalMaxAge
+	if stream == commandsStream {
+		rule = func(signalID, topic string) (time.Duration, bool) {
+			if signalID == uns.FetchLogsAckKey {
+				return engine.FetchLogsAckMaxAge, true
+			}
+			return pol.SignalMaxAge(signalID, topic)
+		}
+	} else if len(pol.Signals) == 0 {
 		return
 	}
 	now := p.now()
@@ -457,7 +472,7 @@ func (p *Pruner) pruneSignals(stream string) {
 	var removed, bytes uint64
 	var overridden []string
 	for {
-		res, err := p.st.PruneSignals(stream, p.signalFrom[stream], now, pol.SignalMaxAge, clamp, at, p.visitCap, marker)
+		res, err := p.st.PruneSignals(stream, p.signalFrom[stream], now, rule, clamp, at, p.visitCap, marker)
 		removed += res.Removed
 		bytes += res.Bytes
 		for _, name := range res.Overridden {

@@ -86,6 +86,7 @@ func TestFloorParityCorpus(t *testing.T) {
 		{"_SystemElement", `{"ulid": "x"}`}, // the registry's field name is not this contract's
 		{"_SystemElement", ``},
 		{"_Ack", `{"correlation_id": "c", "result_code": 200}`},
+		{"_Ack", `{"correlation_id": "c", "result_code": 200, "result": {"records": [], "complete": true}}`},
 		{"_Ack", `{"correlation_id": "c"}`},
 		{"_Ack", ``}, // events: tombstone rejected
 		{"_CmdParam", `{"correlation_id": "c", "expires_at": 99}`},

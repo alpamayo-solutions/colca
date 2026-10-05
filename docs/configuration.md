@@ -217,6 +217,11 @@ the index existed on the node (colca 0.27). Older records leave with the
 stream's `max_age`. Its deletes are spread across the stream rather than a
 prefix, so Pebble reclaims their space as compaction reaches them.
 
+The `commands` stream has one built-in rule of the same kind: the acks of
+`fetchLogs` commands, which carry pages of log records, are kept one hour
+instead of the stream's `max_age` ([Fetching a node's logs](concepts.md#fetching-a-nodes-logs)).
+It is not configurable.
+
 ## Storage
 
 | Key | Default | Meaning |

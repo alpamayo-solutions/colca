@@ -550,6 +550,26 @@ func AuthorizeCmdAt(sc Scope, e *Entry, class, path string) bool {
 	return false
 }
 
+// MayReadFetchLogsAck reports whether e may read the record at topic, whose
+// stored attribution names actorID. Every record but a fetchLogs ack is left to
+// the read grants (true). A fetchLogs ack carries another node's log records,
+// which a read grant on the ack's path does not cover, so only the identity the
+// command is attributed to and holders of the admin command class over the
+// target may read it. The admin token is checked by the caller.
+func MayReadFetchLogsAck(sc Scope, e *Entry, topic, actorID string) bool {
+	path, ok := FetchLogsAck(topic)
+	if !ok {
+		return true
+	}
+	if e == nil {
+		return false
+	}
+	if actorID != "" && e.ULID == actorID {
+		return true
+	}
+	return AuthorizeCmdAt(sc, e, CmdClass("_CmdAdmin"), path)
+}
+
 // AuthorizedAtExecutor reports whether a command is authorized against the
 // plan its executor composes instead of its topic path. True for _CmdEdit,
 // whose path routes to the owning node. The door still checks the class.

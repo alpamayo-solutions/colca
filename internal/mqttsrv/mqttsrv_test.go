@@ -260,7 +260,7 @@ func startServerWithLocalDoor(t *testing.T) *world {
 	s.SetEngine(eng)
 	w.eng = eng
 	domain := uns.NewConfigExec(eng.EntityStore(), reg, eng.Elements(), nil, registry.NewULID, cfg.Plugin)
-	eng.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain))
+	eng.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg, nil), domain))
 	eng.SetObserver(domain)
 	reg.SetNamespace(eng.Elements())
 	reg.SetAuthoring(func(path string) (string, error) {
@@ -1430,4 +1430,52 @@ func TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace(t *testing.T) {
 	}
 	close(stop)
 	<-done
+}
+
+// A fetchLogs ack reaches only the command's sender and holders of the admin
+// command class; a read grant alone delivers every other ack as before.
+func TestFetchLogsAckDeliveredOnlyToAdmins(t *testing.T) {
+	w := newWorld(t)
+	adm := authtest.NewMachine(t, "adm")
+	authtest.EnrollAt(t, w.reg, w.eng, adm, "adm", "read:#", "cmd:#:admin")
+
+	got := map[string]chan string{"obs": make(chan string, 4), "adm": make(chan string, 4)}
+	for name, m := range map[string]*authtest.Machine{"obs": w.obs, "adm": adm} {
+		c := connect(t, w.srv.Addr(), name+"-acks", m)
+		ch := got[name]
+		tok := c.Subscribe("colca/v1/_Ack/#", 1, func(_ paho.Client, msg paho.Message) {
+			ch <- msg.Topic()[strings.LastIndex(msg.Topic(), "/")+1:]
+		})
+		if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
+			t.Fatalf("%s subscribe: %v", name, tok.Error())
+		}
+	}
+	w.srv.DeliverLocal("colca/v1/_Ack/n1/site1/edge1/fetchLogs", []byte(`{"correlation_id":"f","result_code":200,"result":{}}`), false)
+	w.srv.DeliverLocal("colca/v1/_Ack/n1/site1/edge1/revoke", []byte(`{"correlation_id":"r","result_code":200}`), false)
+
+	collect := func(ch chan string, n int) []string {
+		var out []string
+		deadline := time.After(3 * time.Second)
+		for len(out) < n {
+			select {
+			case v := <-ch:
+				out = append(out, v)
+			case <-deadline:
+				return out
+			}
+		}
+		return out
+	}
+	if a := collect(got["adm"], 2); strings.Join(a, ",") != "fetchLogs,revoke" {
+		t.Fatalf("admin received %v", a)
+	}
+	// The observer's revoke arrives after the fetchLogs ack would have.
+	if o := collect(got["obs"], 1); strings.Join(o, ",") != "revoke" {
+		t.Fatalf("read-only observer received %v, want only revoke", o)
+	}
+	select {
+	case v := <-got["obs"]:
+		t.Fatalf("observer also received %s", v)
+	case <-time.After(200 * time.Millisecond):
+	}
 }

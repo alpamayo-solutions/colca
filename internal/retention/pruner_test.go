@@ -1047,3 +1047,34 @@ func TestARetiredCursorNoLongerHoldsRetention(t *testing.T) {
 		t.Fatalf("a retired cursor must not leave a gap marker: next = %d, want 11", next)
 	}
 }
+
+// fetchLogs acks leave the commands stream after engine.FetchLogsAckMaxAge,
+// long before the stream's own policy, except the newest; every other command
+// record stays.
+func TestFetchLogsAcksHaveShortRetention(t *testing.T) {
+	st, eng := mustParts(t)
+	now := time.UnixMilli(100 * 3_600_000)
+	old := now.Add(-engine.FetchLogsAckMaxAge - time.Minute).UnixMilli()
+	ack := func(verb string, ts int64) store.Record {
+		return store.Record{Topic: "colca/v1/_Ack/n-edge1/site1/edge1/" + verb,
+			Payload: []byte(`{"correlation_id":"c","result_code":200,"result":{"records":[]}}`), TS: ts}
+	}
+	if _, _, err := st.Append("commands", []store.Record{
+		ack("fetchLogs", old), ack("revoke", old), ack("fetchLogs", old+1), ack("fetchLogs", now.UnixMilli()),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := newPruner(t, st, eng, config.Retention{})
+	p.now = func() time.Time { return now }
+	p.runOnce()
+
+	var got []string
+	for _, r := range readAll(t, st, "commands", 1) {
+		got = append(got, fmt.Sprintf("%d:%s", r.Offset, r.Topic[strings.LastIndex(r.Topic, "/")+1:]))
+	}
+	// Offset 1 is gone; 3 is the newest before the cutoff, kept as per-signal
+	// retention keeps the value in force; 4 is inside the window.
+	if strings.Join(got, ",") != "2:revoke,3:fetchLogs,4:fetchLogs" {
+		t.Fatalf("commands after the pass = %v", got)
+	}
+}
