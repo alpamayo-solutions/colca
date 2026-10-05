@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.2](https://github.com/alpamayo-solutions/colca/compare/v0.29.1...v0.29.2) (2026-10-05)
+
+
+### Fixes
+
+* **watch:** take a narrowed hint's next offset with its scoped positions ([#157](https://github.com/alpamayo-solutions/colca/issues/157)) ([919dd7f](https://github.com/alpamayo-solutions/colca/commit/919dd7fd28525340bae12c8b37c74f6ae54a5172))
+
 ## [0.29.1](https://github.com/alpamayo-solutions/colca/compare/v0.29.0...v0.29.1) (2026-10-05)
 
 
