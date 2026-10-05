@@ -161,6 +161,9 @@ type Config struct {
 	// apply and pruning is on.
 	Retention Retention `yaml:"retention"`
 
+	// Storage tunes the stream store on disk.
+	Storage Storage `yaml:"storage"`
+
 	// Limits caps the size of a single record or blob.
 	Limits Limits `yaml:"limits"`
 
@@ -345,6 +348,47 @@ type StreamRetention struct {
 	MaxBytes           ByteSize `yaml:"max_bytes"`
 	IgnoreCursorsAfter Duration `yaml:"ignore_cursors_after"`
 	KeepForever        bool     `yaml:"keep_forever"`
+	// Signals are per-signal windows inside the stream's own (metrics only).
+	// The first rule that matches a signal sets its window; a signal no rule
+	// matches keeps the stream's policy. A rule can only shorten: the stream
+	// policy still cuts every signal at its own max_age.
+	Signals []SignalRetention `yaml:"signals"`
+}
+
+// SignalRetention is one per-signal rule. A signal matches when its id is in
+// SignalIDs or its _Metric topic matches one of Topics (MQTT filters, "+" for
+// one level, "#" for the rest). The newest record older than MaxAge is kept,
+// so the value in force when the window opens stays readable.
+type SignalRetention struct {
+	Topics    []string `yaml:"topics"`
+	SignalIDs []string `yaml:"signal_ids"`
+	MaxAge    Duration `yaml:"max_age"`
+}
+
+// matches reports whether the rule selects the signal with this id and topic.
+func (r SignalRetention) matches(signalID, topic string) bool {
+	for _, id := range r.SignalIDs {
+		if id == signalID {
+			return true
+		}
+	}
+	for _, f := range r.Topics {
+		if uns.MatchFilter(f, topic) {
+			return true
+		}
+	}
+	return false
+}
+
+// SignalMaxAge returns the window of the first rule that selects the signal;
+// ok=false when none does.
+func (s StreamRetention) SignalMaxAge(signalID, topic string) (time.Duration, bool) {
+	for _, r := range s.Signals {
+		if r.matches(signalID, topic) {
+			return time.Duration(r.MaxAge), true
+		}
+	}
+	return 0, false
 }
 
 // Retention is the retention: block, keyed by stream name. A stream without an
@@ -356,6 +400,18 @@ type Retention struct {
 	Interval *Duration                  `yaml:"interval"`
 	Streams  map[string]StreamRetention `yaml:"streams"`
 }
+
+// Storage is the storage: block.
+type Storage struct {
+	// Compression is the block compression of the stream store: "snappy" (the
+	// default) or "zstd", smaller at more CPU per flush and compaction. It
+	// applies to data written from then on; older files are rewritten in the
+	// new format as compaction reaches them. Either setting reads both.
+	Compression string `yaml:"compression"`
+}
+
+// knownCompressions are the storage.compression values.
+var knownCompressions = map[string]bool{"": true, "snappy": true, "zstd": true}
 
 // Limits is the limits: block. Zero values mean the defaults.
 type Limits struct {
@@ -740,6 +796,9 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	if !knownCompressions[c.Storage.Compression] {
+		return fmt.Errorf("config: storage.compression %q, want snappy or zstd", c.Storage.Compression)
+	}
 	if err := c.Retention.validate(); err != nil {
 		return err
 	}
@@ -786,6 +845,45 @@ func (a *Auth) validate() error {
 	return nil
 }
 
+// validateSignalRules checks retention.streams.<name>.signals: metrics only,
+// a selector and a positive max_age per rule, valid topic filters, and a window
+// shorter than the stream's own, which would otherwise cut it anyway.
+func validateSignalRules(name string, s, eff StreamRetention) error {
+	if len(s.Signals) == 0 {
+		return nil
+	}
+	if name != "metrics" {
+		return fmt.Errorf("config: retention.streams.%s.signals: per-signal retention applies to the metrics stream only", name)
+	}
+	if s.KeepForever {
+		return fmt.Errorf("config: retention.streams.%s cannot set both keep_forever and signals: keep_forever keeps every record, signals would remove some", name)
+	}
+	for i, rule := range s.Signals {
+		at := fmt.Sprintf("config: retention.streams.%s.signals[%d]", name, i)
+		if len(rule.Topics) == 0 && len(rule.SignalIDs) == 0 {
+			return fmt.Errorf("%s: needs topics or signal_ids", at)
+		}
+		for _, f := range rule.Topics {
+			if !uns.ValidFilter(f) {
+				return fmt.Errorf("%s: invalid topic filter %q", at, f)
+			}
+		}
+		for _, id := range rule.SignalIDs {
+			if id == "" {
+				return fmt.Errorf("%s: empty signal id", at)
+			}
+		}
+		maxAge := time.Duration(rule.MaxAge)
+		if maxAge <= 0 {
+			return fmt.Errorf("%s: max_age must be positive, got %s", at, maxAge)
+		}
+		if streamAge := time.Duration(eff.MaxAge); streamAge > 0 && maxAge >= streamAge {
+			return fmt.Errorf("%s: max_age %s must be shorter than the stream's max_age %s", at, maxAge, streamAge)
+		}
+	}
+	return nil
+}
+
 // validate checks the retention: block: non-negative durations, known streams
 // and the commands.max_age floor.
 func (r Retention) validate() error {
@@ -806,6 +904,9 @@ func (r Retention) validate() error {
 		}
 		if time.Duration(s.IgnoreCursorsAfter) < 0 {
 			return fmt.Errorf("config: retention.streams.%s.ignore_cursors_after must not be negative, got %s", name, time.Duration(s.IgnoreCursorsAfter))
+		}
+		if err := validateSignalRules(name, s, r.EffectiveStream(name)); err != nil {
+			return err
 		}
 	}
 	commands := r.EffectiveStream("commands")

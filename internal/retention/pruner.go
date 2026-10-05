@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -50,16 +51,39 @@ type Pruner struct {
 	// in memory only; after a restart the sweep starts over at the LWM, which is
 	// harmless.
 	evictFrom map[string]uint64
+	// signalFrom is the signal the per-signal pass resumes at per stream, "" for
+	// the start of the index. In memory only, like evictFrom.
+	signalFrom map[string]string
+	// passBudget bounds how long one stream may keep pruning within a cycle when
+	// a pass stopped at its scan cap. Real time, not the injected clock.
+	passBudget time.Duration
+	// scanCap bounds one policy scan, store.DefaultPolicyScanCap outside tests.
+	scanCap uint64
+	// visitCap bounds one PruneSignals call, signalVisitCap outside tests.
+	visitCap int
 }
+
+// defaultPassBudget is how long one stream may keep pruning in one cycle. A
+// large hub appends more records per interval than one capped scan covers, so
+// the pruner repeats the pass instead of falling behind by the difference.
+const defaultPassBudget = 30 * time.Second
+
+// signalVisitCap bounds the index entries one PruneSignals call visits; the
+// pass repeats within passBudget and resumes next cycle where it stopped.
+const signalVisitCap = 200_000
 
 // NewPruner builds a pruner. ulid is this node's ULID, level 4 of every
 // _StreamGap topic it emits. m may be nil.
 func NewPruner(st *store.Store, eng *engine.Engine, cfg config.Retention, m *metrics.Metrics, ulid string) *Pruner {
 	return &Pruner{
 		st: st, eng: eng, cfg: cfg, m: m, ulid: ulid,
-		log:       slog.Default().With("node", ulid, "comp", "retention"),
-		now:       time.Now,
-		evictFrom: map[string]uint64{},
+		log:        slog.Default().With("node", ulid, "comp", "retention"),
+		now:        time.Now,
+		evictFrom:  map[string]uint64{},
+		signalFrom: map[string]string{},
+		passBudget: defaultPassBudget,
+		scanCap:    store.DefaultPolicyScanCap,
+		visitCap:   signalVisitCap,
 		publish: func(topic string, payload []byte, ifKVOffset uint64) (bool, error) {
 			_, applied, err := eng.IngestRefresh(topic, payload, ifKVOffset)
 			return applied, err
@@ -96,7 +120,14 @@ func (p *Pruner) Run(stop <-chan struct{}) {
 func (p *Pruner) runOnce() {
 	p.completePendingRefresh()
 	for _, stream := range streams {
-		p.pruneStream(stream)
+		// Repeat while a pass stopped at its scan cap and still removed records, so a
+		// stream that grows faster than one scan per interval cannot fall behind.
+		for start := time.Now(); p.pruneStream(stream); {
+			if time.Since(start) >= p.passBudget {
+				break
+			}
+		}
+		p.pruneSignals(stream)
 	}
 	p.compactDefinitions()
 	p.evictForeignPrivateState()
@@ -180,14 +211,15 @@ type gapPayload struct {
 }
 
 // pruneStream evaluates one stream's retention policy and commits at most one
-// Prune.
-func (p *Pruner) pruneStream(stream string) {
+// Prune. again reports that the policy scan stopped at its cap after removing
+// records, so another pass would prune further.
+func (p *Pruner) pruneStream(stream string) (again bool) {
 	pol := p.cfg.EffectiveStream(stream)
 	maxAge := time.Duration(pol.MaxAge)
 	maxBytes := uint64(pol.MaxBytes)
 	window := time.Duration(pol.IgnoreCursorsAfter)
 	if maxAge <= 0 && maxBytes == 0 {
-		return // no policy configured for this stream — nothing can ever prune
+		return false // no policy configured for this stream — nothing can ever prune
 	}
 	now := p.now()
 	nowMS := now.UnixMilli()
@@ -197,49 +229,26 @@ func (p *Pruner) pruneStream(stream string) {
 	next := p.st.NextOffset(stream)
 	liveBytes := p.st.StreamBytes(stream)
 
-	// The protected-cursor floor: every cursor on this stream protects it until the
-	// staleness window has passed since its last advance. Cursors on other streams,
-	// such as commands-parent, never count.
-	protecting, staleCursors := p.st.ProtectedCursors(stream, now, window)
-	clamp := next
-	blocking := ""
-	var stale []overriddenCursor
-	for _, c := range protecting {
-		if c.LastAdvanceMS == 0 {
-			// A cursor from before ct/ timestamps counts as advancing now. Only the pruner
-			// persists that stamp, since it is about to prune.
-			p.st.CursorMarkSeen(c.Name, stream, nowMS)
-		}
-		if c.Position < clamp {
-			clamp = c.Position
-			blocking = c.Name
-		}
-	}
-	for _, c := range staleCursors {
-		// staleCursors never holds a cursor without a timestamp, so this recomputes the
-		// value ProtectedCursors used.
-		staleFor := now.Sub(time.UnixMilli(c.LastAdvanceMS))
-		stale = append(stale, overriddenCursor{name: c.Name, pos: c.Position, staleFor: staleFor})
-	}
+	clamp, blocking, stale := p.cursorFloor(stream, next, now, window)
 
-	// The policy scan stops at the protected floor and after DefaultPolicyScanCap
-	// records, so it cannot prune past a live cursor. If the scan cap stops it,
-	// newLWM is still a safe floor and the next cycle continues from there.
-	newLWM, clamped, capped, scanErr := p.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, store.DefaultPolicyScanCap)
+	// The policy scan stops at the protected floor and after scanCap records, so it
+	// cannot prune past a live cursor. If the scan cap stops it, newLWM is still a
+	// safe floor and runOnce repeats the pass while its time budget lasts.
+	newLWM, clamped, capped, scanErr := p.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, p.scanCap)
 	if scanErr != nil {
 		p.log.Error("retention policy scan failed", "stream", stream, "err", scanErr)
-		return
+		return false
 	}
 	if clamped {
 		p.log.Warn("retention policy cursor-clamped: policy wants to prune further but a live cursor forbids it",
 			"stream", stream, "cursor", blocking, "clamp", clamp, "lwm", lwm)
 	}
 	if capped {
-		p.log.Info("retention policy scan hit the per-cycle record cap: pruning this cycle's floor now, continuing next cycle",
-			"stream", stream, "scan_cap", store.DefaultPolicyScanCap, "lwm", lwm, "target", newLWM)
+		p.log.Debug("retention policy scan hit its record cap: pruning to its floor now, then scanning again",
+			"stream", stream, "scan_cap", p.scanCap, "lwm", lwm, "target", newLWM)
 	}
 	if newLWM <= lwm {
-		return // nothing to prune this cycle
+		return false // nothing to prune this cycle
 	}
 
 	// One durable _StreamGap marker per run that prunes past a stale cursor,
@@ -327,10 +336,10 @@ func (p *Pruner) pruneStream(stream string) {
 	removed, err := p.st.Prune(stream, newLWM, names, plan)
 	if err != nil {
 		p.log.Error("prune failed", "stream", stream, "up_to", newLWM, "err", err)
-		return
+		return false
 	}
 	if removed == 0 {
-		return // shrunk to a no-op by the in-batch recheck: nothing was deleted
+		return false // shrunk to a no-op by the in-batch recheck: nothing was deleted
 	}
 	// A run is a cycle that removed something. The bytes come from the store's count
 	// after its recheck (PruneSpan.Shed), not from shed above, which overstates them
@@ -359,6 +368,127 @@ func (p *Pruner) pruneStream(stream string) {
 	if stream == "entities" && len(applied) > 0 {
 		p.completePendingRefresh()
 	}
+	return capped
+}
+
+// cursorFloor is the protected-cursor floor: every cursor on this stream
+// protects it until the staleness window has passed since its last advance.
+// Cursors on other streams, such as commands-parent, never count. It returns
+// the floor (next when no cursor protects), the cursor that sets it, and the
+// stale cursors the caller may pass with a _StreamGap marker.
+func (p *Pruner) cursorFloor(stream string, next uint64, now time.Time, window time.Duration) (clamp uint64, blocking string, stale []overriddenCursor) {
+	protecting, staleCursors := p.st.ProtectedCursors(stream, now, window)
+	clamp = next
+	for _, c := range protecting {
+		if c.LastAdvanceMS == 0 {
+			// A cursor from before ct/ timestamps counts as advancing now. Only the pruner
+			// persists that stamp, since it is about to prune.
+			p.st.CursorMarkSeen(c.Name, stream, now.UnixMilli())
+		}
+		if c.Position < clamp {
+			clamp = c.Position
+			blocking = c.Name
+		}
+	}
+	for _, c := range staleCursors {
+		// staleCursors never holds a cursor without a timestamp, so this recomputes the
+		// value ProtectedCursors used.
+		staleFor := now.Sub(time.UnixMilli(c.LastAdvanceMS))
+		stale = append(stale, overriddenCursor{name: c.Name, pos: c.Position, staleFor: staleFor})
+	}
+	return clamp, blocking, stale
+}
+
+// pruneSignals applies the stream's per-signal rules (retention.streams.<s>.
+// signals): it removes each matching signal's records older than the rule's
+// window, keeping the newest of them as the value in force when the window
+// opens, below the same cursor floor as the stream prune. A stale cursor it
+// passes gets one _StreamGap marker per pass naming it, as with the stream
+// prune. The pass goes signal by signal, so its deletes are spread over the
+// whole range it may thin: the marker names that range, from the cursor to the
+// floor, and is sparse, since other signals' records in it stay.
+func (p *Pruner) pruneSignals(stream string) {
+	pol := p.cfg.EffectiveStream(stream)
+	if len(pol.Signals) == 0 {
+		return
+	}
+	now := p.now()
+	next := p.st.NextOffset(stream)
+	clamp, _, stale := p.cursorFloor(stream, next, now, time.Duration(pol.IgnoreCursorsAfter))
+	// The positions the decision was taken at: a stale cursor that acks during the
+	// pass protects again (the store compares them under its mutex).
+	at := make(map[string]uint64, len(stale))
+	for _, c := range stale {
+		at[c.name] = c.pos
+	}
+	markers := 0
+	marked := map[string]bool{}
+	marker := func(span store.PruneSpan, passed []string) []store.Record {
+		var fresh []string
+		from := span.From
+		for _, name := range passed {
+			if !marked[name] {
+				fresh = append(fresh, name)
+				from = min(from, at[name])
+			}
+		}
+		if len(fresh) == 0 {
+			return nil // this pass already told these cursors
+		}
+		payload, err := json.Marshal(gapPayload{
+			Stream: stream, FromOffset: from, ToOffset: clamp - 1,
+			FirstTS: span.FirstTS, LastTS: span.LastTS, OverriddenCursors: fresh,
+		})
+		if err != nil {
+			p.log.Error("retention gap marker encode failed — pruning WITHOUT a marker", "stream", stream, "err", err)
+			return nil
+		}
+		markers++
+		for _, name := range fresh {
+			marked[name] = true
+		}
+		return []store.Record{{
+			Topic:   uns.Prefix() + "_StreamGap/" + p.ulid + "/" + stream,
+			Payload: payload,
+			TS:      now.UnixMilli(),
+		}}
+	}
+	start := time.Now()
+	var removed, bytes uint64
+	var overridden []string
+	for {
+		res, err := p.st.PruneSignals(stream, p.signalFrom[stream], now, pol.SignalMaxAge, clamp, at, p.visitCap, marker)
+		removed += res.Removed
+		bytes += res.Bytes
+		for _, name := range res.Overridden {
+			if !slices.Contains(overridden, name) {
+				overridden = append(overridden, name)
+			}
+		}
+		if err != nil {
+			p.log.Error("per-signal prune failed — the pass restarts next cycle", "stream", stream, "err", err)
+			p.signalFrom[stream] = ""
+			break
+		}
+		p.signalFrom[stream] = res.Resume
+		if res.Resume == "" || time.Since(start) >= p.passBudget {
+			break
+		}
+	}
+	if removed == 0 {
+		return
+	}
+	p.m.RetentionPruneRun(stream)
+	p.m.RetentionPruned(stream, removed, bytes)
+	for range markers {
+		p.m.RetentionGapRecorded(stream)
+	}
+	for _, name := range overridden {
+		p.log.Error("retention staleness override: per-signal retention pruned past a stale cursor; the consumer will see a gap",
+			"stream", stream, "cursor", name, "window", time.Duration(pol.IgnoreCursorsAfter))
+	}
+	p.log.Info("pruned per signal", "stream", stream, "records", removed, "bytes", bytes,
+		"overridden_cursors", len(overridden))
 }
 
 // queuedDrop is a command a prune removes before the delivery cursor that held

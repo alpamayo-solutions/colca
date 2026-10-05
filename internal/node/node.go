@@ -134,7 +134,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		slog.Info("minted this node's identity — enroll it at its parent",
 			"node", cfg.ULID, "key_file", cfg.KeyFile, "pubkey", id.PublicHex())
 	}
-	st, err := store.Open(cfg.DataDir)
+	st, err := store.OpenWithOptions(cfg.DataDir, store.Options{Compression: cfg.Storage.Compression})
 	if err != nil {
 		return nil, fmt.Errorf("node %s: open store %s: %w", cfg.ULID, cfg.DataDir, err)
 	}
