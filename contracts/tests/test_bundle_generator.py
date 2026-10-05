@@ -617,3 +617,24 @@ def test_ulid_fields_carry_the_one_pattern():
             seen.setdefault(ident, []).append(pointer)
             assert _walk(entry["schema"], pointer)["pattern"] == ULID_PATTERN, (ident, pointer)
     assert {k: sorted(v) for k, v in seen.items()} == {k: sorted(v) for k, v in ULID_CONSTRAINED_FIELDS.items()}
+
+
+def test_an_ack_carrying_a_result_document_is_admitted_and_decodes_whole():
+    # A command whose verb answers with data (the node's _CmdAdmin fetchLogs)
+    # puts it in the ack's `result`. Nodes validate acks against this schema
+    # and clients decode them with franzmq's Ack, so both must keep the field.
+    body, _ = gb.build_bundle()
+    ack = {
+        "correlation_id": "c-1",
+        "result_code": 200,
+        "message": "1 log records",
+        "result": {
+            "records": [{"offset": 7, "ts": 1759650000000, "topic": "colca/v1/_Log/n/svc/INFO", "payload": {}}],
+            "next": 7,
+            "complete": False,
+        },
+    }
+    jsonschema.validate(ack, body["contracts"]["_Ack"]["schema"])
+    decoded = PAYLOAD_CLASSES["_Ack"].decode(json.dumps(ack), 0)
+    assert decoded.result == ack["result"]
+    assert json.loads(decoded.encode())["result"] == ack["result"]

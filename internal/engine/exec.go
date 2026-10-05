@@ -34,6 +34,16 @@ type stateWritingCommandExecutor interface {
 	) (code int, message, result string, writes []uns.StateWrite)
 }
 
+// resultCommandExecutor is a CommandExecutor whose verbs may answer with a
+// result document, carried in the ack's result field (fetchLogs' page).
+type resultCommandExecutor interface {
+	ExecuteWithResult(
+		ctx uns.CommandContext,
+		contract, verb string,
+		payload []byte,
+	) (code int, message, result string, data json.RawMessage)
+}
+
 // CommandOutcome is returned synchronously to local HTTP command callers and
 // is also persisted in the normal _Ack event. StateWrites are the exact
 // records the command produced, so callers wait on state rather than merely
@@ -43,6 +53,8 @@ type CommandOutcome struct {
 	ResultCode    int              `json:"result_code"`
 	Message       string           `json:"message"`
 	StateWrites   []uns.StateWrite `json:"state_writes,omitempty"`
+	// Result is the verb's answer document, for verbs that have one.
+	Result json.RawMessage `json:"result,omitempty"`
 }
 
 // SetExecutor wires the executor in (node startup). An engine without one
@@ -117,22 +129,35 @@ func (m multiExec) Execute(ctx uns.CommandContext, contract, verb string, payloa
 	return 500, "no executor claims " + contract, "error"
 }
 
-func (m multiExec) ExecuteWithWrites(
-	ctx uns.CommandContext,
-	contract, verb string,
-	payload []byte,
-) (int, string, string, []uns.StateWrite) {
-	for _, x := range m {
-		if !x.Handles(contract) {
-			continue
+// commandReply is everything one execution produced.
+type commandReply struct {
+	code            int
+	message, result string
+	writes          []uns.StateWrite
+	data            json.RawMessage
+}
+
+// run executes through the richest interface x offers. multiExec routes to the
+// executor that claims the contract first, so that one's extensions apply.
+func run(x CommandExecutor, ctx uns.CommandContext, contract, verb string, payload []byte) commandReply {
+	if m, ok := x.(multiExec); ok {
+		for _, y := range m {
+			if y.Handles(contract) {
+				return run(y, ctx, contract, verb, payload)
+			}
 		}
-		if writer, ok := x.(stateWritingCommandExecutor); ok {
-			return writer.ExecuteWithWrites(ctx, contract, verb, payload)
-		}
-		code, message, result := x.Execute(ctx, contract, verb, payload)
-		return code, message, result, nil
+		return commandReply{code: 500, message: "no executor claims " + contract, result: "error"}
 	}
-	return 500, "no executor claims " + contract, "error", nil
+	var r commandReply
+	switch w := x.(type) {
+	case resultCommandExecutor:
+		r.code, r.message, r.result, r.data = w.ExecuteWithResult(ctx, contract, verb, payload)
+	case stateWritingCommandExecutor:
+		r.code, r.message, r.result, r.writes = w.ExecuteWithWrites(ctx, contract, verb, payload)
+	default:
+		r.code, r.message, r.result = x.Execute(ctx, contract, verb, payload)
+	}
+	return r
 }
 
 // cmdEnvelope is the part of a command payload every class shares:
@@ -180,9 +205,6 @@ func (e *Engine) maybeExec(
 		return outcome
 	}
 
-	var code int
-	var msg, result string
-	var writes []uns.StateWrite
 	// attribution is the command record's own door-verified attribution — the
 	// same fact ack() below stamps onto this command's outcome. Carrying it
 	// into ctx lets EntityStore.PublishBatch/PublishEvent attribute an
@@ -193,18 +215,15 @@ func (e *Engine) maybeExec(
 		ActorLabel: attribution.ActorLabel,
 		ActorKind:  attribution.ActorKind,
 	}
-	if writer, ok := e.exec.(stateWritingCommandExecutor); ok {
-		code, msg, result, writes = writer.ExecuteWithWrites(ctx, p.Contract, verb, payload)
-	} else {
-		code, msg, result = e.exec.Execute(ctx, p.Contract, verb, payload)
-	}
+	r := run(e.exec, ctx, p.Contract, verb, payload)
 	outcome := &CommandOutcome{
 		CorrelationID: env.CorrelationID,
-		ResultCode:    code,
-		Message:       msg,
-		StateWrites:   writes,
+		ResultCode:    r.code,
+		Message:       r.message,
+		StateWrites:   r.writes,
+		Result:        r.data,
 	}
-	e.ack(p.Contract, verb, outcome, result, attribution)
+	e.ack(p.Contract, verb, outcome, r.result, attribution)
 	return outcome
 }
 

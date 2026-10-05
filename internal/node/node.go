@@ -242,7 +242,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	// The configure executor's blob port: a resource must never point at bytes
 	// this node cannot produce.
 	edit.SetBlobs(blobPort)
-	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain, edit))
+	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg, st), domain, edit))
 	n.Engine.SetObserver(domain)
 	// The observer only sees new records, so the retained state from earlier runs
 	// is replayed to it once.

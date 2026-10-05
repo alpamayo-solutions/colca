@@ -164,7 +164,65 @@ Some commands are executed by the node itself rather than a machine:
 |---|---|
 | `_CmdConfigure` | author the namespace: elements, signals, constants, resources, definitions |
 | `_CmdEdit` | apply an atomic, versioned edit composed by an editor application |
-| `_CmdAdmin` | enroll or revoke an identity on a node that is only reachable through the tree |
+| `_CmdAdmin` | enroll or revoke an identity on a node that is only reachable through the tree, or read a node's own logs (`fetchLogs`) |
+
+### Fetching a node's logs
+
+A node keeps its whole `logs` stream locally. An ancestor reads it on demand
+with the `_CmdAdmin` verb `fetchLogs`, one page per command, answered in the
+command's `_Ack`. Nothing is streamed up for it.
+
+- **Topic.** `{root}/v1/_CmdAdmin/<node ulid>/<mount…>/fetchLogs` at the sender,
+  for example `colca/v1/_CmdAdmin/n-edge1/site1/edge1/fetchLogs` at the hub. The
+  ack comes back as `_Ack/<node ulid>/<mount…>/fetchLogs`.
+- **Who may send it.** A `cmd` grant of class `admin` that covers the target's
+  mount (`cmd:<element>/#:admin`), or the admin token.
+- **Payload**, beside `correlation_id` and `expires_at`:
+
+  | Field | | Meaning |
+  |---|---|---|
+  | `from` | required | window start, unix ms, inclusive |
+  | `to` | required | window end, unix ms, exclusive; must be after `from` |
+  | `after` | optional | stream offset to resume strictly after: the previous page's `next` |
+  | `limit` | optional | records per page, 1–1000, default 500 |
+  | `min_level` | optional | `CRITICAL`, `ERROR`, `WARNING`, `INFO` or `DEBUG` (default, everything) |
+  | `service` | optional | exact service name: the `_Log` topic segment before the level |
+
+  Anything else is refused with a `422` ack naming the field.
+- **Result.** A `200` ack (also for an empty page) carries the page in `result`:
+
+  ```json
+  {"correlation_id": "…", "result_code": 200, "message": "2 log records",
+   "result": {
+     "records": [{"offset": 123, "ts": 1759650000000,
+                  "topic": "colca/v1/_Log/n-edge1/line1/plc/WARNING",
+                  "payload": {"level": "WARNING", "message": "…"}}],
+     "next": 456,
+     "complete": false}}
+  ```
+
+  `ts` is the time the record was stored on the target. `next` is the `after`
+  of the following page and is absent once `complete` is true. `complete` is
+  true when the page reached a record at or after `to`, or the head of the
+  stream with `to` already past; a window that reaches into the future stays
+  incomplete at the head, and a later command with `after: next` continues it.
+  The target's local HTTP `/publish` response carries the same outcome under
+  `command`.
+- **Bounds.** A page stops at `limit` records, at 256 KiB of encoded records
+  (half of `limits.max_record_bytes` when that is smaller), or after examining
+  50 000 records. A record that does not fit on its own, or nests deeper than an
+  ack may, is listed with `"truncated": true` and no `payload`, so every page
+  makes progress.
+- **What it reads.** The target's own `logs` stream, which also holds what its
+  children forwarded to it. The window's first offset is found by binary search
+  over record timestamps, which assumes the stream is in time order; a child's
+  backlog replicated late, with older timestamps, can sit after the window and
+  is then not returned. Records pruned by retention (`logs` keeps 14 days by
+  default) are gone.
+- **Storage.** The ack is an ordinary `_Ack`: stored in the target's
+  `commands` stream and replicated to every ancestor, where `commands`
+  retention (90 days by default) keeps it. Fetch small windows rather than
+  large ones.
 
 ### Writing one metadata key
 

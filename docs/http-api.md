@@ -181,6 +181,11 @@ its stream from the pruner. Nothing removes them on its own.
 | `POST /enroll/{ulid}/drain` | | `{"ulid","offset","status":"draining"}`; decommissions a child node: new commands under its mount are refused, and once its queue is delivered or expired it is retired as with `DELETE ?retire=true`. `409` for an entry that is not a node or is already draining |
 | `GET /debug/state` | | the next offset of every stream |
 
+A node that is reachable only through the tree is administered with
+`_CmdAdmin` commands sent to it from an ancestor: `enroll`, `revoke`, and
+`fetchLogs`, which returns one page of its own logs in the ack's `result`. See
+[Fetching a node's logs](concepts.md#fetching-a-nodes-logs).
+
 ## Secrets
 
 Available when `secrets_dir` is set. The owner is the calling service; a local

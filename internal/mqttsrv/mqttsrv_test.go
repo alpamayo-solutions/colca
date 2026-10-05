@@ -260,7 +260,7 @@ func startServerWithLocalDoor(t *testing.T) *world {
 	s.SetEngine(eng)
 	w.eng = eng
 	domain := uns.NewConfigExec(eng.EntityStore(), reg, eng.Elements(), nil, registry.NewULID, cfg.Plugin)
-	eng.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg), domain))
+	eng.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg, nil), domain))
 	eng.SetObserver(domain)
 	reg.SetNamespace(eng.Elements())
 	reg.SetAuthoring(func(path string) (string, error) {

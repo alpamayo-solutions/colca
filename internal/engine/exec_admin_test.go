@@ -49,7 +49,7 @@ func adminEngine(t *testing.T) (*Engine, *fakeAdmin) {
 	ids.entries["provisioner"] = &uns.Entry{ULID: "provisioner", Kind: uns.KindExternal, Element: "el-provisioner", Grants: []string{"cmd:#:admin"}}
 	e := New(s, cfg, ids, nil, nil, nil)
 	fa := &fakeAdmin{}
-	e.SetExecutor(Executors(NewAdminExecutor(fa)))
+	e.SetExecutor(Executors(NewAdminExecutor(fa, s)))
 	return e, fa
 }
 
@@ -213,7 +213,7 @@ func TestExecAdminWithoutARegistry(t *testing.T) {
 	}
 	t.Cleanup(func() { s.Close() })
 	e := New(s, &config.Config{ULID: "n-edge1"}, testIDs(), nil, nil, nil)
-	e.SetExecutor(Executors(NewAdminExecutor(nil)))
+	e.SetExecutor(Executors(NewAdminExecutor(nil, nil)))
 	if _, err := e.IngestDownlink("colca/v1/_CmdAdmin/n-edge1/enroll", enrollPayload("c-12", futureMS()), 1); err != nil {
 		t.Fatal(err)
 	}
