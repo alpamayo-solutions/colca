@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.0](https://github.com/alpamayo-solutions/colca/compare/v0.27.1...v0.28.0) (2026-10-05)
+
+
+### Features
+
+* **retention:** per-signal retention, zstd storage and repeat capped prunes ([#149](https://github.com/alpamayo-solutions/colca/issues/149)) ([f4f466e](https://github.com/alpamayo-solutions/colca/commit/f4f466e2a7ceabe4d4f217062bbea8b820298bce))
+
 ## [0.27.1](https://github.com/alpamayo-solutions/colca/compare/v0.27.0...v0.27.1) (2026-10-05)
 
 
