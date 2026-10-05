@@ -462,6 +462,29 @@ func IsMetric(contract string) bool {
 	return contract == "_Metric"
 }
 
+// FetchLogsVerb is the _CmdAdmin verb that reads a node's own logs stream. Its
+// ack carries a page of log records, which the core treats apart from other
+// acks: short retention (FetchLogsAckKey) and restricted reads (FetchLogsAck).
+const FetchLogsVerb = "fetchLogs"
+
+// FetchLogsAckKey is the signal-index key the store files fetchLogs acks under,
+// so per-signal retention can remove them from the commands stream long before
+// the stream's own policy would. It is not a ULID, so no signal can take it.
+const FetchLogsAckKey = "_fetchLogsAck"
+
+// FetchLogsAck reports whether topic is the ack of a fetchLogs command, and
+// returns its hierarchy path (the command's path).
+func FetchLogsAck(topic string) (path string, ok bool) {
+	if !strings.HasSuffix(topic, "/"+FetchLogsVerb) || !strings.Contains(topic, "/_Ack/") {
+		return "", false
+	}
+	p, err := Parse(topic)
+	if err != nil || p.Contract != "_Ack" {
+		return "", false
+	}
+	return p.Path, true
+}
+
 // MetricSignalID returns the signal_id of a _Metric record, or "" for any other
 // record. The store keeps it beside the record so a signal filter does not
 // decode every payload it skips.

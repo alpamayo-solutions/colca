@@ -104,12 +104,37 @@ func (l *commandLedger) forget(id string) {
 }
 
 // acked keeps the ack of a remembered command, for a repeat to be answered with.
+// A result document (a fetchLogs page, up to FetchLogsMaxResultBytes) is not
+// kept: across ledgerLimit ids it would hold gigabytes. A repeat gets the
+// outcome without it; the page stays readable in the commands stream.
 func (l *commandLedger) acked(id, topic string, payload []byte) {
+	payload = withoutResult(payload)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if held, ok := l.entries[id]; ok && held.ack == nil {
 		held.ackTopic, held.ack = topic, append([]byte(nil), payload...)
 	}
+}
+
+// withoutResult is an ack payload with its result field removed, or payload
+// itself when it has none.
+func withoutResult(payload []byte) []byte {
+	if !bytes.Contains(payload, []byte(`"result"`)) {
+		return payload
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil {
+		return payload
+	}
+	if _, ok := fields["result"]; !ok {
+		return payload
+	}
+	delete(fields, "result")
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return payload
+	}
+	return out
 }
 
 // refuse notes that actor is owed ack, the refusal of its reuse of id.

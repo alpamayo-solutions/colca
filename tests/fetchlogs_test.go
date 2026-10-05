@@ -38,10 +38,10 @@ func awaitAckPayload(t *testing.T, n *node.Node, ackTopic, corr string) map[stri
 	return found
 }
 
-// publishLog appends one _Log record to n's logs stream. The tests run on the
+// publishLog appends one _Log record stored at ts to n's logs stream. The tests run on the
 // built-in contract floor, which has no _Log schema, so the record goes straight
 // into the store the way the node's log door would put it there.
-func publishLog(t *testing.T, n *node.Node, service, level, message string) {
+func publishLog(t *testing.T, n *node.Node, ts int64, service, level, message string) {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{"level": level, "message": message, "logger_name": service})
 	if err != nil {
@@ -49,7 +49,7 @@ func publishLog(t *testing.T, n *node.Node, service, level, message string) {
 	}
 	rec := store.Record{
 		Topic:   fmt.Sprintf("colca/v1/_Log/%s/%s/%s", n.Cfg.ULID, service, level),
-		Payload: payload, TS: time.Now().UnixMilli(),
+		Payload: payload, TS: ts,
 	}
 	if _, _, err := n.Engine.Store().Append("logs", []store.Record{rec}); err != nil {
 		t.Fatal(err)
@@ -70,17 +70,20 @@ func pageMessages(t *testing.T, ack map[string]any) (msgs []string, next any, co
 		payload := r.(map[string]any)["payload"].(map[string]any)
 		msgs = append(msgs, payload["message"].(string))
 	}
+	if result["gap"] != false || result["lwm"] == nil {
+		t.Fatalf("page without lwm/gap: %v", result)
+	}
 	return msgs, result["next"], result["complete"] == true
 }
 
 func TestFetchLogsFromTheHub(t *testing.T) {
 	tp := startTopo(t)
-	from := time.Now().Add(-time.Second).UnixMilli()
-	publishLog(t, tp.edge1, "fetchsvc", "INFO", "one")
-	publishLog(t, tp.edge1, "fetchsvc", "WARNING", "two")
-	publishLog(t, tp.edge1, "fetchsvc", "INFO", "three")
-	time.Sleep(5 * time.Millisecond)
-	to := time.Now().UnixMilli() // in the past by the time the edge executes
+	// A window that ended more than the skew margin ago, so the head completes it.
+	from := time.Now().Add(-3 * time.Hour).UnixMilli()
+	publishLog(t, tp.edge1, from+1, "fetchsvc", "INFO", "one")
+	publishLog(t, tp.edge1, from+2, "fetchsvc", "WARNING", "two")
+	publishLog(t, tp.edge1, from+3, "fetchsvc", "INFO", "three")
+	to := from + 10_000
 
 	// Page one: two records, a resume point.
 	corr := cmdAdmin(t, tp.global, fetchLogsCmd, map[string]any{
@@ -121,10 +124,9 @@ func TestFetchLogsFromTheHub(t *testing.T) {
 // answered from the edge's store on catch-up.
 func TestFetchLogsExecutesAfterOfflineCatchup(t *testing.T) {
 	tp := startTopo(t)
-	from := time.Now().Add(-time.Second).UnixMilli()
-	publishLog(t, tp.edge1, "fetchsvc", "INFO", "before-outage")
-	time.Sleep(5 * time.Millisecond)
-	to := time.Now().UnixMilli()
+	from := time.Now().Add(-3 * time.Hour).UnixMilli()
+	publishLog(t, tp.edge1, from+1, "fetchsvc", "INFO", "before-outage")
+	to := from + 10_000
 
 	tp.edge1.Stop()
 	time.Sleep(300 * time.Millisecond)

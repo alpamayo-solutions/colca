@@ -420,6 +420,9 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 		originOffset = off
 	}
 	signalID := uns.MetricSignalID(rec.Topic, rec.Payload)
+	if _, ok := uns.FetchLogsAck(rec.Topic); ok && signalID == "" {
+		signalID = uns.FetchLogsAckKey // indexed for its short retention (see sigindex.go)
+	}
 	val, err := json.Marshal(recEnc{
 		SourceLocalOnly: rec.SourceLocalOnly,
 		Topic:           rec.Topic, Payload: rec.Payload, TS: rec.TS,

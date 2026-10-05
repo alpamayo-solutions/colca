@@ -8,7 +8,9 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/store"
@@ -29,6 +31,28 @@ const (
 	// not, so a narrow filter over a long window answers promptly with a resume
 	// point instead of reading the whole stream.
 	FetchLogsMaxScan = 50_000
+	// FetchLogsAckMaxAge is how long a fetchLogs ack, and the page in it, stays
+	// in the commands stream of the target and of every ancestor. The retention
+	// pruner removes older ones once every cursor on the stream passed them,
+	// keeping only the newest (see store.PruneSignals).
+	FetchLogsAckMaxAge = time.Hour
+	// FetchLogsSkew is how far out of append order a record's timestamp may be
+	// and still be found. A node's logs stream is mostly in time order, but not
+	// strictly: records a child replicates keep the child's timestamps, and a
+	// clock step moves the node's own. A page therefore starts its search
+	// FetchLogsSkew before from, and the window counts as exhausted only at a
+	// record FetchLogsSkew past to.
+	FetchLogsSkew = time.Hour
+	// FetchLogsMaxConcurrent bounds the fetchLogs scans that run at once on one
+	// node; more wait their turn.
+	FetchLogsMaxConcurrent = 2
+	// FetchLogsPagesPerHour and FetchLogsBurst rate-limit the pages one node
+	// answers (a token bucket). Together with FetchLogsAckMaxAge they bound what
+	// fetchLogs acks hold in a commands stream: about (1 h + one pruner
+	// interval) x 600 x 256 KiB, roughly 160 MiB per answering node, at the
+	// node and at each ancestor. A command past the limit is answered 429.
+	FetchLogsPagesPerHour = 600
+	FetchLogsBurst        = 60
 	// fetchLogsEntryDepth is how deeply the ack nests a record's payload:
 	// ack object, result object, records array, record object.
 	fetchLogsEntryDepth = 4
@@ -38,6 +62,7 @@ const (
 // Satisfied by *store.Store.
 type LogReader interface {
 	SeekTS(stream string, ts int64) (uint64, error)
+	LWM(stream string) uint64
 	NextOffset(stream string) uint64
 	EachRecord(stream string, from, upTo uint64, fn func(store.StoredRecord) bool) error
 	MaxRecordBytes() uint64
@@ -62,7 +87,8 @@ type fetchLogsCmd struct {
 // fetchLogsQuery is a validated fetchLogs command.
 type fetchLogsQuery struct {
 	from, to int64
-	after    uint64 // 0: start at from
+	after    uint64
+	hasAfter bool // after was given: this page resumes an earlier one
 	limit    int
 	minLevel int
 	service  string
@@ -80,11 +106,17 @@ type FetchLogsRecord struct {
 }
 
 // FetchLogsResult is the fetchLogs page carried in the ack's result. Next is
-// the `after` of the following page and is absent once Complete.
+// the `after` of the following page and is absent once Complete. LWM is the
+// logs stream's lowest retained offset when the page was read; Gap is true when
+// records this page should have started with were already removed by
+// retention: a resume point below the LWM, or a window that reaches back past
+// the oldest retained record.
 type FetchLogsResult struct {
 	Records  []FetchLogsRecord `json:"records"`
 	Next     *uint64           `json:"next,omitempty"`
 	Complete bool              `json:"complete"`
+	LWM      uint64            `json:"lwm"`
+	Gap      bool              `json:"gap"`
 }
 
 func parseFetchLogs(payload []byte) (fetchLogsQuery, error) {
@@ -103,7 +135,7 @@ func parseFetchLogs(payload []byte) (fetchLogsQuery, error) {
 		if *c.After < 0 {
 			return fetchLogsQuery{}, fmt.Errorf("fetchLogs: after must be a stream offset >= 0, got %d", *c.After)
 		}
-		q.after = uint64(*c.After)
+		q.after, q.hasAfter = uint64(*c.After), true
 	}
 	if c.Limit != nil {
 		if *c.Limit < 1 || *c.Limit > FetchLogsMaxLimit {
@@ -151,24 +183,38 @@ type fetchLogsBudget struct {
 	scan  int // records examined
 }
 
-// fetchLogs reads one page of the logs stream. It stops at the first record
-// with ts >= to (the window is exhausted), at the head of the stream, or at the
-// first of the limit, byte or scan budgets.
+// fetchLogs reads one page of the logs stream: the _Log records with
+// from <= ts < to that the filters keep, in offset order.
+//
+// The guarantee: a record whose timestamp is at most FetchLogsSkew out of
+// append order is found. The page starts at the first offset whose timestamp
+// is at least from - FetchLogsSkew (binary search), and the window is
+// exhausted at the first record with ts >= to + FetchLogsSkew, or at the head
+// once to + FetchLogsSkew has passed. A record further out of order (a child's
+// backlog replicated more than FetchLogsSkew late, a larger clock step) can be
+// missed. The page also stops at the limit, byte and scan budgets, which bound
+// the work of a skewed or sparse window; next resumes it.
 func fetchLogs(r LogReader, q fetchLogsQuery, now time.Time, budget fetchLogsBudget) (FetchLogsResult, error) {
 	const stream = "logs"
-	start, err := r.SeekTS(stream, q.from)
+	skew := FetchLogsSkew.Milliseconds()
+	searchFrom, doneAt := addSat(q.from, -skew), addSat(q.to, skew)
+	lwm := r.LWM(stream)
+	start, err := r.SeekTS(stream, searchFrom)
 	if err != nil {
 		return FetchLogsResult{}, err
 	}
-	if q.after >= start {
-		start = q.after + 1
+	res := FetchLogsResult{Records: []FetchLogsRecord{}, LWM: lwm}
+	if q.hasAfter {
+		res.Gap = lwm > 1 && q.after+1 < lwm
+		start = max(start, q.after+1)
+	} else {
+		// The search found no retained record old enough to lie before the window:
+		// what retention removed may have belonged to it.
+		res.Gap = lwm > 1 && start <= lwm
 	}
-	if start < 1 {
-		start = 1 // offsets start at 1
-	}
+	start = max(start, 1) // offsets start at 1
 	head := r.NextOffset(stream)
 
-	res := FetchLogsResult{Records: []FetchLogsRecord{}}
 	// last is the last offset this page fully dealt with: the next page resumes
 	// after it.
 	last := start - 1
@@ -180,11 +226,11 @@ func fetchLogs(r LogReader, q fetchLogsQuery, now time.Time, budget fetchLogsBud
 			return false
 		}
 		scanned++
-		if rec.TS >= q.to {
+		if rec.TS >= doneAt {
 			res.Complete = true
 			return false
 		}
-		if rec.TS < q.from || !q.matches(rec.Topic) {
+		if rec.TS < q.from || rec.TS >= q.to || !q.matches(rec.Topic) {
 			last = rec.Offset
 			return true
 		}
@@ -216,14 +262,27 @@ func fetchLogs(r LogReader, q fetchLogsQuery, now time.Time, budget fetchLogsBud
 		return FetchLogsResult{}, err
 	}
 	if !res.Complete && !stopped {
-		// The head was reached. The window is over when it already ended; a window
-		// that reaches into the future can still gain records.
-		res.Complete = q.to <= now.UnixMilli()
+		// The head was reached. A record can still be appended with a timestamp
+		// up to FetchLogsSkew in the past, so the window is over only once its
+		// end lies further back than that.
+		res.Complete = doneAt <= now.UnixMilli()
 	}
 	if !res.Complete {
 		res.Next = &last
 	}
 	return res, nil
+}
+
+// addSat is a + b, held at the int64 bounds instead of wrapping.
+func addSat(a, b int64) int64 {
+	s := a + b
+	if b > 0 && s < a {
+		return math.MaxInt64
+	}
+	if b < 0 && s > a {
+		return math.MinInt64
+	}
+	return s
 }
 
 func fetchLogsEntrySize(entry FetchLogsRecord) int {
@@ -243,4 +302,29 @@ func fetchLogsBudgetFor(maxRecordBytes uint64) fetchLogsBudget {
 		b.bytes = int(maxRecordBytes / 2) //nolint:gosec // smaller than FetchLogsMaxResultBytes
 	}
 	return b
+}
+
+// pageBucket is the token bucket behind FetchLogsPagesPerHour.
+type pageBucket struct {
+	mu     sync.Mutex
+	tokens float64
+	at     time.Time
+}
+
+// take spends a token, or says how long until one is available.
+func (b *pageBucket) take(now time.Time) (ok bool, wait time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	perSec := float64(FetchLogsPagesPerHour) / 3600
+	if b.at.IsZero() {
+		b.tokens = FetchLogsBurst
+	} else if now.After(b.at) {
+		b.tokens = math.Min(FetchLogsBurst, b.tokens+now.Sub(b.at).Seconds()*perSec)
+	}
+	b.at = now
+	if b.tokens >= 1 {
+		b.tokens--
+		return true, 0
+	}
+	return false, time.Duration((1 - b.tokens) / perSec * float64(time.Second))
 }

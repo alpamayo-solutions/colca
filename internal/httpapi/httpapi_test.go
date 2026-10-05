@@ -3010,3 +3010,43 @@ func TestPublishRefusalStatusAndReason(t *testing.T) {
 		}
 	}
 }
+
+// A fetchLogs ack carries another node's log records. A read grant on the ack's
+// path does not reach it: only the identity the command is attributed to, a
+// holder of the admin command class over the target and the admin token read
+// it. Other acks stay readable under the read grants.
+func TestFetchLogsAckReadableOnlyByRequesterAndAdmins(t *testing.T) {
+	a := newAPI(t)
+	obs, adm, requester := authtest.NewMachine(t, "obs"), authtest.NewMachine(t, "adm"), authtest.NewMachine(t, "req")
+	authtest.EnrollAt(t, a.reg, a.eng, obs, "obs", "read:#")
+	authtest.EnrollAt(t, a.reg, a.eng, adm, "adm", "read:#", "cmd:#:admin")
+	authtest.EnrollAt(t, a.reg, a.eng, requester, "req", "read:#")
+	if _, _, err := a.st.Append("commands", []store.Record{
+		{Topic: "colca/v1/_Ack/n-test/site1/edge1/fetchLogs", Payload: []byte(`{"correlation_id":"f","result_code":200,"result":{"records":[]}}`), TS: 1, ActorID: "req"},
+		{Topic: "colca/v1/_Ack/n-test/site1/edge1/revoke", Payload: []byte(`{"correlation_id":"r","result_code":200}`), TS: 2, ActorID: "req"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	topics := func(hc *http.Client, token, cursor string) string {
+		t.Helper()
+		resp, out := req(t, hc, "GET", a.url+"/fetch?stream=commands&cursor="+cursor, token, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("fetch as %s: %d %v", cursor, resp.StatusCode, out)
+		}
+		var got []string
+		for _, r := range out["records"].([]any) {
+			topic := r.(map[string]any)["topic"].(string)
+			got = append(got, topic[strings.LastIndex(topic, "/")+1:])
+		}
+		return strings.Join(got, ",")
+	}
+	if got := topics(client(obs), "", "obs/c"); got != "revoke" {
+		t.Errorf("read:# alone sees %q, want only revoke", got)
+	}
+	if got := topics(client(adm), "", "adm/c"); got != "fetchLogs,revoke" {
+		t.Errorf("cmd admin holder sees %q", got)
+	}
+	if got := topics(client(requester), "", "req/c"); got != "fetchLogs,revoke" {
+		t.Errorf("requester sees %q", got)
+	}
+}

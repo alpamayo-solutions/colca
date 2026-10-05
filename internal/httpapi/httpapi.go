@@ -685,6 +685,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			if !c.admin && !uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic) {
 				return false
 			}
+			if !c.admin && !uns.MayReadFetchLogsAck(e.Scope(), c.entry, topic, record.ActorID) {
+				return false
+			}
 			if !hasSignalFilter || record.SignalID != "" {
 				return true
 			}

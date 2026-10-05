@@ -537,10 +537,16 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 
 // OnSelectSubscribers keeps an ack from every person except the one who sent its
 // command; an ack whose sender the node does not know reaches no person.
-// Services and machines keep every ack their read grants cover.
+// Services and machines keep every ack their read grants cover, except a
+// fetchLogs ack: that reaches only its sender and holders of the admin command
+// class over the target (uns.MayReadFetchLogsAck).
 func (h *colcaHook) OnSelectSubscribers(subs *mqtt.Subscribers, pk packets.Packet) *mqtt.Subscribers {
 	eng := h.engine()
-	if eng == nil || h.humans.empty() {
+	if eng == nil {
+		return subs
+	}
+	_, restricted := uns.FetchLogsAck(pk.TopicName)
+	if h.humans.empty() && !restricted {
 		return subs
 	}
 	recipient, isAck := eng.AckRecipient(pk.TopicName, pk.Payload)
@@ -548,8 +554,17 @@ func (h *colcaHook) OnSelectSubscribers(subs *mqtt.Subscribers, pk packets.Packe
 		return subs
 	}
 	keep := func(clientID string) bool {
-		s, human := h.humans.get(clientID)
-		return !human || (recipient != "" && s.entry.ULID == recipient)
+		if s, human := h.humans.get(clientID); human {
+			return recipient != "" && s.entry.ULID == recipient
+		}
+		if !restricted {
+			return true
+		}
+		cl, ok := h.broker.Clients.Get(clientID)
+		if !ok {
+			return false
+		}
+		return uns.MayReadFetchLogsAck(eng.Scope(), h.entryForClient(cl), pk.TopicName, recipient)
 	}
 	for id := range subs.Subscriptions {
 		if !keep(id) {

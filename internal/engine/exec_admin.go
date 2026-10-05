@@ -27,12 +27,15 @@ type AdminExecutor struct {
 	registry AdminExec
 	logs     LogReader
 	now      func() time.Time
+	// scans holds a slot per running fetchLogs scan (FetchLogsMaxConcurrent).
+	scans chan struct{}
+	pages pageBucket
 }
 
 // NewAdminExecutor wires the registry manager and the node's store in. With a
 // nil registry enroll and revoke answer 500; with nil logs fetchLogs does.
 func NewAdminExecutor(r AdminExec, logs LogReader) *AdminExecutor {
-	return &AdminExecutor{registry: r, logs: logs, now: time.Now}
+	return &AdminExecutor{registry: r, logs: logs, now: time.Now, scans: make(chan struct{}, FetchLogsMaxConcurrent)}
 }
 
 func (a *AdminExecutor) Handles(contract string) bool { return contract == "_CmdAdmin" }
@@ -71,7 +74,13 @@ func (a *AdminExecutor) fetchLogs(payload []byte) (int, string, string, json.Raw
 	if err != nil {
 		return 422, err.Error(), "invalid", nil
 	}
+	if ok, wait := a.pages.take(a.now()); !ok {
+		return 429, fmt.Sprintf("fetchLogs: more than %d pages an hour, retry in %s",
+			FetchLogsPagesPerHour, wait.Round(time.Second)), "busy", nil
+	}
+	a.scans <- struct{}{}
 	page, err := fetchLogs(a.logs, q, a.now(), fetchLogsBudgetFor(a.logs.MaxRecordBytes()))
+	<-a.scans
 	if err != nil {
 		return 500, "fetchLogs: " + err.Error(), "error", nil
 	}

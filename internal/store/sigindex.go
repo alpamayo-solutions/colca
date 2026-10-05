@@ -26,6 +26,10 @@ import (
 //     the signals cost no extra read.
 //   - Compaction and eviction delete the entry of each record they delete.
 //
+// A fetchLogs ack is filed under the reserved key uns.FetchLogsAckKey in the
+// same way, so per-signal retention can remove those pages from the commands
+// stream after hours instead of the stream's months.
+//
 // Replication needs nothing of its own: a replicated record is appended through
 // the same addRecord on the receiving node, so the index is rebuilt there and
 // never travels.
