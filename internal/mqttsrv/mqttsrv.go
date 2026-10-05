@@ -522,9 +522,10 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 			"bytes", len(pk.Payload), "err", err)
 		return pk, rejectCode(cl, pk, err)
 	}
-	if res.Duplicate || res.Answered {
-		// Nothing stored, nothing to fan out: a repeat, or a command the node
-		// answered itself.
+	if res.Duplicate || res.Answered || res.Withheld != "" {
+		// Nothing stored, nothing to fan out: a repeat, a command the node
+		// answered itself, or a _Log record the log gate collapsed or capped. The
+		// publisher still gets a successful PUBACK: the record was accepted.
 		return pk, packets.CodeSuccessIgnore
 	}
 	if res.Persisted {

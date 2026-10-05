@@ -186,6 +186,11 @@ type Config struct {
 	// reads may wait unread before the node writes a cursor_lag finding.
 	Cursors Cursors `yaml:"cursors"`
 
+	// Logs bounds the _Log records written on this node: repeats are collapsed
+	// into one record with a count, and each service has a record budget per
+	// window. Without the block the defaults apply.
+	Logs Logs `yaml:"logs"`
+
 	// Plugin holds settings for the domain plugin. The core never reads them,
 	// which keeps domain vocabulary out of the broker's configuration.
 	Plugin map[string]string `yaml:"plugin"`
@@ -243,6 +248,70 @@ func (c Cursors) validate() error {
 	}
 	if c.StaleAfter != nil && time.Duration(*c.StaleAfter) < 0 {
 		return fmt.Errorf("config: cursors.stale_after must not be negative, got %s", time.Duration(*c.StaleAfter))
+	}
+	return nil
+}
+
+// Logs is the logs: block. It gates the _Log records a node admits from its own
+// services and from itself; records replicated from a child were gated there.
+type Logs struct {
+	// Window is the repeat-collapse and rate-cap window. 60s when absent; 0
+	// turns both off.
+	Window *Duration `yaml:"window"`
+	// MaxPerService is how many records one service (one _Log position) may
+	// write per window; collapse summaries do not count. 600 when absent; 0
+	// means no cap.
+	MaxPerService *int `yaml:"max_per_service"`
+	// MaxTracked bounds the distinct repeat keys, and separately the services,
+	// held in memory. A record whose key finds no room is stored without
+	// collapsing. 4096 when absent.
+	MaxTracked *int `yaml:"max_tracked"`
+}
+
+// Defaults and upper bounds of the logs: block.
+const (
+	defaultLogsWindow        = time.Minute
+	defaultLogsMaxPerService = 600
+	defaultLogsMaxTracked    = 4096
+	maxLogsWindow            = 24 * time.Hour
+	maxLogsMaxPerService     = 10_000_000
+	maxLogsMaxTracked        = 1_000_000
+)
+
+// EffectiveWindow returns the window: 60s when absent, 0 when turned off.
+func (l Logs) EffectiveWindow() time.Duration {
+	if l.Window == nil {
+		return defaultLogsWindow
+	}
+	return time.Duration(*l.Window)
+}
+
+// EffectiveMaxPerService returns the per-service cap: 600 when absent, 0 for
+// no cap.
+func (l Logs) EffectiveMaxPerService() int {
+	if l.MaxPerService == nil {
+		return defaultLogsMaxPerService
+	}
+	return *l.MaxPerService
+}
+
+// EffectiveMaxTracked returns the bound on tracked keys: 4096 when absent.
+func (l Logs) EffectiveMaxTracked() int {
+	if l.MaxTracked == nil {
+		return defaultLogsMaxTracked
+	}
+	return *l.MaxTracked
+}
+
+func (l Logs) validate() error {
+	if w := l.EffectiveWindow(); w < 0 || w > maxLogsWindow {
+		return fmt.Errorf("config: logs.window must be between 0 and %s, got %s", maxLogsWindow, w)
+	}
+	if n := l.EffectiveMaxPerService(); n < 0 || n > maxLogsMaxPerService {
+		return fmt.Errorf("config: logs.max_per_service must be between 0 and %d, got %d", maxLogsMaxPerService, n)
+	}
+	if n := l.EffectiveMaxTracked(); n < 1 || n > maxLogsMaxTracked {
+		return fmt.Errorf("config: logs.max_tracked must be between 1 and %d, got %d", maxLogsMaxTracked, n)
 	}
 	return nil
 }
@@ -809,6 +878,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.Cursors.validate(); err != nil {
+		return err
+	}
+	if err := c.Logs.validate(); err != nil {
 		return err
 	}
 	if err := c.BlobGC.validate(); err != nil {

@@ -140,6 +140,24 @@ var blobResults = []string{"ok", "error"}
 var blobRejectReasons = []string{"too_large", "digest_mismatch", "bad_digest"}
 var recordRejectReasons = []string{"too_large"}
 
+// Log gate labels: why a _Log record was not stored (colca_log_withheld_total)
+// and which table was full when one passed untracked
+// (colca_log_untracked_total).
+const (
+	LogCollapsed      = "collapsed"
+	LogRateLimited    = "rate_limited"
+	LogTableRepeats   = "repeats"
+	LogTableServices  = "services"
+	logGateSummary    = "summary"
+	logGateDropNotice = "drop_notice"
+)
+
+var (
+	logWithheldReasons = []string{LogCollapsed, LogRateLimited}
+	logUntrackedTables = []string{LogTableRepeats, LogTableServices}
+	logGateWriteKinds  = []string{logGateSummary, logGateDropNotice}
+)
+
 // resourceReadResults are the result labels of colca_resource_reads_total.
 // "pending" means the blob has not replicated here yet and a retry may help;
 // any other blob-store fault is "error".
@@ -251,6 +269,14 @@ type Metrics struct {
 	blobRejectsBy   map[string]prometheus.Counter
 	recordRejects   *prometheus.CounterVec // colca_record_rejects_total{reason}
 	recordRejectsBy map[string]prometheus.Counter
+
+	// The log gate (internal/loggate).
+	logWithheld          *prometheus.CounterVec // colca_log_withheld_total{reason}
+	logWithheldBy        map[string]prometheus.Counter
+	logUntracked         *prometheus.CounterVec // colca_log_untracked_total{table}
+	logUntrackedBy       map[string]prometheus.Counter
+	logGateWriteFailures *prometheus.CounterVec // colca_log_gate_write_failures_total{kind}
+	logGateWriteFailBy   map[string]prometheus.Counter
 
 	// Resource file reads on the published door.
 	resourceReads   *prometheus.CounterVec // colca_resource_reads_total{result}
@@ -495,6 +521,18 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_record_rejects_total",
 			Help: "Records refused at ingress for exceeding the configured size cap. Resets on restart.",
 		}, []string{"reason"}),
+		logWithheld: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_log_withheld_total",
+			Help: "_Log records written on this node that the log gate did not store, by reason: collapsed (an identical record was stored earlier in the window; counted in its summary) or rate_limited (the service exceeded logs.max_per_service; counted in its drop notice). Resets on restart.",
+		}, []string{"reason"}),
+		logUntracked: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_log_untracked_total",
+			Help: "_Log records stored without the log gate remembering them because a table was full (logs.max_tracked), by table: repeats (not collapsed) or services (not capped). Resets on restart.",
+		}, []string{"table"}),
+		logGateWriteFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_log_gate_write_failures_total",
+			Help: "Collapse summaries and drop notices the log gate could not write, by kind (summary, drop_notice). Resets on restart.",
+		}, []string{"kind"}),
 		resourceReads: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_resource_reads_total",
 			Help: "Resource file reads on the published door's GET /resources/{id}/file, by result: ok (bytes served), pending (blob_pending — the record exists but its bytes have not replicated here, the only retryable case), denied (no read grant on the resource's element), not_found (unknown resource id), error (an internal fault reading the blob — a malformed stored digest or a disk/permission fault on this node; never retryable the way pending is). Resets on restart.",
@@ -574,6 +612,9 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	}
 	m.blobRejectsBy = counterChildren(m.blobRejects, blobRejectReasons)
 	m.recordRejectsBy = counterChildren(m.recordRejects, recordRejectReasons)
+	m.logWithheldBy = counterChildren(m.logWithheld, logWithheldReasons)
+	m.logUntrackedBy = counterChildren(m.logUntracked, logUntrackedTables)
+	m.logGateWriteFailBy = counterChildren(m.logGateWriteFailures, logGateWriteKinds)
 	m.resourceReadsBy = counterChildren(m.resourceReads, resourceReadResults)
 
 	// A restart must not reset colca_drains_active while children are still
@@ -625,7 +666,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.gapServed, m.gapReceived, m.replGapApplied, m.replIntegrityFailures,
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
 		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
-		m.blobTransfers, m.blobRejects, m.recordRejects, m.resourceReads, m.httpRequestLimited, m.blobsSwept,
+		m.blobTransfers, m.blobRejects, m.recordRejects, m.logWithheld, m.logUntracked, m.logGateWriteFailures, m.resourceReads, m.httpRequestLimited, m.blobsSwept,
 		m.httpKVRequests, m.httpKVEntries, m.httpFetchRequests, m.httpLimitedByCaller,
 		m.cursorUnreadAge,
 		m.metricsUnbound,
@@ -1117,6 +1158,41 @@ func (m *Metrics) RecordRejected(reason string) {
 		return
 	}
 	m.recordRejects.WithLabelValues(reason).Inc()
+}
+
+// LogWithheld counts one _Log record the log gate did not store; reason is
+// LogCollapsed or LogRateLimited.
+func (m *Metrics) LogWithheld(reason string) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.logWithheldBy[reason]; ok {
+		c.Inc()
+	}
+}
+
+// LogUntracked counts one _Log record stored unremembered because table
+// (LogTableRepeats or LogTableServices) was full.
+func (m *Metrics) LogUntracked(table string) {
+	if m == nil {
+		return
+	}
+	if c, ok := m.logUntrackedBy[table]; ok {
+		c.Inc()
+	}
+}
+
+// LogGateWriteFailed counts one collapse summary (notice false) or drop notice
+// (notice true) the store did not take.
+func (m *Metrics) LogGateWriteFailed(notice bool) {
+	if m == nil {
+		return
+	}
+	kind := logGateSummary
+	if notice {
+		kind = logGateDropNotice
+	}
+	m.logGateWriteFailBy[kind].Inc()
 }
 
 // HTTPRequestLimited counts one 429 response. Callers supply only fixed door

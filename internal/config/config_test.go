@@ -1065,3 +1065,47 @@ func TestStorageCompressionValidation(t *testing.T) {
 		t.Fatalf("lz4 accepted or unclear error: %v", err)
 	}
 }
+
+// logs: 60s / 600 / 4096 when absent; 0 turns the window or the cap off;
+// negative and absurd values are refused.
+func TestLogsBlockThroughLoad(t *testing.T) {
+	load := func(body string) (*Config, error) {
+		doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nkey_file: /keys/edge1.key\n" + body
+		p := filepath.Join(t.TempDir(), "c.yaml")
+		if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(p)
+	}
+	type want struct {
+		window     time.Duration
+		perService int
+		maxTracked int
+	}
+	for body, w := range map[string]want{
+		"": {time.Minute, 600, 4096},
+		"logs:\n  window: 0\n  max_per_service: 0\n":                      {0, 0, 4096},
+		"logs:\n  window: 10s\n  max_per_service: 50\n  max_tracked: 8\n": {10 * time.Second, 50, 8},
+	} {
+		c, err := load(body)
+		if err != nil {
+			t.Fatalf("%q: %v", body, err)
+		}
+		got := want{c.Logs.EffectiveWindow(), c.Logs.EffectiveMaxPerService(), c.Logs.EffectiveMaxTracked()}
+		if got != w {
+			t.Fatalf("%q: got %+v, want %+v", body, got, w)
+		}
+	}
+	for body, field := range map[string]string{
+		"logs:\n  window: -1s\n":           "logs.window",
+		"logs:\n  window: 48h\n":           "logs.window",
+		"logs:\n  max_per_service: -1\n":   "logs.max_per_service",
+		"logs:\n  max_per_service: 1e9\n":  "logs.max_per_service",
+		"logs:\n  max_tracked: 0\n":        "logs.max_tracked",
+		"logs:\n  max_tracked: 50000000\n": "logs.max_tracked",
+	} {
+		if _, err := load(body); err == nil || !strings.Contains(err.Error(), field) {
+			t.Fatalf("%q: err = %v, want a %s error", body, err, field)
+		}
+	}
+}

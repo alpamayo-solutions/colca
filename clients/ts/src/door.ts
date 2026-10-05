@@ -104,9 +104,17 @@ export interface SelfInfo {
 
 export interface PublishResult {
   stream: string;
+  /** Absent when `withheld` is set: nothing was stored. */
   offset: number;
   topic: string;
   command?: unknown;
+  /**
+   * A `_Log` record the node's log gate accepted without storing it (HTTP 202):
+   * `collapsed` repeats are counted in the window's summary record,
+   * `rate_limited` records in the service's drop notice. Not an error; do not
+   * send it again.
+   */
+  withheld?: "collapsed" | "rate_limited";
 }
 
 export interface FetchOptions {

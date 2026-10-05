@@ -199,6 +199,57 @@ A stale cursor is only reported. To let retention pass it, set
 `ignore_cursors_after` on the stream; to remove it, retire it (see
 [HTTP API](http-api.md#cursors-that-nobody-reads)).
 
+## Logs
+
+The node gates the `_Log` records written on it, by its services and by
+itself, before they are stored. Records replicated from a child are not gated
+again; the child gated them.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `logs.window` | `60s` | The collapse and rate-cap window. `0` turns both off. At most `24h`. |
+| `logs.max_per_service` | `600` | Records one service may store per window. `0` means no cap. |
+| `logs.max_tracked` | `4096` | Distinct repeat keys, and separately services, held in memory. |
+
+```yaml
+logs:
+  window: 60s
+  max_per_service: 600
+  max_tracked: 4096
+```
+
+- **Repeats collapse.** The key is the topic (service and level), the
+  `logger_name` and the `message`. The first record of a key is stored at
+  once. Identical records later in its window are not stored, only counted.
+  When the window ends with a count, one record is written at the same topic,
+  attributed to the original writer: the last withheld payload, its message
+  suffixed like `connection refused (×1200 in 60 s)`, and `extra.repeated`,
+  `extra.repeat_window_s`, `extra.first_repeat_at` and `extra.last_repeat_at`
+  (when the node admitted the first and last repeat). A window without
+  repeats writes nothing.
+- **Each service has a budget.** A service is a `_Log` topic without its level
+  segment. It may store `max_per_service` records per window; collapsed
+  repeats and summaries do not count. Records beyond the budget are dropped
+  and counted, and when the window ends one `WARNING` record at the service's
+  position, written by the node (`colca`), says
+  `1834 log record(s) dropped: press exceeded 600 records in 60 s`, with
+  `extra.dropped`, `extra.window_s` and `extra.service`.
+- **Memory is bounded.** At most `max_tracked` repeat keys and
+  `max_tracked` services are held. A repeat key holds one pending payload of
+  at most 64 KiB; a larger record is never collapsed, only counted against its
+  service's budget. A record that finds no room is stored without being
+  collapsed or capped and counted in `colca_log_untracked_total`.
+- A window ends on its own timer; a node that stops writes every pending
+  summary and drop notice before its store closes.
+- A withheld record was accepted: MQTT answers with a successful PUBACK and
+  does not fan it out, `POST /publish` answers `202` with
+  `{"withheld":"collapsed"|"rate_limited"}` (see [HTTP API](http-api.md)).
+  Publishers must not send it again.
+
+The collapse only works when identical events carry identical messages, so a
+publisher puts the event's own text in `message`, not a formatted line with a
+timestamp (see [Topics](topics.md#log-records)).
+
 ## Limits
 
 | Key | Default | Meaning |

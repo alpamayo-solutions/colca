@@ -19,6 +19,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/contracts"
 	"github.com/alpamayo-solutions/colca/internal/cursorwatch"
+	"github.com/alpamayo-solutions/colca/internal/loggate"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -55,6 +56,11 @@ type Result struct {
 	Offset   uint64
 	Topic    string // as persisted, with the mount inserted for replicated records
 	Command  *CommandOutcome
+	// Withheld is a _Log record the log gate accepted without storing it:
+	// "collapsed" (counted in its window's summary) or "rate_limited" (counted
+	// in its service's drop notice). Persisted is false; Stream and Topic are
+	// set.
+	Withheld string
 }
 
 // Attribution is the immutable authorship envelope stored with a record.
@@ -230,6 +236,10 @@ type Engine struct {
 	// cursorFilters remembers what each cursor's consumer reads, from its last
 	// fetch, so the cursor watchdog counts only records it would be woken for.
 	cursorFilters *cursorwatch.Filters
+
+	// logs collapses repeated _Log records and caps each service's log rate
+	// (logs.go). Static per process.
+	logs *loggate.Gate[Attribution]
 }
 
 // New builds an engine. ids is the identity registry: a publish is admitted when
@@ -244,7 +254,11 @@ func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m
 		clk = clock.New(cfg.Parent == nil, time.Now)
 	}
 	e := &Engine{store: s, cfg: cfg, deliver: deliver, ids: ids, log: slog.Default().With("node", cfg.ULID), metrics: m, clk: clk, auditID: newAuditID, unboundLog: newUnboundMetricLog(), adminMetricLog: newUnboundMetricLog(),
-		ledger: newCommandLedger(), cursorFilters: cursorwatch.NewFilters()}
+		ledger: newCommandLedger(), cursorFilters: cursorwatch.NewFilters(),
+		logs: newLogGate(loggate.Config{
+			Window: cfg.Logs.EffectiveWindow(), MaxPerService: cfg.Logs.EffectiveMaxPerService(),
+			MaxTracked: cfg.Logs.EffectiveMaxTracked(),
+		})}
 	e.elements = uns.NewElementIndex(e.EntityStore())
 	e.catalogues = uns.NewCatalogueIndex(e.EntityStore())
 	if raw, ok := s.AncestryGet(); ok {
@@ -605,6 +619,9 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 	if err != nil {
 		return Result{}, err
 	}
+	if res, held := e.gateLog(class, p, topic, payload, attribution); held {
+		return res, nil
+	}
 	// The client already publishes the canonical node-local topic; only the
 	// attribution is added.
 	res, err := e.persistAttributed(class, p, topic, payload, attribution)
@@ -831,6 +848,8 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 		if repeat {
 			return e.repeated(payload), nil
 		}
+	} else if res, held := e.gateLog(class, p, topic, payload, attribution); held {
+		return res, nil
 	}
 	res, err := e.persistAttributed(class, p, topic, payload, attribution)
 	if err != nil {

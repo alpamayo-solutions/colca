@@ -73,6 +73,16 @@ A push is answered once its records are on disk.
 | `colca_mqtt_delivered_payload_bytes_total` | `door` | their payload bytes |
 | `colca_mqtt_publish_dropped_total` | | publishes dropped because a subscriber's queue was full |
 
+### What the log gate holds back
+
+| Metric | Labels | Shows |
+|---|---|---|
+| `colca_log_withheld_total` | `reason` (`collapsed`, `rate_limited`) | `_Log` records accepted but not stored: repeats counted in a summary, records over a service's budget counted in a drop notice |
+| `colca_log_untracked_total` | `table` (`repeats`, `services`) | records stored unremembered because `logs.max_tracked` was reached; non-zero means raise it |
+| `colca_log_gate_write_failures_total` | `kind` (`summary`, `drop_notice`) | summaries and drop notices the store did not take |
+
+See [Configuration](configuration.md#logs).
+
 
 ## Retention
 

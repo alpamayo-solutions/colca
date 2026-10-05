@@ -212,3 +212,47 @@ def test_connecting_mqtt_adds_the_log_publisher_without_owning_the_log():
         root.handlers.clear()
         root.handlers.extend(original_handlers)
         root.setLevel(original_level)
+
+
+def test_a_published_log_message_is_the_records_own_message():
+    """The payload's message is the raw message, not the formatted line: the
+    timestamp, level and logger have fields of their own, and a timestamp in
+    the message would keep every repeat distinct, so the node could never
+    collapse an error loop."""
+    import logging
+
+    from franzmq.data_contracts.base import Log
+
+    from colca_data_contracts.local_service import _LogPublishingHandler
+    from colca_data_contracts.logging import COLCA_LOG_FORMAT
+
+    class _Recording:
+        def __init__(self):
+            self.published = []
+
+        def require_node_id(self):
+            return "node-1"
+
+        def publish(self, topic, payload):
+            self.published.append((str(topic), payload))
+
+    client = _Recording()
+    handler = _LogPublishingHandler(client, ("line-1", "press"))
+    handler.setFormatter(logging.Formatter(COLCA_LOG_FORMAT))
+    logger = logging.getLogger("press.driver")
+    record = logger.makeRecord(
+        "press.driver", logging.ERROR, "driver.py", 42, "connection %s refused", ("plc-1",), None
+    )
+
+    handler.emit(record)
+    handler.emit(record)
+
+    assert len(client.published) == 2
+    (topic, first), (_, second) = client.published
+    assert isinstance(first, Log)
+    assert topic.endswith("/line-1/press/ERROR")
+    assert first.message == "connection plc-1 refused"
+    assert first.message == second.message, "two identical records must carry identical messages"
+    assert first.level == "ERROR"
+    assert first.logger_name == "press.driver"
+    assert first.line_no == 42

@@ -32,6 +32,10 @@ class _LogPublishingHandler(logging.Handler):
     has no write grant for. The record goes where the service's other records
     go instead: its mount, then its name (`service_context`). The Python
     logger name stays in the payload.
+
+    ``message`` is the record's own message (``record.getMessage()``); the
+    handler's formatter only renders ``exc_info``. The node collapses identical
+    repeated messages, so a message must not carry its own timestamp.
     """
 
     def __init__(self, client: Client, context: tuple[str, ...]):
@@ -47,7 +51,10 @@ class _LogPublishingHandler(logging.Handler):
             payload = Log(
                 timestamp=datetime.datetime.now(datetime.UTC).isoformat(),
                 level=record.levelname,
-                message=self.format(record),
+                # The record's own message, not the formatted line: timestamp,
+                # level and logger have fields of their own, and a timestamp in
+                # the message would keep the node from collapsing repeats.
+                message=record.getMessage(),
                 logger_name=record.name,
                 module=record.module,
                 function=record.funcName,

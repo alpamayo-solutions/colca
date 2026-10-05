@@ -116,6 +116,19 @@ checked against the schema only. The id derives from the type, the source, the
 start and the signal set, so placing an annotation or relating it does not
 change its id.
 
+### Log records
+
+A `_Log` topic is `colca/v1/_Log/{node}/{position…}/{LEVEL}`: the service's
+position, then the level (`CRITICAL`, `ERROR`, `WARNING`, `INFO`, `DEBUG`).
+The payload carries `timestamp`, `level`, `message`, `logger_name`, `module`,
+`function` and `line_no`, and may carry `exc_info` and `extra`.
+
+`message` is the event's own text, such as `connection refused`, not a
+formatted console line: the timestamp, level and logger have fields of their
+own, and the traceback goes in `exc_info`. The node collapses identical
+repeated messages and caps each service's log rate, which needs identical
+events to carry identical messages (see [Configuration](configuration.md#logs)).
+
 ## Removing a value
 
 Publishing an empty payload to a data or entity topic retires that path. The
