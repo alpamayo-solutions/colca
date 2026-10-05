@@ -71,9 +71,34 @@ jobs:
         if: github.event_name == 'pull_request'
         run: scripts/check-no-working-notes.sh "origin/${{ github.base_ref }}"
 
-  go-test:
+  # `make test` split into shards that run side by side. scripts/go-test-shards.sh
+  # defines them and checks that together they test every package exactly once.
+  go-test-plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.shards.outputs.shards }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Every package in exactly one shard
+        id: shards
+        run: |
+          scripts/go-test-shards.sh check
+          echo "shards=$(scripts/go-test-shards.sh matrix)" >> "$GITHUB_OUTPUT"
+
+  go-test-shard:
+    name: go-test (${{ matrix.shard }})
+    needs: [go-test-plan]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.go-test-plan.outputs.shards) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
@@ -85,7 +110,26 @@ jobs:
       - name: Schema bundle
         run: make bundle
       - name: Tests
-        run: make test
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mapfile -t packages < <(scripts/go-test-shards.sh packages "$SHARD")
+          go test -race -count=1 "${packages[@]}"
+
+  # The required check `go-test`: green only when the plan and every shard passed.
+  go-test:
+    needs: [go-test-plan, go-test-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: All shards passed
+        env:
+          PLAN: ${{ needs.go-test-plan.result }}
+          SHARDS: ${{ needs.go-test-shard.result }}
+        run: |
+          echo "plan: $PLAN, shards: $SHARDS"
+          [ "$PLAN" = success ] && [ "$SHARDS" = success ]
 
   bench-replication:
     runs-on: ubuntu-latest
