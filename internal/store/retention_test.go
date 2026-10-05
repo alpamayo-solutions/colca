@@ -776,3 +776,25 @@ func TestAppendIfKVUnchangedGuards(t *testing.T) {
 		t.Fatal("guarded append without a KV projection must error")
 	}
 }
+
+// A cursor never saved starts at the LWM; a saved one keeps its position, even
+// below the LWM, where it is a gap.
+func TestCursorStartIsTheLWMForACursorNeverSaved(t *testing.T) {
+	s := mustOpen(t)
+	appendMetrics(t, s, 5, 1000)
+	if created, err := s.CursorSetIfAbsent("saved", "metrics", 2); err != nil || !created {
+		t.Fatalf("cursor: %v", err)
+	}
+	if _, err := s.Prune("metrics", 4, []string{"saved"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if pos, saved := s.CursorStart("new", "metrics"); saved || pos != 4 {
+		t.Fatalf("new cursor starts at %d (saved %v), want the LWM 4", pos, saved)
+	}
+	if pos, saved := s.CursorStart("saved", "metrics"); !saved || pos != 2 {
+		t.Fatalf("saved cursor starts at %d (saved %v), want 2", pos, saved)
+	}
+	if _, ok := s.Gap("metrics", 2); !ok {
+		t.Fatal("a saved position below the LWM must be a gap")
+	}
+}
