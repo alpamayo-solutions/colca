@@ -193,7 +193,7 @@ jobs:
 
   # No check job carries `needs`, so the container and replication tests run
   # beside the Go tests instead of after them. Publishing still waits for the
-  # checks: they are in the `needs` of image and packages below.
+  # checks: they are in the `needs` of every publishing job below.
   ts-lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -244,8 +244,9 @@ jobs:
       - name: Four-node tree in containers
         run: make smoke
 
-  # Everything below runs for pushes to main and for version tags, once every
-  # check above has passed.
+  # Everything below runs for pushes to main and for version tags. The builds
+  # start at once; whatever publishes (image tags, npm, PyPI, the release)
+  # waits until every check above has passed.
 
   version:
     if: github.event_name != 'pull_request'
@@ -271,16 +272,19 @@ jobs:
           echo "semver=$semver" >> "$GITHUB_OUTPUT"
           echo "python=$python" >> "$GITHUB_OUTPUT"
 
+  # The image is built and pushed by digest beside the checks, untagged. Only
+  # publish-image, once every check has passed, gives it its tags, signs it and
+  # attests it.
   image:
-    needs: [version, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
+    needs: [version]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
@@ -294,6 +298,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # The same metadata as in publish-image, for the labels and annotations;
+      # the tags are applied there.
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
         with:
@@ -327,14 +333,62 @@ jobs:
           build-contexts: contracts-bundle=build/bundle
           build-args: VERSION=${{ needs.version.outputs.semver }}
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
           provenance: mode=max
           sbom: true
           cache-from: ${{ steps.cache.outputs.from }}
           cache-to: ${{ steps.cache.outputs.to }}
+
+  publish-image:
+    needs: [version, image, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}@${{ needs.image.outputs.digest }}
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      # With one source and no annotations, imagetools copies the index as it is,
+      # so every tag names exactly the digest that is signed and attested below.
+      - name: Tag the image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          mapfile -t tags < <(grep . <<< "$TAGS")
+          args=()
+          for tag in "${tags[@]}"; do
+            args+=(--tag "$tag")
+          done
+          docker buildx imagetools create "${args[@]}" "$IMAGE"
+          for tag in "${tags[@]}"; do
+            got="sha256:$(docker buildx imagetools inspect --raw "$tag" | sha256sum | cut -d' ' -f1)"
+            if [ "$got" != "$DIGEST" ]; then
+              echo "::error::$tag is $got, not the built $DIGEST"
+              exit 1
+            fi
+            echo "$tag -> $got"
+          done
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
         if: github.event.repository.visibility == 'public'
         with:
@@ -343,13 +397,10 @@ jobs:
       # recorded in the public transparency log. --recursive signs each platform too.
       - name: Sign the image
         if: github.event.repository.visibility == 'public'
-        env:
-          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
         run: cosign sign --yes --recursive "$IMAGE"
       - name: Verify the signature
         if: github.event.repository.visibility == 'public'
         env:
-          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
           IDENTITY: https://github.com/${{ github.workflow_ref }}
         run: |
           cosign verify "$IMAGE" --certificate-identity "$IDENTITY" \
@@ -358,7 +409,7 @@ jobs:
         if: github.event.repository.visibility == 'public'
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ needs.image.outputs.digest }}
           push-to-registry: true
       - id: syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
@@ -367,7 +418,6 @@ jobs:
       - name: SBOMs of the image
         env:
           SYFT: ${{ steps.syft.outputs.cmd }}
-          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
         run: |
           mkdir -p sbom
           for platform in linux/amd64 linux/arm64; do
@@ -379,14 +429,14 @@ jobs:
         if: github.event.repository.visibility == 'public'
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ needs.image.outputs.digest }}
           sbom-path: sbom/colca-image-linux-amd64.spdx.json
           push-to-registry: true
       - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0
         if: github.event.repository.visibility == 'public'
         with:
           subject-name: ghcr.io/${{ github.repository }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ needs.image.outputs.digest }}
           sbom-path: sbom/colca-image-linux-arm64.spdx.json
           push-to-registry: true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -396,7 +446,7 @@ jobs:
           if-no-files-found: error
 
   packages:
-    needs: [version, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
+    needs: [version]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -473,7 +523,7 @@ jobs:
   # The npm package, built the same way as the Python one: version from the tag,
   # SBOM, attestations, and an artifact the publish job takes as it is.
   npm-package:
-    needs: [version, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
+    needs: [version]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -540,7 +590,7 @@ jobs:
   # environment, so no token is stored anywhere. The OIDC exchange needs npm
   # 11.5.1 or newer, hence the explicit install.
   npm:
-    needs: [npm-package]
+    needs: [npm-package, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
     if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -563,7 +613,7 @@ jobs:
   # Trusted publishing: PyPI accepts uploads from this workflow in the pypi
   # environment, so no token is stored anywhere.
   pypi:
-    needs: [packages]
+    needs: [packages, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
     if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -578,7 +628,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
 
   release:
-    needs: [version, image, packages]
+    needs: [version, publish-image, packages]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
