@@ -149,15 +149,20 @@ retention:
 |---|---|
 | `…signals[].topics` | MQTT filters on the signal's `_Metric` topic (`+` one level, `#` the rest). The topic carries the node and the path, so a rule can select by machine, by line or by signal name. |
 | `…signals[].signal_ids` | Signal ids, for single signals. |
-| `…signals[].max_age` | The signal's window. Must be shorter than the stream's `max_age`, which still applies to every signal. |
+| `…signals[].max_age` | The signal's window. Must be shorter than the stream's `max_age`, which still applies to every signal. A stream with `keep_forever` cannot have `signals`. |
 
 For each selected signal the pruner removes records older than the window but
-keeps the newest of them: the value in force when the window opens. A signal
+keeps the one with the latest timestamp among them: the value in force when
+the window opens. It walks a signal in offset order and stops at its first
+record inside the window, so a late sample appended after that stays until the
+stream's `max_age` removes it. A signal
 that stopped changing keeps its last value however old it is, and `/kv` keeps
 the current value as before. The cursor rule is the stream's: nothing a
 protecting cursor has not read is removed, and a cursor that went stale under
-`ignore_cursors_after` is passed with a `_StreamGap` marker naming it. That
-marker's range is sparse: the records of other signals in it are still there.
+`ignore_cursors_after` is passed with one `_StreamGap` marker per pass naming
+it, from its position to the protecting floor. That range is sparse: the
+records of other signals in it are still there. A stale cursor that acks during
+the pass protects again from its next batch on.
 
 The rules are node configuration rather than a signal attribute because how
 long to keep history is a decision of the node that stores it: a hub that

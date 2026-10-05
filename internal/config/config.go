@@ -855,6 +855,9 @@ func validateSignalRules(name string, s, eff StreamRetention) error {
 	if name != "metrics" {
 		return fmt.Errorf("config: retention.streams.%s.signals: per-signal retention applies to the metrics stream only", name)
 	}
+	if s.KeepForever {
+		return fmt.Errorf("config: retention.streams.%s cannot set both keep_forever and signals: keep_forever keeps every record, signals would remove some", name)
+	}
 	for i, rule := range s.Signals {
 		at := fmt.Sprintf("config: retention.streams.%s.signals[%d]", name, i)
 		if len(rule.Topics) == 0 && len(rule.SignalIDs) == 0 {
@@ -874,7 +877,7 @@ func validateSignalRules(name string, s, eff StreamRetention) error {
 		if maxAge <= 0 {
 			return fmt.Errorf("%s: max_age must be positive, got %s", at, maxAge)
 		}
-		if streamAge := time.Duration(eff.MaxAge); !eff.KeepForever && streamAge > 0 && maxAge >= streamAge {
+		if streamAge := time.Duration(eff.MaxAge); streamAge > 0 && maxAge >= streamAge {
 			return fmt.Errorf("%s: max_age %s must be shorter than the stream's max_age %s", at, maxAge, streamAge)
 		}
 	}

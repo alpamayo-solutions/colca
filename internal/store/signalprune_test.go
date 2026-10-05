@@ -172,7 +172,7 @@ func TestPruneSignalsPassesAnOverriddenCursorWithAMarker(t *testing.T) {
 		return []Record{{Topic: "colca/v1/_StreamGap/n/metrics", Payload: []byte(`{}`), TS: now.UnixMilli()}}
 	}
 	rule := signalRuleFor(map[string]time.Duration{"a": time.Hour})
-	res, err := s.PruneSignals("metrics", "", now, rule, head, []string{"c/dead"}, 0, marker)
+	res, err := s.PruneSignals("metrics", "", now, rule, head, map[string]uint64{"c/dead": 1}, 0, marker)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,5 +294,49 @@ func TestPruneSignalsWorksThroughALongSignalInBoundedCalls(t *testing.T) {
 	}
 	if got := signalOffsets(t, s, "long"); !equalOffsets(got, at[len(at)-2:]) {
 		t.Fatalf("long keeps %v after %d calls, want %v", got, calls, at[len(at)-2:])
+	}
+}
+
+// A cursor the caller overrode at one position protects again once it has
+// moved: it acked during the pass, so it is alive.
+func TestPruneSignalsStopsOverridingACursorThatMoved(t *testing.T) {
+	s := mustOpen(t)
+	now := time.Now()
+	at := appendSignalHistory(t, s, now, []string{"a"}, []time.Duration{5 * time.Hour, 4 * time.Hour, 3 * time.Hour, time.Minute})["a"]
+	if created, err := s.CursorSetIfAbsent("c/slow", "metrics", 1); err != nil || !created {
+		t.Fatalf("cursor: %v", err)
+	}
+	// The caller saw c/slow stale at 1; it acks to the second record meanwhile.
+	if !s.CursorAck("c/slow", "metrics", at[1]) {
+		t.Fatal("ack refused")
+	}
+	called := false
+	marker := func(PruneSpan, []string) []Record { called = true; return nil }
+	rule := signalRuleFor(map[string]time.Duration{"a": time.Hour})
+	res, err := s.PruneSignals("metrics", "", now, rule, s.NextOffset("metrics"), map[string]uint64{"c/slow": 1}, 0, marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Removed != 1 || len(res.Overridden) != 0 || called {
+		t.Fatalf("result %+v marker %v, want only the record below c/slow removed and no override", res, called)
+	}
+	if got := signalOffsets(t, s, "a"); !equalOffsets(got, at[1:]) {
+		t.Fatalf("a keeps %v, want %v", got, at[1:])
+	}
+}
+
+// The value in force is the record with the latest timestamp before the
+// cutoff, not the one appended last.
+func TestPruneSignalsKeepsTheLatestTimestampAsTheValueInForce(t *testing.T) {
+	s := mustOpen(t)
+	now := time.Now()
+	// Appended in this order: 4h, 2h, then a late 3h sample, then a fresh one.
+	at := appendSignalHistory(t, s, now, []string{"a"}, []time.Duration{4 * time.Hour, 2 * time.Hour, 3 * time.Hour, time.Minute})["a"]
+	rule := signalRuleFor(map[string]time.Duration{"a": time.Hour})
+	if _, err := s.PruneSignals("metrics", "", now, rule, s.NextOffset("metrics"), nil, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := signalOffsets(t, s, "a"), []uint64{at[1], at[3]}; !equalOffsets(got, want) {
+		t.Fatalf("a keeps %v, want %v (the 2h sample stays in force, the late 3h one goes)", got, want)
 	}
 }

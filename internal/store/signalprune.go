@@ -23,6 +23,12 @@ import (
 //     signal that stopped changing keeps its last value;
 //   - every record at or above the cursor floor, which no consumer has read.
 //
+// "Newest" is the highest timestamp, so a late sample appended after a newer
+// one does not become the value in force. The walk of a signal stops at its
+// first record at or after the cutoff, in offset order, as the stream prune
+// does: an older sample appended after that point stays until the stream
+// policy removes it.
+//
 // Records written before the signal index covered the stream carry no index
 // entry. They are left to the stream's own policy.
 
@@ -59,12 +65,15 @@ type doomedRec struct {
 // entries (0 means no limit), deletes in synced batches, and never deletes at
 // or above clamp, the pruner's floor of protecting cursors.
 //
-// overridden names the stale cursors the caller stopped protecting. Under the
-// mutex, before each batch, the floor is taken again over every other cursor,
-// so a consumer that acked meanwhile is never passed. When a batch passes an
+// overridden maps the stale cursors the caller stopped protecting to the
+// position each had when the caller decided. Under the mutex, before each
+// batch, the floor is taken again over every other cursor, and over an
+// overridden cursor whose position has moved since: a consumer that acked
+// meanwhile, stale or not, is never passed. When a batch passes an
 // overridden cursor, marker builds the records appended in that batch (the
-// _StreamGap marker); the span is the lowest and highest offset deleted.
-func (s *Store) PruneSignals(stream, from string, now time.Time, rule SignalRule, clamp uint64, overridden []string, maxVisit int, marker func(span PruneSpan, passed []string) []Record) (SignalPruneResult, error) {
+// _StreamGap marker); the span is the lowest and highest offset deleted. A
+// marker that returns no records lets the batch commit without one.
+func (s *Store) PruneSignals(stream, from string, now time.Time, rule SignalRule, clamp uint64, overridden map[string]uint64, maxVisit int, marker func(span PruneSpan, passed []string) []Record) (SignalPruneResult, error) {
 	var res SignalPruneResult
 	s.mu.Lock()
 	lwm, next := s.lwm[stream], s.next[stream]
@@ -76,11 +85,6 @@ func (s *Store) PruneSignals(stream, from string, now time.Time, rule SignalRule
 	if clamp <= lwm {
 		return res, nil
 	}
-	ov := make(map[string]bool, len(overridden))
-	for _, name := range overridden {
-		ov[name] = true
-	}
-
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: []byte("si\x00" + stream + "\x00" + from),
 		UpperBound: []byte("si\x00" + stream + "\x01"),
@@ -95,7 +99,7 @@ func (s *Store) PruneSignals(stream, from string, now time.Time, rule SignalRule
 		if len(doomed) == 0 {
 			return nil
 		}
-		removed, shed, passed, err := s.deleteSignalRecords(stream, doomed, ov, marker)
+		removed, shed, passed, err := s.deleteSignalRecords(stream, doomed, overridden, marker)
 		doomed = doomed[:0]
 		if err != nil {
 			return err
@@ -125,7 +129,7 @@ func (s *Store) PruneSignals(stream, from string, now time.Time, rule SignalRule
 		var (
 			cutoff  int64
 			decided bool
-			prev    *doomedRec // newest record before the cutoff seen so far
+			keep    *doomedRec // the value in force so far: highest TS before the cutoff
 		)
 		for ; valid; valid = iter.Next() {
 			id, off, ok := splitSigKey(iter.Key(), stream)
@@ -145,7 +149,7 @@ func (s *Store) PruneSignals(stream, from string, now time.Time, rule SignalRule
 			}
 			if maxVisit > 0 && visited > maxVisit {
 				// A long run of one signal: commit what is decided and resume at this
-				// signal. The kept candidate (prev) is not in doomed, so the next call
+				// signal. The kept candidate (keep) is not in doomed, so the next call
 				// sees it first and carries on.
 				res.Resume = signalID
 				return res, flush()
@@ -161,15 +165,23 @@ func (s *Store) PruneSignals(stream, from string, now time.Time, rule SignalRule
 			if rec.TS >= cutoff {
 				break // the window starts here
 			}
-			if prev != nil {
-				doomed = append(doomed, *prev)
-				if len(doomed) >= signalPruneBatch {
-					if err := flush(); err != nil {
-						return res, err
-					}
+			cand := &doomedRec{off: off, signalID: signalID, ts: rec.TS, size: rec.size}
+			if keep == nil {
+				keep = cand
+				continue
+			}
+			// The value in force is the one with the latest timestamp, not the latest
+			// offset: a late sample appended after a newer one does not replace it. On
+			// equal timestamps the later offset wins.
+			if cand.ts >= keep.ts {
+				keep, cand = cand, keep
+			}
+			doomed = append(doomed, *cand)
+			if len(doomed) >= signalPruneBatch {
+				if err := flush(); err != nil {
+					return res, err
 				}
 			}
-			prev = &doomedRec{off: off, signalID: signalID, ts: rec.TS, size: rec.size}
 		}
 		// Next signal: the first key after every entry of this one.
 		valid = iter.SeekGE([]byte("si\x00" + stream + "\x00" + signalID + "\x01"))
@@ -225,7 +237,7 @@ func (s *Store) readRecordMeta(stream string, off uint64) (recEnc, bool, error) 
 
 // deleteSignalRecords deletes doomed records and their index entries in one
 // synced batch, after taking the cursor floor again under the mutex.
-func (s *Store) deleteSignalRecords(stream string, doomed []doomedRec, overridden map[string]bool, marker func(PruneSpan, []string) []Record) (removed, shed uint64, passed []string, err error) {
+func (s *Store) deleteSignalRecords(stream string, doomed []doomedRec, overridden map[string]uint64, marker func(PruneSpan, []string) []Record) (removed, shed uint64, passed []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	floor := s.next[stream]
@@ -234,7 +246,7 @@ func (s *Store) deleteSignalRecords(stream string, doomed []doomedRec, overridde
 		if cstream != stream {
 			return
 		}
-		if overridden[name] {
+		if at, ok := overridden[name]; ok && at == pos {
 			stale[name] = pos
 			return
 		}

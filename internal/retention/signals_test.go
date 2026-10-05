@@ -142,8 +142,10 @@ func TestSignalRulesPassAStaleCursorWithAGapMarker(t *testing.T) {
 	if err := json.Unmarshal(recs[0].Payload, &gap); err != nil {
 		t.Fatal(err)
 	}
-	if gap.FromOffset != offs[0] || gap.ToOffset != offs[1] || len(gap.OverriddenCursors) != 1 || gap.OverriddenCursors[0] != "c/gone" {
-		t.Fatalf("marker %+v, want [%d..%d] naming c/gone", gap, offs[0], offs[1])
+	// The marker spans what the pass may thin for that cursor: from its position
+	// to the floor (the head here).
+	if gap.FromOffset != 1 || gap.ToOffset != head-1 || len(gap.OverriddenCursors) != 1 || gap.OverriddenCursors[0] != "c/gone" {
+		t.Fatalf("marker %+v, want [1..%d] naming c/gone", gap, head-1)
 	}
 }
 
@@ -161,5 +163,40 @@ func TestCappedPolicyScanRepeatsWithinACycle(t *testing.T) {
 
 	if got := st.LWM("logs"); got != 51 {
 		t.Fatalf("LWM(logs) = %d after one cycle, want 51 (five capped passes)", got)
+	}
+}
+
+// A pass that passes a stale cursor in many batches and calls writes one
+// marker for it, not one per batch.
+func TestSignalRulesWriteOneMarkerPerStaleCursorPerPass(t *testing.T) {
+	st, eng := mustParts(t)
+	now := time.Now()
+	for i := range 6 {
+		appendSignal(t, st, now, fmt.Sprintf("line1/s%d", i), fmt.Sprintf("SIG%d", i), 5*time.Hour, 4*time.Hour, 3*time.Hour, time.Minute)
+	}
+	if created, err := st.CursorSetIfAbsent("c/gone", "metrics", 1); err != nil || !created {
+		t.Fatalf("cursor: %v", err)
+	}
+	pol := config.StreamRetention{
+		IgnoreCursorsAfter: config.Duration(time.Minute),
+		Signals:            []config.SignalRetention{{Topics: []string{"colca/v1/_Metric/#"}, MaxAge: config.Duration(time.Hour)}},
+	}
+	p, m := newPrunerWithMetrics(t, st, eng, retFor("metrics", pol))
+	p.visitCap = 4 // one signal per PruneSignals call
+	p.now = func() time.Time { return now.Add(30 * time.Minute) }
+	head := st.NextOffset("metrics")
+	p.runOnce()
+
+	if got := scrapeMetric(t, m, `colca_retention_pruned_records_total{stream="metrics"}`); got != 12 {
+		t.Fatalf("pruned %v records, want 12 (two per signal)", got)
+	}
+	markers := 0
+	for _, r := range readAll(t, st, "metrics", head) {
+		if strings.Contains(r.Topic, "/_StreamGap/") {
+			markers++
+		}
+	}
+	if markers != 1 {
+		t.Fatalf("%d _StreamGap markers, want 1 for the pass", markers)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -58,6 +59,8 @@ type Pruner struct {
 	passBudget time.Duration
 	// scanCap bounds one policy scan, store.DefaultPolicyScanCap outside tests.
 	scanCap uint64
+	// visitCap bounds one PruneSignals call, signalVisitCap outside tests.
+	visitCap int
 }
 
 // defaultPassBudget is how long one stream may keep pruning in one cycle. A
@@ -80,6 +83,7 @@ func NewPruner(st *store.Store, eng *engine.Engine, cfg config.Retention, m *met
 		signalFrom: map[string]string{},
 		passBudget: defaultPassBudget,
 		scanCap:    store.DefaultPolicyScanCap,
+		visitCap:   signalVisitCap,
 		publish: func(topic string, payload []byte, ifKVOffset uint64) (bool, error) {
 			_, applied, err := eng.IngestRefresh(topic, payload, ifKVOffset)
 			return applied, err
@@ -399,8 +403,10 @@ func (p *Pruner) cursorFloor(stream string, next uint64, now time.Time, window t
 // signals): it removes each matching signal's records older than the rule's
 // window, keeping the newest of them as the value in force when the window
 // opens, below the same cursor floor as the stream prune. A stale cursor it
-// passes gets a _StreamGap marker naming it, as with the stream prune; the
-// marker's range is sparse, since other signals' records in it stay.
+// passes gets one _StreamGap marker per pass naming it, as with the stream
+// prune. The pass goes signal by signal, so its deletes are spread over the
+// whole range it may thin: the marker names that range, from the cursor to the
+// floor, and is sparse, since other signals' records in it stay.
 func (p *Pruner) pruneSignals(stream string) {
 	pol := p.cfg.EffectiveStream(stream)
 	if len(pol.Signals) == 0 {
@@ -409,21 +415,38 @@ func (p *Pruner) pruneSignals(stream string) {
 	now := p.now()
 	next := p.st.NextOffset(stream)
 	clamp, _, stale := p.cursorFloor(stream, next, now, time.Duration(pol.IgnoreCursorsAfter))
-	names := make([]string, len(stale))
-	for i, c := range stale {
-		names[i] = c.name
+	// The positions the decision was taken at: a stale cursor that acks during the
+	// pass protects again (the store compares them under its mutex).
+	at := make(map[string]uint64, len(stale))
+	for _, c := range stale {
+		at[c.name] = c.pos
 	}
 	markers := 0
+	marked := map[string]bool{}
 	marker := func(span store.PruneSpan, passed []string) []store.Record {
+		var fresh []string
+		from := span.From
+		for _, name := range passed {
+			if !marked[name] {
+				fresh = append(fresh, name)
+				from = min(from, at[name])
+			}
+		}
+		if len(fresh) == 0 {
+			return nil // this pass already told these cursors
+		}
 		payload, err := json.Marshal(gapPayload{
-			Stream: stream, FromOffset: span.From, ToOffset: span.To,
-			FirstTS: span.FirstTS, LastTS: span.LastTS, OverriddenCursors: passed,
+			Stream: stream, FromOffset: from, ToOffset: clamp - 1,
+			FirstTS: span.FirstTS, LastTS: span.LastTS, OverriddenCursors: fresh,
 		})
 		if err != nil {
 			p.log.Error("retention gap marker encode failed — pruning WITHOUT a marker", "stream", stream, "err", err)
 			return nil
 		}
 		markers++
+		for _, name := range fresh {
+			marked[name] = true
+		}
 		return []store.Record{{
 			Topic:   uns.Prefix() + "_StreamGap/" + p.ulid + "/" + stream,
 			Payload: payload,
@@ -434,10 +457,14 @@ func (p *Pruner) pruneSignals(stream string) {
 	var removed, bytes uint64
 	var overridden []string
 	for {
-		res, err := p.st.PruneSignals(stream, p.signalFrom[stream], now, pol.SignalMaxAge, clamp, names, signalVisitCap, marker)
+		res, err := p.st.PruneSignals(stream, p.signalFrom[stream], now, pol.SignalMaxAge, clamp, at, p.visitCap, marker)
 		removed += res.Removed
 		bytes += res.Bytes
-		overridden = append(overridden, res.Overridden...)
+		for _, name := range res.Overridden {
+			if !slices.Contains(overridden, name) {
+				overridden = append(overridden, name)
+			}
+		}
 		if err != nil {
 			p.log.Error("per-signal prune failed — the pass restarts next cycle", "stream", stream, "err", err)
 			p.signalFrom[stream] = ""

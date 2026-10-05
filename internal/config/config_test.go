@@ -1044,12 +1044,12 @@ func TestSignalRetentionValidation(t *testing.T) {
 			t.Errorf("%s: error %v, want one containing %q", name, err, tc.want)
 		}
 	}
-	// keep_forever on the stream leaves any window shorter.
+	// keep_forever keeps every record, so it cannot be combined with signals.
 	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Retention: Retention{Streams: map[string]StreamRetention{
-		"metrics": {KeepForever: true, Signals: []SignalRetention{{Topics: []string{"#"}, MaxAge: Duration(9000 * time.Hour)}}},
+		"metrics": {KeepForever: true, Signals: []SignalRetention{{Topics: []string{"#"}, MaxAge: Duration(time.Hour)}}},
 	}}}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("a window under keep_forever was refused: %v", err)
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "keep_forever and signals") {
+		t.Fatalf("keep_forever with signals: error %v, want a refusal naming both", err)
 	}
 }
 
