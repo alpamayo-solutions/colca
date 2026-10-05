@@ -85,16 +85,23 @@ func serveWatch(w http.ResponseWriter, r *http.Request, s *store.Store, writeJSO
 	heartbeat := time.NewTimer(watchHeartbeat)
 	defer heartbeat.Stop()
 	for {
-		waits, next := s.StreamChanges(streams)
-		positions := make(map[string]store.StreamPosition, len(next))
-		for stream, offset := range next {
-			positions[stream] = store.StreamPosition{Next: offset}
-		}
+		var waits map[string]<-chan struct{}
+		var next map[string]uint64
+		var positions map[string]store.StreamPosition
 		if len(contracts) > 0 {
-			wake, scoped := s.Changes(contracts...)
+			// One snapshot: the hint's next offset must include every append
+			// the scoped positions include, or the hint would understate it.
+			var wake <-chan struct{}
+			wake, next, positions = s.ScopedStreamChanges(streams, contracts)
+			waits = make(map[string]<-chan struct{}, len(streams))
 			for _, stream := range streams {
 				waits[stream] = wake
-				positions[stream] = scoped[stream]
+			}
+		} else {
+			waits, next = s.StreamChanges(streams)
+			positions = make(map[string]store.StreamPosition, len(next))
+			for stream, offset := range next {
+				positions[stream] = store.StreamPosition{Next: offset}
 			}
 		}
 		hint := watchHint{Streams: []string{}, Next: map[string]uint64{}}

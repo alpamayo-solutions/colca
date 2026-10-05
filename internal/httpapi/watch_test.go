@@ -148,3 +148,49 @@ func TestContractScopedWatchSuppressesUnrelatedWakeups(t *testing.T) {
 		t.Fatal("matching commit not announced")
 	}
 }
+
+// A contract-scoped watch under a stream of matching appends: once they stop,
+// the newest hint names the stream's real head. Each hint's next offset comes
+// from the same snapshot as the scoped positions; read separately, an append
+// between them left the last hint short of it with no further hint to follow.
+func TestContractScopedWatchHintEndsAtTheHead(t *testing.T) {
+	h := newLocalHandler(t)
+	server := httptest.NewServer(h)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/watch?stream=entities&contract=_Signal&interval_ms=0", nil)
+	req.Header.Set("X-Colca-Service", "test-watch")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	heads := make(chan uint64, 1024)
+	go func() {
+		scanner := bufio.NewScanner(response.Body)
+		for scanner.Scan() {
+			var hint struct {
+				Next map[string]uint64 `json:"next"`
+			}
+			if json.Unmarshal(scanner.Bytes(), &hint) == nil && hint.Next["entities"] > 0 {
+				heads <- hint.Next["entities"]
+			}
+		}
+	}()
+	<-heads // catch-up
+	for i := 0; i < 300; i++ {
+		if _, _, err := h.eng.Store().Append("entities", []store.Record{{Topic: "prekit/v1/_Signal/node/signal"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, want := h.eng.Store().StreamChanges([]string{"entities"})
+	var last uint64
+	for last != want["entities"] {
+		select {
+		case last = <-heads:
+		case <-time.After(time.Second):
+			t.Fatalf("last hint next=%d, stream next=%d", last, want["entities"])
+		}
+	}
+}
