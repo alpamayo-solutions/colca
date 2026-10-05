@@ -1065,3 +1065,62 @@ func TestStorageCompressionValidation(t *testing.T) {
 		t.Fatalf("lz4 accepted or unclear error: %v", err)
 	}
 }
+
+func TestParentLogsParseAndDefault(t *testing.T) {
+	load := func(t *testing.T, parent string) (*Config, error) {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "c.yaml")
+		body := "ulid: n1\ndata_dir: /tmp/d\nkey_file: /k\nparent:\n  url: https://p:9443\n  pubkey: aa\n" + parent
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return Load(p)
+	}
+
+	c, err := load(t, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Parent.Logs.EffectiveMinLevel(); got != "WARNING" {
+		t.Fatalf("absent parent.logs: min level %q, want WARNING", got)
+	}
+	if len(c.Parent.Logs.EffectiveServices()) != 0 {
+		t.Fatalf("absent parent.logs: services %v, want none", c.Parent.Logs.EffectiveServices())
+	}
+
+	c, err = load(t, "  logs:\n    min_level: error\n    services:\n      dataops: Info\n      colca: debug\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Parent.Logs.EffectiveMinLevel(); got != "ERROR" {
+		t.Fatalf("min_level error: got %q, want ERROR", got)
+	}
+	want := map[string]string{"dataops": "INFO", "colca": "DEBUG"}
+	if got := c.Parent.Logs.EffectiveServices(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("services: got %v, want %v", got, want)
+	}
+}
+
+func TestParentLogsRejectsUnknownLevels(t *testing.T) {
+	for name, logs := range map[string]ParentLogs{
+		"unknown min_level":     {MinLevel: "verbose"},
+		"abbreviated min_level": {MinLevel: "WARN"},
+		"unknown service level": {Services: map[string]string{"dataops": "trace"}},
+		"empty service level":   {Services: map[string]string{"dataops": ""}},
+		"empty service name":    {Services: map[string]string{"": "INFO"}},
+		"service with a slash":  {Services: map[string]string{"a/b": "INFO"}},
+	} {
+		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Parent: &Parent{URL: "https://p", Pubkey: "aa", Logs: logs}}
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), "parent.logs") {
+			t.Errorf("%s: want a parent.logs error, got %v", name, err)
+		}
+	}
+	for _, level := range LogLevels {
+		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Parent: &Parent{URL: "https://p", Pubkey: "aa",
+			Logs: ParentLogs{MinLevel: strings.ToLower(level), Services: map[string]string{"svc": level}}}}
+		if err := c.Validate(); err != nil {
+			t.Errorf("level %s: %v", level, err)
+		}
+	}
+}

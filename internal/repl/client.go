@@ -82,11 +82,18 @@ type Client struct {
 	// storeID is this node's store incarnation, sent with every replication
 	// batch so the parent can tell a rebuilt store from a resumed one.
 	storeID string
+	// logs decides which logs-stream records rise (parent.logs). The default
+	// forwards WARNING and above.
+	logs logForwarding
 }
 
 // SetStoreID names the store incarnation replication batches carry (see
 // store.Store.StoreID). Call it before the uplink starts.
 func (c *Client) SetStoreID(id string) { c.storeID = id }
+
+// SetLogForwarding applies a validated parent.logs block. Call it before the
+// uplink starts; without it the client forwards WARNING and above.
+func (c *Client) SetLogForwarding(cfg config.ParentLogs) { c.logs = newLogForwarding(cfg) }
 
 // NewClient returns a TLS client that presents this node's certificate and pins
 // the parent's public key.
@@ -135,6 +142,7 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 		log:              slog.Default().With("comp", "repl-client"),
 		maxReplicateBody: replicateBodyLimit(&config.Config{Limits: limits}),
 		links:            newLinkState(),
+		logs:             newLogForwarding(config.ParentLogs{}),
 	}
 	cl.status.Store(Status{State: UplinkConnecting, Since: time.Now().UTC()})
 	return cl, nil
@@ -417,8 +425,10 @@ var priorityLanes = []struct {
 	{"audit", nil},
 	{"annotations", nil},
 	// Logs go last among the lanes: worth less than an alarm, more than a sample,
-	// and on their own lane they cannot starve the samples.
-	{"logs", nil},
+	// and on their own lane they cannot starve the samples. Which _Log records
+	// rise is per node (parent.logs), so that filter is the Client's and is
+	// applied in pushOnce.
+	{logsStream, nil},
 }
 
 // uplinkStreams is the set RunUplink pushes: every priority lane plus the
@@ -601,9 +611,23 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		pushed := false
 		batch := make([]store.ReplRecord, 0, len(recs))
 		allowed := pushable(filter)
+		// Records the log policy keeps home. Like every filtered record, the cursor
+		// moves past them, so they neither hold the lane nor pin retention. They are
+		// counted only once the cursor has moved, so a retried page counts once.
+		type withheldLog struct {
+			offset uint64
+			level  string
+		}
+		var withheld []withheldLog
 		for _, r := range recs {
 			if !allowed(r.Topic) {
 				continue
+			}
+			if stream == logsStream {
+				if ok, level := c.logs.forward(r.Topic); !ok {
+					withheld = append(withheld, withheldLog{r.Offset, level})
+					continue
+				}
 			}
 			if stream == "metrics" && r.SourceLocalOnly {
 				if n := len(batch); n > 0 && batch[n-1].SkipFrom != 0 && batch[n-1].ChildOffset+1 == r.Offset {
@@ -684,6 +708,11 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		eng.Store().CursorAck(uns.UplinkCursor(c.parentPub), stream, next)
 		if pushed {
 			m.UplinkPushed(stream, time.Now())
+		}
+		for _, w := range withheld {
+			if w.offset < next { // past a trimmed batch's end the page is read again
+				m.UplinkLogWithheld(w.level)
+			}
 		}
 		return true, false
 	}
