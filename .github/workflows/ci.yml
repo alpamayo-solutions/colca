@@ -341,6 +341,73 @@ jobs:
           cache-from: ${{ steps.cache.outputs.from }}
           cache-to: ${{ steps.cache.outputs.to }}
 
+  # TEMPORARY, removed before merge: the push-by-digest and tag path of image and
+  # publish-image, against a throwaway local registry.
+  image-digest-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      registry:
+        image: registry:2
+        ports: ["5000:5000"]
+    env:
+      REPO: localhost:5000/colca
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.11.17"
+      - name: Schema bundle
+        run: make bundle
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          driver-opts: network=host
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ${{ env.REPO }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=raw,value=check
+          labels: |
+            org.opencontainers.image.title=colca
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          build-contexts: contracts-bundle=build/bundle
+          build-args: VERSION=0.0.0-check
+          platforms: linux/amd64,linux/arm64
+          outputs: type=image,name=${{ env.REPO }},push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+      - name: Tag the image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ env.REPO }}@${{ steps.build.outputs.digest }}
+        run: |
+          mapfile -t tags < <(grep . <<< "$TAGS")
+          args=()
+          for tag in "${tags[@]}"; do
+            args+=(--tag "$tag")
+          done
+          docker buildx imagetools create "${args[@]}" "$IMAGE"
+          for tag in "${tags[@]}"; do
+            got="sha256:$(docker buildx imagetools inspect --raw "$tag" | sha256sum | cut -d' ' -f1)"
+            if [ "$got" != "$DIGEST" ]; then
+              echo "::error::$tag is $got, not the built $DIGEST"
+              exit 1
+            fi
+            echo "$tag -> $got"
+          done
+          docker buildx imagetools inspect "$IMAGE"
+
   publish-image:
     needs: [version, image, go-lint, python-lint, repo-lint, ts-lint, ts-test, go-test, contracts-test, smoke]
     if: github.event_name != 'pull_request'
