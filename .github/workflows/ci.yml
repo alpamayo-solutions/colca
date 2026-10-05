@@ -11,9 +11,14 @@ on:
 permissions:
   contents: read
 
+# A newer push to a branch, main included, cancels the run it supersedes. A
+# release-please commit gets a group of its own, so the run that publishes a
+# release is never cancelled; nor is a tag run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: >-
+    ${{ github.ref_type == 'branch' && startsWith(github.event.head_commit.message, 'chore(main): release')
+    && format('ci-release-commit-{0}', github.sha) || format('ci-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   go-lint:
