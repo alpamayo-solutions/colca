@@ -22,7 +22,7 @@ A caller is one of:
 | `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"stream":"logs","withheld":"…"} or {"error":"…","reason":"…"},…]}` |
 | `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N}` |
 | `GET /watch` | machine, service, person, admin | `?stream=S&stream=S2&interval_ms=100` | NDJSON, one line per change: `{"streams":["S"],"next":{"S":N}}` |
-| `POST /ack` | owner of the cursor, admin; to retire also `cmd:<node>/#:admin` | `{"cursor":"NAME","stream":"S","offset":N}`, or `{"cursor":"NAME","stream":"S","delete":true}` to retire it | `{"moved":true}` or `{"deleted":true}` |
+| `POST /ack` | owner of the cursor, admin; to retire a stale cursor also `cmd:<node>/#:admin` | `{"cursor":"NAME","stream":"S","offset":N}`, or `{"cursor":"NAME","stream":"S","delete":true}` to retire it | `{"moved":true}` or `{"deleted":true}` |
 | `GET /backlog` | local service (`?prefix=` required), admin | `?prefix=c/projector/` | `{"queues":[{"cursor":"…","stream":"S","position":N,"head":N,"lag_records":N,"last_ack_ms":T,"stale":false,"read_since_start":true}]}` |
 | `GET /kv` | machine, service, person, admin | `?prefix=P&max=1000&after=TOKEN&contract=_Signal&depth=1` | `{"entries":[{"path":"…","node_id":"…","topic":"…","payload":{…},"ts":T,"offset":N}],"next":"TOKEN"}` |
 | `GET /self` | local service | | the service's registry entry, limits, `standalone_since` and `standalone_ready` |
@@ -175,9 +175,12 @@ its stream from the pruner. Nothing removes them on its own.
 - **Retire.** `POST /ack {"cursor":…,"stream":…,"delete":true}` as the
   cursor's owner or the admin. A holder of the admin command class over the
   whole node (`cmd:<node>/#:admin`, `cmd:$node/#:admin` or `cmd:#:admin`) may
-  retire any identity's cursor (`c/<name>/…`, `<ulid>/…`) too, but not move
-  one, and not a command delivery floor (`…/cmd`) or a node-owned cursor
-  (`downlink:…`, `down-def:…`). The node logs who retired it. A consumer that
+  retire another identity's cursor (`c/<name>/…`, `<ulid>/…`) too, once it is
+  stale as `GET /backlog` reports it (`409` before), and each such retirement
+  is written to the audit stream (`outcome: success`, the actor, the cursor and
+  its owner). It may not move one, nor retire a command delivery floor
+  (`…/cmd`), a node-owned cursor (`downlink:…`, `down-def:…`) or a cursor of
+  colca's own services (`c/historian/…`). The node logs who retired it. A consumer that
   fetches the cursor again starts it over at the stream's oldest retained
   record, without a gap.
 - **Expire.** `retention.streams.<stream>.ignore_cursors_after` lets the pruner

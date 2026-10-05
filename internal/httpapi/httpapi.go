@@ -31,6 +31,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/cursorwatch"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/httplimit"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -839,10 +840,18 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			op = "cursor_delete"
 		}
 		// Retiring someone else's cursor also takes the admin command class
-		// over the whole node; moving it never does.
-		permitted := c.entry == nil || ownsCursor(c.entry, in.Cursor) ||
-			in.Delete && uns.MayRetireCursor(e.Scope(), c.entry, in.Cursor)
-		if !permitted {
+		// over the whole node, and only for a stale cursor (as GET /backlog
+		// reports it); moving it never does. Such a retirement is audited.
+		owned := c.entry == nil || ownsCursor(c.entry, in.Cursor)
+		operator := !owned && in.Delete && uns.MayRetireCursor(e.Scope(), c.entry, in.Cursor)
+		if operator && !staleCursor(e, in.Cursor, in.Stream, cfg.Cursors.EffectiveStaleAfter()) {
+			_ = e.RecordDenial(engine.AuditDenial{Operation: op, ReasonCode: "cursor_not_stale",
+				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream, "cursor": in.Cursor}})
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "only a stale cursor (see GET /backlog) may be retired by another identity"})
+			return
+		}
+		if !owned && !operator {
 			_ = e.RecordDenial(engine.AuditDenial{Operation: op, ReasonCode: "cursor_denied",
 				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
 				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream, "cursor": in.Cursor}})
@@ -850,6 +859,16 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		if in.Delete {
+			if operator {
+				if err := e.RecordAuthorized(engine.AuditDenial{Operation: op, ReasonCode: "cursor_retired_by_operator",
+					ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+					EntityType: "cursor", EntityID: in.Cursor,
+					Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream,
+						"cursor": in.Cursor, "owner": cursorOwner(in.Cursor)}}); err != nil {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "audit unavailable; cursor not retired"})
+					return
+				}
+			}
 			if err := e.Store().CursorDelete(in.Cursor, in.Stream); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
@@ -1201,6 +1220,28 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 // nil-safe: no entry owns nothing.
 func ownsCursor(e *uns.Entry, cursor string) bool {
 	return e.OwnsCursor(cursor)
+}
+
+// staleCursor reports whether cursor on stream is stale as GET /backlog and the
+// stale_cursors finding report it. An unknown cursor is not stale.
+func staleCursor(e *engine.Engine, cursor, stream string, after time.Duration) bool {
+	infos, err := e.Store().CursorPositions([]string{cursor}, 64)
+	if err != nil {
+		return false
+	}
+	for _, info := range infos {
+		if info.Name == cursor && info.Stream == stream {
+			return cursorwatch.Stale(info, e.Store().NextOffset(stream), time.Now(), after)
+		}
+	}
+	return false
+}
+
+// cursorOwner is the namespace a cursor sits in: the local service name of
+// c/<name>/..., or the ULID of <ulid>/....
+func cursorOwner(cursor string) string {
+	owner, _, _ := strings.Cut(strings.TrimPrefix(cursor, uns.LocalCursorPrefix), "/")
+	return owner
 }
 
 func readBody(r *http.Request) ([]byte, error) {

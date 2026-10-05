@@ -48,13 +48,20 @@ func (e *Entry) OwnsCursor(cursor string) bool {
 	return cursor != e.CommandCursor()
 }
 
-// MayRetireCursor reports whether e may retire cursor although it is not its
-// own: e holds the admin command class over the whole node (cmd:<node>/#:admin,
-// or a zone covering this node), and the cursor sits in an identity's namespace
-// (c/<name>/... or <ulid>/...). A command delivery floor (<prefix>cmd) is not
-// retirable this way: it belongs to the node, which drops it with the identity.
-// Node-owned cursors (downlink:, up:, down-def:) have no namespace and are not
-// retirable either. A nil entry may retire nothing.
+// SystemConsumers are the local services that ship with colca. Their cursors
+// keep retention for the node's own history (colca-historian reads metrics and
+// signals through c/historian/...); no operator right retires them.
+var SystemConsumers = []string{"historian"}
+
+// MayRetireCursor reports whether e holds the right to retire cursor although
+// it is not its own: the admin command class over the whole node
+// (cmd:<node>/#:admin, or a zone covering this node), and the cursor sits in a
+// non-system identity's namespace (c/<name>/... or <ulid>/...). A command
+// delivery floor (<prefix>cmd) is not retirable this way: it belongs to the
+// node, which drops it with the identity. Node-owned cursors (downlink:, up:,
+// down-def:) have no namespace and are not retirable either, nor are the
+// cursors of SystemConsumers. The door also requires the cursor to be stale. A
+// nil entry may retire nothing.
 func MayRetireCursor(sc Scope, e *Entry, cursor string) bool {
 	if e == nil || !identityCursor(cursor) {
 		return false
@@ -77,6 +84,11 @@ func MayRetireCursor(sc Scope, e *Entry, cursor string) bool {
 }
 
 func identityCursor(cursor string) bool {
+	for _, name := range SystemConsumers {
+		if strings.HasPrefix(cursor, LocalCursorPrefix+name+"/") {
+			return false
+		}
+	}
 	prefix, rest, ok := strings.Cut(strings.TrimPrefix(cursor, LocalCursorPrefix), "/")
 	return ok && prefix != "" && rest != "" && rest != commandCursorSuffix && !strings.Contains(prefix, ":")
 }
