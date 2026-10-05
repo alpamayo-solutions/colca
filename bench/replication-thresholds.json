@@ -1,0 +1,8 @@
+{
+  "fanout": {
+    "fanout_children_connected":     { "min": 200,  "max": null },
+    "fanout_hop_p95_ms":             { "min": null, "max": 2000 },
+    "fanout_probes_lost":            { "min": null, "max": 0 },
+    "fanout_parent_limited_per_sec": { "min": null, "max": 1 }
+  }
+}

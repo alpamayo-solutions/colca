@@ -291,6 +291,20 @@ func (c *Client) DownlinkDefinitions(defAfter uint64, limit int, timeout time.Du
 	return res.Definitions, res.DefNext, nil
 }
 
+// Poll is one downlink request at both positions, for callers that run their
+// own loop instead of RunDownlink (the fanout benchmark's protocol children). It
+// returns the next positions on commands and definitions.
+func (c *Client) Poll(ctx context.Context, after, defAfter uint64, limit int, timeout time.Duration) (next, defNext uint64, err error) {
+	res, err := c.downlink(ctx, after, defAfter, limit, timeout)
+	if err != nil {
+		return after, defAfter, err
+	}
+	if res.DefNext == 0 {
+		res.DefNext = defAfter
+	}
+	return res.Next, res.DefNext, nil
+}
+
 // hello is the first contact: an immediate answer, with no long poll and no
 // records consumed, that returns the position and any waiting definitions in one
 // round trip.

@@ -49,6 +49,22 @@ missing series.
 `caller` is a registered identity as `kind:name` (`local:dataops-line`), every
 person as `human`, and the admin token as `admin`. No label carries a path.
 
+### The replication door's limits
+
+A parent limits each enrolled child by its node identity, which the TLS
+handshake proves before anything else is read: 100 requests a second, two
+pushes and two downlink polls at a time. Children behind one address, such as
+a site router or a carrier NAT, do not share a budget. A caller whose
+certificate is not an enrolled node's is limited by source address: 100
+requests a second and 64 at a time. A parent holds at most 1024 pushes and 8192
+downlink polls at once. `colca_http_request_limited_total{door="repl"}` counts
+refusals by class: `node`, `auth` (by address), `replication` (pushes),
+`downlink` and `transfer` (files).
+
+A parent commits the pushes that arrive while a commit is being synced
+together in the next one, so its children are not limited to one sync each.
+A push is answered once its records are on disk.
+
 ### What the broker delivers
 
 | Metric | Labels | Shows |
@@ -143,6 +159,24 @@ make bench                      # store micro-benchmarks
 Results are written to `bench/results/<host>.jsonl`, which is not committed.
 Numbers from a laptop say little about an edge device with eMMC storage; run
 the scenarios on the hardware you deploy to before setting thresholds.
+
+The `fanout` scenario measures one parent against many children, each pushing
+a few records a second and holding its downlink poll open. The parent runs as a
+separate process with a pprof listener, so its CPU, mutex and block profiles
+can be saved:
+
+```bash
+make bench-replication          # 200 protocol children; CI gates on bench/replication-thresholds.json
+bin/colca-bench fanout --children 100 --colcad bin/colcad --child-dir /Volumes/ram \
+  --profile-dir prof/            # colcad children, profiles of the parent
+```
+
+`--protocol-children` runs children that speak only the replication protocol,
+in the bench process: a host runs a thousand of them. With colcad children
+every child keeps and syncs its own store; on one machine they share one disk,
+so put `--child-dir` on a RAM disk or the children saturate the disk before the
+parent is measured. `fanout_hop_p95_ms` counts from the moment a child has
+stored a record to its arrival on the parent's bus.
 
 ## Known limitations
 

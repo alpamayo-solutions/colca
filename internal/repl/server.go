@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
@@ -46,6 +47,9 @@ const (
 	maxDownlinkMax     = 500
 )
 
+// downlinkStreams are the streams a downlink poll answers from.
+var downlinkStreams = []string{"commands", "definitions"}
+
 type Server struct {
 	cfg     *config.Config
 	eng     *engine.Engine
@@ -63,6 +67,10 @@ type Server struct {
 	// upstreamClient is this node's own parent link, used to satisfy a child's
 	// pull on a local miss. Set once at startup; nil at the root.
 	upstreamClient *Client
+
+	// downlinkWakes counts waiting downlink polls woken by a change to their
+	// streams. Tests read it: a commit to any other stream must not wake them.
+	downlinkWakes atomic.Int64
 
 	// inflight lets the owner of shutdown see running handlers. Set once before
 	// Start; nil in tests. See SetInflightTracker.
@@ -415,7 +423,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
-	release, ok := s.acquireRequest(w, limitClassReplication, child.ULID, replicationPolicy)
+	release, ok := s.acquireRequest(w, limitClassReplDownlink, child.ULID, replDownlinkPolicy)
 	if !ok {
 		return
 	}
@@ -496,7 +504,12 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	timer := time.NewTimer(longPollFor)
 	defer timer.Stop()
 	for {
-		wake, positions := s.eng.Store().Changes()
+		// Wake only on an append to this child's downlink streams. A parent with
+		// many children commits replicated batches constantly; waking every waiting
+		// poll on each of them made the wakeups grow with children × commits, each
+		// taking the store lock. Pruning does not wake a poll: a gap can only open
+		// below what the poll already read past, and the poll's deadline reports it.
+		wakes, _ := s.eng.Store().StreamChanges(downlinkStreams)
 		// next counts filtered-out records too, so the child's cursor skips over
 		// commands addressed to its siblings instead of re-scanning them forever.
 		recs, next, err := s.eng.Store().Read("commands", after, limit, filter)
@@ -563,24 +576,10 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			// Client gone (or the server was stopped): never outlive the request.
 			return
 		case <-timer.C:
-		case <-wake:
-			// Other streams may be busy. Wait without rescanning commands until
-			// one of this child's downlink streams changes.
-		waitForDownlink:
-			for {
-				var current map[string]store.StreamPosition
-				wake, current = s.eng.Store().Changes()
-				if current["commands"] != positions["commands"] || current["definitions"] != positions["definitions"] {
-					break
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-timer.C:
-					break waitForDownlink
-				case <-wake:
-				}
-			}
+		case <-wakes["commands"]:
+			s.downlinkWakes.Add(1)
+		case <-wakes["definitions"]:
+			s.downlinkWakes.Add(1)
 		}
 	}
 }

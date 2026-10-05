@@ -8,20 +8,39 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/httplimit"
+	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 const (
 	maxReplicateRecords       = 200
 	defaultReplicateBodyBytes = 64 << 20
 	limitClassReplAuth        = "auth"
+	limitClassReplNode        = "node"
 	limitClassReplication     = "replication"
+	limitClassReplDownlink    = "downlink"
 	limitClassReplTransfer    = "transfer"
 )
 
 var (
-	replAuthPolicy     = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 64, GlobalConcurrent: 512}
-	replicationPolicy  = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 2, GlobalConcurrent: 128}
+	// replAuthPolicy guards the door per source address against callers whose
+	// key is not an enrolled node: unknown keys, machines, floods.
+	replAuthPolicy = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 64, GlobalConcurrent: 512}
+	// replNodePolicy is the door's limit for an enrolled node, per node. Many
+	// children share one address behind a site router or a carrier NAT, so their
+	// address says nothing about load. The per-route classes below bound the
+	// door's total.
+	replNodePolicy = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 8}
+	// A push waits for the group commit that makes it durable (see
+	// store.ApplyReplicated), so pushes in flight grow with the children times the
+	// disk's sync time: 1000 children at 3 pushes/s and 80 ms is 240. The global
+	// bound is the memory guard; each child holds at most two bodies.
+	replicationPolicy = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 2, GlobalConcurrent: 1024}
+	// A child holds one downlink poll open all the time, so its slots scale with
+	// the children, not with load, and must never be taken from uplink pushes.
+	// An idle poll costs a goroutine and a timer.
+	replDownlinkPolicy = httplimit.Policy{RatePerSecond: 100, Burst: 200, PerCallerConcurrent: 2, GlobalConcurrent: 8192}
 	replTransferPolicy = httplimit.Policy{RatePerSecond: 10, Burst: 20, PerCallerConcurrent: 2, GlobalConcurrent: 32}
 )
 
@@ -36,9 +55,25 @@ func replicationSourceKey(r *http.Request) string {
 	return "unknown"
 }
 
+// admission picks the door-level limit for a request. TLS 1.3 has already
+// proven that the caller holds the private key of the certificate it presented,
+// so an enrolled node's key identifies that node before the registry checks in
+// childFromReq; everyone else is limited by source address.
+func (s *Server) admission(r *http.Request) (class, caller string, policy httplimit.Policy) {
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		if pub, err := identity.PeerPubHex(r.TLS.PeerCertificates[0].Raw); err == nil {
+			if entry, ok := s.reg.ByPubkey(pub); ok && entry.MayUseDoor(uns.DoorRepl) {
+				return limitClassReplNode, entry.ULID, replNodePolicy
+			}
+		}
+	}
+	return limitClassReplAuth, replicationSourceKey(r), replAuthPolicy
+}
+
 func (s *Server) limitBeforeAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		release, ok := s.acquireRequest(w, limitClassReplAuth, replicationSourceKey(r), replAuthPolicy)
+		class, caller, policy := s.admission(r)
+		release, ok := s.acquireRequest(w, class, caller, policy)
 		if !ok {
 			return
 		}

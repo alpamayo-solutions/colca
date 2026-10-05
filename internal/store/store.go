@@ -124,9 +124,16 @@ type Store struct {
 	lwm            map[string]uint64        // low-water mark per stream: lowest retained offset
 	bytes          map[string]uint64        // live logical bytes per stream (stream key + encoded value)
 	sigFrom        map[string]uint64        // first offset per stream the signal index covers (see sigindex.go)
-	// appendApply is Pebble's atomic apply boundary. Keeping the bound method
-	// injectable lets tests prove an apply failure changes neither stream nor KV.
+	// appendApply is Pebble's atomic apply boundary for appends and replicated
+	// commits. Keeping the bound method injectable lets tests prove an apply
+	// failure changes neither stream nor KV, and hold a commit open.
 	appendApply func(*pebble.Batch, *pebble.WriteOptions) error
+	// replQueue gathers concurrent ApplyReplicated calls into one synced commit;
+	// see replgroup.go.
+	replQueue replQueue
+	// adopted caches, per child, the store incarnation AdoptChildStore last
+	// confirmed, so the common case (unchanged) takes neither s.mu nor a read.
+	adopted sync.Map
 	// maxRecordBytes is 0 (no cap) until SetMaxRecordBytes. It is set once before
 	// the first append, so s.mu does not guard it.
 	maxRecordBytes uint64
@@ -240,6 +247,9 @@ func (s *Store) AdoptChildStore(child, id string) (reset bool, err error) {
 	if id == "" {
 		return false, nil
 	}
+	if known, ok := s.adopted.Load(child); ok && known == id {
+		return false, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev := ""
@@ -252,6 +262,7 @@ func (s *Store) AdoptChildStore(child, id string) (reset bool, err error) {
 		return false, fmt.Errorf("read store id of child %s: %w", child, err)
 	}
 	if prev == id {
+		s.adopted.Store(child, id)
 		return false, nil
 	}
 	b := s.db.NewBatch()
@@ -268,6 +279,7 @@ func (s *Store) AdoptChildStore(child, id string) (reset bool, err error) {
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return false, err
 	}
+	s.adopted.Store(child, id)
 	return reset, nil
 }
 
@@ -914,78 +926,6 @@ type ReplRecord struct {
 	// engine does, from an empty payload on a KV-projecting class; it is not a wire
 	// field.
 	Delete bool `json:"-"`
-}
-
-// ApplyReplicated appends records with ChildOffset > HWM(child, stream) under
-// local offsets and updates KV and the HWM in one atomic batch, so replays are
-// harmless. It returns newly applied records and skip ranges, or nil on error.
-// The caller mirrors only data records onto the local MQTT bus.
-func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applied []ReplRecord, hwm uint64, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.HWMGet(child, stream)
-	hwm = prev
-	off := s.next[stream]
-	if off == 0 {
-		return nil, prev, fmt.Errorf("unknown stream %q", stream)
-	}
-	b := s.db.NewBatch()
-	defer b.Close()
-	liveBytes := s.bytes[stream]
-	for _, r := range recs {
-		if r.SkipFrom != 0 && (stream != "metrics" || r.SkipFrom > r.ChildOffset || r.Topic != "" || len(r.Payload) != 0) {
-			return nil, prev, fmt.Errorf("invalid metric skip range")
-		}
-		if r.ChildOffset <= hwm {
-			continue
-		}
-		if r.SkipFrom != 0 {
-			applied = append(applied, r)
-			hwm = r.ChildOffset
-			continue
-		}
-		if r.OriginOffset == 0 {
-			// Compatibility with a direct/legacy child: at the first hop its
-			// child offset is the owner-authored coordinate.
-			r.OriginOffset = r.ChildOffset
-		}
-		n, err := addRecord(b, stream, off, Record{
-			Topic: r.Topic, Payload: r.Payload, TS: r.TS,
-			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
-			OriginOffset: r.OriginOffset,
-			KVPath:       r.KVPath, KVNode: r.KVNode, Delete: r.Delete,
-		})
-		if err != nil {
-			return nil, prev, err
-		}
-		liveBytes += n
-		off++
-		applied = append(applied, r)
-		hwm = r.ChildOffset
-	}
-	if len(applied) == 0 {
-		return nil, prev, nil
-	}
-	if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
-		return nil, prev, err
-	}
-	if err := b.Set(bytesKey(stream), be64(liveBytes), nil); err != nil {
-		return nil, prev, err
-	}
-	if err := b.Set(hwmKey(child, stream), be64(hwm), nil); err != nil {
-		return nil, prev, err
-	}
-	if err := s.db.Apply(b, pebble.Sync); err != nil {
-		return nil, prev, err
-	}
-	s.next[stream] = off
-	s.bytes[stream] = liveBytes
-	for _, record := range applied {
-		s.noteContractLocked(stream, record.Topic)
-	}
-	s.streamGrewLocked(stream)
-	return applied, hwm, nil
 }
 
 // LWM returns the low-water mark of a stream, the lowest retained offset.
