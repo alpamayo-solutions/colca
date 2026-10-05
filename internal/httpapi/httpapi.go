@@ -813,7 +813,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	//
 	// "delete": true retires the cursor instead and ignores offset. A consumer that
 	// mints a new cursor name per rebuild uses it to drop the old one, which would
-	// otherwise hold back retention. The same ownership rule applies.
+	// otherwise hold back retention. The same ownership rule applies, except that a
+	// holder of the admin command class over the whole node may retire any
+	// identity's cursor (uns.MayRetireCursor), for an operator removing a stale
+	// reader without the node's admin token.
 	mux.HandleFunc("POST /ack", authFor(limitClassWrite, writePolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxAckBodyBytes)
 		var in struct {
@@ -835,7 +838,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if in.Delete {
 			op = "cursor_delete"
 		}
-		if c.entry != nil && !ownsCursor(c.entry, in.Cursor) {
+		// Retiring someone else's cursor also takes the admin command class
+		// over the whole node; moving it never does.
+		if c.entry != nil && !ownsCursor(c.entry, in.Cursor) &&
+			!(in.Delete && uns.MayRetireCursor(e.Scope(), c.entry, in.Cursor)) {
 			_ = e.RecordDenial(engine.AuditDenial{Operation: op, ReasonCode: "cursor_denied",
 				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
 				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream, "cursor": in.Cursor}})

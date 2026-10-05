@@ -3102,3 +3102,58 @@ func TestFetchLogsAckReadableOnlyByRequesterAndAdmins(t *testing.T) {
 		t.Errorf("requester sees %q", got)
 	}
 }
+
+// A person holding the admin command class over the whole node retires another
+// identity's stale cursor without the node's admin token. Moving it, retiring a
+// command delivery floor or a node-owned cursor, and retiring with a narrower
+// class stay refused.
+func TestANodeCmdAdminRetiresAnotherIdentitysCursor(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	registerLocal(t, h, "connector-a", "")
+	reader := uns.LocalCursorPrefix + "connector-a/gen1"
+	floor := uns.LocalCursorPrefix + "connector-a/cmd"
+	for _, c := range []struct{ name, stream string }{{reader, "metrics"}, {floor, "commands"}, {"downlink:01NCHILD", "commands"}} {
+		if _, err := h.eng.Store().CursorSetIfAbsent(c.name, c.stream, 3); err != nil {
+			t.Fatal(err)
+		}
+	}
+	post := func(grants []string, body string) int {
+		t.Helper()
+		token := iss.MintOpt(tokentest.MintOpts{Sub: "kc-sub-op", Grants: grants, Username: "op"})
+		req := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-Colca-Service", "api")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	del := func(cursor, stream string) string {
+		return fmt.Sprintf(`{"cursor":%q,"stream":%q,"delete":true}`, cursor, stream)
+	}
+	admin := []string{"cmd:$node/#:admin"}
+
+	if code := post([]string{"cmd:#:configure"}, del(reader, "metrics")); code != http.StatusForbidden {
+		t.Fatalf("configure-only retire = %d, want 403", code)
+	}
+	if code := post(admin, fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":9}`, reader)); code != http.StatusForbidden {
+		t.Fatalf("cmd admin moving another's cursor = %d, want 403", code)
+	}
+	if code := post(admin, del(floor, "commands")); code != http.StatusForbidden {
+		t.Fatalf("cmd admin retiring a delivery floor = %d, want 403", code)
+	}
+	if code := post(admin, del("downlink:01NCHILD", "commands")); code != http.StatusForbidden {
+		t.Fatalf("cmd admin retiring a node-owned cursor = %d, want 403", code)
+	}
+	if _, held := h.eng.Store().CursorLookup(reader, "metrics"); !held {
+		t.Fatal("a refused request touched the cursor")
+	}
+	if code := post(admin, del(reader, "metrics")); code != http.StatusOK {
+		t.Fatalf("cmd admin retiring a stale reader = %d, want 200", code)
+	}
+	if _, held := h.eng.Store().CursorLookup(reader, "metrics"); held {
+		t.Fatal("the reader's cursor survived its retirement")
+	}
+	if code := post([]string{"cmd:#:admin"}, del(uns.LocalCursorPrefix+"connector-a/gen2", "metrics")); code != http.StatusOK {
+		t.Fatalf("cmd:#:admin retiring a cursor = %d, want 200", code)
+	}
+}

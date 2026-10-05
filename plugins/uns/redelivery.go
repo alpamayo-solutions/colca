@@ -47,3 +47,36 @@ func (e *Entry) OwnsCursor(cursor string) bool {
 	}
 	return cursor != e.CommandCursor()
 }
+
+// MayRetireCursor reports whether e may retire cursor although it is not its
+// own: e holds the admin command class over the whole node (cmd:<node>/#:admin,
+// or a zone covering this node), and the cursor sits in an identity's namespace
+// (c/<name>/... or <ulid>/...). A command delivery floor (<prefix>cmd) is not
+// retirable this way: it belongs to the node, which drops it with the identity.
+// Node-owned cursors (downlink:, up:, down-def:) have no namespace and are not
+// retirable either. A nil entry may retire nothing.
+func MayRetireCursor(sc Scope, e *Entry, cursor string) bool {
+	if e == nil || !identityCursor(cursor) {
+		return false
+	}
+	for _, g := range e.Grants {
+		pg, err := ParseGrant(g)
+		if err != nil || pg.Verb != "cmd" {
+			continue
+		}
+		if zone, ok := grantZone(sc, e, pg.Element); !ok || zone != "#" {
+			continue
+		}
+		for _, c := range pg.Classes {
+			if c == "admin" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func identityCursor(cursor string) bool {
+	prefix, rest, ok := strings.Cut(strings.TrimPrefix(cursor, LocalCursorPrefix), "/")
+	return ok && prefix != "" && rest != "" && rest != commandCursorSuffix && !strings.Contains(prefix, ":")
+}
