@@ -118,15 +118,16 @@ func TestTheEditReceiptIsNodePrivateStateAndNothingElseIs(t *testing.T) {
 }
 
 // A parent's offset gap detection assumes the uplink carries the whole stream.
-// Only commands (only acks and gap markers rise) and entities (the private
-// receipt stays home) are filtered, and both are derived, not listed by hand.
+// Only commands (only acks and gap markers rise), entities (the private
+// receipt stays home) and logs (only levels at or above parent.logs rise) are
+// filtered.
 func TestOnlyFilteredUplinksAreNotGapless(t *testing.T) {
-	for _, stream := range []string{"commands", "entities"} {
+	for _, stream := range []string{"commands", "entities", "logs"} {
 		if UplinkCarriesEveryRecord(stream) {
 			t.Errorf("UplinkCarriesEveryRecord(%q) = true: a parent would report the uplink filter as data loss", stream)
 		}
 	}
-	for _, stream := range []string{"metrics", "alarms", "audit", "annotations", "logs"} {
+	for _, stream := range []string{"metrics", "alarms", "audit", "annotations"} {
 		if !UplinkCarriesEveryRecord(stream) {
 			t.Errorf("UplinkCarriesEveryRecord(%q) = false: a real child-offset gap there would go unreported", stream)
 		}

@@ -87,6 +87,49 @@ or clients in the file: identities are runtime state, stored by the node.
 | `tls.cert_file`, `tls.key_file` | Optional certificate for the HTTP API and the doors people use, for clients that expect one from a CA. Replication and the machine door always present the node's own key. |
 | `parent.url` | `https://host:port` of the parent's replication door. Absent means this node is a root. |
 | `parent.pubkey` | Hex public key of the parent, checked on every connection. |
+| `parent.logs.min_level` | Lowest log level forwarded to the parent, `WARNING` by default. See [Log forwarding](#log-forwarding). |
+| `parent.logs.services` | Per-service override of `min_level`, keyed by service name. |
+
+## Log forwarding
+
+Every node keeps all of its log records in its own `logs` stream, bounded by
+`retention.streams.logs`. Only the records at or above a minimum level are
+forwarded to the parent:
+
+```yaml
+parent:
+  url: https://hub.example:9443
+  pubkey: 3b6a…
+  logs:
+    min_level: WARNING     # the default when absent
+    services:              # optional, keyed by service name
+      dataops: INFO        # e.g. while commissioning
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `parent.logs.min_level` | `WARNING` | Forward a `_Log` record when its level is this or higher. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`, in any case. |
+| `parent.logs.services.<service>` | none | The same, for one service. The service is the topic segment before the level: `{root}/v1/_Log/{node}/{position…}/{service}/{LEVEL}`; colcad's own records use `colca`. |
+
+- An unknown level is a configuration error at startup.
+- A `_Log` record whose last topic segment is not one of the five levels is
+  forwarded, as are the other records on the `logs` stream, such as
+  `_StreamGap` markers.
+- Each hop applies its own setting. A node forwards the records of its children
+  that reached it by the same rule as its own, so a record rises only as far
+  as every node on the way allows. To see a service's INFO at the root, set the
+  override on every node between the service and the root.
+- Withheld records never hold up the uplink: the uplink cursor moves past them,
+  and they do not keep retention from pruning the stream.
+- `colca_uplink_logs_withheld_total{level}` counts the records a node kept
+  home. It resets on restart.
+
+Earlier releases forwarded every log record. A node now forwards `WARNING` and
+above unless `parent.logs` says otherwise. Upgrade parents before their
+children: a parent from before this change treats the holes in a child's logs
+offsets as lost records and logs `replication offset jump` and counts
+`colca_replication_integrity_failures_total` for them. Setting
+`min_level: DEBUG` on a child keeps the old behaviour.
 
 ## People
 
