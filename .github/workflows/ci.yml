@@ -301,6 +301,18 @@ jobs:
             org.opencontainers.image.title=colca
             org.opencontainers.image.description=An MQTT broker for plants organised as a tree
             org.opencontainers.image.licenses=FSL-1.1-ALv2
+      # The layer cache lives in the registry beside the image, not in the
+      # Actions cache with its 10 GB quota. Only main writes it; tags read it.
+      - id: cache
+        name: Layer cache
+        env:
+          REF: ghcr.io/${{ github.repository }}:buildcache
+        run: |
+          echo "from=type=registry,ref=$REF" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            to="type=registry,ref=$REF,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"
+            echo "to=$to" >> "$GITHUB_OUTPUT"
+          fi
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
@@ -315,8 +327,8 @@ jobs:
           annotations: ${{ steps.meta.outputs.annotations }}
           provenance: mode=max
           sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: ${{ steps.cache.outputs.from }}
+          cache-to: ${{ steps.cache.outputs.to }}
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
         if: github.event.repository.visibility == 'public'
         with:
