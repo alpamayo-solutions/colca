@@ -33,6 +33,10 @@ jobs:
       # go vet is left to golangci-lint below, which runs govet.
       - name: gofmt, working notes
         run: make hygiene
+      # Downloaded up front: golangci-lint fetches missing modules one by one
+      # while it type-checks, and reports a failed fetch as a type error.
+      - name: Go modules
+        run: go mod download
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
         with:
