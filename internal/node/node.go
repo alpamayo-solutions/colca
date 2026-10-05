@@ -565,6 +565,14 @@ func Start(cfg *config.Config) (*Node, error) {
 		watchdog.Run(n.stop)
 	}()
 
+	// 10. Log gate: writes collapse summaries and drop notices when their window
+	//     ends. Stop writes what is still pending (FlushLogs).
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		n.Engine.RunLogGate(n.stop)
+	}()
+
 	// The node's own log is delivered only now: the engine is fully configured (a
 	// publisher appending earlier would race with that), and the bundle that
 	// defines _Log is loaded. Earlier lines wait in the queue, in order.
@@ -666,6 +674,13 @@ func (n *Node) Stop() {
 		// before closing the store; later lines still reach stderr.
 		if n.logPublisher != nil {
 			n.logPublisher.Stop()
+		}
+		// The log gate's pending summaries and drop notices are written while the
+		// store and the bus are still open. From here on the gate stores every
+		// record, so a publish that arrives before the broker closes is not
+		// withheld without a summary.
+		if n.Engine != nil {
+			n.Engine.FlushLogs()
 		}
 		if n.MQTT != nil {
 			_ = n.MQTT.Close()

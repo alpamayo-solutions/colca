@@ -73,6 +73,10 @@ func (e *Engine) IngestClientBatch(identity string, records []BatchRecord) []Bat
 			results[i].Err = err
 			continue
 		}
+		if res, held := e.gateLog(class, p, in.Topic, in.Payload, attribution); held {
+			results[i].Result = res
+			continue
+		}
 		rec := store.Record{
 			Topic: in.Topic, Payload: in.Payload, TS: ts,
 			WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,

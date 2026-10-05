@@ -32,6 +32,13 @@ class _LogPublishingHandler(logging.Handler):
     has no write grant for. The record goes where the service's other records
     go instead: its mount, then its name (`service_context`). The Python
     logger name stays in the payload.
+
+    The payload splits what a formatted console line runs together:
+    ``message`` is the record's own message (``record.getMessage()``), and
+    ``exc_info`` carries everything the formatter would have appended to it,
+    the traceback and the ``stack_info`` stack (see `_details`). The node
+    collapses identical repeated messages and keys them on ``message``, so
+    neither a timestamp nor a traceback (whose addresses vary) belongs there.
     """
 
     def __init__(self, client: Client, context: tuple[str, ...]):
@@ -47,14 +54,15 @@ class _LogPublishingHandler(logging.Handler):
             payload = Log(
                 timestamp=datetime.datetime.now(datetime.UTC).isoformat(),
                 level=record.levelname,
-                message=self.format(record),
+                # The record's own message, not the formatted line: timestamp,
+                # level and logger have fields of their own, and a timestamp in
+                # the message would keep the node from collapsing repeats.
+                message=record.getMessage(),
                 logger_name=record.name,
                 module=record.module,
                 function=record.funcName,
                 line_no=record.lineno,
-                exc_info=(
-                    self.formatter.formatException(record.exc_info) if record.exc_info and self.formatter else None
-                ),
+                exc_info=_details(record, self.formatter or logging.Formatter()),
                 extra=getattr(record, "extra", None),
             )
             topic = Topic(
@@ -65,6 +73,23 @@ class _LogPublishingHandler(logging.Handler):
             self.client.publish(topic, payload)
         except Exception:
             self.handleError(record)
+
+
+def _details(record: logging.LogRecord, formatter: logging.Formatter) -> str | None:
+    """The traceback and stack a formatted line would carry after its message.
+
+    ``logging.Formatter.format`` appends the exception text (``exc_info``, or
+    an ``exc_text`` already rendered) and then ``stack_info``. Both go here,
+    in the same order, so nothing the old formatted message held is lost.
+    """
+    parts = []
+    if record.exc_info:
+        parts.append(formatter.formatException(record.exc_info))
+    elif record.exc_text:
+        parts.append(record.exc_text)
+    if record.stack_info:
+        parts.append(formatter.formatStack(record.stack_info))
+    return "\n".join(parts) if parts else None
 
 
 def attach_log_publisher(client: Client, context: tuple[str, ...]) -> None:

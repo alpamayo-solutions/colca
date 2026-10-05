@@ -212,3 +212,116 @@ def test_connecting_mqtt_adds_the_log_publisher_without_owning_the_log():
         root.handlers.clear()
         root.handlers.extend(original_handlers)
         root.setLevel(original_level)
+
+
+def test_a_published_log_message_is_the_records_own_message():
+    """The payload's message is the raw message, not the formatted line: the
+    timestamp, level and logger have fields of their own, and a timestamp in
+    the message would keep every repeat distinct, so the node could never
+    collapse an error loop."""
+    import logging
+
+    from franzmq.data_contracts.base import Log
+
+    from colca_data_contracts.local_service import _LogPublishingHandler
+    from colca_data_contracts.logging import COLCA_LOG_FORMAT
+
+    class _Recording:
+        def __init__(self):
+            self.published = []
+
+        def require_node_id(self):
+            return "node-1"
+
+        def publish(self, topic, payload):
+            self.published.append((str(topic), payload))
+
+    client = _Recording()
+    handler = _LogPublishingHandler(client, ("line-1", "press"))
+    handler.setFormatter(logging.Formatter(COLCA_LOG_FORMAT))
+    logger = logging.getLogger("press.driver")
+    record = logger.makeRecord(
+        "press.driver", logging.ERROR, "driver.py", 42, "connection %s refused", ("plc-1",), None
+    )
+
+    handler.emit(record)
+    handler.emit(record)
+
+    assert len(client.published) == 2
+    (topic, first), (_, second) = client.published
+    assert isinstance(first, Log)
+    assert topic.endswith("/line-1/press/ERROR")
+    assert first.message == "connection plc-1 refused"
+    assert first.message == second.message, "two identical records must carry identical messages"
+    assert first.level == "ERROR"
+    assert first.logger_name == "press.driver"
+    assert first.line_no == 42
+
+
+def test_the_traceback_and_stack_move_to_exc_info():
+    """Everything the formatted line carried after the message still reaches
+    the node: the traceback and the stack_info stack, in exc_info."""
+    import logging
+
+    from colca_data_contracts.local_service import _LogPublishingHandler
+    from colca_data_contracts.logging import COLCA_LOG_FORMAT
+
+    class _Recording:
+        def __init__(self):
+            self.published = []
+
+        def require_node_id(self):
+            return "node-1"
+
+        def publish(self, topic, payload):
+            self.published.append(payload)
+
+    client = _Recording()
+    handler = _LogPublishingHandler(client, ("line-1", "press"))
+    formatter = logging.Formatter(COLCA_LOG_FORMAT)
+    handler.setFormatter(formatter)
+    logger = logging.getLogger("press.driver.tb")
+    logger.propagate = False
+    logger.addHandler(handler)
+    try:
+        try:
+            raise ConnectionRefusedError("plc-1")
+        except ConnectionRefusedError:
+            logger.exception("connection refused", stack_info=True)
+        logger.warning("plain line")
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = True
+
+    failure, plain = client.published
+    assert failure.message == "connection refused"
+    assert "Traceback (most recent call last)" in failure.exc_info
+    assert "ConnectionRefusedError: plc-1" in failure.exc_info
+    assert "Stack (most recent call last)" in failure.exc_info
+    assert plain.exc_info is None, "a line without an exception carries no details"
+
+
+def test_exc_info_holds_exactly_what_the_formatted_line_appended():
+    """`logging.Formatter.format` appends the traceback and the stack to the
+    message; `_details` must be that tail, character for character."""
+    import logging
+
+    from colca_data_contracts.local_service import _details
+
+    formatted = logging.Formatter().format(_with_exception())
+    message, tail = formatted.split("\n", 1)
+    assert message == "failed"
+    assert _details(_with_exception(), logging.Formatter()) == tail
+
+
+def _with_exception():
+    import logging
+    import sys
+
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        info = sys.exc_info()
+    return logging.LogRecord(
+        "x", logging.ERROR, __file__, 1, "failed", None, info, sinfo="Stack (most recent call last):\n  here"
+    )

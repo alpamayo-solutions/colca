@@ -483,6 +483,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": res.Command.Message, "command": res.Command})
 			return
 		}
+		if res.Withheld != "" {
+			// A _Log record the log gate accepted without storing: a repeat counted in
+			// its window's summary, or a record over its service's budget counted in
+			// the drop notice. Accepted, so not an error; 202 because there is no offset.
+			writeJSON(w, http.StatusAccepted, map[string]any{"withheld": res.Withheld, "stream": res.Stream, "topic": res.Topic})
+			return
+		}
 		if !res.Persisted {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "topic outside " + uns.Root() + "/# is not persisted"})
 			return
@@ -509,7 +516,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 	// POST /publish/batch takes many records from one machine or service in one
 	// request: {"records":[{"topic":…,"payload":…},…]}. Each is judged exactly as
 	// POST /publish judges it; the admitted ones are written in one append per
-	// stream. The answer lists one result per record, in order: {"offset":N} or
+	// stream. The answer lists one result per record, in order: {"offset":N},
+	// {"withheld":…} for a _Log record the log gate accepted without storing, or
 	// {"error":…, "reason":…}. reason is a colca_rejected_publishes_total reason
 	// (validation, write_denied, not_producer, …: a verdict on the record),
 	// too_large, or not_written (the store did not write an admitted record,
@@ -559,6 +567,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				continue
 			}
 			accepted++
+			if res.Withheld != "" {
+				// Accepted by the log gate without storing; see POST /publish.
+				out[i] = map[string]any{"stream": res.Stream, "withheld": res.Withheld}
+				continue
+			}
 			out[i] = map[string]any{"stream": res.Stream, "offset": res.Offset}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"accepted": accepted, "results": out})
