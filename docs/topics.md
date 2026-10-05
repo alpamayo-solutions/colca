@@ -124,10 +124,21 @@ The payload carries `timestamp`, `level`, `message`, `logger_name`, `module`,
 `function` and `line_no`, and may carry `exc_info` and `extra`.
 
 `message` is the event's own text, such as `connection refused`, not a
-formatted console line: the timestamp, level and logger have fields of their
-own, and the traceback goes in `exc_info`. The node collapses identical
-repeated messages and caps each service's log rate, which needs identical
-events to carry identical messages (see [Configuration](configuration.md#logs)).
+formatted console line. What a console line runs together is split:
+
+| Field | Holds |
+|---|---|
+| `timestamp`, `level`, `logger_name` | when, how loud, which logger |
+| `module`, `function`, `line_no` | where in the code |
+| `message` | the event's text, nothing else |
+| `exc_info` | everything a formatter appends after the message: the traceback, then the stack of a record logged with `stack_info` |
+| `extra` | structured fields |
+
+A log view shows `message` and, when present, `exc_info`. The node collapses
+identical repeated messages and caps each service's log rate, keyed on
+`message` (see [Configuration](configuration.md#logs)). That needs identical
+events to carry identical messages, so neither a timestamp nor a traceback,
+whose addresses and line numbers change, belongs in `message`.
 
 ## Removing a value
 

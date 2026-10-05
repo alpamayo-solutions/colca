@@ -70,6 +70,10 @@ func TestTheNodeGatesItsServicesLogsAndFlushesOnStop(t *testing.T) {
 	for i := range 200 {
 		publish("colca/v1/_Log/n1/line1/flood/INFO", nodeLogLine("INFO", fmt.Sprintf("debug line %d", i)))
 	}
+	// The flood used up the INFO budget; the error that explains it has its own.
+	if res := publish("colca/v1/_Log/n1/line1/flood/ERROR", nodeLogLine("ERROR", "PLC connection lost")); !res.Persisted {
+		t.Fatalf("the error after the flood: %+v, want stored", res)
+	}
 	for i := range 10 {
 		if res := publish("colca/v1/_Log/n1/line1/oven/INFO", nodeLogLine("INFO", fmt.Sprintf("oven %d", i))); !res.Persisted {
 			t.Fatalf("quiet service record %d: %+v", i, res)
@@ -119,6 +123,9 @@ func TestTheNodeGatesItsServicesLogsAndFlushesOnStop(t *testing.T) {
 		t.Fatalf("drop notice written by %s, want the node", writers["flood/WARNING"][0])
 	}
 
+	if errs := by["flood/ERROR"]; len(errs) != 1 || errs[0]["message"] != "PLC connection lost" {
+		t.Fatalf("the flooding service's error: %v", errs)
+	}
 	if got := len(by["oven/INFO"]); got != 10 {
 		t.Fatalf("quiet service: %d records, want all 10", got)
 	}

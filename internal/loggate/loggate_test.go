@@ -305,3 +305,59 @@ func TestTheHeldPayloadIsACopy(t *testing.T) {
 		t.Fatalf("summary built from a reused buffer: %v", writes)
 	}
 }
+
+func TestAnInfoFloodDoesNotCrowdOutTheError(t *testing.T) {
+	g := newGate(time.Minute, 10, 16)
+	for i := range 50 {
+		g.Admit(t0, pressInfo, logPayload(fmt.Sprintf("debug %d", i), nil), "svc")
+	}
+	if v, _, _ := g.Admit(t0, pressError, logPayload("PLC connection lost", nil), "svc"); v != Store {
+		t.Fatalf("the error after an INFO flood: %v, want stored", v)
+	}
+	// Errors have a budget of their own, bounded too.
+	for i := range 20 {
+		g.Admit(t0, pressError, logPayload(fmt.Sprintf("error %d", i), nil), "svc")
+	}
+	writes := g.Close()
+	if len(writes) != 1 {
+		t.Fatalf("%d writes, want one drop notice", len(writes))
+	}
+	body := decode(t, writes[0].Payload)
+	if body["message"] != "51 log record(s) dropped: press exceeded 10 records in 60 s, 11 of them at WARNING or above" {
+		t.Fatalf("notice %q", body["message"])
+	}
+	if extra := body["extra"].(map[string]any); extra["dropped"] != float64(51) || extra["dropped_warning_and_above"] != float64(11) {
+		t.Fatalf("notice extra %v", extra)
+	}
+}
+
+func TestHeldPayloadsStayWithinTheByteBudget(t *testing.T) {
+	g := newGate(time.Minute, 0, 4096)
+	pad := strings.Repeat("x", MaxCollapsiblePayload-300)
+	payload := func(i int) []byte { return logPayload(fmt.Sprintf("%d %s", i, pad), nil) }
+	keys := MaxHeldBytes/len(payload(0)) + 50
+	untracked := 0
+	for i := range keys {
+		if v, _, _ := g.Admit(t0, pressError, payload(i), "svc"); v != Store {
+			t.Fatalf("first record of key %d: %v", i, v)
+		}
+		v, u, _ := g.Admit(t0, pressError, payload(i), "svc")
+		switch {
+		case v == Collapsed:
+		case v == Store && u == UntrackedRepeat:
+			untracked++
+		default:
+			t.Fatalf("repeat of key %d: %v %v", i, v, u)
+		}
+	}
+	if g.held > MaxHeldBytes {
+		t.Fatalf("held %d bytes, over the budget of %d", g.held, MaxHeldBytes)
+	}
+	if untracked == 0 {
+		t.Fatal("past the byte budget a repeat must be stored, not held")
+	}
+	g.Close()
+	if g.held != 0 {
+		t.Fatalf("%d bytes still counted after every window ended", g.held)
+	}
+}

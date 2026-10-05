@@ -132,7 +132,7 @@ func TestRepeatedClientLogsAreStoredOnceAndSummarizedAtTheWindowEnd(t *testing.T
 func TestAFloodFromOneServiceIsCappedWithOneDropNotice(t *testing.T) {
 	e, clk, m := newLogEngine(t, config.Logs{MaxPerService: intPtr(10)})
 	for i := range 25 {
-		if _, err := e.IngestClient("m1", m1Errors, logLine(fmt.Sprintf("line %d", i))); err != nil {
+		if _, err := e.IngestClient("m1", "colca/v1/_Log/n-edge1/m1/INFO", logLine(fmt.Sprintf("line %d", i))); err != nil {
 			t.Fatal(err)
 		}
 	}

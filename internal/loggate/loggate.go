@@ -9,7 +9,8 @@
 //     record is written at the same topic: the last withheld payload, its
 //     message suffixed with the count, and the count in extra.
 //   - Each service (a _Log topic without its level) may store MaxPerService
-//     records per window. Records beyond that are dropped and counted, and
+//     records per window below WARNING, and as many again at WARNING and
+//     above. Records beyond that are dropped and counted, and
 //     when the window ends one WARNING record at the service's position says
 //     how many.
 //
@@ -19,8 +20,9 @@
 //
 // Memory is bounded: at most MaxTracked repeat keys and MaxTracked services
 // are held, each repeat key with at most one pending payload of at most
-// MaxCollapsiblePayload bytes. A record whose key finds no room is stored
-// without collapsing (counted as untracked).
+// MaxCollapsiblePayload bytes, and all pending payloads together within
+// MaxHeldBytes. A record that finds no room is stored without collapsing
+// (counted as untracked).
 package loggate
 
 import (
@@ -100,8 +102,11 @@ type Gate[A any] struct {
 	cfg  Config
 	node A // the drop notice's author
 
-	mu       sync.Mutex
-	closed   bool
+	mu     sync.Mutex
+	closed bool
+	// held is the bytes of the withheld payloads kept for summaries, at most
+	// MaxHeldBytes.
+	held     int
 	repeats  map[[sha256.Size]byte]*repeat[A]
 	services map[string]*service
 	due      deadlines
@@ -122,11 +127,30 @@ type repeat[A any] struct {
 	hasCount bool
 }
 
+// A service has two budgets of MaxPerService each: one for DEBUG, INFO and
+// unknown levels, one for WARNING and above. A flood of debug lines then
+// never crowds out the error that explains it, and a flood of distinct
+// errors is still bounded.
+const (
+	budgetLow = iota
+	budgetHigh
+)
+
 type service struct {
 	gen     uint64
 	end     time.Time
-	stored  int
-	dropped int
+	stored  [2]int
+	dropped [2]int
+}
+
+// budgetFor is the budget a record's level (its topic's last segment) spends.
+func budgetFor(topic string) int {
+	switch topic[strings.LastIndexByte(topic, '/')+1:] {
+	case "WARNING", "ERROR", "CRITICAL":
+		return budgetHigh
+	default:
+		return budgetLow
+	}
 }
 
 // New builds a gate. node attributes drop notices.
@@ -164,16 +188,21 @@ func (g *Gate[A]) Admit(now time.Time, topic string, payload []byte, author A) (
 	key, collapsible := repeatKey(topic, payload)
 	if collapsible {
 		if r, ok := g.repeats[key]; ok {
-			if !now.Before(r.end) {
+			switch {
+			case !now.Before(r.end):
 				writes = g.endRepeat(key, r, writes)
-			} else {
+			case g.hold(r, payload):
 				r.count++
 				if !r.hasCount {
 					r.first, r.hasCount = now, true
 				}
-				// Copied: the caller's buffer may be reused once Admit returns.
-				r.last, r.payload, r.author = now, bytes.Clone(payload), author
+				r.last, r.author = now, author
 				return Collapsed, NotUntracked, writes
+			default:
+				// No room to keep a payload for the summary: the repeat is stored as
+				// it comes, still within its service's budget.
+				collapsible = false
+				untracked = UntrackedRepeat
 			}
 		}
 	}
@@ -195,12 +224,13 @@ func (g *Gate[A]) Admit(now time.Time, topic string, payload []byte, author A) (
 				g.push(entry{at: s.end, gen: s.gen, service: svcKey})
 			}
 		}
-		if s != nil && untracked == NotUntracked {
-			if s.stored >= g.cfg.MaxPerService {
-				s.dropped++
+		if s != nil && untracked != UntrackedService {
+			b := budgetFor(topic)
+			if s.stored[b] >= g.cfg.MaxPerService {
+				s.dropped[b]++
 				return RateLimited, NotUntracked, writes
 			}
-			s.stored++
+			s.stored[b]++
 		}
 	}
 
@@ -217,6 +247,20 @@ func (g *Gate[A]) Admit(now time.Time, topic string, payload []byte, author A) (
 		}
 	}
 	return Store, untracked, writes
+}
+
+// hold keeps payload as r's summary payload if the held bytes allow it. A
+// replacement that does not fit keeps the earlier payload: it has the same
+// message, only its timestamp and extra are older. ok is false only when r
+// holds nothing and the payload does not fit.
+func (g *Gate[A]) hold(r *repeat[A], payload []byte) bool {
+	if g.held-len(r.payload)+len(payload) > MaxHeldBytes {
+		return r.payload != nil
+	}
+	g.held += len(payload) - len(r.payload)
+	// Copied: the caller's buffer may be reused once Admit returns.
+	r.payload = bytes.Clone(payload)
+	return true
 }
 
 // NextDeadline is when the earliest window ends; ok is false when nothing is
@@ -281,6 +325,7 @@ func (g *Gate[A]) endEntry(e entry, writes []Write[A]) []Write[A] {
 // summary. A stale heap entry for the key is skipped by its generation.
 func (g *Gate[A]) endRepeat(key [sha256.Size]byte, r *repeat[A], writes []Write[A]) []Write[A] {
 	delete(g.repeats, key)
+	g.held -= len(r.payload)
 	if r.count == 0 {
 		return writes
 	}
@@ -295,7 +340,7 @@ func (g *Gate[A]) endRepeat(key [sha256.Size]byte, r *repeat[A], writes []Write[
 
 func (g *Gate[A]) endService(key string, s *service, writes []Write[A]) []Write[A] {
 	delete(g.services, key)
-	if s.dropped == 0 {
+	if s.dropped[budgetLow]+s.dropped[budgetHigh] == 0 {
 		return writes
 	}
 	return append(writes, Write[A]{
@@ -316,11 +361,18 @@ func (g *Gate[A]) push(e entry) {
 	}
 }
 
-// MaxCollapsiblePayload is the largest record the gate collapses. A repeat key
-// holds one pending payload, so this and MaxTracked bound the gate's memory:
-// 4096 keys hold at most 256 MiB, and a real error loop holds a few KiB each.
-// A larger record is stored as it comes, still within its service's budget.
-const MaxCollapsiblePayload = 64 << 10
+// MaxCollapsiblePayload is the largest record the gate collapses; a larger one
+// is stored as it comes, still within its service's budget. The message and
+// the traceback (exc_info) of a real error loop take a few KiB.
+const MaxCollapsiblePayload = 8 << 10
+
+// MaxHeldBytes bounds the withheld payloads held for summaries, across all
+// repeat keys. When it is reached, a key that holds nothing yet stores its
+// repeats instead of collapsing them (counted as untracked). With the key
+// tables this is the gate's worst-case memory: 16 MiB plus about 1 KiB per
+// tracked repeat key and service (750 bytes measured with long topics), so
+// about 20 MiB at MaxTracked 4096 and 80 MiB at the config maximum 65536.
+const MaxHeldBytes = 16 << 20
 
 // repeatKey hashes (topic, logger_name, message). A payload that is not a JSON
 // object with a message, or is larger than MaxCollapsiblePayload, cannot be
@@ -386,7 +438,8 @@ func summaryPayload(last []byte, count int, window time.Duration, first, lastAt 
 }
 
 // dropNotice is the WARNING record that says how many records a service lost.
-func dropNotice(key string, dropped, budget int, window time.Duration, end time.Time) []byte {
+func dropNotice(key string, droppedBy [2]int, budget int, window time.Duration, end time.Time) []byte {
+	dropped := droppedBy[budgetLow] + droppedBy[budgetHigh]
 	name := key
 	if i := strings.LastIndexByte(key, '/'); i >= 0 {
 		name = key[i+1:]
@@ -395,18 +448,30 @@ func dropNotice(key string, dropped, budget int, window time.Duration, end time.
 		"timestamp": end.UTC().Format(time.RFC3339Nano),
 		"level":     "WARNING",
 		"message": fmt.Sprintf("%d log record(s) dropped: %s exceeded %d records in %s s",
-			dropped, name, budget, seconds(window)),
+			dropped, name, budget, seconds(window)) + severe(droppedBy[budgetHigh]),
 		"logger_name": "colca.logs",
 		"module":      "loggate",
 		"function":    "rate_cap",
 		"line_no":     0,
 		"extra": map[string]any{
-			"dropped":  dropped,
-			"window_s": window.Seconds(),
-			"service":  name,
+			"dropped": dropped,
+			// The records at WARNING and above among them; they have a budget of
+			// their own.
+			"dropped_warning_and_above": droppedBy[budgetHigh],
+			"window_s":                  window.Seconds(),
+			"service":                   name,
 		},
 	})
 	return body
+}
+
+// severe names the dropped WARNING-and-above records, which are rare enough
+// to call out.
+func severe(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d of them at WARNING or above", n)
 }
 
 // entry is one window end. gen tells a live window from one already ended

@@ -275,7 +275,7 @@ const (
 	defaultLogsMaxTracked    = 4096
 	maxLogsWindow            = 24 * time.Hour
 	maxLogsMaxPerService     = 10_000_000
-	maxLogsMaxTracked        = 1_000_000
+	maxLogsMaxTracked        = 65_536
 )
 
 // EffectiveWindow returns the window: 60s when absent, 0 when turned off.

@@ -104,8 +104,8 @@ export interface SelfInfo {
 
 export interface PublishResult {
   stream: string;
-  /** Absent when `withheld` is set: nothing was stored. */
-  offset: number;
+  /** The stored record's offset. Absent when `withheld` is set: nothing was stored. */
+  offset?: number;
   topic: string;
   command?: unknown;
   /**

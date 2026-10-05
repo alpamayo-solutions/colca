@@ -208,8 +208,8 @@ again; the child gated them.
 | Key | Default | Meaning |
 |---|---|---|
 | `logs.window` | `60s` | The collapse and rate-cap window. `0` turns both off. At most `24h`. |
-| `logs.max_per_service` | `600` | Records one service may store per window. `0` means no cap. |
-| `logs.max_tracked` | `4096` | Distinct repeat keys, and separately services, held in memory. |
+| `logs.max_per_service` | `600` | Records one service may store per window below `WARNING`, and as many again at `WARNING` and above. `0` means no cap. |
+| `logs.max_tracked` | `4096` | Distinct repeat keys, and separately services, held in memory. At most `65536`. |
 
 ```yaml
 logs:
@@ -228,17 +228,27 @@ logs:
   (when the node admitted the first and last repeat). A window without
   repeats writes nothing.
 - **Each service has a budget.** A service is a `_Log` topic without its level
-  segment. It may store `max_per_service` records per window; collapsed
-  repeats and summaries do not count. Records beyond the budget are dropped
+  segment. It may store `max_per_service` records per window at `DEBUG`,
+  `INFO` or an unknown level, and `max_per_service` more at `WARNING`,
+  `ERROR` and `CRITICAL`; collapsed repeats and summaries do not count. The
+  separate budget keeps a debug flood from dropping the error that explains
+  it, while a flood of distinct errors is still bounded (a repeated error is
+  collapsed anyway). Records beyond the budget are dropped
   and counted, and when the window ends one `WARNING` record at the service's
   position, written by the node (`colca`), says
   `1834 log record(s) dropped: press exceeded 600 records in 60 s`, with
-  `extra.dropped`, `extra.window_s` and `extra.service`.
+  `extra.dropped`, `extra.dropped_warning_and_above`, `extra.window_s` and
+  `extra.service`. When records at `WARNING` or above were dropped, the
+  message adds `, N of them at WARNING or above`.
 - **Memory is bounded.** At most `max_tracked` repeat keys and
   `max_tracked` services are held. A repeat key holds one pending payload of
-  at most 64 KiB; a larger record is never collapsed, only counted against its
-  service's budget. A record that finds no room is stored without being
-  collapsed or capped and counted in `colca_log_untracked_total`.
+  at most 8 KiB, and all pending payloads together at most 16 MiB; a larger
+  record is never collapsed, only counted against its service's budget.
+  A record that finds no room is stored without being collapsed or capped and
+  counted in `colca_log_untracked_total`. Worst case: 16 MiB of payloads plus
+  about 1 KiB per tracked repeat key and service (measured: 750 bytes with
+  long topics), so about 20 MiB at the default `max_tracked` and 80 MiB at
+  its maximum.
 - A window ends on its own timer; a node that stops writes every pending
   summary and drop notice before its store closes.
 - A withheld record was accepted: MQTT answers with a successful PUBACK and

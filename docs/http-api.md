@@ -18,7 +18,7 @@ A caller is one of:
 |---|---|---|---|
 | `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","storage":{"state":"ok"}}` |
 | `GET /metrics` | anyone | | Prometheus text |
-| `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}` |
+| `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}`, or `202` `{"stream":"logs","topic":"…","withheld":"…"}` without `offset` |
 | `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"stream":"logs","withheld":"…"} or {"error":"…","reason":"…"},…]}` |
 | `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N}` |
 | `GET /watch` | machine, service, person, admin | `?stream=S&stream=S2&interval_ms=100` | NDJSON, one line per change: `{"streams":["S"],"next":{"S":N}}` |
@@ -44,7 +44,8 @@ A caller is one of:
 - A `_Log` record the [log gate](configuration.md#logs) accepts without
   storing it is answered `202` with `{"withheld":"collapsed"|"rate_limited",
   "stream":"logs","topic":"…"}` (in a batch, `{"stream":"logs","withheld":…}`,
-  counted in `accepted`). It is not an error and must not be sent again: a
+  counted in `accepted`). Such an answer has no `offset`, since nothing was
+  stored; a client reads `offset` only when `withheld` is absent. It is not an error and must not be sent again: a
   collapsed repeat is counted in its window's summary record, a record over
   the service's budget in the drop notice. Over MQTT the same record gets a
   successful PUBACK and is not fanned out.

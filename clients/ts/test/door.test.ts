@@ -117,6 +117,17 @@ describe("publish", () => {
     expect((failure as DoorError).status).toBe(403);
     expect((failure as DoorError).reason).toBe("zone");
   });
+
+  it("treats a withheld log record as accepted, without an offset", async () => {
+    const topic = "steine/v1/_Log/n-technikum/press/ERROR";
+    const { fetch } = stub([{ status: 202, body: { stream: "logs", topic, withheld: "collapsed" } }]);
+    const door = new Door({ baseUrl: "http://colca", service: "my-app", fetch });
+
+    const result = await door.publish(topic, { message: "connection refused" });
+
+    expect(result.withheld).toBe("collapsed");
+    expect(result.offset).toBeUndefined();
+  });
 });
 
 describe("kv", () => {
