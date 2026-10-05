@@ -21,9 +21,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - id: go
+        uses: ./.github/actions/setup-go
         with:
-          go-version-file: go.mod
+          flavour: lint
       - name: gofmt, go vet, working notes
         run: make check
       - name: golangci-lint
@@ -32,6 +33,12 @@ jobs:
           version: v2.13.2
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: Save the Go cache
+        if: github.ref == 'refs/heads/main' && steps.go.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.path }}
+          key: ${{ steps.go.outputs.key }}
 
   python-lint:
     runs-on: ubuntu-latest
@@ -51,9 +58,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - id: go
+        uses: ./.github/actions/setup-go
         with:
-          go-version-file: go.mod
+          flavour: tools
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: "0.11.17"
@@ -67,6 +75,12 @@ jobs:
         run: make lint-yaml
       - name: gitleaks
         run: make lint-secrets
+      - name: Save the Go cache
+        if: github.ref == 'refs/heads/main' && steps.go.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.path }}
+          key: ${{ steps.go.outputs.key }}
       - name: No working notes in the commits of this pull request
         if: github.event_name == 'pull_request'
         run: scripts/check-no-working-notes.sh "origin/${{ github.base_ref }}"
@@ -101,9 +115,10 @@ jobs:
         shard: ${{ fromJSON(needs.go-test-plan.outputs.shards) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - id: go
+        uses: ./.github/actions/setup-go
         with:
-          go-version-file: go.mod
+          flavour: race-${{ matrix.shard }}
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: "0.11.17"
@@ -115,6 +130,12 @@ jobs:
         run: |
           mapfile -t packages < <(scripts/go-test-shards.sh packages "$SHARD")
           go test -race -count=1 "${packages[@]}"
+      - name: Save the Go cache
+        if: github.ref == 'refs/heads/main' && steps.go.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.path }}
+          key: ${{ steps.go.outputs.key }}
 
   # The required check `go-test`: green only when the plan and every shard passed.
   go-test:
@@ -136,11 +157,18 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - id: go
+        uses: ./.github/actions/setup-go
         with:
-          go-version-file: go.mod
+          flavour: build
       - name: One parent, 200 replicating children
         run: make bench-replication
+      - name: Save the Go cache
+        if: github.ref == 'refs/heads/main' && steps.go.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.path }}
+          key: ${{ steps.go.outputs.key }}
 
   contracts-test:
     runs-on: ubuntu-latest
@@ -362,9 +390,10 @@ jobs:
       VERSION: ${{ needs.version.outputs.python }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+      - id: go
+        uses: ./.github/actions/setup-go
         with:
-          go-version-file: go.mod
+          flavour: wheels
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: "0.11.17"
@@ -376,6 +405,12 @@ jobs:
         run: |
           make wheels VERSION="$VERSION"
           cp build/wheels/*.whl dist/
+      - name: Save the Go cache
+        if: github.ref == 'refs/heads/main' && steps.go.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.go.outputs.path }}
+          key: ${{ steps.go.outputs.key }}
       - name: Check package metadata
         run: uvx twine@7.0.0 check --strict dist/*
       - id: syft
