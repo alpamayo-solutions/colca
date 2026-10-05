@@ -110,6 +110,12 @@ continue after the gap:
 
 Acknowledge `gap.to_offset` to move past it.
 
+A cursor that was never acked has no position below anything: its first
+`/fetch` starts at the stream's oldest retained record (`from` is the
+low-water mark) and carries no gap, so a consumer added after retention ran
+starts cleanly. Only a saved position, or a `from=` read-ahead position, below
+the low-water mark is a gap.
+
 ### Waiting for new records
 
 A consumer that follows a stream does not need to poll `/fetch` while the
@@ -168,8 +174,8 @@ its stream from the pruner. Nothing removes them on its own.
   `read_since_start` (whether anyone fetched it since the node started).
 - **Retire.** `POST /ack {"cursor":…,"stream":…,"delete":true}` as the
   cursor's owner or the admin. The node logs who retired it. A consumer that
-  fetches the cursor again starts it over at offset 1, or below the stream's
-  low-water mark with a gap.
+  fetches the cursor again starts it over at the stream's oldest retained
+  record, without a gap.
 - **Expire.** `retention.streams.<stream>.ignore_cursors_after` lets the pruner
   pass a cursor that has not moved for that long, with a `_StreamGap` record a
   returning consumer sees. Off unless configured.

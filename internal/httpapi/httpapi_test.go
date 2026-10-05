@@ -758,13 +758,23 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		t.Fatalf("second fetch differs — /fetch must not move the cursor:\n%s", body2)
 	}
 
-	// A new cursor on a pruned stream gets the gap too.
+	// A cursor that was never acked starts at the LWM without a gap: a consumer
+	// added after retention ran missed nothing it was promised.
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh", "tok", "")
 	body = withoutClock(body)
-	want = `{"from":1,"gap":{"stream":"metrics","from_offset":1,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
+	want = `{"from":4,"next":6,"records":[` + surviving + `]}` + "\n"
+	if body != want {
+		t.Fatalf("fresh cursor must start at the LWM without a gap:\n got %s\nwant %s", body, want)
+	}
+
+	// Its own read-ahead position below the LWM is a gap: it read up to there and
+	// the pruner overtook it before it acked.
+	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh&from=2", "tok", "")
+	body = withoutClock(body)
+	want = `{"from":2,"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
 		`"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
-		t.Fatalf("fresh-cursor gap wire shape:\n got %s\nwant %s", body, want)
+		t.Fatalf("fresh cursor read-ahead below the LWM must see the gap:\n got %s\nwant %s", body, want)
 	}
 
 	// Acking at/past the LWM is the consumer's explicit acknowledgment of the
@@ -793,6 +803,40 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=entities&cursor=any", "tok", "")
 	if strings.Contains(body, `"gap"`) {
 		t.Fatalf("unpruned stream must not carry a gap: %s", body)
+	}
+}
+
+// A cursor created before a prune and never acked since keeps its saved
+// position. It protects the stream until it goes stale; once the pruner
+// passes it, its first fetch reports the gap.
+func TestFetchGapForACreatedCursorPrunedBeforeItsFirstFetch(t *testing.T) {
+	a := newAPI(t)
+	admin := client(nil)
+	seedMetrics(t, a.st, 5, "colca/v1/_Metric/n-test/line1/temp")
+	if created, err := a.st.CursorSetIfAbsent("created", "metrics", 1); err != nil || !created {
+		t.Fatalf("cursor: %v", err)
+	}
+	// It protects: a prune that does not override it removes nothing.
+	if n, err := a.st.Prune("metrics", 4, nil, nil); err != nil || n != 0 {
+		t.Fatalf("prune past a protecting cursor: %d %v", n, err)
+	}
+	// Stale and overridden: the prune passes it.
+	if n, err := a.st.Prune("metrics", 4, []string{"created"}, nil); err != nil || n != 3 {
+		t.Fatalf("prune: %d %v", n, err)
+	}
+	_, body := raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=created", "tok", "")
+	var out struct {
+		From uint64 `json:"from"`
+		Gap  *struct {
+			FromOffset uint64 `json:"from_offset"`
+			ToOffset   uint64 `json:"to_offset"`
+		} `json:"gap"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("%v in %s", err, body)
+	}
+	if out.From != 1 || out.Gap == nil || out.Gap.FromOffset != 1 || out.Gap.ToOffset != 3 {
+		t.Fatalf("want from 1 with gap [1..3], got %s", body)
 	}
 }
 
@@ -859,8 +903,12 @@ func TestFetchGapApproxFromCoalescedJournal(t *testing.T) {
 		}
 	}
 
-	// A fresh cursor's from_offset (1) falls into the coalesced oldest entry.
-	_, body := raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh", "tok", "")
+	// A cursor saved at 1 before the prunes: its from_offset falls into the
+	// coalesced oldest entry.
+	if created, err := a.st.CursorSetIfAbsent("old", "metrics", 1); err != nil || !created {
+		t.Fatalf("cursor: %v", err)
+	}
+	_, body := raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=old", "tok", "")
 	var out struct {
 		Gap struct {
 			FromOffset uint64 `json:"from_offset"`
@@ -1333,7 +1381,11 @@ func TestFetchGapServedToScopedMachine(t *testing.T) {
 		t.Fatalf("prune: %d %v", n, err)
 	}
 
-	// m1's namespaced cursor starts at 1 < LWM 4 → gap; records filtered empty.
+	// m1's namespaced cursor was saved at 2 before the prune: 2 < LWM 4 → gap;
+	// records filtered empty.
+	if !a.st.CursorAck("m1/c", "metrics", 2) {
+		t.Fatal("ack must move")
+	}
 	resp, body := raw(t, mc, "GET", a.url+"/fetch?stream=metrics&cursor=m1/c", "", "")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("machine fetch: %d %s", resp.StatusCode, body)

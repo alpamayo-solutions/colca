@@ -748,6 +748,19 @@ func (s *Store) CursorLookup(name, stream string) (uint64, bool) {
 	return binary.BigEndian.Uint64(v), true
 }
 
+// CursorStart is where a consumer reading through the cursor starts: its saved
+// position, or, for a cursor that was never saved, the stream's first retained
+// record (the LWM). A consumer that never acked has missed nothing it was
+// promised, so it begins at what retention kept rather than at offset 1 below a
+// pruned prefix. Only a saved position below the LWM is a gap. saved reports
+// which case applies.
+func (s *Store) CursorStart(name, stream string) (pos uint64, saved bool) {
+	if pos, saved = s.CursorLookup(name, stream); saved {
+		return pos, true
+	}
+	return s.LWM(stream), false
+}
+
 // CursorAck moves the cursor forward only and reports whether it moved. The
 // cursor and its last-advance timestamp (ct/) are written in one synced batch.
 func (s *Store) CursorAck(name, stream string, off uint64) bool {
