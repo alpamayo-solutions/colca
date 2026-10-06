@@ -71,6 +71,33 @@ type fetchRecord struct {
 	WrittenBy    string          `json:"written_by"`
 }
 
+// kvEntryJSON is one entry of /kv and /kv/lookup. Attribution mirrors
+// /fetch's record: omitted when this entry's write carried none, rather than
+// sent as empty strings.
+func kvEntryJSON(en store.KVEntry) map[string]any {
+	entry := map[string]any{
+		"path":    en.Path,
+		"node_id": en.NodeID,
+		"topic":   en.Topic,
+		"payload": rawPayload(en.Payload),
+		"ts":      en.TS,
+		"offset":  en.Offset,
+	}
+	if en.WrittenBy != "" {
+		entry["written_by"] = en.WrittenBy
+	}
+	if en.ActorID != "" {
+		entry["actor_id"] = en.ActorID
+	}
+	if en.ActorLabel != "" {
+		entry["actor_label"] = en.ActorLabel
+	}
+	if en.ActorKind != "" {
+		entry["actor_kind"] = en.ActorKind
+	}
+	return entry
+}
+
 // maxLogoutBody bounds a back-channel logout request: one signed JWT in a form.
 const maxLogoutBody = 64 << 10
 
@@ -972,29 +999,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				denied++
 				continue
 			}
-			entry := map[string]any{
-				"path":    en.Path,
-				"node_id": en.NodeID,
-				"topic":   en.Topic,
-				"payload": rawPayload(en.Payload),
-				"ts":      en.TS,
-				"offset":  en.Offset,
-			}
-			// Attribution mirrors /fetch's Record: omitted when this entry's
-			// write carried none, rather than sent as empty strings.
-			if en.WrittenBy != "" {
-				entry["written_by"] = en.WrittenBy
-			}
-			if en.ActorID != "" {
-				entry["actor_id"] = en.ActorID
-			}
-			if en.ActorLabel != "" {
-				entry["actor_label"] = en.ActorLabel
-			}
-			if en.ActorKind != "" {
-				entry["actor_kind"] = en.ActorKind
-			}
-			out = append(out, entry)
+			out = append(out, kvEntryJSON(en))
 		}
 		if denied > 0 {
 			m.ACLDeny(metrics.ACLRead)
@@ -1051,10 +1056,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			if !ok {
 				continue
 			}
-			out = append(out, map[string]any{
-				"path": en.Path, "node_id": en.NodeID, "topic": en.Topic,
-				"payload": rawPayload(en.Payload), "ts": en.TS, "offset": en.Offset,
-			})
+			out = append(out, kvEntryJSON(en))
 		}
 		if denied > 0 {
 			m.ACLDeny(metrics.ACLRead)

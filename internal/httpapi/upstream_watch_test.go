@@ -254,7 +254,8 @@ func TestKVLookupReadsNamedTopics(t *testing.T) {
 	h := newLocalHandler(t)
 	if _, _, err := h.eng.Store().Append("metrics", []store.Record{
 		{Topic: "colca/v1/_Metric/n-test/plant/l1/m1/temp", Payload: []byte(`{"value":1}`), TS: 1, KVPath: "plant/l1/m1/temp", KVNode: "n-test"},
-		{Topic: "colca/v1/_Metric/n-test/plant/l1/m1/temp", Payload: []byte(`{"value":2}`), TS: 2, KVPath: "plant/l1/m1/temp", KVNode: "n-test"},
+		{Topic: "colca/v1/_Metric/n-test/plant/l1/m1/temp", Payload: []byte(`{"value":2}`), TS: 2, KVPath: "plant/l1/m1/temp", KVNode: "n-test",
+			WrittenBy: "svc-connector", ActorID: "u-1", ActorLabel: "Anna", ActorKind: "person"},
 		{Topic: "colca/v1/_Metric/n-test/plant/l1/m2/rpm", Payload: []byte(`{"value":9}`), TS: 3, KVPath: "plant/l1/m2/rpm", KVNode: "n-test"},
 	}); err != nil {
 		t.Fatal(err)
@@ -269,9 +270,13 @@ func TestKVLookupReadsNamedTopics(t *testing.T) {
 	rr := post(`{"topics":["colca/v1/_Metric/n-test/plant/l1/m1/temp","colca/v1/_Metric/n-test/plant/l1/m9/none","not a topic"]}`)
 	var page struct {
 		Entries []struct {
-			Topic   string          `json:"topic"`
-			Payload json.RawMessage `json:"payload"`
-			TS      int64           `json:"ts"`
+			Topic      string          `json:"topic"`
+			Payload    json.RawMessage `json:"payload"`
+			TS         int64           `json:"ts"`
+			WrittenBy  string          `json:"written_by"`
+			ActorID    string          `json:"actor_id"`
+			ActorLabel string          `json:"actor_label"`
+			ActorKind  string          `json:"actor_kind"`
 		} `json:"entries"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &page); err != nil || rr.Code != http.StatusOK {
@@ -280,6 +285,9 @@ func TestKVLookupReadsNamedTopics(t *testing.T) {
 	if len(page.Entries) != 1 || page.Entries[0].Topic != "colca/v1/_Metric/n-test/plant/l1/m1/temp" ||
 		string(page.Entries[0].Payload) != `{"value":2}` || page.Entries[0].TS != 2 {
 		t.Fatalf("lookup entries = %+v, want only the current value of m1/temp", page.Entries)
+	}
+	if en := page.Entries[0]; en.WrittenBy != "svc-connector" || en.ActorID != "u-1" || en.ActorLabel != "Anna" || en.ActorKind != "person" {
+		t.Fatalf("lookup entry attribution = %+v, want the shape /kv gives", en)
 	}
 	if bad := post(`not json`); bad.Code != http.StatusBadRequest {
 		t.Fatalf("a body that is not JSON = %d, want 400", bad.Code)

@@ -25,7 +25,7 @@ A caller is one of:
 | `POST /ack` | owner of the cursor, admin; to retire a stale cursor also `cmd:<node>/#:admin` | `{"cursor":"NAME","stream":"S","offset":N}`, or `{"cursor":"NAME","stream":"S","delete":true}` to retire it | `{"moved":true}` or `{"deleted":true}` |
 | `GET /backlog` | local service (`?prefix=` required), admin | `?prefix=c/projector/` | `{"queues":[{"cursor":"…","stream":"S","position":N,"head":N,"lag_records":N,"last_ack_ms":T,"stale":false,"read_since_start":true}]}` |
 | `GET /kv` | machine, service, person, admin | `?prefix=P&max=1000&after=TOKEN&contract=_Signal&depth=1` | `{"entries":[{"path":"…","node_id":"…","topic":"…","payload":{…},"ts":T,"offset":N}],"next":"TOKEN"}` |
-| `POST /kv/lookup` | machine, service, person, admin | body `{"topics": ["…"]}`, at most 1000 | `{"entries":[{"path":"…","node_id":"…","topic":"…","payload":{…},"ts":T,"offset":N}]}` — the current entry of each named topic the caller may read; topics with no entry are left out |
+| `POST /kv/lookup` | machine, service, person, admin | body `{"topics": ["…"]}`, at most 1000 | `{"entries":[…]}`, each entry shaped as `/kv`'s (attribution included) — the current entry of each named topic the caller may read; topics with no entry are left out |
 | `GET /self` | local service | | the service's registry entry, limits, `standalone_since` and `standalone_ready` |
 | `POST /standalone/complete` | local service on a standalone node | | finish the identity handover; returns its durable issuance cutoff |
 
