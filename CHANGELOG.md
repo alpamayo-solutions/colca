@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0](https://github.com/alpamayo-solutions/colca/compare/v0.29.4...v0.30.0) (2026-10-06)
+
+
+### Features
+
+* **uns:** one signal per tag, binding intents and take_over ([#166](https://github.com/alpamayo-solutions/colca/issues/166)) ([512566f](https://github.com/alpamayo-solutions/colca/commit/512566f994b96446454a9b223c3a1a00226de818))
+
 ## [0.29.4](https://github.com/alpamayo-solutions/colca/compare/v0.29.3...v0.29.4) (2026-10-06)
 
 
