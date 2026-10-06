@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.3](https://github.com/alpamayo-solutions/colca/compare/v0.29.2...v0.29.3) (2026-10-06)
+
+
+### Performance
+
+* let one parent take a thousand children's telemetry ([#160](https://github.com/alpamayo-solutions/colca/issues/160)) ([fa48613](https://github.com/alpamayo-solutions/colca/commit/fa48613484ca442db8dd28f9bed58d3bdd5e4e2a))
+
 ## [0.29.2](https://github.com/alpamayo-solutions/colca/compare/v0.29.1...v0.29.2) (2026-10-05)
 
 
