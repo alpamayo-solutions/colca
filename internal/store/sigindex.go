@@ -112,12 +112,12 @@ func (s *Store) openSigIndex() error {
 // reaches the head in one call. A read that starts below the index's coverage
 // is ReadRecordsBounded.
 func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, limit, maxScan int, signals []string, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
-	s.mu.Lock()
+	s.state.RLock()
 	covered, head := s.sigFrom[stream], s.next[stream]
-	// Appends commit under the mutex, so this snapshot holds every record below
-	// head and the index entries written with them.
+	// Appends publish head after they commit, so this snapshot holds every
+	// record below head and the index entries written with them.
 	snap := s.db.NewSnapshot()
-	s.mu.Unlock()
+	s.state.RUnlock()
 	defer func() { _ = snap.Close() }()
 	if from < covered {
 		return s.ReadRecordsBounded(ctx, stream, from, limit, maxScan, filter)

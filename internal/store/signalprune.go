@@ -317,6 +317,9 @@ func (s *Store) deleteSignalRecords(stream string, doomed []doomedRec, overridde
 	if err := b.Set(bytesKey(stream), be64(liveBytes), nil); err != nil {
 		return 0, 0, nil, err
 	}
+	// The head is published with the records: see commitReplicated.
+	s.state.Lock()
+	defer s.state.Unlock()
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return 0, 0, nil, err
 	}

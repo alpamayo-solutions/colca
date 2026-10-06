@@ -180,6 +180,34 @@ jobs:
           path: ${{ steps.go.outputs.path }}
           key: ${{ steps.go.outputs.key }}
 
+  # The historian's sink against a real Timescale: idempotent replay, page
+  # order across a page written in one statement and over several
+  # connections. The unit suite fakes the database and cannot show either.
+  historian-boundary:
+    needs: [go-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      timescale:
+        image: timescale/timescaledb:2.26.4-pg17
+        env:
+          POSTGRES_PASSWORD: boundary
+          POSTGRES_USER: boundary
+          POSTGRES_DB: boundary
+        ports: ["15433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U boundary -d boundary"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Historian sink against Timescale
+        env:
+          HISTORIAN_TEST_DSN: postgres://boundary:boundary@127.0.0.1:15433/boundary
+        run: go test -tags boundary -count=1 ./internal/historian/
+
   contracts-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15

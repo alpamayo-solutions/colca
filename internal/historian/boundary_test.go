@@ -422,3 +422,75 @@ func TestARetractionAtAStoredKeyClearsTheValue(t *testing.T) {
 		t.Fatalf("stored %s, want one row with every value column NULL", got)
 	}
 }
+
+// A page whose values go to Postgres as one statement: a key that repeats in
+// the page (also a few nanoseconds apart, which Postgres stores as one
+// microsecond) keeps its last value, as one statement per row would have left
+// it, and a retraction between two values still sees the value before it.
+func TestAPageOfValuesLandsAsTheRowByRowApplyWould(t *testing.T) {
+	ctx := context.Background()
+	sink := testPool(t)
+
+	signalID := sigID("sig-bulk")
+	other := sigID("sig-bulk-other")
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	at := func(s int) time.Time { return base.Add(time.Duration(s) * time.Second) }
+	v := func(f float64) *float64 { return &f }
+	page := []Row{
+		{Timestamp: at(0), SignalID: signalID, NodeID: "n1", Number: v(1)},
+		{Timestamp: at(0), SignalID: other, NodeID: "n1", Number: v(10)},
+		{Timestamp: at(0).Add(300 * time.Nanosecond), SignalID: signalID, NodeID: "n1", Number: v(2)}, // same microsecond: replaces 1
+		{Timestamp: at(1), SignalID: signalID, NodeID: "n1", Number: v(3)},
+		{Timestamp: at(2), SignalID: signalID, NodeID: "n1"}, // retraction after 3
+		{Timestamp: at(3), SignalID: signalID, NodeID: "n1", Number: v(4)},
+		{Timestamp: at(3), SignalID: signalID, NodeID: "n1", Number: v(5)}, // replaces 4
+	}
+	for range 2 { // and a replay changes nothing
+		if _, err := sink.Apply(ctx, page, "test:bulk", 1); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+	}
+	if got, want := describe(storedValues(t, sink, signalID)), "2,3,null,5"; got != want {
+		t.Fatalf("stored %s, want %s", got, want)
+	}
+	if got, want := describe(storedValues(t, sink, other)), "10"; got != want {
+		t.Fatalf("other signal stored %s, want %s", got, want)
+	}
+}
+
+// A page written over several connections lands as one connection would land
+// it: each signal's values and retractions in page order, the marker moved
+// once every share committed, and a replay of the page changes nothing.
+func TestAPageWrittenOverSeveralConnectionsLandsAsOneWould(t *testing.T) {
+	ctx := context.Background()
+	sink := testPool(t)
+	sink.Writers = 4
+
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	at := func(s int) time.Time { return base.Add(time.Duration(s) * time.Second) }
+	v := func(f float64) *float64 { return &f }
+	var page []Row
+	var signals []string
+	for i := range 16 {
+		sig := sigID(fmt.Sprintf("sig-part-%02d", i))
+		signals = append(signals, sig)
+		page = append(page,
+			Row{Timestamp: at(0), SignalID: sig, NodeID: "n1", Number: v(float64(i))},
+			Row{Timestamp: at(1), SignalID: sig, NodeID: "n1"}, // retraction after the value
+			Row{Timestamp: at(2), SignalID: sig, NodeID: "n1", Number: v(float64(100 + i))},
+		)
+	}
+	for range 2 {
+		if _, err := sink.Apply(ctx, page, "test:partitioned", 77); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+	}
+	for i, sig := range signals {
+		if got, want := describe(storedValues(t, sink, sig)), fmt.Sprintf("%d,null,%d", i, 100+i); got != want {
+			t.Fatalf("%s stored %s, want %s", sig, got, want)
+		}
+	}
+	if marker, err := sink.Applied(ctx, "test:partitioned"); err != nil || marker != 77 {
+		t.Fatalf("marker %d, %v; want 77", marker, err)
+	}
+}

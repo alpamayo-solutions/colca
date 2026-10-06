@@ -123,7 +123,9 @@ func (s *Store) EvictRecords(stream string, from, maxScan uint64, doomed func(to
 	if err := b.Commit(pebble.Sync); err != nil {
 		return st, err
 	}
+	s.state.Lock()
 	s.bytes[stream] = live - shed
+	s.state.Unlock()
 	st.Removed = uint64(len(keys))
 	st.Bytes = shed
 	return st, nil

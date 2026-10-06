@@ -5,11 +5,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/memlimit"
 	"github.com/alpamayo-solutions/colca/internal/node"
 )
 
@@ -31,10 +33,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
 	}
+	limit := memlimit.Apply()
 	n, err := node.Start(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "start:", err)
 		os.Exit(1)
+	}
+	if msg, warn := memlimit.Report(limit); warn {
+		slog.Warn(msg)
+	} else {
+		slog.Info(msg, "bytes", limit)
 	}
 	// The embedded SDK waits for this lifecycle event, not for file polling.
 	if cfg.AddrFile != "" {

@@ -151,11 +151,14 @@ func TestClosedBrokerRejectsLateAcceptedSocket(t *testing.T) {
 	server, peer := net.Pipe()
 	defer server.Close()
 	defer peer.Close()
-	result := make(chan error, 1)
-	go func() { result <- w.srv.S.EstablishConnection(listenerLocal, server) }()
+	// The deadline goes on before the broker sees the socket: net.Pipe refuses
+	// SetReadDeadline with io.ErrClosedPipe once the other end has closed, and
+	// a closed broker closes it at once.
 	if err := peer.SetReadDeadline(time.Now().Add(promptCloseBudget)); err != nil {
 		t.Fatal(err)
 	}
+	result := make(chan error, 1)
+	go func() { result <- w.srv.S.EstablishConnection(listenerLocal, server) }()
 	if _, err := peer.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("late socket was not closed: %v", err)
 	}

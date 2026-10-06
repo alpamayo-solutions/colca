@@ -158,6 +158,7 @@ func (s *Store) RegistryRetire(ulid, stream string, rec Record, also []Record, r
 	if err != nil {
 		return 0, nil, err
 	}
+	s.hwmsDropped(ret.Child)
 	s.adopted.Delete(ret.Child)
 	return off, retired, nil
 }
@@ -213,6 +214,9 @@ func (s *Store) registryBatchLocked(batches []streamRecords, mut func(*pebble.Ba
 	if err := mut(b); err != nil {
 		return 0, err
 	}
+	// The head is published with the records: see commitReplicated.
+	s.state.Lock()
+	defer s.state.Unlock()
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return 0, err
 	}

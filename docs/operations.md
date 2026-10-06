@@ -62,8 +62,30 @@ refusals by class: `node`, `auth` (by address), `replication` (pushes),
 `downlink` and `transfer` (files).
 
 A parent commits the pushes that arrive while a commit is being synced
-together in the next one, so its children are not limited to one sync each.
-A push is answered once its records are on disk.
+together in the next one, up to 4096 records a commit, so its children are
+not limited to one sync each. A push is answered once its records are on disk.
+
+A parent that falls behind sheds load instead of buffering it: while 16,384
+replicated records wait for its store, or its pushes in progress hold a 32nd
+of its memory limit in request bytes, a new push is answered `429` with
+`Retry-After: 1`, counted as `replication_backlog` or `replication_bytes`. The
+child keeps the batch, waits as long as the parent asked (with jitter, so its
+siblings do not return in step) and sends it again; nothing is dropped, and
+the uplink logs a busy parent as a warning, not as a refusal.
+
+colcad and colca-historian set Go's memory limit to 75 % of their cgroup's
+memory ceiling (cgroup v1 or v2, the process's own cgroup and the smallest
+limit on its ancestors) unless `GOMEMLIMIT` is set, so the collector works
+harder near the ceiling instead of letting the kernel kill the process. They
+log a warning when they find no ceiling. The store's memtables and block
+cache are sized from the same ceiling, a 32nd of it each, between Pebble's
+defaults (4 MiB and 8 MiB, also used when no ceiling is found) and 64 MiB: a
+2 GiB hub gets 64 MiB of each, a 512 MiB edge 16 MiB.
+
+Replicated records reach the local MQTT bus through one goroutine after they
+are durable. Each child's records, and so each topic's, arrive in order;
+records of different children may arrive in another order than the store
+holds them. Records waiting for the bus count against the push budget above.
 
 ### What the broker delivers
 
@@ -218,6 +240,19 @@ bin/colca-bench fanout --children 100 --colcad bin/colcad --child-dir /Volumes/r
   --profile-dir prof/            # colcad children, profiles of the parent
 ```
 
+The `fleet` scenario drives a parent that is already running, such as a hub
+deployed with its historian and Timescale, with protocol children that each
+emulate an edge: a connector scanning `--signals` every `--scan` and reporting
+the `--change` share of them, one push per scan. It prints one JSON line per
+`--interval`: samples generated and accepted, pushes, refusals, push latency
+and the backlog the children hold. Everything else (the parent's CPU, the
+historian's lag) is measured outside:
+
+```bash
+bin/colca-bench fleet --hub-api hub:443 --hub-repl hub:9443 --hub-pubkey HEX \
+  --children 1000 --signals 100 --change 0.1 --duration 5m
+```
+
 `--protocol-children` runs children that speak only the replication protocol,
 in the bench process: a host runs a thousand of them. With colcad children
 every child keeps and syncs its own store; on one machine they share one disk,
@@ -266,6 +301,24 @@ reject the progress entries and the child holds its cursor for retry instead of
 silently discarding data. Upgrade the contracts package and consumers together;
 older Python signal decoders do not recognize the new field. Downgrading a source
 to a binary that does not understand its persisted upload decisions is unsupported.
+
+## How the historian writes
+
+`colca-historian` follows the `metrics` stream in pages of `FETCH_MAX` records
+(default 5000, the most `/fetch` returns) and reads the next page while it
+writes the current one. A page goes to Postgres over `WRITERS` connections at
+once (default 4), each with the rows of its own share of the signals, as one
+`INSERT … SELECT FROM unnest(…) ON CONFLICT` per run of values; retractions keep
+their place in a signal's order. The applied-offset marker moves once every
+share has committed. A crash in between replays the page, which changes
+nothing: an identical value is not rewritten and a retraction is not stored
+twice. `DB_MAX_CONNS` defaults to `WRITERS + 1`. A drain that reached the head
+the node announced on `/watch` waits for the next hint without a final empty
+fetch.
+
+On the fleet scale benchmark (2026-10, Postgres 17 + TimescaleDB 2.30 under
+x86 emulation on an 8-core laptop VM) this wrote ~20,000 rows a second, where
+one statement per row had written ~6,000; Postgres was the limit.
 
 ## Signals the historian does not store
 

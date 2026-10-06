@@ -62,7 +62,7 @@ A caller is one of:
   topics passes the same set, so it reads exactly what wakes it. Skipped
   records move `next` like `contract` does; ack `next - 1` after an empty or
   short page so they do not stay unread on your cursor.
-- `max` defaults to 100 for `/fetch` (at most 1000) and to 1000 for `/kv`
+- `max` defaults to 100 for `/fetch` (at most 5000) and to 1000 for `/kv`
   (at most 10000). Pass `next` back as `after` until it is empty.
 - `contract` on `/kv` and `/fetch` may be repeated. An unknown name is a `400`.
   On `/kv` the node keeps an index by contract, so a filtered read costs what

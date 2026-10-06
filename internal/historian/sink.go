@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +24,31 @@ const insertMetric = `
 INSERT INTO historian_metric
     (timestamp, value_json, value_number, value_text, value_bool, colca_node_id, signal_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (signal_id, timestamp) DO UPDATE SET
+    value_json = EXCLUDED.value_json,
+    value_number = EXCLUDED.value_number,
+    value_text = EXCLUDED.value_text,
+    value_bool = EXCLUDED.value_bool,
+    colca_node_id = EXCLUDED.colca_node_id
+WHERE (historian_metric.value_json, historian_metric.value_number, historian_metric.value_text,
+       historian_metric.value_bool, historian_metric.colca_node_id)
+      IS DISTINCT FROM
+      (EXCLUDED.value_json, EXCLUDED.value_number, EXCLUDED.value_text,
+       EXCLUDED.value_bool, EXCLUDED.colca_node_id)`
+
+// insertMetrics is insertMetric for many rows in one statement: the page's
+// values arrive as one array per column. Postgres plans and executes it once,
+// where one statement per row cost a parse, a plan and an executor start each
+// (the historian's ceiling was one Postgres core at ~5,700 rows/s, fleet scale
+// benchmark 2026-10). A statement may not touch the same row twice, so a group
+// carries each (signal_id, timestamp) once: the last one, as a row-by-row apply
+// would leave it.
+const insertMetrics = `
+INSERT INTO historian_metric
+    (timestamp, value_json, value_number, value_text, value_bool, colca_node_id, signal_id)
+SELECT u.ts, u.vj::jsonb, u.vn, u.vt, u.vb, u.node, u.sig
+FROM unnest($1::timestamptz[], $2::text[], $3::double precision[], $4::text[], $5::boolean[], $6::text[], $7::text[])
+    AS u(ts, vj, vn, vt, vb, node, sig)
 ON CONFLICT (signal_id, timestamp) DO UPDATE SET
     value_json = EXCLUDED.value_json,
     value_number = EXCLUDED.value_number,
@@ -87,6 +113,9 @@ type Sink struct {
 	Pool dbPool
 	// Strict preserves the whole page on any failure during coordinated runs.
 	Strict bool
+	// Writers, above 1, writes a page over that many connections at once, each
+	// with the rows of its own share of the signals; see applyPartitioned.
+	Writers int
 }
 
 // Rejection is one row the schema permanently refused, set aside so the rest of
@@ -208,6 +237,15 @@ func (s *Sink) Applied(ctx context.Context, consumer string) (int64, error) {
 // otherwise the page would block the sink forever. Any other error is returned
 // and the whole page is retried.
 func (s *Sink) Apply(ctx context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error) {
+	if s.Writers > 1 && !s.Strict && len(rows) >= 2*s.Writers {
+		return s.applyPartitioned(ctx, rows, consumer, offset)
+	}
+	return s.applyOne(ctx, rows, consumer, offset)
+}
+
+// applyOne writes rows, and the marker unless consumer is "", in one
+// transaction, falling back to row by row when a row is poison.
+func (s *Sink) applyOne(ctx context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error) {
 	err := s.applyBatch(ctx, rows, consumer, offset)
 	if err == nil {
 		return nil, nil
@@ -218,7 +256,67 @@ func (s *Sink) Apply(ctx context.Context, rows []Row, consumer string, offset in
 	return s.applyRowByRow(ctx, rows, consumer, offset)
 }
 
-// applyBatch sends every row and the marker in one batch and one transaction.
+// applyPartitioned writes a page over s.Writers connections at once. Rows are
+// split by signal, so each signal's rows stay in one transaction and in page
+// order, which is what a retraction depends on. The marker moves in a
+// transaction of its own once every share committed: a crash in between
+// replays the page, and every statement of it is idempotent (an identical
+// value is not rewritten, a retraction is not stored twice). Any share failing
+// fails the page, which is then retried whole.
+//
+// A single transaction keeps one Postgres backend busy; the historian's
+// ceiling was that one core (fleet scale benchmark, 2026-10).
+func (s *Sink) applyPartitioned(ctx context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error) {
+	shares := make([][]Row, s.Writers)
+	for _, row := range rows {
+		i := partitionOf(row.SignalID, s.Writers)
+		shares[i] = append(shares[i], row)
+	}
+	type result struct {
+		rejections []Rejection
+		err        error
+	}
+	results := make([]result, len(shares))
+	var wg sync.WaitGroup
+	for i, share := range shares {
+		if len(share) == 0 {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rej, err := s.applyOne(ctx, share, "", offset)
+			results[i] = result{rej, err}
+		}()
+	}
+	wg.Wait()
+	var rejections []Rejection
+	for _, r := range results {
+		if r.err != nil {
+			return nil, r.err
+		}
+		rejections = append(rejections, r.rejections...)
+	}
+	if _, err := s.Pool.Exec(ctx, upsertOffset, consumer, offset); err != nil {
+		return nil, fmt.Errorf("historian: moving the marker to %d: %w", offset, err)
+	}
+	return rejections, nil
+}
+
+// partitionOf is a signal's share: FNV-1a of its id.
+func partitionOf(signalID string, n int) int {
+	h := uint32(2166136261)
+	for i := 0; i < len(signalID); i++ {
+		h ^= uint32(signalID[i])
+		h *= 16777619
+	}
+	return int(h % uint32(n)) //nolint:gosec // n is a small positive writer count
+}
+
+// applyBatch sends the page and the marker in one batch and one transaction.
+// Runs of values go as one statement each (insertMetrics); a retraction keeps a
+// statement of its own and its place in the order, because whether it writes a
+// row depends on the rows before it.
 func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offset int64) error {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -227,14 +325,26 @@ func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offs
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	batch := &pgx.Batch{}
-	for _, row := range rows {
-		sql, args := statementFor(row)
-		batch.Queue(sql, args...)
+	for start := 0; start < len(rows); {
+		if rows[start].Missing() {
+			sql, args := statementFor(rows[start])
+			batch.Queue(sql, args...)
+			start++
+			continue
+		}
+		end := start
+		for end < len(rows) && !rows[end].Missing() {
+			end++
+		}
+		batch.Queue(insertMetrics, valueColumns(rows[start:end])...)
+		start = end
 	}
-	batch.Queue(upsertOffset, consumer, offset)
+	if consumer != "" {
+		batch.Queue(upsertOffset, consumer, offset)
+	}
 
 	results := tx.SendBatch(ctx, batch)
-	for i := 0; i <= len(rows); i++ {
+	for i := 0; i < batch.Len(); i++ {
 		if _, err := results.Exec(); err != nil {
 			_ = results.Close()
 			return fmt.Errorf("historian: applying a batch of %d at offset %d: %w",
@@ -245,6 +355,53 @@ func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offs
 		return fmt.Errorf("historian: closing a batch: %w", err)
 	}
 	return tx.Commit(ctx)
+}
+
+// valueColumns turns a run of value rows into insertMetrics' column arrays,
+// keeping the last row of each (signal_id, timestamp). The key is the
+// timestamp as Postgres stores it, in microseconds: two samples a few
+// nanoseconds apart are one row there.
+func valueColumns(rows []Row) []any {
+	type key struct {
+		signal string
+		ts     time.Time
+	}
+	stored := func(row Row) time.Time { return row.Timestamp.Truncate(time.Microsecond).UTC() }
+	last := make(map[key]int, len(rows))
+	for i, row := range rows {
+		last[key{row.SignalID, stored(row)}] = i
+	}
+	n := len(last)
+	ts := make([]time.Time, 0, n)
+	vj := make([]*string, 0, n)
+	vn := make([]*float64, 0, n)
+	vt := make([]*string, 0, n)
+	vb := make([]*bool, 0, n)
+	node := make([]*string, 0, n)
+	sig := make([]string, 0, n)
+	for i, row := range rows {
+		if last[key{row.SignalID, stored(row)}] != i {
+			continue
+		}
+		ts = append(ts, stored(row))
+		var j *string
+		if len(row.JSON) > 0 {
+			v := string(row.JSON)
+			j = &v
+		}
+		vj = append(vj, j)
+		vn = append(vn, row.Number)
+		vt = append(vt, row.Text)
+		vb = append(vb, row.Bool)
+		var nd *string
+		if row.NodeID != "" {
+			v := row.NodeID
+			nd = &v
+		}
+		node = append(node, nd)
+		sig = append(sig, row.SignalID)
+	}
+	return []any{ts, vj, vn, vt, vb, node, sig}
 }
 
 // applyRowByRow applies each row under its own savepoint in one transaction,
@@ -285,8 +442,10 @@ func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, o
 		rejections = append(rejections, Rejection{Row: row, Reason: reason, SQLState: sqlstate, Err: execErr})
 	}
 
-	if _, err := tx.Exec(ctx, upsertOffset, consumer, offset); err != nil {
-		return nil, fmt.Errorf("historian: moving the marker after a row-by-row apply at offset %d: %w", offset, err)
+	if consumer != "" {
+		if _, err := tx.Exec(ctx, upsertOffset, consumer, offset); err != nil {
+			return nil, fmt.Errorf("historian: moving the marker after a row-by-row apply at offset %d: %w", offset, err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("historian: committing a row-by-row apply at offset %d: %w", offset, err)

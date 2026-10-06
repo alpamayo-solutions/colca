@@ -59,10 +59,12 @@ const maxLogoutBody = 64 << 10
 
 // defaultMax / maxMax bound how many records one /fetch may return;
 // fetchScanBudget bounds how many it may scan to find them, so a filter that
-// matches nothing costs one short page instead of a walk to the head.
+// matches nothing costs one short page instead of a walk to the head. A bulk
+// follower (the historian) reads pages of maxMax: /fetch is rate limited per
+// caller, so the page size is what bounds its records per second.
 const (
 	defaultMax      = 100
-	maxMax          = 1000
+	maxMax          = 5000
 	fetchScanBudget = 20000
 )
 

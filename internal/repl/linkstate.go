@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,21 @@ type replError struct {
 	Route  string
 	Status int
 	Body   string
+	// RetryAfter is the parent's Retry-After on a 429, 0 without one.
+	RetryAfter time.Duration
+}
+
+// Busy reports whether the parent asked to be called again later (429): it is
+// shedding load, it did not refuse the batch.
+func (e *replError) Busy() bool { return e.Status == http.StatusTooManyRequests }
+
+// retryAfterHeader reads a Retry-After given in seconds, bounded to a minute.
+func retryAfterHeader(resp *http.Response) time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After")))
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(min(secs, 60)) * time.Second
 }
 
 func (e *replError) Error() string {
@@ -30,9 +46,10 @@ func (e *replError) Error() string {
 	return fmt.Sprintf("%s: %s — the parent's answer: %s", e.Route, replicationStatusMeaning(e.Status), e.Body)
 }
 
-// Refused reports whether the parent answered 4xx: it read the request and said
-// no. The child retries anyway, on purpose; see pushOnce in RunUplink.
-func (e *replError) Refused() bool { return e.Status >= 400 && e.Status < 500 }
+// Refused reports whether the parent answered 4xx other than 429: it read the
+// request and said no. The child retries anyway, on purpose; see pushOnce in
+// RunUplink.
+func (e *replError) Refused() bool { return e.Status >= 400 && e.Status < 500 && !e.Busy() }
 
 // readReason reads the parent's explanation off a refused response, bounded so
 // a misbehaving peer cannot write an unbounded string into this node's logs.

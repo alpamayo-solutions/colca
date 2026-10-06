@@ -115,16 +115,28 @@ type Store struct {
 	id             string
 	contractHeads  map[string]map[string]uint64
 	backlogChanged chan struct{}
+	backlogMu      sync.Mutex // guards backlogChanged; taken after state, never before
 	allChanged     chan struct{}
 	db             *pebble.DB
 	health         *pebblelog.Monitor
 	standaloneMu   sync.Mutex
-	mu             sync.Mutex
-	changed        map[string]chan struct{} // closed on the stream's next append; see changes.go
-	next           map[string]uint64        // next offset per stream
-	lwm            map[string]uint64        // low-water mark per stream: lowest retained offset
-	bytes          map[string]uint64        // live logical bytes per stream (stream key + encoded value)
-	sigFrom        map[string]uint64        // first offset per stream the signal index covers (see sigindex.go)
+	// mu serialises every write that changes a stream (appends, replicated
+	// commits, pruning, registry batches); it is held through the synced commit.
+	mu sync.Mutex
+	// state guards the in-memory stream state readers need (next, lwm, bytes,
+	// the change channels and contract heads). A writer holds mu while it
+	// builds its batch and takes state only from its apply until it published
+	// the new head, so readers see records, KV and head change together, and
+	// wait for at most one apply, never for a writer's batch building or
+	// another writer queued behind it. Lock order: mu, cursorMu, state.
+	state sync.RWMutex
+	// cursorMu serialises cursor moves; they never wait for a stream write.
+	cursorMu sync.Mutex
+	changed  map[string]chan struct{} // closed on the stream's next append; see changes.go
+	next     map[string]uint64        // next offset per stream
+	lwm      map[string]uint64        // low-water mark per stream: lowest retained offset
+	bytes    map[string]uint64        // live logical bytes per stream (stream key + encoded value)
+	sigFrom  map[string]uint64        // first offset per stream the signal index covers (see sigindex.go)
 	// appendApply is Pebble's atomic apply boundary for appends and replicated
 	// commits. Keeping the bound method injectable lets tests prove an apply
 	// failure changes neither stream nor KV, and hold a commit open.
@@ -135,6 +147,12 @@ type Store struct {
 	// adopted caches, per child, the store incarnation AdoptChildStore last
 	// confirmed, so the common case (unchanged) takes neither s.mu nor a read.
 	adopted sync.Map
+	// hwms caches replication high-water marks, which every replicated push
+	// reads. A miss is read from Pebble under hwmMu and every change is
+	// written here after its batch committed, also under hwmMu, so a load
+	// cannot overwrite a newer mark; see HWMGet.
+	hwmMu sync.Mutex
+	hwms  map[replHWMKey]uint64
 	// maxRecordBytes is 0 (no cap) until SetMaxRecordBytes. It is set once before
 	// the first append, so s.mu does not guard it.
 	maxRecordBytes uint64
@@ -155,6 +173,10 @@ type Options struct {
 	// a store reads tables of either kind whatever this says; existing tables
 	// change only when compaction rewrites them.
 	Compression string
+	// MemoryCeiling is the memory the node may use in all, in bytes (the
+	// container's ceiling), 0 when unknown. It sizes Pebble's memtables and
+	// block cache; see SizesFor.
+	MemoryCeiling int64
 }
 
 // pebbleOptions applies o to Pebble's options.
@@ -174,6 +196,32 @@ func (o Options) pebbleOptions(opts *pebble.Options) error {
 	return nil
 }
 
+// SizesFor returns the largest memtable and the block cache size for a node
+// whose memory ceiling is ceiling bytes: a 32nd of the ceiling each, at most
+// 64 MiB, at least Pebble's own defaults (4 MiB, 8 MiB), which an unknown
+// ceiling also gets. Two memtables (one flushing) and the cache stay under a
+// tenth of the ceiling, inside the quarter the Go memory limit leaves outside
+// the heap (internal/memlimit). A 2 GiB parent gets 64 MiB of each, a 512 MiB
+// edge 16 MiB.
+//
+// Pebble's 4 MiB memtable flushed a busy parent several times a second: every
+// record writes its stream entry, its signal index entry and its KV
+// projection, spread over the whole key space, so each small flush overlapped
+// the level below and was compacted into it again. At 64 MiB a parent
+// ingesting 1000 children compacted a fifth of the bytes and spent a third less
+// CPU per record. With the 8 MiB cache every cursor and position read of a
+// busy parent went to a table block and decompressed it again (fleet scale
+// benchmark, 2026-10). Pebble starts with a small memtable and doubles it, and
+// the cache fills only with what is read, so a quiet node holds neither.
+func SizesFor(ceiling int64) (memTable, blockCache int64) {
+	const (
+		minMemTable, minCache = 4 << 20, 8 << 20
+		most                  = 64 << 20
+	)
+	share := ceiling / 32
+	return min(max(share, minMemTable), most), min(max(share, minCache), most)
+}
+
 // Open opens or creates the store at dir with the default options.
 func Open(dir string) (*Store, error) { return OpenWithOptions(dir, Options{}) }
 
@@ -183,6 +231,13 @@ func Open(dir string) (*Store, error) { return OpenWithOptions(dir, Options{}) }
 func OpenWithOptions(dir string, o Options) (*Store, error) {
 	health := pebblelog.New("store")
 	opts := health.Options()
+	memTable, cacheSize := SizesFor(o.MemoryCeiling)
+	opts.MemTableSize = uint64(memTable) //nolint:gosec // positive by construction
+	// The block cache Pebble shares with nothing else; the store holds the
+	// only reference after Open.
+	cache := pebble.NewCache(cacheSize)
+	defer cache.Unref()
+	opts.Cache = cache
 	if err := o.pebbleOptions(opts); err != nil {
 		return nil, err
 	}
@@ -313,6 +368,9 @@ func (s *Store) AdoptChildStore(child, id string) (reset bool, err error) {
 	}
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return false, err
+	}
+	if reset {
+		s.hwmsDropped(child)
 	}
 	s.adopted.Store(child, id)
 	return reset, nil
@@ -499,6 +557,8 @@ func (s *Store) AppendAdvancing(stream string, recs []Record, adv CursorAdvance)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.cursorMu.Lock()
+	defer s.cursorMu.Unlock()
 	if s.readU64(cursorKey(adv.Name, adv.Stream), 1) >= adv.To {
 		return 0, 0, false, nil
 	}
@@ -506,7 +566,7 @@ func (s *Store) AppendAdvancing(stream string, recs []Record, adv CursorAdvance)
 	if err != nil {
 		return 0, 0, false, err
 	}
-	s.signalBacklogChangeLocked()
+	s.signalBacklogChange()
 	return first, last, true, nil
 }
 
@@ -562,6 +622,9 @@ func (s *Store) appendAdvancingLocked(stream string, recs []Record, adv *CursorA
 			return 0, 0, err
 		}
 	}
+	// The head is published with the records: see commitReplicated.
+	s.state.Lock()
+	defer s.state.Unlock()
 	if err := s.appendApply(b, pebble.Sync); err != nil {
 		return 0, 0, err
 	}
@@ -619,8 +682,8 @@ func (s *Store) AppendIfKVUnchanged(stream string, rec Record, ifKVOffset uint64
 }
 
 func (s *Store) NextOffset(stream string) uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.state.RLock()
+	defer s.state.RUnlock()
 	return s.next[stream]
 }
 
@@ -764,8 +827,8 @@ func (s *Store) CursorStart(name, stream string) (pos uint64, saved bool) {
 // CursorAck moves the cursor forward only and reports whether it moved. The
 // cursor and its last-advance timestamp (ct/) are written in one synced batch.
 func (s *Store) CursorAck(name, stream string, off uint64) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.cursorMu.Lock()
+	defer s.cursorMu.Unlock()
 	if off <= s.readU64(cursorKey(name, stream), 1) {
 		return false
 	}
@@ -780,7 +843,7 @@ func (s *Store) CursorAck(name, stream string, off uint64) bool {
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return false
 	}
-	s.signalBacklogChangeLocked()
+	s.signalBacklogChange()
 	return true
 }
 
@@ -791,8 +854,8 @@ func (s *Store) CursorAck(name, stream string, off uint64) bool {
 // in one synced batch; a failed write is returned as an error, distinct from
 // "already existed".
 func (s *Store) CursorSetIfAbsent(name, stream string, off uint64) (created bool, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.cursorMu.Lock()
+	defer s.cursorMu.Unlock()
 	if _, closer, err := s.db.Get(cursorKey(name, stream)); err == nil {
 		closer.Close()
 		return false, nil
@@ -808,15 +871,15 @@ func (s *Store) CursorSetIfAbsent(name, stream string, off uint64) (created bool
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return false, err
 	}
-	s.signalBacklogChangeLocked()
+	s.signalBacklogChange()
 	return true, nil
 }
 
 // CursorDelete removes a cursor and its last-advance timestamp in one synced
 // batch. Deleting an absent cursor is a no-op, so a repeated revoke is fine.
 func (s *Store) CursorDelete(name, stream string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.cursorMu.Lock()
+	defer s.cursorMu.Unlock()
 	b := s.db.NewBatch()
 	defer b.Close()
 	if err := b.Delete(cursorKey(name, stream), nil); err != nil {
@@ -828,7 +891,7 @@ func (s *Store) CursorDelete(name, stream string) error {
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return err
 	}
-	s.signalBacklogChangeLocked()
+	s.signalBacklogChange()
 	return nil
 }
 
@@ -836,8 +899,8 @@ func (s *Store) CursorDelete(name, stream string) error {
 // none yet, so a cursor from before ct/ timestamps gets a full staleness window
 // from its first sighting. Synced, so a restart does not reset that clock.
 func (s *Store) CursorMarkSeen(name, stream string, ts int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.cursorMu.Lock()
+	defer s.cursorMu.Unlock()
 	if s.readU64(ctKey(name, stream), 0) != 0 {
 		return
 	}
@@ -850,9 +913,44 @@ func (s *Store) CursorMarkSeen(name, stream string, ts int64) {
 }
 
 // HWMGet returns the highest child offset already applied for (child, stream),
-// or 0 when nothing from that child has been applied yet.
+// or 0 when nothing from that child has been applied yet. It is served from
+// memory after the first read: a parent reads it on every push of every child.
 func (s *Store) HWMGet(child, stream string) uint64 {
-	return s.readU64(hwmKey(child, stream), 0)
+	key := replHWMKey{child, stream}
+	s.hwmMu.Lock()
+	defer s.hwmMu.Unlock()
+	if v, ok := s.hwms[key]; ok {
+		return v
+	}
+	v := s.readU64(hwmKey(child, stream), 0)
+	if s.hwms == nil {
+		s.hwms = map[replHWMKey]uint64{}
+	}
+	s.hwms[key] = v
+	return v
+}
+
+// hwmsCommitted records marks a batch has made durable.
+func (s *Store) hwmsCommitted(marks map[replHWMKey]uint64) {
+	s.hwmMu.Lock()
+	defer s.hwmMu.Unlock()
+	if s.hwms == nil {
+		s.hwms = map[replHWMKey]uint64{}
+	}
+	for k, v := range marks {
+		s.hwms[k] = v
+	}
+}
+
+// hwmsDropped forgets a child's marks after a batch deleted them.
+func (s *Store) hwmsDropped(child string) {
+	s.hwmMu.Lock()
+	defer s.hwmMu.Unlock()
+	for k := range s.hwms {
+		if k.child == child {
+			delete(s.hwms, k)
+		}
+	}
 }
 
 // CursorInfo is a persisted consumer cursor: the next offset the consumer reads.
@@ -982,16 +1080,16 @@ type ReplRecord struct {
 // LWM returns the low-water mark of a stream, the lowest retained offset.
 // Streams start at 1, and pruning removes the prefix [1..LWM).
 func (s *Store) LWM(stream string) uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.state.RLock()
+	defer s.state.RUnlock()
 	return s.lwm[stream]
 }
 
 // StreamBytes returns the live logical bytes of a stream, len(key) + len(value)
 // over retained records, kept current inside the append and prune batches.
 func (s *Store) StreamBytes(stream string) uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.state.RLock()
+	defer s.state.RUnlock()
 	return s.bytes[stream]
 }
 
@@ -1328,6 +1426,9 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if err := s.writeJournal(b, stream, span); err != nil {
 		return 0, err
 	}
+	// The head is published with the records: see commitReplicated.
+	s.state.Lock()
+	defer s.state.Unlock()
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return 0, err
 	}

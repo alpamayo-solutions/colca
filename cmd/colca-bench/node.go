@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/memlimit"
 	"github.com/alpamayo-solutions/colca/internal/node"
 )
 
@@ -26,12 +27,19 @@ func runProfiledNode(cfgPath string) error {
 	}
 	runtime.SetMutexProfileFraction(10)
 	runtime.SetBlockProfileRate(int(10 * time.Microsecond))
-	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	// Loopback unless COLCA_BENCH_PPROF_ADDR says otherwise (a containerised
+	// parent whose profiles are fetched from outside).
+	pprofAddr := "127.0.0.1:0"
+	if a := os.Getenv("COLCA_BENCH_PPROF_ADDR"); a != "" {
+		pprofAddr = a
+	}
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", pprofAddr)
 	if err != nil {
 		return err
 	}
 	srv := &http.Server{Handler: http.DefaultServeMux, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
+	memlimit.Apply()
 	n, err := node.Start(cfg)
 	if err != nil {
 		return err

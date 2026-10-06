@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cockroachdb/pebble/v2"
 )
@@ -25,6 +26,26 @@ import (
 // The leader then hands leadership to the oldest request that arrived meanwhile,
 // so no caller keeps working for others indefinitely.
 
+// maxGroupRecords bounds one group commit. Without a bound a leader took every
+// queued request: when children pushed faster than the store committed, a
+// parent with 1000 children built one batch of tens of thousands of records,
+// held it with the queue behind it and its memtables, and reached its memory
+// ceiling (fleet scale benchmark, 2026-10). Larger groups also gain nothing: a
+// few thousand records already amortise the sync. A request is never split,
+// and the oldest request is always taken.
+const maxGroupRecords = 4096
+
+// takeGroup removes the next group from the front of pending: the oldest
+// request and those after it up to maxGroupRecords records.
+func takeGroup(pending []*replRequest) (group, rest []*replRequest) {
+	n, records := 0, 0
+	for n < len(pending) && (n == 0 || records+len(pending[n].recs) <= maxGroupRecords) {
+		records += len(pending[n].recs)
+		n++
+	}
+	return pending[:n:n], pending[n:]
+}
+
 type replRequest struct {
 	child, stream string
 	recs          []ReplRecord
@@ -41,7 +62,14 @@ type replQueue struct {
 	mu      sync.Mutex
 	pending []*replRequest
 	leading bool
+	// records counts the records of requests queued or being committed.
+	records atomic.Int64
 }
+
+// ReplicatedBacklog reports how many replicated records wait for, or are in,
+// a group commit. A parent's door refuses new pushes (429) while it is high:
+// they would only wait in memory behind the ones already queued.
+func (s *Store) ReplicatedBacklog() int64 { return s.replQueue.records.Load() }
 
 // ApplyReplicated appends records with ChildOffset > HWM(child, stream) under
 // local offsets and updates KV and the HWM in one atomic batch, so replays are
@@ -53,6 +81,8 @@ type replQueue struct {
 func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applied []ReplRecord, hwm uint64, err error) {
 	req := &replRequest{child: child, stream: stream, recs: recs, wake: make(chan struct{}, 1)}
 	q := &s.replQueue
+	q.records.Add(int64(len(recs)))
+	defer q.records.Add(-int64(len(recs)))
 	q.mu.Lock()
 	q.pending = append(q.pending, req)
 	lead := !q.leading
@@ -67,8 +97,8 @@ func (s *Store) ApplyReplicated(child, stream string, recs []ReplRecord) (applie
 	}
 
 	q.mu.Lock()
-	group := q.pending
-	q.pending = nil
+	group, rest := takeGroup(q.pending)
+	q.pending = rest
 	q.mu.Unlock()
 
 	s.commitReplicated(group)
@@ -143,6 +173,11 @@ func (s *Store) commitReplicated(group []*replRequest) {
 	if len(committed) == 0 {
 		return
 	}
+	// Readers see a commit's records, KV and new head together: the state lock
+	// is held from the apply until the head is published. It is not held while
+	// the group is built, and cursor moves never take it.
+	s.state.Lock()
+	defer s.state.Unlock()
 	err := func() error {
 		for stream, off := range next {
 			if off == s.next[stream] {
@@ -169,6 +204,7 @@ func (s *Store) commitReplicated(group []*replRequest) {
 		}
 		return
 	}
+	s.hwmsCommitted(hwms)
 	for stream, off := range next {
 		s.next[stream] = off
 		s.bytes[stream] = liveBytes[stream]

@@ -30,6 +30,7 @@ import (
 	"os/signal"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/historian"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
+	"github.com/alpamayo-solutions/colca/internal/memlimit"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -50,6 +52,7 @@ type config struct {
 	dsn           string
 	maxConns      int32
 	fetchMax      int
+	writers       int
 	httpAddr      string
 	retentionDays int
 }
@@ -88,6 +91,12 @@ func run() int {
 	})
 	publisher.Start(ctx)
 	log = slog.New(publisher).With("service", "colca-historian")
+	limit := memlimit.Apply()
+	if msg, warn := memlimit.Report(limit); warn {
+		log.Warn(msg)
+	} else {
+		log.Info(msg, "bytes", limit)
+	}
 	slog.SetDefault(log)
 
 	pool, err := historian.Open(ctx, cfg.dsn, cfg.maxConns)
@@ -107,7 +116,7 @@ func run() int {
 		log.Error("invalid APPLICATION_TIME_SOURCE")
 		return 2
 	}
-	sink := &historian.Sink{Pool: pool, Strict: deps != nil}
+	sink := &historian.Sink{Pool: pool, Strict: deps != nil, Writers: cfg.writers}
 	// Postgres may still be starting, so retry for a bounded time instead of relying
 	// on a restart policy.
 	if err := ensureSchema(ctx, sink, cfg.retentionDays, log, 90*time.Second); err != nil {
@@ -122,10 +131,18 @@ func run() int {
 	// which is where a signal's is_logged flag changes.
 	watcher := &door.Client{BaseURL: cfg.colcaURL, Service: cfg.colcaService}
 	var changes, signalChanges door.Signal
+	// The newest metrics head the node announced; the bridge drains to it
+	// without a final empty fetch.
+	var metricsHead atomic.Int64
 	link := &watchLink{}
 	go watcher.WatchForever(ctx, []string{"metrics", "entities"}, 100*time.Millisecond, time.Second,
 		func(hint door.Hint) {
 			link.up()
+			// Stored as announced, not maximised: a node whose store was
+			// rebuilt announces a lower head after the reconnect.
+			if next, ok := hint.Next["metrics"]; ok {
+				metricsHead.Store(next)
+			}
 			for _, stream := range hint.Streams {
 				switch stream {
 				case "metrics":
@@ -163,6 +180,7 @@ func run() int {
 		Log:     log,
 		Max:     cfg.fetchMax,
 		Signals: signals,
+		Head:    metricsHead.Load,
 	}
 
 	bridge.BatchInterval = time.Duration(intEnv("BATCH_INTERVAL_MS", 100)) * time.Millisecond
@@ -275,12 +293,18 @@ func load() (config, error) {
 	if cfg.dsn == "" {
 		return cfg, errors.New("DATABASE_URL is required — the historian writes to Timescale")
 	}
-	maxConns := intEnv("DB_MAX_CONNS", 4)
+	// WRITERS connections write a page at once, each its share of the signals;
+	// one more serves the marker and the rest.
+	cfg.writers = intEnv("WRITERS", 4)
+	if cfg.writers < 1 || cfg.writers > 64 {
+		return cfg, fmt.Errorf("WRITERS must be between 1 and 64, got %d", cfg.writers)
+	}
+	maxConns := intEnv("DB_MAX_CONNS", cfg.writers+1)
 	if maxConns < 1 || maxConns > math.MaxInt32 {
 		return cfg, fmt.Errorf("DB_MAX_CONNS must be between 1 and %d, got %d", math.MaxInt32, maxConns)
 	}
 	cfg.maxConns = int32(maxConns)
-	cfg.fetchMax = intEnv("FETCH_MAX", 500)
+	cfg.fetchMax = intEnv("FETCH_MAX", 5000)
 	cfg.retentionDays = intEnv("HISTORIAN_RETENTION_DAYS", 0)
 	if cfg.retentionDays < 0 {
 		return cfg, errors.New("HISTORIAN_RETENTION_DAYS must be zero (unlimited) or positive")

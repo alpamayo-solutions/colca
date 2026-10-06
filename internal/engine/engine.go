@@ -163,6 +163,7 @@ type Engine struct {
 	store   *store.Store
 	cfg     *config.Config
 	deliver LocalDeliver
+	replBus replBus
 	ids     Mounts
 	log     *slog.Logger
 	metrics *metrics.Metrics // nil-safe: every method on a nil receiver is a no-op
@@ -259,6 +260,7 @@ func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m
 			Window: cfg.Logs.EffectiveWindow(), MaxPerService: cfg.Logs.EffectiveMaxPerService(),
 			MaxTracked: cfg.Logs.EffectiveMaxTracked(),
 		})}
+	e.replBus.queue = make(chan []busMsg, replBusQueue)
 	e.elements = uns.NewElementIndex(e.EntityStore())
 	e.catalogues = uns.NewCatalogueIndex(e.EntityStore())
 	if raw, ok := s.AncestryGet(); ok {
@@ -1168,6 +1170,10 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 			applied++
 		}
 	}
+	var bus []busMsg
+	if e.deliver != nil {
+		bus = make([]busMsg, 0, len(got))
+	}
 	for _, r := range got {
 		if r.SkipFrom != 0 {
 			continue
@@ -1183,9 +1189,10 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 		// the mount-inserted path, so an ancestor can resolve grants naming it.
 		e.observeIndexes(p.Contract, r.Topic, r.Payload)
 		if e.deliver != nil {
-			e.deliver(r.Topic, r.Payload, retainFor(e.ClassOf(p.Contract)))
+			bus = append(bus, busMsg{r.Topic, r.Payload, retainFor(e.ClassOf(p.Contract))})
 		}
 	}
+	e.deliverReplicated(bus)
 	return applied, hwm, nil
 }
 
