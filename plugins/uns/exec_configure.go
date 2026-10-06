@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // ConfigExec executes _CmdConfigure: edits to the node's data model. People,
@@ -1190,8 +1191,10 @@ func (c *ConfigExec) elementAuthor(ctx CommandContext, payload []byte) (int, str
 // bindCatalogue creates one signal per unbound tag in a catalogue, under one
 // path and bound to the element there. signal/autobind and the lifecycle
 // trigger both use it, and it is idempotent. Bound tags and taken paths are
-// tracked while the set is composed. A path that holds an unbound declared
-// signal gets that signal bound instead of a new "<name>-2" beside it.
+// tracked while the set is composed. An unbound declared signal that matches
+// a tag (see declaredSignals.claim) gets that tag bound instead of a new
+// signal, so a declaration and discovery never produce two signals for one
+// tag.
 func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, raw []byte) (int, string, string, []StateWrite) {
 	var cat catalogue
 	if err := json.Unmarshal(raw, &cat); err != nil {
@@ -1200,6 +1203,7 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 
 	bindings := c.bindings()
 	taken := c.takenPaths()
+	declared := c.declaredSignals()
 	semantic := c.semanticTags()
 
 	records := make([]StateRecord, 0, len(cat.DataTags))
@@ -1225,26 +1229,26 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 			}
 			under, element = tag.Meta.Element, id
 		}
+		if existing, existingID, path, ok := declared.claim(under, tag.Name); ok {
+			existing["data_tag"] = tag.ID
+			if _, typed := existing["data_type"]; !typed && tag.DataType != "" {
+				existing["data_type"] = tag.DataType
+			}
+			applyTagMeta(existing, tag.Meta.tagMeta, semantic, false)
+			if _, published := existing["is_published"]; !published {
+				existing["is_published"] = true
+			}
+			encoded, err := json.Marshal(existing)
+			if err != nil {
+				return 500, "signal/autobind: encode failed: " + err.Error(), "error", nil
+			}
+			records = append(records, StateRecord{Topic: c.signalTopic(path), Payload: encoded})
+			bindings.bind(tag.ID, existingID)
+			continue
+		}
 		leaf := sanitize(tag.Name)
 		path := joinPath(under, leaf)
 		if taken[path] {
-			if existing, existingID, ok := c.unboundSignalAt(path); ok {
-				existing["data_tag"] = tag.ID
-				if _, typed := existing["data_type"]; !typed && tag.DataType != "" {
-					existing["data_type"] = tag.DataType
-				}
-				applyTagMeta(existing, tag.Meta.tagMeta, semantic, false)
-				if _, published := existing["is_published"]; !published {
-					existing["is_published"] = true
-				}
-				encoded, err := json.Marshal(existing)
-				if err != nil {
-					return 500, "signal/autobind: encode failed: " + err.Error(), "error", nil
-				}
-				records = append(records, StateRecord{Topic: c.signalTopic(path), Payload: encoded})
-				bindings.bind(tag.ID, existingID)
-				continue
-			}
 			leaf = uniquePath(leaf, under, taken)
 			path = joinPath(under, leaf)
 		}
@@ -1365,26 +1369,109 @@ func (c *ConfigExec) syncCatalogueMeta(ctx CommandContext, cat catalogue, overwr
 	return len(records), writes, nil
 }
 
-// unboundSignalAt returns the signal record at a local path if it exists and
-// has no tag yet, as the map it was written as, so binding it keeps the
-// declared fields.
-func (c *ConfigExec) unboundSignalAt(path string) (map[string]any, string, bool) {
-	raw, ok := c.store.KVGet(c.signalTopic(path))
-	if !ok {
-		return nil, "", false
+// declaredSignal is an unbound signal record, as the map it was written as,
+// so binding it keeps the declared fields.
+type declaredSignal struct {
+	record map[string]any
+	id     string
+}
+
+// declaredSignals indexes this node's unbound signals by path. A claimed
+// signal leaves the index, so one autobind run never binds two tags to it.
+type declaredSignals map[string]declaredSignal
+
+// declaredSignals returns every signal this node holds that has an id and no
+// tag yet. A signal bound to any tag is never in it, so autobind cannot take a
+// signal from another tag or connector.
+func (c *ConfigExec) declaredSignals() declaredSignals {
+	out := declaredSignals{}
+	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
+		var record map[string]any
+		if json.Unmarshal(rec.Payload, &record) != nil {
+			continue
+		}
+		if tag, _ := record["data_tag"].(string); tag != "" {
+			continue
+		}
+		id, _ := record["id"].(string)
+		if id == "" {
+			continue
+		}
+		out[rec.Path] = declaredSignal{record: record, id: id}
 	}
-	var record map[string]any
-	if json.Unmarshal(raw, &record) != nil {
-		return nil, "", false
+	return out
+}
+
+// claim finds the unbound declared signal a tag named name binds to under a
+// path, removes it from the index and returns it with its path. The signal
+// must sit directly under that path and match the tag in one of these ways,
+// tried in order:
+//
+//  1. its segment is the tag name as autobind spells it (sanitize);
+//  2. its segment is the tag name as PREKIT spells it (pascalSegment), the
+//     position "prekit dm deploy" declares a signal at;
+//  3. its name field is the tag name, when exactly one signal there has it.
+//
+// No match, or several signals sharing the name, returns false and the caller
+// mints a signal as before.
+func (d declaredSignals) claim(under, name string) (map[string]any, string, string, bool) {
+	for _, segment := range []string{sanitize(name), pascalSegment(name)} {
+		path := joinPath(under, segment)
+		if s, ok := d[path]; ok {
+			delete(d, path)
+			return s.record, s.id, path, true
+		}
 	}
-	if tag, _ := record["data_tag"].(string); tag != "" {
-		return nil, "", false
+	match := ""
+	for path, s := range d {
+		if parentPath(path) != under {
+			continue
+		}
+		if declared, _ := s.record["name"].(string); declared != name {
+			continue
+		}
+		if match != "" {
+			return nil, "", "", false
+		}
+		match = path
 	}
-	id, _ := record["id"].(string)
-	if id == "" {
-		return nil, "", false
+	if match == "" {
+		return nil, "", "", false
 	}
-	return record, id, true
+	s := d[match]
+	delete(d, match)
+	return s.record, s.id, match, true
+}
+
+// parentPath is the path a local path sits directly under; "" for a top-level
+// path.
+func parentPath(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		return path[:i]
+	}
+	return ""
+}
+
+// pascalSegment spells a name as PREKIT spells a topic segment
+// (to_pascal_case since PREKIT 1.33): spaces, "-" and "_" separate words, and
+// each word's first character is uppercased with the rest kept as written.
+// "execution_context" -> "ExecutionContext", "fillLevel" -> "FillLevel",
+// "HMIConfig" -> "HMIConfig", "Line 1" -> "Line1".
+func pascalSegment(name string) string {
+	var b strings.Builder
+	start := true
+	for _, r := range name {
+		if r == '-' || r == '_' || unicode.IsSpace(r) {
+			start = true
+			continue
+		}
+		if start {
+			r = unicode.ToUpper(r)
+			start = false
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // joinPath joins a mount and a leaf. An unplaced identity's mount is "", and
