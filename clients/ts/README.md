@@ -70,8 +70,11 @@ live.onState((state) => showOffline(state !== "online"));
 ```
 
 Data and entity paths are retained at the node, so a subscription starts with
-the current values and continues with the changes; nothing has to be fetched
-first. Around that the client does what a page left open all day needs:
+the current values and continues with the changes. The exception is a node with
+children: it does not retain the `_Metric` records its children replicate up
+(`bus.retain_child_metrics`), so a view of a child's metrics reads the current
+values from `/kv` first and takes the changes from the subscription. Around
+that the client does what a page left open all day needs:
 
 - **One connection for the whole page.** `subscribe` returns the function that
   ends that subscription and no other; the node's subscription goes when the

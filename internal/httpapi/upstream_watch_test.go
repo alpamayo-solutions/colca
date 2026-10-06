@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -245,4 +246,50 @@ func decodeRaw(t *testing.T, rr *httptest.ResponseRecorder) map[string]json.RawM
 		t.Fatal(err)
 	}
 	return out
+}
+
+// POST /kv/lookup answers the current entries of exactly the named topics, in
+// one request, and leaves out what holds nothing.
+func TestKVLookupReadsNamedTopics(t *testing.T) {
+	h := newLocalHandler(t)
+	if _, _, err := h.eng.Store().Append("metrics", []store.Record{
+		{Topic: "colca/v1/_Metric/n-test/plant/l1/m1/temp", Payload: []byte(`{"value":1}`), TS: 1, KVPath: "plant/l1/m1/temp", KVNode: "n-test"},
+		{Topic: "colca/v1/_Metric/n-test/plant/l1/m1/temp", Payload: []byte(`{"value":2}`), TS: 2, KVPath: "plant/l1/m1/temp", KVNode: "n-test"},
+		{Topic: "colca/v1/_Metric/n-test/plant/l1/m2/rpm", Payload: []byte(`{"value":9}`), TS: 3, KVPath: "plant/l1/m2/rpm", KVNode: "n-test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	post := func(body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/kv/lookup", strings.NewReader(body))
+		r.Header.Set("X-Colca-Service", "explorer")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, r)
+		return rr
+	}
+	rr := post(`{"topics":["colca/v1/_Metric/n-test/plant/l1/m1/temp","colca/v1/_Metric/n-test/plant/l1/m9/none","not a topic"]}`)
+	var page struct {
+		Entries []struct {
+			Topic   string          `json:"topic"`
+			Payload json.RawMessage `json:"payload"`
+			TS      int64           `json:"ts"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &page); err != nil || rr.Code != http.StatusOK {
+		t.Fatalf("lookup = %d %s", rr.Code, rr.Body.String())
+	}
+	if len(page.Entries) != 1 || page.Entries[0].Topic != "colca/v1/_Metric/n-test/plant/l1/m1/temp" ||
+		string(page.Entries[0].Payload) != `{"value":2}` || page.Entries[0].TS != 2 {
+		t.Fatalf("lookup entries = %+v, want only the current value of m1/temp", page.Entries)
+	}
+	if bad := post(`not json`); bad.Code != http.StatusBadRequest {
+		t.Fatalf("a body that is not JSON = %d, want 400", bad.Code)
+	}
+	many := make([]string, maxLookupTopics+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("colca/v1/_Metric/n-test/p/%d", i)
+	}
+	body, _ := json.Marshal(map[string]any{"topics": many})
+	if bad := post(string(body)); bad.Code != http.StatusBadRequest {
+		t.Fatalf("%d topics = %d, want 400", len(many), bad.Code)
+	}
 }

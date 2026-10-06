@@ -12,15 +12,18 @@ import (
 
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 
+	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // RunCardinality seeds Paths distinct signal paths and measures what a large
 // namespace costs: KV scan time, retained replay time for a fresh subscriber and
 // RSS growth. Replication runs during seeding, so hub numbers include the
-// replicated copies.
+// replicated copies. The hub retains its child's metrics here
+// (bus.retain_child_metrics), so the replay measures a retained set of the full
+// cardinality; with the default a fresh subscriber hydrates from /kv instead.
 func RunCardinality(p Params) (*Report, error) {
-	pair, err := StartPair(p.WorkDir, 1)
+	pair, err := StartPairWithBus(p.WorkDir, 1, config.Bus{RetainChildMetrics: true})
 	if err != nil {
 		return nil, err
 	}

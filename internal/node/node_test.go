@@ -550,6 +550,8 @@ func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 		KeyFile: keyFile,
 		API:     config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:    config.Endpoint{Addr: "127.0.0.1:0"},
+		// The seeded metrics are m1's, which n1 retains only on request.
+		Bus: config.Bus{RetainChildMetrics: true},
 	}
 	started := time.Now()
 	n := mustStart(t, cfg)
@@ -850,7 +852,8 @@ graceDrain:
 }
 
 // A tombstone replicates upward and retires the path at the parent too: the KV
-// key is deleted and the retained message cleared.
+// key is deleted and, on a parent that retains its children's metrics, the
+// retained message cleared.
 func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 	base := t.TempDir()
 	parentKey := filepath.Join(base, "parent.key")
@@ -866,6 +869,7 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 		Repl:     config.Endpoint{Addr: "127.0.0.1:0"},
+		Bus:      config.Bus{RetainChildMetrics: true},
 	}
 	parent := mustStart(t, parentCfg)
 	// The child's key and the observer are enrolled before the child starts.

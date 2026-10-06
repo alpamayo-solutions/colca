@@ -85,6 +85,12 @@ func enroll(dir string, reg *registry.Manager, ulid, element string, grants ...s
 // StartPair starts a hub and an edge mounted at "edge1", enrolls machines m1 to
 // mN at the edge and a read-all observer at the hub, and returns them running.
 func StartPair(dir string, machines int) (*Pair, error) {
+	return StartPairWithBus(dir, machines, config.Bus{})
+}
+
+// StartPairWithBus is StartPair with the hub's bus: settings, for a scenario
+// that measures the hub retaining its child's metrics.
+func StartPairWithBus(dir string, machines int, hubBus config.Bus) (*Pair, error) {
 	hubKey := filepath.Join(dir, "hub.key")
 	edgeKey := filepath.Join(dir, "edge.key")
 	hubID, err := identity.Generate(hubKey)
@@ -101,6 +107,7 @@ func StartPair(dir string, machines int) (*Pair, error) {
 		API:  config.API{Addr: "127.0.0.1:0", Token: BenchToken},
 		MQTT: config.Endpoint{Addr: "127.0.0.1:0"},
 		Repl: config.Endpoint{Addr: "127.0.0.1:0"},
+		Bus:  hubBus,
 	}
 	hub, err := node.Start(hubCfg)
 	if err != nil {

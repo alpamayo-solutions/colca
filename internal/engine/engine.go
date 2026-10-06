@@ -1214,7 +1214,7 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 		// the mount-inserted path, so an ancestor can resolve grants naming it.
 		e.observeIndexes(p.Contract, r.Topic, r.Payload)
 		if e.deliver != nil {
-			bus = append(bus, busMsg{r.Topic, r.Payload, retainFor(e.ClassOf(p.Contract))})
+			bus = append(bus, busMsg{r.Topic, r.Payload, e.retainOnBus(p)})
 		}
 	}
 	e.deliverReplicated(bus)
@@ -1289,6 +1289,32 @@ func jumpFullyExplainedByDroppedTimeSync(last, childOffset uint64, dropped map[u
 // retained, exactly the set with a KV projection. Commands and acks are events:
 // retaining them would redeliver stale commands to every new subscriber.
 func retainFor(c uns.Class) bool { return uns.IsState(c) }
+
+// retainOnBus is retainFor for one record: a _Metric another node authored,
+// which reached this node through replication, is not retained unless
+// bus.retain_child_metrics says so (see config.Bus).
+func (e *Engine) retainOnBus(p uns.Parsed) bool {
+	if !retainFor(e.ClassOf(p.Contract)) {
+		return false
+	}
+	return !e.childMetric(p)
+}
+
+// childMetric reports whether p is a _Metric another node authored and the
+// bus does not retain such records.
+func (e *Engine) childMetric(p uns.Parsed) bool {
+	return p.Contract == "_Metric" && p.NodeID != e.cfg.ULID && !e.cfg.Bus.RetainChildMetrics
+}
+
+// RetainOnBus reports whether the record at topic is kept as a retained
+// message on the local bus; the node's startup reseed asks it.
+func (e *Engine) RetainOnBus(topic string) bool {
+	p, err := uns.Parse(topic)
+	if err != nil {
+		return false
+	}
+	return e.retainOnBus(p)
+}
 
 func (e *Engine) persistAttributed(class uns.Class, p uns.Parsed, topic string, payload []byte, attribution Attribution) (Result, error) {
 	return e.persistTSAttributed(class, p, topic, payload, time.Now().UnixMilli(), attribution)

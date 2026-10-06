@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"fmt"
 	"github.com/alpamayo-solutions/colca/internal/clock"
 	"log/slog"
 	"strings"
@@ -1069,9 +1070,10 @@ func TestIngestReplicatedDeliversOnlyNewRecords(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("want 2 deliveries, got %d: %+v", len(got), got)
 	}
+	// A child's metrics are published live, not retained (bus.retain_child_metrics).
 	for i, want := range []delivery{
-		{Topic: "colca/v1/_Metric/m1/edge1/m1/a", Payload: `{"v":1}`, Retain: true},
-		{Topic: "colca/v1/_Metric/m1/edge1/m1/b", Payload: `{"v":2}`, Retain: true},
+		{Topic: "colca/v1/_Metric/m1/edge1/m1/a", Payload: `{"v":1}`, Retain: false},
+		{Topic: "colca/v1/_Metric/m1/edge1/m1/b", Payload: `{"v":2}`, Retain: false},
 	} {
 		if got[i] != want {
 			t.Fatalf("delivery %d = %+v, want %+v", i, got[i], want)
@@ -1320,9 +1322,19 @@ func TestClientCannotTombstoneForeignPath(t *testing.T) {
 }
 
 // A tombstone replicates up and retires the path at the ancestor too: KV key
-// deleted, retained message cleared.
+// deleted, and the empty payload delivered, retained (clearing the retained
+// message) when the bus retains children's metrics.
 func TestIngestReplicatedTombstoneRetiresKVAndClearsRetained(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retain_child_metrics=%v", keep), func(t *testing.T) {
+			testReplicatedTombstoneRetires(t, keep)
+		})
+	}
+}
+
+func testReplicatedTombstoneRetires(t *testing.T, keep bool) {
 	e, rec := newRecordingEngine(t)
+	e.cfg.Bus.RetainChildMetrics = keep
 	set := []store.ReplRecord{{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/edge1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "edge1/m1/a", KVNode: "m1"}}
 	if _, _, err := e.IngestReplicated("n-edge1", "metrics", set); err != nil {
 		t.Fatal(err)
@@ -1346,8 +1358,8 @@ func TestIngestReplicatedTombstoneRetiresKVAndClearsRetained(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("want 2 deliveries, got %d: %+v", len(got), got)
 	}
-	if want := (delivery{Topic: "colca/v1/_Metric/m1/edge1/m1/a", Payload: "", Retain: true}); got[1] != want {
-		t.Fatalf("parent clear delivery = %+v, want %+v (empty payload, retained)", got[1], want)
+	if want := (delivery{Topic: "colca/v1/_Metric/m1/edge1/m1/a", Payload: "", Retain: keep}); got[1] != want {
+		t.Fatalf("parent clear delivery = %+v, want %+v", got[1], want)
 	}
 }
 

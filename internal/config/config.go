@@ -221,6 +221,9 @@ type Config struct {
 	// effectively unlimited.
 	MQTTLimits MQTTLimits `yaml:"mqtt_limits"`
 
+	// Bus decides what the local MQTT bus keeps as retained messages.
+	Bus Bus `yaml:"bus"`
+
 	// Retention configures the background pruner. Without the block the defaults
 	// apply and pruning is on.
 	Retention Retention `yaml:"retention"`
@@ -550,6 +553,18 @@ var knownCompressions = map[string]bool{"": true, "snappy": true, "zstd": true}
 type Limits struct {
 	MaxRecordBytes ByteSize `yaml:"max_record_bytes"`
 	MaxBlobBytes   ByteSize `yaml:"max_blob_bytes"`
+}
+
+// Bus is the bus: block.
+type Bus struct {
+	// RetainChildMetrics keeps the _Metric records that children replicate up as
+	// retained messages on this node's bus, as every state record is. Off by
+	// default: a node with children receives every sample of its subtree, and
+	// retaining each one cost a parent with 100 children and 140,000 signals at
+	// 28 k records/s ~30 % of its CPU and ~450 MB (fleet scale benchmark, 2026-10). The records
+	// are still published live, and /kv holds every current value. A node's own
+	// _Metric records, and every other state contract, stay retained.
+	RetainChildMetrics bool `yaml:"retain_child_metrics"`
 }
 
 // MQTTLimits is the mqtt_limits: block. Zero values select the defaults below;

@@ -1709,6 +1709,21 @@ func (s *Store) kvScanPage(prefix, after string, limit int, contracts []string, 
 	return out, folders, "", nil
 }
 
+// KVGet returns the current-state entry at exactly (path, node, topic), and
+// whether there is one.
+func (s *Store) KVGet(path, node, topic string) (KVEntry, bool, error) {
+	v, closer, err := s.db.Get(kvKey(path, node, topic))
+	if errors.Is(err, pebble.ErrNotFound) {
+		return KVEntry{}, false, nil
+	}
+	if err != nil {
+		return KVEntry{}, false, fmt.Errorf("store: kv get %q: %w", topic, err)
+	}
+	defer closer.Close()
+	e, ok := decodeKVEntry(path, node, v)
+	return e, ok, nil
+}
+
 // decodeKVEntry decodes a stored KV value; ok is false when it does not decode.
 func decodeKVEntry(path, node string, value []byte) (KVEntry, bool) {
 	var e kvEnc

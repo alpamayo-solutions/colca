@@ -2,9 +2,12 @@
  * Live values over MQTT, for a page or a service that wants them pushed.
  *
  * Colca retains the current value of every data and entity path, so a
- * subscription brings the present state first and the changes after it. There
- * is no snapshot to fetch and nothing to merge. What this module adds is what a
- * long-lived client needs around that:
+ * subscription brings the present state first and the changes after it. The
+ * exception is a node with children: it does not retain the `_Metric` records
+ * its children replicate up (`bus.retain_child_metrics`), so a view of a
+ * child's metrics reads their current values from `/kv` first and takes the
+ * changes from the subscription. What this module adds is what a long-lived
+ * client needs around that:
  *
  * - one connection, however many parts of a page subscribe, and an unsubscribe
  *   that ends only its own subscription;
@@ -19,7 +22,8 @@
  * - commands that wait for their acknowledgement.
  *
  * These are values, not a log: a change that happens while the connection is
- * being replaced is superseded by the retained value that follows. Anything that
+ * being replaced is superseded by the retained value that follows (for a
+ * child's metric on a parent, by the next `/kv` read or change). Anything that
  * must see every record reads a stream through the door instead.
  *
  * mqtt.js is loaded on first use and is an optional dependency of this package.
