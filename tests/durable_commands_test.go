@@ -2,8 +2,10 @@ package tests
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -59,12 +61,22 @@ func restart(t *testing.T, tp *topo, name string, n *node.Node) *node.Node {
 	n.Stop()
 	cfg := tp.cfgs[name]
 	cfg.Repl.Addr = n.ReplAddr
-	again, err := node.Start(cfg)
-	if err != nil {
-		t.Fatal(err)
+	// The children dial this exact address, so the restart must get it back.
+	// The port was released by Stop; until it is bound again the OS may hand
+	// it to any other socket in the run (another test's outgoing connection),
+	// briefly. Retry while it is taken instead of failing on the first try.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		again, err := node.Start(cfg)
+		if err == nil {
+			t.Cleanup(again.Stop)
+			return again
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) || time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
-	t.Cleanup(again.Stop)
-	return again
 }
 
 // countingMachine connects m1 at edge1, answers every command with 200 and
