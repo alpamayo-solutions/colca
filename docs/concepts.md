@@ -195,8 +195,10 @@ drops its intent, so a later publish does not bind it again.
 **Taking a tag over.** A signal that autobind minted carries `is_autobound:
 true`. A `signal/upsert` entry with `"take_over": true` and a `data_tag` held
 by such a signal moves the tag to the upserted signal and retires the minted
-one in the same commit. It is refused when the holder was declared rather than
-minted, or when anything is positioned below it. The retired signal's metric
+one in the same commit. It also resolves a tag two signals already share: the
+upserted signal keeps it and the minted one is retired. It is refused when the
+holder was declared rather than minted, or when anything is positioned below
+it. The retired signal's metric
 history stays in the historian under the retired signal's id; nothing is
 deleted or rewritten there. A signal minted before `is_autobound` existed
 counts as minted when it carries no field autobind does not write.

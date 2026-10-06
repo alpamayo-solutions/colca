@@ -1028,8 +1028,8 @@ func (c *ConfigExec) upsert(ctx CommandContext, payload []byte) (int, string, st
 		if refusal != "" {
 			return 409, "signal/upsert: " + refusal, "conflict", nil
 		}
-		if retired != "" {
-			vacated = append(vacated, c.signalTopic(retired))
+		for _, path := range retired {
+			vacated = append(vacated, c.signalTopic(path))
 		}
 		topic := c.signalTopic(ref.Path)
 		written[topic] = true
@@ -1052,9 +1052,11 @@ func (c *ConfigExec) upsert(ctx CommandContext, payload []byte) (int, string, st
 // A record with a data_tag drops its bind_intent, which only means something
 // while the signal is unbound. When another signal holds that tag, elsewhere
 // than the position this record replaces, the upsert is refused naming the
-// holder, unless takeOver asks to move the tag: then the
-// holder is retired (its path is returned) if autobind minted it and nothing
-// is positioned below it. Its metric history stays where it is, under its id.
+// holder, unless takeOver asks to move the tag: then every other holder is
+// retired (their paths are returned) if autobind minted it and nothing is
+// positioned below it. Their metric history stays where it is, under their
+// ids. take_over also resolves a tag two signals already share, which an
+// upsert without it leaves alone.
 //
 // A record without a data_tag but with a bind_intent is bound at once when the
 // named connector's catalogue already holds a free tag the intent names, so a
@@ -1062,65 +1064,102 @@ func (c *ConfigExec) upsert(ctx CommandContext, payload []byte) (int, string, st
 // next publish.
 func (c *ConfigExec) settleBinding(
 	id, path string, payload json.RawMessage, takeOver bool, bindings *signalBindings,
-) (json.RawMessage, string, string) {
+) (json.RawMessage, []string, string) {
 	var record map[string]any
 	if json.Unmarshal(payload, &record) != nil {
-		return payload, "", "" // not a record: the schema check refuses it
+		return payload, nil, "" // not a record: the schema check refuses it
 	}
 	tagID, _ := record["data_tag"].(string)
 	if tagID == "" {
 		tag, ok := c.resolveIntent(record, id, bindings)
 		if !ok {
-			return payload, "", ""
+			return payload, nil, ""
 		}
 		bindings.bind(tag.ID, id)
 		encoded, err := json.Marshal(adoptTag(record, tag, c.semanticTags()))
 		if err != nil {
-			return payload, "", ""
+			return payload, nil, ""
 		}
-		return encoded, "", ""
+		return encoded, nil, ""
 	}
 	delete(record, "bind_intent")
 	encoded, err := json.Marshal(record)
 	if err != nil {
-		return payload, "", ""
+		return payload, nil, ""
 	}
-	if bindings.tagHeldBy(id) == tagID {
-		return encoded, "", "" // this binding already stands
+	standing := bindings.tagHeldBy(id) == tagID
+	if standing && !takeOver {
+		// This binding already stands. A second signal on the same tag, from
+		// before the rule, is left alone unless take_over asks to resolve it.
+		return encoded, nil, ""
 	}
-	holder := bindings.signalHolding(tagID)
-	if holder == "" || holder == id {
+	holders := c.otherHolders(tagID, id, path, bindings)
+	if len(holders) == 0 {
 		bindings.bind(tagID, id)
-		return encoded, "", ""
+		return encoded, nil, ""
 	}
-	held := c.signalWithID(holder)
-	if held.path == path {
-		// The holder stands where this record is written, so the write
-		// replaces it: there is no second signal left to hold the tag.
-		bindings.unbind(tagID)
-		bindings.bind(tagID, id)
-		return encoded, "", ""
-	}
-	refusal := (&TagHeldError{Tag: tagID, Signal: id, Holder: holder, HolderPath: held.path}).Error()
-	why := c.notRetirable(held)
+	first := holders[0]
+	refusal := (&TagHeldError{Tag: tagID, Signal: id, Holder: first.id, HolderPath: first.path}).Error()
 	if !takeOver {
-		if why == "" {
-			return nil, "", refusal + ". " + holder + " was created by autobind: send take_over: true with " +
-				id + " to move the tag to it and retire " + holder +
-				" (its metric history stays in the historian under " + holder + ")"
+		if why := c.notRetirable(first); why != "" {
+			return nil, nil, refusal + ". " + why + ", so take_over cannot retire it: unbind or delete it first"
 		}
-		return nil, "", refusal + ". " + why + ", so take_over cannot retire it: unbind or delete it first"
+		return nil, nil, refusal + ". " + first.id + " was created by autobind: send take_over: true with " +
+			id + " to move the tag to it and retire " + first.id +
+			" (its metric history stays in the historian under " + first.id + ")"
 	}
-	if why != "" {
-		return nil, "", refusal + ". take_over refused: " + why + ", so it is not retired: unbind or delete it first"
+	retired := make([]string, 0, len(holders))
+	for _, held := range holders {
+		if why := c.notRetirable(held); why != "" {
+			refusal = (&TagHeldError{Tag: tagID, Signal: id, Holder: held.id, HolderPath: held.path}).Error()
+			return nil, nil, refusal + ". take_over refused: " + why + ", so it is not retired: unbind or delete it first"
+		}
+		retired = append(retired, held.path)
 	}
 	bindings.unbind(tagID)
 	bindings.bind(tagID, id)
-	return encoded, held.path, ""
+	return encoded, retired, ""
+}
+
+// otherHolders lists the signals other than id that hold tagID: those this
+// node stores, except one standing at path (the write replaces it), and one an
+// earlier entry of the same command bound.
+func (c *ConfigExec) otherHolders(tagID, id, path string, bindings *signalBindings) []heldSignal {
+	var out []heldSignal
+	seen := map[string]bool{}
+	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
+		var record map[string]any
+		if json.Unmarshal(rec.Payload, &record) != nil {
+			continue
+		}
+		if tag, _ := record["data_tag"].(string); tag != tagID || rec.Path == path {
+			continue
+		}
+		held, _ := record["id"].(string)
+		if held == "" {
+			held = rec.Path
+		}
+		if held == id {
+			continue
+		}
+		seen[held] = true
+		out = append(out, heldSignal{id: held, path: rec.Path, record: record})
+	}
+	if holder := bindings.signalHolding(tagID); holder != "" && holder != id && !seen[holder] {
+		if held := c.signalWithID(holder); held.path != path {
+			// Bound by an earlier entry of this command: not stored yet, so
+			// nothing autobind minted, and never retirable.
+			held.id = holder
+			out = append(out, held)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
+	return out
 }
 
 // heldSignal is one of this node's signal records, found by id.
 type heldSignal struct {
+	id     string
 	path   string
 	record map[string]any
 }
@@ -1134,7 +1173,7 @@ func (c *ConfigExec) signalWithID(id string) heldSignal {
 			continue
 		}
 		if held, _ := record["id"].(string); held == id || (held == "" && rec.Path == id) {
-			return heldSignal{path: rec.Path, record: record}
+			return heldSignal{id: id, path: rec.Path, record: record}
 		}
 	}
 	return heldSignal{}

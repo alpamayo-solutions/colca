@@ -493,3 +493,32 @@ func TestConcurrentBindsOfOneTagLeaveOneHolder(t *testing.T) {
 		t.Fatalf("codes = %v, holders = %v, want exactly one", codes, holdersOf(c, "t1"))
 	}
 }
+
+// Two signals already sharing a tag, from before the rule: take_over on the
+// declared one retires the minted one, and a plain redeclaration does not.
+func TestTakeOverResolvesATagTwoSignalsAlreadyShare(t *testing.T) {
+	c := intentNode(t)
+	f := c.store.(*fakeStore)
+	for path, record := range map[string]map[string]any{
+		"line1/tag-t1":     {"id": "01SMINTED", "name": "tag-t1", "data_tag": "t1", "is_published": true, "is_autobound": true},
+		"line1/Press/Temp": {"id": "01SDECLARED", "name": "Temp", "data_tag": "t1", "is_logged": true},
+	} {
+		if _, err := f.seed(c.signalTopic(path), mustJSON(record)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	declared := map[string]any{"id": "01SDECLARED", "name": "Temp", "data_tag": "t1", "is_logged": true}
+
+	if code, msg := upsertSignal(t, c, "line1/Press/Temp", declared, false); code != 200 {
+		t.Fatalf("redeclare = %d %q", code, msg)
+	}
+	if got := holdersOf(c, "t1"); len(got) != 2 {
+		t.Fatalf("a redeclaration without take_over resolved the duplicate: %v", got)
+	}
+	if code, msg := upsertSignal(t, c, "line1/Press/Temp", declared, true); code != 200 {
+		t.Fatalf("take over = %d %q", code, msg)
+	}
+	if got := holdersOf(c, "t1"); len(got) != 1 || got[0] != "line1/Press/Temp" {
+		t.Fatalf("t1 is held by %v, want only the declared signal", got)
+	}
+}
