@@ -198,11 +198,11 @@ func (o Options) pebbleOptions(opts *pebble.Options) error {
 
 // SizesFor returns the largest memtable and the block cache size for a node
 // whose memory ceiling is ceiling bytes: a 32nd of the ceiling each, at most
-// 64 MiB, at least Pebble's own defaults (4 MiB, 8 MiB), which an unknown
+// 256 MiB, at least Pebble's own defaults (4 MiB, 8 MiB), which an unknown
 // ceiling also gets. Two memtables (one flushing) and the cache stay under a
 // tenth of the ceiling, inside the quarter the Go memory limit leaves outside
-// the heap (internal/memlimit). A 2 GiB parent gets 64 MiB of each, a 512 MiB
-// edge 16 MiB.
+// the heap (internal/memlimit). A 512 MiB edge gets 16 MiB of each, a 2 GiB
+// parent 64 MiB, an 8 GiB parent 256 MiB.
 //
 // Pebble's 4 MiB memtable flushed a busy parent several times a second: every
 // record writes its stream entry, its signal index entry and its KV
@@ -213,10 +213,15 @@ func (o Options) pebbleOptions(opts *pebble.Options) error {
 // busy parent went to a table block and decompressed it again (fleet scale
 // benchmark, 2026-10). Pebble starts with a small memtable and doubles it, and
 // the cache fills only with what is read, so a quiet node holds neither.
+//
+// The cap was 64 MiB, which a parent given more memory never passed. At
+// 112 k records/s on 10 cores an 8 GiB parent with 256 MiB memtables spent 11 %
+// less CPU than with 64 MiB (compaction 22 % -> 16 % of its CPU) at the same
+// throughput (fleet scale benchmark, round 3, 2026-10).
 func SizesFor(ceiling int64) (memTable, blockCache int64) {
 	const (
 		minMemTable, minCache = 4 << 20, 8 << 20
-		most                  = 64 << 20
+		most                  = 256 << 20
 	)
 	share := ceiling / 32
 	return min(max(share, minMemTable), most), min(max(share, minCache), most)

@@ -79,8 +79,10 @@ limit on its ancestors) unless `GOMEMLIMIT` is set, so the collector works
 harder near the ceiling instead of letting the kernel kill the process. They
 log a warning when they find no ceiling. The store's memtables and block
 cache are sized from the same ceiling, a 32nd of it each, between Pebble's
-defaults (4 MiB and 8 MiB, also used when no ceiling is found) and 64 MiB: a
-2 GiB hub gets 64 MiB of each, a 512 MiB edge 16 MiB.
+defaults (4 MiB and 8 MiB, also used when no ceiling is found) and 256 MiB: a
+512 MiB edge gets 16 MiB of each, a 2 GiB hub 64 MiB, an 8 GiB hub 256 MiB.
+Raising a hub's memory ceiling therefore also gives its store larger
+memtables, which compact less under heavy ingest.
 
 Replicated records reach the local MQTT bus through one goroutine after they
 are durable. Each child's records, and so each topic's, arrive in order;
