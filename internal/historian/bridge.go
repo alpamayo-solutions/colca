@@ -65,6 +65,16 @@ type Bridge struct {
 	// not, why. It is called on every pass; the receiver decides what changed.
 	Health func(ok bool, detail string)
 
+	// Head, when set, reports the newest metrics head the node announced (the
+	// watch hints' next offset), 0 when none is known yet. A drain that reached
+	// the head captured with its wakeup is complete without one more, empty,
+	// fetch.
+	Head func() int64
+
+	// ReadAhead fetches the next page while the current one is written, when
+	// the page was full and the door can read ahead of its cursor. Run sets it.
+	ReadAhead bool
+
 	// Signals, when set, says which signals are historised. A pass waits until
 	// it has loaded, and samples of a signal whose definition says
 	// "is_logged": false are consumed without a row.
@@ -79,9 +89,52 @@ type Bridge struct {
 	// another goroutine.
 	gaps atomic.Int64
 
+	// marker is this consumer's applied offset as last committed, valid while
+	// markerKnown: this bridge is the marker's only writer, so it is read from
+	// the database once and after a failed write, not on every page.
+	marker      int64
+	markerKnown bool
+	// next is the page end of the last pass.
+	next int64
+	// ahead delivers the page read ahead of the cursor, nil when none is in flight.
+	ahead chan aheadPage
+
 	// rejected counts permanently refused rows by reason. A sync.Map of counters
 	// keeps the zero Bridge usable without a constructor.
 	rejected sync.Map // reason string -> *atomic.Int64
+}
+
+type aheadPage struct {
+	from int64
+	page door.Page
+	err  error
+}
+
+// aheadFetcher is a door that can read ahead of its cursor (door.Client).
+type aheadFetcher interface {
+	FetchWithOptions(ctx context.Context, options door.FetchOptions) (door.Page, error)
+}
+
+// takeAhead returns the page read ahead from offset from, if one is in flight
+// and arrived without an error.
+func (b *Bridge) takeAhead(from int64) (door.Page, bool) {
+	if b.ahead == nil {
+		return door.Page{}, false
+	}
+	r := <-b.ahead
+	b.ahead = nil
+	if r.err != nil || r.from != from {
+		return door.Page{}, false
+	}
+	return r.page, true
+}
+
+// dropAhead waits for a read-ahead in flight and discards it.
+func (b *Bridge) dropAhead() {
+	if b.ahead != nil {
+		<-b.ahead
+		b.ahead = nil
+	}
 }
 
 // Gaps returns how many pruned ranges could not be historised. Safe for
@@ -118,7 +171,7 @@ func (b *Bridge) max() int {
 	if b.Max > 0 {
 		return b.Max
 	}
-	return 500
+	return 5000
 }
 
 // Once applies at most one page and reports how many rows were written. Rows and
@@ -138,11 +191,15 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 			return 0, 0, err
 		}
 	}
-	page, err := b.Door.Fetch(ctx, "metrics", Cursor, b.max())
-	if err != nil {
-		return 0, 0, err
+	page, ok := b.takeAhead(b.next)
+	if !ok {
+		page, err = b.Door.Fetch(ctx, "metrics", Cursor, b.max())
+		if err != nil {
+			return 0, 0, err
+		}
 	}
 	fetched = len(page.Records)
+	b.next = page.Next
 	b.NowMS, b.FetchedAt = page.NowMS, time.Now()
 	if b.Strict && page.Gap != nil {
 		return fetched, 0, fmt.Errorf("coordinated history has a stream gap")
@@ -153,10 +210,13 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		return 0, 0, nil
 	}
 
-	applied, err := b.Store.Applied(ctx, Consumer)
-	if err != nil {
-		return fetched, 0, err
+	if !b.markerKnown {
+		if b.marker, err = b.Store.Applied(ctx, Consumer); err != nil {
+			return fetched, 0, err
+		}
+		b.markerKnown = true
 	}
+	applied := b.marker
 	first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
 
 	// Ignore the marker when it cannot be a position in this stream: the page starts
@@ -214,10 +274,24 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		rows = append(rows, row)
 	}
 
+	// A full page means more is waiting: read it while this one is written.
+	if ahead, ok := b.Door.(aheadFetcher); ok && b.ReadAhead && fetched >= b.max() && page.Gap == nil {
+		from := last + 1
+		ch := make(chan aheadPage, 1)
+		b.ahead = ch
+		go func() {
+			p, err := ahead.FetchWithOptions(ctx, door.FetchOptions{Stream: "metrics", Cursor: Cursor, Max: b.max(), From: uint64(from)}) //nolint:gosec // offsets are positive
+			ch <- aheadPage{from: from, page: p, err: err}
+		}()
+	}
+
 	rejections, err := b.Store.Apply(ctx, rows, Consumer, last)
 	if err != nil {
+		b.markerKnown = false
+		b.dropAhead()
 		return fetched, 0, err
 	}
+	b.marker = last
 	for _, rej := range rejections {
 		b.countRejection(rej.Reason)
 		b.logger().Warn("a record was refused by the schema and set aside — the rest of the page still historised",
@@ -261,15 +335,23 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 	started := time.Now()
 	var changed <-chan struct{}
+	var head int64
 	retry := time.Second
+	b.ReadAhead = true
+	defer b.dropAhead()
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		// Keep the version captured before the FIRST page through the final
-		// empty read. Updates arriving during a drain remain owed.
+		// read. Updates arriving during a drain remain owed. The head announced
+		// by then is the boundary this drain must reach.
 		if changed == nil && b.Changes != nil {
 			changed = b.Changes()
+			head = 0
+			if b.Head != nil {
+				head = b.Head()
+			}
 		}
 		fetched, _, err := b.pass(ctx)
 		if b.Health != nil {
@@ -288,7 +370,9 @@ func (b *Bridge) Run(ctx context.Context) error {
 			continue
 		}
 		retry = time.Second
-		if fetched > 0 {
+		// More is waiting unless the page reached the head this drain started
+		// with; without a known head only an empty page proves it.
+		if fetched > 0 && (head == 0 || b.next < head || b.ahead != nil) {
 			continue
 		}
 		if err == nil && b.Changes != nil {

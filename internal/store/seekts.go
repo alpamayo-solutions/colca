@@ -18,9 +18,9 @@ import (
 // ts lies before the first retained record. Offsets the search lands on but no
 // record holds count as the next record that exists.
 func (s *Store) SeekTS(stream string, ts int64) (uint64, error) {
-	s.mu.Lock()
+	s.state.RLock()
 	lo, hi := s.lwm[stream], s.next[stream]
-	s.mu.Unlock()
+	s.state.RUnlock()
 	if lo == 0 {
 		lo = 1 // unknown stream: offsets start at 1
 	}

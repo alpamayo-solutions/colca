@@ -573,6 +573,14 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.Engine.RunLogGate(n.stop)
 	}()
 
+	// 11. Replicated records reach the bus through one goroutine (see
+	//     engine/repldeliver.go).
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		n.Engine.RunReplicatedDelivery(n.stop)
+	}()
+
 	// The node's own log is delivered only now: the engine is fully configured (a
 	// publisher appending earlier would race with that), and the bundle that
 	// defines _Log is loaded. Earlier lines wait in the queue, in order.

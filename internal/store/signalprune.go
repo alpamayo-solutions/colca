@@ -320,6 +320,8 @@ func (s *Store) deleteSignalRecords(stream string, doomed []doomedRec, overridde
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return 0, 0, nil, err
 	}
+	s.state.Lock()
+	defer s.state.Unlock()
 	grew := off != s.next[stream]
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes

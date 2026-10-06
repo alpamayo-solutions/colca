@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"sync"
@@ -45,6 +46,10 @@ const (
 	uplinkIdle   = 30 * time.Second
 	downlinkWait = 20 * time.Second
 	retryAfter   = 500 * time.Millisecond
+	// expectContinueBytes is the push size from which the uplink asks the
+	// parent before sending the body: a backlog's full batches, not the few
+	// records of a live push, whose extra round trip would cost more.
+	expectContinueBytes = 64 << 10
 
 	// A request's deadline grows with what it carries: transferGrace covers the
 	// round trip and minTransferBPS is the slowest link this must still work on. A
@@ -178,13 +183,19 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 		return 0, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if len(body) >= expectContinueBytes {
+		// A busy parent answers 429 before reading a push; asked first, it
+		// does so before a large body crosses the link (and is resent).
+		req.Header.Set("Expect", "100-continue")
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, &replError{Route: "replicate to " + c.base, Status: resp.StatusCode, Body: readReason(resp)}
+		return 0, 0, &replError{Route: "replicate to " + c.base, Status: resp.StatusCode, Body: readReason(resp),
+			RetryAfter: retryAfterHeader(resp)}
 	}
 	var out struct {
 		HWM   uint64 `json:"hwm"`
@@ -563,6 +574,8 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 	// pushOnce pushes at most one batch of stream and reports whether it scanned
 	// anything, which is how "drained" is measured. aborted means our own shutdown.
 	retryPending := false
+	// busyDelay is how long a parent that answered 429 asked to be left alone.
+	var busyDelay time.Duration
 	var pushOnce func(string, func(string) bool) (bool, bool)
 	pushOnce = func(stream string, filter func(string) bool) (scanned, aborted bool) {
 		from := eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), stream)
@@ -673,8 +686,19 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				// colca_uplink_refused_total and this error make the stalled lane visible.
 				var refusal *replError
 				refused := errors.As(err, &refusal) && refusal.Refused()
+				busy := refusal != nil && refusal.Busy()
+				if busy {
+					// The parent is shedding load: wait as long as it asked, with
+					// jitter so its children do not return in step.
+					wait := max(refusal.RetryAfter, retryAfter)
+					busyDelay = max(busyDelay, wait/2+rand.N(wait)) //nolint:gosec // retry jitter
+				}
 				if report, attempts, down := c.links.Failed("uplink:"+stream, time.Now()); report {
-					if refused {
+					if busy {
+						c.log.Warn("the parent is busy and asked the uplink to retry later — the batch is held, nothing is dropped",
+							"stream", stream, "parent", c.base, "retry_after", refusal.RetryAfter,
+							"attempts", attempts, "busy_for", down.Round(time.Second))
+					} else if refused {
 						c.log.Error("uplink refused by the parent — the batch is held and retried, nothing is dropped",
 							"stream", stream, "parent", c.base, "status", refusal.Status,
 							"meaning", replicationStatusMeaning(refusal.Status),
@@ -758,9 +782,10 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		if idle {
 			delay := uplinkIdle // recovery/blob discovery, not ordinary stream pacing
 			if retryPending {
-				delay = retryAfter
+				delay = max(retryAfter, busyDelay)
 				wake = nil // commits cannot shorten a failed-request backoff
 			}
+			busyDelay = 0
 			select {
 			case <-stop:
 				return

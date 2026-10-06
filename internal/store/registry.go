@@ -158,6 +158,7 @@ func (s *Store) RegistryRetire(ulid, stream string, rec Record, also []Record, r
 	if err != nil {
 		return 0, nil, err
 	}
+	s.hwmsDropped(ret.Child)
 	s.adopted.Delete(ret.Child)
 	return off, retired, nil
 }
@@ -216,6 +217,8 @@ func (s *Store) registryBatchLocked(batches []streamRecords, mut func(*pebble.Ba
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return 0, err
 	}
+	s.state.Lock()
+	defer s.state.Unlock()
 	for _, sr := range batches {
 		s.next[sr.stream] = next[sr.stream]
 		s.bytes[sr.stream] = live[sr.stream]

@@ -4,7 +4,9 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/httplimit"
@@ -21,7 +23,13 @@ const (
 	limitClassReplication     = "replication"
 	limitClassReplDownlink    = "downlink"
 	limitClassReplTransfer    = "transfer"
+	limitClassReplBytes       = "replication_bytes"
+	limitClassReplBacklog     = "replication_backlog"
 )
+
+// maxReplicatedBacklog is how many replicated records may wait for the store
+// before the door answers new pushes 429: about four group commits of the largest size.
+var maxReplicatedBacklog int64 = 16384
 
 var (
 	// replAuthPolicy guards the door per source address against callers whose
@@ -107,3 +115,42 @@ func (s *Server) acquireRequest(w http.ResponseWriter, class, child string, poli
 	s.metrics.HTTPRequestLimited(metrics.DoorRepl, class)
 	return nil, false
 }
+
+// replicationBytes bounds the request bytes of the pushes a parent holds at
+// once. A push lives in memory from its body to its group commit at several
+// times its size (the decoded records, their batch, the bus copies); when
+// children push faster than the store commits, every child's push waits in
+// memory, and a parent with 1000 children reached its 2 GiB ceiling within two
+// minutes (fleet scale benchmark, 2026-10). Past the budget a push is answered
+// 429 with Retry-After, and the child keeps the batch and sends it again.
+type byteBudget struct {
+	limit int64
+	used  atomic.Int64
+}
+
+// replicationBudgetBytes is the budget for a node: a 32nd of the Go memory
+// limit when one is set (memlimit derives it from the container), else 64 MiB,
+// and never below one request at its largest.
+func replicationBudgetBytes(maxBody int64) int64 {
+	budget := int64(64 << 20)
+	if limit := debug.SetMemoryLimit(-1); limit > 0 && limit < math.MaxInt64 {
+		budget = limit / 32
+	}
+	return max(budget, maxBody)
+}
+
+// reserve takes n bytes of the budget, or reports false and takes nothing. A
+// request always fits an idle budget, so no size is refused for good.
+func (b *byteBudget) reserve(n int64) bool {
+	for {
+		used := b.used.Load()
+		if used > 0 && used+n > b.limit {
+			return false
+		}
+		if b.used.CompareAndSwap(used, used+n) {
+			return true
+		}
+	}
+}
+
+func (b *byteBudget) release(n int64) { b.used.Add(-n) }

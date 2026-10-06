@@ -72,6 +72,9 @@ type Server struct {
 	// streams. Tests read it: a commit to any other stream must not wake them.
 	downlinkWakes atomic.Int64
 
+	// pushBytes bounds the bytes of pushes held at once; see byteBudget.
+	pushBytes byteBudget
+
 	// inflight lets the owner of shutdown see running handlers. Set once before
 	// Start; nil in tests. See SetInflightTracker.
 	inflight func(http.Handler) http.Handler
@@ -117,8 +120,10 @@ func (s *Server) auditDenied(operation, reason string, entry *uns.Entry, metadat
 // NewServer builds a replication server. m may be nil, and blobs may be nil in
 // tests that never touch the blob routes.
 func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, reg *registry.Manager, blobs *blobstore.Store, m *metrics.Metrics) (*Server, error) {
-	return &Server{cfg: cfg, eng: eng, id: id, reg: reg, blobs: blobs, metrics: m, limiter: httplimit.New(),
-		log: slog.Default().With("node", cfg.ULID, "comp", "repl-server")}, nil
+	s := &Server{cfg: cfg, eng: eng, id: id, reg: reg, blobs: blobs, metrics: m, limiter: httplimit.New(),
+		log: slog.Default().With("node", cfg.ULID, "comp", "repl-server")}
+	s.pushBytes.limit = replicationBudgetBytes(replicateBodyLimit(cfg))
+	return s, nil
 }
 
 // childFromReq resolves the authenticated child from its TLS client
@@ -298,6 +303,26 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	// Records already waiting for the store are what the store commits in the
+	// next second or so; a push beyond that would only wait in memory.
+	if s.eng.Store().ReplicatedBacklog() >= maxReplicatedBacklog {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "the parent is busy: its store is behind", http.StatusTooManyRequests)
+		s.metrics.HTTPRequestLimited(metrics.DoorRepl, limitClassReplBacklog)
+		return
+	}
+	// A body without a declared length is counted at the largest a body may be.
+	size := r.ContentLength
+	if size < 0 {
+		size = replicateBodyLimit(s.cfg)
+	}
+	if !s.pushBytes.reserve(size) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "the parent is busy: too many pushes in progress", http.StatusTooManyRequests)
+		s.metrics.HTTPRequestLimited(metrics.DoorRepl, limitClassReplBytes)
+		return
+	}
+	defer s.pushBytes.release(size)
 	r.Body = http.MaxBytesReader(w, r.Body, replicateBodyLimit(s.cfg))
 	var in struct {
 		Stream  string    `json:"stream"`

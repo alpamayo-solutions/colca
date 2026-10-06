@@ -207,3 +207,34 @@ func TestAdoptChildStoreRemembersTheIncarnation(t *testing.T) {
 		t.Fatalf("HWM after a rebuilt store = %d, want 0", got)
 	}
 }
+
+// A group stops at maxGroupRecords, never splits a request and always takes
+// the oldest, however large it is.
+func TestAGroupCommitIsBounded(t *testing.T) {
+	req := func(n int) *replRequest { return &replRequest{recs: make([]ReplRecord, n)} }
+	big := req(maxGroupRecords + 10)
+	group, rest := takeGroup([]*replRequest{big, req(1)})
+	if len(group) != 1 || group[0] != big || len(rest) != 1 {
+		t.Fatalf("an oversized oldest request: group %d rest %d", len(group), len(rest))
+	}
+	var pending []*replRequest
+	for range 3 * maxGroupRecords / 200 {
+		pending = append(pending, req(200))
+	}
+	total := 0
+	for len(pending) > 0 {
+		var group []*replRequest
+		group, pending = takeGroup(pending)
+		records := 0
+		for _, r := range group {
+			records += len(r.recs)
+		}
+		if records > maxGroupRecords || len(group) == 0 {
+			t.Fatalf("a group of %d records in %d requests", records, len(group))
+		}
+		total += records
+	}
+	if total != 3*maxGroupRecords/200*200 {
+		t.Fatalf("groups covered %d records", total)
+	}
+}
