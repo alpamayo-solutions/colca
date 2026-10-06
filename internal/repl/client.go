@@ -694,17 +694,18 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 					busyDelay = max(busyDelay, wait/2+rand.N(wait)) //nolint:gosec // retry jitter
 				}
 				if report, attempts, down := c.links.Failed("uplink:"+stream, time.Now()); report {
-					if busy {
+					switch {
+					case busy:
 						c.log.Warn("the parent is busy and asked the uplink to retry later — the batch is held, nothing is dropped",
 							"stream", stream, "parent", c.base, "retry_after", refusal.RetryAfter,
 							"attempts", attempts, "busy_for", down.Round(time.Second))
-					} else if refused {
+					case refused:
 						c.log.Error("uplink refused by the parent — the batch is held and retried, nothing is dropped",
 							"stream", stream, "parent", c.base, "status", refusal.Status,
 							"meaning", replicationStatusMeaning(refusal.Status),
 							"parent_said", refusal.Body,
 							"attempts", attempts, "held_for", down.Round(time.Second))
-					} else {
+					default:
 						c.log.Warn("uplink is down (retrying)",
 							"stream", stream, "parent", c.base,
 							"attempts", attempts, "down_for", down.Round(time.Second), "err", err)

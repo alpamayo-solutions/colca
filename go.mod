@@ -73,8 +73,12 @@ require (
 // only for topics with a shared subscription, so the hook can keep one person's
 // acks from another.
 // The connection-admission fix also serializes WaitGroup registration with
-// shutdown, refusing sockets accepted just before the listeners close.
-// Drop this replace once a released mochi version contains all seven;
+// shutdown, refusing sockets accepted just before the listeners close. Its branch
+// perf/retained-expiry-sweep visits only retained messages that carry an expiry
+// in the once-a-second expiry sweep, which copied every retained message (a
+// hub with 100,000 retained metrics spent 7-12 % of a core on it); it is a cost,
+// not a correctness fix, so no test goes red without it.
+// Drop this replace once a released mochi version contains all seven fixes;
 // internal/mqttsrv's TestRetainedDeliveryRacingAWildcardSubscribeDoesNotRace goes
 // red under -race if it is dropped early,
 // TestAPubackBufferedBehindQueuedDeliveriesReachesTheClientBeforeShutdown fails
@@ -83,4 +87,4 @@ require (
 // TestATakenOverConnectionsWillDoesNotOverwriteTheNewAnnounce fails without the
 // takeover fix, and TestAnAckReachesOnlyThePersonWhoSentTheCommand without the
 // subscriber-selection fix.
-replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20260927083005-067d3b1ae6e4
+replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20261005221444-d9e5087371e3
