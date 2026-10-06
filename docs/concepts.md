@@ -166,6 +166,43 @@ Some commands are executed by the node itself rather than a machine:
 | `_CmdEdit` | apply an atomic, versioned edit composed by an editor application |
 | `_CmdAdmin` | enroll or revoke an identity on a node that is only reachable through the tree, or read a node's own logs (`fetchLogs`) |
 
+### Binding a signal to a tag
+
+A signal reads from at most one data tag (`data_tag`), and a tag binds to at
+most one signal of a node. The node refuses a write that would bind a tag
+another signal already holds, whichever door the write comes through
+(`signal/upsert`, a `_CmdEdit` binding, create or update, autobind). The
+refusal is a `409` that names the holder:
+
+```
+signal/upsert: tag <tag> is already bound to signal <id> at <path> — a tag binds to at most one signal. …
+```
+
+Two signals that already shared a tag before this rule are left alone: only a
+new binding is refused, so the command that resolves them can still commit.
+
+**Declaring a binding before the tag exists.** A signal declared before its
+connector has published a catalogue cannot name the tag's id. It names the tag
+it waits for instead, with `bind_intent: {"connector": …, "variable": …}`: the
+connector's enrolled name or ULID, and the tag's `name` or `source`. When that
+connector publishes a catalogue holding the variable, the node binds the tag to
+the signal wherever the signal sits, before it adopts a declared signal by name
+or mints a new one, and drops the intent. A `signal/upsert` whose intent the
+node can already answer binds at once. Two signals waiting for the same tag
+leave it unbound (autobind reports them as `ambiguous`). Unbinding a signal
+drops its intent, so a later publish does not bind it again.
+
+**Taking a tag over.** A signal that autobind minted carries `is_autobound:
+true`. A `signal/upsert` entry with `"take_over": true` and a `data_tag` held
+by such a signal moves the tag to the upserted signal and retires the minted
+one in the same commit. It also resolves a tag two signals already share: the
+upserted signal keeps it and the minted one is retired. It is refused when the
+holder was declared rather than minted, or when anything is positioned below
+it. The retired signal's metric
+history stays in the historian under the retired signal's id; nothing is
+deleted or rewritten there. A signal minted before `is_autobound` existed
+counts as minted when it carries no field autobind does not write.
+
 ### Fetching a node's logs
 
 A node keeps its whole `logs` stream locally. An ancestor reads it on demand

@@ -556,6 +556,10 @@ export type ServiceDetails = {
 
 /** `_Signal` — stream class `entity`. */
 export type Signal = {
+  bind_intent?: null | {
+    connector: string;
+    variable: string;
+  };
   config?: Record<string, unknown>;
   created_at?: null | string;
   data_tag?: null | string;
@@ -564,6 +568,7 @@ export type Signal = {
   has_contract?: boolean;
   id: string;
   index_type?: "time" | "numerical" | "none" | null;
+  is_autobound?: boolean;
   is_logged?: boolean;
   is_published?: boolean;
   max_value?: null | number;

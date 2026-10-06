@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -69,10 +70,11 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	// The trigger writes state like the verb does, so it takes the same lock.
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	element, mount, ok := c.owningEntry(topic)
+	entry, mount, ok := c.owningEntry(topic)
 	if !ok {
 		return // no enrolled entry's computed catalogue topic matches: ignore it
 	}
+	element := entry.Element
 	var cat catalogue
 	if err := json.Unmarshal(payload, &cat); err != nil {
 		return
@@ -97,30 +99,31 @@ func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
 	// left alone, so a republish never revives a binding an operator deleted. With
 	// no earlier publish in this process, bind only if nothing is bound yet; an
 	// explicit signal/autobind covers a catalogue that grew across a restart.
+	//
+	// A declared signal's bind_intent is honoured on every publish, for every
+	// free tag: it is an explicit request, and unbinding a signal drops it, so
+	// it never revives a binding either.
 	bindings := c.bindings()
+	mint := map[string]bool{}
 	if !seen {
+		fresh := true
 		for _, tag := range cat.DataTags {
 			if bindings.propose(tag.ID, "") != bindFree {
-				return // already bound: a republish, not a new connector
+				fresh = false // already bound: a republish, not a new connector
+				break
 			}
 		}
-		c.bindCatalogue(CommandContext{}, mount, element, payload)
-		return
-	}
-	var grown catalogue
-	for _, tag := range cat.DataTags {
-		if _, known := previous[tag.ID]; !known {
-			grown.DataTags = append(grown.DataTags, tag)
+		if fresh {
+			mint = nil // every tag
+		}
+	} else {
+		for _, tag := range cat.DataTags {
+			if _, known := previous[tag.ID]; !known {
+				mint[tag.ID] = true
+			}
 		}
 	}
-	if len(grown.DataTags) == 0 {
-		return // the same catalogue again
-	}
-	encoded, err := json.Marshal(grown)
-	if err != nil {
-		return
-	}
-	c.bindCatalogue(CommandContext{}, mount, element, encoded)
+	c.bindCatalogue(CommandContext{}, mount, element, entry, cat, mint)
 }
 
 // changedMeta returns the tags whose stated fields differ between two
@@ -136,19 +139,19 @@ func changedMeta(previous, current map[string]tagMeta) map[string]bool {
 }
 
 // owningEntry finds the enrolled identity whose computed catalogue topic is
-// topic, and returns the element and mount it is bound to. It compares the
-// full topic, node id included, so records from another node never match.
-func (c *ConfigExec) owningEntry(topic string) (element, mount string, ok bool) {
+// topic, and returns it with the mount it is bound to. It compares the full
+// topic, node id included, so records from another node never match.
+func (c *ConfigExec) owningEntry(topic string) (entry EntryRef, mount string, ok bool) {
 	for _, e := range c.bound.Entries() {
 		m, ok := c.mountFor(e.Element)
 		if !ok {
 			continue // cannot place this entry here: it owns nothing
 		}
 		if CatalogueTopic(c.store.NodeID(), m, e.Name) == topic {
-			return e.Element, m, true
+			return e, m, true
 		}
 	}
-	return "", "", false
+	return EntryRef{}, "", false
 }
 
 // mountFor resolves an identity's element to this node's local path. It keeps
@@ -165,6 +168,10 @@ func (c *ConfigExec) mountFor(element string) (mount string, ok bool) {
 type signalRef struct {
 	Path   string          `json:"path"`
 	Signal json.RawMessage `json:"signal"`
+	// TakeOver moves the signal's data_tag to it when another signal holds
+	// the tag, and retires that signal. Only a signal autobind minted, with
+	// nothing positioned below it, can be retired this way.
+	TakeOver bool `json:"take_over"`
 }
 
 type upsertBody struct {
@@ -271,20 +278,59 @@ type autobindBody struct {
 
 // catalogue is the part of a connector's _DataTags record this needs.
 type catalogue struct {
-	DataTags []struct {
-		// ID is the tag's ULID, minted by the connector at discovery and stable
-		// across rediscovery. Signal.data_tag points here.
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		DataType string `json:"data_type"`
-		// Meta.Element, when set, is the node-local path of the element this tag's
-		// signal belongs under instead of the connector's mount, so one service can
-		// publish for several machines. Missing elements on that path are created.
-		Meta struct {
-			Element string `json:"element"`
-			tagMeta
-		} `json:"meta"`
-	} `json:"data_tags"`
+	DataTags []catalogueTag `json:"data_tags"`
+}
+
+// catalogueTag is one tag of a catalogue.
+type catalogueTag struct {
+	// ID is the tag's ULID, minted by the connector at discovery and stable
+	// across rediscovery. Signal.data_tag points here.
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	DataType string `json:"data_type"`
+	// Source is the tag's address at the connector (an OPC UA node id, a
+	// register); a bind_intent may name the tag by it instead of by name.
+	Source string `json:"source"`
+	// Meta.Element, when set, is the node-local path of the element this tag's
+	// signal belongs under instead of the connector's mount, so one service can
+	// publish for several machines. Missing elements on that path are created.
+	Meta struct {
+		Element string `json:"element"`
+		tagMeta
+	} `json:"meta"`
+}
+
+// bindIntent is a declared signal's bind_intent: the tag it waits for, named
+// by its connector and its variable (the tag's name or source).
+type bindIntent struct {
+	Connector string `json:"connector"`
+	Variable  string `json:"variable"`
+}
+
+// names reports whether the intent names this tag of this connector. The
+// connector is named by its enrolled name or its ULID.
+func (i bindIntent) names(conn EntryRef, tag catalogueTag) bool {
+	if i.Connector == "" || i.Variable == "" {
+		return false
+	}
+	if i.Connector != conn.Name && i.Connector != conn.ULID {
+		return false
+	}
+	return i.Variable == tag.Name || (tag.Source != "" && i.Variable == tag.Source)
+}
+
+// intentOf reads a signal record's bind_intent; ok is false when it has none.
+func intentOf(record map[string]any) (bindIntent, bool) {
+	raw, ok := record["bind_intent"].(map[string]any)
+	if !ok {
+		return bindIntent{}, false
+	}
+	connector, _ := raw["connector"].(string)
+	variable, _ := raw["variable"].(string)
+	if connector == "" || variable == "" {
+		return bindIntent{}, false
+	}
+	return bindIntent{Connector: connector, Variable: variable}, true
 }
 
 // tagMeta is what a catalogue tag says about its signal beyond name and type.
@@ -945,6 +991,7 @@ func (c *ConfigExec) upsert(ctx CommandContext, payload []byte) (int, string, st
 	written := make(map[string]bool, len(body.Signals))
 	var vacated []string
 	claims := c.positionsByID("_Signal", "signal")
+	bindings := c.bindings()
 	for i, ref := range body.Signals {
 		if ref.Path == "" {
 			return 422, fmt.Sprintf("signal/upsert: entry %d has no path", i), "invalid", nil
@@ -973,6 +1020,17 @@ func (c *ConfigExec) upsert(ctx CommandContext, payload []byte) (int, string, st
 		if err != nil {
 			return 422, fmt.Sprintf("signal/upsert: entry %d unreadable: %v", i, err), "invalid", nil
 		}
+		identity := incoming.ID
+		if identity == "" {
+			identity = ref.Path
+		}
+		payload, retired, refusal := c.settleBinding(identity, ref.Path, payload, ref.TakeOver, bindings)
+		if refusal != "" {
+			return 409, "signal/upsert: " + refusal, "conflict", nil
+		}
+		for _, path := range retired {
+			vacated = append(vacated, c.signalTopic(path))
+		}
 		topic := c.signalTopic(ref.Path)
 		written[topic] = true
 		records = append(records, StateRecord{Topic: topic, Payload: payload})
@@ -982,9 +1040,217 @@ func (c *ConfigExec) upsert(ctx CommandContext, payload []byte) (int, string, st
 	writes, err := c.commit(ctx, records)
 	if err != nil {
 		// Nothing was written; the error names the refused record.
-		return 422, "signal/upsert: rejected: " + err.Error(), "invalid", nil
+		code, msg, status := commitRefusal("signal/upsert", err)
+		return code, msg, status, nil
 	}
 	return 200, fmt.Sprintf("upserted %d", upserted), "ok", writes
+}
+
+// settleBinding applies the one-signal-per-tag rule to a signal record an
+// upsert is about to write, and returns the record to write.
+//
+// A record with a data_tag drops its bind_intent, which only means something
+// while the signal is unbound. When another signal holds that tag, elsewhere
+// than the position this record replaces, the upsert is refused naming the
+// holder, unless takeOver asks to move the tag: then every other holder is
+// retired (their paths are returned) if autobind minted it and nothing is
+// positioned below it. Their metric history stays where it is, under their
+// ids. take_over also resolves a tag two signals already share, which an
+// upsert without it leaves alone.
+//
+// A record without a data_tag but with a bind_intent is bound at once when the
+// named connector's catalogue already holds a free tag the intent names, so a
+// catalogue that arrived just before the declaration does not wait for the
+// next publish.
+func (c *ConfigExec) settleBinding(
+	id, path string, payload json.RawMessage, takeOver bool, bindings *signalBindings,
+) (json.RawMessage, []string, string) {
+	var record map[string]any
+	if json.Unmarshal(payload, &record) != nil {
+		return payload, nil, "" // not a record: the schema check refuses it
+	}
+	tagID, _ := record["data_tag"].(string)
+	if tagID == "" {
+		tag, ok := c.resolveIntent(record, id, bindings)
+		if !ok {
+			return payload, nil, ""
+		}
+		bindings.bind(tag.ID, id)
+		encoded, err := json.Marshal(adoptTag(record, tag, c.semanticTags()))
+		if err != nil {
+			return payload, nil, ""
+		}
+		return encoded, nil, ""
+	}
+	delete(record, "bind_intent")
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return payload, nil, ""
+	}
+	standing := bindings.tagHeldBy(id) == tagID
+	if standing && !takeOver {
+		// This binding already stands. A second signal on the same tag, from
+		// before the rule, is left alone unless take_over asks to resolve it.
+		return encoded, nil, ""
+	}
+	holders := c.otherHolders(tagID, id, path, bindings)
+	if len(holders) == 0 {
+		bindings.bind(tagID, id)
+		return encoded, nil, ""
+	}
+	first := holders[0]
+	refusal := (&TagHeldError{Tag: tagID, Signal: id, Holder: first.id, HolderPath: first.path}).Error()
+	if !takeOver {
+		if why := c.notRetirable(first); why != "" {
+			return nil, nil, refusal + ". " + why + ", so take_over cannot retire it: unbind or delete it first"
+		}
+		return nil, nil, refusal + ". " + first.id + " was created by autobind: send take_over: true with " +
+			id + " to move the tag to it and retire " + first.id +
+			" (its metric history stays in the historian under " + first.id + ")"
+	}
+	retired := make([]string, 0, len(holders))
+	for _, held := range holders {
+		if why := c.notRetirable(held); why != "" {
+			refusal = (&TagHeldError{Tag: tagID, Signal: id, Holder: held.id, HolderPath: held.path}).Error()
+			return nil, nil, refusal + ". take_over refused: " + why + ", so it is not retired: unbind or delete it first"
+		}
+		retired = append(retired, held.path)
+	}
+	bindings.unbind(tagID)
+	bindings.bind(tagID, id)
+	return encoded, retired, ""
+}
+
+// otherHolders lists the signals other than id that hold tagID: those this
+// node stores, except one standing at path (the write replaces it), and one an
+// earlier entry of the same command bound.
+func (c *ConfigExec) otherHolders(tagID, id, path string, bindings *signalBindings) []heldSignal {
+	var out []heldSignal
+	seen := map[string]bool{}
+	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
+		var record map[string]any
+		if json.Unmarshal(rec.Payload, &record) != nil {
+			continue
+		}
+		if tag, _ := record["data_tag"].(string); tag != tagID || rec.Path == path {
+			continue
+		}
+		held, _ := record["id"].(string)
+		if held == "" {
+			held = rec.Path
+		}
+		if held == id {
+			continue
+		}
+		seen[held] = true
+		out = append(out, heldSignal{id: held, path: rec.Path, record: record})
+	}
+	if holder := bindings.signalHolding(tagID); holder != "" && holder != id && !seen[holder] {
+		if held := c.signalWithID(holder); held.path != path {
+			// Bound by an earlier entry of this command: not stored yet, so
+			// nothing autobind minted, and never retirable.
+			held.id = holder
+			out = append(out, held)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
+	return out
+}
+
+// heldSignal is one of this node's signal records, found by id.
+type heldSignal struct {
+	id     string
+	path   string
+	record map[string]any
+}
+
+// signalWithID finds this node's signal with the given id, or the one at the
+// path an id-less record is keyed by.
+func (c *ConfigExec) signalWithID(id string) heldSignal {
+	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
+		var record map[string]any
+		if json.Unmarshal(rec.Payload, &record) != nil {
+			continue
+		}
+		if held, _ := record["id"].(string); held == id || (held == "" && rec.Path == id) {
+			return heldSignal{id: id, path: rec.Path, record: record}
+		}
+	}
+	return heldSignal{}
+}
+
+// autoboundFields is every field autobind writes onto a signal it mints. A
+// signal minted before is_autobound existed carries no others.
+var autoboundFields = map[string]bool{
+	"id": true, "name": true, "data_tag": true, "is_published": true, "system_element_id": true,
+	"data_type": true, "unit": true, "description": true, "semantic_type_id": true, "is_autobound": true,
+}
+
+// notRetirable says why a take_over may not retire this signal; "" means it
+// may. Only a signal autobind minted can go: it says is_autobound, or, minted
+// before that field existed, it carries nothing autobind does not write. And
+// nothing may be positioned below it, which retiring it would orphan.
+func (c *ConfigExec) notRetirable(held heldSignal) string {
+	if held.record == nil {
+		return "the holder is not a signal this node holds"
+	}
+	id, _ := held.record["id"].(string)
+	if marked, _ := held.record["is_autobound"].(bool); !marked {
+		for field := range held.record {
+			if !autoboundFields[field] {
+				return id + " was not created by autobind"
+			}
+		}
+	}
+	var below []string
+	for _, contract := range []string{"_Signal", "_SystemElement", "_Constant", "_Resource"} {
+		for _, rec := range c.store.KVScan(contract, c.store.NodeID()) {
+			if strings.HasPrefix(rec.Path, held.path+"/") {
+				below = append(below, rec.Path)
+			}
+		}
+	}
+	if len(below) > 0 {
+		sort.Strings(below)
+		return id + " still holds " + strings.Join(below, ", ")
+	}
+	return ""
+}
+
+// resolveIntent finds the tag a record's bind_intent names in a catalogue this
+// node already holds. It answers only when exactly one free tag matches.
+func (c *ConfigExec) resolveIntent(record map[string]any, id string, bindings *signalBindings) (catalogueTag, bool) {
+	intent, ok := intentOf(record)
+	if !ok || c.bound == nil {
+		return catalogueTag{}, false
+	}
+	var found []catalogueTag
+	for _, entry := range c.bound.Entries() {
+		if intent.Connector != entry.Name && intent.Connector != entry.ULID {
+			continue
+		}
+		mount, ok := c.mountFor(entry.Element)
+		if !ok {
+			continue
+		}
+		raw, ok := c.store.KVGet(CatalogueTopic(c.store.NodeID(), mount, entry.Name))
+		if !ok {
+			continue
+		}
+		var cat catalogue
+		if json.Unmarshal(raw, &cat) != nil {
+			continue
+		}
+		for _, tag := range cat.DataTags {
+			if intent.names(entry, tag) {
+				found = append(found, tag)
+			}
+		}
+	}
+	if len(found) != 1 || bindings.propose(found[0].ID, id) != bindFree {
+		return catalogueTag{}, false
+	}
+	return found[0], true
 }
 
 // preserveBinding keeps the stored binding, learned data type and replication
@@ -1011,10 +1277,24 @@ func (c *ConfigExec) preserveBinding(path string, incoming json.RawMessage) (jso
 			delete(next, "data_tag") // never persist an explicit null
 		}
 	}
-	for _, field := range []string{"is_published", "data_type", "replication_policy"} {
+	// bind_intent like the binding: kept when not spoken, cleared by an
+	// explicit null. A record that is bound has no use for one.
+	for _, field := range []string{"is_published", "data_type", "replication_policy", "bind_intent"} {
 		if _, spoken := next[field]; !spoken {
 			if value, has := stored[field]; has {
 				next[field] = value
+			}
+		}
+	}
+	if intent, spoken := next["bind_intent"]; spoken && intent == nil {
+		delete(next, "bind_intent")
+	}
+	// What autobind minted stays marked as minted while the same signal is
+	// rewritten; a different signal written at its position is not.
+	if storedID, _ := stored["id"].(string); storedID != "" && storedID == next["id"] {
+		if marked, _ := stored["is_autobound"].(bool); marked {
+			if _, spoken := next["is_autobound"]; !spoken {
+				next["is_autobound"] = true
 			}
 		}
 	}
@@ -1100,13 +1380,14 @@ func (c *ConfigExec) autobind(ctx CommandContext, payload []byte) (int, string, 
 		}
 		under, at = body.Under, id
 	}
-	code, msg, status, writes := c.bindCatalogue(ctx, under, at, raw)
-	if code != 200 {
-		return code, msg, status, writes
-	}
 	var cat catalogue
 	if err := json.Unmarshal(raw, &cat); err != nil {
-		return 422, "signal/autobind: unreadable catalogue: " + err.Error(), "invalid", writes
+		return 422, "signal/autobind: unreadable catalogue: " + err.Error(), "invalid", nil
+	}
+	conn := EntryRef{ULID: body.Connector, Name: name, Element: element}
+	code, msg, status, writes := c.bindCatalogue(ctx, under, at, conn, cat, nil)
+	if code != 200 {
+		return code, msg, status, writes
 	}
 	updated, synced, err := c.syncCatalogueMeta(ctx, cat, nil)
 	if err != nil {
@@ -1188,31 +1469,54 @@ func (c *ConfigExec) elementAuthor(ctx CommandContext, payload []byte) (int, str
 	return 200, id, "ok", nil
 }
 
-// bindCatalogue creates one signal per unbound tag in a catalogue, under one
-// path and bound to the element there. signal/autobind and the lifecycle
-// trigger both use it, and it is idempotent. Bound tags and taken paths are
-// tracked while the set is composed. An unbound declared signal that matches
-// a tag (see declaredSignals.claim) gets that tag bound instead of a new
-// signal, so a declaration and discovery never produce two signals for one
-// tag.
-func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, raw []byte) (int, string, string, []StateWrite) {
-	var cat catalogue
-	if err := json.Unmarshal(raw, &cat); err != nil {
-		return 422, "signal/autobind: unreadable catalogue: " + err.Error(), "invalid", nil
-	}
-
+// bindCatalogue binds the free tags of a catalogue, under one path and to the
+// element there. signal/autobind and the lifecycle trigger both use it, and it
+// is idempotent. For each free tag, in this order:
+//
+//  1. an unbound signal whose bind_intent names this connector and the tag
+//     gets the tag, wherever it sits. Two such signals leave the tag unbound:
+//     the intents contradict each other, and minting a third would not help;
+//  2. an unbound declared signal at the tag's position (see
+//     declaredSignals.claim) gets the tag;
+//  3. a new signal is minted for it.
+//
+// Steps 2 and 3 run only for the tags in mint; nil means every tag. Bound
+// tags and taken paths are tracked while the set is composed, so a
+// declaration and discovery never produce two signals for one tag.
+func (c *ConfigExec) bindCatalogue(
+	ctx CommandContext, under, element string, conn EntryRef, cat catalogue, mint map[string]bool,
+) (int, string, string, []StateWrite) {
 	bindings := c.bindings()
 	taken := c.takenPaths()
 	declared := c.declaredSignals()
+	intents := c.intentSignals()
 	semantic := c.semanticTags()
 
 	records := make([]StateRecord, 0, len(cat.DataTags))
-	skipped := 0
+	skipped, ambiguous := 0, 0
 	for _, tag := range cat.DataTags {
 		// Skip tags that are already bound; the edit verbs refuse instead (see
 		// signalBindings). The empty signal id stands for a signal not created yet.
 		if bindings.propose(tag.ID, "") != bindFree {
 			skipped++
+			continue
+		}
+		if matches := intents.matching(conn, tag); len(matches) > 0 {
+			if len(matches) > 1 {
+				ambiguous++
+				continue
+			}
+			waiting := matches[0]
+			intents.release(waiting.path)
+			encoded, err := json.Marshal(adoptTag(waiting.record, tag, semantic))
+			if err != nil {
+				return 500, "signal/autobind: encode failed: " + err.Error(), "error", nil
+			}
+			records = append(records, StateRecord{Topic: c.signalTopic(waiting.path), Payload: encoded})
+			bindings.bind(tag.ID, waiting.id)
+			continue
+		}
+		if mint != nil && !mint[tag.ID] {
 			continue
 		}
 		under, element := under, element
@@ -1230,15 +1534,7 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 			under, element = tag.Meta.Element, id
 		}
 		if existing, existingID, path, ok := declared.claim(under, tag.Name); ok {
-			existing["data_tag"] = tag.ID
-			if _, typed := existing["data_type"]; !typed && tag.DataType != "" {
-				existing["data_type"] = tag.DataType
-			}
-			applyTagMeta(existing, tag.Meta.tagMeta, semantic, false)
-			if _, published := existing["is_published"]; !published {
-				existing["is_published"] = true
-			}
-			encoded, err := json.Marshal(existing)
+			encoded, err := json.Marshal(adoptTag(existing, tag, semantic))
 			if err != nil {
 				return 500, "signal/autobind: encode failed: " + err.Error(), "error", nil
 			}
@@ -1257,11 +1553,14 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 		id := c.newID()
 		// The raw tag name is not copied onto the signal; data_tag already reaches
 		// it, and a copy would drift when a connector renames the tag.
+		// is_autobound marks it as minted, not declared: a take_over may retire
+		// it in favour of a declared signal.
 		signal := map[string]any{
 			"id":           id,
 			"name":         leaf,
 			"data_tag":     tag.ID,
 			"is_published": true,
+			"is_autobound": true,
 		}
 		// The binding to the tree. Absent only for an unplaced connector,
 		// whose signals are bound to the node itself the way it is.
@@ -1282,9 +1581,41 @@ func (c *ConfigExec) bindCatalogue(ctx CommandContext, under, element string, ra
 	}
 	writes, err := c.commit(ctx, records)
 	if err != nil {
-		return 422, "signal/autobind: rejected: " + err.Error(), "invalid", nil
+		code, msg, status := commitRefusal("signal/autobind", err)
+		return code, msg, status, nil
+	}
+	if ambiguous > 0 {
+		// Tags two waiting signals both name: bound to neither, and reported.
+		return 200, fmt.Sprintf(`{"created":%d,"skipped":%d,"ambiguous":%d}`, len(records), skipped, ambiguous), "ok", writes
 	}
 	return 200, fmt.Sprintf(`{"created":%d,"skipped":%d}`, len(records), skipped), "ok", writes
+}
+
+// adoptTag binds a waiting or declared signal record to a tag. What the
+// record declares stays; the tag fills in the type and what its meta states,
+// and the record's bind_intent, now answered, is dropped.
+func adoptTag(record map[string]any, tag catalogueTag, semantic map[string]string) map[string]any {
+	record["data_tag"] = tag.ID
+	delete(record, "bind_intent")
+	if declared, _ := record["data_type"].(string); declared == "" && tag.DataType != "" {
+		record["data_type"] = tag.DataType
+	}
+	applyTagMeta(record, tag.Meta.tagMeta, semantic, false)
+	if _, published := record["is_published"]; !published {
+		record["is_published"] = true
+	}
+	return record
+}
+
+// commitRefusal answers a refused commit. A tag another signal holds is a
+// conflict the caller can resolve, so it is a 409 naming the holder; any other
+// refusal is the record's own fault.
+func commitRefusal(verb string, err error) (int, string, string) {
+	var held *TagHeldError
+	if errors.As(err, &held) {
+		return 409, verb + ": " + held.Error(), "conflict"
+	}
+	return 422, verb + ": rejected: " + err.Error(), "invalid"
 }
 
 // applyTagMeta writes what a tag states onto a signal record: into empty
@@ -1382,7 +1713,8 @@ type declaredSignals map[string]declaredSignal
 
 // declaredSignals returns every signal this node holds that has an id and no
 // tag yet. A signal bound to any tag is never in it, so autobind cannot take a
-// signal from another tag or connector.
+// signal from another tag or connector. Nor is a signal with a bind_intent: it
+// names the one tag it waits for, and only that tag binds it (intentSignals).
 func (c *ConfigExec) declaredSignals() declaredSignals {
 	out := declaredSignals{}
 	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
@@ -1393,6 +1725,9 @@ func (c *ConfigExec) declaredSignals() declaredSignals {
 		if tag, _ := record["data_tag"].(string); tag != "" {
 			continue
 		}
+		if _, waiting := intentOf(record); waiting {
+			continue
+		}
 		id, _ := record["id"].(string)
 		if id == "" {
 			continue
@@ -1401,6 +1736,54 @@ func (c *ConfigExec) declaredSignals() declaredSignals {
 	}
 	return out
 }
+
+// waitingSignal is an unbound signal with a bind_intent.
+type waitingSignal struct {
+	path   string
+	id     string
+	record map[string]any
+	intent bindIntent
+}
+
+// intentSignals indexes this node's unbound signals with a bind_intent by
+// path. A bound signal leaves it, so one run never binds two tags to it.
+type intentSignals map[string]waitingSignal
+
+func (c *ConfigExec) intentSignals() intentSignals {
+	out := intentSignals{}
+	for _, rec := range c.store.KVScan("_Signal", c.store.NodeID()) {
+		var record map[string]any
+		if json.Unmarshal(rec.Payload, &record) != nil {
+			continue
+		}
+		if tag, _ := record["data_tag"].(string); tag != "" {
+			continue
+		}
+		intent, waiting := intentOf(record)
+		id, _ := record["id"].(string)
+		if !waiting || id == "" {
+			continue
+		}
+		out[rec.Path] = waitingSignal{path: rec.Path, id: id, record: record, intent: intent}
+	}
+	return out
+}
+
+// matching lists the waiting signals whose intent names this tag of this
+// connector, by path.
+func (w intentSignals) matching(conn EntryRef, tag catalogueTag) []waitingSignal {
+	var out []waitingSignal
+	for _, s := range w {
+		if s.intent.names(conn, tag) {
+			out = append(out, s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
+	return out
+}
+
+// release removes a signal that has just been bound.
+func (w intentSignals) release(path string) { delete(w, path) }
 
 // claim finds the unbound declared signal a tag named name binds to under a
 // path, removes it from the index and returns it with its path. The signal

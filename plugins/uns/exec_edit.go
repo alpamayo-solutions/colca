@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -331,6 +332,12 @@ func (w *EditExec) ExecuteWithWrites(
 	}
 	batchWrites, err := w.store.PublishBatch(ctx, batch)
 	if err != nil {
+		var held *TagHeldError
+		if errors.As(err, &held) {
+			// The plan bound a tag another signal holds (a create or update
+			// that names data_tag, or a bind that raced another command).
+			return w.remember(envelope.OperationID, digest, 409, held.Error(), "conflict", nil)
+		}
 		return 500, "edit commit failed: " + err.Error(), "error", nil
 	}
 	if len(batchWrites) < stateStart+len(records) {

@@ -183,8 +183,7 @@ func (w *EditExec) composeBinding(
 			}
 			switch bindings.propose(operation.TagID, operation.SignalID) {
 			case bindTagHeld:
-				return 409, fmt.Sprintf("binding: tag %s is already bound to %s",
-					operation.TagID, bindings.signalHolding(operation.TagID)), "conflict", nil
+				return 409, "binding: " + heldBy(operation.TagID, operation.SignalID, bindings, signals), "conflict", nil
 			case bindSignalHeld:
 				return 409, fmt.Sprintf("binding: signal %s is already bound to %s",
 					operation.SignalID, bindings.tagHeldBy(operation.SignalID)), "conflict", nil
@@ -197,6 +196,8 @@ func (w *EditExec) composeBinding(
 			}
 			payload := cloneRawMap(signal.Payload)
 			payload["data_tag"] = rawJSON(operation.TagID)
+			// A bound signal waits for nothing.
+			delete(payload, "bind_intent")
 			if err := queue(signal.Record.Topic, payload); err != nil {
 				return 422, "binding: payload is not encodable", "invalid", nil
 			}
@@ -217,6 +218,9 @@ func (w *EditExec) composeBinding(
 			}
 			payload := cloneRawMap(signal.Payload)
 			delete(payload, "data_tag")
+			// An unbound signal keeps no intent either, or the next catalogue
+			// publish would bind it again behind the person's back.
+			delete(payload, "bind_intent")
 			if err := queue(signal.Record.Topic, payload); err != nil {
 				return 422, "binding: payload is not encodable", "invalid", nil
 			}
@@ -234,8 +238,7 @@ func (w *EditExec) composeBinding(
 			// The signal is new (the guard above refused existing ids), so only
 			// the tag side can refuse.
 			if bindings.propose(operation.TagID, operation.SignalID) != bindFree {
-				return 409, fmt.Sprintf("binding: tag %s is already bound to %s",
-					operation.TagID, bindings.signalHolding(operation.TagID)), "conflict", nil
+				return 409, "binding: " + heldBy(operation.TagID, operation.SignalID, bindings, signals), "conflict", nil
 			}
 			parent, code, message := requireEntity(expected, entities, "system-element", operation.ParentID)
 			if code != 0 {
@@ -274,6 +277,15 @@ func (w *EditExec) composeBinding(
 		records = append(records, pending[topic])
 	}
 	return 200, fmt.Sprintf("applied %d binding operations", len(intent.Operations)), "ok", records
+}
+
+// heldBy is the refusal for binding a tag another signal holds, naming the
+// holder by id and path.
+func heldBy(tagID, signalID string, bindings *signalBindings, signals map[string]editSnapshot) string {
+	holder := bindings.signalHolding(tagID)
+	return (&TagHeldError{
+		Tag: tagID, Signal: signalID, Holder: holder, HolderPath: signals[holder].Record.Path,
+	}).Error()
 }
 
 func compatibleDataTypes(left, right string) bool {

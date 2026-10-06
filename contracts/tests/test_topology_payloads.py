@@ -1,18 +1,25 @@
 """Tests for the positioned topology payload contracts."""
 
 import json
+import sys
+from pathlib import Path
 
 from franzmq.data_contracts import PAYLOAD_CLASSES
 from franzmq.data_contracts.base import DataType, IndexType
 from franzmq.topic import Topic
 
 from colca_data_contracts import (
+    BindIntent,
     ConstantDataType,
     ConstantPayload,
     ResourcePayload,
     SignalPayload,
     SystemElementPayload,
 )
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+import generate_bundle as gb
 
 
 def test_system_element_registered():
@@ -263,3 +270,26 @@ def test_system_element_names_its_parent_by_identity():
 def test_a_root_element_has_no_parent():
     root = SystemElementPayload(id="01HROOT", name="Werk1")
     assert SystemElementPayload.decode(root.encode(), timestamp=0).parent_id is None
+
+
+def test_signal_carries_its_binding_intent():
+    """A declared signal whose tag does not exist yet says which tag it waits
+    for, by connector and variable, and the intent survives a round trip."""
+    sig = SignalPayload(
+        id="01HSIG",
+        name="temp",
+        bind_intent=BindIntent(connector="opcua", variable="Drum.Temp"),
+    )
+    decoded = SignalPayload.decode(sig.encode(), timestamp=0)
+
+    assert decoded.bind_intent == BindIntent(connector="opcua", variable="Drum.Temp")
+    assert decoded.data_tag is None
+    assert decoded.is_autobound is False
+
+
+def test_bind_intent_refuses_unknown_keys_in_the_bundle():
+    schema = gb.build_bundle()[0]["contracts"]["_Signal"]["schema"]["properties"]["bind_intent"]
+
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["connector", "variable"]
+    assert "null" in schema["type"]
