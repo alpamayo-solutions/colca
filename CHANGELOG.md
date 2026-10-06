@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.4](https://github.com/alpamayo-solutions/colca/compare/v0.29.3...v0.29.4) (2026-10-06)
+
+
+### Fixes
+
+* **uns:** autobind adopts a declared signal at PREKIT's spelling ([#164](https://github.com/alpamayo-solutions/colca/issues/164)) ([026fb1d](https://github.com/alpamayo-solutions/colca/commit/026fb1d54912c2c84f119ad59a10f5f57e3727b4))
+
 ## [0.29.3](https://github.com/alpamayo-solutions/colca/compare/v0.29.2...v0.29.3) (2026-10-06)
 
 
