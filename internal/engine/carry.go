@@ -143,7 +143,11 @@ func (e *Engine) moveRetained(contract string, moves []store.RetainedMove, attri
 			"offset", first+uint64(i), "topic", record.Topic, "tombstone", record.Delete)
 		e.observeIndexes(contract, record.Topic, record.Payload)
 		if e.deliver != nil {
-			e.deliver(record.Topic, record.Payload, retainFor(class))
+			retain := retainFor(class)
+			if p, err := uns.Parse(record.Topic); err == nil && e.childMetric(p) {
+				retain = false
+			}
+			e.deliver(record.Topic, record.Payload, retain)
 		}
 	}
 }

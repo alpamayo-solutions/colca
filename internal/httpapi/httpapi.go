@@ -54,6 +54,50 @@ func rawPayload(payload []byte) json.RawMessage {
 	return json.RawMessage(payload)
 }
 
+// fetchRecord is one record of a /fetch page. A struct, not a map per record:
+// a 5000-record page encoded three times faster and with a thousandth of the
+// allocations (fleet scale benchmark, 2026-10).
+type fetchRecord struct {
+	// Fields in the order the map encoding gave them (by name), so the wire
+	// bytes stay what they were.
+	ActorID      string          `json:"actor_id"`
+	ActorKind    string          `json:"actor_kind"`
+	ActorLabel   string          `json:"actor_label"`
+	Offset       uint64          `json:"offset"`
+	OriginOffset uint64          `json:"origin_offset"`
+	Payload      json.RawMessage `json:"payload"`
+	Topic        string          `json:"topic"`
+	TS           int64           `json:"ts"`
+	WrittenBy    string          `json:"written_by"`
+}
+
+// kvEntryJSON is one entry of /kv and /kv/lookup. Attribution mirrors
+// /fetch's record: omitted when this entry's write carried none, rather than
+// sent as empty strings.
+func kvEntryJSON(en store.KVEntry) map[string]any {
+	entry := map[string]any{
+		"path":    en.Path,
+		"node_id": en.NodeID,
+		"topic":   en.Topic,
+		"payload": rawPayload(en.Payload),
+		"ts":      en.TS,
+		"offset":  en.Offset,
+	}
+	if en.WrittenBy != "" {
+		entry["written_by"] = en.WrittenBy
+	}
+	if en.ActorID != "" {
+		entry["actor_id"] = en.ActorID
+	}
+	if en.ActorLabel != "" {
+		entry["actor_label"] = en.ActorLabel
+	}
+	if en.ActorKind != "" {
+		entry["actor_kind"] = en.ActorKind
+	}
+	return entry
+}
+
 // maxLogoutBody bounds a back-channel logout request: one signed JWT in a form.
 const maxLogoutBody = 64 << 10
 
@@ -63,8 +107,11 @@ const maxLogoutBody = 64 << 10
 // follower (the historian) reads pages of maxMax: /fetch is rate limited per
 // caller, so the page size is what bounds its records per second.
 const (
-	defaultMax      = 100
-	maxMax          = 5000
+	defaultMax = 100
+	maxMax     = 5000
+	// maxLookupTopics bounds one POST /kv/lookup, and maxLookupBody its body.
+	maxLookupTopics = 1000
+	maxLookupBody   = 1 << 20
 	fetchScanBudget = 20000
 )
 
@@ -783,18 +830,12 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		out := make([]map[string]any, 0, len(recs))
+		out := make([]fetchRecord, 0, len(recs))
 		for _, rec := range recs {
-			out = append(out, map[string]any{
-				"offset":        rec.Offset,
-				"origin_offset": rec.OriginOffset,
-				"topic":         rec.Topic,
-				"payload":       rawPayload(rec.Payload),
-				"ts":            rec.TS,
-				"written_by":    rec.WrittenBy,
-				"actor_id":      rec.ActorID,
-				"actor_label":   rec.ActorLabel,
-				"actor_kind":    rec.ActorKind,
+			out = append(out, fetchRecord{
+				Offset: rec.Offset, OriginOffset: rec.OriginOffset, Topic: rec.Topic,
+				Payload: rawPayload(rec.Payload), TS: rec.TS, WrittenBy: rec.WrittenBy,
+				ActorID: rec.ActorID, ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind,
 			})
 		}
 		m.HTTPFetch(callerLabel(c), stream)
@@ -958,29 +999,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				denied++
 				continue
 			}
-			entry := map[string]any{
-				"path":    en.Path,
-				"node_id": en.NodeID,
-				"topic":   en.Topic,
-				"payload": rawPayload(en.Payload),
-				"ts":      en.TS,
-				"offset":  en.Offset,
-			}
-			// Attribution mirrors /fetch's Record: omitted when this entry's
-			// write carried none, rather than sent as empty strings.
-			if en.WrittenBy != "" {
-				entry["written_by"] = en.WrittenBy
-			}
-			if en.ActorID != "" {
-				entry["actor_id"] = en.ActorID
-			}
-			if en.ActorLabel != "" {
-				entry["actor_label"] = en.ActorLabel
-			}
-			if en.ActorKind != "" {
-				entry["actor_kind"] = en.ActorKind
-			}
-			out = append(out, entry)
+			out = append(out, kvEntryJSON(en))
 		}
 		if denied > 0 {
 			m.ACLDeny(metrics.ACLRead)
@@ -997,6 +1016,53 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"entries": out, "folders": visible, "next": next})
+	}))
+
+	// POST /kv/lookup reads the current-state entries of named topics: what a
+	// live view hydrates from before it subscribes, on a node that does not
+	// retain them on its bus (bus.retain_child_metrics). One request instead of
+	// one prefix scan per parent path. Topics the caller may not read, or that
+	// hold nothing, are left out.
+	mux.HandleFunc("POST /kv/lookup", authFor(limitClassScan, scanPolicy, func(w http.ResponseWriter, r *http.Request, c caller) {
+		var in struct {
+			Topics []string `json:"topics"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxLookupBody)
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "body must be {\"topics\": [...]}"})
+			return
+		}
+		if len(in.Topics) > maxLookupTopics {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("at most %d topics", maxLookupTopics)})
+			return
+		}
+		out := make([]map[string]any, 0, len(in.Topics))
+		denied := 0
+		for _, topic := range in.Topics {
+			p, err := uns.Parse(topic)
+			if err != nil {
+				continue
+			}
+			if !c.admin && !uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic) {
+				denied++
+				continue
+			}
+			en, ok, err := e.Store().KVGet(p.Path, p.NodeID, topic)
+			if err != nil {
+				slog.Default().Error("kv lookup failed", "topic", topic, "err", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "lookup failed"})
+				return
+			}
+			if !ok {
+				continue
+			}
+			out = append(out, kvEntryJSON(en))
+		}
+		if denied > 0 {
+			m.ACLDeny(metrics.ACLRead)
+		}
+		m.HTTPKVRead(callerLabel(c), "lookup", "lookup", len(out))
+		writeJSON(w, http.StatusOK, map[string]any{"entries": out})
 	}))
 
 	// GET /self is a local service's view of its own registry entry: the ULID minted

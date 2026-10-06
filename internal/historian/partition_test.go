@@ -120,13 +120,15 @@ func TestAPoisonedRowIsReportedOnceAcrossARetriedPartitionedPage(t *testing.T) {
 		}
 	}
 	pool := &markerPool{fakePool: fakePool{begin: func(int) (pgx.Tx, error) { return tx(), nil }}}
-	sink := &Sink{Pool: pool, Writers: 64}
+	// Four writers and eight rows: the page is split (a page needs two rows
+	// per writer), and poison and flaky land in different shares.
+	sink := &Sink{Pool: pool, Writers: 4}
 	v := 1.0
 	var rows []Row
 	for _, sig := range []string{"poison", "flaky", "a", "b", "c", "d", "e", "f"} {
 		rows = append(rows, Row{SignalID: sig, Number: &v})
 	}
-	if partitionOf("poison", 64) == partitionOf("flaky", 64) {
+	if partitionOf("poison", 4) == partitionOf("flaky", 4) {
 		t.Skip("poison and flaky share a partition; the test needs them apart")
 	}
 	rej, err := sink.Apply(context.Background(), rows, Consumer, 8)

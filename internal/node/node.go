@@ -421,6 +421,11 @@ func Start(cfg *config.Config) (*Node, error) {
 			return fail(fmt.Errorf("node %s: reseed retained set: %w", cfg.ULID, err))
 		}
 		for _, en := range entries {
+			// Children's metrics are not retained on this bus (config.Bus);
+			// their current values are in /kv.
+			if !n.Engine.RetainOnBus(en.Topic) {
+				continue
+			}
 			n.MQTT.DeliverLocal(en.Topic, en.Payload, true)
 			seeded++
 		}

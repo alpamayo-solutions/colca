@@ -967,3 +967,41 @@ func TestANodeDescribesItselfWhereItsParentMountedIt(t *testing.T) {
 		t.Fatalf("the root is bound to %q, want nothing above itself", root)
 	}
 }
+
+// A parent does not keep its children's metrics as retained messages
+// (bus.retain_child_metrics is off by default): a fresh subscriber at the parent
+// gets none, a live one still gets every new sample, and /kv holds the current
+// value. The edge that owns the machine keeps retaining it.
+func TestAParentPublishesChildMetricsLiveWithoutRetainingThem(t *testing.T) {
+	tp := startTopo(t)
+	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
+	const atParent = "colca/v1/_Metric/n-edge1/site1/edge1/m1/temp"
+
+	live := subscribeAll(t, observer(t, tp.global.MQTTAddr, "live-observer", tp.obs["n-global"]), "colca/v1/_Metric/#")
+	m1.Publish("colca/v1/_Metric/n-edge1/m1/temp", 1, false, `{"v": 7}`).WaitTimeout(5 * time.Second)
+	m := awaitTopic(t, live, atParent, 20*time.Second)
+	if m.Retained() {
+		t.Fatal("a live sample arrived flagged retained")
+	}
+	waitFor(t, "the current value in the parent's /kv", 10*time.Second, func() bool {
+		for _, e := range kvAt(t, tp.global, "site1/edge1/m1/temp") {
+			if mustJSON(e.(map[string]any)["payload"]) == `{"v":7}` {
+				return true
+			}
+		}
+		return false
+	})
+
+	fresh := observer(t, tp.global.MQTTAddr, "fresh-parent-observer", tp.obs["n-global"])
+	for _, m := range collectFor(subscribeAll(t, fresh, "colca/v1/_Metric/#"), 2*time.Second) {
+		t.Fatalf("the parent replayed a child's metric to a fresh subscriber: %s retained=%v", m.Topic(), m.Retained())
+	}
+	edgeFresh := observer(t, tp.edge1.MQTTAddr, "fresh-edge-observer", tp.obs["n-edge1"])
+	var kept bool
+	for _, m := range collectFor(subscribeAll(t, edgeFresh, "colca/v1/_Metric/#"), 2*time.Second) {
+		kept = kept || (m.Topic() == "colca/v1/_Metric/n-edge1/m1/temp" && m.Retained())
+	}
+	if !kept {
+		t.Fatal("the edge stopped retaining its own machine's metric")
+	}
+}
