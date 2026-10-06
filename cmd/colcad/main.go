@@ -39,8 +39,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "start:", err)
 		os.Exit(1)
 	}
-	if limit > 0 {
-		slog.Info("go memory limit set below the container ceiling", "bytes", limit)
+	if msg, warn := memlimit.Report(limit); warn {
+		slog.Warn(msg)
+	} else {
+		slog.Info(msg, "bytes", limit)
 	}
 	// The embedded SDK waits for this lifecycle event, not for file polling.
 	if cfg.AddrFile != "" {

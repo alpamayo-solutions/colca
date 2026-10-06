@@ -73,9 +73,19 @@ child keeps the batch, waits as long as the parent asked (with jitter, so its
 siblings do not return in step) and sends it again; nothing is dropped, and
 the uplink logs a busy parent as a warning, not as a refusal.
 
-colcad and colca-historian set Go's memory limit to 75 % of the container's
-memory ceiling (cgroup v1 or v2) unless `GOMEMLIMIT` is set, so the collector
-works harder near the ceiling instead of letting the kernel kill the process.
+colcad and colca-historian set Go's memory limit to 75 % of their cgroup's
+memory ceiling (cgroup v1 or v2, the process's own cgroup and the smallest
+limit on its ancestors) unless `GOMEMLIMIT` is set, so the collector works
+harder near the ceiling instead of letting the kernel kill the process. They
+log a warning when they find no ceiling. The store's memtables and block
+cache are sized from the same ceiling, a 32nd of it each, between Pebble's
+defaults (4 MiB and 8 MiB, also used when no ceiling is found) and 64 MiB: a
+2 GiB hub gets 64 MiB of each, a 512 MiB edge 16 MiB.
+
+Replicated records reach the local MQTT bus through one goroutine after they
+are durable. Each child's records, and so each topic's, arrive in order;
+records of different children may arrive in another order than the store
+holds them. Records waiting for the bus count against the push budget above.
 
 ### What the broker delivers
 

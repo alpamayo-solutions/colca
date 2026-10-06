@@ -163,3 +163,19 @@ func TestALargePushAsksFirstAndIsTakenOnceTheParentHasRoom(t *testing.T) {
 		t.Fatalf("large push once the parent has room: %v, metrics next %d", err, ps.NextOffset("metrics"))
 	}
 }
+
+// Records queued for the bus count against the push budget like pushes in
+// progress; an idle budget still takes one push of any size.
+func TestThePushBudgetCountsRecordsQueuedForTheBus(t *testing.T) {
+	b := byteBudget{limit: 1000}
+	if b.reserve(400, 700) {
+		t.Fatal("a push fit although queued records and it exceed the budget")
+	}
+	if !b.reserve(400, 500) {
+		t.Fatal("a push that fits beside the queued records was refused")
+	}
+	b.release(400)
+	if !b.reserve(5000, 0) {
+		t.Fatal("an idle budget refused an oversized push for good")
+	}
+}

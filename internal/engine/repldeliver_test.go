@@ -78,6 +78,7 @@ func TestReplicatedRecordsReachTheBusInCommitOrder(t *testing.T) {
 		}
 	}
 	waitUntil(t, func() bool { return len(bus.seen()) == 22 })
+	waitUntil(t, func() bool { return e.QueuedBytes() == 0 })
 	for i, topic := range bus.seen() {
 		if want := fmt.Sprintf("colca/v1/_Metric/n-c1/m/s%d", i+1); topic != want {
 			t.Fatalf("record %d on the bus is %s, want %s", i, topic, want)
@@ -115,6 +116,9 @@ func TestAPushWaitingForAFullBusQueueIsReleasedByStop(t *testing.T) {
 		t.Fatal("a push went past a full bus queue")
 	case <-time.After(100 * time.Millisecond):
 	}
+	if e.QueuedBytes() <= 0 {
+		t.Fatal("records waiting for the bus are not counted in QueuedBytes")
+	}
 	close(stop)
 	close(bus.gate) // every delivery may proceed now
 	select {
@@ -123,6 +127,9 @@ func TestAPushWaitingForAFullBusQueueIsReleasedByStop(t *testing.T) {
 		t.Fatal("a push waiting for the bus hung after stop")
 	}
 	<-done
+	if got := e.QueuedBytes(); got < 0 {
+		t.Fatalf("QueuedBytes %d after the queue was abandoned", got)
+	}
 }
 
 func waitUntil(t *testing.T, cond func() bool) {

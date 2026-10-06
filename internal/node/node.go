@@ -31,6 +31,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/httpapi"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/memlimit"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/mqttsrv"
 	"github.com/alpamayo-solutions/colca/internal/nodelog"
@@ -134,7 +135,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		slog.Info("minted this node's identity — enroll it at its parent",
 			"node", cfg.ULID, "key_file", cfg.KeyFile, "pubkey", id.PublicHex())
 	}
-	st, err := store.OpenWithOptions(cfg.DataDir, store.Options{Compression: cfg.Storage.Compression})
+	st, err := store.OpenWithOptions(cfg.DataDir, store.Options{Compression: cfg.Storage.Compression, MemoryCeiling: memlimit.Ceiling()})
 	if err != nil {
 		return nil, fmt.Errorf("node %s: open store %s: %w", cfg.ULID, cfg.DataDir, err)
 	}

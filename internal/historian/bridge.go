@@ -123,7 +123,10 @@ func (b *Bridge) takeAhead(from int64) (door.Page, bool) {
 	}
 	r := <-b.ahead
 	b.ahead = nil
-	if r.err != nil || r.from != from {
+	// The page must start where this pass reads: requested there, and served
+	// from there (a node reports where a page started; an older one does not,
+	// and its page is taken as requested).
+	if r.err != nil || r.from != from || (r.page.From != 0 && r.page.From != from) {
 		return door.Page{}, false
 	}
 	return r.page, true

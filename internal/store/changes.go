@@ -102,9 +102,11 @@ func (s *Store) signalChangeLocked() {
 }
 
 // BacklogChanges includes consumer progress without waking record consumers.
+// Its channel has a lock of its own, so a cursor move signals it without
+// waiting for a stream commit that holds the state lock.
 func (s *Store) BacklogChanges() <-chan struct{} {
-	s.state.Lock()
-	defer s.state.Unlock()
+	s.backlogMu.Lock()
+	defer s.backlogMu.Unlock()
 	if s.backlogChanged == nil {
 		s.backlogChanged = make(chan struct{})
 	}
@@ -112,13 +114,13 @@ func (s *Store) BacklogChanges() <-chan struct{} {
 }
 
 // signalBacklogChange wakes backlog watchers after a cursor moved.
-func (s *Store) signalBacklogChange() {
-	s.state.Lock()
-	defer s.state.Unlock()
-	s.signalBacklogChangeLocked()
-}
+func (s *Store) signalBacklogChange() { s.signalBacklogChangeLocked() }
 
+// signalBacklogChangeLocked wakes backlog watchers. The name is historical: it
+// takes backlogMu itself and may be called with or without the state lock.
 func (s *Store) signalBacklogChangeLocked() {
+	s.backlogMu.Lock()
+	defer s.backlogMu.Unlock()
 	if s.backlogChanged != nil {
 		close(s.backlogChanged)
 	}

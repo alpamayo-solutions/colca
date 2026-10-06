@@ -115,6 +115,7 @@ type Store struct {
 	id             string
 	contractHeads  map[string]map[string]uint64
 	backlogChanged chan struct{}
+	backlogMu      sync.Mutex // guards backlogChanged; taken after state, never before
 	allChanged     chan struct{}
 	db             *pebble.DB
 	health         *pebblelog.Monitor
@@ -123,9 +124,11 @@ type Store struct {
 	// commits, pruning, registry batches); it is held through the synced commit.
 	mu sync.Mutex
 	// state guards the in-memory stream state readers need (next, lwm, bytes,
-	// the change channels and contract heads). A writer holds mu and takes
-	// state only to publish what it committed, so a reader never waits for a
-	// writer's sync. Lock order: mu, cursorMu, state.
+	// the change channels and contract heads). A writer holds mu while it
+	// builds its batch and takes state only from its apply until it published
+	// the new head, so readers see records, KV and head change together, and
+	// wait for at most one apply, never for a writer's batch building or
+	// another writer queued behind it. Lock order: mu, cursorMu, state.
 	state sync.RWMutex
 	// cursorMu serialises cursor moves; they never wait for a stream write.
 	cursorMu sync.Mutex
@@ -170,6 +173,10 @@ type Options struct {
 	// a store reads tables of either kind whatever this says; existing tables
 	// change only when compaction rewrites them.
 	Compression string
+	// MemoryCeiling is the memory the node may use in all, in bytes (the
+	// container's ceiling), 0 when unknown. It sizes Pebble's memtables and
+	// block cache; see SizesFor.
+	MemoryCeiling int64
 }
 
 // pebbleOptions applies o to Pebble's options.
@@ -189,22 +196,31 @@ func (o Options) pebbleOptions(opts *pebble.Options) error {
 	return nil
 }
 
-// memTableSize is the largest memtable. Pebble starts small and doubles to it,
-// so a quiet node never holds it. Pebble's own default, 4 MiB, flushes a busy
-// parent several times a second: every record writes its stream entry, its
-// signal index entry and its KV projection, spread over the whole key space,
-// so each small flush overlapped the level below and was compacted into it
-// again. At 64 MiB a parent ingesting 1000 children compacted a fifth of the
-// bytes and spent a third less CPU per record (fleet scale benchmark,
-// 2026-10). Up to two memtables are held while one flushes.
-const memTableSize = 64 << 20
-
-// blockCacheSize is Pebble's block cache. Its default, 8 MiB, held almost
-// nothing of a parent's working set: every cursor and position read on a busy
-// parent (a thousand downlink polls, the historian's pages) went to a table
-// block and decompressed it again (fleet scale benchmark, 2026-10). The cache
-// fills only with what is read.
-const blockCacheSize = 64 << 20
+// SizesFor returns the largest memtable and the block cache size for a node
+// whose memory ceiling is ceiling bytes: a 32nd of the ceiling each, at most
+// 64 MiB, at least Pebble's own defaults (4 MiB, 8 MiB), which an unknown
+// ceiling also gets. Two memtables (one flushing) and the cache stay under a
+// tenth of the ceiling, inside the quarter the Go memory limit leaves outside
+// the heap (internal/memlimit). A 2 GiB parent gets 64 MiB of each, a 512 MiB
+// edge 16 MiB.
+//
+// Pebble's 4 MiB memtable flushed a busy parent several times a second: every
+// record writes its stream entry, its signal index entry and its KV
+// projection, spread over the whole key space, so each small flush overlapped
+// the level below and was compacted into it again. At 64 MiB a parent
+// ingesting 1000 children compacted a fifth of the bytes and spent a third less
+// CPU per record. With the 8 MiB cache every cursor and position read of a
+// busy parent went to a table block and decompressed it again (fleet scale
+// benchmark, 2026-10). Pebble starts with a small memtable and doubles it, and
+// the cache fills only with what is read, so a quiet node holds neither.
+func SizesFor(ceiling int64) (memTable, blockCache int64) {
+	const (
+		minMemTable, minCache = 4 << 20, 8 << 20
+		most                  = 64 << 20
+	)
+	share := ceiling / 32
+	return min(max(share, minMemTable), most), min(max(share, minCache), most)
+}
 
 // Open opens or creates the store at dir with the default options.
 func Open(dir string) (*Store, error) { return OpenWithOptions(dir, Options{}) }
@@ -215,10 +231,11 @@ func Open(dir string) (*Store, error) { return OpenWithOptions(dir, Options{}) }
 func OpenWithOptions(dir string, o Options) (*Store, error) {
 	health := pebblelog.New("store")
 	opts := health.Options()
-	opts.MemTableSize = memTableSize
+	memTable, cacheSize := SizesFor(o.MemoryCeiling)
+	opts.MemTableSize = uint64(memTable) //nolint:gosec // positive by construction
 	// The block cache Pebble shares with nothing else; the store holds the
 	// only reference after Open.
-	cache := pebble.NewCache(blockCacheSize)
+	cache := pebble.NewCache(cacheSize)
 	defer cache.Unref()
 	opts.Cache = cache
 	if err := o.pebbleOptions(opts); err != nil {
@@ -549,9 +566,7 @@ func (s *Store) AppendAdvancing(stream string, recs []Record, adv CursorAdvance)
 	if err != nil {
 		return 0, 0, false, err
 	}
-	s.state.Lock()
-	s.signalBacklogChangeLocked()
-	s.state.Unlock()
+	s.signalBacklogChange()
 	return first, last, true, nil
 }
 
@@ -607,11 +622,12 @@ func (s *Store) appendAdvancingLocked(stream string, recs []Record, adv *CursorA
 			return 0, 0, err
 		}
 	}
+	// The head is published with the records: see commitReplicated.
+	s.state.Lock()
+	defer s.state.Unlock()
 	if err := s.appendApply(b, pebble.Sync); err != nil {
 		return 0, 0, err
 	}
-	s.state.Lock()
-	defer s.state.Unlock()
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
 	s.noteContractsLocked(stream, recs)
@@ -1410,11 +1426,12 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if err := s.writeJournal(b, stream, span); err != nil {
 		return 0, err
 	}
+	// The head is published with the records: see commitReplicated.
+	s.state.Lock()
+	defer s.state.Unlock()
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return 0, err
 	}
-	s.state.Lock()
-	defer s.state.Unlock()
 	grew := off != s.next[stream]
 	s.next[stream] = off
 	s.lwm[stream] = upTo

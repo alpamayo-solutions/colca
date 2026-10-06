@@ -82,3 +82,59 @@ func TestASignalAlwaysLandsInTheSameShare(t *testing.T) {
 		}
 	}
 }
+
+// A poisoned row in one share while another share fails transiently: the
+// failed page reports no rejection, the retried page reports it once, so it
+// is logged and counted once.
+func TestAPoisonedRowIsReportedOnceAcrossARetriedPartitionedPage(t *testing.T) {
+	var flaky atomic.Int64
+	flaky.Store(1)
+	tx := func() pgx.Tx {
+		return &fakeTx{
+			sendBatch: func(_ context.Context, b *pgx.Batch) pgx.BatchResults {
+				var err error
+				for _, q := range b.QueuedQueries {
+					if len(q.Arguments) == 7 {
+						for _, sig := range q.Arguments[6].([]string) {
+							if sig == "poison" {
+								err = &pgconn.PgError{Code: "22001"}
+							}
+							if sig == "flaky" && flaky.Add(-1) >= 0 {
+								err = errors.New("connection reset")
+							}
+						}
+					}
+				}
+				execs := make([]func() (pgconn.CommandTag, error), b.Len())
+				for i := range execs {
+					execs[i] = func() (pgconn.CommandTag, error) { return pgconn.CommandTag{}, err }
+				}
+				return &fakeBatchResults{execs: execs}
+			},
+			execRow: func(args []any) error {
+				if args[len(args)-1] == "poison" {
+					return &pgconn.PgError{Code: "22001"}
+				}
+				return nil
+			},
+		}
+	}
+	pool := &markerPool{fakePool: fakePool{begin: func(int) (pgx.Tx, error) { return tx(), nil }}}
+	sink := &Sink{Pool: pool, Writers: 64}
+	v := 1.0
+	var rows []Row
+	for _, sig := range []string{"poison", "flaky", "a", "b", "c", "d", "e", "f"} {
+		rows = append(rows, Row{SignalID: sig, Number: &v})
+	}
+	if partitionOf("poison", 64) == partitionOf("flaky", 64) {
+		t.Skip("poison and flaky share a partition; the test needs them apart")
+	}
+	rej, err := sink.Apply(context.Background(), rows, Consumer, 8)
+	if err == nil || len(rej) != 0 {
+		t.Fatalf("first attempt: %d rejections, err %v; want none and the transient error", len(rej), err)
+	}
+	rej, err = sink.Apply(context.Background(), rows, Consumer, 8)
+	if err != nil || len(rej) != 1 || rej[0].Row.SignalID != "poison" {
+		t.Fatalf("retry: %v, err %v; want the poisoned row once", rej, err)
+	}
+}

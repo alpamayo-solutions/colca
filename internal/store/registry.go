@@ -214,11 +214,12 @@ func (s *Store) registryBatchLocked(batches []streamRecords, mut func(*pebble.Ba
 	if err := mut(b); err != nil {
 		return 0, err
 	}
+	// The head is published with the records: see commitReplicated.
+	s.state.Lock()
+	defer s.state.Unlock()
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return 0, err
 	}
-	s.state.Lock()
-	defer s.state.Unlock()
 	for _, sr := range batches {
 		s.next[sr.stream] = next[sr.stream]
 		s.bytes[sr.stream] = live[sr.stream]

@@ -316,7 +316,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	if size < 0 {
 		size = replicateBodyLimit(s.cfg)
 	}
-	if !s.pushBytes.reserve(size) {
+	if !s.pushBytes.reserve(size, s.eng.QueuedBytes()) {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "the parent is busy: too many pushes in progress", http.StatusTooManyRequests)
 		s.metrics.HTTPRequestLimited(metrics.DoorRepl, limitClassReplBytes)

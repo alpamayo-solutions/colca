@@ -91,8 +91,11 @@ func run() int {
 	})
 	publisher.Start(ctx)
 	log = slog.New(publisher).With("service", "colca-historian")
-	if limit := memlimit.Apply(); limit > 0 {
-		log.Info("go memory limit set below the container ceiling", "bytes", limit)
+	limit := memlimit.Apply()
+	if msg, warn := memlimit.Report(limit); warn {
+		log.Warn(msg)
+	} else {
+		log.Info(msg, "bytes", limit)
 	}
 	slog.SetDefault(log)
 

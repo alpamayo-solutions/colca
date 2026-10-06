@@ -216,3 +216,21 @@ func TestADrainThatReachedTheAnnouncedHeadNeedsNoEmptyFetch(t *testing.T) {
 		t.Fatalf("written %v", store.values)
 	}
 }
+
+// A read-ahead page the node served from another offset than requested is
+// dropped and the page is fetched from the cursor.
+func TestAReadAheadPageThatStartsElsewhereIsDropped(t *testing.T) {
+	b := &Bridge{}
+	ch := make(chan aheadPage, 1)
+	ch <- aheadPage{from: 4, page: door.Page{From: 7, Next: 9}}
+	b.ahead = ch
+	if _, ok := b.takeAhead(4); ok {
+		t.Fatal("a page served from 7 was taken for a read from 4")
+	}
+	ch = make(chan aheadPage, 1)
+	ch <- aheadPage{from: 4, page: door.Page{From: 4, Next: 9}}
+	b.ahead = ch
+	if _, ok := b.takeAhead(4); !ok {
+		t.Fatal("a page served from where it was requested was dropped")
+	}
+}

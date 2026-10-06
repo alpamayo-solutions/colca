@@ -173,6 +173,11 @@ func (s *Store) commitReplicated(group []*replRequest) {
 	if len(committed) == 0 {
 		return
 	}
+	// Readers see a commit's records, KV and new head together: the state lock
+	// is held from the apply until the head is published. It is not held while
+	// the group is built, and cursor moves never take it.
+	s.state.Lock()
+	defer s.state.Unlock()
 	err := func() error {
 		for stream, off := range next {
 			if off == s.next[stream] {
@@ -200,8 +205,6 @@ func (s *Store) commitReplicated(group []*replRequest) {
 		return
 	}
 	s.hwmsCommitted(hwms)
-	s.state.Lock()
-	defer s.state.Unlock()
 	for stream, off := range next {
 		s.next[stream] = off
 		s.bytes[stream] = liveBytes[stream]

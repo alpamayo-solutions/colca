@@ -87,4 +87,4 @@ require (
 // TestATakenOverConnectionsWillDoesNotOverwriteTheNewAnnounce fails without the
 // takeover fix, and TestAnAckReachesOnlyThePersonWhoSentTheCommand without the
 // subscriber-selection fix.
-replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20261005221444-d9e5087371e3
+replace github.com/mochi-mqtt/server/v2 => github.com/alpamayo-solutions/mochi-server/v2 v2.7.10-0.20261006040929-fce10f18898a

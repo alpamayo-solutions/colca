@@ -10,11 +10,22 @@ import "sync/atomic"
 // queued on that lock: under load nearly all of the parent's lock wait was
 // there, and its ingest stopped near 13,000 records a second while the CPU
 // was half idle (fleet scale benchmark, 2026-10). One goroutine publishes the
-// pushes in the order they committed; a push hands its records over and is
-// answered. The bus still never shows a record that is not durable, and a
-// child's records keep their order: its next push commits after this one was
-// handed over. When the queue is full a push waits for room, so the bus
-// cannot fall arbitrarily far behind the store.
+// pushes in the order they were handed over; a push hands its records over
+// and is answered.
+//
+// What holds: the bus never shows a record that is not durable, and one
+// child's records, so every topic's, reach it in their order, because a
+// child's next push commits only after this one was handed over. Pushes of
+// different children committed in one group may reach the bus in another
+// order than the store has them; no consumer may rely on cross-topic order
+// on the bus (the store's offsets give it).
+//
+// The queued records count as memory: QueuedBytes is part of the replication
+// door's push budget, and when the queue is full a push waits for room, so
+// the bus cannot fall arbitrarily far behind the store. Records still queued
+// when the node stops are not published; the broker stops with the node, and
+// subscribers get the current values on reconnect from the retained set the
+// node reseeds from KV at startup, or from /kv.
 
 // busMsg is one record for the local bus.
 type busMsg struct {
@@ -28,6 +39,8 @@ const replBusQueue = 256
 
 type replBus struct {
 	queue chan []busMsg
+	// bytes is the topic and payload bytes queued, see QueuedBytes.
+	bytes atomic.Int64
 	// stop is the running deliverer's stop channel, nil while none runs.
 	stop atomic.Pointer[<-chan struct{}]
 }
@@ -48,6 +61,7 @@ func (e *Engine) RunReplicatedDelivery(stop <-chan struct{}) {
 			for _, m := range msgs {
 				e.deliver(m.topic, m.payload, m.retain)
 			}
+			e.replBus.bytes.Add(-msgBytes(msgs))
 		}
 	}
 }
@@ -59,13 +73,28 @@ func (e *Engine) deliverReplicated(msgs []busMsg) {
 		return
 	}
 	if stop := e.replBus.stop.Load(); stop != nil {
+		n := msgBytes(msgs)
+		e.replBus.bytes.Add(n)
 		select {
 		case e.replBus.queue <- msgs:
 			return
 		case <-*stop:
+			e.replBus.bytes.Add(-n)
 		}
 	}
 	for _, m := range msgs {
 		e.deliver(m.topic, m.payload, m.retain)
 	}
+}
+
+// QueuedBytes is the topic and payload bytes of replicated records waiting for
+// the bus. The replication door counts them in its push budget.
+func (e *Engine) QueuedBytes() int64 { return e.replBus.bytes.Load() }
+
+func msgBytes(msgs []busMsg) int64 {
+	var n int64
+	for _, m := range msgs {
+		n += int64(len(m.topic) + len(m.payload))
+	}
+	return n
 }

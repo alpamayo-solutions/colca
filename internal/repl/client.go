@@ -574,10 +574,18 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 	// pushOnce pushes at most one batch of stream and reports whether it scanned
 	// anything, which is how "drained" is measured. aborted means our own shutdown.
 	retryPending := false
-	// busyDelay is how long a parent that answered 429 asked to be left alone.
-	var busyDelay time.Duration
+	// busyUntil is, per lane, until when a parent that answered 429 asked to be
+	// left alone. A lane waits it out even while other lanes make progress.
+	busyUntil := map[string]time.Time{}
 	var pushOnce func(string, func(string) bool) (bool, bool)
 	pushOnce = func(stream string, filter func(string) bool) (scanned, aborted bool) {
+		if until, ok := busyUntil[stream]; ok {
+			if time.Now().Before(until) {
+				retryPending = true
+				return false, false
+			}
+			delete(busyUntil, stream)
+		}
 		from := eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), stream)
 		// A cursor below the local LWM means retention pruned past it after the parent
 		// was gone longer than the staleness window. The gap marker already tells the
@@ -691,7 +699,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 					// The parent is shedding load: wait as long as it asked, with
 					// jitter so its children do not return in step.
 					wait := max(refusal.RetryAfter, retryAfter)
-					busyDelay = max(busyDelay, wait/2+rand.N(wait)) //nolint:gosec // retry jitter
+					busyUntil[stream] = time.Now().Add(wait/2 + rand.N(wait)) //nolint:gosec // retry jitter
 				}
 				if report, attempts, down := c.links.Failed("uplink:"+stream, time.Now()); report {
 					switch {
@@ -783,10 +791,18 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		if idle {
 			delay := uplinkIdle // recovery/blob discovery, not ordinary stream pacing
 			if retryPending {
-				delay = max(retryAfter, busyDelay)
+				delay = retryAfter
+				// A busy parent's wait, when every lane that failed is waiting
+				// one out: the soonest of them.
+				var soonest time.Duration
+				for _, until := range busyUntil {
+					if left := time.Until(until); left > 0 && (soonest == 0 || left < soonest) {
+						soonest = left
+					}
+				}
+				delay = max(delay, soonest)
 				wake = nil // commits cannot shorten a failed-request backoff
 			}
-			busyDelay = 0
 			select {
 			case <-stop:
 				return

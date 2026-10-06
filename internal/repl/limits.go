@@ -139,12 +139,14 @@ func replicationBudgetBytes(maxBody int64) int64 {
 	return max(budget, maxBody)
 }
 
-// reserve takes n bytes of the budget, or reports false and takes nothing. A
-// request always fits an idle budget, so no size is refused for good.
-func (b *byteBudget) reserve(n int64) bool {
+// reserve takes n bytes of the budget, or reports false and takes nothing.
+// held is memory the budget covers but does not track itself (records queued
+// for the bus). A request always fits an idle budget, so no size is refused
+// for good.
+func (b *byteBudget) reserve(n, held int64) bool {
 	for {
 		used := b.used.Load()
-		if used > 0 && used+n > b.limit {
+		if (used > 0 || held > 0) && used+held+n > b.limit {
 			return false
 		}
 		if b.used.CompareAndSwap(used, used+n) {
