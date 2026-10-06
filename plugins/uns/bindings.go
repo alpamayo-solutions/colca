@@ -1,5 +1,11 @@
 package uns
 
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+)
+
 // signalBindings is the tag-to-signal binding state a node holds and owns the
 // rule every binding follows: a tag binds to at most one signal, a signal holds
 // at most one tag, and an existing binding is never silently overwritten.
@@ -66,3 +72,88 @@ func (b *signalBindings) signalHolding(tagID string) string { return b.signalOf[
 
 // tagHeldBy is the tag signalID holds, "" if it holds none.
 func (b *signalBindings) tagHeldBy(signalID string) string { return b.tagOf[signalID] }
+
+// TagHeldError refuses a write that would bind a tag another signal already
+// holds. It names both signals, so the caller can say which one is in the
+// way. Executors answer it with a 409.
+type TagHeldError struct {
+	Tag        string // the tag the write binds
+	Signal     string // the signal the write binds it to
+	Holder     string // the signal that holds the tag
+	HolderPath string // where the holder sits at this node
+}
+
+func (e *TagHeldError) Error() string {
+	return fmt.Sprintf("tag %s is already bound to signal %s at %s — a tag binds to at most one signal",
+		e.Tag, e.Holder, e.HolderPath)
+}
+
+// CheckTagBindings applies the rule to a batch about to commit at one node.
+// current is the node's own _Signal records, batch the records the command
+// writes. A record that binds its signal to a tag the signal did not hold
+// before is refused when, once the batch is applied, another signal holds the
+// same tag. A binding that already stands is left alone, including two
+// signals on one tag that a node held before the rule was enforced: the
+// command that resolves them has to be able to commit.
+//
+// The engine runs it under one lock with the commit, so two commands that
+// bind one tag at the same time cannot both pass.
+func CheckTagBindings(current []KVRecord, batch []StateRecord) error {
+	type standing struct{ id, tag, path string }
+	identity := func(s boundSignal, path string) string {
+		if s.ID != "" {
+			return s.ID
+		}
+		return path
+	}
+	held := map[string]string{}    // signal → the tag it held before the batch
+	after := map[string]standing{} // topic → the signal standing there after it
+	for _, rec := range current {
+		var s boundSignal
+		if json.Unmarshal(rec.Payload, &s) != nil {
+			continue
+		}
+		id := identity(s, rec.Path)
+		after[rec.Topic] = standing{id: id, tag: s.DataTag, path: rec.Path}
+		if s.DataTag != "" {
+			held[id] = s.DataTag
+		}
+	}
+	var fresh []standing
+	for _, rec := range batch {
+		parsed, err := Parse(rec.Topic)
+		if err != nil || parsed.Contract != "_Signal" {
+			continue
+		}
+		if len(rec.Payload) == 0 {
+			delete(after, rec.Topic)
+			continue
+		}
+		var s boundSignal
+		if json.Unmarshal(rec.Payload, &s) != nil {
+			continue // not a record: the schema check refuses it
+		}
+		id := identity(s, parsed.Path)
+		after[rec.Topic] = standing{id: id, tag: s.DataTag, path: parsed.Path}
+		if s.DataTag != "" && held[id] != s.DataTag {
+			fresh = append(fresh, standing{id: id, tag: s.DataTag, path: parsed.Path})
+		}
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	topics := make([]string, 0, len(after))
+	for topic := range after {
+		topics = append(topics, topic)
+	}
+	sort.Strings(topics)
+	for _, bound := range fresh {
+		for _, topic := range topics {
+			other := after[topic]
+			if other.tag == bound.tag && other.id != bound.id {
+				return &TagHeldError{Tag: bound.tag, Signal: bound.id, Holder: other.id, HolderPath: other.path}
+			}
+		}
+	}
+	return nil
+}

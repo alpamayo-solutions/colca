@@ -106,6 +106,10 @@ func (f *fakeStore) PublishBatch(ctx CommandContext, records []StateRecord) ([]S
 			return nil, errString(fmt.Sprintf("state batch record %d (%s): %s", i, record.Topic, msg))
 		}
 	}
+	// The engine checks the tag bindings at commit; so does the fake.
+	if err := CheckTagBindings(f.KVScan("_Signal", f.node), records); err != nil {
+		return nil, err
+	}
 	f.batchCalls++
 	writes := make([]StateWrite, 0, len(records))
 	for _, record := range records {

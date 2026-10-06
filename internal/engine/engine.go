@@ -181,6 +181,11 @@ type Engine struct {
 	replayMu    sync.Mutex
 	replayLocks map[string]*sync.Mutex
 
+	// bindMu holds the tag-binding check and the commit of a command batch
+	// that writes signals together, so two commands binding one tag at the
+	// same time cannot both pass (uns.CheckTagBindings).
+	bindMu sync.Mutex
+
 	// The node's position: the chain of elements from the root down to its own,
 	// taught by the parent, persisted, unknown until first taught. The root sets the
 	// empty chain at startup. The prefix is rendered from it, never stored.
@@ -949,8 +954,18 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 	}
 
 	storeRecords := make([]store.Record, len(prepared))
+	writesSignals := false
 	for i := range prepared {
 		storeRecords[i] = prepared[i].record
+		writesSignals = writesSignals || prepared[i].parsed.Contract == "_Signal"
+	}
+	if writesSignals {
+		e.bindMu.Lock()
+		defer e.bindMu.Unlock()
+		if err := e.checkTagBindings(records); err != nil {
+			e.metrics.RejectPublish(metrics.ReasonValidation)
+			return nil, err
+		}
 	}
 	first, _, err := e.store.Append(stream, storeRecords)
 	if err != nil {
@@ -972,6 +987,16 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 		results[i] = Result{Persisted: true, Stream: stream, Offset: offset, Topic: item.record.Topic}
 	}
 	return results, nil
+}
+
+// checkTagBindings refuses a batch that would bind a tag another of this
+// node's signals holds. The caller holds bindMu until the batch is appended.
+func (e *Engine) checkTagBindings(records []uns.StateRecord) error {
+	current, err := e.scanContract("_Signal", func(kv store.KVEntry) bool { return kv.NodeID == e.cfg.ULID })
+	if err != nil {
+		return fmt.Errorf("tag binding check: %w", err)
+	}
+	return uns.CheckTagBindings(current, records)
 }
 
 // ingestAdminEvent commits one append-only event a command executor authored,
