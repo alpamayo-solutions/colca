@@ -1099,6 +1099,20 @@ class SystemElement(ToleratesUnknownFields, Payload):
 
 
 @dataclass
+class BindIntent:
+    """The binding a declared signal waits for: the tag ``variable`` in the
+    catalogue of the connector ``connector``.
+
+    ``connector`` is the connector's enrolled name or its ULID. ``variable`` is
+    a tag's ``name`` or its ``source``. Both are what an author knows before
+    the connector has published anything; the tag's id is not.
+    """
+
+    connector: str
+    variable: str
+
+
+@dataclass
 class Signal(ToleratesUnknownFields, Payload):
     """A signal, authored by the node.
 
@@ -1116,8 +1130,20 @@ class Signal(ToleratesUnknownFields, Payload):
     description: str = ""
     #: ULID of the SystemElement that owns this signal.
     system_element_id: ULID | None = None
-    #: ULID of the DataTag this signal reads from.
+    #: ULID of the DataTag this signal reads from. A tag binds to at most one
+    #: signal: the node refuses a second binding with a ``409`` naming the
+    #: signal that holds the tag.
     data_tag: ULID | None = None
+    #: The binding this signal waits for while ``data_tag`` is empty. When the
+    #: named connector publishes a catalogue holding the variable, the node
+    #: binds the tag to this signal, wherever it sits, before it adopts or
+    #: mints any other signal for the tag, and drops the intent. Ignored once
+    #: ``data_tag`` is set.
+    bind_intent: BindIntent | None = None
+    #: The node minted this signal for a catalogue tag no signal was declared
+    #: for (autobind). Only such a signal may be retired by a ``take_over``
+    #: that moves its tag to a declared signal.
+    is_autobound: bool = False
     #: The connector publishes metrics for this signal.
     is_published: bool = False
     #: The read side historises it (consumed by the historian bridge).
@@ -1149,11 +1175,21 @@ class Signal(ToleratesUnknownFields, Payload):
             d["data_type"] = str(self.data_type)
         if self.index_type is not None:
             d["index_type"] = str(self.index_type)
+        if isinstance(self.bind_intent, BindIntent):
+            d["bind_intent"] = {
+                "connector": self.bind_intent.connector,
+                "variable": self.bind_intent.variable,
+            }
         return d
 
     @classmethod
     def decode(cls, json_str: str, timestamp: int) -> "Signal":
         data = json.loads(json_str)
+        if isinstance(data.get("bind_intent"), dict):
+            data["bind_intent"] = BindIntent(
+                connector=data["bind_intent"]["connector"],
+                variable=data["bind_intent"]["variable"],
+            )
         if "replication_policy" in data:
             data["replication_policy"] = ReplicationPolicy(data["replication_policy"])
         if data.get("data_type") is not None:
