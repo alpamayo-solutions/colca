@@ -9,6 +9,7 @@ from colca_data_contracts import (
     ExternalSystemPayload,
     GroupPayload,
     MetadataTypePayload,
+    NodeAccess,
     NodePayload,
     ServiceDetails,
 )
@@ -110,3 +111,15 @@ def test_annotation_type_carries_metadata():
     # Types written before the field existed still decode.
     older = AnnotationTypePayload.decode('{"id": "01JOLD", "name": "downtime", "data_type": "string"}', timestamp=0)
     assert older.metadata == {}
+
+
+def test_node_carries_declared_access_and_tolerates_newer_fields():
+    node = NodePayload.from_wire(
+        {
+            "id": "n1",
+            "name": "edge-07",
+            "access": {"hostname": "edge-07.example", "ui_url": "https://edge-07.example", "vpn_ip": "x"},
+        }
+    )
+    assert node.access == NodeAccess(hostname="edge-07.example", ui_url="https://edge-07.example")
+    assert NodePayload.from_wire({"id": "n1", "name": "edge-07"}).access is None

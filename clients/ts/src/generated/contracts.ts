@@ -413,6 +413,11 @@ export type Metric = {
 
 /** `_Node` — stream class `entity`. */
 export type Node = {
+  access?: null | {
+    hostname: string;
+    ui_url: string;
+    [key: string]: unknown;
+  };
   description?: string;
   display_name?: string;
   health_metrics?: {
