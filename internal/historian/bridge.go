@@ -494,9 +494,12 @@ func (b *Bridge) Run(ctx context.Context) error {
 		}
 		if err == nil && b.Changes != nil {
 			// An ack that failed at the head is owed: retry it with backoff
-			// rather than waiting for new data to carry the next one.
+			// rather than waiting for new data to carry the next one. Not
+			// without a store to name (a node too old to send one): a blank
+			// store passes the node's store check, so the retry could land
+			// on another store; the next applied page acks instead.
 			recovery := time.Duration(-1)
-			if b.markerKnown && b.ackOwed {
+			if b.markerKnown && b.ackOwed && b.stream != "" {
 				_, err := b.Door.AckStore(ctx, "metrics", Cursor, b.marker, b.stream)
 				switch {
 				case err == nil:

@@ -32,8 +32,9 @@ type stream struct {
 	// fail after that, whatever the offset.
 	failAckFrom, failAckTo int64
 	failAcks               int
-	// staleAcks counts acks that named another store than the current one.
-	staleAcks int
+	// staleAcks counts acks that named another store than the current one;
+	// ackCalls every ack, blankAcks those that named no store.
+	staleAcks, ackCalls, blankAcks int
 }
 
 func newStream(n, signals int) *stream { return newStreamNamed(n, signals, "s") }
@@ -130,6 +131,10 @@ func (s *stream) FetchWithOptions(_ context.Context, o door.FetchOptions) (door.
 func (s *stream) AckStore(_ context.Context, _, _ string, offset int64, store string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ackCalls++
+	if store == "" {
+		s.blankAcks++
+	}
 	if store != "" && store != s.id {
 		s.staleAcks++
 		return false, fmt.Errorf("acking at %d: %w", offset, door.ErrStoreChanged)
@@ -822,6 +827,98 @@ func failedAckAtTheHead(t *testing.T, pages int) {
 	cancel()
 	<-done
 	checkStore(t, s, store)
+}
+
+// A node too old to send a store id: an ack that fails at the head is not
+// retried, since a blank store would pass the node's store check whatever
+// store the node has by then. The next applied page carries the ack.
+func TestAnOwedAckWithoutAStoreIDIsNotRetried(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			s := newStreamNamed(120, 3, "a")
+			s.id = ""                              // an old colcad: /fetch names no store
+			s.failAckFrom, s.failAckTo = 101, 1000 // the acks at the head fail
+			store := newPipeStore(s, 2)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			b := pipelineBridge(s, store, pages, 50)
+			b.Head = func() int64 { return s.head() + 1 } // as the node's hints announce it
+			go func() { done <- b.Run(ctx) }()
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				store.mu.Lock()
+				marker := store.marker
+				store.mu.Unlock()
+				if marker == s.head() {
+					break
+				}
+				if time.Now().After(deadline) {
+					cancel()
+					t.Fatalf("marked %d of %d", marker, s.head())
+				}
+				time.Sleep(time.Millisecond)
+			}
+			s.mu.Lock()
+			calls := s.ackCalls
+			s.mu.Unlock()
+			time.Sleep(2500 * time.Millisecond) // past the first retries (1 s, 2 s)
+			cancel()
+			<-done
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.ackCalls != calls {
+				t.Fatalf("%d acks without a store were retried", s.ackCalls-calls)
+			}
+		})
+	}
+}
+
+// An upgrade: the marker is from before store ids (it names no store) and the
+// cursor lags it. The ack that moves the cursor up fails and is owed. Until a
+// page is marked with its store a retry would name no store, which the node
+// takes for any store, so it is not retried; after a restart with new data the
+// ack goes through naming the store.
+func TestAnOwedAckBeforeTheFirstMarkNamesAStore(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			s := newStreamNamed(600, 7, "a")
+			store := newPipeStore(s, 4)
+			// The old historian wrote all 600 and marked them, store unknown;
+			// its acks failed from 101 on, so the cursor is at 101.
+			for _, r := range s.recs {
+				row, err := RowFrom(r.Topic, r.Payload, r.TS)
+				if err != nil {
+					t.Fatal(err)
+				}
+				store.table.apply(row)
+				store.written[r.Offset] = true
+			}
+			store.marker = 600
+			s.cursor = 101
+			s.failAckFrom, s.failAckTo = 1, 1<<30
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			b := pipelineBridge(s, store, pages, 50)
+			b.Head = func() int64 { return s.head() + 1 }
+			go func() { done <- b.Run(ctx) }()
+			time.Sleep(2500 * time.Millisecond) // past the first retries (1 s, 2 s)
+			cancel()
+			<-done
+
+			s.mu.Lock()
+			s.failAckFrom, s.failAckTo = 0, 0
+			s.mu.Unlock()
+			s.grow(newStreamNamed(100, 7, "a").recs)
+			runToHead(t, pipelineBridge(s, store, pages, 50), s)
+			s.mu.Lock()
+			blank := s.blankAcks
+			s.mu.Unlock()
+			if blank != 0 {
+				t.Fatalf("%d acks named no store", blank)
+			}
+			checkStore(t, s, store)
+		})
+	}
 }
 
 // A new stream that already grew past the marker before the historian looked:

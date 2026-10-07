@@ -525,9 +525,10 @@ func (p *pipeline) adopt(store string) {
 
 // ack moves the cursor to offset, never past the marker and never back, for
 // records read from store. A failed ack is owed: the marker retries it with
-// backoff, also when no new data arrives to carry the next one. An ack the
-// node refuses because its store changed is not owed: the offset names other
-// records there, and the new store is read from its own cursor.
+// backoff, also when no new data arrives to carry the next one, but only once
+// the marker names a store. An ack the node refuses because its store changed
+// is not owed: the offset names other records there, and the new store is
+// read from its own cursor.
 func (p *pipeline) ack(ctx context.Context, offset int64, store string) bool {
 	p.ackMu.Lock()
 	defer p.ackMu.Unlock()
@@ -753,6 +754,14 @@ func (p *pipeline) mark(ctx context.Context) {
 			p.ackMu.Lock()
 			store := p.markedStore
 			p.ackMu.Unlock()
+			if store == "" {
+				// No store to name: a node too old to send one, or no Mark
+				// since start under a marker from before store ids. A blank
+				// store passes the node's store check, so the retry could
+				// land on another store; the next marked page acks instead.
+				owe(true)
+				continue
+			}
 			owe(p.ack(ctx, p.marked.Load(), store))
 			continue
 		case <-ctx.Done():
