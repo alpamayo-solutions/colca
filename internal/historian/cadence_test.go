@@ -28,7 +28,9 @@ func (d *countingDoor) Fetch(context.Context, string, string, int) (door.Page, e
 	return p, nil
 }
 
-func (d *countingDoor) Ack(context.Context, string, string, int64) (bool, error) { return true, nil }
+func (d *countingDoor) AckStore(context.Context, string, string, int64, string) (bool, error) {
+	return true, nil
+}
 
 func runCadence(t *testing.T, pages []door.Page, wantImmediate int) {
 	t.Helper()

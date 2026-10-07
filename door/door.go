@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,7 +76,10 @@ type Page struct {
 	Next    int64    `json:"next"`
 	// From is the offset the page started at (colca 0.18.2+; 0 from older nodes).
 	From int64 `json:"from,omitempty"`
-	Gap  *Gap  `json:"gap,omitempty"`
+	// Store is the store incarnation the page was read from: new whenever the
+	// node's store is created from nothing. Empty from older nodes.
+	Store string `json:"store,omitempty"`
+	Gap   *Gap   `json:"gap,omitempty"`
 }
 
 // FetchOptions are the server-side view applied to one side-effect-free read.
@@ -449,10 +453,27 @@ func escapeSecretPath(name string) string {
 	return strings.Join(segments, "/")
 }
 
+// ErrStoreChanged is wrapped by AckStore's error when the node's store is not
+// the one the records were read from: colcad's data was recreated in between,
+// and the acked offsets name other records now.
+var ErrStoreChanged = errors.New("store changed")
+
 // Ack moves a cursor to offset. Monotonic: acking backwards reports false and
-// changes nothing, so a replaying consumer cannot rewind its own progress.
+// changes nothing, so a replaying consumer cannot rewind its own progress. An
+// offset past the stream's head is refused (HTTP 422).
 func (c *Client) Ack(ctx context.Context, stream, cursor string, offset int64) (bool, error) {
-	body, err := json.Marshal(map[string]any{"cursor": cursor, "stream": stream, "offset": offset})
+	return c.AckStore(ctx, stream, cursor, offset, "")
+}
+
+// AckStore is Ack for records read from store (Page.Store). The node refuses it
+// with ErrStoreChanged when its store is another one; an empty store skips the
+// check.
+func (c *Client) AckStore(ctx context.Context, stream, cursor string, offset int64, store string) (bool, error) {
+	in := map[string]any{"cursor": cursor, "stream": stream, "offset": offset}
+	if store != "" {
+		in["store"] = store
+	}
+	body, err := json.Marshal(in)
 	if err != nil {
 		return false, err
 	}
@@ -467,7 +488,14 @@ func (c *Client) Ack(ctx context.Context, stream, cursor string, offset int64) (
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		reason, _ := io.ReadAll(resp.Body)
+		reason, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		var refusal struct {
+			StoreChanged bool `json:"store_changed"`
+		}
+		if resp.StatusCode == http.StatusConflict && json.Unmarshal(reason, &refusal) == nil && refusal.StoreChanged {
+			return false, httpResponseError(resp, fmt.Errorf("acking %s@%d: %w: %s", cursor, offset, ErrStoreChanged,
+				truncate(reason, 300)))
+		}
 		return false, httpResponseError(resp, fmt.Errorf("acking %s@%d: HTTP %d: %s", cursor, offset, resp.StatusCode,
 			truncate(reason, 300)))
 	}

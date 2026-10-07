@@ -21,6 +21,7 @@ import (
 // late, with a timestamp before its signal's latest.
 type stream struct {
 	mu      sync.Mutex
+	id      string // the store incarnation, as /fetch names it
 	recs    []door.Record
 	cursor  int64 // next offset /fetch reads without From
 	acked   []int64
@@ -31,13 +32,15 @@ type stream struct {
 	// fail after that, whatever the offset.
 	failAckFrom, failAckTo int64
 	failAcks               int
+	// staleAcks counts acks that named another store than the current one.
+	staleAcks int
 }
 
 func newStream(n, signals int) *stream { return newStreamNamed(n, signals, "s") }
 
 // newStreamNamed is newStream with signal ids prefix0..prefix(k-1).
 func newStreamNamed(n, signals int, prefix string) *stream {
-	s := &stream{cursor: 1}
+	s := &stream{cursor: 1, id: newStoreID()}
 	ts := int64(1_000)
 	for off := int64(1); off <= int64(n); off++ {
 		sig := fmt.Sprintf("%s%d", prefix, rand.N(signals))
@@ -62,6 +65,8 @@ func newStreamNamed(n, signals int, prefix string) *stream {
 	return s
 }
 
+func newStoreID() string { return fmt.Sprintf("store-%016x", rand.Uint64()) }
+
 func signalOf(r door.Record) string {
 	row, _ := RowFrom(r.Topic, r.Payload, r.TS)
 	return row.SignalID
@@ -83,7 +88,7 @@ func (s *stream) head() int64 {
 func (s *stream) replace(recs []door.Record) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.recs, s.cursor, s.acked = recs, 1, nil
+	s.recs, s.cursor, s.acked, s.id = recs, 1, nil, newStoreID()
 }
 
 // grow appends records to the stream, numbered on from its head.
@@ -106,7 +111,7 @@ func (s *stream) serve(from int64, limit int) (door.Page, error) {
 	for off := from; off <= int64(len(s.recs)) && len(recs) < limit; off++ {
 		recs = append(recs, s.recs[off-1])
 	}
-	return door.Page{Records: recs, From: from, Next: from + int64(len(recs))}, nil
+	return door.Page{Records: recs, From: from, Next: from + int64(len(recs)), Store: s.id}, nil
 }
 
 func (s *stream) Fetch(_ context.Context, _, _ string, limit int) (door.Page, error) {
@@ -120,9 +125,18 @@ func (s *stream) FetchWithOptions(_ context.Context, o door.FetchOptions) (door.
 	return s.serve(int64(o.From), o.Max) //nolint:gosec // test offsets
 }
 
-func (s *stream) Ack(_ context.Context, _, _ string, offset int64) (bool, error) {
+// AckStore is colcad's /ack: an ack for another store is refused as "store
+// changed", one past the head as such; then the fault injection.
+func (s *stream) AckStore(_ context.Context, _, _ string, offset int64, store string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if store != "" && store != s.id {
+		s.staleAcks++
+		return false, fmt.Errorf("acking at %d: %w", offset, door.ErrStoreChanged)
+	}
+	if offset > int64(len(s.recs)) {
+		return false, fmt.Errorf("offset %d is past the head %d", offset, len(s.recs))
+	}
 	if offset >= s.failAckFrom && offset <= s.failAckTo {
 		return false, errors.New("colcad restarting")
 	}
@@ -219,6 +233,7 @@ type pipeStore struct {
 	table     table
 	marker    int64
 	consumers map[string]int64 // the partitions' markers
+	store     string           // the store the page marker is a position in
 	resets    int
 	// fresh is set by newStream: the next marker may go back, once.
 	fresh     bool
@@ -252,14 +267,17 @@ func (p *pipeStore) Applied(_ context.Context, consumer string) (int64, error) {
 
 // Apply is the one-page path (PIPELINE_PAGES=1): rows and the page marker
 // together.
-func (p *pipeStore) Apply(_ context.Context, rows []Row, _ string, offset int64) ([]Rejection, error) {
+func (p *pipeStore) Apply(_ context.Context, rows []Row, _ string, offset int64, store string) ([]Rejection, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, row := range rows {
+		if p.written[row.Offset] && p.bad == nil {
+			p.bad = fmt.Errorf("offset %d was written twice", row.Offset)
+		}
 		p.table.apply(row)
 		p.written[row.Offset] = true
 	}
-	p.marker = offset
+	p.marker, p.store = offset, store
 	return nil, nil
 }
 
@@ -339,7 +357,13 @@ func (p *pipeStore) ResetPartitionMarkers(_ context.Context, consumer string) er
 	return nil
 }
 
-func (p *pipeStore) Mark(_ context.Context, consumer string, offset, fingerprint int64) error {
+func (p *pipeStore) AppliedStore(context.Context, string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.store, nil
+}
+
+func (p *pipeStore) Mark(_ context.Context, _ string, offset int64, store string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.marks++
@@ -359,8 +383,7 @@ func (p *pipeStore) Mark(_ context.Context, consumer string, offset, fingerprint
 			p.bad = fmt.Errorf("the marker moved to %d before offset %d was written", offset, off)
 		}
 	}
-	p.marker = offset
-	p.consumers[fingerprintConsumer(consumer)] = fingerprint
+	p.marker, p.store = offset, store
 	p.markers = append(p.markers, offset)
 	return nil
 }
@@ -802,8 +825,8 @@ func failedAckAtTheHead(t *testing.T, pages int) {
 }
 
 // A new stream that already grew past the marker before the historian looked:
-// the record at the marker exists, but it is another record. Its fingerprint
-// differs from the one recorded with the marker, so the stream is new.
+// the marker is an offset in it too, but its pages come from another store
+// than the one the marker records, so the stream is new.
 func TestANewStreamThatGrewPastTheMarkerIsNew(t *testing.T) {
 	for _, pages := range []int{1, 4} {
 		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
@@ -832,6 +855,117 @@ func TestANewStreamThatGrewPastTheMarkerIsNew(t *testing.T) {
 			}
 			if got, want := store.table.String(), oracle(oldRecs, fresh.recs).String(); got != want {
 				t.Fatalf("the table differs from one page at a time\n got %s\nwant %s", got, want)
+			}
+		})
+	}
+}
+
+// colcad's store is recreated while acks are owed: every ack of the old
+// stream failed, so the marker is at 600 and the cursor at 1. The owed ack is
+// retried and must not land on the new store (it would move the new cursor to
+// 601 and the new stream's 450 records would count as read). The node refuses
+// it as "store changed", and the historian reads the new store from its
+// cursor and writes all of it. With 900 new records the old marker is inside
+// the new stream, so only the store id tells them apart.
+func TestARecreatedStoreWithAnOwedAckLosesNothing(t *testing.T) {
+	for _, tc := range []struct{ pages, fresh int }{{1, 450}, {4, 450}, {1, 900}, {4, 900}} {
+		pages := tc.pages
+		t.Run(fmt.Sprintf("pages=%d,new=%d", tc.pages, tc.fresh), func(t *testing.T) {
+			s := newStreamNamed(600, 5, "a")
+			s.failAckFrom, s.failAckTo = 1, 600
+			store := newPipeStore(s, 4)
+			var signal door.Signal
+			b := &Bridge{Door: s, Store: store, Max: 50, Pipeline: pages, Changes: signal.Changes}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- b.Run(ctx) }()
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				store.mu.Lock()
+				marker := store.marker
+				store.mu.Unlock()
+				if marker == 600 {
+					break
+				}
+				if time.Now().After(deadline) {
+					cancel()
+					t.Fatalf("marker at %d, never reached the old head", marker)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			oldRecs := s.recs
+
+			fresh := newStreamNamed(tc.fresh, 6, "b")
+			store.newStream(s)
+			s.mu.Lock()
+			s.failAckFrom, s.failAckTo = 0, -1
+			s.mu.Unlock()
+			s.replace(fresh.recs)
+			// Let the owed ack be retried against the new store first, where
+			// the retry timer gets there before the next read.
+			for wait := time.Now().Add(3 * time.Second); time.Now().Before(wait); time.Sleep(5 * time.Millisecond) {
+				s.mu.Lock()
+				stale := s.staleAcks
+				s.mu.Unlock()
+				if stale > 0 {
+					break
+				}
+			}
+			signal.Notify()
+			deadline = time.Now().Add(20 * time.Second)
+			for s.lastAck() != s.head() {
+				if time.Now().After(deadline) {
+					cancel()
+					t.Fatalf("the new store: acked %d of %d (cursor %d)", s.lastAck(), s.head(), s.cursor)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			cancel()
+			<-done
+
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if store.bad != nil {
+				t.Fatal(store.bad)
+			}
+			for off := int64(1); off <= int64(tc.fresh); off++ {
+				if !store.written[off] {
+					t.Fatalf("offset %d of the new store was never written", off)
+				}
+			}
+			if store.resets != 1 {
+				t.Fatalf("reset %d times, want once", store.resets)
+			}
+			if got, want := store.table.String(), oracle(oldRecs, fresh.recs).String(); got != want {
+				t.Fatalf("the table differs from one page at a time\n got %s\nwant %s", got, want)
+			}
+		})
+	}
+}
+
+// A marker written before stores were recorded: the first page from the
+// cursor decides by the old rules, once (the same stream here: nothing is
+// reset), and the marker records the store from then on.
+func TestAMarkerWithoutAStoreIsUpgraded(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			s := newStreamNamed(400, 5, "a")
+			store := newPipeStore(s, 2)
+			for off := int64(1); off <= 100; off++ {
+				row, _ := RowFrom(s.recs[off-1].Topic, s.recs[off-1].Payload, s.recs[off-1].TS)
+				row.Offset = off
+				store.table.apply(row)
+				store.written[off] = true
+			}
+			store.marker = 100
+			s.cursor = 101
+			runToHead(t, pipelineBridge(s, store, pages, 50), s)
+			checkStore(t, s, store)
+			if store.resets != 0 {
+				t.Fatal("a marker without a store was reset on the same stream")
+			}
+			if store.store != s.id {
+				t.Fatalf("the marker records store %q, want %q", store.store, s.id)
 			}
 		})
 	}

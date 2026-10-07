@@ -173,4 +173,7 @@ func TestANewStreamWhileRunningAgainstTimescale(t *testing.T) {
 	if marker, err := sink.Applied(ctx, Consumer); err != nil || marker != 450 {
 		t.Fatalf("marker %d, %v; want 450", marker, err)
 	}
+	if store, err := sink.AppliedStore(ctx, Consumer); err != nil || store != s.id {
+		t.Fatalf("the marker records store %q (%v), want the new store %q", store, err, s.id)
+	}
 }

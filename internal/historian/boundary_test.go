@@ -24,7 +24,7 @@ func TestOfflineImportUsesTheSameSinkAndIndependentMarker(t *testing.T) {
 	input := importLine(int(ts)) + importLine(int(ts+1))
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(input)))
 	before := time.Unix(ts+2, 0)
-	if _, err := sink.Apply(ctx, nil, Consumer, 123); err != nil {
+	if _, err := sink.Apply(ctx, nil, Consumer, 123, ""); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -105,10 +105,10 @@ func TestApplyingTheSamePageTwiceLeavesOneRow(t *testing.T) {
 	value := 21.5
 	rows := []Row{{Timestamp: at, SignalID: signalID, NodeID: "n1", Number: &value}}
 
-	if _, err := sink.Apply(ctx, rows, "test:metrics", 1); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:metrics", 1, ""); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
-	if _, err := sink.Apply(ctx, rows, "test:metrics", 1); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:metrics", 1, ""); err != nil {
 		t.Fatalf("replay: %v", err)
 	}
 
@@ -132,7 +132,7 @@ func TestTheMarkerAndTheRowsCommitTogether(t *testing.T) {
 		Timestamp: time.Now().UTC().Truncate(time.Millisecond),
 		SignalID:  sigID("sig-boundary-2"), NodeID: "n1", Number: &value,
 	}}
-	if _, err := sink.Apply(ctx, rows, "test:together", 42); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:together", 42, ""); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 
@@ -150,7 +150,7 @@ func TestAnEmptyBatchStillMovesTheMarker(t *testing.T) {
 	ctx := context.Background()
 	sink := testPool(t)
 
-	if _, err := sink.Apply(ctx, nil, "test:empty", 7); err != nil {
+	if _, err := sink.Apply(ctx, nil, "test:empty", 7, ""); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	applied, err := sink.Applied(ctx, "test:empty")
@@ -173,12 +173,12 @@ func TestExactMatchOverwritesTheRow(t *testing.T) {
 	first, second := 1.0, 2.0
 	rows := []Row{{Timestamp: at, SignalID: signalID, NodeID: "n1", Number: &first}}
 
-	if _, err := sink.Apply(ctx, rows, "test:overwrite", 1); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:overwrite", 1, ""); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 
 	rows[0].Number = &second
-	if _, err := sink.Apply(ctx, rows, "test:overwrite", 2); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:overwrite", 2, ""); err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
 
@@ -209,7 +209,7 @@ func TestIdenticalReapplyDoesNotChurnTheRow(t *testing.T) {
 	value := 42.0
 	rows := []Row{{Timestamp: at, SignalID: signalID, NodeID: "n1", Number: &value}}
 
-	if _, err := sink.Apply(ctx, rows, "test:no-churn", 1); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:no-churn", 1, ""); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 
@@ -221,7 +221,7 @@ func TestIdenticalReapplyDoesNotChurnTheRow(t *testing.T) {
 	}
 
 	// Same signal, same timestamp, same value: a pure redelivery.
-	if _, err := sink.Apply(ctx, rows, "test:no-churn", 2); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:no-churn", 2, ""); err != nil {
 		t.Fatalf("replay: %v", err)
 	}
 
@@ -248,13 +248,13 @@ func TestAValueTypeChangeClearsTheStaleColumn(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Millisecond)
 	number := 3.0
 	numeric := []Row{{Timestamp: at, SignalID: signalID, NodeID: "n1", Number: &number}}
-	if _, err := sink.Apply(ctx, numeric, "test:type-change", 1); err != nil {
+	if _, err := sink.Apply(ctx, numeric, "test:type-change", 1, ""); err != nil {
 		t.Fatalf("apply numeric: %v", err)
 	}
 
 	text := "now-textual"
 	textual := []Row{{Timestamp: at, SignalID: signalID, NodeID: "n1", Text: &text}}
-	if _, err := sink.Apply(ctx, textual, "test:type-change", 2); err != nil {
+	if _, err := sink.Apply(ctx, textual, "test:type-change", 2, ""); err != nil {
 		t.Fatalf("apply textual: %v", err)
 	}
 
@@ -281,12 +281,12 @@ func TestTheMarkerStillMovesOnAnOverwritingApply(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Millisecond)
 	first, second := 1.0, 2.0
 	rows := []Row{{Timestamp: at, SignalID: sigID("sig-marker-overwrite"), NodeID: "n1", Number: &first}}
-	if _, err := sink.Apply(ctx, rows, "test:marker-overwrite", 5); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:marker-overwrite", 5, ""); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 
 	rows[0].Number = &second
-	if _, err := sink.Apply(ctx, rows, "test:marker-overwrite", 6); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:marker-overwrite", 6, ""); err != nil {
 		t.Fatalf("overwriting apply: %v", err)
 	}
 
@@ -312,7 +312,7 @@ func TestEachValueKindSurvivesTheRoundTrip(t *testing.T) {
 		{Timestamp: at, SignalID: boolSignalID, Bool: &yes},
 		{Timestamp: at, SignalID: jsonSignalID, JSON: []byte(`{"x":[1,2]}`)},
 	}
-	if _, err := sink.Apply(ctx, rows, "test:kinds", 3); err != nil {
+	if _, err := sink.Apply(ctx, rows, "test:kinds", 3, ""); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 
@@ -386,16 +386,16 @@ func TestARetractionIsStoredOnceWhenTheValueGoesMissing(t *testing.T) {
 		{Timestamp: at(4), SignalID: signalID, NodeID: "n1", Number: &four},
 		{Timestamp: at(5), SignalID: signalID, NodeID: "n1"},
 	}
-	if _, err := sink.Apply(ctx, page, "test:retract", 1); err != nil {
+	if _, err := sink.Apply(ctx, page, "test:retract", 1, ""); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	// A replay of the whole page changes nothing.
-	if _, err := sink.Apply(ctx, page, "test:retract", 1); err != nil {
+	if _, err := sink.Apply(ctx, page, "test:retract", 1, ""); err != nil {
 		t.Fatalf("replay: %v", err)
 	}
 	// Nor does another null in a later page.
 	later := []Row{{Timestamp: at(6), SignalID: signalID, NodeID: "n1"}}
-	if _, err := sink.Apply(ctx, later, "test:retract", 2); err != nil {
+	if _, err := sink.Apply(ctx, later, "test:retract", 2, ""); err != nil {
 		t.Fatalf("later null: %v", err)
 	}
 
@@ -412,10 +412,10 @@ func TestARetractionAtAStoredKeyClearsTheValue(t *testing.T) {
 	signalID := sigID("sig-retract-key")
 	at := time.Now().UTC().Truncate(time.Millisecond)
 	text := "warm"
-	if _, err := sink.Apply(ctx, []Row{{Timestamp: at, SignalID: signalID, Text: &text}}, "test:retract-key", 1); err != nil {
+	if _, err := sink.Apply(ctx, []Row{{Timestamp: at, SignalID: signalID, Text: &text}}, "test:retract-key", 1, ""); err != nil {
 		t.Fatalf("apply value: %v", err)
 	}
-	if _, err := sink.Apply(ctx, []Row{{Timestamp: at, SignalID: signalID}}, "test:retract-key", 2); err != nil {
+	if _, err := sink.Apply(ctx, []Row{{Timestamp: at, SignalID: signalID}}, "test:retract-key", 2, ""); err != nil {
 		t.Fatalf("apply retraction: %v", err)
 	}
 	if got := describe(storedValues(t, sink, signalID)); got != "null" {
@@ -446,7 +446,7 @@ func TestAPageOfValuesLandsAsTheRowByRowApplyWould(t *testing.T) {
 		{Timestamp: at(3), SignalID: signalID, NodeID: "n1", Number: v(5)}, // replaces 4
 	}
 	for range 2 { // and a replay changes nothing
-		if _, err := sink.Apply(ctx, page, "test:bulk", 1); err != nil {
+		if _, err := sink.Apply(ctx, page, "test:bulk", 1, ""); err != nil {
 			t.Fatalf("apply: %v", err)
 		}
 	}
@@ -481,7 +481,7 @@ func TestAPageWrittenOverSeveralConnectionsLandsAsOneWould(t *testing.T) {
 		)
 	}
 	for range 2 {
-		if _, err := sink.Apply(ctx, page, "test:partitioned", 77); err != nil {
+		if _, err := sink.Apply(ctx, page, "test:partitioned", 77, ""); err != nil {
 			t.Fatalf("apply: %v", err)
 		}
 	}

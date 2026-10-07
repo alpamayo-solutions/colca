@@ -686,7 +686,7 @@ func TestFetchWireShape(t *testing.T) {
 	}
 }
 
-// seedMetrics appends n records with deterministic timestamps 1000, 2000…
+// seedLocalMetrics appends n records with deterministic timestamps 1000, 2000…
 // directly through the store, so the gap tests can assert exact wire JSON.
 func seedMetrics(t *testing.T, s *store.Store, n int, topic string) {
 	t.Helper()
@@ -737,6 +737,11 @@ func TestFetchGapExactWireShape(t *testing.T) {
 			t.Fatalf("missing authoritative clock: %s", body)
 		}
 		delete(envelope, "now_ms")
+		var storeID string
+		if err := json.Unmarshal(envelope["store"], &storeID); err != nil || storeID != a.eng.Store().StoreID() {
+			t.Fatalf("missing store id: %s", body)
+		}
+		delete(envelope, "store")
 		normalized, err := json.Marshal(envelope)
 		if err != nil {
 			t.Fatal(err)
@@ -1663,6 +1668,19 @@ type localAPI struct {
 	m   *metrics.Metrics
 }
 
+// seedLocalMetrics appends n records to the metrics stream, so a cursor can be
+// acked up to offset n: /ack refuses an offset past the head.
+func seedLocalMetrics(t *testing.T, h *localAPI, n int) {
+	t.Helper()
+	recs := make([]store.Record, n)
+	for i := range recs {
+		recs[i] = store.Record{Topic: fmt.Sprintf("colca/v1/_Metric/m1/m1/seed%d", i), Payload: []byte(`{"value":1}`), TS: int64(1000 + i)}
+	}
+	if _, _, err := h.eng.Store().Append("metrics", recs); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newLocalHandler(t *testing.T) *localAPI {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
@@ -2290,6 +2308,7 @@ func TestTheLocalHandlerDeletesItsOwnCursor(t *testing.T) {
 	cursor := uns.LocalCursorPrefix + "connector-opcua/gen1"
 
 	// Ack forward first, so the later default reading proves the delete.
+	seedLocalMetrics(t, h, 5)
 	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":5}`, cursor)
 	ackReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(ackBody))
 	ackReq.Header.Set("X-Colca-Service", "connector-opcua")
@@ -2334,6 +2353,7 @@ func TestTheLocalHandlerRefusesToDeleteAnotherServicesCursor(t *testing.T) {
 
 	// Give connector-a's cursor a position first, so a delete that wrongly succeeded
 	// would show.
+	seedLocalMetrics(t, h, 2)
 	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":2}`, cursor)
 	ackReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(ackBody))
 	ackReq.Header.Set("X-Colca-Service", "connector-a")
@@ -2385,6 +2405,7 @@ func TestTheLocalHandlerAcksFreshAfterDeletingACursor(t *testing.T) {
 	registerLocal(t, h, "connector-opcua", "")
 	cursor := uns.LocalCursorPrefix + "connector-opcua/gen1"
 
+	seedLocalMetrics(t, h, 9)
 	ackBody := fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":9}`, cursor)
 	ackReq := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(ackBody))
 	ackReq.Header.Set("X-Colca-Service", "connector-opcua")
@@ -3215,5 +3236,56 @@ func TestANodeCmdAdminRetiresAnotherIdentitysStaleCursor(t *testing.T) {
 	if event.Outcome != "success" || event.Operation != "cursor_delete" || event.ActorID != "kc-sub-op" ||
 		event.ActorKind != "human" || event.EntityID != reader || event.Metadata["owner"] != "connector-a" {
 		t.Fatalf("audit event = %+v", event)
+	}
+}
+
+func localAck(t *testing.T, h *localAPI, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/ack", strings.NewReader(body))
+	req.Header.Set("X-Colca-Service", "connector-opcua")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// /ack is for records the consumer read: an offset past the head is refused
+// for everyone, and an ack that names another store than this node's is
+// refused as "store changed". The store id comes with every /fetch page.
+func TestAnAckPastTheHeadOrForAnotherStoreIsRefused(t *testing.T) {
+	h := newLocalHandler(t)
+	registerLocal(t, h, "connector-opcua", "")
+	cursor := uns.LocalCursorPrefix + "connector-opcua/gen1"
+	seedLocalMetrics(t, h, 3)
+	id := h.eng.Store().StoreID()
+
+	fetch := httptest.NewRequest(http.MethodGet, "/fetch?stream=metrics&cursor="+cursor, nil)
+	fetch.Header.Set("X-Colca-Service", "connector-opcua")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, fetch)
+	var page struct {
+		Store string `json:"store"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil || page.Store != id {
+		t.Fatalf("/fetch store = %q (%v), want %q: %s", page.Store, err, id, rec.Body.String())
+	}
+
+	if rec := localAck(t, h, fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":4}`, cursor)); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("ack past the head = %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = localAck(t, h, fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":1,"store":"another-store"}`, cursor))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"store_changed":true`) {
+		t.Fatalf("ack for another store = %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := h.eng.Store().CursorGet(cursor, "metrics"); got != 1 {
+		t.Fatalf("a refused ack moved the cursor to %d", got)
+	}
+	if rec := localAck(t, h, fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":2,"store":%q}`, cursor, id)); rec.Code != http.StatusOK {
+		t.Fatalf("ack for this store = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := localAck(t, h, fmt.Sprintf(`{"cursor":%q,"stream":"metrics","offset":2}`, cursor)); rec.Code != http.StatusOK {
+		t.Fatalf("ack without a store = %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := h.eng.Store().CursorGet(cursor, "metrics"); got != 3 {
+		t.Fatalf("cursor at %d, want 3", got)
 	}
 }

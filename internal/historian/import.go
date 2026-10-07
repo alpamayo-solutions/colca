@@ -87,7 +87,7 @@ func Import(ctx context.Context, input io.Reader, before time.Time, digest strin
 		if len(rows) == 0 {
 			return nil
 		}
-		rejected, err := sink.Apply(ctx, rows, consumer, rows[len(rows)-1].Offset)
+		rejected, err := sink.Apply(ctx, rows, consumer, rows[len(rows)-1].Offset, "")
 		if err != nil {
 			return err
 		}

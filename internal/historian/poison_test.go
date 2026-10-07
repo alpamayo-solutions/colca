@@ -88,12 +88,8 @@ func (p *fakePool) Begin(ctx context.Context) (pgx.Tx, error) {
 	return p.begin(p.calls)
 }
 
-// Exec backs Sink.Mark (the marker's fingerprint after a page) and nothing else.
 func (p *fakePool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	if sql == upsertMarkerAndFingerprint {
-		return pgconn.CommandTag{}, nil
-	}
-	panic("fakePool.Exec: only Sink.Mark is expected")
+	panic("fakePool.Exec: not used by Sink.Apply")
 }
 
 // QueryRow backs Sink.Applied and always reports that there is no marker yet.
@@ -164,7 +160,7 @@ func TestAPoisonedRowLandsTheRestAndIsCounted(t *testing.T) {
 	}
 
 	sink := &Sink{Pool: pool}
-	rejections, err := sink.Apply(context.Background(), rows, "test:poison", 99)
+	rejections, err := sink.Apply(context.Background(), rows, "test:poison", 99, "")
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -197,7 +193,7 @@ func TestATransientFailureIsRetriedNotIsolated(t *testing.T) {
 	}
 
 	sink := &Sink{Pool: pool}
-	rejections, err := sink.Apply(context.Background(), rows, "test:transient", 5)
+	rejections, err := sink.Apply(context.Background(), rows, "test:transient", 5, "")
 	if err == nil {
 		t.Fatal("a transient batch failure reported success")
 	}
@@ -225,7 +221,7 @@ func TestAPgErrorOutsideThePoisonListIsStillTransient(t *testing.T) {
 	}
 
 	sink := &Sink{Pool: pool}
-	if _, err := sink.Apply(context.Background(), rows, "test:serialization", 1); err == nil {
+	if _, err := sink.Apply(context.Background(), rows, "test:serialization", 1, ""); err == nil {
 		t.Fatal("a serialization failure reported success")
 	}
 	if pool.calls != 1 {
@@ -250,7 +246,7 @@ func TestAllValidRowsLandWithNoRejectionsAndNoFallback(t *testing.T) {
 	}
 
 	sink := &Sink{Pool: pool}
-	rejections, err := sink.Apply(context.Background(), rows, "test:clean", 2)
+	rejections, err := sink.Apply(context.Background(), rows, "test:clean", 2, "")
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}

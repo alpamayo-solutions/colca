@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
-	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,10 +28,11 @@ type PipelineStore interface {
 	// marker (consumer) to through, in one transaction. Rejections are rows the
 	// schema permanently refused; an error means nothing was written.
 	ApplyShare(ctx context.Context, rows []Row, consumer string, through int64) ([]Rejection, error)
-	// Mark moves the consumer's marker to offset and, in the same statement,
-	// records the fingerprint of the record at that offset (see
-	// recordFingerprint).
-	Mark(ctx context.Context, consumer string, offset, fingerprint int64) error
+	// Mark moves the consumer's marker to offset in store (door.Page.Store).
+	Mark(ctx context.Context, consumer string, offset int64, store string) error
+	// AppliedStore reads which store the consumer's marker is a position in,
+	// "" when none was recorded.
+	AppliedStore(ctx context.Context, consumer string) (string, error)
 	// PartitionMarkers returns every partition marker of consumer, by name,
 	// whatever writer count wrote it.
 	PartitionMarkers(ctx context.Context, consumer string) (map[string]int64, error)
@@ -127,7 +126,7 @@ func (s *Sink) Partitions() int { return max(s.Writers, 1) }
 // ApplyShare writes one partition's rows and its marker in one transaction,
 // row by row with savepoints when a row is poison (applyOne).
 func (s *Sink) ApplyShare(ctx context.Context, rows []Row, consumer string, through int64) ([]Rejection, error) {
-	return s.applyOne(ctx, rows, consumer, through)
+	return s.applyOne(ctx, rows, consumer, through, "")
 }
 
 // partitionConsumer names partition i of n's marker. The count is part of the
@@ -135,44 +134,20 @@ func (s *Sink) ApplyShare(ctx context.Context, rows []Row, consumer string, thro
 // old partition's marker says nothing about the new one's rows.
 func partitionConsumer(n, i int) string { return fmt.Sprintf("%s/%d.%d", Consumer, n, i) }
 
-// Mark moves the marker and the fingerprint of its record in one statement.
-func (s *Sink) Mark(ctx context.Context, consumer string, offset, fingerprint int64) error {
-	if _, err := s.Pool.Exec(ctx, upsertMarkerAndFingerprint, consumer, offset, fingerprintConsumer(consumer), fingerprint); err != nil {
+// Mark moves the marker, with the store it is a position in, in a transaction
+// of its own.
+func (s *Sink) Mark(ctx context.Context, consumer string, offset int64, store string) error {
+	if _, err := s.Pool.Exec(ctx, upsertOffset, consumer, offset, store); err != nil {
 		return fmt.Errorf("historian: moving the marker to %d: %w", offset, err)
 	}
 	return nil
 }
 
-const upsertMarkerAndFingerprint = `
-INSERT INTO colca_applied_offset (consumer, "offset", updated_at)
-VALUES ($1, $2, now()), ($3, $4, now())
-ON CONFLICT (consumer) DO UPDATE SET "offset" = EXCLUDED."offset", updated_at = now()`
-
-// fingerprintConsumer names the row holding the fingerprint of the record at
-// consumer's marker.
-func fingerprintConsumer(consumer string) string { return consumer + "#record" }
-
-// recordFingerprint identifies a record well enough to tell the same stream
-// from a new one at the same offset: a recreated colcad assigns offset n to
-// another record, ingested at another time. FNV-1a over topic, ingest time and
-// payload; never 0, which means "none recorded".
-func recordFingerprint(r door.Record) int64 {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(r.Topic))
-	_, _ = h.Write([]byte(strconv.FormatInt(r.TS, 10)))
-	_, _ = h.Write(r.Payload)
-	fp := int64(h.Sum64() & math.MaxInt64) //nolint:gosec // masked to positive
-	if fp == 0 {
-		fp = 1
-	}
-	return fp
-}
-
 // pipelinePage is one fetched page on its way to the marker.
 type pipelinePage struct {
-	last    int64 // the page's last offset: the marker once it and every page before it are written
-	lastFP  int64 // the fingerprint of the record at last
-	pending int   // shares not yet written; guarded by pipeline.mu
+	last    int64  // the page's last offset: the marker once it and every page before it are written
+	store   string // the store the page was read from
+	pending int    // shares not yet written; guarded by pipeline.mu
 }
 
 // share is one partition's rows of one page.
@@ -196,7 +171,7 @@ type decoded struct {
 	page    door.Page
 	applied int64   // the marker rowsOf skips at or below
 	last    int64   // the page's last offset
-	lastFP  int64   // the fingerprint of the record at last
+	store   string  // the store the page was read from
 	written []int64 // non-nil: the partitions' markers from this page on
 	rows    []Row
 	done    chan struct{}
@@ -230,14 +205,16 @@ type pipeline struct {
 	// marked is the page marker as last written; idle hears when the last page
 	// in flight was marked.
 	marked atomic.Int64
-	fp     atomic.Int64 // the fingerprint of the record at marked
 	idle   chan struct{}
-	// ackMu orders acks against a new stream's reset of marked; acked is the
-	// last offset the node took; reack asks the marker to retry an ack it
-	// owes.
-	ackMu sync.Mutex
-	acked int64
-	reack chan struct{}
+	// ackMu orders acks against a new stream's reset of marked. stream is the
+	// store the followed stream lives in ("" until known), markedStore the one
+	// of the marker; acked is the last offset the node took; reack asks the
+	// marker to retry an ack it owes.
+	ackMu       sync.Mutex
+	stream      string
+	markedStore string
+	acked       int64
+	reack       chan struct{}
 
 	mu sync.Mutex
 	// failing holds each part's current error (the fetcher, a writer, the
@@ -369,12 +346,12 @@ func (p *pipeline) fetch(ctx context.Context) error {
 		if applied < 0 {
 			marker, err := p.store.Applied(ctx, Consumer)
 			var markers map[string]int64
-			var fp int64
+			var markerStore string
 			if err == nil {
 				markers, err = p.store.PartitionMarkers(ctx, Consumer)
 			}
 			if err == nil {
-				fp, err = p.store.Applied(ctx, fingerprintConsumer(Consumer))
+				markerStore, err = p.store.AppliedStore(ctx, Consumer)
 			}
 			if err != nil {
 				if !failed(err) {
@@ -385,8 +362,8 @@ func (p *pipeline) fetch(ctx context.Context) error {
 			applied, written = startMarkers(marker, markers, len(p.writers))
 			p.ackMu.Lock()
 			p.marked.Store(marker)
+			p.stream, p.markedStore = markerStore, markerStore
 			p.ackMu.Unlock()
-			p.fp.Store(fp)
 		}
 		select {
 		case p.slots <- struct{}{}:
@@ -418,13 +395,24 @@ func (p *pipeline) fetch(ctx context.Context) error {
 		retry = time.Second
 		p.health("fetch", nil)
 		b.NowMS, b.FetchedAt = page.NowMS, time.Now()
+		if following := p.following(); next != 0 && page.Store != "" && following != "" && page.Store != following {
+			// colcad's store was recreated under a read ahead of the cursor:
+			// finish what is in flight, then read the new store from its
+			// cursor, where it shows as a new stream.
+			<-p.slots
+			b.logger().Warn("the node's store changed while reading; reading the new store from the cursor",
+				"store", page.Store, "was", following)
+			if !p.backToCursor(ctx, &next, &applied) {
+				return ctx.Err()
+			}
+			continue
+		}
 		if len(page.Records) == 0 {
 			<-p.slots
 			// At the head: once the pages in flight are marked, the next drain
-			// reads from the cursor again. That is where a recreated stream
-			// (colcad's volume replaced) shows: /fetch from an offset never
-			// reads behind the cursor and past a new stream's head returns
-			// nothing, while the new cursor starts at its first record.
+			// reads from the cursor again. A node older than store ids shows a
+			// recreated stream only there: /fetch from an offset never reads
+			// behind the cursor and past a new stream's head returns nothing.
 			if next != 0 && !p.backToCursor(ctx, &next, &applied) {
 				return ctx.Err()
 			}
@@ -439,27 +427,25 @@ func (p *pipeline) fetch(ctx context.Context) error {
 		fromCursor := next == 0
 		fresh := false
 		if fromCursor {
-			if fresh, err = b.newStream(ctx, page, p.marked.Load(), p.fp.Load()); err != nil {
-				<-p.slots
-				if !failed(err) {
-					return ctx.Err()
-				}
-				continue
-			}
+			fresh = b.newStream(page, p.marked.Load(), p.following())
 			if marked := p.marked.Load(); !fresh && last < marked {
-				// The cursor lags the marker: acks failed while the marks went
-				// in. Everything on this page is written; move the cursor up and
-				// read on from the marker.
+				// The same store, and the cursor lags the marker: acks failed
+				// while the marks went in. Everything on this page is written;
+				// move the cursor up and read on from the marker.
 				<-p.slots
 				b.logger().Warn("the cursor lags the applied-offset marker; acking up to it",
 					"cursor_page_last", last, "marker", marked)
-				p.ack(ctx, marked)
+				p.adopt(page.Store)
+				p.ack(ctx, marked, p.following())
 				next = marked + 1
 				continue
 			}
+			if !fresh {
+				p.adopt(page.Store)
+			}
 		}
 		item := &decoded{page: page, applied: applied, last: last, written: written, done: make(chan struct{}),
-			lastFP: recordFingerprint(page.Records[len(page.Records)-1])}
+			store: page.Store}
 		written = nil
 		if fresh {
 			// The rest of the stream is new too, and so are the partitions'
@@ -479,8 +465,8 @@ func (p *pipeline) fetch(ctx context.Context) error {
 			applied, item.applied = 0, 0
 			p.ackMu.Lock()
 			p.marked.Store(0)
-			p.fp.Store(0)
 			p.acked = 0
+			p.stream, p.markedStore = page.Store, page.Store
 			p.ackMu.Unlock()
 			item.written = make([]int64, len(p.writers))
 		}
@@ -520,17 +506,41 @@ func (p *pipeline) backToCursor(ctx context.Context, next, applied *int64) bool 
 	return true
 }
 
-// ack moves the cursor to offset, never past the marker and never back. A
-// failed ack is owed: the marker retries it with backoff, also when no new
-// data arrives to carry the next one.
-func (p *pipeline) ack(ctx context.Context, offset int64) bool {
+// following is the store of the stream being followed, "" while unknown.
+func (p *pipeline) following() string {
+	p.ackMu.Lock()
+	defer p.ackMu.Unlock()
+	return p.stream
+}
+
+// adopt records the store a page was read from when none is known yet (a
+// marker from before store ids, or a node too old to send one).
+func (p *pipeline) adopt(store string) {
+	p.ackMu.Lock()
+	defer p.ackMu.Unlock()
+	if p.stream == "" {
+		p.stream = store
+	}
+}
+
+// ack moves the cursor to offset, never past the marker and never back, for
+// records read from store. A failed ack is owed: the marker retries it with
+// backoff, also when no new data arrives to carry the next one. An ack the
+// node refuses because its store changed is not owed: the offset names other
+// records there, and the new store is read from its own cursor.
+func (p *pipeline) ack(ctx context.Context, offset int64, store string) bool {
 	p.ackMu.Lock()
 	defer p.ackMu.Unlock()
 	offset = min(offset, p.marked.Load())
 	if offset <= p.acked {
 		return true
 	}
-	if _, err := p.b.Door.Ack(ctx, "metrics", Cursor, offset); err != nil {
+	if _, err := p.b.Door.AckStore(ctx, "metrics", Cursor, offset, store); err != nil {
+		if errors.Is(err, door.ErrStoreChanged) {
+			p.b.logger().Warn("not acking: the node's store changed since the records were read",
+				"offset", offset, "store", store)
+			return true
+		}
 		p.b.logger().Warn("applied but could not ack", "offset", offset, "err", err)
 		select {
 		case p.reack <- struct{}{}:
@@ -561,6 +571,12 @@ func (p *pipeline) decodePages(ctx context.Context) {
 func (p *pipeline) dispatchPages(ctx context.Context) {
 	written := make([]int64, len(p.writers))
 	for {
+		// Stop at once when the run ends: a page whose shares went out only in
+		// part must be the last one, or a later page's share would move its
+		// writer's marker past rows that were never written.
+		if ctx.Err() != nil {
+			return
+		}
 		var item *decoded
 		select {
 		case item = <-p.order:
@@ -575,13 +591,16 @@ func (p *pipeline) dispatchPages(ctx context.Context) {
 		if item.written != nil {
 			copy(written, item.written)
 		}
-		p.dispatch(ctx, item.last, item.lastFP, item.rows, written)
+		if !p.dispatch(ctx, item.last, item.store, item.rows, written) {
+			return
+		}
 	}
 }
 
 // dispatch queues a page for the marker, then its shares for the writers.
-// A row at or below its partition's marker was written before a restart.
-func (p *pipeline) dispatch(ctx context.Context, last, lastFP int64, rows []Row, written []int64) {
+// A row at or below its partition's marker was written before a restart. It
+// reports false when the run ended before every share was queued.
+func (p *pipeline) dispatch(ctx context.Context, last int64, store string, rows []Row, written []int64) bool {
 	n := len(p.writers)
 	shares := make([][]Row, n)
 	for _, row := range rows {
@@ -594,7 +613,7 @@ func (p *pipeline) dispatch(ctx context.Context, last, lastFP int64, rows []Row,
 		}
 		shares[i] = append(shares[i], row)
 	}
-	page := &pipelinePage{last: last, lastFP: lastFP}
+	page := &pipelinePage{last: last, store: store}
 	for _, s := range shares {
 		if len(s) > 0 {
 			page.pending++
@@ -603,11 +622,11 @@ func (p *pipeline) dispatch(ctx context.Context, last, lastFP int64, rows []Row,
 	select {
 	case p.pages <- page:
 	case <-ctx.Done():
-		return
+		return false
 	}
 	if page.pending == 0 {
 		p.wake()
-		return
+		return true
 	}
 	for i, s := range shares {
 		if len(s) == 0 {
@@ -616,9 +635,10 @@ func (p *pipeline) dispatch(ctx context.Context, last, lastFP int64, rows []Row,
 		select {
 		case p.writers[i] <- share{page: page, rows: s}:
 		case <-ctx.Done():
-			return
+			return false
 		}
 	}
+	return true
 }
 
 func (p *pipeline) wake() {
@@ -730,7 +750,10 @@ func (p *pipeline) mark(ctx context.Context) {
 			continue
 		case <-retryC:
 			retryC = nil
-			owe(p.ack(ctx, p.marked.Load()))
+			p.ackMu.Lock()
+			store := p.markedStore
+			p.ackMu.Unlock()
+			owe(p.ack(ctx, p.marked.Load(), store))
 			continue
 		case <-ctx.Done():
 			return
@@ -756,13 +779,15 @@ func (p *pipeline) mark(ctx context.Context) {
 			continue
 		}
 		// Never backwards: pages read from a lagging cursor end below it.
-		last, fp := waiting[n-1].last, waiting[n-1].lastFP
+		last, store := waiting[n-1].last, waiting[n-1].store
 		if marked := p.marked.Load(); marked >= last {
-			last, fp = marked, p.fp.Load()
+			p.ackMu.Lock()
+			last, store = marked, p.markedStore
+			p.ackMu.Unlock()
 		}
 		retry := time.Second
 		for {
-			err := p.store.Mark(ctx, Consumer, last, fp)
+			err := p.store.Mark(ctx, Consumer, last, store)
 			if err == nil {
 				break
 			}
@@ -778,10 +803,10 @@ func (p *pipeline) mark(ctx context.Context) {
 		}
 		p.ackMu.Lock()
 		p.marked.Store(last)
-		p.fp.Store(fp)
+		p.markedStore = store
 		p.ackMu.Unlock()
 		// The rows and the marker are durable; an ack that fails is retried.
-		owe(p.ack(ctx, last))
+		owe(p.ack(ctx, last, store))
 		p.health("marker", nil)
 		waiting = waiting[n:]
 		for range n {

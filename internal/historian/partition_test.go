@@ -55,7 +55,7 @@ func TestAFailedShareFailsThePageAndLeavesTheMarker(t *testing.T) {
 		return batchTxFailingAt(-1, nil), nil
 	}}}
 	sink := &Sink{Pool: pool, Writers: 4}
-	if _, err := sink.Apply(context.Background(), manySignals(40), Consumer, 40); err == nil {
+	if _, err := sink.Apply(context.Background(), manySignals(40), Consumer, 40, ""); err == nil {
 		t.Fatal("a page with a failed share reported success")
 	}
 	if failures.Load() != 1 || pool.markers != 0 {
@@ -64,7 +64,7 @@ func TestAFailedShareFailsThePageAndLeavesTheMarker(t *testing.T) {
 
 	pool.calls = 0
 	pool.begin = func(int) (pgx.Tx, error) { return batchTxFailingAt(-1, nil), nil }
-	if _, err := sink.Apply(context.Background(), manySignals(40), Consumer, 40); err != nil {
+	if _, err := sink.Apply(context.Background(), manySignals(40), Consumer, 40, ""); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	if pool.calls != 4 || pool.markers != 1 {
@@ -131,11 +131,11 @@ func TestAPoisonedRowIsReportedOnceAcrossARetriedPartitionedPage(t *testing.T) {
 	if partitionOf("poison", 4) == partitionOf("flaky", 4) {
 		t.Skip("poison and flaky share a partition; the test needs them apart")
 	}
-	rej, err := sink.Apply(context.Background(), rows, Consumer, 8)
+	rej, err := sink.Apply(context.Background(), rows, Consumer, 8, "")
 	if err == nil || len(rej) != 0 {
 		t.Fatalf("first attempt: %d rejections, err %v; want none and the transient error", len(rej), err)
 	}
-	rej, err = sink.Apply(context.Background(), rows, Consumer, 8)
+	rej, err = sink.Apply(context.Background(), rows, Consumer, 8, "")
 	if err != nil || len(rej) != 1 || rej[0].Row.SignalID != "poison" {
 		t.Fatalf("retry: %v, err %v; want the poisoned row once", rej, err)
 	}

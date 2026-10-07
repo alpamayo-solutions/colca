@@ -841,7 +841,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		m.HTTPFetch(callerLabel(c), stream)
 		// "from" is where this page started, so a client can tell a node that read
 		// ahead from one that ignored the parameter.
-		resp := map[string]any{"records": out, "next": next, "from": from, "now_ms": e.AuthoritativeNow().UnixMilli()}
+		// store names the store incarnation the page was read from; a consumer
+		// passes it back on /ack so an ack can never land on a store that was
+		// recreated in between.
+		resp := map[string]any{"records": out, "next": next, "from": from, "now_ms": e.AuthoritativeNow().UnixMilli(),
+			"store": e.Store().StoreID()}
 		// Without a position of its own the consumer started at the LWM; a prune
 		// between that read and this check moved nothing it was owed.
 		if gap, ok := e.Store().Gap(stream, from); ok && saved {
@@ -868,6 +872,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			Stream string `json:"stream"`
 			Offset uint64 `json:"offset"`
 			Delete bool   `json:"delete"`
+			// Store is the store id /fetch returned with the records acked.
+			// Optional; when given, an ack for another store is refused.
+			Store string `json:"store"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			var tooLarge *http.MaxBytesError
@@ -924,6 +931,21 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 			slog.Default().Info("cursor retired", "cursor", in.Cursor, "stream", in.Stream, "by", by)
 			writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+			return
+		}
+		// An ack is for records the consumer read. From another store (colcad's
+		// data was recreated since the read) or past the stream's head it
+		// would skip records the consumer never saw, so it is refused.
+		if id := e.Store().StoreID(); in.Store != "" && in.Store != id {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": "store changed: the records were read from store " + in.Store + ", this node's store is " + id,
+				"store": id, "store_changed": true})
+			return
+		}
+		if head := e.Store().NextOffset(in.Stream); head > 0 && in.Offset >= head {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"error": fmt.Sprintf("offset %d is past the head of stream %s (next offset %d)", in.Offset, in.Stream, head),
+				"next":  head})
 			return
 		}
 		moved := e.Store().CursorAck(in.Cursor, in.Stream, in.Offset+1)

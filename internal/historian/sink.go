@@ -87,18 +87,23 @@ ON CONFLICT (signal_id, timestamp) DO UPDATE SET
     colca_node_id = EXCLUDED.colca_node_id`
 
 // upsertOffset moves the marker in the same transaction as the rows it
-// describes.
+// describes, with the store the records were read from ($3, NULL when none):
+// colca's /fetch names it, and a marker is a position only in that store.
 const upsertOffset = `
-INSERT INTO colca_applied_offset (consumer, "offset", updated_at)
-VALUES ($1, $2, now())
-ON CONFLICT (consumer) DO UPDATE SET "offset" = EXCLUDED."offset", updated_at = now()`
+INSERT INTO colca_applied_offset (consumer, "offset", store, updated_at)
+VALUES ($1, $2, NULLIF($3::text, ''), now())
+ON CONFLICT (consumer) DO UPDATE SET "offset" = EXCLUDED."offset", store = EXCLUDED.store, updated_at = now()`
 
 const createOffsetTable = `
 CREATE TABLE IF NOT EXISTS colca_applied_offset (
     consumer   text PRIMARY KEY,
     "offset"   bigint NOT NULL DEFAULT 0,
+    store      text,
     updated_at timestamptz NOT NULL DEFAULT now()
 )`
+
+// addOffsetStore gives a table created by an older historian the store column.
+const addOffsetStore = `ALTER TABLE colca_applied_offset ADD COLUMN IF NOT EXISTS store text`
 
 // dbPool is the part of *pgxpool.Pool the sink uses. pgx.Tx is already an
 // interface, so poison_test.go can fake Begin without a database.
@@ -180,6 +185,9 @@ func (s *Sink) EnsureSchema(ctx context.Context, retentionDays int) error {
 	if _, err := s.Pool.Exec(ctx, createOffsetTable); err != nil {
 		return fmt.Errorf("historian: creating the offset table: %w", err)
 	}
+	if _, err := s.Pool.Exec(ctx, addOffsetStore); err != nil {
+		return fmt.Errorf("historian: adding the store to the offset table: %w", err)
+	}
 	var isHypertable bool
 	if err := s.Pool.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -229,6 +237,21 @@ func (s *Sink) Applied(ctx context.Context, consumer string) (int64, error) {
 	return offset, nil
 }
 
+// AppliedStore reads which store this consumer's marker is a position in, ""
+// when none was recorded (a marker written before stores were).
+func (s *Sink) AppliedStore(ctx context.Context, consumer string) (string, error) {
+	var store *string
+	err := s.Pool.QueryRow(ctx,
+		`SELECT store FROM colca_applied_offset WHERE consumer = $1`, consumer).Scan(&store)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && store == nil) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("historian: reading the marker's store for %s: %w", consumer, err)
+	}
+	return *store, nil
+}
+
 // Apply writes the rows and moves the marker in one transaction. An empty batch
 // still moves the marker, or a page of tombstones would be fetched forever.
 //
@@ -236,24 +259,24 @@ func (s *Sink) Applied(ctx context.Context, consumer string) (int64, error) {
 // applied row by row so the good rows land and the bad one is set aside;
 // otherwise the page would block the sink forever. Any other error is returned
 // and the whole page is retried.
-func (s *Sink) Apply(ctx context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error) {
+func (s *Sink) Apply(ctx context.Context, rows []Row, consumer string, offset int64, store string) ([]Rejection, error) {
 	if s.Writers > 1 && !s.Strict && len(rows) >= 2*s.Writers {
-		return s.applyPartitioned(ctx, rows, consumer, offset)
+		return s.applyPartitioned(ctx, rows, consumer, offset, store)
 	}
-	return s.applyOne(ctx, rows, consumer, offset)
+	return s.applyOne(ctx, rows, consumer, offset, store)
 }
 
 // applyOne writes rows, and the marker unless consumer is "", in one
 // transaction, falling back to row by row when a row is poison.
-func (s *Sink) applyOne(ctx context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error) {
-	err := s.applyBatch(ctx, rows, consumer, offset)
+func (s *Sink) applyOne(ctx context.Context, rows []Row, consumer string, offset int64, store string) ([]Rejection, error) {
+	err := s.applyBatch(ctx, rows, consumer, offset, store)
 	if err == nil {
 		return nil, nil
 	}
 	if _, _, poison := poisonReason(err); !poison || s.Strict {
 		return nil, err
 	}
-	return s.applyRowByRow(ctx, rows, consumer, offset)
+	return s.applyRowByRow(ctx, rows, consumer, offset, store)
 }
 
 // applyPartitioned writes a page over s.Writers connections at once. Rows are
@@ -266,7 +289,7 @@ func (s *Sink) applyOne(ctx context.Context, rows []Row, consumer string, offset
 //
 // A single transaction keeps one Postgres backend busy; the historian's
 // ceiling was that one core (fleet scale benchmark, 2026-10).
-func (s *Sink) applyPartitioned(ctx context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error) {
+func (s *Sink) applyPartitioned(ctx context.Context, rows []Row, consumer string, offset int64, store string) ([]Rejection, error) {
 	shares := make([][]Row, s.Writers)
 	for _, row := range rows {
 		i := partitionOf(row.SignalID, s.Writers)
@@ -285,7 +308,7 @@ func (s *Sink) applyPartitioned(ctx context.Context, rows []Row, consumer string
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rej, err := s.applyOne(ctx, share, "", offset)
+			rej, err := s.applyOne(ctx, share, "", offset, "")
 			results[i] = result{rej, err}
 		}()
 	}
@@ -297,7 +320,7 @@ func (s *Sink) applyPartitioned(ctx context.Context, rows []Row, consumer string
 		}
 		rejections = append(rejections, r.rejections...)
 	}
-	if _, err := s.Pool.Exec(ctx, upsertOffset, consumer, offset); err != nil {
+	if _, err := s.Pool.Exec(ctx, upsertOffset, consumer, offset, store); err != nil {
 		return nil, fmt.Errorf("historian: moving the marker to %d: %w", offset, err)
 	}
 	return rejections, nil
@@ -317,7 +340,7 @@ func partitionOf(signalID string, n int) int {
 // Runs of values go as one statement each (insertMetrics); a retraction keeps a
 // statement of its own and its place in the order, because whether it writes a
 // row depends on the rows before it.
-func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offset int64) error {
+func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offset int64, store string) error {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("historian: beginning a batch: %w", err)
@@ -340,7 +363,7 @@ func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offs
 		start = end
 	}
 	if consumer != "" {
-		batch.Queue(upsertOffset, consumer, offset)
+		batch.Queue(upsertOffset, consumer, offset, store)
 	}
 
 	results := tx.SendBatch(ctx, batch)
@@ -407,7 +430,7 @@ func valueColumns(rows []Row) []any {
 // applyRowByRow applies each row under its own savepoint in one transaction,
 // skipping poisoned rows and committing the marker with the rows that landed. A
 // transient error aborts the whole pass, and the page is retried.
-func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error) {
+func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, offset int64, store string) ([]Rejection, error) {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("historian: beginning a row-by-row retry at offset %d: %w", offset, err)
@@ -443,7 +466,7 @@ func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, o
 	}
 
 	if consumer != "" {
-		if _, err := tx.Exec(ctx, upsertOffset, consumer, offset); err != nil {
+		if _, err := tx.Exec(ctx, upsertOffset, consumer, offset, store); err != nil {
 			return nil, fmt.Errorf("historian: moving the marker after a row-by-row apply at offset %d: %w", offset, err)
 		}
 	}

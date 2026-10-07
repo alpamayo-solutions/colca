@@ -20,9 +20,9 @@ A caller is one of:
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}`, or `202` `{"stream":"logs","topic":"…","withheld":"…"}` without `offset` |
 | `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"stream":"logs","withheld":"…"} or {"error":"…","reason":"…"},…]}` |
-| `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N}` |
+| `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N,"store":"ID"}` |
 | `GET /watch` | machine, service, person, admin | `?stream=S&stream=S2&interval_ms=100` | NDJSON, one line per change: `{"streams":["S"],"next":{"S":N}}` |
-| `POST /ack` | owner of the cursor, admin; to retire a stale cursor also `cmd:<node>/#:admin` | `{"cursor":"NAME","stream":"S","offset":N}`, or `{"cursor":"NAME","stream":"S","delete":true}` to retire it | `{"moved":true}` or `{"deleted":true}` |
+| `POST /ack` | owner of the cursor, admin; to retire a stale cursor also `cmd:<node>/#:admin` | `{"cursor":"NAME","stream":"S","offset":N}` (optionally `"store":"ID"`), or `{"cursor":"NAME","stream":"S","delete":true}` to retire it | `{"moved":true}` or `{"deleted":true}`; `409` store changed, `422` past the head |
 | `GET /backlog` | local service (`?prefix=` required), admin | `?prefix=c/projector/` | `{"queues":[{"cursor":"…","stream":"S","position":N,"head":N,"lag_records":N,"last_ack_ms":T,"stale":false,"read_since_start":true}]}` |
 | `GET /kv` | machine, service, person, admin | `?prefix=P&max=1000&after=TOKEN&contract=_Signal&depth=1` | `{"entries":[{"path":"…","node_id":"…","topic":"…","payload":{…},"ts":T,"offset":N}],"next":"TOKEN"}` |
 | `POST /kv/lookup` | machine, service, person, admin | body `{"topics": ["…"]}`, at most 1000 | `{"entries":[…]}`, each entry shaped as `/kv`'s (attribution included) — the current entry of each named topic the caller may read; topics with no entry are left out |
@@ -52,6 +52,16 @@ A caller is one of:
   successful PUBACK and is not fanned out.
 - `/fetch` never moves a cursor. `/ack` takes the last offset you processed and
   only moves forward.
+- An `/ack` past the stream's head (an offset at or above the next offset) is
+  refused with `422` for every caller: it would skip records not yet written.
+- `/fetch` names the store the page was read from (`store`, new whenever the
+  node's store is created from nothing, for instance after its data volume
+  was recreated). A consumer that passes it back as `"store"` on `/ack` gets
+  `409` with `"store_changed":true` when the node's store is another one by
+  then: the acked offsets name other records there, and the consumer should
+  read the new store from its cursor instead. `store` is optional on `/ack`;
+  clients that do not send it (chaski, the TypeScript client) are not checked.
+  Nodes before this release send no `store`.
 - `from=N` reads ahead of the cursor, starting at offset `N`, so a consumer can
   fetch its next page (`from` = the previous page's `next`) while it still
   processes and acks the previous one. It never reads behind the cursor. The

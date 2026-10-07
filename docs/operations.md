@@ -339,25 +339,23 @@ case where the late-sample caveat above can still apply, and only after an
 unclean stop. A failed write is retried in place with backoff; the pages
 behind it wait in bounded queues.
 
-With the marker the historian records a fingerprint of the record at it
-(`historian:metrics#record`: topic, ingest time and payload). An ack that
-fails (colcad restarting) is retried with backoff, also at the head with no
-new data. Until it goes through, the cursor lags the marker, and a read from
-the cursor starts at offset 1 (never acked) or ends below the marker. When
-the record at the marker still has the recorded fingerprint, that is the same
-stream: the cursor is acked up to the marker, reading goes on after it, and
-the marker never moves back.
+The marker records the store it is a position in: `/fetch` names the store a
+page was read from (new whenever colcad's store is created from nothing), and
+the historian acks only with that store id, so the node refuses an ack that
+would land on a recreated store. An ack that fails (colcad restarting) is
+retried with backoff, also at the head with no new data; meanwhile the cursor
+lags the marker. A read from the cursor of the same store is then acked up to
+the marker and reading goes on after it; the marker never moves back.
 
 When colcad's data volume is recreated while Timescale keeps the markers,
-there is no record at the marker, or one with another fingerprint. A marker
-from an older historian has no fingerprint; then a page from offset 1, or a
-short page below the marker, counts as a new stream.
-The historian then logs a warning, zeroes every writer marker in one
-transaction before it writes a row of the new stream, and historises it from
-its first record. A running historian finds it too: at the head, and after a
-failed fetch, it waits until the pages in flight are marked and reads the
-next page from the cursor again, which a new stream resets. Reading from its
-own position instead would only return empty pages there.
+pages come from another store than the marker's. The historian logs a
+warning, zeroes every writer marker in one transaction before it writes a row
+of the new stream, and historises it from its cursor, that is from its first
+record. A running historian finds it on the next page it fetches; ahead of
+the cursor it first waits until the pages in flight are marked. A marker
+written before stores were recorded, or a node that sends no store, falls
+back once to the page: one starting at offset 1, or a short page ending below
+the marker, counts as a new stream; the store is recorded from then on.
 `DB_MAX_CONNS` defaults to `WRITERS + 1`. `PIPELINE_PAGES=1` writes one page
 at a time, with the marker in the same transaction when `WRITERS=1`. A drain
 that reached the head the node announced on `/watch` waits for the next hint
