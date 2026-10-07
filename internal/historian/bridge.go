@@ -107,10 +107,8 @@ type Bridge struct {
 	// while unknown; ackOwed is set while an ack of the marker failed.
 	stream  string
 	ackOwed bool
-	// ownMarker is set once this bridge has moved the marker itself. Without
-	// store ids (a node too old to send one) a page from offset 1 under a
-	// marker otherwise reads as a recreated store; under a marker this bridge
-	// wrote, it is its own cursor lagging behind failed acks.
+	// ownMarker is set once this bridge has moved the marker itself (see
+	// newStream's owedOwnAck).
 	ownMarker bool
 	// skip is what this bridge skips at or below: the marker, or further when
 	// a pipelined run's partition markers say so.
@@ -271,7 +269,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		b.markerKnown = true
 	}
 	last := page.Records[len(page.Records)-1].Offset
-	fresh := !ahead && b.newStream(page, b.marker, b.stream)
+	fresh := !ahead && b.newStream(page, b.marker, b.stream, b.ownMarker && b.ackOwed)
 	if !fresh && b.stream == "" {
 		b.stream = page.Store
 	}
@@ -417,7 +415,14 @@ func (b *Bridge) rowsOf(page door.Page, applied int64) ([]Row, error) {
 // that sends none falls back, once, to the page: one starting at offset 1, or
 // a short page ending below the marker, is a new stream. The caller records
 // the store from then on.
-func (b *Bridge) newStream(page door.Page, marker int64, markerStore string) bool {
+//
+// owedOwnAck: the marker is this process's own and its ack failed. Without
+// store ids (a node too old to send one) a page from offset 1 under a marker
+// reads as a recreated store; while this bridge's own ack of that marker is
+// owed it is its own cursor that lags, and resetting would re-apply the
+// stream's first page every pass. Once acks go through, a page from offset 1
+// is a recreated store again.
+func (b *Bridge) newStream(page door.Page, marker int64, markerStore string, owedOwnAck bool) bool {
 	if marker <= 0 {
 		return false
 	}
@@ -427,10 +432,7 @@ func (b *Bridge) newStream(page door.Page, marker int64, markerStore string) boo
 		if page.Store == markerStore {
 			return false
 		}
-	case page.Store == "" && b.ownMarker:
-		// No store id and a marker this bridge wrote: the cursor lags it
-		// (acks failed), it is not a recreated store. Resetting would
-		// re-apply the stream's first page over and over while acks fail.
+	case page.Store == "" && owedOwnAck:
 		return false
 	case first != 1 && (marker <= last || len(page.Records) >= b.max()):
 		return false

@@ -214,7 +214,9 @@ type pipeline struct {
 	stream      string
 	markedStore string
 	acked       int64
-	reack       chan struct{}
+	// ownMarked: this pipeline has written the marker (see owesOwnAck).
+	ownMarked bool
+	reack     chan struct{}
 
 	mu sync.Mutex
 	// failing holds each part's current error (the fetcher, a writer, the
@@ -427,7 +429,7 @@ func (p *pipeline) fetch(ctx context.Context) error {
 		fromCursor := next == 0
 		fresh := false
 		if fromCursor {
-			fresh = b.newStream(page, p.marked.Load(), p.following())
+			fresh = b.newStream(page, p.marked.Load(), p.following(), p.owesOwnAck())
 			if marked := p.marked.Load(); !fresh && last < marked {
 				// The same store, and the cursor lags the marker: acks failed
 				// while the marks went in. Everything on this page is written;
@@ -504,6 +506,14 @@ func (p *pipeline) backToCursor(ctx context.Context, next, applied *int64) bool 
 	*next = 0
 	*applied = max(*applied, p.marked.Load())
 	return true
+}
+
+// owesOwnAck: the marker is this pipeline's own and the node has not taken
+// its ack (see Bridge.newStream).
+func (p *pipeline) owesOwnAck() bool {
+	p.ackMu.Lock()
+	defer p.ackMu.Unlock()
+	return p.ownMarked && p.acked < p.marked.Load()
 }
 
 // following is the store of the stream being followed, "" while unknown.
@@ -813,6 +823,7 @@ func (p *pipeline) mark(ctx context.Context) {
 		p.ackMu.Lock()
 		p.marked.Store(last)
 		p.markedStore = store
+		p.ownMarked = true
 		p.ackMu.Unlock()
 		// The rows and the marker are durable; an ack that fails is retried.
 		owe(p.ack(ctx, last, store))
