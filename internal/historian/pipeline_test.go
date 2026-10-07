@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"sort"
 	"sync"
@@ -67,14 +68,38 @@ func tsOf(r door.Record) int64 {
 	return row.Timestamp.UnixMilli()
 }
 
-func (s *stream) head() int64 { return int64(len(s.recs)) }
+func (s *stream) head() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return int64(len(s.recs))
+}
+
+// replace gives the node a new stream, as when colcad's data volume is
+// recreated: new records from offset 1 and a cursor that starts there.
+func (s *stream) replace(recs []door.Record) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recs, s.cursor, s.acked = recs, 1, nil
+}
+
+// grow appends records to the stream, numbered on from its head.
+func (s *stream) grow(more []door.Record) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range more {
+		r.Offset = int64(len(s.recs)) + 1
+		s.recs = append(s.recs, r)
+	}
+}
 
 func (s *stream) serve(from int64, limit int) (door.Page, error) {
 	if n := s.fetches.Add(1); n == s.failFetch {
 		return door.Page{}, errors.New("colcad restarted")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var recs []door.Record
-	for off := from; off <= s.head() && len(recs) < limit; off++ {
+	for off := from; off <= int64(len(s.recs)) && len(recs) < limit; off++ {
 		recs = append(recs, s.recs[off-1])
 	}
 	return door.Page{Records: recs, From: from, Next: from + int64(len(recs))}, nil
@@ -183,7 +208,10 @@ type pipeStore struct {
 	table     table
 	marker    int64
 	consumers map[string]int64 // the partitions' markers
-	written   map[int64]bool   // offsets whose rows committed
+	resets    int
+	// fresh is set by newStream: the next marker may go back, once.
+	fresh     bool
+	written   map[int64]bool // offsets whose rows committed
 	markers   []int64
 	slow      int           // this partition's writes take slowFor
 	slowFor   time.Duration //
@@ -211,8 +239,17 @@ func (p *pipeStore) Applied(_ context.Context, consumer string) (int64, error) {
 	return p.consumers[consumer], nil
 }
 
-func (p *pipeStore) Apply(context.Context, []Row, string, int64) ([]Rejection, error) {
-	return nil, errors.New("the pipeline writes shares, not pages")
+// Apply is the one-page path (PIPELINE_PAGES=1): rows and the page marker
+// together.
+func (p *pipeStore) Apply(_ context.Context, rows []Row, _ string, offset int64) ([]Rejection, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, row := range rows {
+		p.table.apply(row)
+		p.written[row.Offset] = true
+	}
+	p.marker = offset
+	return nil, nil
 }
 
 func (p *pipeStore) Partitions() int { return p.partitions }
@@ -265,12 +302,33 @@ func (p *pipeStore) ApplyShare(ctx context.Context, rows []Row, consumer string,
 	return nil, nil
 }
 
+func (p *pipeStore) PartitionMarkers(context.Context, string) (map[string]int64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]int64, len(p.consumers))
+	maps.Copy(out, p.consumers)
+	return out, nil
+}
+
+func (p *pipeStore) ResetPartitionMarkers(context.Context, string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for name := range p.consumers {
+		p.consumers[name] = 0
+	}
+	p.resets++
+	return nil
+}
+
 func (p *pipeStore) Mark(_ context.Context, _ string, offset int64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.marks++
 	if p.marks == p.failMark {
 		return errors.New("marker write failed")
+	}
+	if offset < p.marker && p.fresh {
+		p.marker, p.fresh = 0, false
 	}
 	if offset < p.marker && p.bad == nil {
 		p.bad = fmt.Errorf("the marker went back from %d to %d", p.marker, offset)
@@ -285,6 +343,35 @@ func (p *pipeStore) Mark(_ context.Context, _ string, offset int64) error {
 	p.marker = offset
 	p.markers = append(p.markers, offset)
 	return nil
+}
+
+// newStream points the store's checks at a recreated stream: offsets start
+// again at 1. The table and the markers in the database stay as they are.
+func (p *pipeStore) newStream(s *stream) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stream, p.written, p.fresh = s, map[int64]bool{}, true
+}
+
+func (p *pipeStore) partitionMarkers() map[string]int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return maps.Clone(p.consumers)
+}
+
+// oracle is what one page at a time leaves after each stream in turn.
+func oracle(streams ...[]door.Record) table {
+	t := table{}
+	for _, recs := range streams {
+		for _, r := range recs {
+			row, err := RowFrom(r.Topic, r.Payload, r.TS)
+			if err != nil {
+				panic(err)
+			}
+			t.apply(row)
+		}
+	}
+	return t
 }
 
 func pipelineBridge(s *stream, store *pipeStore, pages, pageSize int) *Bridge {
@@ -466,4 +553,179 @@ func TestACommitWhoseAnswerWasLostIsNotWrittenAgain(t *testing.T) {
 	store.lostShare = 3
 	runToHead(t, pipelineBridge(s, store, 4, 25), s)
 	checkStore(t, s, store)
+}
+
+// colcad's volume is recreated while the historian is stopped. The new stream
+// first has samples of one signal only, so most writers get no rows; their
+// partition markers must not keep the old stream's offsets, or a restart
+// skips their rows of the new one. The first write after the reset fails and
+// must be written again, not taken for committed because of an old marker.
+func TestANewStreamResetsEveryPartitionMarker(t *testing.T) {
+	old := newStreamNamed(1000, 7, "a")
+	store := newPipeStore(old, 4)
+	runToHead(t, pipelineBridge(old, store, 4, 50), old)
+	for name, m := range store.partitionMarkers() {
+		if m < 900 {
+			t.Fatalf("%s at %d after the old stream; the test needs every partition well into it", name, m)
+		}
+	}
+	oldRecs := old.recs
+
+	fresh := newStreamNamed(200, 1, "b")
+	s := &stream{cursor: 1}
+	s.replace(fresh.recs)
+	store.newStream(s)
+	store.failShare = store.shares + 1
+	runToHead(t, pipelineBridge(s, store, 4, 50), s)
+	for name, m := range store.partitionMarkers() {
+		if m > 200 {
+			t.Fatalf("%s still at %d of the old stream after the reset", name, m)
+		}
+	}
+
+	// More signals, so every writer gets rows below the old markers; then a
+	// restart.
+	more := newStreamNamed(1000, 9, "c")
+	s.grow(more.recs)
+	runToHead(t, pipelineBridge(s, store, 4, 50), s)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.bad != nil {
+		t.Fatal(store.bad)
+	}
+	for off := int64(1); off <= s.head(); off++ {
+		if !store.written[off] {
+			t.Fatalf("offset %d of the new stream was never written", off)
+		}
+	}
+	if got, want := store.table.String(), oracle(oldRecs, s.recs).String(); got != want {
+		t.Fatalf("the table differs from one page at a time\n got %s\nwant %s", got, want)
+	}
+}
+
+// colcad's volume is recreated while the historian runs at the head. /fetch
+// from the historian's next offset finds nothing in the new stream; the
+// historian goes back to the cursor and historises the new stream from its
+// first record.
+func TestANewStreamWhileRunningIsReadFromTheCursor(t *testing.T) {
+	old := newStreamNamed(600, 5, "a")
+	store := newPipeStore(old, 4)
+	var signal door.Signal
+	b := &Bridge{Door: old, Store: store, Max: 50, Pipeline: 4, Changes: signal.Changes}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- b.Run(ctx) }()
+	waitAcked := func(s *stream, what string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for s.lastAck() != s.head() {
+			if time.Now().After(deadline) {
+				cancel()
+				t.Fatalf("%s: acked %d of %d", what, s.lastAck(), s.head())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	waitAcked(old, "old stream")
+	oldRecs := old.recs
+
+	fresh := newStreamNamed(450, 8, "b")
+	store.newStream(old)
+	old.replace(fresh.recs)
+	signal.Notify()
+	waitAcked(old, "new stream")
+	cancel()
+	<-done
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.bad != nil {
+		t.Fatal(store.bad)
+	}
+	if store.resets == 0 {
+		t.Fatal("the partition markers were not reset for the new stream")
+	}
+	if got, want := store.table.String(), oracle(oldRecs, fresh.recs).String(); got != want {
+		t.Fatalf("the table differs from one page at a time\n got %s\nwant %s", got, want)
+	}
+}
+
+// After WRITERS changed (or an unclean stop of a run with another count), the
+// smallest marker of a complete set of the old partitions is a point every
+// row at or below has been written; an incomplete set says nothing.
+func TestStartMarkersUseACompleteSetOfAnotherWriterCount(t *testing.T) {
+	applied, own := startMarkers(100, map[string]int64{
+		partitionConsumer(2, 0): 300, partitionConsumer(2, 1): 250, // complete: floor 250
+		partitionConsumer(3, 0): 900, // incomplete: ignored
+		partitionConsumer(4, 1): 180, partitionConsumer(4, 3): 220,
+		"historian:metrics/x.y": 999,
+	}, 4)
+	if applied != 250 {
+		t.Fatalf("start at %d, want 250", applied)
+	}
+	if fmt.Sprint(own) != "[0 180 0 220]" {
+		t.Fatalf("own markers %v", own)
+	}
+}
+
+// The one-page path (PIPELINE_PAGES=1) also zeroes the partition markers when
+// it finds a new stream, so a later pipelined run does not trust old ones; and
+// it starts after a complete set of a pipelined run's partition markers.
+func TestTheOnePagePathResetsAndUsesThePartitionMarkers(t *testing.T) {
+	fresh := newStreamNamed(30, 3, "b")
+	store := newPipeStore(fresh, 2)
+	store.marker = 1000
+	store.consumers = map[string]int64{partitionConsumer(4, 0): 1000, partitionConsumer(4, 2): 990}
+	b := &Bridge{Door: fresh, Store: store, Max: 50}
+	if _, err := b.Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.resets != 1 || store.consumers[partitionConsumer(4, 0)] != 0 {
+		t.Fatalf("resets %d, markers %v", store.resets, store.consumers)
+	}
+	if !store.written[1] || store.marker != 30 {
+		t.Fatalf("the new stream was not written from its start (marker %d)", store.marker)
+	}
+
+	s := newStreamNamed(100, 3, "c")
+	store = newPipeStore(s, 2)
+	store.marker = 20
+	store.consumers = map[string]int64{partitionConsumer(2, 0): 60, partitionConsumer(2, 1): 45}
+	s.cursor = 21
+	b = &Bridge{Door: s, Store: store, Max: 50}
+	if _, err := b.Once(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.written[45] || !store.written[46] {
+		t.Fatalf("the one-page path did not start after the partitions' floor 45: %v", store.written)
+	}
+}
+
+// A complete set of another writer count's markers past the page marker is
+// a start point, not a sign of a new stream: nothing is reset, the rows that
+// set wrote are not written again, and the rest are.
+func TestAStartAfterAnotherWriterCountSkipsWhatItWrote(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			s := newStreamNamed(400, 6, "a")
+			store := newPipeStore(s, 4)
+			// An earlier run with two writers wrote everything up to 300
+			// (one partition to 310) but moved the page marker only to 20.
+			for off := int64(1); off <= 300; off++ {
+				row, _ := RowFrom(s.recs[off-1].Topic, s.recs[off-1].Payload, s.recs[off-1].TS)
+				row.Offset = off
+				store.table.apply(row)
+				store.written[off] = true
+			}
+			store.marker = 20
+			store.consumers = map[string]int64{partitionConsumer(2, 0): 300, partitionConsumer(2, 1): 310}
+			s.cursor = 21
+			runToHead(t, pipelineBridge(s, store, pages, 50), s)
+			checkStore(t, s, store)
+			if store.resets != 0 {
+				t.Fatal("the markers were reset; the stream is the same")
+			}
+		})
+	}
 }

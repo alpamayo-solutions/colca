@@ -2,9 +2,16 @@ package historian
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/alpamayo-solutions/colca/door"
 )
@@ -23,6 +30,91 @@ type PipelineStore interface {
 	ApplyShare(ctx context.Context, rows []Row, consumer string, through int64) ([]Rejection, error)
 	// Mark moves the consumer's marker to offset.
 	Mark(ctx context.Context, consumer string, offset int64) error
+	// PartitionMarkers returns every partition marker of consumer, by name,
+	// whatever writer count wrote it.
+	PartitionMarkers(ctx context.Context, consumer string) (map[string]int64, error)
+	// ResetPartitionMarkers sets every partition marker of consumer to 0, in
+	// one transaction.
+	ResetPartitionMarkers(ctx context.Context, consumer string) error
+}
+
+// PartitionMarkers reads every historian:metrics/<n>.<i> marker.
+func (s *Sink) PartitionMarkers(ctx context.Context, consumer string) (map[string]int64, error) {
+	var raw []byte
+	err := s.Pool.QueryRow(ctx, `SELECT coalesce(json_object_agg(consumer, "offset"), '{}')::text
+		FROM colca_applied_offset WHERE consumer LIKE $1`, consumer+"/%").Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return map[string]int64{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("historian: reading the partition markers: %w", err)
+	}
+	out := map[string]int64{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("historian: reading the partition markers: %w", err)
+	}
+	return out, nil
+}
+
+// ResetPartitionMarkers zeroes every historian:metrics/<n>.<i> marker.
+func (s *Sink) ResetPartitionMarkers(ctx context.Context, consumer string) error {
+	if _, err := s.Pool.Exec(ctx, `UPDATE colca_applied_offset SET "offset" = 0, updated_at = now() WHERE consumer LIKE $1`,
+		consumer+"/%"); err != nil {
+		return fmt.Errorf("historian: resetting the partition markers: %w", err)
+	}
+	return nil
+}
+
+// startMarkers turns the page marker and the partition markers into where a
+// start resumes: the marker rows at or below are skipped, and partition i of
+// n's own marker. Markers of another writer count (WRITERS changed, or a run
+// stopped uncleanly before it) do not map onto today's partitions, but the
+// smallest of a complete set is a point every row at or below has been
+// written, so the start may skip to it.
+func startMarkers(page int64, markers map[string]int64, n int) (int64, []int64) {
+	own := make([]int64, n)
+	sets := map[int][]int64{}
+	for name, offset := range markers {
+		count, index, ok := parsePartitionConsumer(name)
+		if !ok {
+			continue
+		}
+		if count == n {
+			own[index] = offset
+			continue
+		}
+		sets[count] = append(sets[count], offset)
+	}
+	applied := page
+	for count, offsets := range sets {
+		if len(offsets) != count {
+			continue // a partition that never wrote has no marker: no floor
+		}
+		floor := offsets[0]
+		for _, o := range offsets[1:] {
+			floor = min(floor, o)
+		}
+		applied = max(applied, floor)
+	}
+	return applied, own
+}
+
+// parsePartitionConsumer reads historian:metrics/<n>.<i>.
+func parsePartitionConsumer(name string) (n, i int, ok bool) {
+	rest, found := strings.CutPrefix(name, Consumer+"/")
+	if !found {
+		return 0, 0, false
+	}
+	a, b, found := strings.Cut(rest, ".")
+	if !found {
+		return 0, 0, false
+	}
+	n, err1 := strconv.Atoi(a)
+	i, err2 := strconv.Atoi(b)
+	if err1 != nil || err2 != nil || n < 1 || i < 0 || i >= n {
+		return 0, 0, false
+	}
+	return n, i, true
 }
 
 // Partitions reports the sink's writer count.
@@ -104,6 +196,11 @@ type pipeline struct {
 	// dispatcher in fetch order.
 	decode, order chan *decoded
 
+	// marked is the page marker as last written; idle hears when the last page
+	// in flight was marked.
+	marked atomic.Int64
+	idle   chan struct{}
+
 	mu sync.Mutex
 	// failing holds each part's current error (the fetcher, a writer, the
 	// marker); Health hears healthy only when none is failing.
@@ -151,6 +248,7 @@ func (b *Bridge) pipelined() (*pipeline, bool) {
 		writers: make([]chan share, store.Partitions()),
 		pages:   make(chan *pipelinePage, b.Pipeline),
 		written: make(chan struct{}, 1),
+		idle:    make(chan struct{}, 1),
 		decode:  make(chan *decoded, b.Pipeline),
 		order:   make(chan *decoded, b.Pipeline),
 		failing: map[string]string{},
@@ -231,18 +329,9 @@ func (p *pipeline) fetch(ctx context.Context) error {
 		}
 		if applied < 0 {
 			marker, err := p.store.Applied(ctx, Consumer)
-			if err != nil {
-				if !failed(err) {
-					return ctx.Err()
-				}
-				continue
-			}
-			n := len(p.writers)
-			written = make([]int64, n)
-			for i := range n {
-				if written[i], err = p.store.Applied(ctx, partitionConsumer(n, i)); err != nil {
-					break
-				}
+			var markers map[string]int64
+			if err == nil {
+				markers, err = p.store.PartitionMarkers(ctx, Consumer)
 			}
 			if err != nil {
 				if !failed(err) {
@@ -250,7 +339,8 @@ func (p *pipeline) fetch(ctx context.Context) error {
 				}
 				continue
 			}
-			applied = marker
+			applied, written = startMarkers(marker, markers, len(p.writers))
+			p.marked.Store(marker)
 		}
 		select {
 		case p.slots <- struct{}{}:
@@ -272,6 +362,11 @@ func (p *pipeline) fetch(ctx context.Context) error {
 			if !failed(err) {
 				return ctx.Err()
 			}
+			// colcad may have restarted on a new store meanwhile: read from
+			// the cursor again (see below).
+			if next != 0 && !p.backToCursor(ctx, &next, &applied) {
+				return ctx.Err()
+			}
 			continue
 		}
 		retry = time.Second
@@ -279,6 +374,14 @@ func (p *pipeline) fetch(ctx context.Context) error {
 		b.NowMS, b.FetchedAt = page.NowMS, time.Now()
 		if len(page.Records) == 0 {
 			<-p.slots
+			// At the head: once the pages in flight are marked, the next drain
+			// reads from the cursor again. That is where a recreated stream
+			// (colcad's volume replaced) shows: /fetch from an offset never
+			// reads behind the cursor and past a new stream's head returns
+			// nothing, while the new cursor starts at its first record.
+			if next != 0 && !p.backToCursor(ctx, &next, &applied) {
+				return ctx.Err()
+			}
 			p.health("fetch", nil)
 			if !door.WaitChange(ctx, changed, -1, started.Add(b.BatchInterval)) {
 				return ctx.Err()
@@ -286,13 +389,26 @@ func (p *pipeline) fetch(ctx context.Context) error {
 			started, changed = time.Now(), nil
 			continue
 		}
-		first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
+		last := page.Records[len(page.Records)-1].Offset
 		item := &decoded{page: page, applied: applied, last: last, written: written, done: make(chan struct{})}
 		written = nil
-		if applied > 0 && (first == 1 || applied > last) {
-			// rowsOf says why; the rest of the stream is new too, and so are
-			// the partitions' markers.
-			applied = 0
+		if b.newStream(page, p.marked.Load()) {
+			// The rest of the stream is new too, and so are the partitions'
+			// markers. They are zeroed in the database before
+			// any row of the new stream is written: a writer that gets no rows
+			// for a while would otherwise keep an old marker, and a restart
+			// would skip its rows below it.
+			for {
+				err := p.store.ResetPartitionMarkers(ctx, Consumer)
+				if err == nil {
+					break
+				}
+				if !failed(err) {
+					return ctx.Err()
+				}
+			}
+			applied, item.applied = 0, 0
+			p.marked.Store(0)
 			item.written = make([]int64, len(p.writers))
 		}
 		next = page.Next
@@ -314,6 +430,21 @@ func (p *pipeline) fetch(ctx context.Context) error {
 		}
 		started, changed = time.Now(), nil
 	}
+}
+
+// backToCursor waits until every page in flight is marked, then makes the
+// next fetch read from the cursor with the marker as last written.
+func (p *pipeline) backToCursor(ctx context.Context, next, applied *int64) bool {
+	for len(p.slots) > 0 {
+		select {
+		case <-p.idle:
+		case <-ctx.Done():
+			return false
+		}
+	}
+	*next = 0
+	*applied = p.marked.Load()
+	return true
 }
 
 // decodePages turns fetched pages into rows, several pages at once.
@@ -534,9 +665,16 @@ func (p *pipeline) mark(ctx context.Context) {
 			b.Acknowledged = last
 		}
 		p.health("marker", nil)
+		p.marked.Store(last)
 		waiting = waiting[n:]
 		for range n {
 			<-p.slots
+		}
+		if len(p.slots) == 0 {
+			select {
+			case p.idle <- struct{}{}:
+			default:
+			}
 		}
 		// A page that finished while the marker was written has no wakeup of
 		// its own left.

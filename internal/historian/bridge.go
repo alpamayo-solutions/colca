@@ -99,6 +99,9 @@ type Bridge struct {
 	// the database once and after a failed write, not on every page.
 	marker      int64
 	markerKnown bool
+	// skip is what this bridge skips at or below: the marker, or further when
+	// a pipelined run's partition markers say so.
+	skip int64
 	// next is the page end of the last pass.
 	next int64
 	// ahead delivers the page read ahead of the cursor, nil when none is in flight.
@@ -227,14 +230,35 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		return 0, 0, nil
 	}
 
+	ps, pipelineStore := b.Store.(PipelineStore)
 	if !b.markerKnown {
 		if b.marker, err = b.Store.Applied(ctx, Consumer); err != nil {
 			return fetched, 0, err
 		}
+		b.skip = b.marker
+		// A pipelined run before this one may have written past the page
+		// marker; a complete set of its partition markers says how far.
+		if pipelineStore {
+			markers, err := ps.PartitionMarkers(ctx, Consumer)
+			if err != nil {
+				return fetched, 0, err
+			}
+			b.skip, _ = startMarkers(b.marker, markers, 0)
+		}
 		b.markerKnown = true
 	}
 	last := page.Records[len(page.Records)-1].Offset
-	rows, err := b.rowsOf(page, b.marker)
+	if b.newStream(page, b.marker) {
+		// A later pipelined run must not trust the old stream's partition
+		// markers (see runPipelined).
+		if pipelineStore {
+			if err := ps.ResetPartitionMarkers(ctx, Consumer); err != nil {
+				return fetched, 0, err
+			}
+		}
+		b.marker, b.skip = 0, 0
+	}
+	rows, err := b.rowsOf(page, b.skip)
 	if err != nil {
 		return fetched, 0, err
 	}
@@ -256,7 +280,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		b.dropAhead()
 		return fetched, 0, err
 	}
-	b.marker = last
+	b.marker, b.skip = last, last
 	for _, rej := range rejections {
 		b.reject(rej)
 	}
@@ -281,22 +305,6 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 // applied marker (a replay), gaps, tombstones, unhistorisable records and
 // samples of signals that are not logged are consumed without a row.
 func (b *Bridge) rowsOf(page door.Page, applied int64) ([]Row, error) {
-	first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
-
-	// Ignore the marker when it cannot be a position in this stream: the page starts
-	// at offset 1 while the marker is positive, or the marker is past the page's
-	// end. That happens when colcad's data volume is recreated but Timescale keeps
-	// the marker, and trusting it would silently drop a page. At worst this
-	// re-applies the very first page, which the upsert absorbs.
-	if applied > 0 && (first == 1 || applied > last) {
-		b.logger().Warn("the applied-offset marker is not a position in this stream — ignoring it",
-			"marker", applied, "page_first", first, "page_last", last,
-			"detail", "colca's data volume was recreated while Timescale kept the marker "+
-				"(or the marker outran the stream). Applying this page in full rather than "+
-				"reading it as already durable; the marker is rewritten to this stream's position.")
-		applied = 0
-	}
-
 	rows := make([]Row, 0, len(page.Records))
 	for _, record := range page.Records {
 		if record.Offset <= applied {
@@ -338,6 +346,25 @@ func (b *Bridge) rowsOf(page door.Page, applied int64) ([]Row, error) {
 		rows = append(rows, row)
 	}
 	return rows, nil
+}
+
+// newStream reports whether the page marker cannot be a position in the
+// stream a non-empty page comes from: the page starts at offset 1 while the
+// marker is positive, or the marker is past the page's end. That happens when
+// colcad's data volume is recreated but Timescale keeps the marker, and
+// trusting it would silently drop a page. The caller then applies from the
+// stream's start; at worst that re-applies the very first page.
+func (b *Bridge) newStream(page door.Page, marker int64) bool {
+	first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
+	if marker <= 0 || (first != 1 && marker <= last) {
+		return false
+	}
+	b.logger().Warn("the applied-offset marker is not a position in this stream — ignoring it",
+		"marker", marker, "page_first", first, "page_last", last,
+		"detail", "colca's data volume was recreated while Timescale kept the marker "+
+			"(or the marker outran the stream). Applying this page in full rather than "+
+			"reading it as already durable; the markers are rewritten to this stream's positions.")
+	return true
 }
 
 // truncateForLog shortens an untrusted value before it goes into a log line.

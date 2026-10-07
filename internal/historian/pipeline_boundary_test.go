@@ -93,3 +93,84 @@ func TestAPipelinedDrainCrashedAndRestartedLandsAsOnePageAtATime(t *testing.T) {
 		t.Fatalf("marker %d, %v; want %d", marker, err, s.head())
 	}
 }
+
+// Against a real Timescale: colcad's volume is recreated while the historian
+// runs. The partition markers are read and zeroed with the sink's own SQL,
+// and both streams end up in historian_metric as one page at a time leaves
+// them.
+func TestANewStreamWhileRunningAgainstTimescale(t *testing.T) {
+	ctx := context.Background()
+	sink := testPool(t)
+	sink.Writers = 4
+	if _, err := sink.Pool.Exec(ctx, `DELETE FROM colca_applied_offset WHERE consumer LIKE 'historian:metrics%'`); err != nil {
+		t.Fatal(err)
+	}
+	prefixA, prefixB := sigID("reset-a")+"-", sigID("reset-b")+"-"
+	s := newStreamNamed(800, 9, prefixA)
+	oldRecs := s.recs
+	var signal door.Signal
+	b := &Bridge{Door: s, Store: sink, Max: 100, Pipeline: 4, Changes: signal.Changes}
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- b.Run(runCtx) }()
+	waitAcked := func(what string) {
+		t.Helper()
+		deadline := time.Now().Add(20 * time.Second)
+		for s.lastAck() != s.head() {
+			if time.Now().After(deadline) {
+				cancel()
+				t.Fatalf("%s: acked %d of %d", what, s.lastAck(), s.head())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	waitAcked("old stream")
+	markers, err := sink.PartitionMarkers(ctx, Consumer)
+	if err != nil || len(markers) != 4 {
+		t.Fatalf("partition markers %v, %v; want four", markers, err)
+	}
+
+	fresh := newStreamNamed(450, 7, prefixB)
+	s.replace(fresh.recs)
+	signal.Notify()
+	waitAcked("new stream")
+	cancel()
+	<-done
+
+	markers, err = sink.PartitionMarkers(ctx, Consumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, m := range markers {
+		if m > 450 {
+			t.Fatalf("%s at %d, beyond the new stream", name, m)
+		}
+	}
+	got := table{}
+	rows, err := sink.Pool.(interface {
+		Query(context.Context, string, ...any) (pgx.Rows, error)
+	}).Query(ctx, `SELECT signal_id, timestamp, value_number FROM historian_metric WHERE signal_id LIKE $1 OR signal_id LIKE $2`,
+		prefixA+"%", prefixB+"%")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var sig string
+		var ts time.Time
+		var v *float64
+		if err := rows.Scan(&sig, &ts, &v); err != nil {
+			t.Fatal(err)
+		}
+		got[key{sig, ts.UnixMilli()}] = v
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if want := oracle(oldRecs, fresh.recs).String(); got.String() != want {
+		t.Fatalf("historian_metric differs from one page at a time\n got %s\nwant %s",
+			strings.TrimSpace(got.String()), strings.TrimSpace(want))
+	}
+	if marker, err := sink.Applied(ctx, Consumer); err != nil || marker != 450 {
+		t.Fatalf("marker %d, %v; want 450", marker, err)
+	}
+}

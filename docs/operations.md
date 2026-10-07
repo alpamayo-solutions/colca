@@ -330,9 +330,23 @@ written twice. A write whose answer was lost is checked against the writer's
 marker before it is retried. Re-applying a page is not harmless in general: a
 retraction is stored only when the row before it holds a value, and a late
 sample (an older timestamp arriving after the retraction) changes that answer.
-The writer markers depend on `WRITERS`; after changing it the next start
-re-applies at most `PIPELINE_PAGES` pages. A failed write is retried in place
-with backoff; the pages behind it wait in bounded queues.
+The writer markers depend on `WRITERS`. After `WRITERS` changes (or between a
+pipelined run and `PIPELINE_PAGES=1`), a start skips to the smallest marker of
+the previous writer count when all of its writers have one: every row at or
+below it is written. Rows between that point and the previous writers' own
+markers are written again, at most `PIPELINE_PAGES` pages; that is the only
+case where the late-sample caveat above can still apply, and only after an
+unclean stop. A failed write is retried in place with backoff; the pages
+behind it wait in bounded queues.
+
+When colcad's data volume is recreated while Timescale keeps the markers, the
+first page of the new stream starts at offset 1 (or ends below the marker).
+The historian then logs a warning, zeroes every writer marker in one
+transaction before it writes a row of the new stream, and historises it from
+its first record. A running historian finds it too: at the head, and after a
+failed fetch, it waits until the pages in flight are marked and reads the
+next page from the cursor again, which a new stream resets. Reading from its
+own position instead would only return empty pages there.
 `DB_MAX_CONNS` defaults to `WRITERS + 1`. `PIPELINE_PAGES=1` writes one page
 at a time, with the marker in the same transaction when `WRITERS=1`. A drain
 that reached the head the node announced on `/watch` waits for the next hint
