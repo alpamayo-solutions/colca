@@ -339,8 +339,19 @@ case where the late-sample caveat above can still apply, and only after an
 unclean stop. A failed write is retried in place with backoff; the pages
 behind it wait in bounded queues.
 
-When colcad's data volume is recreated while Timescale keeps the markers, the
-first page of the new stream starts at offset 1 (or ends below the marker).
+With the marker the historian records a fingerprint of the record at it
+(`historian:metrics#record`: topic, ingest time and payload). An ack that
+fails (colcad restarting) is retried with backoff, also at the head with no
+new data. Until it goes through, the cursor lags the marker, and a read from
+the cursor starts at offset 1 (never acked) or ends below the marker. When
+the record at the marker still has the recorded fingerprint, that is the same
+stream: the cursor is acked up to the marker, reading goes on after it, and
+the marker never moves back.
+
+When colcad's data volume is recreated while Timescale keeps the markers,
+there is no record at the marker, or one with another fingerprint. A marker
+from an older historian has no fingerprint; then a page from offset 1, or a
+short page below the marker, counts as a new stream.
 The historian then logs a warning, zeroes every writer marker in one
 transaction before it writes a row of the new stream, and historises it from
 its first record. A running historian finds it too: at the head, and after a

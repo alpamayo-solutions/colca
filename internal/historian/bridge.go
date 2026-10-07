@@ -99,6 +99,8 @@ type Bridge struct {
 	// the database once and after a failed write, not on every page.
 	marker      int64
 	markerKnown bool
+	// fingerprint is that of the record at the marker, 0 when unknown.
+	fingerprint int64
 	// skip is what this bridge skips at or below: the marker, or further when
 	// a pipelined run's partition markers say so.
 	skip int64
@@ -239,6 +241,9 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		// A pipelined run before this one may have written past the page
 		// marker; a complete set of its partition markers says how far.
 		if pipelineStore {
+			if b.fingerprint, err = ps.Applied(ctx, fingerprintConsumer(Consumer)); err != nil {
+				return fetched, 0, err
+			}
 			markers, err := ps.PartitionMarkers(ctx, Consumer)
 			if err != nil {
 				return fetched, 0, err
@@ -248,7 +253,36 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		b.markerKnown = true
 	}
 	last := page.Records[len(page.Records)-1].Offset
-	if b.newStream(page, b.marker) {
+	fresh, err := b.newStream(ctx, page, b.marker, b.fingerprint)
+	if err != nil {
+		return fetched, 0, err
+	}
+	if !fresh && last < b.marker {
+		// The cursor lags the marker (acks failed while the marks went in):
+		// everything on this page is written. Move the cursor up to the marker
+		// rather than marking backwards.
+		if _, err := b.Door.Ack(ctx, "metrics", Cursor, b.marker); err != nil {
+			// Read on from the marker meanwhile; the next ack that goes
+			// through moves the cursor past this page too.
+			ahead, ok := b.Door.(aheadFetcher)
+			if !ok {
+				return fetched, 0, err
+			}
+			b.logger().Warn("the cursor lags the applied-offset marker and the ack failed; reading on from the marker",
+				"marker", b.marker, "err", err)
+			from := b.marker + 1
+			ch := make(chan aheadPage, 1)
+			b.ahead, b.next = ch, from
+			go func() {
+				p, err := ahead.FetchWithOptions(ctx, door.FetchOptions{Stream: "metrics", Cursor: Cursor, Max: b.max(), From: uint64(from)}) //nolint:gosec // positive
+				ch <- aheadPage{from: from, page: p, err: err}
+			}()
+			return fetched, 0, nil
+		}
+		b.Acknowledged = b.marker
+		return fetched, 0, nil
+	}
+	if fresh {
 		// A later pipelined run must not trust the old stream's partition
 		// markers (see runPipelined).
 		if pipelineStore {
@@ -256,7 +290,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 				return fetched, 0, err
 			}
 		}
-		b.marker, b.skip = 0, 0
+		b.marker, b.skip, b.fingerprint = 0, 0, 0
 	}
 	rows, err := b.rowsOf(page, b.skip)
 	if err != nil {
@@ -281,6 +315,17 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		return fetched, 0, err
 	}
 	b.marker, b.skip = last, max(b.skip, last)
+	// The fingerprint of the marker's record, so a later read from the cursor
+	// can tell a lagging cursor from a new stream.
+	if pipelineStore {
+		fp := recordFingerprint(page.Records[len(page.Records)-1])
+		if err := ps.Mark(ctx, Consumer, last, fp); err != nil {
+			b.markerKnown = false
+			b.dropAhead()
+			return fetched, 0, err
+		}
+		b.fingerprint = fp
+	}
 	for _, rej := range rejections {
 		b.reject(rej)
 	}
@@ -348,23 +393,48 @@ func (b *Bridge) rowsOf(page door.Page, applied int64) ([]Row, error) {
 	return rows, nil
 }
 
-// newStream reports whether the page marker cannot be a position in the
-// stream a non-empty page comes from: the page starts at offset 1 while the
-// marker is positive, or the marker is past the page's end. That happens when
-// colcad's data volume is recreated but Timescale keeps the marker, and
-// trusting it would silently drop a page. The caller then applies from the
-// stream's start; at worst that re-applies the very first page.
-func (b *Bridge) newStream(page door.Page, marker int64) bool {
+// newStream reports whether a non-empty page read from the cursor comes from
+// a stream the marker is not a position in (colcad's data volume recreated, or
+// its stream cut back, while Timescale kept the marker). The caller then
+// applies from the stream's start instead of skipping a page as durable.
+//
+// A page that starts after the marker, or contains it, is the same stream.
+// Otherwise the page starts at offset 1 (a fresh store's cursor, or a cursor
+// that was never acked) or ends below the marker (a cursor that lags it
+// because acks failed while marks went in, or a stream cut back). The record
+// at the marker decides: none means the stream ends below the marker; one
+// whose fingerprint differs from the one recorded with the marker is another
+// stream's; the same fingerprint is the same stream with a lagging cursor.
+// Without a recorded fingerprint (a marker written by an older historian) or a
+// door that cannot read ahead, a page from offset 1 counts as new and a page
+// below the marker counts as new only when it is shorter than a full page.
+func (b *Bridge) newStream(ctx context.Context, page door.Page, marker, fingerprint int64) (bool, error) {
 	first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
 	if marker <= 0 || (first != 1 && marker <= last) {
-		return false
+		return false, nil
+	}
+	fresh := first == 1 || len(page.Records) < b.max()
+	if ahead, ok := b.Door.(aheadFetcher); ok {
+		probe, err := ahead.FetchWithOptions(ctx, door.FetchOptions{Stream: "metrics", Cursor: Cursor, Max: 1, From: uint64(marker)}) //nolint:gosec // positive
+		if err != nil {
+			return false, err
+		}
+		switch {
+		case len(probe.Records) == 0 || probe.Records[0].Offset != marker:
+			fresh = true
+		case fingerprint != 0:
+			fresh = recordFingerprint(probe.Records[0]) != fingerprint
+		}
+	}
+	if !fresh {
+		return false, nil
 	}
 	b.logger().Warn("the applied-offset marker is not a position in this stream — ignoring it",
 		"marker", marker, "page_first", first, "page_last", last,
 		"detail", "colca's data volume was recreated while Timescale kept the marker "+
-			"(or the marker outran the stream). Applying this page in full rather than "+
-			"reading it as already durable; the markers are rewritten to this stream's positions.")
-	return true
+			"(or the stream was cut back below it). Applying this stream from its start; "+
+			"the markers are rewritten to its positions.")
+	return true, nil
 }
 
 // truncateForLog shortens an untrusted value before it goes into a log line.
@@ -390,7 +460,7 @@ func (b *Bridge) Run(ctx context.Context) error {
 	started := time.Now()
 	var changed <-chan struct{}
 	var head int64
-	retry := time.Second
+	retry, ackRetry := time.Second, time.Second
 	b.ReadAhead = true
 	defer b.dropAhead()
 	for {
@@ -430,7 +500,18 @@ func (b *Bridge) Run(ctx context.Context) error {
 			continue
 		}
 		if err == nil && b.Changes != nil {
-			if !door.WaitChange(ctx, changed, -1, started.Add(b.BatchInterval)) {
+			// An ack that failed at the head is owed: retry it with backoff
+			// rather than waiting for new data to carry the next one.
+			recovery := time.Duration(-1)
+			if b.markerKnown && b.Acknowledged < b.marker {
+				if _, err := b.Door.Ack(ctx, "metrics", Cursor, b.marker); err == nil {
+					b.Acknowledged, ackRetry = b.marker, time.Second
+				} else {
+					b.logger().Warn("applied but could not ack", "offset", b.marker, "err", err)
+					recovery, ackRetry = ackRetry, min(30*time.Second, ackRetry*2)
+				}
+			}
+			if !door.WaitChange(ctx, changed, recovery, started.Add(b.BatchInterval)) {
 				return ctx.Err()
 			}
 			started, changed = time.Now(), nil

@@ -87,8 +87,13 @@ func (p *fakePool) Begin(ctx context.Context) (pgx.Tx, error) {
 	p.calls++
 	return p.begin(p.calls)
 }
+
+// Exec backs Sink.Mark (the marker's fingerprint after a page) and nothing else.
 func (p *fakePool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	panic("fakePool.Exec: not used by Sink.Apply")
+	if sql == upsertMarkerAndFingerprint {
+		return pgconn.CommandTag{}, nil
+	}
+	panic("fakePool.Exec: only Sink.Mark is expected")
 }
 
 // QueryRow backs Sink.Applied and always reports that there is no marker yet.

@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"math/rand/v2"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,6 +27,10 @@ type stream struct {
 	fetches atomic.Int64
 	// failFetch fails the n-th fetch once (1-based), 0 never.
 	failFetch int64
+	// Acks of an offset in [failAckFrom, failAckTo] fail; failAcks more acks
+	// fail after that, whatever the offset.
+	failAckFrom, failAckTo int64
+	failAcks               int
 }
 
 func newStream(n, signals int) *stream { return newStreamNamed(n, signals, "s") }
@@ -119,6 +123,13 @@ func (s *stream) FetchWithOptions(_ context.Context, o door.FetchOptions) (door.
 func (s *stream) Ack(_ context.Context, _, _ string, offset int64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if offset >= s.failAckFrom && offset <= s.failAckTo {
+		return false, errors.New("colcad restarting")
+	}
+	if s.failAcks > 0 {
+		s.failAcks--
+		return false, errors.New("colcad restarting")
+	}
 	s.acked = append(s.acked, offset)
 	s.cursor = offset + 1
 	return true, nil
@@ -302,25 +313,33 @@ func (p *pipeStore) ApplyShare(ctx context.Context, rows []Row, consumer string,
 	return nil, nil
 }
 
-func (p *pipeStore) PartitionMarkers(context.Context, string) (map[string]int64, error) {
+func (p *pipeStore) PartitionMarkers(_ context.Context, consumer string) (map[string]int64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make(map[string]int64, len(p.consumers))
-	maps.Copy(out, p.consumers)
-	return out, nil
+	return p.partitionsLocked(consumer), nil
 }
 
-func (p *pipeStore) ResetPartitionMarkers(context.Context, string) error {
+func (p *pipeStore) partitionsLocked(consumer string) map[string]int64 {
+	out := map[string]int64{}
+	for name, m := range p.consumers {
+		if strings.HasPrefix(name, consumer+"/") {
+			out[name] = m
+		}
+	}
+	return out
+}
+
+func (p *pipeStore) ResetPartitionMarkers(_ context.Context, consumer string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for name := range p.consumers {
+	for name := range p.partitionsLocked(consumer) {
 		p.consumers[name] = 0
 	}
 	p.resets++
 	return nil
 }
 
-func (p *pipeStore) Mark(_ context.Context, _ string, offset int64) error {
+func (p *pipeStore) Mark(_ context.Context, consumer string, offset, fingerprint int64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.marks++
@@ -341,6 +360,7 @@ func (p *pipeStore) Mark(_ context.Context, _ string, offset int64) error {
 		}
 	}
 	p.marker = offset
+	p.consumers[fingerprintConsumer(consumer)] = fingerprint
 	p.markers = append(p.markers, offset)
 	return nil
 }
@@ -356,7 +376,7 @@ func (p *pipeStore) newStream(s *stream) {
 func (p *pipeStore) partitionMarkers() map[string]int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return maps.Clone(p.consumers)
+	return p.partitionsLocked(Consumer)
 }
 
 // oracle is what one page at a time leaves after each stream in turn.
@@ -725,6 +745,93 @@ func TestAStartAfterAnotherWriterCountSkipsWhatItWrote(t *testing.T) {
 			checkStore(t, s, store)
 			if store.resets != 0 {
 				t.Fatal("the markers were reset; the stream is the same")
+			}
+		})
+	}
+}
+
+// Acks fail for a while (colcad restarting mid-drain) while the marks go in,
+// so the cursor falls several pages behind the marker; then a fetch fails and
+// the historian reads from the cursor again. A lagging cursor is not a new
+// stream: nothing is reset, nothing is written twice, the marker never goes
+// back, and the cursor catches up.
+func TestALaggingCursorIsNotANewStream(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			s := newStreamNamed(1000, 7, "a")
+			s.failAckFrom, s.failAckTo = 200, 800
+			s.failFetch = 14 // offset ~650 with pages of 50
+			store := newPipeStore(s, 4)
+			runToHead(t, pipelineBridge(s, store, pages, 50), s)
+			checkStore(t, s, store)
+			if store.resets != 0 {
+				t.Fatalf("the markers were reset %d times for a lagging cursor", store.resets)
+			}
+		})
+	}
+}
+
+// An ack that fails at the head is retried with backoff although no new data
+// arrives to carry the next one.
+func TestAFailedAckAtTheHeadIsRetried(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) { failedAckAtTheHead(t, pages) })
+	}
+}
+
+func failedAckAtTheHead(t *testing.T, pages int) {
+	s := newStreamNamed(120, 3, "a")
+	store := newPipeStore(s, 2)
+	var signal door.Signal
+	b := &Bridge{Door: s, Store: store, Max: 200, Pipeline: pages, Changes: signal.Changes}
+	s.failAcks = 2
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- b.Run(ctx) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for s.lastAck() != s.head() {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("acked %d of %d, never retried", s.lastAck(), s.head())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	checkStore(t, s, store)
+}
+
+// A new stream that already grew past the marker before the historian looked:
+// the record at the marker exists, but it is another record. Its fingerprint
+// differs from the one recorded with the marker, so the stream is new.
+func TestANewStreamThatGrewPastTheMarkerIsNew(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			old := newStreamNamed(300, 5, "a")
+			store := newPipeStore(old, 4)
+			runToHead(t, pipelineBridge(old, store, pages, 50), old)
+			oldRecs := old.recs
+
+			fresh := newStreamNamed(900, 6, "b")
+			s := &stream{cursor: 1}
+			s.replace(fresh.recs)
+			store.newStream(s)
+			runToHead(t, pipelineBridge(s, store, pages, 50), s)
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if store.bad != nil {
+				t.Fatal(store.bad)
+			}
+			if store.resets != 1 {
+				t.Fatalf("reset %d times, want once", store.resets)
+			}
+			for off := int64(1); off <= s.head(); off++ {
+				if !store.written[off] {
+					t.Fatalf("offset %d of the new stream was never written", off)
+				}
+			}
+			if got, want := store.table.String(), oracle(oldRecs, fresh.recs).String(); got != want {
+				t.Fatalf("the table differs from one page at a time\n got %s\nwant %s", got, want)
 			}
 		})
 	}
