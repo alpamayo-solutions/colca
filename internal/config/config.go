@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -170,6 +171,24 @@ type API struct {
 	LocalAddr string `yaml:"local_addr"`
 }
 
+// Access declares how people reach this node: a hostname and the URL of its
+// UI. The node reports it in its own _Node record; nothing else owns it.
+type Access struct {
+	Hostname string `yaml:"hostname"`
+	UIURL    string `yaml:"ui_url"`
+}
+
+func (a *Access) validate() error {
+	if a.Hostname == "" || len(a.Hostname) > 253 || strings.ContainsAny(a.Hostname, "/ \t\r\n") {
+		return fmt.Errorf("config: access.hostname %q must be 1-253 characters with no \"/\" or whitespace", a.Hostname)
+	}
+	u, err := url.Parse(a.UIURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("config: access.ui_url %q must be an http(s) URL with a host and no query or fragment", a.UIURL)
+	}
+	return nil
+}
+
 // Config is a node's configuration. Only ULID, DataDir and KeyFile are
 // required. Machines and child nodes are not configured here; they are
 // enrolled at runtime through the admin API.
@@ -178,6 +197,9 @@ type Config struct {
 	// Name is what the node calls itself in its own _Node record: a deployment's
 	// name, never its position. Empty means the ULID.
 	Name string `yaml:"name"`
+	// Access, when set, is how people reach this node. It is copied into the
+	// node's _Node record and withdrawn from it when removed.
+	Access *Access `yaml:"access"`
 	// TopicRoot is the first segment of every topic in this node's tree,
 	// "colca" when empty. COLCA_TOPIC_ROOT overrides it. All nodes of one tree
 	// must use the same root; nodes do not translate between roots.
@@ -931,6 +953,11 @@ func (c *Config) Validate() error {
 	}
 	if err := uns.ValidRoot(c.EffectiveTopicRoot()); err != nil {
 		return fmt.Errorf("config: %w", err)
+	}
+	if c.Access != nil {
+		if err := c.Access.validate(); err != nil {
+			return err
+		}
 	}
 	if c.SecretsDir != "" && filepath.Clean(c.SecretsDir) == filepath.Clean(c.DataDir) {
 		return fmt.Errorf("config: secrets_dir must be separate from data_dir")

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/store"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 	"github.com/alpamayo-solutions/colca/secrets"
 )
 
@@ -1093,5 +1095,44 @@ func TestStopWhileRequestsArrive(t *testing.T) {
 		n.Stop()
 		close(done)
 		clients.Wait()
+	}
+}
+
+func nodeRecord(t *testing.T, n *Node, ulid string) map[string]any {
+	t.Helper()
+	raw, ok := n.Engine.EntityStore().KVGet(uns.Prefix() + "_Node/" + ulid + "/_colca/nodes/" + ulid)
+	if !ok {
+		t.Fatalf("no _Node record for %s", ulid)
+	}
+	var entity map[string]any
+	if err := json.Unmarshal(raw, &entity); err != nil {
+		t.Fatal(err)
+	}
+	return entity
+}
+
+func TestNodeRecordFollowsConfiguredAccess(t *testing.T) {
+	base := t.TempDir()
+	keyFile := filepath.Join(base, "n1.key")
+	genKey(t, keyFile)
+	cfg := &config.Config{ULID: "n1", DataDir: filepath.Join(base, "data"), KeyFile: keyFile,
+		API:    config.API{Addr: "127.0.0.1:0", Token: tok},
+		Access: &config.Access{Hostname: "edge-07.example", UIURL: "https://edge-07.example"}}
+	first := mustStart(t, cfg)
+	if got := nodeRecord(t, first, "n1")["access"]; !reflect.DeepEqual(got,
+		map[string]any{"hostname": "edge-07.example", "ui_url": "https://edge-07.example"}) {
+		t.Fatalf("access = %v", got)
+	}
+	first.Stop()
+	cfg.Access = &config.Access{Hostname: "edge-07.example", UIURL: "https://edge-07.example:8443"}
+	second := mustStart(t, cfg)
+	if got := nodeRecord(t, second, "n1")["access"].(map[string]any)["ui_url"]; got != "https://edge-07.example:8443" {
+		t.Fatalf("changed access not re-authored: %v", got)
+	}
+	second.Stop()
+	cfg.Access = nil
+	third := mustStart(t, cfg)
+	if _, present := nodeRecord(t, third, "n1")["access"]; present {
+		t.Fatal("withdrawn access still in the record")
 	}
 }
