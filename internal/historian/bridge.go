@@ -71,6 +71,11 @@ type Bridge struct {
 	// fetch.
 	Head func() int64
 
+	// Pipeline, above 1, lets Run hold that many pages between fetch and
+	// marker: writers start on the next page before every partition of the
+	// previous one is written (runPipelined). 0 or 1 applies one page at a time.
+	Pipeline int
+
 	// ReadAhead fetches the next page while the current one is written, when
 	// the page was full and the door can read ahead of its cursor. Run sets it.
 	ReadAhead bool
@@ -158,6 +163,15 @@ func (b *Bridge) Rejected(reason string) int64 {
 	return v.(*atomic.Int64).Load()
 }
 
+// reject counts and logs a row the schema refused.
+func (b *Bridge) reject(rej Rejection) {
+	b.countRejection(rej.Reason)
+	b.logger().Warn("a record was refused by the schema and set aside — the rest of the page still historised",
+		"offset", rej.Row.Offset, "topic", rej.Row.Topic,
+		"signal_id", truncateForLog(rej.Row.SignalID, 40),
+		"sqlstate", rej.SQLState, "reason", rej.Reason, "err", rej.Err)
+}
+
 func (b *Bridge) countRejection(reason string) {
 	counter, _ := b.rejected.LoadOrStore(reason, new(atomic.Int64))
 	counter.(*atomic.Int64).Add(1)
@@ -219,7 +233,54 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		}
 		b.markerKnown = true
 	}
-	applied := b.marker
+	last := page.Records[len(page.Records)-1].Offset
+	rows, err := b.rowsOf(page, b.marker)
+	if err != nil {
+		return fetched, 0, err
+	}
+
+	// A full page means more is waiting: read it while this one is written.
+	if ahead, ok := b.Door.(aheadFetcher); ok && b.ReadAhead && fetched >= b.max() && page.Gap == nil {
+		from := last + 1
+		ch := make(chan aheadPage, 1)
+		b.ahead = ch
+		go func() {
+			p, err := ahead.FetchWithOptions(ctx, door.FetchOptions{Stream: "metrics", Cursor: Cursor, Max: b.max(), From: uint64(from)}) //nolint:gosec // offsets are positive
+			ch <- aheadPage{from: from, page: p, err: err}
+		}()
+	}
+
+	rejections, err := b.Store.Apply(ctx, rows, Consumer, last)
+	if err != nil {
+		b.markerKnown = false
+		b.dropAhead()
+		return fetched, 0, err
+	}
+	b.marker = last
+	for _, rej := range rejections {
+		b.reject(rej)
+	}
+	if b.Strict && len(rejections) > 0 {
+		return fetched, 0, fmt.Errorf("coordinated history refused %d rows", len(rejections))
+	}
+	// The marker moved past any rejected rows, so ack too, or the page would be
+	// fetched forever.
+	if _, err := b.Door.Ack(ctx, "metrics", Cursor, last); err != nil {
+		if b.Strict {
+			return fetched, 0, err
+		}
+		// The rows are durable; the next pass re-reads and the marker skips them.
+		b.logger().Warn("applied but could not ack", "offset", last, "err", err)
+	} else {
+		b.Acknowledged = last
+	}
+	return fetched, len(rows) - len(rejections), nil
+}
+
+// rowsOf turns a non-empty page into the rows to write: records at or below the
+// applied marker (a replay), gaps, tombstones, unhistorisable records and
+// samples of signals that are not logged are consumed without a row.
+func (b *Bridge) rowsOf(page door.Page, applied int64) ([]Row, error) {
 	first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
 
 	// Ignore the marker when it cannot be a position in this stream: the page starts
@@ -243,7 +304,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		}
 		if strings.Contains(record.Topic, gapContract) {
 			if b.Strict {
-				return fetched, 0, fmt.Errorf("coordinated history has a stream gap")
+				return nil, fmt.Errorf("coordinated history has a stream gap")
 			}
 			b.gaps.Add(1)
 			b.logger().Error("metrics were pruned before this bridge read them",
@@ -258,7 +319,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 				continue // a tombstone: nothing to historise
 			}
 			if b.Strict {
-				return fetched, 0, err
+				return nil, err
 			}
 			// One bad record must not wedge the stream forever, but it must not
 			// vanish either.
@@ -276,47 +337,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		row.Topic = record.Topic
 		rows = append(rows, row)
 	}
-
-	// A full page means more is waiting: read it while this one is written.
-	if ahead, ok := b.Door.(aheadFetcher); ok && b.ReadAhead && fetched >= b.max() && page.Gap == nil {
-		from := last + 1
-		ch := make(chan aheadPage, 1)
-		b.ahead = ch
-		go func() {
-			p, err := ahead.FetchWithOptions(ctx, door.FetchOptions{Stream: "metrics", Cursor: Cursor, Max: b.max(), From: uint64(from)}) //nolint:gosec // offsets are positive
-			ch <- aheadPage{from: from, page: p, err: err}
-		}()
-	}
-
-	rejections, err := b.Store.Apply(ctx, rows, Consumer, last)
-	if err != nil {
-		b.markerKnown = false
-		b.dropAhead()
-		return fetched, 0, err
-	}
-	b.marker = last
-	for _, rej := range rejections {
-		b.countRejection(rej.Reason)
-		b.logger().Warn("a record was refused by the schema and set aside — the rest of the page still historised",
-			"offset", rej.Row.Offset, "topic", rej.Row.Topic,
-			"signal_id", truncateForLog(rej.Row.SignalID, 40),
-			"sqlstate", rej.SQLState, "reason", rej.Reason, "err", rej.Err)
-	}
-	if b.Strict && len(rejections) > 0 {
-		return fetched, 0, fmt.Errorf("coordinated history refused %d rows", len(rejections))
-	}
-	// The marker moved past any rejected rows, so ack too, or the page would be
-	// fetched forever.
-	if _, err := b.Door.Ack(ctx, "metrics", Cursor, last); err != nil {
-		if b.Strict {
-			return fetched, 0, err
-		}
-		// The rows are durable; the next pass re-reads and the marker skips them.
-		b.logger().Warn("applied but could not ack", "offset", last, "err", err)
-	} else {
-		b.Acknowledged = last
-	}
-	return fetched, len(rows) - len(rejections), nil
+	return rows, nil
 }
 
 // truncateForLog shortens an untrusted value before it goes into a log line.
@@ -335,6 +356,9 @@ func (b *Bridge) Run(ctx context.Context) error {
 	}
 	if b.Changes == nil {
 		return fmt.Errorf("historian requires a stream subscription")
+	}
+	if p, ok := b.pipelined(); ok {
+		return p.run(ctx)
 	}
 	started := time.Now()
 	var changed <-chan struct{}
