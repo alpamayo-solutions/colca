@@ -32,8 +32,9 @@ type stream struct {
 	// fail after that, whatever the offset.
 	failAckFrom, failAckTo int64
 	failAcks               int
-	// staleAcks counts acks that named another store than the current one.
-	staleAcks int
+	// staleAcks counts acks that named another store than the current one;
+	// ackCalls every ack, blankAcks those that named no store.
+	staleAcks, ackCalls, blankAcks int
 }
 
 func newStream(n, signals int) *stream { return newStreamNamed(n, signals, "s") }
@@ -130,6 +131,10 @@ func (s *stream) FetchWithOptions(_ context.Context, o door.FetchOptions) (door.
 func (s *stream) AckStore(_ context.Context, _, _ string, offset int64, store string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ackCalls++
+	if store == "" {
+		s.blankAcks++
+	}
 	if store != "" && store != s.id {
 		s.staleAcks++
 		return false, fmt.Errorf("acking at %d: %w", offset, door.ErrStoreChanged)
@@ -694,6 +699,135 @@ func TestANewStreamWhileRunningIsReadFromTheCursor(t *testing.T) {
 	}
 }
 
+// A node too old to send store ids, whose acks go through, has its volume
+// recreated while the historian runs: the page from offset 1 under the marker
+// is a new stream (no ack is owed, so it is not the historian's own lagging
+// cursor), and every record of it is written.
+func TestAnOldNodeRecreatedWhileRunningLosesNothing(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			old := newStreamNamed(600, 5, "a")
+			old.id = ""
+			store := newPipeStore(old, 4)
+			var signal door.Signal
+			b := &Bridge{Door: old, Store: store, Max: 50, Pipeline: pages, Changes: signal.Changes}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- b.Run(ctx) }()
+			waitAcked := func(what string) {
+				t.Helper()
+				deadline := time.Now().Add(10 * time.Second)
+				for old.lastAck() != old.head() {
+					if time.Now().After(deadline) {
+						cancel()
+						t.Fatalf("%s: acked %d of %d", what, old.lastAck(), old.head())
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+			waitAcked("old stream")
+			oldRecs := old.recs
+
+			fresh := newStreamNamed(450, 8, "b")
+			store.newStream(old)
+			old.replace(fresh.recs)
+			old.mu.Lock()
+			old.id = ""
+			old.mu.Unlock()
+			signal.Notify()
+			waitAcked("new stream")
+			cancel()
+			<-done
+
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if store.bad != nil {
+				t.Fatal(store.bad)
+			}
+			for off := int64(1); off <= old.head(); off++ {
+				if !store.written[off] {
+					t.Fatalf("offset %d of the new stream was never written", off)
+				}
+			}
+			if got, want := store.table.String(), oracle(oldRecs, fresh.recs).String(); got != want {
+				t.Fatalf("the table differs from one page at a time\n got %s\nwant %s", got, want)
+			}
+		})
+	}
+}
+
+// The same, but recreated while the ack of the old stream's head is owed: the
+// new stream is shorter than the marker, so the node's head is below it and
+// the page from offset 1 is a new stream, not the historian's own lagging
+// cursor. (A new stream already past the marker is the window that needs
+// colcad's store ids.)
+func TestAnOldNodeRecreatedShorterWhileAnAckIsOwedLosesNothing(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			old := newStreamNamed(600, 5, "a")
+			old.id = ""
+			old.failAckFrom, old.failAckTo = 551, 600 // the last page's ack fails
+			store := newPipeStore(old, 4)
+			var signal door.Signal
+			b := &Bridge{Door: old, Store: store, Max: 50, Pipeline: pages, Changes: signal.Changes,
+				Head: func() int64 { return old.head() + 1 }} // as the node's hints announce it
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- b.Run(ctx) }()
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				store.mu.Lock()
+				marker := store.marker
+				store.mu.Unlock()
+				if marker == 600 {
+					break
+				}
+				if time.Now().After(deadline) {
+					cancel()
+					t.Fatalf("marked %d of 600", marker)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			oldRecs := old.recs
+
+			fresh := newStreamNamed(450, 8, "b")
+			store.newStream(old)
+			old.replace(fresh.recs)
+			old.mu.Lock()
+			old.id = ""
+			old.mu.Unlock()
+			deadline = time.Now().Add(10 * time.Second)
+			for old.lastAck() != old.head() {
+				if time.Now().After(deadline) {
+					cancel()
+					t.Fatalf("new stream: acked %d of %d", old.lastAck(), old.head())
+				}
+				// The node's hints, as its new stream grows: the pipelined
+				// path returns to the cursor at an empty page and reads it
+				// at the next hint.
+				signal.Notify()
+				time.Sleep(5 * time.Millisecond)
+			}
+			cancel()
+			<-done
+
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if store.bad != nil {
+				t.Fatal(store.bad)
+			}
+			for off := int64(1); off <= old.head(); off++ {
+				if !store.written[off] {
+					t.Fatalf("offset %d of the new stream was never written", off)
+				}
+			}
+			if got, want := store.table.String(), oracle(oldRecs, fresh.recs).String(); got != want {
+				t.Fatalf("the table differs from one page at a time\n got %s\nwant %s", got, want)
+			}
+		})
+	}
+}
+
 // After WRITERS changed (or an unclean stop of a run with another count), the
 // smallest marker of a complete set of the old partitions is a point every
 // row at or below has been written; an incomplete set says nothing.
@@ -822,6 +956,134 @@ func failedAckAtTheHead(t *testing.T, pages int) {
 	cancel()
 	<-done
 	checkStore(t, s, store)
+}
+
+// A node too old to send a store id: an ack that fails at the head is not
+// retried, since a blank store would pass the node's store check whatever
+// store the node has by then. The next applied page carries the ack.
+func TestAnOwedAckWithoutAStoreIDIsNotRetried(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			s := newStreamNamed(120, 3, "a")
+			s.id = ""                              // an old colcad: /fetch names no store
+			s.failAckFrom, s.failAckTo = 101, 1000 // the acks at the head fail
+			store := newPipeStore(s, 2)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			b := pipelineBridge(s, store, pages, 50)
+			b.Head = func() int64 { return s.head() + 1 } // as the node's hints announce it
+			go func() { done <- b.Run(ctx) }()
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				store.mu.Lock()
+				marker := store.marker
+				store.mu.Unlock()
+				if marker == s.head() {
+					break
+				}
+				if time.Now().After(deadline) {
+					cancel()
+					t.Fatalf("marked %d of %d", marker, s.head())
+				}
+				time.Sleep(time.Millisecond)
+			}
+			s.mu.Lock()
+			calls := s.ackCalls
+			s.mu.Unlock()
+			time.Sleep(2500 * time.Millisecond) // past the first retries (1 s, 2 s)
+			cancel()
+			<-done
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.ackCalls != calls {
+				t.Fatalf("%d acks without a store were retried", s.ackCalls-calls)
+			}
+		})
+	}
+}
+
+// A node too old to send a store id, whose acks fail from the first page on:
+// its cursor stays at 1 under the marker this bridge wrote. That is the
+// bridge's own cursor lagging, not a recreated store, so the first page is not
+// re-applied over and over; and while the ack is owed, re-reading from the
+// cursor backs off instead of running as fast as the node answers.
+func TestAnOldNodeWhoseAcksFailIsNotReadInALoop(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			s := newStreamNamed(120, 3, "a")
+			s.id = ""
+			s.failAcks = 1 << 30
+			store := newPipeStore(s, 2)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			// No Head: before the node's first hint, or a node that announces none.
+			go func() { done <- pipelineBridge(s, store, pages, 50).Run(ctx) }()
+			time.Sleep(3 * time.Second)
+			cancel()
+			<-done
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if store.resets != 0 {
+				t.Fatalf("the markers were reset %d times", store.resets)
+			}
+			// Three pages to the head, then a retry after 1 s and 2 s: a
+			// handful of fetches, not thousands.
+			if n := s.fetches.Load(); n > 12 {
+				t.Fatalf("%d fetches in 3 s while the ack was owed", n)
+			}
+			if store.bad != nil {
+				t.Fatal(store.bad)
+			}
+		})
+	}
+}
+
+// An upgrade: the marker is from before store ids (it names no store) and the
+// cursor lags it. The ack that moves the cursor up fails and is owed. Until a
+// page is marked with its store a retry would name no store, which the node
+// takes for any store, so it is not retried; after a restart with new data the
+// ack goes through naming the store.
+func TestAnOwedAckBeforeTheFirstMarkNamesAStore(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			s := newStreamNamed(600, 7, "a")
+			store := newPipeStore(s, 4)
+			// The old historian wrote all 600 and marked them, store unknown;
+			// its acks failed from 101 on, so the cursor is at 101.
+			for _, r := range s.recs {
+				row, err := RowFrom(r.Topic, r.Payload, r.TS)
+				if err != nil {
+					t.Fatal(err)
+				}
+				store.table.apply(row)
+				store.written[r.Offset] = true
+			}
+			store.marker = 600
+			s.cursor = 101
+			s.failAckFrom, s.failAckTo = 1, 1<<30
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			b := pipelineBridge(s, store, pages, 50)
+			b.Head = func() int64 { return s.head() + 1 }
+			go func() { done <- b.Run(ctx) }()
+			time.Sleep(2500 * time.Millisecond) // past the first retries (1 s, 2 s)
+			cancel()
+			<-done
+
+			s.mu.Lock()
+			s.failAckFrom, s.failAckTo = 0, 0
+			s.mu.Unlock()
+			s.grow(newStreamNamed(100, 7, "a").recs)
+			runToHead(t, pipelineBridge(s, store, pages, 50), s)
+			s.mu.Lock()
+			blank := s.blankAcks
+			s.mu.Unlock()
+			if blank != 0 {
+				t.Fatalf("%d acks named no store", blank)
+			}
+			checkStore(t, s, store)
+		})
+	}
 }
 
 // A new stream that already grew past the marker before the historian looked:

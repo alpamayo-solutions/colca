@@ -214,7 +214,9 @@ type pipeline struct {
 	stream      string
 	markedStore string
 	acked       int64
-	reack       chan struct{}
+	// ownMarked: this pipeline has written the marker (see owesOwnAck).
+	ownMarked bool
+	reack     chan struct{}
 
 	mu sync.Mutex
 	// failing holds each part's current error (the fetcher, a writer, the
@@ -427,7 +429,8 @@ func (p *pipeline) fetch(ctx context.Context) error {
 		fromCursor := next == 0
 		fresh := false
 		if fromCursor {
-			fresh = b.newStream(page, p.marked.Load(), p.following())
+			b.warnNoStore(page)
+			fresh = b.newStream(page, p.marked.Load(), p.following(), p.owesOwnAck())
 			if marked := p.marked.Load(); !fresh && last < marked {
 				// The same store, and the cursor lags the marker: acks failed
 				// while the marks went in. Everything on this page is written;
@@ -506,6 +509,14 @@ func (p *pipeline) backToCursor(ctx context.Context, next, applied *int64) bool 
 	return true
 }
 
+// owesOwnAck: the marker is this pipeline's own and the node has not taken
+// its ack (see Bridge.newStream).
+func (p *pipeline) owesOwnAck() bool {
+	p.ackMu.Lock()
+	defer p.ackMu.Unlock()
+	return p.ownMarked && p.acked < p.marked.Load()
+}
+
 // following is the store of the stream being followed, "" while unknown.
 func (p *pipeline) following() string {
 	p.ackMu.Lock()
@@ -525,9 +536,10 @@ func (p *pipeline) adopt(store string) {
 
 // ack moves the cursor to offset, never past the marker and never back, for
 // records read from store. A failed ack is owed: the marker retries it with
-// backoff, also when no new data arrives to carry the next one. An ack the
-// node refuses because its store changed is not owed: the offset names other
-// records there, and the new store is read from its own cursor.
+// backoff, also when no new data arrives to carry the next one, but only once
+// the marker names a store. An ack the node refuses because its store changed
+// is not owed: the offset names other records there, and the new store is
+// read from its own cursor.
 func (p *pipeline) ack(ctx context.Context, offset int64, store string) bool {
 	p.ackMu.Lock()
 	defer p.ackMu.Unlock()
@@ -753,6 +765,14 @@ func (p *pipeline) mark(ctx context.Context) {
 			p.ackMu.Lock()
 			store := p.markedStore
 			p.ackMu.Unlock()
+			if store == "" {
+				// No store to name: a node too old to send one, or no Mark
+				// since start under a marker from before store ids. A blank
+				// store passes the node's store check, so the retry could
+				// land on another store; the next marked page acks instead.
+				owe(true)
+				continue
+			}
 			owe(p.ack(ctx, p.marked.Load(), store))
 			continue
 		case <-ctx.Done():
@@ -804,6 +824,7 @@ func (p *pipeline) mark(ctx context.Context) {
 		p.ackMu.Lock()
 		p.marked.Store(last)
 		p.markedStore = store
+		p.ownMarked = true
 		p.ackMu.Unlock()
 		// The rows and the marker are durable; an ack that fails is retried.
 		owe(p.ack(ctx, last, store))

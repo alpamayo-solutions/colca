@@ -107,6 +107,11 @@ type Bridge struct {
 	// while unknown; ackOwed is set while an ack of the marker failed.
 	stream  string
 	ackOwed bool
+	// ownMarker is set once this bridge has moved the marker itself (see
+	// newStream's owedOwnAck).
+	ownMarker bool
+	// warnedNoStore: the "node sends no store id" warning was logged.
+	warnedNoStore atomic.Bool
 	// skip is what this bridge skips at or below: the marker, or further when
 	// a pipelined run's partition markers say so.
 	skip int64
@@ -266,7 +271,8 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		b.markerKnown = true
 	}
 	last := page.Records[len(page.Records)-1].Offset
-	fresh := !ahead && b.newStream(page, b.marker, b.stream)
+	b.warnNoStore(page)
+	fresh := !ahead && b.newStream(page, b.marker, b.stream, b.ownMarker && b.ackOwed)
 	if !fresh && b.stream == "" {
 		b.stream = page.Store
 	}
@@ -331,6 +337,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		return fetched, 0, err
 	}
 	b.marker, b.skip = last, max(b.skip, last)
+	b.ownMarker = true
 	for _, rej := range rejections {
 		b.reject(rej)
 	}
@@ -411,16 +418,34 @@ func (b *Bridge) rowsOf(page door.Page, applied int64) ([]Row, error) {
 // that sends none falls back, once, to the page: one starting at offset 1, or
 // a short page ending below the marker, is a new stream. The caller records
 // the store from then on.
-func (b *Bridge) newStream(page door.Page, marker int64, markerStore string) bool {
+//
+// owedOwnAck: the marker is this process's own and its ack failed. Without
+// store ids (a node too old to send one) a page from offset 1 under a marker
+// reads as a recreated store; while this bridge's own ack of that marker is
+// owed it is its own cursor that lags, and resetting would re-apply the
+// stream's first page every pass. Once acks go through, a page from offset 1
+// is a recreated store again, and so it is at once when the node's head is
+// below the marker (a short page ending below it, or the head the node
+// announced): this stream cannot be the one the marker was written in.
+//
+// What remains: a node without store ids recreated while this process's
+// ack is owed, with a new stream that already reaches the marker, is taken
+// for the old one and its records up to the marker are skipped. colcad from
+// 0.31 sends store ids, which close that window; colca-historian logs a
+// warning when a node sends none.
+func (b *Bridge) newStream(page door.Page, marker int64, markerStore string, owedOwnAck bool) bool {
 	if marker <= 0 {
 		return false
 	}
 	first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
-	if page.Store != "" && markerStore != "" {
+	switch {
+	case page.Store != "" && markerStore != "":
 		if page.Store == markerStore {
 			return false
 		}
-	} else if first != 1 && (marker <= last || len(page.Records) >= b.max()) {
+	case page.Store == "" && owedOwnAck && !b.headBelow(page, marker):
+		return false
+	case first != 1 && (marker <= last || len(page.Records) >= b.max()):
 		return false
 	}
 	b.logger().Warn("the applied-offset marker is not a position in this stream — ignoring it",
@@ -428,6 +453,33 @@ func (b *Bridge) newStream(page door.Page, marker int64, markerStore string) boo
 		"detail", "colca's data volume was recreated while Timescale kept the marker. "+
 			"Applying this stream from its start; the markers are rewritten to its positions.")
 	return true
+}
+
+// headBelow reports whether the node's stream ends below marker: the page
+// reached its head (shorter than asked for) below the marker, or the head the
+// node announced is below it.
+func (b *Bridge) headBelow(page door.Page, marker int64) bool {
+	last := page.Records[len(page.Records)-1].Offset
+	if len(page.Records) < b.max() && last < marker {
+		return true
+	}
+	if b.Head != nil {
+		if next := b.Head(); next > 0 && next-1 < marker {
+			return true
+		}
+	}
+	return false
+}
+
+// warnNoStore logs once that the node sends no store id.
+func (b *Bridge) warnNoStore(page door.Page) {
+	if page.Store != "" || len(page.Records) == 0 || b.warnedNoStore.Swap(true) {
+		return
+	}
+	b.logger().Warn("the node sends no store id on /fetch: it is older than colcad 0.31",
+		"detail", "colca-historian from 0.32 expects colcad 0.31 or newer. Without store ids a "+
+			"recreated colcad volume is recognised only by its offsets, and records can be "+
+			"skipped when the volume is recreated while an ack is failing. Upgrade colcad.")
 }
 
 // truncateForLog shortens an untrusted value before it goes into a log line.
@@ -490,13 +542,27 @@ func (b *Bridge) Run(ctx context.Context) error {
 		// More is waiting unless the page reached the head this drain started
 		// with; without a known head only an empty page proves it.
 		if fetched > 0 && (head == 0 || b.next < head || b.ahead != nil) {
+			if b.ackOwed && b.ahead == nil {
+				// The ack failed, so the next fetch from the cursor reads
+				// the same records again: back off rather than re-read them
+				// as fast as the node answers.
+				if !sleep(ctx, ackRetry) {
+					return ctx.Err()
+				}
+				ackRetry = min(30*time.Second, ackRetry*2)
+			} else if !b.ackOwed {
+				ackRetry = time.Second
+			}
 			continue
 		}
 		if err == nil && b.Changes != nil {
 			// An ack that failed at the head is owed: retry it with backoff
-			// rather than waiting for new data to carry the next one.
+			// rather than waiting for new data to carry the next one. Not
+			// without a store to name (a node too old to send one): a blank
+			// store passes the node's store check, so the retry could land
+			// on another store; the next applied page acks instead.
 			recovery := time.Duration(-1)
-			if b.markerKnown && b.ackOwed {
+			if b.markerKnown && b.ackOwed && b.stream != "" {
 				_, err := b.Door.AckStore(ctx, "metrics", Cursor, b.marker, b.stream)
 				switch {
 				case err == nil:
