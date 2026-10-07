@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.31.0](https://github.com/alpamayo-solutions/colca/compare/v0.30.0...v0.31.0) (2026-10-07)
+
+
+### Features
+
+* **hub:** publish children's metrics live, not retained; add POST /kv/lookup ([#169](https://github.com/alpamayo-solutions/colca/issues/169)) ([a915b5c](https://github.com/alpamayo-solutions/colca/commit/a915b5c395d3d982720575c5e1fffcb947c3f70f))
+
+
+### Performance
+
+* **historian:** write several pages at once; ack only the store the records came from ([#172](https://github.com/alpamayo-solutions/colca/issues/172)) ([5f0e89c](https://github.com/alpamayo-solutions/colca/commit/5f0e89cab81a33e87edd50f91ddd83922d8db4b2))
+* **store:** let Pebble's memtables and cache follow a large memory ceiling ([#171](https://github.com/alpamayo-solutions/colca/issues/171)) ([1ac35a6](https://github.com/alpamayo-solutions/colca/commit/1ac35a64dc47ce27fd777c1a6a67ab0d1765ab21))
+
 ## [0.30.0](https://github.com/alpamayo-solutions/colca/compare/v0.29.4...v0.30.0) (2026-10-06)
 
 
