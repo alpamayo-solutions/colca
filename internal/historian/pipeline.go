@@ -443,7 +443,7 @@ func (p *pipeline) backToCursor(ctx context.Context, next, applied *int64) bool 
 		}
 	}
 	*next = 0
-	*applied = p.marked.Load()
+	*applied = max(*applied, p.marked.Load())
 	return true
 }
 

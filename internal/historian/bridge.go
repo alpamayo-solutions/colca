@@ -280,7 +280,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		b.dropAhead()
 		return fetched, 0, err
 	}
-	b.marker, b.skip = last, last
+	b.marker, b.skip = last, max(b.skip, last)
 	for _, rej := range rejections {
 		b.reject(rej)
 	}
