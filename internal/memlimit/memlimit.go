@@ -19,8 +19,9 @@ import (
 )
 
 // Fraction of the container ceiling the Go heap may use. The rest is for
-// memory the runtime does not manage (Pebble's memtables and block cache,
-// thread stacks) and the kernel's view of page cache charged to the cgroup.
+// memory the runtime does not manage (thread stacks, the binary) and the
+// kernel's view of page cache charged to the cgroup. colca builds without
+// cgo, so Pebble's memtables and block cache are Go heap and count inside it.
 const Fraction = 0.75
 
 // The cgroup file system and this process's membership, variables so tests

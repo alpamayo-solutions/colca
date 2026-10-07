@@ -200,9 +200,11 @@ func (o Options) pebbleOptions(opts *pebble.Options) error {
 // whose memory ceiling is ceiling bytes: a 32nd of the ceiling each, at most
 // 256 MiB, at least Pebble's own defaults (4 MiB, 8 MiB), which an unknown
 // ceiling also gets. Two memtables (one flushing) and the cache stay under a
-// tenth of the ceiling, inside the quarter the Go memory limit leaves outside
-// the heap (internal/memlimit). A 512 MiB edge gets 16 MiB of each, a 2 GiB
-// parent 64 MiB, an 8 GiB parent 256 MiB.
+// tenth of the ceiling. colca builds without cgo, where Pebble allocates
+// both on the Go heap, so they count inside the Go memory limit
+// (internal/memlimit, 75 % of the ceiling), not in the quarter outside it. A
+// 512 MiB edge gets 16 MiB of each, a 2 GiB parent 64 MiB, an 8 GiB parent
+// 256 MiB.
 //
 // Pebble's 4 MiB memtable flushed a busy parent several times a second: every
 // record writes its stream entry, its signal index entry and its KV
