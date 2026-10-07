@@ -1,13 +1,17 @@
 package repl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -521,6 +525,14 @@ func placeElement(t *testing.T, eng *engine.Engine, path string) string {
 // the child store: these tests are about lane order, not validation.
 func uplinkPair(t *testing.T) (child, parent *store.Store, parentPub string, start func()) {
 	t.Helper()
+	cs, ps, pub, _, start := uplinkPairWithClient(t)
+	return cs, ps, pub, start
+}
+
+// uplinkPairWithClient is uplinkPair that also returns the child's client, so a
+// test can watch the requests it sends.
+func uplinkPairWithClient(t *testing.T) (*store.Store, *store.Store, string, *Client, func()) {
+	t.Helper()
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
@@ -535,7 +547,7 @@ func uplinkPair(t *testing.T) (child, parent *store.Store, parentPub string, sta
 	_, ceng := nodeParts(t, cs, ccfg, nil, nil, nil)
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
 
-	return cs, ps, parentID.PublicHex(), func() {
+	return cs, ps, parentID.PublicHex(), cl, func() {
 		stop := make(chan struct{})
 		done := make(chan struct{})
 		go func() {
@@ -564,49 +576,118 @@ func seed(t *testing.T, s *store.Store, stream, topic string, n int) {
 	}
 }
 
+// pushLog records, in the order the parent accepted them, the stream and the
+// record count of every /replicate request a client sends. The uplink pushes
+// from one goroutine, so this is the order its cursors moved in.
+type pushLog struct {
+	base http.RoundTripper
+	mu   sync.Mutex
+	log  []push
+}
+
+type push struct {
+	stream  string
+	records int
+}
+
+func (p *pushLog) RoundTrip(req *http.Request) (*http.Response, error) {
+	var msg struct {
+		Stream  string            `json:"stream"`
+		Records []json.RawMessage `json:"records"`
+	}
+	if strings.HasSuffix(req.URL.Path, "/replicate") && req.Body != nil {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		_ = req.Body.Close()
+		_ = json.Unmarshal(body, &msg)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+	}
+	resp, err := p.base.RoundTrip(req)
+	if err == nil && resp.StatusCode == http.StatusOK && msg.Stream != "" {
+		p.mu.Lock()
+		p.log = append(p.log, push{msg.Stream, len(msg.Records)})
+		p.mu.Unlock()
+	}
+	return resp, err
+}
+
+func watchPushes(cl *Client) *pushLog {
+	base := cl.http.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	p := &pushLog{base: base}
+	cl.http.Transport = p
+	return p
+}
+
+// metricsBefore is how many metric records the parent accepted before the
+// lane's backlog of n records was complete, or -1 if it never completed.
+func (p *pushLog) metricsBefore(lane string, n int) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	metrics, done := 0, 0
+	for _, e := range p.log {
+		switch e.stream {
+		case lane:
+			done += e.records
+			if done >= n {
+				return metrics
+			}
+		case "metrics":
+			metrics += e.records
+		}
+	}
+	return -1
+}
+
+// assertLaneDrainsFirst seeds a metrics backlog and a lane backlog several
+// batches deep (with one record, any order that merely put metrics last would
+// pass), and checks from the order of the pushes that at most the single
+// metrics floor batch went before the lane's last record.
+//
+// Counting the parent's metrics after a poll saw the lane complete measured
+// pushes made after it too: on a fast host the uplink sent another metrics
+// batch or more within the poll's 10 ms, and the test failed on unchanged code.
+func assertLaneDrainsFirst(t *testing.T, lane, topic string) {
+	t.Helper()
+	cs, ps, _, cl, start := uplinkPairWithClient(t)
+	pushes := watchPushes(cl)
+	backlog := 3 * replBatch
+	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 5*replBatch)
+	seed(t, cs, lane, topic, backlog)
+
+	start()
+	waitFor(t, "the "+lane+" backlog to reach the parent", 20*time.Second, func() bool {
+		return ps.NextOffset(lane) == uint64(backlog)+1
+	})
+	// The parent commits before it answers; the last answer may still be on
+	// its way to the log.
+	waitFor(t, "the client to see the "+lane+" backlog accepted", 5*time.Second, func() bool {
+		return pushes.metricsBefore(lane, backlog) >= 0
+	})
+
+	// Round-robin would have pushed a metrics batch with each lane batch; with
+	// lanes at most the single floor batch has gone.
+	if got := pushes.metricsBefore(lane, backlog); got < 0 || got > replBatch {
+		t.Fatalf("%d metric records reached the parent before the %d-record %s backlog finished, "+
+			"want at most one %d-record floor batch — the %s lane is not draining ahead of metrics",
+			got, backlog, lane, replBatch, lane)
+	}
+}
+
 // After an outage the small lanes drain before the metrics backlog. Order
 // within a stream never changes, so lanes are what let an alarm arrive promptly.
 func TestUplinkDrainsSmallLanesBeforeTheMetricsBacklog(t *testing.T) {
-	cs, ps, _, start := uplinkPair(t)
-	// The alarm lane is several batches deep: with one record, any order that
-	// merely put metrics last would pass. At three batches the lane must drain
-	// across passes before metrics moves.
-	const alarmBacklog = 3 * replBatch
-	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 5*replBatch)
-	seed(t, cs, "alarms", "colca/v1/_AlarmStateChange/m1/m1/alarm-events/a1/e%d", alarmBacklog)
-
-	start()
-	waitFor(t, "the alarm backlog to reach the parent", 20*time.Second, func() bool {
-		return ps.NextOffset("alarms") == uint64(alarmBacklog)+1
-	})
-
-	// Round-robin would have pushed a metrics batch with each alarm batch; with
-	// lanes at most the single floor batch has gone.
-	if got := ps.NextOffset("metrics") - 1; got > uint64(replBatch) {
-		t.Fatalf("%d metric records reached the parent before the %d-record alarm "+
-			"backlog finished, want at most one %d-record floor batch — the alarm "+
-			"lane is not draining ahead of metrics", got, alarmBacklog, replBatch)
-	}
+	assertLaneDrainsFirst(t, "alarms", "colca/v1/_AlarmStateChange/m1/m1/alarm-events/a1/e%d")
 }
 
 // Annotations get the same guarantee as alarms: they drain ahead of the metrics
 // backlog.
 func TestUplinkDrainsAnnotationsBeforeTheMetricsBacklog(t *testing.T) {
-	cs, ps, _, start := uplinkPair(t)
-	const annotationBacklog = 3 * replBatch
-	seed(t, cs, "metrics", "colca/v1/_Metric/m1/m1/temp%d", 5*replBatch)
-	seed(t, cs, "annotations", "colca/v1/_Annotation/m1/m1/press1/a%d", annotationBacklog)
-
-	start()
-	waitFor(t, "the annotation backlog to reach the parent", 20*time.Second, func() bool {
-		return ps.NextOffset("annotations") == uint64(annotationBacklog)+1
-	})
-
-	if got := ps.NextOffset("metrics") - 1; got > uint64(replBatch) {
-		t.Fatalf("%d metric records reached the parent before the %d-record annotation "+
-			"backlog finished, want at most one %d-record floor batch — the annotation "+
-			"lane is not draining ahead of metrics", got, annotationBacklog, replBatch)
-	}
+	assertLaneDrainsFirst(t, "annotations", "colca/v1/_Annotation/m1/m1/press1/a%d")
 }
 
 // A lane that never empties must not hold the metrics cursor: once the pruner
