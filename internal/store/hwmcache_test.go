@@ -67,7 +67,8 @@ func TestHWMsServedFromMemoryMatchTheDurableMarks(t *testing.T) {
 }
 
 // Pebble's memory follows the node's ceiling: hub-sized only when the node has
-// the memory, Pebble's own defaults when the ceiling is small or unknown.
+// the memory, Pebble's own defaults when the ceiling is small or unknown, and
+// never more than 256 MiB each however large the ceiling.
 func TestPebbleMemoryFollowsTheNodesCeiling(t *testing.T) {
 	for _, tc := range []struct {
 		ceiling         int64
@@ -77,7 +78,9 @@ func TestPebbleMemoryFollowsTheNodesCeiling(t *testing.T) {
 		{128 << 20, 4 << 20, 8 << 20},
 		{512 << 20, 16 << 20, 16 << 20},
 		{2 << 30, 64 << 20, 64 << 20},
-		{16 << 30, 64 << 20, 64 << 20},
+		{4 << 30, 128 << 20, 128 << 20},
+		{8 << 30, 256 << 20, 256 << 20},
+		{64 << 30, 256 << 20, 256 << 20},
 	} {
 		m, c := SizesFor(tc.ceiling)
 		if m != tc.memTable || c != tc.cache {
