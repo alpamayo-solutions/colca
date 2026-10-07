@@ -873,6 +873,38 @@ func TestAnOwedAckWithoutAStoreIDIsNotRetried(t *testing.T) {
 	}
 }
 
+// A node too old to send a store id, whose acks fail from the first page on:
+// its cursor stays at 1 under the marker this bridge wrote. That is the
+// bridge's own cursor lagging, not a recreated store, so the first page is not
+// re-applied over and over; and while the ack is owed, re-reading from the
+// cursor backs off instead of running as fast as the node answers.
+func TestAnOldNodeWhoseAcksFailIsNotReadInALoop(t *testing.T) {
+	s := newStreamNamed(120, 3, "a")
+	s.id = ""
+	s.failAcks = 1 << 30
+	store := newPipeStore(s, 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	// No Head: before the node's first hint, or a node that announces none.
+	go func() { done <- pipelineBridge(s, store, 1, 50).Run(ctx) }()
+	time.Sleep(3 * time.Second)
+	cancel()
+	<-done
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.resets != 0 {
+		t.Fatalf("the markers were reset %d times", store.resets)
+	}
+	// Three pages to the head, then a retry after 1 s and 2 s: a handful of
+	// fetches, not thousands.
+	if n := s.fetches.Load(); n > 12 {
+		t.Fatalf("%d fetches in 3 s while the ack was owed", n)
+	}
+	if store.bad != nil {
+		t.Fatal(store.bad)
+	}
+}
+
 // An upgrade: the marker is from before store ids (it names no store) and the
 // cursor lags it. The ack that moves the cursor up fails and is owed. Until a
 // page is marked with its store a retry would name no store, which the node

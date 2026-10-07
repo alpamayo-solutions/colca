@@ -107,6 +107,11 @@ type Bridge struct {
 	// while unknown; ackOwed is set while an ack of the marker failed.
 	stream  string
 	ackOwed bool
+	// ownMarker is set once this bridge has moved the marker itself. Without
+	// store ids (a node too old to send one) a page from offset 1 under a
+	// marker otherwise reads as a recreated store; under a marker this bridge
+	// wrote, it is its own cursor lagging behind failed acks.
+	ownMarker bool
 	// skip is what this bridge skips at or below: the marker, or further when
 	// a pipelined run's partition markers say so.
 	skip int64
@@ -331,6 +336,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		return fetched, 0, err
 	}
 	b.marker, b.skip = last, max(b.skip, last)
+	b.ownMarker = true
 	for _, rej := range rejections {
 		b.reject(rej)
 	}
@@ -416,11 +422,17 @@ func (b *Bridge) newStream(page door.Page, marker int64, markerStore string) boo
 		return false
 	}
 	first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
-	if page.Store != "" && markerStore != "" {
+	switch {
+	case page.Store != "" && markerStore != "":
 		if page.Store == markerStore {
 			return false
 		}
-	} else if first != 1 && (marker <= last || len(page.Records) >= b.max()) {
+	case page.Store == "" && b.ownMarker:
+		// No store id and a marker this bridge wrote: the cursor lags it
+		// (acks failed), it is not a recreated store. Resetting would
+		// re-apply the stream's first page over and over while acks fail.
+		return false
+	case first != 1 && (marker <= last || len(page.Records) >= b.max()):
 		return false
 	}
 	b.logger().Warn("the applied-offset marker is not a position in this stream — ignoring it",
@@ -490,6 +502,17 @@ func (b *Bridge) Run(ctx context.Context) error {
 		// More is waiting unless the page reached the head this drain started
 		// with; without a known head only an empty page proves it.
 		if fetched > 0 && (head == 0 || b.next < head || b.ahead != nil) {
+			if b.ackOwed && b.ahead == nil {
+				// The ack failed, so the next fetch from the cursor reads
+				// the same records again: back off rather than re-read them
+				// as fast as the node answers.
+				if !sleep(ctx, ackRetry) {
+					return ctx.Err()
+				}
+				ackRetry = min(30*time.Second, ackRetry*2)
+			} else if !b.ackOwed {
+				ackRetry = time.Second
+			}
 			continue
 		}
 		if err == nil && b.Changes != nil {
