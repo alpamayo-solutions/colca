@@ -45,7 +45,7 @@ func (s *importStore) Applied(_ context.Context, consumer string) (int64, error)
 	return s.marker, nil
 }
 
-func (s *importStore) Apply(_ context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error) {
+func (s *importStore) Apply(_ context.Context, rows []Row, consumer string, offset int64, _ string) ([]Rejection, error) {
 	if offset == s.failAt {
 		return nil, fmt.Errorf("database unavailable")
 	}

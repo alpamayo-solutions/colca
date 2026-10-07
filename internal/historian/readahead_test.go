@@ -57,7 +57,7 @@ func (d *streamDoor) FetchWithOptions(_ context.Context, o door.FetchOptions) (d
 	return d.serve(int64(o.From), o.Max), nil //nolint:gosec // test offsets
 }
 
-func (d *streamDoor) Ack(_ context.Context, _, _ string, offset int64) (bool, error) {
+func (d *streamDoor) AckStore(_ context.Context, _, _ string, offset int64, _ string) (bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.acked = append(d.acked, offset)
@@ -83,7 +83,7 @@ func (s *orderedStore) Applied(context.Context, string) (int64, error) {
 	return s.applied, nil
 }
 
-func (s *orderedStore) Apply(_ context.Context, rows []Row, _ string, offset int64) ([]Rejection, error) {
+func (s *orderedStore) Apply(_ context.Context, rows []Row, _ string, offset int64, _ string) ([]Rejection, error) {
 	s.door.mu.Lock()
 	s.door.writing = true
 	s.door.mu.Unlock()

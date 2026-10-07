@@ -14,7 +14,8 @@
 //	COLCA_TOPIC_ROOT  topic root of the tree             (default colca)
 //	DATABASE_URL      Postgres/Timescale DSN             (required)
 //	DB_MAX_CONNS      pool size                          (default 4)
-//	FETCH_MAX         records per page                   (default 500)
+//	FETCH_MAX         records per page                   (default 5000)
+//	PIPELINE_PAGES    pages written at once, 1 = one at a time (default 4)
 //	HTTP_ADDR         /healthz + /metrics                (default :9091)
 package main
 
@@ -52,6 +53,7 @@ type config struct {
 	dsn           string
 	maxConns      int32
 	fetchMax      int
+	pipeline      int
 	writers       int
 	httpAddr      string
 	retentionDays int
@@ -175,12 +177,13 @@ func run() int {
 			BaseURL: cfg.colcaURL,
 			Service: cfg.colcaService,
 		},
-		Store:   sink,
-		Strict:  deps != nil,
-		Log:     log,
-		Max:     cfg.fetchMax,
-		Signals: signals,
-		Head:    metricsHead.Load,
+		Store:    sink,
+		Strict:   deps != nil,
+		Log:      log,
+		Max:      cfg.fetchMax,
+		Pipeline: cfg.pipeline,
+		Signals:  signals,
+		Head:     metricsHead.Load,
 	}
 
 	bridge.BatchInterval = time.Duration(intEnv("BATCH_INTERVAL_MS", 100)) * time.Millisecond
@@ -305,6 +308,13 @@ func load() (config, error) {
 	}
 	cfg.maxConns = int32(maxConns)
 	cfg.fetchMax = intEnv("FETCH_MAX", 5000)
+	// PIPELINE_PAGES pages may be between fetch and marker: the writers start
+	// on the next page while the last partitions of the previous one commit.
+	// It bounds memory (pages × FETCH_MAX rows) and how much a restart replays.
+	cfg.pipeline = intEnv("PIPELINE_PAGES", 4)
+	if cfg.pipeline < 1 || cfg.pipeline > 64 {
+		return cfg, fmt.Errorf("PIPELINE_PAGES must be between 1 and 64, got %d", cfg.pipeline)
+	}
 	cfg.retentionDays = intEnv("HISTORIAN_RETENTION_DAYS", 0)
 	if cfg.retentionDays < 0 {
 		return cfg, errors.New("HISTORIAN_RETENTION_DAYS must be zero (unlimited) or positive")

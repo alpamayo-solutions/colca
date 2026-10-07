@@ -25,7 +25,7 @@ func (f *fakeDoor) Fetch(_ context.Context, stream, cursor string, _ int) (door.
 	return page, nil
 }
 
-func (f *fakeDoor) Ack(_ context.Context, _, _ string, offset int64) (bool, error) {
+func (f *fakeDoor) AckStore(_ context.Context, _, _ string, offset int64, _ string) (bool, error) {
 	f.acked = append(f.acked, offset)
 	return true, nil
 }
@@ -38,7 +38,7 @@ type fakeStore struct {
 
 func (s *fakeStore) Applied(context.Context, string) (int64, error) { return s.applied, nil }
 
-func (s *fakeStore) Apply(_ context.Context, rows []Row, _ string, offset int64) ([]Rejection, error) {
+func (s *fakeStore) Apply(_ context.Context, rows []Row, _ string, offset int64, _ string) ([]Rejection, error) {
 	if s.fail != nil {
 		return nil, s.fail
 	}

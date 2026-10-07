@@ -53,7 +53,7 @@ func (s *lockedStore) Applied(context.Context, string) (int64, error) {
 	return s.applied, nil
 }
 
-func (s *lockedStore) Apply(_ context.Context, rows []Row, _ string, offset int64) ([]Rejection, error) {
+func (s *lockedStore) Apply(_ context.Context, rows []Row, _ string, offset int64, _ string) ([]Rejection, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rows = append(s.rows, rows...)

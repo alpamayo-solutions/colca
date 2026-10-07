@@ -29,7 +29,9 @@ const gapContract = "/_StreamGap/"
 // error means nothing applied and the page is retried.
 type Store interface {
 	Applied(ctx context.Context, consumer string) (int64, error)
-	Apply(ctx context.Context, rows []Row, consumer string, offset int64) ([]Rejection, error)
+	// store is the store the rows were read from (door.Page.Store); the marker
+	// records it.
+	Apply(ctx context.Context, rows []Row, consumer string, offset int64, store string) ([]Rejection, error)
 }
 
 // SignalFilter decides, per sample, whether its signal is historised.
@@ -41,7 +43,9 @@ type SignalFilter interface {
 // Fetcher is the half of the door the bridge uses.
 type Fetcher interface {
 	Fetch(ctx context.Context, stream, cursor string, limit int) (door.Page, error)
-	Ack(ctx context.Context, stream, cursor string, offset int64) (bool, error)
+	// AckStore acks records read from store; the node refuses an ack for
+	// another store (door.ErrStoreChanged).
+	AckStore(ctx context.Context, stream, cursor string, offset int64, store string) (bool, error)
 }
 
 // Bridge follows `metrics` into the hypertables.
@@ -71,6 +75,11 @@ type Bridge struct {
 	// fetch.
 	Head func() int64
 
+	// Pipeline, above 1, lets Run hold that many pages between fetch and
+	// marker: writers start on the next page before every partition of the
+	// previous one is written (runPipelined). 0 or 1 applies one page at a time.
+	Pipeline int
+
 	// ReadAhead fetches the next page while the current one is written, when
 	// the page was full and the door can read ahead of its cursor. Run sets it.
 	ReadAhead bool
@@ -94,6 +103,13 @@ type Bridge struct {
 	// the database once and after a failed write, not on every page.
 	marker      int64
 	markerKnown bool
+	// stream is the store the followed stream lives in (door.Page.Store), ""
+	// while unknown; ackOwed is set while an ack of the marker failed.
+	stream  string
+	ackOwed bool
+	// skip is what this bridge skips at or below: the marker, or further when
+	// a pipelined run's partition markers say so.
+	skip int64
 	// next is the page end of the last pass.
 	next int64
 	// ahead delivers the page read ahead of the cursor, nil when none is in flight.
@@ -158,6 +174,15 @@ func (b *Bridge) Rejected(reason string) int64 {
 	return v.(*atomic.Int64).Load()
 }
 
+// reject counts and logs a row the schema refused.
+func (b *Bridge) reject(rej Rejection) {
+	b.countRejection(rej.Reason)
+	b.logger().Warn("a record was refused by the schema and set aside — the rest of the page still historised",
+		"offset", rej.Row.Offset, "topic", rej.Row.Topic,
+		"signal_id", truncateForLog(rej.Row.SignalID, 40),
+		"sqlstate", rej.SQLState, "reason", rej.Reason, "err", rej.Err)
+}
+
 func (b *Bridge) countRejection(reason string) {
 	counter, _ := b.rejected.LoadOrStore(reason, new(atomic.Int64))
 	counter.(*atomic.Int64).Add(1)
@@ -194,14 +219,21 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 			return 0, 0, err
 		}
 	}
-	page, ok := b.takeAhead(b.next)
-	if !ok {
+	page, ahead := b.takeAhead(b.next)
+	if !ahead {
 		page, err = b.Door.Fetch(ctx, "metrics", Cursor, b.max())
 		if err != nil {
 			return 0, 0, err
 		}
 	}
 	fetched = len(page.Records)
+	if ahead && page.Store != "" && b.stream != "" && page.Store != b.stream {
+		// colcad's store was recreated under a read ahead of the cursor: the
+		// next pass reads the new store from its cursor.
+		b.logger().Warn("the node's store changed while reading; reading the new store from the cursor",
+			"store", page.Store, "was", b.stream)
+		return max(fetched, 1), 0, nil
+	}
 	b.next = page.Next
 	b.NowMS, b.FetchedAt = page.NowMS, time.Now()
 	if b.Strict && page.Gap != nil {
@@ -213,29 +245,118 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		return 0, 0, nil
 	}
 
+	ps, pipelineStore := b.Store.(PipelineStore)
 	if !b.markerKnown {
 		if b.marker, err = b.Store.Applied(ctx, Consumer); err != nil {
 			return fetched, 0, err
 		}
+		b.skip = b.marker
+		// A pipelined run before this one may have written past the page
+		// marker; a complete set of its partition markers says how far.
+		if pipelineStore {
+			if b.stream, err = ps.AppliedStore(ctx, Consumer); err != nil {
+				return fetched, 0, err
+			}
+			markers, err := ps.PartitionMarkers(ctx, Consumer)
+			if err != nil {
+				return fetched, 0, err
+			}
+			b.skip, _ = startMarkers(b.marker, markers, 0)
+		}
 		b.markerKnown = true
 	}
-	applied := b.marker
-	first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
-
-	// Ignore the marker when it cannot be a position in this stream: the page starts
-	// at offset 1 while the marker is positive, or the marker is past the page's
-	// end. That happens when colcad's data volume is recreated but Timescale keeps
-	// the marker, and trusting it would silently drop a page. At worst this
-	// re-applies the very first page, which the upsert absorbs.
-	if applied > 0 && (first == 1 || applied > last) {
-		b.logger().Warn("the applied-offset marker is not a position in this stream — ignoring it",
-			"marker", applied, "page_first", first, "page_last", last,
-			"detail", "colca's data volume was recreated while Timescale kept the marker "+
-				"(or the marker outran the stream). Applying this page in full rather than "+
-				"reading it as already durable; the marker is rewritten to this stream's position.")
-		applied = 0
+	last := page.Records[len(page.Records)-1].Offset
+	fresh := !ahead && b.newStream(page, b.marker, b.stream)
+	if !fresh && b.stream == "" {
+		b.stream = page.Store
+	}
+	if !fresh && last < b.marker {
+		// The same store, and the cursor lags the marker (acks failed while
+		// the marks went in): everything on this page is written. Move the
+		// cursor up to the marker rather than marking backwards.
+		if _, err := b.Door.AckStore(ctx, "metrics", Cursor, b.marker, b.stream); err != nil {
+			if errors.Is(err, door.ErrStoreChanged) {
+				return fetched, 0, err // the next pass reads the new store's cursor
+			}
+			// Read on from the marker meanwhile; the next ack that goes
+			// through moves the cursor past this page too.
+			ahead, ok := b.Door.(aheadFetcher)
+			if !ok {
+				return fetched, 0, err
+			}
+			b.logger().Warn("the cursor lags the applied-offset marker and the ack failed; reading on from the marker",
+				"marker", b.marker, "err", err)
+			from := b.marker + 1
+			ch := make(chan aheadPage, 1)
+			b.ahead, b.next = ch, from
+			go func() {
+				p, err := ahead.FetchWithOptions(ctx, door.FetchOptions{Stream: "metrics", Cursor: Cursor, Max: b.max(), From: uint64(from)}) //nolint:gosec // positive
+				ch <- aheadPage{from: from, page: p, err: err}
+			}()
+			return fetched, 0, nil
+		}
+		b.Acknowledged = b.marker
+		return fetched, 0, nil
+	}
+	if fresh {
+		// A later pipelined run must not trust the old stream's partition
+		// markers (see runPipelined).
+		if pipelineStore {
+			if err := ps.ResetPartitionMarkers(ctx, Consumer); err != nil {
+				return fetched, 0, err
+			}
+		}
+		b.marker, b.skip, b.stream = 0, 0, page.Store
+	}
+	rows, err := b.rowsOf(page, b.skip)
+	if err != nil {
+		return fetched, 0, err
 	}
 
+	// A full page means more is waiting: read it while this one is written.
+	if ahead, ok := b.Door.(aheadFetcher); ok && b.ReadAhead && fetched >= b.max() && page.Gap == nil {
+		from := last + 1
+		ch := make(chan aheadPage, 1)
+		b.ahead = ch
+		go func() {
+			p, err := ahead.FetchWithOptions(ctx, door.FetchOptions{Stream: "metrics", Cursor: Cursor, Max: b.max(), From: uint64(from)}) //nolint:gosec // offsets are positive
+			ch <- aheadPage{from: from, page: p, err: err}
+		}()
+	}
+
+	rejections, err := b.Store.Apply(ctx, rows, Consumer, last, page.Store)
+	if err != nil {
+		b.markerKnown = false
+		b.dropAhead()
+		return fetched, 0, err
+	}
+	b.marker, b.skip = last, max(b.skip, last)
+	for _, rej := range rejections {
+		b.reject(rej)
+	}
+	if b.Strict && len(rejections) > 0 {
+		return fetched, 0, fmt.Errorf("coordinated history refused %d rows", len(rejections))
+	}
+	// The marker moved past any rejected rows, so ack too, or the page would be
+	// fetched forever.
+	b.ackOwed = false
+	if _, err := b.Door.AckStore(ctx, "metrics", Cursor, last, page.Store); err != nil {
+		if b.Strict {
+			return fetched, 0, err
+		}
+		b.ackOwed = !errors.Is(err, door.ErrStoreChanged)
+		// The rows are durable; the next pass re-reads and the marker skips them.
+		b.logger().Warn("applied but could not ack", "offset", last, "err", err)
+	} else {
+		b.Acknowledged = last
+	}
+	return fetched, len(rows) - len(rejections), nil
+}
+
+// rowsOf turns a non-empty page into the rows to write: records at or below the
+// applied marker (a replay), gaps, tombstones, unhistorisable records and
+// samples of signals that are not logged are consumed without a row.
+func (b *Bridge) rowsOf(page door.Page, applied int64) ([]Row, error) {
 	rows := make([]Row, 0, len(page.Records))
 	for _, record := range page.Records {
 		if record.Offset <= applied {
@@ -243,7 +364,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		}
 		if strings.Contains(record.Topic, gapContract) {
 			if b.Strict {
-				return fetched, 0, fmt.Errorf("coordinated history has a stream gap")
+				return nil, fmt.Errorf("coordinated history has a stream gap")
 			}
 			b.gaps.Add(1)
 			b.logger().Error("metrics were pruned before this bridge read them",
@@ -258,7 +379,7 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 				continue // a tombstone: nothing to historise
 			}
 			if b.Strict {
-				return fetched, 0, err
+				return nil, err
 			}
 			// One bad record must not wedge the stream forever, but it must not
 			// vanish either.
@@ -276,47 +397,37 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		row.Topic = record.Topic
 		rows = append(rows, row)
 	}
+	return rows, nil
+}
 
-	// A full page means more is waiting: read it while this one is written.
-	if ahead, ok := b.Door.(aheadFetcher); ok && b.ReadAhead && fetched >= b.max() && page.Gap == nil {
-		from := last + 1
-		ch := make(chan aheadPage, 1)
-		b.ahead = ch
-		go func() {
-			p, err := ahead.FetchWithOptions(ctx, door.FetchOptions{Stream: "metrics", Cursor: Cursor, Max: b.max(), From: uint64(from)}) //nolint:gosec // offsets are positive
-			ch <- aheadPage{from: from, page: p, err: err}
-		}()
+// newStream reports whether a non-empty page read from the cursor comes from
+// another stream than the one the marker is a position in: colcad's data
+// volume recreated while Timescale kept the marker. The caller then applies
+// from the stream's start instead of skipping a page as durable.
+//
+// /fetch names the store a page was read from, and the marker records the
+// store it is a position in; they differ exactly when the store was recreated.
+// A marker without a store (written before stores were recorded) or a node
+// that sends none falls back, once, to the page: one starting at offset 1, or
+// a short page ending below the marker, is a new stream. The caller records
+// the store from then on.
+func (b *Bridge) newStream(page door.Page, marker int64, markerStore string) bool {
+	if marker <= 0 {
+		return false
 	}
-
-	rejections, err := b.Store.Apply(ctx, rows, Consumer, last)
-	if err != nil {
-		b.markerKnown = false
-		b.dropAhead()
-		return fetched, 0, err
-	}
-	b.marker = last
-	for _, rej := range rejections {
-		b.countRejection(rej.Reason)
-		b.logger().Warn("a record was refused by the schema and set aside — the rest of the page still historised",
-			"offset", rej.Row.Offset, "topic", rej.Row.Topic,
-			"signal_id", truncateForLog(rej.Row.SignalID, 40),
-			"sqlstate", rej.SQLState, "reason", rej.Reason, "err", rej.Err)
-	}
-	if b.Strict && len(rejections) > 0 {
-		return fetched, 0, fmt.Errorf("coordinated history refused %d rows", len(rejections))
-	}
-	// The marker moved past any rejected rows, so ack too, or the page would be
-	// fetched forever.
-	if _, err := b.Door.Ack(ctx, "metrics", Cursor, last); err != nil {
-		if b.Strict {
-			return fetched, 0, err
+	first, last := page.Records[0].Offset, page.Records[len(page.Records)-1].Offset
+	if page.Store != "" && markerStore != "" {
+		if page.Store == markerStore {
+			return false
 		}
-		// The rows are durable; the next pass re-reads and the marker skips them.
-		b.logger().Warn("applied but could not ack", "offset", last, "err", err)
-	} else {
-		b.Acknowledged = last
+	} else if first != 1 && (marker <= last || len(page.Records) >= b.max()) {
+		return false
 	}
-	return fetched, len(rows) - len(rejections), nil
+	b.logger().Warn("the applied-offset marker is not a position in this stream — ignoring it",
+		"marker", marker, "marker_store", markerStore, "page_store", page.Store, "page_first", first, "page_last", last,
+		"detail", "colca's data volume was recreated while Timescale kept the marker. "+
+			"Applying this stream from its start; the markers are rewritten to its positions.")
+	return true
 }
 
 // truncateForLog shortens an untrusted value before it goes into a log line.
@@ -336,10 +447,13 @@ func (b *Bridge) Run(ctx context.Context) error {
 	if b.Changes == nil {
 		return fmt.Errorf("historian requires a stream subscription")
 	}
+	if p, ok := b.pipelined(); ok {
+		return p.run(ctx)
+	}
 	started := time.Now()
 	var changed <-chan struct{}
 	var head int64
-	retry := time.Second
+	retry, ackRetry := time.Second, time.Second
 	b.ReadAhead = true
 	defer b.dropAhead()
 	for {
@@ -379,7 +493,24 @@ func (b *Bridge) Run(ctx context.Context) error {
 			continue
 		}
 		if err == nil && b.Changes != nil {
-			if !door.WaitChange(ctx, changed, -1, started.Add(b.BatchInterval)) {
+			// An ack that failed at the head is owed: retry it with backoff
+			// rather than waiting for new data to carry the next one.
+			recovery := time.Duration(-1)
+			if b.markerKnown && b.ackOwed {
+				_, err := b.Door.AckStore(ctx, "metrics", Cursor, b.marker, b.stream)
+				switch {
+				case err == nil:
+					b.Acknowledged, b.ackOwed, ackRetry = b.marker, false, time.Second
+				case errors.Is(err, door.ErrStoreChanged):
+					// Not owed: the offset names other records in the new store,
+					// which the next drain reads from its own cursor.
+					b.ackOwed = false
+				default:
+					b.logger().Warn("applied but could not ack", "offset", b.marker, "err", err)
+					recovery, ackRetry = ackRetry, min(30*time.Second, ackRetry*2)
+				}
+			}
+			if !door.WaitChange(ctx, changed, recovery, started.Add(b.BatchInterval)) {
 				return ctx.Err()
 			}
 			started, changed = time.Now(), nil
