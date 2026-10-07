@@ -756,6 +756,78 @@ func TestAnOldNodeRecreatedWhileRunningLosesNothing(t *testing.T) {
 	}
 }
 
+// The same, but recreated while the ack of the old stream's head is owed: the
+// new stream is shorter than the marker, so the node's head is below it and
+// the page from offset 1 is a new stream, not the historian's own lagging
+// cursor. (A new stream already past the marker is the window that needs
+// colcad's store ids.)
+func TestAnOldNodeRecreatedShorterWhileAnAckIsOwedLosesNothing(t *testing.T) {
+	for _, pages := range []int{1, 4} {
+		t.Run(fmt.Sprintf("pages=%d", pages), func(t *testing.T) {
+			old := newStreamNamed(600, 5, "a")
+			old.id = ""
+			old.failAckFrom, old.failAckTo = 551, 600 // the last page's ack fails
+			store := newPipeStore(old, 4)
+			var signal door.Signal
+			b := &Bridge{Door: old, Store: store, Max: 50, Pipeline: pages, Changes: signal.Changes,
+				Head: func() int64 { return old.head() + 1 }} // as the node's hints announce it
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- b.Run(ctx) }()
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				store.mu.Lock()
+				marker := store.marker
+				store.mu.Unlock()
+				if marker == 600 {
+					break
+				}
+				if time.Now().After(deadline) {
+					cancel()
+					t.Fatalf("marked %d of 600", marker)
+				}
+				time.Sleep(time.Millisecond)
+			}
+			oldRecs := old.recs
+
+			fresh := newStreamNamed(450, 8, "b")
+			store.newStream(old)
+			old.replace(fresh.recs)
+			old.mu.Lock()
+			old.id = ""
+			old.mu.Unlock()
+			deadline = time.Now().Add(10 * time.Second)
+			for old.lastAck() != old.head() {
+				if time.Now().After(deadline) {
+					cancel()
+					t.Fatalf("new stream: acked %d of %d", old.lastAck(), old.head())
+				}
+				// The node's hints, as its new stream grows: the pipelined
+				// path returns to the cursor at an empty page and reads it
+				// at the next hint.
+				signal.Notify()
+				time.Sleep(5 * time.Millisecond)
+			}
+			cancel()
+			<-done
+
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if store.bad != nil {
+				t.Fatal(store.bad)
+			}
+			for off := int64(1); off <= old.head(); off++ {
+				if !store.written[off] {
+					t.Fatalf("offset %d of the new stream was never written", off)
+				}
+			}
+			if got, want := store.table.String(), oracle(oldRecs, fresh.recs).String(); got != want {
+				t.Fatalf("the table differs from one page at a time\n got %s\nwant %s", got, want)
+			}
+		})
+	}
+}
+
 // After WRITERS changed (or an unclean stop of a run with another count), the
 // smallest marker of a complete set of the old partitions is a point every
 // row at or below has been written; an incomplete set says nothing.

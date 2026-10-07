@@ -429,6 +429,7 @@ func (p *pipeline) fetch(ctx context.Context) error {
 		fromCursor := next == 0
 		fresh := false
 		if fromCursor {
+			b.warnNoStore(page)
 			fresh = b.newStream(page, p.marked.Load(), p.following(), p.owesOwnAck())
 			if marked := p.marked.Load(); !fresh && last < marked {
 				// The same store, and the cursor lags the marker: acks failed

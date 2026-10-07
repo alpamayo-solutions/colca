@@ -356,6 +356,18 @@ the cursor it first waits until the pages in flight are marked. A marker
 written before stores were recorded, or a node that sends no store, falls
 back once to the page: one starting at offset 1, or a short page ending below
 the marker, counts as a new stream; the store is recorded from then on.
+
+colca-historian from 0.32 expects colcad 0.31 or newer, which sends store ids,
+and logs a warning once when a node sends none. Without store ids the
+historian tells a recreated volume only by its offsets, and while its own ack
+of the marker is failing it reads a page from offset 1 as its own cursor
+lagging behind (otherwise it would re-apply the first page over and over).
+It still takes that page for a new stream when the node's head is below the
+marker (a short page, or the head announced on `/watch`). What stays open is
+an old colcad recreated while the historian's ack is failing, whose new stream
+has already grown past the marker: its records up to the marker are skipped.
+PREKIT ships colcad and colca-historian from the same colca release, so a
+generated node never runs that pair.
 `DB_MAX_CONNS` defaults to `WRITERS + 1`. `PIPELINE_PAGES=1` writes one page
 at a time, with the marker in the same transaction when `WRITERS=1`. A drain
 that reached the head the node announced on `/watch` waits for the next hint
