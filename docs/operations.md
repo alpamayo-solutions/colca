@@ -307,20 +307,50 @@ to a binary that does not understand its persisted upload decisions is unsupport
 ## How the historian writes
 
 `colca-historian` follows the `metrics` stream in pages of `FETCH_MAX` records
-(default 5000, the most `/fetch` returns) and reads the next page while it
-writes the current one. A page goes to Postgres over `WRITERS` connections at
-once (default 4), each with the rows of its own share of the signals, as one
-`INSERT … SELECT FROM unnest(…) ON CONFLICT` per run of values; retractions keep
-their place in a signal's order. The applied-offset marker moves once every
-share has committed. A crash in between replays the page, which changes
-nothing: an identical value is not rewritten and a retraction is not stored
-twice. `DB_MAX_CONNS` defaults to `WRITERS + 1`. A drain that reached the head
-the node announced on `/watch` waits for the next hint without a final empty
-fetch.
+(default 5000, the most `/fetch` returns). Up to `PIPELINE_PAGES` pages
+(default 4) are between fetch and marker at once:
 
-On the fleet scale benchmark (2026-10, Postgres 17 + TimescaleDB 2.30 under
-x86 emulation on an 8-core laptop VM) this wrote ~20,000 rows a second, where
-one statement per row had written ~6,000; Postgres was the limit.
+- one goroutine fetches pages in stream order; several decode them;
+- each page's rows go to `WRITERS` writers (default 4) by signal, so a signal
+  always lands on the same writer and its rows are written in stream order
+  (retractions depend on it);
+- a writer does not wait for the other writers' share of a page before it
+  starts on the next page, and writes what queued meanwhile in one
+  transaction, as one `INSERT … SELECT FROM unnest(…) ON CONFLICT` per run of
+  values;
+- each writer's transaction also moves that writer's own marker
+  (`historian:metrics/<writers>.<n>` in `colca_applied_offset`);
+- the applied-offset marker (`historian:metrics`) moves, in a transaction of
+  its own, to the end of the newest page that is written completely with every
+  page before it, and the `/ack` follows it.
+
+A restart reads from the cursor. Records at or below the marker are skipped,
+and so are a writer's records at or below its own marker, so nothing is
+written twice. A write whose answer was lost is checked against the writer's
+marker before it is retried. Re-applying a page is not harmless in general: a
+retraction is stored only when the row before it holds a value, and a late
+sample (an older timestamp arriving after the retraction) changes that answer.
+The writer markers depend on `WRITERS`; after changing it the next start
+re-applies at most `PIPELINE_PAGES` pages. A failed write is retried in place
+with backoff; the pages behind it wait in bounded queues.
+`DB_MAX_CONNS` defaults to `WRITERS + 1`. `PIPELINE_PAGES=1` writes one page
+at a time, with the marker in the same transaction when `WRITERS=1`. A drain
+that reached the head the node announced on `/watch` waits for the next hint
+without a final empty fetch.
+
+On the fleet scale benchmark, round 4 (2026-10, PREKIT's Timescale image on
+an amd64 VM, hub stack pinned to 6-10 cores, a 13.4 M-record backlog):
+
+| | one page at a time | `PIPELINE_PAGES=4` |
+|---|---|---|
+| catch-up, 6 / 8 / 10 cores | 95 / 97 / 98 k rows/s | 125 / 128 / 127 k rows/s |
+| live, 112 k records/s offered, 8 / 10 cores | 82 / 84 k rows/s, falling behind | 105 / 107 k rows/s, keeping up |
+
+Eight pages instead of four, or eight writers instead of five, changed
+nothing. At ~127 k rows/s the historian makes 25 `/fetch` requests a second,
+the per-caller limit, and Postgres spends ~25 µs of CPU per row with most of
+its writers busy (wait events: 77 % CPU, 10 % `WALWrite`); 20 000-record pages
+(an experiment, `/fetch` allows 5000) gave only 130-134 k.
 
 ## Signals the historian does not store
 
