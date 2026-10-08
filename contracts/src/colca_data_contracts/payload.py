@@ -411,17 +411,12 @@ class Node(ToleratesUnknownFields, Payload):
     access: NodeAccess | None = None
 
     @classmethod
-    def from_wire(cls, data: dict[str, Any]) -> "Node":
+    def from_wire(cls, data: dict[str, Any]) -> Any:
         """Construct from a decoded record, converting nested access object."""
         if isinstance(data.get("access"), dict):
             data = data.copy()
             data["access"] = NodeAccess.from_wire(data["access"])
         return super().from_wire(data)
-
-    @classmethod
-    def decode(cls, json_str: str, timestamp: int) -> "Node":
-        data = json.loads(json_str)
-        return cls.from_wire(data)
 
 
 @dataclass

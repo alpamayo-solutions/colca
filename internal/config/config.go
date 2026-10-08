@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -179,12 +180,12 @@ type Access struct {
 }
 
 func (a *Access) validate() error {
-	if a.Hostname == "" || len(a.Hostname) > 253 || strings.ContainsAny(a.Hostname, "/ \t\r\n") {
+	if a.Hostname == "" || len(a.Hostname) > 253 || strings.Contains(a.Hostname, "/") || strings.IndexFunc(a.Hostname, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
 		return fmt.Errorf("config: access.hostname %q must be 1-253 characters with no \"/\" or whitespace", a.Hostname)
 	}
 	u, err := url.Parse(a.UIURL)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("config: access.ui_url %q must be an http(s) URL with a host and no query or fragment", a.UIURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("config: access.ui_url %q must be an http(s) URL with a host, no credentials, and no query or fragment", a.UIURL)
 	}
 	return nil
 }

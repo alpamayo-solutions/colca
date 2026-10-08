@@ -123,3 +123,18 @@ def test_node_carries_declared_access_and_tolerates_newer_fields():
     )
     assert node.access == NodeAccess(hostname="edge-07.example", ui_url="https://edge-07.example")
     assert NodePayload.from_wire({"id": "n1", "name": "edge-07"}).access is None
+
+
+def test_node_access_round_trips_through_encode_and_decode():
+    access = NodeAccess(hostname="edge-07.example", ui_url="https://edge-07.example")
+    node = NodePayload(id="n1", name="edge-07", access=access)
+    decoded = NodePayload.decode(node.encode(), timestamp=0)
+    assert decoded == node
+    assert decoded.access == access
+    bare = NodePayload(id="n1", name="edge-07")
+    assert NodePayload.decode(bare.encode(), timestamp=0).access is None
+
+
+def test_node_decodes_access_null_as_none():
+    node = NodePayload.decode('{"id": "n1", "name": "edge-07", "access": null}', timestamp=0)
+    assert node.access is None

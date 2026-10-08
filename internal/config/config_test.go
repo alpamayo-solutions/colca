@@ -1186,6 +1186,8 @@ func TestConfigRejectsAccessWithoutHostname(t *testing.T) {
 		"ftp scheme":         {Hostname: "edge-07.example", UIURL: "ftp://edge-07.example"},
 		"no host":            {Hostname: "edge-07.example", UIURL: "https://"},
 		"query in ui_url":    {Hostname: "edge-07.example", UIURL: "https://edge-07.example/?a=b"},
+		"userinfo in ui_url": {Hostname: "edge-07.example", UIURL: "https://user:pass@edge-07.example"},
+		"tab in hostname":    {Hostname: "edge\v07", UIURL: "https://edge-07.example"},
 		"fragment in ui_url": {Hostname: "edge-07.example", UIURL: "https://edge-07.example/#x"},
 	} {
 		c := base()

@@ -13,6 +13,9 @@ func TestInterfaceTypeRecognisesVPNs(t *testing.T) {
 	}{
 		{net.Interface{Name: "tailscale0", Flags: net.FlagUp | net.FlagPointToPoint}, "vpn"},
 		{net.Interface{Name: "wg0"}, "vpn"},
+		{net.Interface{Name: "tun0"}, "vpn"},
+		{net.Interface{Name: "tap0", HardwareAddr: mac}, "vpn"},
+		{net.Interface{Name: "corpvpn1", HardwareAddr: mac}, "vpn"},
 		{net.Interface{Name: "ztc3qxyz", HardwareAddr: mac}, "vpn"},
 		{net.Interface{Name: "wlan0", HardwareAddr: mac}, "wifi"},
 		{net.Interface{Name: "eth0", HardwareAddr: mac}, "ethernet"},

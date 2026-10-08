@@ -64,7 +64,7 @@ or clients in the file: identities are runtime state, stored by the node.
 |---|---|
 | `ulid` | The node's identity. Appears in every topic the node owns, in logs and in `/healthz`. |
 | `name` | Optional display name for the node's own `_Node` record. |
-| `access` | Optional `{hostname, ui_url}`: how people reach this node. Reported in the node's own `_Node` record and withdrawn when removed. `hostname` is 1-253 characters with no `/` or whitespace; `ui_url` is an `http` or `https` URL with a host and no query or fragment. |
+| `access` | Optional `{hostname, ui_url}`: how people reach this node. Reported in the node's own `_Node` record and withdrawn when removed. `hostname` is 1-253 characters with no `/` or whitespace; `ui_url` is an `http` or `https` URL with a host and no credentials (`user:pass@`), query or fragment. |
 | `topic_root` | First segment of every topic, `colca` by default. `COLCA_TOPIC_ROOT` overrides it. All nodes of one tree must agree. See [Topics](topics.md#choosing-the-root). |
 | `standalone` | `false` by default. Permanently retire fleet trust; cannot coexist with `parent`. See [handover](operations.md#permanent-standalone-handover). |
 | `data_dir` | Directory of the node's database: streams, current state, cursors. |
