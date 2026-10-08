@@ -36,9 +36,9 @@ Source = "https://github.com/alpamayo-solutions/colca"
 
 [dependency-groups]
 lint = [
-    "ruff==0.16.9",
+    "ruff==0.16.10",
     "bandit==1.9.4",
-    "mypy==2.3.1",
+    "mypy==2.4.0",
     "types-PyYAML==6.0.12.20260906",
 ]
 
