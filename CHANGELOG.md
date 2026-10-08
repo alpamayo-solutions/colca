@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.32.0](https://github.com/alpamayo-solutions/colca/compare/v0.31.0...v0.32.0) (2026-10-08)
+
+
+### Features
+
+* **node:** declare node access in the _Node record ([#175](https://github.com/alpamayo-solutions/colca/issues/175)) ([c1b7aa4](https://github.com/alpamayo-solutions/colca/commit/c1b7aa4b8102193b2268d89f8df8c873f5c320b3))
+
+
+### Fixes
+
+* **historian:** retry owed acks only with a store; no ack loop against an old node ([#173](https://github.com/alpamayo-solutions/colca/issues/173)) ([b200f44](https://github.com/alpamayo-solutions/colca/commit/b200f446390990591662e65ab72dcf448d0e633a))
+
 ## [0.31.0](https://github.com/alpamayo-solutions/colca/compare/v0.30.0...v0.31.0) (2026-10-07)
 
 
