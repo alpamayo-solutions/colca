@@ -1168,3 +1168,37 @@ func TestParentLogsRejectsUnknownLevels(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigRejectsAccessWithoutHostname(t *testing.T) {
+	base := func() *Config { return &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"} }
+	ok := &Access{Hostname: "edge-07.example", UIURL: "https://edge-07.example:8443"}
+	c := base()
+	c.Access = ok
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid access refused: %v", err)
+	}
+	for name, a := range map[string]*Access{
+		"no hostname":        {UIURL: "https://edge-07.example"},
+		"slash in hostname":  {Hostname: "edge/07", UIURL: "https://edge-07.example"},
+		"space in hostname":  {Hostname: "edge 07", UIURL: "https://edge-07.example"},
+		"hostname too long":  {Hostname: strings.Repeat("a", 254), UIURL: "https://edge-07.example"},
+		"no ui_url":          {Hostname: "edge-07.example"},
+		"ftp scheme":         {Hostname: "edge-07.example", UIURL: "ftp://edge-07.example"},
+		"no host":            {Hostname: "edge-07.example", UIURL: "https://"},
+		"query in ui_url":    {Hostname: "edge-07.example", UIURL: "https://edge-07.example/?a=b"},
+		"userinfo in ui_url": {Hostname: "edge-07.example", UIURL: "https://user:pass@edge-07.example"},
+		"tab in hostname":    {Hostname: "edge\v07", UIURL: "https://edge-07.example"},
+		"fragment in ui_url": {Hostname: "edge-07.example", UIURL: "https://edge-07.example/#x"},
+	} {
+		c := base()
+		c.Access = a
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+	c = base()
+	c.Access = &Access{Hostname: "edge-07.example", UIURL: "http://edge-07.example"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("http ui_url refused: %v", err)
+	}
+}

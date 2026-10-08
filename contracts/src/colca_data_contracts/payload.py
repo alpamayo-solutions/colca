@@ -384,6 +384,14 @@ class NetworkInterface:
 
 
 @dataclass
+class NodeAccess(ToleratesUnknownFields):
+    """Remote access information for a Colca node."""
+
+    hostname: str
+    ui_url: str
+
+
+@dataclass
 class Node(ToleratesUnknownFields, Payload):
     """A Colca node, authored by the node it describes.
 
@@ -400,6 +408,15 @@ class Node(ToleratesUnknownFields, Payload):
     metadata: dict[str, Any] = field(default_factory=dict)
     health_metrics: list[HealthMetricDeclaration] = field(default_factory=list)
     network_interfaces: list[NetworkInterface] = field(default_factory=list)
+    access: NodeAccess | None = None
+
+    @classmethod
+    def from_wire(cls, data: dict[str, Any]) -> Any:
+        """Construct from a decoded record, converting nested access object."""
+        if isinstance(data.get("access"), dict):
+            data = data.copy()
+            data["access"] = NodeAccess.from_wire(data["access"])
+        return super().from_wire(data)
 
 
 @dataclass

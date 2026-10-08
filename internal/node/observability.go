@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/alpamayo-solutions/colca/internal/config"
 )
 
 func interfaceType(iface net.Interface) string {
@@ -14,14 +17,15 @@ func interfaceType(iface net.Interface) string {
 	switch {
 	case iface.Flags&net.FlagLoopback != 0:
 		return "loopback"
+	case strings.HasPrefix(name, "tailscale") || strings.HasPrefix(name, "wg") || strings.HasPrefix(name, "zt") ||
+		strings.HasPrefix(name, "tun") || strings.HasPrefix(name, "tap") || strings.Contains(name, "vpn"):
+		return "vpn"
 	case strings.HasPrefix(name, "wl") || strings.Contains(name, "wifi") || strings.Contains(name, "wlan"):
 		return "wifi"
 	case strings.Contains(name, "wwan") || strings.Contains(name, "cell"):
 		return "cellular"
 	case strings.HasPrefix(name, "br") || strings.Contains(name, "bridge"):
 		return "bridge"
-	case strings.HasPrefix(name, "tun") || strings.HasPrefix(name, "tap") || strings.Contains(name, "vpn"):
-		return "vpn"
 	case strings.Contains(name, "docker") || strings.HasPrefix(name, "veth") || strings.HasPrefix(name, "vir"):
 		return "virtual"
 	case iface.HardwareAddr != nil:
@@ -29,6 +33,24 @@ func interfaceType(iface net.Interface) string {
 	default:
 		return "other"
 	}
+}
+
+// accessRecord is the _Node form of the configured access, nil when none.
+func accessRecord(a *config.Access) map[string]any {
+	if a == nil {
+		return nil
+	}
+	return map[string]any{"hostname": a.Hostname, "ui_url": a.UIURL}
+}
+
+// sameAccess reports whether the held record's access equals the configured
+// one; both absent is the same.
+func sameAccess(held any, current map[string]any) bool {
+	if current == nil {
+		return held == nil
+	}
+	heldMap, ok := held.(map[string]any)
+	return ok && reflect.DeepEqual(heldMap, current)
 }
 
 func networkInventory(now time.Time) []map[string]any {

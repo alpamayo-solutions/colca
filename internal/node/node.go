@@ -267,9 +267,11 @@ func Start(cfg *config.Config) (*Node, error) {
 		entity := map[string]any{}
 		interfaces := networkInventory(time.Now())
 		metrics := nodeHealthMetrics()
+		access := accessRecord(cfg.Access)
 		if raw, ok := n.Engine.EntityStore().KVGet(topic); ok && json.Unmarshal(raw, &entity) == nil {
 			if held, _ := entity["root_system_element_id"].(string); held == root &&
-				sameNetworkInventory(entity["network_interfaces"], interfaces) {
+				sameNetworkInventory(entity["network_interfaces"], interfaces) &&
+				sameAccess(entity["access"], access) {
 				if heldMetrics, ok := entity["health_metrics"].([]any); ok && len(heldMetrics) > 0 {
 					return
 				}
@@ -277,6 +279,11 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		entity["health_metrics"] = metrics
 		entity["network_interfaces"] = interfaces
+		if access != nil {
+			entity["access"] = access
+		} else {
+			delete(entity, "access")
+		}
 		entity["id"] = cfg.ULID
 		if name, _ := entity["name"].(string); name == "" {
 			entity["name"] = cfg.NodeName()
