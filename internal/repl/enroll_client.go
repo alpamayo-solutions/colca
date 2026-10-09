@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -407,4 +408,41 @@ func closeUnused(id *identity.Identity) {
 	if id != nil {
 		_ = id.Close()
 	}
+}
+
+// Enroll runs one enrollment round now, for callers that drive the protocol
+// themselves instead of RunEnrollment (the fleet benchmark's children). It
+// returns nil once the parent issued a certificate, which the client then
+// presents.
+func (c *Client) Enroll(ctx context.Context, o EnrollOptions) error {
+	outcome, resp := c.enrollRound(ctx, o, nil)
+	if outcome == outcomeApproved {
+		return nil
+	}
+	return fmt.Errorf("enrollment at %s: %s (%s)", c.base, outcomeName(outcome), resp.Reason)
+}
+
+func outcomeName(o enrollOutcome) string {
+	switch o {
+	case outcomeApproved:
+		return enroll.StatusApproved
+	case outcomePending:
+		return enroll.StatusPending
+	case outcomeRejected:
+		return enroll.StatusRejected
+	case outcomeBlocked:
+		return enroll.StatusBlocked
+	case outcomeUnsupported:
+		return "not served by the parent"
+	}
+	return "failed"
+}
+
+// SetEnrollBackoff changes the backoff of a waiting child, for tests that
+// approve a request and must not wait 30 seconds for the child to ask again.
+// It returns a function that restores the previous values.
+func SetEnrollBackoff(minimum, maximum time.Duration) (restore func()) {
+	prevMin, prevMax := enrollBackoffMin, enrollBackoffMax
+	enrollBackoffMin, enrollBackoffMax = minimum, maximum
+	return func() { enrollBackoffMin, enrollBackoffMax = prevMin, prevMax }
 }
