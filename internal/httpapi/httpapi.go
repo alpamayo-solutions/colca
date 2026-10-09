@@ -141,8 +141,16 @@ type caller struct {
 	human *tokenauth.Verified
 }
 
-// Handler builds the node's HTTP surface. pubkey is the node's public key in hex,
-// served on /healthz so a parent can enroll the node before trusting it.
+// NodeKey is what /healthz shows of this node's key, so a parent can enroll
+// the node before trusting it and a person can compare its fingerprint.
+type NodeKey struct {
+	Pubkey      string // SPKI hex
+	Fingerprint string // SHA256:XX:…
+	KeyStore    string // file | tpm
+}
+
+// Handler builds the node's HTTP surface. self is the node's key, served on
+// /healthz.
 //
 // local selects the local door. Reaching it is the credential, so there is
 // nothing to authenticate, only a caller to name and register. The admin routes
@@ -152,7 +160,7 @@ type caller struct {
 // uplink is the node's replication client toward its parent, nil without one.
 // /healthz reports its status, so chaski.Node or an operator can tell "not
 // enrolled yet" from "connected".
-func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, blobs *blobstore.Store, pubkey string, local bool, uplink *repl.Client, secretStores ...*secretstore.Store) http.Handler {
+func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, blobs *blobstore.Store, self NodeKey, local bool, uplink *repl.Client, secretStores ...*secretstore.Store) http.Handler {
 	mux := http.NewServeMux()
 	var secretDB *secretstore.Store
 	if len(secretStores) > 0 {
@@ -362,7 +370,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		defer release()
 		// Enrolling this node at a parent needs its ULID and pubkey before anything trusts
 		// it, so both are readable at this unauthenticated door.
-		payload := map[string]any{"ok": true, "ulid": cfg.ULID, "pubkey": pubkey}
+		payload := map[string]any{"ok": true, "ulid": cfg.ULID, "pubkey": self.Pubkey,
+			"fingerprint": self.Fingerprint, "key_store": self.KeyStore}
 		// uplink lets chaski.Node or an operator tell "not enrolled yet" from "connected"
 		// without reading logs. "none" is an answer: a root has no uplink.
 		switch {

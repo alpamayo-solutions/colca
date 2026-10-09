@@ -455,6 +455,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}(n.MQTT)
 	}
 
+	nodeKey := httpapi.NodeKey{Pubkey: id.PublicHex(), Fingerprint: id.Fingerprint(), KeyStore: id.Store}
 	// 4. HTTPS API with the node's key: machines present their pinned key, admin
 	//    tooling uses the token.
 	if cfg.API.Addr != "" {
@@ -468,7 +469,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.apiLn = ln
 		n.APIAddr = ln.Addr().String()
-		n.httpSrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), false, replClient, n.Secrets)))
+		n.httpSrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, nodeKey, false, replClient, n.Secrets)))
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server stopped", "err", err)
@@ -485,7 +486,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.localAPILn = ln
 		n.LocalAPIAddr = ln.Addr().String()
-		n.localAPISrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, id.PublicHex(), true, replClient, n.Secrets)))
+		n.localAPISrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, nodeKey, true, replClient, n.Secrets)))
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("local api server stopped", "err", err)
