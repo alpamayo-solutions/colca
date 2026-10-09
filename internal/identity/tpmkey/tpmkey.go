@@ -315,20 +315,18 @@ func IsBlob(raw []byte) bool {
 }
 
 func encodeBlob(pub tpm2.TPM2BPublic, priv tpm2.TPM2BPrivate) []byte {
-	body := append(tpm2.Marshal(pub), tpm2.Marshal(priv)...)
-	return pem.EncodeToMemory(&pem.Block{Type: PEMType, Headers: map[string]string{"Parent": parentSRK}, Bytes: body})
+	return pem.EncodeToMemory(&pem.Block{Type: PEMType, Headers: map[string]string{"Parent": parentSRK}, Bytes: MarshalPair(pub, priv)})
 }
 
-// ParseBlob splits a key blob into its TPM2B public and private parts.
-func ParseBlob(raw []byte) (tpm2.TPM2BPublic, tpm2.TPM2BPrivate, error) {
-	b, _ := pem.Decode(raw)
-	if b == nil || b.Type != PEMType {
-		return tpm2.TPM2BPublic{}, tpm2.TPM2BPrivate{}, errors.New("not a TPM key blob")
-	}
-	if p := b.Headers["Parent"]; p != parentSRK {
-		return tpm2.TPM2BPublic{}, tpm2.TPM2BPrivate{}, fmt.Errorf("TPM key blob made under parent %q, want %q", p, parentSRK)
-	}
-	pubB, rest, err := split2B(b.Bytes)
+// MarshalPair concatenates a TPM2B_PUBLIC and TPM2B_PRIVATE, as returned by
+// TPM2_Create, into one byte string.
+func MarshalPair(pub tpm2.TPM2BPublic, priv tpm2.TPM2BPrivate) []byte {
+	return append(tpm2.Marshal(pub), tpm2.Marshal(priv)...)
+}
+
+// ParsePair splits what MarshalPair wrote.
+func ParsePair(b []byte) (tpm2.TPM2BPublic, tpm2.TPM2BPrivate, error) {
+	pubB, rest, err := split2B(b)
 	if err != nil {
 		return tpm2.TPM2BPublic{}, tpm2.TPM2BPrivate{}, err
 	}
@@ -345,6 +343,18 @@ func ParseBlob(raw []byte) (tpm2.TPM2BPublic, tpm2.TPM2BPrivate, error) {
 		return tpm2.TPM2BPublic{}, tpm2.TPM2BPrivate{}, fmt.Errorf("TPM key blob: private part: %w", err)
 	}
 	return *pub, *priv, nil
+}
+
+// ParseBlob splits a key blob into its TPM2B public and private parts.
+func ParseBlob(raw []byte) (tpm2.TPM2BPublic, tpm2.TPM2BPrivate, error) {
+	b, _ := pem.Decode(raw)
+	if b == nil || b.Type != PEMType {
+		return tpm2.TPM2BPublic{}, tpm2.TPM2BPrivate{}, errors.New("not a TPM key blob")
+	}
+	if p := b.Headers["Parent"]; p != parentSRK {
+		return tpm2.TPM2BPublic{}, tpm2.TPM2BPrivate{}, fmt.Errorf("TPM key blob made under parent %q, want %q", p, parentSRK)
+	}
+	return ParsePair(b.Bytes)
 }
 
 // split2B returns the leading TPM2B (size prefix included) and the rest.
