@@ -28,10 +28,10 @@ func appendSparse(t *testing.T, s *Store, others int, at map[int]string) map[uin
 	want := map[uint64]string{}
 	for i := 0; i < others; i++ {
 		if signalID, ok := at[i]; ok {
-			recs = append(recs, metricRecord(signalID, int64(i)))
+			recs = append(recs, metricRecord(signalID, int64(i)+1))
 			want[uint64(len(recs))] = signalID
 		}
-		recs = append(recs, metricRecord("busy", int64(i)))
+		recs = append(recs, metricRecord("busy", int64(i)+1))
 	}
 	if _, _, err := s.Append("metrics", recs); err != nil {
 		t.Fatal(err)
@@ -448,8 +448,8 @@ func TestPruneScannedReadsThePrefixAgainOnlyWhenItChangedUnderTheScan(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Offsets 1..6 are busy, busy, a, busy, busy, busy, with ts 0,1,2,2,3,4.
-		if removed != 6 || span.From != 1 || span.To != 6 || span.FirstTS != 0 || span.LastTS != 4 {
+		// Offsets 1..6 are busy, busy, a, busy, busy, busy, with ts 1,2,3,3,4,5.
+		if removed != 6 || span.From != 1 || span.To != 6 || span.FirstTS != 1 || span.LastTS != 5 {
 			t.Fatalf("removed %d, span %+v", removed, span)
 		}
 		if index := countIndexEntries(t, s, "metrics"); index["busy"] != 5 || index["a"] != 0 || index["b"] != 1 {

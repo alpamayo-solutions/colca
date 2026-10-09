@@ -1078,3 +1078,25 @@ func TestFetchLogsAcksHaveShortRetention(t *testing.T) {
 		t.Fatalf("commands after the pass = %v", got)
 	}
 }
+
+// A record without a timestamp has no age, so max_age never takes it: the age
+// policy stops in front of it. A byte budget still applies.
+func TestAgePolicyNeverPrunesARecordWithoutTimestamp(t *testing.T) {
+	st, eng := mustParts(t)
+	old := time.Now().Add(-48 * time.Hour).UnixMilli()
+	appendAt(t, st, "metrics", 3, old, 1)
+	appendAt(t, st, "metrics", 1, 0, 0)
+	appendAt(t, st, "metrics", 3, old, 1)
+
+	p := newPruner(t, st, eng, retFor("metrics", config.StreamRetention{MaxAge: config.Duration(time.Hour)}))
+	p.runOnce()
+	if got := st.LWM("metrics"); got != 4 {
+		t.Fatalf("LWM = %d, want 4: the three old records go, the one without a timestamp stays", got)
+	}
+
+	p = newPruner(t, st, eng, retFor("metrics", config.StreamRetention{MaxAge: config.Duration(time.Hour), MaxBytes: 1}))
+	p.runOnce()
+	if got := st.LWM("metrics"); got <= 5 {
+		t.Fatalf("LWM = %d, want past 5: max_bytes prunes past a record without a timestamp", got)
+	}
+}

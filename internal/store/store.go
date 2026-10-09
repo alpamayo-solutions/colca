@@ -1570,8 +1570,8 @@ func (s *Store) scanStream(stream string, from, upTo uint64, what string, fn fun
 const DefaultPolicyScanCap = 100_000
 
 // PolicyPruneTarget walks stream forward from lwm and returns the offset the
-// retention policy alone would prune up to: records older than maxAge, and
-// enough bytes to bring the stream under maxBytes (maxAge <= 0 or maxBytes == 0
+// retention policy alone would prune up to: records older than maxAge (a
+// record with TS 0 is never older), and enough bytes to bring the stream under maxBytes (maxAge <= 0 or maxBytes == 0
 // disables either). It never passes clamp or examines more than maxScan records
 // (0 means no limit). The pruner passes the cursor floor as clamp; the metrics
 // collector passes next to see the policy without cursors.
@@ -1606,7 +1606,9 @@ func (s *Store) policyScan(stream string, lwm, next uint64, now time.Time, maxAg
 			return false
 		}
 		scanned++
-		ageWants := maxAge > 0 && e.TS < cutoff
+		// A record without a timestamp has no age: maxAge never takes it, and so
+		// it stops the age policy there. Only maxBytes can prune past it.
+		ageWants := maxAge > 0 && e.TS > 0 && e.TS < cutoff
 		sizeWants := maxBytes > 0 && liveBytes > shed+maxBytes // liveBytes−shed > maxBytes, underflow-safe
 		if !ageWants && !sizeWants {
 			return false // first record the policy keeps
