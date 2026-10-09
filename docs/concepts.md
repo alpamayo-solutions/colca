@@ -164,7 +164,7 @@ Some commands are executed by the node itself rather than a machine:
 |---|---|
 | `_CmdConfigure` | author the namespace: elements, signals, constants, resources, definitions |
 | `_CmdEdit` | apply an atomic, versioned edit composed by an editor application |
-| `_CmdAdmin` | enroll or revoke an identity on a node that is only reachable through the tree, or read a node's own logs (`fetchLogs`) |
+| `_CmdAdmin` | enroll or revoke an identity on a node that is only reachable through the tree, decide the enrollment requests and pre-approvals it holds (`approve`, `reject`, `block`, `unblock`, `preapprove`, `unpreapprove`, `request-key-change`), or read a node's own logs (`fetchLogs`) |
 
 ### Binding a signal to a tag
 

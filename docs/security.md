@@ -1,6 +1,6 @@
 # Security model
 
-Colca has no certificate authority and no password file. Nodes and machines
+Colca has no separate certificate authority and no password file. Nodes and machines
 are identified by key pairs (ed25519, or ECDSA P-256 for keys held in a TPM),
 people by OIDC tokens, and local services by
 the fact that they can reach a door that is never published.
@@ -32,16 +32,24 @@ write. Keep them unpublished.
 Every node and every machine owns a key pair. A machine's key is created with
 `colca-keygen`; a node creates its own on first start (see
 [Node keys](#node-keys)). The TLS certificate is a self-signed wrapper around
-that key and carries no authority of its own.
+that key and carries no authority of its own, with one exception: a parent
+issues each child node it approved a certificate signed with its own node key
+(see [Enrollment](#enrollment)). Children already pin that key, so this adds no
+trust anchor anywhere.
 
 - A parent accepts a child when the key in the child's client certificate
-  belongs to a node enrolled at the parent.
+  belongs to a node enrolled at the parent and the certificate is one the
+  parent issued for that node and still valid. A child enrolled before issued
+  certificates (`cert_state: none`) is accepted with its self-signed
+  certificate until it fetches an issued one, which it does on its first start
+  with this release; from then on only the issued one admits it.
 - A child accepts its parent when the parent presents the key in
   `parent.pubkey`. Anything else aborts the handshake.
 - A machine is accepted when its key is enrolled at the node it connects to.
 
 TLS 1.3 is the minimum on every encrypted door. Revoking an entry closes the
-live session at once.
+live session at once: a machine's MQTT session, and every request of a child
+node at the replication door, including a waiting downlink poll.
 
 ## Node keys
 
@@ -63,9 +71,12 @@ stays a file key, and a file that cannot be read as a key stops the start
 rather than being replaced, because a new key would be a new identity.
 
 A public key is written as hex of its SubjectPublicKeyInfo DER, in registry
-entries, `parent.pubkey` and `/healthz`. Entries and settings written before
-that hold a raw 64-hex ed25519 key; both forms are accepted and compared as
-the same key.
+entries, `parent.pubkey` and `/healthz`. Registries written before held raw
+64-hex ed25519 keys; a node rewrites its entries to SPKI on its first start
+with this release, and `POST /enroll` still takes the raw form and stores it as
+SPKI. `parent.pubkey` is read in either form; a child's replication cursors are
+named by the raw key for an ed25519 parent whichever form the setting holds, so
+changing the spelling does not restart replication.
 
 The **fingerprint** of a key is SHA-256 over its SubjectPublicKeyInfo DER,
 shown as `SHA256:` and upper-case hex pairs separated by `:`; the first four
@@ -87,9 +98,71 @@ endorsement key, which identifies the chip, without a node config.
 An identity is bound to a **system element**, not to a path. Renaming or
 moving the element moves everything bound to it.
 
-Enrollment goes through `POST /enroll` with the admin token, or through a
-`_CmdAdmin` command sent down the tree to a node that is not directly
-reachable.
+Machines and local services are enrolled through `POST /enroll` with the
+admin token, or through a `_CmdAdmin` command sent down the tree to a node that
+is not directly reachable. Nodes are not: they ask (below).
+
+## Enrollment
+
+A node with a key its parent does not know asks to join by itself: it files a
+request at the parent's replication door (`POST /enroll/request`), the only
+route there an unknown key may call. The parent keeps the request as pending,
+outside the registry, so a pending key never authenticates, and shows it with
+the key's fingerprint, its key store and the mount the node asks for. A person
+decides:
+
+| Decision | Effect |
+|---|---|
+| approve at an element | the node is enrolled; its next request returns its certificate |
+| reject | kept as rejected for 7 days; the node stops asking until it restarts |
+| block | refused until unblocked, without new records; blocking an enrolled node's key revokes it |
+
+The person compares the fingerprint with the device: that comparison is the
+security boundary for file keys and for TPM keys that were not attested. The
+decision routes take a person's token with `admin:#`, never the admin token,
+and every decision is an `_AuditEvent` naming the person, the fingerprint and
+the key store. Requests and pre-approvals are mirrored as retained
+`_EnrollmentRequest` and `_EnrollmentPreapproval` records, so the hub sees what
+waits anywhere in the tree and decides through `_CmdAdmin`.
+
+A **pre-approval** decides before the node asks: it names the node key's
+fingerprint, or the fingerprint of the TPM's endorsement key, and an element.
+A matching request is approved on arrival. An endorsement key matches only a
+`tpm-attested` request, never a claim. Pre-approvals expire (30 days by
+default) and admit a set number of requests (one by default).
+
+The parent issues an X.509 certificate for the child's key, signed with its
+own node key: subject `CN=<child ULID>`, issuer `CN=<parent ULID>`, SAN URIs
+`colca:node:<ulid>`, `colca:element:<element>`, `colca:keystore:<level>` and,
+when attested, `colca:ek:<manufacturer>:<serial>`. It is valid for 30 days and
+renewed at two thirds of that. The registry stays the authority: a request is
+admitted when its certificate is valid **and** the entry for its key is
+active, so a revoke or block acts at once; expiry only makes the child
+re-assert its key store monthly. An expired certificate of an active node is
+renewed, not refused.
+
+An enrolled node may move to a new key: it asks with its current key and signs
+the request with the new one. Under `enrollment.key_change: auto` a move into a
+TPM is accepted at once (whoever holds the current key could act as the node
+already, and the new key is better bound); everything else waits for a person.
+The old key is refused from that moment. A node whose configuration says
+`identity.key_store: tpm` and that still holds a file key does this by itself
+on start, unless children are enrolled at it: they pin its key.
+
+## TPM attestation
+
+Key stores are shown as `file`, `tpm` (the node says so) and `tpm-attested`
+(the node proved it). To prove it, the node sends with its request the TPM's
+endorsement key (EK) certificate, an attestation key and a `TPM2_Certify` of
+its node key by that attestation key. The parent checks the certification,
+checks the EK certificate against the TPM manufacturer certificates colcad
+ships (Infineon, STMicroelectronics, Nuvoton, AMD, Intel; more with
+`enrollment.tpm_roots`), and answers with a credential only that TPM can open
+(`MakeCredential` to the EK, bound to the attestation key). The node opens it
+with `ActivateCredential` and returns the secret. Proven with a trusted EK
+certificate the key is `tpm-attested`; proven without one (a virtual TPM, for
+example) it stays `tpm`. `enrollment.require` keeps requests below a level
+from being approved.
 
 ## Who writes a signal's values
 
@@ -284,7 +357,9 @@ the tree's groups in step, if you use Keycloak.
 ## Administration
 
 The administrative routes (`/enroll`, `/debug/state`) require either the node's
-admin token (`X-Colca-Token`) or a token with `admin:#`. An empty `api.token`
+admin token (`X-Colca-Token`) or a token with `admin:#`. The enrollment
+decisions (`/enroll/requests`, `/enroll/preapprovals`) take only a person's
+token with `admin:#`. An empty `api.token`
 authenticates nobody; it does not switch the check off.
 
 ## Secrets

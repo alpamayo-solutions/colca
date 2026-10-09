@@ -39,25 +39,30 @@ parent:
   pubkey: 302a3005…        # the parent's public key, from its /healthz or `colcad identity`
 ```
 
-The edge is then placed and enrolled at its parent once. An identity binds to a
-system element, not to a path, so the element comes first; its id is a ULID.
-The child's mount is wherever that element sits, now and after any rename:
+The edge asks its parent to join by itself: on start it files an enrollment
+request at the parent's replication door, which the parent keeps as pending and
+shows with the edge's key fingerprint. A person compares the fingerprint with
+the one the edge shows (`colcad identity`, or its `/healthz`) and approves the
+request at the element the edge hangs from; from then on the edge presents a
+certificate the parent issued. An identity binds to a system element, not to a
+path, so the child's mount is wherever that element sits, now and after any
+rename:
 
 ```bash
-export COLCA_TOKEN=...   # api.token from the parent's config
-
-# 1. the element the child hangs from
-curl -sk -H "X-Colca-Token: $COLCA_TOKEN" -H "Content-Type: application/json" \
-  -X POST https://global.example.com/publish \
-  -d '{"topic":"colca/v1/_SystemElement/n-global/edge1","payload":{"id":"01J8Z3Y8S5ZC0KQ9M2F5T7W4XB","name":"edge1"}}'
-
-# 2. the child's key, bound to that element
-curl -sk -H "X-Colca-Token: $COLCA_TOKEN" -H "Content-Type: application/json" \
-  -X POST https://global.example.com/enroll \
-  -d '{"ulid":"n-edge1","kind":"node","element":"01J8Z3Y8S5ZC0KQ9M2F5T7W4XB","pubkey":"<edge1 public key>"}'
+# a person's token holding admin:#; the admin token is not accepted for this
+export TOKEN=...
+curl -sk -H "Authorization: Bearer $TOKEN" https://global.example.com/enroll/requests
+curl -sk -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -X POST https://global.example.com/enroll/requests/<fingerprint>/approve \
+  -d '{"element":"01J8Z3Y8S5ZC0KQ9M2F5T7W4XB"}'
 ```
 
-Machines and external services are enrolled the same way, with
+`prekit node approve` and the hub's Admin app do the same. A request can also
+be decided before the edge ever asks, with a pre-approval of its key or its TPM
+(see [Enrollment](#enrollment)).
+
+Machines and external services are enrolled through `POST /enroll` with the
+admin token, with
 `"kind":"external"` and the grants they need. There are no lists of children
 or clients in the file: identities are runtime state, stored by the node.
 
@@ -75,6 +80,8 @@ or clients in the file: identities are runtime state, stored by the node.
 | `identity` | Where the node key lives; see [Identity](#identity). |
 | `log_level` | `debug` for debug logging, anything else for info. |
 | `addr_file` | If set, the node writes the addresses its listeners actually bound to as JSON once they are up. Useful with `:0` ports. |
+| `parent.mount` | Where this node asks to be placed at its parent. It only fills in the approval dialog; the person approving decides. |
+| `enrollment` | The policy for the children asking to join this node; see [Enrollment](#enrollment). |
 
 ## Identity
 
@@ -97,6 +104,29 @@ still has it is refused at start with a pointer to `identity.key_file`.
 The key store only matters when `key_file` does not exist yet: an existing key
 is always loaded from where it is, and `colcad` logs the key store and the
 fingerprint once at start. See [Node keys](security.md#node-keys).
+
+## Enrollment
+
+```yaml
+enrollment:
+  require: any               # any | tpm | tpm-attested
+  key_change: auto           # auto | approve
+  require_issued_cert: false
+  tpm_roots: /etc/colca/tpm-roots.pem
+```
+
+| Key | Meaning |
+|---|---|
+| `enrollment.require` | The lowest key store a child's request must have before it can be approved: `any` (default), `tpm` (the child says its key is in a TPM) or `tpm-attested` (the child proved it, see [TPM attestation](security.md#tpm-attestation)). A request below it is kept and shown with the reason, and cannot be approved. |
+| `enrollment.key_change` | `auto` (default): an enrolled child that asks, with its current key, to move to a key in a TPM is moved at once. `approve`: every key change waits for a person. A move to a file key always waits. |
+| `enrollment.require_issued_cert` | `false` by default. Children enrolled before this release are kept with their self-signed certificate (`cert_state: none`) until they fetch an issued one, which they do on their first start with this release. `true` refuses the ones that have not. `GET /enroll` lists each entry's `cert_state`. |
+| `enrollment.tpm_roots` | A PEM file of TPM manufacturer certificates, roots and intermediates, that endorsement key certificates may chain to, beside the ones colcad ships (Infineon, STMicroelectronics, Nuvoton, AMD, Intel). |
+
+A child stores the certificate its parent issued next to its key
+(`<identity.key_file>.crt`), presents it on every connection to the parent,
+renews it at two thirds of its 30-day lifetime, and shows its end on `/healthz`
+as `cert_not_after`. A key change in progress keeps the new key at
+`<identity.key_file>.next` until the parent accepts it.
 
 ## Listeners
 

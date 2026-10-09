@@ -31,9 +31,10 @@ different bundle does not start.
 - **The bundle carries the routing class** of each contract, so a new contract
   can be introduced by shipping a bundle, without a new broker. A new command
   contract counts as an `admin` command until the domain package names its class.
-- **Some contracts belong to the node.** `_StreamGap`, `_EnrolledIdentity` and
-  `_TimeSync` are produced and checked by the node itself; a bundle that
-  declares one does not load.
+- **Some contracts belong to the node.** `_StreamGap`, `_EnrolledIdentity`,
+  `_EnrollmentRequest`, `_EnrollmentPreapproval` and `_TimeSync` are produced
+  and checked by the node itself; a bundle that declares one does not load, and
+  no door accepts them from a client.
 - **Validation happens once**, at the door where a record enters. Replication
   does not validate again, so nodes on different bundle versions keep
   replicating while a rollout moves through the tree.
