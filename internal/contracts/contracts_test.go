@@ -218,3 +218,34 @@ func TestFailStartConditions(t *testing.T) {
 		t.Fatalf("matching pin must load: %v", err)
 	}
 }
+
+func TestGeneratedClockProgressMatchesBuiltinValidation(t *testing.T) {
+	table, err := Load(contractstest.GeneratedBundlePath(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule, ok := table.Lookup("_ClockProgress")
+	if !ok {
+		t.Fatal("missing ClockProgress")
+	}
+	for _, tc := range []struct {
+		name, payload string
+		valid         bool
+	}{
+		{"ready", `{"run_id":"r","processed_at":1,"ready":true,"observed_at":2}`, true},
+		{"not ready", `{"run_id":"r","processed_at":1,"ready":false,"observed_at":null}`, true},
+		{"not ready with observation", `{"run_id":"r","processed_at":1,"ready":false,"observed_at":2}`, true},
+		{"ready without observation", `{"run_id":"r","processed_at":1,"ready":true,"observed_at":null}`, false},
+		{"missing observation", `{"run_id":"r","processed_at":1,"ready":true}`, false},
+		{"wrong readiness", `{"run_id":"r","processed_at":1,"ready":1,"observed_at":2}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rule.Validate([]byte(tc.payload)) == nil; got != tc.valid {
+				t.Fatalf("bundle valid=%v, want %v", got, tc.valid)
+			}
+			if got := uns.Validate("_ClockProgress", []byte(tc.payload)) == nil; got != tc.valid {
+				t.Fatalf("builtin valid=%v, want %v", got, tc.valid)
+			}
+		})
+	}
+}

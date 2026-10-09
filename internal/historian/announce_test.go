@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -144,80 +145,25 @@ func TestAnnouncerLastWillMarksACrashedServiceInactive(t *testing.T) {
 	waitActive(t, client, false)
 }
 
-// serviceStatus reads architecture_metadata.status and detail from the
-// historian's _ServiceDetails.
-func serviceStatus(t *testing.T, client *door.Client) (status, detail string) {
-	t.Helper()
-	entries, err := client.KV(context.Background(), "", "_ServiceDetails")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		var d serviceDetails
-		if err := json.Unmarshal(e.Payload, &d); err != nil {
-			t.Fatal(err)
-		}
-		if d.Name == "historian" {
-			status, _ = d.ArchitectureMetadata["status"].(string)
-			detail, _ = d.ArchitectureMetadata["detail"].(string)
-			return status, detail
-		}
-	}
-	return "", ""
-}
-
-func waitStatus(t *testing.T, client *door.Client, want, wantDetail string) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	var status, detail string
-	for time.Now().Before(deadline) {
-		if status, detail = serviceStatus(t, client); status == want && detail == wantDetail {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("historian status = %q (%q), want %q (%q)", status, detail, want, wantDetail)
-}
-
-func TestAnnouncerPublishesItsStatusOnChangeOnly(t *testing.T) {
-	n := startLocalNode(t)
-	client := &door.Client{BaseURL: "http://" + n.LocalAPIAddr, Service: "historian"}
-	a := &Announcer{Door: client, MQTTURL: "tcp://" + n.MQTTLocalAddr}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		a.Run(ctx)
-	}()
-
-	waitStatus(t, client, StatusStarting, "")
-	a.Report(true, "")
-	waitStatus(t, client, StatusHealthy, "")
-	a.Report(false, "database unreachable")
-	waitStatus(t, client, StatusUnhealthy, "database unreachable")
-	a.Report(true, "")
-	waitStatus(t, client, StatusHealthy, "")
-
-	cancel()
-	<-done
-	waitActive(t, client, false)
-	waitStatus(t, client, StatusHealthy, "") // a clean stop keeps the last status
-}
-
-func TestAnnouncerRepeatedStatusIsNotRepublished(t *testing.T) {
+func TestRuntimeTelemetryDoesNotAppendRegistration(t *testing.T) {
 	n := startLocalNode(t)
 	client := &door.Client{BaseURL: "http://" + n.LocalAPIAddr, Service: "historian"}
 	a := &Announcer{Door: client, MQTTURL: "tcp://" + n.MQTTLocalAddr}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go a.Run(ctx)
-
-	a.Report(false, "first reason")
-	waitStatus(t, client, StatusUnhealthy, "first reason")
-	a.Report(false, "second reason")
-	time.Sleep(500 * time.Millisecond)
-	if status, detail := serviceStatus(t, client); status != StatusUnhealthy || detail != "first reason" {
-		t.Fatalf("a repeated status was republished: %q (%q)", status, detail)
+	waitActive(t, client, true)
+	before := n.Store.NextOffset("entities")
+	a.Report(true, "")
+	a.Report(false, "database unreachable")
+	a.ReportProgress(map[string]any{"run_id": "run", "processed_at": 1000.0, "ready": true, "observed_at": 10000.0})
+	if after := n.Store.NextOffset("entities"); after != before {
+		t.Fatalf("runtime telemetry appended entities: %d -> %d", before, after)
+	}
+	var output strings.Builder
+	a.WriteMetrics(&output)
+	if !strings.Contains(output.String(), "colca_service_healthy{service=\"historian\"} 0") || !strings.Contains(output.String(), "colca_application_processed_timestamp_seconds{service=\"historian\"} 1000") {
+		t.Fatal(output.String())
 	}
 }
 
@@ -285,4 +231,35 @@ func TestTheHealthDoorFollowsTheNodesCursorLagFinding(t *testing.T) {
 	waitLag(true)
 	readAll()
 	waitLag(false)
+}
+
+type blockingMetricsWriter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *blockingMetricsWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return len(p), nil
+}
+
+func TestSlowMetricsReaderDoesNotBlockClockProgress(t *testing.T) {
+	a := &Announcer{}
+	w := &blockingMetricsWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan struct{})
+	go func() { a.WriteMetrics(w); close(done) }()
+	defer func() { close(w.release); <-done }()
+	<-w.entered
+	progressDone := make(chan struct{})
+	go func() {
+		a.ReportProgress(map[string]any{"processed_at": 1000.0, "ready": true})
+		close(progressDone)
+	}()
+	select {
+	case <-progressDone:
+	case <-time.After(time.Second):
+		t.Fatal("slow metrics response blocked functional clock progress")
+	}
 }

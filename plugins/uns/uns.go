@@ -716,7 +716,21 @@ func Validate(contract string, payload []byte) error {
 		if err := reqStr("run_id"); err != nil {
 			return err
 		}
-		return reqNum("processed_at")
+		if err := reqNum("processed_at"); err != nil {
+			return err
+		}
+		ready, ok := m["ready"].(bool)
+		if !ok {
+			return fmt.Errorf("%s: field ready must be a boolean", contract)
+		}
+		observed, exists := m["observed_at"]
+		if !exists || (ready && observed == nil) {
+			return fmt.Errorf("%s: field observed_at must contain live time when ready", contract)
+		}
+		if observed != nil {
+			return reqNum("observed_at")
+		}
+		return nil
 	case contract == "_ClockDefinition":
 		_, err := DecodeClockDefinition(payload)
 		return err

@@ -37,7 +37,7 @@ func TestClockProgressCannotOvertakeLatePriorityEvents(t *testing.T) {
 				if _, _, err := cs.Append("annotations", []store.Record{{Topic: "colca/v1/_Annotation/n-child/m1/event", Payload: []byte(`{"id":"event"}`), TS: 1}}); err != nil {
 					t.Error(err)
 				}
-				if _, _, err := cs.Append("metrics", []store.Record{{Topic: "colca/v1/_ClockProgress/n-child/dataops/_service", Payload: []byte(`{"run_id":"run","processed_at":10}`), TS: 2}}); err != nil {
+				if _, _, err := cs.Append("metrics", []store.Record{{Topic: "colca/v1/_ClockProgress/n-child/dataops/_service", Payload: []byte(`{"run_id":"run","processed_at":10,"ready":true,"observed_at":2}`), TS: 2}}); err != nil {
 					t.Error(err)
 				}
 			})

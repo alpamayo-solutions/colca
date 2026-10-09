@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
@@ -18,8 +19,7 @@ import (
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
-// Service statuses as a health view reads them from
-// architecture_metadata.status.
+// Runtime statuses exported through Prometheus.
 const (
 	StatusStarting  = "starting"
 	StatusHealthy   = "healthy"
@@ -122,7 +122,6 @@ func (a *Announcer) Run(ctx context.Context) {
 	a.mu.Unlock()
 	// The will is fixed at connect time: a process that dies unannounced is down.
 	details.IsActive = false
-	details.ArchitectureMetadata = map[string]any{"status": StatusUnhealthy}
 	down, err := json.Marshal(details)
 	if err != nil {
 		a.logger().Error("cannot build the service record", "err", err)
@@ -181,9 +180,8 @@ func (a *Announcer) Run(ctx context.Context) {
 	client.Disconnect(250)
 }
 
-// Report sets the status the record carries: healthy, or unhealthy with the
-// reason. Only a change of status is published; a repeat of the same status
-// is not, and its detail stays the one that came with the change.
+// Report records runtime health for telemetry. Repeated states keep the first
+// diagnostic reason; registration is unaffected.
 func (a *Announcer) Report(ok bool, detail string) {
 	status := StatusHealthy
 	if !ok {
@@ -197,19 +195,15 @@ func (a *Announcer) Report(ok bool, detail string) {
 		return
 	}
 	a.status, a.detail = status, detail
-	client := a.client
 	a.mu.Unlock()
 	if status == StatusUnhealthy {
 		a.logger().Warn("reporting the historian unhealthy", "detail", detail)
 	} else {
 		a.logger().Info("reporting the historian healthy")
 	}
-	if client != nil && client.IsConnectionOpen() {
-		a.publish(client, true)
-	}
 }
 
-// current is the status to publish; the caller holds mu.
+// current is the runtime status; the caller holds mu.
 func (a *Announcer) current() string {
 	if a.status == "" {
 		return StatusStarting
@@ -217,9 +211,7 @@ func (a *Announcer) current() string {
 	return a.status
 }
 
-// publish writes the record with the current status. The payload is built and
-// handed to the client under mu, so two publishes leave in the order their
-// statuses were set.
+// publish writes registration lifecycle state under mu, preserving order.
 func (a *Announcer) publish(c pahomqtt.Client, active bool) {
 	a.mu.Lock()
 	if a.details == nil {
@@ -232,13 +224,7 @@ func (a *Announcer) publish(c pahomqtt.Client, active bool) {
 	if a.Version != "" {
 		details.Metadata["version"] = a.Version
 	}
-	if a.clock != nil {
-		details.Metadata["application_clock"] = a.clock
-	}
-	details.ArchitectureMetadata = map[string]any{"status": a.current()}
-	if a.detail != "" {
-		details.ArchitectureMetadata["detail"] = a.detail
-	}
+	details.ArchitectureMetadata = map[string]any{}
 	topic := a.topic
 	payload, err := json.Marshal(details)
 	if err != nil {
@@ -294,17 +280,36 @@ func (a *Announcer) record(self door.Self) (serviceDetails, string) {
 	return details, topic
 }
 
-// ReportClock merges clock progress into the one service record. Health changes
-// and reconnects therefore cannot erase the clock's completion metadata.
-func (a *Announcer) ReportClock(_ context.Context, metadata map[string]any) error {
+// ReportProgress observes functional clock control for Prometheus.
+func (a *Announcer) ReportProgress(progress map[string]any) {
 	a.mu.Lock()
-	if progress, ok := metadata["application_clock"].(map[string]any); ok {
-		a.clock = progress
+	defer a.mu.Unlock()
+	a.clock = make(map[string]any, len(progress))
+	for key, value := range progress {
+		a.clock[key] = value
 	}
-	client := a.client
+}
+
+// WriteMetrics exports runtime observations without durable entity writes.
+func (a *Announcer) WriteMetrics(w io.Writer) {
+	a.mu.Lock()
+	name := "historian"
+	if a.details != nil {
+		name = a.details.Name
+	}
+	healthy := 0
+	if a.current() == StatusHealthy {
+		healthy = 1
+	}
+	clock := a.clock // ReportProgress replaces this immutable snapshot.
 	a.mu.Unlock()
-	if client != nil && client.IsConnectionOpen() {
-		a.publish(client, true)
+	_, _ = fmt.Fprintf(w, "# HELP colca_service_healthy Runtime service health.\n# TYPE colca_service_healthy gauge\ncolca_service_healthy{service=%q} %d\n", name, healthy)
+	if clock != nil {
+		ready := 0
+		if clock["ready"] == true {
+			ready = 1
+		}
+		_, _ = fmt.Fprintf(w, "# HELP colca_application_clock_ready Application time readiness.\n# TYPE colca_application_clock_ready gauge\ncolca_application_clock_ready{service=%q} %d\n", name, ready)
+		_, _ = fmt.Fprintf(w, "# HELP colca_application_processed_timestamp_seconds Last committed application timestamp.\n# TYPE colca_application_processed_timestamp_seconds gauge\ncolca_application_processed_timestamp_seconds{service=%q} %v\n", name, clock["processed_at"])
 	}
-	return nil
 }
