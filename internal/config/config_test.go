@@ -15,7 +15,7 @@ const sample = `
 ulid: n-edge1
 data_dir: /tmp/colca-test
 log_level: debug
-key_file: /keys/edge1.key
+identity: { key_file: /keys/edge1.key }
 api:
   addr: "127.0.0.1:8081"
   token: secret-admin
@@ -47,7 +47,7 @@ func TestLoad(t *testing.T) {
 	}
 
 	// The remaining fields round-trip too.
-	if c.DataDir != "/tmp/colca-test" || c.LogLevel != "debug" || c.KeyFile != "/keys/edge1.key" {
+	if c.DataDir != "/tmp/colca-test" || c.LogLevel != "debug" || c.Identity.KeyFile != "/keys/edge1.key" {
 		t.Fatalf("scalars: %+v", c)
 	}
 	if c.API.Addr != "127.0.0.1:8081" || c.API.Token != "secret-admin" {
@@ -69,7 +69,7 @@ func TestAuthAndHumanMQTTConfig(t *testing.T) {
 	doc := `
 ulid: n-edge1
 data_dir: /tmp/colca-test
-key_file: /keys/edge1.key
+identity: { key_file: /keys/edge1.key }
 auth:
   issuers:
     - url: https://red.example/realms/colca
@@ -108,7 +108,7 @@ mqtt_human:
 	}
 
 	// refresh absent → 1h effective default
-	base := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+	base := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 		Auth: &Auth{Issuers: []AuthIssuer{{URL: "i"}}, Audience: "a", JWKSURL: "j"}}
 	if err := base.Validate(); err != nil {
 		t.Fatalf("auth without mqtt_human must validate: %v", err)
@@ -118,23 +118,23 @@ mqtt_human:
 	}
 
 	for name, c := range map[string]*Config{
-		"mqtt_human without auth": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		"mqtt_human without auth": {ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 			MQTTHuman: MQTTHuman{TCPAddr: ":8884"}},
-		"ws without auth": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		"ws without auth": {ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 			MQTTHuman: MQTTHuman{WSAddr: ":8885"}},
-		"auth missing issuers": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		"auth missing issuers": {ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 			Auth: &Auth{Audience: "a", JWKSURL: "j"}},
-		"auth issuer without url": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		"auth issuer without url": {ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 			Auth: &Auth{Issuers: []AuthIssuer{{JWKSURL: "j"}}, Audience: "a"}},
-		"auth issuer listed twice": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		"auth issuer listed twice": {ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 			Auth: &Auth{Issuers: []AuthIssuer{{URL: "i"}, {URL: "i"}}, Audience: "a", JWKSURL: "j"}},
-		"auth missing audience": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		"auth missing audience": {ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 			Auth: &Auth{Issuers: []AuthIssuer{{URL: "i"}}, JWKSURL: "j"}},
-		"auth missing jwks_url": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		"auth missing jwks_url": {ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 			Auth: &Auth{Issuers: []AuthIssuer{{URL: "i"}}, Audience: "a"}},
-		"one issuer without any jwks_url": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		"one issuer without any jwks_url": {ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 			Auth: &Auth{Issuers: []AuthIssuer{{URL: "i", JWKSURL: "j"}, {URL: "k"}}, Audience: "a"}},
-		"negative refresh": {ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		"negative refresh": {ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 			Auth: &Auth{Issuers: []AuthIssuer{{URL: "i"}}, Audience: "a", JWKSURL: "j", JWKSRefresh: Duration(-time.Hour)}},
 	} {
 		if err := c.Validate(); err == nil {
@@ -149,7 +149,7 @@ func TestAuthSingleIssuerKeyIsRefused(t *testing.T) {
 	doc := `
 ulid: n-edge1
 data_dir: /tmp/colca-test
-key_file: /keys/edge1.key
+identity: { key_file: /keys/edge1.key }
 auth:
   issuer: https://kc.example/realms/colca
   audience: colca
@@ -167,7 +167,7 @@ auth:
 }
 
 func TestValidateRequiredFields(t *testing.T) {
-	base := func() *Config { return &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"} }
+	base := func() *Config { return &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}} }
 
 	// A global node has no parent and no MQTT. Machines and children are not
 	// config.
@@ -178,7 +178,7 @@ func TestValidateRequiredFields(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
 		"no ulid":     func(c *Config) { c.ULID = "" },
 		"no data_dir": func(c *Config) { c.DataDir = "" },
-		"no key_file": func(c *Config) { c.KeyFile = "" },
+		"no key_file": func(c *Config) { c.Identity.KeyFile = "" },
 	} {
 		c := base()
 		mutate(c)
@@ -189,7 +189,7 @@ func TestValidateRequiredFields(t *testing.T) {
 }
 
 func TestSecretStoreMustHaveASeparateLifecycleDirectory(t *testing.T) {
-	cfg := &Config{ULID: "n1", DataDir: "/var/lib/colca", SecretsDir: "/var/lib/colca", KeyFile: "/keys/node.key"}
+	cfg := &Config{ULID: "n1", DataDir: "/var/lib/colca", SecretsDir: "/var/lib/colca", Identity: Identity{KeyFile: "/keys/node.key"}}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("secrets_dir equal to data_dir was accepted")
 	}
@@ -203,7 +203,7 @@ func TestSecretStoreMustHaveASeparateLifecycleDirectory(t *testing.T) {
 const retentionSample = `
 ulid: n-edge1
 data_dir: /tmp/colca-test
-key_file: /keys/edge1.key
+identity: { key_file: /keys/edge1.key }
 retention:
   interval: 5m
   streams:
@@ -271,7 +271,7 @@ func TestRetentionRoundTrip(t *testing.T) {
 // TestRetentionDefaultsWhenAbsent: without a retention block pruning is on,
 // with the default max_age per stream, no max_bytes and no cursor override.
 func TestRetentionDefaultsWhenAbsent(t *testing.T) {
-	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"}
+	c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("config with no retention: block must validate: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestRetentionRejectsKeepForeverWithAnAgeBound(t *testing.T) {
 
 // A stream entry that sets only max_bytes still gets the default max_age.
 func TestRetentionDefaultsApplyPerFieldNotOnlyWhenStreamEntryAbsent(t *testing.T) {
-	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+	c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 		Retention: Retention{Streams: map[string]StreamRetention{
 			"metrics": {MaxBytes: ByteSize(2 << 30)},
 		}},
@@ -362,7 +362,7 @@ func TestRetentionValidationRejectsNegativeDurations(t *testing.T) {
 			"metrics": {IgnoreCursorsAfter: Duration(-time.Hour)},
 		}},
 	} {
-		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Retention: r}
+		c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}, Retention: r}
 		if err := c.Validate(); err == nil {
 			t.Errorf("%s: want validation error", name)
 		} else if !strings.Contains(err.Error(), "config:") {
@@ -375,7 +375,7 @@ func TestRetentionValidationRejectsNegativeDurations(t *testing.T) {
 // when body is empty. Only Load can show a key that was never written.
 func loadRetention(t *testing.T, body string) (*Config, error) {
 	t.Helper()
-	doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nkey_file: /keys/edge1.key\n"
+	doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nidentity: { key_file: /keys/edge1.key }\n"
 	if body != "" {
 		doc += "retention:\n" + body
 	}
@@ -448,7 +448,7 @@ func TestRetentionIntervalNegativeThroughLoad(t *testing.T) {
 }
 
 func TestRetentionValidationRejectsUnknownStream(t *testing.T) {
-	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+	c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 		Retention: Retention{Streams: map[string]StreamRetention{
 			"bogus": {MaxAge: Duration(30 * 24 * time.Hour)},
 		}},
@@ -465,7 +465,7 @@ func TestRetentionValidationRejectsUnknownStream(t *testing.T) {
 // commands.max_age below the floor is rejected, so a valid command's audit
 // trail cannot age out under it.
 func TestRetentionValidationRejectsCommandsBelowFloor(t *testing.T) {
-	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+	c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 		Retention: Retention{Streams: map[string]StreamRetention{
 			"commands": {MaxAge: Duration(24 * time.Hour)}, // 1 day < 7-day floor
 		}},
@@ -482,7 +482,7 @@ func TestRetentionValidationRejectsCommandsBelowFloor(t *testing.T) {
 
 	// At the floor and above passes, even below the stream's default.
 	for _, age := range []time.Duration{minCommandsMaxAge, 30 * 24 * time.Hour} {
-		ok := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k",
+		ok := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"},
 			Retention: Retention{Streams: map[string]StreamRetention{
 				"commands": {MaxAge: Duration(age)},
 			}},
@@ -497,7 +497,7 @@ func TestRetentionValidationRejectsGarbageDurationsAndByteSizes(t *testing.T) {
 	base := `
 ulid: n-edge1
 data_dir: /tmp/colca-test
-key_file: /keys/edge1.key
+identity: { key_file: /keys/edge1.key }
 retention:
 `
 	cases := map[string]string{
@@ -542,7 +542,7 @@ func TestLoadRejectsInvalidYAMLAndInvalidConfig(t *testing.T) {
 // TestTimeSyncDefaultsWhenAbsent: without a time_sync block every value has its
 // default.
 func TestTimeSyncDefaultsWhenAbsent(t *testing.T) {
-	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"}
+	c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("config with no time_sync: block must validate: %v", err)
 	}
@@ -562,7 +562,7 @@ func TestTimeSyncRoundTrip(t *testing.T) {
 	yamlDoc := `
 ulid: n-edge1
 data_dir: /tmp/colca-test
-key_file: /keys/edge1.key
+identity: { key_file: /keys/edge1.key }
 time_sync:
   beacon_interval: 45s
   hold_ms: 20000
@@ -597,7 +597,7 @@ func TestTimeSyncValidationRejectsNegativeValues(t *testing.T) {
 		"negative hold_ms":         {HoldMS: msPtr(-1)},
 		"negative drift_warn_ms":   {DriftWarnMS: msPtr(-1)},
 	} {
-		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", TimeSync: ts}
+		c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}, TimeSync: ts}
 		if err := c.Validate(); err == nil {
 			t.Fatalf("%s: want validation error", name)
 		}
@@ -631,7 +631,7 @@ func TestTimeSyncDriftWarnMSAbsentVsExplicitZeroDiverge(t *testing.T) {
 // loadTimeSync loads a minimal config with the given time_sync body.
 func loadTimeSync(t *testing.T, body string) (*Config, error) {
 	t.Helper()
-	doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nkey_file: /keys/edge1.key\n"
+	doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nidentity: { key_file: /keys/edge1.key }\n"
 	if body != "" {
 		doc += "time_sync:\n" + body
 	}
@@ -721,7 +721,7 @@ func TestTLSBlockIsOptionalAndParsed(t *testing.T) {
 	c := loadDoc(t, `
 ulid: n-a
 data_dir: /data
-key_file: /keys/n.key
+identity: { key_file: /keys/n.key }
 tls:
   cert_file: /certs/node.crt
   key_file: /certs/node.key
@@ -733,7 +733,7 @@ tls:
 	bare := loadDoc(t, `
 ulid: n-a
 data_dir: /data
-key_file: /keys/n.key
+identity: { key_file: /keys/n.key }
 `)
 	if bare.TLS.CertFile != "" || bare.TLS.KeyFile != "" {
 		t.Fatalf("a config with no tls block got %+v", bare.TLS)
@@ -816,7 +816,7 @@ func TestMQTTLimitsParseOverrides(t *testing.T) {
 }
 
 func TestMQTTLimitsRejectInvalidSignedValues(t *testing.T) {
-	base := Config{ULID: "n1", DataDir: "/tmp/x", KeyFile: "/tmp/x.key"}
+	base := Config{ULID: "n1", DataDir: "/tmp/x", Identity: Identity{KeyFile: "/tmp/x.key"}}
 	cases := []MQTTLimits{
 		{MaxClients: -1},
 		{MaxSubscriptionsPerClient: -1},
@@ -847,7 +847,7 @@ func TestLimitsParseHumanSizes(t *testing.T) {
 }
 
 func TestLimitsRejectABlobCapBelowTheRecordCap(t *testing.T) {
-	c := Config{ULID: "n1", DataDir: "/tmp/x", KeyFile: "/tmp/x.key"}
+	c := Config{ULID: "n1", DataDir: "/tmp/x", Identity: Identity{KeyFile: "/tmp/x.key"}}
 	c.Limits = Limits{MaxRecordBytes: ByteSize(8 << 20), MaxBlobBytes: ByteSize(1 << 20)}
 	if err := c.Validate(); err == nil {
 		t.Fatal("want an error when the blob cap is below the record cap")
@@ -859,13 +859,13 @@ func TestLimitsRejectABlobCapBelowTheRecordCap(t *testing.T) {
 func TestLimitsRejectsARecordCapAboveTheUint32SafetyBound(t *testing.T) {
 	// At the bound it is accepted, with a blob cap large enough not to trip the
 	// inversion check.
-	at := Config{ULID: "n1", DataDir: "/tmp/x", KeyFile: "/tmp/x.key"}
+	at := Config{ULID: "n1", DataDir: "/tmp/x", Identity: Identity{KeyFile: "/tmp/x.key"}}
 	at.Limits = Limits{MaxRecordBytes: ByteSize(maxMaxRecordBytes), MaxBlobBytes: ByteSize(maxMaxRecordBytes)}
 	if err := at.Validate(); err != nil {
 		t.Fatalf("record cap at the bound (%d) rejected: %v", maxMaxRecordBytes, err)
 	}
 
-	over := Config{ULID: "n1", DataDir: "/tmp/x", KeyFile: "/tmp/x.key"}
+	over := Config{ULID: "n1", DataDir: "/tmp/x", Identity: Identity{KeyFile: "/tmp/x.key"}}
 	over.Limits = Limits{MaxRecordBytes: ByteSize(maxMaxRecordBytes + 1), MaxBlobBytes: ByteSize(maxMaxRecordBytes + 1)}
 	if err := over.Validate(); err == nil {
 		t.Fatal("want an error when max_record_bytes exceeds the uint32 safety bound")
@@ -886,7 +886,7 @@ func TestBlobGCDefaultsWhenAbsent(t *testing.T) {
 // sweeper.
 func TestBlobGCIntervalThreeStatesThroughLoad(t *testing.T) {
 	t.Run("absent defaults to 15m", func(t *testing.T) {
-		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\n")
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nidentity: { key_file: /tmp/x.key }\n")
 		if c.BlobGC.Interval != nil {
 			t.Fatalf("interval must be nil (absent), got %v", *c.BlobGC.Interval)
 		}
@@ -896,7 +896,7 @@ func TestBlobGCIntervalThreeStatesThroughLoad(t *testing.T) {
 	})
 
 	t.Run("explicit interval: 0 disables the sweeper, not the default", func(t *testing.T) {
-		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\nblob_gc:\n  interval: 0\n")
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nidentity: { key_file: /tmp/x.key }\nblob_gc:\n  interval: 0\n")
 		if c.BlobGC.Interval == nil {
 			t.Fatal("interval must be non-nil — the key was explicitly written")
 		}
@@ -906,7 +906,7 @@ func TestBlobGCIntervalThreeStatesThroughLoad(t *testing.T) {
 	})
 
 	t.Run("explicit interval: 30m", func(t *testing.T) {
-		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\nblob_gc:\n  interval: 30m\n")
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nidentity: { key_file: /tmp/x.key }\nblob_gc:\n  interval: 30m\n")
 		if got, want := c.BlobGC.EffectiveInterval(), 30*time.Minute; got != want {
 			t.Fatalf("got %s want %s", got, want)
 		}
@@ -916,7 +916,7 @@ func TestBlobGCIntervalThreeStatesThroughLoad(t *testing.T) {
 // blob_gc.grace: absent means one hour, an explicit 0 means no grace at all.
 func TestBlobGCGraceThreeStatesThroughLoad(t *testing.T) {
 	t.Run("absent defaults to 1h", func(t *testing.T) {
-		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\n")
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nidentity: { key_file: /tmp/x.key }\n")
 		if c.BlobGC.Grace != nil {
 			t.Fatalf("grace must be nil (absent), got %v", *c.BlobGC.Grace)
 		}
@@ -926,7 +926,7 @@ func TestBlobGCGraceThreeStatesThroughLoad(t *testing.T) {
 	})
 
 	t.Run("explicit grace: 0 means no grace, not the default", func(t *testing.T) {
-		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\nblob_gc:\n  grace: 0\n")
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nidentity: { key_file: /tmp/x.key }\nblob_gc:\n  grace: 0\n")
 		if c.BlobGC.Grace == nil {
 			t.Fatal("grace must be non-nil — the key was explicitly written")
 		}
@@ -936,7 +936,7 @@ func TestBlobGCGraceThreeStatesThroughLoad(t *testing.T) {
 	})
 
 	t.Run("explicit grace: 10m", func(t *testing.T) {
-		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nkey_file: /tmp/x.key\nblob_gc:\n  grace: 10m\n")
+		c := loadDoc(t, "ulid: n1\ndata_dir: /tmp/x\nidentity: { key_file: /tmp/x.key }\nblob_gc:\n  grace: 10m\n")
 		if got, want := c.BlobGC.EffectiveGrace(), 10*time.Minute; got != want {
 			t.Fatalf("got %s want %s", got, want)
 		}
@@ -948,7 +948,7 @@ func TestBlobGCValidationRejectsNegativeDurations(t *testing.T) {
 		"negative interval": {Interval: durPtr(-time.Minute)},
 		"negative grace":    {Grace: durPtr(-time.Minute)},
 	} {
-		c := Config{ULID: "n1", DataDir: "/tmp/x", KeyFile: "/tmp/x.key", BlobGC: b}
+		c := Config{ULID: "n1", DataDir: "/tmp/x", Identity: Identity{KeyFile: "/tmp/x.key"}, BlobGC: b}
 		if err := c.Validate(); err == nil {
 			t.Fatalf("%s: want an error", name)
 		}
@@ -959,7 +959,7 @@ func TestBlobGCValidationRejectsNegativeDurations(t *testing.T) {
 // finding off, a negative value is refused.
 func TestCursorsStaleAfterThroughLoad(t *testing.T) {
 	load := func(body string) (*Config, error) {
-		doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nkey_file: /keys/edge1.key\n" + body
+		doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nidentity: { key_file: /keys/edge1.key }\n" + body
 		p := filepath.Join(t.TempDir(), "c.yaml")
 		if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
 			t.Fatal(err)
@@ -987,7 +987,7 @@ func TestCursorsStaleAfterThroughLoad(t *testing.T) {
 // Per-signal rules and the storage block load from YAML; the first matching
 // rule sets a signal's window.
 func TestSignalRetentionAndStorageLoad(t *testing.T) {
-	doc := "ulid: n-hub\ndata_dir: /tmp/colca-test\nkey_file: /keys/hub.key\n" +
+	doc := "ulid: n-hub\ndata_dir: /tmp/colca-test\nidentity: { key_file: /keys/hub.key }\n" +
 		"storage:\n  compression: zstd\n" +
 		"retention:\n  streams:\n    metrics:\n      max_age: 72h\n      signals:\n" +
 		"        - topics: [\"prekit/v1/_Metric/+/+/Diagnostics/#\"]\n          max_age: 6h\n" +
@@ -1038,14 +1038,14 @@ func TestSignalRetentionValidation(t *testing.T) {
 		"not shorter":     {"metrics", rule(SignalRetention{Topics: []string{"#"}, MaxAge: Duration(336 * time.Hour)}), "shorter than the stream"},
 		"longer than set": {"metrics", StreamRetention{MaxAge: Duration(24 * time.Hour), Signals: []SignalRetention{{Topics: []string{"#"}, MaxAge: Duration(48 * time.Hour)}}}, "shorter than the stream"},
 	} {
-		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Retention: Retention{Streams: map[string]StreamRetention{tc.stream: tc.pol}}}
+		c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}, Retention: Retention{Streams: map[string]StreamRetention{tc.stream: tc.pol}}}
 		err := c.Validate()
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: error %v, want one containing %q", name, err, tc.want)
 		}
 	}
 	// keep_forever keeps every record, so it cannot be combined with signals.
-	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Retention: Retention{Streams: map[string]StreamRetention{
+	c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}, Retention: Retention{Streams: map[string]StreamRetention{
 		"metrics": {KeepForever: true, Signals: []SignalRetention{{Topics: []string{"#"}, MaxAge: Duration(time.Hour)}}},
 	}}}
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "keep_forever and signals") {
@@ -1055,12 +1055,12 @@ func TestSignalRetentionValidation(t *testing.T) {
 
 func TestStorageCompressionValidation(t *testing.T) {
 	for _, v := range []string{"", "snappy", "zstd"} {
-		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Storage: Storage{Compression: v}}
+		c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}, Storage: Storage{Compression: v}}
 		if err := c.Validate(); err != nil {
 			t.Errorf("compression %q refused: %v", v, err)
 		}
 	}
-	c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Storage: Storage{Compression: "lz4"}}
+	c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}, Storage: Storage{Compression: "lz4"}}
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "storage.compression") {
 		t.Fatalf("lz4 accepted or unclear error: %v", err)
 	}
@@ -1070,7 +1070,7 @@ func TestStorageCompressionValidation(t *testing.T) {
 // negative and absurd values are refused.
 func TestLogsBlockThroughLoad(t *testing.T) {
 	load := func(body string) (*Config, error) {
-		doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nkey_file: /keys/edge1.key\n" + body
+		doc := "ulid: n-edge1\ndata_dir: /tmp/colca-test\nidentity: { key_file: /keys/edge1.key }\n" + body
 		p := filepath.Join(t.TempDir(), "c.yaml")
 		if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
 			t.Fatal(err)
@@ -1114,7 +1114,7 @@ func TestParentLogsParseAndDefault(t *testing.T) {
 	load := func(t *testing.T, parent string) (*Config, error) {
 		t.Helper()
 		p := filepath.Join(t.TempDir(), "c.yaml")
-		body := "ulid: n1\ndata_dir: /tmp/d\nkey_file: /k\nparent:\n  url: https://p:9443\n  pubkey: aa\n" + parent
+		body := "ulid: n1\ndata_dir: /tmp/d\nidentity: { key_file: /k }\nparent:\n  url: https://p:9443\n  pubkey: aa\n" + parent
 		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -1154,14 +1154,14 @@ func TestParentLogsRejectsUnknownLevels(t *testing.T) {
 		"empty service name":    {Services: map[string]string{"": "INFO"}},
 		"service with a slash":  {Services: map[string]string{"a/b": "INFO"}},
 	} {
-		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Parent: &Parent{URL: "https://p", Pubkey: "aa", Logs: logs}}
+		c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}, Parent: &Parent{URL: "https://p", Pubkey: "aa", Logs: logs}}
 		err := c.Validate()
 		if err == nil || !strings.Contains(err.Error(), "parent.logs") {
 			t.Errorf("%s: want a parent.logs error, got %v", name, err)
 		}
 	}
 	for _, level := range LogLevels {
-		c := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Parent: &Parent{URL: "https://p", Pubkey: "aa",
+		c := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}, Parent: &Parent{URL: "https://p", Pubkey: "aa",
 			Logs: ParentLogs{MinLevel: strings.ToLower(level), Services: map[string]string{"svc": level}}}}
 		if err := c.Validate(); err != nil {
 			t.Errorf("level %s: %v", level, err)
@@ -1170,7 +1170,7 @@ func TestParentLogsRejectsUnknownLevels(t *testing.T) {
 }
 
 func TestConfigRejectsAccessWithoutHostname(t *testing.T) {
-	base := func() *Config { return &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"} }
+	base := func() *Config { return &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k"}} }
 	ok := &Access{Hostname: "edge-07.example", UIURL: "https://edge-07.example:8443"}
 	c := base()
 	c.Access = ok
@@ -1200,5 +1200,36 @@ func TestConfigRejectsAccessWithoutHostname(t *testing.T) {
 	c.Access = &Access{Hostname: "edge-07.example", UIURL: "http://edge-07.example"}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("http ui_url refused: %v", err)
+	}
+}
+
+func TestIdentityBlock(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	yml := "ulid: n1\ndata_dir: /tmp\nidentity:\n  key_store: tpm\n  key_file: /keys/node.key\n  tpm_device: /dev/tpmrm0\n"
+	if err := os.WriteFile(p, []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := c.IdentityOptions()
+	if o.KeyStore != "tpm" || o.KeyFile != "/keys/node.key" || o.TPMDevice != "/dev/tpmrm0" {
+		t.Fatalf("options: %+v", o)
+	}
+
+	// The top-level key_file is gone: a config that still has it is refused
+	// with a pointer to identity.key_file, never started without its key.
+	old := filepath.Join(t.TempDir(), "old.yaml")
+	if err := os.WriteFile(old, []byte("ulid: n1\ndata_dir: /tmp\nkey_file: /keys/node.key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(old); err == nil || !strings.Contains(err.Error(), "identity.key_file") {
+		t.Fatalf("top-level key_file: %v, want a refusal naming identity.key_file", err)
+	}
+
+	unknown := &Config{ULID: "x", DataDir: "/tmp", Identity: Identity{KeyFile: "/k", KeyStore: "hsm"}}
+	if err := unknown.Validate(); err == nil {
+		t.Error("unknown key_store: want error")
 	}
 }

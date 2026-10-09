@@ -33,7 +33,7 @@ func TestANodePrivateReceiptNeverLeavesTheNodeButItsNeighboursDo(t *testing.T) {
 	// the parent has two records: a filter that dropped the receipt but stalled on
 	// it would also leave two records.
 	waitFor(t, "the child's entities uplink cursor to reach its head", 20*time.Second, func() bool {
-		return cs.CursorGet(uns.UplinkCursor(parentPub), "entities") == head
+		return cs.CursorGet(uns.UplinkCursor(CursorScope(parentPub)), "entities") == head
 	})
 
 	// The parent's entities stream also holds what it authored itself (the child's

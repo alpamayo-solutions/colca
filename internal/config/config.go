@@ -13,6 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -96,6 +97,9 @@ type Endpoint struct {
 type Parent struct {
 	URL    string `yaml:"url"`
 	Pubkey string `yaml:"pubkey"` // pinned parent key
+	// Mount is where this node asks to be placed at its parent. It only fills
+	// in the approval dialog: the person approving decides.
+	Mount string `yaml:"mount"`
 	// Logs decides which of this node's log records the uplink forwards. Every
 	// record stays in the local logs stream either way.
 	Logs ParentLogs `yaml:"logs"`
@@ -190,8 +194,81 @@ func (a *Access) validate() error {
 	return nil
 }
 
-// Config is a node's configuration. Only ULID, DataDir and KeyFile are
-// required. Machines and child nodes are not configured here; they are
+// Identity is the identity: block: where the node key lives. Only key_file is
+// required.
+type Identity struct {
+	// KeyStore is auto (default), tpm or file; see identity.Open.
+	KeyStore string `yaml:"key_store"`
+	// KeyFile holds the file key, or the TPM key blob when the key is in a TPM.
+	KeyFile string `yaml:"key_file"`
+	// TPMDevice is the TPM to use, /dev/tpmrm0 when empty.
+	TPMDevice string `yaml:"tpm_device"`
+}
+
+// Enrollment levels for Enrollment.Require.
+const (
+	EnrollmentRequireAny         = "any"
+	EnrollmentRequireTPM         = "tpm"
+	EnrollmentRequireTPMAttested = "tpm-attested"
+)
+
+// Key change policies for Enrollment.KeyChange.
+const (
+	KeyChangeAuto    = "auto"
+	KeyChangeApprove = "approve"
+)
+
+// Enrollment is the enrollment: block, this node's policy for the children
+// that ask to join it.
+type Enrollment struct {
+	// Require is the lowest key store a request must prove before it can be
+	// approved: any (default), tpm or tpm-attested.
+	Require string `yaml:"require"`
+	// KeyChange decides a key change an enrolled child asks for with its
+	// current key: auto (default) accepts a move into a TPM at once, approve
+	// leaves every key change to a person.
+	KeyChange string `yaml:"key_change"`
+	// RequireIssuedCert refuses children that still present a self-signed
+	// certificate (cert_state none, from before issued certificates).
+	RequireIssuedCert bool `yaml:"require_issued_cert"`
+	// TPMRoots is a PEM file of additional TPM manufacturer certificates
+	// (roots and intermediates) endorsement key certificates may chain to,
+	// beside the ones colcad ships.
+	TPMRoots string `yaml:"tpm_roots"`
+}
+
+// EffectiveRequire is Require with its default.
+func (e Enrollment) EffectiveRequire() string {
+	if e.Require == "" {
+		return EnrollmentRequireAny
+	}
+	return e.Require
+}
+
+// EffectiveKeyChange is KeyChange with its default.
+func (e Enrollment) EffectiveKeyChange() string {
+	if e.KeyChange == "" {
+		return KeyChangeAuto
+	}
+	return e.KeyChange
+}
+
+func (e Enrollment) validate() error {
+	switch e.EffectiveRequire() {
+	case EnrollmentRequireAny, EnrollmentRequireTPM, EnrollmentRequireTPMAttested:
+	default:
+		return fmt.Errorf("config: enrollment.require %q, want any, tpm or tpm-attested", e.Require)
+	}
+	switch e.EffectiveKeyChange() {
+	case KeyChangeAuto, KeyChangeApprove:
+	default:
+		return fmt.Errorf("config: enrollment.key_change %q, want auto or approve", e.KeyChange)
+	}
+	return nil
+}
+
+// Config is a node's configuration. Only ULID, DataDir and the key file
+// (identity.key_file) are required. Machines and child nodes are not configured here; they are
 // enrolled at runtime through the admin API.
 type Config struct {
 	ULID string `yaml:"ulid"`
@@ -218,12 +295,14 @@ type Config struct {
 	// Empty disables the secret store for compositions that do not expose it.
 	SecretsDir string   `yaml:"secrets_dir"`
 	LogLevel   string   `yaml:"log_level"`
-	KeyFile    string   `yaml:"key_file"`
+	Identity   Identity `yaml:"identity"`
 	TLS        TLS      `yaml:"tls"`
 	API        API      `yaml:"api"`
 	MQTT       Endpoint `yaml:"mqtt"`
 	Repl       Endpoint `yaml:"repl"`
 	Parent     *Parent  `yaml:"parent"`
+	// Enrollment is the policy for children asking to join this node.
+	Enrollment Enrollment `yaml:"enrollment"`
 	// Standalone permanently retires fleet trust in this data directory.
 	Standalone      bool            `yaml:"standalone"`
 	StandaloneSince int64           `yaml:"-"` // persisted activation, populated before serving
@@ -917,6 +996,16 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(raw, &c); err != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
+	// The top-level key_file was the spelling before the identity block. It is
+	// not read any more; a config that still has it would otherwise start
+	// without the key it names.
+	var removed struct {
+		KeyFile *string `yaml:"key_file"`
+	}
+	if err := yaml.Unmarshal(raw, &removed); err == nil && removed.KeyFile != nil {
+		return nil, fmt.Errorf("config: %s: the top-level key_file is no longer read — move it to identity.key_file "+
+			"(identity: { key_file: %s })", path, *removed.KeyFile)
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -944,13 +1033,28 @@ func (c *Config) EffectiveTopicRoot() string {
 	return uns.DefaultRoot
 }
 
+// IdentityOptions are the identity block as identity.Open takes them.
+func (c *Config) IdentityOptions() identity.Options {
+	return identity.Options{
+		KeyStore:  c.Identity.KeyStore,
+		KeyFile:   c.Identity.KeyFile,
+		TPMDevice: c.Identity.TPMDevice,
+	}
+}
+
 // Validate checks the required fields and every block.
 func (c *Config) Validate() error {
 	if c.Standalone && c.Parent != nil {
 		return fmt.Errorf("config: standalone cannot have a parent")
 	}
-	if c.ULID == "" || c.DataDir == "" || c.KeyFile == "" {
-		return fmt.Errorf("config: ulid, data_dir, key_file are required")
+	if c.ULID == "" || c.DataDir == "" || c.Identity.KeyFile == "" {
+		return fmt.Errorf("config: ulid, data_dir, identity.key_file are required")
+	}
+	if !identity.ValidKeyStore(c.Identity.KeyStore) {
+		return fmt.Errorf("config: identity.key_store %q, want auto, tpm or file", c.Identity.KeyStore)
+	}
+	if err := c.Enrollment.validate(); err != nil {
+		return err
 	}
 	if err := uns.ValidRoot(c.EffectiveTopicRoot()); err != nil {
 		return fmt.Errorf("config: %w", err)

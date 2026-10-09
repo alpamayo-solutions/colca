@@ -16,7 +16,7 @@ A caller is one of:
 
 | Method and path | Who | Request | Response |
 |---|---|---|---|
-| `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","storage":{"state":"ok"}}` |
+| `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","pubkey":"…","fingerprint":"SHA256:…","key_store":"file"\|"tpm","storage":{"state":"ok"}}` |
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}`, or `202` `{"stream":"logs","topic":"…","withheld":"…"}` without `offset` |
 | `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"stream":"logs","withheld":"…"} or {"error":"…","reason":"…"},…]}` |
@@ -207,14 +207,52 @@ its stream from the pruner. Nothing removes them on its own.
 
 | Method and path | Request | Response |
 |---|---|---|
-| `POST /enroll` | `{"ulid","pubkey","kind":"external"\|"node","element","grants":[…]}` | `{"ulid":"…","offset":N}`; `409` when the key or the element is already taken, `422` on an invalid entry or an element this node does not hold |
+| `POST /enroll` | `{"ulid","pubkey","kind":"external"\|"local","element","grants":[…]}` | `{"ulid":"…","offset":N}`; `409` when the key or the element is already taken, `422` on an invalid entry or an element this node does not hold, and for `kind: node`: a node asks to join by itself (below) |
 | `GET /enroll` | `?max=1000&after=TOKEN` | the locally enrolled entries, public keys only |
 | `DELETE /enroll/{ulid}` | `?retire=true` | `{"revoked":true,"offset":N}`; the same batch retires the records the identity authored about itself — its `_ServiceDetails`, at every mount it published one at. Only that identity may write them, so one left behind could never be retired by anyone. A plain revoke keeps what a child node replicated up: the child may be enrolled again and resumes from its own cursor. With `retire=true` (kind `node` only, `409` otherwise; `400` on a value that is not a boolean) the same batch also tombstones every current-state record the child and the nodes below it replicated, clears its replication marks, and deletes its definitions cursor (`downlink-def:<ulid>`) and every cursor in its own namespace (`<ulid>/...`), so nothing it left stands as live or holds retention and the same identity enrolled later starts clean (a plain revoke keeps the definitions cursor as the child's catch-up position); the response adds `"retired":true,"records_retired":N`. The tombstones replicate up, so ancestors retire their copies too |
 | `POST /enroll/{ulid}/drain` | | `{"ulid","offset","status":"draining"}`; decommissions a child node: new commands under its mount are refused, and once its queue is delivered or expired it is retired as with `DELETE ?retire=true`. `409` for an entry that is not a node or is already draining |
 | `GET /debug/state` | | the next offset of every stream |
 
+### Enrollment requests
+
+A child node with an unknown key files a request at its parent (below); a
+person decides it. These routes take a person's token with `admin:#`
+(`Authorization: Bearer`); the admin token is refused with `403`, so every
+decision names somebody and is audited. A fingerprint in a path is its 64
+lower-case hex characters; in bodies and responses it is `SHA256:AB:CD:…`.
+
+| Method and path | Request | Response |
+|---|---|---|
+| `GET /enroll/requests` | `?state=pending\|rejected\|blocked&max=1000&after=TOKEN` | `{"requests":[…],"next":"…"}`: each request with `fingerprint`, `pubkey`, `key_store` (`file`, `tpm`, `tpm-attested`), `attestation` (`ek`, `ek_manufacturer`, `ek_serial`), `ulid`, `name`, `requested_mount`, `colca_version`, `source_ip`, `first_seen`, `last_seen`, `count`, `state`, `key_change` (`current_fingerprint`, `current_key_store`; present when the request would move an enrolled node to this key), `below_policy`, `preapproval_hint`, `decided_by`, `decided_at`, `reason` |
+| `GET /enroll/requests/{fp}` | | one request; `404` without one |
+| `POST /enroll/requests/{fp}/approve` | `{"element"}` or `{"mount"}` (elements authored where missing), optional `"name"` | enrolls the node (a key change moves the existing entry to the new key); `409` below `enrollment.require` or when blocked, `422` without a placement |
+| `POST /enroll/requests/{fp}/reject` | `{"reason"}` | kept as `rejected` for 7 days; the child stops asking until it restarts |
+| `POST /enroll/requests/{fp}/block` | `{"reason"}`, optional `"ulid"` | refused until unblocked; blocking an enrolled node's key revokes it as well |
+| `POST /enroll/requests/{fp}/unblock` | | back to `pending` (also for a rejected request) |
+| `POST /enroll/{ulid}/request-key-change` | | the node moves to a new key on its next certificate renewal |
+| `GET /enroll/preapprovals` | `?max=1000&after=TOKEN` | `{"preapprovals":[…],"next":"…"}`: `id`, `match` (`ek` or `key`), `element` or `mount`, `name`, `expires_at`, `uses` (left), `used_by`, `state` (`open`, `used`, `expired`), `created_by`, `created_at`, `note` |
+| `POST /enroll/preapprovals` | `{"match":{"ek"\|"key":fp},"element"\|"mount","name","expires_at","uses","note"}` | the pre-approval; `expires_at` (RFC 3339) defaults to 30 days, `uses` to 1. A matching request is approved on arrival, or at once when it is already waiting. A used-up or expired pre-approval stays listed for 7 days |
+| `DELETE /enroll/preapprovals/{id}` | | withdraws it |
+
+A child files its request at `POST /enroll/request` on its parent's
+replication door, the one route there an unknown key may call; the key is the
+one in its TLS client certificate. The parent answers `202 {"status":"pending"}`
+(with a `challenge` while TPM attestation is under way), `200
+{"status":"approved","certificate":"<PEM chain>","not_after"}`, or `403` with
+`"status":"rejected"` or `"blocked"`; `429` when one address filed more than 10
+new keys within the hour. Pending requests expire after 7 days without a
+request; at most 200 are kept. While requests are pending the node raises a
+`_Finding` (`enrollment_requests`) so the alarm and notification path tells
+somebody.
+
 A node that is reachable only through the tree is administered with
-`_CmdAdmin` commands sent to it from an ancestor: `enroll`, `revoke`, and
+`_CmdAdmin` commands sent to it from an ancestor: `enroll` (machines and local
+services), `revoke`, the enrollment decisions `approve` (`fingerprint`,
+`element` or `mount`, `name`), `reject` and `block` (`fingerprint`, `reason`;
+`block` also takes the `ulid` of an enrolled node to revoke), `unblock`
+(`fingerprint`), `preapprove` (`id`, `match`, `element` or `mount`, `name`,
+`valid_until` in RFC 3339 — `expires_at` is the command's own expiry —, `uses`,
+`note`), `unpreapprove` (`id`) and `request-key-change` (`ulid`), and
 `fetchLogs`, which returns one page of its own logs in the ack's `result`. See
 [Fetching a node's logs](concepts.md#fetching-a-nodes-logs).
 

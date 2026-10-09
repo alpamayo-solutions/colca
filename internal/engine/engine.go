@@ -540,8 +540,8 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 	}
 	// Registry entries enter only through the enrollment door; no client may publish
 	// an _EnrolledIdentity, not even its own.
-	if p.Contract == "_EnrolledIdentity" {
-		return e.reject(metrics.ReasonRegistryContract, "client %s may not publish _EnrolledIdentity — registry entries are enrollment-door only", identity)
+	if uns.IsRegistryContract(p.Contract) {
+		return e.reject(metrics.ReasonRegistryContract, "client %s may not publish %s — registry and enrollment records are written by the node itself", identity, p.Contract)
 	}
 	class := e.ClassOf(p.Contract)
 	if uns.IsNodeLocal(class) {
@@ -705,8 +705,8 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 	if err != nil {
 		return e.reject(metrics.ReasonGrammar, "%w", err)
 	}
-	if p.Contract == "_EnrolledIdentity" {
-		return e.reject(metrics.ReasonRegistryContract, "_EnrolledIdentity is enrollment-door only — use POST /enroll")
+	if uns.IsRegistryContract(p.Contract) {
+		return e.reject(metrics.ReasonRegistryContract, "%s is enrollment-door only — use POST /enroll or the enrollment requests", p.Contract)
 	}
 	class := e.ClassOf(p.Contract)
 	if !uns.IsKnown(class) {
@@ -798,9 +798,9 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 	}
 	// Not even the admin token may publish registry entries; enrollment has its own
 	// door.
-	if p.Contract == "_EnrolledIdentity" {
+	if uns.IsRegistryContract(p.Contract) {
 		e.metrics.RejectPublish(metrics.ReasonRegistryContract)
-		return Result{}, fmt.Errorf("_EnrolledIdentity is enrollment-door only — use POST /enroll")
+		return Result{}, fmt.Errorf("%s is enrollment-door only — use POST /enroll or the enrollment requests", p.Contract)
 	}
 	class := e.ClassOf(p.Contract)
 	if uns.IsNodeLocal(class) {
@@ -902,9 +902,9 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 			e.metrics.RejectPublish(metrics.ReasonGrammar)
 			return nil, fmt.Errorf("admin state batch record %d: %w", i, err)
 		}
-		if parsed.Contract == "_EnrolledIdentity" {
+		if uns.IsRegistryContract(parsed.Contract) {
 			e.metrics.RejectPublish(metrics.ReasonRegistryContract)
-			return nil, fmt.Errorf("admin state batch record %d (%s): _EnrolledIdentity is enrollment-door only — use POST /enroll", i, input.Topic)
+			return nil, fmt.Errorf("admin state batch record %d (%s): %s is enrollment-door only — use POST /enroll or the enrollment requests", i, input.Topic, parsed.Contract)
 		}
 		class := e.ClassOf(parsed.Contract)
 		if uns.IsNodeLocal(class) {

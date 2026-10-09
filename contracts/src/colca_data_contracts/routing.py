@@ -65,6 +65,10 @@ CLASS_TABLE: dict[str, str] = {
     "_NotificationDispatched": "alarm",
     "_Annotation": "annotation",
     "_EnrolledIdentity": "entity",
+    # A node's enrollment stores, mirrored by the node that holds them so the
+    # tree above sees what waits for a decision. Built in, like the registry.
+    "_EnrollmentRequest": "entity",
+    "_EnrollmentPreapproval": "entity",
     "_Group": "definition",
     "_ClockDefinition": "definition",
     "_MetadataType": "definition",

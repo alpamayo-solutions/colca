@@ -155,6 +155,17 @@ def test_enrollment_contract_is_builtin_and_edge_node_is_retired():
     assert "_EdgeNode" not in body["contracts"]
 
 
+def test_enrollment_mirrors_are_builtin_entities():
+    from colca_data_contracts.routing import CLASS_TABLE, stream_of_contract
+
+    body, _ = gb.build_bundle()
+    for contract in ("_EnrollmentRequest", "_EnrollmentPreapproval"):
+        assert contract in gb.BUILTIN_ONLY
+        assert contract not in body["contracts"]
+        assert CLASS_TABLE[contract] == "entity"
+        assert stream_of_contract(contract) == "entities"
+
+
 def test_subset_lint_only_allowed_keywords():
     body, _ = gb.build_bundle()
     for ident, entry in body["contracts"].items():

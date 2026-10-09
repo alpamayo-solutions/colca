@@ -61,7 +61,7 @@ func TestUplinkPolicyKeepsQueuedSamplesAndNeverBackfillsLocalHistory(t *testing.
 	done := make(chan struct{})
 	go func() { defer close(done); RunUplink(f.cl, eng, nil, nil, stop) }()
 	defer func() { close(stop); waitForClosed(t, "uplink", done, 5*time.Second) }()
-	waitFor(t, "all physical offsets acknowledged", 5*time.Second, func() bool { return cs.CursorGet(uns.UplinkCursor(f.pid.PublicHex()), "metrics") == 454 })
+	waitFor(t, "all physical offsets acknowledged", 5*time.Second, func() bool { return cs.CursorGet(uns.UplinkCursor(CursorScope(f.pid.PublicHex())), "metrics") == 454 })
 	got, _, err := f.ps.Read("metrics", 1, 100, nil)
 	if err != nil || len(got) != 2 {
 		t.Fatalf("hub metrics: %+v %v", got, err)

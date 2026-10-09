@@ -22,9 +22,9 @@ func (nsByPath) Reaches(string) bool { return false }
 
 var ns = nsByPath{}
 
-// hex64 is a syntactically valid ed25519 pubkey (64 hex chars) — for tests
-// that only need Validate to get past the pubkey shape check.
-var hex64 = strings.Repeat("ab", 32)
+// hex64 is a syntactically valid ed25519 pubkey (SPKI hex) — for tests that
+// only need Validate to get past the pubkey shape check.
+var hex64 = "302a300506032b6570032100" + strings.Repeat("ab", 32)
 
 // mapScope is the explicit test scope: where elements sit and which are this
 // node or above it. Use it where the answer has to change (rename, reparent,
@@ -60,7 +60,7 @@ func cmdAt(path, classes string) string { return "cmd:" + elementAt(path) + "/#:
 func entry(mount string, grants ...string) *Entry {
 	return &Entry{
 		ULID:    "01MACHINE0000000000000000A",
-		Pubkey:  strings.Repeat("ab", 32),
+		Pubkey:  hex64,
 		Kind:    KindExternal,
 		Element: elementAt(mount),
 		Grants:  grants,

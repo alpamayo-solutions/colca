@@ -98,7 +98,10 @@ func (e *Engine) rejectDenied(reason string, actor Attribution, operation string
 	return Result{}, &RejectError{Reason: reason, Denied: true, Err: fmt.Errorf(format, args...)}
 }
 
-var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true, "_TimeSync": true}
+var builtinOnly = map[string]bool{
+	"_StreamGap": true, "_EnrolledIdentity": true, "_TimeSync": true,
+	uns.EnrollmentRequestContract: true, uns.EnrollmentPreapprovalContract: true,
+}
 
 // SetContracts installs the loaded bundle table (node startup; nil = floor).
 func (e *Engine) SetContracts(t *contracts.Table) { e.contracts = t }

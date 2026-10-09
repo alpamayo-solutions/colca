@@ -27,7 +27,7 @@ func startLocalNode(t *testing.T) *node.Node {
 	n, err := node.Start(&config.Config{
 		ULID:      "n-hist",
 		DataDir:   filepath.Join(base, "data"),
-		KeyFile:   keyFile,
+		Identity:  config.Identity{KeyFile: keyFile},
 		API:       config.API{LocalAddr: "127.0.0.1:0"},
 		MQTTLocal: config.Endpoint{Addr: "127.0.0.1:0"},
 	})
@@ -177,7 +177,7 @@ func TestTheHealthDoorFollowsTheNodesCursorLagFinding(t *testing.T) {
 	n, err := node.Start(&config.Config{
 		ULID:      "n-hist",
 		DataDir:   filepath.Join(base, "data"),
-		KeyFile:   keyFile,
+		Identity:  config.Identity{KeyFile: keyFile},
 		API:       config.API{LocalAddr: "127.0.0.1:0"},
 		MQTTLocal: config.Endpoint{Addr: "127.0.0.1:0"},
 		Contracts: config.Contracts{Bundle: contractstest.GeneratedBundlePath(t)},

@@ -205,6 +205,39 @@ for it is answered with a `410` `_Ack`. A plain `DELETE` only
 revokes: the child's replicated state stays, for a child that will be enrolled
 again and resume where it stopped.
 
+## Upgrading to node enrollment
+
+Upgrade the hub first, then the floor nodes top down, then the edges.
+
+- **A parent** rewrites its registry on the first start: every key as SPKI hex
+  with its fingerprint, every enrolled child node kept active and marked
+  `cert_state: none`. Nobody has to approve anything. Such a child is still
+  admitted with its self-signed certificate.
+- **A child** asks its parent for a certificate on its first start with the
+  new release and presents it from then on. Its entry at the parent goes to
+  `cert_state: issued`, and from that moment the parent refuses its
+  self-signed certificate. A child still on the old release keeps working
+  against an upgraded parent (it stays `cert_state: none`); an upgraded child
+  against an old parent keeps its self-signed certificate and asks again
+  hourly.
+- **An IPC with a TPM**: set `identity.key_store: tpm` and map the TPM device.
+  On start the node finds its file key, creates a key in the TPM, and asks the
+  parent to move its entry there, signed by the new key over the old key's
+  connection. Under `enrollment.key_change: auto` the parent accepts at once;
+  the entry, element, mount, replicated data and cursors stay. The old key file
+  is replaced by the TPM key blob. The node's own doors (its MQTT door, its
+  replication door) present the new key after the next restart. A node with
+  children enrolled at it does not do this by itself, because the children pin
+  its key.
+- Once `GET /enroll` shows no `cert_state: none` left, set
+  `enrollment.require_issued_cert: true` at the parent.
+- `parent.pubkey` may now be written as SPKI hex; the raw 64-hex form still
+  works and a change of spelling keeps the replication cursors.
+- The top-level `key_file` is no longer read; move it to `identity.key_file`
+  before upgrading, or the node refuses to start.
+- **Rollback**: an older colcad cannot read a TPM key blob. A node rolled back
+  after a key change needs a new file key and a new approval.
+
 ## Backups
 
 A node's state is its `data_dir`. Stop the node, or snapshot the filesystem,

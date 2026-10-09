@@ -1,5 +1,6 @@
 // Command colca-keygen generates an ed25519 identity key and prints its public
-// key in hex, the value an admin enrolls at a node.
+// key as hex of its SubjectPublicKeyInfo DER, the value an admin enrolls at a
+// node.
 //
 // With -cert it also writes <out.key>.crt, a self-signed certificate wrapping
 // the key, for MQTT and HTTPS clients that need a TLS client certificate. Trust

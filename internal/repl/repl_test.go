@@ -739,7 +739,7 @@ func TestCursorsAreScopedPerParent(t *testing.T) {
 
 	// The cursor that moved is the one named for this parent.
 	waitFor(t, "the uplink cursor for this parent to advance", 20*time.Second, func() bool {
-		return cs.CursorGet(uns.UplinkCursor(parentPub), "metrics") > 1
+		return cs.CursorGet(uns.UplinkCursor(CursorScope(parentPub)), "metrics") > 1
 	})
 	if got := cs.CursorGet(uns.UplinkCursor("ffff"), "metrics"); got != 1 {
 		t.Fatalf("a DIFFERENT parent's uplink cursor = %d, want the untouched default 1 — "+

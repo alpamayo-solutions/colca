@@ -78,7 +78,7 @@ func newWorldWithConfig(t *testing.T, configure func(*config.Config)) *world {
 		m1:  authtest.NewMachine(t, "m1"),
 		obs: authtest.NewMachine(t, "observer"),
 	}
-	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
+	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), Identity: config.Identity{KeyFile: "unused"},
 		MQTT: config.Endpoint{Addr: "127.0.0.1:0"}}
 	if configure != nil {
 		configure(cfg)
@@ -123,7 +123,7 @@ func TestBrokerCapsPacketSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
+	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), Identity: config.Identity{KeyFile: "unused"},
 		MQTT: config.Endpoint{Addr: "127.0.0.1:0"}}
 	s, err := New(cfg, nodeID, reg, nil, nil, nil, 1024)
 	if err != nil {
@@ -245,7 +245,7 @@ func startServerWithLocalDoor(t *testing.T) *world {
 		t.Fatal(err)
 	}
 	w := &world{st: st, reg: reg}
-	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
+	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), Identity: config.Identity{KeyFile: "unused"},
 		MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
 		MQTTLocal: config.Endpoint{Addr: "127.0.0.1:0"},
 	}
@@ -1326,7 +1326,7 @@ func suppliedPair(t *testing.T) (certFile, keyFile string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(other.Priv)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(other.Signer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1374,7 +1374,7 @@ func TestASuppliedCertificateServesTheHumanDoorAndNotTheMachineDoor(t *testing.T
 		t.Fatal(err)
 	}
 	cfg := &config.Config{
-		ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
+		ULID: "n1", DataDir: t.TempDir(), Identity: config.Identity{KeyFile: "unused"},
 		MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
 		MQTTHuman: config.MQTTHuman{TCPAddr: "127.0.0.1:0"},
 		Auth:      &config.Auth{Issuers: []config.AuthIssuer{{URL: "http://issuer.test"}}, Audience: "colca", JWKSURL: "http://issuer.test/jwks"},
