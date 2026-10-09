@@ -449,9 +449,17 @@ The reader's side of the contract:
   its own, before reading the signal's history. That waits for the pages that
   were written without seeing the signal listed.
 - **Timing:** lateness is decided when the mark statement runs, after the
-  page's rows are written; compute an hour no earlier than 65 minutes after
-  its start plus the time from there to the page's commit, for a sample
-  without a mark to be in what is read.
+  page's rows are written. Every marking transaction first takes
+  `LOCK TABLE historian_late_write IN ROW EXCLUSIVE MODE`, before writing
+  samples and before selecting candidate late hours. To close an hour,
+  no earlier than 65 minutes after its start, first take the conflicting
+  `SHARE` lock. This waits for pages that decided they were not late but
+  have not committed yet. Release that barrier before computing: take it
+  inside a savepoint and roll the savepoint back, or use a separate
+  transaction. Pages admitted after the barrier decide lateness after their
+  lock wait and leave marks; the expensive computation never holds them up.
+  Bound the reader's lock wait and retry a refused close without advancing
+  its watermark. A stalled page must not be closed past.
 - **Taking up marks:** the historian looks for the relations when it writes a
   page, at most once a minute. A page that started before it saw them commits
   unmarked: list signals only after the record says `late_write_marks`, and

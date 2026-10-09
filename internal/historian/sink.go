@@ -151,6 +151,12 @@ const lateWriteTablesExist = `
 SELECT to_regclass('historian_late_write') IS NOT NULL
    AND to_regclass('historian_late_write_signal') IS NOT NULL`
 
+// A reader closing an hour briefly takes SHARE on this relation, waiting for
+// every page that might have decided it was not late before the deadline.
+// Take this before writing samples and before the process-clock prefilter:
+// a page queued behind the reader must decide lateness after that wait.
+const lockClosingHour = `LOCK TABLE historian_late_write IN ROW EXCLUSIVE MODE`
+
 // The SQLSTATEs of a reader's relations that are gone or not shaped as the
 // contract says (no such column, no unique key to conflict on): the marks
 // stop, the history does not.
@@ -547,6 +553,11 @@ func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offs
 		return fmt.Errorf("historian: beginning a batch: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if marking {
+		if _, err := tx.Exec(ctx, lockClosingHour); err != nil {
+			return fmt.Errorf("historian: synchronizing a page with hour closing: %w", err)
+		}
+	}
 
 	batch := &pgx.Batch{}
 	for start := 0; start < len(rows); {
@@ -642,6 +653,11 @@ func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, o
 		return nil, fmt.Errorf("historian: beginning a row-by-row retry at offset %d: %w", offset, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if marking {
+		if _, err := tx.Exec(ctx, lockClosingHour); err != nil {
+			return nil, fmt.Errorf("historian: synchronizing a row-by-row page with hour closing: %w", err)
+		}
+	}
 
 	var rejections []Rejection
 	landed := make([]Row, 0, len(rows))
