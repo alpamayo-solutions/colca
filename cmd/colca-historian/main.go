@@ -207,7 +207,7 @@ func run() int {
 		}
 		watch := &clockwork.Subscription{Node: self.Node, Topic: os.Getenv("FACTORY_CLOCK_TOPIC"), Dependencies: deps}
 		announcer.OnConnect, announcer.OnDisconnect = watch.Attach, watch.Reset
-		gate := &clockwork.Gate{Asynchronous: os.Getenv("FACTORY_ASYNC_CONSUMER") == "true", Door: logDoor, Name: cfg.colcaService, Topic: watch.Topic, Dependencies: deps, State: watch.State, Fresh: watch.Fresh, ReportDetails: announcer.ReportClock}
+		gate := &clockwork.Gate{Asynchronous: os.Getenv("FACTORY_ASYNC_CONSUMER") == "true", Door: logDoor, Name: cfg.colcaService, Topic: watch.Topic, Dependencies: deps, State: watch.State, Fresh: watch.Fresh, Telemetry: announcer.ReportProgress}
 		if err := gate.Register(ctx); err != nil {
 			log.Error("clock registration", "err", err)
 			return 2
@@ -402,6 +402,7 @@ func serveObservability(addr string, bridge *historian.Bridge, signals *historia
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		announcer.WriteMetrics(w)
 		_, _ = fmt.Fprintf(w,
 			"# HELP colca_historian_stream_gaps_total Pruned ranges this bridge could not historise.\n"+
 				"# TYPE colca_historian_stream_gaps_total counter\n"+
