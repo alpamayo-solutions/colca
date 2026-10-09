@@ -75,6 +75,10 @@ A caller is one of:
   short page so they do not stay unread on your cursor.
 - `max` defaults to 100 for `/fetch` (at most 5000) and to 1000 for `/kv`
   (at most 10000). Pass `next` back as `after` until it is empty.
+- A page also ends before the record or entry that would take it past 8 MiB
+  of stored data, and `next` resumes at that record or entry. A page always
+  holds at least one. A short page is therefore no sign of the end: for
+  `/fetch` that is `next` reaching the head, for `/kv` an empty `next`.
 - `contract` on `/kv` and `/fetch` may be repeated. An unknown name is a `400`.
   On `/kv` the node keeps an index by contract, so a filtered read costs what
   it returns, not what lies under the prefix. On `/fetch` the other records

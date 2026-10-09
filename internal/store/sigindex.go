@@ -117,7 +117,7 @@ func (s *Store) openSigIndex() error {
 // the given signals: every record it returns carries one of them, and filter
 // decides on the rest of its view (grants, topics). It reads through the signal
 // index, so the records of other signals cost nothing; maxScan bounds the index
-// entries visited.
+// entries visited and maxBytes the stored bytes returned (see pageBytes).
 //
 // next is the offset after the last record visited, or the stream head when
 // none of the signals has a record before it, so a reader of rare signals
@@ -132,7 +132,7 @@ func (s *Store) openSigIndex() error {
 // whose index tables carried megabytes of range tombstones held gigabytes for
 // as long as it ran. Now one read pins the blocks of one position, whatever the
 // number of signals.
-func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, limit, maxScan int, signals []string, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
+func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, signals []string, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	s.state.RLock()
 	covered, head, lwm := s.sigFrom[stream], s.next[stream], s.lwm[stream]
 	// Appends publish head after they commit, so this snapshot holds every
@@ -141,7 +141,7 @@ func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, lim
 	s.state.RUnlock()
 	defer func() { _ = snap.Close() }()
 	if from < covered {
-		return s.ReadRecordsBounded(ctx, stream, from, limit, maxScan, filter)
+		return s.ReadRecordsBounded(ctx, stream, from, limit, maxScan, maxBytes, filter)
 	}
 	if from >= head {
 		return nil, from, nil
@@ -157,6 +157,7 @@ func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, lim
 
 	next = from
 	scanned := 0
+	page := pageBytes{max: maxBytes}
 	// A round collects the `want` smallest index entries from next on and visits
 	// them in offset order. One round serves a read whose filter accepts what the
 	// index yields; each further one looks at more entries at once, so a filter
@@ -197,6 +198,7 @@ func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, lim
 				return nil, next, err
 			}
 			var e recEnc
+			size := len(val)
 			err = json.Unmarshal(val, &e)
 			closer.Close()
 			if err != nil {
@@ -205,6 +207,9 @@ func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, lim
 			record := storedRecord(off, e)
 			if filter != nil && !filter(record) {
 				continue
+			}
+			if !page.take(size, len(out)) {
+				return out, off, nil // the next page starts at this record
 			}
 			out = append(out, record)
 			if len(out) == limit {

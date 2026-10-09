@@ -730,14 +730,16 @@ func (s *Store) Read(stream string, from uint64, limit int, filter func(string) 
 // the last scanned position + 1, filtered records included, so a consumer of a
 // sparse view keeps moving forward.
 func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
-	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, filter)
+	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, 0, filter)
 }
 
 // ReadRecordsBounded is ReadRecords that also stops after maxScan scanned
-// records (0: no bound) and when ctx ends. A filter that matches little would
-// otherwise scan to the head in one call, however long the stream; a bounded
-// page may be empty while next still moves forward.
-func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
+// records (0: no bound), before the record that would take the page past
+// maxBytes stored bytes (0: no bound; see pageBytes), and when ctx ends. A
+// filter that matches little would otherwise scan to the head in one call,
+// however long the stream; a bounded page may be empty while next still moves
+// forward.
+func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: streamKey(stream, from),
 		UpperBound: streamKey(stream, ^uint64(0)),
@@ -748,6 +750,7 @@ func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint
 	defer iter.Close()
 	next = from
 	scanned := 0
+	page := pageBytes{max: maxBytes}
 	for iter.First(); iter.Valid() && len(out) < limit; iter.Next() {
 		if maxScan > 0 && scanned >= maxScan {
 			break
@@ -764,11 +767,15 @@ func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint
 		if err := json.Unmarshal(iter.Value(), &e); err != nil {
 			return nil, next, err
 		}
-		next = off + 1
 		record := storedRecord(off, e)
 		if filter != nil && !filter(record) {
+			next = off + 1
 			continue
 		}
+		if !page.take(len(iter.Value()), len(out)) {
+			break // next stays at this record
+		}
+		next = off + 1
 		out = append(out, record)
 	}
 	if err := iter.Error(); err != nil {
@@ -1711,15 +1718,19 @@ func (s *Store) KVVisit(prefix string, visit func(KVEntry)) error {
 // turn one request into a full walk. A non-empty contracts keeps only those
 // contracts and walks the contract index, so the work is proportional to the
 // entries that match rather than to everything under the prefix.
+//
+// It sets no byte bound: it is for the node's own walks, which take a page and
+// let it go before the next. A page for a client is KVScanPageDepth's.
 func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) ([]KVEntry, string, error) {
-	return s.KVScanPageDepth(prefix, after, limit, contracts, 0)
+	return s.KVScanPageDepth(prefix, after, limit, 0, contracts, 0)
 }
 
 // KVScanPageDepth is KVScanPage limited to entries at most depth path segments
-// below prefix (0: no limit). Deeper subtrees are skipped with a seek, not
-// walked, so a tree view reading one level pays for that level only.
-func (s *Store) KVScanPageDepth(prefix, after string, limit int, contracts []string, depth int) ([]KVEntry, string, error) {
-	entries, _, next, err := s.kvScanPage(prefix, after, limit, contracts, depth, false)
+// below prefix (0: no limit) and to maxBytes stored bytes (0: no bound; see
+// pageBytes). Deeper subtrees are skipped with a seek, not walked, so a tree
+// view reading one level pays for that level only.
+func (s *Store) KVScanPageDepth(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int) ([]KVEntry, string, error) {
+	entries, _, next, err := s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, false)
 	return entries, next, err
 }
 
@@ -1729,14 +1740,14 @@ func (s *Store) KVScanPageDepth(prefix, after string, limit int, contracts []str
 // call and learns which rows expand. Each folder is reported once, on the page
 // where the scan skips its subtree, and counts towards limit like an entry.
 // Folders ignore the contract filter: they describe the tree, not a contract.
-func (s *Store) KVScanLevel(prefix, after string, limit int, contracts []string, depth int) ([]KVEntry, []string, string, error) {
+func (s *Store) KVScanLevel(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int) ([]KVEntry, []string, string, error) {
 	if depth < 1 {
 		return nil, nil, "", fmt.Errorf("store: KV level scan needs a positive depth")
 	}
-	return s.kvScanPage(prefix, after, limit, contracts, depth, true)
+	return s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, true)
 }
 
-func (s *Store) kvScanPage(prefix, after string, limit int, contracts []string, depth int, withFolders bool) ([]KVEntry, []string, string, error) {
+func (s *Store) kvScanPage(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int, withFolders bool) ([]KVEntry, []string, string, error) {
 	if limit <= 0 {
 		return nil, nil, "", fmt.Errorf("store: KV page size must be positive")
 	}
@@ -1744,7 +1755,7 @@ func (s *Store) kvScanPage(prefix, after string, limit int, contracts []string, 
 		return nil, nil, "", fmt.Errorf("store: KV depth must not be negative")
 	}
 	if len(contracts) > 0 && depth == 0 {
-		entries, next, err := s.kvScanPageIndexed(prefix, after, limit, contracts)
+		entries, next, err := s.kvScanPageIndexed(prefix, after, limit, maxBytes, contracts)
 		return entries, nil, next, err
 	}
 	var want map[string]bool
@@ -1781,15 +1792,16 @@ func (s *Store) kvScanPage(prefix, after string, limit int, contracts []string, 
 		capacity = maxPrealloc
 	}
 	out := make([]KVEntry, 0, capacity)
+	page := pageBytes{max: maxBytes}
 	matched := 0
 	var lastKey []byte
 	var folders []string
 	for valid && matched < limit {
-		lastKey = append(lastKey[:0], iter.Key()...)
 		path, node, topic, ok := splitKVKey(string(iter.Key()[2:])) // strip "k\x00"
 		if ok && depth > 0 {
 			if d, lead := kvRelativeDepth(prefix, path); d > depth {
 				skip := kvSkipBelow(prefix, path, depth, lead)
+				lastKey = append(lastKey[:0], iter.Key()...)
 				if withFolders {
 					// The skip target sorts after the whole subtree and is no stored
 					// key, so as a page token it resumes past the folder, not in it.
@@ -1802,11 +1814,15 @@ func (s *Store) kvScanPage(prefix, after string, limit int, contracts []string, 
 			}
 		}
 		if ok && kvContractMatches(topic, want) {
+			if !page.take(len(iter.Value()), len(out)) {
+				break // the token resumes at this entry
+			}
 			if entry, decoded := decodeKVEntry(path, node, iter.Value()); decoded {
 				out = append(out, entry)
 				matched++
 			}
 		}
+		lastKey = append(lastKey[:0], iter.Key()...)
 		valid = iter.Next()
 	}
 	if err := iter.Error(); err != nil {

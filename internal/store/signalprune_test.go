@@ -19,7 +19,7 @@ func signalRuleFor(windows map[string]time.Duration) SignalRule {
 // signalOffsets lists the offsets of one signal's live records.
 func signalOffsets(t *testing.T, s *Store, signalID string) []uint64 {
 	t.Helper()
-	recs, _, err := s.ReadSignals(context.Background(), "metrics", s.LWM("metrics"), 10_000, 0, []string{signalID}, nil)
+	recs, _, err := s.ReadSignals(context.Background(), "metrics", s.LWM("metrics"), 10_000, 0, 0, []string{signalID}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

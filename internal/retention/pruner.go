@@ -551,7 +551,7 @@ func (p *Pruner) droppedCommands(stream string, overridden []overriddenCursor, u
 		}
 		message := "dropped: retention pruned it before " + who + " received it"
 		for from := c.pos; from < upTo; {
-			recs, next, err := p.st.ReadRecordsBounded(context.Background(), stream, from, 500, int(min(upTo-from, uint64(droppedScanBatch))), queued)
+			recs, next, err := p.st.ReadRecordsBounded(context.Background(), stream, from, 500, int(min(upTo-from, uint64(droppedScanBatch))), 0, queued)
 			if err != nil {
 				p.log.Error("retention: queued commands about to be pruned could not be read; their senders will not be answered",
 					"cursor", c.name, "err", err)

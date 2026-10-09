@@ -113,6 +113,13 @@ const (
 	maxLookupTopics = 1000
 	maxLookupBody   = 1 << 20
 	fetchScanBudget = 20000
+	// pageMaxBytes bounds the stored bytes of one /fetch or /kv page. A page of
+	// maxMax records may otherwise hold maxMax records of the record size limit
+	// (4 MiB by default): gigabytes, on the heap at once, once decoded and again
+	// once encoded. 8 MiB holds a full page of ordinary records (the historian's
+	// 5000 metrics are about 2 MiB); a page that ends early has a next or a token
+	// like any other, and holds at least one record, however large.
+	pageMaxBytes = 8 << 20
 )
 
 // TLSConfig builds the API listener's TLS config. Client certificates are
@@ -819,9 +826,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if hasSignalFilter {
 			// The signal index reads only the wanted signals' records, so a
 			// consumer of a few signals does not pay for the whole stream.
-			recs, next, err = e.Store().ReadSignals(r.Context(), stream, from, limit, fetchScanBudget, slices.Collect(maps.Keys(signalSet)), filter)
+			recs, next, err = e.Store().ReadSignals(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, slices.Collect(maps.Keys(signalSet)), filter)
 		} else {
-			recs, next, err = e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, filter)
+			recs, next, err = e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, filter)
 		}
 		if r.Context().Err() != nil {
 			return // the caller is gone; nobody reads the page
@@ -999,9 +1006,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		var folders []string
 		var next string
 		if withFolders {
-			entries, folders, next, err = e.Store().KVScanLevel(prefix, after, pageSize, contracts, depth)
+			entries, folders, next, err = e.Store().KVScanLevel(prefix, after, pageSize, pageMaxBytes, contracts, depth)
 		} else {
-			entries, next, err = e.Store().KVScanPageDepth(prefix, after, pageSize, contracts, depth)
+			entries, next, err = e.Store().KVScanPageDepth(prefix, after, pageSize, pageMaxBytes, contracts, depth)
 		}
 		if err != nil {
 			if errors.Is(err, store.ErrInvalidPageToken) {

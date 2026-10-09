@@ -66,7 +66,7 @@ func TestReadSignalsReturnsOnlyTheWantedSignalsAndItsBudgetCountsOnlyThem(t *tes
 
 	// A budget of 3 index entries reaches all three, 3000 busy records apart.
 	// The same budget on a scan would not leave the first busy records.
-	got, next, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 3, []string{"a", "b", "a"}, nil)
+	got, next, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 3, 0, []string{"a", "b", "a"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,14 +85,14 @@ func TestReadSignalsReturnsOnlyTheWantedSignalsAndItsBudgetCountsOnlyThem(t *tes
 	}
 
 	// A budget smaller than the matches pages through them without skipping one.
-	page, next, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 2, []string{"a", "b"}, nil)
+	page, next, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 2, 0, []string{"a", "b"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(page) != 2 || next != page[1].Offset+1 {
 		t.Fatalf("first page of two: %d records next=%d", len(page), next)
 	}
-	rest, next, err := s.ReadSignals(context.Background(), "metrics", next, 10, 2, []string{"a", "b"}, nil)
+	rest, next, err := s.ReadSignals(context.Background(), "metrics", next, 10, 2, 0, []string{"a", "b"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestReadSignalsReturnsOnlyTheWantedSignalsAndItsBudgetCountsOnlyThem(t *tes
 	}
 
 	// The limit stops the page at the last record it returns.
-	one, next, err := s.ReadSignals(context.Background(), "metrics", 1, 1, 0, []string{"a", "b"}, nil)
+	one, next, err := s.ReadSignals(context.Background(), "metrics", 1, 1, 0, 0, []string{"a", "b"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestReadSignalsReturnsOnlyTheWantedSignalsAndItsBudgetCountsOnlyThem(t *tes
 	}
 
 	// The filter still decides on what the index yields.
-	none, next, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 0, []string{"a", "b"}, func(r StoredRecord) bool { return r.SignalID == "b" })
+	none, next, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 0, 0, []string{"a", "b"}, func(r StoredRecord) bool { return r.SignalID == "b" })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestPruneCompactionAndEvictionTakeTheirIndexEntriesWithThem(t *testing.T) {
 	if got := countIndexEntries(t, s, "metrics"); got["busy"] != 1 {
 		t.Fatalf("index after compaction = %v, want the one live busy record", got)
 	}
-	got, _, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 0, []string{"busy"}, nil)
+	got, _, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 0, 0, []string{"busy"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestTheIndexIsTrustedAfterACleanCloseAndRestartsAfterAWriteWithoutIt(t *tes
 	if s, err = Open(dir); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 1, []string{"a"}, nil)
+	got, _, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 1, 0, []string{"a"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestTheIndexIsTrustedAfterACleanCloseAndRestartsAfterAWriteWithoutIt(t *tes
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	got, next, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 0, []string{"a"}, func(r StoredRecord) bool { return r.SignalID == "a" })
+	got, next, err := s.ReadSignals(context.Background(), "metrics", 1, 10, 0, 0, []string{"a"}, func(r StoredRecord) bool { return r.SignalID == "a" })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestTheIndexIsTrustedAfterACleanCloseAndRestartsAfterAWriteWithoutIt(t *tes
 	if _, _, err := s.Append("metrics", []Record{metricRecord("a", 5)}); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err = s.ReadSignals(context.Background(), "metrics", head+1, 10, 1, []string{"a"}, nil)
+	got, _, err = s.ReadSignals(context.Background(), "metrics", head+1, 10, 1, 0, []string{"a"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func mergedRead(t *testing.T, s *Store, from uint64, limit, maxScan int, signals
 		off := entries[0]
 		entries = entries[1:]
 		next = off + 1
-		recs, _, err := s.ReadRecordsBounded(context.Background(), "metrics", off, 1, 1, nil)
+		recs, _, err := s.ReadRecordsBounded(context.Background(), "metrics", off, 1, 1, 0, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -351,7 +351,7 @@ func TestReadSignalsVisitsTheSameEntriesAsAMergeOfEverySignal(t *testing.T) {
 			from := tc.from
 			for page := 0; ; page++ {
 				want, wantNext := mergedRead(t, s, from, tc.limit, tc.maxScan, tc.signals, tc.filter)
-				got, next, err := s.ReadSignals(context.Background(), "metrics", from, tc.limit, tc.maxScan, tc.signals, tc.filter)
+				got, next, err := s.ReadSignals(context.Background(), "metrics", from, tc.limit, tc.maxScan, 0, tc.signals, tc.filter)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -379,7 +379,7 @@ func TestReadSignalsStopsWhenItsContextEnds(t *testing.T) {
 	appendSparse(t, s, 10, map[int]string{2: "a"})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got, _, err := s.ReadSignals(ctx, "metrics", 1, 10, 0, []string{"a", "busy"}, nil); !errors.Is(err, context.Canceled) || got != nil {
+	if got, _, err := s.ReadSignals(ctx, "metrics", 1, 10, 0, 0, []string{"a", "busy"}, nil); !errors.Is(err, context.Canceled) || got != nil {
 		t.Fatalf("a cancelled read returned %d records and %v", len(got), err)
 	}
 }
@@ -405,7 +405,7 @@ func TestPruneLeavesOneRangeTombstonePerPruneHoweverManySignals(t *testing.T) {
 			t.Fatalf("the index holds %d entries of %s, want the %d of the last batch", index[id], id, perPrune)
 		}
 	}
-	got, next, err := s.ReadSignals(context.Background(), "metrics", 1, 1000, 0, ids, nil)
+	got, next, err := s.ReadSignals(context.Background(), "metrics", 1, 1000, 0, 0, ids, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -148,7 +148,7 @@ func BenchmarkReadSignalsAfterPrunes(b *testing.B) {
 					b.ResetTimer()
 					for range b.N {
 						p, a := peakHeap(func() {
-							if _, _, err := s.ReadSignals(context.Background(), "metrics", at.from, 1000, 20000, ids, nil); err != nil {
+							if _, _, err := s.ReadSignals(context.Background(), "metrics", at.from, 1000, 20000, 0, ids, nil); err != nil {
 								b.Fatal(err)
 							}
 						})
