@@ -229,7 +229,7 @@ func smallestSigOffsets(ctx context.Context, iter *pebble.Iterator, stream strin
 		upTo := head
 		if len(offs) == n {
 			upTo = offs[0]
-			if upTo-from < uint64(n) {
+			if upTo-from < uint64(n) { //nolint:gosec // n is positive
 				break // the n offsets are from..from+n-1: none smaller is left
 			}
 		}
