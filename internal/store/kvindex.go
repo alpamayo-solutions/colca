@@ -190,12 +190,13 @@ func (s *Store) reconcileKVIndexBounded(rows, batchBytes int, committed func(kvI
 					ik := kvIndexKey(path, node, topic)
 					if ik != nil {
 						_, c, getErr := s.db.Get(ik)
-						if getErr == nil {
+						switch {
+						case getErr == nil:
 							c.Close()
-						} else if errors.Is(getErr, pebble.ErrNotFound) {
+						case errors.Is(getErr, pebble.ErrNotFound):
 							err = b.Set(ik, nil, nil)
 							added++
-						} else {
+						default:
 							err = getErr
 						}
 					}
@@ -211,11 +212,12 @@ func (s *Store) reconcileKVIndexBounded(rows, batchBytes int, committed func(kvI
 					if !stale {
 						kvk := append([]byte("k\x00"), suffix...)
 						_, c, getErr := s.db.Get(kvk)
-						if getErr == nil {
+						switch {
+						case getErr == nil:
 							c.Close()
-						} else if errors.Is(getErr, pebble.ErrNotFound) {
+						case errors.Is(getErr, pebble.ErrNotFound):
 							stale = true
-						} else {
+						default:
 							err = getErr
 						}
 					}
