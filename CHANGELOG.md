@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.32.1](https://github.com/alpamayo-solutions/colca/compare/v0.32.0...v0.32.1) (2026-10-09)
+
+
+### Fixes
+
+* bound retained-state recovery and separate service runtime telemetry ([ec09e48](https://github.com/alpamayo-solutions/colca/commit/ec09e48e8a58498b5a31710b868c923517a0d19f))
+* **deps:** Go 1.26.9 and golang.org/x/net 0.60.0 ([#180](https://github.com/alpamayo-solutions/colca/issues/180)) ([6db8335](https://github.com/alpamayo-solutions/colca/commit/6db8335e38ecc0724a3403cb5cc41136861d50d1))
+
 ## [0.32.0](https://github.com/alpamayo-solutions/colca/compare/v0.31.0...v0.32.0) (2026-10-08)
 
 
