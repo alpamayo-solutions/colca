@@ -97,7 +97,13 @@ func NewPruner(st *store.Store, eng *engine.Engine, cfg config.Retention, m *met
 // Run runs one prune cycle every EffectiveInterval until stop is closed; an
 // interval of 0 disables the pruner and Run returns at once. A running cycle
 // always completes before Run returns. Before the first cycle, Run finishes any
-// state refresh a previous process left pending.
+// state refresh a previous process left pending and makes one policy pass per
+// stream.
+//
+// That first pass keeps a node that restarts more often than the interval from
+// never pruning: a parent restarted every two to three minutes for a day never
+// reached a 5 minute cycle, and its metrics piled up past their max_age. It is one capped pass, not a cycle: a restart
+// does not start the cycle's catch-up loop while the node is still recovering.
 func (p *Pruner) Run(stop <-chan struct{}) {
 	interval := p.cfg.EffectiveInterval()
 	if interval <= 0 {
@@ -105,6 +111,14 @@ func (p *Pruner) Run(stop <-chan struct{}) {
 		return
 	}
 	p.completePendingRefresh()
+	for _, stream := range streams {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		p.pruneStream(stream)
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
