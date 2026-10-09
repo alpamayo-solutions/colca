@@ -78,6 +78,10 @@ func (i *Identity) PublicHex() string { return hex.EncodeToString(i.spki) }
 // Fingerprint is SHA256:XX:XX:… over the SubjectPublicKeyInfo DER.
 func (i *Identity) Fingerprint() string { return pubkey.Fingerprint(i.spki) }
 
+// FingerprintID is the fingerprint as 64 lower-case hex characters, the form
+// used in URL paths.
+func (i *Identity) FingerprintID() string { return pubkey.FingerprintID(i.spki) }
+
 // ShortFingerprint is the first four pairs of the fingerprint.
 func (i *Identity) ShortFingerprint() string { return pubkey.Short(pubkey.Fingerprint(i.spki)) }
 

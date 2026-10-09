@@ -128,6 +128,29 @@ func FingerprintOf(pub crypto.PublicKey) (string, error) {
 	return Fingerprint(spki), nil
 }
 
+// FingerprintID is the fingerprint as 64 lower-case hex characters without
+// separators: the form a fingerprint takes in URL paths and record keys. The
+// display form is Fingerprint's.
+func FingerprintID(spki []byte) string {
+	sum := sha256.Sum256(spki)
+	return hex.EncodeToString(sum[:])
+}
+
+// ParseFingerprint reads a fingerprint in either form, display
+// ("SHA256:AB:CD:…", any case) or ID (64 hex characters), and returns its ID
+// form.
+func ParseFingerprint(s string) (string, error) {
+	body := s
+	if b, ok := strings.CutPrefix(s, "SHA256:"); ok {
+		body = strings.ReplaceAll(b, ":", "")
+	}
+	raw, err := hex.DecodeString(body)
+	if err != nil || len(raw) != sha256.Size {
+		return "", fmt.Errorf("fingerprint %q: want SHA256:XX:… or 64 hex characters", s)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
 func pairs(b []byte) string {
 	h := strings.ToUpper(hex.EncodeToString(b))
 	var sb strings.Builder

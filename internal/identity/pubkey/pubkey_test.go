@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -112,6 +113,27 @@ func TestEntryValidationAgreesWithParseHex(t *testing.T) {
 		uerr := uns.ValidPubkeyHex(in)
 		if (perr == nil) != (uerr == nil) {
 			t.Errorf("%q: ParseHex err=%v, uns.ValidPubkeyHex err=%v", in, perr, uerr)
+		}
+	}
+}
+
+func TestFingerprintIDAndParse(t *testing.T) {
+	spki, _ := hex.DecodeString(ed25519SPKI)
+	id := FingerprintID(spki)
+	if id != "06e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9" {
+		t.Fatalf("id = %s", id)
+	}
+	for _, in := range []string{ed25519FP, strings.ToLower(ed25519FP[7:]), id, "SHA256:" + id} {
+		if in == strings.ToLower(ed25519FP[7:]) {
+			in = "SHA256:" + in
+		}
+		if got, err := ParseFingerprint(in); err != nil || got != id {
+			t.Fatalf("ParseFingerprint(%q) = %s, %v", in, got, err)
+		}
+	}
+	for _, in := range []string{"", "SHA256:AB", id[:62], "SHA256:" + id + "00"} {
+		if _, err := ParseFingerprint(in); err == nil {
+			t.Fatalf("parsed %q", in)
 		}
 	}
 }
