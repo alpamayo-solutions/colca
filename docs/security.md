@@ -1,7 +1,8 @@
 # Security model
 
 Colca has no certificate authority and no password file. Nodes and machines
-are identified by ed25519 keys, people by OIDC tokens, and local services by
+are identified by key pairs (ed25519, or ECDSA P-256 for keys held in a TPM),
+people by OIDC tokens, and local services by
 the fact that they can reach a door that is never published.
 
 ## Doors
@@ -28,9 +29,10 @@ write. Keep them unpublished.
 
 ## Keys instead of a CA
 
-Every node and every machine owns an ed25519 key pair, created with
-`colca-keygen`. The TLS certificate is a self-signed wrapper around that key
-and carries no authority of its own.
+Every node and every machine owns a key pair. A machine's key is created with
+`colca-keygen`; a node creates its own on first start (see
+[Node keys](#node-keys)). The TLS certificate is a self-signed wrapper around
+that key and carries no authority of its own.
 
 - A parent accepts a child when the key in the child's client certificate
   belongs to a node enrolled at the parent.
@@ -40,6 +42,38 @@ and carries no authority of its own.
 
 TLS 1.3 is the minimum on every encrypted door. Revoking an entry closes the
 live session at once.
+
+## Node keys
+
+A node's key lives in one of two key stores, chosen by `identity.key_store`
+(see [Configuration](configuration.md#identity)):
+
+| Store | Algorithm | At `identity.key_file` | Can the private key be copied? |
+|---|---|---|---|
+| `file` | ed25519 for new keys; an existing ECDSA P-256 file key is kept | PKCS#8 PEM, mode 0600 | yes, by whoever can read the file |
+| `tpm` | ECDSA P-256, `fixedTPM` and `fixedParent`, signing only | the key's TPM2B public and private parts; the private part is wrapped by the chip | no |
+
+The TPM key is created under the owner hierarchy's standard ECC storage root
+key, which the node re-creates as a transient object whenever it needs it; no
+persistent TPM handle is used. A key blob is useless on any other TPM.
+
+What exists at `key_file` always wins over `key_store`: a TPM blob is only
+ever loaded from its TPM (the node does not start without it), a file key
+stays a file key, and a file that cannot be read as a key stops the start
+rather than being replaced, because a new key would be a new identity.
+
+A public key is written as hex of its SubjectPublicKeyInfo DER, in registry
+entries, `parent.pubkey` and `/healthz`. Entries and settings written before
+that hold a raw 64-hex ed25519 key; both forms are accepted and compared as
+the same key.
+
+The **fingerprint** of a key is SHA-256 over its SubjectPublicKeyInfo DER,
+shown as `SHA256:` and upper-case hex pairs separated by `:`; the first four
+pairs are the short fingerprint for reading out loud. In URL paths it is
+written as 64 lower-case hex characters. A node shows its fingerprint and key
+store in its start log, on `GET /healthz` and with `colcad identity
+<config.yaml>`. `colcad tpm-identity` prints the fingerprint of the TPM's
+endorsement key, which identifies the chip, without a node config.
 
 ## Identities
 

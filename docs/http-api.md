@@ -16,7 +16,7 @@ A caller is one of:
 
 | Method and path | Who | Request | Response |
 |---|---|---|---|
-| `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","storage":{"state":"ok"}}` |
+| `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","pubkey":"…","fingerprint":"SHA256:…","key_store":"file"\|"tpm","storage":{"state":"ok"}}` |
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}`, or `202` `{"stream":"logs","topic":"…","withheld":"…"}` without `offset` |
 | `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"stream":"logs","withheld":"…"} or {"error":"…","reason":"…"},…]}` |

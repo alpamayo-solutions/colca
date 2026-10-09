@@ -1,10 +1,13 @@
 # Configuration
 
 `colcad` takes one argument, the path to a YAML file. Only `ulid`, `data_dir`
-and `key_file` are required; every listener is off unless its address is set.
+and `identity.key_file` are required; every listener is off unless its address
+is set.
 
 ```bash
 colcad /etc/colca/node.yaml
+colcad identity /etc/colca/node.yaml   # print this node's key fingerprint
+colcad tpm-identity                    # print the TPM's endorsement key fingerprint
 ```
 
 ## A small tree
@@ -15,7 +18,7 @@ children:
 ```yaml
 ulid: n-global
 data_dir: /data
-key_file: /keys/global.key
+identity: { key_file: /keys/global.key }
 api:  { addr: ":443", local_addr: ":80", token: "change-me" }
 mqtt: { addr: ":8883" }
 mqtt_local: { addr: ":1883" }
@@ -27,13 +30,13 @@ An edge node below it. The parent's public key is pinned:
 ```yaml
 ulid: n-edge1
 data_dir: /data
-key_file: /keys/edge1.key
+identity: { key_file: /keys/edge1.key }
 api:  { addr: ":443", local_addr: ":80", token: "change-me" }
 mqtt: { addr: ":8883" }
 mqtt_local: { addr: ":1883" }
 parent:
   url: https://global.example.com:9443
-  pubkey: 3f1c…            # printed by colca-keygen for the parent's key
+  pubkey: 302a3005…        # the parent's public key, from its /healthz or `colcad identity`
 ```
 
 The edge is then placed and enrolled at its parent once. An identity binds to a
@@ -69,9 +72,29 @@ or clients in the file: identities are runtime state, stored by the node.
 | `standalone` | `false` by default. Permanently retire fleet trust; cannot coexist with `parent`. See [handover](operations.md#permanent-standalone-handover). |
 | `data_dir` | Directory of the node's database: streams, current state, cursors. |
 | `secrets_dir` | Separate database for sealed secrets. Empty disables `/secrets`. Must differ from `data_dir`. |
-| `key_file` | PEM file with the node's ed25519 private key, from `colca-keygen`. |
+| `identity` | Where the node key lives; see [Identity](#identity). |
 | `log_level` | `debug` for debug logging, anything else for info. |
 | `addr_file` | If set, the node writes the addresses its listeners actually bound to as JSON once they are up. Useful with `:0` ports. |
+
+## Identity
+
+```yaml
+identity:
+  key_store: auto          # auto | tpm | file
+  key_file: /keys/node.key
+  tpm_device: /dev/tpmrm0
+```
+
+| Key | Meaning |
+|---|---|
+| `identity.key_store` | `auto` (default): the TPM when `tpm_device` opens and a key can be created in it, otherwise a file key. `tpm`: the TPM or no start, so a missing device mapping is loud. `file`: a key file, as before TPM support. |
+| `identity.key_file` | Required. The file key (PKCS#8 PEM), or the TPM key blob for a key held in a TPM. The node creates it on first start. |
+| `identity.tpm_device` | The TPM, `/dev/tpmrm0` by default. A Unix socket path selects a TPM simulator (`swtpm --server type=unixio`). |
+| `key_file` | Older spelling of `identity.key_file`, still read. Setting both to different files is an error. |
+
+The key store only matters when `key_file` does not exist yet: an existing key
+is always loaded from where it is, and `colcad` logs the key store and the
+fingerprint once at start. See [Node keys](security.md#node-keys).
 
 ## Listeners
 
@@ -87,7 +110,7 @@ or clients in the file: identities are runtime state, stored by the node.
 | `repl.addr` | Replication door for child nodes. |
 | `tls.cert_file`, `tls.key_file` | Optional certificate for the HTTP API and the doors people use, for clients that expect one from a CA. Replication and the machine door always present the node's own key. |
 | `parent.url` | `https://host:port` of the parent's replication door. Absent means this node is a root. |
-| `parent.pubkey` | Hex public key of the parent, checked on every connection. |
+| `parent.pubkey` | Hex public key of the parent (SubjectPublicKeyInfo DER, or the raw 64-hex ed25519 form), checked on every connection. |
 | `parent.logs.min_level` | Lowest log level forwarded to the parent, `WARNING` by default. See [Log forwarding](#log-forwarding). |
 | `parent.logs.services` | Per-service override of `min_level`, keyed by service name. |
 
