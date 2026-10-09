@@ -256,6 +256,9 @@ func RunFleet(p FleetParams) error {
 			if err == nil {
 				client, err = repl.NewClient("https://"+p.HubRepl, p.HubPubkeyHex, id)
 			}
+			if err == nil {
+				err = enrollProtocolChild(context.Background(), client, childULID)
+			}
 			if err != nil {
 				errMu.Lock()
 				startErr = fmt.Errorf("%s: %w", name, err)
