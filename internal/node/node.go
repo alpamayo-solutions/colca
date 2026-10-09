@@ -422,19 +422,18 @@ func Start(cfg *config.Config) (*Node, error) {
 		// before Serve, so no client publish can race it and be overwritten by the
 		// snapshot. 10k paths take about 70ms.
 		seeded := 0
-		entries, err := st.KVScan("")
-		if err != nil {
-			// Without the full scan the retained set would be silently incomplete.
-			return fail(fmt.Errorf("node %s: reseed retained set: %w", cfg.ULID, err))
-		}
-		for _, en := range entries {
+		err := st.KVVisit("", func(en store.KVEntry) {
 			// Children's metrics are not retained on this bus (config.Bus);
 			// their current values are in /kv.
 			if !n.Engine.RetainOnBus(en.Topic) {
-				continue
+				return
 			}
 			n.MQTT.DeliverLocal(en.Topic, en.Payload, true)
 			seeded++
+		})
+		if err != nil {
+			// Without the full scan the retained set would be silently incomplete.
+			return fail(fmt.Errorf("node %s: reseed retained set: %w", cfg.ULID, err))
 		}
 		n.Metrics.SetReseedCount(seeded)
 		go func(mq *mqttsrv.Server) {

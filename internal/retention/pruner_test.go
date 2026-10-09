@@ -1078,3 +1078,59 @@ func TestFetchLogsAcksHaveShortRetention(t *testing.T) {
 		t.Fatalf("commands after the pass = %v", got)
 	}
 }
+
+// A record without a timestamp has no age, so max_age never takes it: the age
+// policy stops in front of it. A byte budget still applies.
+func TestAgePolicyNeverPrunesARecordWithoutTimestamp(t *testing.T) {
+	st, eng := mustParts(t)
+	old := time.Now().Add(-48 * time.Hour).UnixMilli()
+	appendAt(t, st, "metrics", 3, old, 1)
+	appendAt(t, st, "metrics", 1, 0, 0)
+	appendAt(t, st, "metrics", 3, old, 1)
+
+	p := newPruner(t, st, eng, retFor("metrics", config.StreamRetention{MaxAge: config.Duration(time.Hour)}))
+	p.runOnce()
+	if got := st.LWM("metrics"); got != 4 {
+		t.Fatalf("LWM = %d, want 4: the three old records go, the one without a timestamp stays", got)
+	}
+
+	p = newPruner(t, st, eng, retFor("metrics", config.StreamRetention{MaxAge: config.Duration(time.Hour), MaxBytes: 1}))
+	p.runOnce()
+	if got := st.LWM("metrics"); got <= 5 {
+		t.Fatalf("LWM = %d, want past 5: max_bytes prunes past a record without a timestamp", got)
+	}
+}
+
+// A node that restarts more often than the interval must still prune: Run makes
+// one capped policy pass per stream before it waits for the first cycle.
+func TestRunPrunesOncePerStreamBeforeTheFirstInterval(t *testing.T) {
+	st, eng := mustParts(t)
+	appendAt(t, st, "metrics", 20, time.Now().Add(-48*time.Hour).UnixMilli(), 1)
+	iv := config.Duration(time.Hour)
+	p := newPruner(t, st, eng, config.Retention{Interval: &iv, Streams: map[string]config.StreamRetention{"metrics": {MaxAge: config.Duration(time.Minute)}}})
+	p.scanCap = 3
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	p.beforePrune = func(stream string) {
+		if stream == "metrics" {
+			close(stop)
+		}
+	}
+	go func() { p.Run(stop); close(done) }()
+	<-done
+	if got := st.LWM("metrics"); got != 4 {
+		t.Fatalf("LWM = %d, want 4: one pass capped at 3 records, not the cycle's catch-up loop", got)
+	}
+}
+
+func TestRunStoppedBeforeItStartsPrunesNothing(t *testing.T) {
+	st, eng := mustParts(t)
+	appendAt(t, st, "metrics", 5, time.Now().Add(-48*time.Hour).UnixMilli(), 1)
+	p := newPruner(t, st, eng, retFor("metrics", config.StreamRetention{MaxAge: config.Duration(time.Minute)}))
+	stop := make(chan struct{})
+	close(stop)
+	p.Run(stop)
+	if got := st.LWM("metrics"); got != 1 {
+		t.Fatalf("a stopped pruner moved the LWM to %d", got)
+	}
+}

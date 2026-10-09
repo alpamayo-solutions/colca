@@ -108,7 +108,7 @@ func TestReadRecordsBoundedStopsAtTheScanBudgetAndStillReachesTheMatch(t *testin
 	}
 	wanted := func(r StoredRecord) bool { return r.SignalID == "wanted" }
 
-	got, next, err := s.ReadRecordsBounded(context.Background(), "metrics", 1, 10, 1000, wanted)
+	got, next, err := s.ReadRecordsBounded(context.Background(), "metrics", 1, 10, 1000, 0, wanted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestReadRecordsBoundedStopsAtTheScanBudgetAndStillReachesTheMatch(t *testin
 	}
 	pages := 1
 	for len(got) == 0 {
-		if got, next, err = s.ReadRecordsBounded(context.Background(), "metrics", next, 10, 1000, wanted); err != nil {
+		if got, next, err = s.ReadRecordsBounded(context.Background(), "metrics", next, 10, 1000, 0, wanted); err != nil {
 			t.Fatal(err)
 		}
 		pages++
@@ -137,12 +137,12 @@ func TestReadRecordsBoundedEndsWithItsContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	none := func(StoredRecord) bool { return false }
-	if _, next, err := s.ReadRecordsBounded(context.Background(), "metrics", 1, 10, 0, none); err != nil || next != 3001 {
+	if _, next, err := s.ReadRecordsBounded(context.Background(), "metrics", 1, 10, 0, 0, none); err != nil || next != 3001 {
 		t.Fatalf("live context: next=%d err=%v, want the whole stream scanned", next, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := s.ReadRecordsBounded(ctx, "metrics", 1, 10, 0, none); !errors.Is(err, context.Canceled) {
+	if _, _, err := s.ReadRecordsBounded(ctx, "metrics", 1, 10, 0, 0, none); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled context: err=%v, want context.Canceled", err)
 	}
 }

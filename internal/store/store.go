@@ -123,6 +123,10 @@ type Store struct {
 	// mu serialises every write that changes a stream (appends, replicated
 	// commits, pruning, registry batches); it is held through the synced commit.
 	mu sync.Mutex
+	// holes counts, per stream, the batches that removed records other than as a
+	// prefix: compaction, eviction, per-signal retention. A prune compares it
+	// with the count its scan started from. Guarded by mu.
+	holes map[string]uint64
 	// state guards the in-memory stream state readers need (next, lwm, bytes,
 	// the change channels and contract heads). A writer holds mu while it
 	// builds its batch and takes state only from its apply until it published
@@ -199,8 +203,8 @@ func (o Options) pebbleOptions(opts *pebble.Options) error {
 // SizesFor returns the largest memtable and the block cache size for a node
 // whose memory ceiling is ceiling bytes: a 32nd of the ceiling each, at most
 // 256 MiB, at least Pebble's own defaults (4 MiB, 8 MiB), which an unknown
-// ceiling also gets. Two memtables (one flushing) and the cache stay under a
-// tenth of the ceiling. colca builds without cgo, where Pebble allocates
+// ceiling also gets. Three memtables (see cacheSize) and the cache stay within
+// an eighth of the ceiling. colca builds without cgo, where Pebble allocates
 // both on the Go heap, so they count inside the Go memory limit
 // (internal/memlimit, 75 % of the ceiling), not in the quarter outside it. A
 // 512 MiB edge gets 16 MiB of each, a 2 GiB parent 64 MiB, an 8 GiB parent
@@ -229,6 +233,22 @@ func SizesFor(ceiling int64) (memTable, blockCache int64) {
 	return min(max(share, minMemTable), most), min(max(share, minCache), most)
 }
 
+// memtableReservations is how many full memtables Pebble may hold at once: the
+// two its write stall allows (MemTableStopWritesThreshold) and the one it keeps
+// for recycling.
+const memtableReservations = 3
+
+// cacheSize is the size the block cache is created with, so that blockCache
+// bytes of blocks fit beside the memtables. Pebble reserves every memtable it
+// allocates in the block cache (Cache.Reserve) and caches blocks only in what
+// is left. A cache of blockCache alone held no block once the memtables had
+// grown: the Chocolate Factory hub (2 GiB, 64 MiB of each) had 129 MiB of
+// memtables and 1.5 MiB of cached blocks in its heap profile, so every block
+// read was allocated and decompressed again.
+func cacheSize(memTable, blockCache int64) int64 {
+	return memtableReservations*memTable + blockCache
+}
+
 // Open opens or creates the store at dir with the default options.
 func Open(dir string) (*Store, error) { return OpenWithOptions(dir, Options{}) }
 
@@ -238,11 +258,12 @@ func Open(dir string) (*Store, error) { return OpenWithOptions(dir, Options{}) }
 func OpenWithOptions(dir string, o Options) (*Store, error) {
 	health := pebblelog.New("store")
 	opts := health.Options()
-	memTable, cacheSize := SizesFor(o.MemoryCeiling)
+	memTable, blockCache := SizesFor(o.MemoryCeiling)
 	opts.MemTableSize = uint64(memTable) //nolint:gosec // positive by construction
+	opts.MemTableStopWritesThreshold = memtableReservations - 1
 	// The block cache Pebble shares with nothing else; the store holds the
 	// only reference after Open.
-	cache := pebble.NewCache(cacheSize)
+	cache := pebble.NewCache(cacheSize(memTable, blockCache))
 	defer cache.Unref()
 	opts.Cache = cache
 	if err := o.pebbleOptions(opts); err != nil {
@@ -255,6 +276,7 @@ func OpenWithOptions(dir string, o Options) (*Store, error) {
 	s := &Store{
 		db: db, health: health, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{},
 		sigFrom:     map[string]uint64{},
+		holes:       map[string]uint64{},
 		appendApply: db.Apply,
 	}
 	for _, stream := range streams {
@@ -708,14 +730,16 @@ func (s *Store) Read(stream string, from uint64, limit int, filter func(string) 
 // the last scanned position + 1, filtered records included, so a consumer of a
 // sparse view keeps moving forward.
 func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
-	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, filter)
+	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, 0, filter)
 }
 
 // ReadRecordsBounded is ReadRecords that also stops after maxScan scanned
-// records (0: no bound) and when ctx ends. A filter that matches little would
-// otherwise scan to the head in one call, however long the stream; a bounded
-// page may be empty while next still moves forward.
-func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
+// records (0: no bound), before the record that would take the page past
+// maxBytes stored bytes (0: no bound; see pageBytes), and when ctx ends. A
+// filter that matches little would otherwise scan to the head in one call,
+// however long the stream; a bounded page may be empty while next still moves
+// forward.
+func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: streamKey(stream, from),
 		UpperBound: streamKey(stream, ^uint64(0)),
@@ -726,6 +750,7 @@ func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint
 	defer iter.Close()
 	next = from
 	scanned := 0
+	page := pageBytes{max: maxBytes}
 	for iter.First(); iter.Valid() && len(out) < limit; iter.Next() {
 		if maxScan > 0 && scanned >= maxScan {
 			break
@@ -742,11 +767,15 @@ func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint
 		if err := json.Unmarshal(iter.Value(), &e); err != nil {
 			return nil, next, err
 		}
-		next = off + 1
 		record := storedRecord(off, e)
 		if filter != nil && !filter(record) {
+			next = off + 1
 			continue
 		}
+		if !page.take(len(iter.Value()), len(out)) {
+			break // next stays at this record
+		}
+		next = off + 1
 		out = append(out, record)
 	}
 	if err := iter.Error(); err != nil {
@@ -1251,50 +1280,73 @@ func (s *Store) writeJournal(b *pebble.Batch, stream string, span PruneSpan) err
 }
 
 // pruneStats is the accounting of a doomed prefix: record count, shed logical
-// bytes and the time span, gathered by scanDoomed.
+// bytes and the time span, gathered by the scan that read it.
 type pruneStats struct {
 	pruned, shed    uint64
 	firstTS, lastTS int64
-	// signals are the signal ids the prefix carries: their index ranges go with it.
-	signals map[string]struct{}
+	// index names the signal index entry of every record of the prefix that has
+	// one: they go with their records. A signal id is held once, however many
+	// records carry it, so a prefix of 100k records costs a few megabytes.
+	index []sigEntry
+	ids   map[string]string
+}
+
+// sigEntry is one entry of the signal index.
+type sigEntry struct {
+	signalID string
+	off      uint64
+}
+
+// add accounts for one record of the prefix.
+func (st *pruneStats) add(off uint64, e *recEnc, size uint64) {
+	if st.pruned == 0 || e.TS < st.firstTS {
+		st.firstTS = e.TS
+	}
+	if st.pruned == 0 || e.TS > st.lastTS {
+		st.lastTS = e.TS
+	}
+	st.shed += size
+	st.pruned++
+	if e.SignalID == "" {
+		return
+	}
+	id, ok := st.ids[e.SignalID]
+	if !ok {
+		if st.ids == nil {
+			st.ids = map[string]string{}
+		}
+		id = e.SignalID
+		st.ids[id] = id
+	}
+	st.index = append(st.index, sigEntry{signalID: id, off: off})
 }
 
 // scanDoomed accumulates the accounting stats of the prefix [from, upTo).
 func (s *Store) scanDoomed(stream string, from, upTo uint64) (pruneStats, error) {
 	var st pruneStats
-	iter, err := s.db.NewIter(&pebble.IterOptions{
-		LowerBound: streamKey(stream, from),
-		UpperBound: streamKey(stream, upTo),
+	err := s.scanStream(stream, from, upTo, "prune", func(off uint64, e *recEnc, size uint64) bool {
+		st.add(off, e, size)
+		return true
 	})
-	if err != nil {
-		return st, err
-	}
-	for iter.First(); iter.Valid(); iter.Next() {
-		var e recEnc
-		if err := json.Unmarshal(iter.Value(), &e); err != nil {
-			iter.Close()
-			return st, fmt.Errorf("decode record %q during prune: %w", iter.Key(), err)
-		}
-		if st.pruned == 0 || e.TS < st.firstTS {
-			st.firstTS = e.TS
-		}
-		if st.pruned == 0 || e.TS > st.lastTS {
-			st.lastTS = e.TS
-		}
-		st.shed += uint64(len(iter.Key()) + len(iter.Value()))
-		st.pruned++
-		if e.SignalID != "" {
-			if st.signals == nil {
-				st.signals = map[string]struct{}{}
-			}
-			st.signals[e.SignalID] = struct{}{}
-		}
-	}
-	if err := iter.Close(); err != nil {
-		return st, err
-	}
-	return st, nil
+	return st, err
 }
+
+// PruneScan is a prefix of a stream as a policy scan read it: where it ends and
+// what Prune has to know of its records to delete them. PruneScanned takes it,
+// so the prefix is read and decoded once, not by the policy and again by the
+// prune.
+type PruneScan struct {
+	stream     string
+	from, upTo uint64
+	// holes is the stream's count of record deletions when the scan began: if it
+	// moved since, the scan may describe records that are gone.
+	holes uint64
+	stats pruneStats
+}
+
+// UpTo is the offset the scan would prune up to: the stream's new low-water
+// mark, or the old one when there is nothing to prune.
+func (p *PruneScan) UpTo() uint64 { return p.upTo }
 
 // RefreshRange is an owed state refresh: KV entries with Offset in [From, To)
 // must be appended again. It is stored as rp/{stream} in the prune batch and
@@ -1311,7 +1363,8 @@ type PruneOutcome struct {
 }
 
 // Prune removes the prefix [LWM..upTo) of a stream in one atomic, synced batch
-// (range tombstone, l/ and b/ counters, journal entry, and whatever plan adds),
+// (one range tombstone over its records, their signal index entries, l/ and b/
+// counters, journal entry, and whatever plan adds),
 // so a crash leaves the stream either fully pruned or untouched.
 //
 // Under the mutex, which CursorAck also takes, upTo shrinks to any cursor not in
@@ -1322,7 +1375,7 @@ type PruneOutcome struct {
 // the number of records removed.
 func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func(span PruneSpan) PruneOutcome) (uint64, error) {
 	s.mu.Lock()
-	next, lwm := s.next[stream], s.lwm[stream]
+	next, lwm, holes := s.next[stream], s.lwm[stream], s.holes[stream]
 	s.mu.Unlock()
 	if next == 0 {
 		return 0, fmt.Errorf("unknown stream %q", stream)
@@ -1333,19 +1386,30 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if upTo > next {
 		return 0, fmt.Errorf("prune %q up to %d: beyond next offset %d", stream, upTo, next)
 	}
-
-	// Scan the doomed prefix without the mutex: appends only write at offsets >=
-	// upTo, and the prefix only shrinks through Prune, which the LWM recheck below
-	// serializes.
 	stats, err := s.scanDoomed(stream, lwm, upTo)
 	if err != nil {
 		return 0, err
 	}
+	return s.PruneScanned(&PruneScan{stream: stream, from: lwm, upTo: upTo, holes: holes, stats: stats}, overridden, plan)
+}
 
+// PruneScanned is Prune of the prefix a policy scan read, without reading it
+// again. The scan ran without the mutex: appends only write at offsets beyond
+// it, and whatever else removes records of the stream is noticed here, under the
+// mutex, and answered with a second scan. A prune that committed since the scan
+// is an error.
+func (s *Store) PruneScanned(scan *PruneScan, overridden []string, plan func(span PruneSpan) PruneOutcome) (uint64, error) {
+	stream, lwm, upTo, stats := scan.stream, scan.from, scan.upTo, scan.stats
+	if upTo <= lwm {
+		return 0, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lwm[stream] != lwm {
 		return 0, fmt.Errorf("concurrent prune on stream %q", stream)
+	}
+	if next := s.next[stream]; upTo > next {
+		return 0, fmt.Errorf("prune %q up to %d: beyond next offset %d", stream, upTo, next)
 	}
 	// Recheck under the mutex: shrink upTo to the floor of every cursor the caller
 	// did not override.
@@ -1366,11 +1430,12 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if upTo <= lwm {
 		return 0, nil // a live cursor moved into the doomed range: nothing may go
 	}
-	if stats.pruned != upTo-lwm {
-		// A cursor moved into the range after the scan. Rescan the smaller range so the
-		// journal and plan see exactly what gets deleted.
-		stats, err = s.scanDoomed(stream, lwm, upTo)
-		if err != nil {
+	if upTo != scan.upTo || s.holes[stream] != scan.holes {
+		// A cursor moved into the range after the scan, or compaction, eviction or
+		// per-signal retention removed records of the stream. Rescan so the
+		// journal, the plan and the batch see exactly what gets deleted.
+		var err error
+		if stats, err = s.scanDoomed(stream, lwm, upTo); err != nil {
 			return 0, err
 		}
 	}
@@ -1384,8 +1449,9 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if err := b.DeleteRange(streamKey(stream, lwm), streamKey(stream, upTo), nil); err != nil {
 		return 0, err
 	}
-	for signalID := range stats.signals {
-		if err := b.DeleteRange(sigKey(stream, signalID, lwm), sigKey(stream, signalID, upTo), nil); err != nil {
+	// The index entries go one by one, not as a range per signal: see sigindex.go.
+	for _, e := range stats.index {
+		if err := b.Delete(sigKey(stream, e.signalID, e.off), nil); err != nil {
 			return 0, err
 		}
 	}
@@ -1488,6 +1554,14 @@ func (s *Store) ClearRefreshPending(stream string) error {
 // until fn returns false. It takes no mutex; Pebble iterators are consistent
 // snapshots. A record that does not decode is an error.
 func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64, ts int64, size uint64) bool) error {
+	return s.scanStream(stream, from, upTo, "scan", func(off uint64, e *recEnc, size uint64) bool {
+		return fn(off, e.TS, size)
+	})
+}
+
+// scanStream is ScanRecords with the whole decoded record, which is only valid
+// during the call. what names the scan in its error.
+func (s *Store) scanStream(stream string, from, upTo uint64, what string, fn func(off uint64, e *recEnc, size uint64) bool) error {
 	if upTo <= from {
 		return nil
 	}
@@ -1504,9 +1578,9 @@ func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64
 		off := binary.BigEndian.Uint64(key[len(key)-8:])
 		var e recEnc
 		if err := json.Unmarshal(iter.Value(), &e); err != nil {
-			return fmt.Errorf("decode record %q during scan: %w", key, err)
+			return fmt.Errorf("decode record %q during %s: %w", key, what, err)
 		}
-		if !fn(off, e.TS, uint64(len(key)+len(iter.Value()))) {
+		if !fn(off, &e, uint64(len(key)+len(iter.Value()))) {
 			break
 		}
 	}
@@ -1520,8 +1594,8 @@ func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64
 const DefaultPolicyScanCap = 100_000
 
 // PolicyPruneTarget walks stream forward from lwm and returns the offset the
-// retention policy alone would prune up to: records older than maxAge, and
-// enough bytes to bring the stream under maxBytes (maxAge <= 0 or maxBytes == 0
+// retention policy alone would prune up to: records older than maxAge (a
+// record with TS 0 is never older), and enough bytes to bring the stream under maxBytes (maxAge <= 0 or maxBytes == 0
 // disables either). It never passes clamp or examines more than maxScan records
 // (0 means no limit). The pruner passes the cursor floor as clamp; the metrics
 // collector passes next to see the policy without cursors.
@@ -1530,16 +1604,35 @@ const DefaultPolicyScanCap = 100_000
 // more. Either way target is a floor: safe to prune to, possibly short of the
 // policy's real target.
 func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time, maxAge time.Duration, maxBytes, liveBytes, clamp, maxScan uint64) (target uint64, clampedAtCap, hitScanCap bool, err error) {
+	return s.policyScan(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, maxScan, nil)
+}
+
+// PolicyPruneScan is PolicyPruneTarget for a caller that goes on to prune: the
+// scan it returns ends at the target and keeps what PruneScanned needs of the
+// records before it.
+func (s *Store) PolicyPruneScan(stream string, lwm, next uint64, now time.Time, maxAge time.Duration, maxBytes, liveBytes, clamp, maxScan uint64) (scan *PruneScan, clampedAtCap, hitScanCap bool, err error) {
+	s.mu.Lock()
+	scan = &PruneScan{stream: stream, from: lwm, holes: s.holes[stream]}
+	s.mu.Unlock()
+	scan.upTo, clampedAtCap, hitScanCap, err = s.policyScan(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, maxScan, &scan.stats)
+	return scan, clampedAtCap, hitScanCap, err
+}
+
+// policyScan walks the policy over the stream. It accounts in stats, when
+// given, for each record the policy prunes.
+func (s *Store) policyScan(stream string, lwm, next uint64, now time.Time, maxAge time.Duration, maxBytes, liveBytes, clamp, maxScan uint64, stats *pruneStats) (target uint64, clampedAtCap, hitScanCap bool, err error) {
 	cutoff := now.UnixMilli() - maxAge.Milliseconds()
 	target = lwm
 	var shed, scanned uint64
-	err = s.ScanRecords(stream, lwm, next, func(off uint64, ts int64, size uint64) bool {
+	err = s.scanStream(stream, lwm, next, "scan", func(off uint64, e *recEnc, size uint64) bool {
 		if maxScan > 0 && scanned >= maxScan {
 			hitScanCap = true // policy wants more, the scan budget forbids it
 			return false
 		}
 		scanned++
-		ageWants := maxAge > 0 && ts < cutoff
+		// A record without a timestamp has no age: maxAge never takes it, and so
+		// it stops the age policy there. Only maxBytes can prune past it.
+		ageWants := maxAge > 0 && e.TS > 0 && e.TS < cutoff
 		sizeWants := maxBytes > 0 && liveBytes > shed+maxBytes // liveBytes−shed > maxBytes, underflow-safe
 		if !ageWants && !sizeWants {
 			return false // first record the policy keeps
@@ -1550,6 +1643,9 @@ func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time
 		}
 		shed += size
 		target = off + 1
+		if stats != nil {
+			stats.add(off, e, size)
+		}
 		return true
 	})
 	return target, clampedAtCap, hitScanCap, err
@@ -1561,14 +1657,27 @@ func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time
 // storage fault. Callers must not treat that as empty: the blob sweeper would
 // delete files that are still referenced.
 func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
+	var out []KVEntry
+	err := s.KVVisit(prefix, func(entry KVEntry) { out = append(out, entry) })
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// KVVisit visits the current KV projection in key order without retaining the
+// decoded entries. The iterator holds one consistent view, including when a
+// visitor writes state; newly written records are not added to this visit.
+// The callback must not close the store. An iterator error may follow callbacks
+// that already ran, so callers must handle a partially completed visit.
+func (s *Store) KVVisit(prefix string, visit func(KVEntry)) error {
 	lb := kvPrefix(prefix)
 	ub := append(append([]byte{}, lb...), 0xFF)
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
 	if err != nil {
-		return nil, fmt.Errorf("store: kv scan %q: open iterator: %w", prefix, err)
+		return fmt.Errorf("store: kv scan %q: open iterator: %w", prefix, err)
 	}
 	defer iter.Close()
-	var out []KVEntry
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := string(iter.Key()[2:]) // strip "k\x00"
 		// The key is path \x00 node \x00 topic. Keeping the topic in the key makes the
@@ -1586,7 +1695,7 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 		if json.Unmarshal(iter.Value(), &e) != nil {
 			continue
 		}
-		out = append(out, KVEntry{
+		visit(KVEntry{
 			Path:         key[:pathSep],
 			NodeID:       rest[:nodeSep],
 			Topic:        e.Topic,
@@ -1599,9 +1708,9 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 		})
 	}
 	if err := iter.Error(); err != nil {
-		return nil, fmt.Errorf("store: kv scan %q: %w", prefix, err)
+		return fmt.Errorf("store: kv scan %q: %w", prefix, err)
 	}
-	return out, nil
+	return nil
 }
 
 // KVScanPage returns at most limit KV entries and an opaque continuation token.
@@ -1609,15 +1718,19 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 // turn one request into a full walk. A non-empty contracts keeps only those
 // contracts and walks the contract index, so the work is proportional to the
 // entries that match rather than to everything under the prefix.
+//
+// It sets no byte bound: it is for the node's own walks, which take a page and
+// let it go before the next. A page for a client is KVScanPageDepth's.
 func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) ([]KVEntry, string, error) {
-	return s.KVScanPageDepth(prefix, after, limit, contracts, 0)
+	return s.KVScanPageDepth(prefix, after, limit, 0, contracts, 0)
 }
 
 // KVScanPageDepth is KVScanPage limited to entries at most depth path segments
-// below prefix (0: no limit). Deeper subtrees are skipped with a seek, not
-// walked, so a tree view reading one level pays for that level only.
-func (s *Store) KVScanPageDepth(prefix, after string, limit int, contracts []string, depth int) ([]KVEntry, string, error) {
-	entries, _, next, err := s.kvScanPage(prefix, after, limit, contracts, depth, false)
+// below prefix (0: no limit) and to maxBytes stored bytes (0: no bound; see
+// pageBytes). Deeper subtrees are skipped with a seek, not walked, so a tree
+// view reading one level pays for that level only.
+func (s *Store) KVScanPageDepth(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int) ([]KVEntry, string, error) {
+	entries, _, next, err := s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, false)
 	return entries, next, err
 }
 
@@ -1627,14 +1740,14 @@ func (s *Store) KVScanPageDepth(prefix, after string, limit int, contracts []str
 // call and learns which rows expand. Each folder is reported once, on the page
 // where the scan skips its subtree, and counts towards limit like an entry.
 // Folders ignore the contract filter: they describe the tree, not a contract.
-func (s *Store) KVScanLevel(prefix, after string, limit int, contracts []string, depth int) ([]KVEntry, []string, string, error) {
+func (s *Store) KVScanLevel(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int) ([]KVEntry, []string, string, error) {
 	if depth < 1 {
 		return nil, nil, "", fmt.Errorf("store: KV level scan needs a positive depth")
 	}
-	return s.kvScanPage(prefix, after, limit, contracts, depth, true)
+	return s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, true)
 }
 
-func (s *Store) kvScanPage(prefix, after string, limit int, contracts []string, depth int, withFolders bool) ([]KVEntry, []string, string, error) {
+func (s *Store) kvScanPage(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int, withFolders bool) ([]KVEntry, []string, string, error) {
 	if limit <= 0 {
 		return nil, nil, "", fmt.Errorf("store: KV page size must be positive")
 	}
@@ -1642,7 +1755,7 @@ func (s *Store) kvScanPage(prefix, after string, limit int, contracts []string, 
 		return nil, nil, "", fmt.Errorf("store: KV depth must not be negative")
 	}
 	if len(contracts) > 0 && depth == 0 {
-		entries, next, err := s.kvScanPageIndexed(prefix, after, limit, contracts)
+		entries, next, err := s.kvScanPageIndexed(prefix, after, limit, maxBytes, contracts)
 		return entries, nil, next, err
 	}
 	var want map[string]bool
@@ -1679,15 +1792,16 @@ func (s *Store) kvScanPage(prefix, after string, limit int, contracts []string, 
 		capacity = maxPrealloc
 	}
 	out := make([]KVEntry, 0, capacity)
+	page := pageBytes{max: maxBytes}
 	matched := 0
 	var lastKey []byte
 	var folders []string
 	for valid && matched < limit {
-		lastKey = append(lastKey[:0], iter.Key()...)
 		path, node, topic, ok := splitKVKey(string(iter.Key()[2:])) // strip "k\x00"
 		if ok && depth > 0 {
 			if d, lead := kvRelativeDepth(prefix, path); d > depth {
 				skip := kvSkipBelow(prefix, path, depth, lead)
+				lastKey = append(lastKey[:0], iter.Key()...)
 				if withFolders {
 					// The skip target sorts after the whole subtree and is no stored
 					// key, so as a page token it resumes past the folder, not in it.
@@ -1700,11 +1814,15 @@ func (s *Store) kvScanPage(prefix, after string, limit int, contracts []string, 
 			}
 		}
 		if ok && kvContractMatches(topic, want) {
+			if !page.take(len(iter.Value()), len(out)) {
+				break // the token resumes at this entry
+			}
 			if entry, decoded := decodeKVEntry(path, node, iter.Value()); decoded {
 				out = append(out, entry)
 				matched++
 			}
 		}
+		lastKey = append(lastKey[:0], iter.Key()...)
 		valid = iter.Next()
 	}
 	if err := iter.Error(); err != nil {

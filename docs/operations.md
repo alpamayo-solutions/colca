@@ -82,7 +82,27 @@ cache are sized from the same ceiling, a 32nd of it each, between Pebble's
 defaults (4 MiB and 8 MiB, also used when no ceiling is found) and 256 MiB: a
 512 MiB edge gets 16 MiB of each, a 2 GiB hub 64 MiB, an 8 GiB hub 256 MiB.
 Raising a hub's memory ceiling therefore also gives its store larger
-memtables, which compact less under heavy ingest.
+memtables, which compact less under heavy ingest. Pebble reserves its
+memtables in the block cache, so the cache is created with room for three of
+them beside the blocks; memtables and cache together stay within an eighth of
+the ceiling.
+
+### The store's own statistics
+
+| Metric | Labels | Shows |
+|---|---|---|
+| `colca_pebble_block_cache_bytes` | | bytes of blocks in the block cache |
+| `colca_pebble_block_cache_hits_total`, `colca_pebble_block_cache_misses_total` | | block reads served from the cache, and those read from a table |
+| `colca_pebble_memtable_bytes` | `state` (`current`, `obsolete`) | memtables in use and queued for flush, and those an open read still pins or Pebble keeps for reuse |
+| `colca_pebble_level_bytes`, `colca_pebble_level_tables` | `level` | size and number of tables per LSM level |
+| `colca_pebble_bytes_written_total` | `kind` (`wal`, `flush`, `compaction`) | what the store wrote since it opened; compaction against the other two is the write amplification |
+| `colca_pebble_compaction_debt_bytes`, `colca_pebble_compactions_in_progress` | | compaction work still owed, and compactions running |
+| `colca_pebble_table_iterators` | | open table iterators; a read holds several |
+| `colca_pebble_tombstones` | | approximate number of point and range deletion tombstones in the tables |
+| `colca_pebble_deletion_reclaimable_bytes` | `kind` (`point`, `range`) | table bytes compaction can drop because deletions cover them |
+| `colca_pebble_table_stats_complete` | | 1 once the two deletion gauges cover every table present at start |
+
+A scrape reads Pebble's counters only; it opens no table.
 
 Replicated records reach the local MQTT bus through one goroutine after they
 are durable. Each child's records, and so each topic's, arrive in order;
@@ -112,6 +132,10 @@ See [Configuration](configuration.md#logs).
 
 The pruner removes the oldest records of a stream in one atomic step and never
 touches the current-state view, which only shrinks through empty payloads.
+It runs every `retention.interval` (5 minutes by default) and once at start, one
+pass of at most 100 000 records per stream, so a node that restarts more often
+than the interval still prunes. `max_age` never removes a record without a
+timestamp; `max_bytes` does.
 
 Every named cursor protects the stream, including the replication cursor that
 forms a child's offline buffer. If the age or size limit wants to remove

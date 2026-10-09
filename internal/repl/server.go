@@ -635,7 +635,7 @@ func (s *Server) noteForwarded(child, mount string, after uint64) {
 			uns.CommandWantsProgress(r.Payload)
 	}
 	for from < after {
-		recs, next, err := st.ReadRecordsBounded(context.Background(), "commands", from, maxDownlinkMax, int(min(after-from, uint64(maxDownlinkScan))), wants)
+		recs, next, err := st.ReadRecordsBounded(context.Background(), "commands", from, maxDownlinkMax, int(min(after-from, uint64(maxDownlinkScan))), 0, wants)
 		if err != nil {
 			s.log.Warn("downlink: progress acks for forwarded commands not written", "child", child, "err", err)
 			return

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/cockroachdb/pebble/v2"
 )
@@ -21,10 +22,21 @@ import (
 // not the length of the stream it crosses.
 //
 // The entry lives and dies with its record, always in the same batch:
-//   - Prune deletes [LWM, upTo) of every signal the doomed prefix carries, one
-//     range per signal. The prefix is decoded for the prune journal anyway, so
-//     the signals cost no extra read.
-//   - Compaction and eviction delete the entry of each record they delete.
+//   - Prune deletes the entry of each record of the doomed prefix. The prefix
+//     is decoded for the retention policy and the prune journal anyway, so the
+//     entries cost no extra read.
+//   - Compaction, eviction and per-signal retention delete the entry of each
+//     record they delete.
+//
+// Prune used to delete [LWM, upTo) of every signal the prefix carried as one
+// range per signal. That is one range tombstone per signal and prune, and they
+// are slow to leave: Pebble drops one only when it reaches the last level. A
+// parent pruning 450 signals in batches of 100k records had 361,000 of them in
+// its tables, megabytes of range deletion block per table, which every iterator
+// on the index has to load whole. A point tombstone lies in the data blocks
+// beside the entry it deletes, below the low-water mark where no read seeks,
+// and goes with it in the next compaction. The stream's own records still go as
+// one range per prune.
 //
 // A fetchLogs ack is filed under the reserved key uns.FetchLogsAckKey in the
 // same way, so per-signal retention can remove those pages from the commands
@@ -105,126 +117,170 @@ func (s *Store) openSigIndex() error {
 // the given signals: every record it returns carries one of them, and filter
 // decides on the rest of its view (grants, topics). It reads through the signal
 // index, so the records of other signals cost nothing; maxScan bounds the index
-// entries visited.
+// entries visited and maxBytes the stored bytes returned (see pageBytes).
 //
 // next is the offset after the last record visited, or the stream head when
 // none of the signals has a record before it, so a reader of rare signals
 // reaches the head in one call. A read that starts below the index's coverage
 // is ReadRecordsBounded.
-func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, limit, maxScan int, signals []string, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
+//
+// The read walks the signals one after the other with a single iterator and
+// keeps only the smallest offsets it may still visit. It used to hold one open
+// iterator per signal and merge them. Every open iterator pins the range
+// deletion block of each table it stands in, and a block the cache cannot keep
+// is allocated once per iterator: a read of some hundred signals on a store
+// whose index tables carried megabytes of range tombstones held gigabytes for
+// as long as it ran. Now one read pins the blocks of one position, whatever the
+// number of signals.
+func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, signals []string, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	s.state.RLock()
-	covered, head := s.sigFrom[stream], s.next[stream]
+	covered, head, lwm := s.sigFrom[stream], s.next[stream], s.lwm[stream]
 	// Appends publish head after they commit, so this snapshot holds every
 	// record below head and the index entries written with them.
 	snap := s.db.NewSnapshot()
 	s.state.RUnlock()
 	defer func() { _ = snap.Close() }()
 	if from < covered {
-		return s.ReadRecordsBounded(ctx, stream, from, limit, maxScan, filter)
+		return s.ReadRecordsBounded(ctx, stream, from, limit, maxScan, maxBytes, filter)
 	}
 	if from >= head {
 		return nil, from, nil
 	}
 
-	var cursors offsetHeap
-	defer func() {
-		for _, c := range cursors.all {
-			_ = c.iter.Close()
-		}
-	}()
-	seen := make(map[string]bool, len(signals))
-	for _, signalID := range signals {
-		if seen[signalID] {
-			continue
-		}
-		seen[signalID] = true
-		iter, err := snap.NewIter(&pebble.IterOptions{
-			LowerBound: sigKey(stream, signalID, from),
-			UpperBound: sigKey(stream, signalID, head),
-		})
-		if err != nil {
-			return nil, from, err
-		}
-		c := &sigCursor{iter: iter}
-		cursors.all = append(cursors.all, c)
-		if iter.First() {
-			c.off, _ = offsetOf(iter.Key())
-			cursors.live = append(cursors.live, c)
-		} else if err := iter.Error(); err != nil {
-			return nil, from, err
-		}
+	// In key order, so the iterator only ever moves forward within a round.
+	wanted := slices.Compact(slices.Sorted(slices.Values(signals)))
+	iter, err := snap.NewIter(nil)
+	if err != nil {
+		return nil, from, err
 	}
-	heap.Init(&cursors)
+	defer func() { _ = iter.Close() }()
 
 	next = from
 	scanned := 0
-	for cursors.Len() > 0 && len(out) < limit {
-		if maxScan > 0 && scanned >= maxScan {
-			return out, next, nil
-		}
-		scanned++
-		if scanned%1024 == 0 {
-			if err := ctx.Err(); err != nil {
-				return nil, next, err
+	page := pageBytes{max: maxBytes}
+	// A round collects the `want` smallest index entries from next on and visits
+	// them in offset order. One round serves a read whose filter accepts what the
+	// index yields; each further one looks at more entries at once, so a filter
+	// that rejects most of them does not cost a pass over the signals per page.
+	want := limit
+	for len(out) < limit {
+		budget := maxSigRound
+		if maxScan > 0 {
+			if scanned >= maxScan {
+				return out, next, nil
 			}
+			budget = min(budget, maxScan-scanned)
 		}
-		c := cursors.live[0]
-		off := c.off
-		if c.iter.Next() {
-			c.off, _ = offsetOf(c.iter.Key())
-			heap.Fix(&cursors, 0)
-		} else {
-			if err := c.iter.Error(); err != nil {
-				return nil, next, err
-			}
-			heap.Pop(&cursors)
-		}
-		next = off + 1
-		val, closer, err := snap.Get(streamKey(stream, off))
-		if errors.Is(err, pebble.ErrNotFound) {
-			continue // an entry its record outlived; nothing to return
-		}
+		want = min(max(want, limit-len(out)), budget)
+		// One more than this round visits tells whether any entry is left after it.
+		// Below the low-water mark lie only the tombstones of pruned entries.
+		offs, err := smallestSigOffsets(ctx, iter, stream, wanted, max(next, lwm), head, want+1)
 		if err != nil {
 			return nil, next, err
 		}
-		var e recEnc
-		err = json.Unmarshal(val, &e)
-		closer.Close()
-		if err != nil {
-			return nil, next, fmt.Errorf("decode record %d of %q: %w", off, stream, err)
+		more := len(offs) > want
+		if more {
+			offs = offs[:want]
 		}
-		record := storedRecord(off, e)
-		if filter != nil && !filter(record) {
-			continue
+		for i, off := range offs {
+			scanned++
+			if scanned%1024 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, next, err
+				}
+			}
+			next = off + 1
+			val, closer, err := snap.Get(streamKey(stream, off))
+			if errors.Is(err, pebble.ErrNotFound) {
+				continue // an entry its record outlived; nothing to return
+			}
+			if err != nil {
+				return nil, next, err
+			}
+			var e recEnc
+			size := len(val)
+			err = json.Unmarshal(val, &e)
+			closer.Close()
+			if err != nil {
+				return nil, next, fmt.Errorf("decode record %d of %q: %w", off, stream, err)
+			}
+			record := storedRecord(off, e)
+			if filter != nil && !filter(record) {
+				continue
+			}
+			if !page.take(size, len(out)) {
+				return out, off, nil // the next page starts at this record
+			}
+			out = append(out, record)
+			if len(out) == limit {
+				more = more || i < len(offs)-1
+				break
+			}
 		}
-		out = append(out, record)
-	}
-	if cursors.Len() == 0 {
-		// No wanted record remains before the head.
-		next = head
+		if !more {
+			// No wanted record remains before the head.
+			return out, head, nil
+		}
+		want *= 4
 	}
 	return out, next, nil
 }
 
-// sigCursor is one signal's position in a merged index read.
-type sigCursor struct {
-	iter *pebble.Iterator
-	off  uint64
+// maxSigRound bounds the offsets one round of ReadSignals holds (8 bytes each)
+// when the caller sets no scan budget.
+const maxSigRound = 1 << 16
+
+// smallestSigOffsets returns, ascending, the n smallest offsets in [from, head)
+// that the signal index holds for any of the signals, or all of them when there
+// are fewer. It moves the one iterator from signal to signal. Once it holds n
+// offsets, a later signal is only read below the largest of them, so the entries
+// it steps over stay close to n however many records the signals have.
+func smallestSigOffsets(ctx context.Context, iter *pebble.Iterator, stream string, signals []string, from, head uint64, n int) ([]uint64, error) {
+	offs := make(offsetMaxHeap, 0, min(n, 1024))
+	for i, signalID := range signals {
+		if i%64 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		upTo := head
+		if len(offs) == n {
+			upTo = offs[0]
+			if upTo-from < uint64(n) { //nolint:gosec // n is positive
+				break // the n offsets are from..from+n-1: none smaller is left
+			}
+		}
+		iter.SetBounds(sigKey(stream, signalID, from), sigKey(stream, signalID, upTo))
+		for valid := iter.First(); valid; valid = iter.Next() {
+			off, _ := offsetOf(iter.Key())
+			if len(offs) < n {
+				heap.Push(&offs, off)
+				continue
+			}
+			if off >= offs[0] {
+				break
+			}
+			offs[0] = off
+			heap.Fix(&offs, 0)
+		}
+		if err := iter.Error(); err != nil {
+			return nil, err
+		}
+	}
+	slices.Sort(offs)
+	return offs, nil
 }
 
-// offsetHeap orders the live cursors by their next offset. all keeps every
-// iterator opened, so each is closed exactly once however the read ends.
-type offsetHeap struct {
-	live []*sigCursor
-	all  []*sigCursor
-}
+// offsetMaxHeap keeps the largest of the offsets it holds on top.
+type offsetMaxHeap []uint64
 
-func (h *offsetHeap) Len() int           { return len(h.live) }
-func (h *offsetHeap) Less(i, j int) bool { return h.live[i].off < h.live[j].off }
-func (h *offsetHeap) Swap(i, j int)      { h.live[i], h.live[j] = h.live[j], h.live[i] }
-func (h *offsetHeap) Push(x any)         { h.live = append(h.live, x.(*sigCursor)) }
-func (h *offsetHeap) Pop() any {
-	last := h.live[len(h.live)-1]
-	h.live = h.live[:len(h.live)-1]
+func (h offsetMaxHeap) Len() int           { return len(h) }
+func (h offsetMaxHeap) Less(i, j int) bool { return h[i] > h[j] }
+func (h offsetMaxHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *offsetMaxHeap) Push(x any)        { *h = append(*h, x.(uint64)) }
+func (h *offsetMaxHeap) Pop() any {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
 	return last
 }
