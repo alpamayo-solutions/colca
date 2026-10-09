@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -225,5 +227,158 @@ func TestTheIndexIsTrustedAfterACleanCloseAndRestartsAfterAWriteWithoutIt(t *tes
 	}
 	if len(got) != 1 || got[0].Offset != head+1 {
 		t.Fatalf("after the restart: %+v, want the record appended at %d", got, head+1)
+	}
+}
+
+// mergedRead is what ReadSignals has to return, computed the plain way: every
+// index entry of the wanted signals from `from` on, visited in offset order
+// until the limit or the scan budget ends the page.
+func mergedRead(t *testing.T, s *Store, from uint64, limit, maxScan int, signals []string, filter func(StoredRecord) bool) (offsets []uint64, next uint64) {
+	t.Helper()
+	wanted := map[string]bool{}
+	for _, signalID := range signals {
+		wanted[signalID] = true
+	}
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: []byte("si\x00metrics\x00"),
+		UpperBound: []byte("si\x00metrics\x01"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer iter.Close()
+	var entries []uint64
+	prefix := len("si\x00metrics\x00")
+	for iter.First(); iter.Valid(); iter.Next() {
+		key := iter.Key()
+		if off, _ := offsetOf(key); wanted[string(key[prefix:len(key)-9])] && off >= from {
+			entries = append(entries, off)
+		}
+	}
+	slices.Sort(entries)
+	next = from
+	scanned := 0
+	for len(entries) > 0 && len(offsets) < limit {
+		if maxScan > 0 && scanned >= maxScan {
+			return offsets, next
+		}
+		scanned++
+		off := entries[0]
+		entries = entries[1:]
+		next = off + 1
+		recs, _, err := s.ReadRecordsBounded(context.Background(), "metrics", off, 1, 1, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(recs) == 0 || recs[0].Offset != off || (filter != nil && !filter(recs[0])) {
+			continue
+		}
+		offsets = append(offsets, off)
+	}
+	if len(entries) == 0 {
+		next = s.NextOffset("metrics")
+	}
+	return offsets, next
+}
+
+func TestReadSignalsVisitsTheSameEntriesAsAMergeOfEverySignal(t *testing.T) {
+	s := mustOpen(t)
+	// 40 signals of very different rates, interleaved: s00 has a record in every
+	// round, s39 in every 40th; "silent" has none at all.
+	var recs []Record
+	var ids []string
+	for i := range 40 {
+		ids = append(ids, fmt.Sprintf("s%02d", i))
+	}
+	for round := range 120 {
+		for i, id := range ids {
+			if round%(i+1) == 0 {
+				recs = append(recs, metricRecord(id, int64(round)))
+			}
+		}
+		recs = append(recs, metricRecord("other", int64(round)))
+	}
+	if _, _, err := s.Append("metrics", recs); err != nil {
+		t.Fatal(err)
+	}
+	head := s.NextOffset("metrics")
+	// The index entry of a record that is gone is stepped over, and still counts
+	// as visited.
+	if err := s.db.Delete(streamKey("metrics", 7), pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prune("metrics", 4, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	total := len(recs) - 120
+	odd := func(r StoredRecord) bool { return r.Offset%2 == 1 }
+	rare := func(r StoredRecord) bool { return r.Offset%97 == 0 }
+	none := func(StoredRecord) bool { return false }
+	all := append([]string{"silent", "s05"}, ids...) // s05 twice, in no order
+	for _, tc := range []struct {
+		name           string
+		from           uint64
+		limit, maxScan int
+		signals        []string
+		filter         func(StoredRecord) bool
+	}{
+		{"everything in one page", 1, total + 10, 0, all, nil},
+		{"the limit is exactly what is left", 4, total - 3, 0, all, nil},
+		{"one less than what is left", 4, total - 4, 0, all, nil},
+		{"small pages", 1, 7, 0, all, nil},
+		{"the budget ends the page", 1, 100, 13, all, nil},
+		{"the budget is exactly what is left", 4, 1000, total - 3, all, nil},
+		{"limit and budget end together", 1, 9, 9, all, nil},
+		{"the filter rejects half", 1, 50, 0, all, odd},
+		{"the filter rejects nearly all", 1, 3, 0, all, rare},
+		{"the filter rejects nearly all, on a budget", 1, 3, 150, all, rare},
+		{"the filter rejects all", 1, 10, 0, all, none},
+		{"the filter rejects all, on a budget", 1, 10, 200, all, none},
+		{"rare signals only", 1, 10, 0, []string{"s39", "s37", "silent"}, nil},
+		{"signals without records", 1, 10, 5, []string{"silent", "absent"}, nil},
+		{"no signals", 1, 10, 0, nil, nil},
+		{"from the middle", head / 2, 25, 0, all, nil},
+		{"the last record", head - 1, 10, 0, all, nil},
+		{"past the last wanted record", head - 1, 10, 0, []string{"s39"}, nil},
+		{"at the head", head, 10, 0, all, nil},
+		{"below the low-water mark", 2, 5, 0, all, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Page through to the head: every page has to match, and so the pages
+			// together neither skip nor repeat a record.
+			from := tc.from
+			for page := 0; ; page++ {
+				want, wantNext := mergedRead(t, s, from, tc.limit, tc.maxScan, tc.signals, tc.filter)
+				got, next, err := s.ReadSignals(context.Background(), "metrics", from, tc.limit, tc.maxScan, tc.signals, tc.filter)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var offsets []uint64
+				for _, r := range got {
+					offsets = append(offsets, r.Offset)
+				}
+				if !slices.Equal(offsets, want) || next != wantNext {
+					t.Fatalf("page %d from %d: offsets %v next=%d, want %v next=%d", page, from, offsets, next, want, wantNext)
+				}
+				if next >= head {
+					return
+				}
+				if next <= from {
+					t.Fatalf("page %d from %d made no progress", page, from)
+				}
+				from = next
+			}
+		})
+	}
+}
+
+func TestReadSignalsStopsWhenItsContextEnds(t *testing.T) {
+	s := mustOpen(t)
+	appendSparse(t, s, 10, map[int]string{2: "a"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got, _, err := s.ReadSignals(ctx, "metrics", 1, 10, 0, []string{"a", "busy"}, nil); !errors.Is(err, context.Canceled) || got != nil {
+		t.Fatalf("a cancelled read returned %d records and %v", len(got), err)
 	}
 }
