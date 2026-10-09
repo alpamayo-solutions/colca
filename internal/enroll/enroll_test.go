@@ -10,9 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-tpm/tpm2"
+
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/identity/tpmattest"
+	"github.com/alpamayo-solutions/colca/internal/identity/tpmkey"
+	"github.com/alpamayo-solutions/colca/internal/identity/tpmtest"
 	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -309,6 +314,15 @@ func TestPendingStoreLimits(t *testing.T) {
 	}
 	if _, err := f.m.Request(extra.Fingerprint()); !errors.Is(err, ErrNotFound) {
 		t.Fatal("a refused key was stored")
+	}
+	// A pre-approved key is not stored as pending, so the limit does not hold
+	// it back (a fleet of edges behind one address).
+	pre := f.key("pre")
+	if _, err := f.m.Preapprove(PreapprovalInput{Match: uns.EnrollmentMatch{Key: pre.Fingerprint()}, Element: "el-press"}, person); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := f.ask(pre, Request{ULID: "01PRE"}); code != 200 {
+		t.Fatalf("a pre-approved key from a limited source: %d", code)
 	}
 	// Another source is not limited by the first one's keys; an hour later the
 	// first one isn't either.
@@ -682,5 +696,81 @@ func TestDecideMapsTheVerbs(t *testing.T) {
 	}
 	if _, _, _, handled := f.m.Decide(ctx, "enroll", nil); handled {
 		t.Fatal("enroll is not an enrollment verb")
+	}
+}
+
+// A TPM proves its key in the request: evidence, the credential challenge,
+// activation. With an EK certificate from a trusted manufacturer the request
+// is tpm-attested and matches a pre-approval of that TPM's endorsement key;
+// the issued certificate names the TPM.
+func TestAnAttestedTPMMatchesItsEKPreapproval(t *testing.T) {
+	dev, err := tpmkey.Open(tpmtest.Start(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dev.Close()
+	_, manufacturer := tpmtest.ProvisionEKCert(t, dev, tpm2.ECCEKTemplate, tpmattest.EKCertIndexECC)
+	ek, err := tpmattest.ReadEK(dev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := dev.CreateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ak, err := tpmattest.CreateAK(dev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ak.Close()
+
+	f := newFixture(t, config.Enrollment{Require: "tpm-attested"})
+	f.now = time.Now() // the EK certificate is valid around the real time
+	f.m.roots.AddCert(manufacturer)
+	id, err := identity.New(key, identity.StoreTPM, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.m.Preapprove(PreapprovalInput{Match: uns.EnrollmentMatch{EK: ek.Fingerprint()}, Element: "el-press"}, person); err != nil {
+		t.Fatal(err)
+	}
+	qd, _ := QualifyingData(f.parent.PublicHex())
+	ev, err := tpmattest.Collect(ek, ak, key, qd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, resp := f.ask(id, Request{ULID: "01TPM", KeyStore: "tpm", Attestation: ev})
+	if code != 202 || resp.Challenge == nil {
+		t.Fatalf("first round: %d %+v", code, resp)
+	}
+	// Activation with a wrong secret proves nothing.
+	if code, resp := f.ask(id, Request{ULID: "01TPM", KeyStore: "tpm", Activation: []byte("guess")}); code != 202 || resp.Challenge != nil {
+		t.Fatalf("a guessed secret: %d %+v", code, resp)
+	}
+	if r, _ := f.m.Request(id.Fingerprint()); r.KeyStore != uns.KeyStoreTPM || r.BelowPolicy != "tpm-attested" {
+		t.Fatalf("a claim is not attested: %+v", r)
+	}
+	code, resp = f.ask(id, Request{ULID: "01TPM", KeyStore: "tpm", Attestation: ev})
+	if code != 202 || resp.Challenge == nil {
+		t.Fatalf("second challenge: %d %+v", code, resp)
+	}
+	secret, err := tpmattest.ActivateCredential(ak, ek, resp.Challenge.CredentialBlob, resp.Challenge.EncryptedSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, resp = f.ask(id, Request{ULID: "01TPM", KeyStore: "tpm", Activation: secret})
+	if code != 200 || resp.KeyStore != uns.KeyStoreTPMAttested {
+		t.Fatalf("activated: %d %+v", code, resp)
+	}
+	leaf := f.leaf(resp, id)
+	var uris []string
+	for _, u := range leaf.URIs {
+		uris = append(uris, u.String())
+	}
+	if !strings.Contains(strings.Join(uris, " "), "colca:keystore:tpm-attested") || !strings.Contains(strings.Join(uris, " "), "colca:ek:Infineon:1267") {
+		t.Fatalf("SAN URIs: %v", uris)
+	}
+	if e, _ := f.reg.Get("01TPM"); e.KeyStore != uns.KeyStoreTPMAttested || e.EKManufacturer != "Infineon" || e.EKSerial != "1267" {
+		t.Fatalf("entry: %+v", e)
 	}
 }

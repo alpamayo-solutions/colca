@@ -534,6 +534,9 @@ func (m *Manager) newRequestLocked(peerHex, fp, fpID string, pub crypto.PublicKe
 		return reply(400, Response{Fingerprint: fp, Reason: err.Error()})
 	}
 	rec, known := m.requests[fpID]
+	// A source that filed NewKeysPerIPHour new keys within the hour gets no
+	// more stored. A pre-approved key is not stored either, so it still joins.
+	limited := false
 	if !known {
 		recent := m.newByIP[source][:0]
 		for _, t := range m.newByIP[source] {
@@ -542,10 +545,9 @@ func (m *Manager) newRequestLocked(peerHex, fp, fpID string, pub crypto.PublicKe
 			}
 		}
 		m.newByIP[source] = recent
-		if len(recent) >= NewKeysPerIPHour {
-			return reply(429, Response{Fingerprint: fp, Reason: "too many new keys from this address in the last hour"})
-		}
+		limited = len(recent) >= NewKeysPerIPHour
 	}
+
 	level, att, ch := m.attestLocked(fpID, pub, req.Attestation, req.Activation, req.KeyStore, now)
 	if ch != nil && known {
 		level = rec.KeyStore // unchanged until the challenge is answered
@@ -583,15 +585,17 @@ func (m *Manager) newRequestLocked(peerHex, fp, fpID string, pub crypto.PublicKe
 	}
 
 	if ch != nil {
-		if err := m.storeNewLocked(fpID, &r, known, source, now); err != nil {
-			return reply(500, Response{Reason: err.Error()})
+		if !limited {
+			if err := m.storeNewLocked(fpID, &r, known, source, now); err != nil {
+				return reply(500, Response{Reason: err.Error()})
+			}
 		}
 		return reply(202, Response{Status: StatusPending, Fingerprint: fp, Challenge: ch})
 	}
 
 	if r.State == uns.RequestPending {
 		if p, hint := m.matchPreapprovalLocked(fp, &r, now); p != nil {
-			if err := m.storeNewLocked(fpID, &r, known, source, now); err != nil {
+			if err := m.storeNewLocked(fpID, &r, known || limited, source, now); err != nil {
 				return reply(500, Response{Reason: err.Error()})
 			}
 			actor := Actor{ID: p.CreatedBy, Label: p.CreatedBy, Kind: "preapproval"}
@@ -611,6 +615,9 @@ func (m *Manager) newRequestLocked(peerHex, fp, fpID string, pub crypto.PublicKe
 		} else if hint != "" {
 			r.PreapprovalHint = hint
 		}
+	}
+	if limited {
+		return reply(429, Response{Fingerprint: fp, Reason: "too many new keys from this address in the last hour"})
 	}
 	if err := m.storeNewLocked(fpID, &r, known, source, now); err != nil {
 		return reply(500, Response{Reason: err.Error()})
