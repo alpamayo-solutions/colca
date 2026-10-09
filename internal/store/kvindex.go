@@ -3,8 +3,10 @@ package store
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -115,98 +117,167 @@ func (s *Store) openKVIndex() (added, removed int, err error) {
 	return added, removed, s.db.Delete(kvIndexCleanKey, pebble.Sync)
 }
 
-// reconcileKVIndex makes the contract index list exactly the KV entries: it adds
-// the index key of every entry that lacks one and deletes index keys whose entry
-// is gone, so a store written by a version without the index (a first start
-// after the upgrade, or after a downgrade and upgrade) is indexed before the
-// first read. It holds the indexed KV keys in memory for one pass over each
-// range. It returns how many keys it added and removed.
+// Recovery checkpoints are versioned and tied to the stream heads. A version
+// without this index may have written between opens; changed heads invalidate
+// its checkpoint just as they invalidate the clean marker.
+var kvIndexRecoveryKey = []byte("xr\x00")
+
+const (
+	kvIndexRecoveryVersion = 1
+	kvIndexRecoveryRows    = 4096
+	// The byte target may be exceeded by one indivisible key and its checkpoint.
+	kvIndexRecoveryBytes = 1 << 20
+)
+
+type kvIndexRecovery struct {
+	Version int    `json:"version"`
+	Heads   []byte `json:"heads"`
+	Phase   int    `json:"phase"`
+	After   []byte `json:"after"`
+	Scanned uint64 `json:"scanned"`
+}
+
+// reconcileKVIndex uses point lookups rather than an inventory of all keys.
+// Each bounded page commits its repairs and resume position together, including
+// pages needing no repairs, so an interrupted open makes durable progress.
 func (s *Store) reconcileKVIndex() (added, removed int, err error) {
-	indexed := map[string][]byte{} // KV key suffix -> its index key
-	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte("x\x00"), UpperBound: []byte("x\x01")})
-	if err != nil {
-		return 0, 0, err
-	}
-	var stale [][]byte
-	for iter.First(); iter.Valid(); iter.Next() {
-		key := append([]byte(nil), iter.Key()...)
-		rest := key[2:]
-		sep := bytes.IndexByte(rest, 0)
-		if sep < 0 {
-			stale = append(stale, key)
-			continue
-		}
-		indexed[string(rest[sep+1:])] = key
-	}
-	err = iter.Error()
-	iter.Close()
-	if err != nil {
-		return 0, 0, err
-	}
+	return s.reconcileKVIndexBounded(kvIndexRecoveryRows, kvIndexRecoveryBytes, nil)
+}
 
-	b := s.db.NewBatch()
-	defer func() { b.Close() }()
-	flush := func() error {
-		if b.Len() < 4<<20 {
-			return nil
+func (s *Store) reconcileKVIndexBounded(rows, batchBytes int, committed func(kvIndexRecovery, int) error) (added, removed int, err error) {
+	progress := kvIndexRecovery{Version: kvIndexRecoveryVersion, Heads: s.kvIndexCleanValue()}
+	raw, closer, err := s.db.Get(kvIndexRecoveryKey)
+	if err == nil {
+		var saved kvIndexRecovery
+		decodeErr := json.Unmarshal(raw, &saved)
+		closer.Close()
+		if decodeErr == nil && saved.Version == progress.Version && bytes.Equal(saved.Heads, progress.Heads) && saved.Phase >= 0 && saved.Phase < 2 {
+			lb, ub := kvIndexRecoveryBounds(saved.Phase)
+			if len(saved.After) == 0 || (bytes.Compare(saved.After, lb) >= 0 && bytes.Compare(saved.After, ub) < 0) {
+				progress = saved
+			}
 		}
-		if err := b.Commit(pebble.NoSync); err != nil {
-			return err
+	} else if !errors.Is(err, pebble.ErrNotFound) {
+		return 0, 0, err
+	}
+	pages := 0
+	for progress.Phase < 2 {
+		phase := progress.Phase
+		lb, ub := kvIndexRecoveryBounds(progress.Phase)
+		iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
+		if err != nil {
+			return added, removed, err
 		}
+		valid := iter.First()
+		if len(progress.After) > 0 {
+			valid = iter.SeekGE(progress.After)
+			if valid && bytes.Equal(iter.Key(), progress.After) {
+				valid = iter.Next()
+			}
+		}
+		b := s.db.NewBatch()
+		scanned := 0
+		for valid && scanned < rows && b.Len() < batchBytes {
+			key := iter.Key()
+			// Reserve space for the repair and its key-bearing checkpoint before
+			// admitting another row. An oversized first row still makes progress.
+			if scanned > 0 && b.Len()+3*len(key)+512 > batchBytes {
+				break
+			}
+			if progress.Phase == 0 {
+				path, node, topic, ok := splitKVKey(string(key[2:]))
+				if ok {
+					ik := kvIndexKey(path, node, topic)
+					if ik != nil {
+						_, c, getErr := s.db.Get(ik)
+						if getErr == nil {
+							c.Close()
+						} else if errors.Is(getErr, pebble.ErrNotFound) {
+							err = b.Set(ik, nil, nil)
+							added++
+						} else {
+							err = getErr
+						}
+					}
+				}
+			} else {
+				rest := key[2:]
+				sep := bytes.IndexByte(rest, 0)
+				stale := sep < 0
+				if !stale {
+					suffix := rest[sep+1:]
+					path, node, topic, ok := splitKVKey(string(suffix))
+					stale = !ok || !bytes.Equal(key, kvIndexKey(path, node, topic))
+					if !stale {
+						kvk := append([]byte("k\x00"), suffix...)
+						_, c, getErr := s.db.Get(kvk)
+						if getErr == nil {
+							c.Close()
+						} else if errors.Is(getErr, pebble.ErrNotFound) {
+							stale = true
+						} else {
+							err = getErr
+						}
+					}
+				}
+				if stale {
+					err = b.Delete(key, nil)
+					removed++
+				}
+			}
+			if err != nil {
+				break
+			}
+			progress.After = append(progress.After[:0], key...)
+			scanned++
+			progress.Scanned++
+			valid = iter.Next()
+		}
+		if err == nil {
+			err = iter.Error()
+		}
+		if err == nil && !valid {
+			progress.Phase++
+			progress.After = nil
+		}
+		iter.Close()
+		if err == nil {
+			if progress.Phase == 2 {
+				err = b.Delete(kvIndexRecoveryKey, nil)
+			} else {
+				raw, marshalErr := json.Marshal(progress)
+				err = marshalErr
+				if err == nil {
+					err = b.Set(kvIndexRecoveryKey, raw, nil)
+				}
+			}
+		}
+		if err == nil {
+			err = b.Commit(pebble.Sync)
+		}
+		size := b.Len()
 		b.Close()
-		b = s.db.NewBatch()
-		return nil
+		if err != nil {
+			return added, removed, err
+		}
+		pages++
+		if pages == 1 || pages%64 == 0 || progress.Phase != phase {
+			slog.Info("store: KV contract index recovery checkpoint", "phase", progress.Phase, "scanned", progress.Scanned, "added", added, "removed", removed)
+		}
+		if committed != nil {
+			if err := committed(progress, size); err != nil {
+				return added, removed, err
+			}
+		}
 	}
+	return added, removed, nil
+}
 
-	kvLB := kvPrefix("")
-	kvUB := append(append([]byte{}, kvLB...), 0xFF)
-	iter, err = s.db.NewIter(&pebble.IterOptions{LowerBound: kvLB, UpperBound: kvUB})
-	if err != nil {
-		return 0, 0, err
+func kvIndexRecoveryBounds(phase int) ([]byte, []byte) {
+	if phase == 0 {
+		return []byte("k\x00"), []byte("k\x01")
 	}
-	for iter.First(); iter.Valid(); iter.Next() {
-		suffix := string(iter.Key()[2:])
-		if _, ok := indexed[suffix]; ok {
-			delete(indexed, suffix)
-			continue
-		}
-		path, node, topic, ok := splitKVKey(suffix)
-		if !ok {
-			continue
-		}
-		ik := kvIndexKey(path, node, topic)
-		if ik == nil {
-			continue
-		}
-		if err := b.Set(ik, nil, nil); err != nil {
-			iter.Close()
-			return added, removed, err
-		}
-		added++
-		if err := flush(); err != nil {
-			iter.Close()
-			return added, removed, err
-		}
-	}
-	err = iter.Error()
-	iter.Close()
-	if err != nil {
-		return added, removed, err
-	}
-	// What is left names entries that are gone.
-	for _, key := range indexed {
-		stale = append(stale, key)
-	}
-	for _, key := range stale {
-		if err := b.Delete(key, nil); err != nil {
-			return added, removed, err
-		}
-		removed++
-		if err := flush(); err != nil {
-			return added, removed, err
-		}
-	}
-	return added, removed, b.Commit(pebble.Sync)
+	return []byte("x\x00"), []byte("x\x01")
 }
 
 // kvPageToken decodes a page token and checks that it lies within [lb, ub).
