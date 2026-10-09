@@ -52,8 +52,8 @@ func (e *Engine) IngestClientBatch(identity string, records []BatchRecord) []Bat
 			results[i].Err = e.batchReject(metrics.ReasonGrammar, "%w", err)
 			continue
 		}
-		if p.Contract == "_EnrolledIdentity" {
-			results[i].Err = e.batchReject(metrics.ReasonRegistryContract, "_EnrolledIdentity is enrollment-door only")
+		if uns.IsRegistryContract(p.Contract) {
+			results[i].Err = e.batchReject(metrics.ReasonRegistryContract, "%s is enrollment-door only", p.Contract)
 			continue
 		}
 		class := e.ClassOf(p.Contract)

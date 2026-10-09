@@ -65,7 +65,7 @@ TOMBSTONE_OVERRIDES: dict[str, bool] = {}
 
 # Contracts colcad produces and validates itself. They never appear in a
 # bundle; the loader refuses one that declares them.
-BUILTIN_ONLY = {"_StreamGap", "_EnrolledIdentity", "_TimeSync"}
+BUILTIN_ONLY = {"_StreamGap", "_EnrolledIdentity", "_EnrollmentRequest", "_EnrollmentPreapproval", "_TimeSync"}
 
 # Clients decode these broker-authored records. They must never turn into a
 # bundle entry granting client publication; the broker owns their wire shape.

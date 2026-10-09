@@ -100,7 +100,7 @@ func ClassOf(contract string) Class {
 	// A log line is an event: a later line does not replace an earlier one.
 	case contract == "_Log":
 		return ClassLog
-	case contract == "_EnrolledIdentity" || contract == "_Node" ||
+	case IsRegistryContract(contract) || contract == "_Node" ||
 		contract == "_ServiceDetails" || contract == "_SystemElement" ||
 		contract == "_Signal" || contract == "_Constant" || contract == "_ExternalReference" ||
 		contract == "_Resource" ||
@@ -664,6 +664,10 @@ func Validate(contract string, payload []byte) error {
 	case contract == "_EnrolledIdentity":
 		// A registry entry names itself by the enrolled identity.
 		return reqStr("ulid")
+	case contract == EnrollmentRequestContract:
+		return reqStr("fingerprint")
+	case contract == EnrollmentPreapprovalContract:
+		return reqStr("id")
 	case contract == "_Constant":
 		_, err := validateConstantPayload(payload)
 		return err

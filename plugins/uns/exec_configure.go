@@ -937,7 +937,7 @@ func (c *ConfigExec) checkCommandEntity(contract string) error {
 	switch contract {
 	case "_Node", "_ExternalReference", "_AlarmNotificationConfig":
 		return nil
-	case "_ServiceDetails", "_EnrolledIdentity", "_NotificationConfigStatus":
+	case "_ServiceDetails", "_EnrolledIdentity", EnrollmentRequestContract, EnrollmentPreapprovalContract, "_NotificationConfigStatus":
 		return fmt.Errorf("%s is observed state and has its own writer", contract)
 	default:
 		return fmt.Errorf("%s is not a platform-inventory entity authored by this command", contract)
