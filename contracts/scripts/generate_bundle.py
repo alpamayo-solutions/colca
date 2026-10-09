@@ -206,9 +206,7 @@ def _lint_subset(schema: object, path: str = "") -> list[str]:
                 continue
             if k not in ALLOWED_KEYWORDS:
                 bad.append(f"{path}.{k}")
-            if k in ("properties",):
-                bad += _lint_subset(v, f"{path}.{k}")
-            elif k in ("items", "if", "then"):
+            if k in ("properties", "items", "if", "then"):
                 bad += _lint_subset(v, f"{path}.{k}")
     return bad
 
