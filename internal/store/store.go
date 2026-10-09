@@ -203,8 +203,8 @@ func (o Options) pebbleOptions(opts *pebble.Options) error {
 // SizesFor returns the largest memtable and the block cache size for a node
 // whose memory ceiling is ceiling bytes: a 32nd of the ceiling each, at most
 // 256 MiB, at least Pebble's own defaults (4 MiB, 8 MiB), which an unknown
-// ceiling also gets. Two memtables (one flushing) and the cache stay under a
-// tenth of the ceiling. colca builds without cgo, where Pebble allocates
+// ceiling also gets. Three memtables (see cacheSize) and the cache stay within
+// an eighth of the ceiling. colca builds without cgo, where Pebble allocates
 // both on the Go heap, so they count inside the Go memory limit
 // (internal/memlimit, 75 % of the ceiling), not in the quarter outside it. A
 // 512 MiB edge gets 16 MiB of each, a 2 GiB parent 64 MiB, an 8 GiB parent
@@ -233,6 +233,22 @@ func SizesFor(ceiling int64) (memTable, blockCache int64) {
 	return min(max(share, minMemTable), most), min(max(share, minCache), most)
 }
 
+// memtableReservations is how many full memtables Pebble may hold at once: the
+// two its write stall allows (MemTableStopWritesThreshold) and the one it keeps
+// for recycling.
+const memtableReservations = 3
+
+// cacheSize is the size the block cache is created with, so that blockCache
+// bytes of blocks fit beside the memtables. Pebble reserves every memtable it
+// allocates in the block cache (Cache.Reserve) and caches blocks only in what
+// is left. A cache of blockCache alone held no block once the memtables had
+// grown: the Chocolate Factory hub (2 GiB, 64 MiB of each) had 129 MiB of
+// memtables and 1.5 MiB of cached blocks in its heap profile, so every block
+// read was allocated and decompressed again.
+func cacheSize(memTable, blockCache int64) int64 {
+	return memtableReservations*memTable + blockCache
+}
+
 // Open opens or creates the store at dir with the default options.
 func Open(dir string) (*Store, error) { return OpenWithOptions(dir, Options{}) }
 
@@ -242,11 +258,12 @@ func Open(dir string) (*Store, error) { return OpenWithOptions(dir, Options{}) }
 func OpenWithOptions(dir string, o Options) (*Store, error) {
 	health := pebblelog.New("store")
 	opts := health.Options()
-	memTable, cacheSize := SizesFor(o.MemoryCeiling)
+	memTable, blockCache := SizesFor(o.MemoryCeiling)
 	opts.MemTableSize = uint64(memTable) //nolint:gosec // positive by construction
+	opts.MemTableStopWritesThreshold = memtableReservations - 1
 	// The block cache Pebble shares with nothing else; the store holds the
 	// only reference after Open.
-	cache := pebble.NewCache(cacheSize)
+	cache := pebble.NewCache(cacheSize(memTable, blockCache))
 	defer cache.Unref()
 	opts.Cache = cache
 	if err := o.pebbleOptions(opts); err != nil {
