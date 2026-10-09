@@ -10,6 +10,7 @@
 package tpmkey
 
 import (
+	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -20,13 +21,15 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"os"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
-	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
 )
 
 // PEMType is the PEM block type of a key blob written by this package.
@@ -53,7 +56,7 @@ func Open(path string) (*Device, error) {
 	}
 	var t transport.TPMCloser
 	if fi.Mode()&os.ModeSocket != 0 {
-		t, err = linuxudstpm.Open(path)
+		t = transport.FromReadWriteCloser(&simulatorConn{path: path})
 	} else {
 		t, err = linuxtpm.Open(path)
 	}
@@ -367,4 +370,50 @@ func split2B(b []byte) ([]byte, []byte, error) {
 		return nil, nil, errors.New("TPM key blob: truncated")
 	}
 	return b[:n], b[n:], nil
+}
+
+// simulatorConn speaks to a TPM simulator on a Unix socket the way swtpm
+// expects: one connection per command. swtpm accepts the next connection only
+// after it finished the previous one, so a dial refused right after a command
+// is retried briefly instead of failing the command.
+type simulatorConn struct {
+	path string
+	conn net.Conn
+}
+
+func (s *simulatorConn) Write(p []byte) (int, error) {
+	if s.conn != nil {
+		return 0, errors.New("tpm simulator: write before the previous response was read")
+	}
+	var err error
+	for wait := time.Millisecond; ; wait *= 2 {
+		s.conn, err = (&net.Dialer{}).DialContext(context.Background(), "unix", s.path)
+		if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || wait > 2*time.Second {
+			break
+		}
+		time.Sleep(wait)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return s.conn.Write(p)
+}
+
+func (s *simulatorConn) Read(p []byte) (int, error) {
+	if s.conn == nil {
+		return 0, errors.New("tpm simulator: read without a command")
+	}
+	n, err := s.conn.Read(p)
+	_ = s.conn.Close()
+	s.conn = nil
+	return n, err
+}
+
+func (s *simulatorConn) Close() error {
+	if s.conn == nil {
+		return nil
+	}
+	err := s.conn.Close()
+	s.conn = nil
+	return err
 }
