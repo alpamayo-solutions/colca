@@ -448,9 +448,14 @@ The reader's side of the contract:
   `LOCK TABLE historian_late_write IN SHARE MODE` once, in a transaction of
   its own, before reading the signal's history. That waits for the pages that
   were written without seeing the signal listed.
-- **Timing:** compute an hour no earlier than 65 minutes after its start plus
-  the time a write transaction may take, for a sample without a mark to be in
-  what is read.
+- **Timing:** lateness is decided when the mark statement runs, after the
+  page's rows are written; compute an hour no earlier than 65 minutes after
+  its start plus the time from there to the page's commit, for a sample
+  without a mark to be in what is read.
+- **Taking up marks:** the historian looks for the relations when it writes a
+  page, at most once a minute. A page that started before it saw them commits
+  unmarked: list signals only after the record says `late_write_marks`, and
+  allow for a page that started before that.
 
 The historian looks for the two relations at start and, while they are
 missing, again when it writes a page, at most once a minute. A database

@@ -114,8 +114,11 @@ ON CONFLICT (consumer) DO UPDATE SET "offset" = EXCLUDED."offset", store = EXCLU
 //   - The rows are taken in one order, by signal and hour, as the reader takes
 //     them, so the two cannot deadlock over two marks.
 //
-// The database's clock decides what is late, and hours are UTC hours: the
-// reader uses the same clock and the same grid. $1 and $2 are parallel arrays.
+// The database's clock decides what is late, read when this statement runs
+// (clock_timestamp, not the transaction's start): the page's rows are written
+// by then, so only the commit that follows lies between the decision and a
+// reader. Hours are UTC hours: the reader uses the same clock and the same
+// grid. $1 and $2 are parallel arrays.
 // The reader is notified when a mark was added.
 const markLateWrites = `
 WITH marked AS (
@@ -123,7 +126,7 @@ WITH marked AS (
     SELECT late.sig, late.hour
     FROM (SELECT DISTINCT u.sig, u.hour
           FROM unnest($1::text[], $2::timestamptz[]) AS u(sig, hour)
-          WHERE u.hour + interval '65 minutes' <= now()
+          WHERE u.hour + interval '65 minutes' <= clock_timestamp()
             AND EXISTS (SELECT 1 FROM historian_late_write_signal AS wanted WHERE wanted.signal_id = u.sig)
           ORDER BY u.sig, u.hour) AS late
     ON CONFLICT (signal_id, hour) DO UPDATE SET hour = EXCLUDED.hour WHERE false
@@ -148,8 +151,14 @@ const lateWriteTablesExist = `
 SELECT to_regclass('historian_late_write') IS NOT NULL
    AND to_regclass('historian_late_write_signal') IS NOT NULL`
 
-// undefinedTable is the SQLSTATE of a statement naming a table that is gone.
-const undefinedTable = "42P01"
+// The SQLSTATEs of a reader's relations that are gone or not shaped as the
+// contract says (no such column, no unique key to conflict on): the marks
+// stop, the history does not.
+const (
+	undefinedTable  = "42P01"
+	undefinedColumn = "42703"
+	noConflictKey   = "42P10"
+)
 
 const createOffsetTable = `
 CREATE TABLE IF NOT EXISTS colca_applied_offset (
@@ -286,7 +295,14 @@ func lateWrites(rows []Row, now time.Time) (signals []string, hours []time.Time)
 
 func isUndefinedTable(err error) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == undefinedTable
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case undefinedTable, undefinedColumn, noConflictKey:
+		return true
+	}
+	return false
 }
 
 // Rejection is one row the schema permanently refused, set aside so the rest of
@@ -454,9 +470,8 @@ func (s *Sink) applyOne(ctx context.Context, rows []Row, consumer string, offset
 	return rejections, err
 }
 
-// stopMarking turns the marks off after a statement found a table missing:
-// the reader of the marks took its table away, and a page must not wait for
-// it. The page is then written again without marks; were it the metric table
+// stopMarking turns the marks off after a statement found the reader's
+// relations missing or misshapen, and a page must not wait for them. The page is then written again without marks; were it the metric table
 // that is missing, that attempt fails the same way and is retried as before.
 func (s *Sink) stopMarking(cause error) bool {
 	slog.Default().Warn("a table was missing while marking late writes — writing without marks", "err", cause)
