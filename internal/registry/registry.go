@@ -132,6 +132,12 @@ func adopt(e *uns.Entry) (bool, error) {
 	if e.Pubkey == "" {
 		return false, nil
 	}
+	// Every entry this release writes carries its fingerprint, so an entry
+	// without one predates node enrollment. Only such a child node is adopted
+	// without a certificate: one approved since has cert_state empty until it
+	// fetches its first certificate, and must not be admitted with a
+	// self-signed one meanwhile.
+	written := e.Fingerprint != ""
 	pub, err := pubkey.ParseHex(e.Pubkey)
 	if err != nil {
 		return false, fmt.Errorf("pubkey: %w", err)
@@ -152,7 +158,7 @@ func adopt(e *uns.Entry) (bool, error) {
 		e.Fingerprint = fp
 		changed = true
 	}
-	if e.ReplicatesUp() && e.CertState == "" {
+	if !written && e.ReplicatesUp() && e.CertState == "" {
 		e.CertState = uns.CertStateNone
 		changed = true
 	}

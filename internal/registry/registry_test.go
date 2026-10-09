@@ -1066,9 +1066,18 @@ func TestTheAdoptionPassRewritesLegacyEntries(t *testing.T) {
 	if kv, ok, err := st.KVGet("_colca/identities/01N1", "01NODE", uns.Prefix()+"_EnrolledIdentity/01NODE/_colca/identities/01N1"); err != nil || !ok || !strings.Contains(string(kv.Payload), `"fingerprint"`) {
 		t.Fatalf("mirror not rewritten: %s %v %v", kv.Payload, ok, err)
 	}
-	m2, _ := newManager(t, st, "z/a", "z/b")
+	m2, _ := newManager(t, st, "z/a", "z/b", "z/c")
 	if e, ok := m2.ByPubkey(spkiOf(raw)); !ok || e.CertState != uns.CertStateNone {
 		t.Fatalf("after reload: %v %v", e, ok)
+	}
+	// A node approved by this release has no certificate until it asks for
+	// one; a restart must not adopt it as cert_state none.
+	if _, _, err := m2.Enroll(entryJSON(t, node("01N2", "z/c", pub("ef")))); err != nil {
+		t.Fatal(err)
+	}
+	m3, _ := newManager(t, st, "z/a", "z/b", "z/c")
+	if e, _ := m3.Get("01N2"); e.CertState != "" {
+		t.Fatalf("a node enrolled since was adopted: %+v", e)
 	}
 }
 
