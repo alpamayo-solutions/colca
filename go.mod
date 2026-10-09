@@ -1,6 +1,6 @@
 module github.com/alpamayo-solutions/colca
 
-go 1.26.8
+go 1.26.9
 
 require (
 	github.com/cockroachdb/pebble/v2 v2.1.7
@@ -48,7 +48,7 @@ require (
 	github.com/rogpeppe/go-internal v1.9.0 // indirect
 	github.com/rs/xid v1.4.0 // indirect
 	golang.org/x/exp v0.0.0-20230626212559-97b1e661b5df // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
