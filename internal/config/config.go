@@ -97,6 +97,9 @@ type Endpoint struct {
 type Parent struct {
 	URL    string `yaml:"url"`
 	Pubkey string `yaml:"pubkey"` // pinned parent key
+	// Mount is where this node asks to be placed at its parent. It only fills
+	// in the approval dialog: the person approving decides.
+	Mount string `yaml:"mount"`
 	// Logs decides which of this node's log records the uplink forwards. Every
 	// record stays in the local logs stream either way.
 	Logs ParentLogs `yaml:"logs"`
@@ -202,6 +205,68 @@ type Identity struct {
 	TPMDevice string `yaml:"tpm_device"`
 }
 
+// Enrollment levels for Enrollment.Require.
+const (
+	EnrollmentRequireAny         = "any"
+	EnrollmentRequireTPM         = "tpm"
+	EnrollmentRequireTPMAttested = "tpm-attested"
+)
+
+// Key change policies for Enrollment.KeyChange.
+const (
+	KeyChangeAuto    = "auto"
+	KeyChangeApprove = "approve"
+)
+
+// Enrollment is the enrollment: block, this node's policy for the children
+// that ask to join it.
+type Enrollment struct {
+	// Require is the lowest key store a request must prove before it can be
+	// approved: any (default), tpm or tpm-attested.
+	Require string `yaml:"require"`
+	// KeyChange decides a key change an enrolled child asks for with its
+	// current key: auto (default) accepts a move into a TPM at once, approve
+	// leaves every key change to a person.
+	KeyChange string `yaml:"key_change"`
+	// RequireIssuedCert refuses children that still present a self-signed
+	// certificate (cert_state none, from before issued certificates).
+	RequireIssuedCert bool `yaml:"require_issued_cert"`
+	// TPMRoots is a PEM file of additional TPM manufacturer certificates
+	// (roots and intermediates) endorsement key certificates may chain to,
+	// beside the ones colcad ships.
+	TPMRoots string `yaml:"tpm_roots"`
+}
+
+// EffectiveRequire is Require with its default.
+func (e Enrollment) EffectiveRequire() string {
+	if e.Require == "" {
+		return EnrollmentRequireAny
+	}
+	return e.Require
+}
+
+// EffectiveKeyChange is KeyChange with its default.
+func (e Enrollment) EffectiveKeyChange() string {
+	if e.KeyChange == "" {
+		return KeyChangeAuto
+	}
+	return e.KeyChange
+}
+
+func (e Enrollment) validate() error {
+	switch e.EffectiveRequire() {
+	case EnrollmentRequireAny, EnrollmentRequireTPM, EnrollmentRequireTPMAttested:
+	default:
+		return fmt.Errorf("config: enrollment.require %q, want any, tpm or tpm-attested", e.Require)
+	}
+	switch e.EffectiveKeyChange() {
+	case KeyChangeAuto, KeyChangeApprove:
+	default:
+		return fmt.Errorf("config: enrollment.key_change %q, want auto or approve", e.KeyChange)
+	}
+	return nil
+}
+
 // Config is a node's configuration. Only ULID, DataDir and the key file
 // (identity.key_file or key_file) are required. Machines and child nodes are not configured here; they are
 // enrolled at runtime through the admin API.
@@ -239,6 +304,8 @@ type Config struct {
 	MQTT     Endpoint `yaml:"mqtt"`
 	Repl     Endpoint `yaml:"repl"`
 	Parent   *Parent  `yaml:"parent"`
+	// Enrollment is the policy for children asking to join this node.
+	Enrollment Enrollment `yaml:"enrollment"`
 	// Standalone permanently retires fleet trust in this data directory.
 	Standalone      bool            `yaml:"standalone"`
 	StandaloneSince int64           `yaml:"-"` // persisted activation, populated before serving
@@ -989,6 +1056,9 @@ func (c *Config) Validate() error {
 	}
 	if !identity.ValidKeyStore(c.Identity.KeyStore) {
 		return fmt.Errorf("config: identity.key_store %q, want auto, tpm or file", c.Identity.KeyStore)
+	}
+	if err := c.Enrollment.validate(); err != nil {
+		return err
 	}
 	if err := uns.ValidRoot(c.EffectiveTopicRoot()); err != nil {
 		return fmt.Errorf("config: %w", err)

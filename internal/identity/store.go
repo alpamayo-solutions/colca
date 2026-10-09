@@ -186,3 +186,41 @@ func (i *Identity) TPMKey() (*tpmkey.Key, bool) {
 	k, ok := i.Signer.(*tpmkey.Key)
 	return k, ok
 }
+
+// PendingKeyFile is where a key change keeps the new key until the parent
+// accepts it: next to KeyFile, so a restart in the middle resumes the change
+// with the same key instead of locking the node out.
+func (o Options) PendingKeyFile() string { return o.KeyFile + ".next" }
+
+// CertFile is where the certificate the parent issued is kept, next to the key.
+func (o Options) CertFile() string { return o.KeyFile + ".crt" }
+
+// MintPending creates the new key of a key change at PendingKeyFile, in the
+// TPM for StoreTPM and as an ed25519 file key otherwise.
+func MintPending(o Options, store string) (*Identity, error) {
+	path := o.PendingKeyFile()
+	if store == StoreTPM {
+		p := o
+		p.KeyFile = path
+		return mintTPM(p)
+	}
+	return Generate(path)
+}
+
+// OpenPending loads the new key of a key change in progress; an
+// fs.ErrNotExist error when there is none.
+func OpenPending(o Options) (*Identity, error) {
+	p := o
+	p.KeyFile = o.PendingKeyFile()
+	return OpenExisting(p)
+}
+
+// PromotePending makes the pending key the node key: it replaces KeyFile in
+// one rename, so the old key is gone (it is no longer valid anywhere) and a
+// crash leaves either the old key with the pending one, or the new key.
+func PromotePending(o Options) error {
+	if err := os.Rename(o.PendingKeyFile(), o.KeyFile); err != nil {
+		return fmt.Errorf("identity: promote the new key: %w", err)
+	}
+	return nil
+}
