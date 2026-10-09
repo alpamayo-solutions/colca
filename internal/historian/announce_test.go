@@ -232,3 +232,34 @@ func TestTheHealthDoorFollowsTheNodesCursorLagFinding(t *testing.T) {
 	readAll()
 	waitLag(false)
 }
+
+type blockingMetricsWriter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *blockingMetricsWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return len(p), nil
+}
+
+func TestSlowMetricsReaderDoesNotBlockClockProgress(t *testing.T) {
+	a := &Announcer{}
+	w := &blockingMetricsWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan struct{})
+	go func() { a.WriteMetrics(w); close(done) }()
+	defer func() { close(w.release); <-done }()
+	<-w.entered
+	progressDone := make(chan struct{})
+	go func() {
+		a.ReportProgress(map[string]any{"processed_at": 1000.0, "ready": true})
+		close(progressDone)
+	}()
+	select {
+	case <-progressDone:
+	case <-time.After(time.Second):
+		t.Fatal("slow metrics response blocked functional clock progress")
+	}
+}

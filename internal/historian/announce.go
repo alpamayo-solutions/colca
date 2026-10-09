@@ -293,7 +293,6 @@ func (a *Announcer) ReportProgress(progress map[string]any) {
 // WriteMetrics exports runtime observations without durable entity writes.
 func (a *Announcer) WriteMetrics(w io.Writer) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	name := "historian"
 	if a.details != nil {
 		name = a.details.Name
@@ -302,13 +301,15 @@ func (a *Announcer) WriteMetrics(w io.Writer) {
 	if a.current() == StatusHealthy {
 		healthy = 1
 	}
+	clock := a.clock // ReportProgress replaces this immutable snapshot.
+	a.mu.Unlock()
 	_, _ = fmt.Fprintf(w, "# HELP colca_service_healthy Runtime service health.\n# TYPE colca_service_healthy gauge\ncolca_service_healthy{service=%q} %d\n", name, healthy)
-	if a.clock != nil {
+	if clock != nil {
 		ready := 0
-		if a.clock["ready"] == true {
+		if clock["ready"] == true {
 			ready = 1
 		}
 		_, _ = fmt.Fprintf(w, "# HELP colca_application_clock_ready Application time readiness.\n# TYPE colca_application_clock_ready gauge\ncolca_application_clock_ready{service=%q} %d\n", name, ready)
-		_, _ = fmt.Fprintf(w, "# HELP colca_application_processed_timestamp_seconds Last committed application timestamp.\n# TYPE colca_application_processed_timestamp_seconds gauge\ncolca_application_processed_timestamp_seconds{service=%q} %v\n", name, a.clock["processed_at"])
+		_, _ = fmt.Fprintf(w, "# HELP colca_application_processed_timestamp_seconds Last committed application timestamp.\n# TYPE colca_application_processed_timestamp_seconds gauge\ncolca_application_processed_timestamp_seconds{service=%q} %v\n", name, clock["processed_at"])
 	}
 }
