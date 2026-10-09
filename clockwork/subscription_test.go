@@ -101,9 +101,9 @@ func TestLocalAliasIgnoresOtherWorkersAndKeepsEarlyProgress(t *testing.T) {
 
 func TestHeartbeatAgeUsesLocalReceiptAndRejectsRetainedReplay(t *testing.T) {
 	now := time.Now()
-	topic := "colca/v1/_ServiceDetails/node/source/_service"
-	s := &Subscription{Node: "node", Dependencies: []string{topic}, Now: func() time.Time { return now }}
-	payload := []byte(`{"is_active":true,"metadata":{"application_clock":{"observed_at":900000,"ready":true}}}`)
+	topic := "colca/v1/_ClockProgress/node/source/_service"
+	s := &Subscription{Node: "node", Dependencies: []string{"colca/v1/_ServiceDetails/node/source/_service"}, Now: func() time.Time { return now }}
+	payload := []byte(`{"run_id":"run","processed_at":10,"observed_at":900000,"ready":true}`)
 	s.observe(topic, payload, true)
 	if s.Fresh(topic) {
 		t.Fatal("retained state is not live health")
@@ -117,7 +117,7 @@ func TestHeartbeatAgeUsesLocalReceiptAndRejectsRetainedReplay(t *testing.T) {
 	if s.Fresh(topic) {
 		t.Fatal("duplicate renewed stale health")
 	}
-	s.observe(topic, []byte(`{"metadata":{"application_clock":{"observed_at":900005}}}`), false)
+	s.observe(topic, []byte(`{"run_id":"run","processed_at":10,"observed_at":900005,"ready":true}`), false)
 	if !s.Fresh(topic) {
 		t.Fatal("new heartbeat did not restore health")
 	}

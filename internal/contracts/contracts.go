@@ -27,6 +27,7 @@ var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true,
 // load with Go's RE2, so a bad expression fails startup and matching cannot
 // backtrack.
 var allowedKeywords = map[string]bool{
+	"if": true, "then": true,
 	"type": true, "properties": true, "required": true, "enum": true,
 	"items": true, "minLength": true, "maxLength": true, "pattern": true,
 	"minimum": true, "maximum": true, "minItems": true, "additionalProperties": true,
@@ -203,8 +204,8 @@ func lintSubset(raw json.RawMessage, path string) error {
 					return err
 				}
 			}
-		case "items":
-			if err := lintSubset(v, path+".items"); err != nil {
+		case "items", "if", "then":
+			if err := lintSubset(v, path+"."+k); err != nil {
 				return err
 			}
 		}

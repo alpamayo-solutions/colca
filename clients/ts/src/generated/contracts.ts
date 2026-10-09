@@ -184,7 +184,9 @@ export type ClockDefinition = {
 
 /** `_ClockProgress` — stream class `data`. */
 export type ClockProgress = {
+  observed_at: null | number;
   processed_at: number;
+  ready: boolean;
   run_id: string;
   [key: string]: unknown;
 };

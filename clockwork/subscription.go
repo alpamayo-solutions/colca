@@ -97,7 +97,7 @@ func (s *Subscription) Fresh(topic string) bool {
 }
 
 func (s *Subscription) heartbeat(topic string, payload []byte, retained bool) bool {
-	if !strings.Contains(topic, "/_ServiceDetails/") {
+	if !strings.Contains(topic, "/_ClockProgress/") {
 		return false
 	}
 	if len(payload) == 0 {
@@ -108,16 +108,12 @@ func (s *Subscription) heartbeat(topic string, payload []byte, retained bool) bo
 		return false
 	}
 	var row struct {
-		Metadata struct {
-			Clock struct {
-				Observed *float64 `json:"observed_at"`
-			} `json:"application_clock"`
-		} `json:"metadata"`
+		Observed *float64 `json:"observed_at"`
 	}
-	if json.Unmarshal(payload, &row) != nil || row.Metadata.Clock.Observed == nil {
+	if json.Unmarshal(payload, &row) != nil || row.Observed == nil {
 		return false
 	}
-	observed := *row.Metadata.Clock.Observed
+	observed := *row.Observed
 	if math.IsNaN(observed) || math.IsInf(observed, 0) {
 		return false
 	}
@@ -213,6 +209,11 @@ func (s *Subscription) observe(topic string, payload []byte, retained bool) {
 		}
 		if len(payload) == 0 {
 			delete(s.rows, topic)
+			if strings.Contains(topic, "/_ServiceDetails/") {
+				marker := strings.Replace(topic, "/_ServiceDetails/", "/_ClockProgress/", 1)
+				delete(s.rows, marker)
+				delete(s.heartbeats, marker)
+			}
 		} else {
 			s.rows[topic] = door.KVEntry{Topic: topic, Payload: append(json.RawMessage(nil), payload...)}
 		}

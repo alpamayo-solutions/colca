@@ -1,6 +1,6 @@
 // Package clockwork coordinates HTTP consumers of bounded application time.
 // It shares the broker's ClockDefinition projection and existing service
-// metadata. It never changes OS time or creates another time authority.
+// discovery and ordered progress control. It never changes OS time.
 package clockwork
 
 import (
@@ -31,20 +31,20 @@ type Gate struct {
 	Asynchronous bool
 	// State supplies the live subscription; coordinated consumers require it.
 	State func(context.Context) ([]door.KVEntry, error)
-	// ReportDetails lets the service health announcer own the full record.
-	ReportDetails func(context.Context, map[string]any) error
-	definition    *uns.ClockDefinition
-	Door          Door
-	Topic         string
-	Dependencies  []string
-	Name          string
-	Metadata      map[string]any
-	Details       map[string]any
-	Drain         func(context.Context, float64) (bool, error)
-	self          *door.Self
-	run           string
-	completed     *float64
-	lastReport    time.Time
+	// Telemetry observes runtime progress without publishing registration.
+	Telemetry    func(map[string]any)
+	definition   *uns.ClockDefinition
+	Door         Door
+	Topic        string
+	Dependencies []string
+	Name         string
+	Metadata     map[string]any
+	Details      map[string]any
+	Drain        func(context.Context, float64) (bool, error)
+	self         *door.Self
+	run          string
+	completed    *float64
+	lastReport   time.Time
 }
 
 // Dependencies parses the shared deployment setting. An empty string disables
@@ -81,7 +81,7 @@ func (g *Gate) Register(ctx context.Context) error {
 		return err
 	}
 	g.self = &self
-	return g.report(ctx, 0)
+	return g.register(ctx)
 }
 
 // Once checks a window, drains downstream effects, then publishes completion.
@@ -176,22 +176,13 @@ func (g *Gate) Once(ctx context.Context, realNow float64) (bool, error) {
 		found := false
 		for _, entry := range entries {
 			var row struct {
-				Name     string `json:"name"`
-				Active   bool   `json:"is_active"`
-				Metadata struct {
-					Clock struct {
-						Run       string   `json:"run_id"`
-						Ready     bool     `json:"ready"`
-						Observed  float64  `json:"observed_at"`
-						Processed *float64 `json:"processed_at"`
-					} `json:"application_clock"`
-				} `json:"metadata"`
+				Name   string `json:"name"`
+				Active bool   `json:"is_active"`
 			}
 			if json.Unmarshal(entry.Payload, &row) != nil {
 				continue
 			}
 			matches := dep == entry.Topic || (strings.HasPrefix(dep, "./") && row.Name == dep[2:] && strings.HasPrefix(entry.Topic, uns.Prefix()+"_ServiceDetails/"+g.self.Node+"/"))
-			p := row.Metadata.Clock
 			barrierReady := false
 			if matches {
 				barrierTopic := strings.Replace(entry.Topic, "/_ServiceDetails/", "/_ClockProgress/", 1)
@@ -202,13 +193,14 @@ func (g *Gate) Once(ctx context.Context, realNow float64) (bool, error) {
 					var progress struct {
 						Run       string  `json:"run_id"`
 						Processed float64 `json:"processed_at"`
+						Ready     bool    `json:"ready"`
 					}
-					if json.Unmarshal(barrier.Payload, &progress) == nil && progress.Run == g.run && progress.Processed >= target {
+					if json.Unmarshal(barrier.Payload, &progress) == nil && progress.Ready && progress.Run == g.run && progress.Processed >= target && g.Fresh != nil && g.Fresh(barrierTopic) {
 						barrierReady = true
 					}
 				}
 			}
-			if matches && barrierReady && row.Active && p.Ready && p.Run == g.run && g.Fresh != nil && g.Fresh(entry.Topic) {
+			if matches && barrierReady && row.Active {
 				found = true
 				break
 			}
@@ -230,40 +222,39 @@ func (g *Gate) Once(ctx context.Context, realNow float64) (bool, error) {
 	return true, nil
 }
 
-func (g *Gate) report(ctx context.Context, realNow float64) error {
+func (g *Gate) serviceTopic() string {
+	hierarchy := uns.ServiceContext(g.self.Mount, g.Name)
+	return uns.Prefix() + "_ServiceDetails/" + g.self.Node + "/" + strings.Join(hierarchy, "/") + "/_service"
+}
+
+func (g *Gate) register(ctx context.Context) error {
 	metadata := map[string]any{}
 	for k, v := range g.Metadata {
 		metadata[k] = v
 	}
-	if g.completed != nil {
-		metadata["application_clock"] = map[string]any{"ready": true, "run_id": g.run, "processed_at": g.completed, "observed_at": realNow}
-	}
-	hierarchy := uns.ServiceContext(g.self.Mount, g.Name)
-	payload := map[string]any{"id": g.self.ULID, "name": g.Name, "service_type": "other", "display_name": g.Name, "colca_node_id": g.self.Node, "hierarchy": hierarchy, "is_active": true, "metadata": metadata}
+	payload := map[string]any{"id": g.self.ULID, "name": g.Name, "service_type": "other", "display_name": g.Name, "colca_node_id": g.self.Node, "hierarchy": uns.ServiceContext(g.self.Mount, g.Name), "is_active": true, "metadata": metadata}
 	for key, value := range g.Details {
 		if key != "metadata" {
 			payload[key] = value
 		}
 	}
-	topic := uns.Prefix() + "_ServiceDetails/" + g.self.Node + "/" + strings.Join(hierarchy, "/") + "/_service"
-	// Ordered before service liveness. Repeating the marker is idempotent;
-	// it also repairs delivery after a process or MQTT-session restart.
-	if g.completed != nil {
-		marker := map[string]any{"run_id": g.run, "processed_at": g.completed}
-		if err := g.Door.Publish(ctx, strings.Replace(topic, "/_ServiceDetails/", "/_ClockProgress/", 1), marker); err != nil {
-			return err
-		}
-	}
-	// Full service records drive database projections; completion has its own
-	// ordered marker above. Keep details at a real-time heartbeat cadence.
-	if time.Since(g.lastReport) < 5*time.Second {
+	return g.Door.Publish(ctx, g.serviceTopic(), payload)
+}
+
+func (g *Gate) report(ctx context.Context, realNow float64) error {
+	if g.completed == nil {
 		return nil
 	}
-	if g.ReportDetails != nil {
-		if err := g.ReportDetails(ctx, metadata); err != nil {
-			return err
-		}
-	} else if err := g.Door.Publish(ctx, topic, payload); err != nil {
+	var observed any
+	if realNow > 0 {
+		observed = realNow
+	}
+	marker := map[string]any{"run_id": g.run, "processed_at": *g.completed, "ready": realNow > 0, "observed_at": observed}
+	if g.Telemetry != nil {
+		g.Telemetry(marker)
+	}
+	// Functional readiness remains ordered behind samples and priority events.
+	if err := g.Door.Publish(ctx, strings.Replace(g.serviceTopic(), "/_ServiceDetails/", "/_ClockProgress/", 1), marker); err != nil {
 		return err
 	}
 	g.lastReport = time.Now()

@@ -638,3 +638,14 @@ def test_an_ack_carrying_a_result_document_is_admitted_and_decodes_whole():
     decoded = PAYLOAD_CLASSES["_Ack"].decode(json.dumps(ack), 0)
     assert decoded.result == ack["result"]
     assert json.loads(decoded.encode())["result"] == ack["result"]
+
+
+@pytest.mark.parametrize(
+    ("ready", "observed_at", "valid"),
+    [(True, 2, True), (False, None, True), (False, 2, True), (True, None, False)],
+)
+def test_clock_progress_readiness_requires_observation(ready, observed_at, valid):
+    body, _ = gb.build_bundle()
+    schema = body["contracts"]["_ClockProgress"]["schema"]
+    payload = {"run_id": "r", "processed_at": 1, "ready": ready, "observed_at": observed_at}
+    assert jsonschema.Draft202012Validator(schema).is_valid(payload) is valid

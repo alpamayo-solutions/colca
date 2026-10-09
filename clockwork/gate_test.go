@@ -53,9 +53,9 @@ func TestCompletionRequiresFreshUpstreamAndDurableDrain(t *testing.T) {
 	if err := step(); err != nil || calls != 0 {
 		t.Fatal("status overtook its sample lane")
 	}
-	// Details can lag the ordered completion marker by a heartbeat.
-	d.rows[1].Payload = json.RawMessage(`{"name":"dataops","is_active":true,"metadata":{"application_clock":{"ready":true,"run_id":"run","processed_at":10,"observed_at":200}}}`)
-	d.rows = append(d.rows, door.KVEntry{Topic: "colca/v1/_ClockProgress/node/dataops/_service", Payload: json.RawMessage(`{"run_id":"run","processed_at":20}`)})
+	// Registration contains no runtime observations.
+	d.rows[1].Payload = json.RawMessage(`{"name":"dataops","is_active":true}`)
+	d.rows = append(d.rows, door.KVEntry{Topic: "colca/v1/_ClockProgress/node/dataops/_service", Payload: json.RawMessage(`{"run_id":"run","processed_at":20,"ready":true,"observed_at":200}`)})
 	if step() == nil || len(d.published) != 0 {
 		t.Fatal("failed database work acknowledged")
 	}
@@ -65,7 +65,7 @@ func TestCompletionRequiresFreshUpstreamAndDurableDrain(t *testing.T) {
 		t.Fatal("failed acknowledgement advanced progress")
 	}
 	d.fail = false
-	if err := step(); err != nil || len(d.published) != 2 || g.completed == nil || *g.completed != 20 {
+	if err := step(); err != nil || len(d.published) != 1 || g.completed == nil || *g.completed != 20 {
 		t.Fatalf("successful drain not acknowledged: %v", err)
 	}
 	before := calls
@@ -73,7 +73,7 @@ func TestCompletionRequiresFreshUpstreamAndDurableDrain(t *testing.T) {
 		t.Fatal("completed window repeated")
 	}
 	g.lastReport = time.Time{}
-	if err := step(); err != nil || len(d.published) != 4 || calls != before {
+	if err := step(); err != nil || len(d.published) != 2 || calls != before {
 		t.Fatal("paused heartbeat did not preserve completed position")
 	}
 }
@@ -110,8 +110,8 @@ func TestWaitingConsumerUsesAValidServiceCategory(t *testing.T) {
 func TestAsyncGateDrainsOlderCommittedBoundaryWhileClockIsAhead(t *testing.T) {
 	d := &fakeDoor{rows: []door.KVEntry{
 		{Topic: "colca/v1/_ClockDefinition/node/test", Payload: json.RawMessage(`{"id":"test","run_id":"run","revision":1,"real_anchor":100,"factory_anchor":10,"rate":100,"stop_at":40}`)},
-		{Topic: "colca/v1/_ServiceDetails/node/source/_service", Payload: json.RawMessage(`{"name":"source","is_active":true,"metadata":{"application_clock":{"ready":true,"run_id":"run","observed_at":101}}}`)},
-		{Topic: "colca/v1/_ClockProgress/node/source/_service", Payload: json.RawMessage(`{"run_id":"run","processed_at":20}`)},
+		{Topic: "colca/v1/_ServiceDetails/node/source/_service", Payload: json.RawMessage(`{"name":"source","is_active":true}`)},
+		{Topic: "colca/v1/_ClockProgress/node/source/_service", Payload: json.RawMessage(`{"run_id":"run","processed_at":20,"ready":true,"observed_at":200}`)},
 	}}
 	targets := []float64{}
 	g := &Gate{Fresh: func(string) bool { return true }, Door: d, State: func(context.Context) ([]door.KVEntry, error) { return d.rows, nil }, Name: "historian", Topic: d.rows[0].Topic, Dependencies: []string{"./source"}, Asynchronous: true,
@@ -125,7 +125,7 @@ func TestAsyncGateDrainsOlderCommittedBoundaryWhileClockIsAhead(t *testing.T) {
 	if len(targets) != 1 || targets[0] != 20 || g.completed == nil || *g.completed != 20 {
 		t.Fatalf("targets=%v completed=%v", targets, g.completed)
 	}
-	d.rows[2].Payload = json.RawMessage(`{"run_id":"run","processed_at":40}`)
+	d.rows[2].Payload = json.RawMessage(`{"run_id":"run","processed_at":40,"ready":true,"observed_at":201}`)
 	if _, err := g.Once(context.Background(), 101); err != nil {
 		t.Fatal(err)
 	}

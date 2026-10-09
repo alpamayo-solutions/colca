@@ -308,12 +308,15 @@ class TimeSync(ToleratesUnknownFields, Payload):
 class ClockProgress(ToleratesUnknownFields, Payload):
     """Ordered completion marker on the metrics lane, never a measurement.
 
-    ServiceDetails carries liveness; this marker proves the preceding samples
-    and priority-lane events arrived before consumers acknowledge a window.
+    This marker proves preceding samples and priority-lane events arrived
+    before consumers acknowledge a window. Live readiness uses fresh,
+    non-retained observations; ServiceDetails only supplies discovery.
     """
 
     run_id: str
     processed_at: float
+    ready: bool
+    observed_at: float | None
 
 
 @dataclass

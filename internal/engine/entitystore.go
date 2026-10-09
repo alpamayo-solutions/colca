@@ -62,33 +62,35 @@ func (s *entityStore) scan(contract string, keep func(store.KVEntry) bool) []uns
 	return out
 }
 
-// scanContract walks the KV projection once and returns the records of one
-// contract that keep accepts. Shared by scan and ScanContractAll, which differ
-// only in how they treat a store failure.
+// scanContract reads only the requested contract through the paged KV index.
+// The result retains the matching state required by the plugin port; unrelated
+// telemetry and entities never become a full in-memory snapshot.
 func (e *Engine) scanContract(contract string, keep func(store.KVEntry) bool) ([]uns.KVRecord, error) {
-	kvs, err := e.store.KVScan("")
-	if err != nil {
-		return nil, err
-	}
+	const pageSize = 128
 	var out []uns.KVRecord
-	for _, kv := range kvs {
-		if !keep(kv) {
-			continue
+	for after := ""; ; {
+		kvs, next, err := e.store.KVScanPage("", after, pageSize, []string{contract})
+		if err != nil {
+			return nil, err
 		}
-		p, err := uns.Parse(kv.Topic)
-		if err != nil || p.Contract != contract {
-			continue
+		for _, kv := range kvs {
+			if !keep(kv) {
+				continue
+			}
+			p, err := uns.Parse(kv.Topic)
+			if err != nil || p.Contract != contract {
+				continue
+			}
+			out = append(out, uns.KVRecord{
+				Topic: kv.Topic, Path: p.Path, NodeID: kv.NodeID, Payload: kv.Payload,
+				Offset: kv.Offset, OriginOffset: kv.OriginOffset,
+			})
 		}
-		out = append(out, uns.KVRecord{
-			Topic:        kv.Topic,
-			Path:         p.Path,
-			NodeID:       kv.NodeID,
-			Payload:      kv.Payload,
-			Offset:       kv.Offset,
-			OriginOffset: kv.OriginOffset,
-		})
+		if next == "" {
+			return out, nil
+		}
+		after = next
 	}
-	return out, nil
 }
 
 // ScanContractAll is EntityStore().KVScanAll with storage failures returned

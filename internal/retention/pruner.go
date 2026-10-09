@@ -591,39 +591,47 @@ func (p *Pruner) refreshEntities(from, to uint64) bool {
 	// The refreshed topics for the log line, capped so a large refresh cannot write
 	// an unbounded line.
 	var names []string
-	entries, err := p.st.KVScan("")
-	if err != nil {
-		// Like a failed append: the range stays pending and is retried next cycle.
-		p.log.Error("entities state refresh KV scan failed (range stays pending, retried next cycle)", "err", err)
-		return false
-	}
-	for _, e := range entries {
-		if e.Offset < from || e.Offset >= to {
-			continue
-		}
-		parsed, err := uns.Parse(e.Topic)
-		if err != nil || !uns.NeedsStateRefresh(p.eng.ClassOf(parsed.Contract)) {
-			continue // only entity-class entries are refreshed
-		}
-		applied, err := p.publish(e.Topic, e.Payload, e.Offset)
+	// Keep only a small page live while publishing. Successful refreshes move
+	// their KV offsets outside the pending range, so retries remain idempotent.
+	const pageSize = 32
+	for after := ""; ; {
+		entries, next, err := p.st.KVScanPage("", after, pageSize, nil)
 		if err != nil {
-			p.log.Error("entities state refresh append failed (range stays pending, retried next cycle)", "topic", e.Topic, "err", err)
-			failed++
-			p.m.StateRefreshFailed()
-			continue
+			p.log.Error("entities state refresh KV scan failed (range stays pending, retried next cycle)", "err", err)
+			return false
 		}
-		if !applied {
-			p.log.Warn("entities state refresh skipped: path retired or superseded since the snapshot",
-				"topic", e.Topic, "snapshot_offset", e.Offset)
-			skipped++
-			p.m.StateRefreshSkipped()
-			continue
+		for _, e := range entries {
+			if e.Offset < from || e.Offset >= to {
+				continue
+			}
+			parsed, err := uns.Parse(e.Topic)
+			if err != nil || !uns.NeedsStateRefresh(p.eng.ClassOf(parsed.Contract)) {
+				continue // only entity-class entries are refreshed
+			}
+			applied, err := p.publish(e.Topic, e.Payload, e.Offset)
+			if err != nil {
+				p.log.Error("entities state refresh append failed (range stays pending, retried next cycle)", "topic", e.Topic, "err", err)
+				failed++
+				p.m.StateRefreshFailed()
+				continue
+			}
+			if !applied {
+				p.log.Warn("entities state refresh skipped: path retired or superseded since the snapshot",
+					"topic", e.Topic, "snapshot_offset", e.Offset)
+				skipped++
+				p.m.StateRefreshSkipped()
+				continue
+			}
+			refreshed++
+			if len(names) < refreshNamesLogged {
+				names = append(names, e.Topic)
+			}
+			p.m.StateRefreshApplied()
 		}
-		refreshed++
-		if len(names) < refreshNamesLogged {
-			names = append(names, e.Topic)
+		if next == "" {
+			break
 		}
-		p.m.StateRefreshApplied()
+		after = next
 	}
 	if refreshed > 0 || skipped > 0 || failed > 0 {
 		p.log.Info("entities state refresh", "paths", refreshed, "skipped", skipped, "failed", failed,
