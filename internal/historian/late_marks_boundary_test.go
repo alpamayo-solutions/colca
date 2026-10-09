@@ -5,6 +5,7 @@ package historian
 import (
 	"context"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -12,44 +13,31 @@ import (
 )
 
 // The marks against Postgres: what the statement calls late, that the marks
-// commit with the rows, that they are bounded, and that the reader is woken.
-// The relations are created as their owner (PREKIT's migrations) creates them;
+// commit with the rows and never hold a page up, and that the reader is woken.
+// testPool creates the relations as their owner (PREKIT's migrations) does;
 // wanted lists the signals this test asks marks for.
 func markingSink(t *testing.T, wanted ...string) *Sink {
 	t.Helper()
 	sink := testPool(t)
-	ctx := context.Background()
-	if _, err := sink.Pool.Exec(ctx, `
-        CREATE TABLE IF NOT EXISTS historian_late_write (
-            id        bigserial PRIMARY KEY,
-            signal_id text NOT NULL,
-            hour      timestamptz NOT NULL,
-            UNIQUE (signal_id, hour)
-        );
-        CREATE TABLE IF NOT EXISTS historian_late_write_signal (signal_id text PRIMARY KEY)`); err != nil {
-		t.Fatalf("creating the late write relations: %v", err)
-	}
 	for _, signalID := range wanted {
-		if _, err := sink.Pool.Exec(ctx,
+		if _, err := sink.Pool.Exec(context.Background(),
 			`INSERT INTO historian_late_write_signal VALUES ($1) ON CONFLICT DO NOTHING`, signalID); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := sink.WatchLateWrites(ctx, nil); err != nil {
-		t.Fatal(err)
-	}
-	if !sink.MarksLateWrites() {
-		t.Fatal("the sink does not mark although the relations exist")
-	}
 	return sink
 }
 
-func marksOf(t *testing.T, sink *Sink, signalID string) []time.Time {
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// marksOf returns the hour of every mark row that names signalID, in the order
+// they were written: an hour appears once per page that marked it.
+func marksOf(t *testing.T, q querier, signalID string) []time.Time {
 	t.Helper()
-	rows, err := sink.Pool.(interface {
-		Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	}).Query(context.Background(),
-		`SELECT hour FROM historian_late_write WHERE signal_id = $1 ORDER BY id`, signalID)
+	rows, err := q.Query(context.Background(),
+		`SELECT hour FROM historian_late_write WHERE signal_ids ? $1 ORDER BY id`, signalID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,19 +45,23 @@ func marksOf(t *testing.T, sink *Sink, signalID string) []time.Time {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for i := range hours {
+		hours[i] = hours[i].UTC()
+	}
 	return hours
 }
 
 func number(v float64) *float64 { return &v }
 
-func TestALatePageMarksEachHourOfEachSignalOnce(t *testing.T) {
+func TestALatePageMarksEachLateHourOnceWithItsSignals(t *testing.T) {
 	ctx := context.Background()
-	late, current, unlisted := sigID("late"), sigID("current"), sigID("unlisted")
-	sink := markingSink(t, late, current)
+	late, other, current, unlisted := sigID("late"), sigID("other"), sigID("current"), sigID("unlisted")
+	sink := markingSink(t, late, other, current)
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-5 * time.Hour)
 	rows := []Row{
 		{SignalID: late, NodeID: "n1", Timestamp: hour.Add(time.Minute), Number: number(1)},
 		{SignalID: late, NodeID: "n1", Timestamp: hour.Add(2 * time.Minute), Number: number(2)},
+		{SignalID: other, NodeID: "n1", Timestamp: hour.Add(3 * time.Minute), Number: number(2)},
 		{SignalID: late, NodeID: "n1", Timestamp: hour.Add(61 * time.Minute), Number: number(3)},
 		{SignalID: late, NodeID: "n1", Timestamp: hour.Add(62 * time.Minute)}, // a retraction is a write too
 		{SignalID: current, NodeID: "n1", Timestamp: time.Now().UTC(), Number: number(4)},
@@ -79,38 +71,44 @@ func TestALatePageMarksEachHourOfEachSignalOnce(t *testing.T) {
 	if _, err := sink.Apply(ctx, rows, "test:late", 1, ""); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	got := marksOf(t, sink, late)
-	if len(got) != 2 || !got[0].Equal(hour) && !got[1].Equal(hour) || !got[0].Equal(hour.Add(time.Hour)) && !got[1].Equal(hour.Add(time.Hour)) {
+	if got := marksOf(t, sink.Pool.(querier), late); !slices.Equal(got, []time.Time{hour, hour.Add(time.Hour)}) &&
+		!slices.Equal(got, []time.Time{hour.Add(time.Hour), hour}) {
 		t.Fatalf("marks of the late signal = %v, want %v and %v once each", got, hour, hour.Add(time.Hour))
 	}
-	if got := marksOf(t, sink, current); len(got) != 0 {
+	var signals []string
+	if err := sink.Pool.QueryRow(ctx, `SELECT signal_ids FROM historian_late_write WHERE hour = $1 AND signal_ids ? $2`,
+		hour, late).Scan(&signals); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{late, other}; !slices.Equal(signals, want) && !slices.Equal(signals, []string{other, late}) {
+		t.Fatalf("the hour's mark names %v, want %v", signals, want)
+	}
+	if got := marksOf(t, sink.Pool.(querier), current); len(got) != 0 {
 		t.Fatalf("a current sample was marked: %v", got)
 	}
-
-	if got := marksOf(t, sink, unlisted); len(got) != 0 {
+	if got := marksOf(t, sink.Pool.(querier), unlisted); len(got) != 0 {
 		t.Fatalf("a signal that is not listed was marked: %v", got)
 	}
 
-	// However many pages write into an hour, it has one mark.
-	for offset := int64(2); offset < 5; offset++ {
-		more := []Row{{SignalID: late, NodeID: "n1", Timestamp: hour.Add(time.Duration(offset) * time.Minute), Number: number(5)}}
-		if _, err := sink.Apply(ctx, more, "test:late", offset, ""); err != nil {
-			t.Fatalf("apply %d: %v", offset, err)
-		}
+	// Every page that writes into the hour late adds its own mark: nothing is
+	// looked up or locked, the reader merges them.
+	more := []Row{{SignalID: late, NodeID: "n1", Timestamp: hour.Add(5 * time.Minute), Number: number(5)}}
+	if _, err := sink.Apply(ctx, more, "test:late", 2, ""); err != nil {
+		t.Fatalf("apply: %v", err)
 	}
-	if got := marksOf(t, sink, late); len(got) != 2 {
-		t.Fatalf("marks after more pages into the same hour = %v, want still 2", got)
+	if got := marksOf(t, sink.Pool.(querier), late); len(got) != 3 || !got[2].Equal(hour) {
+		t.Fatalf("marks after another page into the hour = %v, want a third for %v", got, hour)
 	}
 }
 
-// The reader deletes a mark, then reads the hour, in one transaction. A page
-// that is still writing into that hour holds the mark, so the delete waits for
-// it and the read sees its sample; without that the sample would be stored,
-// its mark gone and the hour read without it.
-func TestAReaderDeletingAMarkWaitsForThePageThatHoldsIt(t *testing.T) {
+// A reader that is handling marks (it has deleted them and not committed yet)
+// does not hold a page up: the page appends its own mark and commits. And a
+// page's mark is not visible before the page commits, so a reader never sees
+// a mark whose samples it cannot read.
+func TestAPageNeitherWaitsForTheReaderNorShowsItsMarkEarly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	signalID := sigID("held")
+	signalID := sigID("free")
 	sink := markingSink(t, signalID)
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-8 * time.Hour)
 	first := []Row{{SignalID: signalID, NodeID: "n1", Timestamp: hour.Add(time.Minute), Number: number(1)}}
@@ -118,7 +116,15 @@ func TestAReaderDeletingAMarkWaitsForThePageThatHoldsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A page in flight: its sample and its (already present) mark, not committed.
+	reader, err := sink.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Rollback(context.Background()) }()
+	if _, err := reader.Exec(ctx, `DELETE FROM historian_late_write WHERE signal_ids ? $1`, signalID); err != nil {
+		t.Fatal(err)
+	}
+
 	page, err := sink.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -127,50 +133,77 @@ func TestAReaderDeletingAMarkWaitsForThePageThatHoldsIt(t *testing.T) {
 	if _, err := page.Exec(ctx, insertMetric, hour.Add(2*time.Minute), nil, number(2), nil, nil, "n1", signalID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := page.Exec(ctx, markLateWrites, []string{signalID}, []time.Time{hour}); err != nil {
-		t.Fatal(err)
+	quick, stop := context.WithTimeout(ctx, 2*time.Second)
+	defer stop()
+	if _, err := page.Exec(quick, markLateWrites, []string{signalID}, []time.Time{hour}); err != nil {
+		t.Fatalf("the page waited for the reader: %v", err)
 	}
-
-	seen := make(chan int, 1)
-	failed := make(chan error, 1)
-	go func() {
-		reader, err := sink.Pool.Begin(ctx)
-		if err != nil {
-			failed <- err
-			return
-		}
-		defer func() { _ = reader.Rollback(context.Background()) }()
-		if _, err := reader.Exec(ctx, `DELETE FROM historian_late_write WHERE signal_id = $1 AND hour = $2`, signalID, hour); err != nil {
-			failed <- err
-			return
-		}
-		var n int
-		if err := reader.QueryRow(ctx, `SELECT count(*) FROM historian_metric WHERE signal_id = $1`, signalID).Scan(&n); err != nil {
-			failed <- err
-			return
-		}
-		seen <- n
-	}()
-
-	select {
-	case n := <-seen:
-		t.Fatalf("the reader read %d samples while the page was still open", n)
-	case err := <-failed:
-		t.Fatal(err)
-	case <-time.After(500 * time.Millisecond):
+	if got := marksOf(t, reader, signalID); len(got) != 0 {
+		t.Fatalf("the reader sees marks it deleted or a page has not committed: %v", got)
 	}
 	if err := page.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case n := <-seen:
-		if n != 2 {
-			t.Fatalf("the reader saw %d samples, want both", n)
-		}
-	case err := <-failed:
+	if err := reader.Commit(ctx); err != nil {
 		t.Fatal(err)
-	case <-ctx.Done():
-		t.Fatal("the reader never finished")
+	}
+	if got := marksOf(t, sink.Pool.(querier), signalID); len(got) != 1 || !got[0].Equal(hour) {
+		t.Fatalf("marks after both committed = %v, want the page's mark for %v", got, hour)
+	}
+}
+
+// The reader closes an hour once it is due and every transaction that was in
+// flight then has ended (docs/operations.md). That holds a page that decided
+// "not late" because the page has its transaction id from its first row,
+// before the mark statement decides: it is older than any id the reader takes
+// after the decision, and stays in flight for the reader until it commits.
+func TestAPageThatHasWrittenIsInFlightForTheReaderUntilItCommits(t *testing.T) {
+	ctx := context.Background()
+	signalID := sigID("inflight")
+	sink := markingSink(t, signalID)
+	page, err := sink.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = page.Rollback(context.Background()) }()
+	now := time.Now().UTC()
+	if _, err := page.Exec(ctx, insertMetric, now, nil, number(1), nil, nil, "n1", signalID); err != nil {
+		t.Fatal(err)
+	}
+	// Current: the statement decides it is not late and marks nothing.
+	if _, err := page.Exec(ctx, markLateWrites, []string{signalID}, []time.Time{now.Truncate(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The reader takes a transaction id once the hour is due; every page
+	// that decided before then has a smaller one. It waits until the oldest
+	// transaction still running is its own or younger.
+	reader, err := sink.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Rollback(context.Background()) }()
+	var due string
+	if err := reader.QueryRow(ctx, `SELECT pg_current_xact_id()::text`).Scan(&due); err != nil {
+		t.Fatal(err)
+	}
+	ended := func() bool {
+		t.Helper()
+		var done bool
+		if err := reader.QueryRow(ctx,
+			`SELECT pg_snapshot_xmin(pg_current_snapshot()) >= $1::xid8`, due).Scan(&done); err != nil {
+			t.Fatal(err)
+		}
+		return done
+	}
+	if ended() {
+		t.Fatal("the reader sees no page in flight although one has written and not committed")
+	}
+	if err := page.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !ended() {
+		t.Fatal("the page committed and the reader still waits for it")
 	}
 }
 
@@ -199,12 +232,12 @@ func TestAnHourIsLateFromSixtyFiveMinutesAfterItsStart(t *testing.T) {
 	if now.Sub(previous) >= lateAfter {
 		want[previous] = true
 	}
-	got := marksOf(t, sink, signalID)
+	got := marksOf(t, sink.Pool.(querier), signalID)
 	if len(got) != len(want) {
 		t.Fatalf("marks = %v, want %v (now %v)", got, want, now)
 	}
 	for _, h := range got {
-		if !want[h.UTC()] {
+		if !want[h] {
 			t.Fatalf("marks = %v, want %v (now %v)", got, want, now)
 		}
 	}
@@ -236,9 +269,8 @@ func TestMarksReachTheListenerWhenThePageCommits(t *testing.T) {
 		t.Fatalf("channel = %q", note.Channel)
 	}
 	// The mark is there when the listener hears of it.
-	var n int
-	if err := listener.QueryRow(ctx, `SELECT count(*) FROM historian_late_write WHERE signal_id = $1`, signalID).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("marks visible to the listener = %d, %v", n, err)
+	if got := marksOf(t, listener, signalID); len(got) != 1 {
+		t.Fatalf("marks visible to the listener = %v", got)
 	}
 }
 
@@ -261,12 +293,14 @@ func TestAPartitionedPageMarksItsLateWrites(t *testing.T) {
 	if _, err := sink.Apply(ctx, rows, "test:late-part", 1, ""); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	var n int
-	if err := sink.Pool.QueryRow(ctx,
-		`SELECT count(*) FROM historian_late_write WHERE signal_id LIKE $1`, prefix+"-%").Scan(&n); err != nil {
+	var n, marks int
+	if err := sink.Pool.QueryRow(ctx, `
+        SELECT count(DISTINCT s), count(DISTINCT w.id)
+        FROM historian_late_write w, jsonb_array_elements_text(w.signal_ids) AS s
+        WHERE s LIKE $1`, prefix+"-%").Scan(&n, &marks); err != nil {
 		t.Fatal(err)
 	}
-	if n != 20 {
-		t.Fatalf("marks = %d, want one per signal (20)", n)
+	if n != 20 || marks < 1 || marks > sink.Writers {
+		t.Fatalf("signals marked = %d in %d marks, want all 20 in at most one mark per share", n, marks)
 	}
 }

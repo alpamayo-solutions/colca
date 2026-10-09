@@ -416,62 +416,52 @@ per-signal statistics) has to learn when a sample lands in an hour it already
 computed: a child catching up after an outage, a replay, an import, a corrected
 value. `colca-historian` tells it in the database.
 
-The reader owns two relations, and the historian marks only while both exist:
+The reader owns two relations, and its migrations create them before
+`colca-historian` runs (PREKIT starts the historian after its api, which
+migrates first):
 
 ```sql
 CREATE TABLE historian_late_write (
-    id bigserial PRIMARY KEY, signal_id text NOT NULL, hour timestamptz NOT NULL,
-    UNIQUE (signal_id, hour));
+    id bigserial PRIMARY KEY,
+    hour timestamptz NOT NULL,       -- a UTC hour
+    signal_ids jsonb NOT NULL);      -- the signals written into it, a JSON array
 -- the signals to mark: a table or a view with a signal_id column
 CREATE VIEW historian_late_write_signal AS SELECT signal_id FROM ...;
 ```
 
-For every page it writes, the historian adds a row to `historian_late_write`
-for each listed signal and UTC hour the page has a sample of, when that hour
-started 65 minutes ago or longer by the database's clock, and sends
-`NOTIFY historian_late_write` when it added one. This happens in the
-transaction that writes the samples, so a sample is never stored without its
-mark. An offline `colca-historian import` marks the same way.
+For every page it writes, the historian appends one row to
+`historian_late_write` per UTC hour the page has a sample of, when that hour
+started 65 minutes ago or longer by the database's clock, naming the listed
+signals it wrote into that hour, and sends `NOTIFY historian_late_write` when
+it appended one. This happens in the transaction that writes the samples: a
+sample is never stored without its mark, and a mark is never visible before
+its samples. An offline `colca-historian import` marks the same way. Without
+the relations the mark statement fails and the page is retried; the historian
+writes no page unmarked.
 
-What it costs is bounded whatever is replayed: a signal that is not listed
-writes nothing, and a (signal, hour) has one row however many pages write into
-it. A mark that is already there is locked until the page commits, not written
-again.
+Marking never holds ingestion up: it is a plain insert, with no unique key, no
+conflict handling and no table lock. A signal that is not listed writes nothing,
+and a page of current samples does not run the statement at all. Several pages
+writing into one hour leave one row each; the reader merges them.
 
 The reader's side of the contract:
 
-- **Handling a mark:** delete it first, then read the hour, in one
-  transaction, taking marks in `(signal_id, hour)` order. The delete waits for
-  a page that is still writing into that hour, and the read then sees its
-  samples; a page that comes after the delete adds the mark again.
-- **Listing a new signal:** commit it to the list, then take
-  `LOCK TABLE historian_late_write IN SHARE MODE` once, in a transaction of
-  its own, before reading the signal's history. That waits for the pages that
-  were written without seeing the signal listed.
-- **Timing:** lateness is decided when the mark statement runs, after the
-  page's rows are written. Every marking transaction first takes
-  `LOCK TABLE historian_late_write IN ROW EXCLUSIVE MODE`, before writing
-  samples and before selecting candidate late hours. To close an hour,
-  no earlier than 65 minutes after its start, first take the conflicting
-  `SHARE` lock. This waits for pages that decided they were not late but
-  have not committed yet. Release that barrier before computing: take it
-  inside a savepoint and roll the savepoint back, or use a separate
-  transaction. Pages admitted after the barrier decide lateness after their
-  lock wait and leave marks; the expensive computation never holds them up.
-  Bound the reader's lock wait and retry a refused close without advancing
-  its watermark. A stalled page must not be closed past.
-- **Taking up marks:** the historian looks for the relations when it writes a
-  page, at most once a minute. A page that started before it saw them commits
-  unmarked: list signals only after the record says `late_write_marks`, and
-  allow for a page that started before that.
-
-The historian looks for the two relations at start and, while they are
-missing, again when it writes a page, at most once a minute. A database
-without them gets no marks and no error, and relations that are dropped stop
-the marks without stopping the history. While it marks, the historian's
-`_ServiceDetails` record carries `metadata.late_write_marks: true`. A reader
-checks that before it relies on the marks: a historian that predates them
-writes none and says nothing.
+- **Handling marks:** read committed marks, recompute their (signal, hour)
+  pairs from `historian_metric`, then delete the marks it read, by `id`. A mark
+  it can read was committed with its samples, so the recompute sees them; a
+  mark committed meanwhile stays for the next pass. A crash in between leaves
+  the marks, and recomputing again is harmless.
+- **Closing an hour:** no earlier than 65 minutes after its start by the
+  database's clock, take a transaction id (`pg_current_xact_id()`), then wait
+  until `pg_snapshot_xmin(pg_current_snapshot())` is at least that id before
+  reading the hour. Every page that decided by then that it was not late has
+  written its rows, so it already has a smaller transaction id; the wait ends
+  when all of those committed or rolled back. Pages are never made to wait:
+  the reader waits, bounded, and tries again later.
+- **Listing a new signal:** commit it to the list, then wait the same way
+  before reading the signal's history. A page whose mark statement ran before
+  the listing committed has an older transaction id; every later one sees the
+  listing.
 
 ## Permanent standalone handover
 

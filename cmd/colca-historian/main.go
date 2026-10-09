@@ -198,14 +198,6 @@ func run() int {
 		MQTTURL: cfg.colcaMQTTURL,
 		Version: version,
 		Log:     log,
-		// Whether pages mark their late writes; PREKIT reads it from the record.
-		LateWriteMarks: sink.MarksLateWrites,
-	}
-	// Late writes are marked while the database has the table for the marks;
-	// the record follows when that changes.
-	if err := sink.WatchLateWrites(ctx, func(bool) { announcer.Refresh() }); err != nil {
-		log.Error("schema", "err", err)
-		return 2
 	}
 	if deps != nil {
 		self, err := logDoor.Self(ctx)

@@ -37,10 +37,10 @@ func BenchmarkLateWriteIngest(b *testing.B) {
 	}
 	for _, scenario := range []struct {
 		name    string
-		wanted  int // -1: no marking relations
+		wanted  int
 		current bool
 	}{
-		{"no-relations", -1, false}, {"empty-wanted", 0, false},
+		{"empty-wanted", 0, false},
 		{"300-wanted", 300, false}, {"14000-wanted", 14000, false},
 		{"14000-current", 14000, true},
 	} {
@@ -60,17 +60,12 @@ SELECT create_hypertable('historian_metric','timestamp',chunk_time_interval=>INT
 			if err := sink.EnsureSchema(ctx, 0); err != nil {
 				b.Fatal(err)
 			}
-			if scenario.wanted >= 0 {
-				if _, err := pool.Exec(ctx, `CREATE TABLE historian_late_write (
- id bigserial PRIMARY KEY, signal_id text NOT NULL, hour timestamptz NOT NULL, UNIQUE(signal_id,hour));
+			if _, err := pool.Exec(ctx, `CREATE TABLE historian_late_write (
+ id bigserial PRIMARY KEY, hour timestamptz NOT NULL, signal_ids jsonb NOT NULL);
 CREATE TABLE historian_late_write_signal (signal_id text PRIMARY KEY);`); err != nil {
-					b.Fatal(err)
-				}
-				if _, err := pool.Exec(ctx, `INSERT INTO historian_late_write_signal SELECT 'signal-' || i FROM generate_series(0,$1::int-1) i`, scenario.wanted); err != nil {
-					b.Fatal(err)
-				}
+				b.Fatal(err)
 			}
-			if err := sink.WatchLateWrites(ctx, nil); err != nil {
+			if _, err := pool.Exec(ctx, `INSERT INTO historian_late_write_signal SELECT 'signal-' || i FROM generate_series(0,$1::int-1) i`, scenario.wanted); err != nil {
 				b.Fatal(err)
 			}
 			const pageSize = 1250
@@ -96,14 +91,12 @@ CREATE TABLE historian_late_write_signal (signal_id text PRIMARY KEY);`); err !=
 			if err := pool.QueryRow(ctx, `SELECT count(*) FROM historian_metric`).Scan(&count); err != nil || count != b.N*pageSize {
 				b.Fatalf("stored=%d want=%d err=%v", count, b.N*pageSize, err)
 			}
-			if scenario.wanted >= 0 {
-				want := min(scenario.wanted, b.N*pageSize)
-				if scenario.current {
-					want = 0
-				}
-				if err := pool.QueryRow(ctx, `SELECT count(*) FROM historian_late_write`).Scan(&count); err != nil || count != want {
-					b.Fatalf("marks=%d want=%d err=%v", count, want, err)
-				}
+			want := min(scenario.wanted, b.N*pageSize)
+			if scenario.current {
+				want = 0
+			}
+			if err := pool.QueryRow(ctx, `SELECT count(DISTINCT s) FROM historian_late_write, jsonb_array_elements_text(signal_ids) AS s`).Scan(&count); err != nil || count != want {
+				b.Fatalf("signals marked=%d want=%d err=%v", count, want, err)
 			}
 		})
 	}

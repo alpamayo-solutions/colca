@@ -84,11 +84,6 @@ func importFile(args []string) error {
 			return err
 		}
 		sink := &historian.Sink{Pool: pool, Strict: true}
-		// Imported history is late by definition: its hours are marked like
-		// any other late write, where the database has the table for it.
-		if err := sink.WatchLateWrites(ctx, nil); err != nil {
-			return err
-		}
 		if _, err := historian.Import(ctx, spool, before, *digest, *batchSize, sink); err != nil {
 			return err
 		}

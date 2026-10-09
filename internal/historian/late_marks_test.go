@@ -69,47 +69,54 @@ func TestLateWritesUsesUTCHours(t *testing.T) {
 	}
 }
 
-// marksPool answers the table question and records the batches it is sent.
+// marksPool records the statements of every transaction it begins: the
+// batch's and those sent one by one.
 type marksPool struct {
-	exists  bool
-	looks   int
 	batches [][]string
+	execs   []string
 	// failMarks, when set, is the error the mark statement returns once.
 	failMarks error
 }
 
-type existsRow struct{ exists bool }
-
-func (r existsRow) Scan(dest ...any) error {
-	*(dest[0].(*bool)) = r.exists
-	return nil
-}
-
 func (p *marksPool) Begin(context.Context) (pgx.Tx, error) {
-	return &fakeTx{sendBatch: func(_ context.Context, b *pgx.Batch) pgx.BatchResults {
-		var queued []string
-		results := &fakeBatchResults{}
-		for _, q := range b.QueuedQueries {
-			queued = append(queued, q.SQL)
-			fail := error(nil)
-			if q.SQL == markLateWrites && p.failMarks != nil {
-				fail, p.failMarks = p.failMarks, nil
-			}
-			results.execs = append(results.execs, func() (pgconn.CommandTag, error) { return pgconn.CommandTag{}, fail })
-		}
-		p.batches = append(p.batches, queued)
-		return results
-	}}, nil
+	return &marksTx{pool: p}, nil
 }
 
-func (p *marksPool) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+func (p *marksPool) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+	p.execs = append(p.execs, sql)
 	return pgconn.CommandTag{}, nil
 }
 
 func (p *marksPool) QueryRow(context.Context, string, ...any) pgx.Row {
-	p.looks++
-	return existsRow{p.exists}
+	panic("marksPool.QueryRow: the sink asks the database nothing to mark")
 }
+
+type marksTx struct {
+	pgx.Tx
+	pool *marksPool
+}
+
+func (tx *marksTx) SendBatch(_ context.Context, b *pgx.Batch) pgx.BatchResults {
+	var queued []string
+	results := &fakeBatchResults{}
+	for _, q := range b.QueuedQueries {
+		queued = append(queued, q.SQL)
+		fail := error(nil)
+		if q.SQL == markLateWrites && tx.pool.failMarks != nil {
+			fail, tx.pool.failMarks = tx.pool.failMarks, nil
+		}
+		results.execs = append(results.execs, func() (pgconn.CommandTag, error) { return pgconn.CommandTag{}, fail })
+	}
+	tx.pool.batches = append(tx.pool.batches, queued)
+	return results
+}
+
+func (tx *marksTx) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+	tx.pool.execs = append(tx.pool.execs, sql)
+	return pgconn.CommandTag{}, nil
+}
+func (tx *marksTx) Commit(context.Context) error   { return nil }
+func (tx *marksTx) Rollback(context.Context) error { return nil }
 
 func lateRow(signal string) Row {
 	v := 1.0
@@ -125,37 +132,21 @@ func marked(batch []string) bool {
 	return false
 }
 
-// A sink that was never told to look writes no marks: a database without the
-// table must see exactly the statements it saw before.
-func TestASinkThatDoesNotWatchWritesNoMarks(t *testing.T) {
-	pool := &marksPool{exists: true}
+// A late page marks in the transaction that writes its rows, before the
+// marker moves, and nothing else: no lock, no question to the database. A page
+// of current samples queues no mark statement at all.
+func TestALatePageMarksInItsTransactionAndTakesNoLock(t *testing.T) {
+	pool := &marksPool{}
 	sink := &Sink{Pool: pool}
-	if _, err := sink.Apply(context.Background(), []Row{lateRow("a")}, Consumer, 1, ""); err != nil {
-		t.Fatal(err)
-	}
-	if pool.looks != 0 || marked(pool.batches[0]) {
-		t.Fatalf("looks=%d batch=%v", pool.looks, pool.batches[0])
-	}
-}
-
-// With the table, a late page marks in the transaction that writes its rows,
-// before the marker moves; a page of current samples queues no mark statement.
-func TestAWatchingSinkMarksLatePagesInTheirTransaction(t *testing.T) {
-	pool := &marksPool{exists: true}
-	sink := &Sink{Pool: pool}
-	var heard []bool
-	if err := sink.WatchLateWrites(context.Background(), func(on bool) { heard = append(heard, on) }); err != nil {
-		t.Fatal(err)
-	}
-	if !sink.MarksLateWrites() || len(heard) != 1 || !heard[0] {
-		t.Fatalf("marks=%v heard=%v", sink.MarksLateWrites(), heard)
-	}
 	if _, err := sink.Apply(context.Background(), []Row{lateRow("a")}, Consumer, 1, ""); err != nil {
 		t.Fatal(err)
 	}
 	batch := pool.batches[0]
 	if len(batch) != 3 || batch[0] != insertMetrics || batch[1] != markLateWrites || batch[2] != upsertOffset {
 		t.Fatalf("batch = %v", batch)
+	}
+	if len(pool.execs) != 0 {
+		t.Fatalf("statements beside the batch: %v", pool.execs)
 	}
 
 	v := 2.0
@@ -168,73 +159,19 @@ func TestAWatchingSinkMarksLatePagesInTheirTransaction(t *testing.T) {
 	}
 }
 
-// Without the table the sink looks again when it writes, at most once per
-// lateMarkRecheck, and starts marking when the table has appeared.
-func TestASinkWithoutTheTableLooksAgainWhenItWrites(t *testing.T) {
-	pool := &marksPool{}
-	sink := &Sink{Pool: pool}
-	var heard []bool
-	if err := sink.WatchLateWrites(context.Background(), func(on bool) { heard = append(heard, on) }); err != nil {
-		t.Fatal(err)
-	}
-	apply := func(offset int64) {
-		t.Helper()
-		if _, err := sink.Apply(context.Background(), []Row{lateRow("a")}, Consumer, offset, ""); err != nil {
-			t.Fatal(err)
-		}
-	}
-	apply(1)
-	if pool.looks != 1 || marked(pool.batches[0]) {
-		t.Fatalf("looked again within the interval: looks=%d batch=%v", pool.looks, pool.batches[0])
-	}
-
-	pool.exists = true
-	sink.marks.mu.Lock()
-	sink.marks.checked = time.Now().Add(-lateMarkRecheck)
-	sink.marks.mu.Unlock()
-	apply(2)
-	if pool.looks != 2 || !marked(pool.batches[1]) {
-		t.Fatalf("looks=%d batch=%v", pool.looks, pool.batches[1])
-	}
-	if len(heard) != 1 || !heard[0] {
-		t.Fatalf("heard = %v, want one change to on", heard)
-	}
-}
-
-// A table that is taken away must not stop the history: the page is written
-// again without marks, and the change is announced.
-func TestADroppedTableStopsTheMarksNotThePage(t *testing.T) {
-	pool := &marksPool{exists: true, failMarks: &pgconn.PgError{Code: undefinedTable}}
-	sink := &Sink{Pool: pool}
-	var heard []bool
-	if err := sink.WatchLateWrites(context.Background(), func(on bool) { heard = append(heard, on) }); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sink.Apply(context.Background(), []Row{lateRow("a")}, Consumer, 1, ""); err != nil {
-		t.Fatalf("the page failed: %v", err)
-	}
-	if len(pool.batches) != 2 || !marked(pool.batches[0]) || marked(pool.batches[1]) {
-		t.Fatalf("batches = %v", pool.batches)
-	}
-	if sink.MarksLateWrites() || len(heard) != 2 || heard[1] {
-		t.Fatalf("marks=%v heard=%v", sink.MarksLateWrites(), heard)
-	}
-}
-
-// Any other failure of the mark statement fails the page, which is retried:
-// rows must not commit without their marks.
+// A failed mark statement fails the page, which is retried: rows must not
+// commit without their marks. That includes a database without the mark
+// table: its owner's migrations create it before the historian runs.
 func TestAFailedMarkFailsThePage(t *testing.T) {
-	boom := errors.New("connection reset")
-	pool := &marksPool{exists: true, failMarks: boom}
-	sink := &Sink{Pool: pool}
-	if err := sink.WatchLateWrites(context.Background(), nil); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sink.Apply(context.Background(), []Row{lateRow("a")}, Consumer, 1, ""); !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the mark statement's", err)
-	}
-	if !sink.MarksLateWrites() {
-		t.Fatal("a transient failure turned the marks off")
+	for _, cause := range []error{errors.New("connection reset"), &pgconn.PgError{Code: "42P01"}} {
+		pool := &marksPool{failMarks: cause}
+		sink := &Sink{Pool: pool}
+		if _, err := sink.Apply(context.Background(), []Row{lateRow("a")}, Consumer, 1, ""); !errors.Is(err, cause) {
+			t.Fatalf("err = %v, want the mark statement's %v", err, cause)
+		}
+		if len(pool.batches) != 1 {
+			t.Fatalf("the page was written again without its marks: %v", pool.batches)
+		}
 	}
 }
 
@@ -248,18 +185,19 @@ type rowsPool struct {
 
 type rowsTx struct {
 	pgx.Tx
-	pool  *rowsPool
-	batch bool
+	pool *rowsPool
 }
 
 func (p *rowsPool) Begin(context.Context) (pgx.Tx, error) {
 	p.begun++
-	return &rowsTx{pool: p, batch: p.begun == 1}, nil
+	return &rowsTx{pool: p}, nil
 }
 func (p *rowsPool) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
 	return pgconn.CommandTag{}, nil
 }
-func (p *rowsPool) QueryRow(context.Context, string, ...any) pgx.Row { return existsRow{true} }
+func (p *rowsPool) QueryRow(context.Context, string, ...any) pgx.Row {
+	panic("rowsPool.QueryRow: not used")
+}
 
 func (tx *rowsTx) SendBatch(_ context.Context, b *pgx.Batch) pgx.BatchResults {
 	results := &fakeBatchResults{}
@@ -290,9 +228,6 @@ func (tx *rowsTx) Rollback(context.Context) error { return nil }
 func TestARowByRowPageMarksTheRowsThatLanded(t *testing.T) {
 	pool := &rowsPool{refuse: "refused"}
 	sink := &Sink{Pool: pool}
-	if err := sink.WatchLateWrites(context.Background(), nil); err != nil {
-		t.Fatal(err)
-	}
 	rejections, err := sink.Apply(context.Background(), []Row{lateRow("landed"), lateRow("refused")}, Consumer, 1, "")
 	if err != nil || len(rejections) != 1 {
 		t.Fatalf("rejections=%d err=%v", len(rejections), err)

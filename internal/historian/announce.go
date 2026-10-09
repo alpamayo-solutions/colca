@@ -32,17 +32,13 @@ const (
 // only uses HTTP, which has no will, so the record needs a connection of its
 // own.
 type Announcer struct {
-	Version string
-	// LateWriteMarks, when set, reports whether the sink marks late writes
-	// (Sink.MarksLateWrites). The record carries it as metadata.late_write_marks,
-	// which is how a reader of the marks knows this historian writes them.
-	LateWriteMarks func() bool
-	OnConnect      func(pahomqtt.Client) error
-	OnDisconnect   func()
-	clock          map[string]any
-	Door           *door.Client // resolves the identity through /self
-	MQTTURL        string       // the local MQTT door, e.g. tcp://colca:1883
-	Log            *slog.Logger
+	Version      string
+	OnConnect    func(pahomqtt.Client) error
+	OnDisconnect func()
+	clock        map[string]any
+	Door         *door.Client // resolves the identity through /self
+	MQTTURL      string       // the local MQTT door, e.g. tcp://colca:1883
+	Log          *slog.Logger
 
 	// Dial replaces the network dial; tests use it to cut the connection.
 	Dial func(ctx context.Context, addr string) (net.Conn, error)
@@ -224,7 +220,10 @@ func (a *Announcer) publish(c pahomqtt.Client, active bool) {
 	}
 	details := *a.details
 	details.IsActive = active
-	details.Metadata = a.metadata()
+	details.Metadata = map[string]any{"consumer": Consumer, "app_class": "core"}
+	if a.Version != "" {
+		details.Metadata["version"] = a.Version
+	}
 	details.ArchitectureMetadata = map[string]any{}
 	topic := a.topic
 	payload, err := json.Marshal(details)
@@ -256,8 +255,13 @@ func (a *Announcer) resolve(ctx context.Context) (door.Self, bool) {
 }
 
 // record returns the service record without its status, and its topic.
+// app_class "core" marks it as the node's own service, not an app.
 func (a *Announcer) record(self door.Self) (serviceDetails, string) {
 	context := uns.ServiceContext(self.Mount, self.Name)
+	metadata := map[string]any{"consumer": Consumer, "app_class": "core"}
+	if a.Version != "" {
+		metadata["version"] = a.Version
+	}
 	details := serviceDetails{
 		ID:                   self.ULID,
 		Name:                 self.Name,
@@ -268,35 +272,12 @@ func (a *Announcer) record(self door.Self) (serviceDetails, string) {
 		SystemElementID:      self.Element,
 		Hierarchy:            context,
 		IsActive:             true,
-		Metadata:             a.metadata(),
+		Metadata:             metadata,
 		ArchitectureMetadata: map[string]any{},
 		HealthMetrics:        []map[string]any{},
 	}
 	topic := fmt.Sprintf("%s_ServiceDetails/%s/%s/_service", uns.Prefix(), self.Node, strings.Join(context, "/"))
 	return details, topic
-}
-
-// metadata is the record's metadata without the clock progress. app_class
-// "core" marks it as the node's own service, not an app.
-func (a *Announcer) metadata() map[string]any {
-	metadata := map[string]any{"consumer": Consumer, "app_class": "core"}
-	if a.Version != "" {
-		metadata["version"] = a.Version
-	}
-	if a.LateWriteMarks != nil && a.LateWriteMarks() {
-		metadata["late_write_marks"] = true
-	}
-	return metadata
-}
-
-// Refresh publishes the record again after something it carries changed.
-func (a *Announcer) Refresh() {
-	a.mu.Lock()
-	client := a.client
-	a.mu.Unlock()
-	if client != nil && client.IsConnectionOpen() {
-		a.publish(client, true)
-	}
 }
 
 // ReportProgress observes functional clock control for Prometheus.
