@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/cockroachdb/pebble/v2"
 )
@@ -381,4 +382,137 @@ func TestReadSignalsStopsWhenItsContextEnds(t *testing.T) {
 	if got, _, err := s.ReadSignals(ctx, "metrics", 1, 10, 0, []string{"a", "busy"}, nil); !errors.Is(err, context.Canceled) || got != nil {
 		t.Fatalf("a cancelled read returned %d records and %v", len(got), err)
 	}
+}
+
+func TestPruneLeavesOneRangeTombstonePerPruneHoweverManySignals(t *testing.T) {
+	s := mustOpen(t)
+	const signals, prunes, perPrune = 50, 20, 2
+	ids := prunedSignalStore(t, s, signals, prunes, perPrune, false)
+	// One over the stream's records per prune; a range per signal would be 1000
+	// more. Compaction may split a tombstone at a table boundary.
+	if n := rangeTombstones(t, s); n == 0 || n > 2*prunes {
+		t.Fatalf("%d range tombstones after %d prunes of %d signals, want about one per prune", n, prunes, signals)
+	}
+
+	// The index holds exactly the entries of the records that are left.
+	lwm, head := s.LWM("metrics"), s.NextOffset("metrics")
+	index := countIndexEntries(t, s, "metrics")
+	if len(index) != signals {
+		t.Fatalf("the index holds %d signals, want %d", len(index), signals)
+	}
+	for _, id := range ids {
+		if index[id] != perPrune {
+			t.Fatalf("the index holds %d entries of %s, want the %d of the last batch", index[id], id, perPrune)
+		}
+	}
+	got, next, err := s.ReadSignals(context.Background(), "metrics", 1, 1000, 0, ids, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != signals*perPrune || got[0].Offset != lwm || next != head {
+		t.Fatalf("read %d records from %d, next=%d; want the %d from the low-water mark %d and the head %d", len(got), got[0].Offset, next, signals*perPrune, lwm, head)
+	}
+}
+
+func TestPruneScannedReadsThePrefixAgainOnlyWhenItChangedUnderTheScan(t *testing.T) {
+	policyScan := func(t *testing.T, s *Store, upTo uint64) *PruneScan {
+		t.Helper()
+		// Every record is older than the policy allows; the clamp ends the scan.
+		scan, _, _, err := s.PolicyPruneScan("metrics", s.LWM("metrics"), s.NextOffset("metrics"), time.UnixMilli(1<<40), time.Millisecond, 0, 0, upTo, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if scan.UpTo() != upTo {
+			t.Fatalf("the policy scan ends at %d, want %d", scan.UpTo(), upTo)
+		}
+		return scan
+	}
+	// liveBytes is what the records still in the stream cost.
+	liveBytes := func(t *testing.T, s *Store) (n uint64) {
+		t.Helper()
+		if err := s.ScanRecords("metrics", 1, s.NextOffset("metrics"), func(_ uint64, _ int64, size uint64) bool {
+			n += size
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	t.Run("untouched", func(t *testing.T) {
+		s := mustOpen(t)
+		appendSparse(t, s, 10, map[int]string{2: "a", 8: "b"})
+		scan := policyScan(t, s, 7)
+		var span PruneSpan
+		removed, err := s.PruneScanned(scan, nil, func(sp PruneSpan) PruneOutcome { span = sp; return PruneOutcome{} })
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Offsets 1..6 are busy, busy, a, busy, busy, busy, with ts 0,1,2,2,3,4.
+		if removed != 6 || span.From != 1 || span.To != 6 || span.FirstTS != 0 || span.LastTS != 4 {
+			t.Fatalf("removed %d, span %+v", removed, span)
+		}
+		if index := countIndexEntries(t, s, "metrics"); index["busy"] != 5 || index["a"] != 0 || index["b"] != 1 {
+			t.Fatalf("index after the prune = %v, want 5 busy, no a, 1 b", index)
+		}
+		if got, want := s.StreamBytes("metrics"), liveBytes(t, s); got != want {
+			t.Fatalf("stream bytes = %d, want the %d of the records left", got, want)
+		}
+	})
+
+	t.Run("records evicted after the scan", func(t *testing.T) {
+		s := mustOpen(t)
+		appendSparse(t, s, 10, map[int]string{2: "a", 8: "b"})
+		scan := policyScan(t, s, 7)
+		if _, err := s.EvictRecords("metrics", 1, 100, func(topic string) bool { return topic == "colca/v1/_Metric/n/a" }); err != nil {
+			t.Fatal(err)
+		}
+		var span PruneSpan
+		removed, err := s.PruneScanned(scan, nil, func(sp PruneSpan) PruneOutcome { span = sp; return PruneOutcome{} })
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The record of a is gone already: it is neither counted nor shed twice.
+		if removed != 5 || span.To != 6 {
+			t.Fatalf("removed %d, span %+v; want the 5 records the eviction left", removed, span)
+		}
+		if got, want := s.StreamBytes("metrics"), liveBytes(t, s); got != want {
+			t.Fatalf("stream bytes = %d, want the %d of the records left", got, want)
+		}
+	})
+
+	t.Run("a cursor moved into the prefix", func(t *testing.T) {
+		s := mustOpen(t)
+		appendSparse(t, s, 10, map[int]string{2: "a", 8: "b"})
+		scan := policyScan(t, s, 7)
+		if !s.CursorAck("reader", "metrics", 4) {
+			t.Fatal("the cursor did not move")
+		}
+		removed, err := s.PruneScanned(scan, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if removed != 3 || s.LWM("metrics") != 4 {
+			t.Fatalf("removed %d up to %d, want the 3 records below the cursor at 4", removed, s.LWM("metrics"))
+		}
+		// a, at offset 3, went; the busy records from 4 on and b stay indexed.
+		if index := countIndexEntries(t, s, "metrics"); index["busy"] != 8 || index["a"] != 0 || index["b"] != 1 {
+			t.Fatalf("index after the prune = %v, want 8 busy, no a, 1 b", index)
+		}
+		if got, want := s.StreamBytes("metrics"), liveBytes(t, s); got != want {
+			t.Fatalf("stream bytes = %d, want the %d of the records left", got, want)
+		}
+	})
+
+	t.Run("another prune committed first", func(t *testing.T) {
+		s := mustOpen(t)
+		appendSparse(t, s, 10, map[int]string{2: "a", 8: "b"})
+		scan := policyScan(t, s, 7)
+		if _, err := s.Prune("metrics", 3, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if removed, err := s.PruneScanned(scan, nil, nil); err == nil || removed != 0 {
+			t.Fatalf("a scan from a low-water mark that moved pruned %d records, err=%v", removed, err)
+		}
+	})
 }

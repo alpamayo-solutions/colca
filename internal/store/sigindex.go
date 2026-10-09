@@ -22,10 +22,21 @@ import (
 // not the length of the stream it crosses.
 //
 // The entry lives and dies with its record, always in the same batch:
-//   - Prune deletes [LWM, upTo) of every signal the doomed prefix carries, one
-//     range per signal. The prefix is decoded for the prune journal anyway, so
-//     the signals cost no extra read.
-//   - Compaction and eviction delete the entry of each record they delete.
+//   - Prune deletes the entry of each record of the doomed prefix. The prefix
+//     is decoded for the retention policy and the prune journal anyway, so the
+//     entries cost no extra read.
+//   - Compaction, eviction and per-signal retention delete the entry of each
+//     record they delete.
+//
+// Prune used to delete [LWM, upTo) of every signal the prefix carried as one
+// range per signal. That is one range tombstone per signal and prune, and they
+// are slow to leave: Pebble drops one only when it reaches the last level. A
+// parent pruning 450 signals in batches of 100k records had 361,000 of them in
+// its tables, megabytes of range deletion block per table, which every iterator
+// on the index has to load whole. A point tombstone lies in the data blocks
+// beside the entry it deletes, below the low-water mark where no read seeks,
+// and goes with it in the next compaction. The stream's own records still go as
+// one range per prune.
 //
 // A fetchLogs ack is filed under the reserved key uns.FetchLogsAckKey in the
 // same way, so per-signal retention can remove those pages from the commands
@@ -123,7 +134,7 @@ func (s *Store) openSigIndex() error {
 // number of signals.
 func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, limit, maxScan int, signals []string, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	s.state.RLock()
-	covered, head := s.sigFrom[stream], s.next[stream]
+	covered, head, lwm := s.sigFrom[stream], s.next[stream], s.lwm[stream]
 	// Appends publish head after they commit, so this snapshot holds every
 	// record below head and the index entries written with them.
 	snap := s.db.NewSnapshot()
@@ -161,7 +172,8 @@ func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, lim
 		}
 		want = min(max(want, limit-len(out)), budget)
 		// One more than this round visits tells whether any entry is left after it.
-		offs, err := smallestSigOffsets(ctx, iter, stream, wanted, next, head, want+1)
+		// Below the low-water mark lie only the tombstones of pruned entries.
+		offs, err := smallestSigOffsets(ctx, iter, stream, wanted, max(next, lwm), head, want+1)
 		if err != nil {
 			return nil, next, err
 		}

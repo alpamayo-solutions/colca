@@ -123,6 +123,10 @@ type Store struct {
 	// mu serialises every write that changes a stream (appends, replicated
 	// commits, pruning, registry batches); it is held through the synced commit.
 	mu sync.Mutex
+	// holes counts, per stream, the batches that removed records other than as a
+	// prefix: compaction, eviction, per-signal retention. A prune compares it
+	// with the count its scan started from. Guarded by mu.
+	holes map[string]uint64
 	// state guards the in-memory stream state readers need (next, lwm, bytes,
 	// the change channels and contract heads). A writer holds mu while it
 	// builds its batch and takes state only from its apply until it published
@@ -255,6 +259,7 @@ func OpenWithOptions(dir string, o Options) (*Store, error) {
 	s := &Store{
 		db: db, health: health, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{},
 		sigFrom:     map[string]uint64{},
+		holes:       map[string]uint64{},
 		appendApply: db.Apply,
 	}
 	for _, stream := range streams {
@@ -1251,50 +1256,73 @@ func (s *Store) writeJournal(b *pebble.Batch, stream string, span PruneSpan) err
 }
 
 // pruneStats is the accounting of a doomed prefix: record count, shed logical
-// bytes and the time span, gathered by scanDoomed.
+// bytes and the time span, gathered by the scan that read it.
 type pruneStats struct {
 	pruned, shed    uint64
 	firstTS, lastTS int64
-	// signals are the signal ids the prefix carries: their index ranges go with it.
-	signals map[string]struct{}
+	// index names the signal index entry of every record of the prefix that has
+	// one: they go with their records. A signal id is held once, however many
+	// records carry it, so a prefix of 100k records costs a few megabytes.
+	index []sigEntry
+	ids   map[string]string
+}
+
+// sigEntry is one entry of the signal index.
+type sigEntry struct {
+	signalID string
+	off      uint64
+}
+
+// add accounts for one record of the prefix.
+func (st *pruneStats) add(off uint64, e *recEnc, size uint64) {
+	if st.pruned == 0 || e.TS < st.firstTS {
+		st.firstTS = e.TS
+	}
+	if st.pruned == 0 || e.TS > st.lastTS {
+		st.lastTS = e.TS
+	}
+	st.shed += size
+	st.pruned++
+	if e.SignalID == "" {
+		return
+	}
+	id, ok := st.ids[e.SignalID]
+	if !ok {
+		if st.ids == nil {
+			st.ids = map[string]string{}
+		}
+		id = e.SignalID
+		st.ids[id] = id
+	}
+	st.index = append(st.index, sigEntry{signalID: id, off: off})
 }
 
 // scanDoomed accumulates the accounting stats of the prefix [from, upTo).
 func (s *Store) scanDoomed(stream string, from, upTo uint64) (pruneStats, error) {
 	var st pruneStats
-	iter, err := s.db.NewIter(&pebble.IterOptions{
-		LowerBound: streamKey(stream, from),
-		UpperBound: streamKey(stream, upTo),
+	err := s.scanStream(stream, from, upTo, "prune", func(off uint64, e *recEnc, size uint64) bool {
+		st.add(off, e, size)
+		return true
 	})
-	if err != nil {
-		return st, err
-	}
-	for iter.First(); iter.Valid(); iter.Next() {
-		var e recEnc
-		if err := json.Unmarshal(iter.Value(), &e); err != nil {
-			iter.Close()
-			return st, fmt.Errorf("decode record %q during prune: %w", iter.Key(), err)
-		}
-		if st.pruned == 0 || e.TS < st.firstTS {
-			st.firstTS = e.TS
-		}
-		if st.pruned == 0 || e.TS > st.lastTS {
-			st.lastTS = e.TS
-		}
-		st.shed += uint64(len(iter.Key()) + len(iter.Value()))
-		st.pruned++
-		if e.SignalID != "" {
-			if st.signals == nil {
-				st.signals = map[string]struct{}{}
-			}
-			st.signals[e.SignalID] = struct{}{}
-		}
-	}
-	if err := iter.Close(); err != nil {
-		return st, err
-	}
-	return st, nil
+	return st, err
 }
+
+// PruneScan is a prefix of a stream as a policy scan read it: where it ends and
+// what Prune has to know of its records to delete them. PruneScanned takes it,
+// so the prefix is read and decoded once, not by the policy and again by the
+// prune.
+type PruneScan struct {
+	stream     string
+	from, upTo uint64
+	// holes is the stream's count of record deletions when the scan began: if it
+	// moved since, the scan may describe records that are gone.
+	holes uint64
+	stats pruneStats
+}
+
+// UpTo is the offset the scan would prune up to: the stream's new low-water
+// mark, or the old one when there is nothing to prune.
+func (p *PruneScan) UpTo() uint64 { return p.upTo }
 
 // RefreshRange is an owed state refresh: KV entries with Offset in [From, To)
 // must be appended again. It is stored as rp/{stream} in the prune batch and
@@ -1311,7 +1339,8 @@ type PruneOutcome struct {
 }
 
 // Prune removes the prefix [LWM..upTo) of a stream in one atomic, synced batch
-// (range tombstone, l/ and b/ counters, journal entry, and whatever plan adds),
+// (one range tombstone over its records, their signal index entries, l/ and b/
+// counters, journal entry, and whatever plan adds),
 // so a crash leaves the stream either fully pruned or untouched.
 //
 // Under the mutex, which CursorAck also takes, upTo shrinks to any cursor not in
@@ -1322,7 +1351,7 @@ type PruneOutcome struct {
 // the number of records removed.
 func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func(span PruneSpan) PruneOutcome) (uint64, error) {
 	s.mu.Lock()
-	next, lwm := s.next[stream], s.lwm[stream]
+	next, lwm, holes := s.next[stream], s.lwm[stream], s.holes[stream]
 	s.mu.Unlock()
 	if next == 0 {
 		return 0, fmt.Errorf("unknown stream %q", stream)
@@ -1333,19 +1362,30 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if upTo > next {
 		return 0, fmt.Errorf("prune %q up to %d: beyond next offset %d", stream, upTo, next)
 	}
-
-	// Scan the doomed prefix without the mutex: appends only write at offsets >=
-	// upTo, and the prefix only shrinks through Prune, which the LWM recheck below
-	// serializes.
 	stats, err := s.scanDoomed(stream, lwm, upTo)
 	if err != nil {
 		return 0, err
 	}
+	return s.PruneScanned(&PruneScan{stream: stream, from: lwm, upTo: upTo, holes: holes, stats: stats}, overridden, plan)
+}
 
+// PruneScanned is Prune of the prefix a policy scan read, without reading it
+// again. The scan ran without the mutex: appends only write at offsets beyond
+// it, and whatever else removes records of the stream is noticed here, under the
+// mutex, and answered with a second scan. A prune that committed since the scan
+// is an error.
+func (s *Store) PruneScanned(scan *PruneScan, overridden []string, plan func(span PruneSpan) PruneOutcome) (uint64, error) {
+	stream, lwm, upTo, stats := scan.stream, scan.from, scan.upTo, scan.stats
+	if upTo <= lwm {
+		return 0, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lwm[stream] != lwm {
 		return 0, fmt.Errorf("concurrent prune on stream %q", stream)
+	}
+	if next := s.next[stream]; upTo > next {
+		return 0, fmt.Errorf("prune %q up to %d: beyond next offset %d", stream, upTo, next)
 	}
 	// Recheck under the mutex: shrink upTo to the floor of every cursor the caller
 	// did not override.
@@ -1366,11 +1406,12 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if upTo <= lwm {
 		return 0, nil // a live cursor moved into the doomed range: nothing may go
 	}
-	if stats.pruned != upTo-lwm {
-		// A cursor moved into the range after the scan. Rescan the smaller range so the
-		// journal and plan see exactly what gets deleted.
-		stats, err = s.scanDoomed(stream, lwm, upTo)
-		if err != nil {
+	if upTo != scan.upTo || s.holes[stream] != scan.holes {
+		// A cursor moved into the range after the scan, or compaction, eviction or
+		// per-signal retention removed records of the stream. Rescan so the
+		// journal, the plan and the batch see exactly what gets deleted.
+		var err error
+		if stats, err = s.scanDoomed(stream, lwm, upTo); err != nil {
 			return 0, err
 		}
 	}
@@ -1384,8 +1425,9 @@ func (s *Store) Prune(stream string, upTo uint64, overridden []string, plan func
 	if err := b.DeleteRange(streamKey(stream, lwm), streamKey(stream, upTo), nil); err != nil {
 		return 0, err
 	}
-	for signalID := range stats.signals {
-		if err := b.DeleteRange(sigKey(stream, signalID, lwm), sigKey(stream, signalID, upTo), nil); err != nil {
+	// The index entries go one by one, not as a range per signal: see sigindex.go.
+	for _, e := range stats.index {
+		if err := b.Delete(sigKey(stream, e.signalID, e.off), nil); err != nil {
 			return 0, err
 		}
 	}
@@ -1488,6 +1530,14 @@ func (s *Store) ClearRefreshPending(stream string) error {
 // until fn returns false. It takes no mutex; Pebble iterators are consistent
 // snapshots. A record that does not decode is an error.
 func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64, ts int64, size uint64) bool) error {
+	return s.scanStream(stream, from, upTo, "scan", func(off uint64, e *recEnc, size uint64) bool {
+		return fn(off, e.TS, size)
+	})
+}
+
+// scanStream is ScanRecords with the whole decoded record, which is only valid
+// during the call. what names the scan in its error.
+func (s *Store) scanStream(stream string, from, upTo uint64, what string, fn func(off uint64, e *recEnc, size uint64) bool) error {
 	if upTo <= from {
 		return nil
 	}
@@ -1504,9 +1554,9 @@ func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64
 		off := binary.BigEndian.Uint64(key[len(key)-8:])
 		var e recEnc
 		if err := json.Unmarshal(iter.Value(), &e); err != nil {
-			return fmt.Errorf("decode record %q during scan: %w", key, err)
+			return fmt.Errorf("decode record %q during %s: %w", key, what, err)
 		}
-		if !fn(off, e.TS, uint64(len(key)+len(iter.Value()))) {
+		if !fn(off, &e, uint64(len(key)+len(iter.Value()))) {
 			break
 		}
 	}
@@ -1530,16 +1580,33 @@ const DefaultPolicyScanCap = 100_000
 // more. Either way target is a floor: safe to prune to, possibly short of the
 // policy's real target.
 func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time, maxAge time.Duration, maxBytes, liveBytes, clamp, maxScan uint64) (target uint64, clampedAtCap, hitScanCap bool, err error) {
+	return s.policyScan(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, maxScan, nil)
+}
+
+// PolicyPruneScan is PolicyPruneTarget for a caller that goes on to prune: the
+// scan it returns ends at the target and keeps what PruneScanned needs of the
+// records before it.
+func (s *Store) PolicyPruneScan(stream string, lwm, next uint64, now time.Time, maxAge time.Duration, maxBytes, liveBytes, clamp, maxScan uint64) (scan *PruneScan, clampedAtCap, hitScanCap bool, err error) {
+	s.mu.Lock()
+	scan = &PruneScan{stream: stream, from: lwm, holes: s.holes[stream]}
+	s.mu.Unlock()
+	scan.upTo, clampedAtCap, hitScanCap, err = s.policyScan(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, maxScan, &scan.stats)
+	return scan, clampedAtCap, hitScanCap, err
+}
+
+// policyScan walks the policy over the stream. It accounts in stats, when
+// given, for each record the policy prunes.
+func (s *Store) policyScan(stream string, lwm, next uint64, now time.Time, maxAge time.Duration, maxBytes, liveBytes, clamp, maxScan uint64, stats *pruneStats) (target uint64, clampedAtCap, hitScanCap bool, err error) {
 	cutoff := now.UnixMilli() - maxAge.Milliseconds()
 	target = lwm
 	var shed, scanned uint64
-	err = s.ScanRecords(stream, lwm, next, func(off uint64, ts int64, size uint64) bool {
+	err = s.scanStream(stream, lwm, next, "scan", func(off uint64, e *recEnc, size uint64) bool {
 		if maxScan > 0 && scanned >= maxScan {
 			hitScanCap = true // policy wants more, the scan budget forbids it
 			return false
 		}
 		scanned++
-		ageWants := maxAge > 0 && ts < cutoff
+		ageWants := maxAge > 0 && e.TS < cutoff
 		sizeWants := maxBytes > 0 && liveBytes > shed+maxBytes // liveBytes−shed > maxBytes, underflow-safe
 		if !ageWants && !sizeWants {
 			return false // first record the policy keeps
@@ -1550,6 +1617,9 @@ func (s *Store) PolicyPruneTarget(stream string, lwm, next uint64, now time.Time
 		}
 		shed += size
 		target = off + 1
+		if stats != nil {
+			stats.add(off, e, size)
+		}
 		return true
 	})
 	return target, clampedAtCap, hitScanCap, err

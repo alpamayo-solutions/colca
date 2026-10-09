@@ -237,11 +237,13 @@ func (p *Pruner) pruneStream(stream string) (again bool) {
 	// The policy scan stops at the protected floor and after scanCap records, so it
 	// cannot prune past a live cursor. If the scan cap stops it, newLWM is still a
 	// safe floor and runOnce repeats the pass while its time budget lasts.
-	newLWM, clamped, capped, scanErr := p.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, p.scanCap)
+	// Prune takes what the scan read of the doomed prefix, so it is decoded once.
+	scan, clamped, capped, scanErr := p.st.PolicyPruneScan(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, p.scanCap)
 	if scanErr != nil {
 		p.log.Error("retention policy scan failed", "stream", stream, "err", scanErr)
 		return false
 	}
+	newLWM := scan.UpTo()
 	if clamped {
 		p.log.Warn("retention policy cursor-clamped: policy wants to prune further but a live cursor forbids it",
 			"stream", stream, "cursor", blocking, "clamp", clamp, "lwm", lwm)
@@ -336,7 +338,7 @@ func (p *Pruner) pruneStream(stream string) (again bool) {
 		p.beforePrune(stream)
 	}
 	// One atomic, synced batch; the store rechecks cursors against names.
-	removed, err := p.st.Prune(stream, newLWM, names, plan)
+	removed, err := p.st.PruneScanned(scan, names, plan)
 	if err != nil {
 		p.log.Error("prune failed", "stream", stream, "up_to", newLWM, "err", err)
 		return false
