@@ -115,7 +115,7 @@ func restartOn(t *testing.T, w *world, addr string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
+	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), Identity: config.Identity{KeyFile: "unused"},
 		MQTT: config.Endpoint{Addr: addr}}
 	s, err := New(cfg, nodeID, w.reg, nil, nil, w.m, config.Limits{}.EffectiveMaxRecordBytes())
 	if err != nil {

@@ -33,7 +33,7 @@ func testOfflineBacklogRecovery(t *testing.T, days int) {
 	childID := genKey(t, childKey)
 	noPruning := config.Duration(0)
 	pcfg := &config.Config{
-		ULID: "n-parent", DataDir: filepath.Join(dir, "parent"), KeyFile: parentKey,
+		ULID: "n-parent", DataDir: filepath.Join(dir, "parent"), Identity: config.Identity{KeyFile: parentKey},
 		Repl:      config.Endpoint{Addr: "127.0.0.1:0"},
 		Retention: config.Retention{Interval: &noPruning},
 	}
@@ -63,7 +63,7 @@ func testOfflineBacklogRecovery(t *testing.T, days int) {
 	}
 	interval := config.Duration(5 * time.Millisecond)
 	cfg := &config.Config{
-		ULID: "n-child", DataDir: dataDir, KeyFile: childKey,
+		ULID: "n-child", DataDir: dataDir, Identity: config.Identity{KeyFile: childKey},
 		Parent: &config.Parent{URL: offlineURL, Pubkey: parentID.PublicHex()},
 		Retention: config.Retention{
 			Interval: &interval,

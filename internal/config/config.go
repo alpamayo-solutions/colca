@@ -195,7 +195,7 @@ func (a *Access) validate() error {
 }
 
 // Identity is the identity: block: where the node key lives. Only key_file is
-// required, here or as the top-level key_file.
+// required.
 type Identity struct {
 	// KeyStore is auto (default), tpm or file; see identity.Open.
 	KeyStore string `yaml:"key_store"`
@@ -268,7 +268,7 @@ func (e Enrollment) validate() error {
 }
 
 // Config is a node's configuration. Only ULID, DataDir and the key file
-// (identity.key_file or key_file) are required. Machines and child nodes are not configured here; they are
+// (identity.key_file) are required. Machines and child nodes are not configured here; they are
 // enrolled at runtime through the admin API.
 type Config struct {
 	ULID string `yaml:"ulid"`
@@ -293,17 +293,14 @@ type Config struct {
 	// service-sealed ciphertext. It is deliberately outside DataDir so stream
 	// reset/restore and replication lifecycle can never include it by accident.
 	// Empty disables the secret store for compositions that do not expose it.
-	SecretsDir string `yaml:"secrets_dir"`
-	LogLevel   string `yaml:"log_level"`
-	// KeyFile is the top-level spelling of identity.key_file, kept for configs
-	// written before the identity block. Use EffectiveKeyFile.
-	KeyFile  string   `yaml:"key_file"`
-	Identity Identity `yaml:"identity"`
-	TLS      TLS      `yaml:"tls"`
-	API      API      `yaml:"api"`
-	MQTT     Endpoint `yaml:"mqtt"`
-	Repl     Endpoint `yaml:"repl"`
-	Parent   *Parent  `yaml:"parent"`
+	SecretsDir string   `yaml:"secrets_dir"`
+	LogLevel   string   `yaml:"log_level"`
+	Identity   Identity `yaml:"identity"`
+	TLS        TLS      `yaml:"tls"`
+	API        API      `yaml:"api"`
+	MQTT       Endpoint `yaml:"mqtt"`
+	Repl       Endpoint `yaml:"repl"`
+	Parent     *Parent  `yaml:"parent"`
 	// Enrollment is the policy for children asking to join this node.
 	Enrollment Enrollment `yaml:"enrollment"`
 	// Standalone permanently retires fleet trust in this data directory.
@@ -999,6 +996,16 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(raw, &c); err != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
+	// The top-level key_file was the spelling before the identity block. It is
+	// not read any more; a config that still has it would otherwise start
+	// without the key it names.
+	var removed struct {
+		KeyFile *string `yaml:"key_file"`
+	}
+	if err := yaml.Unmarshal(raw, &removed); err == nil && removed.KeyFile != nil {
+		return nil, fmt.Errorf("config: %s: the top-level key_file is no longer read — move it to identity.key_file "+
+			"(identity: { key_file: %s })", path, *removed.KeyFile)
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -1026,19 +1033,11 @@ func (c *Config) EffectiveTopicRoot() string {
 	return uns.DefaultRoot
 }
 
-// EffectiveKeyFile is identity.key_file, else the top-level key_file.
-func (c *Config) EffectiveKeyFile() string {
-	if c.Identity.KeyFile != "" {
-		return c.Identity.KeyFile
-	}
-	return c.KeyFile
-}
-
 // IdentityOptions are the identity block as identity.Open takes them.
 func (c *Config) IdentityOptions() identity.Options {
 	return identity.Options{
 		KeyStore:  c.Identity.KeyStore,
-		KeyFile:   c.EffectiveKeyFile(),
+		KeyFile:   c.Identity.KeyFile,
 		TPMDevice: c.Identity.TPMDevice,
 	}
 }
@@ -1048,11 +1047,8 @@ func (c *Config) Validate() error {
 	if c.Standalone && c.Parent != nil {
 		return fmt.Errorf("config: standalone cannot have a parent")
 	}
-	if c.ULID == "" || c.DataDir == "" || c.EffectiveKeyFile() == "" {
-		return fmt.Errorf("config: ulid, data_dir, key_file are required")
-	}
-	if c.KeyFile != "" && c.Identity.KeyFile != "" && c.KeyFile != c.Identity.KeyFile {
-		return fmt.Errorf("config: key_file %q and identity.key_file %q differ; set one of them", c.KeyFile, c.Identity.KeyFile)
+	if c.ULID == "" || c.DataDir == "" || c.Identity.KeyFile == "" {
+		return fmt.Errorf("config: ulid, data_dir, identity.key_file are required")
 	}
 	if !identity.ValidKeyStore(c.Identity.KeyStore) {
 		return fmt.Errorf("config: identity.key_store %q, want auto, tpm or file", c.Identity.KeyStore)

@@ -64,7 +64,7 @@ func newHumanWorld(t *testing.T) *humanWorld {
 
 	w := &humanWorld{st: st, reg: reg, iss: iss, ver: ver, m: m, m1: authtest.NewMachine(t, "m1")}
 
-	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), KeyFile: "unused",
+	cfg := &config.Config{ULID: "n1", DataDir: t.TempDir(), Identity: config.Identity{KeyFile: "unused"},
 		MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
 		MQTTHuman: config.MQTTHuman{TCPAddr: "127.0.0.1:0", WSAddr: "127.0.0.1:0"},
 		Auth:      &config.Auth{Issuers: []config.AuthIssuer{{URL: iss.Iss()}}, Audience: iss.Aud(), JWKSURL: iss.JWKSURL()},

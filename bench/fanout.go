@@ -112,7 +112,7 @@ func (n *fanoutNode) kill() {
 func nodeConfig(ulid, dir, keyPath, addrFile, parent string) string {
 	cfg := fmt.Sprintf(`ulid: %s
 data_dir: %s
-key_file: %s
+identity: { key_file: %s }
 log_level: warn
 addr_file: %s
 api:

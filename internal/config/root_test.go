@@ -28,7 +28,7 @@ func TestTopicRootComesFromTheEnvironmentThenTheFileThenTheDefault(t *testing.T)
 func TestTopicRootIsReadFromTheConfigFile(t *testing.T) {
 	t.Setenv("COLCA_TOPIC_ROOT", "")
 	path := filepath.Join(t.TempDir(), "node.yaml")
-	if err := os.WriteFile(path, []byte("ulid: n1\ndata_dir: /data\nkey_file: /keys/n1.key\ntopic_root: acme\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("ulid: n1\ndata_dir: /data\nidentity: { key_file: /keys/n1.key }\ntopic_root: acme\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c, err := Load(path)
@@ -47,7 +47,7 @@ func TestAnInvalidTopicRootFailsValidation(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("COLCA_TOPIC_ROOT", "")
-			c := &Config{ULID: "n1", DataDir: "/data", KeyFile: "/keys/n1.key"}
+			c := &Config{ULID: "n1", DataDir: "/data", Identity: Identity{KeyFile: "/keys/n1.key"}}
 			set(c)
 			err := c.Validate()
 			if err == nil || !strings.Contains(err.Error(), "topic root") {

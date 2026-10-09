@@ -90,7 +90,9 @@ identity:
 | `identity.key_store` | `auto` (default): the TPM when `tpm_device` opens and a key can be created in it, otherwise a file key. `tpm`: the TPM or no start, so a missing device mapping is loud. `file`: a key file, as before TPM support. |
 | `identity.key_file` | Required. The file key (PKCS#8 PEM), or the TPM key blob for a key held in a TPM. The node creates it on first start. |
 | `identity.tpm_device` | The TPM, `/dev/tpmrm0` by default. A Unix socket path selects a TPM simulator (`swtpm --server type=unixio`). |
-| `key_file` | Older spelling of `identity.key_file`, still read. Setting both to different files is an error. |
+
+The top-level `key_file` of older configs is not read any more: a config that
+still has it is refused at start with a pointer to `identity.key_file`.
 
 The key store only matters when `key_file` does not exist yet: an existing key
 is always loaded from where it is, and `colcad` logs the key store and the
