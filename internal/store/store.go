@@ -1631,14 +1631,27 @@ func (s *Store) policyScan(stream string, lwm, next uint64, now time.Time, maxAg
 // storage fault. Callers must not treat that as empty: the blob sweeper would
 // delete files that are still referenced.
 func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
+	var out []KVEntry
+	err := s.KVVisit(prefix, func(entry KVEntry) { out = append(out, entry) })
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// KVVisit visits the current KV projection in key order without retaining the
+// decoded entries. The iterator holds one consistent view, including when a
+// visitor writes state; newly written records are not added to this visit.
+// The callback must not close the store. An iterator error may follow callbacks
+// that already ran, so callers must handle a partially completed visit.
+func (s *Store) KVVisit(prefix string, visit func(KVEntry)) error {
 	lb := kvPrefix(prefix)
 	ub := append(append([]byte{}, lb...), 0xFF)
 	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
 	if err != nil {
-		return nil, fmt.Errorf("store: kv scan %q: open iterator: %w", prefix, err)
+		return fmt.Errorf("store: kv scan %q: open iterator: %w", prefix, err)
 	}
 	defer iter.Close()
-	var out []KVEntry
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := string(iter.Key()[2:]) // strip "k\x00"
 		// The key is path \x00 node \x00 topic. Keeping the topic in the key makes the
@@ -1656,7 +1669,7 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 		if json.Unmarshal(iter.Value(), &e) != nil {
 			continue
 		}
-		out = append(out, KVEntry{
+		visit(KVEntry{
 			Path:         key[:pathSep],
 			NodeID:       rest[:nodeSep],
 			Topic:        e.Topic,
@@ -1669,9 +1682,9 @@ func (s *Store) KVScan(prefix string) ([]KVEntry, error) {
 		})
 	}
 	if err := iter.Error(); err != nil {
-		return nil, fmt.Errorf("store: kv scan %q: %w", prefix, err)
+		return fmt.Errorf("store: kv scan %q: %w", prefix, err)
 	}
-	return out, nil
+	return nil
 }
 
 // KVScanPage returns at most limit KV entries and an opaque continuation token.
