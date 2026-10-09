@@ -132,6 +132,10 @@ See [Configuration](configuration.md#logs).
 
 The pruner removes the oldest records of a stream in one atomic step and never
 touches the current-state view, which only shrinks through empty payloads.
+It runs every `retention.interval` (5 minutes by default) and once at start, one
+pass of at most 100 000 records per stream, so a node that restarts more often
+than the interval still prunes. `max_age` never removes a record without a
+timestamp; `max_bytes` does.
 
 Every named cursor protects the stream, including the replication cursor that
 forms a child's offline buffer. If the age or size limit wants to remove
