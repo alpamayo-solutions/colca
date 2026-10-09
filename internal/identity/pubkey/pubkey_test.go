@@ -100,7 +100,8 @@ func TestUnsupportedKeysAreRefused(t *testing.T) {
 }
 
 // plugins/uns validates entry keys without importing this package; both must
-// agree on what a key is.
+// agree on what a key is, except that a stored entry never holds the legacy
+// raw ed25519 form (the registry rewrites it to SPKI first).
 func TestEntryValidationAgreesWithParseHex(t *testing.T) {
 	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	if err != nil {
@@ -113,6 +114,12 @@ func TestEntryValidationAgreesWithParseHex(t *testing.T) {
 	for _, in := range []string{ed25519Raw, ed25519SPKI, p256SPKI, hex.EncodeToString(p384DER), "", "abcd", "zz", ed25519Raw[:62]} {
 		_, perr := ParseHex(in)
 		uerr := uns.ValidPubkeyHex(in)
+		if in == ed25519Raw {
+			if perr != nil || uerr == nil {
+				t.Errorf("raw ed25519: ParseHex err=%v (want nil), uns.ValidPubkeyHex err=%v (want an error)", perr, uerr)
+			}
+			continue
+		}
 		if (perr == nil) != (uerr == nil) {
 			t.Errorf("%q: ParseHex err=%v, uns.ValidPubkeyHex err=%v", in, perr, uerr)
 		}

@@ -41,7 +41,7 @@ const (
 // form is both the enrollment payload and the stored r/{ulid} value.
 type Entry struct {
 	ULID   string `json:"ulid"`
-	Pubkey string `json:"pubkey"` // hex public key (SPKI DER, or raw ed25519 when enrolled before SPKI), pinned on connect; empty for KindLocal
+	Pubkey string `json:"pubkey"` // hex of the public key's SubjectPublicKeyInfo DER, pinned on connect; empty for KindLocal
 	Kind   Kind   `json:"kind"`
 	// Name identifies a KindLocal entry, which has no pubkey; the local door
 	// finds the entry by it.
@@ -72,6 +72,32 @@ type Entry struct {
 	// can drain; an external service's delivery lives in broker session state,
 	// so there is nothing to drain.
 	Status string `json:"status,omitempty"`
+
+	// Fingerprint is the key's SHA256:… fingerprint, derived from Pubkey by
+	// the registry so a person can compare it without decoding the key.
+	Fingerprint string `json:"fingerprint,omitempty"`
+	// KeyStore is where the key lives as far as this node knows: KeyStoreFile,
+	// KeyStoreTPM (claimed by the identity) or KeyStoreTPMAttested (proven to
+	// this node). Empty when nothing was said.
+	KeyStore string `json:"key_store,omitempty"`
+	// CertState is a child node's certificate state: CertStateNone while it is
+	// still admitted with a self-signed certificate (adopted on the upgrade
+	// that introduced issued certificates), CertStateIssued once this node
+	// issued one. The transition is one way.
+	CertState string `json:"cert_state,omitempty"`
+	// CertNotAfter is the end of the validity of the last certificate issued,
+	// RFC 3339 UTC.
+	CertNotAfter string `json:"cert_not_after,omitempty"`
+	// KeyChangeRequested asks the node to move to a new key on its next
+	// certificate renewal.
+	KeyChangeRequested bool `json:"key_change_requested,omitempty"`
+	// LastSeen is when the node last asked for a certificate, RFC 3339 UTC.
+	LastSeen string `json:"last_seen,omitempty"`
+	// EKManufacturer and EKSerial name the TPM a tpm-attested key was proven
+	// to live in: the manufacturer and serial of its endorsement key
+	// certificate.
+	EKManufacturer string `json:"ek_manufacturer,omitempty"`
+	EKSerial       string `json:"ek_serial,omitempty"`
 }
 
 // Entry lifecycle states, the values of Entry.Status.
@@ -181,21 +207,20 @@ func (e *Entry) MayPublishContract(contract string) bool {
 type Registry map[string]*Entry
 
 // ValidPubkeyHex accepts a node or machine key as stored in an entry: hex of
-// SubjectPublicKeyInfo DER holding an ed25519 or ECDSA P-256 key, or the raw
-// 64-hex ed25519 form entries were enrolled with before SPKI. It is the
-// standard-library-only twin of internal/identity/pubkey.ParseHex, which
-// tests hold to the same answers.
+// SubjectPublicKeyInfo DER holding an ed25519 or ECDSA P-256 key. The raw
+// 64-hex ed25519 form older entries held is rewritten to SPKI when the
+// registry loads (the adoption pass) and at the enrollment door, so a stored
+// entry never holds it. It is the standard-library-only twin of
+// internal/identity/pubkey.ParseHex restricted to SPKI, which tests hold to
+// the same answers.
 func ValidPubkeyHex(s string) error {
 	raw, err := hex.DecodeString(s)
 	if err != nil {
 		return fmt.Errorf("not hex: %w", err)
 	}
-	if len(raw) == ed25519.PublicKeySize {
-		return nil
-	}
 	pub, err := x509.ParsePKIXPublicKey(raw)
 	if err != nil {
-		return fmt.Errorf("neither SPKI DER nor a raw ed25519 key: %w", err)
+		return fmt.Errorf("not SPKI DER: %w", err)
 	}
 	switch k := pub.(type) {
 	case ed25519.PublicKey:
@@ -251,6 +276,20 @@ func (e *Entry) Validate() error {
 	}
 	if e.Status == StatusDraining && e.Kind != KindNode {
 		return fmt.Errorf("entry %s: only kind=%q entries may drain", e.ULID, KindNode)
+	}
+	switch e.KeyStore {
+	case "", KeyStoreFile, KeyStoreTPM, KeyStoreTPMAttested:
+	default:
+		return fmt.Errorf("entry %s: key_store must be %q, %q or %q, got %q", e.ULID, KeyStoreFile, KeyStoreTPM, KeyStoreTPMAttested, e.KeyStore)
+	}
+	switch e.CertState {
+	case "":
+	case CertStateNone, CertStateIssued:
+		if e.Kind != KindNode {
+			return fmt.Errorf("entry %s: only kind=%q entries hold an issued certificate", e.ULID, KindNode)
+		}
+	default:
+		return fmt.Errorf("entry %s: cert_state must be %q or %q, got %q", e.ULID, CertStateNone, CertStateIssued, e.CertState)
 	}
 	for _, g := range e.Grants {
 		pg, err := ParseGrant(g)

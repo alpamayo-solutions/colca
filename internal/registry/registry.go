@@ -54,7 +54,7 @@ type Manager struct {
 	// (a service's HTTP and MQTT connections starting together) share one entry.
 	registerMu sync.Mutex
 	byID       uns.Registry      // ulid → entry
-	byPK       map[string]string // pkKey(pubkey) → ulid; KindLocal holds none, so "" is never indexed here
+	byPK       map[string]string // SPKI hex pubkey → ulid; KindLocal holds none, so "" is never indexed here
 	byName     map[string]string // name → ulid (KindLocal only; a second index, same shape as byPK)
 	kick       func(ulid string)
 	deliver    func(topic string, payload []byte, retain bool)
@@ -86,23 +86,91 @@ func New(st *store.Store, nodeULID string) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("registry: load persisted entries: %w", err)
 	}
+	adopted := 0
 	for ulid, raw := range persisted {
 		var e uns.Entry
 		if err := json.Unmarshal(raw, &e); err != nil {
 			return nil, fmt.Errorf("registry: corrupt persisted entry %s: %w", ulid, err)
 		}
+		changed, err := adopt(&e)
+		if err != nil {
+			return nil, fmt.Errorf("registry: persisted entry %s: %w", ulid, err)
+		}
 		if err := e.Validate(); err != nil {
 			return nil, fmt.Errorf("registry: persisted entry %s invalid: %w", ulid, err)
 		}
+		if changed {
+			if err := m.persist(&e); err != nil {
+				return nil, fmt.Errorf("registry: rewrite entry %s: %w", ulid, err)
+			}
+			adopted++
+		}
 		m.byID[e.ULID] = &e
 		if e.Pubkey != "" {
-			m.byPK[pkKey(e.Pubkey)] = e.ULID
+			m.byPK[e.Pubkey] = e.ULID
 		}
 		if e.Name != "" {
 			m.byName[e.Name] = e.ULID
 		}
 	}
+	if adopted > 0 {
+		m.log.Info("registry entries adopted: keys stored as SPKI, enrolled child nodes kept active without an issued certificate until they ask for one",
+			"entries", adopted)
+	}
 	return m, nil
+}
+
+// adopt brings an entry written by an earlier release to the current shape
+// (node enrollment spec §7.1): its key as SPKI hex with its fingerprint, and a
+// child node marked cert_state none, so it is still admitted with its
+// self-signed certificate until it fetches an issued one. Every child node
+// was enrolled by a person, so no decision is needed. A key that was enrolled
+// raw is an ed25519 file key: TPM keys came later and never were raw. It
+// reports whether anything changed; it runs on every load and changes
+// nothing the second time.
+func adopt(e *uns.Entry) (bool, error) {
+	if e.Pubkey == "" {
+		return false, nil
+	}
+	pub, err := pubkey.ParseHex(e.Pubkey)
+	if err != nil {
+		return false, fmt.Errorf("pubkey: %w", err)
+	}
+	spki, err := pubkey.Hex(pub)
+	if err != nil {
+		return false, fmt.Errorf("pubkey: %w", err)
+	}
+	changed := false
+	if spki != e.Pubkey {
+		if e.KeyStore == "" && e.ReplicatesUp() {
+			e.KeyStore = uns.KeyStoreFile
+		}
+		e.Pubkey = spki
+		changed = true
+	}
+	if fp, _ := pubkey.FingerprintHex(spki); fp != e.Fingerprint {
+		e.Fingerprint = fp
+		changed = true
+	}
+	if e.ReplicatesUp() && e.CertState == "" {
+		e.CertState = uns.CertStateNone
+		changed = true
+	}
+	return changed, nil
+}
+
+// persist writes e and its _EnrolledIdentity record in one batch. The caller
+// holds the lock or has the manager to itself (New).
+func (m *Manager) persist(e *uns.Entry) error {
+	canonical, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	topic, kvPath := m.topicFor(e)
+	_, err = m.st.RegistryPut(e.ULID, canonical, "entities", store.Record{
+		Topic: topic, Payload: canonical, TS: time.Now().UnixMilli(), KVPath: kvPath, KVNode: m.nodeID,
+	})
+	return err
 }
 
 // SetKick late-binds the session-kick callback (the broker exists after the
@@ -178,6 +246,18 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 	if err := json.Unmarshal(entryJSON, &e); err != nil {
 		return "", 0, fmt.Errorf("enroll: not valid JSON: %w", err)
 	}
+	// The enrollment door may still be handed a key in the raw 64-hex ed25519
+	// form; it is stored as SPKI, with its fingerprint.
+	if e.Pubkey != "" {
+		spki, err := pubkey.NormalizeHex(e.Pubkey)
+		if err != nil {
+			return "", 0, fmt.Errorf("enroll: entry %s: pubkey: %w", e.ULID, err)
+		}
+		e.Pubkey = spki
+		e.Fingerprint, _ = pubkey.FingerprintHex(spki)
+	} else {
+		e.Fingerprint = ""
+	}
 	if err := e.Validate(); err != nil {
 		return "", 0, fmt.Errorf("enroll: %w", err)
 	}
@@ -186,7 +266,7 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 	// Local entries have no pubkey, so an empty key is not deduplicated; their names
 	// are unique instead (below).
 	if e.Pubkey != "" {
-		if other, ok := m.byPK[pkKey(e.Pubkey)]; ok && other != e.ULID {
+		if other, ok := m.byPK[e.Pubkey]; ok && other != e.ULID {
 			m.mu.Unlock()
 			return "", 0, fmt.Errorf("enroll %s: pubkey already enrolled for %s: %w", e.ULID, other, ErrConflict)
 		}
@@ -255,7 +335,7 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 	prev, existed := m.byID[e.ULID]
 	if existed {
 		if prev.Pubkey != "" {
-			delete(m.byPK, pkKey(prev.Pubkey))
+			delete(m.byPK, prev.Pubkey)
 		}
 		if prev.Name != "" {
 			delete(m.byName, prev.Name)
@@ -263,7 +343,7 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 	}
 	m.byID[e.ULID] = &e
 	if e.Pubkey != "" {
-		m.byPK[pkKey(e.Pubkey)] = e.ULID
+		m.byPK[e.Pubkey] = e.ULID
 	}
 	if e.Name != "" {
 		m.byName[e.Name] = e.ULID
@@ -369,7 +449,7 @@ func (m *Manager) revoke(ulid string, retire bool) (offset uint64, wasDraining b
 	}
 	delete(m.byID, ulid)
 	if e.Pubkey != "" {
-		delete(m.byPK, pkKey(e.Pubkey))
+		delete(m.byPK, e.Pubkey)
 	}
 	if e.Name != "" {
 		delete(m.byName, e.Name)
@@ -680,12 +760,12 @@ func (m *Manager) Get(ulid string) (*uns.Entry, bool) {
 	return e, ok
 }
 
-// ByPubkey resolves an entry by its public key, given as hex in either form
-// pubkey.ParseHex accepts.
+// ByPubkey resolves an entry by its public key as SPKI hex, the form
+// identity.PeerPubHex returns and every stored entry holds.
 func (m *Manager) ByPubkey(pubkeyHex string) (*uns.Entry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	ulid, ok := m.byPK[pkKey(pubkeyHex)]
+	ulid, ok := m.byPK[pubkeyHex]
 	if !ok {
 		return nil, false
 	}
@@ -737,15 +817,81 @@ func (m *Manager) ListPage(after string, limit int) (entries []*uns.Entry, next 
 	return entries, next
 }
 
-// pkKey is the byPK index key of a stored or presented public key: its SPKI
-// hex. Entries enrolled before SPKI keys hold the raw 64-hex ed25519 form,
-// while peers are now presented as SPKI, so both sides are normalised here.
-// Once the adoption pass (node enrollment spec §7.1) rewrites every stored key
-// to SPKI, the stored side needs no normalising and this goes away. Input that
-// does not parse is indexed as given; it can never match a presented key.
-func pkKey(pubkeyHex string) string {
-	if n, err := pubkey.NormalizeHex(pubkeyHex); err == nil {
-		return n
+// Update changes an enrolled entry in place: fn edits a copy, which is
+// validated and persisted with its _EnrolledIdentity record in one batch. A
+// changed pubkey moves the key index and kicks the identity's live sessions,
+// so the old key is refused from that moment; any other change (a certificate
+// issued, a flag set) leaves the sessions alone. ErrNotEnrolled when ulid is
+// not enrolled here, ErrConflict when the new key belongs to another entry.
+func (m *Manager) Update(ulid string, fn func(*uns.Entry) error) (*uns.Entry, error) {
+	m.mu.Lock()
+	cur, ok := m.byID[ulid]
+	if !ok {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("update %s: %w", ulid, ErrNotEnrolled)
 	}
-	return pubkeyHex
+	next := *cur
+	next.Grants = append([]string(nil), cur.Grants...)
+	if err := fn(&next); err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	next.ULID, next.Kind = cur.ULID, cur.Kind
+	if next.Pubkey != "" {
+		spki, err := pubkey.NormalizeHex(next.Pubkey)
+		if err != nil {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("update %s: pubkey: %w", ulid, err)
+		}
+		next.Pubkey = spki
+		next.Fingerprint, _ = pubkey.FingerprintHex(spki)
+	}
+	if err := next.Validate(); err != nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("update %s: %w", ulid, err)
+	}
+	keyChanged := next.Pubkey != cur.Pubkey
+	if keyChanged {
+		if other, taken := m.byPK[next.Pubkey]; taken && other != ulid {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("update %s: pubkey already enrolled for %s: %w", ulid, other, ErrConflict)
+		}
+	}
+	if err := m.persist(&next); err != nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("update %s: %w", ulid, err)
+	}
+	if keyChanged {
+		delete(m.byPK, cur.Pubkey)
+		m.byPK[next.Pubkey] = ulid
+	}
+	m.byID[ulid] = &next
+	topic, _ := m.topicFor(&next)
+	canonical, _ := json.Marshal(&next)
+	kick, deliver := m.kick, m.deliver
+	m.mu.Unlock() // callbacks outside the lock, see Enroll
+	if keyChanged && kick != nil {
+		kick(ulid)
+	}
+	if deliver != nil {
+		deliver(topic, canonical, true)
+	}
+	if keyChanged {
+		m.log.Info("identity key changed", "ulid", ulid, "fingerprint", next.Fingerprint, "key_store", next.KeyStore)
+	}
+	out := next
+	return &out, nil
+}
+
+// HoldsChildNodes reports whether any child node is enrolled here. A node with
+// children must not change its own key on its own: the children pin it.
+func (m *Manager) HoldsChildNodes() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, e := range m.byID {
+		if e.ReplicatesUp() {
+			return true
+		}
+	}
+	return false
 }
