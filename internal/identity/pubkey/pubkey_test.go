@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/hex"
-	"math/big"
 	"strings"
 	"testing"
 
@@ -52,9 +51,12 @@ func TestGoldenVectorsEd25519(t *testing.T) {
 }
 
 func TestGoldenVectorsP256(t *testing.T) {
-	x, _ := new(big.Int).SetString(p256X, 16)
-	y, _ := new(big.Int).SetString(p256Y, 16)
-	got, err := Hex(&ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y})
+	pt, _ := hex.DecodeString("04" + p256X + p256Y)
+	key, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), pt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Hex(key)
 	if err != nil || got != p256SPKI {
 		t.Fatalf("SPKI hex = %s, %v; want %s", got, err, p256SPKI)
 	}

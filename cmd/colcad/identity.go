@@ -44,22 +44,22 @@ func identityCmd(args []string, stdout, stderr io.Writer) int {
 	fl.SetOutput(stderr)
 	asJSON := fl.Bool("json", false, "print a JSON object")
 	if err := fl.Parse(args); err != nil || fl.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: colcad identity [-json] <config.yaml>")
+		_, _ = fmt.Fprintln(stderr, "usage: colcad identity [-json] <config.yaml>")
 		return 2
 	}
 	cfg, err := config.Load(fl.Arg(0))
 	if err != nil {
-		fmt.Fprintln(stderr, "config:", err)
+		_, _ = fmt.Fprintln(stderr, "config:", err)
 		return 1
 	}
 	o := cfg.IdentityOptions()
 	id, err := identity.OpenExisting(o)
 	if errors.Is(err, fs.ErrNotExist) {
-		fmt.Fprintf(stderr, "no node key at %s yet: colcad creates it on its first start\n", o.KeyFile)
+		_, _ = fmt.Fprintf(stderr, "no node key at %s yet: colcad creates it on its first start\n", o.KeyFile)
 		return 1
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, "identity:", err)
+		_, _ = fmt.Fprintln(stderr, "identity:", err)
 		return 1
 	}
 	defer func() { _ = id.Close() }()
@@ -72,7 +72,7 @@ func identityCmd(args []string, stdout, stderr io.Writer) int {
 		{"fingerprint_id", id.FingerprintID()},
 		{"pubkey", id.PublicHex()},
 	}); err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
 	return 0
@@ -87,18 +87,18 @@ func tpmIdentityCmd(args []string, stdout, stderr io.Writer) int {
 	asJSON := fl.Bool("json", false, "print a JSON object")
 	device := fl.String("device", identity.DefaultTPMDevice, "TPM device or simulator socket")
 	if err := fl.Parse(args); err != nil || fl.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: colcad tpm-identity [-json] [-device /dev/tpmrm0]")
+		_, _ = fmt.Fprintln(stderr, "usage: colcad tpm-identity [-json] [-device /dev/tpmrm0]")
 		return 2
 	}
 	dev, err := tpmkey.Open(*device)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
 	defer func() { _ = dev.Close() }()
 	ek, err := tpmattest.ReadEK(dev)
 	if err != nil {
-		fmt.Fprintln(stderr, "endorsement key:", err)
+		_, _ = fmt.Fprintln(stderr, "endorsement key:", err)
 		return 1
 	}
 	fp := ek.Fingerprint()
@@ -117,7 +117,7 @@ func tpmIdentityCmd(args []string, stdout, stderr io.Writer) int {
 		fields = append(fields, field{"ek_issuer", c.Issuer.String()}, field{"ek_serial", c.SerialNumber.String()})
 	}
 	if err := printFields(stdout, *asJSON, fields); err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
 	return 0

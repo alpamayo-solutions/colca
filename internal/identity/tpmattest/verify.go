@@ -179,10 +179,14 @@ func EKPublicFromKey(key crypto.PublicKey) (tpm2.TPMTPublic, error) {
 		if k.Curve != elliptic.P256() {
 			return tpm2.TPMTPublic{}, errors.New("ECC EK is not P-256")
 		}
+		pt, err := k.Bytes() // 0x04 || X || Y
+		if err != nil {
+			return tpm2.TPMTPublic{}, err
+		}
 		p := tpm2.ECCEKTemplate
 		p.Unique = tpm2.NewTPMUPublicID(tpm2.TPMAlgECC, &tpm2.TPMSECCPoint{
-			X: tpm2.TPM2BECCParameter{Buffer: k.X.FillBytes(make([]byte, 32))},
-			Y: tpm2.TPM2BECCParameter{Buffer: k.Y.FillBytes(make([]byte, 32))},
+			X: tpm2.TPM2BECCParameter{Buffer: pt[1:33]},
+			Y: tpm2.TPM2BECCParameter{Buffer: pt[33:65]},
 		})
 		return p, nil
 	}

@@ -4,6 +4,7 @@
 package tpmtest
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,7 +34,7 @@ func Start(t testing.TB) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "s")
-	cmd := exec.Command(bin, "socket", "--tpm2", //nolint:gosec // test helper, fixed arguments
+	cmd := exec.CommandContext(context.Background(), bin, "socket", "--tpm2", //nolint:gosec // test helper, fixed arguments
 		"--tpmstate", "dir="+dir,
 		"--server", "type=unixio,path="+sock,
 		"--ctrl", "type=unixio,path="+filepath.Join(dir, "c"),
