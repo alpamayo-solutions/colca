@@ -28,6 +28,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/contracts"
 	"github.com/alpamayo-solutions/colca/internal/cursorwatch"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/enroll"
 	"github.com/alpamayo-solutions/colca/internal/httpapi"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -57,8 +58,11 @@ type Node struct {
 	Engine   *engine.Engine
 	MQTT     *mqttsrv.Server
 	ReplSrv  *repl.Server
-	Metrics  *metrics.Metrics
-	Registry *registry.Manager
+	// Enrollment holds the requests of children asking to join this node, its
+	// pre-approvals, and issues the children's certificates.
+	Enrollment *enroll.Manager
+	Metrics    *metrics.Metrics
+	Registry   *registry.Manager
 
 	APIAddr  string // resolved HTTP API address ("" if no api configured)
 	ReplAddr string // resolved replication address ("" if this node has no children)
@@ -89,6 +93,10 @@ type Node struct {
 	// does not track, so Stop must stop it before closing the store.
 	logPublisher *door.LogPublisher
 }
+
+// Version is the colcad release, which a child reports with its enrollment
+// request. colcad sets it from its build.
+var Version = "dev"
 
 // Start builds and starts a node from cfg. On any failure after the store is
 // open, everything already started is closed again before returning, so no
@@ -246,7 +254,20 @@ func Start(cfg *config.Config) (*Node, error) {
 	// The configure executor's blob port: a resource must never point at bytes
 	// this node cannot produce.
 	edit.SetBlobs(blobPort)
-	n.Engine.SetExecutor(engine.Executors(engine.NewAdminExecutor(reg, st), domain, edit))
+	// Enrollment: children ask to join, people decide, this node's key issues
+	// their certificates. Built before the executor, which answers its verbs.
+	roots, err := enroll.LoadTPMRoots(cfg.Enrollment.TPMRoots)
+	if err != nil {
+		return fail(fmt.Errorf("node %s: %w", cfg.ULID, err))
+	}
+	enr, err := enroll.New(st, reg, enroll.Options{NodeULID: cfg.ULID, Signer: id.Signer, Policy: cfg.Enrollment, Roots: roots})
+	if err != nil {
+		return fail(fmt.Errorf("node %s: enrollment: %w", cfg.ULID, err))
+	}
+	n.Enrollment = enr
+	admin := engine.NewAdminExecutor(reg, st)
+	admin.SetEnrollment(enr)
+	n.Engine.SetExecutor(engine.Executors(admin, domain, edit))
 	n.Engine.SetObserver(domain)
 	// The observer only sees new records, so the retained state from earlier runs
 	// is replayed to it once.
@@ -353,7 +374,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	// A local service registering with a mount that does not exist yet gets its
 	// elements authored through the same path as everything else. Without this,
 	// such registrations are refused.
-	reg.SetAuthoring(func(path string) (string, error) {
+	authorAt := func(path string) (string, error) {
 		payload, err := json.Marshal(map[string]string{"path": path})
 		if err != nil {
 			return "", err
@@ -363,6 +384,18 @@ func Start(cfg *config.Config) (*Node, error) {
 			return "", fmt.Errorf("author element at %s: %s", path, msg)
 		}
 		return msg, nil
+	}
+	reg.SetAuthoring(authorAt)
+	// Approving a child at a mount authors the elements there the same way.
+	enr.SetAuthoring(authorAt)
+	enr.SetElements(n.Engine.Elements())
+	enr.SetAudit(func(d engine.AuditDenial) { _ = n.Engine.RecordAuthorized(d) })
+	enr.SetFinding(func(topic string, payload []byte) error {
+		_, err := n.Engine.IngestAdminAttributed(topic, payload, engine.Attribution{
+			WrittenBy: enroll.FindingAuthor, ActorID: enroll.FindingAuthor,
+			ActorLabel: enroll.FindingAuthor, ActorKind: "system",
+		})
+		return err
 	})
 	if ver != nil {
 		// People's grants come from their token's groups, resolved against the
@@ -408,6 +441,8 @@ func Start(cfg *config.Config) (*Node, error) {
 			return fail(fmt.Errorf("node %s: repl client for %s: %w", cfg.ULID, cfg.Parent.URL, err))
 		}
 		replClient.SetStoreID(st.StoreID())
+		// A certificate the parent issued before this start is presented right away.
+		replClient.LoadIssuedCert(idOpts.CertFile())
 		replClient.SetLogForwarding(cfg.Parent.Logs)
 		if err := repl.PrepareUplink(replClient, st); err != nil {
 			return fail(fmt.Errorf("node %s: %w", cfg.ULID, err))
@@ -418,8 +453,8 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.MQTT.SetEngine(n.Engine)
 		// Revocation kicks the live session, and registry changes appear on the local
 		// bus like any entity.
-		reg.SetKick(n.MQTT.Kick)
 		reg.SetDeliver(n.MQTT.DeliverLocal)
+		enr.SetDeliver(n.MQTT.DeliverLocal)
 		// Reseed the broker's retained set from KV: mochi keeps it in memory, so a
 		// restarted node would otherwise give new subscribers no state. This runs
 		// before Serve, so no client publish can race it and be overwritten by the
@@ -456,6 +491,15 @@ func Start(cfg *config.Config) (*Node, error) {
 	}
 
 	nodeKey := httpapi.NodeKey{Pubkey: id.PublicHex(), Fingerprint: id.Fingerprint(), KeyStore: id.Store}
+	if replClient != nil {
+		// The uplink's key and certificate change at runtime (renewal, key change).
+		uplink := replClient
+		nodeKey.Live = func() httpapi.NodeKey {
+			cur := uplink.Identity()
+			return httpapi.NodeKey{Pubkey: cur.PublicHex(), Fingerprint: cur.Fingerprint(), KeyStore: cur.Store,
+				CertNotAfter: uplink.CertNotAfter()}
+		}
+	}
 	// 4. HTTPS API with the node's key: machines present their pinned key, admin
 	//    tooling uses the token.
 	if cfg.API.Addr != "" {
@@ -469,7 +513,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.apiLn = ln
 		n.APIAddr = ln.Addr().String()
-		n.httpSrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, nodeKey, false, replClient, n.Secrets)))
+		n.httpSrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, nodeKey, false, replClient, enr, n.Secrets)))
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("api server stopped", "err", err)
@@ -486,7 +530,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 		n.localAPILn = ln
 		n.LocalAPIAddr = ln.Addr().String()
-		n.localAPISrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, nodeKey, true, replClient, n.Secrets)))
+		n.localAPISrv = httpserver.New(n.trackInflight(httpapi.Handler(n.Engine, cfg, reg, ver, n.Metrics, n.Blobs, nodeKey, true, replClient, enr, n.Secrets)))
 		go func(srv *http.Server, ln net.Listener) {
 			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("local api server stopped", "err", err)
@@ -505,6 +549,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		// Stop closes repl connections instead of draining them, so the repl door needs
 		// in-flight tracking or a handler could outlive the store.
 		rs.SetInflightTracker(n.trackInflight)
+		rs.SetEnrollment(enr)
 		addr, err := rs.Start()
 		if err != nil {
 			return fail(fmt.Errorf("node %s: repl listen %s: %w", cfg.ULID, cfg.Repl.Addr, err))
@@ -519,6 +564,24 @@ func Start(cfg *config.Config) (*Node, error) {
 			rs.RunDrainCompletion(n.stop)
 		}()
 	}
+
+	// Revoking, blocking or re-keying an identity ends its live sessions: the
+	// MQTT session, and every request of a child on the replication door,
+	// including a waiting downlink poll (node enrollment spec §8.1).
+	reg.SetKick(func(ulid string) {
+		if n.MQTT != nil {
+			n.MQTT.Kick(ulid)
+		}
+		if n.ReplSrv != nil {
+			n.ReplSrv.CancelChild(ulid)
+		}
+	})
+	// Requests and pre-approvals expire; the finding follows what is pending.
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		enr.Run(n.stop)
+	}()
 
 	// 6. Uplink and downlink loops towards the parent.
 	if cfg.Parent != nil {
@@ -537,6 +600,16 @@ func Start(cfg *config.Config) (*Node, error) {
 		go func() {
 			defer n.wg.Done()
 			repl.RunDownlink(cl, n.Engine, n.Metrics, n.stop)
+		}()
+		// Enrollment: ask the parent to join, fetch and renew the certificate,
+		// move the key into the TPM when the configuration asks for it.
+		n.wg.Add(1)
+		go func() {
+			defer n.wg.Done()
+			repl.RunEnrollment(cl, repl.EnrollOptions{
+				ULID: cfg.ULID, Name: cfg.NodeName(), RequestedMount: cfg.Parent.Mount,
+				ColcaVersion: Version, Key: idOpts, HoldsChildren: reg.HoldsChildNodes,
+			}, n.stop)
 		}()
 	}
 

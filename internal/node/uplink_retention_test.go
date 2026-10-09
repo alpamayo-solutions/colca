@@ -8,6 +8,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/authtest"
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/repl"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -69,7 +70,7 @@ func testOfflineBacklogRecovery(t *testing.T, days int) {
 			Streams:  map[string]config.StreamRetention{"metrics": {MaxBytes: 1}},
 		},
 	}
-	cursor := uns.UplinkCursor(parentID.PublicHex())
+	cursor := uns.UplinkCursor(repl.CursorScope(parentID.PublicHex()))
 	for boot := range 2 {
 		child := mustStart(t, cfg)
 		protected, _ := child.Store.ProtectedCursors("metrics", time.Now(), 0)

@@ -141,7 +141,7 @@ func newAPI(t *testing.T) *api {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: Handler(e, cfg, reg, ver, m, testBlobs(t, cfg), NodeKey{Pubkey: nodeID.PublicHex()}, false, nil)}
+	srv := &http.Server{Handler: Handler(e, cfg, reg, ver, m, testBlobs(t, cfg), NodeKey{Pubkey: nodeID.PublicHex()}, false, nil, nil)}
 	go func() { _ = srv.Serve(tls.NewListener(ln, tlsCfg)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
@@ -1180,7 +1180,7 @@ func plainHandler(t *testing.T, cfg *config.Config, m *metrics.Metrics) *httptes
 	}
 	eng := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), testNodeKey, false, nil))
+	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), testNodeKey, false, nil, nil))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -1201,7 +1201,7 @@ func newTestHandler(t *testing.T, cfg *config.Config) http.Handler {
 	m := metrics.New(s, config.Retention{}, nil)
 	eng := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	return Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), NodeKey{Pubkey: "deadbeef"}, false, nil)
+	return Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), NodeKey{Pubkey: "deadbeef"}, false, nil, nil)
 }
 
 // doAdmin performs a request against a Handler's mux as admin via X-Colca-Token.
@@ -1321,7 +1321,7 @@ func TestPublishOversizeRecordCountsRecordRejectedOnce(t *testing.T) {
 	m := metrics.New(st, config.Retention{}, nil)
 	eng := engine.New(st, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), testNodeKey, false, nil))
+	srv := httptest.NewServer(Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), testNodeKey, false, nil, nil))
 	t.Cleanup(srv.Close)
 	line := `colca_record_rejects_total{reason="too_large"}`
 	before := metricstest.Value(t, m, line)
@@ -1646,7 +1646,7 @@ func TestHealthzReportsTheUplinkClientsStatus(t *testing.T) {
 	m := metrics.New(s, config.Retention{}, nil)
 	eng := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	h := Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), NodeKey{Pubkey: "deadbeef"}, false, cl)
+	h := Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), NodeKey{Pubkey: "deadbeef"}, false, cl, nil)
 
 	rr := httptest.NewRecorder()
 	req, err := http.NewRequest(http.MethodGet, "/healthz", nil)
@@ -1719,7 +1719,7 @@ func newLocalHandler(t *testing.T) *localAPI {
 		}
 		return msg, nil
 	})
-	h := Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), NodeKey{Pubkey: "deadbeef"}, true, nil)
+	h := Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), NodeKey{Pubkey: "deadbeef"}, true, nil, nil)
 	return &localAPI{Handler: h, reg: reg, eng: eng, m: m}
 }
 
@@ -2539,7 +2539,7 @@ func newLocalHandlerWithVerifier(t *testing.T) (*localAPI, *tokentest.Issuer) {
 		t.Fatal(err)
 	}
 	primeVerifier(t, ver)
-	h.Handler = Handler(h.eng, &config.Config{ULID: "n-test"}, h.reg, ver, h.m, testBlobs(t, &config.Config{ULID: "n-test"}), NodeKey{Pubkey: "deadbeef"}, true, nil)
+	h.Handler = Handler(h.eng, &config.Config{ULID: "n-test"}, h.reg, ver, h.m, testBlobs(t, &config.Config{ULID: "n-test"}), NodeKey{Pubkey: "deadbeef"}, true, nil, nil)
 	return h, iss
 }
 
@@ -2675,7 +2675,7 @@ func newLocalHandlerWithPersonalAccessToken(t *testing.T, id string, scopes []st
 	}
 	primeVerifier(t, ver)
 	token := installPersonalAccessToken(t, h, ver, id, scopes)
-	h.Handler = Handler(h.eng, &config.Config{ULID: "n-test"}, h.reg, ver, h.m, testBlobs(t, &config.Config{ULID: "n-test"}), NodeKey{Pubkey: "deadbeef"}, true, nil)
+	h.Handler = Handler(h.eng, &config.Config{ULID: "n-test"}, h.reg, ver, h.m, testBlobs(t, &config.Config{ULID: "n-test"}), NodeKey{Pubkey: "deadbeef"}, true, nil, nil)
 	return h, token
 }
 
@@ -2718,7 +2718,7 @@ func TestTheLocalDoorRefusesAPersonalAccessTokenWithoutTheApiScope(t *testing.T)
 func adminHandlerFor(t *testing.T, h *localAPI) http.Handler {
 	t.Helper()
 	cfg := &config.Config{ULID: "n-test", API: config.API{Token: "tok"}}
-	return Handler(h.eng, cfg, h.reg, nil, h.m, testBlobs(t, cfg), NodeKey{Pubkey: "deadbeef"}, false, nil)
+	return Handler(h.eng, cfg, h.reg, nil, h.m, testBlobs(t, cfg), NodeKey{Pubkey: "deadbeef"}, false, nil, nil)
 }
 
 // serviceRecords returns the _ServiceDetails records this node holds, so a test
@@ -3149,7 +3149,7 @@ func TestANodeCmdAdminRetiresAnotherIdentitysStaleCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	primeVerifier(t, ver)
-	h.Handler = Handler(h.eng, cfg, h.reg, ver, h.m, testBlobs(t, cfg), NodeKey{Pubkey: "deadbeef"}, true, nil)
+	h.Handler = Handler(h.eng, cfg, h.reg, ver, h.m, testBlobs(t, cfg), NodeKey{Pubkey: "deadbeef"}, true, nil, nil)
 	registerLocal(t, h, "connector-a", "")
 
 	st := h.eng.Store()

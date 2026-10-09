@@ -48,6 +48,7 @@ func main() {
 		os.Exit(1)
 	}
 	limit := memlimit.Apply()
+	node.Version = version
 	n, err := node.Start(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "start:", err)

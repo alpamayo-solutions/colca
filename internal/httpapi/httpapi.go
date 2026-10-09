@@ -33,6 +33,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/cursorwatch"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/enroll"
 	"github.com/alpamayo-solutions/colca/internal/httplimit"
 	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -147,6 +148,12 @@ type NodeKey struct {
 	Pubkey      string // SPKI hex
 	Fingerprint string // SHA256:XX:…
 	KeyStore    string // file | tpm
+	// CertNotAfter is the end of the certificate the parent issued, RFC 3339;
+	// empty without one.
+	CertNotAfter string
+	// Live, when set, is read on every /healthz instead of the fields above: a
+	// key change or a renewed certificate shows at once.
+	Live func() NodeKey
 }
 
 // Handler builds the node's HTTP surface. self is the node's key, served on
@@ -160,7 +167,10 @@ type NodeKey struct {
 // uplink is the node's replication client toward its parent, nil without one.
 // /healthz reports its status, so chaski.Node or an operator can tell "not
 // enrolled yet" from "connected".
-func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, blobs *blobstore.Store, self NodeKey, local bool, uplink *repl.Client, secretStores ...*secretstore.Store) http.Handler {
+//
+// enr is the node's enrollment manager, which serves the decisions on
+// enrollment requests (admin door only); nil leaves those routes out.
+func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *tokenauth.Verifier, m *metrics.Metrics, blobs *blobstore.Store, self NodeKey, local bool, uplink *repl.Client, enr *enroll.Manager, secretStores ...*secretstore.Store) http.Handler {
 	mux := http.NewServeMux()
 	var secretDB *secretstore.Store
 	if len(secretStores) > 0 {
@@ -370,8 +380,20 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		defer release()
 		// Enrolling this node at a parent needs its ULID and pubkey before anything trusts
 		// it, so both are readable at this unauthenticated door.
-		payload := map[string]any{"ok": true, "ulid": cfg.ULID, "pubkey": self.Pubkey,
-			"fingerprint": self.Fingerprint, "key_store": self.KeyStore}
+		key := self
+		if self.Live != nil {
+			key = self.Live()
+		}
+		payload := map[string]any{"ok": true, "ulid": cfg.ULID, "pubkey": key.Pubkey,
+			"fingerprint": key.Fingerprint, "key_store": key.KeyStore}
+		if cfg.Parent != nil {
+			// null while the parent has issued no certificate yet
+			var notAfter any
+			if key.CertNotAfter != "" {
+				notAfter = key.CertNotAfter
+			}
+			payload["cert_not_after"] = notAfter
+		}
 		// uplink lets chaski.Node or an operator tell "not enrolled yet" from "connected"
 		// without reading logs. "none" is an answer: a root has no uplink.
 		switch {
@@ -1178,6 +1200,10 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			mountAdminSecretRoutes(mux, secretDB, writeJSON, adminFor)
 		}
 
+		if enr != nil {
+			mountEnrollmentRoutes(mux, enr, writeJSON, authFor)
+		}
+
 		// The enrollment door is the only write path for registry entries and requires
 		// admin.
 		mux.HandleFunc("POST /enroll", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
@@ -1190,6 +1216,15 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 					return
 				}
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			// A node asks to join by itself and a person decides (node enrollment
+			// spec §4, §5); the admin token enrolls machines and local services only.
+			var kind uns.Entry
+			if json.Unmarshal(body, &kind) == nil && kind.ReplicatesUp() {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "a node is not enrolled through POST /enroll: " +
+					"it files its own request at its parent, which a person approves at POST /enroll/requests/{fingerprint}/approve " +
+					"(or ahead of time with POST /enroll/preapprovals)"})
 				return
 			}
 			ulid, off, err := reg.Enroll(body)

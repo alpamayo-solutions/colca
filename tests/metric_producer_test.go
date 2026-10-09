@@ -139,6 +139,9 @@ func TestOnlyTheProducerPublishesABoundSignalsMetric(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer child.Stop()
+	// The child attaches once its parent issued its certificate; a command
+	// issued before that attachment is not meant for it.
+	waitForPrefix(t, "n-child", child)
 
 	// The PLC connector: a machine at mount plc with its catalogue.
 	plc := authtest.NewMachine(t, "plc-1")

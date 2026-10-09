@@ -70,7 +70,7 @@ func newResourceAPI(t *testing.T) *resourceAPI {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: Handler(e, cfg, reg, nil, m, blobs, NodeKey{Pubkey: nodeID.PublicHex()}, false, nil)}
+	srv := &http.Server{Handler: Handler(e, cfg, reg, nil, m, blobs, NodeKey{Pubkey: nodeID.PublicHex()}, false, nil, nil)}
 	go func() { _ = srv.Serve(tls.NewListener(ln, tlsCfg)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
@@ -283,7 +283,7 @@ func newLocalResourceAPI(t *testing.T) (*localResourceAPI, *tokentest.Issuer) {
 	}
 	primeVerifier(t, ver)
 
-	h := Handler(e, cfg, reg, ver, m, blobs, NodeKey{Pubkey: "deadbeef"}, true, nil)
+	h := Handler(e, cfg, reg, ver, m, blobs, NodeKey{Pubkey: "deadbeef"}, true, nil, nil)
 	return &localResourceAPI{Handler: h, eng: e, blobs: blobs}, iss
 }
 

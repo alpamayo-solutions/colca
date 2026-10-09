@@ -3,7 +3,10 @@ package repl
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,12 +72,22 @@ func transferDeadline(size int64) time.Duration {
 
 type Client struct {
 	base string
-	// parentPub is the parent's pinned public key. Every connection verifies it, and
-	// cursor names are derived from it (uns.UplinkCursor and friends), so a reparent
-	// never resumes against the old parent's offsets and a return to a former parent
-	// finds its position intact.
-	parentPub        string
-	http             *http.Client
+	// parentPub is the parent's key as cursor names carry it (CursorScope). Cursor
+	// names are derived from it (uns.UplinkCursor and friends), so a reparent never
+	// resumes against the old parent's offsets and a return to a former parent finds
+	// its position intact.
+	parentPub string
+	// configured is parent.pubkey as written in the config; pin is the same key
+	// as SPKI hex, which every connection verifies.
+	configured, pin string
+	http            *http.Client
+	transport       swappableTransport
+	// id is the key the uplink presents; a key change replaces it. cert is the
+	// certificate presented with it: issued by the parent, or self-signed until
+	// then. leaf is the issued one, nil while self-signed.
+	id               atomic.Pointer[identity.Identity]
+	cert             atomic.Pointer[tls.Certificate]
+	leaf             atomic.Pointer[x509.Certificate]
 	log              *slog.Logger
 	maxReplicateBody int64
 	// Whether each replication lane is currently failing, so an outage logs
@@ -102,21 +115,37 @@ func (c *Client) SetStoreID(id string) { c.storeID = id }
 func (c *Client) SetLogForwarding(cfg config.ParentLogs) { c.logs = newLogForwarding(cfg) }
 
 // NewClient returns a TLS client that presents this node's certificate and pins
-// the parent's public key.
+// the parent's public key. Until the parent issues a certificate (see
+// RunEnrollment) it presents a self-signed one around the node key.
 func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordBytes ...uint64) (*Client, error) {
 	cert, err := id.SelfSignedCert("colca-child")
 	if err != nil {
 		return nil, err
 	}
 	// The pin is compared as SPKI. parent.pubkey may name the key in the legacy
-	// raw ed25519 form; the configured string itself stays the cursor scope, so
-	// rewriting it into the other form would restart every cursor.
+	// raw ed25519 form or as SPKI; CursorScope makes both spellings of one key
+	// one cursor scope.
 	pin, err := pubkey.NormalizeHex(parentPubHex)
 	if err != nil {
 		pin = parentPubHex // never matches: every connection fails with a mismatch
 	}
+	cl := &Client{
+		base:       baseURL,
+		parentPub:  CursorScope(parentPubHex),
+		configured: parentPubHex,
+		pin:        pin,
+		log:        slog.Default().With("comp", "repl-client"),
+		links:      newLinkState(),
+		logs:       newLogForwarding(config.ParentLogs{}),
+	}
+	cl.id.Store(id)
+	cl.cert.Store(&cert)
 	tlsCfg := &tls.Config{
-		Certificates:       []tls.Certificate{cert},
+		// The certificate is looked up per handshake, so an issued one is
+		// presented as soon as it arrives.
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return cl.cert.Load(), nil
+		},
 		InsecureSkipVerify: true, //nolint:gosec // trust is the pinned parent key, checked below
 		MinVersion:         tls.VersionTLS13,
 		// Unlike VerifyPeerCertificate, VerifyConnection also runs on resumed sessions.
@@ -148,22 +177,68 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 		ExpectContinueTimeout: time.Second,
 		IdleConnTimeout:       90 * time.Second,
 	}
-	cl := &Client{
-		base:             baseURL,
-		parentPub:        parentPubHex,
-		http:             &http.Client{Transport: transport},
-		log:              slog.Default().With("comp", "repl-client"),
-		maxReplicateBody: replicateBodyLimit(&config.Config{Limits: limits}),
-		links:            newLinkState(),
-		logs:             newLogForwarding(config.ParentLogs{}),
-	}
+	cl.transport.cur.Store(transport)
+	cl.http = &http.Client{Transport: &cl.transport}
+	cl.maxReplicateBody = replicateBodyLimit(&config.Config{Limits: limits})
 	cl.status.Store(Status{State: UplinkConnecting, Since: time.Now().UTC()})
 	return cl, nil
 }
 
-// ParentPub is the pinned parent key this client is bound to, and the scope of
-// every replication cursor against it.
+// swappableTransport sends every request over the current transport. A new
+// client certificate gets a new transport, so no connection opened with the
+// old certificate is reused.
+type swappableTransport struct {
+	cur atomic.Pointer[http.Transport]
+}
+
+func (s *swappableTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return s.cur.Load().RoundTrip(r)
+}
+
+// renew moves future requests to a fresh transport and closes the idle
+// connections of the old one.
+func (s *swappableTransport) renew() {
+	old := s.cur.Load()
+	s.cur.Store(old.Clone())
+	old.CloseIdleConnections()
+}
+
+// CursorScope is the parent key as cursor names carry it. Cursor names were
+// derived from the configured parent.pubkey string, which used to be the raw
+// 64-hex ed25519 key; prekit now renders the SPKI form. An ed25519 key is
+// therefore always scoped by its raw hex and any other key by its SPKI hex,
+// so both spellings of one key keep one set of cursors. A string that is no
+// key at all stays as it is (it never connects anyway).
+func CursorScope(parentPubHex string) string {
+	pub, err := pubkey.ParseHex(parentPubHex)
+	if err != nil {
+		return parentPubHex
+	}
+	if raw, ok := pub.(ed25519.PublicKey); ok {
+		return hex.EncodeToString(raw)
+	}
+	h, err := pubkey.Hex(pub)
+	if err != nil {
+		return parentPubHex
+	}
+	return h
+}
+
+// ParentPub is the scope of every replication cursor against the pinned parent:
+// its key as CursorScope spells it.
 func (c *Client) ParentPub() string { return c.parentPub }
+
+// Identity is the key the uplink presents now.
+func (c *Client) Identity() *identity.Identity { return c.id.Load() }
+
+// CertNotAfter is the end of the issued certificate's validity, RFC 3339 UTC,
+// or "" while the client presents a self-signed one.
+func (c *Client) CertNotAfter() string {
+	if l := c.leaf.Load(); l != nil {
+		return l.NotAfter.UTC().Format(time.RFC3339)
+	}
+	return ""
+}
 
 func (c *Client) Replicate(stream string, recs []store.ReplRecord) (hwm uint64, err error) {
 	hwm, _, err = c.replicate(context.Background(), stream, recs)
@@ -477,6 +552,32 @@ func adoptLegacy(c *Client, st *store.Store, legacyName, scopedName, stream stri
 	return true
 }
 
+// adoptScope moves a cursor named under the parent key as parent.pubkey spelled
+// it, when that is not CursorScope's spelling, to the canonical name: a config
+// that switched between the raw and the SPKI form of the same key keeps its
+// position, including position 1 (a commands cursor that met an empty stream
+// must not be re-seated at the parent's head). Both names count against the
+// same parent and the same streams, so where both exist the further one wins.
+func (c *Client) adoptScope(st *store.Store, name func(string) string, stream string) {
+	if c.configured == "" || c.configured == c.parentPub {
+		return
+	}
+	from, to := name(c.configured), name(c.parentPub)
+	pos, known := st.CursorLookup(from, stream)
+	if !known {
+		return
+	}
+	if _, err := st.CursorSetIfAbsent(to, stream, pos); err != nil {
+		c.log.Warn("cursor not carried over to the canonical parent key spelling", "cursor", from, "stream", stream, "err", err)
+		return
+	}
+	st.CursorAck(to, stream, pos) // forward only: the further position wins
+	c.log.Info("cursor carried over to the canonical parent key spelling", "from", from, "to", to, "stream", stream, "position", pos)
+	if err := st.CursorDelete(from, stream); err != nil {
+		c.log.Warn("cursor under the old parent key spelling not deleted", "cursor", from, "stream", stream, "err", err)
+	}
+}
+
 // PrepareUplink persists retention protection for the configured parent before
 // any pruning can run. It needs no connection to the parent. For each stream:
 //
@@ -490,8 +591,11 @@ func adoptLegacy(c *Client, st *store.Store, legacyName, scopedName, stream stri
 // calls it for users of the replication loop outside that lifecycle. Repeating
 // it never rewinds a cursor or refreshes an existing cursor's staleness timestamp.
 func PrepareUplink(c *Client, st *store.Store) error {
+	c.adoptScope(st, uns.DownlinkDefCursor, downlinkDefStream)
+	c.adoptScope(st, uns.DownlinkCursor, downlinkStream)
 	up := uns.UplinkCursor(c.parentPub)
 	for _, stream := range uplinkStreams() {
+		c.adoptScope(st, uns.UplinkCursor, stream)
 		if st.CursorGet(up, stream) > 1 {
 			continue // case 1
 		}

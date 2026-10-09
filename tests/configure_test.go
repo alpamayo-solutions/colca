@@ -122,6 +122,9 @@ func TestAutobindIssuedAtTheParentBindsAtTheChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer child.Stop()
+	// The child attaches once its parent issued its certificate; a command
+	// issued before that attachment is not meant for it.
+	waitForPrefix(t, "n-child", child)
 
 	// A connector enrolls at the child and publishes its catalogue at the topic its
 	// entry computes: node, mount, name.

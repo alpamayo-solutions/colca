@@ -222,7 +222,7 @@ func TestUplinkJumpsPastPrunedCursorAndConverges(t *testing.T) {
 	time.Sleep(300 * time.Millisecond) // pushes are failing; cursor pinned at 1
 
 	// Retention overrides the uplink cursor: offsets 1..3 are gone, LWM is 4.
-	if n, err := cs.Prune("metrics", 4, []string{uns.UplinkCursor(parentID.PublicHex())}, nil); err != nil || n != 3 {
+	if n, err := cs.Prune("metrics", 4, []string{uns.UplinkCursor(CursorScope(parentID.PublicHex()))}, nil); err != nil || n != 3 {
 		t.Fatalf("prune: %d %v", n, err)
 	}
 
@@ -412,10 +412,10 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 	// This pins the pruner passing a cursor that exists, one that already offered
 	// {v:1} to this parent. A first-contact cursor starts at the LWM and cannot be
 	// overridden, so the position is planted here.
-	if !cs.CursorAck(uns.UplinkCursor(parentID.PublicHex()), "metrics", 2) {
+	if !cs.CursorAck(uns.UplinkCursor(CursorScope(parentID.PublicHex())), "metrics", 2) {
 		t.Fatal("seeding the uplink cursor did not move it — the precondition is a no-op")
 	}
-	if n, err := cs.Prune("metrics", 4, []string{uns.UplinkCursor(parentID.PublicHex())}, nil); err != nil || n != 3 {
+	if n, err := cs.Prune("metrics", 4, []string{uns.UplinkCursor(CursorScope(parentID.PublicHex()))}, nil); err != nil || n != 3 {
 		t.Fatalf("prune: %d %v", n, err)
 	}
 
