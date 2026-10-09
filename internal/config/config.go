@@ -13,6 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/alpamayo-solutions/colca/internal/identity"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -190,8 +191,19 @@ func (a *Access) validate() error {
 	return nil
 }
 
-// Config is a node's configuration. Only ULID, DataDir and KeyFile are
-// required. Machines and child nodes are not configured here; they are
+// Identity is the identity: block: where the node key lives. Only key_file is
+// required, here or as the top-level key_file.
+type Identity struct {
+	// KeyStore is auto (default), tpm or file; see identity.Open.
+	KeyStore string `yaml:"key_store"`
+	// KeyFile holds the file key, or the TPM key blob when the key is in a TPM.
+	KeyFile string `yaml:"key_file"`
+	// TPMDevice is the TPM to use, /dev/tpmrm0 when empty.
+	TPMDevice string `yaml:"tpm_device"`
+}
+
+// Config is a node's configuration. Only ULID, DataDir and the key file
+// (identity.key_file or key_file) are required. Machines and child nodes are not configured here; they are
 // enrolled at runtime through the admin API.
 type Config struct {
 	ULID string `yaml:"ulid"`
@@ -216,14 +228,17 @@ type Config struct {
 	// service-sealed ciphertext. It is deliberately outside DataDir so stream
 	// reset/restore and replication lifecycle can never include it by accident.
 	// Empty disables the secret store for compositions that do not expose it.
-	SecretsDir string   `yaml:"secrets_dir"`
-	LogLevel   string   `yaml:"log_level"`
-	KeyFile    string   `yaml:"key_file"`
-	TLS        TLS      `yaml:"tls"`
-	API        API      `yaml:"api"`
-	MQTT       Endpoint `yaml:"mqtt"`
-	Repl       Endpoint `yaml:"repl"`
-	Parent     *Parent  `yaml:"parent"`
+	SecretsDir string `yaml:"secrets_dir"`
+	LogLevel   string `yaml:"log_level"`
+	// KeyFile is the top-level spelling of identity.key_file, kept for configs
+	// written before the identity block. Use EffectiveKeyFile.
+	KeyFile  string   `yaml:"key_file"`
+	Identity Identity `yaml:"identity"`
+	TLS      TLS      `yaml:"tls"`
+	API      API      `yaml:"api"`
+	MQTT     Endpoint `yaml:"mqtt"`
+	Repl     Endpoint `yaml:"repl"`
+	Parent   *Parent  `yaml:"parent"`
 	// Standalone permanently retires fleet trust in this data directory.
 	Standalone      bool            `yaml:"standalone"`
 	StandaloneSince int64           `yaml:"-"` // persisted activation, populated before serving
@@ -944,13 +959,36 @@ func (c *Config) EffectiveTopicRoot() string {
 	return uns.DefaultRoot
 }
 
+// EffectiveKeyFile is identity.key_file, else the top-level key_file.
+func (c *Config) EffectiveKeyFile() string {
+	if c.Identity.KeyFile != "" {
+		return c.Identity.KeyFile
+	}
+	return c.KeyFile
+}
+
+// IdentityOptions are the identity block as identity.Open takes them.
+func (c *Config) IdentityOptions() identity.Options {
+	return identity.Options{
+		KeyStore:  c.Identity.KeyStore,
+		KeyFile:   c.EffectiveKeyFile(),
+		TPMDevice: c.Identity.TPMDevice,
+	}
+}
+
 // Validate checks the required fields and every block.
 func (c *Config) Validate() error {
 	if c.Standalone && c.Parent != nil {
 		return fmt.Errorf("config: standalone cannot have a parent")
 	}
-	if c.ULID == "" || c.DataDir == "" || c.KeyFile == "" {
+	if c.ULID == "" || c.DataDir == "" || c.EffectiveKeyFile() == "" {
 		return fmt.Errorf("config: ulid, data_dir, key_file are required")
+	}
+	if c.KeyFile != "" && c.Identity.KeyFile != "" && c.KeyFile != c.Identity.KeyFile {
+		return fmt.Errorf("config: key_file %q and identity.key_file %q differ; set one of them", c.KeyFile, c.Identity.KeyFile)
+	}
+	if !identity.ValidKeyStore(c.Identity.KeyStore) {
+		return fmt.Errorf("config: identity.key_store %q, want auto, tpm or file", c.Identity.KeyStore)
 	}
 	if err := uns.ValidRoot(c.EffectiveTopicRoot()); err != nil {
 		return fmt.Errorf("config: %w", err)

@@ -48,7 +48,9 @@ import (
 // listener addresses (a config may ask for "127.0.0.1:0"); each is empty when
 // the node has no such listener.
 type Node struct {
-	Cfg      *config.Config
+	Cfg *config.Config
+	// Identity is this node's key; Stop closes it (a TPM key holds the TPM).
+	Identity *identity.Identity
 	Store    *store.Store
 	Secrets  *secretstore.Store
 	Blobs    *blobstore.Store
@@ -125,18 +127,18 @@ func Start(cfg *config.Config) (*Node, error) {
 
 	// First boot mints this node's identity; every later boot loads it. The key
 	// must not come from anything distributed to install the node.
-	id, minted, err := identity.LoadOrGenerate(cfg.KeyFile)
+	idOpts := cfg.IdentityOptions()
+	id, minted, err := identity.Open(idOpts)
 	if err != nil {
-		return nil, fmt.Errorf("node %s: key %s: %w", cfg.ULID, cfg.KeyFile, err)
+		return nil, fmt.Errorf("node %s: key %s: %w", cfg.ULID, idOpts.KeyFile, err)
 	}
-	if minted {
-		// At INFO with the pubkey, because this is the moment an operator needs
-		// it: nothing can enroll this node until its parent holds this key.
-		slog.Info("minted this node's identity — enroll it at its parent",
-			"node", cfg.ULID, "key_file", cfg.KeyFile, "pubkey", id.PublicHex())
-	}
+	// Once per start, at INFO, with the fingerprint: it is what a person compares
+	// when this node's key is accepted at its parent.
+	slog.Info("node identity", "node", cfg.ULID, "key_store", id.Store, "fingerprint", id.Fingerprint(),
+		"algorithm", id.Algorithm(), "minted", minted, "key_file", idOpts.KeyFile, "pubkey", id.PublicHex())
 	st, err := store.OpenWithOptions(cfg.DataDir, store.Options{Compression: cfg.Storage.Compression, MemoryCeiling: memlimit.Ceiling()})
 	if err != nil {
+		_ = id.Close()
 		return nil, fmt.Errorf("node %s: open store %s: %w", cfg.ULID, cfg.DataDir, err)
 	}
 	st.SetMaxRecordBytes(cfg.Limits.EffectiveMaxRecordBytes())
@@ -145,6 +147,7 @@ func Start(cfg *config.Config) (*Node, error) {
 		secretDB, err = secretstore.Open(cfg.SecretsDir)
 		if err != nil {
 			_ = st.Close()
+			_ = id.Close()
 			return nil, fmt.Errorf("node %s: open secret store %s: %w", cfg.ULID, cfg.SecretsDir, err)
 		}
 	}
@@ -152,7 +155,7 @@ func Start(cfg *config.Config) (*Node, error) {
 	// clk is this node's authoritative time; a node without a parent is the
 	// authority. Metrics and Engine must share this instance.
 	clk := clock.New(cfg.Parent == nil, time.Now)
-	n := &Node{Cfg: cfg, Store: st, Secrets: secretDB, Metrics: metrics.New(st, cfg.Retention, clk), stop: make(chan struct{})}
+	n := &Node{Cfg: cfg, Identity: id, Store: st, Secrets: secretDB, Metrics: metrics.New(st, cfg.Retention, clk), stop: make(chan struct{})}
 	log := slog.Default().With("node", cfg.ULID, "comp", "node")
 	// From here on every error path unwinds through Stop.
 	fail := func(err error) (*Node, error) {
@@ -711,6 +714,9 @@ func (n *Node) Stop() {
 		}
 		if n.Secrets != nil {
 			_ = n.Secrets.Close()
+		}
+		if n.Identity != nil {
+			_ = n.Identity.Close()
 		}
 	})
 }

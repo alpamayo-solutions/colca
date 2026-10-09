@@ -1202,3 +1202,38 @@ func TestConfigRejectsAccessWithoutHostname(t *testing.T) {
 		t.Fatalf("http ui_url refused: %v", err)
 	}
 }
+
+func TestIdentityBlock(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	yml := "ulid: n1\ndata_dir: /tmp\nidentity:\n  key_store: tpm\n  key_file: /keys/node.key\n  tpm_device: /dev/tpmrm0\n"
+	if err := os.WriteFile(p, []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := c.IdentityOptions()
+	if o.KeyStore != "tpm" || o.KeyFile != "/keys/node.key" || o.TPMDevice != "/dev/tpmrm0" {
+		t.Fatalf("options: %+v", o)
+	}
+
+	// The top-level key_file still names the key.
+	legacy := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k"}
+	if err := legacy.Validate(); err != nil || legacy.IdentityOptions().KeyFile != "/k" {
+		t.Fatalf("top-level key_file: %v %+v", err, legacy.IdentityOptions())
+	}
+	same := &Config{ULID: "x", DataDir: "/tmp", KeyFile: "/k", Identity: Identity{KeyFile: "/k"}}
+	if err := same.Validate(); err != nil {
+		t.Fatalf("both spellings naming one file: %v", err)
+	}
+
+	for name, c := range map[string]*Config{
+		"two key files":     {ULID: "x", DataDir: "/tmp", KeyFile: "/a", Identity: Identity{KeyFile: "/b"}},
+		"unknown key_store": {ULID: "x", DataDir: "/tmp", KeyFile: "/k", Identity: Identity{KeyStore: "hsm"}},
+	} {
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+}

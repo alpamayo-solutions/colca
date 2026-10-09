@@ -7,6 +7,7 @@ require (
 	github.com/eclipse/paho.golang v0.23.0
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/google/go-tpm v0.9.8
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/mochi-mqtt/server/v2 v2.7.9
 	github.com/oklog/ulid/v2 v2.1.2
