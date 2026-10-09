@@ -409,6 +409,57 @@ without a row) and `colca_historian_signals_not_logged` (signals currently
 marked). `/healthz` fails with `signal_definitions` while the definitions
 cannot be loaded or followed.
 
+## Late writes the historian marks
+
+A reader that keeps something computed from `historian_metric` per hour (PREKIT's
+per-signal statistics) has to learn when a sample lands in an hour it already
+computed: a child catching up after an outage, a replay, an import, a corrected
+value. `colca-historian` tells it in the database.
+
+The reader owns two relations, and the historian marks only while both exist:
+
+```sql
+CREATE TABLE historian_late_write (
+    id bigserial PRIMARY KEY, signal_id text NOT NULL, hour timestamptz NOT NULL,
+    UNIQUE (signal_id, hour));
+-- the signals to mark: a table or a view with a signal_id column
+CREATE VIEW historian_late_write_signal AS SELECT signal_id FROM ...;
+```
+
+For every page it writes, the historian adds a row to `historian_late_write`
+for each listed signal and UTC hour the page has a sample of, when that hour
+started 65 minutes ago or longer by the database's clock, and sends
+`NOTIFY historian_late_write` when it added one. This happens in the
+transaction that writes the samples, so a sample is never stored without its
+mark. An offline `colca-historian import` marks the same way.
+
+What it costs is bounded whatever is replayed: a signal that is not listed
+writes nothing, and a (signal, hour) has one row however many pages write into
+it. A mark that is already there is locked until the page commits, not written
+again.
+
+The reader's side of the contract:
+
+- **Handling a mark:** delete it first, then read the hour, in one
+  transaction, taking marks in `(signal_id, hour)` order. The delete waits for
+  a page that is still writing into that hour, and the read then sees its
+  samples; a page that comes after the delete adds the mark again.
+- **Listing a new signal:** commit it to the list, then take
+  `LOCK TABLE historian_late_write IN SHARE MODE` once, in a transaction of
+  its own, before reading the signal's history. That waits for the pages that
+  were written without seeing the signal listed.
+- **Timing:** compute an hour no earlier than 65 minutes after its start plus
+  the time a write transaction may take, for a sample without a mark to be in
+  what is read.
+
+The historian looks for the two relations at start and, while they are
+missing, again when it writes a page, at most once a minute. A database
+without them gets no marks and no error, and relations that are dropped stop
+the marks without stopping the history. While it marks, the historian's
+`_ServiceDetails` record carries `metadata.late_write_marks: true`. A reader
+checks that before it relies on the marks: a historian that predates them
+writes none and says nothing.
+
 ## Permanent standalone handover
 
 `standalone: true` is a permanent trust transition, distinct from an offline

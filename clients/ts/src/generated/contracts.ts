@@ -576,6 +576,7 @@ export type Signal = {
   is_autobound?: boolean;
   is_logged?: boolean;
   is_published?: boolean;
+  keeps_statistics?: boolean;
   max_value?: null | number;
   metadata?: Record<string, unknown>;
   min_value?: null | number;

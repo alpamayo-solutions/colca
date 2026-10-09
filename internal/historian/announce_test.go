@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -113,6 +114,60 @@ func TestAnnouncerDeclaresTheHistorianACoreService(t *testing.T) {
 		}
 	}
 	t.Fatal("no historian _ServiceDetails")
+}
+
+// lateWriteMarks reads metadata.late_write_marks of the historian's record;
+// found is false while the record is not active.
+func lateWriteMarks(t *testing.T, client *door.Client) (marks, found bool) {
+	t.Helper()
+	entries, err := client.KV(context.Background(), "", "_ServiceDetails")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		var d serviceDetails
+		if err := json.Unmarshal(e.Payload, &d); err != nil {
+			t.Fatal(err)
+		}
+		if d.Name == "historian" && d.IsActive {
+			marks, _ = d.Metadata["late_write_marks"].(bool)
+			return marks, true
+		}
+	}
+	return false, false
+}
+
+// A reader of the late write marks learns from the record whether this
+// historian writes them, and hears when that changes: the record says nothing
+// while no marks are written, which is also what an older historian says.
+func TestAnnouncerSaysWhetherLateWritesAreMarked(t *testing.T) {
+	n := startLocalNode(t)
+	client := &door.Client{BaseURL: "http://" + n.LocalAPIAddr, Service: "historian"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var marking atomic.Bool
+	announcer := &Announcer{Door: client, MQTTURL: "tcp://" + n.MQTTLocalAddr, LateWriteMarks: marking.Load}
+	go announcer.Run(ctx)
+
+	waitMarks := func(want bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if marks, found := lateWriteMarks(t, client); found && marks == want {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("the record never said late_write_marks=%v", want)
+	}
+	waitActive(t, client, true)
+	waitMarks(false)
+	marking.Store(true)
+	announcer.Refresh()
+	waitMarks(true)
+	marking.Store(false)
+	announcer.Refresh()
+	waitMarks(false)
 }
 
 func TestAnnouncerLastWillMarksACrashedServiceInactive(t *testing.T) {

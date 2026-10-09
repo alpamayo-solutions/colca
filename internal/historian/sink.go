@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -94,6 +95,62 @@ INSERT INTO colca_applied_offset (consumer, "offset", store, updated_at)
 VALUES ($1, $2, NULLIF($3::text, ''), now())
 ON CONFLICT (consumer) DO UPDATE SET "offset" = EXCLUDED."offset", store = EXCLUDED.store, updated_at = now()`
 
+// markLateWrites records which hours of which signals a page wrote into after
+// those hours were due to be summarised. PREKIT keeps per-signal statistics of
+// the history and computes an hour once, lateAfter past its start; a sample
+// that arrives later (a child catching up, a replay, a corrected value) would
+// leave that hour's statistics stale. The mark names the hour again, in the
+// transaction that writes the sample, so nothing can be written unmarked.
+//
+// What bounds it, whatever is replayed:
+//   - Only signals the reader lists in historian_late_write_signal are marked.
+//     A node without statistics writes nothing here.
+//   - A (signal, hour) has at most one mark, by the table's unique key. A mark
+//     that is already there is locked, not written again, until this
+//     transaction ends: the reader deletes a mark before it reads the hour, in
+//     one transaction, so its delete waits for a sample that is still being
+//     written and its read then sees it. (An ON CONFLICT DO UPDATE locks the
+//     row it conflicts with even when its WHERE keeps it from updating.)
+//   - The rows are taken in one order, by signal and hour, as the reader takes
+//     them, so the two cannot deadlock over two marks.
+//
+// The database's clock decides what is late, and hours are UTC hours: the
+// reader uses the same clock and the same grid. $1 and $2 are parallel arrays.
+// The reader is notified when a mark was added.
+const markLateWrites = `
+WITH marked AS (
+    INSERT INTO historian_late_write (signal_id, hour)
+    SELECT late.sig, late.hour
+    FROM (SELECT DISTINCT u.sig, u.hour
+          FROM unnest($1::text[], $2::timestamptz[]) AS u(sig, hour)
+          WHERE u.hour + interval '65 minutes' <= now()
+            AND EXISTS (SELECT 1 FROM historian_late_write_signal AS wanted WHERE wanted.signal_id = u.sig)
+          ORDER BY u.sig, u.hour) AS late
+    ON CONFLICT (signal_id, hour) DO UPDATE SET hour = EXCLUDED.hour WHERE false
+    RETURNING 1
+)
+SELECT pg_notify('historian_late_write', '') FROM (SELECT 1 FROM marked LIMIT 1) AS any_marked`
+
+// lateAfter is how long after an hour's start a sample of that hour is late;
+// markLateWrites carries the same 65 minutes. lateSlack is how far this
+// process's clock may run behind the database's before a late sample would
+// not be offered to the statement at all.
+const (
+	lateAfter = 65 * time.Minute
+	lateSlack = 10 * time.Minute
+)
+
+// lateWriteTablesExist asks whether the two relations the marks need exist:
+// the table they go into and the list of signals to mark. Both belong to the
+// reader of the marks (PREKIT's migrations); without them nobody reads marks
+// and none are written.
+const lateWriteTablesExist = `
+SELECT to_regclass('historian_late_write') IS NOT NULL
+   AND to_regclass('historian_late_write_signal') IS NOT NULL`
+
+// undefinedTable is the SQLSTATE of a statement naming a table that is gone.
+const undefinedTable = "42P01"
+
 const createOffsetTable = `
 CREATE TABLE IF NOT EXISTS colca_applied_offset (
     consumer   text PRIMARY KEY,
@@ -121,6 +178,115 @@ type Sink struct {
 	// Writers, above 1, writes a page over that many connections at once, each
 	// with the rows of its own share of the signals; see applyPartitioned.
 	Writers int
+
+	marks lateMarks
+}
+
+// lateMarks is whether this sink marks late writes (markLateWrites), which it
+// does exactly while the reader's relations for them exist.
+type lateMarks struct {
+	mu sync.Mutex
+	// watching is set once WatchLateWrites has looked for the table. A sink
+	// that never looked writes no marks.
+	watching bool
+	on       bool
+	checked  time.Time
+	changed  func(on bool)
+}
+
+// lateMarkRecheck is how often a sink without the table looks for it again,
+// when a page is written. The table appears when its owner's migrations run,
+// which can be after this process started.
+const lateMarkRecheck = time.Minute
+
+// WatchLateWrites looks for the table late writes are marked in and has the
+// sink mark them while it exists. changed, when not nil, hears every change of
+// that, so the service record can say whether marks are written.
+func (s *Sink) WatchLateWrites(ctx context.Context, changed func(on bool)) error {
+	s.marks.mu.Lock()
+	s.marks.watching, s.marks.changed = true, changed
+	s.marks.mu.Unlock()
+	return s.lookForLateWriteTable(ctx)
+}
+
+// MarksLateWrites reports whether pages currently mark their late writes.
+// Safe for concurrent use.
+func (s *Sink) MarksLateWrites() bool {
+	s.marks.mu.Lock()
+	defer s.marks.mu.Unlock()
+	return s.marks.on
+}
+
+func (s *Sink) lookForLateWriteTable(ctx context.Context) error {
+	var exists bool
+	if err := s.Pool.QueryRow(ctx, lateWriteTablesExist).Scan(&exists); err != nil {
+		return fmt.Errorf("historian: looking for the late write table: %w", err)
+	}
+	s.setLateMarks(exists)
+	return nil
+}
+
+func (s *Sink) setLateMarks(on bool) {
+	s.marks.mu.Lock()
+	changed := s.marks.on != on
+	s.marks.on, s.marks.checked = on, time.Now()
+	notify := s.marks.changed
+	s.marks.mu.Unlock()
+	if changed && notify != nil {
+		notify(on)
+	}
+}
+
+// marking reports whether the page about to be written marks its late writes.
+// A sink without the table looks for it again here, at most once per
+// lateMarkRecheck; a failed look leaves marks off until the next one.
+func (s *Sink) marking(ctx context.Context) bool {
+	s.marks.mu.Lock()
+	on, due := s.marks.on, s.marks.watching && time.Since(s.marks.checked) >= lateMarkRecheck
+	if !on && due {
+		s.marks.checked = time.Now() // one look per interval, also across writers
+	}
+	s.marks.mu.Unlock()
+	if on || !due {
+		return on
+	}
+	if err := s.lookForLateWriteTable(ctx); err != nil {
+		return false
+	}
+	return s.MarksLateWrites()
+}
+
+// lateWrites returns markLateWrites' arrays for rows: each (signal, hour) once,
+// left out when the hour cannot be late yet by this process's clock plus
+// lateSlack. The statement decides exactly, by the database's clock.
+func lateWrites(rows []Row, now time.Time) (signals []string, hours []time.Time) {
+	type key struct {
+		signal string
+		hour   time.Time
+	}
+	var seen map[key]bool
+	for _, row := range rows {
+		hour := row.Timestamp.UTC().Truncate(time.Hour)
+		if hour.Add(lateAfter).After(now.Add(lateSlack)) {
+			continue
+		}
+		k := key{row.SignalID, hour}
+		if seen[k] {
+			continue
+		}
+		if seen == nil {
+			seen = make(map[key]bool)
+		}
+		seen[k] = true
+		signals = append(signals, row.SignalID)
+		hours = append(hours, hour)
+	}
+	return signals, hours
+}
+
+func isUndefinedTable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == undefinedTable
 }
 
 // Rejection is one row the schema permanently refused, set aside so the rest of
@@ -269,14 +435,33 @@ func (s *Sink) Apply(ctx context.Context, rows []Row, consumer string, offset in
 // applyOne writes rows, and the marker unless consumer is "", in one
 // transaction, falling back to row by row when a row is poison.
 func (s *Sink) applyOne(ctx context.Context, rows []Row, consumer string, offset int64, store string) ([]Rejection, error) {
-	err := s.applyBatch(ctx, rows, consumer, offset, store)
+	marking := s.marking(ctx)
+	err := s.applyBatch(ctx, rows, consumer, offset, store, marking)
+	if marking && isUndefinedTable(err) {
+		marking = s.stopMarking(err)
+		err = s.applyBatch(ctx, rows, consumer, offset, store, marking)
+	}
 	if err == nil {
 		return nil, nil
 	}
 	if _, _, poison := poisonReason(err); !poison || s.Strict {
 		return nil, err
 	}
-	return s.applyRowByRow(ctx, rows, consumer, offset, store)
+	rejections, err := s.applyRowByRow(ctx, rows, consumer, offset, store, marking)
+	if marking && isUndefinedTable(err) {
+		return s.applyRowByRow(ctx, rows, consumer, offset, store, s.stopMarking(err))
+	}
+	return rejections, err
+}
+
+// stopMarking turns the marks off after a statement found a table missing:
+// the reader of the marks took its table away, and a page must not wait for
+// it. The page is then written again without marks; were it the metric table
+// that is missing, that attempt fails the same way and is retried as before.
+func (s *Sink) stopMarking(cause error) bool {
+	slog.Default().Warn("a table was missing while marking late writes — writing without marks", "err", cause)
+	s.setLateMarks(false)
+	return false
 }
 
 // applyPartitioned writes a page over s.Writers connections at once. Rows are
@@ -339,8 +524,9 @@ func partitionOf(signalID string, n int) int {
 // applyBatch sends the page and the marker in one batch and one transaction.
 // Runs of values go as one statement each (insertMetrics); a retraction keeps a
 // statement of its own and its place in the order, because whether it writes a
-// row depends on the rows before it.
-func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offset int64, store string) error {
+// row depends on the rows before it. With marking, the page's late writes are
+// marked in the same transaction (markLateWrites).
+func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offset int64, store string, marking bool) error {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("historian: beginning a batch: %w", err)
@@ -361,6 +547,11 @@ func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offs
 		}
 		batch.Queue(insertMetrics, valueColumns(rows[start:end])...)
 		start = end
+	}
+	if marking {
+		if signals, hours := lateWrites(rows, time.Now()); len(signals) > 0 {
+			batch.Queue(markLateWrites, signals, hours)
+		}
 	}
 	if consumer != "" {
 		batch.Queue(upsertOffset, consumer, offset, store)
@@ -430,7 +621,7 @@ func valueColumns(rows []Row) []any {
 // applyRowByRow applies each row under its own savepoint in one transaction,
 // skipping poisoned rows and committing the marker with the rows that landed. A
 // transient error aborts the whole pass, and the page is retried.
-func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, offset int64, store string) ([]Rejection, error) {
+func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, offset int64, store string, marking bool) ([]Rejection, error) {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("historian: beginning a row-by-row retry at offset %d: %w", offset, err)
@@ -438,6 +629,7 @@ func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, o
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var rejections []Rejection
+	landed := make([]Row, 0, len(rows))
 	for i, row := range rows {
 		savepoint := fmt.Sprintf("hist_row_%d", i)
 		if _, err := tx.Exec(ctx, "SAVEPOINT "+savepoint); err != nil {
@@ -450,6 +642,7 @@ func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, o
 			if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+savepoint); err != nil {
 				return nil, fmt.Errorf("historian: releasing the savepoint for row %d at offset %d: %w", i, offset, err)
 			}
+			landed = append(landed, row)
 			continue
 		}
 
@@ -465,6 +658,13 @@ func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, o
 		rejections = append(rejections, Rejection{Row: row, Reason: reason, SQLState: sqlstate, Err: execErr})
 	}
 
+	if marking {
+		if signals, hours := lateWrites(landed, time.Now()); len(signals) > 0 {
+			if _, err := tx.Exec(ctx, markLateWrites, signals, hours); err != nil {
+				return nil, fmt.Errorf("historian: marking the late writes of a row-by-row apply at offset %d: %w", offset, err)
+			}
+		}
+	}
 	if consumer != "" {
 		if _, err := tx.Exec(ctx, upsertOffset, consumer, offset, store); err != nil {
 			return nil, fmt.Errorf("historian: moving the marker after a row-by-row apply at offset %d: %w", offset, err)

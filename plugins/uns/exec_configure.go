@@ -1253,11 +1253,12 @@ func (c *ConfigExec) resolveIntent(record map[string]any, id string, bindings *s
 	return found[0], true
 }
 
-// preserveBinding keeps the stored binding, learned data type and replication
-// policy when an upsert does not set them. Declarations
+// preserveBinding keeps the stored binding, learned data type, replication
+// policy and statistics setting when an upsert does not set them. Declarations
 // carry data_tag: null, and replacing the record whole would unbind every
-// declared signal on each reconcile. A non-empty data_tag or an explicit
-// is_published or data_type still wins.
+// declared signal on each reconcile, and switch off the statistics an operator
+// switched on. A non-empty data_tag or an explicit is_published, data_type or
+// keeps_statistics still wins.
 func (c *ConfigExec) preserveBinding(path string, incoming json.RawMessage) (json.RawMessage, error) {
 	existing, ok := c.store.KVGet(c.signalTopic(path))
 	if !ok {
@@ -1279,7 +1280,7 @@ func (c *ConfigExec) preserveBinding(path string, incoming json.RawMessage) (jso
 	}
 	// bind_intent like the binding: kept when not spoken, cleared by an
 	// explicit null. A record that is bound has no use for one.
-	for _, field := range []string{"is_published", "data_type", "replication_policy", "bind_intent"} {
+	for _, field := range []string{"is_published", "data_type", "replication_policy", "keeps_statistics", "bind_intent"} {
 		if _, spoken := next[field]; !spoken {
 			if value, has := stored[field]; has {
 				next[field] = value
