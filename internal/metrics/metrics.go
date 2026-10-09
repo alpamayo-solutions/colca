@@ -680,7 +680,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.cursorUnreadAge,
 		m.metricsUnbound,
 		clockOffset, clockSyncAge,
-		newStoreCollector(st, cfg, store.DefaultPolicyScanCap))
+		newStoreCollector(st, cfg, store.DefaultPolicyScanCap), &pebbleCollector{st: st})
 	return m
 }
 
