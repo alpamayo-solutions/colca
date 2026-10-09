@@ -1326,7 +1326,7 @@ func suppliedPair(t *testing.T) (certFile, keyFile string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(other.Priv)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(other.Signer)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,9 +17,7 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -35,6 +33,7 @@ import (
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/identity/pubkey"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -79,12 +78,15 @@ func nodeKeyPin() (string, error) {
 	return parsePubHex(strings.TrimSpace(string(raw)))
 }
 
+// parsePubHex accepts the node key as SPKI hex (what colca-keygen and /healthz
+// print) or as the raw ed25519 hex older releases printed, and returns it as
+// SPKI hex, the form identity.PeerPubHex compares against.
 func parsePubHex(v string) (string, error) {
-	key, err := hex.DecodeString(v)
-	if err != nil || len(key) != ed25519.PublicKeySize {
-		return "", fmt.Errorf("%q is not a hex ed25519 public key", v)
+	n, err := pubkey.NormalizeHex(v)
+	if err != nil {
+		return "", fmt.Errorf("%q is not a node public key: %w", v, err)
 	}
-	return hex.EncodeToString(key), nil
+	return n, nil
 }
 
 // tlsConfig presents the machine's certificate and accepts only the node whose key

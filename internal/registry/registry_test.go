@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alpamayo-solutions/colca/internal/identity/pubkey"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -999,5 +1000,42 @@ func TestRevokeLeavesRecordsAuthoredAtAnotherNodeAlone(t *testing.T) {
 	if got := serviceTopics(t, st); len(got) != 1 || got[0] != belowChild {
 		t.Fatalf("after revoking the child the node holds %v, want its replicated record %s "+
 			"untouched — this node does not author or retire it", got, belowChild)
+	}
+}
+
+// Entries enrolled before SPKI keys hold the raw 64-hex ed25519 form; peers
+// are now presented as SPKI. Until the adoption pass rewrites the stored keys,
+// both spellings of one key must be one key to the registry.
+func TestARawEd25519EntryIsFoundByItsSPKIForm(t *testing.T) {
+	dir := t.TempDir()
+	st := openStore(t, dir)
+	m, _ := newManager(t, st, "z/a", "z/b")
+	raw := pub("ab")
+	spki, err := pubkey.NormalizeHex(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.Enroll(entryJSON(t, node("01N1", "z/a", raw))); err != nil {
+		t.Fatal(err)
+	}
+	for _, form := range []string{raw, spki} {
+		if e, ok := m.ByPubkey(form); !ok || e.ULID != "01N1" {
+			t.Fatalf("ByPubkey(%s…): %v %v", form[:12], e, ok)
+		}
+	}
+	// The other spelling of a taken key is the same key.
+	if _, _, err := m.Enroll(entryJSON(t, node("01N2", "z/b", spki))); !errors.Is(err, ErrConflict) {
+		t.Fatalf("enrolling the SPKI form of a taken raw key: %v, want ErrConflict", err)
+	}
+	// A reload indexes persisted raw entries the same way.
+	m2, _ := newManager(t, st, "z/a", "z/b")
+	if e, ok := m2.ByPubkey(spki); !ok || e.ULID != "01N1" {
+		t.Fatalf("after reload: %v %v", e, ok)
+	}
+	if _, _, err := m2.Revoke("01N1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m2.ByPubkey(spki); ok {
+		t.Fatal("a revoked raw entry is still found by its SPKI form")
 	}
 }

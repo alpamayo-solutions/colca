@@ -19,6 +19,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/identity/pubkey"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -107,6 +108,13 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 	if err != nil {
 		return nil, err
 	}
+	// The pin is compared as SPKI. parent.pubkey may name the key in the legacy
+	// raw ed25519 form; the configured string itself stays the cursor scope, so
+	// rewriting it into the other form would restart every cursor.
+	pin, err := pubkey.NormalizeHex(parentPubHex)
+	if err != nil {
+		pin = parentPubHex // never matches: every connection fails with a mismatch
+	}
 	tlsCfg := &tls.Config{
 		Certificates:       []tls.Certificate{cert},
 		InsecureSkipVerify: true, //nolint:gosec // trust is the pinned parent key, checked below
@@ -120,7 +128,7 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 			if err != nil {
 				return err
 			}
-			if pub != parentPubHex {
+			if pub != pin {
 				return fmt.Errorf("parent key mismatch: got %s want %s", short(pub), short(parentPubHex))
 			}
 			return nil

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/identity/pubkey"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -53,7 +54,7 @@ type Manager struct {
 	// (a service's HTTP and MQTT connections starting together) share one entry.
 	registerMu sync.Mutex
 	byID       uns.Registry      // ulid → entry
-	byPK       map[string]string // pubkey hex → ulid; KindLocal holds none, so "" is never indexed here
+	byPK       map[string]string // pkKey(pubkey) → ulid; KindLocal holds none, so "" is never indexed here
 	byName     map[string]string // name → ulid (KindLocal only; a second index, same shape as byPK)
 	kick       func(ulid string)
 	deliver    func(topic string, payload []byte, retain bool)
@@ -95,7 +96,7 @@ func New(st *store.Store, nodeULID string) (*Manager, error) {
 		}
 		m.byID[e.ULID] = &e
 		if e.Pubkey != "" {
-			m.byPK[e.Pubkey] = e.ULID
+			m.byPK[pkKey(e.Pubkey)] = e.ULID
 		}
 		if e.Name != "" {
 			m.byName[e.Name] = e.ULID
@@ -185,7 +186,7 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 	// Local entries have no pubkey, so an empty key is not deduplicated; their names
 	// are unique instead (below).
 	if e.Pubkey != "" {
-		if other, ok := m.byPK[e.Pubkey]; ok && other != e.ULID {
+		if other, ok := m.byPK[pkKey(e.Pubkey)]; ok && other != e.ULID {
 			m.mu.Unlock()
 			return "", 0, fmt.Errorf("enroll %s: pubkey already enrolled for %s: %w", e.ULID, other, ErrConflict)
 		}
@@ -254,7 +255,7 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 	prev, existed := m.byID[e.ULID]
 	if existed {
 		if prev.Pubkey != "" {
-			delete(m.byPK, prev.Pubkey)
+			delete(m.byPK, pkKey(prev.Pubkey))
 		}
 		if prev.Name != "" {
 			delete(m.byName, prev.Name)
@@ -262,7 +263,7 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 	}
 	m.byID[e.ULID] = &e
 	if e.Pubkey != "" {
-		m.byPK[e.Pubkey] = e.ULID
+		m.byPK[pkKey(e.Pubkey)] = e.ULID
 	}
 	if e.Name != "" {
 		m.byName[e.Name] = e.ULID
@@ -368,7 +369,7 @@ func (m *Manager) revoke(ulid string, retire bool) (offset uint64, wasDraining b
 	}
 	delete(m.byID, ulid)
 	if e.Pubkey != "" {
-		delete(m.byPK, e.Pubkey)
+		delete(m.byPK, pkKey(e.Pubkey))
 	}
 	if e.Name != "" {
 		delete(m.byName, e.Name)
@@ -679,10 +680,12 @@ func (m *Manager) Get(ulid string) (*uns.Entry, bool) {
 	return e, ok
 }
 
+// ByPubkey resolves an entry by its public key, given as hex in either form
+// pubkey.ParseHex accepts.
 func (m *Manager) ByPubkey(pubkeyHex string) (*uns.Entry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	ulid, ok := m.byPK[pubkeyHex]
+	ulid, ok := m.byPK[pkKey(pubkeyHex)]
 	if !ok {
 		return nil, false
 	}
@@ -732,4 +735,17 @@ func (m *Manager) ListPage(after string, limit int) (entries []*uns.Entry, next 
 		next = entries[len(entries)-1].ULID
 	}
 	return entries, next
+}
+
+// pkKey is the byPK index key of a stored or presented public key: its SPKI
+// hex. Entries enrolled before SPKI keys hold the raw 64-hex ed25519 form,
+// while peers are now presented as SPKI, so both sides are normalised here.
+// Once the adoption pass (node enrollment spec §7.1) rewrites every stored key
+// to SPKI, the stored side needs no normalising and this goes away. Input that
+// does not parse is indexed as given; it can never match a presented key.
+func pkKey(pubkeyHex string) string {
+	if n, err := pubkey.NormalizeHex(pubkeyHex); err == nil {
+		return n
+	}
+	return pubkeyHex
 }

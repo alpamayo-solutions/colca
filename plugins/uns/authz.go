@@ -5,6 +5,10 @@
 package uns
 
 import (
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -37,7 +41,7 @@ const (
 // form is both the enrollment payload and the stored r/{ulid} value.
 type Entry struct {
 	ULID   string `json:"ulid"`
-	Pubkey string `json:"pubkey"` // hex ed25519 public key, pinned on connect; empty for KindLocal
+	Pubkey string `json:"pubkey"` // hex public key (SPKI DER, or raw ed25519 when enrolled before SPKI), pinned on connect; empty for KindLocal
 	Kind   Kind   `json:"kind"`
 	// Name identifies a KindLocal entry, which has no pubkey; the local door
 	// finds the entry by it.
@@ -176,6 +180,34 @@ func (e *Entry) MayPublishContract(contract string) bool {
 // swapping and locking belong to the core's registry manager.
 type Registry map[string]*Entry
 
+// ValidPubkeyHex accepts a node or machine key as stored in an entry: hex of
+// SubjectPublicKeyInfo DER holding an ed25519 or ECDSA P-256 key, or the raw
+// 64-hex ed25519 form entries were enrolled with before SPKI. It is the
+// standard-library-only twin of internal/identity/pubkey.ParseHex, which
+// tests hold to the same answers.
+func ValidPubkeyHex(s string) error {
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return fmt.Errorf("not hex: %w", err)
+	}
+	if len(raw) == ed25519.PublicKeySize {
+		return nil
+	}
+	pub, err := x509.ParsePKIXPublicKey(raw)
+	if err != nil {
+		return fmt.Errorf("neither SPKI DER nor a raw ed25519 key: %w", err)
+	}
+	switch k := pub.(type) {
+	case ed25519.PublicKey:
+		return nil
+	case *ecdsa.PublicKey:
+		if k.Curve == elliptic.P256() {
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported key %T: want ed25519 or ECDSA P-256", pub)
+}
+
 // Validate checks the entry's own shape. Uniqueness across the registry is
 // the registry manager's job.
 func (e *Entry) Validate() error {
@@ -184,11 +216,8 @@ func (e *Entry) Validate() error {
 	}
 	switch e.Kind {
 	case KindExternal, KindNode:
-		if len(e.Pubkey) != 64 {
-			return fmt.Errorf("entry %s: pubkey must be 64 hex chars (ed25519), got %d", e.ULID, len(e.Pubkey))
-		}
-		if _, err := hex.DecodeString(e.Pubkey); err != nil {
-			return fmt.Errorf("entry %s: pubkey is not hex: %w", e.ULID, err)
+		if err := ValidPubkeyHex(e.Pubkey); err != nil {
+			return fmt.Errorf("entry %s: pubkey: %w", e.ULID, err)
 		}
 	case KindLocal:
 		if e.Name == "" {
