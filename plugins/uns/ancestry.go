@@ -41,6 +41,12 @@ func (a Ancestry) Covers(elementID string) bool {
 	return false
 }
 
+// Binds reports whether elementID is the element this node is bound to, the
+// last step of its ancestry. The empty id never matches.
+func (a Ancestry) Binds(elementID string) bool {
+	return elementID != "" && len(a) > 0 && a[len(a)-1].Element == elementID
+}
+
 // Placements says which element sits at a local path, the reverse of
 // Namespace. *ElementIndex implements both.
 type Placements interface {

@@ -269,6 +269,11 @@ type Scope interface {
 	// Reaches reports whether the element is this node or above it. A grant on
 	// such an element covers everything here.
 	Reaches(elementID string) bool
+	// Binds reports whether the element is the one this node is bound to: the
+	// position its parent enrolled it at. Its record lives at the parent, so
+	// the node holds no entity for it, yet it is the parent of everything the
+	// node authors at its root.
+	Binds(elementID string) bool
 }
 
 // NodeZone is the node-relative zone: the node a person signed in at. A grant

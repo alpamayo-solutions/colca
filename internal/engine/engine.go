@@ -402,6 +402,11 @@ func (s scope) Reaches(elementID string) bool {
 	return ok && a.Covers(elementID)
 }
 
+func (s scope) Binds(elementID string) bool {
+	a, ok := s.e.Ancestry()
+	return ok && a.Binds(elementID)
+}
+
 // Scope is what Authorize resolves grants through at this node.
 func (e *Engine) Scope() uns.Scope { return scope{e} }
 

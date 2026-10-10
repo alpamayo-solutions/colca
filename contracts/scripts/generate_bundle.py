@@ -26,7 +26,7 @@ from franzmq.data_contracts import PAYLOAD_CLASSES
 from franzmq.data_contracts.base import Ack, Cmd
 
 import colca_data_contracts  # noqa: F401  (import populates the registry)
-from colca_data_contracts.payload import Pattern
+from colca_data_contracts.payload import Bounds, MaxLength, Pattern
 from colca_data_contracts.routing import CLASS_TABLE
 
 # ---------------------------------------------------------------------------
@@ -81,8 +81,9 @@ NOT_ON_THE_WIRE: dict[str, str] = {
     ),
 }
 
-# The JSON Schema keywords the loader accepts. `pattern` and `maxLength` are
-# there because a ULID is 26 characters of one alphabet.
+# The JSON Schema keywords the loader accepts. `pattern`, `maxLength`,
+# `minimum` and `maximum` carry the limits payload fields declare (`Pattern`,
+# `MaxLength`, `Bounds` in payload.py).
 ALLOWED_KEYWORDS = {
     "if",
     "then",
@@ -123,14 +124,29 @@ def _schema_for_type(t: object, *, required: bool) -> dict:
     origin = typing.get_origin(t)
     args = typing.get_args(t)
 
-    # Annotated[str, Pattern(...)], as payload.ULID uses. The pattern already
-    # rules out an empty string, so no minLength.
+    # Annotated[X, Pattern(...) | MaxLength(...) | Bounds(...)]: the limits a
+    # payload field declares (payload.py). A pattern already rules out an
+    # empty string, so no minLength.
     if origin is typing.Annotated:
         inner = _schema_for_type(args[0], required=required)
         for meta in args[1:]:
             if isinstance(meta, Pattern):
                 inner["pattern"] = meta.regex
                 inner.pop("minLength", None)
+            elif isinstance(meta, MaxLength):
+                inner["maxLength"] = meta.limit
+            elif isinstance(meta, Bounds):
+                if meta.integer:
+                    kind = inner.get("type")
+                    inner["type"] = (
+                        sorted({"integer" if t == "number" else t for t in kind})
+                        if isinstance(kind, list)
+                        else "integer"
+                    )
+                if meta.minimum is not None:
+                    inner["minimum"] = meta.minimum
+                if meta.maximum is not None:
+                    inner["maximum"] = meta.maximum
         return inner
 
     # Optional[X] / X | None → nullable schema of X
@@ -185,9 +201,6 @@ def _schema_for_dataclass(cls: type, *, required_extra: list[str], required_drop
         props[f.name] = _schema_for_type(hints.get(f.name, typing.Any), required=is_req)
         if is_req:
             required.append(f.name)
-    if cls.__name__ == "ClockDefinition":
-        props["revision"] = {"type": "integer", "minimum": 1}
-        props["rate"].update(minimum=0, maximum=1000)
     schema: dict = {"type": "object", "properties": props}
     if cls.__name__ in STRICT_NESTED_DATACLASSES:
         schema["additionalProperties"] = False
