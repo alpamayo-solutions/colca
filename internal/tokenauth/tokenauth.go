@@ -60,7 +60,8 @@ type Issuer struct {
 
 // Verified is a successfully verified token.
 type Verified struct {
-	Entry            *uns.Entry // KindHuman, grants from colca_grants
+	Entry            *uns.Entry // KindHuman, grants from colca_grants and the groups claim
+	TokenGrants      []string   // the colca_grants claim alone; Entry.Groups holds the group ids
 	Sub              string
 	Username         string // preferred_username, "" if absent
 	Exp              time.Time
@@ -391,12 +392,37 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		return nil, ReasonBadToken, fmt.Errorf("token rejected: unreadable exp")
 	}
 	grants := stringList(claims["colca_grants"])
-	// Grants name system elements, which mean the same at every node, so they are
-	// kept as they are. The groups claim is resolved against the _Group definitions
-	// this node holds: membership lives in the identity provider, grants in the tree.
-	entry, problems, err := uns.TokenEntryWithGroups(sub, grants, stringList(claims["groups"]), v.groups())
+	username, _ := claims["preferred_username"].(string)
+	entry, err := v.ResolveEntry(sub, username, grants, stringList(claims["groups"]))
 	if err != nil {
 		return nil, ReasonBadToken, fmt.Errorf("token rejected: %w", err)
+	}
+	sid, _ := claims["sid"].(string)
+	var issuedAt time.Time
+	if iat, err := claims.GetIssuedAt(); err == nil && iat != nil {
+		issuedAt = iat.Time
+	}
+	if v.logouts.covers(sid, sub, issuedAt, time.Now()) {
+		return nil, ReasonLoggedOut, fmt.Errorf("token rejected: its session was logged out")
+	}
+	return &Verified{
+		Entry: entry, Sub: sub, Username: username, Exp: exp.Time, Credential: "oidc",
+		TokenGrants: grants,
+		SessionID:   sid, IssuedAt: issuedAt,
+	}, "", nil
+}
+
+// ResolveEntry builds the entry of a person from what their token says: the
+// grants on the token itself and the group ids it names, resolved against the
+// _Group definitions this node holds now. Grants name system elements, which mean
+// the same at every node, so they are kept as they are; membership lives in the
+// identity provider, grants in the tree. It is the one resolver for verified
+// tokens: VerifyForScope uses it, and so does a live session that resolves the
+// same token again after this node's _Group definitions changed.
+func (v *Verifier) ResolveEntry(sub, username string, grants, groupIDs []string) (*uns.Entry, error) {
+	entry, problems, err := uns.TokenEntryWithGroups(sub, grants, groupIDs, v.groups())
+	if err != nil {
+		return nil, err
 	}
 	for _, problem := range problems {
 		// Not fatal, and deliberately: one stale membership must cost the human
@@ -411,20 +437,8 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		}
 		v.log.Warn("token: a group contributed no grants", "sub", sub, "err", problem)
 	}
-	sid, _ := claims["sid"].(string)
-	var issuedAt time.Time
-	if iat, err := claims.GetIssuedAt(); err == nil && iat != nil {
-		issuedAt = iat.Time
-	}
-	if v.logouts.covers(sid, sub, issuedAt, time.Now()) {
-		return nil, ReasonLoggedOut, fmt.Errorf("token rejected: its session was logged out")
-	}
-	username, _ := claims["preferred_username"].(string)
 	entry.Username = username
-	return &Verified{
-		Entry: entry, Sub: sub, Username: username, Exp: exp.Time, Credential: "oidc",
-		SessionID: sid, IssuedAt: issuedAt,
-	}, "", nil
+	return entry, nil
 }
 
 // signingKey is the jwt.Keyfunc for every token this verifier accepts. The issuer
