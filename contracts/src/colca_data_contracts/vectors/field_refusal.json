@@ -1,0 +1,86 @@
+{
+  "_comment": "Golden field refusals. When a record a command executor composed breaks a field limit its contract declares (payload.py: MaxLength, Bounds, Pattern), the node answers `invalid_field: <field>: <keyword>[ <limit>]` (plugins/uns/field_error.go). colca's Go suite validates each payload against the generated bundle and checks the refusal it answers (internal/contracts); a client that turns the refusal into a per-field message parses the same strings, so the two sides cannot drift apart.",
+  "cases": [
+    {
+      "contract": "_Signal",
+      "payload": {
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "name": "Temperature",
+        "unit": "uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu"
+      },
+      "field": "unit",
+      "keyword": "maxLength",
+      "limit": "50",
+      "refusal": "invalid_field: unit: maxLength 50"
+    },
+    {
+      "contract": "_Signal",
+      "payload": {
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "name": "Temperature",
+        "precision": -1
+      },
+      "field": "precision",
+      "keyword": "minimum",
+      "limit": "0",
+      "refusal": "invalid_field: precision: minimum 0"
+    },
+    {
+      "contract": "_Signal",
+      "payload": {
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "name": "Temperature",
+        "precision": 11
+      },
+      "field": "precision",
+      "keyword": "maximum",
+      "limit": "10",
+      "refusal": "invalid_field: precision: maximum 10"
+    },
+    {
+      "contract": "_Constant",
+      "payload": {
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "name": "Setpoint",
+        "data_type": "float64",
+        "unit": "uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu"
+      },
+      "field": "unit",
+      "keyword": "maxLength",
+      "limit": "50",
+      "refusal": "invalid_field: unit: maxLength 50"
+    },
+    {
+      "contract": "_SystemElement",
+      "payload": {
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+      },
+      "field": "name",
+      "keyword": "maxLength",
+      "limit": "255",
+      "refusal": "invalid_field: name: maxLength 255"
+    },
+    {
+      "contract": "_SystemElement",
+      "payload": {
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAVEXTRA",
+        "name": "Line 1"
+      },
+      "field": "id",
+      "keyword": "pattern",
+      "limit": "",
+      "refusal": "invalid_field: id: pattern"
+    },
+    {
+      "contract": "_SystemElement",
+      "payload": {
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+      },
+      "field": "name",
+      "keyword": "required",
+      "limit": "",
+      "refusal": "invalid_field: name: required"
+    }
+  ]
+}

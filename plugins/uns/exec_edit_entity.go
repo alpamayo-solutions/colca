@@ -70,9 +70,13 @@ func (w *EditExec) composeCreate(
 	var path string
 	switch intent.Entity.Kind {
 	case "system-element", "signal", "constant":
-		parent, code, message := requireEntity(expected, entities, "system-element", intent.ParentID)
-		if code != 0 {
-			return code, "create: " + message, resultFor(code), nil
+		parentPath, ownElement := "", w.scope != nil && w.scope.Binds(intent.ParentID)
+		if !ownElement {
+			parent, code, message := requireEntity(expected, entities, "system-element", intent.ParentID)
+			if code != 0 {
+				return code, "create: " + message, resultFor(code), nil
+			}
+			parentPath = parent.Record.Path
 		}
 		name, nameErr := rawString(attributes["name"])
 		if nameErr != nil || name == "" {
@@ -82,14 +86,23 @@ func (w *EditExec) composeCreate(
 		if segment == "" {
 			segment = sanitize(name)
 		}
-		path = joinPath(parent.Record.Path, segment)
+		path = joinPath(parentPath, segment)
 		if intent.Entity.Kind == "system-element" {
 			// Element ids become grant zones, so this must be an identity, not a
 			// wildcard; see ValidElementID.
 			if err := ValidElementID(intent.Entity.ID); err != nil {
 				return 422, "create: " + err.Error(), "invalid", nil
 			}
-			attributes["parent_id"] = rawJSON(intent.ParentID)
+			// Under the element this node is bound to, the new element is one
+			// of the node's roots. Its parent is that element, whose record
+			// lives at the node's parent, so like every root the node authors
+			// it names no parent: an ancestor places it below the mount the
+			// node's records arrive under.
+			if ownElement {
+				delete(attributes, "parent_id")
+			} else {
+				attributes["parent_id"] = rawJSON(intent.ParentID)
+			}
 		} else {
 			attributes["system_element_id"] = rawJSON(intent.ParentID)
 		}

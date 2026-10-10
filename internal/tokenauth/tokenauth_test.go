@@ -42,6 +42,7 @@ type atWerk1 struct{}
 
 func (atWerk1) PathOf(id string) (string, bool) { return "werk1", id == "01HWERK1" }
 func (atWerk1) Reaches(string) bool             { return false }
+func (atWerk1) Binds(string) bool               { return false }
 
 func TestVerifyTruthTable(t *testing.T) {
 	iss, v := world(t)

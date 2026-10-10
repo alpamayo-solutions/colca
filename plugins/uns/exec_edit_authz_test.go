@@ -29,6 +29,7 @@ func (s scopeOf) PathOf(elementID string) (string, bool) {
 	return "", false
 }
 func (scopeOf) Reaches(string) bool { return false }
+func (scopeOf) Binds(string) bool   { return false }
 
 // scopedTo is a person whose configure grant names one element.
 func scopedTo(element string) CommandContext {

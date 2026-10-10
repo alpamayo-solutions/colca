@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,5 +248,60 @@ func TestGeneratedClockProgressMatchesBuiltinValidation(t *testing.T) {
 				t.Fatalf("builtin valid=%v, want %v", got, tc.valid)
 			}
 		})
+	}
+}
+
+// fieldRefusalVectorPath is the golden dataset of field refusals: what the
+// node answers when a composed record breaks a field limit, which the api
+// parses into a per-field message.
+const fieldRefusalVectorPath = "../../contracts/src/colca_data_contracts/vectors/field_refusal.json"
+
+// Each golden payload is refused by the generated bundle's schema with a
+// FieldError naming the vector's field, keyword and limit, and the refusal an
+// executor answers with is the vector's string. The limits themselves are
+// declared once, in the payload contracts; this proves they reach the node and
+// come back out in the shape the api reads.
+func TestFieldRefusalsMatchTheGoldenVectors(t *testing.T) {
+	tbl, err := Load(contractstest.GeneratedBundlePath(t), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Clean(fieldRefusalVectorPath))
+	if err != nil {
+		t.Fatalf("golden field refusal vectors missing: %v", err)
+	}
+	var vectors struct {
+		Cases []struct {
+			Contract string          `json:"contract"`
+			Payload  json.RawMessage `json:"payload"`
+			Field    string          `json:"field"`
+			Keyword  string          `json:"keyword"`
+			Limit    string          `json:"limit"`
+			Refusal  string          `json:"refusal"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &vectors); err != nil {
+		t.Fatalf("golden field refusal vectors unparseable: %v", err)
+	}
+	if len(vectors.Cases) == 0 {
+		t.Fatal("golden field refusal vectors carry no cases")
+	}
+	for _, c := range vectors.Cases {
+		rule, ok := tbl.Lookup(c.Contract)
+		if !ok {
+			t.Fatalf("%s is not in the bundle", c.Contract)
+		}
+		err := rule.Validate(c.Payload)
+		var refused *uns.FieldError
+		if !errors.As(err, &refused) {
+			t.Fatalf("%s %s: want a FieldError, got %v", c.Contract, c.Payload, err)
+		}
+		if refused.Field != c.Field || refused.Keyword != c.Keyword || refused.Limit != c.Limit {
+			t.Errorf("%s %s: refused %q %q %q, vectors want %q %q %q (%v)", c.Contract, c.Payload,
+				refused.Field, refused.Keyword, refused.Limit, c.Field, c.Keyword, c.Limit, err)
+		}
+		if got := refused.Refusal(); got != c.Refusal {
+			t.Errorf("%s: refusal %q, vectors want %q", c.Contract, got, c.Refusal)
+		}
 	}
 }

@@ -649,3 +649,59 @@ def test_clock_progress_readiness_requires_observation(ready, observed_at, valid
     schema = body["contracts"]["_ClockProgress"]["schema"]
     payload = {"run_id": "r", "processed_at": 1, "ready": ready, "observed_at": observed_at}
     assert jsonschema.Draft202012Validator(schema).is_valid(payload) is valid
+
+
+def test_every_declared_field_limit_reaches_the_bundle():
+    # The node refuses what the bundle refuses, so a limit declared on a
+    # payload field and lost on the way into the schema is a limit nothing
+    # enforces: the read side then sets the record aside after the node has
+    # applied it (a 5000-character unit, a precision of -1).
+    from colca_data_contracts import field_limits
+
+    body, _ = gb.build_bundle()
+    checked = 0
+    for ident, cls in sorted(PAYLOAD_CLASSES.items()):
+        if ident not in body["contracts"]:
+            continue
+        props = body["contracts"][ident]["schema"]["properties"]
+        for name, limit in field_limits(cls).items():
+            prop = props[name]
+            if limit.max_length is not None:
+                assert prop.get("maxLength") == limit.max_length, (ident, name, prop)
+                checked += 1
+            if limit.minimum is not None:
+                assert prop.get("minimum") == limit.minimum, (ident, name, prop)
+                checked += 1
+            if limit.maximum is not None:
+                assert prop.get("maximum") == limit.maximum, (ident, name, prop)
+                checked += 1
+            if limit.integer:
+                kinds = prop["type"] if isinstance(prop["type"], list) else [prop["type"]]
+                assert "integer" in kinds and "number" not in kinds, (ident, name, prop)
+    # The denominator: the fields the read side once set aside are among them.
+    assert field_limits(PAYLOAD_CLASSES["_Signal"])["unit"].max_length == 50
+    assert field_limits(PAYLOAD_CLASSES["_Signal"])["precision"].minimum == 0
+    assert checked > 40, f"only {checked} limits reached the bundle"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "valid"),
+    [
+        ("unit", "u" * 50, True),
+        ("unit", "u" * 51, False),
+        ("unit", None, True),
+        ("name", "n" * 255, True),
+        ("name", "n" * 256, False),
+        ("precision", 0, True),
+        ("precision", 10, True),
+        ("precision", -1, False),
+        ("precision", 11, False),
+        ("precision", 1.5, False),
+        ("precision", None, True),
+    ],
+)
+def test_a_signal_field_outside_its_limit_is_refused(field, value, valid):
+    body, _ = gb.build_bundle()
+    validator = jsonschema.Draft202012Validator(body["contracts"]["_Signal"]["schema"])
+    record = {"id": GOLDEN_ULID, "name": "Temperature", field: value}
+    assert validator.is_valid(record) is valid, (field, value)

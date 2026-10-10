@@ -2,6 +2,8 @@ import datetime
 import hashlib
 import inspect
 import json
+import types
+import typing
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import TYPE_CHECKING, Annotated, Any
@@ -202,6 +204,84 @@ ULID_PATTERN = r"^[0-9A-HJKMNP-TV-Z]{26}$"
 ULID = Annotated[str, Pattern(ULID_PATTERN)]
 
 
+@dataclass(frozen=True)
+class MaxLength:
+    """The most characters a string field's wire value may have.
+
+    Attach it with ``typing.Annotated``. The bundle carries it as a JSON Schema
+    ``maxLength``, so the node refuses an overlong value where it is published
+    or composed, before anything is written. This is the one definition of the
+    limit: a read model that stores the field sizes its column from it (or is
+    pinned to it by a test), never the other way round. Python constructors do
+    not check it.
+    """
+
+    limit: int
+
+
+@dataclass(frozen=True)
+class Bounds:
+    """The range a numeric field's wire value must lie in, both ends included.
+
+    Attach it with ``typing.Annotated``. The bundle carries ``minimum`` and
+    ``maximum``, and ``"type": "integer"`` when ``integer`` is set, so the node
+    refuses a value outside the range where it is published or composed. Like
+    `MaxLength`, it is the one definition of the range; Python constructors do
+    not check it.
+    """
+
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+    integer: bool = False
+
+
+@dataclass(frozen=True)
+class FieldLimit:
+    """What the contract bounds about one field: `field_limits` returns these."""
+
+    max_length: int | None = None
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+    integer: bool = False
+    pattern: str | None = None
+
+
+def field_limits(cls: type) -> dict[str, FieldLimit]:
+    """The limits a payload class declares, by field name.
+
+    Read from the same ``Annotated`` metadata the bundle generator reads, so a
+    consumer that validates before publishing (a preflight) or sizes a column
+    asks the one definition the node enforces instead of keeping a copy.
+    Fields without a limit are absent.
+    """
+
+    limits: dict[str, FieldLimit] = {}
+    for name, hint in typing.get_type_hints(cls, include_extras=True).items():
+        if typing.get_origin(hint) in (typing.Union, types.UnionType):
+            # `ULID | None`: the limit sits on the one non-None member.
+            members = [arg for arg in typing.get_args(hint) if arg is not type(None)]
+            hint = members[0] if len(members) == 1 else hint
+        if typing.get_origin(hint) is not Annotated:
+            continue
+        found: dict[str, Any] = {}
+        for meta in typing.get_args(hint)[1:]:
+            if isinstance(meta, MaxLength):
+                found["max_length"] = meta.limit
+            elif isinstance(meta, Bounds):
+                found.update(minimum=meta.minimum, maximum=meta.maximum, integer=meta.integer)
+            elif isinstance(meta, Pattern):
+                found["pattern"] = meta.regex
+        if found:
+            limits[name] = FieldLimit(**found)
+    return limits
+
+
+#: How many decimals a reading of a signal or constant is shown to. A negative
+#: count cannot be rendered (Python's format spec and JavaScript's ``toFixed``
+#: both refuse it), and ten is more than a float64 reading carries in practice.
+PRECISION = Bounds(minimum=0, maximum=10, integer=True)
+
+
 # ---------------------------------------------------------------------------
 # Decoding
 # ---------------------------------------------------------------------------
@@ -342,10 +422,10 @@ class ClockDefinition(ToleratesUnknownFields, Payload):
 
     id: str
     run_id: str
-    revision: int
+    revision: Annotated[int, Bounds(minimum=1, integer=True)]
     real_anchor: float
     factory_anchor: float
-    rate: float
+    rate: Annotated[float, Bounds(minimum=0, maximum=1000)]
     stop_at: float | None = None
     catch_up: bool = False
     previous: ClockSegment | None = None
@@ -403,10 +483,10 @@ class Node(ToleratesUnknownFields, Payload):
     its position. The other fields come from the deployment or an operator.
     """
 
-    id: str
-    name: str
+    id: Annotated[str, MaxLength(26)]
+    name: Annotated[str, MaxLength(255)]
     root_system_element_id: str | None = None
-    display_name: str = ""
+    display_name: Annotated[str, MaxLength(255)] = ""
     description: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     health_metrics: list[HealthMetricDeclaration] = field(default_factory=list)
@@ -445,11 +525,11 @@ class ServiceDetails(ToleratesUnknownFields, Payload):
     here so the node can answer a command no service executes.
     """
 
-    id: str
-    name: str
+    id: Annotated[str, MaxLength(26)]
+    name: Annotated[str, MaxLength(255)]
     service_type: ServiceType
     colca_node_id: str
-    display_name: str = ""
+    display_name: Annotated[str, MaxLength(255)] = ""
     description: str = ""
     system_element_id: str | None = None
     hierarchy: list[str] = field(default_factory=list)
@@ -964,13 +1044,13 @@ class AnnotationType(ToleratesUnknownFields, Payload):
     """A global annotation definition projected at every descendant node."""
 
     id: ULID
-    name: str
-    data_type: str
-    i18n_name: str = ""
+    name: Annotated[str, MaxLength(150)]
+    data_type: Annotated[str, MaxLength(20)]
+    i18n_name: Annotated[str, MaxLength(150)] = ""
     description: str = ""
     min_value: float | None = None
     max_value: float | None = None
-    unit: str | None = None
+    unit: Annotated[str | None, MaxLength(50)] = None
     create_option_on_input_new: bool = False
     options: list[dict[str, Any]] = field(default_factory=list)
     #: Keyed by metadata type, the same map elements and signals carry.
@@ -982,9 +1062,9 @@ class MetadataType(ToleratesUnknownFields, Payload):
     """A global metadata definition projected at every descendant node."""
 
     id: ULID
-    name: str
-    data_type: str
-    i18n_name: str = ""
+    name: Annotated[str, MaxLength(100)]
+    data_type: Annotated[str, MaxLength(20)]
+    i18n_name: Annotated[str, MaxLength(100)] = ""
     description: str = ""
     is_mandatory: bool = False
     allowed_content_type_keys: list[str] = field(default_factory=list)
@@ -995,13 +1075,13 @@ class SemanticTag(ToleratesUnknownFields, Payload):
     """A global semantic-type definition projected at every descendant node."""
 
     id: ULID
-    name: str
-    i18n_name: str = ""
+    name: Annotated[str, MaxLength(255)]
+    i18n_name: Annotated[str, MaxLength(255)] = ""
     description: str = ""
     applies_to: list[str] = field(default_factory=list)
-    icon: str = ""
-    quantity_kind: str | None = None
-    data_type: str | None = None
+    icon: Annotated[str, MaxLength(64)] = ""
+    quantity_kind: Annotated[str | None, MaxLength(64)] = None
+    data_type: Annotated[str | None, MaxLength(32)] = None
 
 
 @dataclass
@@ -1014,8 +1094,8 @@ class Group(ToleratesUnknownFields, Payload):
     unions their grants, so membership lives in the identity provider.
     """
 
-    id: str
-    name: str
+    id: Annotated[str, MaxLength(255)]
+    name: Annotated[str, MaxLength(255)]
     #: Grant strings in the uns grammar (``read:<element>/#``,
     #: ``cmd:<element>/#:classes``, ``admin:#``). Validated at authoring time by
     #: the reconciler and again by the node that applies the definition.
@@ -1057,8 +1137,8 @@ class DataModel(ToleratesUnknownFields, Payload):
     #: The definition's identity: its path on the wire, and what a system
     #: element references to implement this model.
     id: ULID
-    name: str
-    version: str = "1.0"
+    name: Annotated[str, MaxLength(255)]
+    version: Annotated[str, MaxLength(64)] = "1.0"
     description: str = ""
     extends: list[str] = field(default_factory=list)
     slots: list[dict[str, Any]] = field(default_factory=list)
@@ -1069,9 +1149,9 @@ class ExternalSystem(ToleratesUnknownFields, Payload):
     """A non-secret global definition for an external integration system."""
 
     id: ULID
-    key: str
-    name: str
-    system_type: str
+    key: Annotated[str, MaxLength(100)]
+    name: Annotated[str, MaxLength(255)]
+    system_type: Annotated[str, MaxLength(100)]
     description: str = ""
     properties: dict[str, Any] = field(default_factory=dict)
 
@@ -1081,13 +1161,13 @@ class ExternalReference(ToleratesUnknownFields, Payload):
     """An upward reference from a Colca object to an external-system row."""
 
     id: ULID
-    source_entity: str
-    source_object_id: str
-    relationship_type: str
+    source_entity: Annotated[str, MaxLength(100)]
+    source_object_id: Annotated[str, MaxLength(255)]
+    relationship_type: Annotated[str, MaxLength(255)]
     external_system_id: ULID
-    external_table: str
-    external_row_id: str
-    external_column: str = ""
+    external_table: Annotated[str, MaxLength(255)]
+    external_row_id: Annotated[str, MaxLength(255)]
+    external_column: Annotated[str, MaxLength(255)] = ""
     description: str = ""
 
 
@@ -1105,7 +1185,7 @@ class SystemElement(ToleratesUnknownFields, Payload):
     """
 
     id: ULID
-    name: str
+    name: Annotated[str, MaxLength(255)]
     description: str = ""
     #: ULID of the enclosing element; None for a root.
     parent_id: ULID | None = None
@@ -1146,7 +1226,7 @@ class Signal(ToleratesUnknownFields, Payload):
     """
 
     id: ULID
-    name: str
+    name: Annotated[str, MaxLength(255)]
     description: str = ""
     #: ULID of the SystemElement that owns this signal.
     system_element_id: ULID | None = None
@@ -1178,8 +1258,8 @@ class Signal(ToleratesUnknownFields, Payload):
     #: that enum has and decoding resolves.
     data_type: SignalDataType | None = None
     index_type: IndexType | None = None
-    unit: str | None = None
-    precision: int | None = None
+    unit: Annotated[str | None, MaxLength(50)] = None
+    precision: Annotated[int | None, PRECISION] = None
     min_value: float | None = None
     max_value: float | None = None
     config: dict[str, Any] = field(default_factory=dict)
@@ -1234,14 +1314,14 @@ class Constant(ToleratesUnknownFields, Payload):
     """
 
     id: ULID
-    name: str
+    name: Annotated[str, MaxLength(255)]
     data_type: ConstantDataType
     #: May be ``null`` or left out, so the schema does not require it.
     value: Any = None
     description: str = ""
     system_element_id: ULID | None = None
-    unit: str | None = None
-    precision: int | None = None
+    unit: Annotated[str | None, MaxLength(50)] = None
+    precision: Annotated[int | None, PRECISION] = None
     metadata: dict[str, Any] = field(default_factory=dict)
     #: ULID of the `_SemanticTag` definition saying what this entity is; None
     #: means unclassified.
@@ -1277,15 +1357,17 @@ class Resource(ToleratesUnknownFields, Payload):
 
     id: ULID
     system_element_id: ULID
-    filename: str
+    filename: Annotated[str, MaxLength(100)]
     #: Optional for a writer, so the payload is no stricter than the data it
     #: carries: a missing value is the empty string.
-    content_type: str = ""
-    sha256: str = ""
-    display_name: str = ""
+    content_type: Annotated[str, MaxLength(255)] = ""
+    sha256: Annotated[str, MaxLength(64)] = ""
+    display_name: Annotated[str, MaxLength(255)] = ""
     description: str = ""
-    resource_type: str = "other"
-    size_bytes: int = 0
+    resource_type: Annotated[str, MaxLength(50)] = "other"
+    #: Bounded to a signed 32-bit count: a resource is a manual or a drawing,
+    #: and the read side counts its size in one.
+    size_bytes: Annotated[int, Bounds(minimum=0, maximum=2**31 - 1, integer=True)] = 0
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str | None = None
     updated_at: str | None = None
