@@ -1168,6 +1168,9 @@ class Signal(ToleratesUnknownFields, Payload):
     is_published: bool = False
     #: The read side historises it (consumed by the historian bridge).
     is_logged: bool = False
+    #: The read side keeps pre-computed statistics of its history. A node keeps
+    #: the setting when the signal is declared again without it.
+    keeps_statistics: bool = False
     #: Upload eligibility for new samples; queued samples retain their decision.
     replication_policy: ReplicationPolicy = ReplicationPolicy.REPLICATE_TO_PARENTS
     #: ``SignalDataType``, not franzmq's ``DataType``: a signal may be ``json``.

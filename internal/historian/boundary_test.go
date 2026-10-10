@@ -89,6 +89,18 @@ func testPool(t *testing.T) *Sink {
             ON historian_metric (signal_id, timestamp);`); err != nil {
 		t.Fatalf("creating the metric table: %v", err)
 	}
+	// So do the late write marks and the list of signals to mark
+	// (docs/operations.md, "Late writes the historian marks"). PREKIT's list
+	// is a view of its statistics state; a table serves the suite.
+	if _, err := pool.Exec(ctx, `
+        CREATE TABLE IF NOT EXISTS historian_late_write (
+            id         bigserial PRIMARY KEY,
+            hour       timestamptz NOT NULL,
+            signal_ids jsonb NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS historian_late_write_signal (signal_id text PRIMARY KEY);`); err != nil {
+		t.Fatalf("creating the late write relations: %v", err)
+	}
 	sink := &Sink{Pool: pool}
 	if err := sink.EnsureSchema(ctx, 0); err != nil {
 		t.Fatalf("ensuring the offset table and unlimited retention: %v", err)
