@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.33.0](https://github.com/alpamayo-solutions/colca/compare/v0.32.1...v0.33.0) (2026-10-10)
+
+
+### Features
+
+* **historian:** mark late writes for per-signal statistics ([#183](https://github.com/alpamayo-solutions/colca/issues/183)) ([36e025a](https://github.com/alpamayo-solutions/colca/commit/36e025a8b5e56e939cdf9bc0448fa0d2ff7e3a34))
+
+
+### Fixes
+
+* **store:** bound signal-index reads and prunes in memory ([#185](https://github.com/alpamayo-solutions/colca/issues/185)) ([51b1739](https://github.com/alpamayo-solutions/colca/commit/51b1739255826e709b9598db3221b72ea623d82f))
+
 ## [0.32.1](https://github.com/alpamayo-solutions/colca/compare/v0.32.0...v0.32.1) (2026-10-09)
 
 
