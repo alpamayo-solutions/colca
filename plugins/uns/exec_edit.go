@@ -307,6 +307,13 @@ func (w *EditExec) ExecuteWithWrites(
 	if code != 200 {
 		return w.remember(envelope.OperationID, digest, code, message, result, nil)
 	}
+	// A record below a child node's mount is that node's to write
+	// (exec_edit_mount.go).
+	if code, message, result := refuseChildPositions(
+		intent.Type, records, childMounts(entities, attachments),
+	); code != 0 {
+		return w.remember(envelope.OperationID, digest, code, message, result, nil)
+	}
 	// Nothing is written yet. Every position the plan touches must be
 	// covered by the person's grants, or the whole command is refused.
 	if code, message, result := w.authorizeTouched(ctx, w.planFor(ctx, intent, records, entities, catalogues)); code != 0 {
