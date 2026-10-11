@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.33.1](https://github.com/alpamayo-solutions/colca/compare/v0.33.0...v0.33.1) (2026-10-11)
+
+
+### Fixes
+
+* **mqttsrv:** apply group changes to live human sessions ([#188](https://github.com/alpamayo-solutions/colca/issues/188)) ([3253376](https://github.com/alpamayo-solutions/colca/commit/3253376e7d76e1c025068391a03230973ab87e5c))
+* refuse out-of-limit fields at the node and create under a node's bound element ([#189](https://github.com/alpamayo-solutions/colca/issues/189)) ([c6f9f3e](https://github.com/alpamayo-solutions/colca/commit/c6f9f3e567016df048f4ef2e85cb259cfd3b31e1))
+
 ## [0.33.0](https://github.com/alpamayo-solutions/colca/compare/v0.32.1...v0.33.0) (2026-10-10)
 
 
