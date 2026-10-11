@@ -247,6 +247,17 @@ identity provider, grants live in the tree, and an edge cut off from its parent
 still knows what its people may do. `colca-grantsync` keeps a Keycloak realm and
 the tree's groups in step, if you use Keycloak.
 
+A grant change applies to open sessions as soon as the `_Group` definition
+reaches the node, not at the next token renewal. REST reads resolve the groups on
+every request. A live MQTT or WebSocket session resolves its token's groups again
+before its next delivery: a narrowed group stops an existing subscription at its
+next message (counted in `colca_acl_denials_total{action="sub"}` and audited as
+`subscribe_denied`), and a widened one starts delivering without a reconnect.
+Group membership itself lives in the token, so adding or removing a person from a
+group at the identity provider applies when the token is renewed or ends. A
+personal access token carries its own grants rather than groups; its sessions
+keep the grants they authenticated with, so re-issue the token to change them.
+
 ## Administration
 
 The administrative routes (`/enroll`, `/debug/state`) require either the node's

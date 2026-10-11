@@ -2,7 +2,9 @@
 // WebSocket (human-ws), with no client certificate. The CONNECT password carries a
 // JWT or PAT and the username must equal its sub. A session lasts as long as the
 // token: every delivery checks grants and expiry, and a sweeper kicks expired
-// sessions every 10 seconds. A client that connected with the authentication
+// sessions every 10 seconds. The grants an OIDC session holds follow this node's
+// _Group definitions: when one is stored, every session resolves its token's
+// group ids again before its next delivery (see groupsChanged). A client that connected with the authentication
 // method AuthMethodToken renews its token on the open connection (reauth.go), and
 // a back-channel logout from the identity provider ends the sessions it names.
 
@@ -10,6 +12,7 @@ package mqttsrv
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
@@ -38,7 +41,27 @@ type humanSession struct {
 	credentialDigest string
 	sid              string    // the identity provider's session; empty for PATs
 	issuedAt         time.Time // of the token in force
+	// token is what the OIDC token in force says about grants, kept so the entry
+	// can be resolved again when the _Group definitions change. Nil for a PAT,
+	// whose grants are a snapshot of its definition.
+	token *sessionToken
+	// groupsGen is the _Group generation entry was resolved at (groupGenerations).
+	groupsGen uint64
 }
+
+// sessionToken is the grant-bearing part of a verified OIDC token. Its address
+// identifies the token in force: a renewal puts a new one.
+type sessionToken struct {
+	grants []string // colca_grants
+	groups []string // the groups claim
+}
+
+// groupGenerations counts the _Group definitions stored at this node. A session
+// whose entry was resolved at an older generation resolves it again.
+type groupGenerations struct{ n atomic.Uint64 }
+
+func (g *groupGenerations) current() uint64 { return g.n.Load() }
+func (g *groupGenerations) advance()        { g.n.Add(1) }
 
 // humanSessions is the session table keyed by MQTT client id. Client ids are
 // broker-unique across listeners, and sessions are only ever created on the
@@ -69,6 +92,21 @@ func (h *humanSessions) get(clientID string) (humanSession, bool) {
 	defer h.mu.RUnlock()
 	s, ok := h.m[clientID]
 	return s, ok
+}
+
+// reresolved stores entry, resolved at generation gen for the token of was, if
+// the table still holds that connection and token at an older generation. A
+// renewal or a newer resolution that got there first wins.
+func (h *humanSessions) reresolved(clientID string, was humanSession, entry *uns.Entry, gen uint64) (humanSession, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.m[clientID]
+	if !ok || s.client != was.client || s.token != was.token || s.groupsGen >= gen {
+		return s, ok
+	}
+	s.entry, s.groupsGen = entry, gen
+	h.m[clientID] = s
+	return s, true
 }
 
 // drop removes the session of this connection. A connection that took over the
@@ -111,6 +149,9 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 		return false
 	}
 	user := string(pk.Connect.Username)
+	// Taken before the token is resolved: a _Group definition stored meanwhile
+	// makes the session resolve again before its first delivery.
+	gen := h.groups.current()
 	v, reason, err := h.ver.VerifyForScope(string(pk.Connect.Password), uns.ScopeBrokerMQTT)
 	if err != nil {
 		h.log.Warn("human auth rejected", "user", user, "reason", reason, "err", err)
@@ -131,7 +172,7 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 		h.auditDenied("authenticate", metrics.AuthMethod, metrics.DoorMQTT, v.Entry, nil)
 		return false
 	}
-	n := h.humans.put(cl.ID, sessionFor(cl, v))
+	n := h.humans.put(cl.ID, sessionFor(cl, v, gen))
 	h.metrics.SetHumanSessions(n)
 	// A logout that arrived after the token check and before the put found no
 	// session to end; it is in force by now, so it is seen here.
@@ -147,21 +188,57 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 	return true
 }
 
-// sessionFor is the session a verified token opens or renews.
-func sessionFor(cl *mqtt.Client, v *tokenauth.Verified) humanSession {
-	return humanSession{
+// sessionFor is the session a verified token opens or renews; gen is the _Group
+// generation read before the token was verified.
+func sessionFor(cl *mqtt.Client, v *tokenauth.Verified, gen uint64) humanSession {
+	s := humanSession{
 		client: cl, entry: v.Entry, sub: v.Sub, username: v.Username, exp: v.Exp,
 		credential: v.Credential, credentialID: v.CredentialID,
 		credentialDigest: v.CredentialDigest,
 		sid:              v.SessionID, issuedAt: v.IssuedAt,
+		groupsGen: gen,
 	}
+	if v.Credential == "oidc" {
+		s.token = &sessionToken{grants: v.TokenGrants, groups: v.Entry.Groups}
+	}
+	return s
+}
+
+// groupsChanged is the engine's callback for a stored _Group definition. It
+// only advances the generation; each OIDC session resolves its token again on
+// its next ACL check (currentSession), before anything more is delivered to it.
+func (h *colcaHook) groupsChanged() { h.groups.advance() }
+
+// currentSession returns the client's session with its entry resolved against
+// the _Group definitions this node holds now. A PAT session keeps the grants it
+// authenticated with: a changed PAT is re-issued, not re-resolved.
+func (h *colcaHook) currentSession(cl *mqtt.Client) (humanSession, bool) {
+	s, ok := h.humans.get(cl.ID)
+	if !ok || s.token == nil || h.ver == nil {
+		return s, ok
+	}
+	gen := h.groups.current()
+	if s.groupsGen >= gen {
+		return s, true
+	}
+	entry, err := h.ver.ResolveEntry(s.sub, s.username, s.token.grants, s.token.groups)
+	if err != nil {
+		// The same token resolved at CONNECT, so this is a bug; a session without
+		// an entry is refused every delivery.
+		h.log.Error("human session: grants could not be resolved again — denying", "sub", s.sub, "err", err)
+		entry = nil
+	}
+	h.log.Debug("human session grants resolved again after a _Group change", "sub", s.sub, "client", cl.ID)
+	return h.humans.reresolved(cl.ID, s, entry, gen)
 }
 
 // humanACL is the human branch of OnACLCheck: the session must exist and not be
 // expired, so an expired session stops receiving before the sweeper kicks it, and
-// the topic must be covered by its read grants.
+// the topic must be covered by its read grants as this node's _Group definitions
+// stand now. mochi asks for every delivery, not only at SUBSCRIBE, so a narrowed
+// group stops an existing subscription at its next message.
 func (h *colcaHook) humanACL(cl *mqtt.Client, topic string) bool {
-	s, ok := h.humans.get(cl.ID)
+	s, ok := h.currentSession(cl)
 	if !ok || time.Now().After(s.exp) {
 		return false
 	}

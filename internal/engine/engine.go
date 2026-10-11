@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/clock"
@@ -212,6 +213,9 @@ type Engine struct {
 	// onPosition is called when this node learns or changes its position, so the
 	// node can describe itself in its _Node record.
 	onPosition func(uns.Ancestry)
+	// onGroups is called after a _Group definition was stored here, so the
+	// grants of people already signed in follow it (SetOnGroupsChanged).
+	onGroups atomic.Pointer[func()]
 
 	// contracts is the loaded schema-bundle table (nil = builtin floor).
 	// Static per process: set once at startup, before any door serves.
@@ -336,6 +340,12 @@ func (e *Engine) SetAncestry(a uns.Ancestry) {
 // SetOnPosition registers the position callback. Call it before the root sets
 // its empty ancestry, so the first position is reported too.
 func (e *Engine) SetOnPosition(fn func(uns.Ancestry)) { e.onPosition = fn }
+
+// SetOnGroupsChanged registers the callback for a stored _Group definition,
+// whatever door it came through: written here, or handed down by the parent. It
+// runs after the record is in KV, so a resolution it starts sees the new
+// definition. The callback must be cheap and must not ingest.
+func (e *Engine) SetOnGroupsChanged(fn func()) { e.onGroups.Store(&fn) }
 
 func (e *Engine) Store() *store.Store { return e.store }
 

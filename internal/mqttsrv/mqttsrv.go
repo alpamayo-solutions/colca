@@ -59,6 +59,7 @@ type colcaHook struct {
 	reg    *registry.Manager
 	ver    *tokenauth.Verifier // nil when the node has no auth: block
 	humans *humanSessions
+	groups groupGenerations // advanced by the engine on every stored _Group
 	cfg    *config.Config
 	log    *slog.Logger
 	// refusals logs refused publishes once per sender and minute: a client can
@@ -298,7 +299,7 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 
 func (h *colcaHook) entryForClient(cl *mqtt.Client) *uns.Entry {
 	if isHumanListener(cl) {
-		if session, ok := h.humans.get(cl.ID); ok {
+		if session, ok := h.currentSession(cl); ok {
 			return session.entry
 		}
 		return nil
@@ -690,7 +691,10 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 }
 
 // SetEngine late-binds the engine the publish hook ingests into.
-func (s *Server) SetEngine(e *engine.Engine) { s.hook.setEngine(e) }
+func (s *Server) SetEngine(e *engine.Engine) {
+	e.SetOnGroupsChanged(s.hook.groupsChanged)
+	s.hook.setEngine(e)
+}
 
 // PublishTimeSync publishes one _TimeSync beacon, for RunBeacon and tests.
 func (s *Server) PublishTimeSync() { s.hook.publishTimeSync() }
