@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.3](https://github.com/alpamayo-solutions/colca/compare/v0.33.2...v0.33.3) (2026-10-11)
+
+
+### Fixes
+
+* **uns:** never write below a child node's mount; move onto the bound element ([#193](https://github.com/alpamayo-solutions/colca/issues/193)) ([c32895f](https://github.com/alpamayo-solutions/colca/commit/c32895fc551b4e662bf3834e6ba7231114ca5e26))
+
 ## [0.33.2](https://github.com/alpamayo-solutions/colca/compare/v0.33.1...v0.33.2) (2026-10-11)
 
 
