@@ -1610,11 +1610,16 @@ func adoptTag(record map[string]any, tag catalogueTag, semantic map[string]strin
 
 // commitRefusal answers a refused commit. A tag another signal holds is a
 // conflict the caller can resolve, so it is a 409 naming the holder; any other
-// refusal is the record's own fault.
+// refusal is the record's own fault, named by field where the contract says
+// which one.
 func commitRefusal(verb string, err error) (int, string, string) {
 	var held *TagHeldError
 	if errors.As(err, &held) {
 		return 409, verb + ": " + held.Error(), "conflict"
+	}
+	var invalid *FieldError
+	if errors.As(err, &invalid) {
+		return 422, verb + ": " + invalid.Refusal(), "invalid"
 	}
 	return 422, verb + ": rejected: " + err.Error(), "invalid"
 }

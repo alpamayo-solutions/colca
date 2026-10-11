@@ -274,7 +274,7 @@ export type Constant = {
   id: string;
   metadata?: Record<string, unknown>;
   name: string;
-  precision?: null | number;
+  precision?: number | null;
   semantic_type_id?: null | string;
   system_element_id?: null | string;
   unit?: null | string;
@@ -583,7 +583,7 @@ export type Signal = {
   metadata?: Record<string, unknown>;
   min_value?: null | number;
   name: string;
-  precision?: null | number;
+  precision?: number | null;
   replication_policy?: "replicate_to_parents" | "source_local_only";
   semantic_type_id?: null | string;
   system_element_id?: null | string;

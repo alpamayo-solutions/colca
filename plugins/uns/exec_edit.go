@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -241,6 +242,7 @@ func (w *EditExec) ExecuteWithWrites(
 	if err != nil {
 		return 422, "expected_versions: " + err.Error(), "invalid", nil
 	}
+	w.dropBoundElementVersion(expectedVersions)
 	if len(envelope.Intent) == 0 || bytes.Equal(envelope.Intent, []byte("null")) {
 		return 422, "intent is required", "invalid", nil
 	}
@@ -338,6 +340,14 @@ func (w *EditExec) ExecuteWithWrites(
 			// that names data_tag, or a bind that raced another command).
 			return w.remember(envelope.OperationID, digest, 409, held.Error(), "conflict", nil)
 		}
+		var invalid *FieldError
+		if errors.As(err, &invalid) {
+			// A composed record breaks its contract: a value the caller
+			// supplied, or one the entity already held, lies outside a
+			// field's limit. Refused before anything is written, so the read
+			// side never receives a record it cannot store.
+			return w.remember(envelope.OperationID, digest, 422, invalid.Refusal(), "invalid", nil)
+		}
 		return 500, "edit commit failed: " + err.Error(), "error", nil
 	}
 	if len(batchWrites) < stateStart+len(records) {
@@ -345,6 +355,22 @@ func (w *EditExec) ExecuteWithWrites(
 	}
 	writes := batchWrites[stateStart : stateStart+len(records)]
 	return w.remember(envelope.OperationID, digest, 200, message, "ok", writes)
+}
+
+// dropBoundElementVersion forgets a version the caller sent for the element
+// this node is bound to. That record lives at the node's parent, which is
+// where its version was read and checked; this node holds no entity for it,
+// so it can neither confirm nor refute the version, and keeping it would
+// refuse every create at the node's root as stale.
+func (w *EditExec) dropBoundElementVersion(expected map[string]uint64) {
+	if w.scope == nil {
+		return
+	}
+	for key := range expected {
+		if id, ok := strings.CutPrefix(key, "system-element:"); ok && w.scope.Binds(id) {
+			delete(expected, key)
+		}
+	}
 }
 
 func requireEntity(

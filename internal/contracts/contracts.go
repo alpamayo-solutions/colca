@@ -10,10 +10,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -40,16 +44,55 @@ type Rule struct {
 	schema    *jsonschema.Schema
 }
 
-// Validate applies the compiled schema to a non-empty payload.
+// Validate applies the compiled schema to a non-empty payload. A refusal
+// wraps a *uns.FieldError naming the first field the schema refused, so an
+// executor that composed the record can answer with the field.
 func (r Rule) Validate(payload []byte) error {
 	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("payload is not valid JSON: %w", err)
 	}
 	if err := r.schema.Validate(inst); err != nil {
-		return fmt.Errorf("schema: %w", err)
+		return fmt.Errorf("schema: %w", fieldError(err))
 	}
 	return nil
+}
+
+// fieldError names the field behind a schema refusal: the deepest first
+// cause, which is the keyword that failed at the value's own location. The
+// validator's words stay the error text.
+func fieldError(err error) error {
+	var refused *jsonschema.ValidationError
+	if !errors.As(err, &refused) {
+		return err
+	}
+	leaf := refused
+	for len(leaf.Causes) > 0 {
+		leaf = leaf.Causes[0]
+	}
+	field := strings.Join(leaf.InstanceLocation, ".")
+	keyword, limit := "", ""
+	switch k := leaf.ErrorKind.(type) {
+	case *kind.MaxLength:
+		keyword, limit = "maxLength", strconv.Itoa(k.Want)
+	case *kind.MinLength:
+		keyword, limit = "minLength", strconv.Itoa(k.Want)
+	case *kind.Minimum:
+		keyword, limit = "minimum", k.Want.RatString()
+	case *kind.Maximum:
+		keyword, limit = "maximum", k.Want.RatString()
+	case *kind.Required:
+		// Reported at the object; the field is the one that is missing.
+		keyword = "required"
+		if len(k.Missing) > 0 {
+			field = strings.Join(append(append([]string{}, leaf.InstanceLocation...), k.Missing[0]), ".")
+		}
+	default:
+		if path := leaf.ErrorKind.KeywordPath(); len(path) > 0 {
+			keyword = path[len(path)-1]
+		}
+	}
+	return &uns.FieldError{Field: field, Keyword: keyword, Limit: limit, Err: err}
 }
 
 // Table is the immutable per-process contract authority built from one bundle.

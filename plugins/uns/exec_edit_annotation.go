@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -143,6 +144,12 @@ func (w *EditExec) executeAnnotationWrite(
 	}
 	write, err := w.store.PublishEvent(ctx, records[0])
 	if err != nil {
+		var invalid *FieldError
+		if errors.As(err, &invalid) {
+			// A time or value outside its contract, refused before it reaches
+			// the shared annotations stream.
+			return w.remember(operationID, digest, 422, invalid.Refusal(), "invalid", nil)
+		}
 		return 500, "edit commit failed: " + err.Error(), "error", nil
 	}
 	if err := w.persistStandaloneReceipt(

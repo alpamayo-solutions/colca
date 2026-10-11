@@ -166,6 +166,17 @@ Some commands are executed by the node itself rather than a machine:
 | `_CmdEdit` | apply an atomic, versioned edit composed by an editor application |
 | `_CmdAdmin` | enroll or revoke an identity on a node that is only reachable through the tree, or read a node's own logs (`fetchLogs`) |
 
+### Creating at a node's root
+
+A node is bound to an element its parent authored, so it holds no record for
+that element, yet everything it authors at its root sits directly below it. A
+`_CmdEdit` create whose `parent_id` is the element the node is bound to creates
+the entity at the node's root: an element names no `parent_id`, like every root
+the node authors, and a signal or constant stands on the bound element. The
+bound element's version is the parent's to check, so a version sent for it in
+`expected_versions` is not compared. Any other parent must be an element the
+node holds.
+
 ### Binding a signal to a tag
 
 A signal reads from at most one data tag (`data_tag`), and a tag binds to at

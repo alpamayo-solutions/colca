@@ -19,6 +19,7 @@ func (nsByPath) PathOf(id string) (string, bool) {
 }
 
 func (nsByPath) Reaches(string) bool { return false }
+func (nsByPath) Binds(string) bool   { return false }
 
 var ns = nsByPath{}
 
@@ -36,6 +37,7 @@ type mapScope struct {
 
 func (m mapScope) PathOf(id string) (string, bool) { p, ok := m.paths[id]; return p, ok }
 func (m mapScope) Reaches(id string) bool          { return id != "" && m.above[id] }
+func (m mapScope) Binds(string) bool               { return false }
 
 // testScope builds a Scope from element id to local path, with no
 // ancestors.

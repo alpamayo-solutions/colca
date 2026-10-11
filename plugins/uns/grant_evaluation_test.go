@@ -60,6 +60,7 @@ type grantEvaluationScope struct {
 
 func (s grantEvaluationScope) PathOf(id string) (string, bool) { p, ok := s.paths[id]; return p, ok }
 func (grantEvaluationScope) Reaches(string) bool               { return false }
+func (grantEvaluationScope) Binds(string) bool                 { return false }
 
 func buildGrantEvaluationScope(t *testing.T, elements map[string]*string) grantEvaluationScope {
 	t.Helper()
