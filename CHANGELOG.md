@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.2](https://github.com/alpamayo-solutions/colca/compare/v0.33.1...v0.33.2) (2026-10-11)
+
+
+### Fixes
+
+* **uns:** write a moved entity's new record before retiring its old position ([#191](https://github.com/alpamayo-solutions/colca/issues/191)) ([595aece](https://github.com/alpamayo-solutions/colca/commit/595aece507019347046208b652fa546c52506294))
+
 ## [0.33.1](https://github.com/alpamayo-solutions/colca/compare/v0.33.0...v0.33.1) (2026-10-11)
 
 
