@@ -149,8 +149,11 @@ func TestALatePageMarksInItsTransactionAndTakesNoLock(t *testing.T) {
 		t.Fatalf("statements beside the batch: %v", pool.execs)
 	}
 
+	// A sample of the hour that has not started yet: never late, whatever the
+	// minute. time.Now() itself falls within lateSlack of its hour's deadline
+	// from minute 55 on, where the statement, not this process, decides.
 	v := 2.0
-	current := []Row{{SignalID: "a", Timestamp: time.Now(), Number: &v}}
+	current := []Row{{SignalID: "a", Timestamp: time.Now().Truncate(time.Hour).Add(time.Hour), Number: &v}}
 	if _, err := sink.Apply(context.Background(), current, Consumer, 2, ""); err != nil {
 		t.Fatal(err)
 	}
