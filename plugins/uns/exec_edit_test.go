@@ -315,6 +315,92 @@ func TestEditPlacementMovesAWholeEntitySubtreeInOneBatch(t *testing.T) {
 	}
 }
 
+// A consumer applies a placement batch in order and keys annotation links and
+// alarms by the entity's id. A tombstone ahead of the new record deletes that
+// row, and the links with it, before the new record re-creates a bare one. So
+// every new record comes first, and no tombstone retires a topic the batch
+// writes.
+func TestEditPlacementWritesEveryNewRecordBeforeRetiringTheOldOnes(t *testing.T) {
+	f := newStore("n-edge1")
+	seedEditEntity(t, f, "_SystemElement", "line1", map[string]any{"id": "el-line1", "name": "Line 1"})
+	machineVersion := seedEditEntity(t, f, "_SystemElement", "line1/machine", map[string]any{
+		"id": "el-machine", "name": "Machine", "parent_id": "el-line1",
+	})
+	tempVersion := seedEditEntity(t, f, "_Signal", "line1/machine/temp", map[string]any{
+		"id": "sig-temp", "name": "Temperature", "system_element_id": "el-machine",
+	})
+	speedVersion := seedEditEntity(t, f, "_Signal", "line1/machine/speed", map[string]any{
+		"id": "sig-speed", "name": "Speed", "system_element_id": "el-machine",
+	})
+	targetVersion := seedEditEntity(t, f, "_SystemElement", "line2", map[string]any{
+		"id": "el-line2", "name": "Line 2",
+	})
+	exec := NewEditExec(f, nil)
+
+	assertOrder := func(t *testing.T, writes []StateWrite, oldTopics []string) {
+		t.Helper()
+		old := map[string]bool{}
+		for _, topic := range oldTopics {
+			old[topic] = true
+		}
+		written := map[string]bool{}
+		retiring := false
+		for i, write := range writes {
+			tombstone := old[write.Topic]
+			if tombstone {
+				retiring = true
+				if written[write.Topic] {
+					t.Fatalf("write %d retires %s, which the batch also writes", i, write.Topic)
+				}
+				continue
+			}
+			if retiring {
+				t.Fatalf("write %d (%s) is a new record after a tombstone: %+v", i, write.Topic, writes)
+			}
+			written[write.Topic] = true
+		}
+		if len(written) != len(oldTopics) || !retiring {
+			t.Fatalf("want %d new records then their tombstones, got %+v", len(oldTopics), writes)
+		}
+	}
+
+	t.Run("signal", func(t *testing.T) {
+		code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(
+			t, "op-move-signal", map[string]uint64{
+				"signal:sig-speed":        speedVersion,
+				"system-element:el-line2": targetVersion,
+			}, map[string]any{
+				"type": "placement", "entity": map[string]any{"kind": "signal", "id": "sig-speed"},
+				"target_parent_id": "el-line2",
+			},
+		))
+		if code != 200 {
+			t.Fatalf("placement = %d %q", code, msg)
+		}
+		assertOrder(t, writes, []string{"colca/v1/_Signal/n-edge1/line1/machine/speed"})
+	})
+
+	t.Run("subtree", func(t *testing.T) {
+		code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(
+			t, "op-move-subtree", map[string]uint64{
+				"system-element:el-machine": machineVersion,
+				"system-element:el-line2":   targetVersion,
+				"signal:sig-temp":           tempVersion,
+			}, map[string]any{
+				"type": "placement", "entity": map[string]any{"kind": "system-element", "id": "el-machine"},
+				"target_parent_id": "el-line2",
+			},
+		))
+		if code != 200 {
+			t.Fatalf("placement = %d %q", code, msg)
+		}
+		assertOrder(t, writes, []string{
+			"colca/v1/_SystemElement/n-edge1/line1/machine",
+			"colca/v1/_Signal/n-edge1/line1/machine/temp",
+		})
+	})
+}
+
 func TestEditBindingValidatesWholeMixedBatchBeforeWriting(t *testing.T) {
 	f := newStore("n-edge1")
 	parentVersion := seedEditEntity(t, f, "_SystemElement", "line1", map[string]any{
