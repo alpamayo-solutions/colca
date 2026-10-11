@@ -90,13 +90,14 @@ func (w *EditExec) composePlacement(
 		}
 		payload := cloneRawMap(candidate.Payload)
 		if candidate.Record.Topic == current.Record.Topic {
-			if current.Kind == "system-element" && ownElement {
+			switch {
+			case current.Kind == "system-element" && ownElement:
 				// A root this node authors names no parent; an ancestor
 				// places it below the mount (see composeCreate).
 				delete(payload, "parent_id")
-			} else if current.Kind == "system-element" {
+			case current.Kind == "system-element":
 				payload["parent_id"] = rawJSON(intent.TargetParentID)
-			} else {
+			default:
 				payload["system_element_id"] = rawJSON(intent.TargetParentID)
 			}
 		}
