@@ -281,6 +281,13 @@ def field_limits(cls: type) -> dict[str, FieldLimit]:
 #: both refuse it), and ten is more than a float64 reading carries in practice.
 PRECISION = Bounds(minimum=0, maximum=10, integer=True)
 
+#: An instant as unix seconds, from the epoch to the last second of year 9999
+#: (UTC): the range a read side can turn into a date (Python's ``datetime``
+#: ends there; PostgreSQL's ``timestamptz`` reaches further). A time outside it
+#: is refused where it is published instead of failing the projection of the
+#: stream it travels on.
+UNIX_SECONDS = Bounds(minimum=0, maximum=253402300799)
+
 
 # ---------------------------------------------------------------------------
 # Decoding
@@ -959,12 +966,15 @@ class Annotation(ToleratesUnknownFields, Payload):
     #: A ULID in practice, but not constrained on the wire yet: the golden
     #: vectors in `vectors/annotation_id.json` use readable type ids.
     annotation_type_id: str
-    time_start: float
-    time_end: float | None = None
-    value: Any | None = None
+    time_start: Annotated[float, UNIX_SECONDS]
+    time_end: Annotated[float | None, UNIX_SECONDS] = None
+    #: A string value is a note or an option name, never a document: it is
+    #: bounded so one record cannot carry megabytes onto a shared stream.
+    #: Other value types are bounded by the record size the node accepts.
+    value: Annotated[Any | None, MaxLength(10_000)] = None
     signal_ids: list[ULID] = field(default_factory=list)
     #: Producing identity for audit, e.g. ``"dataops/<producer-name>"``.
-    source: str = ""
+    source: Annotated[str, MaxLength(255)] = ""
     deleted: bool = False
     revision: int = 1
     #: The element the annotation belongs to. Optional: a producer that only

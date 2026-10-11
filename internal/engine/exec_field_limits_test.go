@@ -141,3 +141,59 @@ func TestAnEntityHoldingAnOutOfLimitValueIsRepairedByTheEditThatCorrectsIt(t *te
 		t.Fatalf("the corrected record is not the current state: %s", raw)
 	}
 }
+
+// An annotation travels on the shared annotations stream, and a time the read
+// side cannot turn into a date used to be appended there and fail the
+// projection of the stream it rides on. The contract bounds the times and a
+// string value; the node refuses the record naming the field, and appends
+// nothing.
+func TestAnAnnotationOutsideItsContractIsRefusedBeforeTheStream(t *testing.T) {
+	e := execEngine(t, nil)
+	withGeneratedBundle(t, e)
+	e.SetExecutor(uns.NewEditExec(e.EntityStore(), nil))
+	annotation := func(op string, overrides map[string]any) *CommandOutcome {
+		intent := map[string]any{
+			"type": "annotation", "action": "create",
+			"annotation_type_id": "01M4JQ0000000000000000TYPE", "source": "user/anna",
+			"time_start": 1710000000.0,
+		}
+		for k, v := range overrides {
+			intent[k] = v
+		}
+		return runEdit(t, e, editCommand(t, op, map[string]uint64{}, intent))
+	}
+
+	before := e.Store().NextOffset("annotations")
+	for i, c := range []struct {
+		overrides map[string]any
+		refusal   string
+	}{
+		{map[string]any{"time_start": 1e20}, "invalid_field: time_start: maximum 253402300799"},
+		{map[string]any{"time_start": -1.0}, "invalid_field: time_start: minimum 0"},
+		{map[string]any{"time_end": 1e20}, "invalid_field: time_end: maximum 253402300799"},
+		{map[string]any{"value": strings.Repeat("v", 10_001)}, "invalid_field: value: maxLength 10000"},
+	} {
+		outcome := annotation(fmt.Sprintf("op-annotation-%d", i), c.overrides)
+		if outcome.ResultCode != 422 || outcome.Message != c.refusal {
+			t.Fatalf("annotation with %v = %d %q, want 422 %q", keys(c.overrides), outcome.ResultCode, outcome.Message, c.refusal)
+		}
+	}
+	if got := e.Store().NextOffset("annotations"); got != before {
+		t.Fatalf("a refused annotation was appended: next=%d want=%d", got, before)
+	}
+	// The denominator: the same command inside its limits is appended.
+	if outcome := annotation("op-annotation-ok", map[string]any{"value": "checked"}); outcome.ResultCode != 200 {
+		t.Fatalf("an annotation inside its limits = %d %q", outcome.ResultCode, outcome.Message)
+	}
+	if got := e.Store().NextOffset("annotations"); got != before+1 {
+		t.Fatalf("an applied annotation must append one record: next=%d want=%d", got, before+1)
+	}
+}
+
+func keys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

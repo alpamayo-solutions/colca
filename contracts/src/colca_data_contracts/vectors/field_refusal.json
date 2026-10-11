@@ -81,6 +81,18 @@
       "keyword": "required",
       "limit": "",
       "refusal": "invalid_field: name: required"
+    },
+    {
+      "contract": "_Annotation",
+      "payload": {
+        "annotation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "annotation_type_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        "time_start": 1e+20
+      },
+      "field": "time_start",
+      "keyword": "maximum",
+      "limit": "253402300799",
+      "refusal": "invalid_field: time_start: maximum 253402300799"
     }
   ]
 }
