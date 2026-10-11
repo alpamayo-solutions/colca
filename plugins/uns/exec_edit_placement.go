@@ -63,10 +63,13 @@ func (w *EditExec) composePlacement(
 		movingTopics[candidate.Record.Topic] = true
 	}
 
+	// Every new record goes first, then the tombstones (retire): a consumer
+	// that applies the batch in order sees the entity at its new position before
+	// the old one is retired, so what it keys by the entity's id (annotation
+	// links, alarms) is moved with it instead of deleted with the old row.
 	records := make([]StateRecord, 0, len(selected)*2)
-	for _, candidate := range selected {
-		records = append(records, StateRecord{Topic: candidate.Record.Topic})
-	}
+	vacated := make([]string, 0, len(selected))
+	written := make(map[string]bool, len(selected))
 	for _, candidate := range selected {
 		suffix := strings.TrimPrefix(candidate.Record.Path, current.Record.Path)
 		newPath := newRoot + suffix
@@ -91,7 +94,10 @@ func (w *EditExec) composePlacement(
 			return 422, "placement: payload is not encodable", "invalid", nil
 		}
 		records = append(records, StateRecord{Topic: newTopic, Payload: encoded})
+		written[newTopic] = true
+		vacated = append(vacated, candidate.Record.Topic)
 	}
+	records = append(records, retire(vacated, written)...)
 	return 200, fmt.Sprintf("moved %d entities", len(selected)), "ok", records
 }
 
