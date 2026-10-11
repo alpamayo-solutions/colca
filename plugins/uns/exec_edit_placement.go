@@ -23,19 +23,26 @@ func (w *EditExec) composePlacement(
 	if code != 0 {
 		return code, "placement: " + message, resultFor(code), nil
 	}
-	target, code, message := requireEntity(expected, entities, "system-element", intent.TargetParentID)
-	if code != 0 {
-		return code, "placement: " + message, resultFor(code), nil
-	}
-	if current.Kind == "system-element" &&
-		(target.Record.Path == current.Record.Path || strings.HasPrefix(target.Record.Path, current.Record.Path+"/")) {
-		return 409, "descendant_cycle", "conflict", nil
+	// The element this node is bound to is its root: its record lives at the
+	// node's parent, which checked its version, and a move onto it makes the
+	// entity one of this node's roots -- the same as a create there.
+	targetPath, ownElement := "", w.scope != nil && w.scope.Binds(intent.TargetParentID)
+	if !ownElement {
+		target, code, message := requireEntity(expected, entities, "system-element", intent.TargetParentID)
+		if code != 0 {
+			return code, "placement: " + message, resultFor(code), nil
+		}
+		targetPath = target.Record.Path
+		if current.Kind == "system-element" &&
+			(targetPath == current.Record.Path || strings.HasPrefix(targetPath, current.Record.Path+"/")) {
+			return 409, "descendant_cycle", "conflict", nil
+		}
 	}
 	leaf := current.Record.Path
 	if index := strings.LastIndexByte(leaf, '/'); index >= 0 {
 		leaf = leaf[index+1:]
 	}
-	newRoot := joinPath(target.Record.Path, leaf)
+	newRoot := joinPath(targetPath, leaf)
 	if newRoot == current.Record.Path {
 		return 409, "placement_unchanged", "conflict", nil
 	}
@@ -83,7 +90,11 @@ func (w *EditExec) composePlacement(
 		}
 		payload := cloneRawMap(candidate.Payload)
 		if candidate.Record.Topic == current.Record.Topic {
-			if current.Kind == "system-element" {
+			if current.Kind == "system-element" && ownElement {
+				// A root this node authors names no parent; an ancestor
+				// places it below the mount (see composeCreate).
+				delete(payload, "parent_id")
+			} else if current.Kind == "system-element" {
 				payload["parent_id"] = rawJSON(intent.TargetParentID)
 			} else {
 				payload["system_element_id"] = rawJSON(intent.TargetParentID)

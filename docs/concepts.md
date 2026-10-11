@@ -175,7 +175,17 @@ the entity at the node's root: an element names no `parent_id`, like every root
 the node authors, and a signal or constant stands on the bound element. The
 bound element's version is the parent's to check, so a version sent for it in
 `expected_versions` is not compared. Any other parent must be an element the
-node holds.
+node holds. A `_CmdEdit` placement onto the bound element works the same way:
+the entity becomes one of the node's roots.
+
+The other side of the same rule: below the element a child node is attached
+at, every position is the child's. A `_CmdEdit` at the parent never writes an
+element, signal or constant record there. A create answers `422
+foreign_position: …`, a move `422 cross_node_move: …`, both naming the child
+node. Retiring a record that already stands there (a move out, a delete) is
+allowed, so one written before this rule can still be cleaned up. An entity
+does not change owner by moving: to put it under another node, delete it and
+create it there.
 
 ### Binding a signal to a tag
 
