@@ -32,13 +32,10 @@ const (
 // only uses HTTP, which has no will, so the record needs a connection of its
 // own.
 type Announcer struct {
-	Version      string
-	OnConnect    func(pahomqtt.Client) error
-	OnDisconnect func()
-	clock        map[string]any
-	Door         *door.Client // resolves the identity through /self
-	MQTTURL      string       // the local MQTT door, e.g. tcp://colca:1883
-	Log          *slog.Logger
+	Version string
+	Door    *door.Client // resolves the identity through /self
+	MQTTURL string       // the local MQTT door, e.g. tcp://colca:1883
+	Log     *slog.Logger
 
 	// Dial replaces the network dial; tests use it to cut the connection.
 	Dial func(ctx context.Context, addr string) (net.Conn, error)
@@ -139,11 +136,6 @@ func (a *Announcer) Run(ctx context.Context) {
 		SetMaxReconnectInterval(time.Minute).
 		SetBinaryWill(topic, down, 1, true).
 		SetOnConnectHandler(func(c pahomqtt.Client) {
-			if a.OnConnect != nil {
-				if err := a.OnConnect(c); err != nil {
-					a.logger().Error("service subscriptions failed", "err", err)
-				}
-			}
 			// A reconnect follows a drop, after which the will said inactive.
 			a.publish(c, true)
 			// A clean session forgets subscriptions; the retained finding comes
@@ -151,9 +143,6 @@ func (a *Announcer) Run(ctx context.Context) {
 			c.Subscribe(findingTopic, 1, a.onFinding)
 		}).
 		SetConnectionLostHandler(func(_ pahomqtt.Client, err error) {
-			if a.OnDisconnect != nil {
-				a.OnDisconnect()
-			}
 			a.logger().Warn("local MQTT connection lost, reconnecting", "err", err)
 		})
 	if a.Dial != nil {
@@ -280,16 +269,6 @@ func (a *Announcer) record(self door.Self) (serviceDetails, string) {
 	return details, topic
 }
 
-// ReportProgress observes functional clock control for Prometheus.
-func (a *Announcer) ReportProgress(progress map[string]any) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.clock = make(map[string]any, len(progress))
-	for key, value := range progress {
-		a.clock[key] = value
-	}
-}
-
 // WriteMetrics exports runtime observations without durable entity writes.
 func (a *Announcer) WriteMetrics(w io.Writer) {
 	a.mu.Lock()
@@ -301,15 +280,6 @@ func (a *Announcer) WriteMetrics(w io.Writer) {
 	if a.current() == StatusHealthy {
 		healthy = 1
 	}
-	clock := a.clock // ReportProgress replaces this immutable snapshot.
 	a.mu.Unlock()
 	_, _ = fmt.Fprintf(w, "# HELP colca_service_healthy Runtime service health.\n# TYPE colca_service_healthy gauge\ncolca_service_healthy{service=%q} %d\n", name, healthy)
-	if clock != nil {
-		ready := 0
-		if clock["ready"] == true {
-			ready = 1
-		}
-		_, _ = fmt.Fprintf(w, "# HELP colca_application_clock_ready Application time readiness.\n# TYPE colca_application_clock_ready gauge\ncolca_application_clock_ready{service=%q} %d\n", name, ready)
-		_, _ = fmt.Fprintf(w, "# HELP colca_application_processed_timestamp_seconds Last committed application timestamp.\n# TYPE colca_application_processed_timestamp_seconds gauge\ncolca_application_processed_timestamp_seconds{service=%q} %v\n", name, clock["processed_at"])
-	}
 }

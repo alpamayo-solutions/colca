@@ -570,16 +570,13 @@ func TestThePipelineHoldsAtMostItsPages(t *testing.T) {
 	}
 }
 
-// Strict (coordinated) history and a door that cannot read ahead keep the
-// one-page-at-a-time path.
+// A door that cannot read ahead or a store that cannot write partitions keeps
+// the one-page-at-a-time path.
 func TestThePipelineIsOnlyUsedWhereItCanBe(t *testing.T) {
 	s := newStream(10, 2)
 	store := newPipeStore(s, 2)
 	if _, ok := (&Bridge{Door: s, Store: store, Pipeline: 4}).pipelined(); !ok {
 		t.Fatal("not pipelined with a read-ahead door and a pipeline store")
-	}
-	if _, ok := (&Bridge{Door: s, Store: store, Pipeline: 4, Strict: true}).pipelined(); ok {
-		t.Fatal("strict history was pipelined")
 	}
 	if _, ok := (&Bridge{Door: s, Store: store, Pipeline: 1}).pipelined(); ok {
 		t.Fatal("Pipeline 1 was pipelined")

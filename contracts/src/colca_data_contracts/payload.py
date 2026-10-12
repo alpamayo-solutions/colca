@@ -392,54 +392,6 @@ class TimeSync(ToleratesUnknownFields, Payload):
 
 
 @dataclass
-class ClockProgress(ToleratesUnknownFields, Payload):
-    """Ordered completion marker on the metrics lane, never a measurement.
-
-    This marker proves preceding samples and priority-lane events arrived
-    before consumers acknowledge a window. Live readiness uses fresh,
-    non-retained observations; ServiceDetails only supplies discovery.
-    """
-
-    run_id: str
-    processed_at: float
-    ready: bool
-    observed_at: float | None
-
-
-@dataclass
-class ClockSegment:
-    """The preceding segment carried with a future-effective clock change."""
-
-    real_anchor: float
-    factory_anchor: float
-    rate: float
-    stop_at: float | None = None
-    catch_up: bool = False
-
-
-@dataclass
-class ClockDefinition(ToleratesUnknownFields, Payload):
-    """An opt-in application timeline, distributed down the node tree.
-
-    Epochs are UTC seconds. ``rate=0`` pauses, ``rate=1`` runs in real time.
-    Consumers select one exact authority/topic; this never changes OS time,
-    authentication, command deadlines or Colca's operational clock. A new
-    run requires explicit consumer reset; revisions within a run cannot rewind.
-    """
-
-    id: str
-    run_id: str
-    revision: Annotated[int, Bounds(minimum=1, integer=True)]
-    real_anchor: float
-    factory_anchor: float
-    rate: Annotated[float, Bounds(minimum=0, maximum=1000)]
-    stop_at: float | None = None
-    catch_up: bool = False
-    previous: ClockSegment | None = None
-    start_at: float | None = None
-
-
-@dataclass
 class HealthMetricDeclaration:
     """One bounded, self-described Prometheus health signal.
 

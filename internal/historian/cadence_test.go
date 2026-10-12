@@ -79,37 +79,3 @@ func TestRunFollowsAFullPageOfSkippedRecordsAtOnce(t *testing.T) {
 		page(4, record(3, `{"signal_id":"s1","value":3}`)),
 	}, 3)
 }
-
-func TestCoordinatedRunWaitsForWakeWithoutEmptyFetches(t *testing.T) {
-	d := &countingDoor{fetches: make(chan struct{}, 16)}
-	checks := make(chan struct{}, 16)
-	wake := make(chan struct{}, 1)
-	b := &Bridge{Door: d, Store: &fakeStore{}, Coordinate: func(context.Context) (bool, error) { checks <- struct{}{}; return false, nil },
-		WaitCoordinate: func(ctx context.Context) {
-			select {
-			case <-ctx.Done():
-			case <-wake:
-			}
-		}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- b.Run(ctx) }()
-	<-checks
-	select {
-	case <-checks:
-		t.Fatal("polled coordination without a wakeup")
-	case <-time.After(40 * time.Millisecond):
-	}
-	wake <- struct{}{}
-	select {
-	case <-checks:
-	case <-time.After(time.Second):
-		t.Fatal("missed commit wakeup")
-	}
-	cancel()
-	<-done
-	if len(d.fetches) != 0 {
-		t.Fatal("fetched ahead of upstream completion")
-	}
-}
