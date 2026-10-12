@@ -539,6 +539,24 @@ func TestLoadRejectsInvalidYAMLAndInvalidConfig(t *testing.T) {
 	}
 }
 
+// A config written for a release that had a time_sync: block still loads: the
+// block is not read, so a node can be upgraded before its config is cleaned.
+func TestLoadIgnoresALeftoverTimeSyncBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node.yaml")
+	doc := "ulid: n1\ndata_dir: /tmp/data\nidentity: { key_file: /tmp/n1.key }\n" +
+		"time_sync:\n  beacon_interval: 45s\n  hold_ms: 20000\n  drift_warn_ms: 2500\n"
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("a config with a leftover time_sync block must load: %v", err)
+	}
+	if c.ULID != "n1" {
+		t.Fatalf("ulid = %q, want n1", c.ULID)
+	}
+}
+
 func loadDoc(t *testing.T, doc string) *Config {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "node.yaml")
