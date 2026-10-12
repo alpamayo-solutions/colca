@@ -772,7 +772,7 @@ func TestHelloCarriesTheParentsCommandHead(t *testing.T) {
 	}
 
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
-	res, err := cl.hello(context.Background(), 1)
+	res, err := cl.hello(context.Background(), greeting{})
 	if err != nil {
 		t.Fatal(err)
 	}

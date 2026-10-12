@@ -190,10 +190,17 @@ type Metrics struct {
 	// colca_downlink_head_absent_total: the parent answered hello without a command
 	// head, as older parents do, so no start position could be adopted.
 	downlinkHeadAbsent prometheus.Counter
-	reseed             prometheus.Gauge
-	authReject         *prometheus.CounterVec
-	aclDeny            *prometheus.CounterVec
-	kicks              prometheus.Counter
+	// The store-incarnation check (repl/incarnation.go, repl/resync.go).
+	storeReincarnated    *prometheus.CounterVec // colca_store_incarnation_changes_total{reason}
+	childAheadOfStore    prometheus.Counter     // colca_repl_child_ahead_of_store_total
+	uplinkResyncs        prometheus.Counter     // colca_uplink_resyncs_total
+	uplinkResyncActive   prometheus.Gauge       // colca_uplink_resync_active
+	uplinkResyncGap      *prometheus.CounterVec // colca_uplink_resync_unreplayable_records_total{stream}
+	downlinkCommandKnown prometheus.Counter     // colca_downlink_commands_already_held_total
+	reseed               prometheus.Gauge
+	authReject           *prometheus.CounterVec
+	aclDeny              *prometheus.CounterVec
+	kicks                prometheus.Counter
 	// colca_mqtt_publish_dropped_total: mochi dropped a publish because a client's
 	// outbound queue was full. A retained replay on subscribe is the usual burst;
 	// a non-zero value means delivered state went missing.
@@ -372,6 +379,30 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		downlinkHeadAbsent: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_downlink_head_absent_total",
 			Help: "Process starts whose parent answered hello without a command head (a parent predating parent-scoped cursors). A node with no commands cursor for that parent yet starts at 1 and may be handed commands issued under its mount before it attached; one that already has a cursor keeps it and loses nothing. Resets on restart.",
+		}),
+		storeReincarnated: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_store_incarnation_changes_total",
+			Help: "Times this node's store took a new incarnation id: reason=regression when a peer proved the store is behind what it recorded (a restore from a backup), reason=operator on POST /store/incarnation. Children re-sync after each. Resets on restart; /healthz store.changed keeps the last one.",
+		}, []string{"reason"}),
+		childAheadOfStore: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_repl_child_ahead_of_store_total",
+			Help: "Requests of children that are ahead of this store and cannot re-sync because their colca predates the re-sync. Above 0: this store was restored or replaced and such a child gets no commands until the stream passes its position. Resets on restart.",
+		}),
+		uplinkResyncs: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_uplink_resyncs_total",
+			Help: "Re-syncs with the parent after its store changed incarnation (restored from a backup, replaced, or changed by an operator). Resets on restart.",
+		}),
+		uplinkResyncActive: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_uplink_resync_active",
+			Help: "1 while this node sends again what its parent's store lacks after a re-sync, 0 otherwise.",
+		}),
+		uplinkResyncGap: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_uplink_resync_unreplayable_records_total",
+			Help: "Offsets the parent's store lacked at a re-sync that local retention had already pruned, per stream: they were not sent again. Resets on restart; /healthz uplink.resync.gaps keeps the ranges.",
+		}, []string{"stream"}),
+		downlinkCommandKnown: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_downlink_commands_already_held_total",
+			Help: "Commands the parent handed down that this node already held, so they were not stored or executed again (the parent's store regressed, or the command reached the parent a second time). Resets on restart.",
 		}),
 		reseed: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_retained_reseed_records",
@@ -585,6 +616,9 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.rejectedBy = counterChildren(m.rejected, reasons)
 	m.uplinkFailBy = counterChildren(m.uplinkFail, uplinkStreams)
 	m.uplinkRefusedBy = counterChildren(m.uplinkRefused, uplinkStreams)
+	// Pre-created so an alert sees the first one.
+	counterChildren(m.uplinkResyncGap, uplinkStreams)
+	counterChildren(m.storeReincarnated, incarnationReasons)
 	m.uplinkLogsWithheldBy = counterChildren(m.uplinkLogsWithheld, config.LogLevels)
 	m.aclDenyBy = counterChildren(m.aclDeny, aclActions)
 	m.securityChangeBy = counterChildren(m.securityChanges, securityChangeKinds)
@@ -666,6 +700,8 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused, m.uplinkLogsWithheld,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
+		m.storeReincarnated, m.childAheadOfStore, m.uplinkResyncs, m.uplinkResyncActive, m.uplinkResyncGap,
+		m.downlinkCommandKnown,
 		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.deliveredMessages, m.deliveredBytes, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.securityChanges, m.nodePrefix,
 		m.commandUndelivered, m.commandUnroutable, m.commandDropped, m.commandRedelivered,
@@ -852,6 +888,10 @@ func (m *Metrics) MQTTDelivered(door string, payloadBytes int) {
 
 // counterChildren pre-resolves one child per known label value, so incrementing
 // is a plain map hit — no per-message label allocation or vec lookup.
+// incarnationReasons are the values of colca_store_incarnation_changes_total's
+// reason label.
+var incarnationReasons = []string{"regression", "operator"}
+
 func counterChildren(vec *prometheus.CounterVec, labels []string) map[string]prometheus.Counter {
 	out := make(map[string]prometheus.Counter, len(labels))
 	for _, l := range labels {
@@ -977,6 +1017,59 @@ func (m *Metrics) DownlinkHeadAbsent() {
 		return
 	}
 	m.downlinkHeadAbsent.Inc()
+}
+
+// StoreReincarnated counts one change of this node's store incarnation.
+func (m *Metrics) StoreReincarnated(reason string) {
+	if m == nil {
+		return
+	}
+	m.storeReincarnated.WithLabelValues(reason).Inc()
+}
+
+// ChildAheadOfStore counts one request of a child that is ahead of this store
+// and cannot re-sync.
+func (m *Metrics) ChildAheadOfStore() {
+	if m == nil {
+		return
+	}
+	m.childAheadOfStore.Inc()
+}
+
+// UplinkResynced counts one re-sync with the parent.
+func (m *Metrics) UplinkResynced() {
+	if m == nil {
+		return
+	}
+	m.uplinkResyncs.Inc()
+}
+
+// SetUplinkResyncActive says whether a re-sync is still sending records again.
+func (m *Metrics) SetUplinkResyncActive(active bool) {
+	if m == nil {
+		return
+	}
+	if active {
+		m.uplinkResyncActive.Set(1)
+		return
+	}
+	m.uplinkResyncActive.Set(0)
+}
+
+// UplinkResyncGap counts offsets of stream a re-sync could not send again.
+func (m *Metrics) UplinkResyncGap(stream string, records uint64) {
+	if m == nil {
+		return
+	}
+	m.uplinkResyncGap.WithLabelValues(stream).Add(float64(records))
+}
+
+// DownlinkCommandKnown counts one command handed down that this node held.
+func (m *Metrics) DownlinkCommandKnown() {
+	if m == nil {
+		return
+	}
+	m.downlinkCommandKnown.Inc()
 }
 
 // SetReseedCount records how many KV entries the startup reseed replayed.

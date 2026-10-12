@@ -6,16 +6,15 @@ package store
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -110,9 +109,16 @@ type KVEntry struct {
 }
 
 type Store struct {
-	// id names this store's incarnation. It is minted once, with the store, so a
-	// store rebuilt under the same node identity is told apart from the old one.
-	id             string
+	// id names this store's incarnation: minted with the store and again
+	// whenever its history may have regressed (see incarnation.go).
+	id atomic.Pointer[string]
+	// incMu serialises incarnation changes and guards incChanged, which is
+	// closed on the next one.
+	incMu      sync.Mutex
+	incChanged chan struct{}
+	// idMinted is true when this process minted the current id, at Open or
+	// since: such a history cannot have regressed.
+	idMinted       atomic.Bool
 	contractHeads  map[string]map[string]uint64
 	backlogChanged chan struct{}
 	backlogMu      sync.Mutex // guards backlogChanged; taken after state, never before
@@ -323,38 +329,15 @@ func OpenWithOptions(dir string, o Options) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("open the signal index: %w", err)
 	}
-	if s.id, err = loadOrMintStoreID(db); err != nil {
+	id, minted, err := loadOrMintStoreID(db)
+	if err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	s.id.Store(&id)
+	s.idMinted.Store(minted)
 	return s, nil
 }
-
-func loadOrMintStoreID(db *pebble.DB) (string, error) {
-	v, closer, err := db.Get(storeIDKey())
-	if err == nil {
-		id := string(v)
-		_ = closer.Close()
-		return id, nil
-	}
-	if !errors.Is(err, pebble.ErrNotFound) {
-		return "", fmt.Errorf("read store id: %w", err)
-	}
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("mint store id: %w", err)
-	}
-	id := hex.EncodeToString(b)
-	if err := db.Set(storeIDKey(), []byte(id), pebble.Sync); err != nil {
-		return "", fmt.Errorf("persist store id: %w", err)
-	}
-	return id, nil
-}
-
-// StoreID is this store's incarnation: stable across restarts, new whenever the
-// store is created from nothing. A child sends it with every replication batch
-// so its parent can tell a rebuilt store from a resumed one.
-func (s *Store) StoreID() string { return s.id }
 
 // AdoptChildStore records the incarnation a child replicates from. When it
 // differs from the one recorded before, the child's store was rebuilt: its

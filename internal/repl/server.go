@@ -75,6 +75,10 @@ type Server struct {
 	// pushBytes bounds the bytes of pushes held at once; see byteBudget.
 	pushBytes byteBudget
 
+	// regressed remembers which children that cannot re-sync already had
+	// their stale position logged, so it is a state and not a line per poll.
+	regressed *linkState
+
 	// inflight lets the owner of shutdown see running handlers. Set once before
 	// Start; nil in tests. See SetInflightTracker.
 	inflight func(http.Handler) http.Handler
@@ -121,7 +125,8 @@ func (s *Server) auditDenied(operation, reason string, entry *uns.Entry, metadat
 // tests that never touch the blob routes.
 func NewServer(cfg *config.Config, eng *engine.Engine, id *identity.Identity, reg *registry.Manager, blobs *blobstore.Store, m *metrics.Metrics) (*Server, error) {
 	s := &Server{cfg: cfg, eng: eng, id: id, reg: reg, blobs: blobs, metrics: m, limiter: httplimit.New(),
-		log: slog.Default().With("node", cfg.ULID, "comp", "repl-server")}
+		regressed: newLinkState(),
+		log:       slog.Default().With("node", cfg.ULID, "comp", "repl-server")}
 	s.pushBytes.limit = replicationBudgetBytes(replicateBodyLimit(cfg))
 	return s, nil
 }
@@ -330,6 +335,11 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		// Store is the child's store incarnation; empty from a child that
 		// predates it.
 		Store string `json:"store,omitempty"`
+		// Parent is the incarnation of this node's store the child recorded,
+		// and Acked the highest offset of Stream it was told is stored here.
+		// Absent from a child that predates the fields.
+		Parent *string `json:"parent"`
+		Acked  uint64  `json:"acked,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		var tooLarge *http.MaxBytesError
@@ -353,6 +363,11 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		s.auditDenied("replicate", "direction_denied", child,
 			map[string]any{"route": r.URL.Path, "stream": in.Stream})
 		http.Error(w, fmt.Sprintf("stream %s does not accept replicated records", in.Stream), http.StatusForbidden)
+		return
+	}
+	// Before anything is applied: a batch stored on a store the child does not
+	// know would move the mark past the records the child has yet to send again.
+	if s.refuseForResync(w, child.ULID, in.Parent, childPosition{store: in.Store, acked: map[string]uint64{in.Stream: in.Acked}}) {
 		return
 	}
 
@@ -418,17 +433,9 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	// Through the engine, never straight into the store: the engine is the single
 	// place every write converges, and it is what mirrors the newly applied
 	// records onto this node's local MQTT bus.
-	// A child whose store was rebuilt under the same identity restarts at offset
-	// 1; the marks kept for its old store would drop everything it sends and
-	// report it delivered. Adopting the new incarnation clears them first.
-	reset, err := s.eng.Store().AdoptChildStore(child.ULID, in.Store)
-	if err != nil {
+	if err := s.adoptChildStore(child.ULID, in.Store); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if reset {
-		s.log.Warn("child store rebuilt: its replication marks were reset and it replicates from the start",
-			"child", child.ULID, "store", in.Store)
 	}
 	applied, hwm, err := s.eng.IngestReplicated(child.ULID, in.Stream, repl)
 	if err != nil {
@@ -439,7 +446,8 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	// now_ms is stamped after IngestReplicated, from the parent's authoritative
 	// clock rather than raw local time, so corrections carry down the tree. The
 	// root has no offset, so there it is the raw clock.
-	writeJSON(w, map[string]any{"hwm": hwm, "now_ms": s.eng.AuthoritativeNow().UnixMilli()})
+	writeJSON(w, map[string]any{"hwm": hwm, "now_ms": s.eng.AuthoritativeNow().UnixMilli(),
+		"store": s.eng.Store().StoreID()})
 }
 
 func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
@@ -468,10 +476,31 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		limit = defaultDownlinkMax
 	}
 
+	// The incarnation of this store the child recorded. A child that sends the
+	// parameter, even empty, can re-sync; one that predates it cannot.
+	var claimed *string
+	if r.URL.Query().Has("parent") {
+		v := r.URL.Query().Get("parent")
+		claimed = &v
+	}
+	position := childPosition{store: r.URL.Query().Get("store"), commands: after, definitions: defAfter,
+		acked: parseAcked(r.URL.Query().Get("acked"))}
+
 	// hello=1 answers at once instead of long-polling, so a reconnecting child
 	// learns its position in one round trip and a fresh node does not keep refusing
 	// people until the first idle poll ends.
 	if r.URL.Query().Get("hello") == "1" {
+		// The handshake reports instead of refusing: it is how a child learns
+		// where this store stands.
+		resync, err := s.judge(child.ULID, claimed, position)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.adoptChildStore(child.ULID, position.store); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		head := s.eng.Store().NextOffset("commands")
 		// A child with no cursor here yet starts at head: seat its delivery floor
 		// there, so retention keeps what is queued for it from now on and its first
@@ -488,8 +517,21 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		if a, ok := s.ancestryFor(mount); ok {
 			resp["ancestry"] = a
 		}
-		s.addDefinitions(resp, child.ULID, defAfter, limit)
+		if claimed != nil {
+			s.addHandshake(resp, child.ULID, resync)
+		}
+		if !resync {
+			// A child about to re-sync reads definitions from the position
+			// the handshake names, not from the one it asked with.
+			s.addDefinitions(resp, child.ULID, defAfter, limit)
+		}
 		writeJSON(w, resp)
+		return
+	}
+	// Captured before the check, so a change of incarnation while this poll
+	// waits is not missed.
+	reincarnated := s.eng.Store().IncarnationChanges()
+	if s.refuseForResync(w, child.ULID, claimed, position) {
 		return
 	}
 
@@ -529,6 +571,17 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 	timer := time.NewTimer(longPollFor)
 	defer timer.Stop()
 	for {
+		select {
+		case <-reincarnated:
+			// The store took a new incarnation while the child waited at a
+			// position of the old one. A child that can re-sync is told now;
+			// one that cannot keeps waiting as before.
+			if s.refuseForResync(w, child.ULID, claimed, position) {
+				return
+			}
+			reincarnated = nil
+		default:
+		}
 		// Wake only on an append to this child's downlink streams. A parent with
 		// many children commits replicated batches constantly; waking every waiting
 		// poll on each of them made the wakeups grow with children × commits, each
@@ -601,6 +654,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			// Client gone (or the server was stopped): never outlive the request.
 			return
 		case <-timer.C:
+		case <-reincarnated: // answered at the top of the loop
 		case <-wakes["commands"]:
 			s.downlinkWakes.Add(1)
 		case <-wakes["definitions"]:

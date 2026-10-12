@@ -24,7 +24,15 @@ type replError struct {
 	Body   string
 	// RetryAfter is the parent's Retry-After on a 429, 0 without one.
 	RetryAfter time.Duration
+	// Store is the parent's store incarnation on a 409 that asks for a
+	// re-sync, "" otherwise.
+	Store string
 }
+
+// StoreChanged reports whether the parent refused because its store is not the
+// incarnation this node recorded: nothing is wrong with the request, the node
+// has to re-sync first (resync.go).
+func (e *replError) StoreChanged() bool { return e.Status == http.StatusConflict && e.Store != "" }
 
 // Busy reports whether the parent asked to be called again later (429): it is
 // shedding load, it did not refuse the batch.
@@ -49,7 +57,9 @@ func (e *replError) Error() string {
 // Refused reports whether the parent answered 4xx other than 429: it read the
 // request and said no. The child retries anyway, on purpose; see pushOnce in
 // RunUplink.
-func (e *replError) Refused() bool { return e.Status >= 400 && e.Status < 500 && !e.Busy() }
+func (e *replError) Refused() bool {
+	return e.Status >= 400 && e.Status < 500 && !e.Busy() && !e.StoreChanged()
+}
 
 // readReason reads the parent's explanation off a refused response, bounded so
 // a misbehaving peer cannot write an unbounded string into this node's logs.
@@ -76,6 +86,8 @@ func replicationStatusMeaning(status int) string {
 			status)
 	case http.StatusNotFound:
 		return fmt.Sprintf("http %d — the parent does not serve this route (wrong URL, or an older build)", status)
+	case http.StatusConflict:
+		return fmt.Sprintf("http %d — the parent's store is not the one this node recorded; the node re-syncs", status)
 	case http.StatusRequestEntityTooLarge:
 		return fmt.Sprintf("http %d — the batch exceeded the parent's request bound", status)
 	case http.StatusTooManyRequests:

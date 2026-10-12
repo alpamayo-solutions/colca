@@ -66,6 +66,78 @@ connection. It needs no open port and no VPN, only a route to the parent.
 While the parent is unreachable the child's cursors simply do not move. That
 is the whole offline buffer.
 
+### Store incarnations
+
+A child remembers offsets of its parent's store: how far it read commands and
+definitions, and for each of its own streams the highest offset the parent
+confirmed. A parent remembers offsets of each child's store: the highest one
+it applied per stream. These positions are only valid for the history they
+were read from. A store restored from a backup hands out offsets it handed out
+before, for other records, and stands behind positions its neighbours hold.
+
+So every store has an **incarnation id**: 32 hex characters, minted when the
+store is created and again whenever its history may have regressed. It is the
+`store` that `GET /fetch` returns and `/healthz` shows. Nodes exchange it on
+the replication link, and a node that meets another incarnation than the one
+it recorded re-syncs instead of continuing from its old positions.
+
+A restored volume carries the id it was copied with, so the id alone does not
+reveal a restore. The positions do. Two things are checked on every contact:
+
+| Signal | Where | What it proves |
+|---|---|---|
+| The child states the parent incarnation it recorded | every poll, every push, every hello | another id: the parent's store was replaced, wiped, or given a new incarnation |
+| The child states how far it read commands and definitions, and what the parent confirmed per stream | hello after every (re)connect; the confirmed offset also on every push | a position the parent's store has not reached: this incarnation regressed |
+| The parent answers with the highest offset it holds per stream of the child | hello, every push | an offset the child's store has not handed out yet: the child's own store regressed |
+
+A stream's head never moves back and a confirmed offset only follows what was
+stored, so on a store that kept its history none of the last two can be true.
+When one is, the regressed store takes a new incarnation id itself, once, and
+records why. From then on the first signal tells every other neighbour. Only a
+store that was opened with the id it already had can be a restored copy; an id
+minted since the node started names a history that only grew, and a neighbour
+that claims to be ahead of it re-syncs alone without changing the id.
+
+What each side does:
+
+| | Parent | Child |
+|---|---|---|
+| Same incarnation, nothing ahead | answers as usual | continues |
+| Child knows another incarnation | refuses polls and pushes with `409` and its id, answers hello | re-syncs |
+| Child is ahead of the incarnation it names | takes a new incarnation, then as above | re-syncs |
+| Child never recorded an incarnation | answers; tells the child to re-sync if it is ahead | records the id; re-syncs if told |
+| Child's colca predates the check | answers as before; reports a child that is ahead (`colca_repl_child_ahead_of_store_total`) | nothing |
+| Parent's colca predates the check | nothing | continues as before; reports a commands position past the parent's head (`colca_downlink_cursor_beyond_head_total`) |
+
+A **re-sync** is one hello and one write on the child:
+
+- The commands and definitions positions move to where the parent's store last
+  saw the child ask from. That can be behind where the child stood. A command
+  the child already holds is recognised by its topic, payload and timestamp
+  and is not stored or executed again, at whatever offset it arrives; a command
+  that reuses an old offset is new and is executed. A definition the child holds
+  byte for byte is not stored again.
+- Each uplink cursor moves back to just past the highest offset the parent
+  holds of that stream, as far as the child's retention still has it. The
+  child then sends that range again through the ordinary uplink, priority lanes
+  first. The parent drops what it already holds, by the same high-water mark
+  that makes a repeated push harmless.
+- A range the parent lacks and the child has already pruned cannot be sent
+  again. It is logged, counted and stays listed on the child's `/healthz`.
+
+A push that was on its way while the re-sync happened names the old
+incarnation and is refused, so it cannot move the parent's mark past the range
+that is about to be sent again.
+
+A node whose own store regressed takes a new incarnation as soon as its parent
+proves it. Its parent then clears the marks it kept for the old incarnation,
+instead of dropping, as already stored, the records the node writes at the
+offsets it hands out a second time. Local consumers see the change as
+`store_changed` on `/ack`.
+
+[Restoring a parent from a backup](operations.md#restoring-a-parent-from-a-backup)
+says what this recovers and what it does not.
+
 ## Commands
 
 A command is a record in the `commands` stream, written at any ancestor of

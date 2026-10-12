@@ -59,3 +59,21 @@ func journalKey(stream string, first uint64) []byte {
 func journalBounds(stream string) (lb, ub []byte) {
 	return []byte("j\x00" + stream + "\x00"), []byte("j\x00" + stream + "\x01")
 }
+
+// incarnationChangeKey holds why and when this store last took a new
+// incarnation id (see Store.Reincarnate). Absent on a store that never did.
+func incarnationChangeKey() []byte { return []byte("ic\x00") }
+
+// parentStateKey holds what this node recorded about one parent, keyed by the
+// parent's pinned key: the replication client's own document.
+func parentStateKey(parent string) []byte { return []byte("p\x00" + parent) }
+
+// ackedKey holds the highest offset of a stream the parent confirmed as
+// stored. It is not the uplink cursor, which also moves past records that are
+// never pushed.
+func ackedKey(parent, stream string) []byte {
+	return []byte("pa\x00" + parent + "\x00" + stream)
+}
+
+// ackedBounds covers every ackedKey, for a range delete.
+func ackedBounds() (lb, ub []byte) { return []byte("pa\x00"), []byte("pa\x01") }
