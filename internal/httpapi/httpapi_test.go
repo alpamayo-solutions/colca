@@ -1024,10 +1024,30 @@ func TestFetchPrefixAndMax(t *testing.T) {
 	if len(out["records"].([]any)) != 0 {
 		t.Fatalf("prefix must not match the raw topic: %v", out)
 	}
-	for _, q := range []string{"&max=0", "&max=-5", "&max=99999", "&max=nonsense", ""} {
-		_, out = req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=m1"+q, "tok", nil)
-		if len(out["records"].([]any)) != 2 {
-			t.Fatalf("max=%q must fall back to the default: %v", q, out)
+	for q, want := range map[string]int{"": 2, "&max=": 2, "&max=1": 1, "&max=5000": 2} {
+		resp, out := req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=m1"+q, "tok", nil)
+		if resp.StatusCode != http.StatusOK || len(out["records"].([]any)) != want {
+			t.Fatalf("%q: status %d, want %d records: %v", q, resp.StatusCode, want, out)
+		}
+	}
+}
+
+// A max outside 1..5000 is a bad request, like /kv's. Falling back to the
+// default page instead hid the mistake: max=6000 returned 100 records with 200.
+func TestFetchRejectsMaxOutOfRange(t *testing.T) {
+	a := newAPI(t)
+	admin := client(nil)
+	if resp, out := req(t, admin, "POST", a.url+"/publish", "tok",
+		map[string]any{"topic": "colca/v1/_Metric/n-test/line1/temp", "payload": map[string]any{"v": 1.0}}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("seed: %d %v", resp.StatusCode, out)
+	}
+	for _, q := range []string{"0", "-5", "5001", "6000", "20000", "nonsense", "1.5"} {
+		resp, out := req(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=m1&max="+q, "tok", nil)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("max=%q: status %d, want 400: %v", q, resp.StatusCode, out)
+		}
+		if out["error"] != "max must be between 1 and 5000" {
+			t.Fatalf("max=%q: error %v", q, out["error"])
 		}
 	}
 }

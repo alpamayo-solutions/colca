@@ -74,7 +74,10 @@ A caller is one of:
   records move `next` like `contract` does; ack `next - 1` after an empty or
   short page so they do not stay unread on your cursor.
 - `max` defaults to 100 for `/fetch` (at most 5000) and to 1000 for `/kv`
-  (at most 10000). Pass `next` back as `after` until it is empty.
+  (at most 10000). A `max` that is not a whole number in that range is a
+  `400` naming the range (`max must be between 1 and 5000`); before colca
+  0.33.4 `/fetch` quietly served 100 records instead. Pass `next` back as
+  `after` until it is empty.
 - A page also ends before the record or entry that would take it past 8 MiB
   of stored data, and `next` resumes at that record or entry. A page always
   holds at least one. A short page is therefore no sign of the end: for

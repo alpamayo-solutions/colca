@@ -671,9 +671,16 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown stream " + strconv.Quote(stream)})
 			return
 		}
-		limit, _ := strconv.Atoi(q.Get("max"))
-		if limit <= 0 || limit > maxMax {
-			limit = defaultMax
+		// An out-of-range max is a bad request, as on /kv: falling back to the
+		// default page would hand a caller fewer records than it asked for.
+		limit := defaultMax
+		if raw := q.Get("max"); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 1 || n > maxMax {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("max must be between 1 and %d", maxMax)})
+				return
+			}
+			limit = n
 		}
 		prefix := q.Get("prefix")
 		// contract narrows the page to the given contracts (repeatable), like /kv's.

@@ -41,6 +41,24 @@ func TestFetchAsksForTheStreamAndCursorItWasGiven(t *testing.T) {
 	}
 }
 
+// Max 0 leaves the page size to the node. The node rejects max=0 with 400, so
+// the client must not send it.
+func TestFetchWithoutMaxLeavesThePageSizeToTheNode(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"records":[],"next":1}`))
+	}))
+	defer srv.Close()
+
+	if _, err := (&Client{BaseURL: srv.URL}).Fetch(context.Background(), "metrics", "c1", 0); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if gotQuery != "cursor=c1&stream=metrics" {
+		t.Fatalf("query = %q, want no max", gotQuery)
+	}
+}
+
 func TestFilteredFetchEncodesRepeatedSignalIDsAndDecodesGapAttribution(t *testing.T) {
 	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
