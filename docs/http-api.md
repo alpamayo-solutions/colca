@@ -16,7 +16,7 @@ A caller is one of:
 
 | Method and path | Who | Request | Response |
 |---|---|---|---|
-| `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","storage":{"state":"ok"}}` |
+| `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","storage":{"state":"ok"},"store":{"id":"…"},"uplink":{"state":"connected","since":"…"}}`; `store.changed` and `uplink.resync` appear after a [restore](operations.md#restoring-a-parent-from-a-backup) |
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}`, or `202` `{"stream":"logs","topic":"…","withheld":"…"}` without `offset` |
 | `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"stream":"logs","withheld":"…"} or {"error":"…","reason":"…"},…]}` |
@@ -56,7 +56,9 @@ A caller is one of:
   refused with `422` for every caller: it would skip records not yet written.
 - `/fetch` names the store the page was read from (`store`, new whenever the
   node's store is created from nothing, for instance after its data volume
-  was recreated). A consumer that passes it back as `"store"` on `/ack` gets
+  was recreated, and whenever its history may have regressed, as after a
+  restore from a backup; see
+  [Store incarnations](concepts.md#store-incarnations)). A consumer that passes it back as `"store"` on `/ack` gets
   `409` with `"store_changed":true` when the node's store is another one by
   then: the acked offsets name other records there, and the consumer should
   read the new store from its cursor instead. `store` is optional on `/ack`;
@@ -257,6 +259,7 @@ its stream from the pruner. Nothing removes them on its own.
 | `GET /enroll` | `?max=1000&after=TOKEN` | the locally enrolled entries, public keys only |
 | `DELETE /enroll/{ulid}` | `?retire=true` | `{"revoked":true,"offset":N}`; the same batch retires the records the identity authored about itself — its `_ServiceDetails`, at every mount it published one at. Only that identity may write them, so one left behind could never be retired by anyone. A plain revoke keeps what a child node replicated up: the child may be enrolled again and resumes from its own cursor. With `retire=true` (kind `node` only, `409` otherwise; `400` on a value that is not a boolean) the same batch also tombstones every current-state record the child and the nodes below it replicated, clears its replication marks, and deletes its definitions cursor (`downlink-def:<ulid>`) and every cursor in its own namespace (`<ulid>/...`), so nothing it left stands as live or holds retention and the same identity enrolled later starts clean (a plain revoke keeps the definitions cursor as the child's catch-up position); the response adds `"retired":true,"records_retired":N`. The tombstones replicate up, so ancestors retire their copies too |
 | `POST /enroll/{ulid}/drain` | | `{"ulid","offset","status":"draining"}`; decommissions a child node: new commands under its mount are refused, and once its queue is delivered or expired it is retired as with `DELETE ?retire=true`. `409` for an entry that is not a node or is already draining |
+| `POST /store/incarnation` | | `{"store":"NEW","previous":"OLD"}`; gives the node's store a new incarnation id, so every child re-syncs with it, its parent clears the marks kept for it and local consumers get `store_changed` on `/ack`. For a store restored or replaced without a neighbour noticing; see [Restoring a parent from a backup](operations.md#restoring-a-parent-from-a-backup) |
 | `GET /debug/state` | | the next offset of every stream |
 
 A node that is reachable only through the tree is administered with

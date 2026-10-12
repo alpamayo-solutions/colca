@@ -11,6 +11,8 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -85,16 +87,35 @@ type Client struct {
 	statusMu      sync.Mutex
 	statusChanged chan struct{}
 	// storeID is this node's store incarnation, sent with every replication
-	// batch so the parent can tell a rebuilt store from a resumed one.
-	storeID string
+	// batch so the parent can tell a rebuilt store from a resumed one. It is
+	// read per request: the incarnation can change while the node runs.
+	storeID func() string
+	// syncMu guards what this node keeps about the parent's store (resync.go):
+	// state, the epoch of the uplink positions, and the cancel of the poll in
+	// flight. It is never held across a request.
+	syncMu      sync.Mutex
+	state       parentState
+	stateLoaded bool
+	epoch       uint64
+	pollCancel  context.CancelFunc
+	// resyncWanted is set by the uplink loop when the parent refused a push
+	// for a re-sync; the downlink loop runs the handshake and clears it.
+	resyncWanted atomic.Bool
+	// replaying is true while a re-sync still sends records again, so the
+	// uplink loop checks for its completion only then.
+	replaying atomic.Bool
 	// logs decides which logs-stream records rise (parent.logs). The default
 	// forwards WARNING and above.
 	logs logForwarding
 }
 
-// SetStoreID names the store incarnation replication batches carry (see
-// store.Store.StoreID). Call it before the uplink starts.
-func (c *Client) SetStoreID(id string) { c.storeID = id }
+// SetStoreID names the store incarnation replication batches carry, for a
+// pusher that has no store of its own. Call it before the uplink starts.
+func (c *Client) SetStoreID(id string) { c.storeID = func() string { return id } }
+
+// FollowStore makes replication batches carry st's incarnation as it is when
+// each is sent (see store.Store.StoreID). Call it before the uplink starts.
+func (c *Client) FollowStore(st *store.Store) { c.storeID = st.StoreID }
 
 // SetLogForwarding applies a validated parent.logs block. Call it before the
 // uplink starts; without it the client forwards WARNING and above.
@@ -148,6 +169,7 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 		maxReplicateBody: replicateBodyLimit(&config.Config{Limits: limits}),
 		links:            newLinkState(),
 		logs:             newLogForwarding(config.ParentLogs{}),
+		storeID:          func() string { return "" },
 	}
 	cl.status.Store(Status{State: UplinkConnecting, Since: time.Now().UTC()})
 	return cl, nil
@@ -158,18 +180,31 @@ func NewClient(baseURL, parentPubHex string, id *identity.Identity, maxRecordByt
 func (c *Client) ParentPub() string { return c.parentPub }
 
 func (c *Client) Replicate(stream string, recs []store.ReplRecord) (hwm uint64, err error) {
-	hwm, _, err = c.replicate(context.Background(), stream, recs)
+	hwm, _, err = c.replicate(context.Background(), envelope{store: c.storeID(), stream: stream}, recs)
 	return hwm, err
+}
+
+// envelope is what a replication request says besides its records.
+type envelope struct {
+	// store is this node's own incarnation.
+	store  string
+	stream string
+	// handshake is set by the uplink loop: the request then states the parent
+	// incarnation this node recorded and the highest offset of stream the
+	// parent confirmed, and the parent refuses it when they no longer hold.
+	handshake bool
+	parent    string
+	acked     uint64
 }
 
 // replicate is the context-aware implementation behind Replicate and RunUplink.
 // nowMS is the parent's clock from the response; RunUplink applies it and
 // Replicate drops it.
-func (c *Client) replicate(ctx context.Context, stream string, recs []store.ReplRecord) (hwm uint64, nowMS int64, err error) {
+func (c *Client) replicate(ctx context.Context, env envelope, recs []store.ReplRecord) (hwm uint64, nowMS int64, err error) {
 	if len(recs) > maxReplicateRecords {
 		return 0, 0, fmt.Errorf("replicate: batch has %d records, maximum is %d", len(recs), maxReplicateRecords)
 	}
-	body, err := marshalReplication(c.storeID, stream, recs)
+	body, err := marshalReplication(env, recs)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -195,7 +230,7 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return 0, 0, &replError{Route: "replicate to " + c.base, Status: resp.StatusCode, Body: readReason(resp),
-			RetryAfter: retryAfterHeader(resp)}
+			RetryAfter: retryAfterHeader(resp), Store: resp.Header.Get(storeHeader)}
 	}
 	var out struct {
 		HWM   uint64 `json:"hwm"`
@@ -207,7 +242,7 @@ func (c *Client) replicate(ctx context.Context, stream string, recs []store.Repl
 	return out.HWM, out.NowMS, nil
 }
 
-func marshalReplication(storeID, stream string, recs []store.ReplRecord) ([]byte, error) {
+func marshalReplication(env envelope, recs []store.ReplRecord) ([]byte, error) {
 	wire := make([]wireRec, len(recs))
 	for i, r := range recs {
 		wire[i] = wireRec{
@@ -216,9 +251,17 @@ func marshalReplication(storeID, stream string, recs []store.ReplRecord) ([]byte
 			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups, AC: r.ActorClient,
 		}
 	}
-	msg := map[string]any{"stream": stream, "records": wire}
-	if storeID != "" {
-		msg["store"] = storeID
+	msg := map[string]any{"stream": env.stream, "records": wire}
+	if env.store != "" {
+		msg["store"] = env.store
+	}
+	if env.handshake {
+		// Always present, also empty: its presence is what tells the parent
+		// this node can re-sync.
+		msg["parent"] = env.parent
+		if env.acked > 0 {
+			msg["acked"] = env.acked
+		}
 	}
 	return json.Marshal(msg)
 }
@@ -226,8 +269,8 @@ func marshalReplication(storeID, stream string, recs []store.ReplRecord) ([]byte
 // fitReplicationBatch returns the largest non-empty prefix whose exact JSON
 // envelope fits the server contract. The normal 200-record batch needs one
 // marshal; binary search is used only for unusually large records.
-func fitReplicationBatch(storeID, stream string, batch []store.ReplRecord, maxBytes int64) ([]store.ReplRecord, error) {
-	body, err := marshalReplication(storeID, stream, batch)
+func fitReplicationBatch(env envelope, batch []store.ReplRecord, maxBytes int64) ([]store.ReplRecord, error) {
+	body, err := marshalReplication(env, batch)
 	if err != nil || int64(len(body)) <= maxBytes {
 		return batch, err
 	}
@@ -235,7 +278,7 @@ func fitReplicationBatch(storeID, stream string, batch []store.ReplRecord, maxBy
 	best := 0
 	for low <= high {
 		mid := low + (high-low)/2
-		body, err := marshalReplication(storeID, stream, batch[:mid])
+		body, err := marshalReplication(env, batch[:mid])
 		if err != nil {
 			return nil, err
 		}
@@ -279,6 +322,17 @@ type downResult struct {
 	// cursor for this parent must start. Only the hello response carries it; 0 means
 	// the parent sent none.
 	Head uint64
+	// Store is the incarnation of the parent's store, "" from a parent that
+	// predates incarnations.
+	Store string
+	// The rest is the hello response's handshake. Resync: the parent asks for
+	// a re-sync. Resume and DefResume: where this node reads commands and
+	// definitions from after one. HWMs: the highest offset of each uplink
+	// stream the parent holds from this node.
+	Resync    bool
+	Resume    uint64
+	DefResume uint64
+	HWMs      map[string]uint64
 }
 
 // Downlink polls the parent once. gap is non-nil when the position falls in a
@@ -328,9 +382,43 @@ func (c *Client) Poll(ctx context.Context, after, defAfter uint64, limit int, ti
 // hello is the first contact: an immediate answer, with no long poll and no
 // records consumed, that returns the position and any waiting definitions in one
 // round trip.
-func (c *Client) hello(ctx context.Context, defAfter uint64) (downResult, error) {
-	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=1&max=1&hello=1&def_after=%d",
-		c.base, defAfter), 10*time.Second)
+//
+// It is also the handshake: this node states the parent incarnation it
+// recorded, its own, how far it read and what the parent confirmed, and the
+// parent answers where its store stands (see resync.go).
+func (c *Client) hello(ctx context.Context, g greeting) (downResult, error) {
+	q := url.Values{}
+	q.Set("hello", "1")
+	q.Set("max", "1")
+	q.Set("after", strconv.FormatUint(max(g.after, 1), 10))
+	q.Set("def_after", strconv.FormatUint(max(g.defAfter, 1), 10))
+	q.Set("parent", c.parentStore())
+	q.Set("store", c.storeID())
+	if v := formatAcked(g.acked); v != "" {
+		q.Set("acked", v)
+	}
+	return c.downlinkURL(ctx, c.base+"/downlink?"+q.Encode(), 10*time.Second)
+}
+
+// greeting is what a node states about its positions in a hello: the next
+// command and definition offsets it reads, and per uplink stream the highest
+// offset the parent confirmed.
+type greeting struct {
+	after, defAfter uint64
+	acked           map[string]uint64
+}
+
+// greet reads this node's positions against its parent from st.
+func (c *Client) greet(st *store.Store) greeting {
+	g := greeting{
+		after:    st.CursorGet(uns.DownlinkCursor(c.parentPub), downlinkStream),
+		defAfter: st.CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream),
+		acked:    map[string]uint64{},
+	}
+	for _, stream := range uplinkStreams() {
+		g.acked[stream] = st.AckedMark(c.parentPub, stream)
+	}
+	return g
 }
 
 // downlink is the context-aware implementation behind the wrappers and
@@ -339,6 +427,14 @@ func (c *Client) hello(ctx context.Context, defAfter uint64) (downResult, error)
 func (c *Client) downlink(ctx context.Context, after, defAfter uint64, limit int, timeout time.Duration) (downResult, error) {
 	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d",
 		c.base, after, defAfter, limit), timeout)
+}
+
+// poll is downlink for the replication loop: it states the parent incarnation
+// this node recorded, so a parent whose store changed refuses instead of
+// answering a position of another history.
+func (c *Client) poll(ctx context.Context, after, defAfter uint64) (downResult, error) {
+	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d&parent=%s&store=%s",
+		c.base, after, defAfter, replBatch, url.QueryEscape(c.parentStore()), url.QueryEscape(c.storeID())), downlinkWait)
 }
 
 func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Duration) (downResult, error) {
@@ -356,17 +452,23 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return downResult{}, &replError{Route: "downlink from " + c.base, Status: resp.StatusCode, Body: readReason(resp)}
+		return downResult{}, &replError{Route: "downlink from " + c.base, Status: resp.StatusCode, Body: readReason(resp),
+			Store: resp.Header.Get(storeHeader)}
 	}
 	var out struct {
-		Records     []wireRec      `json:"records"`
-		Next        uint64         `json:"next"`
-		Gap         *store.GapSpan `json:"gap"`
-		NowMS       int64          `json:"now_ms"`
-		Ancestry    *uns.Ancestry  `json:"ancestry"`
-		Definitions []wireRec      `json:"definitions"`
-		DefNext     uint64         `json:"def_next"`
-		Head        uint64         `json:"head"`
+		Records     []wireRec         `json:"records"`
+		Next        uint64            `json:"next"`
+		Gap         *store.GapSpan    `json:"gap"`
+		NowMS       int64             `json:"now_ms"`
+		Ancestry    *uns.Ancestry     `json:"ancestry"`
+		Definitions []wireRec         `json:"definitions"`
+		DefNext     uint64            `json:"def_next"`
+		Head        uint64            `json:"head"`
+		Store       string            `json:"store"`
+		Resync      bool              `json:"resync"`
+		Resume      uint64            `json:"resume"`
+		DefResume   uint64            `json:"def_resume"`
+		HWMs        map[string]uint64 `json:"hwms"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return downResult{}, err
@@ -380,6 +482,11 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 		Definitions: toDownRecs(out.Definitions),
 		DefNext:     out.DefNext,
 		Head:        out.Head,
+		Store:       out.Store,
+		Resync:      out.Resync,
+		Resume:      out.Resume,
+		DefResume:   out.DefResume,
+		HWMs:        out.HWMs,
 	}, nil
 }
 
@@ -484,6 +591,9 @@ func adoptLegacy(c *Client, st *store.Store, legacyName, scopedName, stream stri
 // calls it for users of the replication loop outside that lifecycle. Repeating
 // it never rewinds a cursor or refreshes an existing cursor's staleness timestamp.
 func PrepareUplink(c *Client, st *store.Store) error {
+	if err := c.loadState(st); err != nil {
+		return err
+	}
 	up := uns.UplinkCursor(c.parentPub)
 	for _, stream := range uplinkStreams() {
 		if st.CursorGet(up, stream) > 1 {
@@ -499,46 +609,47 @@ func PrepareUplink(c *Client, st *store.Store) error {
 	return nil
 }
 
-// initDownlinkCursors settles definitions and commands after hello. Definitions
-// start at 1; first-contact commands start at the parent's head because earlier
-// commands were not meant for this attachment. Existing scoped positions and
-// legacy positions are preserved. m may be nil.
-func initDownlinkCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64) {
-	st := eng.Store()
-
-	// Definitions: case 3 IS the default position, so there is nothing to write
-	// unless a legacy cursor has a position to hand over.
-	def := uns.DownlinkDefCursor(c.parentPub)
-	if st.CursorGet(def, downlinkDefStream) <= 1 {
+// adoptLegacyDownlink carries the downlink positions kept under the names from
+// before cursors were scoped by parent over to the scoped names. It needs no
+// contact and runs before the first hello, which states these positions.
+func adoptLegacyDownlink(c *Client, st *store.Store) {
+	if def := uns.DownlinkDefCursor(c.parentPub); st.CursorGet(def, downlinkDefStream) <= 1 {
 		adoptLegacy(c, st, legacyDownlinkDefCursor, def, downlinkDefStream)
 	}
+	adoptLegacy(c, st, legacyDownlinkCursor, uns.DownlinkCursor(c.parentPub), downlinkStream)
+}
 
+// initDownlinkCursors settles the commands position after hello. First-contact
+// commands start at the parent's head because earlier commands were not meant
+// for this attachment; an existing position is preserved. Definitions start at
+// 1, which is the default position, so there is nothing to write. m may be nil.
+func initDownlinkCursors(c *Client, eng *engine.Engine, m *metrics.Metrics, head uint64) {
+	st := eng.Store()
 	// Commands need the exact case, so probe for the key: CursorGet returns 1 both
 	// for "never met this parent" and for "met it while its stream was empty", and
 	// the second must deliver from offset 1 so a command queued while the target was
 	// down still runs.
 	cmd := uns.DownlinkCursor(c.parentPub)
-	if !adoptLegacy(c, st, legacyDownlinkCursor, cmd, downlinkStream) { // case 2
-		// First contact only: CursorSetIfAbsent leaves an existing cursor alone and
-		// records even position 1. With head 0 nothing is claimed; a caller with a head
-		// settles it.
-		if head > 0 {
-			if _, err := st.CursorSetIfAbsent(cmd, downlinkStream, head); err != nil {
-				// Nothing recorded, so CursorGet returns 1 and the first poll reads commands
-				// issued before this node attached.
-				c.log.Warn("first-contact commands cursor not recorded — this node polls from 1 and may "+
-					"execute commands issued under its mount before it attached",
-					"cursor", cmd, "head", head, "err", err)
-			}
+	// First contact only: CursorSetIfAbsent leaves an existing cursor alone and
+	// records even position 1. With head 0 nothing is claimed; a caller with a head
+	// settles it.
+	if head > 0 {
+		if _, err := st.CursorSetIfAbsent(cmd, downlinkStream, head); err != nil {
+			// Nothing recorded, so CursorGet returns 1 and the first poll reads commands
+			// issued before this node attached.
+			c.log.Warn("first-contact commands cursor not recorded — this node polls from 1 and may "+
+				"execute commands issued under its mount before it attached",
+				"cursor", cmd, "head", head, "err", err)
 		}
 	}
-	// A position past the parent's head means the parent pruned past it or was
-	// rebuilt empty, and this node would stay deaf to commands without an error.
-	// Only report it: rewinding would re-deliver commands that already ran.
+	// A position past the head of a parent that sends no store incarnation: it
+	// pruned past the position or was rebuilt, and this node stays deaf to commands
+	// without an error. A parent that sends one is re-synced with instead
+	// (resync.go); this one can only be reported.
 	if pos := st.CursorGet(cmd, downlinkStream); head > 0 && pos > head {
-		c.log.Warn("downlink commands cursor is past the parent's head — the parent pruned past "+
-			"this position or was rebuilt; this node will receive no commands until the parent's "+
-			"stream grows past it",
+		c.log.Warn("downlink commands cursor is past the parent's head — the parent's store was restored "+
+			"or rebuilt and its colca predates the re-sync; this node will receive no commands until the "+
+			"parent's stream grows past it",
 			"position", pos, "parent_head", head, "parent_key", short(c.parentPub))
 		m.DownlinkCursorBeyondHead()
 	}
@@ -580,6 +691,13 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 	// left alone. A lane waits it out even while other lanes make progress.
 	busyUntil := map[string]time.Time{}
 	pushOnce := func(stream string, filter func(string) bool) (scanned, aborted bool) {
+		if c.resyncWanted.Load() {
+			// The parent's store is not the one this node's positions belong
+			// to. Every lane waits for the downlink loop to re-sync: a batch
+			// stored now would move the parent's mark past what it lacks.
+			retryPending = true
+			return false, false
+		}
 		if until, ok := busyUntil[stream]; ok {
 			if time.Now().Before(until) {
 				retryPending = true
@@ -587,6 +705,13 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			}
 			delete(busyUntil, stream)
 		}
+		// The epoch and the parent incarnation are read together and before the
+		// cursor: a page read at a position a re-sync has since moved names the
+		// incarnation recorded before it. The parent refuses it when that is
+		// another than its own, so the page cannot move its mark past the range
+		// about to be sent again. (A re-sync that keeps the incarnation has no
+		// such range: the parent's store did not regress.)
+		epoch, parentStore := c.uplinkEpoch()
 		from := eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), stream)
 		// A cursor below the local LWM means retention pruned past it after the parent
 		// was gone longer than the staleness window. The gap marker already tells the
@@ -609,6 +734,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			return false, false // nothing scanned: this lane is empty
 		}
 		pushed := false
+		var hwm uint64
 		batch := make([]store.ReplRecord, 0, len(recs))
 		allowed := pushable(filter)
 		// Records the log policy keeps home. Like every filtered record, the cursor
@@ -646,7 +772,9 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		}
 		if len(batch) > 0 {
 			fullBatchLen := len(batch)
-			batch, err = fitReplicationBatch(c.storeID, stream, batch, c.maxReplicateBody)
+			env := envelope{store: c.storeID(), stream: stream, handshake: true, parent: parentStore,
+				acked: eng.Store().AckedMark(c.parentPub, stream)}
+			batch, err = fitReplicationBatch(env, batch, c.maxReplicateBody)
 			if err != nil {
 				c.log.Error("uplink batch cannot fit the replication request bound", "stream", stream, "err", err)
 				retryPending = true
@@ -656,7 +784,8 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			if len(batch) < fullBatchLen {
 				next = batch[len(batch)-1].ChildOffset + 1
 			}
-			hwm, nowMS, err := c.replicate(ctx, stream, batch)
+			var nowMS int64
+			hwm, nowMS, err = c.replicate(ctx, env, batch)
 			if err == nil && hwm < batch[len(batch)-1].ChildOffset {
 				err = fmt.Errorf("parent acknowledged offset %d below batch end %d", hwm, batch[len(batch)-1].ChildOffset)
 			}
@@ -672,6 +801,16 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				// without a trace over what is usually a config mismatch (max_record_bytes).
 				// colca_uplink_refused_total and this error make the stalled lane visible.
 				var refusal *replError
+				if errors.As(err, &refusal) && refusal.StoreChanged() {
+					// Not a refusal of the batch: the parent's store changed.
+					// Hand it to the downlink loop and hold every lane.
+					c.requestResync()
+					c.log.Warn("uplink held: the parent's store has another incarnation than this node recorded — "+
+						"re-syncing before anything else is sent",
+						"stream", stream, "parent", c.base, "parent_store", refusal.Store, "recorded", parentStore)
+					retryPending = true
+					return false, false
+				}
 				refused := errors.As(err, &refusal) && refusal.Refused()
 				busy := refusal != nil && refusal.Busy()
 				if busy {
@@ -715,12 +854,25 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			// Every /replicate response carries the parent's clock; keep the offset fresh
 			// whichever stream triggered the push.
 			eng.ApplyClockSample(nowMS)
+			if hwm >= eng.Store().NextOffset(stream) &&
+				(env.store != c.storeID() || c.ownStoreBehind(eng.Store(), m, stream, hwm)) {
+				// The parent holds an offset this store has not handed out: it
+				// dropped the page as records it has. The store has a new
+				// incarnation, taken just now or while the page was out, and
+				// the cursor stays: the page is sent again under it.
+				return true, false
+			}
 			pushed = true
 		}
-		eng.Store().CursorAck(uns.UplinkCursor(c.parentPub), stream, next)
+		if !c.ackUplink(eng.Store(), epoch, stream, next, pushed, hwm) {
+			// A re-sync placed the cursors while this page was out: read again
+			// from where they stand now.
+			return true, false
+		}
 		if pushed {
 			m.UplinkPushed(stream, time.Now())
 		}
+		c.noteReplayProgress(eng.Store(), m)
 		for _, w := range withheld {
 			if w.offset < next { // past a trimmed batch's end the page is read again
 				m.UplinkLogWithheld(w.level)
@@ -795,83 +947,114 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 // RunDownlink fetches from the parent and hands the result to the engine:
 // commands run at their target, definitions are applied where they land. m may
 // be nil.
+//
+// Every contact after an interruption starts with the handshake (hello): the
+// parent may have come back on another store, and this node must know before it
+// asks from a position or lets the uplink push.
 func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan struct{}) {
 	ctx, cancel := contextFromStop(stop)
 	defer cancel()
-	// First contact: learn the position and waiting definitions in one round trip.
-	// Retry until it answers: a child with no cursor for this parent must adopt the
-	// head before its first poll, or it would receive every command issued before it
-	// attached. While hello fails the parent is unreachable anyway.
-	for {
-		res, err := c.hello(ctx, eng.Store().CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream))
-		if err == nil {
-			// A parent without a head predates the field, as during a rolling upgrade.
-			// There is nothing to adopt, so a missing commands cursor stays at 1 and the
-			// poll delivers commands issued before this node attached. This is logged on
-			// every start against such a parent, even when a cursor already exists.
-			if res.Head == 0 {
-				c.log.Warn("parent answered hello without a command head — it predates parent-scoped "+
-					"cursors; if this node has no commands cursor for it yet, that cursor starts at 1 "+
-					"and it may execute commands issued under its mount before it attached",
-					"parent", c.base, "parent_key", short(c.parentPub))
-				m.DownlinkHeadAbsent()
-			}
-			// Before anything is applied, settle first-contact cursors, including adopting
-			// the head from this response before the poll reads commands.
-			initDownlinkCursors(c, eng, m, res.Head)
-			if res.Ancestry != nil {
-				eng.SetAncestry(*res.Ancestry)
-			}
-			_ = applyDefinitions(c, eng, m, res)
-			if wasFailing, attempts, waited := c.links.Recovered("hello", time.Now()); wasFailing {
-				c.log.Info("first contact with the parent succeeded",
-					"parent", c.base, "attempts", attempts, "waited", waited.Round(time.Second))
-			}
-			c.setStatus(UplinkConnected)
-			break
-		}
-		c.setStatus(classifyUplinkErr(err))
+	st := eng.Store()
+	if err := c.loadState(st); err != nil {
+		c.log.Error("downlink not started: what this node recorded about its parent cannot be read", "err", err)
+		return
+	}
+	m.SetUplinkResyncActive(c.replaying.Load())
+	adoptLegacyDownlink(c, st)
+	// Read before the first command is taken: it is what keeps a command this
+	// node already holds from running again when the parent hands it at
+	// another offset.
+	memory, err := loadCommandMemory(eng)
+	if err != nil {
+		c.log.Error("downlink not started: the commands this node holds cannot be read", "err", err)
+		return
+	}
+	stopped := func() bool {
 		select {
 		case <-stop:
-			return // the request was aborted by our own shutdown
+			return true
 		default:
-		}
-		if report, attempts, down := c.links.Failed("hello", time.Now()); report {
-			c.log.Warn("first contact with the parent has not succeeded yet (retrying) — "+
-				"its command head must be known before the first poll",
-				"parent", c.base, "attempts", attempts, "down_for", down.Round(time.Second), "err", err)
-		}
-		m.DownlinkFetchFailed()
-		select {
-		case <-stop:
-			return
-		case <-time.After(retryAfter):
+			return false
 		}
 	}
-	for {
+	pause := func() bool {
 		select {
 		case <-stop:
-			return
-		default:
+			return false
+		case <-time.After(retryAfter):
+			return true
 		}
-		after := eng.Store().CursorGet(uns.DownlinkCursor(c.parentPub), downlinkStream)
-		defAfter := eng.Store().CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream)
-		res, err := c.downlink(ctx, after, defAfter, replBatch, downlinkWait)
+	}
+	// handshake retries hello until the parent answered and this node is
+	// placed against its store. It returns false on shutdown. first is the
+	// contact at start: a child with no cursor for this parent must adopt the
+	// head before its first poll, or it would receive every command issued
+	// before it attached.
+	handshake := func(first bool) bool {
+		for {
+			res, err := c.hello(ctx, c.greet(st))
+			if err == nil && c.settle(eng, m, res, first) {
+				if wasFailing, attempts, waited := c.links.Recovered("hello", time.Now()); wasFailing {
+					c.log.Info("contact with the parent succeeded",
+						"parent", c.base, "attempts", attempts, "waited", waited.Round(time.Second))
+				}
+				c.setStatus(UplinkConnected)
+				return true
+			}
+			if stopped() {
+				return false // the request was aborted by our own shutdown
+			}
+			if err != nil {
+				c.setStatus(classifyUplinkErr(err))
+				if report, attempts, down := c.links.Failed("hello", time.Now()); report {
+					c.log.Warn("contact with the parent has not succeeded yet (retrying) — "+
+						"its store and command head must be known before the next poll",
+						"parent", c.base, "attempts", attempts, "down_for", down.Round(time.Second), "err", err)
+				}
+				m.DownlinkFetchFailed()
+			}
+			if !pause() {
+				return false
+			}
+		}
+	}
+	if !handshake(true) {
+		return
+	}
+	rehello := false
+	for {
+		if stopped() {
+			return
+		}
+		if rehello || c.resyncWanted.Load() {
+			if !handshake(false) {
+				return
+			}
+			rehello = false
+		}
+		after := st.CursorGet(uns.DownlinkCursor(c.parentPub), downlinkStream)
+		defAfter := st.CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream)
+		res, err := c.pollInterruptibly(ctx, after, defAfter)
 		recs, next, gap, nowMS, ancestry := res.Records, res.Next, res.Gap, res.NowMS, res.Ancestry
 		if err != nil {
-			c.setStatus(classifyUplinkErr(err))
-			select {
-			case <-stop:
+			if stopped() {
 				return // the request was aborted by our own shutdown
-			default:
 			}
+			if c.resyncWanted.Load() {
+				continue // the uplink loop ended the poll: re-sync first
+			}
+			var refusal *replError
+			if errors.As(err, &refusal) && refusal.StoreChanged() {
+				c.resyncWanted.Store(true)
+				continue
+			}
+			c.setStatus(classifyUplinkErr(err))
 			c.log.Warn("downlink fetch failed (will retry)", "err", err)
 			m.DownlinkFetchFailed()
-			select {
-			case <-stop:
+			if !pause() {
 				return
-			case <-time.After(retryAfter):
 			}
+			rehello = true
 			continue
 		}
 		c.setStatus(UplinkConnected)
@@ -897,14 +1080,25 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		// failure (full disk, I/O error, record over max_record_bytes) says nothing about
 		// the record, and acking past it would silently drop the command.
 		ackTo := next
+		rehanded := c.commandsRehandedBelow()
 		for _, r := range recs {
+			// A command this node already holds is the same command at whatever
+			// offset it arrives: the parent's store regressed and reuses offsets,
+			// or the command came down to the parent a second time.
+			if memory.holds(r.Topic, r.Payload, r.TS) && (hasCorrelationID(r.Payload) || r.ParentOffset < rehanded) {
+				c.log.Warn("command already held by this node — not stored or executed again",
+					"topic", r.Topic, "parent_offset", r.ParentOffset)
+				m.DownlinkCommandKnown()
+				continue
+			}
 			// The record and the cursor past it are one write: a crash or a lost
 			// response makes the parent hand it again, and it is then recognized as
 			// stored instead of being stored and executed a second time.
-			if _, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
+			stored, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
 				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
-			}, &store.CursorAdvance{Name: uns.DownlinkCursor(c.parentPub), Stream: downlinkStream, To: r.ParentOffset + 1}); err != nil {
+			}, &store.CursorAdvance{Name: uns.DownlinkCursor(c.parentPub), Stream: downlinkStream, To: r.ParentOffset + 1})
+			if err != nil {
 				var refused *engine.RejectError
 				if errors.As(err, &refused) {
 					c.log.Error("downlink command refused by this node — skipping past it",
@@ -916,22 +1110,137 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 				ackTo = r.ParentOffset
 				break
 			}
+			if stored.Persisted {
+				memory.add(r.Topic, r.Payload, r.TS, stored.Offset, st.LWM("commands"))
+			}
 		}
 		progressed := applyDefinitions(c, eng, m, res)
 		if ackTo > after {
-			eng.Store().CursorAck(uns.DownlinkCursor(c.parentPub), downlinkStream, ackTo)
+			st.CursorAck(uns.DownlinkCursor(c.parentPub), downlinkStream, ackTo)
 			progressed = true
 		}
 		if !progressed {
 			// Neither cursor moved. Usually that is an idle long poll, but a poll that
 			// answered immediately without progress would otherwise spin at the rate limit.
-			select {
-			case <-stop:
+			if !pause() {
 				return
-			case <-time.After(retryAfter):
 			}
 		}
 	}
+}
+
+// pollInterruptibly is one poll that requestResync can end.
+func (c *Client) pollInterruptibly(ctx context.Context, after, defAfter uint64) (downResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	c.syncMu.Lock()
+	c.pollCancel = cancel
+	c.syncMu.Unlock()
+	defer func() {
+		c.syncMu.Lock()
+		c.pollCancel = nil
+		c.syncMu.Unlock()
+	}()
+	if c.resyncWanted.Load() {
+		// Asked for between the loop's check and the cancel being in place.
+		return downResult{}, context.Canceled
+	}
+	return c.poll(ctx, after, defAfter)
+}
+
+// settle places this node against the store the parent described in a hello
+// response, and applies what the response carries. It reports false when a
+// re-sync could not be persisted: nothing moved, and the handshake is repeated.
+func (c *Client) settle(eng *engine.Engine, m *metrics.Metrics, res downResult, first bool) bool {
+	st := eng.Store()
+	// A parent without a head predates the field, as during a rolling upgrade.
+	// There is nothing to adopt, so a missing commands cursor stays at 1 and the
+	// poll delivers commands issued before this node attached. This is logged on
+	// every start against such a parent, even when a cursor already exists.
+	if first && res.Head == 0 {
+		c.log.Warn("parent answered hello without a command head — it predates parent-scoped "+
+			"cursors; if this node has no commands cursor for it yet, that cursor starts at 1 "+
+			"and it may execute commands issued under its mount before it attached",
+			"parent", c.base, "parent_key", short(c.parentPub))
+		m.DownlinkHeadAbsent()
+	}
+	ownStoreRegressed := c.checkOwnStore(st, m, res)
+	switch judgeParent(c.parentStore(), res.Store, res.Resync) {
+	case parentChanged:
+		if ownStoreRegressed {
+			// The parent's marks name offsets of the incarnation this store
+			// just left; it clears them at the next push. Nothing of this
+			// node's streams is placed by them.
+			res.HWMs = nil
+		}
+		if !c.resync(eng, m, res, !ownStoreRegressed) {
+			return false
+		}
+	case parentFirstSeen:
+		c.recordParent(st, res.Store)
+	case parentUnchanged, parentPredatesIncarnations:
+	}
+	c.resyncWanted.Store(false)
+	// Before anything is applied, settle first-contact cursors, including adopting
+	// the head from this response before the poll reads commands.
+	initDownlinkCursors(c, eng, m, res.Head)
+	if res.Ancestry != nil {
+		eng.SetAncestry(*res.Ancestry)
+	}
+	_ = applyDefinitions(c, eng, m, res)
+	return true
+}
+
+// checkOwnStore compares the parent's marks with this node's own streams and
+// gives this store a new incarnation when one proves it regressed. It reports
+// whether it did.
+func (c *Client) checkOwnStore(st *store.Store, m *metrics.Metrics, res downResult) bool {
+	for _, stream := range uplinkStreams() {
+		if c.ownStoreBehind(st, m, stream, res.HWMs[stream]) {
+			return true
+		}
+	}
+	return false
+}
+
+// ownStoreBehind handles a parent's mark at or past the head of this node's own
+// stream: an offset this store has not handed out. The store regressed,
+// typically restored from a backup, and will hand those offsets out again for
+// other records; the parent would drop them as already stored and report them
+// delivered. A new incarnation makes the parent clear its marks instead. It
+// reports whether the store took one.
+func (c *Client) ownStoreBehind(st *store.Store, m *metrics.Metrics, stream string, parentHWM uint64) bool {
+	head := st.NextOffset(stream)
+	if head == 0 || parentHWM < head {
+		return false
+	}
+	if !st.MayHaveRegressed() {
+		// The incarnation began in this run, so its history did not regress.
+		// The parent holds marks of an earlier one and did not clear them: its
+		// colca predates store incarnations. Nothing here changes that.
+		return false
+	}
+	previous := st.StoreID()
+	id, err := st.Reincarnate(fmt.Sprintf("the parent holds this node's %s records up to offset %d, the stream here ends at %d",
+		stream, parentHWM, head-1))
+	if err != nil {
+		c.log.Error("this store is behind what its parent holds of it, and could not take a new incarnation — "+
+			"the parent drops what this node writes at offsets it holds already", "stream", stream, "err", err)
+		return false
+	}
+	m.StoreReincarnated("regression")
+	c.log.Error("this store is behind what its parent holds of it — it was restored from a backup. It takes "+
+		"a new incarnation, so the parent accepts what it writes from here on; what it held after the backup is lost here",
+		"stream", stream, "parent_holds_up_to", parentHWM, "stream_ends_at", head-1, "previous_store", previous, "store", id)
+	return true
+}
+
+// hasCorrelationID reports whether a command names itself.
+func hasCorrelationID(payload []byte) bool {
+	var body struct {
+		CorrelationID string `json:"correlation_id"`
+	}
+	return json.Unmarshal(payload, &body) == nil && body.CorrelationID != ""
 }
 
 // applyDefinitions stores what the parent handed down, advances the definitions
@@ -944,6 +1253,9 @@ func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res dow
 	cursor := uns.DownlinkDefCursor(c.parentPub)
 	advanceTo := res.DefNext
 	for _, r := range res.Definitions {
+		if holdsDefinition(eng.Store(), r) {
+			continue // read again after a re-sync: nothing to store or hand on
+		}
 		if _, err := eng.IngestDownlinkDefinitionAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
 			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
@@ -983,4 +1295,20 @@ func contextFromStop(stop <-chan struct{}) (context.Context, context.CancelFunc)
 		}
 	}()
 	return ctx, cancel
+}
+
+// holdsDefinition reports whether r is, byte for byte, the definition this node
+// already holds at that topic. After a re-sync a node reads definitions again
+// from where the parent's store stands; storing one it holds would only hand
+// the same record to every node below.
+func holdsDefinition(st *store.Store, r DownRec) bool {
+	if len(r.Payload) == 0 {
+		return false // a tombstone is always applied
+	}
+	p, err := uns.Parse(r.Topic)
+	if err != nil {
+		return false
+	}
+	held, ok, err := st.KVGet(p.Path, p.NodeID, r.Topic)
+	return err == nil && ok && held.TS == r.TS && bytes.Equal(held.Payload, r.Payload)
 }

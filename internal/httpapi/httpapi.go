@@ -377,11 +377,30 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			payload["uplink"] = map[string]any{"state": "none"}
 		case uplink != nil:
 			st := uplink.Status()
-			payload["uplink"] = map[string]any{
+			up := map[string]any{
 				"state": string(st.State),
 				"since": st.Since.Format(time.RFC3339),
 			}
+			// The last re-sync with a parent whose store changed incarnation:
+			// "replaying" while this node still sends again what the parent
+			// lacks, and the ranges it could not send again. The link state
+			// stays what it is, since the link is up throughout.
+			if resync := uplink.ResyncStatus(e.Store()); resync != nil {
+				up["resync"] = resync
+			}
+			payload["uplink"] = up
 		}
+		// store names the incarnation of this node's store, and why and when
+		// it last changed: a node restored from a backup says so here.
+		storeInfo := map[string]any{"id": e.Store().StoreID()}
+		if change, ok := e.Store().LastIncarnationChange(); ok {
+			storeInfo["changed"] = map[string]any{
+				"at":       time.UnixMilli(change.AtMS).UTC().Format(time.RFC3339),
+				"reason":   change.Reason,
+				"previous": change.Previous,
+			}
+		}
+		payload["store"] = storeInfo
 		// storage stays 200 like uplink: restarting does not free a full disk, the
 		// operator has to, and the state tells them to look.
 		payload["storage"] = e.Store().Health()
@@ -1298,6 +1317,25 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 			entries, next := reg.ListPage(after, pageSize)
 			writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "next": next})
+		}))
+
+		// POST /store/incarnation gives this node's store a new incarnation id,
+		// for a store whose history regressed without a peer proving it: a
+		// volume restored from a backup that no child was ahead of. Every
+		// child re-syncs at its next request, the node's own parent clears the
+		// marks it kept for it, and local consumers see a store change on
+		// /ack.
+		mux.HandleFunc("POST /store/incarnation", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
+			previous := e.Store().StoreID()
+			id, err := e.Store().Reincarnate("operator: POST /store/incarnation")
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			m.StoreReincarnated("operator")
+			slog.Default().Warn("store incarnation changed by an operator: children re-sync with this node",
+				"previous_store", previous, "store", id)
+			writeJSON(w, http.StatusOK, map[string]any{"store": id, "previous": previous})
 		}))
 
 		mux.HandleFunc("GET /debug/state", adminFor(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request) {

@@ -24,6 +24,10 @@ alert first:
 | `colca_rejected_publishes_total` | rises: clients send what the node refuses; `reason` says why |
 | `colca_auth_rejections_total` | rises: unknown keys or bad tokens at a door |
 | `colca_replication_integrity_failures_total` | above `0`: a child pruned records before its parent received them |
+| `colca_store_incarnation_changes_total` | rises: this node's store was restored from a backup, replaced, or given a new incarnation by an operator; its children re-sync |
+| `colca_uplink_resync_active` | stays `1`: this node is still sending again what its restored parent lacks |
+| `colca_uplink_resync_unreplayable_records_total` | above `0`: a restored parent lacks records this node had already pruned |
+| `colca_repl_child_ahead_of_store_total` | rises: a child too old to re-sync is ahead of this node's store |
 | `colca_jwks_keys` | `0` on a node with an `auth:` block |
 | `colca_contracts_bundle_info` | `source="builtin"` where you expected a bundle |
 
@@ -232,13 +236,109 @@ again and resume where it stopped.
 ## Backups
 
 A node's state is its `data_dir`. Stop the node, or snapshot the filesystem,
-and copy the directory. A restored node that is behind its parent simply
-receives newer definitions and commands again; its children push what the
-restored node is missing, because their replication cursors never moved past
-what was acknowledged.
+and copy the directory.
 
 Keep `secrets_dir` and the key file separate from `data_dir`. Losing a
 service's own keyring makes its stored secrets unreadable.
+
+## Restoring a parent from a backup
+
+A node restored from a copy of its `data_dir` is behind everything that
+happened since the copy was taken. Its children and its own parent hold
+positions of the store it was before. Nodes detect this on the replication
+link and re-sync; see [Store incarnations](concepts.md#store-incarnations) for
+how. Nothing has to be done on the children.
+
+Recovered without an operator:
+
+- **Commands flow again at once.** Each child takes commands from where the
+  restored store stands for it. It does not wait for the parent's `commands`
+  stream to grow past the head it remembered.
+- **No command runs twice.** A command a child already holds is not stored or
+  executed again, also when the restored node receives it from its own parent
+  a second time and hands it on.
+- **Current state converges.** Each child sends again what the parent lacks of
+  its `entities` stream, so elements, signals, alarms' standing state and the
+  last metric values at the parent are those of the children again.
+- **History is sent again as far as the children still hold it**: `metrics`,
+  `alarms`, `annotations`, `audit`, `logs`, and the `_Ack`s of the `commands`
+  stream, from the highest offset the restored parent holds of each stream.
+  The parent stores each record once.
+- **The restored node keeps replicating to its own parent.** That parent
+  clears the marks it kept for the node's earlier store, so records written at
+  offsets the node hands out again are stored, not dropped as known.
+
+Not recovered:
+
+- **What only the restored node held.** Records written at the node itself
+  since the backup — commands issued there, definitions authored there, what
+  its own machines and services published — are gone unless a node above holds
+  them. A command issued there after the backup that a child already executed
+  stays executed; its record and its ack reach the parent again only as the
+  child's `_Ack`.
+- **Definitions authored since the backup stay on the children that received
+  them.** The restored node no longer has them and so never changes or retires
+  them. Author them again, or retire them, at the node that owns them.
+- **Ranges a child's retention already pruned.** A child keeps what its parent
+  has not confirmed, but it had been told these were stored. The gap is logged
+  at ERROR on the child (`re-sync gap`), counted in
+  `colca_uplink_resync_unreplayable_records_total{stream}` and listed under
+  `uplink.resync.gaps` on the child's `/healthz` until the next re-sync.
+- **Nodes above the restored one receive the replayed history a second time**,
+  under new offsets: they are not restored and already hold it. Current state
+  is unaffected and the historian writes a sample once per signal and
+  timestamp, but a consumer of `alarms`, `annotations`, `audit` or `logs` at an
+  ancestor reads those records again.
+- **A command without `correlation_id`** is recognised as already held only
+  among what the parent's `commands` stream held when the child re-synced. One
+  that reaches the child again later is executed again.
+
+What you see while it happens:
+
+| Where | What |
+|---|---|
+| Restored node, log | ERROR `this store is behind what a child recorded of it` (a child proved it) or `this store is behind what its parent holds of it` (its parent did) |
+| Restored node, `/healthz` | `store.id` is new; `store.changed` has `at`, `reason` and the `previous` id |
+| Restored node, `/metrics` | `colca_store_incarnation_changes_total{reason="regression"}` |
+| Child, log | ERROR `re-syncing with the parent`, then INFO `re-sync with the parent complete` |
+| Child, `/healthz` | `uplink.resync`: `state` is `replaying` while records are still being sent again and `complete` afterwards, with `reason`, both store ids, the range per stream (`from`, `to`, `position`) and `gaps`. `uplink.state` stays `connected` |
+| Child, `/metrics` | `colca_uplink_resyncs_total`, `colca_uplink_resync_active` (`1` while replaying), `colca_downlink_commands_already_held_total` |
+
+A restore is only detected when a neighbour holds a position the restored
+store has not reached: a child that read a command or was confirmed a record
+since the backup, or a parent that holds a record of the node written since.
+If nothing was exchanged since the backup, nothing was lost on the link and
+nothing happens. If you restored a node and want every child to re-sync
+regardless, or you replaced a store by other means, tell the node:
+
+```bash
+curl -sk -X POST -H "X-Colca-Token: $COLCA_TOKEN" https://<node>/store/incarnation
+# {"store":"<new id>","previous":"<old id>"}
+```
+
+The node takes a new incarnation. Every child re-syncs at its next request,
+the node's own parent clears its marks for it, and local consumers get
+`store_changed` on their next `/ack`. It is safe to repeat: a re-sync against
+a store that lacks nothing replays nothing.
+
+Mixed versions keep replicating as before, without the protection:
+
+- **A child older than the check under a restored parent** is not told and does
+  not re-sync: it takes no commands until the parent's stream passes its
+  position, and does not send again what the parent lacks. The parent logs
+  `a child is ahead of this store and cannot re-sync` and counts it in
+  `colca_repl_child_ahead_of_store_total`. Upgrade the child.
+- **A child under a parent older than the check** learns no incarnation and
+  never re-syncs. It still reports a commands position past the parent's head
+  (`colca_downlink_cursor_beyond_head_total`).
+- A child records what its parent confirms from its first push after the
+  upgrade. A restore of the parent before that is detected by the commands
+  position only, and what the child sent since the backup may not be sent
+  again.
+- A restored node that wrote more records than it had lost before it reached
+  its parent again is not recognised as restored by that parent's marks: the
+  parent drops, as already stored, what the node wrote at the offsets it holds.
+  Tell the node with `POST /store/incarnation` right after such a restore.
 
 ## Benchmarks
 

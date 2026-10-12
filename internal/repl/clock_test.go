@@ -44,7 +44,7 @@ func TestServerStampsNowMSFromEngineAuthoritativeNow(t *testing.T) {
 	}
 
 	// /replicate
-	_, nowMS, err = cl.replicate(t.Context(), "metrics", []store.ReplRecord{
+	_, nowMS, err = cl.replicate(t.Context(), envelope{stream: "metrics"}, []store.ReplRecord{
 		{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":1}`), TS: 1},
 	})
 	if err != nil {

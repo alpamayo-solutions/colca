@@ -150,7 +150,7 @@ func TestALargePushAsksFirstAndIsTakenOnceTheParentHasRoom(t *testing.T) {
 		recs[i] = store.ReplRecord{ChildOffset: uint64(i + 1), Topic: "colca/v1/_Metric/n-child/m1/t",
 			Payload: []byte(`{"v":1,"note":"` + pad + `"}`), TS: 1}
 	}
-	if body, _ := marshalReplication("", "metrics", recs); len(body) < expectContinueBytes {
+	if body, _ := marshalReplication(envelope{stream: "metrics"}, recs); len(body) < expectContinueBytes {
 		t.Fatalf("the push is %d bytes, below the %d that ask first: the test proves nothing", len(body), expectContinueBytes)
 	}
 	srv.pushBytes.used.Store(srv.pushBytes.limit)
