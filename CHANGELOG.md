@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.34.0](https://github.com/alpamayo-solutions/colca/compare/v0.33.4...v0.34.0) (2026-10-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* _ClockDefinition and _ClockProgress are no longer contracts, and the historian ignores FACTORY_* and APPLICATION_TIME_SOURCE.
+
+### Changes
+
+* remove application time ([#198](https://github.com/alpamayo-solutions/colca/issues/198)) ([1958282](https://github.com/alpamayo-solutions/colca/commit/1958282e61ac46a05bc6d314ab2ccfcc57256ec4))
+
 ## [0.33.4](https://github.com/alpamayo-solutions/colca/compare/v0.33.3...v0.33.4) (2026-10-12)
 
 
