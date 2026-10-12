@@ -65,11 +65,7 @@ TOMBSTONE_OVERRIDES: dict[str, bool] = {}
 
 # Contracts colcad produces and validates itself. They never appear in a
 # bundle; the loader refuses one that declares them.
-BUILTIN_ONLY = {"_StreamGap", "_EnrolledIdentity", "_EnrollmentRequest", "_EnrollmentPreapproval", "_TimeSync"}
-
-# Clients decode these broker-authored records. They must never turn into a
-# bundle entry granting client publication; the broker owns their wire shape.
-DECODE_ONLY = {"_TimeSync"}
+BUILTIN_ONLY = {"_StreamGap", "_EnrolledIdentity", "_EnrollmentRequest", "_EnrollmentPreapproval"}
 
 # Registered payload classes that nothing may publish, each with the reason it
 # still exists as a Python type. A door rejects a contract it does not know
@@ -252,8 +248,6 @@ def build_bundle(git_sha: str = "unknown") -> tuple[dict, str]:
     contracts: dict = {}
     for identifier in sorted(PAYLOAD_CLASSES):
         cls = PAYLOAD_CLASSES[identifier]
-        if identifier in DECODE_ONLY:
-            continue
         if identifier in BUILTIN_ONLY:
             raise SystemExit(
                 f"generate_bundle: {identifier} is builtin-only and must never be a registered payload class"

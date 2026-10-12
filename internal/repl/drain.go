@@ -148,7 +148,7 @@ func (s *Server) scanDrain(e *uns.Entry) (total, pending int, gapped bool, delay
 		from = lwm
 	}
 	next := st.NextOffset("commands")
-	nowMS := s.eng.AuthoritativeNow().UnixMilli()
+	nowMS := s.eng.Now().UnixMilli()
 	filter := func(topic string) bool {
 		p, err := uns.Parse(topic)
 		if err != nil || !uns.IsCommand(s.eng.ClassOf(p.Contract)) {

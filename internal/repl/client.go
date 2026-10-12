@@ -281,8 +281,8 @@ type envelope struct {
 }
 
 // replicate is the context-aware implementation behind Replicate and RunUplink.
-// nowMS is the parent's clock from the response; RunUplink applies it and
-// Replicate drops it.
+// nowMS is the parent's clock from the response; RunUplink records the skew to
+// it and Replicate drops it.
 func (c *Client) replicate(ctx context.Context, env envelope, recs []store.ReplRecord) (hwm uint64, nowMS int64, err error) {
 	if len(recs) > maxReplicateRecords {
 		return 0, 0, fmt.Errorf("replicate: batch has %d records, maximum is %d", len(recs), maxReplicateRecords)
@@ -505,8 +505,8 @@ func (c *Client) greet(st *store.Store) greeting {
 }
 
 // downlink is the context-aware implementation behind the wrappers and
-// RunDownlink. NowMS is the parent's clock, which RunDownlink applies before
-// ingesting anything. Ancestry is the position the parent teaches, or nil.
+// RunDownlink. NowMS is the parent's clock, which RunDownlink measures this
+// node's skew against. Ancestry is the position the parent teaches, or nil.
 func (c *Client) downlink(ctx context.Context, after, defAfter uint64, limit int, timeout time.Duration) (downResult, error) {
 	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d",
 		c.base, after, defAfter, limit), timeout)
@@ -963,9 +963,9 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 					"stream", stream, "parent", c.base,
 					"attempts", attempts, "down_for", down.Round(time.Second))
 			}
-			// Every /replicate response carries the parent's clock; keep the offset fresh
-			// whichever stream triggered the push.
-			eng.ApplyClockSample(nowMS)
+			// Every /replicate response carries the parent's clock; keep the skew
+			// measurement fresh whichever stream triggered the push.
+			eng.ObserveParentClock(nowMS)
 			if hwm >= eng.Store().NextOffset(stream) &&
 				(env.store != c.storeID() || c.ownStoreBehind(eng.Store(), m, stream, hwm)) {
 				// The parent holds an offset this store has not handed out: it
@@ -1171,9 +1171,9 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		}
 		c.setStatus(UplinkConnected)
 		m.DownlinkFetched(time.Now())
-		// Apply the clock offset from this response before ingesting its records, so
-		// expiry decisions after a reconnect use fresh time.
-		eng.ApplyClockSample(nowMS)
+		// The response carries the parent's clock: a skew measurement, nothing more.
+		// Expiry is judged on this node's own clock.
+		eng.ObserveParentClock(nowMS)
 		if ancestry != nil {
 			eng.SetAncestry(*ancestry) // idempotent: every poll may carry it
 		}

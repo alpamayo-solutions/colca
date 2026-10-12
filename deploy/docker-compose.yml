@@ -190,10 +190,6 @@ services:
       NODE_ULID: n-edge1
       NODE_PUBKEY_FILE: /keys/edge1.pub
       PUBLISH_INTERVAL_MS: "1000"
-      # Simulated clock skew for this machine only (SIM_CLOCK_OFFSET_MS in
-      # cmd/colca-machine): a test recreates m1 with SIM_CLOCK_OFFSET_MS_M1 set
-      # to skew its notion of wall time. Unset or 0 means no skew.
-      SIM_CLOCK_OFFSET_MS: "${SIM_CLOCK_OFFSET_MS_M1:-0}"
     volumes:
       - "world-keys:/keys:ro"
     depends_on: [edge1]
@@ -210,8 +206,6 @@ services:
       NODE_ULID: n-edge2
       NODE_PUBKEY_FILE: /keys/edge2.pub
       PUBLISH_INTERVAL_MS: "1000"
-      # See m1's SIM_CLOCK_OFFSET_MS comment above.
-      SIM_CLOCK_OFFSET_MS: "${SIM_CLOCK_OFFSET_MS_M2:-0}"
     volumes:
       - "world-keys:/keys:ro"
     depends_on: [edge2]

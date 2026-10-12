@@ -39,9 +39,6 @@ const (
 	// ReasonHumanWrite: a person published data, entity or ack records. People
 	// command; machines write state.
 	ReasonHumanWrite = "human_write"
-	// ReasonTimeSync: a _TimeSync publish came from a client, an admin caller or a
-	// replicated batch. Only the node's own beacon may publish it.
-	ReasonTimeSync = "time_sync"
 	// ReasonDraining: a command targeted a mount that is being drained. New
 	// commands are refused so the drain can finish.
 	ReasonDraining = "draining"
@@ -51,7 +48,7 @@ const (
 	ReasonNotProducer = "not_producer"
 )
 
-var reasons = []string{ReasonNodeID, ReasonGrammar, ReasonValidation, ReasonIdentity, ReasonWriteDenied, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonTimeSync, ReasonDraining, ReasonNotProducer}
+var reasons = []string{ReasonNodeID, ReasonGrammar, ReasonValidation, ReasonIdentity, ReasonWriteDenied, ReasonCmdDenied, ReasonRegistryContract, ReasonHumanWrite, ReasonDraining, ReasonNotProducer}
 
 // Move-drain outcomes: the label values of colca_drains_completed_total.
 const (
@@ -335,8 +332,8 @@ type Metrics struct {
 // present from the first scrape. cfg is the retention policy the collector
 // needs for the pressure and blocked-by-cursor gauges.
 //
-// clk must be the same *clock.Clock the engine uses, or the clock gauges
-// report state nobody updates. A nil clk reads as never synced.
+// clk must be the same *clock.Clock the engine uses, or the parent skew gauges
+// report state nobody updates. A nil clk exports no clock metric.
 func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m := &Metrics{
 		reg: prometheus.NewRegistry(),
@@ -676,28 +673,6 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	}
 	m.drainsActive.Set(float64(draining))
 
-	// The clock gauges are read at scrape time: the sync age is seconds since the
-	// last sample, now, which no write path could push ahead of time.
-	clockOffset := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "colca_clock_offset_ms",
-		Help: "Current authoritative-time offset estimate in milliseconds: offset_ms = now_ms - wall_receipt from the most recent /downlink or /replicate response. Always 0 on the root and on a node that has never synced.",
-	}, func() float64 {
-		if clk == nil {
-			return 0
-		}
-		return float64(clk.OffsetMS())
-	})
-	clockSyncAge := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "colca_clock_sync_age_seconds",
-		Help: "Seconds since the last accepted offset sample. The root exports 0 by definition. +Inf means never synced.",
-	}, func() float64 {
-		if clk == nil {
-			return math.Inf(1)
-		}
-		// clk.Now() keeps tests with a fake clock deterministic.
-		return clk.SyncAgeSeconds(clk.Now())
-	})
-
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused, m.uplinkLogsWithheld,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.storeReincarnated, m.childAheadOfStore, m.uplinkResyncs, m.uplinkResyncActive, m.uplinkResyncGap,
@@ -715,7 +690,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.httpKVRequests, m.httpKVEntries, m.httpFetchRequests, m.httpLimitedByCaller,
 		m.cursorUnreadAge,
 		m.metricsUnbound,
-		clockOffset, clockSyncAge,
+		&clockCollector{clk: clk},
 		newStoreCollector(st, cfg, store.DefaultPolicyScanCap), &pebbleCollector{st: st})
 	return m
 }

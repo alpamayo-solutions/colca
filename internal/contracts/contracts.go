@@ -25,7 +25,7 @@ import (
 // builtinOnly are contracts colcad produces and validates itself; a bundle that
 // declares one fails to load.
 var builtinOnly = map[string]bool{
-	"_StreamGap": true, "_EnrolledIdentity": true, "_TimeSync": true,
+	"_StreamGap": true, "_EnrolledIdentity": true,
 	uns.EnrollmentRequestContract: true, uns.EnrollmentPreapprovalContract: true,
 }
 

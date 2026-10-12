@@ -160,8 +160,8 @@ func Start(cfg *config.Config) (*Node, error) {
 		}
 	}
 
-	// clk is this node's authoritative time; a node without a parent is the
-	// authority. Metrics and Engine must share this instance.
+	// clk is this node's wall clock and its skew measurement against the parent.
+	// Metrics and Engine must share this instance.
 	clk := clock.New(cfg.Parent == nil, time.Now)
 	n := &Node{Cfg: cfg, Identity: id, Store: st, Secrets: secretDB, Metrics: metrics.New(st, cfg.Retention, clk), stop: make(chan struct{})}
 	log := slog.Default().With("node", cfg.ULID, "comp", "node")
@@ -300,12 +300,22 @@ func Start(cfg *config.Config) (*Node, error) {
 			if held, _ := entity["root_system_element_id"].(string); held == root &&
 				sameNetworkInventory(entity["network_interfaces"], interfaces) &&
 				sameAccess(entity["access"], access) {
-				if heldMetrics, ok := entity["health_metrics"].([]any); ok && len(heldMetrics) > 0 {
+				if heldMetrics, ok := entity["health_metrics"].([]any); ok && len(heldMetrics) > 0 &&
+					len(missingHealthMetrics(heldMetrics, metrics)) == 0 {
 					return
 				}
 			}
 		}
-		entity["health_metrics"] = metrics
+		// A held list is kept as it is and only gains the declarations it lacks,
+		// so a node that upgrades shows a health metric added since.
+		if heldMetrics, ok := entity["health_metrics"].([]any); ok && len(heldMetrics) > 0 {
+			for _, added := range missingHealthMetrics(heldMetrics, metrics) {
+				heldMetrics = append(heldMetrics, added)
+			}
+			entity["health_metrics"] = heldMetrics
+		} else {
+			entity["health_metrics"] = metrics
+		}
 		entity["network_interfaces"] = interfaces
 		if access != nil {
 			entity["access"] = access
@@ -482,14 +492,6 @@ func Start(cfg *config.Config) (*Node, error) {
 			if err := mq.Serve(); err != nil {
 				log.Error("mqtt server stopped", "err", err)
 			}
-		}(n.MQTT)
-
-		// The periodic time beacon; mqttsrv also sends one on each subscribe. It joins
-		// wg so Stop waits for it before closing MQTT.
-		n.wg.Add(1)
-		go func(mq *mqttsrv.Server) {
-			defer n.wg.Done()
-			mq.RunBeacon(cfg.TimeSync.EffectiveBeaconInterval(), n.stop)
 		}(n.MQTT)
 	}
 

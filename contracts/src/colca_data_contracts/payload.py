@@ -381,17 +381,6 @@ class Metric(ToleratesUnknownFields, BaseMetric):
 
 
 @dataclass
-class TimeSync(ToleratesUnknownFields, Payload):
-    """Colca's live, broker-authored clock beacon. Never retained or persisted.
-
-    This built-in contract is decoded by clients but is not part of the
-    publishable schema bundle: the broker refuses client-authored beacons.
-    """
-
-    now_ms: int
-
-
-@dataclass
 class HealthMetricDeclaration:
     """One bounded, self-described Prometheus health signal.
 

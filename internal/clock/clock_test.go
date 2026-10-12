@@ -1,103 +1,103 @@
 package clock
 
 import (
-	"math"
 	"testing"
 	"time"
+
+	"github.com/alpamayo-solutions/colca/internal/hostclock"
 )
 
-func fixed(t time.Time) func() time.Time {
-	return func() time.Time { return t }
-}
+type fakeNow struct{ t time.Time }
 
-// TestRootNeverLearnsAnOffset: the root's offset stays 0 whatever it is fed, and
-// its sync age is 0.
-func TestRootNeverLearnsAnOffset(t *testing.T) {
-	base := time.UnixMilli(1_000_000)
-	c := New(true, fixed(base))
+func (f *fakeNow) now() time.Time { return f.t }
 
-	if got := c.AuthoritativeNow(); !got.Equal(base) {
-		t.Fatalf("root AuthoritativeNow = %v, want %v", got, base)
-	}
-	// A sample far from its own clock must be ignored.
-	if off := c.ApplySample(base.UnixMilli() + 999_999); off != 0 {
-		t.Fatalf("root ApplySample returned offset %d, want 0", off)
-	}
-	if got := c.OffsetMS(); got != 0 {
-		t.Fatalf("root OffsetMS = %d, want 0", got)
-	}
-	if got := c.AuthoritativeNow(); !got.Equal(base) {
-		t.Fatalf("root AuthoritativeNow after ApplySample = %v, want unchanged %v", got, base)
-	}
-	if age := c.SyncAgeSeconds(base.Add(time.Hour)); age != 0 {
-		t.Fatalf("root SyncAgeSeconds = %v, want 0", age)
-	}
-}
+func unreported() hostclock.Status { return hostclock.Status{} }
 
-// TestNeverSyncedNonRootServesOwnWallClock: a non-root node without a sample has
-// offset 0, so AuthoritativeNow is its raw wall clock, and its sync age is +Inf.
-func TestNeverSyncedNonRootServesOwnWallClock(t *testing.T) {
-	base := time.UnixMilli(5_000_000)
-	c := New(false, fixed(base))
+// The skew is the parent's now_ms minus this node's clock at receipt, signed,
+// and the node's own clock is not moved by it.
+func TestObserveParentMeasuresTheSkewAndCorrectsNothing(t *testing.T) {
+	wall := &fakeNow{t: time.UnixMilli(1_700_000_000_000)}
+	c := NewWithHost(false, wall.now, unreported)
 
-	if got := c.AuthoritativeNow(); !got.Equal(base) {
-		t.Fatalf("never-synced AuthoritativeNow = %v, want raw wall clock %v", got, base)
+	if _, ok := c.ParentSkew(); ok {
+		t.Fatal("a node that never heard from its parent has no skew to report")
 	}
-	if age := c.SyncAgeSeconds(base); !math.IsInf(age, 1) {
-		t.Fatalf("never-synced SyncAgeSeconds = %v, want +Inf", age)
+	if _, ok := c.ParentSampleAge(wall.t); ok {
+		t.Fatal("a node that never heard from its parent has no sample age to report")
+	}
+
+	skew, _ := c.ObserveParent(wall.t.UnixMilli() + 1500)
+	if skew != 1500*time.Millisecond {
+		t.Fatalf("skew = %v, want 1.5s (parent ahead)", skew)
+	}
+	if got := c.Now(); !got.Equal(wall.t) {
+		t.Fatalf("Now = %v after a parent sample, want the unchanged wall clock %v", got, wall.t)
+	}
+
+	c.ObserveParent(wall.t.UnixMilli() - 250)
+	if got, ok := c.ParentSkew(); !ok || got != -250*time.Millisecond {
+		t.Fatalf("ParentSkew = %v, %v, want -250ms (parent behind): the latest sample wins", got, ok)
+	}
+
+	wall.t = wall.t.Add(42 * time.Second)
+	if age, ok := c.ParentSampleAge(wall.t); !ok || age != 42*time.Second {
+		t.Fatalf("ParentSampleAge = %v, %v, want 42s", age, ok)
 	}
 }
 
-// TestApplySampleComputesOffsetAndCorrectsAuthoritativeNow: the offset is now_ms
-// minus the wall time at receipt, and AuthoritativeNow adds it to wall time
-// afterwards.
-func TestApplySampleComputesOffsetAndCorrectsAuthoritativeNow(t *testing.T) {
-	wall := time.UnixMilli(10_000)              // this node's raw clock at receipt
-	authorityNowMS := wall.UnixMilli() + 30_000 // authority is 30s ahead
-	cur := wall
-	c := New(false, func() time.Time { return cur })
-
-	off := c.ApplySample(authorityNowMS)
-	if off != 30_000 {
-		t.Fatalf("offset = %d, want 30000", off)
+// Only a move across SkewAlarm is a transition, in either direction and for
+// either sign of the skew.
+func TestObserveParentReportsOnlyTheCrossing(t *testing.T) {
+	wall := &fakeNow{t: time.UnixMilli(1_700_000_000_000)}
+	c := NewWithHost(false, wall.now, unreported)
+	at := func(skew time.Duration) Transition {
+		_, tr := c.ObserveParent(wall.t.Add(skew).UnixMilli())
+		return tr
 	}
-	if got := c.OffsetMS(); got != 30_000 {
-		t.Fatalf("OffsetMS = %d, want 30000", got)
-	}
-	// Advance the raw clock by 5s; AuthoritativeNow must track wall+offset.
-	cur = wall.Add(5 * time.Second)
-	want := cur.Add(30 * time.Second)
-	if got := c.AuthoritativeNow(); !got.Equal(want) {
-		t.Fatalf("AuthoritativeNow = %v, want %v", got, want)
-	}
-}
-
-// TestApplySampleLastWriteWinsNoSmoothing: a second, very different sample
-// replaces the first instead of averaging with it.
-func TestApplySampleLastWriteWinsNoSmoothing(t *testing.T) {
-	wall := time.UnixMilli(0)
-	c := New(false, fixed(wall))
-
-	c.ApplySample(100_000) // offset 100000
-	if got := c.OffsetMS(); got != 100_000 {
-		t.Fatalf("first sample offset = %d, want 100000", got)
-	}
-	c.ApplySample(-50_000) // offset -50000 (clock behind)
-	if got := c.OffsetMS(); got != -50_000 {
-		t.Fatalf("second sample must fully replace the first (no smoothing): offset = %d, want -50000", got)
+	for i, step := range []struct {
+		skew time.Duration
+		want Transition
+	}{
+		{100 * time.Millisecond, Unchanged},
+		{SkewAlarm, Unchanged}, // exactly at the threshold is still within it
+		{SkewAlarm + time.Millisecond, Exceeded},
+		{time.Minute, Unchanged},
+		{-time.Minute, Unchanged}, // still beyond, on the other side
+		{-SkewAlarm, Recovered},
+		{0, Unchanged},
+		{-SkewAlarm - time.Millisecond, Exceeded},
+	} {
+		if got := at(step.skew); got != step.want {
+			t.Fatalf("step %d (skew %v): transition = %v, want %v", i, step.skew, got, step.want)
+		}
 	}
 }
 
-// TestSyncAgeSecondsTracksElapsedTimeSinceLastSample: the gauge is wall time
-// since the last accepted sample, measured against an explicit now rather than
-// the injected clock.
-func TestSyncAgeSecondsTracksElapsedTimeSinceLastSample(t *testing.T) {
-	receiptWall := time.UnixMilli(1_000_000)
-	c := New(false, fixed(receiptWall))
-	c.ApplySample(receiptWall.UnixMilli()) // offset 0, synced at receiptWall
+// The root has no parent: a sample is ignored. A now_ms that is not a time (a
+// response without the field decodes to 0) is no sample either, on any node.
+func TestObserveParentIgnoresTheRootAndAMissingNowMS(t *testing.T) {
+	wall := &fakeNow{t: time.UnixMilli(1_700_000_000_000)}
+	root := NewWithHost(true, wall.now, unreported)
+	if _, tr := root.ObserveParent(wall.t.UnixMilli() + 60_000); tr != Unchanged {
+		t.Fatalf("root transition = %v, want Unchanged", tr)
+	}
+	if _, ok := root.ParentSkew(); ok {
+		t.Fatal("the root must never report a parent skew")
+	}
 
-	later := receiptWall.Add(42 * time.Second)
-	if age := c.SyncAgeSeconds(later); age != 42 {
-		t.Fatalf("SyncAgeSeconds = %v, want 42", age)
+	child := NewWithHost(false, wall.now, unreported)
+	if _, tr := child.ObserveParent(0); tr != Unchanged {
+		t.Fatalf("transition for now_ms 0 = %v, want Unchanged: it is not a 56-year skew", tr)
+	}
+	if _, ok := child.ParentSkew(); ok {
+		t.Fatal("now_ms 0 must not be recorded as a sample")
+	}
+}
+
+func TestHostReturnsTheInjectedReading(t *testing.T) {
+	want := hostclock.Status{Reported: true, Synchronized: true, EstimatedError: time.Millisecond}
+	c := NewWithHost(true, time.Now, func() hostclock.Status { return want })
+	if got := c.Host(); got != want {
+		t.Fatalf("Host = %+v, want %+v", got, want)
 	}
 }
