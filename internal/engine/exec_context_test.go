@@ -60,6 +60,32 @@ func TestExecutorReceivesTheActingEntry(t *testing.T) {
 		t.Fatalf("downlink actor = %+v, want anna reconstituted with this node's operators grants", got)
 	}
 
+	// Who authored an annotation is decided by the attribution's own fields:
+	// the subject for a person, the client for a service account. A label that
+	// reads like a service account's name is still a person's label.
+	for name, c := range map[string]struct {
+		label, client, want string
+	}{
+		"person":                            {"Anna Muster", "", "user/kc-sub-anna"},
+		"person named like a service":       {"service-account-erp-bridge", "", "user/kc-sub-anna"},
+		"service account":                   {"service-account-erp-bridge", "erp-bridge", "service/erp-bridge"},
+		"service account with another name": {"ERP bridge", "erp-bridge", "service/erp-bridge"},
+	} {
+		if _, err := e.IngestDownlinkAttributed(topic, cmdPayload("c-src-"+name), ts, Attribution{
+			WrittenBy: "n-hub", ActorID: "kc-sub-anna", ActorLabel: c.label, ActorKind: "human",
+			ActorClient: c.client, ActorGroups: []string{"operators"},
+		}, nil); err != nil {
+			t.Fatal(name, err)
+		}
+		got := rec.actors[len(rec.actors)-1]
+		if got == nil || got.ULID != "kc-sub-anna" || len(got.Grants) != 1 {
+			t.Fatalf("%s: downlink actor = %+v, want the subject with this node's grants", name, got)
+		}
+		if source := uns.AnnotationSource(got); source != c.want {
+			t.Fatalf("%s: annotation source = %q, want %q", name, source, c.want)
+		}
+	}
+
 	// A downlinked command without attested groups, or from a service, is
 	// nobody at the executor: it must not pass as a person.
 	for name, attribution := range map[string]Attribution{

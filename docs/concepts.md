@@ -251,13 +251,28 @@ node holds. A `_CmdEdit` placement onto the bound element works the same way:
 the entity becomes one of the node's roots.
 
 The other side of the same rule: below the element a child node is attached
-at, every position is the child's. A `_CmdEdit` at the parent never writes an
-element, signal or constant record there. A create answers `422
-foreign_position: …`, a move `422 cross_node_move: …`, both naming the child
-node. Retiring a record that already stands there (a move out, a delete) is
-allowed, so one written before this rule can still be cleaned up. An entity
-does not change owner by moving: to put it under another node, delete it and
-create it there.
+at, every position is the child's. Neither `_CmdEdit` nor `_CmdConfigure` at
+the parent writes an element, signal or constant record there, nor a resource
+on an element there. This holds for every `_CmdConfigure` verb that writes a
+positioned record (`element/upsert`, `element/author`, `signal/upsert`,
+`signal/autobind`, `constant/upsert`, `resource/upsert`) and for the autobind
+of a newly seen connector. The command is refused as a whole and nothing is
+written. A create answers `422 foreign_position: …`, a move `422
+cross_node_move: …` (a `_CmdEdit` placement, or an upsert naming an entity the
+node holds elsewhere), and the message names the position, the element the
+child is attached at and the child node:
+
+```text
+foreign_position: beans/roaster would stand below beans, where node 01J… is attached; records there are written by that node, not by this one
+```
+
+To write there, address the command to the child node. The mount element
+itself is the parent's record: the parent renames it, and a resource on it is
+the parent's. Retiring a record that already stands below a mount (a move
+out, a delete verb) is allowed, so one written before this rule can still be
+cleaned up. Definitions and inventory entities have no position and are not
+affected. An entity does not change owner by moving: to put it under another
+node, delete it and create it there.
 
 ### Binding a signal to a tag
 

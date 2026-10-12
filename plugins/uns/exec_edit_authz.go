@@ -78,6 +78,17 @@ func constantParamEligible(intent editIntent) bool {
 // client-credentials token.
 const keycloakServiceAccountPrefix = "service-account-"
 
+// ServiceAccountClient is the client id of the Keycloak service account a
+// token's preferred_username names, "" for a person. Only the door that
+// verified the token asks: the answer travels on as Entry.ServiceClient, and
+// no later reader derives it from a name again.
+func ServiceAccountClient(preferredUsername string) string {
+	if !strings.HasPrefix(preferredUsername, keycloakServiceAccountPrefix) {
+		return ""
+	}
+	return strings.TrimPrefix(preferredUsername, keycloakServiceAccountPrefix)
+}
+
 // AnnotationSource is the source the api stamps on an annotation this actor
 // authors, and half of its derived id, so a node can prove authorship from the
 // id alone. A person is user/<sub>, a Keycloak service account
@@ -86,10 +97,8 @@ func AnnotationSource(e *Entry) string {
 	if e == nil {
 		return ""
 	}
-	if strings.HasPrefix(e.Username, keycloakServiceAccountPrefix) {
-		if client := strings.TrimPrefix(e.Username, keycloakServiceAccountPrefix); client != "" {
-			return "service/" + client
-		}
+	if e.ServiceClient != "" {
+		return "service/" + e.ServiceClient
 	}
 	return "user/" + e.ULID
 }

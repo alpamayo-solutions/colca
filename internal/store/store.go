@@ -58,6 +58,10 @@ type Record struct {
 	// ActorGroups are the groups a person's grants came from, kept so a replicated
 	// command can be authorized again where it executes.
 	ActorGroups []string `json:"ag,omitempty"`
+	// ActorClient is the client id of a Keycloak service account that sent a
+	// command through a token door, "" for a person. It is kept with
+	// ActorGroups, for the same node that authorizes the command again.
+	ActorClient string `json:"ac,omitempty"`
 	// Door names the door that admitted a command on this node ("client" or
 	// "human"), where its sender's grants were checked. It is empty for a command
 	// that came down from the parent or through the admin door, and never leaves
@@ -85,6 +89,7 @@ type StoredRecord struct {
 	ActorLabel      string
 	ActorKind       string
 	ActorGroups     []string
+	ActorClient     string
 	// Door is Record.Door as stored.
 	Door string
 	// SignalID is the signal of a _Metric record, "" for other records and for
@@ -462,6 +467,7 @@ type recEnc struct {
 	ActorLabel      string   `json:"al,omitempty"`
 	ActorKind       string   `json:"ak,omitempty"`
 	ActorGroups     []string `json:"ag,omitempty"`
+	ActorClient     string   `json:"ac,omitempty"`
 	Door            string   `json:"door,omitempty"`
 	SignalID        string   `json:"sid,omitempty"`
 	// size is the encoded length of this record as stored, set by scanRecords for
@@ -497,7 +503,7 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 		SourceLocalOnly: rec.SourceLocalOnly,
 		Topic:           rec.Topic, Payload: rec.Payload, TS: rec.TS,
 		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
-		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, OriginOffset: originOffset,
+		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, ActorClient: rec.ActorClient, OriginOffset: originOffset,
 		Door:     rec.Door,
 		SignalID: signalID,
 	})
@@ -1088,6 +1094,7 @@ type ReplRecord struct {
 	ActorLabel   string   `json:"al,omitempty"`
 	ActorKind    string   `json:"ak,omitempty"`
 	ActorGroups  []string `json:"ag,omitempty"`
+	ActorClient  string   `json:"ac,omitempty"`
 	KVPath       string   `json:"kp,omitempty"`
 	KVNode       string   `json:"kn,omitempty"`
 	// Delete mirrors Record.Delete. The parent derives it after decoding, as the
@@ -1867,7 +1874,7 @@ func storedRecord(off uint64, e recEnc) StoredRecord {
 		Offset:          off, OriginOffset: originOffset(e.OriginOffset, off),
 		Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 		WrittenBy: e.WrittenBy, ActorID: e.ActorID,
-		ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups,
+		ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups, ActorClient: e.ActorClient,
 		Door: e.Door, SignalID: e.SignalID,
 	}
 }

@@ -211,7 +211,8 @@ func TestCmdEditByAHumanAttributesTheResultingWriteToThatHuman(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := e.IngestHumanAttributed(operator, "anna@example.com", "colca/v1/_CmdEdit/n-edge1/apply", payload)
+	operator.DisplayName = "anna@example.com"
+	result, err := e.IngestHuman(operator, "colca/v1/_CmdEdit/n-edge1/apply", payload)
 	if err != nil {
 		t.Fatal(err)
 	}

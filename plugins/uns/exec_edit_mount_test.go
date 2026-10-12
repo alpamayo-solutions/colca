@@ -184,3 +184,43 @@ func TestEditMoveOntoTheElementThisNodeIsBoundToMovesToItsRoot(t *testing.T) {
 		t.Fatalf("a root moved onto the bound element = %d %q, want placement_unchanged", code, msg)
 	}
 }
+
+// A resource stands on an element. On the mount element it stands on the
+// parent's own record; on anything below it, in the child's subtree.
+func TestEditRefusesAResourceOnAnElementBelowAChildNodesMount(t *testing.T) {
+	f := newStore("n-site1")
+	seedEditEntity(t, f, "_SystemElement", "beans", map[string]any{"id": "el-beans", "name": "Beans"})
+	seedEditEntity(t, f, "_SystemElement", "packaging", map[string]any{"id": "el-packaging", "name": "Packaging"})
+	seedNodeAttachment(t, f, "n-beans", "el-beans")
+	exec := NewEditExec(f, nil)
+	exec.SetBlobs(&heldBlobs{})
+
+	below := resourceIntent(t, "op-res-below", "create", "beans/roaster/res-1", map[string]any{
+		"resource": resourcePayload("res-1", "el-roaster"),
+	})
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", below)
+	if code != 422 || !strings.HasPrefix(msg, "foreign_position: ") || !strings.Contains(msg, "n-beans") || len(writes) != 0 {
+		t.Fatalf("resource below a child's mount = %d %q writes=%+v, want 422 foreign_position naming the node", code, msg, writes)
+	}
+
+	onMount := resourceIntent(t, "op-res-mount", "create", "beans/res-1", map[string]any{
+		"resource": resourcePayload("res-1", "el-beans"),
+	})
+	if code, msg, _, _ := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", onMount); code != 200 {
+		t.Fatalf("resource on the mount element = %d %q, want 200", code, msg)
+	}
+
+	move := resourceIntent(t, "op-res-move", "update", "beans/roaster/res-1", map[string]any{
+		"resource": resourcePayload("res-1", "el-roaster"), "from_path": "beans/res-1",
+	})
+	code, msg, _, _ = exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", move)
+	if code != 422 || !strings.HasPrefix(msg, "cross_node_move: ") {
+		t.Fatalf("resource moved below a child's mount = %d %q, want 422 cross_node_move", code, msg)
+	}
+	if _, ok := f.KVGet("colca/v1/_Resource/n-site1/beans/res-1"); !ok {
+		t.Fatal("the refused move retired the resource on the mount element")
+	}
+	if _, ok := f.KVGet("colca/v1/_Resource/n-site1/beans/roaster/res-1"); ok {
+		t.Fatal("a refused resource stands below the mount")
+	}
+}

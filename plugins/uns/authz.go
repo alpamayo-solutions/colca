@@ -54,10 +54,18 @@ type Entry struct {
 	// after replication can rebuild the same person from its own _Group
 	// definitions. Never set on a registry entry.
 	Groups []string `json:"groups,omitempty"`
-	// Username is a KindHuman entry's preferred_username, set by the door that
-	// verified the token. AnnotationSource uses it to tell a Keycloak service
-	// account (service-account-<client>) from a person. Never persisted.
-	Username string `json:"-"`
+	// DisplayName is what a KindHuman entry's token calls its holder, set by
+	// the door that verified it: the `name` claim, else `preferred_username`.
+	// It is recorded as actor_label, a hint for readers that was true when the
+	// act happened. The subject (ULID) is the identity; nothing is authorized
+	// or keyed by this name. Never persisted.
+	DisplayName string `json:"-"`
+	// ServiceClient is the client id of a Keycloak service account, set by the
+	// door that verified its token; "" for a person. It travels with the
+	// account's commands as attribution (actor_client), so the node that
+	// executes one knows the account from a person without reading a name.
+	// Never persisted.
+	ServiceClient string `json:"-"`
 	// SignedInHere marks a KindHuman entry whose token was verified, or whose
 	// groups were attested, at this node. Only such a person's node-relative
 	// grants ($node) resolve here: a person rebuilt from a command that came
@@ -499,6 +507,18 @@ func (e *Entry) IsLocal() bool { return e != nil && e.Kind == KindLocal }
 // MayPublishAudit reports whether the entry may publish _AuditEvent. Only
 // local services may; no grant gives it to anyone else.
 func (e *Entry) MayPublishAudit() bool { return e != nil && e.Kind == KindLocal }
+
+// ActorLabel is the display hint an entry's records carry beside its id: what
+// a person's token called them (possibly nothing), a machine's enrolled name.
+func (e *Entry) ActorLabel() string {
+	if e == nil {
+		return ""
+	}
+	if e.Kind == KindHuman {
+		return e.DisplayName
+	}
+	return e.Name
+}
 
 // ActorKind maps registry and token kinds to the audit envelope's actor
 // vocabulary. Machines are service actors; WrittenBy keeps the keyed/local

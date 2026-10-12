@@ -3309,3 +3309,159 @@ func TestAnAckPastTheHeadOrForAnotherStoreIsRefused(t *testing.T) {
 		t.Fatalf("cursor at %d, want 3", got)
 	}
 }
+
+// A person is one subject however their account is named. The same person
+// sends a command, is renamed in the identity provider (username and full
+// name), and sends another: both records name the same actor_id, each keeps
+// the name the token gave at the time as actor_label, and the rename changes
+// nothing about what they may do. A token that names nobody leaves the label
+// empty instead of repeating the subject.
+func TestARenamedPersonKeepsOneIdentityOnCommandsAndAuditRecords(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	const sub = "8c0e6d1f-6a57-4c1d-9a55-0f4f6f4f1a11"
+	send := func(corr string, o tokentest.MintOpts, topic string) int {
+		t.Helper()
+		o.Sub = sub
+		rec := localPublish(t, h,
+			map[string]string{"Authorization": "Bearer " + iss.MintOpt(o), "X-Colca-Service": "api"},
+			map[string]any{"topic": topic,
+				"payload": map[string]any{"correlation_id": corr, "expires_at": 9999999999999}})
+		return rec.Code
+	}
+	const granted = "colca/v1/_CmdOperate/n-test/line1/start"
+	grants := []string{"cmd:#:operate"}
+	tokens := []struct {
+		corr      string
+		opts      tokentest.MintOpts
+		wantLabel string
+	}{
+		{"c-before", tokentest.MintOpts{Grants: grants, Username: "anna", Name: "Anna Muster"}, "Anna Muster"},
+		{"c-after", tokentest.MintOpts{Grants: grants, Username: "ameier", Name: "Anna Meier"}, "Anna Meier"},
+		{"c-username", tokentest.MintOpts{Grants: grants, Username: "ameier"}, "ameier"},
+		{"c-unnamed", tokentest.MintOpts{Grants: grants}, ""},
+	}
+	for _, tok := range tokens {
+		if code := send(tok.corr, tok.opts, granted); code != http.StatusOK {
+			t.Fatalf("%s: the same subject with the same grants = %d, want 200", tok.corr, code)
+		}
+	}
+	commands, _, err := h.eng.Store().Read("commands", 1, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := map[string]string{}
+	for _, rec := range commands {
+		if rec.Topic != granted {
+			continue
+		}
+		var body struct {
+			CorrelationID string `json:"correlation_id"`
+		}
+		if err := json.Unmarshal(rec.Payload, &body); err != nil {
+			t.Fatal(err)
+		}
+		if rec.ActorID != sub || rec.WrittenBy != sub || rec.ActorKind != "human" || rec.ActorClient != "" {
+			t.Fatalf("%s: actor = %q written_by %q kind %q client %q, want the one subject, a person",
+				body.CorrelationID, rec.ActorID, rec.WrittenBy, rec.ActorKind, rec.ActorClient)
+		}
+		labels[body.CorrelationID] = rec.ActorLabel
+	}
+	for _, tok := range tokens {
+		got, stored := labels[tok.corr]
+		if !stored || got != tok.wantLabel {
+			t.Fatalf("%s: actor_label = %q (stored %v), want %q", tok.corr, got, stored, tok.wantLabel)
+		}
+	}
+
+	// A refusal names the same subject and the same hint as an accepted command.
+	if code := send("c-denied", tokentest.MintOpts{Username: "ameier", Name: "Anna Meier"}, granted); code != http.StatusForbidden {
+		t.Fatalf("a command without a grant = %d, want 403", code)
+	}
+	audit, _, err := h.eng.Store().Read("audit", 1, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denials := 0
+	for _, rec := range audit {
+		var event struct {
+			Outcome    string `json:"outcome"`
+			ActorID    string `json:"actor_id"`
+			ActorLabel string `json:"actor_label"`
+			ActorKind  string `json:"actor_kind"`
+		}
+		if err := json.Unmarshal(rec.Payload, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Outcome != "denied" {
+			continue
+		}
+		denials++
+		if event.ActorID != sub || event.ActorLabel != "Anna Meier" || event.ActorKind != "human" ||
+			rec.ActorID != sub || rec.ActorLabel != "Anna Meier" {
+			t.Fatalf("denial names %+v (envelope %q %q), want the subject and the token's name", event, rec.ActorID, rec.ActorLabel)
+		}
+	}
+	if denials != 1 {
+		t.Fatalf("denials in the audit stream = %d, want 1", denials)
+	}
+}
+
+// A Keycloak service account acts through the same door as a person. Its
+// record says so in a field of its own, set from the verified token, so no
+// reader has to recognise the account by the look of its name.
+func TestAServiceAccountsCommandNamesItsClient(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	token := iss.MintOpt(tokentest.MintOpts{
+		Sub: "0c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f", Grants: []string{"cmd:#:operate"},
+		Username: "service-account-erp-bridge",
+	})
+	rec := localPublish(t, h,
+		map[string]string{"Authorization": "Bearer " + token, "X-Colca-Service": "api"},
+		map[string]any{"topic": "colca/v1/_CmdOperate/n-test/line1/start",
+			"payload": map[string]any{"correlation_id": "c-svc", "expires_at": 9999999999999}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("service account command = %d: %s", rec.Code, rec.Body.String())
+	}
+	recs, _, err := h.eng.Store().Read("commands", 1, 10, nil)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("commands stream: %v %+v", err, recs)
+	}
+	if got := recs[0]; got.ActorID != "0c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f" || got.ActorClient != "erp-bridge" ||
+		got.ActorLabel != "service-account-erp-bridge" {
+		t.Fatalf("record = %+v, want the account's subject and its client erp-bridge", got)
+	}
+}
+
+// A local service acting for a person it cannot name sends no label, and the
+// record keeps none: a subject is never stored as a name. Another kind of
+// actor is still called by its id.
+func TestALocalServiceNamingNoPersonLeavesTheLabelEmpty(t *testing.T) {
+	h := newLocalHandler(t)
+	svc := map[string]string{"X-Colca-Service": "api"}
+	publish := func(suffix, actor, kind string) {
+		t.Helper()
+		rec := localPublish(t, h, svc, map[string]any{
+			"topic":    "colca/v1/_SystemElement/n-test/line-" + suffix,
+			"payload":  map[string]any{"id": "el-" + suffix, "name": "Line " + suffix},
+			"actor_id": actor, "actor_kind": kind})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: publish = %d: %s", suffix, rec.Code, rec.Body.String())
+		}
+	}
+	publish("a", "kc-sub-anna", "human")
+	publish("b", "erp-bridge", "service")
+	recs, _, err := h.eng.Store().Read("entities", 1, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := map[string]string{}
+	for _, rec := range recs {
+		labels[rec.ActorID] = rec.ActorLabel
+	}
+	if label, stored := labels["kc-sub-anna"]; !stored || label != "" {
+		t.Fatalf("person's label = %q (stored %v), want none", label, stored)
+	}
+	if label := labels["erp-bridge"]; label != "erp-bridge" {
+		t.Fatalf("service's label = %q, want its id", label)
+	}
+}

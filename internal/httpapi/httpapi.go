@@ -196,7 +196,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			Metadata: map[string]any{"door": door, "route": r.URL.Path, "method": r.Method},
 		}
 		if entry != nil {
-			d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.Name, entry.ActorKind()
+			d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.ActorLabel(), entry.ActorKind()
 		}
 		_ = e.RecordDenial(d)
 	}
@@ -355,7 +355,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 			if c.human != nil {
 				slog.Default().Info("admin action by human", "sub", c.human.Sub,
-					"username", c.human.Username, "path", r.URL.Path, "method", r.Method)
+					"name", c.human.Entry.DisplayName, "path", r.URL.Path, "method", r.Method)
 			}
 			next(w, r)
 		})
@@ -505,11 +505,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			if actorID == "" {
 				actorID = writtenBy
 			}
-			if actorLabel == "" {
-				actorLabel = actorID
-			}
 			if actorKind == "" {
 				actorKind = "system"
+			}
+			if actorLabel == "" && actorKind != "human" {
+				actorLabel = actorID // a person's subject is never stored as their name
 			}
 			res, err = e.IngestAdminAttributed(in.Topic, in.Payload, engine.Attribution{
 				WrittenBy: writtenBy, ActorID: actorID,
@@ -517,11 +517,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			})
 		case c.human != nil:
 			// Humans only send commands; IngestHuman enforces it.
-			actor := c.human.Username
-			if actor == "" {
-				actor = c.human.Sub
-			}
-			res, err = e.IngestHumanAttributed(c.entry, actor, in.Topic, in.Payload)
+			res, err = e.IngestHuman(c.entry, in.Topic, in.Payload)
 		default:
 			// A machine publishing over HTTP is judged exactly like its MQTT
 			// publish: own zone, identity rule, cmd grants.
@@ -804,7 +800,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		}
 		if c.entry != nil && !ownsCursor(c.entry, cursor) {
 			_ = e.RecordDenial(engine.AuditDenial{Operation: "read", ReasonCode: "cursor_denied",
-				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+				ActorID: c.entry.ULID, ActorLabel: c.entry.ActorLabel(), ActorKind: c.entry.ActorKind(),
 				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": stream, "cursor": cursor}})
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: this identity's cursors are named " + c.entry.CursorPrefix() + "..."})
 			return
@@ -929,14 +925,14 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		operator := !owned && in.Delete && uns.MayRetireCursor(e.Scope(), c.entry, in.Cursor)
 		if operator && !staleCursor(e, in.Cursor, in.Stream, cfg.Cursors.EffectiveStaleAfter()) {
 			_ = e.RecordDenial(engine.AuditDenial{Operation: op, ReasonCode: "cursor_not_stale",
-				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+				ActorID: c.entry.ULID, ActorLabel: c.entry.ActorLabel(), ActorKind: c.entry.ActorKind(),
 				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream, "cursor": in.Cursor}})
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "only a stale cursor (see GET /backlog) may be retired by another identity"})
 			return
 		}
 		if !owned && !operator {
 			_ = e.RecordDenial(engine.AuditDenial{Operation: op, ReasonCode: "cursor_denied",
-				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+				ActorID: c.entry.ULID, ActorLabel: c.entry.ActorLabel(), ActorKind: c.entry.ActorKind(),
 				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream, "cursor": in.Cursor}})
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: this identity's cursors are named " + c.entry.CursorPrefix() + "..."})
 			return
@@ -944,7 +940,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if in.Delete {
 			if operator {
 				if err := e.RecordAuthorized(engine.AuditDenial{Operation: op, ReasonCode: "cursor_retired_by_operator",
-					ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+					ActorID: c.entry.ULID, ActorLabel: c.entry.ActorLabel(), ActorKind: c.entry.ActorKind(),
 					EntityType: "cursor", EntityID: in.Cursor,
 					Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream,
 						"cursor": in.Cursor, "owner": cursorOwner(in.Cursor)}}); err != nil {
