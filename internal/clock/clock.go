@@ -45,11 +45,13 @@ type ParentSample struct {
 }
 
 // roundTrip is the time the sample spent on the link: the exchange minus the
-// parent's hold. ok is false when the readings contradict each other (the
-// response before the request, a hold longer than the exchange).
-func (s ParentSample) roundTrip() (rt time.Duration, ok bool) {
-	rt = s.Received.Sub(s.Sent) - s.Held
-	return rt, s.Held >= 0 && rt >= 0
+// parent's hold, and never less than nothing. The two are measured on two
+// hosts' clocks and the hold is sent in whole milliseconds, so on a fast link
+// a hold can come out a little longer than the exchange it is part of (two
+// oscillators 100 ppm apart differ by 2 ms over a 20 s long poll). That is a
+// round trip too short to measure, not a contradiction.
+func (s ParentSample) roundTrip() time.Duration {
+	return max(s.Received.Sub(s.Sent)-max(s.Held, 0), 0)
 }
 
 // Transition says whether a parent sample moved the skew across SkewAlarm.
@@ -105,15 +107,14 @@ func (c *Clock) Host() hostclock.Status { return c.host() }
 //
 // used is false when nothing was recorded and the previous measurement stands:
 // on the root, for a now_ms that is not a time (0, from a response without the
-// field), and for a sample whose round trip exceeds MaxRoundTrip or cannot be
-// determined. A response that waited on a stalled link is such a sample: the
-// stall is not skew.
+// field), and for a sample whose round trip exceeds MaxRoundTrip. A response
+// that waited on a stalled link is such a sample: the stall is not skew.
 func (c *Clock) ObserveParent(s ParentSample) (skew time.Duration, t Transition, used bool) {
 	if c.isRoot || s.NowMS <= 0 {
 		return 0, Unchanged, false
 	}
-	rt, ok := s.roundTrip()
-	if !ok || rt > MaxRoundTrip {
+	rt := s.roundTrip()
+	if rt > MaxRoundTrip {
 		return 0, Unchanged, false
 	}
 	skew = time.UnixMilli(s.NowMS).Sub(s.Received) + rt/2

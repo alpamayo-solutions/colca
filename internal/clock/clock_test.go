@@ -201,9 +201,10 @@ func TestObserveParentDiscardsARoundTripBeyondTheWarningThreshold(t *testing.T) 
 		{"past the bound", MaxRoundTrip + time.Millisecond, 0, false},
 		{"long poll, short link", 20*time.Second + MaxRoundTrip, 20 * time.Second, true},
 		{"long poll, hold not reported", 20 * time.Second, 0, false},
-		{"hold longer than the exchange", time.Second, 2 * time.Second, false},
-		{"response before the request", -time.Second, 0, false},
-		{"negative hold", 100 * time.Millisecond, -time.Second, false},
+		// Two hosts' clocks measured the two: a hold a little over the exchange
+		// is a round trip too short to measure.
+		{"hold just over the exchange", 20 * time.Second, 20*time.Second + 2*time.Millisecond, true},
+		{"negative hold counts as none", MaxRoundTrip + time.Millisecond, -time.Second, false},
 	} {
 		c := NewWithHost(false, time.Now, unreported)
 		received := sent.Add(tc.exchange)
@@ -223,5 +224,20 @@ func TestARealSkewWithAShortRoundTripIsReported(t *testing.T) {
 	skew, tr, used := c.ObserveParent(ParentSample{NowMS: sent.Add(6*time.Second + 20*time.Millisecond).UnixMilli(), Sent: sent, Received: received})
 	if !used || skew != 6*time.Second || tr != Exceeded {
 		t.Fatalf("skew = %v, transition = %v, used = %v, want a used 6s sample that crosses the alarm", skew, tr, used)
+	}
+}
+
+// A hold that comes out longer than the exchange leaves no round trip to take
+// the middle of: the parent's stamp is compared with the time of receipt.
+func TestAHoldLongerThanTheExchangeLeavesNoRoundTrip(t *testing.T) {
+	sent := time.UnixMilli(1_700_000_000_000)
+	received := sent.Add(20 * time.Second)
+	c := NewWithHost(false, time.Now, unreported)
+	skew, _, used := c.ObserveParent(ParentSample{
+		NowMS: received.Add(30 * time.Millisecond).UnixMilli(), Held: 20*time.Second + 2*time.Millisecond,
+		Sent: sent, Received: received,
+	})
+	if !used || skew != 30*time.Millisecond {
+		t.Fatalf("skew = %v, used = %v, want a used sample of 30ms", skew, used)
 	}
 }
