@@ -35,7 +35,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alpamayo-solutions/colca/clockwork"
 	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/historian"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
@@ -108,17 +107,7 @@ func run() int {
 	}
 	defer pool.Close()
 
-	deps, err := clockwork.Dependencies(os.Getenv("FACTORY_STEP_DEPENDENCIES"), os.Getenv("FACTORY_CLOCK_TOPIC"))
-	if err != nil {
-		log.Error("clock configuration", "err", err)
-		return 2
-	}
-	source := env("APPLICATION_TIME_SOURCE", "local")
-	if source != "local" && source != "mqtt" {
-		log.Error("invalid APPLICATION_TIME_SOURCE")
-		return 2
-	}
-	sink := &historian.Sink{Pool: pool, Strict: deps != nil, Writers: cfg.writers}
+	sink := &historian.Sink{Pool: pool, Writers: cfg.writers}
 	// Postgres may still be starting, so retry for a bounded time instead of relying
 	// on a restart policy.
 	if err := ensureSchema(ctx, sink, cfg.retentionDays, log, 90*time.Second); err != nil {
@@ -178,7 +167,6 @@ func run() int {
 			Service: cfg.colcaService,
 		},
 		Store:    sink,
-		Strict:   deps != nil,
 		Log:      log,
 		Max:      cfg.fetchMax,
 		Pipeline: cfg.pipeline,
@@ -199,49 +187,6 @@ func run() int {
 		Version: version,
 		Log:     log,
 	}
-	if deps != nil {
-		self, err := logDoor.Self(ctx)
-		if err != nil {
-			log.Error("clock identity", "err", err)
-			return 2
-		}
-		watch := &clockwork.Subscription{Node: self.Node, Topic: os.Getenv("FACTORY_CLOCK_TOPIC"), Dependencies: deps}
-		announcer.OnConnect, announcer.OnDisconnect = watch.Attach, watch.Reset
-		gate := &clockwork.Gate{Asynchronous: os.Getenv("FACTORY_ASYNC_CONSUMER") == "true", Door: logDoor, Name: cfg.colcaService, Topic: watch.Topic, Dependencies: deps, State: watch.State, Fresh: watch.Fresh, Telemetry: announcer.ReportProgress}
-		if err := gate.Register(ctx); err != nil {
-			log.Error("clock registration", "err", err)
-			return 2
-		}
-		var lastDrain time.Time
-		gate.Drain = func(ctx context.Context, _ float64) (bool, error) {
-			if gate.Asynchronous && time.Since(lastDrain) < bridge.BatchInterval {
-				return false, nil
-			}
-			lastDrain = time.Now()
-			// Capture after upstream completion; continuous arrivals must not
-			// prevent this committed boundary from being reported.
-			err := door.DrainToHead(ctx, logDoor, "metrics", historian.Cursor, func(ctx context.Context) (int64, error) {
-				_, err := bridge.Once(ctx)
-				return bridge.Acknowledged, err
-			})
-			return err == nil, err
-		}
-		var changed <-chan struct{}
-		bridge.Coordinate = func(ctx context.Context) (bool, error) {
-			changed = watch.Changes()
-			return gate.Once(ctx, watch.RealNow(source))
-		}
-		bridge.WaitCoordinate = func(ctx context.Context) {
-			delay := gate.WaitDelay(watch.RealNow(source))
-			if gate.Asynchronous {
-				if batch := time.Until(lastDrain.Add(bridge.BatchInterval)); batch > 0 && batch < delay {
-					delay = batch
-				}
-			}
-			clockwork.Wait(ctx, changed, delay)
-		}
-	}
-
 	go serveObservability(cfg.httpAddr, bridge, signals, announcer, link, log)
 
 	bridge.Health = announcer.Report

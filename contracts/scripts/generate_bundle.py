@@ -85,8 +85,6 @@ NOT_ON_THE_WIRE: dict[str, str] = {
 # `minimum` and `maximum` carry the limits payload fields declare (`Pattern`,
 # `MaxLength`, `Bounds` in payload.py).
 ALLOWED_KEYWORDS = {
-    "if",
-    "then",
     "type",
     "properties",
     "required",
@@ -219,7 +217,7 @@ def _lint_subset(schema: object, path: str = "") -> list[str]:
                 continue
             if k not in ALLOWED_KEYWORDS:
                 bad.append(f"{path}.{k}")
-            if k in ("properties", "items", "if", "then"):
+            if k in ("properties", "items"):
                 bad += _lint_subset(v, f"{path}.{k}")
     return bad
 
@@ -268,9 +266,6 @@ def build_bundle(git_sha: str = "unknown") -> tuple[dict, str]:
             required_extra=REQUIRED_EXTRA.get(identifier, []),
             required_drop=_required_drop_for(identifier, cls),
         )
-        if identifier == "_ClockProgress":
-            schema["if"] = {"properties": {"ready": {"enum": [True]}}, "required": ["ready"]}
-            schema["then"] = {"properties": {"observed_at": {"type": "number"}}}
         if bad := _lint_subset(schema, identifier):
             raise SystemExit(f"generate_bundle: schema outside the supported subset: {bad}")
         # State classes, definitions included, are retracted by an empty payload.

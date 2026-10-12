@@ -1195,13 +1195,13 @@ func (e *Engine) IngestDownlinkDefinitionAttributed(topic string, payload []byte
 // then mirror every newly applied record onto the local bus. The replication
 // server never writes to the store directly.
 func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord) (applied int, hwm uint64, err error) {
-	recs, droppedTimeSync := e.rejectTimeSync(child, recs)
+	recs, dropped := e.dropUnreplicable(child, stream, recs)
 	prev := e.store.HWMGet(child, stream)
 	got, hwm, err := e.store.ApplyReplicated(child, stream, recs)
 	if err != nil {
 		return 0, hwm, err
 	}
-	e.logOffsetJumps(child, stream, prev, got, droppedTimeSync)
+	e.logOffsetJumps(child, stream, prev, got, dropped)
 	// Replicated records count toward colca_ingest_records_total like the other entry
 	// paths.
 	for _, r := range got {
@@ -1236,16 +1236,23 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 	return applied, hwm, nil
 }
 
-// rejectTimeSync drops _TimeSync records from a replicated batch before they
-// reach the store. A well-behaved child never stores one, so such a record is
-// forged or buggy; the rest of the batch still applies.
+// dropUnreplicable keeps records a parent never stores out of a replicated
+// batch before they reach the store; the rest of the batch still applies.
 //
-// It returns the dropped child offsets, so logOffsetJumps does not report the
-// hole a drop leaves as data loss.
-func (e *Engine) rejectTimeSync(child string, recs []store.ReplRecord) (filtered []store.ReplRecord, dropped map[uint64]bool) {
+//   - _TimeSync is node-local and never replicated, so such a record is forged
+//     or buggy. It is dropped.
+//   - A retired contract (uns.IsRetired) can still sit in an older child's
+//     metrics stream. Its record becomes a one-offset skip, so the HWM moves
+//     past it and a batch ending in one does not hold the lane.
+//
+// Both are counted as rejected publishes. It returns the dropped child offsets,
+// so logOffsetJumps does not report the hole a drop leaves as data loss.
+func (e *Engine) dropUnreplicable(child, stream string, recs []store.ReplRecord) (filtered []store.ReplRecord, dropped map[uint64]bool) {
 	filtered = recs[:0:0]
 	for _, r := range recs {
-		if p, err := uns.Parse(r.Topic); err == nil && uns.IsNodeLocal(uns.ClassOf(p.Contract)) {
+		p, err := uns.Parse(r.Topic)
+		switch {
+		case err == nil && uns.IsNodeLocal(uns.ClassOf(p.Contract)):
 			e.metrics.RejectPublish(metrics.ReasonTimeSync)
 			e.log.Warn("rejected _TimeSync record from replication: it is node-local and never replicated",
 				"child", child, "topic", r.Topic)
@@ -1253,9 +1260,13 @@ func (e *Engine) rejectTimeSync(child string, recs []store.ReplRecord) (filtered
 				dropped = make(map[uint64]bool)
 			}
 			dropped[r.ChildOffset] = true
-			continue
+		case err == nil && uns.IsRetired(p.Contract) && stream == "metrics":
+			e.metrics.RejectPublish(metrics.ReasonValidation)
+			e.log.Debug("skipped a replicated record of a retired contract", "child", child, "topic", r.Topic)
+			filtered = append(filtered, store.ReplRecord{ChildOffset: r.ChildOffset, SkipFrom: r.ChildOffset})
+		default:
+			filtered = append(filtered, r)
 		}
-		filtered = append(filtered, r)
 	}
 	return filtered, dropped
 }
@@ -1266,8 +1277,8 @@ func (e *Engine) rejectTimeSync(child string, recs []store.ReplRecord) (filtered
 // Detection only.
 //
 // Streams whose uplink is filtered (uns.UplinkCarriesEveryRecord) are exempt, and
-// so are holes fully explained by this batch's dropped _TimeSync records.
-func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []store.ReplRecord, droppedTimeSync map[uint64]bool) {
+// so are holes fully explained by this batch's dropped records.
+func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []store.ReplRecord, dropped map[uint64]bool) {
 	if !uns.UplinkCarriesEveryRecord(stream) {
 		return
 	}
@@ -1277,7 +1288,7 @@ func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []sto
 		if r.SkipFrom != 0 {
 			first = r.SkipFrom
 		}
-		if first > last+1 && !jumpFullyExplainedByDroppedTimeSync(last, first, droppedTimeSync) {
+		if first > last+1 && !jumpFullyExplainedByDropped(last, first, dropped) {
 			e.log.Error("replication offset jump: this node never received the child offsets between have and got, most likely pruned at the child before replication",
 				"child", child, "stream", stream, "have", last, "got", r.ChildOffset)
 			e.metrics.GapApplied(child, stream)
@@ -1286,9 +1297,9 @@ func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []sto
 	}
 }
 
-// jumpFullyExplainedByDroppedTimeSync reports whether every offset strictly
-// between last and childOffset was a dropped _TimeSync record.
-func jumpFullyExplainedByDroppedTimeSync(last, childOffset uint64, dropped map[uint64]bool) bool {
+// jumpFullyExplainedByDropped reports whether every offset strictly between
+// last and childOffset was a dropped record.
+func jumpFullyExplainedByDropped(last, childOffset uint64, dropped map[uint64]bool) bool {
 	if len(dropped) == 0 {
 		return false
 	}

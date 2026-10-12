@@ -785,7 +785,7 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		if err != nil {
 			return false // only uns records exist in the store: fail closed
 		}
-		if localClockRead(e, topic) {
+		if localServiceRead(e, topic) {
 			return true
 		}
 		for _, z := range readZones(sc, e) {
@@ -804,7 +804,7 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 			// whatever its zone: the beacon is per node, not per path.
 			return true
 		}
-		if localClockRead(e, topic) {
+		if localServiceRead(e, topic) {
 			return true
 		}
 		fixed, isUns := fixedPathPrefix(topic)
@@ -865,24 +865,17 @@ func AuthorizeBrowse(sc Scope, e *Entry, path string) bool {
 	return false
 }
 
-// localClockRead admits only the clock coordination contracts to services
-// inside the deployment. Placement scopes process data, but a connector must
-// still read the shared clock and completion reports from workers at other
-// mounts. This gives no publication rights and does not widen human or keyed
-// external identities. A wildcard contract never qualifies.
-func localClockRead(e *Entry, topic string) bool {
+// localServiceRead admits services inside the deployment to every service's
+// _ServiceDetails. Placement scopes process data, but a service must still find
+// the other services of its node, wherever they are mounted. This gives no
+// publication rights and does not widen human or keyed external identities. A
+// wildcard contract never qualifies.
+func localServiceRead(e *Entry, topic string) bool {
 	if !e.IsLocal() {
 		return false
 	}
 	parts := strings.Split(topic, "/")
-	if len(parts) < 4 || parts[0] != Root() || parts[1] != Version {
-		return false
-	}
-	switch parts[2] {
-	case "_ClockDefinition", "_ClockProgress", "_ServiceDetails":
-		return true
-	}
-	return false
+	return len(parts) >= 4 && parts[0] == Root() && parts[1] == Version && parts[2] == "_ServiceDetails"
 }
 
 // isReservedFilter reports whether a subscribe filter reaches into MQTT's

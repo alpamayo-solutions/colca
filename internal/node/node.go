@@ -160,6 +160,10 @@ func Start(cfg *config.Config) (*Node, error) {
 		return nil, err
 	}
 
+	if _, err := purgeRetiredState(st, log); err != nil {
+		return fail(fmt.Errorf("node %s: purge retired state: %w", cfg.ULID, err))
+	}
+
 	// The blob store lives beside Pebble under the same data directory, so a
 	// node's whole durable state is one directory to back up or wipe.
 	blobs, err := blobstore.Open(filepath.Join(cfg.DataDir, "blobs"), cfg.Limits.EffectiveMaxBlobBytes())

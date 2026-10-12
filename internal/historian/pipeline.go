@@ -245,10 +245,9 @@ func (p *pipeline) health(part string, err error) {
 }
 
 // pipelined reports whether Run can write several pages at once: the door reads
-// ahead of the cursor, the store writes partitions on their own, and the run is
-// neither strict nor coordinated (those apply one page at a time on purpose).
+// ahead of the cursor and the store writes partitions on their own.
 func (b *Bridge) pipelined() (*pipeline, bool) {
-	if b.Pipeline < 2 || b.Strict || b.Coordinate != nil {
+	if b.Pipeline < 2 {
 		return nil, false
 	}
 	ahead, ok := b.Door.(aheadFetcher)
@@ -396,7 +395,6 @@ func (p *pipeline) fetch(ctx context.Context) error {
 		}
 		retry = time.Second
 		p.health("fetch", nil)
-		b.NowMS, b.FetchedAt = page.NowMS, time.Now()
 		if following := p.following(); next != 0 && page.Store != "" && following != "" && page.Store != following {
 			// colcad's store was recreated under a read ahead of the cursor:
 			// finish what is in flight, then read the new store from its

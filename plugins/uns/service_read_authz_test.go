@@ -2,9 +2,11 @@ package uns
 
 import "testing"
 
-func TestMountedLocalServiceReadsClockCoordination(t *testing.T) {
+// A service mounted below the node reads every service's _ServiceDetails, and
+// nothing else outside its placement; no other kind of identity gains the read.
+func TestMountedLocalServiceReadsServiceDetails(t *testing.T) {
 	local := &Entry{ULID: "connector", Kind: KindLocal, Name: "connector", Element: elementAt("line/machine")}
-	for _, contract := range []string{"_ClockDefinition", "_ClockProgress", "_ServiceDetails"} {
+	for _, contract := range []string{"_ServiceDetails"} {
 		for _, action := range []Action{ActReadRecord, ActSub} {
 			topic := "colca/v1/" + contract + "/node/other-worker/_service"
 			if !Authorize(ns, local, action, topic) {
@@ -14,7 +16,7 @@ func TestMountedLocalServiceReadsClockCoordination(t *testing.T) {
 				outsider := *local
 				outsider.Kind = kind
 				if Authorize(ns, &outsider, action, topic) {
-					t.Errorf("clock read widened %s via %v", kind, action)
+					t.Errorf("service read widened %s via %v", kind, action)
 				}
 			}
 		}
@@ -22,7 +24,7 @@ func TestMountedLocalServiceReadsClockCoordination(t *testing.T) {
 			t.Errorf("local alias subscription denied for %s", contract)
 		}
 		if Authorize(ns, local, ActPub, "colca/v1/"+contract+"/node/other-worker/_service") {
-			t.Errorf("clock read widened publication of %s", contract)
+			t.Errorf("service read widened publication of %s", contract)
 		}
 	}
 	for _, topic := range []string{
@@ -32,7 +34,7 @@ func TestMountedLocalServiceReadsClockCoordination(t *testing.T) {
 		"colca/v1/+/node/#", "colca/#", "#",
 	} {
 		if Authorize(ns, local, ActSub, topic) {
-			t.Errorf("clock read widened unrelated subscription %s", topic)
+			t.Errorf("service read widened unrelated subscription %s", topic)
 		}
 	}
 }

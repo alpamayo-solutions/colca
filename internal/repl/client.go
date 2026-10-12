@@ -404,11 +404,12 @@ func ackOnly(topic string) bool {
 
 // leavesTheNode runs on every lane and the metrics floor before the lane's own
 // filter: node-private records (uns.IsNodePrivate, such as Edit replay receipts
-// and their tombstones) never go to the parent. Read still advances past what it
-// filters, so a private record cannot hold a lane. Unparseable topics pass.
+// and their tombstones) and records of retired contracts (uns.IsRetired) never
+// go to the parent. Read still advances past what it filters, so such a record
+// cannot hold a lane. Unparseable topics pass.
 func leavesTheNode(topic string) bool {
 	p, err := uns.Parse(topic)
-	return err != nil || !uns.IsNodePrivate(p.Contract)
+	return err != nil || (!uns.IsNodePrivate(p.Contract) && !uns.IsRetired(p.Contract))
 }
 
 // pushable composes the universal keep-home rule with a lane's own filter.
@@ -577,8 +578,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 	// busyUntil is, per lane, until when a parent that answered 429 asked to be
 	// left alone. A lane waits it out even while other lanes make progress.
 	busyUntil := map[string]time.Time{}
-	var pushOnce func(string, func(string) bool) (bool, bool)
-	pushOnce = func(stream string, filter func(string) bool) (scanned, aborted bool) {
+	pushOnce := func(stream string, filter func(string) bool) (scanned, aborted bool) {
 		if until, ok := busyUntil[stream]; ok {
 			if time.Now().Before(until) {
 				retryPending = true
@@ -606,28 +606,6 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		}
 		if next == from {
 			return false, false // nothing scanned: this lane is empty
-		}
-		// A completion marker must not overtake an annotation/alarm that was
-		// written after the outer loop snapshotted its priority lanes. Capture
-		// those floors AFTER reading the marker and drain them before forwarding
-		// this metrics page. Each hop preserves this order independently.
-		if stream == "metrics" {
-			for _, record := range recs {
-				parsed, _ := uns.Parse(record.Topic)
-				if parsed.Contract != "_ClockProgress" {
-					continue
-				}
-				for _, lane := range priorityLanes {
-					target := eng.Store().NextOffset(lane.name)
-					for eng.Store().CursorGet(uns.UplinkCursor(c.parentPub), lane.name) < target {
-						scanned, aborted := pushOnce(lane.name, lane.filter)
-						if aborted || !scanned {
-							return false, aborted
-						}
-					}
-				}
-				break
-			}
 		}
 		pushed := false
 		batch := make([]store.ReplRecord, 0, len(recs))
