@@ -543,7 +543,7 @@ func TestLoadRejectsInvalidYAMLAndInvalidConfig(t *testing.T) {
 // block is not read, so a node can be upgraded before its config is cleaned.
 func TestLoadIgnoresALeftoverTimeSyncBlock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "node.yaml")
-	doc := "ulid: n1\ndata_dir: /tmp/data\nidentity: { key_file: /tmp/n1.key }\n" +
+	doc := "ulid: n1\ndata_dir: /tmp/data\nkey_file: /tmp/n1.key\n" +
 		"time_sync:\n  beacon_interval: 45s\n  hold_ms: 20000\n  drift_warn_ms: 2500\n"
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)

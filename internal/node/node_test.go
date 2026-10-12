@@ -1145,7 +1145,7 @@ func TestNodeRecordGainsAHealthMetricAddedSinceItWasWritten(t *testing.T) {
 	base := t.TempDir()
 	keyFile := filepath.Join(base, "n1.key")
 	genKey(t, keyFile)
-	cfg := &config.Config{ULID: "n1", DataDir: filepath.Join(base, "data"), Identity: config.Identity{KeyFile: keyFile},
+	cfg := &config.Config{ULID: "n1", DataDir: filepath.Join(base, "data"), KeyFile: keyFile,
 		API: config.API{Addr: "127.0.0.1:0", Token: tok}}
 	keys := func(entity map[string]any) (out []string, names map[string]any) {
 		names = map[string]any{}
