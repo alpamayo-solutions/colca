@@ -578,8 +578,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 	// busyUntil is, per lane, until when a parent that answered 429 asked to be
 	// left alone. A lane waits it out even while other lanes make progress.
 	busyUntil := map[string]time.Time{}
-	var pushOnce func(string, func(string) bool) (bool, bool)
-	pushOnce = func(stream string, filter func(string) bool) (scanned, aborted bool) {
+	pushOnce := func(stream string, filter func(string) bool) (scanned, aborted bool) {
 		if until, ok := busyUntil[stream]; ok {
 			if time.Now().Before(until) {
 				retryPending = true
