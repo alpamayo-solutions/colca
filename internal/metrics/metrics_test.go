@@ -408,6 +408,7 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_uplink_resync_active":                     1,
 		"colca_uplink_resync_unreplayable_records_total": len(uplinkStreams),
 		"colca_downlink_commands_already_held_total":     1,
+		"colca_clock_parent_samples_discarded_total":     1,
 		// Collector gauges: one child per stream regardless of activity.
 		"colca_stream_low_water_mark": len(streams),
 		"colca_stream_live_bytes":     len(streams),

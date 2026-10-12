@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 )
 
@@ -125,7 +126,7 @@ func nodeHealthMetrics() []map[string]any {
 		{"key": "replication_lag", "name": "Replication lag", "metric": "replication_lag_records", "description": "Records waiting behind this node's replication cursors.", "query": `max({{__name__=~"(edge|hub):replication_lag_records",node_id=~"{node_id_pattern}"}})`, "visualization": "timeline", "unit": "records", "precision": 0, "min_value": 0, "thresholds": map[string]any{}},
 		{"key": "uplink_backlog_age", "name": "Upload backlog age", "metric": "uplink_next_record_age_seconds", "description": "Age of the next retained record awaiting uplink progress. Includes local-only records until progress is acknowledged; zero when caught up.", "query": `max({{__name__=~"(edge|hub):uplink_next_record_age_seconds",node_id=~"{node_id_pattern}",stream="metrics"}}) / 86400`, "visualization": "timeline", "unit": "days", "precision": 1, "min_value": 0, "thresholds": map[string]any{}},
 		{"key": "broker_metric_bytes", "name": "Buffered metric storage", "metric": "broker_retained_bytes", "description": "Logical bytes in the broker's metric stream, including uploaded and local-only records still retained. Disk files and historian storage use additional space.", "query": `max({{__name__=~"(edge|hub):broker_retained_bytes",node_id=~"{node_id_pattern}",stream="metrics"}}) / 1048576`, "visualization": "timeline", "unit": "MiB", "precision": 1, "min_value": 0, "thresholds": map[string]any{}},
-		{"key": "clock", "name": "Clock error", "metric": "clock_error_seconds", "description": "The larger of the host clock's estimated error and this node's skew to its parent. Command expiry is judged on each node's own clock, so nodes whose clocks disagree judge it differently.", "query": `max({{__name__=~"(edge|hub):clock_error_seconds",node_id=~"{node_id_pattern}"}}) * 1000`, "visualization": "timeline", "unit": "ms", "precision": 0, "min_value": 0, "thresholds": map[string]any{"warning": 500, "critical": 5000}},
+		{"key": "clock", "name": "Clock error", "metric": "clock_error_seconds", "description": "The larger of the host clock's estimated error and this node's skew to its parent. Command expiry is judged on each node's own clock, so nodes whose clocks disagree judge it differently.", "query": `max({{__name__=~"(edge|hub):clock_error_seconds",node_id=~"{node_id_pattern}"}}) * 1000`, "visualization": "timeline", "unit": "ms", "precision": 0, "min_value": 0, "thresholds": map[string]any{"warning": int(clock.SkewWarn.Milliseconds()), "critical": int(clock.SkewAlarm.Milliseconds())}},
 	}
 }
 

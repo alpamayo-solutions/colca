@@ -40,6 +40,13 @@ func newClockWorld(t *testing.T, isRoot bool) *clockWorld {
 	return w
 }
 
+// observeNow hands the engine a parent sample taken with no round trip at the
+// world's current time: the parent's clock reads skew ahead of this node's.
+func (w *clockWorld) observeNow(skew time.Duration) {
+	at := w.wall.now()
+	w.e.ObserveParentClock(clock.ParentSample{NowMS: at.Add(skew).UnixMilli(), Sent: at, Received: at})
+}
+
 const (
 	parentSkewLine      = "colca_clock_parent_skew_seconds"
 	parentSampleAgeLine = "colca_clock_parent_sample_age_seconds"
@@ -58,7 +65,7 @@ func TestParentSkewMetricsFollowTheParentsNowMS(t *testing.T) {
 		}
 	}
 
-	w.e.ObserveParentClock(w.wall.now().UnixMilli() + 7_000) // the parent is 7s ahead
+	w.observeNow(7 * time.Second) // the parent is 7s ahead
 	if v := metricstest.Value(t, w.m, parentSkewLine); v != 7 {
 		t.Fatalf("%s = %v, want 7", parentSkewLine, v)
 	}
@@ -74,7 +81,7 @@ func TestParentSkewMetricsFollowTheParentsNowMS(t *testing.T) {
 		t.Fatalf("%s = %v, want the last measurement 7 until the next sample", parentSkewLine, v)
 	}
 
-	w.e.ObserveParentClock(w.wall.now().UnixMilli() - 250) // the parent is 250ms behind
+	w.observeNow(-250 * time.Millisecond) // the parent is 250ms behind
 	if v := metricstest.Value(t, w.m, parentSkewLine); v != -0.25 {
 		t.Fatalf("%s = %v, want -0.25", parentSkewLine, v)
 	}
@@ -83,7 +90,7 @@ func TestParentSkewMetricsFollowTheParentsNowMS(t *testing.T) {
 // A root has no parent: the parent series are never exported there.
 func TestParentSkewMetricsAreAbsentOnTheRoot(t *testing.T) {
 	w := newClockWorld(t, true)
-	w.e.ObserveParentClock(w.wall.now().UnixMilli() + 60_000)
+	w.observeNow(time.Minute)
 	for _, line := range []string{parentSkewLine, parentSampleAgeLine} {
 		if v, ok := metricstest.Lookup(t, w.m, line); ok {
 			t.Fatalf("%s = %v on the root, want the series absent", line, v)
@@ -130,7 +137,7 @@ func TestCommandExpiryIsJudgedOnTheNodesOwnClockWhateverTheParentsClockSays(t *t
 		return b
 	}
 	deadline := w.wall.now().Add(10 * time.Second)
-	w.e.ObserveParentClock(w.wall.now().Add(time.Minute).UnixMilli()) // parent: 50s past the deadline
+	w.observeNow(time.Minute) // parent: 50s past the deadline
 
 	if got := w.e.Now(); !got.Equal(w.wall.now()) {
 		t.Fatalf("Now = %v after a parent sample, want the node's own wall clock %v", got, w.wall.now())
@@ -159,7 +166,7 @@ func TestParentSkewIsLoggedOnTheCrossingAndOnRecoveryOnly(t *testing.T) {
 	w := newClockWorld(t, false)
 	const exceeded, recovered = "clock skew to the parent exceeds the alarm threshold", "clock skew to the parent is back within the alarm threshold"
 	count := func(marker string) int { return strings.Count(logs.String(), marker) }
-	observe := func(skew time.Duration) { w.e.ObserveParentClock(w.wall.now().Add(skew).UnixMilli()) }
+	observe := w.observeNow
 
 	observe(4 * time.Second)
 	if count(exceeded) != 0 || count(recovered) != 0 {
@@ -181,6 +188,60 @@ func TestParentSkewIsLoggedOnTheCrossingAndOnRecoveryOnly(t *testing.T) {
 	observe(-6 * time.Second)
 	if count(exceeded) != 2 {
 		t.Fatalf("a second crossing must log again, got %d:\n%s", count(exceeded), logs.String())
+	}
+}
+
+// The first response after a link that stalled for seconds is late, not skewed:
+// both hosts are on one clock and the response sat on the link for 6s. Nothing
+// is logged, the metric and the /health block keep the measurement from before
+// the stall, and the dropped sample is counted. The same 6s as a real skew over
+// a short round trip is logged.
+func TestAStalledResponseRaisesNoSkewAlarm(t *testing.T) {
+	logs := captureLogs(t)
+	w := newClockWorld(t, false)
+	const exceeded, recovered = "clock skew to the parent exceeds the alarm threshold", "clock skew to the parent is back within the alarm threshold"
+	const discarded = "colca_clock_parent_samples_discarded_total"
+	w.observeNow(12 * time.Millisecond)
+
+	sent := w.wall.now()
+	const hold, stall = 20 * time.Second, 6 * time.Second
+	w.wall.advance(hold + stall)
+	w.e.ObserveParentClock(clock.ParentSample{NowMS: sent.Add(hold).UnixMilli(), Held: hold, Sent: sent, Received: w.wall.now()})
+	w.observeNow(12 * time.Millisecond) // the next response, on the working link
+
+	if strings.Contains(logs.String(), exceeded) || strings.Contains(logs.String(), recovered) {
+		t.Fatalf("a stalled response must not be logged as skew:\n%s", logs.String())
+	}
+	if v := metricstest.Value(t, w.m, discarded); v != 1 {
+		t.Fatalf("%s = %v, want 1", discarded, v)
+	}
+	if v := metricstest.Value(t, w.m, parentSkewLine); v != 0.012 {
+		t.Fatalf("%s = %v, want 0.012", parentSkewLine, v)
+	}
+
+	// Between the stalled response and the next one, the measurement from
+	// before the stall stands, with its age.
+	w2 := newClockWorld(t, false)
+	w2.observeNow(12 * time.Millisecond)
+	sent = w2.wall.now()
+	w2.wall.advance(hold + stall)
+	w2.e.ObserveParentClock(clock.ParentSample{NowMS: sent.Add(hold).UnixMilli(), Held: hold, Sent: sent, Received: w2.wall.now()})
+	if status := w2.e.ClockStatus(); status["parent_skew_ms"] != int64(12) || status["parent_sample_age_s"] != float64(26) {
+		t.Fatalf("/health clock after a stalled response = %v, want the 12ms measured 26s ago", status)
+	}
+	if v := metricstest.Value(t, w2.m, parentSkewLine); v != 0.012 {
+		t.Fatalf("%s = %v after a stalled response, want the previous 0.012", parentSkewLine, v)
+	}
+
+	// A parent that is 6s ahead, answered over 40ms.
+	sent = w.wall.now()
+	w.wall.advance(40 * time.Millisecond)
+	w.e.ObserveParentClock(clock.ParentSample{NowMS: sent.Add(6*time.Second + 20*time.Millisecond).UnixMilli(), Sent: sent, Received: w.wall.now()})
+	if strings.Count(logs.String(), exceeded) != 1 {
+		t.Fatalf("a 6s skew over a 40ms round trip must be logged once:\n%s", logs.String())
+	}
+	if v := metricstest.Value(t, w.m, parentSkewLine); v != 6 {
+		t.Fatalf("%s = %v, want 6", parentSkewLine, v)
 	}
 }
 
@@ -230,7 +291,7 @@ func TestClockStatusShape(t *testing.T) {
 	if status := child.e.ClockStatus(); status["parent_skew_ms"] != nil || status["parent_sample_age_s"] != nil {
 		t.Fatalf("a child that never heard from its parent must report null parent fields: %v", status)
 	}
-	child.e.ObserveParentClock(child.wall.now().UnixMilli() - 1_250)
+	child.observeNow(-1250 * time.Millisecond)
 	child.wall.advance(4 * time.Second)
 	status = child.e.ClockStatus()
 	host = status["host"].(map[string]any)

@@ -253,8 +253,9 @@ block of [`/healthz`](http-api.md#the-clock-in-healthz):
 | `colca_host_clock_synchronized` | `1` when the kernel reports the clock as synchronized by an NTP daemon, `0` when not |
 | `colca_host_clock_estimated_error_seconds` | the kernel's estimate of the clock's error |
 | `colca_host_clock_max_error_seconds` | the kernel's bound on the error; it grows while no daemon updates the clock |
-| `colca_clock_parent_skew_seconds` | the parent's clock minus this node's, from the `now_ms` on the latest `/downlink` or `/replicate` response; positive when the parent is ahead |
+| `colca_clock_parent_skew_seconds` | the parent's clock minus this node's, from the `now_ms` on the latest `/downlink` or `/replicate` response whose round trip was at most 0.5 s; positive when the parent is ahead |
 | `colca_clock_parent_sample_age_seconds` | seconds since that measurement |
+| `colca_clock_parent_samples_discarded_total` | responses not used for the measurement because their round trip was longer than 0.5 s |
 
 - **The host series** come from a read-only `adjtimex` call, which needs no
   privilege and passes Docker's default seccomp profile, so they work in the
@@ -264,11 +265,26 @@ block of [`/healthz`](http-api.md#the-clock-in-healthz):
   `node_timex_estimated_error_seconds` and `node_timex_maxerror_seconds` carry
   the same reading from the host itself.
 - **The parent series** exist on a node with a parent once the parent has
-  answered, and never on a root. The measurement is off by the response's
-  network latency, a few milliseconds on a LAN. It catches what the kernel's
-  verdict cannot: two hosts that are each synchronized, to sources that
-  disagree. It is a measurement only. A node whose clock differs from its
+  answered, and never on a root. The node notes its clock when the request
+  leaves and when the response is read; the parent states its clock (`now_ms`)
+  and how long it had the request by then (`held_ms`: a long poll's wait, an
+  ingest). The round trip is the exchange minus that hold, and the parent's
+  clock is compared with the middle of it, so the measurement is off by at most
+  half the round trip: a few milliseconds on a LAN. It catches what the
+  kernel's verdict cannot: two hosts that are each synchronized, to sources
+  that disagree. It is a measurement only. A node whose clock differs from its
   parent's keeps deciding on its own clock.
+- **A slow or stalled link is not skew.** A response whose round trip is
+  longer than 0.5 s, the warning threshold below, could be off by more than
+  half that threshold, so it cannot show a skew of that size. It is not used:
+  the series keep the previous measurement,
+  `colca_clock_parent_sample_age_seconds` keeps growing, and
+  `colca_clock_parent_samples_discarded_total` counts it. The first response
+  after a link that dropped packets for some seconds is such a response. On a
+  link whose round trip is always above 0.5 s the skew is never measured; the
+  growing sample age shows that. A parent that predates `held_ms` has the whole
+  exchange counted as round trip, so under it only responses that came back
+  within 0.5 s are used, and a long poll that waited is not.
 - **Alert** on `colca_host_clock_synchronized == 0` for 15 minutes, on
   `max(abs(colca_clock_parent_skew_seconds), colca_host_clock_estimated_error_seconds)`
   above `0.5` for 10 minutes (warning) and above `5` for 5 minutes (critical).
@@ -291,7 +307,8 @@ reason `time_sync` are gone. Nodes can be upgraded in any order:
   parent now answers with its own wall clock rather than a time corrected
   towards the root, so the correction reaches one level, not the whole tree.
 - **An upgraded child under an older parent** measures its skew against the
-  parent's `now_ms` and corrects nothing.
+  parent's `now_ms` and corrects nothing. Such a parent sends no `held_ms`, so
+  the child uses only its responses that came back within 0.5 s.
 - **An older machine** still subscribes to `<root>/v1/_TimeSync/+` when it
   connects. The node refuses that one filter (SUBACK `0x80`, counted in
   `colca_acl_denials_total{action="sub"}`, with an audit event) and leaves the

@@ -194,6 +194,7 @@ type Metrics struct {
 	uplinkResyncActive   prometheus.Gauge       // colca_uplink_resync_active
 	uplinkResyncGap      *prometheus.CounterVec // colca_uplink_resync_unreplayable_records_total{stream}
 	downlinkCommandKnown prometheus.Counter     // colca_downlink_commands_already_held_total
+	clockSampleDiscarded prometheus.Counter     // colca_clock_parent_samples_discarded_total
 	reseed               prometheus.Gauge
 	authReject           *prometheus.CounterVec
 	aclDeny              *prometheus.CounterVec
@@ -400,6 +401,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		downlinkCommandKnown: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "colca_downlink_commands_already_held_total",
 			Help: "Commands the parent handed down that this node already held, so they were not stored or executed again (the parent's store regressed, or the command reached the parent a second time). Resets on restart.",
+		}),
+		clockSampleDiscarded: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_clock_parent_samples_discarded_total",
+			Help: "Replication responses that were not used to measure colca_clock_parent_skew_seconds because their round trip was longer than 0.5 s: a slow or stalled link, which cannot be told from skew. Resets on restart.",
 		}),
 		reseed: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_retained_reseed_records",
@@ -677,6 +682,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.storeReincarnated, m.childAheadOfStore, m.uplinkResyncs, m.uplinkResyncActive, m.uplinkResyncGap,
 		m.downlinkCommandKnown,
+		m.clockSampleDiscarded,
 		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.deliveredMessages, m.deliveredBytes, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.securityChanges, m.nodePrefix,
 		m.commandUndelivered, m.commandUnroutable, m.commandDropped, m.commandRedelivered,
@@ -1037,6 +1043,15 @@ func (m *Metrics) UplinkResyncGap(stream string, records uint64) {
 		return
 	}
 	m.uplinkResyncGap.WithLabelValues(stream).Add(float64(records))
+}
+
+// ClockParentSampleDiscarded counts one replication response whose round trip
+// was too long to measure the skew to the parent from.
+func (m *Metrics) ClockParentSampleDiscarded() {
+	if m == nil {
+		return
+	}
+	m.clockSampleDiscarded.Inc()
 }
 
 // DownlinkCommandKnown counts one command handed down that this node held.

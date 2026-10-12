@@ -320,8 +320,9 @@ publish is dropped and counted in `colca_rejected_publishes_total`.
 `wall_now_ms` is the host's wall clock, the only time the node decides on.
 `host` is the kernel's verdict on that clock; both fields are `null` where it
 cannot be read. `parent_skew_ms` is the parent's clock minus this node's,
-measured on the latest replication response, and `parent_sample_age_s` its age;
-both are `null` on a root and until the parent has answered once. See
+measured on the latest replication response whose round trip was at most
+0.5 s, and `parent_sample_age_s` its age; both are `null` on a root and until
+there is such a response. See
 [Clocks](operations.md#clocks).
 
 ### Local stream wakeups and backlog telemetry

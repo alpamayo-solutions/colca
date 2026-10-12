@@ -97,7 +97,7 @@ func TestHealthzClockBlockOnAChild(t *testing.T) {
 	wantJSON(t, block, "host", `{"estimated_error_ms":2.5,"synchronized":true}`)
 
 	// The parent's clock is 3s behind; the sample is 12s old when /healthz is read.
-	eng.ObserveParentClock(wall.UnixMilli() - 3_000)
+	eng.ObserveParentClock(clock.ParentSample{NowMS: wall.UnixMilli() - 3_000, Sent: wall, Received: wall})
 	wall = wall.Add(12 * time.Second)
 	host.Synchronized = false
 	reg, err := registry.New(eng.Store(), cfg.ULID)

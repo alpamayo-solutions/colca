@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
+	"github.com/alpamayo-solutions/colca/internal/clock"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -197,25 +198,39 @@ type envelope struct {
 	acked     uint64
 }
 
+// parentClock is what a replication response says about the parent's clock:
+// its wall clock when it wrote the response, and how long it had the request by
+// then. Held is 0 from a parent that predates the field.
+type parentClock struct {
+	NowMS  int64
+	HeldMS int64
+}
+
+// sample is the reading as the clock package takes it, with this node's clock
+// before the request and after the response.
+func (p parentClock) sample(sent, received time.Time) clock.ParentSample {
+	return clock.ParentSample{NowMS: p.NowMS, Held: time.Duration(p.HeldMS) * time.Millisecond, Sent: sent, Received: received}
+}
+
 // replicate is the context-aware implementation behind Replicate and RunUplink.
-// nowMS is the parent's clock from the response; RunUplink records the skew to
+// pc is the parent's clock from the response; RunUplink records the skew to
 // it and Replicate drops it.
-func (c *Client) replicate(ctx context.Context, env envelope, recs []store.ReplRecord) (hwm uint64, nowMS int64, err error) {
+func (c *Client) replicate(ctx context.Context, env envelope, recs []store.ReplRecord) (hwm uint64, pc parentClock, err error) {
 	if len(recs) > maxReplicateRecords {
-		return 0, 0, fmt.Errorf("replicate: batch has %d records, maximum is %d", len(recs), maxReplicateRecords)
+		return 0, parentClock{}, fmt.Errorf("replicate: batch has %d records, maximum is %d", len(recs), maxReplicateRecords)
 	}
 	body, err := marshalReplication(env, recs)
 	if err != nil {
-		return 0, 0, err
+		return 0, parentClock{}, err
 	}
 	if int64(len(body)) > c.maxReplicateBody {
-		return 0, 0, fmt.Errorf("replicate: request is %d bytes, maximum is %d", len(body), c.maxReplicateBody)
+		return 0, parentClock{}, fmt.Errorf("replicate: request is %d bytes, maximum is %d", len(body), c.maxReplicateBody)
 	}
 	ctx, cancel := context.WithTimeout(ctx, transferDeadline(int64(len(body))))
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/replicate", bytes.NewReader(body))
 	if err != nil {
-		return 0, 0, err
+		return 0, parentClock{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if len(body) >= expectContinueBytes {
@@ -225,21 +240,22 @@ func (c *Client) replicate(ctx context.Context, env envelope, recs []store.ReplR
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, 0, err
+		return 0, parentClock{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, &replError{Route: "replicate to " + c.base, Status: resp.StatusCode, Body: readReason(resp),
+		return 0, parentClock{}, &replError{Route: "replicate to " + c.base, Status: resp.StatusCode, Body: readReason(resp),
 			RetryAfter: retryAfterHeader(resp), Store: resp.Header.Get(storeHeader)}
 	}
 	var out struct {
-		HWM   uint64 `json:"hwm"`
-		NowMS int64  `json:"now_ms"`
+		HWM    uint64 `json:"hwm"`
+		NowMS  int64  `json:"now_ms"`
+		HeldMS int64  `json:"held_ms"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return 0, 0, err
+		return 0, parentClock{}, err
 	}
-	return out.HWM, out.NowMS, nil
+	return out.HWM, parentClock{NowMS: out.NowMS, HeldMS: out.HeldMS}, nil
 }
 
 func marshalReplication(env envelope, recs []store.ReplRecord) ([]byte, error) {
@@ -314,7 +330,7 @@ type downResult struct {
 	Records     []DownRec
 	Next        uint64
 	Gap         *store.GapSpan
-	NowMS       int64
+	Clock       parentClock
 	Ancestry    *uns.Ancestry
 	Definitions []DownRec
 	DefNext     uint64
@@ -422,7 +438,7 @@ func (c *Client) greet(st *store.Store) greeting {
 }
 
 // downlink is the context-aware implementation behind the wrappers and
-// RunDownlink. NowMS is the parent's clock, which RunDownlink measures this
+// RunDownlink. Clock is the parent's clock, which RunDownlink measures this
 // node's skew against. Ancestry is the position the parent teaches, or nil.
 func (c *Client) downlink(ctx context.Context, after, defAfter uint64, limit int, timeout time.Duration) (downResult, error) {
 	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d",
@@ -460,6 +476,7 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 		Next        uint64            `json:"next"`
 		Gap         *store.GapSpan    `json:"gap"`
 		NowMS       int64             `json:"now_ms"`
+		HeldMS      int64             `json:"held_ms"`
 		Ancestry    *uns.Ancestry     `json:"ancestry"`
 		Definitions []wireRec         `json:"definitions"`
 		DefNext     uint64            `json:"def_next"`
@@ -477,7 +494,7 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 		Records:     toDownRecs(out.Records),
 		Next:        out.Next,
 		Gap:         out.Gap,
-		NowMS:       out.NowMS,
+		Clock:       parentClock{NowMS: out.NowMS, HeldMS: out.HeldMS},
 		Ancestry:    out.Ancestry,
 		Definitions: toDownRecs(out.Definitions),
 		DefNext:     out.DefNext,
@@ -784,8 +801,10 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			if len(batch) < fullBatchLen {
 				next = batch[len(batch)-1].ChildOffset + 1
 			}
-			var nowMS int64
-			hwm, nowMS, err = c.replicate(ctx, env, batch)
+			var pc parentClock
+			sent := eng.Now()
+			hwm, pc, err = c.replicate(ctx, env, batch)
+			received := eng.Now()
 			if err == nil && hwm < batch[len(batch)-1].ChildOffset {
 				err = fmt.Errorf("parent acknowledged offset %d below batch end %d", hwm, batch[len(batch)-1].ChildOffset)
 			}
@@ -853,7 +872,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			}
 			// Every /replicate response carries the parent's clock; keep the skew
 			// measurement fresh whichever stream triggered the push.
-			eng.ObserveParentClock(nowMS)
+			eng.ObserveParentClock(pc.sample(sent, received))
 			if hwm >= eng.Store().NextOffset(stream) &&
 				(env.store != c.storeID() || c.ownStoreBehind(eng.Store(), m, stream, hwm)) {
 				// The parent holds an offset this store has not handed out: it
@@ -1034,8 +1053,10 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		}
 		after := st.CursorGet(uns.DownlinkCursor(c.parentPub), downlinkStream)
 		defAfter := st.CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream)
+		sent := eng.Now()
 		res, err := c.pollInterruptibly(ctx, after, defAfter)
-		recs, next, gap, nowMS, ancestry := res.Records, res.Next, res.Gap, res.NowMS, res.Ancestry
+		received := eng.Now()
+		recs, next, gap, ancestry := res.Records, res.Next, res.Gap, res.Ancestry
 		if err != nil {
 			if stopped() {
 				return // the request was aborted by our own shutdown
@@ -1059,9 +1080,10 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		}
 		c.setStatus(UplinkConnected)
 		m.DownlinkFetched(time.Now())
-		// The response carries the parent's clock: a skew measurement, nothing more.
+		// The response carries the parent's clock: a skew measurement, nothing more,
+		// and none at all when the exchange took too long on the link to bound one.
 		// Expiry is judged on this node's own clock.
-		eng.ObserveParentClock(nowMS)
+		eng.ObserveParentClock(res.Clock.sample(sent, received))
 		if ancestry != nil {
 			eng.SetAncestry(*ancestry) // idempotent: every poll may carry it
 		}

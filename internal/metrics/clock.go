@@ -17,8 +17,8 @@ var (
 	hostClockSynchronized = prometheus.NewDesc("colca_host_clock_synchronized", "1 when the kernel reports the host clock as synchronized by an NTP daemon, 0 when not. Read with a read-only adjtimex. Absent when the kernel's verdict cannot be read (not Linux, or the call is refused).", nil, nil)
 	hostClockEstimated    = prometheus.NewDesc("colca_host_clock_estimated_error_seconds", "The kernel's estimate of the host clock's error, in seconds. Absent when the kernel's verdict cannot be read.", nil, nil)
 	hostClockMaxError     = prometheus.NewDesc("colca_host_clock_max_error_seconds", "The kernel's bound on the host clock's error, in seconds. It grows while no NTP daemon updates the clock. Absent when the kernel's verdict cannot be read.", nil, nil)
-	clockParentSkew       = prometheus.NewDesc("colca_clock_parent_skew_seconds", "Parent's clock minus this node's clock, in seconds, from the now_ms of the latest /downlink or /replicate response; positive when the parent is ahead. A measurement only: nothing is corrected by it. Absent on the root and before the first response.", nil, nil)
-	clockParentSampleAge  = prometheus.NewDesc("colca_clock_parent_sample_age_seconds", "Seconds since colca_clock_parent_skew_seconds was last measured. Absent on the root and before the first response.", nil, nil)
+	clockParentSkew       = prometheus.NewDesc("colca_clock_parent_skew_seconds", "Parent's clock minus this node's clock, in seconds, from the now_ms of the latest /downlink or /replicate response whose round trip was at most 0.5 s, taken at the middle of that round trip; positive when the parent is ahead. A measurement only: nothing is corrected by it. Absent on the root and before the first such response.", nil, nil)
+	clockParentSampleAge  = prometheus.NewDesc("colca_clock_parent_sample_age_seconds", "Seconds since colca_clock_parent_skew_seconds was last measured. Absent on the root and before the first measurement.", nil, nil)
 )
 
 func (c *clockCollector) Describe(ch chan<- *prometheus.Desc) {
