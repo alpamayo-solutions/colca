@@ -166,6 +166,26 @@ for it, in order.
   in one write, so a command handed again after a crash or a lost response is
   recognized and not stored or executed twice. Executors still deduplicate by
   `correlation_id`, and must not repeat an effect that is not idempotent.
+- **What waited together is stored together.** A child stores the commands
+  of one fetch in a single write, up to 200 at a time, and delivers none of
+  them before all are in its `commands` stream. Before that write it asks the
+  parent once more, without waiting, for everything that waits for it now: the
+  parent answers a waiting fetch the moment the first command arrives, and on
+  a link that stalls that answer can be seconds old when the child reads it.
+  So a consumer that is handed a command finds behind it, in the node's
+  stream, every command the parent held for this node when it answered that
+  second request. Two commands issued while a node was away, such as a
+  request and its withdrawal, are therefore never seen one without the other.
+
+    What this does not cover: a command issued after the parent answered. It
+    arrives later, however short the time between the two, and nothing recalls
+    a command that was already handed over. A sender that takes something
+    back must wait for the executor's `_Ack` to learn which of the two took
+    effect. A consumer that reads ahead before it acts reads its own stream
+    from the command's offset to the head once; it does not wait and read
+    again. If the second request fails, the commands in hand are stored as
+    they are rather than kept back on a failing link, and under a parent older
+    than this behaviour the child stores each fetch as it arrives.
 - **Progress, if asked.** With `"progress": true` in the command, the sender
   also gets `_Ack` records with `result_code` `202` and a `stage`: `queued`
   from the node that accepted it for a child, and `forwarded` from every node
