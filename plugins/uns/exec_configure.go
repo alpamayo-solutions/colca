@@ -40,6 +40,11 @@ type ConfigExec struct {
 	// process saw and what each said, so a republish can tell a new tag from one
 	// an operator deleted, and a changed unit from an unchanged one.
 	observed map[string]map[string]tagMeta
+	// refused is set when commit refuses the running command's records for
+	// standing below a child node's mount. It is the command's answer whichever
+	// verb composed the records, so ExecuteWithWrites gives it instead of the
+	// verb's own wording of a failed commit.
+	refused *ChildPositionError
 }
 
 // NewConfigExec builds the executor. Unknown settings keys are ignored, so a
@@ -374,7 +379,12 @@ func (c *ConfigExec) ExecuteWithWrites(
 ) (int, string, string, []StateWrite) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.execute(ctx, contract, verb, payload)
+	c.refused = nil
+	code, message, result, writes := c.execute(ctx, contract, verb, payload)
+	if c.refused != nil {
+		return 422, c.refused.Error(), "invalid", writes
+	}
+	return code, message, result, writes
 }
 
 func (c *ConfigExec) execute(ctx CommandContext, contract, verb string, payload []byte) (int, string, string, []StateWrite) {
@@ -415,11 +425,37 @@ func (c *ConfigExec) execute(ctx CommandContext, contract, verb string, payload 
 // commit writes a verb's record set as one transition: every record is stored
 // or none is, so a refused record never leaves the node half configured. An
 // empty set is a successful no-op.
+//
+// Every write of this executor passes here, the lifecycle trigger's included,
+// so this is where a record below a child node's mount is refused
+// (child_mount.go).
 func (c *ConfigExec) commit(ctx CommandContext, records []StateRecord) ([]StateWrite, error) {
 	if len(records) == 0 {
 		return nil, nil
 	}
+	if refusal := refuseChildPositions(records, childMounts(c.store), c.arrivesByMove); refusal != nil {
+		c.refused = refusal
+		return nil, refusal
+	}
 	return c.store.PublishBatch(ctx, records)
+}
+
+// arrivesByMove reports whether a record about to be written names an
+// identity this node holds at another position: the upsert verbs move such an
+// identity (idClaims.claim). A resource is addressed by its path alone and
+// never moves.
+func (c *ConfigExec) arrivesByMove(contract, path string, payload []byte) bool {
+	var incoming identified
+	if contract == "_Resource" || json.Unmarshal(payload, &incoming) != nil || incoming.ID == "" {
+		return false
+	}
+	for _, rec := range c.store.KVScan(contract, c.store.NodeID()) {
+		var held identified
+		if rec.Path != path && json.Unmarshal(rec.Payload, &held) == nil && held.ID == incoming.ID {
+			return true
+		}
+	}
+	return false
 }
 
 // positionsByID maps each id of a contract to the path holding it at this

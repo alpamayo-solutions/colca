@@ -308,11 +308,14 @@ func (w *EditExec) ExecuteWithWrites(
 		return w.remember(envelope.OperationID, digest, code, message, result, nil)
 	}
 	// A record below a child node's mount is that node's to write
-	// (exec_edit_mount.go).
-	if code, message, result := refuseChildPositions(
-		intent.Type, records, childMounts(entities, attachments),
-	); code != 0 {
-		return w.remember(envelope.OperationID, digest, code, message, result, nil)
+	// (child_mount.go). Every record of a placement arrives by the move, and
+	// so does the record of a resource that names where it comes from.
+	arrivesByMove := intent.Type == "placement" ||
+		(intent.Type == "resource" && intent.FromPath != "" && intent.FromPath != intent.Path)
+	if refusal := refuseChildPositions(
+		records, childMounts(w.store), func(string, string, []byte) bool { return arrivesByMove },
+	); refusal != nil {
+		return w.remember(envelope.OperationID, digest, 422, refusal.Error(), "invalid", nil)
 	}
 	// Nothing is written yet. Every position the plan touches must be
 	// covered by the person's grants, or the whole command is refused.
