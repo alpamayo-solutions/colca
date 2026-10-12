@@ -185,7 +185,7 @@ type stalledLink struct {
 func (l *stalledLink) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := l.next.RoundTrip(req)
 	if err == nil && strings.HasSuffix(req.URL.Path, "/downlink") && req.URL.Query().Get("hello") == "" &&
-		l.stalled.CompareAndSwap(false, true) {
+		req.URL.Query().Get("confirm") == "" && l.stalled.CompareAndSwap(false, true) {
 		l.wall.advance(l.stall)
 	}
 	return resp, err
@@ -228,11 +228,17 @@ func TestAResponseStalledOnTheLinkIsNotMeasuredAsSkew(t *testing.T) {
 	waitFor(t, "the child to take the command from the stalled response", 5*time.Second, func() bool {
 		return cs.NextOffset("commands") > 1 && metricstest.Value(t, cm, discarded) == 1
 	})
-	if v, ok := metricstest.Lookup(t, cm, "colca_clock_parent_skew_seconds"); ok {
-		t.Fatalf("colca_clock_parent_skew_seconds = %v from a response that waited 6s on the link, want no measurement", v)
+	// The page is confirmed over the link as it is now, and that exchange is a
+	// sample: the two clocks agree.
+	waitFor(t, "the child to measure its skew from the confirming request", 5*time.Second, func() bool {
+		_, ok := metricstest.Lookup(t, cm, "colca_clock_parent_skew_seconds")
+		return ok
+	})
+	if v := metricstest.Value(t, cm, "colca_clock_parent_skew_seconds"); v != 0 {
+		t.Fatalf("colca_clock_parent_skew_seconds = %v after a response that waited 6s on the link, want 0: the stall is not skew", v)
 	}
-	if status := ceng.ClockStatus(); status["parent_skew_ms"] != nil {
-		t.Fatalf("/health clock = %v, want a null parent_skew_ms", status)
+	if status := ceng.ClockStatus(); status["parent_skew_ms"] != int64(0) {
+		t.Fatalf("/health clock = %v, want parent_skew_ms 0", status)
 	}
 }
 

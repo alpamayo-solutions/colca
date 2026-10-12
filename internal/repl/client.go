@@ -334,6 +334,10 @@ type downResult struct {
 	Ancestry    *uns.Ancestry
 	Definitions []DownRec
 	DefNext     uint64
+	// Confirms is true from a parent that answers a confirm request at once
+	// (see confirmPage). One that predates it would hold the request as a long
+	// poll, so it is never asked.
+	Confirms bool
 	// Head is the parent's commands stream head at hello time, where a child with no
 	// cursor for this parent must start. Only the hello response carries it; 0 means
 	// the parent sent none.
@@ -448,9 +452,17 @@ func (c *Client) downlink(ctx context.Context, after, defAfter uint64, limit int
 // poll is downlink for the replication loop: it states the parent incarnation
 // this node recorded, so a parent whose store changed refuses instead of
 // answering a position of another history.
-func (c *Client) poll(ctx context.Context, after, defAfter uint64) (downResult, error) {
-	return c.downlinkURL(ctx, fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d&parent=%s&store=%s",
-		c.base, after, defAfter, replBatch, url.QueryEscape(c.parentStore()), url.QueryEscape(c.storeID())), downlinkWait)
+//
+// confirm asks the parent to answer at once with what it holds, instead of
+// holding the request until there is something: the request then has a round
+// trip's time and no more.
+func (c *Client) poll(ctx context.Context, after, defAfter uint64, confirm bool) (downResult, error) {
+	u := fmt.Sprintf("%s/downlink?after=%d&def_after=%d&max=%d&parent=%s&store=%s",
+		c.base, after, defAfter, replBatch, url.QueryEscape(c.parentStore()), url.QueryEscape(c.storeID()))
+	if confirm {
+		return c.downlinkURL(ctx, u+"&confirm=1", 0)
+	}
+	return c.downlinkURL(ctx, u, downlinkWait)
 }
 
 func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Duration) (downResult, error) {
@@ -477,6 +489,7 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 		Gap         *store.GapSpan    `json:"gap"`
 		NowMS       int64             `json:"now_ms"`
 		HeldMS      int64             `json:"held_ms"`
+		Confirms    bool              `json:"confirms"`
 		Ancestry    *uns.Ancestry     `json:"ancestry"`
 		Definitions []wireRec         `json:"definitions"`
 		DefNext     uint64            `json:"def_next"`
@@ -495,6 +508,7 @@ func (c *Client) downlinkURL(ctx context.Context, url string, timeout time.Durat
 		Next:        out.Next,
 		Gap:         out.Gap,
 		Clock:       parentClock{NowMS: out.NowMS, HeldMS: out.HeldMS},
+		Confirms:    out.Confirms,
 		Ancestry:    out.Ancestry,
 		Definitions: toDownRecs(out.Definitions),
 		DefNext:     out.DefNext,
@@ -1054,9 +1068,8 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		after := st.CursorGet(uns.DownlinkCursor(c.parentPub), downlinkStream)
 		defAfter := st.CursorGet(uns.DownlinkDefCursor(c.parentPub), downlinkDefStream)
 		sent := eng.Now()
-		res, err := c.pollInterruptibly(ctx, after, defAfter)
+		res, err := c.pollInterruptibly(ctx, after, defAfter, false)
 		received := eng.Now()
-		recs, next, gap, ancestry := res.Records, res.Next, res.Gap, res.Ancestry
 		if err != nil {
 			if stopped() {
 				return // the request was aborted by our own shutdown
@@ -1084,6 +1097,15 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		// and none at all when the exchange took too long on the link to bound one.
 		// Expiry is judged on this node's own clock.
 		eng.ObserveParentClock(res.Clock.sample(sent, received))
+		if len(res.Records) > 0 && res.Confirms {
+			// The parent wrote this page when its first command arrived there, and
+			// the page may have been on the link for a long time since: a link that
+			// stalls keeps a written response back for seconds. Ask once more,
+			// without waiting, for everything that waits now, so what queued up
+			// behind the page is stored with it rather than a moment after it.
+			res = c.confirmPage(ctx, eng, res, after, defAfter)
+		}
+		recs, next, gap, ancestry := res.Records, res.Next, res.Gap, res.Ancestry
 		if ancestry != nil {
 			eng.SetAncestry(*ancestry) // idempotent: every poll may carry it
 		}
@@ -1096,46 +1118,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 				"first_ts", gap.FirstTS, "last_ts", gap.LastTS, "approx", gap.Approx)
 			m.GapReceived("commands")
 		}
-		// A record this node refused is skipped; a record it could not store holds the
-		// cursor so the parent offers it again. A refusal (engine.RejectError) will be
-		// made the same way every time, so rereading it would stall the lane. A store
-		// failure (full disk, I/O error, record over max_record_bytes) says nothing about
-		// the record, and acking past it would silently drop the command.
-		ackTo := next
-		rehanded := c.commandsRehandedBelow()
-		for _, r := range recs {
-			// A command this node already holds is the same command at whatever
-			// offset it arrives: the parent's store regressed and reuses offsets,
-			// or the command came down to the parent a second time.
-			if memory.holds(r.Topic, r.Payload, r.TS) && (hasCorrelationID(r.Payload) || r.ParentOffset < rehanded) {
-				c.log.Warn("command already held by this node — not stored or executed again",
-					"topic", r.Topic, "parent_offset", r.ParentOffset)
-				m.DownlinkCommandKnown()
-				continue
-			}
-			// The record and the cursor past it are one write: a crash or a lost
-			// response makes the parent hand it again, and it is then recognized as
-			// stored instead of being stored and executed a second time.
-			stored, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
-				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
-			}, &store.CursorAdvance{Name: uns.DownlinkCursor(c.parentPub), Stream: downlinkStream, To: r.ParentOffset + 1})
-			if err != nil {
-				var refused *engine.RejectError
-				if errors.As(err, &refused) {
-					c.log.Error("downlink command refused by this node — skipping past it",
-						"topic", r.Topic, "reason", refused.Reason, "err", err)
-					continue
-				}
-				c.log.Error("downlink command not stored — holding the cursor so the parent offers it again",
-					"topic", r.Topic, "parent_offset", r.ParentOffset, "err", err)
-				ackTo = r.ParentOffset
-				break
-			}
-			if stored.Persisted {
-				memory.add(r.Topic, r.Payload, r.TS, stored.Offset, st.LWM("commands"))
-			}
-		}
+		ackTo := c.storePage(eng, m, memory, recs, next)
 		progressed := applyDefinitions(c, eng, m, res)
 		if ackTo > after {
 			st.CursorAck(uns.DownlinkCursor(c.parentPub), downlinkStream, ackTo)
@@ -1151,8 +1134,120 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 	}
 }
 
-// pollInterruptibly is one poll that requestResync can end.
-func (c *Client) pollInterruptibly(ctx context.Context, after, defAfter uint64) (downResult, error) {
+// confirmPage asks the parent again, without waiting, for what it holds from
+// the position page was read at, and returns that answer in page's place. The
+// position is the same one, so the parent takes no receipt from the request;
+// the commands of page come again, with any issued since. When the request
+// fails the page in hand is returned as it is: a command this node holds is not
+// kept back on a link that is failing, and the next poll reports the failure.
+func (c *Client) confirmPage(ctx context.Context, eng *engine.Engine, page downResult, after, defAfter uint64) downResult {
+	sent := eng.Now()
+	confirmed, err := c.pollInterruptibly(ctx, after, defAfter, true)
+	received := eng.Now()
+	if err != nil {
+		c.log.Warn("downlink page not confirmed with the parent — storing the commands in hand; "+
+			"any that queued behind them follow with the next poll",
+			"parent", c.base, "commands", len(page.Records), "err", err)
+		return page
+	}
+	eng.ObserveParentClock(confirmed.Clock.sample(sent, received))
+	return confirmed
+}
+
+// storePage stores the commands of one downlink page and returns the position
+// to acknowledge. The page is one write (engine.IngestDownlinkPage): a consumer
+// that is handed its first command finds the others behind it.
+//
+// A command this node refused is skipped; one it could not store holds the
+// cursor so the parent offers it again. A refusal (engine.RejectError) will be
+// made the same way every time, so rereading it would stall the lane. A store
+// failure (full disk, I/O error, record over max_record_bytes) says nothing about
+// the command, and acking past it would silently drop it. A page that cannot be
+// written as one is therefore stored command by command, which finds the one
+// that fails.
+func (c *Client) storePage(eng *engine.Engine, m *metrics.Metrics, memory *commandMemory, recs []DownRec, next uint64) (ackTo uint64) {
+	st := eng.Store()
+	rehanded := c.commandsRehandedBelow()
+	fresh := make([]DownRec, 0, len(recs))
+	for _, r := range recs {
+		// A command this node already holds is the same command at whatever
+		// offset it arrives: the parent's store regressed and reuses offsets,
+		// or the command came down to the parent a second time.
+		if memory.holds(r.Topic, r.Payload, r.TS) && (hasCorrelationID(r.Payload) || r.ParentOffset < rehanded) {
+			c.log.Warn("command already held by this node — not stored or executed again",
+				"topic", r.Topic, "parent_offset", r.ParentOffset)
+			m.DownlinkCommandKnown()
+			continue
+		}
+		fresh = append(fresh, r)
+	}
+	if len(fresh) == 0 {
+		return next
+	}
+	attribution := func(r DownRec) engine.Attribution {
+		return engine.Attribution{
+			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
+		}
+	}
+	cursor := uns.DownlinkCursor(c.parentPub)
+	cmds := make([]engine.DownlinkCommand, len(fresh))
+	for i, r := range fresh {
+		cmds[i] = engine.DownlinkCommand{Topic: r.Topic, Payload: r.Payload, TS: r.TS, Attribution: attribution(r)}
+	}
+	// The commands and the cursor past the page are one write: a crash or a lost
+	// response makes the parent hand the page again, and it is then recognized as
+	// stored instead of being stored and executed a second time.
+	results, err := eng.IngestDownlinkPage(cmds, store.CursorAdvance{Name: cursor, Stream: downlinkStream, To: next})
+	if err == nil {
+		for i, res := range results {
+			r := fresh[i]
+			switch {
+			case res.Err != nil:
+				c.logRefused(r, res.Err)
+			case res.Persisted:
+				memory.add(r.Topic, r.Payload, r.TS, res.Offset, st.LWM("commands"))
+			}
+		}
+		return next
+	}
+	if !errors.Is(err, engine.ErrNotOnePage) {
+		c.log.Warn("downlink page not stored in one write — storing it command by command",
+			"commands", len(fresh), "err", err)
+	}
+	for _, r := range fresh {
+		stored, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, attribution(r),
+			&store.CursorAdvance{Name: cursor, Stream: downlinkStream, To: r.ParentOffset + 1})
+		if err != nil {
+			var refused *engine.RejectError
+			if errors.As(err, &refused) {
+				c.logRefused(r, err)
+				continue
+			}
+			c.log.Error("downlink command not stored — holding the cursor so the parent offers it again",
+				"topic", r.Topic, "parent_offset", r.ParentOffset, "err", err)
+			return r.ParentOffset
+		}
+		if stored.Persisted {
+			memory.add(r.Topic, r.Payload, r.TS, stored.Offset, st.LWM("commands"))
+		}
+	}
+	return next
+}
+
+func (c *Client) logRefused(r DownRec, err error) {
+	reason := ""
+	var refused *engine.RejectError
+	if errors.As(err, &refused) {
+		reason = refused.Reason
+	}
+	c.log.Error("downlink command refused by this node — skipping past it",
+		"topic", r.Topic, "reason", reason, "err", err)
+}
+
+// pollInterruptibly is one poll that requestResync can end. confirm asks the
+// parent to answer at once (see confirmPage).
+func (c *Client) pollInterruptibly(ctx context.Context, after, defAfter uint64, confirm bool) (downResult, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	c.syncMu.Lock()
@@ -1167,7 +1262,7 @@ func (c *Client) pollInterruptibly(ctx context.Context, after, defAfter uint64) 
 		// Asked for between the loop's check and the cancel being in place.
 		return downResult{}, context.Canceled
 	}
-	return c.poll(ctx, after, defAfter)
+	return c.poll(ctx, after, defAfter, confirm)
 }
 
 // settle places this node against the store the parent described in a hello

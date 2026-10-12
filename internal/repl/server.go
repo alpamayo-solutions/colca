@@ -569,6 +569,10 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		return uns.UnderMount(p.Path, mount)
 	}
 
+	// confirm=1 is a child asking what waits for it now, after it received a
+	// page: answered at once, with or without records, never held.
+	confirm := r.URL.Query().Get("confirm") == "1"
+
 	ctx := r.Context()
 	deadline := time.Now().Add(longPollFor)
 	timer := time.NewTimer(longPollFor)
@@ -606,7 +610,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		// A waiting definition is as good a reason to answer as a command: a child
 		// should not sit out a 20s poll while policy it needs is already here.
 		hasDefs := s.eng.Store().NextOffset("definitions") > defAfter
-		if len(recs) > 0 || hasGap || hasDefs || time.Now().After(deadline) {
+		if len(recs) > 0 || hasGap || hasDefs || confirm || time.Now().After(deadline) {
 			out := make([]wireRec, 0, len(recs))
 			for _, rec := range recs {
 				// The sender's grants are checked again as the command leaves this
@@ -632,6 +636,8 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			resp := map[string]any{
 				"records": out, "next": next,
 				"now_ms": s.eng.Now().UnixMilli(), "held_ms": time.Since(received).Milliseconds(),
+				// This node answers confirm=1 at once; a child asks only a parent that says so.
+				"confirms": true,
 			}
 			// Every downlink response teaches the child its position in the parent's
 			// chain. It is left out while this node's own position is unknown.
@@ -647,7 +653,11 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 					resp["next"] = lwm
 				}
 				resp["gap"] = gap
-				s.metrics.GapServed("commands", "downlink")
+				if !confirm {
+					// A confirm request repeats a page from the same position: the
+					// hole was counted when the poll before it reported it.
+					s.metrics.GapServed("commands", "downlink")
+				}
 			}
 			s.log.Debug("downlink", "child", child.ULID, "delivered", len(out), "next", resp["next"], "gap", hasGap)
 			writeJSON(w, resp)

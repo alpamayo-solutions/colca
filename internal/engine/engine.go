@@ -1151,6 +1151,105 @@ func (e *Engine) IngestDownlinkAttributed(topic string, payload []byte, ts int64
 	return res, err
 }
 
+// DownlinkCommand is one command the parent handed down, in local coordinates,
+// with the parent's timestamp and the authorship stamped at its origin.
+type DownlinkCommand struct {
+	Topic       string
+	Payload     []byte
+	TS          int64
+	Attribution Attribution
+}
+
+// ErrNotOnePage says a downlink page cannot be stored in one write: it holds a
+// record that is not a command. The caller stores it record by record.
+var ErrNotOnePage = errors.New("downlink page holds a record that is not a command")
+
+// IngestDownlinkPage stores the commands of one downlink page, and the downlink
+// cursor past the page, in a single write. Nothing is delivered or executed
+// before all of them are in the stream, so a consumer handed the first command
+// of a page finds the rest of the page behind it. Delivery and execution then
+// follow in the page's order.
+//
+// results has one entry per command: Persisted with its offset, or Err for a
+// command this node refuses (a *RejectError), which is left out of the write
+// like IngestDownlinkAttributed leaves it out. All are Duplicate when the
+// cursor already stood at or past at.To: the page was stored before.
+//
+// err is for the page as a whole and nothing was written: ErrNotOnePage, or a
+// store failure. A failure may be one record's (over max_record_bytes), so the
+// caller then stores the page record by record to hold the cursor at that one.
+func (e *Engine) IngestDownlinkPage(cmds []DownlinkCommand, at store.CursorAdvance) (results []PageResult, err error) {
+	results = make([]PageResult, len(cmds))
+	type accepted struct {
+		i     int
+		p     uns.Parsed
+		class uns.Class
+	}
+	var keep []accepted
+	var recs []store.Record
+	stream := ""
+	for i, c := range cmds {
+		p, perr := uns.Parse(c.Topic)
+		if perr != nil {
+			_, results[i].Err = e.reject(metrics.ReasonGrammar, "%w", perr)
+			continue
+		}
+		class := e.ClassOf(p.Contract)
+		if !uns.IsCommand(class) || (stream != "" && uns.StreamFor(class) != stream) {
+			return nil, ErrNotOnePage
+		}
+		stream = uns.StreamFor(class)
+		if e.ids.DrainingMount(p.Path) {
+			_, results[i].Err = e.reject(metrics.ReasonDraining,
+				"downlink: %s is draining, no new commands admitted", p.Path)
+			continue
+		}
+		keep = append(keep, accepted{i, p, class})
+		a := c.Attribution
+		recs = append(recs, store.Record{
+			Topic: c.Topic, Payload: c.Payload, TS: c.TS,
+			WrittenBy: a.WrittenBy, ActorID: a.ActorID, ActorLabel: a.ActorLabel, ActorKind: a.ActorKind,
+			ActorGroups: a.ActorGroups, ActorClient: a.ActorClient, Door: a.Door,
+		})
+	}
+	if len(recs) == 0 {
+		return results, nil
+	}
+	first, _, applied, err := e.store.AppendAdvancing(stream, recs, at)
+	if err != nil {
+		if errors.Is(err, store.ErrRecordTooLarge) {
+			return nil, err
+		}
+		return nil, &StorageError{Err: err}
+	}
+	if !applied {
+		e.log.Info("downlink page already stored: not stored, forwarded or executed again",
+			"cursor", at.Name, "position", at.To-1, "commands", len(recs))
+		for _, k := range keep {
+			results[k.i].Duplicate = true
+		}
+		return results, nil
+	}
+	for n, k := range keep {
+		results[k.i].Persisted, results[k.i].Offset = true, first+uint64(n)
+	}
+	for _, k := range keep {
+		c := cmds[k.i]
+		e.afterPersist(k.class, k.p, c.Topic, c.Payload, results[k.i].Offset)
+		// The target executes downlinked commands, as in IngestDownlinkAttributed.
+		e.maybeExec(k.p, c.Payload, c.Attribution, e.actorForAttested(c.Attribution, false))
+	}
+	return results, nil
+}
+
+// PageResult is what IngestDownlinkPage did with one command.
+type PageResult struct {
+	Persisted bool
+	Duplicate bool
+	Offset    uint64
+	Err       error
+}
+
 // IngestDownlinkDefinition applies a definition handed down by the parent. A
 // command is executed at its target; a definition is applied everywhere it
 // lands, so this persists, projects into KV and mirrors retained, and never calls
@@ -1358,8 +1457,16 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 		}
 		return Result{}, &StorageError{Err: err}
 	}
+	e.afterPersist(class, p, topic, payload, first)
+	return Result{Persisted: true, Stream: streamName, Offset: first, Topic: topic}, nil
+}
+
+// afterPersist is what follows a record's durable write at offset: the
+// counters, the indexes and the local delivery.
+func (e *Engine) afterPersist(class uns.Class, p uns.Parsed, topic string, payload []byte, offset uint64) {
+	streamName := uns.StreamFor(class)
 	e.metrics.IngestRecord(streamName)
-	e.log.Debug("ingest", "stream", streamName, "offset", first, "topic", topic)
+	e.log.Debug("ingest", "stream", streamName, "offset", offset, "topic", topic)
 	if uns.IsAck(class) {
 		// A 202 progress ack is not the answer a repeated command gets.
 		if id := correlationID(payload); id != "" && !isProgressAck(payload) {
@@ -1380,10 +1487,9 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 		// publishing it and recording its delivery are one decision. Everything else goes
 		// straight to the bus.
 		if uns.IsCommand(class) {
-			e.deliverCommand(class, p, topic, payload, first)
+			e.deliverCommand(class, p, topic, payload, offset)
 		} else {
 			e.deliver(topic, payload, retainFor(class))
 		}
 	}
-	return Result{Persisted: true, Stream: streamName, Offset: first, Topic: topic}, nil
 }
