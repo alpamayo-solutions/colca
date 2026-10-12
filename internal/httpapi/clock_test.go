@@ -30,7 +30,7 @@ func healthzClock(t *testing.T, cfg *config.Config, clk *clock.Clock) (block map
 	}
 	eng = engine.New(s, cfg, reg, nil, nil, clk)
 	reg.SetNamespace(eng.Elements())
-	return readHealthzClock(t, Handler(eng, cfg, reg, nil, nil, testBlobs(t, cfg), "deadbeef", false, nil)), eng
+	return readHealthzClock(t, Handler(eng, cfg, reg, nil, nil, testBlobs(t, cfg), testNodeKey, false, nil, nil)), eng
 }
 
 func readHealthzClock(t *testing.T, h http.Handler) map[string]json.RawMessage {
@@ -104,7 +104,7 @@ func TestHealthzClockBlockOnAChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	block = readHealthzClock(t, Handler(eng, cfg, reg, nil, nil, testBlobs(t, cfg), "deadbeef", false, nil))
+	block = readHealthzClock(t, Handler(eng, cfg, reg, nil, nil, testBlobs(t, cfg), testNodeKey, false, nil, nil))
 	if len(block) != 5 {
 		t.Fatalf("clock block has %d fields, want exactly 5: %v", len(block), block)
 	}

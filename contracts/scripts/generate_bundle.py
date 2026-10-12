@@ -65,7 +65,7 @@ TOMBSTONE_OVERRIDES: dict[str, bool] = {}
 
 # Contracts colcad produces and validates itself. They never appear in a
 # bundle; the loader refuses one that declares them.
-BUILTIN_ONLY = {"_StreamGap", "_EnrolledIdentity"}
+BUILTIN_ONLY = {"_StreamGap", "_EnrolledIdentity", "_EnrollmentRequest", "_EnrollmentPreapproval"}
 
 # Registered payload classes that nothing may publish, each with the reason it
 # still exists as a Python type. A door rejects a contract it does not know

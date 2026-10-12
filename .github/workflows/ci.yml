@@ -132,9 +132,16 @@ jobs:
           version: "0.11.17"
       - name: Schema bundle
         run: make bundle
+      # The TPM key store and attestation tests (internal/identity/..., in the
+      # rest shard) run against swtpm; COLCA_TPM_TESTS=require turns a missing
+      # simulator into a failure instead of a skip.
+      - name: swtpm
+        if: matrix.shard == 'rest'
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends swtpm
       - name: Tests
         env:
           SHARD: ${{ matrix.shard }}
+          COLCA_TPM_TESTS: ${{ matrix.shard == 'rest' && 'require' || '' }}
         run: |
           mapfile -t packages < <(scripts/go-test-shards.sh packages "$SHARD")
           go test -race -count=1 "${packages[@]}"

@@ -24,7 +24,10 @@ import (
 
 // builtinOnly are contracts colcad produces and validates itself; a bundle that
 // declares one fails to load.
-var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true}
+var builtinOnly = map[string]bool{
+	"_StreamGap": true, "_EnrolledIdentity": true,
+	uns.EnrollmentRequestContract: true, uns.EnrollmentPreapprovalContract: true,
+}
 
 // allowedKeywords is the supported schema subset, enforced at load so a bundle
 // cannot use features the broker does not support. pattern is compiled once at

@@ -103,7 +103,7 @@ func StartPairWithBus(dir string, machines int, hubBus config.Bus) (*Pair, error
 	}
 
 	hubCfg := &config.Config{
-		ULID: "n-hub", DataDir: filepath.Join(dir, "hub-data"), KeyFile: hubKey,
+		ULID: "n-hub", DataDir: filepath.Join(dir, "hub-data"), Identity: config.Identity{KeyFile: hubKey},
 		API:  config.API{Addr: "127.0.0.1:0", Token: BenchToken},
 		MQTT: config.Endpoint{Addr: "127.0.0.1:0"},
 		Repl: config.Endpoint{Addr: "127.0.0.1:0"},
@@ -145,7 +145,7 @@ func StartPairWithBus(dir string, machines int, hubBus config.Bus) (*Pair, error
 	}
 
 	edgeCfg := &config.Config{
-		ULID: "n-edge", DataDir: filepath.Join(dir, "edge-data"), KeyFile: edgeKey,
+		ULID: "n-edge", DataDir: filepath.Join(dir, "edge-data"), Identity: config.Identity{KeyFile: edgeKey},
 		API:    config.API{Addr: "127.0.0.1:0", Token: BenchToken},
 		MQTT:   config.Endpoint{Addr: "127.0.0.1:0"},
 		Parent: &config.Parent{URL: "https://" + hub.ReplAddr, Pubkey: hubID.PublicHex()},

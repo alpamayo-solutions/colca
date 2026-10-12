@@ -15,7 +15,7 @@ func TestPrepareUplinkProtectsEmptyStreamsAndPreservesProgress(t *testing.T) {
 	parent := mustIdentity(t, filepath.Join(dir, "parent.key"))
 	cl := mustClient(t, "127.0.0.1:1", parent.PublicHex(), id)
 	st := mustStore(t, filepath.Join(dir, "data"))
-	cursor := uns.UplinkCursor(parent.PublicHex())
+	cursor := uns.UplinkCursor(CursorScope(parent.PublicHex()))
 
 	if err := PrepareUplink(cl, st); err != nil {
 		t.Fatal(err)
@@ -63,7 +63,7 @@ func TestPrepareUplinkAdoptsLegacyAndKeepsParentsIndependent(t *testing.T) {
 	if err := PrepareUplink(cl, st); err != nil {
 		t.Fatal(err)
 	}
-	if got := st.CursorGet(uns.UplinkCursor(parent.PublicHex()), "metrics"); got != 4 {
+	if got := st.CursorGet(uns.UplinkCursor(CursorScope(parent.PublicHex())), "metrics"); got != 4 {
 		t.Fatalf("legacy progress lost: got %d, want 4", got)
 	}
 	for _, c := range st.Cursors() {
@@ -75,13 +75,13 @@ func TestPrepareUplinkAdoptsLegacyAndKeepsParentsIndependent(t *testing.T) {
 	if err := PrepareUplink(other, st); err != nil {
 		t.Fatal(err)
 	}
-	if got := st.CursorGet(uns.UplinkCursor(otherParent.PublicHex()), "metrics"); got != 1 {
+	if got := st.CursorGet(uns.UplinkCursor(CursorScope(otherParent.PublicHex())), "metrics"); got != 1 {
 		t.Fatalf("new parent inherited another parent's progress: %d", got)
 	}
 	if err := PrepareUplink(cl, st); err != nil {
 		t.Fatal(err)
 	}
-	if got := st.CursorGet(uns.UplinkCursor(parent.PublicHex()), "metrics"); got != 4 {
+	if got := st.CursorGet(uns.UplinkCursor(CursorScope(parent.PublicHex())), "metrics"); got != 4 {
 		t.Fatalf("returning to parent rewound its cursor: %d", got)
 	}
 }

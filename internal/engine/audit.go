@@ -101,6 +101,10 @@ var auditMetadataKey = map[string]bool{
 	"door": true, "route": true, "method": true, "stream": true,
 	"contract": true, "filter": true, "cursor": true, "topic": true,
 	"owner": true,
+	// Enrollment decisions: which key, where it lives, which node and element,
+	// which pre-approval admitted it, and the key it replaced.
+	"fingerprint": true, "key_store": true, "ek": true, "ulid": true,
+	"element": true, "preapproval": true, "previous": true,
 }
 
 func flatAuditMetadata(value any) bool {

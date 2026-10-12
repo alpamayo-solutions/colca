@@ -91,7 +91,7 @@ func TestBundleRolloutSkewAcrossTheTree(t *testing.T) {
 	mk := func(ulid, bundlePath string, parent *config.Parent) *config.Config {
 		return &config.Config{
 			ULID: ulid, DataDir: filepath.Join(base, ulid+"-data"), LogLevel: "debug",
-			KeyFile:   filepath.Join(base, ulid+".key"),
+			Identity:  config.Identity{KeyFile: filepath.Join(base, ulid+".key")},
 			API:       config.API{Addr: "127.0.0.1:0", Token: tok},
 			Repl:      config.Endpoint{Addr: "127.0.0.1:0"},
 			Parent:    parent,

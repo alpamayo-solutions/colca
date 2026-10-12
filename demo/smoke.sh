@@ -94,8 +94,9 @@ done
 say "   global answers /healthz: $(curl -skf "$G/healthz")"
 
 echo "── enrolling the tree: children at their parents, machines at their edges…"
-say "   the registry is runtime state: an identity exists at a node only after"
-say "   POST /enroll (entry-before-connect); everything below retries until then."
+say "   the registry is runtime state: a machine exists at a node only after"
+say "   POST /enroll; a child node asks its parent by itself and joins once its key"
+say "   is approved — here ahead of time, by a pre-approval of its fingerprint."
 # An identity binds to a system element, not to a path,
 # so the element is authored first and the entry names it. The mount is then
 # wherever that element sits, now and after any later rename.
@@ -134,6 +135,44 @@ enroll() { # $1 = base url, $2 = ulid, $3 = kind, $4 = mount, $5 = pubkey file, 
   [ "$ok" = 1 ] || fail "enrolling $2 at $1 failed"
   say "   enrolled $2 ($3) at $1 on element $element, which sits at '$4'"
 }
+# fingerprint <pubkey file> → the key's SHA-256 fingerprint as 64 hex characters.
+fingerprint() {
+  python3 -c '
+import hashlib, sys
+k = open(sys.argv[1]).read().strip()
+if len(k) == 64:  # a raw ed25519 key from before SPKI
+    k = "302a300506032b6570032100" + k
+print(hashlib.sha256(bytes.fromhex(k)).hexdigest())' "$1"
+}
+# enroll_node: a node files its own enrollment request at its parent; a person
+# (here: the admin token through _CmdAdmin) pre-approves its key at an element,
+# so the request is approved the moment it arrives, or at once if it is already
+# waiting. Then wait until the child fetched its certificate.
+enroll_node() { # $1 = parent base url, $2 = child ulid, $3 = mount, $4 = pubkey file, $5 = parent node ulid
+  element=$(place "$1" "$5" "$3")
+  fp=$(fingerprint "$4")
+  ok=0
+  for _ in $(seq 1 60); do
+    if curl -skf -H "$TOK" -H "Content-Type: application/json" -X POST "$1/publish" \
+      -d "{\"topic\":\"colca/v1/_CmdAdmin/$5/preapprove\",\"payload\":{\"correlation_id\":\"smoke-pre-$2\",\"id\":\"smoke-$2\",\"match\":{\"key\":\"$fp\"},\"element\":\"$element\"}}" >/dev/null 2>&1; then
+      ok=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$ok" = 1 ] || fail "pre-approving $2 at $1 failed"
+  ok=0
+  # A child that asked before the pre-approval retries after its backoff (30 s).
+  for _ in $(seq 1 120); do
+    if [ "$(json_int "$1/enroll" "sum(1 for e in d['entries'] if e['ulid'] == '$2' and e.get('cert_state') == 'issued')")" = 1 ]; then
+      ok=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$ok" = 1 ] || fail "$2 never fetched its certificate from $1"
+  say "   enrolled $2 (node) at $1 on element $element, which sits at '$3' — certificate issued"
+}
 # Groups are definitions, authored once at the root and descending to every
 # node below it. Keycloak carries who is in which
 # group; what a group MAY do lives here.
@@ -151,9 +190,9 @@ define_group() { # $1 = base url, $2 = node ulid, $3 = group id, $4 = grants JSO
   say "   defined group $3 with grants $4"
 }
 
-enroll "$G" n-site1 node site1 keys/site1.pub n-global
-enroll "$S1" n-edge1 node edge1 keys/edge1.pub n-site1
-enroll "$S1" n-edge2 node edge2 keys/edge2.pub n-site1
+enroll_node "$G" n-site1 site1 keys/site1.pub n-global
+enroll_node "$S1" n-edge1 edge1 keys/edge1.pub n-site1
+enroll_node "$S1" n-edge2 edge2 keys/edge2.pub n-site1
 enroll "$E1" m1 external m1 keys/m1-machine.pub n-edge1 write
 enroll "$E2" m2 external m2 keys/m2-machine.pub n-edge2 write
 

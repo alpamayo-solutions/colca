@@ -15,6 +15,13 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/node"
 )
 
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: colcad <config.yaml>")
+	fmt.Fprintln(os.Stderr, "       colcad identity [-json] <config.yaml>")
+	fmt.Fprintln(os.Stderr, "       colcad tpm-identity [-json] [-device /dev/tpmrm0]")
+	fmt.Fprintln(os.Stderr, "       colcad --version")
+}
+
 // version is set by release builds with -ldflags "-X main.version=...".
 var version = "dev"
 
@@ -23,9 +30,16 @@ func main() {
 		fmt.Println("colcad", version)
 		return
 	}
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "identity":
+			os.Exit(identityCmd(os.Args[2:], os.Stdout, os.Stderr))
+		case "tpm-identity":
+			os.Exit(tpmIdentityCmd(os.Args[2:], os.Stdout, os.Stderr))
+		}
+	}
 	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: colcad <config.yaml>")
-		fmt.Fprintln(os.Stderr, "       colcad --version")
+		usage()
 		os.Exit(2)
 	}
 	cfg, err := config.Load(os.Args[1])
@@ -34,6 +48,7 @@ func main() {
 		os.Exit(1)
 	}
 	limit := memlimit.Apply()
+	node.Version = version
 	n, err := node.Start(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "start:", err)

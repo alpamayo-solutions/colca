@@ -29,6 +29,7 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/enroll"
 	"github.com/alpamayo-solutions/colca/internal/httplimit"
 	"github.com/alpamayo-solutions/colca/internal/httpserver"
 	"github.com/alpamayo-solutions/colca/internal/identity"
@@ -74,6 +75,13 @@ type Server struct {
 
 	// pushBytes bounds the bytes of pushes held at once; see byteBudget.
 	pushBytes byteBudget
+
+	// enrollment is the node's enrollment manager (SetEnrollment); nil keeps the
+	// door to pinning alone.
+	enrollment *enroll.Manager
+	// running holds every child's in-flight requests, so a revoke ends them
+	// (CancelChild).
+	running inflightSet
 
 	// regressed remembers which children that cannot re-sync already had
 	// their stale position logged, so it is a state and not a line per poll.
@@ -160,6 +168,11 @@ func (s *Server) childFromReq(r *http.Request) (*uns.Entry, string, error) {
 		s.auditDenied("authenticate", metrics.AuthKind, entry, map[string]any{"route": r.URL.Path})
 		return nil, "", fmt.Errorf("identity %s is kind %q — the repl door is for nodes", entry.ULID, entry.Kind)
 	}
+	if err := s.admitCertificate(r, entry); err != nil {
+		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
+		s.auditDenied("authenticate", "certificate", entry, map[string]any{"route": r.URL.Path})
+		return nil, "", fmt.Errorf("identity %s: %w — file POST %s for a certificate", entry.ULID, err, enroll.RequestRoute)
+	}
 	mount, placed := s.eng.Elements().PathOf(entry.Element)
 	if !placed {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthKind)
@@ -238,6 +251,7 @@ func (s *Server) Start() (addr string, err error) {
 		MinVersion:   tls.VersionTLS13,
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST "+enroll.RequestRoute, s.handleEnrollRequest)
 	mux.HandleFunc("POST /replicate", s.handleReplicate)
 	mux.HandleFunc("GET /downlink", s.handleDownlink)
 	mux.HandleFunc("HEAD /blobs/{sha}", s.handleBlobHead)
@@ -304,6 +318,8 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
+	r, done := s.track(r, child.ULID)
+	defer done()
 	release, ok := s.acquireRequest(w, limitClassReplication, child.ULID, replicationPolicy)
 	if !ok {
 		return
@@ -434,6 +450,10 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	// Through the engine, never straight into the store: the engine is the single
 	// place every write converges, and it is what mirrors the newly applied
 	// records onto this node's local MQTT bus.
+	if revoked(r) {
+		s.refuseRevoked(w, child, r.URL.Path)
+		return
+	}
 	if err := s.adoptChildStore(child.ULID, in.Store); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -456,6 +476,8 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
+	r, done := s.track(r, child.ULID)
+	defer done()
 	release, ok := s.acquireRequest(w, limitClassReplDownlink, child.ULID, replDownlinkPolicy)
 	if !ok {
 		return
@@ -650,6 +672,10 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-ctx.Done():
+			if revoked(r) {
+				s.refuseRevoked(w, child, r.URL.Path)
+				return
+			}
 			// Client gone (or the server was stopped): never outlive the request.
 			return
 		case <-timer.C:
