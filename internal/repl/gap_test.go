@@ -98,7 +98,7 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	b64 := func(i int) string {
 		return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`{"correlation_id":"c%d","expires_at":99999999999}`, i)))
 	}
-	// now_ms is a live timestamp: checked for plausibility separately and removed
+	// now_ms and held_ms are live: checked for plausibility separately and removed
 	// before the exact comparison.
 	rest, nowMS := stripNowMS(t, body)
 	if nowMS < before || nowMS > after {
@@ -131,8 +131,8 @@ func TestDownlinkGapExactWireShape(t *testing.T) {
 	}
 }
 
-// stripNowMS removes now_ms from body and marshals it again with sorted keys, so
-// exact-shape assertions can check everything but the live timestamp.
+// stripNowMS removes now_ms and held_ms from body and marshals it again with sorted keys, so
+// exact-shape assertions can check everything but the live values.
 func stripNowMS(t *testing.T, body []byte) (rest string, nowMS int64) {
 	t.Helper()
 	var m map[string]json.RawMessage
@@ -146,7 +146,16 @@ func stripNowMS(t *testing.T, body []byte) (rest string, nowMS int64) {
 	if err := json.Unmarshal(raw, &nowMS); err != nil {
 		t.Fatalf("now_ms not an int64: %v", err)
 	}
+	// held_ms is live as well: how long this response was held, which the
+	// exchange around it bounds.
+	var heldMS int64
+	if raw, ok := m["held_ms"]; !ok {
+		t.Fatalf("response missing held_ms: %s", body)
+	} else if err := json.Unmarshal(raw, &heldMS); err != nil || heldMS < 0 || heldMS > 60_000 {
+		t.Fatalf("held_ms = %s, want a small non-negative int64 (%v)", raw, err)
+	}
 	delete(m, "now_ms")
+	delete(m, "held_ms")
 	b, err := json.Marshal(m)
 	if err != nil {
 		t.Fatalf("re-marshal without now_ms: %v", err)

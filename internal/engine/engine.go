@@ -385,11 +385,21 @@ func (e *Engine) ClockStatus() map[string]any {
 }
 
 // ObserveParentClock records the skew between this node's clock and the
-// parent's now_ms from a replication response. It is a measurement for the
-// metrics and /health; no decision is corrected by it. It logs once when the
-// skew passes clock.SkewAlarm and once when it is back within it.
-func (e *Engine) ObserveParentClock(nowMS int64) {
-	skew, transition := e.clk.ObserveParent(nowMS)
+// parent's, from one replication response and the round trip that bounds it
+// (clock.ParentSample). It is a measurement for the metrics and /health; no
+// decision is corrected by it. A sample whose round trip is too long to say
+// anything is dropped. It logs once when the skew passes clock.SkewAlarm and
+// once when it is back within it.
+func (e *Engine) ObserveParentClock(s clock.ParentSample) {
+	skew, transition, used := e.clk.ObserveParent(s)
+	if !used {
+		if !e.clk.IsRoot() && s.NowMS > 0 {
+			e.metrics.ClockParentSampleDiscarded()
+			e.log.Debug("parent clock sample discarded: its round trip is too long to bound a skew",
+				"round_trip_ms", (s.Received.Sub(s.Sent) - s.Held).Milliseconds(), "max_ms", clock.MaxRoundTrip.Milliseconds())
+		}
+		return
+	}
 	switch transition {
 	case clock.Exceeded:
 		e.log.Warn("clock skew to the parent exceeds the alarm threshold: this node and its parent judge command expiry differently; check NTP on both hosts",

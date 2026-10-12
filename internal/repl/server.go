@@ -299,6 +299,7 @@ type wireRec struct {
 }
 
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
+	received := time.Now() // held_ms on the response is measured from here
 	child, mount, err := s.childFromReq(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
@@ -444,13 +445,15 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Debug("replicate", "child", child.ULID, "stream", in.Stream, "received", len(repl), "applied", applied, "hwm", hwm)
-	// now_ms is this node's wall clock, stamped after IngestReplicated. The
-	// child measures its skew against it and corrects nothing.
+	// now_ms is this node's wall clock, stamped after IngestReplicated, and
+	// held_ms how long this node had the request by then. The child measures
+	// its skew against them and corrects nothing.
 	writeJSON(w, map[string]any{"hwm": hwm, "now_ms": s.eng.Now().UnixMilli(),
-		"store": s.eng.Store().StoreID()})
+		"held_ms": time.Since(received).Milliseconds(), "store": s.eng.Store().StoreID()})
 }
 
 func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
+	received := time.Now() // held_ms on the response is measured from here
 	child, mount, err := s.childFromReq(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
@@ -622,11 +625,13 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 			// now_ms is this node's wall clock, stamped here, after the long-poll
-			// wait, so the child's skew sample is off by network latency rather than
-			// the poll duration. No head: only the hello response carries it.
+			// wait, and held_ms is how long this node had the request by then. The
+			// child subtracts it from the exchange, so its skew sample is bounded by
+			// the network round trip rather than the poll duration. No head: only
+			// the hello response carries it.
 			resp := map[string]any{
 				"records": out, "next": next,
-				"now_ms": s.eng.Now().UnixMilli(),
+				"now_ms": s.eng.Now().UnixMilli(), "held_ms": time.Since(received).Milliseconds(),
 			}
 			// Every downlink response teaches the child its position in the parent's
 			// chain. It is left out while this node's own position is unknown.
