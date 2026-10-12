@@ -630,9 +630,11 @@ started 65 minutes ago or longer by the database's clock, naming the listed
 signals it wrote into that hour, and sends `NOTIFY historian_late_write` when
 it appended one. This happens in the transaction that writes the samples: a
 sample is never stored without its mark, and a mark is never visible before
-its samples. An offline `colca-historian import` marks the same way. Without
-the relations the mark statement fails and the page is retried; the historian
-writes no page unmarked.
+its samples. An offline `colca-historian import` marks the same way. The
+historian writes no page unmarked, so it checks for both relations when it
+starts and exits at once, naming the missing one, when the reader's migrations
+have not run (PREKIT: the api's historian migration `0005_metric_statistics`).
+It does not wait for them; start it after the migrations.
 
 Marking never holds ingestion up: it is a plain insert, with no unique key, no
 conflict handling and no table lock. A signal that is not listed writes nothing,
