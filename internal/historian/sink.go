@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -252,14 +253,54 @@ func poisonReason(err error) (reason, sqlstate string, ok bool) {
 	return reason, pgErr.Code, ok
 }
 
-// EnsureSchema creates the offset table and applies the retention policy.
-// historian_metric itself belongs to the API's migrations.
+// ErrLateWriteRelationsMissing reports a database without the relations
+// markLateWrites needs. Waiting does not create them: their owner's migrations
+// do, so a caller stops instead of retrying.
+var ErrLateWriteRelationsMissing = errors.New("historian: late write relations missing")
+
+// checkLateWriteRelations fails when historian_late_write or
+// historian_late_write_signal is missing (a table or a view, found the way the
+// mark statement finds them, through the search path).
+//
+// Without this the historian starts, writes current samples for as long as
+// no page is late, and then every page that carries a late sample fails with
+// 42P01 and is retried forever: on a busy node that is every writer, from
+// about minute 55 of the first hour after an outage or a replay.
+func (s *Sink) checkLateWriteRelations(ctx context.Context) error {
+	var marks, wanted bool
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT to_regclass('historian_late_write') IS NOT NULL,
+		        to_regclass('historian_late_write_signal') IS NOT NULL`).Scan(&marks, &wanted); err != nil {
+		return fmt.Errorf("historian: checking the late write relations: %w", err)
+	}
+	var missing []string
+	if !marks {
+		missing = append(missing, "historian_late_write")
+	}
+	if !wanted {
+		missing = append(missing, "historian_late_write_signal")
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: the database has no %s. Their reader's migrations create them before "+
+		"colca-historian starts (PREKIT: the api's historian migration 0005_metric_statistics, "+
+		"`manage.py migrate historian`); see docs/operations.md, \"Late writes the historian marks\"",
+		ErrLateWriteRelationsMissing, strings.Join(missing, " or "))
+}
+
+// EnsureSchema creates the offset table, checks that the late write relations
+// exist and applies the retention policy. historian_metric and the late write
+// relations belong to the API's migrations.
 func (s *Sink) EnsureSchema(ctx context.Context, retentionDays int) error {
 	if _, err := s.Pool.Exec(ctx, createOffsetTable); err != nil {
 		return fmt.Errorf("historian: creating the offset table: %w", err)
 	}
 	if _, err := s.Pool.Exec(ctx, addOffsetStore); err != nil {
 		return fmt.Errorf("historian: adding the store to the offset table: %w", err)
+	}
+	if err := s.checkLateWriteRelations(ctx); err != nil {
+		return err
 	}
 	var isHypertable bool
 	if err := s.Pool.QueryRow(ctx, `
