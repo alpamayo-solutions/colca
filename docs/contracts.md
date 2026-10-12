@@ -31,9 +31,9 @@ different bundle does not start.
 - **The bundle carries the routing class** of each contract, so a new contract
   can be introduced by shipping a bundle, without a new broker. A new command
   contract counts as an `admin` command until the domain package names its class.
-- **Some contracts belong to the node.** `_StreamGap`, `_EnrolledIdentity` and
-  `_TimeSync` are produced and checked by the node itself; a bundle that
-  declares one does not load.
+- **Some contracts belong to the node.** `_StreamGap` and `_EnrolledIdentity`
+  are produced and checked by the node itself; a bundle that declares one does
+  not load.
 - **Field limits are part of the contract.** A payload field declares its
   limit in `payload.py` with `MaxLength`, `Bounds` or `Pattern`, and the bundle
   carries it as `maxLength`, `minimum`/`maximum` or `pattern`. The declaration

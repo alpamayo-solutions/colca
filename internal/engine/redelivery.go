@@ -77,7 +77,7 @@ func (e *Engine) deliverCommand(class uns.Class, p uns.Parsed, topic string, pay
 	// Asked after the publish, deliberately: the question is whether the
 	// publish that just happened reached a subscription of this machine.
 	delivered := e.hasSubscriber(topic, target.ULID)
-	if delivered || !uns.CommandStillLive(payload, e.AuthoritativeNow().UnixMilli()) {
+	if delivered || !uns.CommandStillLive(payload, e.Now().UnixMilli()) {
 		// A forward ack is correct here: owedBelow just established that nothing between
 		// the floor and this record is owed. It also lets the floor cross unrelated
 		// records in between.
@@ -100,7 +100,7 @@ func (e *Engine) owedBelow(stream string, floor, offset uint64, ulid string) boo
 	if floor >= offset {
 		return false
 	}
-	now := e.AuthoritativeNow().UnixMilli()
+	now := e.Now().UnixMilli()
 	recs, _, err := e.store.ReadRecords(stream, floor, 1, func(r store.StoredRecord) bool {
 		return !e.CommandRetired(r) && uns.OwedCommand(r.Topic, r.Payload, ulid, now)
 	})
@@ -138,7 +138,7 @@ func (e *Engine) ReplayOwedCommands(entry *uns.Entry) int {
 	cursor := entry.CommandCursor()
 	from := e.store.CursorGet(cursor, stream)
 	head := e.store.NextOffset(stream)
-	now := e.AuthoritativeNow().UnixMilli()
+	now := e.Now().UnixMilli()
 
 	published := 0
 	for from < head && published < replayCap {

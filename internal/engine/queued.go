@@ -114,7 +114,7 @@ func (e *Engine) writeProgress(p uns.Parsed, payload []byte, attribution Attribu
 	}
 	body, err := json.Marshal(progressAck{
 		CorrelationID: id, ResultCode: AckProgress, Stage: stage, Message: message,
-		PerformedAt: e.AuthoritativeNow().UnixMilli(),
+		PerformedAt: e.Now().UnixMilli(),
 	})
 	if err != nil {
 		return
@@ -266,7 +266,7 @@ func (e *Engine) QueuedAnswer(rec store.StoredRecord, code int, message string) 
 // node's downlink cursor holds the commands under its mount, a machine's
 // delivery cursor the commands addressed to it.
 func (e *Engine) QueuedFor(cursor string) (func(store.StoredRecord) bool, string, bool) {
-	now := e.AuthoritativeNow().UnixMilli()
+	now := e.Now().UnixMilli()
 	if child, ok := strings.CutPrefix(cursor, uns.DownlinkCursorPrefix); ok {
 		entry, known := e.ids.Get(child)
 		if !known || !entry.ReplicatesUp() {

@@ -444,10 +444,9 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Debug("replicate", "child", child.ULID, "stream", in.Stream, "received", len(repl), "applied", applied, "hwm", hwm)
-	// now_ms is stamped after IngestReplicated, from the parent's authoritative
-	// clock rather than raw local time, so corrections carry down the tree. The
-	// root has no offset, so there it is the raw clock.
-	writeJSON(w, map[string]any{"hwm": hwm, "now_ms": s.eng.AuthoritativeNow().UnixMilli(),
+	// now_ms is this node's wall clock, stamped after IngestReplicated. The
+	// child measures its skew against it and corrects nothing.
+	writeJSON(w, map[string]any{"hwm": hwm, "now_ms": s.eng.Now().UnixMilli(),
 		"store": s.eng.Store().StoreID()})
 }
 
@@ -622,13 +621,12 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 					WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups, AC: rec.ActorClient,
 				})
 			}
-			// now_ms is stamped here, after the long-poll wait, so the sample error is
-			// network latency rather than the poll duration. It is the parent's
-			// authoritative clock (raw on the root). No head: only the hello response
-			// carries it.
+			// now_ms is this node's wall clock, stamped here, after the long-poll
+			// wait, so the child's skew sample is off by network latency rather than
+			// the poll duration. No head: only the hello response carries it.
 			resp := map[string]any{
 				"records": out, "next": next,
-				"now_ms": s.eng.AuthoritativeNow().UnixMilli(),
+				"now_ms": s.eng.Now().UnixMilli(),
 			}
 			// Every downlink response teaches the child its position in the parent's
 			// chain. It is left out while this node's own position is unknown.

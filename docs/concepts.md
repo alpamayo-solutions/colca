@@ -158,7 +158,9 @@ for it, in order.
   is delivered whenever its target comes back, for as long as retention keeps
   it. A command that must not act late carries `expires_at` (unix
   milliseconds); the executor answers `498` without running it once it has
-  passed. Commands to physical machines should carry a short one; the sender
+  passed. Every node and machine judges that on its own clock, which is why
+  the clocks of a tree are kept in step by NTP and
+  [watched](operations.md#clocks). Commands to physical machines should carry a short one; the sender
   decides.
 - **Delivered once.** A child stores a command and moves its downlink cursor
   in one write, so a command handed again after a crash or a lost response is

@@ -80,43 +80,19 @@ func TestParseAndClass(t *testing.T) {
 	if _, err := Parse("colca/v1/_Metric/m1"); err == nil {
 		t.Fatal("want error: missing path")
 	}
+	// No contract is exempt from the five-segment rule. _TimeSync, which once
+	// was, is a contract colca does not know.
+	if _, err := Parse("colca/v1/_TimeSync/n-edge1"); err == nil {
+		t.Fatal("a 4-segment _TimeSync topic must fail the grammar like any other 4-segment topic")
+	}
+	if got := ClassOf("_TimeSync"); got != ClassNone {
+		t.Fatalf("ClassOf(_TimeSync) = %v, want ClassNone: the contract no longer exists", got)
+	}
 	if IsUns("other/topic") {
 		t.Fatal("non-UNS must be false")
 	}
 	if !IsUns("colca/v1/_Metric/m1/m1/temp") {
 		t.Fatal("UNS topic must be true")
-	}
-}
-
-// _TimeSync is the only contract whose topic has no hierarchy path; Parse's
-// length exception is tied to that contract.
-func TestTimeSyncTopicShape(t *testing.T) {
-	p, err := Parse("colca/v1/_TimeSync/n-edge1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Contract != "_TimeSync" || p.NodeID != "n-edge1" || p.Path != "" {
-		t.Fatalf("%+v", p)
-	}
-	if p.Prefix != "colca" || p.Version != "v1" {
-		t.Fatalf("%+v", p)
-	}
-	if ClassOf("_TimeSync") != ClassTimeSync || StreamFor(ClassOf("_TimeSync")) != "" {
-		t.Fatalf("_TimeSync class/stream: %v/%q", ClassOf("_TimeSync"), StreamFor(ClassOf("_TimeSync")))
-	}
-	if got := TimeSyncTopic("n-edge1"); got != "colca/v1/_TimeSync/n-edge1" {
-		t.Fatalf("TimeSyncTopic = %q", got)
-	}
-	// A 5+-segment _TimeSync topic still parses normally; the exception only
-	// adds the 4-segment shape.
-	p2, err := Parse("colca/v1/_TimeSync/n-edge1/extra")
-	if err != nil || p2.Path != "extra" {
-		t.Fatalf("padded _TimeSync topic: %+v, err=%v", p2, err)
-	}
-
-	// Any other contract at 4 segments is still a grammar error.
-	if _, err := Parse("colca/v1/_Metric/n-edge1"); err == nil {
-		t.Fatal("4-segment _Metric must still error — the relaxation is _TimeSync-only")
 	}
 }
 
@@ -278,7 +254,6 @@ func TestValidate(t *testing.T) {
 		{"_EditOperation", `{"id":"op-1","digest":"abc","message":"created","result":"ok","topics":["colca/v1/_Constant/n1/a"]}`},
 		{"_StreamGap", `{"stream":"metrics","from_offset":57,"to_offset":49999,"first_ts":1755100000000,"last_ts":1755700000000,"overridden_cursors":["uplink"]}`},
 		{"_StreamGap", `{"stream":"commands","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":["downlink:child-01","uplink"]}`},
-		{"_TimeSync", `{"now_ms": 1755000000000}`},
 	}
 	for _, c := range ok {
 		if err := Validate(c[0], []byte(c[1])); err != nil {
@@ -304,8 +279,6 @@ func TestValidate(t *testing.T) {
 		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":[]}`},   // empty overridden_cursors
 		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":[""]}`}, // empty cursor name
 		{"_StreamGap", `{"stream":"metrics","from_offset":1,"to_offset":2,"first_ts":1,"last_ts":2,"overridden_cursors":[1]}`},  // non-string cursor name
-		{"_TimeSync", `{}`},                // missing now_ms
-		{"_TimeSync", `{"now_ms":"nope"}`}, // now_ms not a number
 		// The identity fields do not cross over: an element carrying only the
 		// registry's field name is unaddressable, and vice versa.
 		{"_SystemElement", `{"ulid":"01HLINE1","name":"Linie 1"}`},
@@ -334,7 +307,7 @@ func TestValidateEmptyPayloadTombstoneRule(t *testing.T) {
 			t.Errorf("zero-length payload on KV-projecting %s must validate (tombstone): %v", contract, err)
 		}
 	}
-	for _, contract := range []string{"_CmdParam", "_Ack", "_StreamGap", "_TimeSync", "_Unknown"} {
+	for _, contract := range []string{"_CmdParam", "_Ack", "_StreamGap", "_Unknown"} {
 		if err := Validate(contract, nil); err == nil {
 			t.Errorf("empty payload on %s must be rejected — deletion is not meaningful for events", contract)
 		}
@@ -406,7 +379,6 @@ func TestAlarmIsAnEventNotState(t *testing.T) {
 		"IsCommand":              IsCommand(ClassAlarm),
 		"IsDefinition":           IsDefinition(ClassAlarm),
 		"IsCommandAuthoredState": IsCommandAuthoredState(ClassAlarm),
-		"IsNodeLocal":            IsNodeLocal(ClassAlarm),
 		"NeedsStateRefresh":      NeedsStateRefresh(ClassAlarm),
 	} {
 		if got {
@@ -534,7 +506,6 @@ func TestAnnotationIsAnEventNotState(t *testing.T) {
 		"IsCommand":              IsCommand(ClassAnnotation),
 		"IsDefinition":           IsDefinition(ClassAnnotation),
 		"IsCommandAuthoredState": IsCommandAuthoredState(ClassAnnotation),
-		"IsNodeLocal":            IsNodeLocal(ClassAnnotation),
 		"NeedsStateRefresh":      NeedsStateRefresh(ClassAnnotation),
 	} {
 		if got {

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -261,9 +260,9 @@ type Engine struct {
 // the identity's write scope covers the topic's path. m may be nil; every Metrics
 // method is nil-safe.
 //
-// clk may be nil, and New then builds one from cfg. A caller that also passes a
-// clock to metrics.New must build it itself and pass the same instance to both,
-// or the clock metrics never change.
+// clk is the node's wall clock and may be nil; New then builds one from cfg. A
+// caller that also passes a clock to metrics.New must build it itself and pass
+// the same instance to both, or the parent skew metrics never change.
 func New(s *store.Store, cfg *config.Config, ids Mounts, deliver LocalDeliver, m *metrics.Metrics, clk *clock.Clock) *Engine {
 	if clk == nil {
 		clk = clock.New(cfg.Parent == nil, time.Now)
@@ -357,48 +356,49 @@ func (e *Engine) Store() *store.Store { return e.store }
 // CursorFilters is what each cursor's consumer reads, as its last fetch said.
 func (e *Engine) CursorFilters() *cursorwatch.Filters { return e.cursorFilters }
 
-// AuthoritativeNow is this node's estimate of the root's clock: wall time plus
-// the offset from the latest parent response, or raw wall time on the root and
-// before the first sync.
-func (e *Engine) AuthoritativeNow() time.Time {
-	return e.clk.AuthoritativeNow()
-}
+// Now is this node's wall clock, the one time every expiry, drain and audit
+// decision reads. Tests inject it through the engine's clock.Clock.
+func (e *Engine) Now() time.Time { return e.clk.Now() }
 
-// ClockStatus reports the same clock that powers _TimeSync and replication.
-// Unknown synchronization age is null, never an invented successful sync.
+// ClockStatus is the /health clock block: the wall clock, the kernel's verdict
+// on it, and the skew to the parent. What is not known is null, never an
+// invented value: the host fields when the kernel's verdict cannot be read, the
+// parent fields on the root and before the first response from the parent.
 func (e *Engine) ClockStatus() map[string]any {
 	now := e.clk.Now()
-	age := e.clk.SyncAgeSeconds(now)
-	var syncAge any
-	if !math.IsInf(age, 0) && !math.IsNaN(age) {
-		syncAge = age
+	host := map[string]any{"synchronized": nil, "estimated_error_ms": nil}
+	if h := e.clk.Host(); h.Reported {
+		host["synchronized"] = h.Synchronized
+		host["estimated_error_ms"] = float64(h.EstimatedError) / float64(time.Millisecond)
 	}
-	return map[string]any{
-		"now_ms":  e.clk.AuthoritativeNow().UnixMilli(),
-		"is_root": e.clk.IsRoot(), "offset_ms": e.clk.OffsetMS(),
-		"sync_age_seconds":        syncAge,
-		"beacon_interval_seconds": e.cfg.TimeSync.EffectiveBeaconInterval().Seconds(),
+	status := map[string]any{
+		"wall_now_ms": now.UnixMilli(), "is_root": e.clk.IsRoot(), "host": host,
+		"parent_skew_ms": nil, "parent_sample_age_s": nil,
 	}
+	if skew, ok := e.clk.ParentSkew(); ok {
+		status["parent_skew_ms"] = skew.Milliseconds()
+	}
+	if age, ok := e.clk.ParentSampleAge(now); ok {
+		status["parent_sample_age_s"] = age.Seconds()
+	}
+	return status
 }
 
-// ApplyClockSample records the offset from a parent's now_ms and warns when drift
-// exceeds time_sync.drift_warn_ms. Callers apply it before ingesting the records
-// from the same response, so expiry decisions use the corrected time. A no-op on
-// the root.
-func (e *Engine) ApplyClockSample(nowMS int64) (offsetMS int64) {
-	offsetMS = e.clk.ApplySample(nowMS)
-	if warn := e.cfg.TimeSync.EffectiveDriftWarnMS(); abs64(offsetMS) > warn {
-		e.log.Warn("clock drift exceeds warn threshold",
-			"offset_ms", offsetMS, "drift_warn_ms", warn)
+// ObserveParentClock records the skew between this node's clock and the
+// parent's now_ms from a replication response. It is a measurement for the
+// metrics and /health; no decision is corrected by it. It logs once when the
+// skew passes clock.SkewAlarm and once when it is back within it.
+func (e *Engine) ObserveParentClock(nowMS int64) {
+	skew, transition := e.clk.ObserveParent(nowMS)
+	switch transition {
+	case clock.Exceeded:
+		e.log.Warn("clock skew to the parent exceeds the alarm threshold: this node and its parent judge command expiry differently; check NTP on both hosts",
+			"parent_skew_ms", skew.Milliseconds(), "threshold_ms", clock.SkewAlarm.Milliseconds())
+	case clock.Recovered:
+		e.log.Info("clock skew to the parent is back within the alarm threshold",
+			"parent_skew_ms", skew.Milliseconds(), "threshold_ms", clock.SkewAlarm.Milliseconds())
+	case clock.Unchanged:
 	}
-	return offsetMS
-}
-
-func abs64(n int64) int64 {
-	if n < 0 {
-		return -n
-	}
-	return n
 }
 
 // Elements is this node's namespace: the element index every placement
@@ -566,11 +566,6 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		return e.reject(metrics.ReasonRegistryContract, "client %s may not publish _EnrolledIdentity — registry entries are enrollment-door only", identity)
 	}
 	class := e.ClassOf(p.Contract)
-	if uns.IsNodeLocal(class) {
-		// _TimeSync is published only by this node's beacon. A client attempting it is
-		// rejected with its own reason rather than the generic grammar reason.
-		return e.reject(metrics.ReasonTimeSync, "client %s may not publish _TimeSync: it is node-local and never replicated", identity)
-	}
 	if uns.IsCommand(class) {
 		// A mount under an active drain accepts no new commands, whatever the caller's
 		// grants. Checked first so the rejection gives the real reason.
@@ -731,12 +726,6 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 	if !uns.IsKnown(class) {
 		return e.reject(metrics.ReasonGrammar, "unknown contract %s", p.Contract)
 	}
-	if uns.IsNodeLocal(class) {
-		// _TimeSync is node-local only, as at the other doors. Checked before the
-		// human-write rule so the rejection gives the real reason.
-		e.metrics.RejectPublish(metrics.ReasonTimeSync)
-		return Result{}, fmt.Errorf("human %s may not publish _TimeSync: it is node-local and never replicated", entry.ULID)
-	}
 	if uns.IsAudit(class) {
 		return e.rejectDenied(metrics.ReasonWriteDenied, attributionForEntry(entry), "publish", &p,
 			"human %s may not publish _AuditEvent — the audit producer is local-only", entry.ULID)
@@ -818,12 +807,6 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 		return Result{}, fmt.Errorf("_EnrolledIdentity is enrollment-door only — use POST /enroll")
 	}
 	class := e.ClassOf(p.Contract)
-	if uns.IsNodeLocal(class) {
-		// Same rule as IngestClient: _TimeSync is node-local-publish-only,
-		// not even the admin token may author it through /publish.
-		e.metrics.RejectPublish(metrics.ReasonTimeSync)
-		return Result{}, fmt.Errorf("admin may not publish _TimeSync: it is node-local and never replicated")
-	}
 	if uns.IsAudit(class) {
 		return e.rejectDenied(metrics.ReasonWriteDenied, attribution, "publish", &p,
 			"admin may not publish _AuditEvent — use the local audit producer")
@@ -922,10 +905,6 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 			return nil, fmt.Errorf("admin state batch record %d (%s): _EnrolledIdentity is enrollment-door only — use POST /enroll", i, input.Topic)
 		}
 		class := e.ClassOf(parsed.Contract)
-		if uns.IsNodeLocal(class) {
-			e.metrics.RejectPublish(metrics.ReasonTimeSync)
-			return nil, fmt.Errorf("admin state batch record %d may not publish _TimeSync: ephemeral, node-local-publish-only", i)
-		}
 		if !uns.IsKnown(class) {
 			e.metrics.RejectPublish(metrics.ReasonGrammar)
 			return nil, fmt.Errorf("admin state batch record %d: unknown contract %s", i, parsed.Contract)
@@ -1195,13 +1174,13 @@ func (e *Engine) IngestDownlinkDefinitionAttributed(topic string, payload []byte
 // then mirror every newly applied record onto the local bus. The replication
 // server never writes to the store directly.
 func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord) (applied int, hwm uint64, err error) {
-	recs, dropped := e.dropUnreplicable(child, stream, recs)
+	recs = e.dropUnreplicable(child, stream, recs)
 	prev := e.store.HWMGet(child, stream)
 	got, hwm, err := e.store.ApplyReplicated(child, stream, recs)
 	if err != nil {
 		return 0, hwm, err
 	}
-	e.logOffsetJumps(child, stream, prev, got, dropped)
+	e.logOffsetJumps(child, stream, prev, got)
 	// Replicated records count toward colca_ingest_records_total like the other entry
 	// paths.
 	for _, r := range got {
@@ -1239,36 +1218,23 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 // dropUnreplicable keeps records a parent never stores out of a replicated
 // batch before they reach the store; the rest of the batch still applies.
 //
-//   - _TimeSync is node-local and never replicated, so such a record is forged
-//     or buggy. It is dropped.
-//   - A retired contract (uns.IsRetired) can still sit in an older child's
-//     metrics stream. Its record becomes a one-offset skip, so the HWM moves
-//     past it and a batch ending in one does not hold the lane.
-//
-// Both are counted as rejected publishes. It returns the dropped child offsets,
-// so logOffsetJumps does not report the hole a drop leaves as data loss.
-func (e *Engine) dropUnreplicable(child, stream string, recs []store.ReplRecord) (filtered []store.ReplRecord, dropped map[uint64]bool) {
-	filtered = recs[:0:0]
+// A retired contract (uns.IsRetired) can still sit in an older child's metrics
+// stream. Its record becomes a one-offset skip, so the HWM moves past it and a
+// batch ending in one does not hold the lane. It is counted as a rejected
+// publish.
+func (e *Engine) dropUnreplicable(child, stream string, recs []store.ReplRecord) []store.ReplRecord {
+	filtered := recs[:0:0]
 	for _, r := range recs {
 		p, err := uns.Parse(r.Topic)
-		switch {
-		case err == nil && uns.IsNodeLocal(uns.ClassOf(p.Contract)):
-			e.metrics.RejectPublish(metrics.ReasonTimeSync)
-			e.log.Warn("rejected _TimeSync record from replication: it is node-local and never replicated",
-				"child", child, "topic", r.Topic)
-			if dropped == nil {
-				dropped = make(map[uint64]bool)
-			}
-			dropped[r.ChildOffset] = true
-		case err == nil && uns.IsRetired(p.Contract) && stream == "metrics":
+		if err == nil && uns.IsRetired(p.Contract) && stream == "metrics" {
 			e.metrics.RejectPublish(metrics.ReasonValidation)
 			e.log.Debug("skipped a replicated record of a retired contract", "child", child, "topic", r.Topic)
 			filtered = append(filtered, store.ReplRecord{ChildOffset: r.ChildOffset, SkipFrom: r.ChildOffset})
-		default:
-			filtered = append(filtered, r)
+			continue
 		}
+		filtered = append(filtered, r)
 	}
-	return filtered, dropped
+	return filtered
 }
 
 // logOffsetJumps is the second check for lost records: a child's stream offsets
@@ -1276,9 +1242,8 @@ func (e *Engine) dropUnreplicable(child, stream string, recs []store.ReplRecord)
 // records are gone at the child, even if it never emitted a _StreamGap marker.
 // Detection only.
 //
-// Streams whose uplink is filtered (uns.UplinkCarriesEveryRecord) are exempt, and
-// so are holes fully explained by this batch's dropped records.
-func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []store.ReplRecord, dropped map[uint64]bool) {
+// Streams whose uplink is filtered (uns.UplinkCarriesEveryRecord) are exempt.
+func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []store.ReplRecord) {
 	if !uns.UplinkCarriesEveryRecord(stream) {
 		return
 	}
@@ -1288,27 +1253,13 @@ func (e *Engine) logOffsetJumps(child, stream string, prev uint64, applied []sto
 		if r.SkipFrom != 0 {
 			first = r.SkipFrom
 		}
-		if first > last+1 && !jumpFullyExplainedByDropped(last, first, dropped) {
+		if first > last+1 {
 			e.log.Error("replication offset jump: this node never received the child offsets between have and got, most likely pruned at the child before replication",
 				"child", child, "stream", stream, "have", last, "got", r.ChildOffset)
 			e.metrics.GapApplied(child, stream)
 		}
 		last = r.ChildOffset
 	}
-}
-
-// jumpFullyExplainedByDropped reports whether every offset strictly between
-// last and childOffset was a dropped record.
-func jumpFullyExplainedByDropped(last, childOffset uint64, dropped map[uint64]bool) bool {
-	if len(dropped) == 0 {
-		return false
-	}
-	for o := last + 1; o < childOffset; o++ {
-		if !dropped[o] {
-			return false
-		}
-	}
-	return true
 }
 
 // retainFor decides how a record appears on the local bus. State classes are

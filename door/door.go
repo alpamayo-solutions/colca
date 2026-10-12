@@ -70,8 +70,6 @@ type Gap struct {
 
 // Page is one /fetch response.
 type Page struct {
-	// Same real-time authority as _TimeSync; sampled when the response is sent.
-	NowMS   int64    `json:"now_ms,omitempty"`
 	Records []Record `json:"records"`
 	Next    int64    `json:"next"`
 	// From is the offset the page started at (colca 0.18.2+; 0 from older nodes).

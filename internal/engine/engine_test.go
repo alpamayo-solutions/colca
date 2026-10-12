@@ -3,12 +3,10 @@ package engine
 import (
 	"bytes"
 	"fmt"
-	"github.com/alpamayo-solutions/colca/internal/clock"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/metrics"
@@ -625,135 +623,6 @@ func TestEnrolledIdentityRejectedAtOrdinaryDoors(t *testing.T) {
 	if kv := mustKVScan(t, e.Store(), "edge1/_colca/identities/m9"); len(kv) != 1 {
 		t.Fatalf("replicated _EnrolledIdentity must project into KV: %v", kv)
 	}
-}
-
-// _TimeSync is rejected at every door, replication included, with its own reason
-// rather than the generic grammar reason, for both the canonical and a padded
-// topic.
-func TestTimeSyncRejectedAtEveryIngestDoor(t *testing.T) {
-	s, err := store.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { s.Close() })
-	cfg := &config.Config{ULID: "n-edge1"}
-	m := metrics.New(s, config.Retention{}, nil)
-	e := New(s, cfg, testIDs(), nil, m, nil)
-
-	const rejectedLine = `colca_rejected_publishes_total{reason="time_sync"}`
-	if v := metricstest.Value(t, m, rejectedLine); v != 0 {
-		t.Fatalf("%s = %v before any attempt, want 0", rejectedLine, v)
-	}
-
-	for _, topic := range []string{"colca/v1/_TimeSync/n-edge1", "colca/v1/_TimeSync/n-edge1/extra"} {
-		if _, err := e.IngestClient("m1", topic, []byte(`{"now_ms":1}`)); err == nil || !strings.Contains(err.Error(), "_TimeSync") {
-			t.Fatalf("client publish of %s must be rejected with a _TimeSync-specific error, got %v", topic, err)
-		}
-		if _, err := e.IngestAdmin(topic, []byte(`{"now_ms":1}`)); err == nil || !strings.Contains(err.Error(), "_TimeSync") {
-			t.Fatalf("admin publish of %s must be rejected with a _TimeSync-specific error, got %v", topic, err)
-		}
-		// The human door rejects it with the time_sync reason too, whatever the grants.
-		if _, err := e.IngestHuman(humanEntry(t, "read:#", "cmd:#:admin", "admin:#"), topic, []byte(`{"now_ms":1}`)); err == nil || !strings.Contains(err.Error(), "_TimeSync") {
-			t.Fatalf("human publish of %s must be rejected with a _TimeSync-specific error, got %v", topic, err)
-		}
-	}
-	for _, stream := range []string{"metrics", "entities", "commands", "definitions", "audit"} {
-		if off := e.Store().NextOffset(stream); off != 1 {
-			t.Fatalf("stream %s next offset = %d, want 1 (rejected _TimeSync must never persist)", stream, off)
-		}
-	}
-	if v := metricstest.Value(t, m, rejectedLine); v != 6 {
-		t.Fatalf("%s = %v after 6 rejected attempts (2 topic shapes x client+admin+human), want 6", rejectedLine, v)
-	}
-
-	// Replication drops a forged _TimeSync record; the other records in the batch
-	// still apply and advance the HWM.
-	recs := []store.ReplRecord{
-		{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/child1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "child1/m1/a", KVNode: "m1"},
-		{ChildOffset: 2, Topic: "colca/v1/_TimeSync/n-child", Payload: []byte(`{"now_ms":1}`), TS: 1},
-		{ChildOffset: 3, Topic: "colca/v1/_Metric/m1/child1/m1/b", Payload: []byte(`{"v":2}`), TS: 2, KVPath: "child1/m1/b", KVNode: "m1"},
-	}
-	applied, hwm, err := e.IngestReplicated("n-child", "metrics", recs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if applied != 2 {
-		t.Fatalf("applied = %d, want 2 (the _TimeSync record must be dropped, never persisted)", applied)
-	}
-	if hwm != 3 {
-		t.Fatalf("hwm = %d, want 3", hwm)
-	}
-	if v := metricstest.Value(t, m, rejectedLine); v != 7 {
-		t.Fatalf("%s = %v after the replicated _TimeSync attempt, want 7", rejectedLine, v)
-	}
-}
-
-// Dropping a forged _TimeSync record does not trip the gap detector, but a gap
-// only partly explained by the drop still logs.
-func TestTimeSyncDropDoesNotFalsePositiveGapJump(t *testing.T) {
-	const marker = "replication offset jump"
-
-	t.Run("gap fully explained by the dropped record is silent", func(t *testing.T) {
-		s, err := store.Open(t.TempDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { s.Close() })
-		buf := captureLogs(t)
-		m := metrics.New(s, config.Retention{}, nil)
-		e := New(s, &config.Config{ULID: "n-parent"}, testIDs(), nil, m, nil)
-
-		recs := []store.ReplRecord{
-			{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/child1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "child1/m1/a", KVNode: "m1"},
-			{ChildOffset: 2, Topic: "colca/v1/_TimeSync/n-child", Payload: []byte(`{"now_ms":1}`), TS: 1},
-			{ChildOffset: 3, Topic: "colca/v1/_Metric/m1/child1/m1/b", Payload: []byte(`{"v":2}`), TS: 2, KVPath: "child1/m1/b", KVNode: "m1"},
-		}
-		applied, hwm, err := e.IngestReplicated("n-child", "metrics", recs)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if applied != 2 || hwm != 3 {
-			t.Fatalf("applied=%d hwm=%d, want 2/3", applied, hwm)
-		}
-		if strings.Contains(buf.String(), marker) {
-			t.Fatalf("gap fully explained by a dropped _TimeSync record must not log a jump:\n%s", buf.String())
-		}
-		if body := scrapeBody(t, m); strings.Contains(body, `colca_repl_gap_applied_total{child="n-child",stream="metrics"}`) {
-			t.Fatalf("gap fully explained by a dropped _TimeSync record must not touch colca_repl_gap_applied_total:\n%s", body)
-		}
-	})
-
-	t.Run("a genuinely missing offset alongside a dropped record still logs", func(t *testing.T) {
-		s, err := store.Open(t.TempDir())
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { s.Close() })
-		buf := captureLogs(t)
-		m := metrics.New(s, config.Retention{}, nil)
-		e := New(s, &config.Config{ULID: "n-parent"}, testIDs(), nil, m, nil)
-
-		// Offset 2 is the dropped _TimeSync; offset 3 is simply missing, a real loss, so
-		// the gap from 1 to 4 is only partly explained.
-		recs := []store.ReplRecord{
-			{ChildOffset: 1, Topic: "colca/v1/_Metric/m1/child1/m1/a", Payload: []byte(`{"v":1}`), TS: 1, KVPath: "child1/m1/a", KVNode: "m1"},
-			{ChildOffset: 2, Topic: "colca/v1/_TimeSync/n-child", Payload: []byte(`{"now_ms":1}`), TS: 1},
-			{ChildOffset: 4, Topic: "colca/v1/_Metric/m1/child1/m1/c", Payload: []byte(`{"v":3}`), TS: 3, KVPath: "child1/m1/c", KVNode: "m1"},
-		}
-		applied, hwm, err := e.IngestReplicated("n-child", "metrics", recs)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if applied != 2 || hwm != 4 {
-			t.Fatalf("applied=%d hwm=%d, want 2/4", applied, hwm)
-		}
-		if !strings.Contains(buf.String(), marker) || !strings.Contains(buf.String(), "have=1") || !strings.Contains(buf.String(), "got=4") {
-			t.Fatalf("a partially-explained gap (real offset 3 also missing) must still log:\n%s", buf.String())
-		}
-		if body := scrapeBody(t, m); !strings.Contains(body, `colca_repl_gap_applied_total{child="n-child",stream="metrics"} 1`) {
-			t.Fatalf("a partially-explained gap must still increment colca_repl_gap_applied_total:\n%s", body)
-		}
-	})
 }
 
 // A client with a covering cmd grant may publish commands of that class into the
@@ -1412,22 +1281,5 @@ func TestIngestRefreshGuardAndSkipSemantics(t *testing.T) {
 	}
 	if _, _, err := e.IngestRefresh(topic, nil, 2); err == nil {
 		t.Fatal("empty refresh payload must be rejected — a refresh cannot tombstone")
-	}
-}
-
-func TestClockStatusUsesExistingAuthority(t *testing.T) {
-	e := &Engine{cfg: &config.Config{}, clk: clock.New(true, func() time.Time { return time.Unix(100, 0) })}
-	status := e.ClockStatus()
-	if status["now_ms"] != int64(100000) || status["is_root"] != true || status["sync_age_seconds"] != float64(0) {
-		t.Fatal(status)
-	}
-	e.clk = clock.New(false, func() time.Time { return time.Unix(100, 0) })
-	if e.ClockStatus()["sync_age_seconds"] != nil {
-		t.Fatal("unsynchronized edge reported a synchronization")
-	}
-	e.ApplyClockSample(101000)
-	status = e.ClockStatus()
-	if status["now_ms"] != int64(101000) || status["offset_ms"] != int64(1000) {
-		t.Fatal(status)
 	}
 }

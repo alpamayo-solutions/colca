@@ -15,7 +15,7 @@ import "strings"
 // The identity is topic level 4, the one segment no hop rewrites, so the same
 // record is selected correctly at the root and at the leaf. It refuses
 // non-commands, an empty ulid, and commands past expires_at (CommandStillLive).
-func OwedCommand(topic string, payload []byte, ulid string, authoritativeNowMS int64) bool {
+func OwedCommand(topic string, payload []byte, ulid string, nowMS int64) bool {
 	if ulid == "" {
 		return false
 	}
@@ -26,7 +26,7 @@ func OwedCommand(topic string, payload []byte, ulid string, authoritativeNowMS i
 	if p.NodeID != ulid {
 		return false
 	}
-	return CommandStillLive(payload, authoritativeNowMS)
+	return CommandStillLive(payload, nowMS)
 }
 
 // CommandCursor names the cursor tracking this identity's command delivery on

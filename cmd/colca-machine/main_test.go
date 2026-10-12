@@ -22,48 +22,23 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/identity"
 )
 
-// fakeBeaconMessage is a minimal pahomqtt.Message for driving handleBeacon.
-type fakeBeaconMessage struct {
-	nowMS     int64
-	duplicate bool
+// fakeCommand is a minimal pahomqtt.Message for driving handleCommand.
+type fakeCommand struct {
+	topic   string
+	payload []byte
 }
 
-func (m fakeBeaconMessage) Duplicate() bool   { return m.duplicate }
-func (m fakeBeaconMessage) Qos() byte         { return 0 }
-func (m fakeBeaconMessage) Retained() bool    { return false }
-func (m fakeBeaconMessage) Topic() string     { return "colca/v1/_TimeSync/n1" }
-func (m fakeBeaconMessage) MessageID() uint16 { return 0 }
-func (m fakeBeaconMessage) Payload() []byte {
-	b, _ := json.Marshal(struct {
-		NowMS int64 `json:"now_ms"`
-	}{m.nowMS})
-	return b
-}
-func (m fakeBeaconMessage) Ack() {}
+func (m fakeCommand) Duplicate() bool   { return false }
+func (m fakeCommand) Qos() byte         { return 1 }
+func (m fakeCommand) Retained() bool    { return false }
+func (m fakeCommand) Topic() string     { return m.topic }
+func (m fakeCommand) MessageID() uint16 { return 0 }
+func (m fakeCommand) Payload() []byte   { return m.payload }
+func (m fakeCommand) Ack()              {}
 
-var _ pahomqtt.Message = fakeBeaconMessage{}
+var _ pahomqtt.Message = fakeCommand{}
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
-
-// fakeClock is a manually advanced clock, so decisions need no real waiting.
-type fakeClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func newFakeClock(start time.Time) *fakeClock { return &fakeClock{now: start} }
-
-func (f *fakeClock) Now() time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.now
-}
-
-func (f *fakeClock) Advance(d time.Duration) {
-	f.mu.Lock()
-	f.now = f.now.Add(d)
-	f.mu.Unlock()
-}
 
 var epoch = time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 
@@ -96,296 +71,48 @@ func TestResultExpiryBoundary(t *testing.T) {
 	}
 }
 
-// After Connect with a non-zero hold, an expiry decision waits until a beacon
-// arrives.
-func TestHoldReleasesOnBeacon(t *testing.T) {
-	fc := newFakeClock(epoch)
-	ts := newTimeSync(fc.Now, 10000) // 10s hold
-	ts.Connect()
-
-	if ready, _, _ := decide(ts.Snapshot(), fc.Now()); ready {
-		t.Fatal("must be holding immediately after Connect, before any beacon")
+// The machine judges expires_at on its own clock and nothing else: the same
+// command is executed by a machine whose clock is before the deadline and
+// answered 498 by one whose clock is past it. No time from the node enters the
+// decision.
+func TestCommandExpiryIsJudgedOnTheMachinesOwnClock(t *testing.T) {
+	deadline := epoch.Add(time.Minute)
+	command, err := json.Marshal(map[string]any{
+		"correlation_id": "c-1", "expires_at": deadline.UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	fc.Advance(2 * time.Second) // well before the 10s deadline
-	if ready, _, _ := decide(ts.Snapshot(), fc.Now()); ready {
-		t.Fatal("must still be holding before the beacon and before the deadline")
-	}
-
-	ts.Beacon(fc.Now().UnixMilli())
-	ready, _, deadlineHit := decide(ts.Snapshot(), fc.Now())
-	if !ready {
-		t.Fatal("a beacon must release the hold immediately, without waiting for the deadline")
-	}
-	if deadlineHit {
-		t.Fatal("release via beacon must not report deadlineHit — that flag is for the fail-open path only")
-	}
-}
-
-// When the hold ends without a beacon, the decision proceeds on the last known
-// offset and reports deadlineHit so the caller logs a warning.
-func TestHoldDeadlineProceedsWithWarning(t *testing.T) {
-	fc := newFakeClock(epoch)
-	ts := newTimeSync(fc.Now, 10000)
-	ts.Connect()
-
-	fc.Advance(9999 * time.Millisecond)
-	if ready, _, _ := decide(ts.Snapshot(), fc.Now()); ready {
-		t.Fatal("must still be holding 1ms before the deadline")
-	}
-
-	fc.Advance(1 * time.Millisecond) // now exactly at the deadline
-	ready, syncedNow, deadlineHit := decide(ts.Snapshot(), fc.Now())
-	if !ready {
-		t.Fatal("the deadline must fail open, not keep holding forever")
-	}
-	if !deadlineHit {
-		t.Fatal("proceeding via the deadline must report deadlineHit=true")
-	}
-	if !syncedNow.Equal(fc.Now()) {
-		t.Fatalf("synced_now with a never-learned offset (0) must equal wall_now: got %v, want %v", syncedNow, fc.Now())
-	}
-}
-
-// hold_ms 0 means no hold: a decision proceeds immediately without a beacon.
-func TestZeroHoldMeansNoHold(t *testing.T) {
-	fc := newFakeClock(epoch)
-	ts := newTimeSync(fc.Now, 0)
-	ts.Connect()
-	ready, _, deadlineHit := decide(ts.Snapshot(), fc.Now())
-	if !ready || deadlineHit {
-		t.Fatalf("hold_ms=0 must proceed immediately with deadlineHit=false, got ready=%v deadlineHit=%v", ready, deadlineHit)
-	}
-}
-
-// The learned offset corrects a skewed machine clock in both directions.
-// Deciding on the raw skewed clock must give the wrong answer in each case, or
-// the test would not show the correction matters.
-func TestSkewedClockCorrectsBothDirections(t *testing.T) {
-	const fiveMinMS = 5 * 60 * 1000
-	tests := []struct {
-		name          string
-		skewMS        int64 // machine's wall clock relative to authoritative time
-		expiresOffset int64 // expires_at relative to authoritative "now", ms
-		wantCode      int
+	for name, tc := range map[string]struct {
+		now  time.Time
+		want int
 	}{
-		{
-			name:          "ahead skew: raw clock would falsely reject a live command",
-			skewMS:        10 * 60 * 1000, // machine thinks it's 10 min ahead
-			expiresOffset: fiveMinMS,      // 5-minute TTL from authoritative now: still live
-			wantCode:      codeOK,
-		},
-		{
-			name:          "behind skew: raw clock would wrongly execute an expired command",
-			skewMS:        -10 * 60 * 1000, // machine thinks it's 10 min behind
-			expiresOffset: -1 * 60 * 1000,  // expired 1 minute ago, authoritative time
-			wantCode:      codeExpired,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			skewedNow := func() time.Time { return epoch.Add(time.Duration(tc.skewMS) * time.Millisecond) }
-			ts := newTimeSync(skewedNow, 0) // no hold: isolate the offset-correction math
-			ts.Connect()
-			// The beacon reports the unskewed time, as the node's beacon does.
-			ts.Beacon(epoch.UnixMilli())
-
-			ready, syncedNow, _ := decide(ts.Snapshot(), skewedNow())
-			if !ready {
-				t.Fatal("no hold configured — must be ready immediately")
+		"clock before the deadline executes":  {epoch, codeOK},
+		"clock at the deadline executes":      {deadline, codeOK},
+		"clock past the deadline answers 498": {deadline.Add(time.Millisecond), codeExpired},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var ackTopic string
+			var ack map[string]any
+			publish := func(topic string, _ byte, _ bool, payload interface{}) pahomqtt.Token {
+				ackTopic = topic
+				if err := json.Unmarshal(payload.([]byte), &ack); err != nil {
+					t.Errorf("ack is not JSON: %v", err)
+				}
+				tok := newFakeToken()
+				tok.complete()
+				return tok
 			}
-			if !syncedNow.Equal(epoch) {
-				t.Fatalf("synced_now = %v, want the corrected authoritative time %v", syncedNow, epoch)
+			handleCommand(discardLogger(), publish, "m1", "n1", func() time.Time { return tc.now },
+				fakeCommand{topic: "colca/v1/_CmdParam/n1/m1/setpoint", payload: command})
+			if ackTopic != "colca/v1/_Ack/n1/m1/setpoint" {
+				t.Fatalf("ack topic = %q, want colca/v1/_Ack/n1/m1/setpoint", ackTopic)
 			}
-
-			expiresAtMS := epoch.UnixMilli() + tc.expiresOffset
-			cmd := map[string]any{"expires_at": float64(expiresAtMS)}
-
-			code, msg := result(cmd, syncedNow.UnixMilli())
-			if code != tc.wantCode {
-				t.Fatalf("deciding on synced_now: code = %d (%s), want %d", code, msg, tc.wantCode)
-			}
-
-			// Deciding on the raw skewed clock must give the other answer.
-			rawCode, _ := result(cmd, skewedNow().UnixMilli())
-			if rawCode == tc.wantCode {
-				t.Fatalf("mutation check failed: deciding on the raw skewed wall clock also produced %d — "+
-					"this test case cannot distinguish synced_now from a bare time.Now(), strengthen it", rawCode)
+			if got := int(ack["result_code"].(float64)); got != tc.want {
+				t.Fatalf("result_code = %d, want %d", got, tc.want)
 			}
 		})
 	}
-}
-
-// A beacon arriving while Await waits releases it right away, well before the
-// hold's deadline.
-func TestAwaitReleasesOnBeaconWithoutWaitingForDeadline(t *testing.T) {
-	ts := newTimeSync(time.Now, 5000) // 5s hold — must NOT be what we wait out
-	ts.Connect()
-
-	type result struct {
-		syncedNow   time.Time
-		deadlineHit bool
-	}
-	done := make(chan result, 1)
-	start := time.Now()
-	go func() {
-		syncedNow, _, deadlineHit := ts.Await(context.Background())
-		done <- result{syncedNow, deadlineHit}
-	}()
-
-	ts.Beacon(time.Now().UnixMilli())
-
-	select {
-	case r := <-done:
-		if r.deadlineHit {
-			t.Fatal("release via beacon must not report deadlineHit")
-		}
-		if elapsed := time.Since(start); elapsed > 2*time.Second {
-			t.Fatalf("Await took %v to release on a beacon, want near-immediate (well under the 5s hold)", elapsed)
-		}
-	case <-time.After(4 * time.Second):
-		t.Fatal("Await never released after Beacon — it appears to be waiting out the full hold deadline instead")
-	}
-}
-
-// Without a beacon, Await returns once the hold elapses, with deadlineHit set.
-func TestAwaitDeadlineFailsOpen(t *testing.T) {
-	ts := newTimeSync(time.Now, 100) // 100ms hold — short but real wall-clock time
-	ts.Connect()
-
-	done := make(chan bool, 1)
-	go func() {
-		_, _, deadlineHit := ts.Await(context.Background())
-		done <- deadlineHit
-	}()
-
-	select {
-	case deadlineHit := <-done:
-		if !deadlineHit {
-			t.Fatal("Await returned without a beacon but deadlineHit=false")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Await never returned — the deadline path did not fail open")
-	}
-}
-
-// Await must not hang forever past shutdown: ctx cancellation returns it
-// even with an open hold and no beacon.
-func TestAwaitReturnsOnContextCancel(t *testing.T) {
-	ts := newTimeSync(time.Now, 60_000) // 60s hold — long enough that only cancellation explains a quick return
-	ts.Connect()
-	ctx, cancel := context.WithCancel(context.Background())
-
-	done := make(chan struct{})
-	go func() {
-		ts.Await(ctx)
-		close(done)
-	}()
-	cancel()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Await did not return after ctx cancellation")
-	}
-}
-
-// Two readings of the skewed clock differ by the real elapsed time: the
-// constant skew cancels out, which Await's timer relies on.
-func TestSimClockConstantSkewCancelsInSubtraction(t *testing.T) {
-	clk := newSimClock(10 * 60 * 1000) // +10 minutes
-	a := clk()
-	time.Sleep(5 * time.Millisecond)
-	b := clk()
-	if d := b.Sub(a); d < 0 || d > 200*time.Millisecond {
-		t.Fatalf("b.Sub(a) = %v, want a small positive duration close to the real elapsed time (skew must cancel)", d)
-	}
-	// The skew itself must still be present in the absolute reading.
-	if time.Until(b) < 9*time.Minute {
-		t.Fatalf("clock does not appear skewed by ~10 minutes: b=%v now=%v", b, time.Now())
-	}
-}
-
-// A beacon flagged as a duplicate is a resend carrying an old now_ms.
-// handleBeacon drops it, so it neither ends the hold nor skews the offset; a
-// genuine beacon afterwards still works.
-func TestHandleBeaconIgnoresDuplicateFlaggedMessage(t *testing.T) {
-	fc := newFakeClock(epoch)
-	ts := newTimeSync(fc.Now, 10000) // 10s hold
-	ts.Connect()
-
-	// A stale beacon: Duplicate()=true, carrying a now_ms from long before
-	// the outage (simulates the redelivered pre-outage sample).
-	staleNowMS := epoch.Add(-10 * time.Minute).UnixMilli()
-	handleBeacon(discardLogger(), ts, fakeBeaconMessage{nowMS: staleNowMS, duplicate: true})
-
-	if ready, _, _ := decide(ts.Snapshot(), fc.Now()); ready {
-		t.Fatal("a duplicate-flagged beacon must not release the hold")
-	}
-	if got := ts.Snapshot().offsetMS; got != 0 {
-		t.Fatalf("a duplicate-flagged beacon must not update the offset, got offsetMS=%d (a real sample would show ~ -10 minutes = %d)",
-			got, epoch.UnixMilli()-staleNowMS)
-	}
-
-	// A genuine, fresh (non-duplicate) beacon must still work normally.
-	handleBeacon(discardLogger(), ts, fakeBeaconMessage{nowMS: fc.Now().UnixMilli(), duplicate: false})
-	ready, syncedNow, deadlineHit := decide(ts.Snapshot(), fc.Now())
-	if !ready || deadlineHit {
-		t.Fatalf("a genuine beacon must release the hold via the beacon path, got ready=%v deadlineHit=%v", ready, deadlineHit)
-	}
-	if !syncedNow.Equal(fc.Now()) {
-		t.Fatalf("synced_now after the genuine beacon = %v, want %v", syncedNow, fc.Now())
-	}
-}
-
-// What the duplicate guard prevents, shown through result(): a stale beacon
-// makes the synced time lag behind, so an already expired command would be
-// acked 200 instead of 498.
-func TestStaleDuplicateBeaconWouldCorruptExpiryWithoutTheGuard(t *testing.T) {
-	// The command expired one minute before the reconnect.
-	cmd := map[string]any{"expires_at": float64(epoch.Add(-1 * time.Minute).UnixMilli())}
-	// The stale beacon's now_ms is from ten minutes earlier.
-	staleNowMS := epoch.Add(-10 * time.Minute).UnixMilli()
-
-	t.Run("guarded: the stale duplicate is ignored, decision stays correct", func(t *testing.T) {
-		fc := newFakeClock(epoch)
-		ts := newTimeSync(fc.Now, 10000)
-		ts.Connect()
-
-		handleBeacon(discardLogger(), ts, fakeBeaconMessage{nowMS: staleNowMS, duplicate: true})
-		if ready, _, _ := decide(ts.Snapshot(), fc.Now()); ready {
-			t.Fatal("precondition: must still be holding — the duplicate must not have released it")
-		}
-		// No genuine beacon arrives before the deadline: fail open on the
-		// last-known offset, which the duplicate never touched (still 0).
-		fc.Advance(10 * time.Second)
-		ready, syncedNow, deadlineHit := decide(ts.Snapshot(), fc.Now())
-		if !ready || !deadlineHit {
-			t.Fatalf("expected the deadline fail-open path, got ready=%v deadlineHit=%v", ready, deadlineHit)
-		}
-		code, msg := result(cmd, syncedNow.UnixMilli())
-		if code != codeExpired {
-			t.Fatalf("guarded path: code=%d (%s), want %d (codeExpired) — a genuinely stale command must still 498", code, msg, codeExpired)
-		}
-	})
-
-	t.Run("mutation check: skipping the Duplicate() guard reproduces the false-200 bug", func(t *testing.T) {
-		// Without the Duplicate() check, the stale sample goes straight into Beacon.
-		fc := newFakeClock(epoch)
-		ts := newTimeSync(fc.Now, 10000)
-		ts.Connect()
-		ts.Beacon(staleNowMS) // no Duplicate() check — the pre-fix behavior
-
-		ready, syncedNow, _ := decide(ts.Snapshot(), fc.Now())
-		if !ready {
-			t.Fatal("a beacon (even a stale one) releases the hold immediately")
-		}
-		code, msg := result(cmd, syncedNow.UnixMilli())
-		if code != codeOK {
-			t.Fatalf("mutation check failed: without the Duplicate() guard, got code=%d (%s), want codeOK (%d) — "+
-				"the bug did not reproduce, so this test cannot distinguish the guard from a no-op", code, msg, codeOK)
-		}
-	})
 }
 
 // fakeToken is a minimal pahomqtt.Token whose completion the test controls.
