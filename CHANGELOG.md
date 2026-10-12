@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.36.0](https://github.com/alpamayo-solutions/colca/compare/v0.35.0...v0.36.0) (2026-10-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* the _TimeSync contract, topic, beacon and subscribe exception are removed, with the time_sync config block (ignored if present), now_ms on /fetch, door.Page.NowMS, the metrics colca_clock_offset_ms and colca_clock_sync_age_seconds, the rejection reason time_sync and colca_data_contracts.payload.TimeSync.
+
+### Changes
+
+* replace _TimeSync with host clock monitoring ([#205](https://github.com/alpamayo-solutions/colca/issues/205)) ([d688726](https://github.com/alpamayo-solutions/colca/commit/d688726494ad5edb8bf6fac91773eaa7286a43e4))
+
 ## [0.35.0](https://github.com/alpamayo-solutions/colca/compare/v0.34.0...v0.35.0) (2026-10-12)
 
 
