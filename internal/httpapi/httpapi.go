@@ -904,7 +904,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		// store names the store incarnation the page was read from; a consumer
 		// passes it back on /ack so an ack can never land on a store that was
 		// recreated in between.
-		resp := map[string]any{"records": out, "next": next, "from": from, "now_ms": e.AuthoritativeNow().UnixMilli(),
+		resp := map[string]any{"records": out, "next": next, "from": from,
 			"store": e.Store().StoreID()}
 		// Without a position of its own the consumer started at the LWM; a prune
 		// between that read and this check moved nothing it was owed.

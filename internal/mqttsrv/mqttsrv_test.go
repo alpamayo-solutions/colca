@@ -791,211 +791,82 @@ func TestDeniedSubscribeLeaksNoRetained(t *testing.T) {
 	}
 }
 
-// The beacon fires on SUBSCRIBE to the beacon topic: the subscribing client gets
-// its own beacon within a round trip, and a bystander subscribed earlier sees it
-// too. A beacon on connect arrived before the client could subscribe and was lost
-// at QoS 0.
-func TestTimeSyncBeaconOnSubscribe(t *testing.T) {
-	w := newWorld(t)
-
-	bystander := connect(t, w.srv.Addr(), "obs-timesync", w.obs)
-	byMsgs := make(chan paho.Message, 8)
-	btok := bystander.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { byMsgs <- m })
-	if !btok.WaitTimeout(5*time.Second) || btok.Error() != nil {
-		t.Fatalf("bystander subscribe: %v", btok.Error())
-	}
-	// The bystander's own subscribe produced a beacon of its own; drain it so the
-	// assertion below is about the client under test.
-	select {
-	case <-byMsgs:
-	case <-time.After(5 * time.Second):
-		t.Fatal("no beacon for the bystander's own subscribe (baseline)")
-	}
-
-	c := connect(t, w.srv.Addr(), "m1-subscribe-timesync", w.m1)
-	ownMsgs := make(chan paho.Message, 8)
-	tok := c.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { ownMsgs <- m })
-	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
-		t.Fatalf("subscribe: %v", tok.Error())
-	}
-
-	checkBeacon := func(t *testing.T, msgs chan paho.Message, who string) {
-		t.Helper()
-		select {
-		case m := <-msgs:
-			if want := "colca/v1/_TimeSync/n1"; m.Topic() != want {
-				t.Fatalf("%s: beacon topic = %q, want %q", who, m.Topic(), want)
-			}
-			if m.Retained() {
-				t.Fatalf("%s: beacon must never be retained: a retained time message is stale by definition", who)
-			}
-			var p struct {
-				NowMS int64 `json:"now_ms"`
-			}
-			if err := json.Unmarshal(m.Payload(), &p); err != nil {
-				t.Fatalf("%s: beacon payload not JSON: %v (%s)", who, err, m.Payload())
-			}
-			if p.NowMS <= 0 {
-				t.Fatalf("%s: beacon now_ms = %d, want a positive unix-ms timestamp", who, p.NowMS)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s: no beacon received", who)
-		}
-	}
-
-	// The subscribing client's own subscribe produces its beacon.
-	checkBeacon(t, ownMsgs, "subscribing client")
-	// The broadcast still reaches an unrelated bystander too.
-	checkBeacon(t, byMsgs, "bystander")
-}
-
-// RunBeacon keeps publishing to a live subscriber without further connects.
-func TestTimeSyncBeaconPeriodicCadence(t *testing.T) {
-	w := newWorld(t)
-	sub := connect(t, w.srv.Addr(), "obs-cadence", w.obs)
-	msgs := make(chan paho.Message, 8)
-	tok := sub.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
-	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
-		t.Fatalf("subscribe: %v", tok.Error())
-	}
-	// obs's own subscribe already produced one beacon; it counts toward the three
-	// below, which does not change what this test shows.
-
-	stop := make(chan struct{})
-	defer close(stop)
-	go w.srv.RunBeacon(30*time.Millisecond, stop)
-
-	got := 0
-	deadline := time.After(3 * time.Second)
-	for got < 3 {
-		select {
-		case <-msgs:
-			got++
-		case <-deadline:
-			t.Fatalf("only received %d periodic beacon(s) in 3s at a 30ms interval, want at least 3", got)
-		}
-	}
-}
-
-// A client publishing _TimeSync is rejected and counted with the time_sync reason.
-func TestTimeSyncPublishRejectedFromClient(t *testing.T) {
+// _TimeSync is not a contract: a client publish to its old four-segment topic is
+// refused by the grammar like any other four-segment topic, and nothing is
+// stored.
+func TestAPublishToTheRetiredTimeSyncTopicFailsTheGrammar(t *testing.T) {
 	w := newWorld(t)
 	c := connect(t, w.srv.Addr(), "m1-pub-timesync", w.m1)
 
-	const rejectedLine = `colca_rejected_publishes_total{reason="time_sync"}`
-	before := scrapeMetric(t, w.m, rejectedLine)
+	const grammarLine = `colca_rejected_publishes_total{reason="grammar"}`
+	before := scrapeMetric(t, w.m, grammarLine)
+	streams := []string{"metrics", "entities", "commands"}
+	stored := map[string]uint64{}
+	for _, stream := range streams {
+		stored[stream] = w.st.NextOffset(stream)
+	}
 
 	// A rejected packet gets no PUBACK under MQTT 3.1.1, so the token never
-	// completes — the assertion is on the metric, not on the token.
+	// completes: the assertion is on the metric, not on the token.
 	tok := c.Publish("colca/v1/_TimeSync/n1", 1, false, []byte(`{"now_ms":1}`))
 	tok.WaitTimeout(500 * time.Millisecond)
 
 	deadline := time.Now().Add(3 * time.Second)
-	for scrapeMetric(t, w.m, rejectedLine) == before {
+	for scrapeMetric(t, w.m, grammarLine) == before {
 		if time.Now().After(deadline) {
-			t.Fatalf("%s never incremented after a client _TimeSync publish attempt", rejectedLine)
+			t.Fatalf("%s never incremented after a client publish to the retired _TimeSync topic", grammarLine)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-}
-
-// The beacon is QoS 0 so it is never queued for an offline subscriber: mochi only
-// queues QoS>0 messages. A persistent-session machine must not get stale beacons on
-// reconnect.
-func TestTimeSyncBeaconAtQoS0NeverQueuedForOfflineSubscriber(t *testing.T) {
-	w := newWorld(t)
-
-	dial := func(clientID string) paho.Client {
-		t.Helper()
-		opts := paho.NewClientOptions().
-			AddBroker("ssl://" + w.srv.Addr()).
-			SetTLSConfig(w.m1.TLSConfig()).
-			SetClientID(clientID).
-			SetUsername(w.m1.ULID).
-			SetProtocolVersion(4).
-			SetCleanSession(false). // persistent session
-			SetConnectTimeout(5 * time.Second)
-		c := paho.NewClient(opts)
-		tok := c.Connect()
-		if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
-			t.Fatalf("connect: %v", tok.Error())
+	for _, stream := range streams {
+		if off := w.st.NextOffset(stream); off != stored[stream] {
+			t.Fatalf("stream %s next offset = %d, want %d: the refused publish must not be stored", stream, off, stored[stream])
 		}
-		return c
-	}
-
-	// Subscribe at QoS 1: the delivered QoS is the lower of publish and subscribe, so a
-	// QoS 0 subscription would hide the publish QoS this test is about.
-	msgs := make(chan paho.Message, 8)
-	c1 := dial("m1-persistent")
-	tok := c1.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
-	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
-		t.Fatalf("subscribe: %v", tok.Error())
-	}
-	// c1's own subscribe produces its baseline beacon.
-	select {
-	case <-msgs:
-	case <-time.After(5 * time.Second):
-		t.Fatal("no beacon received for c1's own subscribe")
-	}
-
-	// Disconnect without unsubscribing; the persistent session survives on the server.
-	c1.Disconnect(100)
-	deadline := time.Now().Add(5 * time.Second)
-	for c1.IsConnectionOpen() {
-		if time.Now().After(deadline) {
-			t.Fatal("c1 never registered as disconnected")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Beacons published while offline, which a QoS 1 beacon would queue.
-	for i := 0; i < 3; i++ {
-		w.srv.PublishTimeSync()
-	}
-
-	// Reconnect with the same session and resubscribe. Only this subscribe's own
-	// beacon may arrive.
-	c2 := dial("m1-persistent")
-	defer c2.Disconnect(100)
-	tok = c2.Subscribe("colca/v1/_TimeSync/+", 1, func(_ paho.Client, m paho.Message) { msgs <- m })
-	if !tok.WaitTimeout(5*time.Second) || tok.Error() != nil {
-		t.Fatalf("re-subscribe on reconnect: %v", tok.Error())
-	}
-
-	select {
-	case <-msgs:
-	case <-time.After(5 * time.Second):
-		t.Fatal("no beacon on reconnect")
-	}
-	select {
-	case m := <-msgs:
-		t.Fatalf("a beacon arrived that must have been dropped for the offline subscriber (QoS 0 must never queue): topic=%s", m.Topic())
-	case <-time.After(700 * time.Millisecond):
 	}
 }
 
-// Any machine may subscribe the beacon topic regardless of its grants; m1 has no
-// read:#.
-func TestTimeSyncSubscribeAllowedRegardlessOfZone(t *testing.T) {
+// A machine built before the beacon was removed still subscribes to it when it
+// connects. The node refuses that one filter and counts the refusal; the session
+// stays up and the machine's command subscription works, so the machine goes on
+// and judges expiry on its own clock once its hold runs out.
+func TestAnOlderMachinesBeaconSubscriptionIsRefusedAndItsSessionGoesOn(t *testing.T) {
 	w := newWorld(t)
-	c := connect(t, w.srv.Addr(), "m1-timesync-acl", w.m1)
+	c := connect(t, w.srv.Addr(), "m1-old-machine", w.m1)
 
-	const filter = "colca/v1/_TimeSync/+"
-	tok := c.Subscribe(filter, 1, func(paho.Client, paho.Message) {})
-	if !tok.WaitTimeout(5 * time.Second) {
-		t.Fatal("subscribe: timed out")
-	}
-	if err := tok.Error(); err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	if st, ok := tok.(*paho.SubscribeToken); ok {
-		if qos, found := st.Result()[filter]; found && qos == 0x80 {
-			t.Fatal("_TimeSync subscribe rejected (0x80) despite m1 having no read:# grant")
-		}
-	}
 	const denyLine = `colca_acl_denials_total{action="sub"}`
-	if v := scrapeMetric(t, w.m, denyLine); v != 0 {
-		t.Fatalf("%s = %v, want 0 (the _TimeSync subscribe must never be denied)", denyLine, v)
+	before := scrapeMetric(t, w.m, denyLine)
+
+	const beacon = "colca/v1/_TimeSync/+"
+	tok := c.Subscribe(beacon, 0, func(paho.Client, paho.Message) {})
+	if !tok.WaitTimeout(5 * time.Second) {
+		t.Fatal("beacon subscribe: no SUBACK")
+	}
+	st, ok := tok.(*paho.SubscribeToken)
+	if !ok {
+		t.Fatalf("subscribe token is %T", tok)
+	}
+	if code := st.Result()[beacon]; code != 0x80 {
+		t.Fatalf("SUBACK for %s = 0x%02X, want 0x80: the beacon filter has no exception any more", beacon, code)
+	}
+	if got := scrapeMetric(t, w.m, denyLine); got != before+1 {
+		t.Fatalf("%s = %v, want %v: the refused beacon subscription is counted", denyLine, got, before+1)
+	}
+
+	// The same session still subscribes to its commands and publishes.
+	const commands = "colca/v1/_CmdParam/+/m1/#"
+	ctok := c.Subscribe(commands, 1, func(paho.Client, paho.Message) {})
+	if !ctok.WaitTimeout(5*time.Second) || ctok.Error() != nil {
+		t.Fatalf("command subscribe after the refused beacon subscribe: %v", ctok.Error())
+	}
+	if code := ctok.(*paho.SubscribeToken).Result()[commands]; code == 0x80 {
+		t.Fatal("the command subscription was refused after the refused beacon subscribe")
+	}
+	ptok := c.Publish("colca/v1/_Metric/n1/m1/temp", 1, false, []byte(`{"v":1}`))
+	if !ptok.WaitTimeout(5*time.Second) || ptok.Error() != nil {
+		t.Fatalf("publish after the refused beacon subscribe: %v", ptok.Error())
+	}
+	if !c.IsConnected() {
+		t.Fatal("the session ended after the refused beacon subscribe")
 	}
 }
 
@@ -1084,11 +955,7 @@ drain:
 	for {
 		select {
 		case m := <-msgs:
-			// Beacons are unrelated to this test and filtered out.
-			if strings.HasPrefix(m.Topic(), "colca/v1/_TimeSync/") {
-				continue
-			}
-			// So is the fixture's own retained element record.
+			// The fixture's own retained element record is unrelated to this test.
 			if strings.HasPrefix(m.Topic(), "colca/v1/_SystemElement/") {
 				continue
 			}

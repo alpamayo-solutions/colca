@@ -37,16 +37,9 @@ class EnrolledIdentity(Payload):
     id: str = ""
 
 
-@dataclass
-class TimeSync(Payload):
-    """Stand-in for the time beacon, which the broker binary owns."""
-
-    now_ms: int = 0
-
-
 @pytest.fixture(autouse=True)
 def _register_broker_owned_contracts():
-    added = [EnrolledIdentity, TimeSync]
+    added = [EnrolledIdentity]
     for cls in added:
         PAYLOAD_CLASSES[cls.get_identifier()] = cls
     yield

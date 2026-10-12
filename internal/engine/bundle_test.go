@@ -202,9 +202,6 @@ func TestBuiltinOnlyContractsBypassTheBundle(t *testing.T) {
 	if e.ClassOf("_StreamGap") != uns.ClassGap {
 		t.Fatal("_StreamGap must keep its builtin class under a bundle")
 	}
-	if e.ClassOf("_TimeSync") != uns.ClassTimeSync {
-		t.Fatal("_TimeSync must keep its builtin class under a bundle")
-	}
 	// And _EnrolledIdentity is still enrollment-door-only at the doors.
 	if _, err := e.IngestClient("m1", "colca/v1/_EnrolledIdentity/m1/_colca/identities/u", []byte(`{"ulid": "u"}`)); err == nil {
 		t.Fatal("_EnrolledIdentity must stay enrollment-door-only under a bundle")

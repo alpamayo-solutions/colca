@@ -1,8 +1,8 @@
 // With a loaded bundle, the bundle answers class, tombstonability and schema for
 // every contract it carries, replacing the builtin floor rather than merging with
-// it. Without one, the floor in plugins/uns applies. _StreamGap,
-// _EnrolledIdentity and _TimeSync are always answered by the binary that produces
-// them; a bundle may not redeclare them.
+// it. Without one, the floor in plugins/uns applies. _StreamGap and
+// _EnrolledIdentity are always answered by the binary that produces them; a
+// bundle may not redeclare them.
 
 package engine
 
@@ -99,7 +99,7 @@ func (e *Engine) rejectDenied(reason string, actor Attribution, operation string
 }
 
 var builtinOnly = map[string]bool{
-	"_StreamGap": true, "_EnrolledIdentity": true, "_TimeSync": true,
+	"_StreamGap": true, "_EnrolledIdentity": true,
 	uns.EnrollmentRequestContract: true, uns.EnrollmentPreapprovalContract: true,
 }
 

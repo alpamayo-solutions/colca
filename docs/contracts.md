@@ -32,8 +32,8 @@ different bundle does not start.
   can be introduced by shipping a bundle, without a new broker. A new command
   contract counts as an `admin` command until the domain package names its class.
 - **Some contracts belong to the node.** `_StreamGap`, `_EnrolledIdentity`,
-  `_EnrollmentRequest`, `_EnrollmentPreapproval` and `_TimeSync` are produced
-  and checked by the node itself; a bundle that declares one does not load, and
+  `_EnrollmentRequest` and `_EnrollmentPreapproval` are produced and checked by
+  the node itself; a bundle that declares one does not load, and
   no door accepts them from a client.
 - **Field limits are part of the contract.** A payload field declares its
   limit in `payload.py` with `MaxLength`, `Bounds` or `Pattern`, and the bundle

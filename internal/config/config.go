@@ -340,9 +340,6 @@ type Config struct {
 	// a one-hour grace period.
 	BlobGC BlobGC `yaml:"blob_gc"`
 
-	// TimeSync configures authoritative time. It is on by default.
-	TimeSync TimeSync `yaml:"time_sync"`
-
 	// Contracts names the schema bundle. Without it the bundle baked into the
 	// image is used if present, else the built-in rules. SHA256 pins the bundle:
 	// a mismatching digest refuses to start.
@@ -924,68 +921,6 @@ func (r Retention) EffectiveStream(stream string) StreamRetention {
 	return s
 }
 
-// TimeSync configures authoritative time: clock offsets learned over
-// replication, the MQTT time beacon and the machines' hold window. It is on by
-// default.
-type TimeSync struct {
-	// BeaconInterval is how often the node publishes _TimeSync while machines are
-	// attached, 30s by default.
-	BeaconInterval Duration `yaml:"beacon_interval"`
-	// HoldMS is how long a machine holds expiry decisions after connecting before
-	// it trusts its last known offset, 10000 by default. A pointer because an
-	// explicit 0 means no hold.
-	HoldMS *int64 `yaml:"hold_ms"`
-	// DriftWarnMS is the offset beyond which colcad logs a warning, 5000 by
-	// default. A pointer because an explicit 0 means warn on any offset.
-	DriftWarnMS *int64 `yaml:"drift_warn_ms"`
-}
-
-const (
-	defaultBeaconInterval = 30 * time.Second
-	defaultHoldMS         = int64(10000)
-	defaultDriftWarnMS    = int64(5000)
-)
-
-// EffectiveBeaconInterval returns BeaconInterval, or 30s when unset.
-func (t TimeSync) EffectiveBeaconInterval() time.Duration {
-	if time.Duration(t.BeaconInterval) <= 0 {
-		return defaultBeaconInterval
-	}
-	return time.Duration(t.BeaconInterval)
-}
-
-// EffectiveHoldMS returns HoldMS, or 10000 when absent. An explicit 0 means no
-// hold.
-func (t TimeSync) EffectiveHoldMS() int64 {
-	if t.HoldMS == nil {
-		return defaultHoldMS
-	}
-	return *t.HoldMS
-}
-
-// EffectiveDriftWarnMS returns DriftWarnMS, or 5000 when absent. An explicit 0
-// means warn on any non-zero offset.
-func (t TimeSync) EffectiveDriftWarnMS() int64 {
-	if t.DriftWarnMS == nil {
-		return defaultDriftWarnMS
-	}
-	return *t.DriftWarnMS
-}
-
-// validate rejects negative values; absent and 0 are both valid.
-func (t TimeSync) validate() error {
-	if time.Duration(t.BeaconInterval) < 0 {
-		return fmt.Errorf("config: time_sync.beacon_interval must not be negative, got %s", time.Duration(t.BeaconInterval))
-	}
-	if t.HoldMS != nil && *t.HoldMS < 0 {
-		return fmt.Errorf("config: time_sync.hold_ms must not be negative, got %d", *t.HoldMS)
-	}
-	if t.DriftWarnMS != nil && *t.DriftWarnMS < 0 {
-		return fmt.Errorf("config: time_sync.drift_warn_ms must not be negative, got %d", *t.DriftWarnMS)
-	}
-	return nil
-}
-
 // Load reads a YAML config from path and validates it.
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path) //nolint:gosec // the config file the operator named
@@ -1099,10 +1034,7 @@ func (c *Config) Validate() error {
 	if err := c.Logs.validate(); err != nil {
 		return err
 	}
-	if err := c.BlobGC.validate(); err != nil {
-		return err
-	}
-	return c.TimeSync.validate()
+	return c.BlobGC.validate()
 }
 
 // validate checks the auth: block: an audience, at least one issuer, each named

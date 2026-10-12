@@ -887,11 +887,6 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		if isReservedFilter(topic) {
 			return false
 		}
-		if isTimeSyncFilter(topic) {
-			// Every authenticated machine session may subscribe to _TimeSync,
-			// whatever its zone: the beacon is per node, not per path.
-			return true
-		}
 		if localServiceRead(e, topic) {
 			return true
 		}
@@ -972,14 +967,6 @@ func localServiceRead(e *Entry, topic string) bool {
 // nothing under "$", and shared subscriptions never get retained state, which
 // live values depend on.
 func isReservedFilter(filter string) bool { return strings.HasPrefix(filter, "$") }
-
-// isTimeSyncFilter reports whether a filter names _TimeSync exactly at segment
-// 2 ("colca/v1/_TimeSync", "colca/v1/_TimeSync/+" or a node ulid). A broader
-// wildcard such as "colca/#" does not count and goes through the zone check.
-func isTimeSyncFilter(filter string) bool {
-	seg := strings.SplitN(filter, "/", 4)
-	return len(seg) >= 3 && seg[0] == Root() && seg[1] == Version && seg[2] == "_TimeSync"
-}
 
 // fixedPathPrefix splits a subscription filter. isUns reports whether the
 // filter can match anything under the topic root; if not, it is plain-broker

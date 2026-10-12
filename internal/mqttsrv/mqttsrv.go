@@ -7,10 +7,8 @@ package mqttsrv
 
 import (
 	"crypto/tls"
-	"encoding/json"
 	"log/slog"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,7 +65,7 @@ type colcaHook struct {
 	refusals *slog.Logger
 	metrics  *metrics.Metrics // nil-safe: every Metrics method is a no-op on nil
 	// broker is the server New builds around this hook, never nil in practice. The
-	// hook uses it to publish the time-sync beacon.
+	// hook looks up live clients through it.
 	broker *mqtt.Server
 	// closing is set by Server.Close before it disconnects anyone. While set, the door
 	// refuses new connections and publishes, so shutdown is not chasing arrivals. See
@@ -309,20 +307,10 @@ func (h *colcaHook) entryForClient(cl *mqtt.Client) *uns.Entry {
 }
 
 // OnSubscribed runs after mochi registered a client's subscriptions, which already
-// passed the ACL.
-//
-// It sends a time-sync beacon when a filter matches this node's beacon topic:
-// subscribing is the first moment the client can receive it, so a reconnecting
-// machine gets one within a round trip. It also tries to replay commands owed to a
-// machine identity. The replay decides per record whether the machine is
-// listening, so running it on every subscribe costs nothing when nothing is owed.
+// passed the ACL. It tries to replay commands owed to a machine identity. The
+// replay decides per record whether the machine is listening, so running it on
+// every subscribe costs nothing when nothing is owed.
 func (h *colcaHook) OnSubscribed(cl *mqtt.Client, pk packets.Packet, reasonCodes []byte) {
-	for _, sub := range pk.Filters {
-		if h.matchesOwnBeacon(sub.Filter) {
-			h.publishTimeSync()
-			break
-		}
-	}
 	h.replayOwedCommands(cl)
 }
 
@@ -347,39 +335,6 @@ func (h *colcaHook) replayOwedCommands(cl *mqtt.Client) {
 	}
 }
 
-// matchesOwnBeacon reports whether filter delivers this node's beacon topic
-// (uns.TimeSyncTopic). _TimeSync topics always have four segments, so a match is
-// the exact topic or a single-level wildcard in the last position.
-func (h *colcaHook) matchesOwnBeacon(filter string) bool {
-	seg := strings.Split(filter, "/")
-	return len(seg) == 4 && seg[0] == uns.Root() && seg[1] == uns.Version && seg[2] == "_TimeSync" &&
-		(seg[3] == "+" || seg[3] == h.cfg.ULID)
-}
-
-// publishTimeSync publishes one beacon on the local bus: topic
-// colca/v1/_TimeSync/{node ulid}, payload {"now_ms": ...} from the engine's
-// AuthoritativeNow, never retained. A no-op before the engine is bound.
-//
-// It publishes at QoS 0 on purpose: mochi queues only QoS>0 messages for offline
-// persistent sessions, so a machine never receives stale beacons on reconnect.
-func (h *colcaHook) publishTimeSync() {
-	eng := h.engine()
-	if eng == nil {
-		return
-	}
-	payload, err := json.Marshal(struct {
-		NowMS int64 `json:"now_ms"`
-	}{eng.AuthoritativeNow().UnixMilli()})
-	if err != nil {
-		h.log.Warn("time-sync beacon not published: encode failed", "err", err)
-		return
-	}
-	topic := uns.TimeSyncTopic(h.cfg.ULID)
-	if err := h.broker.Publish(topic, payload, false, 0); err != nil {
-		h.log.Warn("time-sync beacon publish failed", "topic", topic, "err", err)
-	}
-}
-
 // refuse answers a publish the hook refused. mochi acts on a reason code only for an
 // MQTT 5 client at QoS 1 or 2; any other publish it would still retain and fan out,
 // so those are dropped and the metric and audit are the only trace.
@@ -400,7 +355,7 @@ func rejectCode(cl *mqtt.Client, pk packets.Packet, err error) error {
 	case metrics.ReasonValidation:
 		return refuse(cl, pk, packets.ErrPayloadFormatInvalid)
 	case metrics.ReasonNodeID, metrics.ReasonCmdDenied, metrics.ReasonRegistryContract,
-		metrics.ReasonWriteDenied, metrics.ReasonHumanWrite, metrics.ReasonTimeSync,
+		metrics.ReasonWriteDenied, metrics.ReasonHumanWrite,
 		metrics.ReasonNotProducer:
 		// Authorization verdicts, write_denied included: the identity has no write
 		// standing at that topic.
@@ -690,28 +645,6 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 func (s *Server) SetEngine(e *engine.Engine) {
 	e.SetOnGroupsChanged(s.hook.groupsChanged)
 	s.hook.setEngine(e)
-}
-
-// PublishTimeSync publishes one _TimeSync beacon, for RunBeacon and tests.
-func (s *Server) PublishTimeSync() { s.hook.publishTimeSync() }
-
-// RunBeacon publishes a beacon every interval until stop closes; with the beacon
-// on subscribe, attached machines also get periodic refreshes. interval <= 0
-// disables it.
-func (s *Server) RunBeacon(interval time.Duration, stop <-chan struct{}) {
-	if interval <= 0 {
-		return
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			s.PublishTimeSync()
-		}
-	}
 }
 
 // Kick disconnects every live session of the identity. The registry calls it on

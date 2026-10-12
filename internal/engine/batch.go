@@ -58,9 +58,6 @@ func (e *Engine) IngestClientBatch(identity string, records []BatchRecord) []Bat
 		}
 		class := e.ClassOf(p.Contract)
 		switch {
-		case uns.IsNodeLocal(class):
-			results[i].Err = e.batchReject(metrics.ReasonTimeSync, "%s is node-local", p.Contract)
-			continue
 		case uns.IsCommand(class):
 			results[i].Err = e.batchReject(metrics.ReasonValidation, "a command is published on its own, not in a batch")
 			continue

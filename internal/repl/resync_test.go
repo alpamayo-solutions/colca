@@ -350,7 +350,13 @@ func TestAChildTakesCommandsFromARestoredParentAtOnce(t *testing.T) {
 			t.Fatalf("command %s was handed to the child's bus %d times, want 1", id, n)
 		}
 	}
-	if status := r.cl.ResyncStatus(r.cs); status == nil || status.State != resyncComplete || status.Reason == "" {
+	// The re-sync completes when the uplink has sent the replayed range again,
+	// which is after the command above was handed down.
+	waitFor(t, "the re-sync to complete", 5*time.Second, func() bool {
+		status := r.cl.ResyncStatus(r.cs)
+		return status != nil && status.State == resyncComplete
+	})
+	if status := r.cl.ResyncStatus(r.cs); status.Reason == "" {
 		t.Fatalf("re-sync status = %+v, want a complete re-sync with a reason", status)
 	}
 }
