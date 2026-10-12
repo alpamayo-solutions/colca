@@ -120,7 +120,7 @@ func (h *colcaHook) auditDeniedAt(operation, reason, door string, entry *uns.Ent
 		EntityType: entityType, EntityID: entityID,
 	}
 	if entry != nil {
-		d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.Name, entry.ActorKind()
+		d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.ActorLabel(), entry.ActorKind()
 	}
 	_ = eng.RecordDenial(d)
 }
@@ -504,11 +504,7 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		if !ok || time.Now().After(s.exp) {
 			return pk, packets.ErrRejectPacket
 		}
-		actor := s.username
-		if actor == "" {
-			actor = s.sub
-		}
-		res, err := eng.IngestHumanAttributed(s.entry, actor, pk.TopicName, pk.Payload)
+		res, err := eng.IngestHuman(s.entry, pk.TopicName, pk.Payload)
 		if err != nil {
 			h.refusals.Warn("human publish rejected", "sub", s.sub, "topic", pk.TopicName,
 				"bytes", len(pk.Payload), "err", err)

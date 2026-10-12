@@ -34,7 +34,7 @@ type humanSession struct {
 	client           *mqtt.Client // the connection holding the session
 	entry            *uns.Entry
 	sub              string
-	username         string
+	holder           tokenauth.Holder // the token's name for its holder, kept for resolving the entry again
 	exp              time.Time
 	credential       string
 	credentialID     string
@@ -183,7 +183,7 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 		h.auditDenied("authenticate", tokenauth.ReasonLoggedOut, metrics.DoorMQTT, v.Entry, nil)
 		return false
 	}
-	h.log.Debug("human authenticated", "sub", v.Sub, "username", v.Username,
+	h.log.Debug("human authenticated", "sub", v.Sub, "name", v.Entry.DisplayName,
 		"exp", v.Exp, "listener", cl.Net.Listener)
 	return true
 }
@@ -192,7 +192,8 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 // generation read before the token was verified.
 func sessionFor(cl *mqtt.Client, v *tokenauth.Verified, gen uint64) humanSession {
 	s := humanSession{
-		client: cl, entry: v.Entry, sub: v.Sub, username: v.Username, exp: v.Exp,
+		client: cl, entry: v.Entry, sub: v.Sub, exp: v.Exp,
+		holder:     tokenauth.Holder{DisplayName: v.Entry.DisplayName, ServiceClient: v.Entry.ServiceClient},
 		credential: v.Credential, credentialID: v.CredentialID,
 		credentialDigest: v.CredentialDigest,
 		sid:              v.SessionID, issuedAt: v.IssuedAt,
@@ -221,7 +222,7 @@ func (h *colcaHook) currentSession(cl *mqtt.Client) (humanSession, bool) {
 	if s.groupsGen >= gen {
 		return s, true
 	}
-	entry, err := h.ver.ResolveEntry(s.sub, s.username, s.token.grants, s.token.groups)
+	entry, err := h.ver.ResolveEntry(s.sub, s.holder, s.token.grants, s.token.groups)
 	if err != nil {
 		// The same token resolved at CONNECT, so this is a bug; a session without
 		// an entry is refused every delivery.

@@ -63,7 +63,6 @@ type Verified struct {
 	Entry            *uns.Entry // KindHuman, grants from colca_grants and the groups claim
 	TokenGrants      []string   // the colca_grants claim alone; Entry.Groups holds the group ids
 	Sub              string
-	Username         string // preferred_username, "" if absent
 	Exp              time.Time
 	Scopes           []string // empty for OIDC JWTs, explicit for personal access tokens
 	Credential       string   // "oidc" or "pat"
@@ -362,8 +361,11 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		if record.ExpiresAt != "" {
 			expires, _ = time.Parse(time.RFC3339, record.ExpiresAt)
 		}
+		// A PAT carries no name claim; its owner's email is the only name the
+		// record holds.
+		entry.DisplayName = record.OwnerEmail
 		return &Verified{
-			Entry: entry, Sub: record.OwnerSub, Username: record.OwnerEmail,
+			Entry: entry, Sub: record.OwnerSub,
 			Exp: expires, Scopes: append([]string(nil), record.Scopes...),
 			Credential: "pat", CredentialID: record.ID, CredentialDigest: record.HashedSecret,
 		}, "", nil
@@ -392,8 +394,8 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		return nil, ReasonBadToken, fmt.Errorf("token rejected: unreadable exp")
 	}
 	grants := stringList(claims["colca_grants"])
-	username, _ := claims["preferred_username"].(string)
-	entry, err := v.ResolveEntry(sub, username, grants, stringList(claims["groups"]))
+	who := holderOf(claims)
+	entry, err := v.ResolveEntry(sub, who, grants, stringList(claims["groups"]))
 	if err != nil {
 		return nil, ReasonBadToken, fmt.Errorf("token rejected: %w", err)
 	}
@@ -406,7 +408,7 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 		return nil, ReasonLoggedOut, fmt.Errorf("token rejected: its session was logged out")
 	}
 	return &Verified{
-		Entry: entry, Sub: sub, Username: username, Exp: exp.Time, Credential: "oidc",
+		Entry: entry, Sub: sub, Exp: exp.Time, Credential: "oidc",
 		TokenGrants: grants,
 		SessionID:   sid, IssuedAt: issuedAt,
 	}, "", nil
@@ -419,7 +421,7 @@ func (v *Verifier) VerifyForScope(token, requiredScope string) (*Verified, strin
 // identity provider, grants in the tree. It is the one resolver for verified
 // tokens: VerifyForScope uses it, and so does a live session that resolves the
 // same token again after this node's _Group definitions changed.
-func (v *Verifier) ResolveEntry(sub, username string, grants, groupIDs []string) (*uns.Entry, error) {
+func (v *Verifier) ResolveEntry(sub string, who Holder, grants, groupIDs []string) (*uns.Entry, error) {
 	entry, problems, err := uns.TokenEntryWithGroups(sub, grants, groupIDs, v.groups())
 	if err != nil {
 		return nil, err
@@ -437,8 +439,29 @@ func (v *Verifier) ResolveEntry(sub, username string, grants, groupIDs []string)
 		}
 		v.log.Warn("token: a group contributed no grants", "sub", sub, "err", problem)
 	}
-	entry.Username = username
+	entry.DisplayName, entry.ServiceClient = who.DisplayName, who.ServiceClient
 	return entry, nil
+}
+
+// Holder is what a verified token says about its holder beside the subject.
+// Neither field takes part in any authorization of the token's own grants.
+type Holder struct {
+	// DisplayName is the `name` claim, else `preferred_username`, else "".
+	// Records keep it as actor_label: a hint, true when the act happened.
+	DisplayName string
+	// ServiceClient is the client id of a Keycloak service account, "" for a
+	// person.
+	ServiceClient string
+}
+
+func holderOf(claims jwt.MapClaims) Holder {
+	name, _ := claims["name"].(string)
+	username, _ := claims["preferred_username"].(string)
+	display := strings.TrimSpace(name)
+	if display == "" {
+		display = strings.TrimSpace(username)
+	}
+	return Holder{DisplayName: display, ServiceClient: uns.ServiceAccountClient(username)}
 }
 
 // signingKey is the jwt.Keyfunc for every token this verifier accepts. The issuer

@@ -249,7 +249,7 @@ func (s *Store) buildReplicated(b *pebble.Batch, r *replRequest, prev, off uint6
 		n, err := addRecord(own, r.stream, off, Record{
 			Topic: rec.Topic, Payload: rec.Payload, TS: rec.TS,
 			WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
-			ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups,
+			ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, ActorClient: rec.ActorClient,
 			OriginOffset: rec.OriginOffset,
 			KVPath:       rec.KVPath, KVNode: rec.KVNode, Delete: rec.Delete,
 		})

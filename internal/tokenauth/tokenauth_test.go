@@ -55,7 +55,7 @@ func TestVerifyTruthTable(t *testing.T) {
 		if err != nil || reason != "" {
 			t.Fatalf("valid token rejected: %s %v", reason, err)
 		}
-		if got.Sub != "anna" || got.Username != "anna@plant" || got.Entry.Kind != uns.KindHuman {
+		if got.Sub != "anna" || got.Entry.DisplayName != "anna@plant" || got.Entry.Kind != uns.KindHuman {
 			t.Fatalf("verified shape: %+v", got)
 		}
 		if !uns.Authorize(atWerk1{}, got.Entry, uns.ActReadRecord, "colca/v1/_Metric/x/werk1/temp") {
@@ -427,6 +427,39 @@ func TestAnUnknownTokenGroupIsLoggedOncePerGroup(t *testing.T) {
 	for _, group := range []string{"offline_access", "uma_authorization"} {
 		if got := strings.Count(out, "group="+group); got != 1 {
 			t.Fatalf("%s logged %d times, want once:\n%s", group, got, out)
+		}
+	}
+}
+
+// What a token calls its holder is a hint for readers: the full name when the
+// token has one, else the username, else nothing. The subject is never copied
+// into it. Only preferred_username says the holder is a Keycloak service
+// account; a person's own name cannot.
+func TestATokensNameIsAHintAndOnlyItsUsernameNamesAServiceAccount(t *testing.T) {
+	iss, v := world(t)
+	cases := []struct {
+		name, username, tokenName string
+		wantDisplay, wantClient   string
+	}{
+		{"full name wins", "anna", "Anna Muster", "Anna Muster", ""},
+		{"username when no name", "anna", "", "anna", ""},
+		{"blank name falls back", "anna", "   ", "anna", ""},
+		{"nothing names them", "", "", "", ""},
+		{"service account", "service-account-erp-bridge", "", "service-account-erp-bridge", "erp-bridge"},
+		{"a person named like a service account", "anna", "service-account-erp-bridge", "service-account-erp-bridge", ""},
+	}
+	for _, c := range cases {
+		tok := iss.MintOpt(tokentest.MintOpts{Sub: "kc-sub-1", Username: c.username, Name: c.tokenName})
+		got, reason, err := v.Verify(tok)
+		if err != nil {
+			t.Fatalf("%s: rejected: %s %v", c.name, reason, err)
+		}
+		if got.Sub != "kc-sub-1" || got.Entry.ULID != "kc-sub-1" {
+			t.Fatalf("%s: subject = %q / %q, want the token's sub", c.name, got.Sub, got.Entry.ULID)
+		}
+		if got.Entry.DisplayName != c.wantDisplay || got.Entry.ServiceClient != c.wantClient {
+			t.Fatalf("%s: display %q client %q, want %q %q", c.name,
+				got.Entry.DisplayName, got.Entry.ServiceClient, c.wantDisplay, c.wantClient)
 		}
 	}
 }
