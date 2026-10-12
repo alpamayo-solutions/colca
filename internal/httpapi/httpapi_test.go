@@ -3431,3 +3431,37 @@ func TestAServiceAccountsCommandNamesItsClient(t *testing.T) {
 		t.Fatalf("record = %+v, want the account's subject and its client erp-bridge", got)
 	}
 }
+
+// A local service acting for a person it cannot name sends no label, and the
+// record keeps none: a subject is never stored as a name. Another kind of
+// actor is still called by its id.
+func TestALocalServiceNamingNoPersonLeavesTheLabelEmpty(t *testing.T) {
+	h := newLocalHandler(t)
+	svc := map[string]string{"X-Colca-Service": "api"}
+	publish := func(suffix, actor, kind string) {
+		t.Helper()
+		rec := localPublish(t, h, svc, map[string]any{
+			"topic":    "colca/v1/_SystemElement/n-test/line-" + suffix,
+			"payload":  map[string]any{"id": "el-" + suffix, "name": "Line " + suffix},
+			"actor_id": actor, "actor_kind": kind})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: publish = %d: %s", suffix, rec.Code, rec.Body.String())
+		}
+	}
+	publish("a", "kc-sub-anna", "human")
+	publish("b", "erp-bridge", "service")
+	recs, _, err := h.eng.Store().Read("entities", 1, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := map[string]string{}
+	for _, rec := range recs {
+		labels[rec.ActorID] = rec.ActorLabel
+	}
+	if label, stored := labels["kc-sub-anna"]; !stored || label != "" {
+		t.Fatalf("person's label = %q (stored %v), want none", label, stored)
+	}
+	if label := labels["erp-bridge"]; label != "erp-bridge" {
+		t.Fatalf("service's label = %q, want its id", label)
+	}
+}

@@ -486,11 +486,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			if actorID == "" {
 				actorID = writtenBy
 			}
-			if actorLabel == "" {
-				actorLabel = actorID
-			}
 			if actorKind == "" {
 				actorKind = "system"
+			}
+			if actorLabel == "" && actorKind != "human" {
+				actorLabel = actorID // a person's subject is never stored as their name
 			}
 			res, err = e.IngestAdminAttributed(in.Topic, in.Payload, engine.Attribution{
 				WrittenBy: writtenBy, ActorID: actorID,

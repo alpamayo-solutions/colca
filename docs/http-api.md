@@ -124,7 +124,8 @@ grants, never by a name.
 `actor_label` is optional. The door that verifies a person's token records
 what the token called them at that moment: the `name` claim, else
 `preferred_username`, and nothing when the token has neither (a personal
-access token records its owner's email). It is a hint for a reader that
+access token records its owner's email). A local service that acts for a
+person passes the label it knows, or none. It is a hint for a reader that
 cannot resolve the subject, and it is history: a record written before a
 rename keeps the old name. A reader that shows who acted should resolve the
 current name from `actor_id` in one place and fall back to the label only

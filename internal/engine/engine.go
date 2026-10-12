@@ -538,7 +538,9 @@ func (e *Engine) IngestLocalAttributed(identity, topic string, payload []byte, a
 		return e.reject(metrics.ReasonIdentity, "local actor attribution requires actor_id and a valid actor_kind")
 	}
 	actor.WrittenBy = entry.ULID
-	if actor.ActorLabel == "" {
+	// A person's label is a name or nothing: their subject is never repeated
+	// as one. Any other actor is called by its id when the service names none.
+	if actor.ActorLabel == "" && actor.ActorKind != "human" {
 		actor.ActorLabel = actor.ActorID
 	}
 	return e.ingestClientAttributed(identity, topic, payload, &actor)
