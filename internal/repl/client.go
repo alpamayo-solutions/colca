@@ -213,7 +213,7 @@ func marshalReplication(storeID, stream string, recs []store.ReplRecord) ([]byte
 		wire[i] = wireRec{
 			SkipFrom: r.SkipFrom,
 			O:        r.ChildOffset, OO: r.OriginOffset, T: r.Topic, P: r.Payload, TS: r.TS,
-			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups,
+			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups, AC: r.ActorClient,
 		}
 	}
 	msg := map[string]any{"stream": stream, "records": wire}
@@ -262,6 +262,7 @@ type DownRec struct {
 	ActorLabel   string
 	ActorKind    string
 	ActorGroups  []string
+	ActorClient  string
 }
 
 // downResult is one decoded downlink response. Definitions share the response
@@ -388,7 +389,7 @@ func toDownRecs(in []wireRec) []DownRec {
 		out[i] = DownRec{
 			ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS,
 			WrittenBy: r.WB, ActorID: r.AID,
-			ActorLabel: r.AL, ActorKind: r.AK, ActorGroups: r.AG,
+			ActorLabel: r.AL, ActorKind: r.AK, ActorGroups: r.AG, ActorClient: r.AC,
 		}
 	}
 	return out
@@ -640,7 +641,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				ChildOffset: r.Offset, OriginOffset: r.OriginOffset,
 				Topic: r.Topic, Payload: r.Payload, TS: r.TS,
 				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
+				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
 			})
 		}
 		if len(batch) > 0 {
@@ -902,7 +903,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			// stored instead of being stored and executed a second time.
 			if _, err := eng.IngestDownlinkAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
+				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
 			}, &store.CursorAdvance{Name: uns.DownlinkCursor(c.parentPub), Stream: downlinkStream, To: r.ParentOffset + 1}); err != nil {
 				var refused *engine.RejectError
 				if errors.As(err, &refused) {
@@ -945,7 +946,7 @@ func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res dow
 	for _, r := range res.Definitions {
 		if _, err := eng.IngestDownlinkDefinitionAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
 		}); err != nil {
 			m.DefinitionRejected()
 			var refused *engine.RejectError

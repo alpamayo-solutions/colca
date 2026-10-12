@@ -836,8 +836,10 @@ class AlarmState(ToleratesUnknownFields, Payload):
     silenced_until: float | None = None
     #: Readable names beside ``acknowledged_by`` and ``silenced_by``, so every
     #: reader can show who acted without resolving a ``sub``. A snapshot of the
-    #: command record's ``actor_label``, which the node sets from the token's
-    #: ``preferred_username``. For display only; the ``sub`` stays the identity.
+    #: command record's ``actor_label``: what the person's token called them
+    #: when they acted (its ``name``, else ``preferred_username``), absent when
+    #: it named nobody. For display only; the ``sub`` stays the identity, and a
+    #: reader that can resolve the ``sub`` shows the current name instead.
     acknowledged_by_name: str | None = None
     silenced_by_name: str | None = None
     #: The finding's retention as the manager resolved it, so every reader

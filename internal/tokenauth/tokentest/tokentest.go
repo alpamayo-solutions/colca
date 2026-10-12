@@ -32,6 +32,7 @@ type MintOpts struct {
 	Kid      string   // override key id
 	WrongKey bool     // sign with a key the JWKS does not serve
 	Username string   // preferred_username
+	Name     string   // name: the person's full name
 	Groups   []string // groups claim: the group ids a node resolves against its _Group definitions
 	Sid      string   // the identity provider's session id
 }
@@ -140,6 +141,9 @@ func (i *Issuer) MintOpt(o MintOpts) string {
 	}
 	if o.Username != "" {
 		claims["preferred_username"] = o.Username
+	}
+	if o.Name != "" {
+		claims["name"] = o.Name
 	}
 	if o.Groups != nil {
 		claims["groups"] = o.Groups

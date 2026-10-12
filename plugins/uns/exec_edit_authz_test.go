@@ -352,7 +352,7 @@ func TestAnnotationSourceMatchesTheGoldenVectors(t *testing.T) {
 		if c.Kind == "service" {
 			continue // mTLS services never act at the executor; that case is the api's
 		}
-		got := AnnotationSource(&Entry{ULID: c.Sub, Kind: KindHuman, Username: c.Username})
+		got := AnnotationSource(&Entry{ULID: c.Sub, Kind: KindHuman, ServiceClient: ServiceAccountClient(c.Username)})
 		if got != c.Source {
 			t.Fatalf("%s: AnnotationSource = %q, want %q", c.Kind, got, c.Source)
 		}
