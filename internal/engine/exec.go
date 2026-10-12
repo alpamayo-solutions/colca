@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
@@ -80,17 +81,15 @@ func (e *Engine) ReplayRetained() {
 	if e.observer == nil {
 		return
 	}
-	entries, err := e.store.KVScan("")
-	if err != nil {
-		e.log.Warn("retained replay skipped: KV scan failed", "err", err)
-		return
-	}
-	for _, kv := range entries {
+	err := e.store.KVVisit("", func(kv store.KVEntry) {
 		parsed, err := uns.Parse(kv.Topic)
 		if err != nil {
-			continue
+			return
 		}
 		e.observer.Observe(parsed.Contract, kv.Topic, kv.Payload)
+	})
+	if err != nil {
+		e.log.Warn("retained replay incomplete: KV scan failed", "err", err)
 	}
 }
 

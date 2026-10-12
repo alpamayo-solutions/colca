@@ -29,6 +29,7 @@ func (s scopeOf) PathOf(elementID string) (string, bool) {
 	return "", false
 }
 func (scopeOf) Reaches(string) bool { return false }
+func (scopeOf) Binds(string) bool   { return false }
 
 // scopedTo is a person whose configure grant names one element.
 func scopedTo(element string) CommandContext {
@@ -351,7 +352,7 @@ func TestAnnotationSourceMatchesTheGoldenVectors(t *testing.T) {
 		if c.Kind == "service" {
 			continue // mTLS services never act at the executor; that case is the api's
 		}
-		got := AnnotationSource(&Entry{ULID: c.Sub, Kind: KindHuman, Username: c.Username})
+		got := AnnotationSource(&Entry{ULID: c.Sub, Kind: KindHuman, ServiceClient: ServiceAccountClient(c.Username)})
 		if got != c.Source {
 			t.Fatalf("%s: AnnotationSource = %q, want %q", c.Kind, got, c.Source)
 		}

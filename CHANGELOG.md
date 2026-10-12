@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.35.0](https://github.com/alpamayo-solutions/colca/compare/v0.34.0...v0.35.0) (2026-10-12)
+
+
+### Features
+
+* **repl:** children re-sync with a parent restored from a backup ([#203](https://github.com/alpamayo-solutions/colca/issues/203)) ([23f2264](https://github.com/alpamayo-solutions/colca/commit/23f226416df447b7706fe6eaa512d15bcf07d5c5))
+
+
+### Fixes
+
+* **audit:** record a person by subject with their name as a hint, and never authorize by the name ([#200](https://github.com/alpamayo-solutions/colca/issues/200)) ([c1f8d70](https://github.com/alpamayo-solutions/colca/commit/c1f8d7012eac4b455c1c26ca4f21ca60db70c188))
+* **uns:** refuse configure writes below a child node's mount ([#202](https://github.com/alpamayo-solutions/colca/issues/202)) ([e0b656c](https://github.com/alpamayo-solutions/colca/commit/e0b656cdb2d77767f9d0adcacceebaf3c472828e))
+
+## [0.34.0](https://github.com/alpamayo-solutions/colca/compare/v0.33.4...v0.34.0) (2026-10-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* _ClockDefinition and _ClockProgress are no longer contracts, and the historian ignores FACTORY_* and APPLICATION_TIME_SOURCE.
+
+### Changes
+
+* remove application time ([#198](https://github.com/alpamayo-solutions/colca/issues/198)) ([1958282](https://github.com/alpamayo-solutions/colca/commit/1958282e61ac46a05bc6d314ab2ccfcc57256ec4))
+
+## [0.33.4](https://github.com/alpamayo-solutions/colca/compare/v0.33.3...v0.33.4) (2026-10-12)
+
+
+### Fixes
+
+* **httpapi:** reject /fetch max outside 1..5000 with 400 ([#196](https://github.com/alpamayo-solutions/colca/issues/196)) ([acfdd61](https://github.com/alpamayo-solutions/colca/commit/acfdd6150a8ec0bcc4fa827644b38a3f1a9187a9))
+
+## [0.33.3](https://github.com/alpamayo-solutions/colca/compare/v0.33.2...v0.33.3) (2026-10-11)
+
+
+### Fixes
+
+* **uns:** never write below a child node's mount; move onto the bound element ([#193](https://github.com/alpamayo-solutions/colca/issues/193)) ([c32895f](https://github.com/alpamayo-solutions/colca/commit/c32895fc551b4e662bf3834e6ba7231114ca5e26))
+
+## [0.33.2](https://github.com/alpamayo-solutions/colca/compare/v0.33.1...v0.33.2) (2026-10-11)
+
+
+### Fixes
+
+* **uns:** write a moved entity's new record before retiring its old position ([#191](https://github.com/alpamayo-solutions/colca/issues/191)) ([595aece](https://github.com/alpamayo-solutions/colca/commit/595aece507019347046208b652fa546c52506294))
+
+## [0.33.1](https://github.com/alpamayo-solutions/colca/compare/v0.33.0...v0.33.1) (2026-10-11)
+
+
+### Fixes
+
+* **mqttsrv:** apply group changes to live human sessions ([#188](https://github.com/alpamayo-solutions/colca/issues/188)) ([3253376](https://github.com/alpamayo-solutions/colca/commit/3253376e7d76e1c025068391a03230973ab87e5c))
+* refuse out-of-limit fields at the node and create under a node's bound element ([#189](https://github.com/alpamayo-solutions/colca/issues/189)) ([c6f9f3e](https://github.com/alpamayo-solutions/colca/commit/c6f9f3e567016df048f4ef2e85cb259cfd3b31e1))
+
+## [0.33.0](https://github.com/alpamayo-solutions/colca/compare/v0.32.1...v0.33.0) (2026-10-10)
+
+
+### Features
+
+* **historian:** mark late writes for per-signal statistics ([#183](https://github.com/alpamayo-solutions/colca/issues/183)) ([36e025a](https://github.com/alpamayo-solutions/colca/commit/36e025a8b5e56e939cdf9bc0448fa0d2ff7e3a34))
+
+
+### Fixes
+
+* **store:** bound signal-index reads and prunes in memory ([#185](https://github.com/alpamayo-solutions/colca/issues/185)) ([51b1739](https://github.com/alpamayo-solutions/colca/commit/51b1739255826e709b9598db3221b72ea623d82f))
+
 ## [0.32.1](https://github.com/alpamayo-solutions/colca/compare/v0.32.0...v0.32.1) (2026-10-09)
 
 

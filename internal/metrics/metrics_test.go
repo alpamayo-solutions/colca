@@ -401,6 +401,13 @@ func TestAllFamiliesPresentZeroValuedBeforeAnyEvent(t *testing.T) {
 		"colca_downlink_cursor_beyond_head_total":       1,
 		"colca_downlink_head_absent_total":              1,
 		"colca_retained_reseed_records":                 1,
+		// The store-incarnation check.
+		"colca_store_incarnation_changes_total":          len(incarnationReasons),
+		"colca_repl_child_ahead_of_store_total":          1,
+		"colca_uplink_resyncs_total":                     1,
+		"colca_uplink_resync_active":                     1,
+		"colca_uplink_resync_unreplayable_records_total": len(uplinkStreams),
+		"colca_downlink_commands_already_held_total":     1,
 		// Collector gauges: one child per stream regardless of activity.
 		"colca_stream_low_water_mark": len(streams),
 		"colca_stream_live_bytes":     len(streams),

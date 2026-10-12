@@ -58,10 +58,18 @@ type Entry struct {
 	// after replication can rebuild the same person from its own _Group
 	// definitions. Never set on a registry entry.
 	Groups []string `json:"groups,omitempty"`
-	// Username is a KindHuman entry's preferred_username, set by the door that
-	// verified the token. AnnotationSource uses it to tell a Keycloak service
-	// account (service-account-<client>) from a person. Never persisted.
-	Username string `json:"-"`
+	// DisplayName is what a KindHuman entry's token calls its holder, set by
+	// the door that verified it: the `name` claim, else `preferred_username`.
+	// It is recorded as actor_label, a hint for readers that was true when the
+	// act happened. The subject (ULID) is the identity; nothing is authorized
+	// or keyed by this name. Never persisted.
+	DisplayName string `json:"-"`
+	// ServiceClient is the client id of a Keycloak service account, set by the
+	// door that verified its token; "" for a person. It travels with the
+	// account's commands as attribution (actor_client), so the node that
+	// executes one knows the account from a person without reading a name.
+	// Never persisted.
+	ServiceClient string `json:"-"`
 	// SignedInHere marks a KindHuman entry whose token was verified, or whose
 	// groups were attested, at this node. Only such a person's node-relative
 	// grants ($node) resolve here: a person rebuilt from a command that came
@@ -337,6 +345,11 @@ type Scope interface {
 	// Reaches reports whether the element is this node or above it. A grant on
 	// such an element covers everything here.
 	Reaches(elementID string) bool
+	// Binds reports whether the element is the one this node is bound to: the
+	// position its parent enrolled it at. Its record lives at the parent, so
+	// the node holds no entity for it, yet it is the parent of everything the
+	// node authors at its root.
+	Binds(elementID string) bool
 }
 
 // NodeZone is the node-relative zone: the node a person signed in at. A grant
@@ -562,6 +575,18 @@ func (e *Entry) IsLocal() bool { return e != nil && e.Kind == KindLocal }
 // MayPublishAudit reports whether the entry may publish _AuditEvent. Only
 // local services may; no grant gives it to anyone else.
 func (e *Entry) MayPublishAudit() bool { return e != nil && e.Kind == KindLocal }
+
+// ActorLabel is the display hint an entry's records carry beside its id: what
+// a person's token called them (possibly nothing), a machine's enrolled name.
+func (e *Entry) ActorLabel() string {
+	if e == nil {
+		return ""
+	}
+	if e.Kind == KindHuman {
+		return e.DisplayName
+	}
+	return e.Name
+}
 
 // ActorKind maps registry and token kinds to the audit envelope's actor
 // vocabulary. Machines are service actors; WrittenBy keeps the keyed/local
@@ -848,7 +873,7 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		if err != nil {
 			return false // only uns records exist in the store: fail closed
 		}
-		if localClockRead(e, topic) {
+		if localServiceRead(e, topic) {
 			return true
 		}
 		for _, z := range readZones(sc, e) {
@@ -867,7 +892,7 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 			// whatever its zone: the beacon is per node, not per path.
 			return true
 		}
-		if localClockRead(e, topic) {
+		if localServiceRead(e, topic) {
 			return true
 		}
 		fixed, isUns := fixedPathPrefix(topic)
@@ -928,24 +953,17 @@ func AuthorizeBrowse(sc Scope, e *Entry, path string) bool {
 	return false
 }
 
-// localClockRead admits only the clock coordination contracts to services
-// inside the deployment. Placement scopes process data, but a connector must
-// still read the shared clock and completion reports from workers at other
-// mounts. This gives no publication rights and does not widen human or keyed
-// external identities. A wildcard contract never qualifies.
-func localClockRead(e *Entry, topic string) bool {
+// localServiceRead admits services inside the deployment to every service's
+// _ServiceDetails. Placement scopes process data, but a service must still find
+// the other services of its node, wherever they are mounted. This gives no
+// publication rights and does not widen human or keyed external identities. A
+// wildcard contract never qualifies.
+func localServiceRead(e *Entry, topic string) bool {
 	if !e.IsLocal() {
 		return false
 	}
 	parts := strings.Split(topic, "/")
-	if len(parts) < 4 || parts[0] != Root() || parts[1] != Version {
-		return false
-	}
-	switch parts[2] {
-	case "_ClockDefinition", "_ClockProgress", "_ServiceDetails":
-		return true
-	}
-	return false
+	return len(parts) >= 4 && parts[0] == Root() && parts[1] == Version && parts[2] == "_ServiceDetails"
 }
 
 // isReservedFilter reports whether a subscribe filter reaches into MQTT's

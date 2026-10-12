@@ -34,7 +34,6 @@ COMMAND_CONTRACTS: tuple[str, ...] = (
 # (Cmd subclasses -> "cmd", Ack subclasses -> "ack" — derived, not listed).
 CLASS_TABLE: dict[str, str] = {
     "_Metric": "data",
-    "_ClockProgress": "data",
     # A log line is an event: a later line does not replace an earlier one.
     "_Log": "log",
     "_SystemElement": "entity",
@@ -70,7 +69,6 @@ CLASS_TABLE: dict[str, str] = {
     "_EnrollmentRequest": "entity",
     "_EnrollmentPreapproval": "entity",
     "_Group": "definition",
-    "_ClockDefinition": "definition",
     "_MetadataType": "definition",
     "_AnnotationType": "definition",
     "_DataModel": "definition",

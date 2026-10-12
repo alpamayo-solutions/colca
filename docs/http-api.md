@@ -16,7 +16,7 @@ A caller is one of:
 
 | Method and path | Who | Request | Response |
 |---|---|---|---|
-| `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","pubkey":"…","fingerprint":"SHA256:…","key_store":"file"\|"tpm","storage":{"state":"ok"}}` |
+| `GET /healthz` | anyone | | `{"ok":true,"ulid":"…","pubkey":"…","fingerprint":"SHA256:…","key_store":"file"\|"tpm","storage":{"state":"ok"},"store":{"id":"…"},"uplink":{"state":"connected","since":"…"}}`; `store.changed` and `uplink.resync` appear after a [restore](operations.md#restoring-a-parent-from-a-backup) |
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}`, or `202` `{"stream":"logs","topic":"…","withheld":"…"}` without `offset` |
 | `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"stream":"logs","withheld":"…"} or {"error":"…","reason":"…"},…]}` |
@@ -56,7 +56,9 @@ A caller is one of:
   refused with `422` for every caller: it would skip records not yet written.
 - `/fetch` names the store the page was read from (`store`, new whenever the
   node's store is created from nothing, for instance after its data volume
-  was recreated). A consumer that passes it back as `"store"` on `/ack` gets
+  was recreated, and whenever its history may have regressed, as after a
+  restore from a backup; see
+  [Store incarnations](concepts.md#store-incarnations)). A consumer that passes it back as `"store"` on `/ack` gets
   `409` with `"store_changed":true` when the node's store is another one by
   then: the acked offsets name other records there, and the consumer should
   read the new store from its cursor instead. `store` is optional on `/ack`;
@@ -74,7 +76,14 @@ A caller is one of:
   records move `next` like `contract` does; ack `next - 1` after an empty or
   short page so they do not stay unread on your cursor.
 - `max` defaults to 100 for `/fetch` (at most 5000) and to 1000 for `/kv`
-  (at most 10000). Pass `next` back as `after` until it is empty.
+  (at most 10000). A `max` that is not a whole number in that range is a
+  `400` naming the range (`max must be between 1 and 5000`); before colca
+  0.33.4 `/fetch` quietly served 100 records instead. Pass `next` back as
+  `after` until it is empty.
+- A page also ends before the record or entry that would take it past 8 MiB
+  of stored data, and `next` resumes at that record or entry. A page always
+  holds at least one. A short page is therefore no sign of the end: for
+  `/fetch` that is `next` reaching the head, for `/kv` an empty `next`.
 - `contract` on `/kv` and `/fetch` may be repeated. An unknown name is a `400`.
   On `/kv` the node keeps an index by contract, so a filtered read costs what
   it returns, not what lies under the prefix. On `/fetch` the other records
@@ -105,6 +114,45 @@ A caller is one of:
   `_CmdEdit` on their own constant (see [security.md](security.md#grants))
   is the case this exists for: `/kv` can show "set by \<operator\> at \<time\>"
   from Colca's own verified identity, not a client-written field.
+
+### Who a record names
+
+`actor_id` is the identity. For a person or a Keycloak service account it is
+the token's `sub`, which stays the same when the account is renamed; for a
+machine or a local service it is its registry id. Authorization, command
+deduplication and annotation authorship all go by it and by the token's
+grants, never by a name.
+
+`actor_label` is optional. The door that verifies a person's token records
+what the token called them at that moment: the `name` claim, else
+`preferred_username`, and nothing when the token has neither (a personal
+access token records its owner's email). A local service that acts for a
+person passes the label it knows, or none. It is a hint for a reader that
+cannot resolve the subject, and it is history: a record written before a
+rename keeps the old name. A reader that shows who acted should resolve the
+current name from `actor_id` in one place and fall back to the label only
+when the subject can no longer be resolved.
+
+`actor_kind` is `human` for every token door identity, `service` for a
+machine or a local service, `node`, `system` for the admin token and the
+node's own writes, or `anonymous`.
+
+Whether a token belongs to a Keycloak service account is decided once, at the
+door that verified it, from the token's `preferred_username`
+(`service-account-<client-id>`). The node keeps the client id with the
+command and replicates it with the command's groups, so the node that
+executes it knows a service account's annotations (`service/<client-id>`)
+from a person's (`user/<sub>`) without reading the label. `/fetch` and `/kv`
+do not return it.
+
+Nodes of different versions in one tree keep working. A node from before this
+rule recorded `preferred_username` as the label and the subject when the token
+had none; such records read as before. It ignores the client id it is sent
+and recognises a service account by its label, as it always did. A command
+that reaches a newer node through an older parent arrives without a client
+id, so there it counts as a person's: a service account then needs
+`configure` to change an annotation it authored, until the parent is
+upgraded.
 
 When a cursor stands below what retention has already removed, the response
 carries a `gap` object that names the missing offsets and times, and `records`
@@ -211,6 +259,7 @@ its stream from the pruner. Nothing removes them on its own.
 | `GET /enroll` | `?max=1000&after=TOKEN` | the locally enrolled entries, public keys only |
 | `DELETE /enroll/{ulid}` | `?retire=true` | `{"revoked":true,"offset":N}`; the same batch retires the records the identity authored about itself — its `_ServiceDetails`, at every mount it published one at. Only that identity may write them, so one left behind could never be retired by anyone. A plain revoke keeps what a child node replicated up: the child may be enrolled again and resumes from its own cursor. With `retire=true` (kind `node` only, `409` otherwise; `400` on a value that is not a boolean) the same batch also tombstones every current-state record the child and the nodes below it replicated, clears its replication marks, and deletes its definitions cursor (`downlink-def:<ulid>`) and every cursor in its own namespace (`<ulid>/...`), so nothing it left stands as live or holds retention and the same identity enrolled later starts clean (a plain revoke keeps the definitions cursor as the child's catch-up position); the response adds `"retired":true,"records_retired":N`. The tombstones replicate up, so ancestors retire their copies too |
 | `POST /enroll/{ulid}/drain` | | `{"ulid","offset","status":"draining"}`; decommissions a child node: new commands under its mount are refused, and once its queue is delivered or expired it is retired as with `DELETE ?retire=true`. `409` for an entry that is not a node or is already draining |
+| `POST /store/incarnation` | | `{"store":"NEW","previous":"OLD"}`; gives the node's store a new incarnation id, so every child re-syncs with it, its parent clears the marks kept for it and local consumers get `store_changed` on `/ack`. For a store restored or replaced without a neighbour noticing; see [Restoring a parent from a backup](operations.md#restoring-a-parent-from-a-backup) |
 | `GET /debug/state` | | the next offset of every stream |
 
 ### Enrollment requests

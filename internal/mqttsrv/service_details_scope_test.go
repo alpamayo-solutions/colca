@@ -9,7 +9,9 @@ import (
 	pahov5 "github.com/eclipse/paho.golang/paho"
 )
 
-func TestMountedLocalConnectorReceivesSharedClockRecords(t *testing.T) {
+// A connector mounted below the node receives other services' retained
+// _ServiceDetails, which service discovery reads.
+func TestMountedLocalConnectorReceivesServiceDetails(t *testing.T) {
 	s := startServerWithLocalDoor(t)
 	conn, err := net.Dial("tcp", s.LocalAddr())
 	if err != nil {
@@ -26,14 +28,14 @@ func TestMountedLocalConnectorReceivesSharedClockRecords(t *testing.T) {
 	defer cancel()
 	props := &pahov5.ConnectProperties{}
 	props.User.Add("mount", "line1/press3")
-	ack, err := client.Connect(ctx, &pahov5.Connect{ClientID: "clock-connector", Username: "clock-connector",
+	ack, err := client.Connect(ctx, &pahov5.Connect{ClientID: "mounted-connector", Username: "mounted-connector",
 		UsernameFlag: true, CleanStart: true, KeepAlive: 30, Properties: props})
 	if err != nil || ack.ReasonCode != 0 {
 		t.Fatalf("connect: %v, %v", ack, err)
 	}
 	t.Cleanup(func() { _ = client.Disconnect(&pahov5.Disconnect{}) })
-	for _, contract := range []string{"_ClockDefinition", "_ClockProgress", "_ServiceDetails"} {
-		topic := "colca/v1/" + contract + "/n1/shared-clock/worker"
+	for _, contract := range []string{"_ServiceDetails"} {
+		topic := "colca/v1/" + contract + "/n1/line2/worker"
 		s.srv.DeliverLocal(topic, []byte(`{"fixture":true}`), true)
 		suback, err := client.Subscribe(ctx, &pahov5.Subscribe{Subscriptions: []pahov5.SubscribeOptions{{Topic: "colca/v1/" + contract + "/n1/#", QoS: 1}}})
 		if err != nil || len(suback.Reasons) != 1 || suback.Reasons[0] > 2 {

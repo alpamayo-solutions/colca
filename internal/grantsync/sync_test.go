@@ -409,6 +409,7 @@ type stubScope struct{}
 
 func (stubScope) PathOf(string) (string, bool) { return "", false }
 func (stubScope) Reaches(string) bool          { return false }
+func (stubScope) Binds(string) bool            { return false }
 
 func TestTheRealmAdminBundleReachesTheTreeAndOpensEveryDoor(t *testing.T) {
 	// The role holder joins the group, the group's grants become the _Group

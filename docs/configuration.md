@@ -384,7 +384,7 @@ timestamp (see [Topics](topics.md#log-records)).
 
 | Key | Default | |
 |---|---|---|
-| `bus.retain_child_metrics` | `false` | Keep the `_Metric` records children replicate up as retained messages on this node's MQTT bus. Off, they are published live only; `/kv` holds their current values, and a consumer hydrates from it before it subscribes. A node's own metrics, `_ClockProgress` and every entity stay retained either way. A parent with 100 children and 140,000 signals at 28 k records/s spent ~30 % of its CPU and ~450 MB retaining them (fleet scale benchmark, 2026-10). |
+| `bus.retain_child_metrics` | `false` | Keep the `_Metric` records children replicate up as retained messages on this node's MQTT bus. Off, they are published live only; `/kv` holds their current values, and a consumer hydrates from it before it subscribes. A node's own metrics and every entity stay retained either way. A parent with 100 children and 140,000 signals at 28 k records/s spent ~30 % of its CPU and ~450 MB retaining them (fleet scale benchmark, 2026-10). |
 
 ## Time
 

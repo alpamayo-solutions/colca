@@ -84,9 +84,10 @@ type Page struct {
 
 // FetchOptions are the server-side view applied to one side-effect-free read.
 type FetchOptions struct {
-	Tail      bool // Capture the current head without changing cursor filters.
-	Stream    string
-	Cursor    string
+	Tail   bool // Capture the current head without changing cursor filters.
+	Stream string
+	Cursor string
+	// Max is the page size, 1 to 5000; 0 leaves it to the node (100).
 	Max       int
 	Prefix    string
 	SignalIDs []string
@@ -167,7 +168,9 @@ func (c *Client) FetchWithOptions(ctx context.Context, options FetchOptions) (Pa
 	q := url.Values{
 		"stream": {options.Stream},
 		"cursor": {options.Cursor},
-		"max":    {strconv.Itoa(options.Max)},
+	}
+	if options.Max != 0 {
+		q.Set("max", strconv.Itoa(options.Max))
 	}
 	if options.Tail {
 		q.Set("tail", "1")

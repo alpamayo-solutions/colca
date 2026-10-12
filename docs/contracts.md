@@ -35,6 +35,15 @@ different bundle does not start.
   `_EnrollmentRequest`, `_EnrollmentPreapproval` and `_TimeSync` are produced
   and checked by the node itself; a bundle that declares one does not load, and
   no door accepts them from a client.
+- **Field limits are part of the contract.** A payload field declares its
+  limit in `payload.py` with `MaxLength`, `Bounds` or `Pattern`, and the bundle
+  carries it as `maxLength`, `minimum`/`maximum` or `pattern`. The declaration
+  is the one definition of the limit: a consumer that validates early reads it
+  with `field_limits(cls)`, and a read model that stores the field sizes its
+  column to it. A record a command executor composes is validated like any
+  other, so a `_CmdEdit` or `_CmdConfigure` whose result breaks a limit is
+  refused with `422 invalid_field: <field>: <keyword> <limit>`
+  (`invalid_field: unit: maxLength 50`) and nothing is written.
 - **Validation happens once**, at the door where a record enters. Replication
   does not validate again, so nodes on different bundle versions keep
   replicating while a rollout moves through the tree.
@@ -83,9 +92,6 @@ plus `PRODUCT_SCHEMA` and `RECIPE_SCHEMA`), and `CatalogProduct` and
 
 ## Golden vectors
 
-For the optional virtual clock definition and its continuity rules, see
-[application time](application-time.md).
-
 Where Go and Python both need a rule natively, a vector file in
 `contracts/src/colca_data_contracts/vectors/` holds the cases and the expected
 answers, and the tests on both sides read the same file:
@@ -98,8 +104,8 @@ answers, and the tests on both sides read the same file:
 | `annotation_id.json` | how an annotation's id is derived |
 | `data_model_vocabulary.json`, `signal_data_types.json` | the data type vocabularies |
 | `metric_rows.json` | which historian column a metric value lands in |
-| `application_time.json` | real-to-application clock projection in Go and Chaski |
 | `sanitize.json` | how names become path segments |
+| `field_refusal.json` | the refusal a node answers for a field outside its limit |
 | `service_context.json`, `log_payload.json`, `manifest_streams.json` | service identity, log records, stream manifest |
 | `catalog_records.json` | product and recipe records, Python and TypeScript |
 

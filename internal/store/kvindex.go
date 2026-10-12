@@ -295,7 +295,7 @@ func kvPageToken(after string, lb, ub []byte) ([]byte, error) {
 // index instead of every entry under the prefix, so the work is proportional to
 // the entries returned. Entries come in KV key order and tokens are KV keys, as
 // from the unindexed walk.
-func (s *Store) kvScanPageIndexed(prefix, after string, limit int, contracts []string) ([]KVEntry, string, error) {
+func (s *Store) kvScanPageIndexed(prefix, after string, limit int, maxBytes uint64, contracts []string) ([]KVEntry, string, error) {
 	lb := kvPrefix(prefix)
 	ub := append(append([]byte{}, lb...), 0xFF)
 	var resume []byte // the token's KV key without "k\x00"
@@ -347,6 +347,7 @@ func (s *Store) kvScanPageIndexed(prefix, after string, limit int, contracts []s
 
 	// A filtered page is usually small; append grows it past this.
 	out := make([]KVEntry, 0, 64)
+	page := pageBytes{max: maxBytes}
 	var lastKey []byte
 	for len(out) < limit {
 		var next *cursor
@@ -362,12 +363,15 @@ func (s *Store) kvScanPageIndexed(prefix, after string, limit int, contracts []s
 			break
 		}
 		kvk := append([]byte("k\x00"), next.iter.Key()[next.skip:]...)
-		next.iter.Next()
-		lastKey = kvk
-		entry, ok, err := getKVEntry(snap, kvk)
+		entry, size, ok, err := getKVEntry(snap, kvk)
 		if err != nil {
 			return nil, "", fmt.Errorf("store: kv page %q: %w", prefix, err)
 		}
+		if ok && !page.take(size, len(out)) {
+			break // the cursor stays on this entry, so the token resumes at it
+		}
+		next.iter.Next()
+		lastKey = kvk
 		if ok {
 			out = append(out, entry)
 		}
@@ -385,22 +389,23 @@ func (s *Store) kvScanPageIndexed(prefix, after string, limit int, contracts []s
 	return out, "", nil
 }
 
-// getKVEntry reads one KV entry; ok is false when it is absent or undecodable.
-func getKVEntry(r pebble.Reader, kvk []byte) (KVEntry, bool, error) {
+// getKVEntry reads one KV entry and its stored size; ok is false when it is
+// absent or undecodable.
+func getKVEntry(r pebble.Reader, kvk []byte) (KVEntry, int, bool, error) {
 	value, closer, err := r.Get(kvk)
 	if errors.Is(err, pebble.ErrNotFound) {
-		return KVEntry{}, false, nil
+		return KVEntry{}, 0, false, nil
 	}
 	if err != nil {
-		return KVEntry{}, false, err
+		return KVEntry{}, 0, false, err
 	}
 	defer closer.Close()
 	path, node, _, ok := splitKVKey(string(kvk[2:]))
 	if !ok {
-		return KVEntry{}, false, nil
+		return KVEntry{}, 0, false, nil
 	}
 	entry, ok := decodeKVEntry(path, node, value)
-	return entry, ok, nil
+	return entry, len(value), ok, nil
 }
 
 // kvRelativeDepth is how many path segments path has below prefix: 0 for the

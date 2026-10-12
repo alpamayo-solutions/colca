@@ -23,19 +23,26 @@ func (w *EditExec) composePlacement(
 	if code != 0 {
 		return code, "placement: " + message, resultFor(code), nil
 	}
-	target, code, message := requireEntity(expected, entities, "system-element", intent.TargetParentID)
-	if code != 0 {
-		return code, "placement: " + message, resultFor(code), nil
-	}
-	if current.Kind == "system-element" &&
-		(target.Record.Path == current.Record.Path || strings.HasPrefix(target.Record.Path, current.Record.Path+"/")) {
-		return 409, "descendant_cycle", "conflict", nil
+	// The element this node is bound to is its root: its record lives at the
+	// node's parent, which checked its version, and a move onto it makes the
+	// entity one of this node's roots -- the same as a create there.
+	targetPath, ownElement := "", w.scope != nil && w.scope.Binds(intent.TargetParentID)
+	if !ownElement {
+		target, code, message := requireEntity(expected, entities, "system-element", intent.TargetParentID)
+		if code != 0 {
+			return code, "placement: " + message, resultFor(code), nil
+		}
+		targetPath = target.Record.Path
+		if current.Kind == "system-element" &&
+			(targetPath == current.Record.Path || strings.HasPrefix(targetPath, current.Record.Path+"/")) {
+			return 409, "descendant_cycle", "conflict", nil
+		}
 	}
 	leaf := current.Record.Path
 	if index := strings.LastIndexByte(leaf, '/'); index >= 0 {
 		leaf = leaf[index+1:]
 	}
-	newRoot := joinPath(target.Record.Path, leaf)
+	newRoot := joinPath(targetPath, leaf)
 	if newRoot == current.Record.Path {
 		return 409, "placement_unchanged", "conflict", nil
 	}
@@ -63,10 +70,13 @@ func (w *EditExec) composePlacement(
 		movingTopics[candidate.Record.Topic] = true
 	}
 
+	// Every new record goes first, then the tombstones (retire): a consumer
+	// that applies the batch in order sees the entity at its new position before
+	// the old one is retired, so what it keys by the entity's id (annotation
+	// links, alarms) is moved with it instead of deleted with the old row.
 	records := make([]StateRecord, 0, len(selected)*2)
-	for _, candidate := range selected {
-		records = append(records, StateRecord{Topic: candidate.Record.Topic})
-	}
+	vacated := make([]string, 0, len(selected))
+	written := make(map[string]bool, len(selected))
 	for _, candidate := range selected {
 		suffix := strings.TrimPrefix(candidate.Record.Path, current.Record.Path)
 		newPath := newRoot + suffix
@@ -80,9 +90,14 @@ func (w *EditExec) composePlacement(
 		}
 		payload := cloneRawMap(candidate.Payload)
 		if candidate.Record.Topic == current.Record.Topic {
-			if current.Kind == "system-element" {
+			switch {
+			case current.Kind == "system-element" && ownElement:
+				// A root this node authors names no parent; an ancestor
+				// places it below the mount (see composeCreate).
+				delete(payload, "parent_id")
+			case current.Kind == "system-element":
 				payload["parent_id"] = rawJSON(intent.TargetParentID)
-			} else {
+			default:
 				payload["system_element_id"] = rawJSON(intent.TargetParentID)
 			}
 		}
@@ -91,7 +106,10 @@ func (w *EditExec) composePlacement(
 			return 422, "placement: payload is not encodable", "invalid", nil
 		}
 		records = append(records, StateRecord{Topic: newTopic, Payload: encoded})
+		written[newTopic] = true
+		vacated = append(vacated, candidate.Record.Topic)
 	}
+	records = append(records, retire(vacated, written)...)
 	return 200, fmt.Sprintf("moved %d entities", len(selected)), "ok", records
 }
 

@@ -461,6 +461,30 @@ func TestReDeclaringABoundSignalKeepsItsBinding(t *testing.T) {
 	}
 }
 
+// Statistics are switched on for a signal by an operator, not by its
+// declaration. A reconcile that re-declares the signal must leave them on:
+// dropping the setting would delete the statistics and build them again.
+func TestReDeclaringASignalKeepsItsStatisticsSetting(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", map[string]any{
+		"unit": "°C", "keeps_statistics": true,
+	})
+
+	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", map[string]any{"unit": "°C"})
+	if after := signalRecordAt(t, c, "line1/tag-t1"); after["keeps_statistics"] != true {
+		t.Fatalf("re-declaration dropped keeps_statistics: %+v", after)
+	}
+
+	// A declaration that speaks it still decides.
+	declareSignal(t, c, "line1/tag-t1", "01SDECLARED", "01HLINE1", map[string]any{
+		"unit": "°C", "keeps_statistics": false,
+	})
+	if after := signalRecordAt(t, c, "line1/tag-t1"); after["keeps_statistics"] != false {
+		t.Fatalf("an explicit keeps_statistics must win: %+v", after)
+	}
+}
+
 // An upsert that names a non-empty data_tag still sets the binding.
 func TestAnUpsertNamingATagStillSetsIt(t *testing.T) {
 	c := newConfigExec(t)

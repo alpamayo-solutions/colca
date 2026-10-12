@@ -105,6 +105,7 @@ func (s *Store) Compact(stream string) (CompactStats, error) {
 	if err := b.Commit(pebble.Sync); err != nil {
 		return st, err
 	}
+	s.holes[stream]++
 	s.state.Lock()
 	s.bytes[stream] = live - shed
 	s.state.Unlock()

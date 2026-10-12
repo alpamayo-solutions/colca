@@ -24,6 +24,10 @@ alert first:
 | `colca_rejected_publishes_total` | rises: clients send what the node refuses; `reason` says why |
 | `colca_auth_rejections_total` | rises: unknown keys or bad tokens at a door |
 | `colca_replication_integrity_failures_total` | above `0`: a child pruned records before its parent received them |
+| `colca_store_incarnation_changes_total` | rises: this node's store was restored from a backup, replaced, or given a new incarnation by an operator; its children re-sync |
+| `colca_uplink_resync_active` | stays `1`: this node is still sending again what its restored parent lacks |
+| `colca_uplink_resync_unreplayable_records_total` | above `0`: a restored parent lacks records this node had already pruned |
+| `colca_repl_child_ahead_of_store_total` | rises: a child too old to re-sync is ahead of this node's store |
 | `colca_jwks_keys` | `0` on a node with an `auth:` block |
 | `colca_contracts_bundle_info` | `source="builtin"` where you expected a bundle |
 
@@ -82,7 +86,27 @@ cache are sized from the same ceiling, a 32nd of it each, between Pebble's
 defaults (4 MiB and 8 MiB, also used when no ceiling is found) and 256 MiB: a
 512 MiB edge gets 16 MiB of each, a 2 GiB hub 64 MiB, an 8 GiB hub 256 MiB.
 Raising a hub's memory ceiling therefore also gives its store larger
-memtables, which compact less under heavy ingest.
+memtables, which compact less under heavy ingest. Pebble reserves its
+memtables in the block cache, so the cache is created with room for three of
+them beside the blocks; memtables and cache together stay within an eighth of
+the ceiling.
+
+### The store's own statistics
+
+| Metric | Labels | Shows |
+|---|---|---|
+| `colca_pebble_block_cache_bytes` | | bytes of blocks in the block cache |
+| `colca_pebble_block_cache_hits_total`, `colca_pebble_block_cache_misses_total` | | block reads served from the cache, and those read from a table |
+| `colca_pebble_memtable_bytes` | `state` (`current`, `obsolete`) | memtables in use and queued for flush, and those an open read still pins or Pebble keeps for reuse |
+| `colca_pebble_level_bytes`, `colca_pebble_level_tables` | `level` | size and number of tables per LSM level |
+| `colca_pebble_bytes_written_total` | `kind` (`wal`, `flush`, `compaction`) | what the store wrote since it opened; compaction against the other two is the write amplification |
+| `colca_pebble_compaction_debt_bytes`, `colca_pebble_compactions_in_progress` | | compaction work still owed, and compactions running |
+| `colca_pebble_table_iterators` | | open table iterators; a read holds several |
+| `colca_pebble_tombstones` | | approximate number of point and range deletion tombstones in the tables |
+| `colca_pebble_deletion_reclaimable_bytes` | `kind` (`point`, `range`) | table bytes compaction can drop because deletions cover them |
+| `colca_pebble_table_stats_complete` | | 1 once the two deletion gauges cover every table present at start |
+
+A scrape reads Pebble's counters only; it opens no table.
 
 Replicated records reach the local MQTT bus through one goroutine after they
 are durable. Each child's records, and so each topic's, arrive in order;
@@ -112,6 +136,10 @@ See [Configuration](configuration.md#logs).
 
 The pruner removes the oldest records of a stream in one atomic step and never
 touches the current-state view, which only shrinks through empty payloads.
+It runs every `retention.interval` (5 minutes by default) and once at start, one
+pass of at most 100 000 records per stream, so a node that restarts more often
+than the interval still prunes. `max_age` never removes a record without a
+timestamp; `max_bytes` does.
 
 Every named cursor protects the stream, including the replication cursor that
 forms a child's offline buffer. If the age or size limit wants to remove
@@ -241,13 +269,109 @@ Upgrade the hub first, then the floor nodes top down, then the edges.
 ## Backups
 
 A node's state is its `data_dir`. Stop the node, or snapshot the filesystem,
-and copy the directory. A restored node that is behind its parent simply
-receives newer definitions and commands again; its children push what the
-restored node is missing, because their replication cursors never moved past
-what was acknowledged.
+and copy the directory.
 
 Keep `secrets_dir` and the key file separate from `data_dir`. Losing a
 service's own keyring makes its stored secrets unreadable.
+
+## Restoring a parent from a backup
+
+A node restored from a copy of its `data_dir` is behind everything that
+happened since the copy was taken. Its children and its own parent hold
+positions of the store it was before. Nodes detect this on the replication
+link and re-sync; see [Store incarnations](concepts.md#store-incarnations) for
+how. Nothing has to be done on the children.
+
+Recovered without an operator:
+
+- **Commands flow again at once.** Each child takes commands from where the
+  restored store stands for it. It does not wait for the parent's `commands`
+  stream to grow past the head it remembered.
+- **No command runs twice.** A command a child already holds is not stored or
+  executed again, also when the restored node receives it from its own parent
+  a second time and hands it on.
+- **Current state converges.** Each child sends again what the parent lacks of
+  its `entities` stream, so elements, signals, alarms' standing state and the
+  last metric values at the parent are those of the children again.
+- **History is sent again as far as the children still hold it**: `metrics`,
+  `alarms`, `annotations`, `audit`, `logs`, and the `_Ack`s of the `commands`
+  stream, from the highest offset the restored parent holds of each stream.
+  The parent stores each record once.
+- **The restored node keeps replicating to its own parent.** That parent
+  clears the marks it kept for the node's earlier store, so records written at
+  offsets the node hands out again are stored, not dropped as known.
+
+Not recovered:
+
+- **What only the restored node held.** Records written at the node itself
+  since the backup — commands issued there, definitions authored there, what
+  its own machines and services published — are gone unless a node above holds
+  them. A command issued there after the backup that a child already executed
+  stays executed; its record and its ack reach the parent again only as the
+  child's `_Ack`.
+- **Definitions authored since the backup stay on the children that received
+  them.** The restored node no longer has them and so never changes or retires
+  them. Author them again, or retire them, at the node that owns them.
+- **Ranges a child's retention already pruned.** A child keeps what its parent
+  has not confirmed, but it had been told these were stored. The gap is logged
+  at ERROR on the child (`re-sync gap`), counted in
+  `colca_uplink_resync_unreplayable_records_total{stream}` and listed under
+  `uplink.resync.gaps` on the child's `/healthz` until the next re-sync.
+- **Nodes above the restored one receive the replayed history a second time**,
+  under new offsets: they are not restored and already hold it. Current state
+  is unaffected and the historian writes a sample once per signal and
+  timestamp, but a consumer of `alarms`, `annotations`, `audit` or `logs` at an
+  ancestor reads those records again.
+- **A command without `correlation_id`** is recognised as already held only
+  among what the parent's `commands` stream held when the child re-synced. One
+  that reaches the child again later is executed again.
+
+What you see while it happens:
+
+| Where | What |
+|---|---|
+| Restored node, log | ERROR `this store is behind what a child recorded of it` (a child proved it) or `this store is behind what its parent holds of it` (its parent did) |
+| Restored node, `/healthz` | `store.id` is new; `store.changed` has `at`, `reason` and the `previous` id |
+| Restored node, `/metrics` | `colca_store_incarnation_changes_total{reason="regression"}` |
+| Child, log | ERROR `re-syncing with the parent`, then INFO `re-sync with the parent complete` |
+| Child, `/healthz` | `uplink.resync`: `state` is `replaying` while records are still being sent again and `complete` afterwards, with `reason`, both store ids, the range per stream (`from`, `to`, `position`) and `gaps`. `uplink.state` stays `connected` |
+| Child, `/metrics` | `colca_uplink_resyncs_total`, `colca_uplink_resync_active` (`1` while replaying), `colca_downlink_commands_already_held_total` |
+
+A restore is only detected when a neighbour holds a position the restored
+store has not reached: a child that read a command or was confirmed a record
+since the backup, or a parent that holds a record of the node written since.
+If nothing was exchanged since the backup, nothing was lost on the link and
+nothing happens. If you restored a node and want every child to re-sync
+regardless, or you replaced a store by other means, tell the node:
+
+```bash
+curl -sk -X POST -H "X-Colca-Token: $COLCA_TOKEN" https://<node>/store/incarnation
+# {"store":"<new id>","previous":"<old id>"}
+```
+
+The node takes a new incarnation. Every child re-syncs at its next request,
+the node's own parent clears its marks for it, and local consumers get
+`store_changed` on their next `/ack`. It is safe to repeat: a re-sync against
+a store that lacks nothing replays nothing.
+
+Mixed versions keep replicating as before, without the protection:
+
+- **A child older than the check under a restored parent** is not told and does
+  not re-sync: it takes no commands until the parent's stream passes its
+  position, and does not send again what the parent lacks. The parent logs
+  `a child is ahead of this store and cannot re-sync` and counts it in
+  `colca_repl_child_ahead_of_store_total`. Upgrade the child.
+- **A child under a parent older than the check** learns no incarnation and
+  never re-syncs. It still reports a commands position past the parent's head
+  (`colca_downlink_cursor_beyond_head_total`).
+- A child records what its parent confirms from its first push after the
+  upgrade. A restore of the parent before that is detected by the commands
+  position only, and what the child sent since the backup may not be sent
+  again.
+- A restored node that wrote more records than it had lost before it reached
+  its parent again is not recognised as restored by that parent's marks: the
+  parent drops, as already stored, what the node wrote at the offsets it holds.
+  Tell the node with `POST /store/incarnation` right after such a restore.
 
 ## Benchmarks
 
@@ -441,6 +565,60 @@ stores, replicates (that is `replication_policy`, above) or delivers over MQTT.
 without a row) and `colca_historian_signals_not_logged` (signals currently
 marked). `/healthz` fails with `signal_definitions` while the definitions
 cannot be loaded or followed.
+
+## Late writes the historian marks
+
+A reader that keeps something computed from `historian_metric` per hour (PREKIT's
+per-signal statistics) has to learn when a sample lands in an hour it already
+computed: a child catching up after an outage, a replay, an import, a corrected
+value. `colca-historian` tells it in the database.
+
+The reader owns two relations, and its migrations create them before
+`colca-historian` runs (PREKIT starts the historian after its api, which
+migrates first):
+
+```sql
+CREATE TABLE historian_late_write (
+    id bigserial PRIMARY KEY,
+    hour timestamptz NOT NULL,       -- a UTC hour
+    signal_ids jsonb NOT NULL);      -- the signals written into it, a JSON array
+-- the signals to mark: a table or a view with a signal_id column
+CREATE VIEW historian_late_write_signal AS SELECT signal_id FROM ...;
+```
+
+For every page it writes, the historian appends one row to
+`historian_late_write` per UTC hour the page has a sample of, when that hour
+started 65 minutes ago or longer by the database's clock, naming the listed
+signals it wrote into that hour, and sends `NOTIFY historian_late_write` when
+it appended one. This happens in the transaction that writes the samples: a
+sample is never stored without its mark, and a mark is never visible before
+its samples. An offline `colca-historian import` marks the same way. Without
+the relations the mark statement fails and the page is retried; the historian
+writes no page unmarked.
+
+Marking never holds ingestion up: it is a plain insert, with no unique key, no
+conflict handling and no table lock. A signal that is not listed writes nothing,
+and a page of current samples does not run the statement at all. Several pages
+writing into one hour leave one row each; the reader merges them.
+
+The reader's side of the contract:
+
+- **Handling marks:** read committed marks, recompute their (signal, hour)
+  pairs from `historian_metric`, then delete the marks it read, by `id`. A mark
+  it can read was committed with its samples, so the recompute sees them; a
+  mark committed meanwhile stays for the next pass. A crash in between leaves
+  the marks, and recomputing again is harmless.
+- **Closing an hour:** no earlier than 65 minutes after its start by the
+  database's clock, take a transaction id (`pg_current_xact_id()`), then wait
+  until `pg_snapshot_xmin(pg_current_snapshot())` is at least that id before
+  reading the hour. Every page that decided by then that it was not late has
+  written its rows, so it already has a smaller transaction id; the wait ends
+  when all of those committed or rolled back. Pages are never made to wait:
+  the reader waits, bounded, and tries again later.
+- **Listing a new signal:** commit it to the list, then wait the same way
+  before reading the signal's history. A page whose mark statement ran before
+  the listing committed has an older transaction id; every later one sees the
+  listing.
 
 ## Permanent standalone handover
 

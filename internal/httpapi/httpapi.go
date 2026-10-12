@@ -114,6 +114,13 @@ const (
 	maxLookupTopics = 1000
 	maxLookupBody   = 1 << 20
 	fetchScanBudget = 20000
+	// pageMaxBytes bounds the stored bytes of one /fetch or /kv page. A page of
+	// maxMax records may otherwise hold maxMax records of the record size limit
+	// (4 MiB by default): gigabytes, on the heap at once, once decoded and again
+	// once encoded. 8 MiB holds a full page of ordinary records (the historian's
+	// 5000 metrics are about 2 MiB); a page that ends early has a next or a token
+	// like any other, and holds at least one record, however large.
+	pageMaxBytes = 8 << 20
 )
 
 // TLSConfig builds the API listener's TLS config. Client certificates are
@@ -207,7 +214,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			Metadata: map[string]any{"door": door, "route": r.URL.Path, "method": r.Method},
 		}
 		if entry != nil {
-			d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.Name, entry.ActorKind()
+			d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.ActorLabel(), entry.ActorKind()
 		}
 		_ = e.RecordDenial(d)
 	}
@@ -366,7 +373,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 			if c.human != nil {
 				slog.Default().Info("admin action by human", "sub", c.human.Sub,
-					"username", c.human.Username, "path", r.URL.Path, "method", r.Method)
+					"name", c.human.Entry.DisplayName, "path", r.URL.Path, "method", r.Method)
 			}
 			next(w, r)
 		})
@@ -401,11 +408,30 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			payload["uplink"] = map[string]any{"state": "none"}
 		case uplink != nil:
 			st := uplink.Status()
-			payload["uplink"] = map[string]any{
+			up := map[string]any{
 				"state": string(st.State),
 				"since": st.Since.Format(time.RFC3339),
 			}
+			// The last re-sync with a parent whose store changed incarnation:
+			// "replaying" while this node still sends again what the parent
+			// lacks, and the ranges it could not send again. The link state
+			// stays what it is, since the link is up throughout.
+			if resync := uplink.ResyncStatus(e.Store()); resync != nil {
+				up["resync"] = resync
+			}
+			payload["uplink"] = up
 		}
+		// store names the incarnation of this node's store, and why and when
+		// it last changed: a node restored from a backup says so here.
+		storeInfo := map[string]any{"id": e.Store().StoreID()}
+		if change, ok := e.Store().LastIncarnationChange(); ok {
+			storeInfo["changed"] = map[string]any{
+				"at":       time.UnixMilli(change.AtMS).UTC().Format(time.RFC3339),
+				"reason":   change.Reason,
+				"previous": change.Previous,
+			}
+		}
+		payload["store"] = storeInfo
 		// storage stays 200 like uplink: restarting does not free a full disk, the
 		// operator has to, and the state tells them to look.
 		payload["storage"] = e.Store().Health()
@@ -510,11 +536,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			if actorID == "" {
 				actorID = writtenBy
 			}
-			if actorLabel == "" {
-				actorLabel = actorID
-			}
 			if actorKind == "" {
 				actorKind = "system"
+			}
+			if actorLabel == "" && actorKind != "human" {
+				actorLabel = actorID // a person's subject is never stored as their name
 			}
 			res, err = e.IngestAdminAttributed(in.Topic, in.Payload, engine.Attribution{
 				WrittenBy: writtenBy, ActorID: actorID,
@@ -522,11 +548,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			})
 		case c.human != nil:
 			// Humans only send commands; IngestHuman enforces it.
-			actor := c.human.Username
-			if actor == "" {
-				actor = c.human.Sub
-			}
-			res, err = e.IngestHumanAttributed(c.entry, actor, in.Topic, in.Payload)
+			res, err = e.IngestHuman(c.entry, in.Topic, in.Payload)
 		default:
 			// A machine publishing over HTTP is judged exactly like its MQTT
 			// publish: own zone, identity rule, cmd grants.
@@ -695,9 +717,16 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown stream " + strconv.Quote(stream)})
 			return
 		}
-		limit, _ := strconv.Atoi(q.Get("max"))
-		if limit <= 0 || limit > maxMax {
-			limit = defaultMax
+		// An out-of-range max is a bad request, as on /kv: falling back to the
+		// default page would hand a caller fewer records than it asked for.
+		limit := defaultMax
+		if raw := q.Get("max"); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 1 || n > maxMax {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("max must be between 1 and %d", maxMax)})
+				return
+			}
+			limit = n
 		}
 		prefix := q.Get("prefix")
 		// contract narrows the page to the given contracts (repeatable), like /kv's.
@@ -802,7 +831,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		}
 		if c.entry != nil && !ownsCursor(c.entry, cursor) {
 			_ = e.RecordDenial(engine.AuditDenial{Operation: "read", ReasonCode: "cursor_denied",
-				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+				ActorID: c.entry.ULID, ActorLabel: c.entry.ActorLabel(), ActorKind: c.entry.ActorKind(),
 				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": stream, "cursor": cursor}})
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: this identity's cursors are named " + c.entry.CursorPrefix() + "..."})
 			return
@@ -850,9 +879,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if hasSignalFilter {
 			// The signal index reads only the wanted signals' records, so a
 			// consumer of a few signals does not pay for the whole stream.
-			recs, next, err = e.Store().ReadSignals(r.Context(), stream, from, limit, fetchScanBudget, slices.Collect(maps.Keys(signalSet)), filter)
+			recs, next, err = e.Store().ReadSignals(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, slices.Collect(maps.Keys(signalSet)), filter)
 		} else {
-			recs, next, err = e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, filter)
+			recs, next, err = e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, filter)
 		}
 		if r.Context().Err() != nil {
 			return // the caller is gone; nobody reads the page
@@ -927,14 +956,14 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		operator := !owned && in.Delete && uns.MayRetireCursor(e.Scope(), c.entry, in.Cursor)
 		if operator && !staleCursor(e, in.Cursor, in.Stream, cfg.Cursors.EffectiveStaleAfter()) {
 			_ = e.RecordDenial(engine.AuditDenial{Operation: op, ReasonCode: "cursor_not_stale",
-				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+				ActorID: c.entry.ULID, ActorLabel: c.entry.ActorLabel(), ActorKind: c.entry.ActorKind(),
 				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream, "cursor": in.Cursor}})
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "only a stale cursor (see GET /backlog) may be retired by another identity"})
 			return
 		}
 		if !owned && !operator {
 			_ = e.RecordDenial(engine.AuditDenial{Operation: op, ReasonCode: "cursor_denied",
-				ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+				ActorID: c.entry.ULID, ActorLabel: c.entry.ActorLabel(), ActorKind: c.entry.ActorKind(),
 				Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream, "cursor": in.Cursor}})
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cursor not owned: this identity's cursors are named " + c.entry.CursorPrefix() + "..."})
 			return
@@ -942,7 +971,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if in.Delete {
 			if operator {
 				if err := e.RecordAuthorized(engine.AuditDenial{Operation: op, ReasonCode: "cursor_retired_by_operator",
-					ActorID: c.entry.ULID, ActorLabel: c.entry.Name, ActorKind: c.entry.ActorKind(),
+					ActorID: c.entry.ULID, ActorLabel: c.entry.ActorLabel(), ActorKind: c.entry.ActorKind(),
 					EntityType: "cursor", EntityID: in.Cursor,
 					Metadata: map[string]any{"door": metrics.DoorHTTP, "route": r.URL.Path, "stream": in.Stream,
 						"cursor": in.Cursor, "owner": cursorOwner(in.Cursor)}}); err != nil {
@@ -1030,9 +1059,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		var folders []string
 		var next string
 		if withFolders {
-			entries, folders, next, err = e.Store().KVScanLevel(prefix, after, pageSize, contracts, depth)
+			entries, folders, next, err = e.Store().KVScanLevel(prefix, after, pageSize, pageMaxBytes, contracts, depth)
 		} else {
-			entries, next, err = e.Store().KVScanPageDepth(prefix, after, pageSize, contracts, depth)
+			entries, next, err = e.Store().KVScanPageDepth(prefix, after, pageSize, pageMaxBytes, contracts, depth)
 		}
 		if err != nil {
 			if errors.Is(err, store.ErrInvalidPageToken) {
@@ -1332,6 +1361,25 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 			entries, next := reg.ListPage(after, pageSize)
 			writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "next": next})
+		}))
+
+		// POST /store/incarnation gives this node's store a new incarnation id,
+		// for a store whose history regressed without a peer proving it: a
+		// volume restored from a backup that no child was ahead of. Every
+		// child re-syncs at its next request, the node's own parent clears the
+		// marks it kept for it, and local consumers see a store change on
+		// /ack.
+		mux.HandleFunc("POST /store/incarnation", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
+			previous := e.Store().StoreID()
+			id, err := e.Store().Reincarnate("operator: POST /store/incarnation")
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			m.StoreReincarnated("operator")
+			slog.Default().Warn("store incarnation changed by an operator: children re-sync with this node",
+				"previous_store", previous, "store", id)
+			writeJSON(w, http.StatusOK, map[string]any{"store": id, "previous": previous})
 		}))
 
 		mux.HandleFunc("GET /debug/state", adminFor(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request) {

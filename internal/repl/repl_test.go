@@ -53,7 +53,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	recs := []store.ReplRecord{
 		{ChildOffset: 1, OriginOffset: 41, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":1}`), TS: 1,
 			WrittenBy: "svc-connector", ActorID: "user-anna", ActorLabel: "anna@example.com", ActorKind: "human",
-			ActorGroups: []string{"operators"}},
+			ActorGroups: []string{"operators"}, ActorClient: "erp-bridge"},
 		{ChildOffset: 2, OriginOffset: 42, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":2}`), TS: 2},
 	}
 	hwm, err := cl.Replicate("metrics", recs)
@@ -70,7 +70,8 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	}
 	if stored[0].WrittenBy != "svc-connector" || stored[0].ActorID != "user-anna" ||
 		stored[0].ActorLabel != "anna@example.com" || stored[0].ActorKind != "human" ||
-		len(stored[0].ActorGroups) != 1 || stored[0].ActorGroups[0] != "operators" {
+		len(stored[0].ActorGroups) != 1 || stored[0].ActorGroups[0] != "operators" ||
+		stored[0].ActorClient != "erp-bridge" || stored[1].ActorClient != "" {
 		t.Fatalf("uplink lost attribution: %+v", stored[0])
 	}
 	if stored[0].OriginOffset != 41 || stored[1].OriginOffset != 42 {
@@ -95,7 +96,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 		"colca/v1/_CmdParam/m1/child1/m1/go",
 		[]byte(`{"correlation_id":"c1","expires_at":99999999999}`),
 		engine.Attribution{WrittenBy: "api", ActorID: "user-anna", ActorLabel: "anna@example.com", ActorKind: "human",
-			ActorGroups: []string{"operators"}},
+			ActorGroups: []string{"operators"}, ActorClient: "erp-bridge"},
 	)
 	dl, next, gap, err := cl.Downlink(1, 10, 5*time.Second)
 	if err != nil {
@@ -109,7 +110,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	}
 	if dl[0].WrittenBy != "api" || dl[0].ActorID != "user-anna" ||
 		dl[0].ActorLabel != "anna@example.com" || dl[0].ActorKind != "human" ||
-		len(dl[0].ActorGroups) != 1 || dl[0].ActorGroups[0] != "operators" {
+		len(dl[0].ActorGroups) != 1 || dl[0].ActorGroups[0] != "operators" || dl[0].ActorClient != "erp-bridge" {
 		t.Fatalf("downlink lost attribution — the executing node cannot reconstitute the person: %+v", dl[0])
 	}
 	if next != 2 {
@@ -772,7 +773,7 @@ func TestHelloCarriesTheParentsCommandHead(t *testing.T) {
 	}
 
 	cl := mustClient(t, addr, parentID.PublicHex(), childID)
-	res, err := cl.hello(context.Background(), 1)
+	res, err := cl.hello(context.Background(), greeting{})
 	if err != nil {
 		t.Fatal(err)
 	}

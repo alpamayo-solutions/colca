@@ -59,6 +59,7 @@ type colcaHook struct {
 	reg    *registry.Manager
 	ver    *tokenauth.Verifier // nil when the node has no auth: block
 	humans *humanSessions
+	groups groupGenerations // advanced by the engine on every stored _Group
 	cfg    *config.Config
 	log    *slog.Logger
 	// refusals logs refused publishes once per sender and minute: a client can
@@ -119,7 +120,7 @@ func (h *colcaHook) auditDeniedAt(operation, reason, door string, entry *uns.Ent
 		EntityType: entityType, EntityID: entityID,
 	}
 	if entry != nil {
-		d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.Name, entry.ActorKind()
+		d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.ActorLabel(), entry.ActorKind()
 	}
 	_ = eng.RecordDenial(d)
 }
@@ -298,7 +299,7 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 
 func (h *colcaHook) entryForClient(cl *mqtt.Client) *uns.Entry {
 	if isHumanListener(cl) {
-		if session, ok := h.humans.get(cl.ID); ok {
+		if session, ok := h.currentSession(cl); ok {
 			return session.entry
 		}
 		return nil
@@ -503,11 +504,7 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		if !ok || time.Now().After(s.exp) {
 			return pk, packets.ErrRejectPacket
 		}
-		actor := s.username
-		if actor == "" {
-			actor = s.sub
-		}
-		res, err := eng.IngestHumanAttributed(s.entry, actor, pk.TopicName, pk.Payload)
+		res, err := eng.IngestHuman(s.entry, pk.TopicName, pk.Payload)
 		if err != nil {
 			h.refusals.Warn("human publish rejected", "sub", s.sub, "topic", pk.TopicName,
 				"bytes", len(pk.Payload), "err", err)
@@ -690,7 +687,10 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 }
 
 // SetEngine late-binds the engine the publish hook ingests into.
-func (s *Server) SetEngine(e *engine.Engine) { s.hook.setEngine(e) }
+func (s *Server) SetEngine(e *engine.Engine) {
+	e.SetOnGroupsChanged(s.hook.groupsChanged)
+	s.hook.setEngine(e)
+}
 
 // PublishTimeSync publishes one _TimeSync beacon, for RunBeacon and tests.
 func (s *Server) PublishTimeSync() { s.hook.publishTimeSync() }

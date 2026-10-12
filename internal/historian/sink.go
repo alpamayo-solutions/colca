@@ -94,6 +94,51 @@ INSERT INTO colca_applied_offset (consumer, "offset", store, updated_at)
 VALUES ($1, $2, NULLIF($3::text, ''), now())
 ON CONFLICT (consumer) DO UPDATE SET "offset" = EXCLUDED."offset", store = EXCLUDED.store, updated_at = now()`
 
+// markLateWrites records which hours of which signals a page wrote into after
+// those hours were due to be summarised. PREKIT keeps per-signal statistics of
+// the history and computes an hour once, from lateAfter past its start; a
+// sample that arrives later (a child catching up, a replay, an import, a
+// corrected value) would leave that hour's statistics stale. The mark names the
+// hour again, in the transaction that writes the sample: a sample is never
+// committed without its mark, and a mark is never visible before its sample.
+//
+// It is append-only: one row per hour the page wrote late into, carrying the
+// signals as a JSON array. No unique key, no conflict handling, no lock beyond
+// the insert's own: a page never waits for the reader or for another page.
+// The reader (PREKIT's statistics worker) reads committed marks, recomputes
+// their hours from historian_metric and deletes the marks it handled; marks of
+// the same hour from several pages are merged there, not here.
+//
+// Only signals the reader lists in historian_late_write_signal are marked: a
+// node without statistics writes nothing here. The database's clock decides
+// what is late, read when this statement runs (clock_timestamp): the reader
+// closes an hour by the same clock and first waits for every transaction that
+// was in flight when the hour became due, so a page that decided "not late"
+// has committed before the hour is read. Hours are UTC hours. $1 and $2 are
+// parallel arrays, each (signal, hour) once (lateWrites).
+//
+// The reader is notified when a mark was added.
+const markLateWrites = `
+WITH marked AS (
+    INSERT INTO historian_late_write (hour, signal_ids)
+    SELECT u.hour, jsonb_agg(u.sig ORDER BY u.sig)
+    FROM unnest($1::text[], $2::timestamptz[]) AS u(sig, hour)
+    WHERE u.hour + interval '65 minutes' <= clock_timestamp()
+      AND EXISTS (SELECT 1 FROM historian_late_write_signal AS wanted WHERE wanted.signal_id = u.sig)
+    GROUP BY u.hour
+    RETURNING 1
+)
+SELECT pg_notify('historian_late_write', '') FROM (SELECT 1 FROM marked LIMIT 1) AS any_marked`
+
+// lateAfter is how long after an hour's start a sample of that hour is late;
+// markLateWrites carries the same 65 minutes. lateSlack is how far this
+// process's clock may run behind the database's before a late sample would
+// not be offered to the statement at all.
+const (
+	lateAfter = 65 * time.Minute
+	lateSlack = 10 * time.Minute
+)
+
 const createOffsetTable = `
 CREATE TABLE IF NOT EXISTS colca_applied_offset (
     consumer   text PRIMARY KEY,
@@ -121,6 +166,34 @@ type Sink struct {
 	// Writers, above 1, writes a page over that many connections at once, each
 	// with the rows of its own share of the signals; see applyPartitioned.
 	Writers int
+}
+
+// lateWrites returns markLateWrites' arrays for rows: each (signal, hour) once,
+// left out when the hour cannot be late yet by this process's clock plus
+// lateSlack. The statement decides exactly, by the database's clock.
+func lateWrites(rows []Row, now time.Time) (signals []string, hours []time.Time) {
+	type key struct {
+		signal string
+		hour   time.Time
+	}
+	var seen map[key]bool
+	for _, row := range rows {
+		hour := row.Timestamp.UTC().Truncate(time.Hour)
+		if hour.Add(lateAfter).After(now.Add(lateSlack)) {
+			continue
+		}
+		k := key{row.SignalID, hour}
+		if seen[k] {
+			continue
+		}
+		if seen == nil {
+			seen = make(map[key]bool)
+		}
+		seen[k] = true
+		signals = append(signals, row.SignalID)
+		hours = append(hours, hour)
+	}
+	return signals, hours
 }
 
 // Rejection is one row the schema permanently refused, set aside so the rest of
@@ -339,7 +412,8 @@ func partitionOf(signalID string, n int) int {
 // applyBatch sends the page and the marker in one batch and one transaction.
 // Runs of values go as one statement each (insertMetrics); a retraction keeps a
 // statement of its own and its place in the order, because whether it writes a
-// row depends on the rows before it.
+// row depends on the rows before it. The page's late writes are marked in the
+// same transaction (markLateWrites).
 func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offset int64, store string) error {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -361,6 +435,9 @@ func (s *Sink) applyBatch(ctx context.Context, rows []Row, consumer string, offs
 		}
 		batch.Queue(insertMetrics, valueColumns(rows[start:end])...)
 		start = end
+	}
+	if signals, hours := lateWrites(rows, time.Now()); len(signals) > 0 {
+		batch.Queue(markLateWrites, signals, hours)
 	}
 	if consumer != "" {
 		batch.Queue(upsertOffset, consumer, offset, store)
@@ -438,6 +515,7 @@ func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, o
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var rejections []Rejection
+	landed := make([]Row, 0, len(rows))
 	for i, row := range rows {
 		savepoint := fmt.Sprintf("hist_row_%d", i)
 		if _, err := tx.Exec(ctx, "SAVEPOINT "+savepoint); err != nil {
@@ -450,6 +528,7 @@ func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, o
 			if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+savepoint); err != nil {
 				return nil, fmt.Errorf("historian: releasing the savepoint for row %d at offset %d: %w", i, offset, err)
 			}
+			landed = append(landed, row)
 			continue
 		}
 
@@ -465,6 +544,11 @@ func (s *Sink) applyRowByRow(ctx context.Context, rows []Row, consumer string, o
 		rejections = append(rejections, Rejection{Row: row, Reason: reason, SQLState: sqlstate, Err: execErr})
 	}
 
+	if signals, hours := lateWrites(landed, time.Now()); len(signals) > 0 {
+		if _, err := tx.Exec(ctx, markLateWrites, signals, hours); err != nil {
+			return nil, fmt.Errorf("historian: marking the late writes of a row-by-row apply at offset %d: %w", offset, err)
+		}
+	}
 	if consumer != "" {
 		if _, err := tx.Exec(ctx, upsertOffset, consumer, offset, store); err != nil {
 			return nil, fmt.Errorf("historian: moving the marker after a row-by-row apply at offset %d: %w", offset, err)

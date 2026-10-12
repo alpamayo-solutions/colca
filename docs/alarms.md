@@ -138,7 +138,9 @@ payload must not assert who performed it.
    there was one, the `note`.
 
 So `acknowledged_by` is always a subject the node vouched for, never one the
-writer claimed for itself. For a person, `actor_label` is the token's
-`preferred_username`; the name is for display, the subject is the identity. A silence works the same way, but as a `_CmdOperate`
+writer claimed for itself. For a person, `actor_label` is what their token
+called them when they acted (see
+[http-api.md](http-api.md#who-a-record-names)); the subject is the identity,
+and a reader that shows a name resolves it from the subject. A silence works the same way, but as a `_CmdOperate`
 (`silenceAlarm`, `unsilenceAlarm`): keeping an alarm from notifying anyone is
 more than confirming one has seen it, so it needs `operate`.

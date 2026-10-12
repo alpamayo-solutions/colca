@@ -381,23 +381,15 @@ func TestALegacyCommandsCursorIsAdoptedInsteadOfTheParentsHead(t *testing.T) {
 }
 
 // The definitions half: definitions have their own name and first-contact rule
-// (start at 1), so the commands case says nothing about them. The parent's
-// definitions stream is empty, so a cursor at 4 can only come from the legacy
-// key.
+// (start at 1), so the commands case says nothing about them. The parent hands
+// down no definitions, so a cursor at 4 can only come from the legacy key.
 func TestALegacyDefinitionsCursorIsAdoptedOnceThenGone(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
-
-	ps := mustStore(t, filepath.Join(dir, "pdata"))
-	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
-	srv, addr := startServer(t, pcfg, peng, parentID, preg)
-	defer srv.Stop()
-	if got := ps.NextOffset("definitions"); got != 1 {
-		t.Fatalf("parent definitions head = %d, want the empty-stream 1 — with definitions waiting, a "+
-			"cursor above 1 could be explained by consumption instead of by adoption", got)
-	}
+	// A parent as old as the legacy cursor: it hands down no definitions and
+	// names no store incarnation, so nothing but adoption moves the cursor.
+	addr := olderParent(t, parentID, 1)
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, nil, nil)
@@ -486,6 +478,14 @@ func TestAParentThatAnswersHelloWithoutAHeadIsReported(t *testing.T) {
 // checks no CA.
 func preScopedParent(t *testing.T, id *identity.Identity) string {
 	t.Helper()
+	return olderParent(t, id, 0)
+}
+
+// olderParent speaks the downlink protocol of a parent from before store
+// incarnations: its answers name no store. With head 0 it also predates the
+// head field.
+func olderParent(t *testing.T, id *identity.Identity, head uint64) string {
+	t.Helper()
 	cert, err := id.SelfSignedCert("colca-parent")
 	if err != nil {
 		t.Fatalf("parent cert: %v", err)
@@ -497,8 +497,11 @@ func preScopedParent(t *testing.T, id *identity.Identity) string {
 			time.Sleep(200 * time.Millisecond)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"records":[],"next":1,"now_ms":` +
-			strconv.FormatInt(time.Now().UnixMilli(), 10) + `}`))
+		answer := `{"records":[],"next":1,"now_ms":` + strconv.FormatInt(time.Now().UnixMilli(), 10)
+		if head > 0 && r.URL.Query().Get("hello") == "1" {
+			answer += `,"head":` + strconv.FormatUint(head, 10)
+		}
+		_, _ = w.Write([]byte(answer + `}`))
 	}))
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13}
 	srv.StartTLS()
@@ -506,24 +509,15 @@ func preScopedParent(t *testing.T, id *identity.Identity) string {
 	return strings.TrimPrefix(srv.URL, "https://")
 }
 
-// A commands cursor past the parent's head (the parent pruned past it or was
-// rebuilt empty) would leave the node hearing nothing, silently. It must be
-// reported, and not rewound: a legitimately pruned parent looks the same, and
-// rewinding would re-deliver commands that already ran.
-func TestExistingCommandsCursorPastTheParentsHeadIsReported(t *testing.T) {
+// A commands cursor past the head of a parent that names no store incarnation
+// would leave the node hearing nothing, silently. Such a parent cannot say where
+// its store stands for this node, so the position is reported and left alone.
+// A parent that names one is re-synced with (resync_test.go).
+func TestACommandsCursorPastAnOlderParentsHeadIsReported(t *testing.T) {
 	dir := t.TempDir()
 	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
 	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
-
-	ps := mustStore(t, filepath.Join(dir, "pdata"))
-	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
-	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
-	srv, addr := startServer(t, pcfg, peng, parentID, preg)
-	defer srv.Stop()
-	if head := ps.NextOffset("commands"); head != 1 {
-		t.Fatalf("parent commands head = %d, want the empty-stream 1 — this test needs a parent "+
-			"the child's cursor can be past", head)
-	}
+	addr := olderParent(t, parentID, 1)
 
 	cs := mustStore(t, filepath.Join(dir, "cdata"))
 	cm := metrics.New(cs, config.Retention{}, nil)
@@ -548,7 +542,10 @@ func TestExistingCommandsCursorPastTheParentsHeadIsReported(t *testing.T) {
 		return scrapeMetric(t, cm, beyond) == 1
 	})
 	if got := cs.CursorGet(uns.DownlinkCursor(cl.ParentPub()), downlinkStream); got != stranded {
-		t.Fatalf("the stranded cursor moved to %d — detection must never rewind it, because a "+
-			"shorter parent stream is also what a legitimately pruned parent looks like", got)
+		t.Fatalf("the stranded cursor moved to %d — a parent that names no store incarnation "+
+			"never told this node where to resume", got)
+	}
+	if got := scrapeMetric(t, cm, `colca_uplink_resyncs_total`); got != 0 {
+		t.Fatalf("re-syncs = %v against a parent that names no store incarnation, want 0", got)
 	}
 }

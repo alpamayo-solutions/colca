@@ -88,7 +88,7 @@ func Parse(topic string) (Parsed, error) {
 // _Cmd prefix, and every _Cmd* contract is a command.
 func ClassOf(contract string) Class {
 	switch {
-	case contract == "_Metric" || contract == "_ClockProgress":
+	case contract == "_Metric":
 		return ClassData
 	// Alarms are events with a lifecycle, not samples, so they get their own
 	// stream.
@@ -118,7 +118,7 @@ func ClassOf(contract string) Class {
 		// retired by tombstone. It outlives the alarms it covers.
 		contract == "_AlarmSilence":
 		return ClassEntity
-	case contract == "_ClockDefinition" || contract == "_Group" || contract == "_MetadataType" ||
+	case contract == "_Group" || contract == "_MetadataType" ||
 		contract == "_AnnotationType" || contract == "_DataModel" ||
 		contract == "_ExternalSystem" || contract == "_SemanticTag" ||
 		contract == PersonalAccessTokenContract:
@@ -716,28 +716,6 @@ func Validate(contract string, payload []byte) error {
 		// Data-model records name themselves by "id", which grants and
 		// bindings reference.
 		return reqStr("id")
-	case contract == "_ClockProgress":
-		if err := reqStr("run_id"); err != nil {
-			return err
-		}
-		if err := reqNum("processed_at"); err != nil {
-			return err
-		}
-		ready, ok := m["ready"].(bool)
-		if !ok {
-			return fmt.Errorf("%s: field ready must be a boolean", contract)
-		}
-		observed, exists := m["observed_at"]
-		if !exists || (ready && observed == nil) {
-			return fmt.Errorf("%s: field observed_at must contain live time when ready", contract)
-		}
-		if observed != nil {
-			return reqNum("observed_at")
-		}
-		return nil
-	case contract == "_ClockDefinition":
-		_, err := DecodeClockDefinition(payload)
-		return err
 	case contract == "_TimeSync":
 		// Only direct callers reach this: the engine rejects _TimeSync by
 		// class first, and the node's own beacon bypasses Validate.

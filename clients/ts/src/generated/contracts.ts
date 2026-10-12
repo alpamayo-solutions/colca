@@ -160,37 +160,6 @@ export type AuditEvent = {
   [key: string]: unknown;
 };
 
-/** `_ClockDefinition` — stream class `definition`. */
-export type ClockDefinition = {
-  catch_up?: boolean;
-  factory_anchor: number;
-  id: string;
-  previous?: null | {
-    catch_up?: boolean;
-    factory_anchor: number;
-    rate: number;
-    real_anchor: number;
-    stop_at?: null | number;
-    [key: string]: unknown;
-  };
-  rate: number;
-  real_anchor: number;
-  revision: number;
-  run_id: string;
-  start_at?: null | number;
-  stop_at?: null | number;
-  [key: string]: unknown;
-};
-
-/** `_ClockProgress` — stream class `data`. */
-export type ClockProgress = {
-  observed_at: null | number;
-  processed_at: number;
-  ready: boolean;
-  run_id: string;
-  [key: string]: unknown;
-};
-
 /** `_Cmd` — stream class `cmd`. */
 export type Cmd = {
   command?: Record<string, unknown>;
@@ -274,7 +243,7 @@ export type Constant = {
   id: string;
   metadata?: Record<string, unknown>;
   name: string;
-  precision?: null | number;
+  precision?: number | null;
   semantic_type_id?: null | string;
   system_element_id?: null | string;
   unit?: null | string;
@@ -578,11 +547,12 @@ export type Signal = {
   is_autobound?: boolean;
   is_logged?: boolean;
   is_published?: boolean;
+  keeps_statistics?: boolean;
   max_value?: null | number;
   metadata?: Record<string, unknown>;
   min_value?: null | number;
   name: string;
-  precision?: null | number;
+  precision?: number | null;
   replication_policy?: "replicate_to_parents" | "source_local_only";
   semantic_type_id?: null | string;
   system_element_id?: null | string;
@@ -615,8 +585,6 @@ export const CONTRACTS = {
   "_Annotation": { class: "annotation", tombstone: false },
   "_AnnotationType": { class: "definition", tombstone: true },
   "_AuditEvent": { class: "audit", tombstone: false },
-  "_ClockDefinition": { class: "definition", tombstone: true },
-  "_ClockProgress": { class: "data", tombstone: true },
   "_Cmd": { class: "cmd", tombstone: false },
   "_CmdAcknowledge": { class: "cmd", tombstone: false },
   "_CmdAdmin": { class: "cmd", tombstone: false },
@@ -660,8 +628,6 @@ export interface PayloadByContract {
   "_Annotation": Annotation;
   "_AnnotationType": AnnotationType;
   "_AuditEvent": AuditEvent;
-  "_ClockDefinition": ClockDefinition;
-  "_ClockProgress": ClockProgress;
   "_Cmd": Cmd;
   "_CmdAcknowledge": CmdAcknowledge;
   "_CmdAdmin": CmdAdmin;

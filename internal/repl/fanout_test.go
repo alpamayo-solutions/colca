@@ -62,7 +62,7 @@ type pollResult struct {
 // openPoll makes first contact and opens a long poll at the parent's head.
 func openPoll(ctx context.Context, t *testing.T, c *Client) (after uint64, done <-chan pollResult) {
 	t.Helper()
-	hello, err := c.hello(ctx, 1)
+	hello, err := c.hello(ctx, greeting{})
 	if err != nil {
 		t.Fatalf("hello: %v", err)
 	}

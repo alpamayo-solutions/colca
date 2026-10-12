@@ -97,7 +97,13 @@ func NewPruner(st *store.Store, eng *engine.Engine, cfg config.Retention, m *met
 // Run runs one prune cycle every EffectiveInterval until stop is closed; an
 // interval of 0 disables the pruner and Run returns at once. A running cycle
 // always completes before Run returns. Before the first cycle, Run finishes any
-// state refresh a previous process left pending.
+// state refresh a previous process left pending and makes one policy pass per
+// stream.
+//
+// That first pass keeps a node that restarts more often than the interval from
+// never pruning: a parent restarted every two to three minutes for a day never
+// reached a 5 minute cycle, and its metrics piled up past their max_age. It is one capped pass, not a cycle: a restart
+// does not start the cycle's catch-up loop while the node is still recovering.
 func (p *Pruner) Run(stop <-chan struct{}) {
 	interval := p.cfg.EffectiveInterval()
 	if interval <= 0 {
@@ -105,6 +111,14 @@ func (p *Pruner) Run(stop <-chan struct{}) {
 		return
 	}
 	p.completePendingRefresh()
+	for _, stream := range streams {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		p.pruneStream(stream)
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -237,11 +251,13 @@ func (p *Pruner) pruneStream(stream string) (again bool) {
 	// The policy scan stops at the protected floor and after scanCap records, so it
 	// cannot prune past a live cursor. If the scan cap stops it, newLWM is still a
 	// safe floor and runOnce repeats the pass while its time budget lasts.
-	newLWM, clamped, capped, scanErr := p.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, p.scanCap)
+	// Prune takes what the scan read of the doomed prefix, so it is decoded once.
+	scan, clamped, capped, scanErr := p.st.PolicyPruneScan(stream, lwm, next, now, maxAge, maxBytes, liveBytes, clamp, p.scanCap)
 	if scanErr != nil {
 		p.log.Error("retention policy scan failed", "stream", stream, "err", scanErr)
 		return false
 	}
+	newLWM := scan.UpTo()
 	if clamped {
 		p.log.Warn("retention policy cursor-clamped: policy wants to prune further but a live cursor forbids it",
 			"stream", stream, "cursor", blocking, "clamp", clamp, "lwm", lwm)
@@ -336,7 +352,7 @@ func (p *Pruner) pruneStream(stream string) (again bool) {
 		p.beforePrune(stream)
 	}
 	// One atomic, synced batch; the store rechecks cursors against names.
-	removed, err := p.st.Prune(stream, newLWM, names, plan)
+	removed, err := p.st.PruneScanned(scan, names, plan)
 	if err != nil {
 		p.log.Error("prune failed", "stream", stream, "up_to", newLWM, "err", err)
 		return false
@@ -535,7 +551,7 @@ func (p *Pruner) droppedCommands(stream string, overridden []overriddenCursor, u
 		}
 		message := "dropped: retention pruned it before " + who + " received it"
 		for from := c.pos; from < upTo; {
-			recs, next, err := p.st.ReadRecordsBounded(context.Background(), stream, from, 500, int(min(upTo-from, uint64(droppedScanBatch))), queued)
+			recs, next, err := p.st.ReadRecordsBounded(context.Background(), stream, from, 500, int(min(upTo-from, uint64(droppedScanBatch))), 0, queued)
 			if err != nil {
 				p.log.Error("retention: queued commands about to be pruned could not be read; their senders will not be answered",
 					"cursor", c.name, "err", err)

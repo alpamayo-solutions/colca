@@ -13,7 +13,15 @@ import (
 func (e *Engine) observeIndexes(contract, topic string, payload []byte) {
 	e.elements.Observe(contract, topic, payload)
 	e.catalogues.Observe(contract, topic, payload)
+	if contract == groupContract {
+		if fn := e.onGroups.Load(); fn != nil {
+			(*fn)()
+		}
+	}
 }
+
+// groupContract holds the group definitions human tokens resolve against.
+const groupContract = "_Group"
 
 // boundTag returns the data tag the signal at a _Metric's path is bound to,
 // or "" when there is no signal there or the signal is bound to nothing.

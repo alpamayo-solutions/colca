@@ -65,8 +65,10 @@ from colca_data_contracts.machine_state import (
 )
 from colca_data_contracts.observability import container_resource_health_metrics
 from colca_data_contracts.payload import (
+    PRECISION,
     ULID,
     ULID_PATTERN,
+    UNIX_SECONDS,
     ActorKind,
     AlarmNotificationConfigSnapshot,
     AlarmNotificationSummary,
@@ -80,14 +82,17 @@ from colca_data_contracts.payload import (
     AuditOutcome,
     AuditSource,
     BindIntent,
+    Bounds,
     CmdEdit,
     CommandRoute,
     ConstantDataType,
     CustomEncoder,
     DataTag,
     DataTags,
+    FieldLimit,
     HealthMetricDeclaration,
     HealthMetricVisualization,
+    MaxLength,
     Metric,
     NetworkInterface,
     NetworkInterfaceType,
@@ -104,6 +109,7 @@ from colca_data_contracts.payload import (
     ServiceType,
     SignalDataType,
     derive_annotation_id,
+    field_limits,
 )
 from colca_data_contracts.payload import (
     Annotation as AnnotationPayload,
@@ -185,6 +191,12 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "Pattern",
     "ULID",
     "ULID_PATTERN",
+    "MaxLength",
+    "Bounds",
+    "FieldLimit",
+    "field_limits",
+    "PRECISION",
+    "UNIX_SECONDS",
     # Extended base types
     "ServiceType",
     "AuditSource",

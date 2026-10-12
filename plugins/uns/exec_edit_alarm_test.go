@@ -124,6 +124,7 @@ type enrolledScope struct {
 }
 
 func (s enrolledScope) Reaches(elementID string) bool { return elementID != "" && elementID == s.own }
+func (s enrolledScope) Binds(elementID string) bool   { return elementID != "" && elementID == s.own }
 
 func applyIntent(t *testing.T, op string, snapshot map[string]any, extra map[string]any) []byte {
 	t.Helper()

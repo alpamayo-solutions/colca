@@ -156,13 +156,12 @@ func TestRuntimeTelemetryDoesNotAppendRegistration(t *testing.T) {
 	before := n.Store.NextOffset("entities")
 	a.Report(true, "")
 	a.Report(false, "database unreachable")
-	a.ReportProgress(map[string]any{"run_id": "run", "processed_at": 1000.0, "ready": true, "observed_at": 10000.0})
 	if after := n.Store.NextOffset("entities"); after != before {
 		t.Fatalf("runtime telemetry appended entities: %d -> %d", before, after)
 	}
 	var output strings.Builder
 	a.WriteMetrics(&output)
-	if !strings.Contains(output.String(), "colca_service_healthy{service=\"historian\"} 0") || !strings.Contains(output.String(), "colca_application_processed_timestamp_seconds{service=\"historian\"} 1000") {
+	if !strings.Contains(output.String(), "colca_service_healthy{service=\"historian\"} 0") {
 		t.Fatal(output.String())
 	}
 }
@@ -245,21 +244,21 @@ func (w *blockingMetricsWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestSlowMetricsReaderDoesNotBlockClockProgress(t *testing.T) {
+func TestSlowMetricsReaderDoesNotBlockHealthReports(t *testing.T) {
 	a := &Announcer{}
 	w := &blockingMetricsWriter{entered: make(chan struct{}), release: make(chan struct{})}
 	done := make(chan struct{})
 	go func() { a.WriteMetrics(w); close(done) }()
 	defer func() { close(w.release); <-done }()
 	<-w.entered
-	progressDone := make(chan struct{})
+	reported := make(chan struct{})
 	go func() {
-		a.ReportProgress(map[string]any{"processed_at": 1000.0, "ready": true})
-		close(progressDone)
+		a.Report(false, "database unreachable")
+		close(reported)
 	}()
 	select {
-	case <-progressDone:
+	case <-reported:
 	case <-time.After(time.Second):
-		t.Fatal("slow metrics response blocked functional clock progress")
+		t.Fatal("slow metrics response blocked a health report")
 	}
 }

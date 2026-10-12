@@ -66,6 +66,78 @@ connection. It needs no open port and no VPN, only a route to the parent.
 While the parent is unreachable the child's cursors simply do not move. That
 is the whole offline buffer.
 
+### Store incarnations
+
+A child remembers offsets of its parent's store: how far it read commands and
+definitions, and for each of its own streams the highest offset the parent
+confirmed. A parent remembers offsets of each child's store: the highest one
+it applied per stream. These positions are only valid for the history they
+were read from. A store restored from a backup hands out offsets it handed out
+before, for other records, and stands behind positions its neighbours hold.
+
+So every store has an **incarnation id**: 32 hex characters, minted when the
+store is created and again whenever its history may have regressed. It is the
+`store` that `GET /fetch` returns and `/healthz` shows. Nodes exchange it on
+the replication link, and a node that meets another incarnation than the one
+it recorded re-syncs instead of continuing from its old positions.
+
+A restored volume carries the id it was copied with, so the id alone does not
+reveal a restore. The positions do. Two things are checked on every contact:
+
+| Signal | Where | What it proves |
+|---|---|---|
+| The child states the parent incarnation it recorded | every poll, every push, every hello | another id: the parent's store was replaced, wiped, or given a new incarnation |
+| The child states how far it read commands and definitions, and what the parent confirmed per stream | hello after every (re)connect; the confirmed offset also on every push | a position the parent's store has not reached: this incarnation regressed |
+| The parent answers with the highest offset it holds per stream of the child | hello, every push | an offset the child's store has not handed out yet: the child's own store regressed |
+
+A stream's head never moves back and a confirmed offset only follows what was
+stored, so on a store that kept its history none of the last two can be true.
+When one is, the regressed store takes a new incarnation id itself, once, and
+records why. From then on the first signal tells every other neighbour. Only a
+store that was opened with the id it already had can be a restored copy; an id
+minted since the node started names a history that only grew, and a neighbour
+that claims to be ahead of it re-syncs alone without changing the id.
+
+What each side does:
+
+| | Parent | Child |
+|---|---|---|
+| Same incarnation, nothing ahead | answers as usual | continues |
+| Child knows another incarnation | refuses polls and pushes with `409` and its id, answers hello | re-syncs |
+| Child is ahead of the incarnation it names | takes a new incarnation, then as above | re-syncs |
+| Child never recorded an incarnation | answers; tells the child to re-sync if it is ahead | records the id; re-syncs if told |
+| Child's colca predates the check | answers as before; reports a child that is ahead (`colca_repl_child_ahead_of_store_total`) | nothing |
+| Parent's colca predates the check | nothing | continues as before; reports a commands position past the parent's head (`colca_downlink_cursor_beyond_head_total`) |
+
+A **re-sync** is one hello and one write on the child:
+
+- The commands and definitions positions move to where the parent's store last
+  saw the child ask from. That can be behind where the child stood. A command
+  the child already holds is recognised by its topic, payload and timestamp
+  and is not stored or executed again, at whatever offset it arrives; a command
+  that reuses an old offset is new and is executed. A definition the child holds
+  byte for byte is not stored again.
+- Each uplink cursor moves back to just past the highest offset the parent
+  holds of that stream, as far as the child's retention still has it. The
+  child then sends that range again through the ordinary uplink, priority lanes
+  first. The parent drops what it already holds, by the same high-water mark
+  that makes a repeated push harmless.
+- A range the parent lacks and the child has already pruned cannot be sent
+  again. It is logged, counted and stays listed on the child's `/healthz`.
+
+A push that was on its way while the re-sync happened names the old
+incarnation and is refused, so it cannot move the parent's mark past the range
+that is about to be sent again.
+
+A node whose own store regressed takes a new incarnation as soon as its parent
+proves it. Its parent then clears the marks it kept for the old incarnation,
+instead of dropping, as already stored, the records the node writes at the
+offsets it hands out a second time. Local consumers see the change as
+`store_changed` on `/ack`.
+
+[Restoring a parent from a backup](operations.md#restoring-a-parent-from-a-backup)
+says what this recovers and what it does not.
+
 ## Commands
 
 A command is a record in the `commands` stream, written at any ancestor of
@@ -165,6 +237,42 @@ Some commands are executed by the node itself rather than a machine:
 | `_CmdConfigure` | author the namespace: elements, signals, constants, resources, definitions |
 | `_CmdEdit` | apply an atomic, versioned edit composed by an editor application |
 | `_CmdAdmin` | enroll or revoke an identity on a node that is only reachable through the tree, decide the enrollment requests and pre-approvals it holds (`approve`, `reject`, `block`, `unblock`, `preapprove`, `unpreapprove`, `request-key-change`), or read a node's own logs (`fetchLogs`) |
+
+### Creating at a node's root
+
+A node is bound to an element its parent authored, so it holds no record for
+that element, yet everything it authors at its root sits directly below it. A
+`_CmdEdit` create whose `parent_id` is the element the node is bound to creates
+the entity at the node's root: an element names no `parent_id`, like every root
+the node authors, and a signal or constant stands on the bound element. The
+bound element's version is the parent's to check, so a version sent for it in
+`expected_versions` is not compared. Any other parent must be an element the
+node holds. A `_CmdEdit` placement onto the bound element works the same way:
+the entity becomes one of the node's roots.
+
+The other side of the same rule: below the element a child node is attached
+at, every position is the child's. Neither `_CmdEdit` nor `_CmdConfigure` at
+the parent writes an element, signal or constant record there, nor a resource
+on an element there. This holds for every `_CmdConfigure` verb that writes a
+positioned record (`element/upsert`, `element/author`, `signal/upsert`,
+`signal/autobind`, `constant/upsert`, `resource/upsert`) and for the autobind
+of a newly seen connector. The command is refused as a whole and nothing is
+written. A create answers `422 foreign_position: …`, a move `422
+cross_node_move: …` (a `_CmdEdit` placement, or an upsert naming an entity the
+node holds elsewhere), and the message names the position, the element the
+child is attached at and the child node:
+
+```text
+foreign_position: beans/roaster would stand below beans, where node 01J… is attached; records there are written by that node, not by this one
+```
+
+To write there, address the command to the child node. The mount element
+itself is the parent's record: the parent renames it, and a resource on it is
+the parent's. Retiring a record that already stands below a mount (a move
+out, a delete verb) is allowed, so one written before this rule can still be
+cleaned up. Definitions and inventory entities have no position and are not
+affected. An entity does not change owner by moving: to put it under another
+node, delete it and create it there.
 
 ### Binding a signal to a tag
 

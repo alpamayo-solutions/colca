@@ -226,7 +226,7 @@ func TestDepthLimitedScan(t *testing.T) {
 		var out []string
 		after := ""
 		for {
-			entries, next, err := s.KVScanPageDepth(prefix, after, 1, contracts, depth)
+			entries, next, err := s.KVScanPageDepth(prefix, after, 1, 0, contracts, depth)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -304,7 +304,7 @@ func TestLevelScanNamesFolders(t *testing.T) {
 		var entries, folders []string
 		after := ""
 		for {
-			page, fs, next, err := s.KVScanLevel(prefix, after, limit, contracts, depth)
+			page, fs, next, err := s.KVScanLevel(prefix, after, limit, 0, contracts, depth)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -333,7 +333,7 @@ func TestLevelScanNamesFolders(t *testing.T) {
 	if entries, folders := level("plant/", 1, 1, "_Signal"); entries != "[plant/l3]" || folders != "[plant/l1 plant/l2 plant/l30]" {
 		t.Errorf("contract: entries %s folders %s", entries, folders)
 	}
-	if _, _, _, err := s.KVScanLevel("plant/", "", 10, nil, 0); err == nil {
+	if _, _, _, err := s.KVScanLevel("plant/", "", 10, 0, nil, 0); err == nil {
 		t.Error("depth 0 must be refused")
 	}
 }

@@ -52,6 +52,7 @@ func (h *colcaHook) OnAuthPacket(cl *mqtt.Client, pk packets.Packet) (packets.Pa
 	if !ok {
 		return pk, packets.ErrNotAuthorized
 	}
+	gen := h.groups.current()
 	v, reason, err := h.ver.VerifyForScope(string(pk.Properties.AuthenticationData), uns.ScopeBrokerMQTT)
 	if err != nil {
 		h.log.Warn("human re-authentication rejected", "sub", current.sub, "reason", reason, "err", err)
@@ -65,7 +66,7 @@ func (h *colcaHook) OnAuthPacket(cl *mqtt.Client, pk packets.Packet) (packets.Pa
 		h.auditDenied("reauthenticate", metrics.AuthSubjectChanged, metrics.DoorMQTT, v.Entry, nil)
 		return pk, packets.ErrNotAuthorized
 	}
-	h.humans.put(cl.ID, sessionFor(cl, v))
+	h.humans.put(cl.ID, sessionFor(cl, v, gen))
 	if h.ver.LoggedOut(v) {
 		// A logout that ran between the check and the put; see authenticateHuman.
 		h.humans.put(cl.ID, current)

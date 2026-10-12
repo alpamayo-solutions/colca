@@ -108,7 +108,7 @@ func TestReadRecordsBoundedStopsAtTheScanBudgetAndStillReachesTheMatch(t *testin
 	}
 	wanted := func(r StoredRecord) bool { return r.SignalID == "wanted" }
 
-	got, next, err := s.ReadRecordsBounded(context.Background(), "metrics", 1, 10, 1000, wanted)
+	got, next, err := s.ReadRecordsBounded(context.Background(), "metrics", 1, 10, 1000, 0, wanted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestReadRecordsBoundedStopsAtTheScanBudgetAndStillReachesTheMatch(t *testin
 	}
 	pages := 1
 	for len(got) == 0 {
-		if got, next, err = s.ReadRecordsBounded(context.Background(), "metrics", next, 10, 1000, wanted); err != nil {
+		if got, next, err = s.ReadRecordsBounded(context.Background(), "metrics", next, 10, 1000, 0, wanted); err != nil {
 			t.Fatal(err)
 		}
 		pages++
@@ -137,12 +137,12 @@ func TestReadRecordsBoundedEndsWithItsContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	none := func(StoredRecord) bool { return false }
-	if _, next, err := s.ReadRecordsBounded(context.Background(), "metrics", 1, 10, 0, none); err != nil || next != 3001 {
+	if _, next, err := s.ReadRecordsBounded(context.Background(), "metrics", 1, 10, 0, 0, none); err != nil || next != 3001 {
 		t.Fatalf("live context: next=%d err=%v, want the whole stream scanned", next, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := s.ReadRecordsBounded(ctx, "metrics", 1, 10, 0, none); !errors.Is(err, context.Canceled) {
+	if _, _, err := s.ReadRecordsBounded(ctx, "metrics", 1, 10, 0, 0, none); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled context: err=%v, want context.Canceled", err)
 	}
 }
@@ -255,6 +255,7 @@ func TestDurabilityAcrossReopen(t *testing.T) {
 		Topic: "a", Payload: []byte("1"), TS: 1,
 		WrittenBy: "svc-connector", ActorID: "user-anna",
 		ActorLabel: "anna@example.com", ActorKind: "human", ActorGroups: []string{"operators", "maintainers"},
+		ActorClient: "erp-bridge",
 	}}); err != nil {
 		t.Fatalf("append before reopen: %v", err)
 	}
@@ -274,7 +275,8 @@ func TestDurabilityAcrossReopen(t *testing.T) {
 	got, _, err := s2.Read("metrics", 1, 1, nil)
 	if err != nil || len(got) != 1 || got[0].WrittenBy != "svc-connector" ||
 		got[0].ActorID != "user-anna" || got[0].ActorLabel != "anna@example.com" || got[0].ActorKind != "human" ||
-		len(got[0].ActorGroups) != 2 || got[0].ActorGroups[0] != "operators" || got[0].ActorGroups[1] != "maintainers" {
+		len(got[0].ActorGroups) != 2 || got[0].ActorGroups[0] != "operators" || got[0].ActorGroups[1] != "maintainers" ||
+		got[0].ActorClient != "erp-bridge" {
 		t.Fatalf("attribution not durable across reopen: %+v, %v", got, err)
 	}
 }

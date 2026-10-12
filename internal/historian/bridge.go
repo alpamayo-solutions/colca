@@ -54,16 +54,11 @@ type Bridge struct {
 	Store Store
 	Log   *slog.Logger
 
-	Max            int
-	Strict         bool
-	Drained        bool
-	Acknowledged   int64
-	NowMS          int64
-	FetchedAt      time.Time
-	Coordinate     func(context.Context) (bool, error)
-	WaitCoordinate func(context.Context)
-	Changes        func() <-chan struct{}
-	BatchInterval  time.Duration
+	Max           int
+	Drained       bool
+	Acknowledged  int64
+	Changes       func() <-chan struct{}
+	BatchInterval time.Duration
 
 	// Health, when set, hears after every pass whether it succeeded and, when
 	// not, why. It is called on every pass; the receiver decides what changed.
@@ -240,10 +235,6 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 		return max(fetched, 1), 0, nil
 	}
 	b.next = page.Next
-	b.NowMS, b.FetchedAt = page.NowMS, time.Now()
-	if b.Strict && page.Gap != nil {
-		return fetched, 0, fmt.Errorf("coordinated history has a stream gap")
-	}
 	if fetched == 0 {
 		b.Drained = true
 		b.Acknowledged = page.Next - 1
@@ -341,16 +332,10 @@ func (b *Bridge) pass(ctx context.Context) (fetched, written int, err error) {
 	for _, rej := range rejections {
 		b.reject(rej)
 	}
-	if b.Strict && len(rejections) > 0 {
-		return fetched, 0, fmt.Errorf("coordinated history refused %d rows", len(rejections))
-	}
 	// The marker moved past any rejected rows, so ack too, or the page would be
 	// fetched forever.
 	b.ackOwed = false
 	if _, err := b.Door.AckStore(ctx, "metrics", Cursor, last, page.Store); err != nil {
-		if b.Strict {
-			return fetched, 0, err
-		}
 		b.ackOwed = !errors.Is(err, door.ErrStoreChanged)
 		// The rows are durable; the next pass re-reads and the marker skips them.
 		b.logger().Warn("applied but could not ack", "offset", last, "err", err)
@@ -370,9 +355,6 @@ func (b *Bridge) rowsOf(page door.Page, applied int64) ([]Row, error) {
 			continue // already durable: a replay after a crash between commit and ack
 		}
 		if strings.Contains(record.Topic, gapContract) {
-			if b.Strict {
-				return nil, fmt.Errorf("coordinated history has a stream gap")
-			}
 			b.gaps.Add(1)
 			b.logger().Error("metrics were pruned before this bridge read them",
 				"offset", record.Offset,
@@ -384,9 +366,6 @@ func (b *Bridge) rowsOf(page door.Page, applied int64) ([]Row, error) {
 		if err != nil {
 			if errors.Is(err, ErrNotAMeasurement) {
 				continue // a tombstone: nothing to historise
-			}
-			if b.Strict {
-				return nil, err
 			}
 			// One bad record must not wedge the stream forever, but it must not
 			// vanish either.
@@ -493,9 +472,6 @@ func truncateForLog(s string, limit int) string {
 // Run drains all available pages, then waits for a stream hint. Backpressure
 // batches drain starts; a short page never delays the rest of the queue.
 func (b *Bridge) Run(ctx context.Context) error {
-	if b.Coordinate != nil {
-		return b.runCoordinated(ctx)
-	}
 	if b.Changes == nil {
 		return fmt.Errorf("historian requires a stream subscription")
 	}
@@ -594,35 +570,4 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
-}
-
-// Coordinated acquisition has a known upstream completion marker. Fetch only
-// after that marker, instead of polling empty metrics between windows. This
-// leaves the fetch budget for durable drains (including their final empty read).
-func (b *Bridge) runCoordinated(ctx context.Context) error {
-	if b.WaitCoordinate == nil {
-		return fmt.Errorf("coordinated historian requires commit wakeups")
-	}
-	retry := time.Second
-	for ctx.Err() == nil {
-		_, err := b.Coordinate(ctx)
-		if b.Health != nil {
-			if err != nil {
-				b.Health(false, err.Error())
-			} else {
-				b.Health(true, "")
-			}
-		}
-		if err != nil {
-			b.logger().Error("coordinated historian failed, retrying", "err", err)
-			if !sleep(ctx, door.RetryDelay(err, retry)) {
-				return ctx.Err()
-			}
-			retry = min(30*time.Second, retry*2)
-			continue
-		}
-		retry = time.Second
-		b.WaitCoordinate(ctx)
-	}
-	return ctx.Err()
 }
