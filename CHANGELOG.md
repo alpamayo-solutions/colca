@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.35.0](https://github.com/alpamayo-solutions/colca/compare/v0.34.0...v0.35.0) (2026-10-12)
+
+
+### Features
+
+* **repl:** children re-sync with a parent restored from a backup ([#203](https://github.com/alpamayo-solutions/colca/issues/203)) ([23f2264](https://github.com/alpamayo-solutions/colca/commit/23f226416df447b7706fe6eaa512d15bcf07d5c5))
+
+
+### Fixes
+
+* **audit:** record a person by subject with their name as a hint, and never authorize by the name ([#200](https://github.com/alpamayo-solutions/colca/issues/200)) ([c1f8d70](https://github.com/alpamayo-solutions/colca/commit/c1f8d7012eac4b455c1c26ca4f21ca60db70c188))
+* **uns:** refuse configure writes below a child node's mount ([#202](https://github.com/alpamayo-solutions/colca/issues/202)) ([e0b656c](https://github.com/alpamayo-solutions/colca/commit/e0b656cdb2d77767f9d0adcacceebaf3c472828e))
+
 ## [0.34.0](https://github.com/alpamayo-solutions/colca/compare/v0.33.4...v0.34.0) (2026-10-12)
 
 
