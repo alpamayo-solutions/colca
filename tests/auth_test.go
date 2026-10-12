@@ -202,8 +202,23 @@ func TestEnrolledIdentityRejectedAtEveryOrdinaryDoor(t *testing.T) {
 	m1 := machine(t, tp.edge1.MQTTAddr, tp.m1)
 	m1.Publish("colca/v1/_EnrolledIdentity/m1/_colca/identities/m1", 1, false, `{"ulid":"m1"}`).WaitTimeout(time.Second)
 	time.Sleep(500 * time.Millisecond)
-	if got := tp.edge1.Store.NextOffset("entities"); got != entitiesBefore {
-		t.Fatalf("_EnrolledIdentity via MQTT persisted: entities %d → %d", entitiesBefore, got)
+	// The node rewrites its own _Node record once it learns its position, so
+	// the stream may grow; what must not appear is an identity.
+	enrolledSince := func() []string {
+		recs, _, err := tp.edge1.Store.Read("entities", entitiesBefore, 100, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found []string
+		for _, r := range recs {
+			if strings.Contains(r.Topic, "/_EnrolledIdentity/") {
+				found = append(found, r.Topic)
+			}
+		}
+		return found
+	}
+	if got := enrolledSince(); len(got) != 0 {
+		t.Fatalf("_EnrolledIdentity via MQTT persisted: %v", got)
 	}
 
 	// Admin /publish.
@@ -212,8 +227,8 @@ func TestEnrolledIdentityRejectedAtEveryOrdinaryDoor(t *testing.T) {
 	if code != 422 {
 		t.Fatalf("_EnrolledIdentity via admin /publish: want 422, got %d", code)
 	}
-	if got := tp.edge1.Store.NextOffset("entities"); got != entitiesBefore {
-		t.Fatal("_EnrolledIdentity via admin /publish persisted")
+	if got := enrolledSince(); len(got) != 0 {
+		t.Fatalf("_EnrolledIdentity via admin /publish persisted: %v", got)
 	}
 }
 
