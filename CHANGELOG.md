@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.4](https://github.com/alpamayo-solutions/colca/compare/v0.33.3...v0.33.4) (2026-10-12)
+
+
+### Fixes
+
+* **httpapi:** reject /fetch max outside 1..5000 with 400 ([#196](https://github.com/alpamayo-solutions/colca/issues/196)) ([acfdd61](https://github.com/alpamayo-solutions/colca/commit/acfdd6150a8ec0bcc4fa827644b38a3f1a9187a9))
+
 ## [0.33.3](https://github.com/alpamayo-solutions/colca/compare/v0.33.2...v0.33.3) (2026-10-11)
 
 
