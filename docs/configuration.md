@@ -333,14 +333,11 @@ timestamp (see [Topics](topics.md#log-records)).
 
 ## Time
 
-Nodes share one clock: the root's. Each node learns its offset over the
-replication link and tells its machines on `<root>/v1/_TimeSync/<node>`.
-
-| Key | Default | Meaning |
-|---|---|---|
-| `time_sync.beacon_interval` | `30s` | How often the node publishes its time beacon. |
-| `time_sync.hold_ms` | `10000` | Clock difference above which a machine holds commands. |
-| `time_sync.drift_warn_ms` | `5000` | Clock difference above which a warning is logged. |
+A node has one time: its host's wall clock. Colca reads it and never corrects
+it, so there is nothing to configure here. Keep the clock right with an NTP
+daemon on the host (chrony, ntpd or systemd-timesyncd), and let the machines on
+a node's network follow the same source or the node's host. The node reports
+how good its clock is; see [Clocks](operations.md#clocks).
 
 ## Commands
 

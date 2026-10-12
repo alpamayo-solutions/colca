@@ -408,30 +408,6 @@ func TestAuthorizeSub(t *testing.T) {
 	}
 }
 
-// Every authenticated machine session may subscribe to the beacon filter,
-// even an element-less observer with no grants.
-func TestAuthorizeSubTimeSyncBypassesZoneGrants(t *testing.T) {
-	cases := []struct {
-		name   string
-		e      *Entry
-		filter string
-		want   bool
-	}{
-		{"zone-scoped machine, canonical filter", entry("werk1/linie3"), "colca/v1/_TimeSync/+", true},
-		{"unplaced machine with zero grants", entry(""), "colca/v1/_TimeSync/+", true},
-		{"concrete node ulid, no wildcard", entry("werk1/linie3"), "colca/v1/_TimeSync/n-edge1", true},
-		{"bare contract, no trailing segment", entry(""), "colca/v1/_TimeSync", true},
-		{"broad colca/# wildcard is judged normally, not bypassed", entry("werk1/linie3"), "colca/#", false},
-		{"broad colca/# wildcard WITH read:# still allowed (normal rule, not the bypass)", entry("", "read:#"), "colca/#", true},
-		{"different contract at the same position is not the bypass", entry("werk1/linie3"), "colca/v1/_Metric/+", false},
-	}
-	for _, c := range cases {
-		if got := Authorize(ns, c.e, ActSub, c.filter); got != c.want {
-			t.Errorf("%s: Authorize(Sub, %q) = %v, want %v", c.name, c.filter, got, c.want)
-		}
-	}
-}
-
 func TestAuthorizeCmd(t *testing.T) {
 	withGrant := entry("hmi", cmdAt("werk1/linie3", "param,operate"))
 	cases := []struct {
@@ -836,14 +812,16 @@ func TestAuthorizeSubRefusesTheReservedDollarSpace(t *testing.T) {
 		{"machine: shared sub over its OWN zone", zoned, "$share/g/colca/v1/+/+/werk1/linie3/#", false},
 		{"machine: broker internals", zoned, "$SYS/#", false},
 		{"machine: shared sub with read:# is still refused", readAll, "$share/g/colca/#", false},
-		{"machine: shared sub naming the time-sync beacon", zoned, "$share/g/colca/v1/_TimeSync/+", false},
 		{"human: shared sub over everything", human, "$share/g/colca/#", false},
 		{"human: shared sub over its own zone", human, "$share/g/colca/v1/+/+/werk1/linie3/#", false},
 
 		{"machine: everything, unaliased, is denied by zone", zoned, "colca/#", false},
+		// The beacon filter of an older machine has no exception any more: it names
+		// no path, so only an identity that may read everything is granted it.
+		{"machine: the retired time beacon filter is denied by zone", zoned, "colca/v1/_TimeSync/+", false},
+		{"machine: the retired time beacon filter, with read:#", readAll, "colca/v1/_TimeSync/+", true},
 		{"machine: own zone, unaliased, is granted", zoned, "colca/v1/+/+/werk1/linie3/#", true},
 		{"machine: everything, unaliased, with read:#", readAll, "colca/#", true},
-		{"machine: the beacon itself, unaliased, is granted", zoned, "colca/v1/_TimeSync/+", true},
 		{"human: own zone, unaliased, is granted", human, "colca/v1/+/+/werk1/linie3/#", true},
 	}
 	for _, c := range cases {

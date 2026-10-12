@@ -726,17 +726,16 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("fetch: %d %s", resp.StatusCode, body)
 	}
-	// The broker clock is live metadata; the stream/gap shape stays stable.
-	withoutClock := func(body string) string {
+	// The store id differs per run; the stream/gap shape stays stable. A page
+	// carries no clock: a consumer reads its own.
+	withoutStore := func(body string) string {
 		var envelope map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(body), &envelope); err != nil {
 			t.Fatal(err)
 		}
-		var nowMS int64
-		if err := json.Unmarshal(envelope["now_ms"], &nowMS); err != nil || nowMS <= 0 {
-			t.Fatalf("missing authoritative clock: %s", body)
+		if _, present := envelope["now_ms"]; present {
+			t.Fatalf("a /fetch page must not carry now_ms: %s", body)
 		}
-		delete(envelope, "now_ms")
 		var storeID string
 		if err := json.Unmarshal(envelope["store"], &storeID); err != nil || storeID != a.eng.Store().StoreID() {
 			t.Fatalf("missing store id: %s", body)
@@ -748,7 +747,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		}
 		return string(normalized) + "\n"
 	}
-	body = withoutClock(body)
+	body = withoutStore(body)
 	want := `{"from":2,"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
 		`"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
@@ -758,7 +757,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	// The gap is per-consumer and side-effect free: an identical second fetch
 	// sees the identical gap (no cursor movement).
 	_, body2 := raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
-	body2 = withoutClock(body2)
+	body2 = withoutStore(body2)
 	if body2 != want {
 		t.Fatalf("second fetch differs — /fetch must not move the cursor:\n%s", body2)
 	}
@@ -766,7 +765,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	// A cursor that was never acked starts at the LWM without a gap: a consumer
 	// added after retention ran missed nothing it was promised.
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh", "tok", "")
-	body = withoutClock(body)
+	body = withoutStore(body)
 	want = `{"from":4,"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fresh cursor must start at the LWM without a gap:\n got %s\nwant %s", body, want)
@@ -775,7 +774,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	// Its own read-ahead position below the LWM is a gap: it read up to there and
 	// the pruner overtook it before it acked.
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh&from=2", "tok", "")
-	body = withoutClock(body)
+	body = withoutStore(body)
 	want = `{"from":2,"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
 		`"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
@@ -789,7 +788,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 		t.Fatalf("ack past the LWM must move the cursor: %v", out)
 	}
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
-	body = withoutClock(body)
+	body = withoutStore(body)
 	want = `{"from":5,"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
 	if body != want {
 		t.Fatalf("after ack past LWM the gap object must disappear:\n got %s\nwant %s", body, want)

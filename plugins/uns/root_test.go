@@ -49,9 +49,6 @@ func TestSetRootMovesTheWholeNamespace(t *testing.T) {
 	if IsUns("colca/v1/_Metric/n1/line1/temp") {
 		t.Error("a topic under the default root is still part of the namespace after the root changed")
 	}
-	if got := TimeSyncTopic("n1"); got != "acme/v1/_TimeSync/n1" {
-		t.Errorf("TimeSyncTopic = %q, want acme/v1/_TimeSync/n1", got)
-	}
 	if got := SignalTopicForMetric(Parsed{NodeID: "n1", Path: "line1/temp"}); got != "acme/v1/_Signal/n1/line1/temp" {
 		t.Errorf("SignalTopicForMetric = %q, want acme/v1/_Signal/n1/line1/temp", got)
 	}
@@ -60,9 +57,6 @@ func TestSetRootMovesTheWholeNamespace(t *testing.T) {
 	}
 	if _, inNamespace := fixedPathPrefix("colca/#"); inNamespace {
 		t.Error("a subscription under the old root is still judged as namespace traffic")
-	}
-	if !isTimeSyncFilter("acme/v1/_TimeSync/+") || isTimeSyncFilter("colca/v1/_TimeSync/+") {
-		t.Error("the time-sync filter does not follow the root")
 	}
 }
 

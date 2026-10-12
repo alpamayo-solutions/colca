@@ -41,7 +41,6 @@ func FuzzGrantGrammar(f *testing.F) {
 func FuzzTopicAndPayloadGrammar(f *testing.F) {
 	f.Add("colca/v1/_Metric/node/path", []byte(`{"v":1}`))
 	f.Add("colca/v1/_CmdConfigure/node/path", []byte(`{"expires_at":1}`))
-	f.Add("colca/v1/_TimeSync/node", []byte(`{"offset_ms":0}`))
 	f.Add("", []byte{})
 
 	f.Fuzz(func(t *testing.T, topic string, payload []byte) {

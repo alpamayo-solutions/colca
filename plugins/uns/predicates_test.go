@@ -25,7 +25,7 @@ func TestDefinitionsAreStateButNotOwnedState(t *testing.T) {
 // Events are neither; retaining a command would replay stale instructions to
 // every new subscriber.
 func TestEventsAreNeitherStateNorOwnedState(t *testing.T) {
-	for _, c := range []Class{ClassCmd, ClassAck, ClassGap, ClassTimeSync, ClassAudit} {
+	for _, c := range []Class{ClassCmd, ClassAck, ClassGap, ClassAudit} {
 		if IsState(c) || IsOwnedState(c) {
 			t.Errorf("class %v is an event and must not be state", c)
 		}
@@ -38,7 +38,7 @@ func TestOnlyEntitiesNeedStateRefresh(t *testing.T) {
 	if !NeedsStateRefresh(ClassEntity) {
 		t.Error("entities are authored here and nothing re-supplies them — they must refresh")
 	}
-	for _, c := range []Class{ClassData, ClassDefinition, ClassCmd, ClassAck, ClassGap, ClassTimeSync, ClassAudit} {
+	for _, c := range []Class{ClassData, ClassDefinition, ClassCmd, ClassAck, ClassGap, ClassAudit} {
 		if NeedsStateRefresh(c) {
 			t.Errorf("class %v must not refresh: it is either re-supplied or meant to age out", c)
 		}
@@ -53,7 +53,7 @@ func TestOnlyEntitiesAndDefinitionsMayBeCommandAuthored(t *testing.T) {
 			t.Errorf("class %v is authored by a command and must be accepted by the atomic commit port", c)
 		}
 	}
-	for _, c := range []Class{ClassData, ClassCmd, ClassAck, ClassGap, ClassTimeSync, ClassAudit, ClassAlarm, ClassNone} {
+	for _, c := range []Class{ClassData, ClassCmd, ClassAck, ClassGap, ClassAudit, ClassAlarm, ClassNone} {
 		if IsCommandAuthoredState(c) {
 			t.Errorf("class %v must not enter a command's atomic state batch", c)
 		}
@@ -66,15 +66,15 @@ func TestOnlyClassNoneIsUnknown(t *testing.T) {
 	if IsKnown(ClassNone) {
 		t.Error("ClassNone is the unknown-contract answer and must not read as known")
 	}
-	for _, c := range []Class{ClassData, ClassEntity, ClassDefinition, ClassCmd, ClassAck, ClassGap, ClassTimeSync, ClassAudit} {
+	for _, c := range []Class{ClassData, ClassEntity, ClassDefinition, ClassCmd, ClassAck, ClassGap, ClassAudit} {
 		if !IsKnown(c) {
 			t.Errorf("class %v is a real class and must read as known", c)
 		}
 	}
 }
 
-// A bundle may declare wire contracts only. Gap markers and time beacons are
-// authored by the binary, so a bundle naming their class must fail to load.
+// A bundle may declare wire contracts only. Gap markers are authored by the
+// binary, so a bundle naming their class must fail to load.
 func TestManifestVocabularyExcludesBuiltinAuthoredClasses(t *testing.T) {
 	for name, want := range map[string]Class{
 		"data": ClassData, "entity": ClassEntity, "definition": ClassDefinition,
@@ -85,7 +85,7 @@ func TestManifestVocabularyExcludesBuiltinAuthoredClasses(t *testing.T) {
 			t.Errorf("manifest class %q: got (%v, %v), want (%v, true)", name, got, ok, want)
 		}
 	}
-	for _, name := range []string{"gap", "timesync", "time_sync", "none", ""} {
+	for _, name := range []string{"gap", "none", ""} {
 		if got, ok := ClassFromManifest(name); ok {
 			t.Errorf("manifest class %q must not map (got %v) — builtin-authored classes are not declarable", name, got)
 		}
@@ -143,7 +143,7 @@ func TestOnlyOwnedEventsAndStateFlowUp(t *testing.T) {
 			t.Errorf("class %v must flow upward", c)
 		}
 	}
-	for _, c := range []Class{ClassDefinition, ClassCmd, ClassTimeSync, ClassNone} {
+	for _, c := range []Class{ClassDefinition, ClassCmd, ClassNone} {
 		if FlowsUp(c) {
 			t.Errorf("class %v must not flow upward", c)
 		}

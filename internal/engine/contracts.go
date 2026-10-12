@@ -1,8 +1,8 @@
 // With a loaded bundle, the bundle answers class, tombstonability and schema for
 // every contract it carries, replacing the builtin floor rather than merging with
-// it. Without one, the floor in plugins/uns applies. _StreamGap,
-// _EnrolledIdentity and _TimeSync are always answered by the binary that produces
-// them; a bundle may not redeclare them.
+// it. Without one, the floor in plugins/uns applies. _StreamGap and
+// _EnrolledIdentity are always answered by the binary that produces them; a
+// bundle may not redeclare them.
 
 package engine
 
@@ -98,7 +98,7 @@ func (e *Engine) rejectDenied(reason string, actor Attribution, operation string
 	return Result{}, &RejectError{Reason: reason, Denied: true, Err: fmt.Errorf(format, args...)}
 }
 
-var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true, "_TimeSync": true}
+var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true}
 
 // SetContracts installs the loaded bundle table (node startup; nil = floor).
 func (e *Engine) SetContracts(t *contracts.Table) { e.contracts = t }

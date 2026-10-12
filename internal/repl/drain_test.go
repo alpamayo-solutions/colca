@@ -85,7 +85,7 @@ func TestDrainLifecycleDeliveredThenAutoRevoke(t *testing.T) {
 	}
 }
 
-// A child that never fetches still converges: once AuthoritativeNow passes
+// A child that never fetches still converges: once the node's clock passes
 // every queued command's expires_at, the drain completes with "expired".
 // clkNow is changed directly; nothing else runs concurrently.
 func TestDrainExpiryBoundedCompletion(t *testing.T) {
@@ -119,7 +119,7 @@ func TestDrainExpiryBoundedCompletion(t *testing.T) {
 		t.Fatalf(`colca_drain_pending_commands{child="n-child"} = %v, want 1 while the command is still live`, v)
 	}
 
-	// Advance authoritative time past expires_at and tick again.
+	// Advance the clock past expires_at and tick again.
 	clkNow = 2_000_000
 	srv.evaluateAllDrains()
 	if _, ok := preg.Get("n-child"); ok {

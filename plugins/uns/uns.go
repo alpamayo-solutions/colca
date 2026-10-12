@@ -36,7 +36,6 @@ const (
 	ClassCmd              // _Cmd*        write: ancestors/admin, flows down
 	ClassAck              // _Ack         write: owner, flows up
 	ClassGap              // _StreamGap: written by the pruner only; event, no KV, not retained
-	ClassTimeSync         // _TimeSync: published by the node itself; no stream, never persisted or retained
 	ClassAudit            // _AuditEvent  append-only security event, local/internal write, flows up
 	ClassAlarm            // _AlarmStateChange, _NotificationDispatched: events on their own stream, never behind metrics
 	ClassLog              // _Log: events on their own stream; logs are the loudest class and would crowd out samples
@@ -57,18 +56,12 @@ const MaxTopicBytes = 65535
 func IsUns(topic string) bool { return strings.HasPrefix(topic, Root()+"/") }
 
 // Parse decomposes a UNS topic. It requires at least 5 segments and a _Contract
-// at index 2. The one exception is _TimeSync, whose topic has no hierarchy path
-// (4 segments); it parses with an empty Path so the engine can reject it with
-// its own reason. The exception is tied to the contract, so MountInsert and
-// MountStrip never silently skip a short topic of another contract.
+// at index 2.
 func Parse(topic string) (Parsed, error) {
 	if len(topic) > MaxTopicBytes {
 		return Parsed{}, fmt.Errorf("uns grammar: topic is %d bytes, MQTT carries at most %d", len(topic), MaxTopicBytes)
 	}
 	seg := strings.Split(topic, "/")
-	if len(seg) == 4 && seg[2] == "_TimeSync" {
-		return Parsed{Prefix: seg[0], Version: seg[1], Contract: seg[2], NodeID: seg[3]}, nil
-	}
 	if len(seg) < 5 {
 		return Parsed{}, fmt.Errorf("uns grammar: need >=5 segments, got %d in %q", len(seg), topic)
 	}
@@ -127,8 +120,6 @@ func ClassOf(contract string) Class {
 		return ClassAck
 	case contract == "_StreamGap":
 		return ClassGap
-	case contract == "_TimeSync":
-		return ClassTimeSync
 	case contract == "_AuditEvent":
 		return ClassAudit
 	case strings.HasPrefix(contract, "_Cmd"):
@@ -176,11 +167,12 @@ func CommandDeadline(payload []byte) (int64, bool) {
 }
 
 // CommandStillLive reports whether a ClassCmd record may still execute at
-// authoritativeNowMS: it has no expires_at, or expires_at has not passed.
-// Move-drain completion and the undelivered-command signal both ask this.
-func CommandStillLive(payload []byte, authoritativeNowMS int64) bool {
+// nowMS, the deciding node's wall clock: it has no expires_at, or expires_at
+// has not passed. Move-drain completion and the undelivered-command signal both
+// ask this.
+func CommandStillLive(payload []byte, nowMS int64) bool {
 	deadline, ok := CommandDeadline(payload)
-	return !ok || deadline >= authoritativeNowMS
+	return !ok || deadline >= nowMS
 }
 
 // CommandWantsProgress reports whether the sender asked for progress
@@ -198,11 +190,6 @@ func CommandWantsProgress(payload []byte) bool {
 // IsAck reports whether a record answers a command. It belongs to whoever sent
 // the command: a person receives only the acks of their own commands.
 func IsAck(c Class) bool { return c == ClassAck }
-
-// IsNodeLocal reports whether only the node itself may produce a class. No
-// door accepts one; the beacon loop publishes it to the local bus, and it is
-// never stored or retained.
-func IsNodeLocal(c Class) bool { return c == ClassTimeSync }
 
 // IsOwnedState reports whether a class is state an identity authors under its
 // own mount: KV-projected at mount-rewritten paths and replicated up the tree.
@@ -394,8 +381,8 @@ func ValidateAuditTopic(p Parsed, payload []byte) error {
 func NeedsStateRefresh(c Class) bool { return c == ClassEntity }
 
 // manifestClasses maps a bundle manifest's class names to classes. It is data,
-// not a switch, so tests can enumerate it. ClassGap and ClassTimeSync have no
-// manifest name: the node authors them itself.
+// not a switch, so tests can enumerate it. ClassGap has no manifest name: the
+// node authors it itself.
 var manifestClasses = map[string]Class{
 	"data":       ClassData,
 	"entity":     ClassEntity,
@@ -448,17 +435,8 @@ func StreamFor(c Class) string {
 		return "logs"
 	case ClassGap:
 		return ""
-	case ClassTimeSync:
-		return "" // ephemeral: no stream, never persisted
 	}
 	return ""
-}
-
-// TimeSyncTopic builds the beacon topic {root}/v1/_TimeSync/{node-ulid}, the
-// only topic without a hierarchy path. nodeULID is the publishing node, never a
-// machine.
-func TimeSyncTopic(nodeULID string) string {
-	return Prefix() + "_TimeSync/" + nodeULID
 }
 
 // IsMetric reports whether contract is _Metric, so the core never compares the
@@ -712,10 +690,6 @@ func Validate(contract string, payload []byte) error {
 		// Data-model records name themselves by "id", which grants and
 		// bindings reference.
 		return reqStr("id")
-	case contract == "_TimeSync":
-		// Only direct callers reach this: the engine rejects _TimeSync by
-		// class first, and the node's own beacon bypasses Validate.
-		return reqNum("now_ms")
 	case contract == "_StreamGap":
 		if err := reqStr("stream"); err != nil {
 			return err

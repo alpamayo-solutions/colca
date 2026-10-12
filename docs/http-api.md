@@ -307,7 +307,22 @@ Over MQTT 5 at QoS 1 or higher, a refused publish is answered in the `PUBACK`:
 authorized, `0x89` node is draining. MQTT 3.1.1 has no reason codes; the
 publish is dropped and counted in `colca_rejected_publishes_total`.
 
-`/healthz` includes `clock`: `now_ms`, `is_root`, `offset_ms`, nullable `sync_age_seconds`, and `beacon_interval_seconds`. These describe the existing `_TimeSync` authority; a null age means an edge has never synchronized. Host NTP status is not inferred.
+### The clock in /healthz
+
+`/healthz` includes `clock`, what the node knows about its time:
+
+```json
+{"wall_now_ms": 1760272496123, "is_root": false,
+ "host": {"synchronized": true, "estimated_error_ms": 0.4},
+ "parent_skew_ms": -12, "parent_sample_age_s": 3.2}
+```
+
+`wall_now_ms` is the host's wall clock, the only time the node decides on.
+`host` is the kernel's verdict on that clock; both fields are `null` where it
+cannot be read. `parent_skew_ms` is the parent's clock minus this node's,
+measured on the latest replication response, and `parent_sample_age_s` its age;
+both are `null` on a root and until the parent has answered once. See
+[Clocks](operations.md#clocks).
 
 ### Local stream wakeups and backlog telemetry
 

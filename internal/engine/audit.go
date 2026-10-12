@@ -47,7 +47,7 @@ func (e *Engine) recordAuthorization(d AuditDenial, outcome string) error {
 	if d.ActorKind == "" {
 		d.ActorKind = "anonymous"
 	}
-	nowTime := e.clk.AuthoritativeNow()
+	nowTime := e.Now()
 	eventID := e.auditID(nowTime)
 	now := nowTime.UnixMilli()
 	for key, value := range d.Metadata {

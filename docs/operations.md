@@ -28,6 +28,8 @@ alert first:
 | `colca_uplink_resync_active` | stays `1`: this node is still sending again what its restored parent lacks |
 | `colca_uplink_resync_unreplayable_records_total` | above `0`: a restored parent lacks records this node had already pruned |
 | `colca_repl_child_ahead_of_store_total` | rises: a child too old to re-sync is ahead of this node's store |
+| `colca_host_clock_synchronized` | stays `0`: no NTP daemon vouches for the host's clock (see [Clocks](#clocks)) |
+| `abs(colca_clock_parent_skew_seconds)` | above `0.5` for minutes, and at once above `5`: this node and its parent disagree about the time |
 | `colca_jwks_keys` | `0` on a node with an `auth:` block |
 | `colca_contracts_bundle_info` | `source="builtin"` where you expected a bundle |
 
@@ -232,6 +234,75 @@ draining, use `DELETE /enroll/{ulid}?retire=true`; every command still queued
 for it is answered with a `410` `_Ack`. A plain `DELETE` only
 revokes: the child's replicated state stays, for a child that will be enrolled
 again and resume where it stopped.
+
+## Clocks
+
+Colca has one time per node, the host's wall clock, and never corrects it.
+Stream timestamps, audit times and the expiry of commands all read it. A
+command's `expires_at` is judged by each node on the way and by the machine
+that executes it, each on its own clock, so the clocks of a tree have to agree
+to well within the shortest expiry in use. That is the host's job: run an NTP
+daemon (chrony, ntpd, systemd-timesyncd) on every node's host, and point the
+machines on a node's network at the same source or at the node's host.
+
+The node reports two things about its clock, on `/metrics` and in the `clock`
+block of [`/healthz`](http-api.md#the-clock-in-healthz):
+
+| Metric | Meaning |
+|---|---|
+| `colca_host_clock_synchronized` | `1` when the kernel reports the clock as synchronized by an NTP daemon, `0` when not |
+| `colca_host_clock_estimated_error_seconds` | the kernel's estimate of the clock's error |
+| `colca_host_clock_max_error_seconds` | the kernel's bound on the error; it grows while no daemon updates the clock |
+| `colca_clock_parent_skew_seconds` | the parent's clock minus this node's, from the `now_ms` on the latest `/downlink` or `/replicate` response; positive when the parent is ahead |
+| `colca_clock_parent_sample_age_seconds` | seconds since that measurement |
+
+- **The host series** come from a read-only `adjtimex` call, which needs no
+  privilege and passes Docker's default seccomp profile, so they work in the
+  stock container. Where the kernel's verdict cannot be read (a host that is
+  not Linux, a sandbox that refuses the call) the three series are absent and
+  `/healthz` reports `null`; node-exporter's `node_timex_sync_status`,
+  `node_timex_estimated_error_seconds` and `node_timex_maxerror_seconds` carry
+  the same reading from the host itself.
+- **The parent series** exist on a node with a parent once the parent has
+  answered, and never on a root. The measurement is off by the response's
+  network latency, a few milliseconds on a LAN. It catches what the kernel's
+  verdict cannot: two hosts that are each synchronized, to sources that
+  disagree. It is a measurement only. A node whose clock differs from its
+  parent's keeps deciding on its own clock.
+- **Alert** on `colca_host_clock_synchronized == 0` for 15 minutes, on
+  `max(abs(colca_clock_parent_skew_seconds), colca_host_clock_estimated_error_seconds)`
+  above `0.5` for 10 minutes (warning) and above `5` for 5 minutes (critical).
+  The node's own `clock` health metric uses the same two thresholds.
+- **The log** has one line when the skew to the parent passes 5 seconds
+  (`clock skew to the parent exceeds the alarm threshold`) and one when it is
+  back within it.
+
+### Upgrading from the time beacon
+
+Releases before this one corrected each node's time towards the root's and
+published it to machines on `<root>/v1/_TimeSync/<node>`. Nothing of that is
+left: no `time_sync:` configuration (a block still in a config file is
+ignored), no `_TimeSync` contract, no `now_ms` on `/fetch`, and the metrics
+`colca_clock_offset_ms` and `colca_clock_sync_age_seconds` and the rejection
+reason `time_sync` are gone. Nodes can be upgraded in any order:
+
+- **An older child under an upgraded parent** still reads `now_ms` from the
+  parent's responses and corrects its own decisions by it, as before. The
+  parent now answers with its own wall clock rather than a time corrected
+  towards the root, so the correction reaches one level, not the whole tree.
+- **An upgraded child under an older parent** measures its skew against the
+  parent's `now_ms` and corrects nothing.
+- **An older machine** still subscribes to `<root>/v1/_TimeSync/+` when it
+  connects. The node refuses that one filter (SUBACK `0x80`, counted in
+  `colca_acl_denials_total{action="sub"}`, with an audit event) and leaves the
+  session and its command subscription alone. The machine waits out its hold
+  (10 seconds by default) after each connect, then decides on its own clock.
+- A publish to `<root>/v1/_TimeSync/…` is refused like any topic the grammar
+  does not know and counted in `colca_rejected_publishes_total{reason="grammar"}`.
+
+Make sure NTP runs on every host before the upgrade: until now a node with a
+wrong clock still judged expiry by the root's time, and from this release it
+judges by its own.
 
 ## Backups
 
