@@ -116,3 +116,44 @@ func TestAChildMeasuresItsSkewFromTheParentsNowMSAndKeepsItsOwnClock(t *testing.
 		t.Fatalf("the child's clock = %v after the sample, want its own wall clock %v: the skew is measured, never applied", got, childAt)
 	}
 }
+
+// A node that only pushes, with no downlink poll answered yet, measures its
+// skew all the same: every /replicate response carries the parent's clock.
+func TestAChildMeasuresItsSkewFromAReplicateResponse(t *testing.T) {
+	dir := t.TempDir()
+	parentAt := time.UnixMilli(3_000_000_000_000)
+	childAt := parentAt.Add(3 * time.Second) // the child's clock runs ahead
+
+	parentID := mustIdentity(t, filepath.Join(dir, "p.key"))
+	childID := mustIdentity(t, filepath.Join(dir, "c.key"))
+	ps := mustStore(t, filepath.Join(dir, "pdata"))
+	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
+	preg, peng := nodeParts(t, ps, pcfg, nil, nil, fixedClock(true, parentAt), childSpec{"n-child", childID.PublicHex(), "child1"})
+	srv, addr := startServer(t, pcfg, peng, parentID, preg)
+	defer srv.Stop()
+
+	cs := mustStore(t, filepath.Join(dir, "cdata"))
+	cclk := fixedClock(false, childAt)
+	cm := metrics.New(cs, config.Retention{}, cclk)
+	_, ceng := nodeParts(t, cs, &config.Config{ULID: "n-child"}, nil, cm, cclk)
+	payload := []byte(`{"event_id":"evt-1","source":"api","action":"authorize","outcome":"denied","actor_kind":"human","occurred_at":1}`)
+	if _, _, err := cs.Append("audit", []store.Record{{
+		Topic: "colca/v1/_AuditEvent/n-child/_colca/audit/evt-1", Payload: payload, TS: 1, WrittenBy: "api",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	cl := mustClient(t, addr, parentID.PublicHex(), childID)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() { defer close(done); RunUplink(cl, ceng, nil, cm, stop) }()
+	t.Cleanup(func() { close(stop); waitForClosed(t, "RunUplink to stop", done, 5*time.Second) })
+
+	const skewLine = "colca_clock_parent_skew_seconds"
+	waitFor(t, "the child to measure its skew to the parent", 5*time.Second, func() bool {
+		_, ok := metricstest.Lookup(t, cm, skewLine)
+		return ok
+	})
+	if v := metricstest.Value(t, cm, skewLine); v != -3 {
+		t.Fatalf("%s = %v, want -3: the parent's clock is 3s behind the child's", skewLine, v)
+	}
+}

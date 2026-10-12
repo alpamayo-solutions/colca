@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1134,5 +1135,64 @@ func TestNodeRecordFollowsConfiguredAccess(t *testing.T) {
 	third := mustStart(t, cfg)
 	if _, present := nodeRecord(t, third, "n1")["access"]; present {
 		t.Fatal("withdrawn access still in the record")
+	}
+}
+
+// A node record written by an older release has no clock health metric. The
+// next start adds it and keeps the declarations the record already holds as
+// they are.
+func TestNodeRecordGainsAHealthMetricAddedSinceItWasWritten(t *testing.T) {
+	base := t.TempDir()
+	keyFile := filepath.Join(base, "n1.key")
+	genKey(t, keyFile)
+	cfg := &config.Config{ULID: "n1", DataDir: filepath.Join(base, "data"), Identity: config.Identity{KeyFile: keyFile},
+		API: config.API{Addr: "127.0.0.1:0", Token: tok}}
+	keys := func(entity map[string]any) (out []string, names map[string]any) {
+		names = map[string]any{}
+		for _, raw := range entity["health_metrics"].([]any) {
+			item := raw.(map[string]any)
+			out = append(out, item["key"].(string))
+			names[item["key"].(string)] = item["name"]
+		}
+		return out, names
+	}
+
+	first := mustStart(t, cfg)
+	entity := nodeRecord(t, first, "n1")
+	current, _ := keys(entity)
+	if !slices.Contains(current, "clock") {
+		t.Fatalf("a new node record declares no clock health metric: %v", current)
+	}
+	// The record as an older release left it: no clock, and one declaration an
+	// operator renamed.
+	var older []any
+	for _, raw := range entity["health_metrics"].([]any) {
+		item := raw.(map[string]any)
+		if item["key"] == "clock" {
+			continue
+		}
+		if item["key"] == "cpu" {
+			item["name"] = "Processor"
+		}
+		older = append(older, item)
+	}
+	entity["health_metrics"] = older
+	payload, err := json.Marshal(entity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Engine.IngestAdmin(uns.Prefix()+"_Node/n1/_colca/nodes/n1", payload); err != nil {
+		t.Fatal(err)
+	}
+	first.Stop()
+
+	second := mustStart(t, cfg)
+	defer second.Stop()
+	got, names := keys(nodeRecord(t, second, "n1"))
+	if want := append(slices.DeleteFunc(slices.Clone(current), func(k string) bool { return k == "clock" }), "clock"); !slices.Equal(got, want) {
+		t.Fatalf("health metrics after the upgrade = %v, want %v: the held ones in place and clock added", got, want)
+	}
+	if names["cpu"] != "Processor" {
+		t.Fatalf("cpu is named %v after the upgrade, want the held name kept", names["cpu"])
 	}
 }
