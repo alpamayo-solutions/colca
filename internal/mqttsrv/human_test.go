@@ -387,7 +387,8 @@ func TestHumanExpiryKick(t *testing.T) {
 func TestHumanPublishThroughDoor(t *testing.T) {
 	w := newHumanWorld(t)
 	future := time.Now().Add(5 * time.Minute)
-	tok := w.iss.Mint("hmi-user", []string{"cmd:" + authtest.ElementID("m1") + "/#:param", "read:" + authtest.ElementID("m1") + "/#"}, future)
+	tok := w.iss.MintOpt(tokentest.MintOpts{Sub: "hmi-user", Exp: future, Username: "hmi", Name: "Hanna Meier",
+		Grants: []string{"cmd:" + authtest.ElementID("m1") + "/#:param", "read:" + authtest.ElementID("m1") + "/#"}})
 
 	c, err := humanConnect(t, w.srv.HumanTCPAddr(), "ssl", "hmi-user", tok)
 	if err != nil {
@@ -402,6 +403,12 @@ func TestHumanPublishThroughDoor(t *testing.T) {
 	recs, _, _ := w.st.Read("commands", 1, 10, nil)
 	if len(recs) != 1 || recs[0].Topic != "colca/v1/_CmdParam/m1/m1/set-speed" {
 		t.Fatalf("command not persisted: %+v", recs)
+	}
+	// The door witnesses the person: the subject is the identity, the token's
+	// name the hint beside it.
+	if got := recs[0]; got.ActorID != "hmi-user" || got.WrittenBy != "hmi-user" ||
+		got.ActorLabel != "Hanna Meier" || got.ActorKind != "human" || got.ActorClient != "" {
+		t.Fatalf("command attributed to %+v, want the subject with the token's name", got)
 	}
 
 	// A data write is rejected (no PUBACK) and never persisted.

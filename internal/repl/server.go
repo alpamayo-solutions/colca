@@ -112,7 +112,7 @@ func (s *Server) auditDenied(operation, reason string, entry *uns.Entry, metadat
 	metadata["door"] = metrics.DoorRepl
 	d := engine.AuditDenial{Operation: operation, ReasonCode: reason, Metadata: metadata}
 	if entry != nil {
-		d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.Name, entry.ActorKind()
+		d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.ActorLabel(), entry.ActorKind()
 	}
 	_ = s.eng.RecordDenial(d)
 }
@@ -179,7 +179,7 @@ func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter 
 	for _, rec := range recs {
 		out = append(out, wireRec{
 			O: rec.Offset, T: rec.Topic, P: rec.Payload, TS: rec.TS,
-			WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups,
+			WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups, AC: rec.ActorClient,
 		})
 	}
 	resp["definitions"], resp["def_next"] = out, next
@@ -290,6 +290,7 @@ type wireRec struct {
 	AL       string   `json:"al,omitempty"`
 	AK       string   `json:"ak,omitempty"`
 	AG       []string `json:"ag,omitempty"`
+	AC       string   `json:"ac,omitempty"`
 }
 
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
@@ -364,7 +365,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rec.SkipFrom != 0 {
-			if in.Stream != "metrics" || rec.SkipFrom > rec.O || rec.SkipFrom <= previous || rec.T != "" || len(rec.P) != 0 || rec.OO != 0 || rec.TS != 0 || rec.WB != "" || rec.AID != "" || rec.AL != "" || rec.AK != "" || len(rec.AG) != 0 {
+			if in.Stream != "metrics" || rec.SkipFrom > rec.O || rec.SkipFrom <= previous || rec.T != "" || len(rec.P) != 0 || rec.OO != 0 || rec.TS != 0 || rec.WB != "" || rec.AID != "" || rec.AL != "" || rec.AK != "" || len(rec.AG) != 0 || rec.AC != "" {
 				http.Error(w, "invalid metric skip range", http.StatusBadRequest)
 				return
 			}
@@ -402,7 +403,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 			ChildOffset: rec.O, OriginOffset: rec.OO,
 			Topic: topic, Payload: rec.P, TS: rec.TS,
 			WrittenBy: rec.WB, ActorID: rec.AID,
-			ActorLabel: rec.AL, ActorKind: rec.AK, ActorGroups: rec.AG,
+			ActorLabel: rec.AL, ActorKind: rec.AK, ActorGroups: rec.AG, ActorClient: rec.AC,
 		}
 		// Route by the engine's bundle-aware classes: a declared data or entity
 		// contract projects into KV here as at any door.
@@ -565,7 +566,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 				}
 				out = append(out, wireRec{
 					O: rec.Offset, T: stripped, P: rec.Payload, TS: rec.TS,
-					WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups,
+					WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups, AC: rec.ActorClient,
 				})
 			}
 			// now_ms is stamped here, after the long-poll wait, so the sample error is

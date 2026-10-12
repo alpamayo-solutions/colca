@@ -81,7 +81,7 @@ func (e *Engine) IngestClientBatch(identity string, records []BatchRecord) []Bat
 			Topic: in.Topic, Payload: in.Payload, TS: ts,
 			WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 			ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-			ActorGroups: attribution.ActorGroups,
+			ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient,
 		}
 		if uns.IsState(class) {
 			rec.KVPath, rec.KVNode = p.Path, p.NodeID

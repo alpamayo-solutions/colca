@@ -66,12 +66,18 @@ type Result struct {
 
 // Attribution is the immutable authorship envelope stored with a record.
 // WrittenBy is the authenticated publishing identity. ActorID is the stable
-// subject it acted as; ActorLabel is only a display snapshot.
+// subject it acted as. ActorLabel is optional: what that subject was called
+// when it acted, for readers to show. Nothing is authorized or keyed by it.
 type Attribution struct {
 	WrittenBy  string
 	ActorID    string
 	ActorLabel string
 	ActorKind  string
+	// ActorClient is the client id of a Keycloak service account acting through
+	// a token door, "" for a person. Like ActorGroups it travels with the
+	// record, so the node that executes a downlinked command knows the account
+	// from a person without reading its label.
+	ActorClient string
 	// ActorGroups are the group ids a human's grants were resolved from at the
 	// verifying door. They travel with the record, so the node that executes a
 	// downlinked command can resolve the same person against its own _Group
@@ -93,13 +99,14 @@ func attributionForEntry(entry *uns.Entry) Attribution {
 	if entry == nil {
 		return Attribution{}
 	}
-	label := entry.Name
-	if label == "" {
+	label := entry.ActorLabel()
+	if label == "" && !entry.IsHuman() {
 		label = entry.ULID
 	}
 	return Attribution{
 		WrittenBy: entry.ULID, ActorID: entry.ULID,
 		ActorLabel: label, ActorKind: entry.ActorKind(),
+		ActorClient: entry.ServiceClient,
 		ActorGroups: append([]string(nil), entry.Groups...),
 	}
 }
@@ -134,9 +141,7 @@ func (e *Engine) actorForAttested(attribution Attribution, signedInHere bool) *u
 		}
 		e.log.Warn("attested actor: group unresolved for the acting human", "actor", attribution.ActorID, "err", problem)
 	}
-	if attribution.ActorLabel != "" && attribution.ActorLabel != attribution.ActorID {
-		entry.Username = attribution.ActorLabel // the verifying door's preferred_username, kept as the label
-	}
+	entry.DisplayName, entry.ServiceClient = attribution.ActorLabel, attribution.ActorClient
 	entry.SignedInHere = signedInHere
 	return entry
 }
@@ -533,7 +538,9 @@ func (e *Engine) IngestLocalAttributed(identity, topic string, payload []byte, a
 		return e.reject(metrics.ReasonIdentity, "local actor attribution requires actor_id and a valid actor_kind")
 	}
 	actor.WrittenBy = entry.ULID
-	if actor.ActorLabel == "" {
+	// A person's label is a name or nothing: their subject is never repeated
+	// as one. Any other actor is called by its id when the service names none.
+	if actor.ActorLabel == "" && actor.ActorKind != "human" {
 		actor.ActorLabel = actor.ActorID
 	}
 	return e.ingestClientAttributed(identity, topic, payload, &actor)
@@ -705,14 +712,11 @@ func (e *Engine) admitClientData(identity string, p uns.Parsed, class uns.Class,
 // gated by their cmd grants; data, entity and ack contracts are rejected with
 // ReasonHumanWrite whatever the grants. Commands target absolute node-local
 // paths, as admin commands do.
+//
+// The record's envelope names the person by their subject (actor_id) and keeps
+// what their token called them (actor_label) as a hint; authorization uses
+// entry's grants, never the name.
 func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Result, error) {
-	return e.IngestHumanAttributed(entry, entry.ULID, topic, payload)
-}
-
-// IngestHumanAttributed is IngestHuman with the verified display label retained in
-// the record envelope. Authorization still uses entry; the label is evidence,
-// never an authority input.
-func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic string, payload []byte) (Result, error) {
 	if !uns.IsUns(topic) {
 		return e.reject(metrics.ReasonGrammar, "human publish must be %s/#", uns.Root())
 	}
@@ -762,12 +766,8 @@ func (e *Engine) IngestHumanAttributed(entry *uns.Entry, actorLabel, topic strin
 	if message, ok := e.unannounced(p); ok {
 		return e.answeredUnannounced(p, payload, entry.ULID, message), nil
 	}
-	attribution := Attribution{
-		WrittenBy: entry.ULID, ActorID: entry.ULID,
-		ActorLabel: actorLabel, ActorKind: "human",
-		ActorGroups: append([]string(nil), entry.Groups...),
-		Door:        doorHuman,
-	}
+	attribution := attributionForEntry(entry)
+	attribution.Door = doorHuman
 	// Forwarding checks the person again from the groups alone, so the door is
 	// recorded only when the groups alone authorize the command. Grants carried
 	// in the token itself cannot change during its life and are not checked again.
@@ -962,8 +962,8 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 				Topic: input.Topic, Payload: input.Payload, TS: ts,
 				WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 				ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-				ActorGroups: attribution.ActorGroups,
-				KVPath:      parsed.Path, KVNode: parsed.NodeID, Delete: len(input.Payload) == 0,
+				ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient,
+				KVPath: parsed.Path, KVNode: parsed.NodeID, Delete: len(input.Payload) == 0,
 			},
 		})
 	}
@@ -1057,7 +1057,7 @@ func (e *Engine) ingestAdminEvent(record uns.StateRecord, attribution Attributio
 		Topic: record.Topic, Payload: record.Payload, TS: ts,
 		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-		ActorGroups: attribution.ActorGroups,
+		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient,
 		// Deliberately no KVPath/KVNode: this class is never state (IsState is
 		// false), so there is nothing to project and nothing to retract.
 	}
@@ -1368,7 +1368,7 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 		Topic: topic, Payload: payload, TS: ts,
 		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-		ActorGroups: attribution.ActorGroups, Door: attribution.Door,
+		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, Door: attribution.Door,
 	}
 	if uns.IsState(class) {
 		rec.KVPath, rec.KVNode = p.Path, p.NodeID

@@ -173,7 +173,7 @@
       "id": "5R292XVR359J398V8AGVK5AYWJ"
     }
   ],
-  "_sources_comment": "Golden `source` vectors per identity kind: the `source` part of a derived annotation id names the kind of identity that authored it. plugins/uns AnnotationSource derives it again at the executor to prove authorship under an operate grant, and every client that stamps a source must agree with these cases: a person (a JWT or an API key on that person) -> user/<sub>; a Keycloak service account (preferred_username starts with service-account-) -> service/<client-id>; an mTLS service -> service/<service-name>, a case only clients see, since a service never acts through the Edit executor.",
+  "_sources_comment": "Golden `source` vectors per identity kind: the `source` part of a derived annotation id names the kind of identity that authored it. plugins/uns AnnotationSource derives it again at the executor to prove authorship under an operate grant, and every client that stamps a source must agree with these cases: a person (a JWT or an API key on that person) -> user/<sub>; a Keycloak service account (the token's preferred_username starts with service-account-, read once by whoever verified the token and never from a display name or a record's actor_label) -> service/<client-id>; an mTLS service -> service/<service-name>, a case only clients see, since a service never acts through the Edit executor.",
   "sources": [
     {
       "kind": "person",

@@ -113,6 +113,45 @@ A caller is one of:
   is the case this exists for: `/kv` can show "set by \<operator\> at \<time\>"
   from Colca's own verified identity, not a client-written field.
 
+### Who a record names
+
+`actor_id` is the identity. For a person or a Keycloak service account it is
+the token's `sub`, which stays the same when the account is renamed; for a
+machine or a local service it is its registry id. Authorization, command
+deduplication and annotation authorship all go by it and by the token's
+grants, never by a name.
+
+`actor_label` is optional. The door that verifies a person's token records
+what the token called them at that moment: the `name` claim, else
+`preferred_username`, and nothing when the token has neither (a personal
+access token records its owner's email). A local service that acts for a
+person passes the label it knows, or none. It is a hint for a reader that
+cannot resolve the subject, and it is history: a record written before a
+rename keeps the old name. A reader that shows who acted should resolve the
+current name from `actor_id` in one place and fall back to the label only
+when the subject can no longer be resolved.
+
+`actor_kind` is `human` for every token door identity, `service` for a
+machine or a local service, `node`, `system` for the admin token and the
+node's own writes, or `anonymous`.
+
+Whether a token belongs to a Keycloak service account is decided once, at the
+door that verified it, from the token's `preferred_username`
+(`service-account-<client-id>`). The node keeps the client id with the
+command and replicates it with the command's groups, so the node that
+executes it knows a service account's annotations (`service/<client-id>`)
+from a person's (`user/<sub>`) without reading the label. `/fetch` and `/kv`
+do not return it.
+
+Nodes of different versions in one tree keep working. A node from before this
+rule recorded `preferred_username` as the label and the subject when the token
+had none; such records read as before. It ignores the client id it is sent
+and recognises a service account by its label, as it always did. A command
+that reaches a newer node through an older parent arrives without a client
+id, so there it counts as a person's: a service account then needs
+`configure` to change an annotation it authored, until the parent is
+upgraded.
+
 When a cursor stands below what retention has already removed, the response
 carries a `gap` object that names the missing offsets and times, and `records`
 continue after the gap:

@@ -255,6 +255,7 @@ func TestDurabilityAcrossReopen(t *testing.T) {
 		Topic: "a", Payload: []byte("1"), TS: 1,
 		WrittenBy: "svc-connector", ActorID: "user-anna",
 		ActorLabel: "anna@example.com", ActorKind: "human", ActorGroups: []string{"operators", "maintainers"},
+		ActorClient: "erp-bridge",
 	}}); err != nil {
 		t.Fatalf("append before reopen: %v", err)
 	}
@@ -274,7 +275,8 @@ func TestDurabilityAcrossReopen(t *testing.T) {
 	got, _, err := s2.Read("metrics", 1, 1, nil)
 	if err != nil || len(got) != 1 || got[0].WrittenBy != "svc-connector" ||
 		got[0].ActorID != "user-anna" || got[0].ActorLabel != "anna@example.com" || got[0].ActorKind != "human" ||
-		len(got[0].ActorGroups) != 2 || got[0].ActorGroups[0] != "operators" || got[0].ActorGroups[1] != "maintainers" {
+		len(got[0].ActorGroups) != 2 || got[0].ActorGroups[0] != "operators" || got[0].ActorGroups[1] != "maintainers" ||
+		got[0].ActorClient != "erp-bridge" {
 		t.Fatalf("attribution not durable across reopen: %+v, %v", got, err)
 	}
 }
