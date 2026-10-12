@@ -42,7 +42,7 @@ func (m *Manager) Decide(ctx uns.CommandContext, verb string, payload []byte) (i
 	}
 	a := Actor{ID: ctx.ActorID, Label: ctx.ActorLabel, Kind: ctx.ActorKind}
 	if a.Label == "" && ctx.Actor != nil {
-		a.Label = ctx.Actor.Username
+		a.Label = ctx.Actor.ActorLabel()
 	}
 	var err error
 	message := verb

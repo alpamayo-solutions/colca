@@ -27,11 +27,9 @@ func enrollmentStatus(err error) int {
 }
 
 func actorOf(c caller) enroll.Actor {
-	label := c.human.Username
-	if label == "" {
-		label = c.human.Sub
-	}
-	return enroll.Actor{ID: c.human.Sub, Label: label, Kind: "human"}
+	// The subject is the identity; the label is what the token calls its
+	// holder and may be empty. A subject is never stored as a person's label.
+	return enroll.Actor{ID: c.human.Sub, Label: c.human.Entry.ActorLabel(), Kind: "human"}
 }
 
 // mountEnrollmentRoutes serves the decisions on enrollment requests and
