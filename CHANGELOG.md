@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.36.2](https://github.com/alpamayo-solutions/colca/compare/v0.36.1...v0.36.2) (2026-10-13)
+
+
+### Fixes
+
+* **audit:** write a repeated denial once and then its count, and name an unknown key ([#215](https://github.com/alpamayo-solutions/colca/issues/215)) ([db0178c](https://github.com/alpamayo-solutions/colca/commit/db0178c410df56794dde86f835565b8637fba7dd))
+* **mqtt:** end a retired service's session and bound a connected client that never acknowledges ([#216](https://github.com/alpamayo-solutions/colca/issues/216)) ([a8f7e70](https://github.com/alpamayo-solutions/colca/commit/a8f7e70bd75fd549d0f2d74d8bfad3ec61f33497))
+
 ## [0.36.1](https://github.com/alpamayo-solutions/colca/compare/v0.36.0...v0.36.1) (2026-10-13)
 
 
