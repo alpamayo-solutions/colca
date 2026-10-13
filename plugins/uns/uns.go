@@ -616,6 +616,10 @@ func Validate(contract string, payload []byte) error {
 		if err := reqNum("occurred_at"); err != nil {
 			return err
 		}
+		if field, limit, found := auditFieldTooLong(m); found {
+			return &FieldError{Field: field, Keyword: "maxLength", Limit: strconv.Itoa(limit),
+				Err: fmt.Errorf("%s: field %q is longer than %d characters", contract, field, limit)}
+		}
 		if raw, exists := m["metadata"]; exists {
 			metadata, ok := raw.(map[string]any)
 			if !ok {

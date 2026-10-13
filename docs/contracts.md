@@ -43,6 +43,12 @@ different bundle does not start.
   other, so a `_CmdEdit` or `_CmdConfigure` whose result breaks a limit is
   refused with `422 invalid_field: <field>: <keyword> <limit>`
   (`invalid_field: unit: maxLength 50`) and nothing is written.
+- **An audit record's text is bounded too.** Every text field of
+  `_AuditEvent` declares a limit (512 characters for `operation`, 255 for the
+  ids, names and codes), so a producer's overlong record is refused where it
+  is published. The node's own audit writer passes no door; it cuts what a
+  refused caller sent (a contract, a topic path) to the same limits, and a
+  test compares its table with the bundle.
 - **Validation happens once**, at the door where a record enters. Replication
   does not validate again, so nodes on different bundle versions keep
   replicating while a rollout moves through the tree.

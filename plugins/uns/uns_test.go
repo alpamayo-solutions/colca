@@ -1,8 +1,12 @@
 package uns
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestMetricSignalIDIsReadFromMetricsOnly(t *testing.T) {
@@ -709,5 +713,47 @@ func TestParseRefusesATopicMQTTCannotCarry(t *testing.T) {
 	_, err := Parse(head + strings.Repeat("x", MaxTopicBytes-len(head)+1))
 	if err == nil || !strings.Contains(err.Error(), "MQTT carries at most 65535") {
 		t.Fatalf("a topic one byte over the limit must be refused, got %v", err)
+	}
+}
+
+// A node without a bundle holds an audit record to the same text limits, and
+// names the field the way the bundle's schema would.
+func TestTheBuiltInAuditRuleRefusesATextFieldOverItsLimit(t *testing.T) {
+	event := func(operation string) []byte {
+		raw, err := json.Marshal(map[string]any{
+			"event_id": "evt-1", "source": "api", "action": "authorize", "outcome": "denied",
+			"actor_kind": "human", "occurred_at": 1, "operation": operation,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	limit := AuditFieldLimits()["operation"]
+	if err := Validate("_AuditEvent", event(strings.Repeat("ä", limit))); err != nil {
+		t.Fatalf("an operation at its limit was refused: %v", err)
+	}
+	err := Validate("_AuditEvent", event(strings.Repeat("ä", limit+1)))
+	var refused *FieldError
+	if !errors.As(err, &refused) {
+		t.Fatalf("want a FieldError, got %v", err)
+	}
+	if got, want := refused.Refusal(), fmt.Sprintf("invalid_field: operation: maxLength %d", limit); got != want {
+		t.Fatalf("refusal = %q, want %q", got, want)
+	}
+}
+
+func TestBoundAuditFieldCutsByCharacters(t *testing.T) {
+	limit := AuditFieldLimits()["entity_id"]
+	if got := BoundAuditField("entity_id", strings.Repeat("ä", limit+7)); got != strings.Repeat("ä", limit) {
+		t.Fatalf("cut to %d characters, want %d", utf8.RuneCountInString(got), limit)
+	}
+	// More bytes than the limit but not more characters: left whole.
+	whole := strings.Repeat("ä", limit)
+	if got := BoundAuditField("entity_id", whole); got != whole {
+		t.Fatal("a value at its limit was cut")
+	}
+	if got := BoundAuditField("metadata", strings.Repeat("x", 9000)); len(got) != 9000 {
+		t.Fatal("a field without a limit was cut")
 	}
 }

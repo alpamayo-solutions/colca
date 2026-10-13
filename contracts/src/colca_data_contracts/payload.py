@@ -288,6 +288,10 @@ PRECISION = Bounds(minimum=0, maximum=10, integer=True)
 #: stream it travels on.
 UNIX_SECONDS = Bounds(minimum=0, maximum=253402300799)
 
+#: The same range as unix milliseconds, for the instants a record carries in
+#: milliseconds.
+UNIX_MILLIS = Bounds(minimum=0, maximum=253402300799999)
+
 
 # ---------------------------------------------------------------------------
 # Decoding
@@ -488,23 +492,39 @@ class ServiceDetails(ToleratesUnknownFields, Payload):
     commands: list[CommandRoute] = field(default_factory=list)
 
 
+#: An audit record's identifiers, names and codes: who acted, on what, and why
+#: it was refused. Long enough for a Keycloak resource path or a key
+#: fingerprint, and what the archive's columns are sized from.
+AUDIT_TEXT = MaxLength(255)
+
+#: What was attempted. Longer than the other fields because an API denial
+#: writes the HTTP method and the whole route here.
+AUDIT_OPERATION = MaxLength(512)
+
+
 @dataclass
 class AuditEvent(ToleratesUnknownFields, Payload):
-    """A non-state security event that travels only toward ancestor nodes."""
+    """A non-state security event that travels only toward ancestor nodes.
 
-    event_id: str
+    Every text field is bounded, so the node refuses a record its archive
+    could not store. Before, the limits lived only in the archive's columns:
+    the node accepted an API denial whose operation was longer than 64
+    characters and the read side set the record aside.
+    """
+
+    event_id: Annotated[str, AUDIT_TEXT]
     source: AuditSource
     action: AuditAction
     outcome: AuditOutcome
     actor_kind: ActorKind
-    occurred_at: int
-    operation: str | None = None
-    actor_id: str | None = None
-    actor_label: str | None = None
-    entity_type: str | None = None
-    entity_id: str | None = None
-    correlation_id: str | None = None
-    reason_code: str | None = None
+    occurred_at: Annotated[int, UNIX_MILLIS]
+    operation: Annotated[str | None, AUDIT_OPERATION] = None
+    actor_id: Annotated[str | None, AUDIT_TEXT] = None
+    actor_label: Annotated[str | None, AUDIT_TEXT] = None
+    entity_type: Annotated[str | None, AUDIT_TEXT] = None
+    entity_id: Annotated[str | None, AUDIT_TEXT] = None
+    correlation_id: Annotated[str | None, AUDIT_TEXT] = None
+    reason_code: Annotated[str | None, AUDIT_TEXT] = None
     changed_fields: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 

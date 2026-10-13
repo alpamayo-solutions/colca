@@ -68,6 +68,15 @@ func (e *Engine) recordAuthorization(d AuditDenial, outcome string) error {
 	if d.ActorKind == "" {
 		d.ActorKind = "anonymous"
 	}
+	// This writer passes no door, so nothing else holds its record to the
+	// contract's limits. A denial repeats what the caller sent (the contract
+	// and path of a refused topic), which can be any length.
+	d.Operation = uns.BoundAuditField("operation", d.Operation)
+	d.ReasonCode = uns.BoundAuditField("reason_code", d.ReasonCode)
+	d.ActorID = uns.BoundAuditField("actor_id", d.ActorID)
+	d.ActorLabel = uns.BoundAuditField("actor_label", d.ActorLabel)
+	d.EntityType = uns.BoundAuditField("entity_type", d.EntityType)
+	d.EntityID = uns.BoundAuditField("entity_id", d.EntityID)
 	nowTime := e.Now()
 	eventID := e.auditID(nowTime)
 	now := nowTime.UnixMilli()

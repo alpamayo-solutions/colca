@@ -480,6 +480,43 @@ def test_audit_event_is_append_only_and_has_stable_required_fields():
     ]
 
 
+def test_every_audit_text_field_is_bounded():
+    """An audit record is stored in bounded columns by the read side, so a text
+    field without a limit is a record the node accepts and the archive cannot
+    hold: an API denial's 70-character operation was set aside that way. A new
+    text field must declare its limit to pass."""
+    import typing
+
+    from colca_data_contracts import AuditEvent, field_limits
+
+    limits = field_limits(AuditEvent)
+    hints = typing.get_type_hints(AuditEvent)
+    text_fields = {name for name, hint in hints.items() if hint in (str, str | None)}
+    assert text_fields == {
+        "event_id",
+        "operation",
+        "actor_id",
+        "actor_label",
+        "entity_type",
+        "entity_id",
+        "correlation_id",
+        "reason_code",
+    }
+    unbounded = sorted(name for name in text_fields if limits.get(name) is None or limits[name].max_length is None)
+    assert not unbounded, f"_AuditEvent text fields without a MaxLength: {unbounded}"
+
+    body, _ = gb.build_bundle()
+    properties = body["contracts"]["_AuditEvent"]["schema"]["properties"]
+    for name in text_fields:
+        assert properties[name]["maxLength"] == limits[name].max_length
+    # The longest values today's producers write fit: an API denial's method
+    # and route, and the label of a key the node does not know.
+    assert limits["operation"].max_length >= 512
+    assert limits["actor_label"].max_length >= len("unknown key ") + 64
+    # The time is turned into a date by the read side, so it is bounded to what a date holds.
+    assert properties["occurred_at"]["maximum"] == limits["occurred_at"].maximum == 253402300799999
+
+
 def test_definitions_are_their_own_class_and_retractable():
     """Definitions have their own routing class, and an empty payload retracts one."""
     body, _ = gb.build_bundle()
