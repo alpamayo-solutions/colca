@@ -362,6 +362,30 @@ func TestAuthorizeBrowse(t *testing.T) {
 	}
 }
 
+func TestFilterContractNamesTheLiteralThirdLevelOfAFilterUnderTheRoot(t *testing.T) {
+	named := map[string]string{
+		"colca/v1/_TimeSync/+":    "_TimeSync",
+		"colca/v1/_TimeSync/#":    "_TimeSync",
+		"colca/v1/_Metric/n1/a/b": "_Metric",
+		"+/v1/_TimeSync/n1/#":     "_TimeSync",
+		"colca/+/_Nope/#":         "_Nope",
+		"colca/v1/Metric":         "Metric",
+	}
+	for filter, want := range named {
+		if got, ok := FilterContract(filter); !ok || got != want {
+			t.Errorf("FilterContract(%q) = %q, %v, want %q, true", filter, got, ok, want)
+		}
+	}
+	for _, filter := range []string{
+		"#", "colca/#", "colca/v1", "colca/v1/#", "colca/v1/+/n1/#", "+/#",
+		"factory/raw/_TimeSync", // outside the root colca is a plain broker
+	} {
+		if got, ok := FilterContract(filter); ok {
+			t.Errorf("FilterContract(%q) = %q, true, want no contract named", filter, got)
+		}
+	}
+}
+
 func TestUnplacedLocalServiceReadsAndSubscribesAcrossItsNode(t *testing.T) {
 	local := &Entry{ULID: "svc-projector", Kind: KindLocal, Name: "projector"}
 	topic := "colca/v1/_AuditEvent/n-edge1/_colca/audit/evt-1"
@@ -816,8 +840,10 @@ func TestAuthorizeSubRefusesTheReservedDollarSpace(t *testing.T) {
 		{"human: shared sub over its own zone", human, "$share/g/colca/v1/+/+/werk1/linie3/#", false},
 
 		{"machine: everything, unaliased, is denied by zone", zoned, "colca/#", false},
-		// The beacon filter of an older machine has no exception any more: it names
-		// no path, so only an identity that may read everything is granted it.
+		// The beacon filter of an older machine has no exception among the grants:
+		// it names no path, so only read:# covers it. The door refuses it before
+		// the grants are read, because it names a contract the node does not define
+		// (FilterContract).
 		{"machine: the retired time beacon filter is denied by zone", zoned, "colca/v1/_TimeSync/+", false},
 		{"machine: the retired time beacon filter, with read:#", readAll, "colca/v1/_TimeSync/+", true},
 		{"machine: own zone, unaliased, is granted", zoned, "colca/v1/+/+/werk1/linie3/#", true},

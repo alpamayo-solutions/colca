@@ -310,10 +310,16 @@ reason `time_sync` are gone. Nodes can be upgraded in any order:
   parent's `now_ms` and corrects nothing. Such a parent sends no `held_ms`, so
   the child uses only its responses that came back within 0.5 s.
 - **An older machine** still subscribes to `<root>/v1/_TimeSync/+` when it
-  connects. The node refuses that one filter (SUBACK `0x80`, counted in
-  `colca_acl_denials_total{action="sub"}`, with an audit event) and leaves the
-  session and its command subscription alone. The machine waits out its hold
-  (10 seconds by default) after each connect, then decides on its own clock.
+  connects. The node refuses that one filter (SUBACK `0x80`, or `0x87` over
+  MQTT 5; counted in `colca_acl_denials_total{action="sub"}`, with an audit
+  event) and leaves the session and its command subscription alone. The
+  machine waits out its hold (10 seconds by default) after each connect, then
+  decides on its own clock. The refusal does not depend on who asks: a filter
+  that names a contract the node does not define is refused on the machine
+  door, the local door and the people's door, also for an identity that may
+  read everything, because nothing is ever published there. A filter with a
+  wildcard at the contract level (`<root>/v1/+/…`, `<root>/#`) names no
+  contract and is judged by the read grants as before.
 - A publish to `<root>/v1/_TimeSync/…` is refused like any topic the grammar
   does not know and counted in `colca_rejected_publishes_total{reason="grammar"}`.
 

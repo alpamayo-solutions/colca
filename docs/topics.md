@@ -97,6 +97,10 @@ bus and appear in the key-value view. Commands, acknowledgements and the event
 classes are history only: retaining a command would deliver it again to every
 new subscriber.
 
+A topic whose third level is not one of these contracts is refused: a publish
+with the reason `grammar`, a subscription with a failed SUBACK, whatever the
+caller may read. A subscription may put a wildcard at that level.
+
 A definition has no position in the plant. Its topic is
 `colca/v1/_Group/{authoring-node}/{definition-id}`, nothing rewrites it on the
 way down, and it looks the same on every node that holds it.
