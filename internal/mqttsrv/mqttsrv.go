@@ -285,7 +285,7 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 		return h.humanACL(cl, topic)
 	}
 	entry, ok := h.reg.Get(string(cl.Properties.Username))
-	if !ok || !uns.Authorize(h.scope(), entry, uns.ActSub, topic) {
+	if !ok || h.namesUnknownContract(topic) || !uns.Authorize(h.scope(), entry, uns.ActSub, topic) {
 		h.log.Warn("mqtt subscribe denied", "ulid", string(cl.Properties.Username), "filter", topic)
 		h.metrics.ACLDeny(metrics.ACLSub)
 		h.auditDenied("read", "subscribe_denied", metrics.DoorMQTT, entry,
@@ -293,6 +293,21 @@ func (h *colcaHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 		return false
 	}
 	return true
+}
+
+// namesUnknownContract reports whether a subscribe filter names a contract this
+// node does not define: a retired one such as _TimeSync, or a misspelt one. The
+// engine answers from the contracts in force, the same answer a publish gets. No
+// grant covers such a filter, on any door.
+func (h *colcaHook) namesUnknownContract(filter string) bool {
+	contract, named := uns.FilterContract(filter)
+	if !named {
+		return false
+	}
+	if eng := h.engine(); eng != nil {
+		return !uns.IsKnown(eng.ClassOf(contract))
+	}
+	return !uns.IsKnown(uns.ClassOf(contract))
 }
 
 func (h *colcaHook) entryForClient(cl *mqtt.Client) *uns.Entry {

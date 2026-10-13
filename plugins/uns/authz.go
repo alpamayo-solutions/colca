@@ -925,6 +925,23 @@ func fixedPathPrefix(filter string) (fixed string, isUns bool) {
 	return strings.Join(path, "/"), true
 }
 
+// FilterContract returns the contract a subscribe filter under the topic root
+// names at its third level. named is false when the filter is outside the root
+// or has a wildcard at or before that level: such a filter names no contract.
+// The door refuses a filter that names a contract the node does not define,
+// before any grant is read: nothing is ever published there, so a granted
+// subscription would leave its holder waiting without an error.
+func FilterContract(filter string) (contract string, named bool) {
+	seg := strings.Split(filter, "/")
+	if len(seg) < 3 || (seg[0] != Root() && seg[0] != "+") {
+		return "", false
+	}
+	if seg[1] == "#" || seg[2] == "+" || seg[2] == "#" {
+		return "", false
+	}
+	return seg[2], true
+}
+
 // SubscriptionPath returns the fixed hierarchy path named by an MQTT filter.
 // Door audit records use the same decomposition as subscription authorization,
 // so a denial can be filtered under the element where it happened.
