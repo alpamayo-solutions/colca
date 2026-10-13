@@ -641,8 +641,17 @@ func TestMQTTLimitsDefaultsAreGenerousAndFinite(t *testing.T) {
 	if got, want := l.EffectiveMaxTopicAliasesPerClient(), uint16(256); got != want {
 		t.Fatalf("topic aliases/client = %d, want %d", got, want)
 	}
-	if got, want := l.EffectiveMaxSessionExpiry(), 7*24*time.Hour; got != want {
+	if got, want := l.EffectiveMaxSessionExpiry(), 24*time.Hour; got != want {
 		t.Fatalf("session expiry = %s, want %s", got, want)
+	}
+	if got, want := l.EffectiveMaxOfflineMessagesPerClient(), 4096; got != want {
+		t.Fatalf("offline messages/client = %d, want %d", got, want)
+	}
+	if got, want := l.EffectiveMaxOfflineBytesPerClient(), int64(8<<20); got != want {
+		t.Fatalf("offline bytes/client = %d, want %d", got, want)
+	}
+	if got, want := l.EffectiveMaxOfflineBytes(), int64(64<<20); got != want {
+		t.Fatalf("offline bytes = %d, want %d", got, want)
 	}
 }
 
@@ -656,6 +665,9 @@ func TestMQTTLimitsParseOverrides(t *testing.T) {
   max_pending_writes_per_client: 90
   max_topic_aliases_per_client: 123
   max_session_expiry: 48h
+  max_offline_messages_per_client: 100
+  max_offline_bytes_per_client: 1MiB
+  max_offline_bytes: 16MiB
 `), &c); err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +675,9 @@ func TestMQTTLimitsParseOverrides(t *testing.T) {
 	if l.EffectiveMaxClients() != 12 || l.EffectiveMaxSubscriptionsPerClient() != 34 ||
 		l.EffectiveReceiveMaximum() != 56 || l.EffectiveMaximumInflight() != 78 ||
 		l.EffectiveMaxPendingWritesPerClient() != 90 || l.EffectiveMaxTopicAliasesPerClient() != 123 ||
-		l.EffectiveMaxSessionExpiry() != 48*time.Hour {
+		l.EffectiveMaxSessionExpiry() != 48*time.Hour ||
+		l.EffectiveMaxOfflineMessagesPerClient() != 100 || l.EffectiveMaxOfflineBytesPerClient() != 1<<20 ||
+		l.EffectiveMaxOfflineBytes() != 16<<20 {
 		t.Fatalf("parsed MQTT limits = %+v", l)
 	}
 }
@@ -676,6 +690,9 @@ func TestMQTTLimitsRejectInvalidSignedValues(t *testing.T) {
 		{MaxPendingWritesPerClient: -1},
 		{MaxSessionExpiry: Duration(-time.Second)},
 		{MaxSessionExpiry: Duration(time.Millisecond)},
+		{MaxOfflineMessagesPerClient: -1},
+		{MaxOfflineBytesPerClient: 2 << 40},
+		{MaxOfflineBytes: 2 << 40},
 	}
 	for _, limits := range cases {
 		cfg := base

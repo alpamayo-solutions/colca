@@ -597,6 +597,11 @@ type MQTTLimits struct {
 	MaxPendingWritesPerClient int32    `yaml:"max_pending_writes_per_client"`
 	MaxTopicAliasesPerClient  uint16   `yaml:"max_topic_aliases_per_client"`
 	MaxSessionExpiry          Duration `yaml:"max_session_expiry"`
+	// What the broker queues for sessions whose client is away, see
+	// mqttsrv.offlineSessions.
+	MaxOfflineMessagesPerClient int      `yaml:"max_offline_messages_per_client"`
+	MaxOfflineBytesPerClient    ByteSize `yaml:"max_offline_bytes_per_client"`
+	MaxOfflineBytes             ByteSize `yaml:"max_offline_bytes"`
 }
 
 const (
@@ -611,8 +616,19 @@ const (
 	// is bounded by MaximumPacketSize times this, per client.
 	defaultMQTTMaxPendingWritesPerClient int32  = 8192
 	defaultMQTTMaxTopicAliasesPerClient  uint16 = 256
-	defaultMQTTMaxSessionExpiry                 = 7 * 24 * time.Hour
-	maxMQTTSessionExpiry                        = time.Duration(^uint32(0)) * time.Second
+	// A session nobody returned to for a day is abandoned. The sessions live in
+	// memory only, so every client already resubscribes after a node restart;
+	// an expired session costs it nothing else.
+	defaultMQTTMaxSessionExpiry = 24 * time.Hour
+	// One offline session subscribed to everything fills its queue within
+	// seconds on a busy node, so the queue is sized for a client that is away
+	// for a restart, not for history: that is read from the streams with
+	// /fetch. All offline sessions together stay well below an edge node's
+	// memory limit (512 MiB in the PREKIT deployments).
+	defaultMQTTMaxOfflineMessagesPerClient int   = 4096
+	defaultMQTTMaxOfflineBytesPerClient    int64 = 8 << 20
+	defaultMQTTMaxOfflineBytes             int64 = 64 << 20
+	maxMQTTSessionExpiry                         = time.Duration(^uint32(0)) * time.Second
 )
 
 func (l MQTTLimits) EffectiveMaxClients() int64 {
@@ -664,7 +680,38 @@ func (l MQTTLimits) EffectiveMaxSessionExpiry() time.Duration {
 	return time.Duration(l.MaxSessionExpiry)
 }
 
+func (l MQTTLimits) EffectiveMaxOfflineMessagesPerClient() int {
+	if l.MaxOfflineMessagesPerClient == 0 {
+		return defaultMQTTMaxOfflineMessagesPerClient
+	}
+	return l.MaxOfflineMessagesPerClient
+}
+
+func (l MQTTLimits) EffectiveMaxOfflineBytesPerClient() int64 {
+	if l.MaxOfflineBytesPerClient == 0 {
+		return defaultMQTTMaxOfflineBytesPerClient
+	}
+	return int64(l.MaxOfflineBytesPerClient) //nolint:gosec // validated below
+}
+
+func (l MQTTLimits) EffectiveMaxOfflineBytes() int64 {
+	if l.MaxOfflineBytes == 0 {
+		return defaultMQTTMaxOfflineBytes
+	}
+	return int64(l.MaxOfflineBytes) //nolint:gosec // validated below
+}
+
 func (l MQTTLimits) validate() error {
+	if l.MaxOfflineMessagesPerClient < 0 {
+		return fmt.Errorf("config: mqtt_limits.max_offline_messages_per_client must not be negative, got %d", l.MaxOfflineMessagesPerClient)
+	}
+	const maxOfflineBytes = 1 << 40
+	if l.MaxOfflineBytesPerClient > maxOfflineBytes {
+		return fmt.Errorf("config: mqtt_limits.max_offline_bytes_per_client must be at most 1TiB, got %d", l.MaxOfflineBytesPerClient)
+	}
+	if l.MaxOfflineBytes > maxOfflineBytes {
+		return fmt.Errorf("config: mqtt_limits.max_offline_bytes must be at most 1TiB, got %d", l.MaxOfflineBytes)
+	}
 	if l.MaxClients < 0 {
 		return fmt.Errorf("config: mqtt_limits.max_clients must not be negative, got %d", l.MaxClients)
 	}

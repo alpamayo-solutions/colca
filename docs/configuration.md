@@ -323,7 +323,40 @@ timestamp (see [Topics](topics.md#log-records)).
 | `mqtt_limits.maximum_inflight` | `65535` | Unacknowledged QoS 1/2 messages per client. |
 | `mqtt_limits.max_pending_writes_per_client` | `8192` | Queued outbound packets before a slow client is dropped. |
 | `mqtt_limits.max_topic_aliases_per_client` | `256` | |
-| `mqtt_limits.max_session_expiry` | `168h` | Upper bound for a client's requested session expiry. |
+| `mqtt_limits.max_session_expiry` | `24h` | How long the session of a client that is away is kept: its subscriptions and what is queued for it. An MQTT 5 client may ask for less; an MQTT 3 session gets this value. |
+| `mqtt_limits.max_offline_messages_per_client` | `4096` | QoS 1 and 2 messages queued for one session whose client is away. |
+| `mqtt_limits.max_offline_bytes_per_client` | `8MiB` | The same queue in bytes: payload, topic and 1 KiB per message. |
+| `mqtt_limits.max_offline_bytes` | `64MiB` | The queues of all offline sessions together. |
+
+### Sessions of clients that are away
+
+A client that connects with a persistent session (MQTT 3 `clean session` off,
+MQTT 5 with a session expiry) keeps its subscriptions while it is away, and
+the node queues the QoS 1 and 2 messages they match **in memory** until the
+client returns. The three `max_offline_*` limits bound that queue. When a
+session's queue is full, or all queues together are, further messages are not
+queued for it: the session keeps what arrived first after the disconnect and
+loses what came later. One log line says so (`offline mqtt session's queue is
+full`), `colca_mqtt_offline_dropped_total` counts the messages, and a second
+line reports the count when the client is back.
+
+The queue covers a restart, not history. A consumer that must see every
+record reads the stream with `/fetch` from its own cursor after it
+reconnects; the session only tells it sooner. Sessions are not stored: a node
+restart ends all of them, so a client always subscribes again when the
+CONNACK reports no session.
+
+A session ends without its client when it stays away longer than
+`max_session_expiry`, or within ten seconds once its identity was revoked or
+retired, since nobody can return to it. Its queue and subscriptions go with it
+(`colca_mqtt_offline_sessions_ended_total`).
+
+What to set: leave the defaults on an edge node. Raise
+`max_offline_messages_per_client` only for a consumer that is known to be away
+for minutes and whose subscriptions are narrow, and keep
+`max_offline_bytes` below a tenth of the container's memory limit. Lower
+`max_session_expiry` (for example `1h`) where clients are redeployed under new
+client ids often.
 
 ## Bus
 

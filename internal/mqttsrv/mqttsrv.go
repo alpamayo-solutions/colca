@@ -73,6 +73,8 @@ type colcaHook struct {
 	closing atomic.Bool
 	// publishing counts client publishes admitted before closing whose PUBACK is not
 	// written yet; admitted holds the client of each. Close waits for them.
+	// offline bounds what is queued for sessions whose client is away.
+	offline    *offlineSessions
 	pubDone    door.Signal
 	publishing atomic.Int64
 	admitted   sync.Map // *mqtt.Client -> struct{}
@@ -140,6 +142,8 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnAuthPacket,
 		mqtt.OnPacketEncode,
 		mqtt.OnSelectSubscribers,
+		mqtt.OnSessionEstablished,
+		mqtt.OnClientExpired,
 	}, b)
 }
 
@@ -509,6 +513,14 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 // fetchLogs ack: that reaches only its sender and holders of the admin command
 // class over the target (uns.MayReadFetchLogsAck).
 func (h *colcaHook) OnSelectSubscribers(subs *mqtt.Subscribers, pk packets.Packet) *mqtt.Subscribers {
+	subs = h.selectRecipients(subs, pk)
+	// Last, so a session is charged only for what it is still a subscriber of.
+	h.boundOfflineQueues(subs, pk)
+	return subs
+}
+
+// selectRecipients narrows an acknowledgement's subscribers to who may read it.
+func (h *colcaHook) selectRecipients(subs *mqtt.Subscribers, pk packets.Packet) *mqtt.Subscribers {
 	eng := h.engine()
 	if eng == nil {
 		return subs
@@ -610,6 +622,7 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 	s.Options.Capabilities.SharedSubAvailable = 0
 	hook := &colcaHook{eng: eng, reg: reg, ver: ver, humans: newHumanSessions(),
 		cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s,
+		offline:  newOfflineSessions(cfg.MQTTLimits),
 		refusals: slog.New(newMochiLogHandler(slog.Default().Handler())).With("node", cfg.ULID, "comp", "mqtt")}
 	if err := s.AddHook(hook, nil); err != nil {
 		return nil, err
@@ -647,11 +660,9 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 		}
 		srv.humanWS = w
 	}
-	if srv.humanTCP != nil || srv.humanWS != nil {
-		go srv.runSweeper(srv.sweepStop)
-		if ver != nil {
-			ver.OnLogout(srv.endLoggedOutSessions)
-		}
+	go srv.runSweeper(srv.sweepStop)
+	if (srv.humanTCP != nil || srv.humanWS != nil) && ver != nil {
+		ver.OnLogout(srv.endLoggedOutSessions)
 	}
 	return srv, nil
 }

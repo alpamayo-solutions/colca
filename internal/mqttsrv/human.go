@@ -254,10 +254,16 @@ func (h *colcaHook) humanACL(cl *mqtt.Client, topic string) bool {
 	return true
 }
 
-// OnDisconnect drops the session table entry (nil-op for machine clients).
-func (h *colcaHook) OnDisconnect(cl *mqtt.Client, _ error, _ bool) {
+// OnDisconnect drops the session table entry (nil-op for machine clients), and
+// starts the account of a session that stays behind without its client. expire
+// says the session ends with the connection; a connection replaced by a newer
+// one of the same client id leaves the session to that one.
+func (h *colcaHook) OnDisconnect(cl *mqtt.Client, _ error, expire bool) {
 	if isHumanListener(cl) {
 		h.metrics.SetHumanSessions(h.humans.drop(cl.ID, cl))
+	}
+	if !expire && !cl.IsTakenOver() {
+		h.wentOffline(cl)
 	}
 }
 
@@ -316,6 +322,7 @@ func (s *Server) runSweeper(stop <-chan struct{}) {
 			return
 		case <-t.C:
 			s.sweepInvalidHumanSessions(time.Now())
+			s.sweepOfflineSessions()
 		}
 	}
 }
