@@ -1,8 +1,10 @@
 package repl
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
@@ -59,6 +61,60 @@ func (e *replError) Error() string {
 // RunUplink.
 func (e *replError) Refused() bool {
 	return e.Status >= 400 && e.Status < 500 && !e.Busy() && !e.StoreChanged()
+}
+
+// Unauthorized reports whether the parent does not know this node's key (401):
+// the node is not enrolled there, or not any more.
+func (e *replError) Unauthorized() bool { return e.Status == http.StatusUnauthorized }
+
+// isUnauthorized reports whether err is the parent's 401.
+func isUnauthorized(err error) bool {
+	var refusal *replError
+	return errors.As(err, &refusal) && refusal.Unauthorized()
+}
+
+// Bounds of the wait between requests to a parent that does not know this
+// node's key.
+const (
+	unenrolledRetryMin = time.Second
+	unenrolledRetryMax = 10 * time.Second
+)
+
+// unenrolledBackoff spaces the requests of a node its parent does not know. An
+// edge started before its enrolment used to ask on every lane twice a second,
+// about ten refused requests a second for as long as nobody enrolled it. Every
+// request of the client waits here, so one refusal quiets all lanes, and the
+// wait doubles up to unenrolledRetryMax: enrolment is noticed within that.
+type unenrolledBackoff struct {
+	mu    sync.Mutex
+	delay time.Duration
+	until time.Time
+}
+
+// refused notes a 401 received at now. A refusal that arrives while a wait is
+// already running (another lane's request, sent before it) does not extend it.
+func (b *unenrolledBackoff) refused(now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if now.Before(b.until) {
+		return
+	}
+	b.delay = min(max(2*b.delay, unenrolledRetryMin), unenrolledRetryMax)
+	b.until = now.Add(b.delay/2 + rand.N(b.delay/2+1)) //nolint:gosec // retry jitter
+}
+
+// accepted ends the backoff: the parent answered a request of this node.
+func (b *unenrolledBackoff) accepted() {
+	b.mu.Lock()
+	b.delay, b.until = 0, time.Time{}
+	b.mu.Unlock()
+}
+
+// wait is how long requests are still held back at now.
+func (b *unenrolledBackoff) wait(now time.Time) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return max(b.until.Sub(now), 0)
 }
 
 // readReason reads the parent's explanation off a refused response, bounded so

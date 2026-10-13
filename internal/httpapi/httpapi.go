@@ -190,15 +190,20 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		w.WriteHeader(code)
 		_, _ = w.Write(buf.Bytes())
 	}
-	auditDenied := func(r *http.Request, door, reason string, entry *uns.Entry) {
+	// auditDeniedPeer records a refused caller; peer is the fingerprint of a
+	// key this node knows no identity for, "" otherwise.
+	auditDeniedPeer := func(r *http.Request, door, reason string, entry *uns.Entry, peer string) {
 		d := engine.AuditDenial{
-			Operation: "authenticate", ReasonCode: reason,
+			Operation: "authenticate", ReasonCode: reason, Peer: peer,
 			Metadata: map[string]any{"door": door, "route": r.URL.Path, "method": r.Method},
 		}
 		if entry != nil {
 			d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.ActorLabel(), entry.ActorKind()
 		}
 		_ = e.RecordDenial(d)
+	}
+	auditDenied := func(r *http.Request, door, reason string, entry *uns.Entry) {
+		auditDeniedPeer(r, door, reason, entry, "")
 	}
 
 	var resolve func(r *http.Request) (caller, bool)
@@ -269,7 +274,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				entry, ok := reg.ByPubkey(pub)
 				if !ok {
 					m.AuthReject(metrics.DoorHTTP, metrics.AuthUnknownKey)
-					auditDenied(r, metrics.DoorHTTP, metrics.AuthUnknownKey, nil)
+					auditDeniedPeer(r, metrics.DoorHTTP, metrics.AuthUnknownKey, nil, identity.Fingerprint(pub))
 					return caller{}, false
 				}
 				if !entry.MayUseDoor(uns.DoorHTTP) {

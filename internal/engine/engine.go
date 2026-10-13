@@ -238,6 +238,8 @@ type Engine struct {
 	// auditID is injectable for deterministic event tests. Audit writes bypass
 	// the public ingest doors; see audit.go.
 	auditID func(time.Time) string
+	// auditRepeats counts the repeats of a denial instead of writing each.
+	auditRepeats auditRepeats
 
 	// unboundLog rate-limits the "_Metric with no _Signal" log line per path
 	// (unbound.go).

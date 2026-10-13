@@ -591,6 +591,14 @@ func Start(cfg *config.Config) (*Node, error) {
 		n.Engine.RunLogGate(n.stop)
 	}()
 
+	// Repeated denials are counted, not written one by one; their counts are
+	// written when the window ends. Stop writes what is still counted.
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		n.Engine.RunAuditRepeats(n.stop)
+	}()
+
 	// 11. Replicated records reach the bus through one goroutine (see
 	//     engine/repldeliver.go).
 	n.wg.Add(1)
@@ -707,6 +715,7 @@ func (n *Node) Stop() {
 		// withheld without a summary.
 		if n.Engine != nil {
 			n.Engine.FlushLogs()
+			n.Engine.FlushAuditRepeats()
 		}
 		if n.MQTT != nil {
 			_ = n.MQTT.Close()

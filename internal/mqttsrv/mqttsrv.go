@@ -105,6 +105,19 @@ func (h *colcaHook) auditDenied(operation, reason, door string, entry *uns.Entry
 	h.auditDeniedAt(operation, reason, door, entry, metadata, "", "")
 }
 
+// auditUnknownKey records a connection refused because its key is not
+// enrolled, under the key's fingerprint.
+func (h *colcaHook) auditUnknownKey(door, pub string) {
+	eng := h.engine()
+	if eng == nil {
+		return
+	}
+	_ = eng.RecordDenial(engine.AuditDenial{
+		Operation: "authenticate", ReasonCode: metrics.AuthUnknownKey,
+		Metadata: map[string]any{"door": door}, Peer: identity.Fingerprint(pub),
+	})
+}
+
 func (h *colcaHook) auditDeniedAt(operation, reason, door string, entry *uns.Entry,
 	metadata map[string]any, entityType, entityID string) {
 	eng := h.engine()
@@ -256,7 +269,7 @@ func (h *colcaHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bo
 	if !ok {
 		h.log.Warn("mqtt auth rejected: key not enrolled", "user", user)
 		h.metrics.AuthReject(metrics.DoorMQTT, metrics.AuthUnknownKey)
-		h.auditDenied("authenticate", metrics.AuthUnknownKey, metrics.DoorMQTT, nil, nil)
+		h.auditUnknownKey(metrics.DoorMQTT, pub)
 		return false
 	}
 	if !entry.MayUseDoor(uns.DoorMQTT) {

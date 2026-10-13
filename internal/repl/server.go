@@ -110,11 +110,17 @@ func (s *Server) upstream() *Client {
 }
 
 func (s *Server) auditDenied(operation, reason string, entry *uns.Entry, metadata map[string]any) {
+	s.auditDeniedPeer(operation, reason, entry, "", metadata)
+}
+
+// auditDeniedPeer records a denial of a caller this node knows no identity for
+// under the fingerprint of the key it showed.
+func (s *Server) auditDeniedPeer(operation, reason string, entry *uns.Entry, peer string, metadata map[string]any) {
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
 	metadata["door"] = metrics.DoorRepl
-	d := engine.AuditDenial{Operation: operation, ReasonCode: reason, Metadata: metadata}
+	d := engine.AuditDenial{Operation: operation, ReasonCode: reason, Metadata: metadata, Peer: peer}
 	if entry != nil {
 		d.ActorID, d.ActorLabel, d.ActorKind = entry.ULID, entry.ActorLabel(), entry.ActorKind()
 	}
@@ -152,7 +158,7 @@ func (s *Server) childFromReq(r *http.Request) (*uns.Entry, string, error) {
 	entry, ok := s.reg.ByPubkey(pub)
 	if !ok {
 		s.metrics.AuthReject(metrics.DoorRepl, metrics.AuthUnknownKey)
-		s.auditDenied("authenticate", metrics.AuthUnknownKey, nil, map[string]any{"route": r.URL.Path})
+		s.auditDeniedPeer("authenticate", metrics.AuthUnknownKey, nil, identity.Fingerprint(pub), map[string]any{"route": r.URL.Path})
 		return nil, "", fmt.Errorf("client key %s not enrolled at this node", short(pub))
 	}
 	if !entry.MayUseDoor(uns.DoorRepl) {

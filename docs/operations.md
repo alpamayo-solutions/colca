@@ -23,6 +23,7 @@ alert first:
 | `colca_cursor_unread_age_seconds` | age of the oldest record waiting that the consumer actually reads (its fetch filter applied); `0` on an idle stream. Past `cursors.lag_alarm_after` (default `60s`, `0` writes no finding) the node also writes a `cursor_lag` finding about the service |
 | `colca_rejected_publishes_total` | rises: clients send what the node refuses; `reason` says why |
 | `colca_auth_rejections_total` | rises: unknown keys or bad tokens at a door |
+| `colca_audit_denials_suppressed_total` | rises: a caller repeats a request the node refuses. The audit holds the first denial and one record per five minutes with the count (`metadata.repeated`) |
 | `colca_replication_integrity_failures_total` | above `0`: a child pruned records before its parent received them |
 | `colca_store_incarnation_changes_total` | rises: this node's store was restored from a backup, replaced, or given a new incarnation by an operator; its children re-sync |
 | `colca_uplink_resync_active` | stays `1`: this node is still sending again what its restored parent lacks |
