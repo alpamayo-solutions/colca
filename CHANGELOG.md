@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.36.3](https://github.com/alpamayo-solutions/colca/compare/v0.36.2...v0.36.3) (2026-10-13)
+
+
+### Fixes
+
+* **contracts:** bound every text field of an audit event and hold the node's own audit writer to the limits ([#219](https://github.com/alpamayo-solutions/colca/issues/219)) ([147f8f4](https://github.com/alpamayo-solutions/colca/commit/147f8f4d08178e716b65ebe8265ddbb3c6fbb329))
+* **uns:** refuse a second record for an external reference the node already holds ([#218](https://github.com/alpamayo-solutions/colca/issues/218)) ([e2ce318](https://github.com/alpamayo-solutions/colca/commit/e2ce318f5c67360dd950e45022a50b5fa009e28d))
+
 ## [0.36.2](https://github.com/alpamayo-solutions/colca/compare/v0.36.1...v0.36.2) (2026-10-13)
 
 
