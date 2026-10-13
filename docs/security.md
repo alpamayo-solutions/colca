@@ -130,6 +130,13 @@ element, and deleting such an entity together with its references. A changed
 or removed reference also counts at the entity it belongs to now, so it cannot
 be moved away from an entity outside the grant.
 
+A node holds one record per reference: the entity, the relationship, the
+external system, the table and the row are its identity, and the record's id
+only addresses it. A write that would add a second record for an identity the
+node already holds is refused with `409 duplicate_external_reference`, naming
+the record that stands, whichever command or door wrote it. A node that held
+two such records before this rule keeps both until an edit removes one.
+
 `#` in place of an element means the whole node. A grant on an element the node
 has never heard of covers nothing, and a node that has never reached its parent
 cannot resolve elements above itself, so scoped grants fail closed there.

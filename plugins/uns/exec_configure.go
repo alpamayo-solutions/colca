@@ -881,7 +881,8 @@ func (c *ConfigExec) entityUpsert(ctx CommandContext, payload []byte) (int, stri
 	}
 	writes, err := c.commit(ctx, records)
 	if err != nil {
-		return 422, "entity/upsert: rejected: " + err.Error(), "invalid", nil
+		code, message, result := commitRefusal("entity/upsert", err)
+		return code, message, result, nil
 	}
 	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
 }
@@ -1644,14 +1645,18 @@ func adoptTag(record map[string]any, tag catalogueTag, semantic map[string]strin
 	return record
 }
 
-// commitRefusal answers a refused commit. A tag another signal holds is a
-// conflict the caller can resolve, so it is a 409 naming the holder; any other
-// refusal is the record's own fault, named by field where the contract says
-// which one.
+// commitRefusal answers a refused commit. A tag another signal holds, or an
+// external reference another record holds, is a conflict the caller can
+// resolve, so it is a 409 naming the holder; any other refusal is the record's
+// own fault, named by field where the contract says which one.
 func commitRefusal(verb string, err error) (int, string, string) {
 	var held *TagHeldError
 	if errors.As(err, &held) {
 		return 409, verb + ": " + held.Error(), "conflict"
+	}
+	var duplicate *ReferenceHeldError
+	if errors.As(err, &duplicate) {
+		return 409, verb + ": " + duplicate.Error(), "conflict"
 	}
 	var invalid *FieldError
 	if errors.As(err, &invalid) {

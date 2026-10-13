@@ -212,7 +212,7 @@ func (w *EditExec) composeExternalReferences(
 
 	desiredIDs := map[string]bool{}
 	clientIDs := map[string]bool{}
-	semanticKeys := map[string]bool{}
+	identities := map[string]bool{}
 	newRecords := map[string]StateRecord{}
 	for index, reference := range *intent.ExternalReferences {
 		if reference.ClientID == "" || clientIDs[reference.ClientID] {
@@ -232,14 +232,15 @@ func (w *EditExec) composeExternalReferences(
 		if !externalSystems[reference.ExternalSystemID] {
 			return 422, "external_system_not_found: " + reference.ExternalSystemID, nil
 		}
-		semanticKey := strings.Join([]string{
-			reference.RelationshipType, reference.ExternalSystemID,
-			reference.ExternalTable, reference.ExternalRowID,
-		}, "\x00")
-		if semanticKeys[semanticKey] {
+		identity := referenceIdentity{
+			SourceEntity: reference.SourceEntity, SourceObjectID: reference.SourceObjectID,
+			RelationshipType: reference.RelationshipType, ExternalSystemID: reference.ExternalSystemID,
+			ExternalTable: reference.ExternalTable, ExternalRowID: reference.ExternalRowID,
+		}.key()
+		if identities[identity] {
 			return 422, "duplicate_external_reference", nil
 		}
-		semanticKeys[semanticKey] = true
+		identities[identity] = true
 
 		key := entityVersionKey("external-reference", reference.ID)
 		existing, belongsToSource := current[reference.ID]
