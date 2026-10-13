@@ -68,6 +68,7 @@ from colca_data_contracts.payload import (
     PRECISION,
     ULID,
     ULID_PATTERN,
+    UNIX_MILLIS,
     UNIX_SECONDS,
     ActorKind,
     AlarmNotificationConfigSnapshot,
@@ -197,6 +198,7 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "field_limits",
     "PRECISION",
     "UNIX_SECONDS",
+    "UNIX_MILLIS",
     # Extended base types
     "ServiceType",
     "AuditSource",
