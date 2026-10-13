@@ -110,6 +110,10 @@ func (f *fakeStore) PublishBatch(ctx CommandContext, records []StateRecord) ([]S
 	if err := CheckTagBindings(f.KVScan("_Signal", f.node), records); err != nil {
 		return nil, err
 	}
+	// And that no second record takes an external reference's identity.
+	if err := CheckExternalReferences(f.KVScan("_ExternalReference", f.node), records); err != nil {
+		return nil, err
+	}
 	f.batchCalls++
 	writes := make([]StateWrite, 0, len(records))
 	for _, record := range records {

@@ -350,6 +350,13 @@ func (w *EditExec) ExecuteWithWrites(
 			// that names data_tag, or a bind that raced another command).
 			return w.remember(envelope.OperationID, digest, 409, held.Error(), "conflict", nil)
 		}
+		var duplicate *ReferenceHeldError
+		if errors.As(err, &duplicate) {
+			// The plan adds a reference another record already is: one
+			// written since the caller read the entity, or by a command
+			// that raced this one.
+			return w.remember(envelope.OperationID, digest, 409, duplicate.Error(), "conflict", nil)
+		}
 		var invalid *FieldError
 		if errors.As(err, &invalid) {
 			// A composed record breaks its contract: a value the caller

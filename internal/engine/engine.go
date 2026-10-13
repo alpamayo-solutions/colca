@@ -186,9 +186,10 @@ type Engine struct {
 	replayMu    sync.Mutex
 	replayLocks map[string]*sync.Mutex
 
-	// bindMu holds the tag-binding check and the commit of a command batch
-	// that writes signals together, so two commands binding one tag at the
-	// same time cannot both pass (uns.CheckTagBindings).
+	// bindMu holds a one-holder check and the commit of the write it guards
+	// together, so two writes taking the same thing at the same time cannot
+	// both pass: a tag bound to one signal (uns.CheckTagBindings), and an
+	// external reference held by one record (uns.CheckExternalReferences).
 	bindMu sync.Mutex
 
 	// The node's position: the chain of elements from the root down to its own,
@@ -875,7 +876,7 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 	} else if res, held := e.gateLog(class, p, topic, payload, attribution); held {
 		return res, nil
 	}
-	res, err := e.persistAttributed(class, p, topic, payload, attribution)
+	res, err := e.persistAdminRecord(class, p, topic, payload, attribution)
 	if err != nil {
 		e.ledger.forget(id)
 		return res, err
@@ -885,6 +886,21 @@ func (e *Engine) IngestAdminAttributed(topic string, payload []byte, attribution
 	}
 	res.Command = e.maybeExec(p, payload, attribution, nil) // the admin door presents a token, not an identity
 	return res, nil
+}
+
+// persistAdminRecord persists one admin publish. An external reference this
+// node authors is held to the rule a command's batch is held to: the record
+// is the same whichever door wrote it.
+func (e *Engine) persistAdminRecord(class uns.Class, p uns.Parsed, topic string, payload []byte, attribution Attribution) (Result, error) {
+	if p.Contract == "_ExternalReference" && p.NodeID == e.cfg.ULID {
+		e.bindMu.Lock()
+		defer e.bindMu.Unlock()
+		if err := e.checkExternalReferences([]uns.StateRecord{{Topic: topic, Payload: payload}}); err != nil {
+			e.metrics.RejectPublish(metrics.ReasonValidation)
+			return Result{}, err
+		}
+	}
+	return e.persistAttributed(class, p, topic, payload, attribution)
 }
 
 // ingestAdminStateBatch commits the complete state result of one domain command.
@@ -967,15 +983,24 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 	}
 
 	storeRecords := make([]store.Record, len(prepared))
-	writesSignals := false
+	writesSignals, writesReferences := false, false
 	for i := range prepared {
 		storeRecords[i] = prepared[i].record
 		writesSignals = writesSignals || prepared[i].parsed.Contract == "_Signal"
+		writesReferences = writesReferences || prepared[i].parsed.Contract == "_ExternalReference"
 	}
-	if writesSignals {
+	if writesSignals || writesReferences {
 		e.bindMu.Lock()
 		defer e.bindMu.Unlock()
+	}
+	if writesSignals {
 		if err := e.checkTagBindings(records); err != nil {
+			e.metrics.RejectPublish(metrics.ReasonValidation)
+			return nil, err
+		}
+	}
+	if writesReferences {
+		if err := e.checkExternalReferences(records); err != nil {
 			e.metrics.RejectPublish(metrics.ReasonValidation)
 			return nil, err
 		}
@@ -1010,6 +1035,17 @@ func (e *Engine) checkTagBindings(records []uns.StateRecord) error {
 		return fmt.Errorf("tag binding check: %w", err)
 	}
 	return uns.CheckTagBindings(current, records)
+}
+
+// checkExternalReferences refuses a write that would give this node a second
+// external reference with an identity one of its records already holds. The
+// caller holds bindMu until the write is appended.
+func (e *Engine) checkExternalReferences(records []uns.StateRecord) error {
+	current, err := e.scanContract("_ExternalReference", func(kv store.KVEntry) bool { return kv.NodeID == e.cfg.ULID })
+	if err != nil {
+		return fmt.Errorf("external reference check: %w", err)
+	}
+	return uns.CheckExternalReferences(current, records)
 }
 
 // ingestAdminEvent commits one append-only event a command executor authored,

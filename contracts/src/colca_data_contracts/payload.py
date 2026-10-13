@@ -6,7 +6,7 @@ import types
 import typing
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, is_dataclass
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import ulid
 from franzmq.data_contracts.base import (
@@ -1111,7 +1111,15 @@ class ExternalSystem(ToleratesUnknownFields, Payload):
 
 @dataclass
 class ExternalReference(ToleratesUnknownFields, Payload):
-    """An upward reference from a Colca object to an external-system row."""
+    """An upward reference from a Colca object to an external-system row.
+
+    Topic: ``colca/v1/_ExternalReference/{node-id}/_colca/external-references/{id}``,
+    written by the node that owns the source object.
+
+    The ``id`` addresses the record; ``identity`` says which link it is. A node
+    holds at most one record per identity and refuses a second one
+    (``duplicate_external_reference``), so a reader may key by either.
+    """
 
     id: ULID
     source_entity: Annotated[str, MaxLength(100)]
@@ -1122,6 +1130,22 @@ class ExternalReference(ToleratesUnknownFields, Payload):
     external_row_id: Annotated[str, MaxLength(255)]
     external_column: Annotated[str, MaxLength(255)] = ""
     description: str = ""
+
+    #: The fields that make two records the same reference, in order. The key
+    #: column and the description describe the link and are not part of it.
+    IDENTITY_FIELDS: ClassVar[tuple[str, ...]] = (
+        "source_entity",
+        "source_object_id",
+        "relationship_type",
+        "external_system_id",
+        "external_table",
+        "external_row_id",
+    )
+
+    @property
+    def identity(self) -> tuple[str, ...]:
+        """The object, the relationship and the external row this reference links."""
+        return tuple(str(getattr(self, name)) for name in self.IDENTITY_FIELDS)
 
 
 @dataclass
