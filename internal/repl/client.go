@@ -82,6 +82,8 @@ type Client struct {
 	// Whether each replication lane is currently failing, so an outage logs
 	// as a state change rather than once per retry (see linkstate.go).
 	links *linkState
+	// unenrolled spaces every request while the parent answers 401.
+	unenrolled unenrolledBackoff
 	// status is the current uplink condition, read by /healthz. It is an
 	// atomic.Value so a /healthz read never contends with the loops that write it.
 	status        atomic.Value
@@ -736,6 +738,12 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			}
 			delete(busyUntil, stream)
 		}
+		if c.unenrolled.wait(time.Now()) > 0 {
+			// The parent does not know this node's key: no lane asks again
+			// before the wait is over.
+			retryPending = true
+			return false, false
+		}
 		// The epoch and the parent incarnation are read together and before the
 		// cursor: a page read at a position a re-sync has since moved names the
 		// incarnation recorded before it. The parent refuses it when that is
@@ -846,6 +854,9 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				}
 				refused := errors.As(err, &refusal) && refusal.Refused()
 				busy := refusal != nil && refusal.Busy()
+				if refused && refusal.Unauthorized() {
+					c.unenrolled.refused(time.Now())
+				}
 				if busy {
 					// The parent is shedding load: wait as long as it asked, with
 					// jitter so its children do not return in step.
@@ -879,6 +890,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				// ends the drain loop instead of spinning.
 				return false, false
 			}
+			c.unenrolled.accepted()
 			if wasFailing, attempts, down := c.links.Recovered("uplink:"+stream, time.Now()); wasFailing {
 				c.log.Info("uplink recovered",
 					"stream", stream, "parent", c.base,
@@ -964,7 +976,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 						soonest = left
 					}
 				}
-				delay = max(delay, soonest)
+				delay = max(delay, soonest, c.unenrolled.wait(time.Now()))
 				wake = nil // commits cannot shorten a failed-request backoff
 			}
 			select {
@@ -1014,7 +1026,7 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		select {
 		case <-stop:
 			return false
-		case <-time.After(retryAfter):
+		case <-time.After(max(retryAfter, c.unenrolled.wait(time.Now()))):
 			return true
 		}
 	}
@@ -1026,6 +1038,11 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 	handshake := func(first bool) bool {
 		for {
 			res, err := c.hello(ctx, c.greet(st))
+			if err == nil {
+				c.unenrolled.accepted()
+			} else if isUnauthorized(err) {
+				c.unenrolled.refused(time.Now())
+			}
 			if err == nil && c.settle(eng, m, res, first) {
 				if wasFailing, attempts, waited := c.links.Recovered("hello", time.Now()); wasFailing {
 					c.log.Info("contact with the parent succeeded",
@@ -1081,6 +1098,9 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			if errors.As(err, &refusal) && refusal.StoreChanged() {
 				c.resyncWanted.Store(true)
 				continue
+			}
+			if isUnauthorized(err) {
+				c.unenrolled.refused(time.Now())
 			}
 			c.setStatus(classifyUplinkErr(err))
 			c.log.Warn("downlink fetch failed (will retry)", "err", err)

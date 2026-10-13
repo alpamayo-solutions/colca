@@ -137,6 +137,15 @@ func (i *Identity) WriteSelfSignedCert(path, cn string) error {
 	return nil
 }
 
+// Fingerprint shortens a hex public key to what a log line or an audit record
+// names a key by: enough to tell two keys apart and to find the one meant.
+func Fingerprint(pubHex string) string {
+	if len(pubHex) <= 16 {
+		return pubHex
+	}
+	return pubHex[:16]
+}
+
 // PeerPubHex extracts the hex pubkey from a peer leaf certificate (for pinning).
 func PeerPubHex(rawCert []byte) (string, error) {
 	c, err := x509.ParseCertificate(rawCert)

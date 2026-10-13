@@ -277,6 +277,7 @@ type Metrics struct {
 	definitionsApplied   prometheus.Counter     // colca_definitions_applied_total
 	definitionsRejected  prometheus.Counter     // colca_definitions_rejected_total
 	auditWriteFailures   prometheus.Counter     // colca_audit_write_failures_total
+	auditSuppressed      *prometheus.CounterVec // colca_audit_denials_suppressed_total{door,reason}
 	drainsCompletedBy    map[string]prometheus.Counter
 
 	// Blob transfers and ingress rejections.
@@ -587,6 +588,10 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_audit_write_failures_total",
 			Help: "Security audit events that could not be durably appended. The protected operation remains denied. Resets on restart.",
 		}),
+		auditSuppressed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_audit_denials_suppressed_total",
+			Help: "Repeated denials that were counted instead of written to the audit stream, by door and reason. The first denial of a caller and cause is written; its repeats are reported in one record per five minutes. Resets on restart.",
+		}, []string{"door", "reason"}),
 		blobTransfers: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_blob_transfers_total",
 			Help: "Blob transfers by direction (push to parent, pull from parent, receive from child) and outcome. Resets on restart.",
@@ -735,7 +740,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied, m.replIntegrityFailures,
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
-		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures,
+		m.definitionsApplied, m.definitionsRejected, m.auditWriteFailures, m.auditSuppressed,
 		m.blobTransfers, m.blobRejects, m.recordRejects, m.logWithheld, m.logUntracked, m.logGateWriteFailures, m.resourceReads, m.httpRequestLimited, m.blobsSwept,
 		m.httpKVRequests, m.httpKVEntries, m.httpFetchRequests, m.httpLimitedByCaller,
 		m.cursorUnreadAge,
@@ -751,6 +756,14 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 func (m *Metrics) AuditWriteFailure() {
 	if m != nil {
 		m.auditWriteFailures.Inc()
+	}
+}
+
+// AuditDenialSuppressed counts one repeated denial that was counted instead of
+// written to the audit stream.
+func (m *Metrics) AuditDenialSuppressed(door, reason string) {
+	if m != nil {
+		m.auditSuppressed.WithLabelValues(door, reason).Inc()
 	}
 }
 
