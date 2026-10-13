@@ -74,7 +74,12 @@ type colcaHook struct {
 	// publishing counts client publishes admitted before closing whose PUBACK is not
 	// written yet; admitted holds the client of each. Close waits for them.
 	// offline bounds what is queued for sessions whose client is away.
-	offline    *offlineSessions
+	offline *offlineSessions
+	// unacked bounds what is held for connected clients that do not acknowledge.
+	unacked *unackedClients
+	// retiring holds the clients that retired their own _ServiceDetails on this
+	// connection: their session ends with the connection.
+	retiring   sync.Map // *mqtt.Client -> struct{}
 	pubDone    door.Signal
 	publishing atomic.Int64
 	admitted   sync.Map // *mqtt.Client -> struct{}
@@ -144,6 +149,7 @@ func (h *colcaHook) Provides(b byte) bool {
 		mqtt.OnSelectSubscribers,
 		mqtt.OnSessionEstablished,
 		mqtt.OnClientExpired,
+		mqtt.OnQosComplete,
 	}, b)
 }
 
@@ -487,12 +493,14 @@ func (h *colcaHook) OnPublish(cl *mqtt.Client, pk packets.Packet) (packets.Packe
 		h.log.Debug("human ingest", "sub", s.sub, "topic", res.Topic, "stream", res.Stream, "offset", res.Offset)
 		return pk, packets.CodeSuccessIgnore
 	}
+	retires := h.retiresOwnRecord(eng, ident, pk)
 	res, err := eng.IngestClient(ident, pk.TopicName, pk.Payload)
 	if err != nil {
 		h.refusals.Warn("publish rejected", "identity", ident, "topic", pk.TopicName,
 			"bytes", len(pk.Payload), "err", err)
 		return pk, rejectCode(cl, pk, err)
 	}
+	h.noteServiceRecord(cl, pk, retires)
 	if res.Duplicate || res.Answered || res.Withheld != "" {
 		// Nothing stored, nothing to fan out: a repeat, a command the node
 		// answered itself, or a _Log record the log gate collapsed or capped. The
@@ -516,6 +524,7 @@ func (h *colcaHook) OnSelectSubscribers(subs *mqtt.Subscribers, pk packets.Packe
 	subs = h.selectRecipients(subs, pk)
 	// Last, so a session is charged only for what it is still a subscriber of.
 	h.boundOfflineQueues(subs, pk)
+	h.boundUnacked(subs, pk)
 	return subs
 }
 
@@ -624,6 +633,7 @@ func New(cfg *config.Config, id *identity.Identity, reg *registry.Manager, ver *
 		cfg: cfg, log: slog.Default().With("node", cfg.ULID, "comp", "mqtt"), metrics: m, broker: s,
 		offline:  newOfflineSessions(cfg.MQTTLimits),
 		refusals: slog.New(newMochiLogHandler(slog.Default().Handler())).With("node", cfg.ULID, "comp", "mqtt")}
+	hook.unacked = newUnackedClients(hook.offline)
 	if err := s.AddHook(hook, nil); err != nil {
 		return nil, err
 	}

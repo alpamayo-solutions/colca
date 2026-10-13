@@ -210,6 +210,8 @@ type Metrics struct {
 	offlineQueuedBytes    prometheus.Gauge       // colca_mqtt_offline_queued_bytes
 	offlineDropped        prometheus.Counter     // colca_mqtt_offline_dropped_total
 	offlineEnded          *prometheus.CounterVec // colca_mqtt_offline_sessions_ended_total{reason}
+	stalledClients        prometheus.Gauge       // colca_mqtt_stalled_clients
+	unackedDropped        prometheus.Counter     // colca_mqtt_unacked_dropped_total
 	// Publishes the broker wrote to subscribers, by door, pre-created per door.
 	deliveredMessages   *prometheus.CounterVec // colca_mqtt_delivered_messages_total{door}
 	deliveredBytes      *prometheus.CounterVec // colca_mqtt_delivered_payload_bytes_total{door}
@@ -451,8 +453,16 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}),
 		offlineEnded: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_mqtt_offline_sessions_ended_total",
-			Help: "Offline MQTT sessions removed without their client returning, by reason (expired, identity_removed). Resets on restart.",
+			Help: "MQTT sessions removed without their client returning, by reason (expired, identity_removed, retired). Resets on restart.",
 		}, []string{"reason"}),
+		stalledClients: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_mqtt_stalled_clients",
+			Help: "Connected MQTT clients that hold more unacknowledged messages than an offline session may keep and acknowledged nothing for 30 s. Nothing more is queued for them until they acknowledge.",
+		}),
+		unackedDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_mqtt_unacked_dropped_total",
+			Help: "Messages dropped for a connected MQTT client that does not acknowledge: what it held over the per-client bounds, and what was not queued for it while it was stalled. Resets on restart.",
+		}),
 		deliveredMessages: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_mqtt_delivered_messages_total",
 			Help: "PUBLISH packets the broker wrote to subscribers, by door (mqtt, local, human). Resets on restart.",
@@ -705,8 +715,8 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	}
 	m.drainsActive.Set(float64(draining))
 
-	// Both reasons exist from the first scrape, so a rate over them has a zero.
-	for _, reason := range []string{"expired", "identity_removed"} {
+	// Every reason exists from the first scrape, so a rate over them has a zero.
+	for _, reason := range []string{"expired", "identity_removed", "retired"} {
 		m.offlineEnded.WithLabelValues(reason)
 	}
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused, m.uplinkLogsWithheld,
@@ -716,6 +726,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.clockSampleDiscarded,
 		m.authReject, m.aclDeny, m.kicks, m.publishDropped,
 		m.offlineSessions, m.offlineQueuedMessages, m.offlineQueuedBytes, m.offlineDropped, m.offlineEnded,
+		m.stalledClients, m.unackedDropped,
 		m.deliveredMessages, m.deliveredBytes, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.securityChanges, m.nodePrefix,
 		m.commandUndelivered, m.commandUnroutable, m.commandDropped, m.commandRedelivered,
@@ -904,6 +915,22 @@ func (m *Metrics) MQTTOfflineDropped() {
 		return
 	}
 	m.offlineDropped.Inc()
+}
+
+// SetMQTTStalledClients reports the connected clients nothing is queued for
+// because they do not acknowledge.
+func (m *Metrics) SetMQTTStalledClients(n int) {
+	if m != nil {
+		m.stalledClients.Set(float64(n))
+	}
+}
+
+// MQTTUnackedDropped counts one message dropped for a connected client that
+// does not acknowledge.
+func (m *Metrics) MQTTUnackedDropped() {
+	if m != nil {
+		m.unackedDropped.Inc()
+	}
 }
 
 // MQTTOfflineSessionEnded counts one offline session removed without its client

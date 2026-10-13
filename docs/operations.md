@@ -125,7 +125,9 @@ holds them. Records waiting for the bus count against the push budget above.
 | `colca_mqtt_offline_sessions` | | sessions kept for a client that is not connected |
 | `colca_mqtt_offline_queued_messages`, `colca_mqtt_offline_queued_bytes` | | what is queued in memory for them; bounded by [`mqtt_limits.max_offline_*`](configuration.md#sessions-of-clients-that-are-away) |
 | `colca_mqtt_offline_dropped_total` | | messages not queued because an offline session's queue was full; the log has one line per session and absence |
-| `colca_mqtt_offline_sessions_ended_total` | `reason` (`expired`, `identity_removed`) | offline sessions removed without their client returning |
+| `colca_mqtt_offline_sessions_ended_total` | `reason` (`expired`, `identity_removed`, `retired`) | sessions removed without their client returning |
+| `colca_mqtt_stalled_clients` | | connected clients over the per-client bounds that acknowledged nothing for 30 s; nothing more is queued for them until they acknowledge |
+| `colca_mqtt_unacked_dropped_total` | | messages dropped for such a client; the log has one line per client and stall |
 
 ### What the log gate holds back
 

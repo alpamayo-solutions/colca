@@ -347,9 +347,21 @@ restart ends all of them, so a client always subscribes again when the
 CONNACK reports no session.
 
 A session ends without its client when it stays away longer than
-`max_session_expiry`, or within ten seconds once its identity was revoked or
-retired, since nobody can return to it. Its queue and subscriptions go with it
-(`colca_mqtt_offline_sessions_ended_total`).
+`max_session_expiry`, or within ten seconds once its identity was revoked,
+since nobody can return to it. The session of a service that retired itself
+(it published an empty `_ServiceDetails` over its own record, as
+`chaski.Service.retire()` does) ends with its connection. Its queue and
+subscriptions go with it (`colca_mqtt_offline_sessions_ended_total`).
+
+A connected client is bounded the same way once it stops acknowledging. The
+node holds every QoS 1 and 2 message until the client acknowledges it. A
+client that holds more than `max_offline_messages_per_client` messages or
+`max_offline_bytes_per_client` bytes and acknowledged nothing for 30 seconds
+is cut back to those bounds, newest first, and nothing more is queued for it
+until it acknowledges again. One log line says so (`mqtt client does not
+acknowledge`), `colca_mqtt_stalled_clients` counts such clients and
+`colca_mqtt_unacked_dropped_total` the messages. A client that acknowledges is
+never cut back, however much it holds at one moment.
 
 What to set: leave the defaults on an edge node. Raise
 `max_offline_messages_per_client` only for a consumer that is known to be away

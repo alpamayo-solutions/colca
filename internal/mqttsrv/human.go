@@ -262,6 +262,11 @@ func (h *colcaHook) OnDisconnect(cl *mqtt.Client, _ error, expire bool) {
 	if isHumanListener(cl) {
 		h.metrics.SetHumanSessions(h.humans.drop(cl.ID, cl))
 	}
+	h.forgetUnacked(cl)
+	if _, retired := h.retiring.LoadAndDelete(cl); retired && !cl.IsTakenOver() {
+		h.endRetired(cl, expire)
+		return
+	}
 	if !expire && !cl.IsTakenOver() {
 		h.wentOffline(cl)
 	}
@@ -323,6 +328,7 @@ func (s *Server) runSweeper(stop <-chan struct{}) {
 		case <-t.C:
 			s.sweepInvalidHumanSessions(time.Now())
 			s.sweepOfflineSessions()
+			s.sweepUnackedClients(time.Now())
 		}
 	}
 }
