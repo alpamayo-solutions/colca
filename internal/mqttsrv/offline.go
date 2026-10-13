@@ -9,6 +9,8 @@ import (
 	"github.com/mochi-mqtt/server/v2/packets"
 
 	"github.com/alpamayo-solutions/colca/internal/config"
+	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // offlineMessageOverhead is what one message queued for an offline session
@@ -21,6 +23,7 @@ const offlineMessageOverhead = 1024
 const (
 	offlineEndedExpired         = "expired"
 	offlineEndedIdentityRemoved = "identity_removed"
+	offlineEndedRetired         = "retired"
 )
 
 // offlineSession is the queue of one session whose client is away. mochi keeps
@@ -254,4 +257,58 @@ func (s *Server) sweepOfflineSessions() {
 		s.hook.endOffline(cl, offlineEndedIdentityRemoved)
 		s.S.Clients.Delete(cl.ID)
 	}
+}
+
+// retiresOwnRecord reports whether pk is a service retiring its own
+// _ServiceDetails: an empty payload at a record this identity authored. It is
+// asked before the publish is stored, while the record still says who wrote it.
+func (h *colcaHook) retiresOwnRecord(eng *engine.Engine, ident string, pk packets.Packet) bool {
+	if len(pk.Payload) != 0 {
+		return false
+	}
+	p, err := uns.Parse(pk.TopicName)
+	if err != nil || p.Contract != "_ServiceDetails" {
+		return false
+	}
+	entry, ok := h.reg.Get(ident)
+	if !ok {
+		return false
+	}
+	held, ok := eng.EntityStore().KVGet(pk.TopicName)
+	return ok && uns.ServiceRecordAuthor(p.Contract, held) == entry.ULID
+}
+
+// noteServiceRecord remembers that a client retired its own _ServiceDetails,
+// and forgets it when the client announces itself again on the same connection.
+func (h *colcaHook) noteServiceRecord(cl *mqtt.Client, pk packets.Packet, retires bool) {
+	if retires {
+		h.retiring.Store(cl, struct{}{})
+		return
+	}
+	if len(pk.Payload) == 0 {
+		return
+	}
+	if _, marked := h.retiring.Load(cl); !marked {
+		return
+	}
+	if p, err := uns.Parse(pk.TopicName); err == nil && p.Contract == "_ServiceDetails" {
+		h.retiring.Delete(cl)
+	}
+}
+
+// endRetired ends the session of a service that retired itself, when its
+// connection ends. A retired service does not come back for what its session
+// would queue; before, the session of a service inside the deployment stayed
+// until its expiry, because nothing removes a local service's identity.
+// expire says mochi removes the session itself right after the hook.
+func (h *colcaHook) endRetired(cl *mqtt.Client, expire bool) {
+	queued := cl.State.Inflight.Len()
+	if !expire {
+		cl.ClearInflights()
+		h.broker.UnsubscribeClient(cl)
+		h.broker.Clients.Delete(cl.ID)
+	}
+	h.metrics.MQTTOfflineSessionEnded(offlineEndedRetired)
+	h.log.Info("mqtt session of a retired service removed", "client", cl.ID,
+		"identity", string(cl.Properties.Username), "listener", cl.Net.Listener, "discarded_messages", queued)
 }
