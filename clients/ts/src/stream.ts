@@ -11,7 +11,7 @@
  */
 
 import type { Door, DoorRecord, FetchOptions, Gap, Page } from "./door.js";
-import type { Doorbell } from "./doorbell.js";
+import { IDLE_DRAIN_MS, type Doorbell } from "./doorbell.js";
 
 export interface StreamOptions {
   /** Records per page, 1…1000. */
@@ -40,6 +40,14 @@ export interface FollowOptions {
    */
   bell: Doorbell;
   signal?: AbortSignal;
+  /**
+   * How long to wait on a silent bell before reading from the cursor anyway,
+   * `IDLE_DRAIN_MS` (five minutes) when omitted. It recovers from a ring that
+   * never arrived and is not a polling cadence: keep it long, and ring the
+   * bell for everything that can grow the stream. `null` waits for a ring
+   * alone — then a lost ring stalls the consumer until `signal` aborts.
+   */
+  idleDrainMs?: number | null;
 }
 
 export class Stream {
@@ -93,14 +101,24 @@ export class Stream {
 
   /**
    * Drain now, then again after every ring of `bell`, until `signal` aborts.
-   * Nothing is read on a timer: a ring during a drain leads to one more drain,
-   * and a consumer rings the bell on reconnect so what arrived meanwhile is read.
+   * A ring during a drain leads to one more drain, and a consumer rings the
+   * bell on reconnect so what arrived meanwhile is read.
+   *
+   * The wait on the bell is bounded by `idleDrainMs`: when nothing rang for
+   * that long, the stream is read from its cursor once more. That read is the
+   * recovery for a ring that was lost on its way to the bell, which would
+   * otherwise leave the consumer waiting forever beside a growing stream. It
+   * is not how a consumer learns of new records, and an idle stream costs one
+   * empty page per bound.
    */
-  async *follow({ bell, signal }: FollowOptions): AsyncGenerator<DoorRecord> {
+  async *follow({ bell, signal, idleDrainMs = IDLE_DRAIN_MS }: FollowOptions): AsyncGenerator<DoorRecord> {
+    if (idleDrainMs !== null && !(idleDrainMs > 0)) {
+      throw new RangeError(`idleDrainMs must be greater than zero, or null, got ${String(idleDrainMs)}`);
+    }
     while (!signal?.aborted) {
       const seen = bell.generation;
       yield* this.drain(signal);
-      await bell.after(seen, signal);
+      await bell.after(seen, { signal, timeoutMs: idleDrainMs ?? undefined });
     }
   }
 
