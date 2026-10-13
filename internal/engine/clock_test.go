@@ -52,6 +52,7 @@ const (
 	parentSampleAgeLine = "colca_clock_parent_sample_age_seconds"
 	hostSyncLine        = "colca_host_clock_synchronized"
 	hostEstimatedLine   = "colca_host_clock_estimated_error_seconds"
+	hostStaleBoundLine  = "colca_host_clock_stale_bound_seconds"
 	hostMaxErrorLine    = "colca_host_clock_max_error_seconds"
 )
 
@@ -102,24 +103,57 @@ func TestParentSkewMetricsAreAbsentOnTheRoot(t *testing.T) {
 // read: an unreported clock is neither synchronized nor unsynchronized.
 func TestHostClockMetricsCarryTheKernelsVerdict(t *testing.T) {
 	w := newClockWorld(t, true)
-	for _, line := range []string{hostSyncLine, hostEstimatedLine, hostMaxErrorLine} {
+	for _, line := range []string{hostSyncLine, hostEstimatedLine, hostMaxErrorLine, hostStaleBoundLine} {
 		if v, ok := metricstest.Lookup(t, w.m, line); ok {
 			t.Fatalf("%s = %v with an unreported host clock, want the series absent", line, v)
 		}
 	}
 
-	w.host = hostclock.Status{Reported: true, Synchronized: true, EstimatedError: 1500 * time.Microsecond, MaxError: 250 * time.Millisecond}
-	for line, want := range map[string]float64{hostSyncLine: 1, hostEstimatedLine: 0.0015, hostMaxErrorLine: 0.25} {
+	// chrony: an estimate, and a bound well inside one poll interval.
+	w.host = hostclock.Status{Reported: true, Synchronized: true, EstimateReported: true,
+		EstimatedError: 1500 * time.Microsecond, MaxError: 250 * time.Millisecond}
+	for line, want := range map[string]float64{hostSyncLine: 1, hostEstimatedLine: 0.0015, hostMaxErrorLine: 0.25, hostStaleBoundLine: 0} {
 		if v := metricstest.Value(t, w.m, line); v != want {
 			t.Fatalf("%s = %v, want %v", line, v, want)
 		}
 	}
 
-	w.host = hostclock.Status{Reported: true, Synchronized: false, EstimatedError: 16 * time.Second, MaxError: 16 * time.Second}
-	for line, want := range map[string]float64{hostSyncLine: 0, hostEstimatedLine: 16, hostMaxErrorLine: 16} {
+	w.host = hostclock.Status{Reported: true, Synchronized: false, EstimateReported: true,
+		EstimatedError: 16 * time.Second, MaxError: 16 * time.Second}
+	for line, want := range map[string]float64{hostSyncLine: 0, hostEstimatedLine: 16, hostMaxErrorLine: 16,
+		hostStaleBoundLine: (16*time.Second - hostclock.PollAllowance).Seconds()} {
 		if v := metricstest.Value(t, w.m, line); v != want {
 			t.Fatalf("%s = %v, want %v", line, v, want)
 		}
+	}
+}
+
+// systemd-timesyncd keeps no estimate in the kernel: it writes 0. The estimate
+// series is then absent, not 0, and the stale bound carries the host's state:
+// 0 while timesyncd updates the clock, growing once it stops.
+func TestAHostWhoseNTPServiceKeepsNoEstimateReportsNoEstimate(t *testing.T) {
+	w := newClockWorld(t, true)
+	w.host = hostclock.Status{Reported: true, Synchronized: true, MaxError: 848_500 * time.Microsecond}
+	if v, ok := metricstest.Lookup(t, w.m, hostEstimatedLine); ok {
+		t.Fatalf("%s = %v on a host without an estimate, want the series absent", hostEstimatedLine, v)
+	}
+	for line, want := range map[string]float64{hostSyncLine: 1, hostMaxErrorLine: 0.8485, hostStaleBoundLine: 0} {
+		if v := metricstest.Value(t, w.m, line); v != want {
+			t.Fatalf("%s = %v, want %v", line, v, want)
+		}
+	}
+	host := w.e.ClockStatus()["host"].(map[string]any)
+	if host["estimated_error_ms"] != nil || host["max_error_ms"] != 848.5 || host["stale_bound_ms"] != float64(0) {
+		t.Fatalf("clock.host = %v, want a null estimate, max_error_ms 848.5 and stale_bound_ms 0", host)
+	}
+
+	// Two hours without an update: 7200 s at 500 µs/s.
+	w.host.MaxError = 3600 * time.Millisecond
+	if v := metricstest.Value(t, w.m, hostStaleBoundLine); v != 2.576 {
+		t.Fatalf("%s = %v two hours after the last update, want 2.576", hostStaleBoundLine, v)
+	}
+	if v, ok := metricstest.Lookup(t, w.m, hostEstimatedLine); ok {
+		t.Fatalf("%s = %v, want it absent as before", hostEstimatedLine, v)
 	}
 }
 
@@ -273,7 +307,7 @@ func TestClockStatusShape(t *testing.T) {
 		t.Fatalf("clock block keys = %v", keys(status))
 	}
 	host := status["host"].(map[string]any)
-	if !sameKeys(host, "synchronized", "estimated_error_ms") {
+	if !sameKeys(host, "synchronized", "estimated_error_ms", "max_error_ms", "stale_bound_ms") {
 		t.Fatalf("clock.host keys = %v", keys(host))
 	}
 	if status["wall_now_ms"] != int64(1_700_000_000_000) || status["is_root"] != true {
@@ -282,12 +316,13 @@ func TestClockStatusShape(t *testing.T) {
 	if status["parent_skew_ms"] != nil || status["parent_sample_age_s"] != nil {
 		t.Fatalf("the root has no parent, want null parent fields: %v", status)
 	}
-	if host["synchronized"] != nil || host["estimated_error_ms"] != nil {
+	if host["synchronized"] != nil || host["estimated_error_ms"] != nil ||
+		host["max_error_ms"] != nil || host["stale_bound_ms"] != nil {
 		t.Fatalf("an unreported host clock must be null, never false or 0: %v", host)
 	}
 
 	child := newClockWorld(t, false)
-	child.host = hostclock.Status{Reported: true, Synchronized: true, EstimatedError: 1500 * time.Microsecond}
+	child.host = hostclock.Status{Reported: true, Synchronized: true, EstimateReported: true, EstimatedError: 1500 * time.Microsecond}
 	if status := child.e.ClockStatus(); status["parent_skew_ms"] != nil || status["parent_sample_age_s"] != nil {
 		t.Fatalf("a child that never heard from its parent must report null parent fields: %v", status)
 	}

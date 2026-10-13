@@ -363,13 +363,20 @@ func (e *Engine) Now() time.Time { return e.clk.Now() }
 // ClockStatus is the /health clock block: the wall clock, the kernel's verdict
 // on it, and the skew to the parent. What is not known is null, never an
 // invented value: the host fields when the kernel's verdict cannot be read, the
-// parent fields on the root and before the first response from the parent.
+// host's estimate where its NTP service keeps none, the parent fields on the
+// root and before the first response from the parent.
 func (e *Engine) ClockStatus() map[string]any {
 	now := e.clk.Now()
-	host := map[string]any{"synchronized": nil, "estimated_error_ms": nil}
+	host := map[string]any{"synchronized": nil, "estimated_error_ms": nil, "max_error_ms": nil, "stale_bound_ms": nil}
 	if h := e.clk.Host(); h.Reported {
+		ms := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 		host["synchronized"] = h.Synchronized
-		host["estimated_error_ms"] = float64(h.EstimatedError) / float64(time.Millisecond)
+		// Null on a host whose NTP service keeps no estimate, see hostclock.Status.
+		if h.EstimateReported {
+			host["estimated_error_ms"] = ms(h.EstimatedError)
+		}
+		host["max_error_ms"] = ms(h.MaxError)
+		host["stale_bound_ms"] = ms(h.StaleBound())
 	}
 	status := map[string]any{
 		"wall_now_ms": now.UnixMilli(), "is_root": e.clk.IsRoot(), "host": host,

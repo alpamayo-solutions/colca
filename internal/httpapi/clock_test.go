@@ -65,7 +65,8 @@ func wantJSON(t *testing.T, block map[string]json.RawMessage, key, want string) 
 }
 
 // The /healthz clock block is {wall_now_ms, is_root, host:{synchronized,
-// estimated_error_ms}, parent_skew_ms, parent_sample_age_s} on every node. On a
+// estimated_error_ms, max_error_ms, stale_bound_ms}, parent_skew_ms,
+// parent_sample_age_s} on every node. On a
 // root the parent fields are null; where the kernel's verdict cannot be read the
 // host fields are null. Nothing of the old block (now_ms, offset_ms,
 // sync_age_seconds, beacon_interval_seconds) is left.
@@ -81,12 +82,12 @@ func TestHealthzClockBlockOnARoot(t *testing.T) {
 	wantJSON(t, block, "is_root", "true")
 	wantJSON(t, block, "parent_skew_ms", "null")
 	wantJSON(t, block, "parent_sample_age_s", "null")
-	wantJSON(t, block, "host", `{"estimated_error_ms":null,"synchronized":null}`)
+	wantJSON(t, block, "host", `{"estimated_error_ms":null,"max_error_ms":null,"stale_bound_ms":null,"synchronized":null}`)
 }
 
 func TestHealthzClockBlockOnAChild(t *testing.T) {
 	wall := time.UnixMilli(1_700_000_000_000)
-	host := hostclock.Status{Reported: true, Synchronized: true, EstimatedError: 2500 * time.Microsecond, MaxError: time.Second}
+	host := hostclock.Status{Reported: true, Synchronized: true, EstimateReported: true, EstimatedError: 2500 * time.Microsecond, MaxError: time.Second}
 	clk := clock.NewWithHost(false, func() time.Time { return wall }, func() hostclock.Status { return host })
 	cfg := &config.Config{ULID: "n-child", Parent: &config.Parent{}}
 
@@ -94,12 +95,14 @@ func TestHealthzClockBlockOnAChild(t *testing.T) {
 	wantJSON(t, block, "is_root", "false")
 	wantJSON(t, block, "parent_skew_ms", "null") // no response from the parent yet
 	wantJSON(t, block, "parent_sample_age_s", "null")
-	wantJSON(t, block, "host", `{"estimated_error_ms":2.5,"synchronized":true}`)
+	wantJSON(t, block, "host", `{"estimated_error_ms":2.5,"max_error_ms":1000,"stale_bound_ms":0,"synchronized":true}`)
 
 	// The parent's clock is 3s behind; the sample is 12s old when /healthz is read.
 	eng.ObserveParentClock(clock.ParentSample{NowMS: wall.UnixMilli() - 3_000, Sent: wall, Received: wall})
 	wall = wall.Add(12 * time.Second)
 	host.Synchronized = false
+	// A service that stopped updating and keeps no estimate: 2 s of bound.
+	host.EstimateReported, host.EstimatedError, host.MaxError = false, 0, 2*time.Second
 	reg, err := registry.New(eng.Store(), cfg.ULID)
 	if err != nil {
 		t.Fatal(err)
@@ -111,5 +114,5 @@ func TestHealthzClockBlockOnAChild(t *testing.T) {
 	wantJSON(t, block, "wall_now_ms", "1700000012000")
 	wantJSON(t, block, "parent_skew_ms", "-3000")
 	wantJSON(t, block, "parent_sample_age_s", "12")
-	wantJSON(t, block, "host", `{"estimated_error_ms":2.5,"synchronized":false}`)
+	wantJSON(t, block, "host", `{"estimated_error_ms":null,"max_error_ms":2000,"stale_bound_ms":976,"synchronized":false}`)
 }

@@ -313,13 +313,18 @@ publish is dropped and counted in `colca_rejected_publishes_total`.
 
 ```json
 {"wall_now_ms": 1760272496123, "is_root": false,
- "host": {"synchronized": true, "estimated_error_ms": 0.4},
+ "host": {"synchronized": true, "estimated_error_ms": 0.4,
+          "max_error_ms": 212.5, "stale_bound_ms": 0},
  "parent_skew_ms": -12, "parent_sample_age_s": 3.2}
 ```
 
 `wall_now_ms` is the host's wall clock, the only time the node decides on.
-`host` is the kernel's verdict on that clock; both fields are `null` where it
-cannot be read. `parent_skew_ms` is the parent's clock minus this node's,
+`host` is the kernel's verdict on that clock; its fields are `null` where it
+cannot be read. `estimated_error_ms` is also `null` on a host whose NTP service
+keeps no estimate (systemd-timesyncd): `null` is "not reported", not an error
+of zero. `max_error_ms` is the kernel's bound on the error and
+`stale_bound_ms` the part of it beyond one NTP poll interval, which grows
+while the clock is not updated. `parent_skew_ms` is the parent's clock minus this node's,
 measured on the latest replication response whose round trip was at most
 0.5 s, and `parent_sample_age_s` its age; both are `null` on a root and until
 there is such a response. See
