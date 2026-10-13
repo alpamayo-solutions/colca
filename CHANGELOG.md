@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.4](https://github.com/alpamayo-solutions/colca/compare/v0.36.3...v0.36.4) (2026-10-13)
+
+
+### Fixes
+
+* **ts:** bound the wait on a doorbell in follow and say why it woke ([#221](https://github.com/alpamayo-solutions/colca/issues/221)) ([ed0db76](https://github.com/alpamayo-solutions/colca/commit/ed0db76a7d2ef0f05f9c13ba13f4ad90b68b22c9))
+
 ## [0.36.3](https://github.com/alpamayo-solutions/colca/compare/v0.36.2...v0.36.3) (2026-10-13)
 
 
