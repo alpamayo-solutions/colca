@@ -27,6 +27,11 @@ for await (const record of panels.follow({ bell })) {
 }
 ```
 
+`follow()` also reads from its cursor when the bell stayed silent for
+`idleDrainMs` (five minutes by default), so a ring that was lost does not stall
+the consumer for good. That is a recovery read, not a polling cadence: keep it
+long. `idleDrainMs: null` waits for a ring alone.
+
 ## A producer
 
 ```ts
