@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.36.1](https://github.com/alpamayo-solutions/colca/compare/v0.36.0...v0.36.1) (2026-10-13)
+
+
+### Fixes
+
+* **clock:** a hold longer than the exchange leaves no round trip ([#211](https://github.com/alpamayo-solutions/colca/issues/211)) ([4728179](https://github.com/alpamayo-solutions/colca/commit/4728179264c6ce616789e253e01be80f1cee29f5))
+* **clock:** measure the parent skew within the request's round trip ([#209](https://github.com/alpamayo-solutions/colca/issues/209)) ([ca7b678](https://github.com/alpamayo-solutions/colca/commit/ca7b6786fe87d96d707e47d996d60d7f492c2bbb))
+* **clock:** report no host estimate where the NTP service keeps none, and export the stale bound ([#214](https://github.com/alpamayo-solutions/colca/issues/214)) ([b66e68a](https://github.com/alpamayo-solutions/colca/commit/b66e68a654432f3a4bce1a3a6c29df37c5b403e7))
+* **historian:** stop at start when the late write relations are missing ([#207](https://github.com/alpamayo-solutions/colca/issues/207)) ([fed3f08](https://github.com/alpamayo-solutions/colca/commit/fed3f081854b99f48c5bc27e4d66508d4ea71042))
+* **mqtt:** bound what is queued for offline sessions and end abandoned ones ([#213](https://github.com/alpamayo-solutions/colca/issues/213)) ([6d275ab](https://github.com/alpamayo-solutions/colca/commit/6d275abdf1bdf9b7328554eb409a35ce8707af4d))
+* **mqtt:** refuse a subscription that names an unknown contract on every door ([#212](https://github.com/alpamayo-solutions/colca/issues/212)) ([887ccfa](https://github.com/alpamayo-solutions/colca/commit/887ccfa11d4f7b853cdccc0b4a2c0fb26106f9a0))
+* **repl:** store commands that waited at the parent in one write ([#210](https://github.com/alpamayo-solutions/colca/issues/210)) ([c8a1cbd](https://github.com/alpamayo-solutions/colca/commit/c8a1cbdbacbc15b4d8e441bfa16104150617e03e))
+
 ## [0.36.0](https://github.com/alpamayo-solutions/colca/compare/v0.35.0...v0.36.0) (2026-10-12)
 
 
