@@ -203,6 +203,13 @@ type Metrics struct {
 	// outbound queue was full. A retained replay on subscribe is the usual burst;
 	// a non-zero value means delivered state went missing.
 	publishDropped prometheus.Counter
+	// What the broker holds for MQTT sessions whose client is away, and what it
+	// did not keep for them.
+	offlineSessions       prometheus.Gauge       // colca_mqtt_offline_sessions
+	offlineQueuedMessages prometheus.Gauge       // colca_mqtt_offline_queued_messages
+	offlineQueuedBytes    prometheus.Gauge       // colca_mqtt_offline_queued_bytes
+	offlineDropped        prometheus.Counter     // colca_mqtt_offline_dropped_total
+	offlineEnded          *prometheus.CounterVec // colca_mqtt_offline_sessions_ended_total{reason}
 	// Publishes the broker wrote to subscribers, by door, pre-created per door.
 	deliveredMessages   *prometheus.CounterVec // colca_mqtt_delivered_messages_total{door}
 	deliveredBytes      *prometheus.CounterVec // colca_mqtt_delivered_payload_bytes_total{door}
@@ -426,6 +433,26 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_mqtt_publish_dropped_total",
 			Help: "Publishes the broker dropped because a client's outbound queue was full (MaximumClientWritesPending). Resets on restart.",
 		}),
+		offlineSessions: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_mqtt_offline_sessions",
+			Help: "MQTT sessions kept for a client that is not connected.",
+		}),
+		offlineQueuedMessages: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_mqtt_offline_queued_messages",
+			Help: "Messages queued in memory for offline MQTT sessions.",
+		}),
+		offlineQueuedBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "colca_mqtt_offline_queued_bytes",
+			Help: "Estimated memory of the messages queued for offline MQTT sessions (payload, topic and 1 KiB per message); bounded by mqtt_limits.max_offline_bytes.",
+		}),
+		offlineDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "colca_mqtt_offline_dropped_total",
+			Help: "Messages not queued for an offline MQTT session because its queue, or the queue of all offline sessions, was full. Resets on restart.",
+		}),
+		offlineEnded: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_mqtt_offline_sessions_ended_total",
+			Help: "Offline MQTT sessions removed without their client returning, by reason (expired, identity_removed). Resets on restart.",
+		}, []string{"reason"}),
 		deliveredMessages: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_mqtt_delivered_messages_total",
 			Help: "PUBLISH packets the broker wrote to subscribers, by door (mqtt, local, human). Resets on restart.",
@@ -678,12 +705,18 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	}
 	m.drainsActive.Set(float64(draining))
 
+	// Both reasons exist from the first scrape, so a rate over them has a zero.
+	for _, reason := range []string{"expired", "identity_removed"} {
+		m.offlineEnded.WithLabelValues(reason)
+	}
 	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused, m.uplinkLogsWithheld,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.storeReincarnated, m.childAheadOfStore, m.uplinkResyncs, m.uplinkResyncActive, m.uplinkResyncGap,
 		m.downlinkCommandKnown,
 		m.clockSampleDiscarded,
-		m.authReject, m.aclDeny, m.kicks, m.publishDropped, m.deliveredMessages, m.deliveredBytes, m.humanSessions, m.jwksKeys, m.jwksFailures,
+		m.authReject, m.aclDeny, m.kicks, m.publishDropped,
+		m.offlineSessions, m.offlineQueuedMessages, m.offlineQueuedBytes, m.offlineDropped, m.offlineEnded,
+		m.deliveredMessages, m.deliveredBytes, m.humanSessions, m.jwksKeys, m.jwksFailures,
 		m.nodeCmds, m.securityChanges, m.nodePrefix,
 		m.commandUndelivered, m.commandUnroutable, m.commandDropped, m.commandRedelivered,
 		m.bundleInfo, m.bundleContracts,
@@ -853,6 +886,33 @@ func (m *Metrics) PublishDropped() {
 		return
 	}
 	m.publishDropped.Inc()
+}
+
+// SetMQTTOffline reports the offline MQTT sessions and what is queued for them.
+func (m *Metrics) SetMQTTOffline(sessions, messages int, bytes int64) {
+	if m == nil {
+		return
+	}
+	m.offlineSessions.Set(float64(sessions))
+	m.offlineQueuedMessages.Set(float64(messages))
+	m.offlineQueuedBytes.Set(float64(bytes))
+}
+
+// MQTTOfflineDropped counts one message not queued for an offline session.
+func (m *Metrics) MQTTOfflineDropped() {
+	if m == nil {
+		return
+	}
+	m.offlineDropped.Inc()
+}
+
+// MQTTOfflineSessionEnded counts one offline session removed without its client
+// returning.
+func (m *Metrics) MQTTOfflineSessionEnded(reason string) {
+	if m == nil {
+		return
+	}
+	m.offlineEnded.WithLabelValues(reason).Inc()
 }
 
 // MQTTDelivered counts one PUBLISH written to a subscriber on door and its
