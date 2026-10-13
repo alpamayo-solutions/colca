@@ -251,8 +251,9 @@ block of [`/healthz`](http-api.md#the-clock-in-healthz):
 | Metric | Meaning |
 |---|---|
 | `colca_host_clock_synchronized` | `1` when the kernel reports the clock as synchronized by an NTP daemon, `0` when not |
-| `colca_host_clock_estimated_error_seconds` | the kernel's estimate of the clock's error |
-| `colca_host_clock_max_error_seconds` | the kernel's bound on the error; it grows while no daemon updates the clock |
+| `colca_host_clock_estimated_error_seconds` | the NTP service's estimate of the clock's error; absent where the service keeps none |
+| `colca_host_clock_max_error_seconds` | the kernel's bound on the error; the service sets it at every update and the kernel adds 0.5 ms a second |
+| `colca_host_clock_stale_bound_seconds` | the part of that bound one poll interval does not explain: `0` while the clock is updated, then 0.5 ms for each second since an update came due |
 | `colca_clock_parent_skew_seconds` | the parent's clock minus this node's, from the `now_ms` on the latest `/downlink` or `/replicate` response whose round trip was at most 0.5 s; positive when the parent is ahead |
 | `colca_clock_parent_sample_age_seconds` | seconds since that measurement |
 | `colca_clock_parent_samples_discarded_total` | responses not used for the measurement because their round trip was longer than 0.5 s |
@@ -264,6 +265,20 @@ block of [`/healthz`](http-api.md#the-clock-in-healthz):
   `/healthz` reports `null`; node-exporter's `node_timex_sync_status`,
   `node_timex_estimated_error_seconds` and `node_timex_maxerror_seconds` carry
   the same reading from the host itself.
+- **Which host series to trust depends on the NTP service.** chrony and ntpd
+  keep the kernel's estimate and its bound. systemd-timesyncd keeps the
+  synchronized flag and the bound only: it writes an estimate of 0 at every
+  update, so `colca_host_clock_estimated_error_seconds` is absent on such a
+  host and `/healthz` reports `null`. The bound works under all three: the
+  service sets it when it updates the clock (to 0 or to its root distance) and
+  the kernel adds 500 µs every second, which makes it a record of how long
+  ago the last update was. One poll interval of a healthy service adds at
+  most 1.024 s (2048 s, systemd-timesyncd's longest), and
+  `colca_host_clock_stale_bound_seconds` is the bound above that: `0` on a
+  healthy host, `0.5` when no update arrived for 51 minutes, `5` after
+  3 h 21 min. At a bound of 16 s (8 h 53 min) the kernel declares the clock
+  unsynchronized. A service configured to poll less often than every 2048 s
+  shows a stale bound between polls.
 - **The parent series** exist on a node with a parent once the parent has
   answered, and never on a root. The node notes its clock when the request
   leaves and when the response is read; the parent states its clock (`now_ms`)
@@ -286,8 +301,11 @@ block of [`/healthz`](http-api.md#the-clock-in-healthz):
   exchange counted as round trip, so under it only responses that came back
   within 0.5 s are used, and a long poll that waited is not.
 - **Alert** on `colca_host_clock_synchronized == 0` for 15 minutes, on
-  `max(abs(colca_clock_parent_skew_seconds), colca_host_clock_estimated_error_seconds)`
-  above `0.5` for 10 minutes (warning) and above `5` for 5 minutes (critical).
+  the largest of `abs(colca_clock_parent_skew_seconds)`,
+  `colca_host_clock_estimated_error_seconds` and
+  `colca_host_clock_stale_bound_seconds` above `0.5` for 10 minutes (warning)
+  and above `5` for 5 minutes (critical). The stale bound is the term that
+  fires under every NTP service; the estimate adds what chrony and ntpd know.
   The node's own `clock` health metric uses the same two thresholds.
 - **The log** has one line when the skew to the parent passes 5 seconds
   (`clock skew to the parent exceeds the alarm threshold`) and one when it is
