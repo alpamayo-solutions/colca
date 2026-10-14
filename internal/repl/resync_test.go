@@ -376,6 +376,13 @@ func TestAResyncReportsWhatRetentionAlreadyPruned(t *testing.T) {
 	backup := r.backUp()
 	seed(t, r.cs, "metrics", "colca/v1/_Metric/m1/m1/late%d", 8)
 	waitFor(t, "the records sent since the backup at the parent", 10*time.Second, func() bool { return r.parentHolds() == 10 })
+	// The parent holding them is not the child knowing it: the child records
+	// the parent's confirmation when the reply arrives, and loops stopped
+	// before that leave the mark at 2, so the restored parent looks current
+	// and no re-sync starts.
+	waitFor(t, "the child to record the parent's confirmation", 10*time.Second, func() bool {
+		return r.cs.AckedMark(r.cl.ParentPub(), "metrics") == 10
+	})
 
 	// The child is stopped while the parent is restored, and its retention
 	// prunes offsets 1..6: four of them are records the restored parent lacks.
