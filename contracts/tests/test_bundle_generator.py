@@ -586,7 +586,7 @@ def test_every_definition_is_addressable_by_id():
 #: loses its `ULID` annotation, or a new id field without one, fails here.
 ULID_CONSTRAINED_FIELDS = {
     "_SystemElement": ["id", "parent_id", "semantic_type_id"],
-    "_Signal": ["id", "system_element_id", "data_tag", "semantic_type_id"],
+    "_Signal": ["id", "system_element_id", "data_tag", "semantic_type_id", "relationships/items/target_signal_id"],
     "_Constant": ["id", "system_element_id", "semantic_type_id"],
     "_Resource": ["id", "system_element_id"],
     "_ExternalReference": ["id", "external_system_id"],

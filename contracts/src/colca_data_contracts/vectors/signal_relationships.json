@@ -1,0 +1,523 @@
+{
+  "_comment": "Golden vectors for signal relationships (colca_data_contracts.signal_relationships). The rule table and the cases are judged by the Python suite (tests/test_signal_relationships.py) and by colca's Go suite (plugins/uns/signal_relationships_test.go), so the two copies of the rules cannot drift apart. Each case maps an end's key to its data type and its (relationship_type, target key) links.",
+  "access": [
+    "read",
+    "read_write"
+  ],
+  "numeric_data_types": [
+    "float",
+    "int",
+    "integer",
+    "number"
+  ],
+  "rules": {
+    "actual": {
+      "max_sources_per_target": 1,
+      "chains": false,
+      "data_types": "same_or_numeric"
+    },
+    "feedback": {
+      "max_sources_per_target": null,
+      "chains": false,
+      "data_types": "any"
+    },
+    "lower_limit": {
+      "max_sources_per_target": null,
+      "chains": true,
+      "data_types": "numeric"
+    },
+    "upper_limit": {
+      "max_sources_per_target": null,
+      "chains": true,
+      "data_types": "numeric"
+    }
+  },
+  "cases": [
+    {
+      "name": "no relationships",
+      "valid": true,
+      "ends": {
+        "a": {
+          "data_type": "float",
+          "relationships": []
+        }
+      }
+    },
+    {
+      "name": "setpoint names its actual",
+      "valid": true,
+      "ends": {
+        "pv": {
+          "data_type": "float",
+          "relationships": []
+        },
+        "sp": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "actual",
+              "pv"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "int setpoint with float actual",
+      "valid": true,
+      "ends": {
+        "pv": {
+          "data_type": "float",
+          "relationships": []
+        },
+        "sp": {
+          "data_type": "int",
+          "relationships": [
+            [
+              "actual",
+              "pv"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "slot vocabulary: integer setpoint with number actual",
+      "valid": true,
+      "ends": {
+        "pv": {
+          "data_type": "number",
+          "relationships": []
+        },
+        "sp": {
+          "data_type": "integer",
+          "relationships": [
+            [
+              "actual",
+              "pv"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "unknown data type passes the data type rule",
+      "valid": true,
+      "ends": {
+        "pv": {
+          "data_type": null,
+          "relationships": []
+        },
+        "sp": {
+          "data_type": "boolean",
+          "relationships": [
+            [
+              "actual",
+              "pv"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "upper and lower limit on one value",
+      "valid": true,
+      "ends": {
+        "v": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "upper_limit",
+              "hi"
+            ],
+            [
+              "lower_limit",
+              "lo"
+            ]
+          ]
+        },
+        "hi": {
+          "data_type": "float",
+          "relationships": []
+        },
+        "lo": {
+          "data_type": "int",
+          "relationships": []
+        }
+      }
+    },
+    {
+      "name": "one limit shared by two values",
+      "valid": true,
+      "ends": {
+        "a": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "upper_limit",
+              "max"
+            ]
+          ]
+        },
+        "b": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "upper_limit",
+              "max"
+            ]
+          ]
+        },
+        "max": {
+          "data_type": "float",
+          "relationships": []
+        }
+      }
+    },
+    {
+      "name": "a limit with a limit of its own",
+      "valid": true,
+      "ends": {
+        "v": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "upper_limit",
+              "soft"
+            ]
+          ]
+        },
+        "soft": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "upper_limit",
+              "hard"
+            ]
+          ]
+        },
+        "hard": {
+          "data_type": "float",
+          "relationships": []
+        }
+      }
+    },
+    {
+      "name": "feedback between any data types",
+      "valid": true,
+      "ends": {
+        "cmd": {
+          "data_type": "boolean",
+          "relationships": [
+            [
+              "feedback",
+              "pos"
+            ]
+          ]
+        },
+        "pos": {
+          "data_type": "string",
+          "relationships": []
+        }
+      }
+    },
+    {
+      "name": "one signal holds every type once",
+      "valid": true,
+      "ends": {
+        "sp": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "actual",
+              "pv"
+            ],
+            [
+              "upper_limit",
+              "hi"
+            ],
+            [
+              "lower_limit",
+              "lo"
+            ],
+            [
+              "feedback",
+              "ok"
+            ]
+          ]
+        },
+        "pv": {
+          "data_type": "float",
+          "relationships": []
+        },
+        "hi": {
+          "data_type": "float",
+          "relationships": []
+        },
+        "lo": {
+          "data_type": "float",
+          "relationships": []
+        },
+        "ok": {
+          "data_type": "boolean",
+          "relationships": []
+        }
+      }
+    },
+    {
+      "name": "target does not exist",
+      "valid": false,
+      "ends": {
+        "sp": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "actual",
+              "pv"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "target is the signal itself",
+      "valid": false,
+      "ends": {
+        "sp": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "actual",
+              "sp"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "unknown relationship type",
+      "valid": false,
+      "ends": {
+        "a": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "derived_from",
+              "b"
+            ]
+          ]
+        },
+        "b": {
+          "data_type": "float",
+          "relationships": []
+        }
+      }
+    },
+    {
+      "name": "two links of one type",
+      "valid": false,
+      "ends": {
+        "sp": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "actual",
+              "a"
+            ],
+            [
+              "actual",
+              "b"
+            ]
+          ]
+        },
+        "a": {
+          "data_type": "float",
+          "relationships": []
+        },
+        "b": {
+          "data_type": "float",
+          "relationships": []
+        }
+      }
+    },
+    {
+      "name": "actual data types incompatible",
+      "valid": false,
+      "ends": {
+        "pv": {
+          "data_type": "boolean",
+          "relationships": []
+        },
+        "sp": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "actual",
+              "pv"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "limit on a string",
+      "valid": false,
+      "ends": {
+        "v": {
+          "data_type": "string",
+          "relationships": [
+            [
+              "upper_limit",
+              "max"
+            ]
+          ]
+        },
+        "max": {
+          "data_type": "string",
+          "relationships": []
+        }
+      }
+    },
+    {
+      "name": "two setpoints name one actual",
+      "valid": false,
+      "ends": {
+        "pv": {
+          "data_type": "float",
+          "relationships": []
+        },
+        "a": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "actual",
+              "pv"
+            ]
+          ]
+        },
+        "b": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "actual",
+              "pv"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "actual links chain",
+      "valid": false,
+      "ends": {
+        "a": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "actual",
+              "b"
+            ]
+          ]
+        },
+        "b": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "actual",
+              "c"
+            ]
+          ]
+        },
+        "c": {
+          "data_type": "float",
+          "relationships": []
+        }
+      }
+    },
+    {
+      "name": "feedback links chain",
+      "valid": false,
+      "ends": {
+        "a": {
+          "data_type": "boolean",
+          "relationships": [
+            [
+              "feedback",
+              "b"
+            ]
+          ]
+        },
+        "b": {
+          "data_type": "boolean",
+          "relationships": [
+            [
+              "feedback",
+              "c"
+            ]
+          ]
+        },
+        "c": {
+          "data_type": "boolean",
+          "relationships": []
+        }
+      }
+    },
+    {
+      "name": "limit links form a cycle",
+      "valid": false,
+      "ends": {
+        "a": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "upper_limit",
+              "b"
+            ]
+          ]
+        },
+        "b": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "upper_limit",
+              "a"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "longer limit cycle",
+      "valid": false,
+      "ends": {
+        "a": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "lower_limit",
+              "b"
+            ]
+          ]
+        },
+        "b": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "lower_limit",
+              "c"
+            ]
+          ]
+        },
+        "c": {
+          "data_type": "float",
+          "relationships": [
+            [
+              "lower_limit",
+              "a"
+            ]
+          ]
+        }
+      }
+    }
+  ]
+}

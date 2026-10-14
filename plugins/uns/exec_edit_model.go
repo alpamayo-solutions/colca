@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // modelSlot is the part of a _DataModel slot compose needs: name, kind,
@@ -32,6 +33,57 @@ type modelSlot struct {
 	// EntityName is the child's name: the slot key, or the entity_name
 	// override from the YAML. Never empty for a child slot.
 	EntityName string `json:"entity_name"`
+	// Access is the signal slot's access, read or read_write; empty (read)
+	// for a child slot and for a manifest compiled before slots carried it.
+	Access string `json:"access"`
+	// Relationships link this signal slot to other signal slots of the model,
+	// by key. Assign gives the signals that fill the slots the same links.
+	Relationships []slotRelationship `json:"relationships"`
+}
+
+// slotRelationship is one link a data-model slot declares: its type and the
+// key of the target slot.
+type slotRelationship struct {
+	Type   string `json:"type"`
+	Target string `json:"target"`
+}
+
+// slotLinkTarget is the target key a slot's link of one type names.
+func slotLinkTarget(slot modelSlot, kind string) string {
+	for _, link := range slot.Relationships {
+		if link.Type == kind {
+			return link.Target
+		}
+	}
+	return ""
+}
+
+// validateSlotDeclarations checks a model's slot access and relationships by
+// the rules the Python loader applies after flattening. A manifest the loader
+// compiled passes; a hand-written one may not.
+func validateSlotDeclarations(model string, slots []modelSlot) []string {
+	problems := []string{}
+	ends := map[string]relationshipEnd{}
+	children := map[string]bool{}
+	for _, slot := range slots {
+		if slot.Kind == "child" {
+			children[slot.Key] = true
+			if slot.Access != "" || len(slot.Relationships) > 0 {
+				problems = append(problems, fmt.Sprintf("%s slot %q: a child slot declares no access or relationships", model, slot.Key))
+			}
+			continue
+		}
+		if slot.Access != "" && !signalAccessValues[slot.Access] {
+			problems = append(problems, fmt.Sprintf("%s slot %q: unknown access %q", model, slot.Key, slot.Access))
+		}
+		links := make([]relationshipLink, len(slot.Relationships))
+		for i, link := range slot.Relationships {
+			links[i] = relationshipLink(link)
+		}
+		ends[slot.Key] = relationshipEnd{DataType: slot.DataType, Links: links}
+	}
+	label := func(key string) string { return fmt.Sprintf("%s slot %q", model, key) }
+	return append(problems, relationshipProblems(ends, label, nil, children)...)
 }
 
 // dataModelManifest holds the fields of a _DataModel record composeModel
@@ -442,6 +494,9 @@ func (w *EditExec) resolveModelSlots(
 				return 422, fmt.Sprintf("model: %s slot %q has unknown data_type %q", name, slot.Key, slot.DataType)
 			}
 		}
+		if problems := validateSlotDeclarations(name, state.manifests[name].Slots); len(problems) > 0 {
+			return 422, "model: " + strings.Join(problems, "; ")
+		}
 	}
 
 	// Two desired models may not compute the same slot unless it is the
@@ -456,6 +511,10 @@ func (w *EditExec) resolveModelSlots(
 	}
 	requiredSignals := map[string]requirement{}
 	signalOrder := []string{}
+	// What the models declare for each required signal slot beyond its type:
+	// the access it needs and the links it holds, by target slot key.
+	slotAccess := map[string]requirement{}
+	slotLinks := map[string]map[string]requirement{} // key -> type -> the declaring slot
 
 	// Child slots with the same key merge: every child_model at that key is
 	// applied to the same child. Two different keys with the same
@@ -521,6 +580,20 @@ func (w *EditExec) resolveModelSlots(
 			if !slot.Required {
 				continue
 			}
+			if slot.Access == "read_write" {
+				slotAccess[slot.Key] = requirement{slot: slot, model: name}
+			}
+			for _, link := range slot.Relationships {
+				if slotLinks[slot.Key] == nil {
+					slotLinks[slot.Key] = map[string]requirement{}
+				}
+				if prev, seen := slotLinks[slot.Key][link.Type]; seen && slotLinkTarget(prev.slot, link.Type) != link.Target {
+					return 409, fmt.Sprintf(
+						"model: %s and %s give slot %q different %s targets", prev.model, name, slot.Key, link.Type,
+					)
+				}
+				slotLinks[slot.Key][link.Type] = requirement{slot: slot, model: name}
+			}
 			if prev, seen := requiredSignals[slot.Key]; seen {
 				if prev.slot.DataType != slot.DataType || prev.slot.SemanticType != slot.SemanticType {
 					return 409, fmt.Sprintf("model: %s and %s require incompatible %q", prev.model, name, slot.Key)
@@ -574,6 +647,14 @@ func (w *EditExec) resolveModelSlots(
 		}
 	}
 
+	// The signal filling each required slot after this plan: its id, topic
+	// and payload (the queued one where the plan changes it).
+	type filled struct {
+		id      string
+		topic   string
+		payload map[string]json.RawMessage
+	}
+	resolved := map[string]*filled{}
 	for _, key := range signalOrder {
 		slot := requiredSignals[key].slot
 		combinedKey := modelSlotPath(path, key)
@@ -603,13 +684,15 @@ func (w *EditExec) resolveModelSlots(
 			if tagID != "" && existingTag != "" && existingTag != tagID {
 				return 409, fmt.Sprintf("model: slot %q has an incompatible semantic type already assigned", combinedKey)
 			}
+			payload := existing.Payload
 			if tagID != "" && existingTag == "" {
-				payload := cloneRawMap(existing.Payload)
+				payload = cloneRawMap(existing.Payload)
 				payload["semantic_type_id"] = rawJSON(tagID)
 				if err := state.queue(existing.Record.Topic, payload); err != nil {
 					return 422, "model: payload is not encodable"
 				}
 			}
+			resolved[key] = &filled{id: existingID, topic: existing.Record.Topic, payload: payload}
 			continue
 		}
 
@@ -647,6 +730,75 @@ func (w *EditExec) resolveModelSlots(
 			return 422, "model: payload is not encodable"
 		}
 		state.signalPaths[signalPath] = true
+		resolved[key] = &filled{id: signalID, topic: topic, payload: payload}
+	}
+
+	// Access and links the slots declare land on the signals that fill them.
+	// A read_write slot makes its signal read_write; a signal that is
+	// read_write where the slot is read does not implement it. A link whose
+	// target slot no signal fills here (an optional slot) is left out.
+	for _, key := range signalOrder {
+		fill := resolved[key]
+		combinedKey := modelSlotPath(path, key)
+		payload := cloneRawMap(fill.payload)
+		current, _ := rawString(payload["access"])
+		if current == "" {
+			current = "read"
+		}
+		_, wantsWrite := slotAccess[key]
+		switch {
+		case wantsWrite && current != "read_write":
+			payload["access"] = rawJSON("read_write")
+		case !wantsWrite && current == "read_write":
+			return 409, fmt.Sprintf(
+				"model: slot %q is read, but its signal %s is read_write; a read slot is implemented by a read signal",
+				combinedKey, fill.id,
+			)
+		}
+		var links []relationshipLink
+		if raw, ok := payload["relationships"]; ok && len(raw) > 0 && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &links); err != nil {
+				return 422, fmt.Sprintf("model: signal %s has unreadable relationships", fill.id)
+			}
+		}
+		kinds := make([]string, 0, len(slotLinks[key]))
+		for kind := range slotLinks[key] {
+			kinds = append(kinds, kind)
+		}
+		sort.Strings(kinds)
+		addedLinks := false
+		for _, kind := range kinds {
+			targetFill := resolved[slotLinkTarget(slotLinks[key][kind].slot, kind)]
+			if targetFill == nil {
+				continue
+			}
+			held := -1
+			for i, link := range links {
+				if link.Type == kind {
+					held = i
+				}
+			}
+			switch {
+			case held < 0:
+				links = append(links, relationshipLink{Type: kind, Target: targetFill.id})
+				addedLinks = true
+			case links[held].Target != targetFill.id:
+				return 409, fmt.Sprintf(
+					"model: slot %q needs %s target %s, but its signal %s already names %s",
+					combinedKey, kind, targetFill.id, fill.id, links[held].Target,
+				)
+			}
+		}
+		if addedLinks {
+			payload["relationships"] = rawJSON(links)
+		}
+		if rawMapsEqual(payload, fill.payload) {
+			continue
+		}
+		if err := state.queue(fill.topic, payload); err != nil {
+			return 422, "model: payload is not encodable"
+		}
+		fill.payload = payload
 	}
 
 	childrenByName := directChildrenByName(state.entities, elementID)

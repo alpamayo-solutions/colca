@@ -532,6 +532,7 @@ export type ServiceDetails = {
 
 /** `_Signal` — stream class `entity`. */
 export type Signal = {
+  access?: "read" | "read_write";
   bind_intent?: null | {
     connector: string;
     variable: string;
@@ -553,6 +554,10 @@ export type Signal = {
   min_value?: null | number;
   name: string;
   precision?: number | null;
+  relationships?: {
+    relationship_type: "actual" | "upper_limit" | "lower_limit" | "feedback";
+    target_signal_id: string;
+  }[];
   replication_policy?: "replicate_to_parents" | "source_local_only";
   semantic_type_id?: null | string;
   system_element_id?: null | string;

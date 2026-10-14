@@ -437,7 +437,7 @@ func (c *ConfigExec) commit(ctx CommandContext, records []StateRecord) ([]StateW
 		c.refused = refusal
 		return nil, refusal
 	}
-	return c.store.PublishBatch(ctx, records)
+	return c.store.PublishBatch(ctx, withRelationshipCleanup(c.store, records))
 }
 
 // arrivesByMove reports whether a record about to be written names an
@@ -1657,6 +1657,10 @@ func commitRefusal(verb string, err error) (int, string, string) {
 	var duplicate *ReferenceHeldError
 	if errors.As(err, &duplicate) {
 		return 409, verb + ": " + duplicate.Error(), "conflict"
+	}
+	var relationships *RelationshipError
+	if errors.As(err, &relationships) {
+		return 422, verb + ": " + relationships.Error(), "invalid"
 	}
 	var invalid *FieldError
 	if errors.As(err, &invalid) {

@@ -188,8 +188,9 @@ type Engine struct {
 
 	// bindMu holds a one-holder check and the commit of the write it guards
 	// together, so two writes taking the same thing at the same time cannot
-	// both pass: a tag bound to one signal (uns.CheckTagBindings), and an
-	// external reference held by one record (uns.CheckExternalReferences).
+	// both pass: a tag bound to one signal (uns.CheckTagBindings), a target
+	// named by one setpoint (uns.CheckSignalRelationships), and an external
+	// reference held by one record (uns.CheckExternalReferences).
 	bindMu sync.Mutex
 
 	// The node's position: the chain of elements from the root down to its own,
@@ -994,7 +995,7 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 		defer e.bindMu.Unlock()
 	}
 	if writesSignals {
-		if err := e.checkTagBindings(records); err != nil {
+		if err := e.checkSignals(records); err != nil {
 			e.metrics.RejectPublish(metrics.ReasonValidation)
 			return nil, err
 		}
@@ -1027,14 +1028,18 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 	return results, nil
 }
 
-// checkTagBindings refuses a batch that would bind a tag another of this
-// node's signals holds. The caller holds bindMu until the batch is appended.
-func (e *Engine) checkTagBindings(records []uns.StateRecord) error {
+// checkSignals refuses a batch that would bind a tag another of this node's
+// signals holds, or leave a signal with relationships that break a rule. The
+// caller holds bindMu until the batch is appended.
+func (e *Engine) checkSignals(records []uns.StateRecord) error {
 	current, err := e.scanContract("_Signal", func(kv store.KVEntry) bool { return kv.NodeID == e.cfg.ULID })
 	if err != nil {
-		return fmt.Errorf("tag binding check: %w", err)
+		return fmt.Errorf("signal check: %w", err)
 	}
-	return uns.CheckTagBindings(current, records)
+	if err := uns.CheckTagBindings(current, records); err != nil {
+		return err
+	}
+	return uns.CheckSignalRelationships(current, records)
 }
 
 // checkExternalReferences refuses a write that would give this node a second
