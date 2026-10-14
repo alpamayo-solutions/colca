@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.0](https://github.com/alpamayo-solutions/colca/compare/v0.36.4...v0.37.0) (2026-10-14)
+
+
+### Features
+
+* **uns:** signal access and typed signal-to-signal relationships ([#224](https://github.com/alpamayo-solutions/colca/issues/224)) ([309c169](https://github.com/alpamayo-solutions/colca/commit/309c16960d42f4b19e1e66f0b37eb5898639c0c2))
+
 ## [0.36.4](https://github.com/alpamayo-solutions/colca/compare/v0.36.3...v0.36.4) (2026-10-13)
 
 
