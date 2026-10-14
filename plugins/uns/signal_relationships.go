@@ -222,7 +222,7 @@ func relationshipCycles(
 		if at, looped := onTrail[node]; looped {
 			cycle := trail[at:]
 			anyChecked := false
-			names := make([]string, 0, len(cycle)+1)
+			var names []string
 			for _, member := range cycle {
 				reported[member] = true
 				anyChecked = anyChecked || isChecked(member)
