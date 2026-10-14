@@ -1792,3 +1792,184 @@ func TestModelAssignRefusesTheSameCreateIDTwiceInOneBatch(t *testing.T) {
 		t.Fatalf("conflict message must name the id: %q", msg)
 	}
 }
+
+// pressModel seeds a Press model whose speed_setpoint is read_write and names
+// speed as its actual and speed_max as its upper limit.
+func pressModel(t *testing.T, f *fakeStore) {
+	t.Helper()
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/press", map[string]any{
+		"id": "dm-press", "name": "Press", "version": "1.2",
+		"slots": []map[string]any{
+			{"key": "speed", "kind": "measured", "data_type": "number", "required": true, "declared_by": "Press", "access": "read"},
+			{"key": "speed_max", "kind": "measured", "data_type": "number", "required": true, "declared_by": "Press", "access": "read"},
+			{
+				"key": "speed_setpoint", "kind": "measured", "data_type": "number", "required": true, "declared_by": "Press",
+				"access": "read_write",
+				"relationships": []map[string]string{
+					{"type": "actual", "target": "speed"},
+					{"type": "upper_limit", "target": "speed_max"},
+				},
+			},
+		},
+	})
+}
+
+func signalPayloadAt(t *testing.T, f *fakeStore, topic string) map[string]any {
+	t.Helper()
+	raw, ok := f.KVGet(topic)
+	if !ok {
+		t.Fatalf("no signal at %s", topic)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+// Assign gives the signals it creates the slots' access and links.
+func TestModelAssignCreatesSlotAccessAndRelationships(t *testing.T) {
+	f := newStore("n-edge1")
+	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{"id": "el-press", "name": "Press"})
+	pressModel(t, f)
+	exec := NewEditExec(f, nil)
+
+	code, msg, _, _ := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(t, "op-assign-press",
+		map[string]uint64{"system-element:el-press": elementVersion},
+		map[string]any{
+			"type": "model", "action": "assign",
+			"entity": map[string]any{"kind": "system-element", "id": "el-press"},
+			"models": []string{"Press"},
+			"creates": map[string]string{
+				"speed": "sig-speed", "speed_max": "sig-max", "speed_setpoint": "sig-sp",
+			},
+		}))
+	if code != 200 {
+		t.Fatalf("assign = %d %q", code, msg)
+	}
+	setpoint := signalPayloadAt(t, f, "colca/v1/_Signal/n-edge1/press/speed_setpoint")
+	if setpoint["access"] != "read_write" {
+		t.Fatalf("setpoint access = %v", setpoint["access"])
+	}
+	links, _ := json.Marshal(setpoint["relationships"])
+	want := `[{"relationship_type":"actual","target_signal_id":"sig-speed"},{"relationship_type":"upper_limit","target_signal_id":"sig-max"}]`
+	if string(links) != want {
+		t.Fatalf("setpoint relationships = %s, want %s", links, want)
+	}
+	if speed := signalPayloadAt(t, f, "colca/v1/_Signal/n-edge1/press/speed"); speed["access"] != nil || speed["relationships"] != nil {
+		t.Fatalf("a read slot without links gained fields: %+v", speed)
+	}
+}
+
+// Assign adopts existing signals: a read signal in a read_write slot becomes
+// read_write and gains the links; a link it already holds is kept.
+func TestModelAssignAdoptsSignalsAndAddsAccessAndLinks(t *testing.T) {
+	f := newStore("n-edge1")
+	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{"id": "el-press", "name": "Press"})
+	versions := map[string]uint64{"system-element:el-press": elementVersion}
+	for _, signal := range []map[string]any{
+		{"id": "sig-speed", "name": "speed", "system_element_id": "el-press", "data_type": "float"},
+		{"id": "sig-max", "name": "speed_max", "system_element_id": "el-press", "data_type": "float"},
+		{
+			"id": "sig-sp", "name": "speed_setpoint", "system_element_id": "el-press", "data_type": "float",
+			"access":        "read",
+			"relationships": []map[string]string{{"relationship_type": "actual", "target_signal_id": "sig-speed"}},
+		},
+	} {
+		versions["signal:"+signal["id"].(string)] = seedEditEntity(t, f, "_Signal", "press/"+signal["name"].(string), signal)
+	}
+	pressModel(t, f)
+	exec := NewEditExec(f, nil)
+
+	code, msg, _, _ := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(t, "op-adopt-press", versions,
+		map[string]any{
+			"type": "model", "action": "assign",
+			"entity": map[string]any{"kind": "system-element", "id": "el-press"},
+			"models": []string{"Press"},
+		}))
+	if code != 200 {
+		t.Fatalf("assign = %d %q", code, msg)
+	}
+	setpoint := signalPayloadAt(t, f, "colca/v1/_Signal/n-edge1/press/speed_setpoint")
+	links, _ := json.Marshal(setpoint["relationships"])
+	want := `[{"relationship_type":"actual","target_signal_id":"sig-speed"},{"relationship_type":"upper_limit","target_signal_id":"sig-max"}]`
+	if setpoint["access"] != "read_write" || string(links) != want {
+		t.Fatalf("setpoint = %+v, links %s", setpoint, links)
+	}
+}
+
+// A read_write signal does not implement a read slot, and a signal whose link
+// names another target than the model's is a conflict. Nothing is written.
+func TestModelAssignRefusesAccessAndLinkConflicts(t *testing.T) {
+	cases := []struct {
+		name   string
+		signal map[string]any
+		want   string
+	}{
+		{
+			name:   "read_write signal in a read slot",
+			signal: map[string]any{"id": "sig-speed", "name": "speed", "system_element_id": "el-press", "data_type": "float", "access": "read_write"},
+			want:   `slot "speed" is read, but its signal sig-speed is read_write`,
+		},
+		{
+			name: "setpoint already names another actual",
+			signal: map[string]any{
+				"id": "sig-sp", "name": "speed_setpoint", "system_element_id": "el-press", "data_type": "float",
+				"relationships": []map[string]string{{"relationship_type": "actual", "target_signal_id": "sig-elsewhere"}},
+			},
+			want: `slot "speed_setpoint" needs actual target sig-speed, but its signal sig-sp already names sig-elsewhere`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newStore("n-edge1")
+			elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{"id": "el-press", "name": "Press"})
+			signalVersion := seedEditEntity(t, f, "_Signal", "press/"+tc.signal["name"].(string), tc.signal)
+			pressModel(t, f)
+			exec := NewEditExec(f, nil)
+			creates := map[string]string{"speed": "sig-speed", "speed_max": "sig-max", "speed_setpoint": "sig-sp"}
+			delete(creates, tc.signal["name"].(string))
+			before := f.offset
+			code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(t, "op-"+tc.name,
+				map[string]uint64{"system-element:el-press": elementVersion, "signal:" + tc.signal["id"].(string): signalVersion},
+				map[string]any{
+					"type": "model", "action": "assign",
+					"entity":  map[string]any{"kind": "system-element", "id": "el-press"},
+					"models":  []string{"Press"},
+					"creates": creates,
+				}))
+			if code != 409 || len(writes) != 0 || f.offset != before || !strings.Contains(msg, tc.want) {
+				t.Fatalf("assign = %d %q writes=%+v, want 409 containing %q", code, msg, writes, tc.want)
+			}
+		})
+	}
+}
+
+// A hand-written manifest whose links break a rule is refused before
+// anything is written.
+func TestModelAssignRefusesAManifestWithBrokenLinks(t *testing.T) {
+	f := newStore("n-edge1")
+	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{"id": "el-press", "name": "Press"})
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/press", map[string]any{
+		"id": "dm-press", "name": "Press", "version": "1.0",
+		"slots": []map[string]any{
+			{"key": "running", "kind": "measured", "data_type": "boolean", "required": true, "declared_by": "Press"},
+			{
+				"key": "sp", "kind": "measured", "data_type": "number", "required": true, "declared_by": "Press",
+				"relationships": []map[string]string{{"type": "actual", "target": "running"}},
+			},
+		},
+	})
+	exec := NewEditExec(f, nil)
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(t, "op-broken-links",
+		map[string]uint64{"system-element:el-press": elementVersion},
+		map[string]any{
+			"type": "model", "action": "assign",
+			"entity":  map[string]any{"kind": "system-element", "id": "el-press"},
+			"models":  []string{"Press"},
+			"creates": map[string]string{"running": "sig-run", "sp": "sig-sp"},
+		}))
+	if code != 422 || len(writes) != 0 || !strings.Contains(msg, `Press slot "sp": actual target Press slot "running" has data type "boolean"`) {
+		t.Fatalf("assign = %d %q writes=%+v", code, msg, writes)
+	}
+}

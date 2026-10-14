@@ -333,6 +333,32 @@ history stays in the historian under the retired signal's id; nothing is
 deleted or rewritten there. A signal minted before `is_autobound` existed
 counts as minted when it carries no field autobind does not write.
 
+**Access.** A signal's `access` is `read` (the default, and what a record
+without the field means) or `read_write`. It only declares that the signal's
+value may be written to its source; it makes no connector write. A data-model
+slot carries the same field, and a signal implementing a slot has its access:
+assigning a model makes the signal of a `read_write` slot `read_write`, and
+refuses a `read_write` signal for a `read` slot.
+
+**Relationships.** A signal links to other signals of its node with
+`relationships: [{"relationship_type": …, "target_signal_id": …}]`, at most one
+link per type:
+
+| Type | The target is | Rules |
+|---|---|---|
+| `actual` | the measured actual value of this setpoint | a target is the actual of at most one setpoint; no chains; data types equal or both numeric |
+| `upper_limit` | the upper limit for this value | both numeric; no cycles |
+| `lower_limit` | the lower limit for this value | both numeric; no cycles |
+| `feedback` | the confirmation that this command took effect | no chains |
+
+The node checks a signal's links when a write changes them, whichever door
+the write comes through, and refuses a broken one with a `422`
+(`invalid_relationships: …`) naming the signal and the rule. A write that
+retires a signal drops the links naming it in the same commit. Data-model slots
+declare links by slot key (`relationships: [{type, target}]`), and assigning
+the model gives the signals filling the slots the same links. The rules are
+`colca_data_contracts.signal_relationships.RULES`.
+
 ### Fetching a node's logs
 
 A node keeps its whole `logs` stream locally. An ancestor reads it on demand

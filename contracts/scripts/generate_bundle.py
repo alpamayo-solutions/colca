@@ -99,6 +99,7 @@ ALLOWED_KEYWORDS = {
 # in a cleartext password or an outcome consumers read differently.
 STRICT_NESTED_DATACLASSES = {
     "BindIntent",
+    "SignalRelationship",
     "CommandRoute",
     "HealthMetricDeclaration",
     "NetworkInterface",

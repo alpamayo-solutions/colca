@@ -684,7 +684,12 @@ func Validate(contract string, payload []byte) error {
 				return fmt.Errorf("_Signal: replication_policy must be replicate_to_parents or source_local_only")
 			}
 		}
-		return nil
+		if value, present := m["access"]; present {
+			if access, ok := value.(string); !ok || !signalAccessValues[access] {
+				return fmt.Errorf("_Signal: access must be read or read_write")
+			}
+		}
+		return validateSignalRelationshipsField(m)
 	case contract == "_Node" || contract == "_ServiceDetails" ||
 		contract == "_SystemElement" ||
 		contract == "_ExternalReference" || contract == "_Group" ||

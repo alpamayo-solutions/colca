@@ -84,6 +84,34 @@ class ReplicationPolicy(BaseStrEnum):
     SOURCE_LOCAL_ONLY = "source_local_only"
 
 
+class SignalAccess(BaseStrEnum):
+    """Whether a signal may be written, not only read.
+
+    ``read_write`` only declares that a value may be written to the signal's
+    source; it does not make any connector write. A signal without the field
+    is ``read``.
+    """
+
+    READ = "read"
+    READ_WRITE = "read_write"
+
+
+class SignalRelationshipType(BaseStrEnum):
+    """What a directed link from one signal (source) to another (target) means.
+
+    The rules each type carries live in ``signal_relationships.RULES``.
+    """
+
+    #: The target is the measured actual value of the source setpoint.
+    ACTUAL = "actual"
+    #: The target is the upper limit for the source value.
+    UPPER_LIMIT = "upper_limit"
+    #: The target is the lower limit for the source value.
+    LOWER_LIMIT = "lower_limit"
+    #: The target confirms that the source command took effect.
+    FEEDBACK = "feedback"
+
+
 class ConstantDataType(BaseStrEnum):
     """Value types of Colca configuration constants.
 
@@ -1210,6 +1238,34 @@ class BindIntent:
 
 
 @dataclass
+class SignalRelationship:
+    """A directed link from the signal that holds it to another signal of the
+    same node.
+
+    A signal holds at most one relationship per type, never to itself, and
+    every target is a signal the node holds when the link is written; the
+    other rules are ``signal_relationships.RULES``. Deleting the target
+    removes the link in the same batch.
+    """
+
+    relationship_type: SignalRelationshipType
+    target_signal_id: ULID
+
+
+def _relationship_wire(relationship: "SignalRelationship | dict[str, Any]") -> dict[str, str]:
+    """A relationship as its wire object, from the dataclass or a plain dict."""
+    if isinstance(relationship, dict):
+        return {
+            "relationship_type": str(relationship["relationship_type"]),
+            "target_signal_id": str(relationship["target_signal_id"]),
+        }
+    return {
+        "relationship_type": str(relationship.relationship_type),
+        "target_signal_id": relationship.target_signal_id,
+    }
+
+
+@dataclass
 class Signal(ToleratesUnknownFields, Payload):
     """A signal, authored by the node.
 
@@ -1265,12 +1321,19 @@ class Signal(ToleratesUnknownFields, Payload):
     #: ULID of the `_SemanticTag` definition saying what this entity is; None
     #: means unclassified.
     semantic_type_id: ULID | None = None
+    #: Whether the signal may be written; see `SignalAccess`.
+    access: SignalAccess = SignalAccess.READ
+    #: Links from this signal to other signals of the node; see
+    #: `SignalRelationship`.
+    relationships: list[SignalRelationship] = field(default_factory=list)
     created_at: str | None = None
     updated_at: str | None = None
 
     @property
     def __dict__(self):
         d = super().__dict__.copy()
+        d["access"] = str(self.access)
+        d["relationships"] = [_relationship_wire(relationship) for relationship in self.relationships]
         if self.data_type is not None:
             d["data_type"] = str(self.data_type)
         if self.index_type is not None:
@@ -1292,6 +1355,16 @@ class Signal(ToleratesUnknownFields, Payload):
             )
         if "replication_policy" in data:
             data["replication_policy"] = ReplicationPolicy(data["replication_policy"])
+        if data.get("access") is not None:
+            data["access"] = SignalAccess(data["access"])
+        if isinstance(data.get("relationships"), list):
+            data["relationships"] = [
+                SignalRelationship(
+                    relationship_type=SignalRelationshipType(item["relationship_type"]),
+                    target_signal_id=item["target_signal_id"],
+                )
+                for item in data["relationships"]
+            ]
         if data.get("data_type") is not None:
             # SignalDataType, because a _Signal may be json and franzmq's
             # DataType has no such member.

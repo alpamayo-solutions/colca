@@ -328,6 +328,10 @@ func (w *EditExec) ExecuteWithWrites(
 		// answer.
 		return w.remember(envelope.OperationID, digest, 200, message, "ok", nil)
 	}
+	// Retiring a signal drops the links naming it, here and on the node's
+	// other signals, in the same batch. That follows from the authorized
+	// delete and changes nothing else, so it is not authorized again.
+	records = withRelationshipCleanup(w.store, records)
 	if intent.Type == "annotation" {
 		// Checked only once the plan is authorized, so a refusal here cannot
 		// tell a person where an element or signal outside their grants sits.
@@ -356,6 +360,11 @@ func (w *EditExec) ExecuteWithWrites(
 			// written since the caller read the entity, or by a command
 			// that raced this one.
 			return w.remember(envelope.OperationID, digest, 409, duplicate.Error(), "conflict", nil)
+		}
+		var relationships *RelationshipError
+		if errors.As(err, &relationships) {
+			// A signal's relationships break a rule once the plan is applied.
+			return w.remember(envelope.OperationID, digest, 422, relationships.Error(), "invalid", nil)
 		}
 		var invalid *FieldError
 		if errors.As(err, &invalid) {

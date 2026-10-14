@@ -28,8 +28,15 @@ YAML schema (one file per model)::
         computed: true               # -> kind "computed"; default false -> "measured"
         required: true               # default true
         unit: null                   # optional
+        access: read                 # read (default) | read_write
         description: |
           0 UNKNOWN | 1 OFFLINE | ...
+      - name: speed_setpoint
+        data_type: number
+        access: read_write
+        relationships:               # optional; directed links to other
+          - type: actual             # signal slots of this model, see
+            target: speed            # colca_data_contracts.signal_relationships
     children:
       - name: drive_end_bearing      # slot key
         child_model: BearingModel    # optional; omitted -> plain structural child
@@ -63,6 +70,16 @@ Resolution rules:
 - Two signals, in one model or in different ones, referencing the same
   ``semantic_type`` with different ``data_type`` values is a load error
   naming every model involved. A tag name seeds exactly one stub.
+- A signal's ``access`` is ``read`` (the default) or ``read_write``. It only
+  declares that the signal may be written. A signal implementing the slot has
+  the same access.
+- A signal's ``relationships`` link it to other signal slots of the same
+  (flattened) model by key, each with a ``type`` from
+  ``SignalRelationshipType``. They are checked after flattening against
+  ``signal_relationships.RULES``, so a link may name an inherited slot, and an
+  override that turns its target into a child slot is caught. A child slot
+  declares neither field; its manifest carries ``access: None`` and no
+  relationships.
 - Every problem found during a single ``compile_models()`` call is
   accumulated and raised together as one ``CompileError``.
 """
@@ -73,6 +90,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from colca_data_contracts.payload import SignalAccess
+from colca_data_contracts.signal_relationships import RelationshipEnd, relationship_problems
+
 # The canonical slot data_type vocabulary. colca's plugins/uns.slotDataTypes
 # is checked against it through vectors/data_model_vocabulary.json.
 CANONICAL_DATA_TYPES = frozenset({"boolean", "integer", "number", "string", "json"})
@@ -80,6 +100,32 @@ CANONICAL_DATA_TYPES = frozenset({"boolean", "integer", "number", "string", "jso
 
 class CompileError(ValueError):
     pass
+
+
+ACCESS_VALUES = frozenset(str(member) for member in SignalAccess)
+
+
+def _slot_relationships(where: str, raw: Any) -> tuple[list[dict[str, str]], list[str]]:
+    """A signal's ``relationships:`` as manifest entries, sorted by type and
+    target. Malformed entries are problems and are dropped."""
+    if raw is None:
+        return [], []
+    if not isinstance(raw, list):
+        return [], [f"{where}: relationships must be a list of {{type, target}} entries"]
+    entries: list[dict[str, str]] = []
+    problems: list[str] = []
+    for index, item in enumerate(raw):
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"type", "target"}
+            or not isinstance(item.get("type"), str)
+            or not isinstance(item.get("target"), str)
+        ):
+            problems.append(f"{where}: relationships[{index}] must have exactly a string type and target")
+            continue
+        entries.append({"type": item["type"], "target": item["target"]})
+    entries.sort(key=lambda entry: (entry["type"], entry["target"]))
+    return entries, problems
 
 
 def _default_source_dir() -> Path:
@@ -121,6 +167,11 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
         data_type = item.get("data_type")
         if data_type not in CANONICAL_DATA_TYPES:
             problems.append(f"{name}.{key}: unknown data_type {data_type!r}; use one of {sorted(CANONICAL_DATA_TYPES)}")
+        access = item.get("access", "read")
+        if access not in ACCESS_VALUES:
+            problems.append(f"{name}.{key}: unknown access {access!r}; use one of {sorted(ACCESS_VALUES)}")
+        relationships, relationship_problems_ = _slot_relationships(f"{name}.{key}", item.get("relationships"))
+        problems.extend(relationship_problems_)
         slots[key] = {
             "key": key,
             "kind": "computed" if item.get("computed", False) else "measured",
@@ -133,9 +184,14 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "declared_by": name,
             "child_model": None,
             "entity_name": None,
+            "access": access,
+            "relationships": relationships,
         }
     for item in raw.get("children") or []:
         key = item["name"]
+        for field_name in ("access", "relationships"):
+            if field_name in item:
+                problems.append(f"{name}.{key}: a child slot cannot declare {field_name}; only signal slots do")
         entity_name = item.get("entity_name")
         if entity_name is not None and not entity_name.strip():
             problems.append(
@@ -156,6 +212,8 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "declared_by": name,
             "child_model": item.get("child_model"),
             "entity_name": entity_name,
+            "access": None,
+            "relationships": [],
         }
     return slots, problems
 
@@ -276,6 +334,20 @@ def _duplicate_child_names(model_name: str, slots: list[dict[str, Any]]) -> list
     return problems
 
 
+def _slot_relationship_problems(model_name: str, slots: list[dict[str, Any]]) -> list[str]:
+    """The relationship rules over one flattened model's signal slots."""
+    ends = {
+        slot["key"]: RelationshipEnd(
+            data_type=slot["data_type"],
+            relationships=[(entry["type"], entry["target"]) for entry in slot["relationships"]],
+        )
+        for slot in slots
+        if slot["kind"] != "child"
+    }
+    child_keys = {slot["key"] for slot in slots if slot["kind"] == "child"}
+    return relationship_problems(ends, label=lambda key: f"{model_name}.{key}", not_signals=child_keys)
+
+
 def compile_models(source_dir: Path | None = None) -> list[dict[str, Any]]:
     directory = source_dir if source_dir is not None else _default_source_dir()
     documents, problems = _load_documents(directory)
@@ -324,6 +396,7 @@ def compile_models(source_dir: Path | None = None) -> list[dict[str, Any]]:
             if child_name not in documents:
                 problems.append(f"{name}.{slot_key}: child_model {child_name!r} is not a known data model")
         problems.extend(_duplicate_child_names(name, manifest["slots"]))
+        problems.extend(_slot_relationship_problems(name, manifest["slots"]))
 
     child_edges: dict[str, list[tuple[str, ...]]] = {
         name: [
