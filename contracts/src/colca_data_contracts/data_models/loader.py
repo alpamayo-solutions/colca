@@ -30,6 +30,10 @@ YAML schema (one file per model)::
         unit: null                   # optional
         description: |
           0 UNKNOWN | 1 OFFLINE | ...
+      - name: speed_setpoint
+        data_type: number
+        actual: speed                # optional: key of the signal slot that
+                                      # carries this setpoint's actual value
     children:
       - name: drive_end_bearing      # slot key
         child_model: BearingModel    # optional; omitted -> plain structural child
@@ -63,6 +67,13 @@ Resolution rules:
 - Two signals, in one model or in different ones, referencing the same
   ``semantic_type`` with different ``data_type`` values is a load error
   naming every model involved. A tag name seeds exactly one stub.
+- A signal's ``actual`` names the signal slot that carries its actual
+  value, making the declaring slot a setpoint. It is checked on the
+  flattened model: the target must be a signal slot of the same model, not
+  the slot itself, must not declare ``actual`` itself (no chains), and must
+  have a compatible ``data_type`` (equal, or ``integer`` with ``number``).
+  At most one setpoint may name a given actual. Child slots cannot declare
+  ``actual``; their manifest ``actual`` is always ``None``.
 - Every problem found during a single ``compile_models()`` call is
   accumulated and raised together as one ``CompileError``.
 """
@@ -121,6 +132,10 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
         data_type = item.get("data_type")
         if data_type not in CANONICAL_DATA_TYPES:
             problems.append(f"{name}.{key}: unknown data_type {data_type!r}; use one of {sorted(CANONICAL_DATA_TYPES)}")
+        actual = item.get("actual")
+        if actual is not None and (not isinstance(actual, str) or not actual.strip()):
+            problems.append(f"{name}.{key}: actual must be the key of a signal slot, got {actual!r}")
+            actual = None
         slots[key] = {
             "key": key,
             "kind": "computed" if item.get("computed", False) else "measured",
@@ -133,9 +148,14 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "declared_by": name,
             "child_model": None,
             "entity_name": None,
+            "actual": actual,
         }
     for item in raw.get("children") or []:
         key = item["name"]
+        if "actual" in item:
+            problems.append(
+                f"{name}.{key}: a child slot cannot declare actual; only signal slots link to an actual value"
+            )
         entity_name = item.get("entity_name")
         if entity_name is not None and not entity_name.strip():
             problems.append(
@@ -156,6 +176,7 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "declared_by": name,
             "child_model": item.get("child_model"),
             "entity_name": entity_name,
+            "actual": None,
         }
     return slots, problems
 
@@ -276,6 +297,55 @@ def _duplicate_child_names(model_name: str, slots: list[dict[str, Any]]) -> list
     return problems
 
 
+# Slot data types a setpoint and its actual may differ by: both are numbers.
+_NUMERIC_DATA_TYPES = frozenset({"integer", "number"})
+
+
+def _compatible_actual_types(left: str | None, right: str | None) -> bool:
+    return left == right or (left in _NUMERIC_DATA_TYPES and right in _NUMERIC_DATA_TYPES)
+
+
+def _actual_link_problems(model_name: str, slots: list[dict[str, Any]]) -> list[str]:
+    """Setpoint -> actual links of one flattened model that cannot hold.
+
+    Checked after flattening, so a link may point at an inherited slot and an
+    override that turns the target into a child slot is caught.
+    """
+    problems: list[str] = []
+    by_key = {slot["key"]: slot for slot in slots}
+    setpoint_of: dict[str, str] = {}
+    for slot in slots:
+        target_key = slot.get("actual")
+        if not target_key:
+            continue
+        where = f"{model_name}.{slot['key']}"
+        if target_key == slot["key"]:
+            problems.append(f"{where}: actual names the slot itself")
+            continue
+        target = by_key.get(target_key)
+        if target is None:
+            problems.append(f"{where}: actual {target_key!r} is not a slot of {model_name}")
+            continue
+        if target["kind"] == "child":
+            problems.append(f"{where}: actual {target_key!r} is a child slot, not a signal slot")
+            continue
+        if target.get("actual"):
+            problems.append(
+                f"{where}: actual {target_key!r} is itself a setpoint (actual {target['actual']!r}); links cannot chain"
+            )
+            continue
+        if not _compatible_actual_types(slot["data_type"], target["data_type"]):
+            problems.append(
+                f"{where}: data_type {slot['data_type']!r} is not compatible with "
+                f"actual {target_key!r} data_type {target['data_type']!r}"
+            )
+            continue
+        other = setpoint_of.setdefault(target_key, slot["key"])
+        if other != slot["key"]:
+            problems.append(f"{model_name}: setpoints {other!r} and {slot['key']!r} both name actual {target_key!r}")
+    return problems
+
+
 def compile_models(source_dir: Path | None = None) -> list[dict[str, Any]]:
     directory = source_dir if source_dir is not None else _default_source_dir()
     documents, problems = _load_documents(directory)
@@ -324,6 +394,7 @@ def compile_models(source_dir: Path | None = None) -> list[dict[str, Any]]:
             if child_name not in documents:
                 problems.append(f"{name}.{slot_key}: child_model {child_name!r} is not a known data model")
         problems.extend(_duplicate_child_names(name, manifest["slots"]))
+        problems.extend(_actual_link_problems(name, manifest["slots"]))
 
     child_edges: dict[str, list[tuple[str, ...]]] = {
         name: [

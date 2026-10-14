@@ -9,8 +9,10 @@ package uns
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // modelSlot is the part of a _DataModel slot compose needs: name, kind,
@@ -32,6 +34,10 @@ type modelSlot struct {
 	// EntityName is the child's name: the slot key, or the entity_name
 	// override from the YAML. Never empty for a child slot.
 	EntityName string `json:"entity_name"`
+	// Actual is the key of the signal slot that carries this slot's actual
+	// value, which makes this slot a setpoint. Empty when the slot names none;
+	// always empty for a child slot.
+	Actual string `json:"actual"`
 }
 
 // dataModelManifest holds the fields of a _DataModel record composeModel
@@ -47,6 +53,69 @@ type dataModelManifest struct {
 // vocabulary.
 var slotDataTypes = map[string]string{
 	"boolean": "boolean", "integer": "int", "number": "float", "string": "string", "json": "json",
+}
+
+// validateActualLinks checks one model's setpoint -> actual links, the same
+// rules the Python loader applies after flattening: the target is another
+// signal slot of the model, is not itself a setpoint, has a compatible
+// data_type (equal, or integer with number), and is named by at most one
+// setpoint. A child slot may not name an actual.
+func validateActualLinks(model string, slots []modelSlot) error {
+	byKey := make(map[string]modelSlot, len(slots))
+	for _, slot := range slots {
+		byKey[slot.Key] = slot
+	}
+	setpointOf := map[string]string{}
+	problems := []error{}
+	for _, slot := range slots {
+		if slot.Actual == "" {
+			continue
+		}
+		if slot.Kind == "child" {
+			problems = append(problems, fmt.Errorf("%s slot %q: a child slot cannot declare actual", model, slot.Key))
+			continue
+		}
+		if slot.Actual == slot.Key {
+			problems = append(problems, fmt.Errorf("%s slot %q: actual names the slot itself", model, slot.Key))
+			continue
+		}
+		target, ok := byKey[slot.Actual]
+		switch {
+		case !ok:
+			problems = append(problems, fmt.Errorf("%s slot %q: actual %q is not a slot of %s", model, slot.Key, slot.Actual, model))
+			continue
+		case target.Kind == "child":
+			problems = append(problems, fmt.Errorf("%s slot %q: actual %q is a child slot, not a signal slot", model, slot.Key, slot.Actual))
+			continue
+		case target.Actual != "":
+			problems = append(problems, fmt.Errorf(
+				"%s slot %q: actual %q is itself a setpoint (actual %q); links cannot chain",
+				model, slot.Key, slot.Actual, target.Actual,
+			))
+			continue
+		case !compatibleActualTypes(slot.DataType, target.DataType):
+			problems = append(problems, fmt.Errorf(
+				"%s slot %q: data_type %q is not compatible with actual %q data_type %q",
+				model, slot.Key, slot.DataType, slot.Actual, target.DataType,
+			))
+			continue
+		}
+		if other, taken := setpointOf[slot.Actual]; taken {
+			problems = append(problems, fmt.Errorf(
+				"%s: setpoints %q and %q both name actual %q", model, other, slot.Key, slot.Actual,
+			))
+			continue
+		}
+		setpointOf[slot.Actual] = slot.Key
+	}
+	return errors.Join(problems...)
+}
+
+// compatibleActualTypes compares canonical slot data types: equal, or both
+// numeric.
+func compatibleActualTypes(left, right string) bool {
+	numeric := func(value string) bool { return value == "integer" || value == "number" }
+	return left == right || (numeric(left) && numeric(right))
 }
 
 // modelPlanState is the state shared across one recursive model compose, so
@@ -441,6 +510,9 @@ func (w *EditExec) resolveModelSlots(
 			if _, known := slotDataTypes[slot.DataType]; !known {
 				return 422, fmt.Sprintf("model: %s slot %q has unknown data_type %q", name, slot.Key, slot.DataType)
 			}
+		}
+		if err := validateActualLinks(name, state.manifests[name].Slots); err != nil {
+			return 422, "model: " + strings.ReplaceAll(err.Error(), "\n", "; ")
 		}
 	}
 

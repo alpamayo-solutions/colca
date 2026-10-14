@@ -1792,3 +1792,115 @@ func TestModelAssignRefusesTheSameCreateIDTwiceInOneBatch(t *testing.T) {
 		t.Fatalf("conflict message must name the id: %q", msg)
 	}
 }
+
+// actualLinksVectorPath holds the setpoint -> actual link cases the Python
+// loader judges through compile_models.
+const actualLinksVectorPath = "../../contracts/src/colca_data_contracts/vectors/data_model_actual_links.json"
+
+// validateActualLinks agrees with the Python loader on every golden case.
+func TestValidateActualLinksMatchesTheGoldenVectors(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Clean(actualLinksVectorPath))
+	if err != nil {
+		t.Fatalf("read actual link vectors: %v", err)
+	}
+	var vectors struct {
+		Cases []struct {
+			Name  string      `json:"name"`
+			Valid bool        `json:"valid"`
+			Slots []modelSlot `json:"slots"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &vectors); err != nil {
+		t.Fatalf("decode actual link vectors: %v", err)
+	}
+	if len(vectors.Cases) == 0 {
+		t.Fatal("actual link vectors carry no cases")
+	}
+	for _, tc := range vectors.Cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			err := validateActualLinks("Model", tc.Slots)
+			if tc.Valid && err != nil {
+				t.Fatalf("valid case refused: %v", err)
+			}
+			if !tc.Valid && err == nil {
+				t.Fatal("invalid case accepted")
+			}
+		})
+	}
+}
+
+// A child slot carrying actual is refused; the Python loader never emits one,
+// so only a hand-written manifest can.
+func TestValidateActualLinksRefusesAChildSetpoint(t *testing.T) {
+	err := validateActualLinks("Press", []modelSlot{
+		{Key: "speed", Kind: "measured", DataType: "number"},
+		{Key: "spindle", Kind: "child", Actual: "speed"},
+	})
+	if err == nil || !strings.Contains(err.Error(), `"spindle": a child slot cannot declare actual`) {
+		t.Fatalf("child setpoint = %v", err)
+	}
+}
+
+// Assign decodes actual from the manifest and creates both signals of a valid
+// setpoint pair.
+func TestModelAssignAcceptsAValidActualLink(t *testing.T) {
+	f := newStore("n-edge1")
+	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
+		"id": "el-press", "name": "Press",
+	})
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/press", map[string]any{
+		"id": "dm-press", "name": "Press", "version": "1.0",
+		"slots": []map[string]any{
+			{"key": "speed", "kind": "measured", "data_type": "number", "required": true, "declared_by": "Press", "actual": nil},
+			{"key": "speed_setpoint", "kind": "measured", "data_type": "integer", "required": true, "declared_by": "Press", "actual": "speed"},
+		},
+	})
+	exec := NewEditExec(f, nil)
+
+	payload := editBody(t, "op-model-actual-ok", map[string]uint64{
+		"system-element:el-press": elementVersion,
+	}, map[string]any{
+		"type": "model", "action": "assign",
+		"entity":  map[string]any{"kind": "system-element", "id": "el-press"},
+		"models":  []string{"Press"},
+		"creates": map[string]string{"speed": "sig-speed", "speed_setpoint": "sig-speed-sp"},
+	})
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
+	if code != 200 || len(writes) != 3 {
+		t.Fatalf("valid actual link = %d %q writes=%+v", code, msg, writes)
+	}
+}
+
+// A manifest whose setpoint names a missing actual is refused before anything
+// is written, naming the model, the setpoint and the target.
+func TestModelAssignRefusesABrokenActualLink(t *testing.T) {
+	f := newStore("n-edge1")
+	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{
+		"id": "el-press", "name": "Press",
+	})
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/press", map[string]any{
+		"id": "dm-press", "name": "Press", "version": "1.0",
+		"slots": []map[string]any{
+			{"key": "speed_setpoint", "kind": "measured", "data_type": "number", "required": true, "declared_by": "Press", "actual": "speed"},
+		},
+	})
+	exec := NewEditExec(f, nil)
+
+	before := f.offset
+	payload := editBody(t, "op-model-actual-broken", map[string]uint64{
+		"system-element:el-press": elementVersion,
+	}, map[string]any{
+		"type": "model", "action": "assign",
+		"entity":  map[string]any{"kind": "system-element", "id": "el-press"},
+		"models":  []string{"Press"},
+		"creates": map[string]string{"speed_setpoint": "sig-speed-sp"},
+	})
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", payload)
+	if code != 422 || len(writes) != 0 || f.offset != before || f.batchCalls != 0 {
+		t.Fatalf("broken actual link = %d %q writes=%+v offset=%d batches=%d", code, msg, writes, f.offset, f.batchCalls)
+	}
+	want := `model: Press slot "speed_setpoint": actual "speed" is not a slot of Press`
+	if msg != want {
+		t.Fatalf("message = %q, want %q", msg, want)
+	}
+}

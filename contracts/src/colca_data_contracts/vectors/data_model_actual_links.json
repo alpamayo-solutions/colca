@@ -1,0 +1,84 @@
+{
+  "_comment": "Golden vectors for setpoint -> actual links on data model signal slots. Each case is the flattened slot list of one model; valid says whether its actual links hold. Judged by the Python loader (tests/test_data_models_actual.py, through compile_models) and by colca's Go suite (plugins/uns/exec_edit_model_test.go, through validateActualLinks).",
+  "cases": [
+    {
+      "name": "no links",
+      "valid": true,
+      "slots": [
+        {"key": "speed", "kind": "measured", "data_type": "number"}
+      ]
+    },
+    {
+      "name": "setpoint names its actual",
+      "valid": true,
+      "slots": [
+        {"key": "speed", "kind": "measured", "data_type": "number"},
+        {"key": "speed_setpoint", "kind": "measured", "data_type": "number", "actual": "speed"}
+      ]
+    },
+    {
+      "name": "integer setpoint with number actual",
+      "valid": true,
+      "slots": [
+        {"key": "temperature", "kind": "measured", "data_type": "number"},
+        {"key": "temperature_setpoint", "kind": "measured", "data_type": "integer", "actual": "temperature"}
+      ]
+    },
+    {
+      "name": "computed actual",
+      "valid": true,
+      "slots": [
+        {"key": "rate", "kind": "computed", "data_type": "number"},
+        {"key": "rate_setpoint", "kind": "measured", "data_type": "number", "actual": "rate"}
+      ]
+    },
+    {
+      "name": "actual names no slot",
+      "valid": false,
+      "slots": [
+        {"key": "speed_setpoint", "kind": "measured", "data_type": "number", "actual": "speed"}
+      ]
+    },
+    {
+      "name": "actual names the slot itself",
+      "valid": false,
+      "slots": [
+        {"key": "speed", "kind": "measured", "data_type": "number", "actual": "speed"}
+      ]
+    },
+    {
+      "name": "actual names a child slot",
+      "valid": false,
+      "slots": [
+        {"key": "spindle", "kind": "child", "data_type": ""},
+        {"key": "speed_setpoint", "kind": "measured", "data_type": "number", "actual": "spindle"}
+      ]
+    },
+    {
+      "name": "actual is itself a setpoint",
+      "valid": false,
+      "slots": [
+        {"key": "a", "kind": "measured", "data_type": "number", "actual": "b"},
+        {"key": "b", "kind": "measured", "data_type": "number", "actual": "c"},
+        {"key": "c", "kind": "measured", "data_type": "number"}
+      ]
+    },
+    {
+      "name": "incompatible data types",
+      "valid": false,
+      "slots": [
+        {"key": "running", "kind": "measured", "data_type": "boolean"},
+        {"key": "speed_setpoint", "kind": "measured", "data_type": "number", "actual": "running"}
+      ]
+    },
+    {
+      "name": "two setpoints name one actual",
+      "valid": false,
+      "slots": [
+        {"key": "speed", "kind": "measured", "data_type": "number"},
+        {"key": "speed_high", "kind": "measured", "data_type": "number", "actual": "speed"},
+        {"key": "speed_low", "kind": "measured", "data_type": "number", "actual": "speed"}
+      ]
+    }
+  ]
+}
