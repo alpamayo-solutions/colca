@@ -159,6 +159,9 @@ type Store struct {
 	// replQueue gathers concurrent ApplyReplicated calls into one synced commit;
 	// see replgroup.go.
 	replQueue groupQueue[*replRequest]
+	// appendQueue gathers concurrent Append calls into one synced commit; see
+	// appendgroup.go.
+	appendQueue groupQueue[*appendRequest]
 	// adopted caches, per child, the store incarnation AdoptChildStore last
 	// confirmed, so the common case (unchanged) takes neither s.mu nor a read.
 	adopted sync.Map
@@ -546,14 +549,15 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 }
 
 // Append writes records, meta, the byte counter and KV projections in one
-// atomic, synced batch.
+// atomic, synced batch. Concurrent calls share that batch (see appendgroup.go);
+// each returns only once its records are durable.
 func (s *Store) Append(stream string, recs []Record) (first, last uint64, err error) {
 	if len(recs) == 0 {
 		return 0, 0, nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.appendLocked(stream, recs)
+	req := &appendRequest{groupWait: newGroupWait(), stream: stream, recs: recs}
+	s.appendQueue.run(req, s.commitAppends)
+	return req.first, req.last, req.err
 }
 
 // CursorAdvance moves a named cursor forward in the same batch as an append.
@@ -588,43 +592,28 @@ func (s *Store) AppendAdvancing(stream string, recs []Record, adv CursorAdvance)
 	return first, last, true, nil
 }
 
-// appendLocked is Append's body; the caller holds s.mu.
+// appendLocked appends in a commit of its own, for a caller that holds s.mu
+// to decide on the append (AppendIfKVUnchanged, a move).
 func (s *Store) appendLocked(stream string, recs []Record) (first, last uint64, err error) {
 	return s.appendAdvancingLocked(stream, recs, nil)
 }
 
 func (s *Store) appendAdvancingLocked(stream string, recs []Record, adv *CursorAdvance) (first, last uint64, err error) {
-	off := s.next[stream]
-	if off == 0 {
+	first = s.next[stream]
+	if first == 0 {
 		return 0, 0, fmt.Errorf("unknown stream %q", stream)
 	}
-	if s.maxRecordBytes > 0 {
-		for i, rec := range recs {
-			if uint64(len(rec.Payload)) > s.maxRecordBytes {
-				return 0, 0, fmt.Errorf("stream %q record %d (%s): %d bytes > %d: %w",
-					stream, i, rec.Topic, len(rec.Payload), s.maxRecordBytes, ErrRecordTooLarge)
-			}
-		}
-	}
-	first = off
 	b := s.db.NewBatch()
 	defer b.Close()
-	liveBytes := s.bytes[stream]
-	for _, r := range recs {
-		if stream == "metrics" {
-			var err error
-			r.SourceLocalOnly, err = s.metricSourceLocalOnly(r)
-			if err != nil {
-				return 0, 0, err
-			}
-		}
-		n, err := addRecord(b, stream, off, r)
-		if err != nil {
-			return 0, 0, err
-		}
-		liveBytes += n
-		off++
+	localOnly, err := s.checkAppend(stream, recs)
+	if err != nil {
+		return 0, 0, err
 	}
+	off, added, err := writeAppend(b, stream, recs, localOnly, first)
+	if err != nil {
+		return 0, 0, err
+	}
+	liveBytes := s.bytes[stream] + added
 	last = off - 1
 	if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
 		return 0, 0, err
@@ -651,6 +640,47 @@ func (s *Store) appendAdvancingLocked(stream string, recs []Record, adv *CursorA
 	s.noteContractsLocked(stream, recs)
 	s.streamGrewLocked(stream)
 	return first, last, nil
+}
+
+// checkAppend checks recs before any of them is written: the record cap, and
+// the replication policy of each metric's signal, which it returns for
+// writeAppend. The caller holds s.mu.
+func (s *Store) checkAppend(stream string, recs []Record) (localOnly []bool, err error) {
+	if s.maxRecordBytes > 0 {
+		for i, rec := range recs {
+			if uint64(len(rec.Payload)) > s.maxRecordBytes {
+				return nil, fmt.Errorf("stream %q record %d (%s): %d bytes > %d: %w",
+					stream, i, rec.Topic, len(rec.Payload), s.maxRecordBytes, ErrRecordTooLarge)
+			}
+		}
+	}
+	if stream != "metrics" {
+		return nil, nil
+	}
+	localOnly = make([]bool, len(recs))
+	for i, rec := range recs {
+		if localOnly[i], err = s.metricSourceLocalOnly(rec); err != nil {
+			return nil, err
+		}
+	}
+	return localOnly, nil
+}
+
+// writeAppend adds recs to b from offset off and returns the next offset and
+// the bytes added. localOnly is checkAppend's answer.
+func writeAppend(b *pebble.Batch, stream string, recs []Record, localOnly []bool, off uint64) (next, added uint64, err error) {
+	for i, r := range recs {
+		if localOnly != nil {
+			r.SourceLocalOnly = localOnly[i]
+		}
+		n, err := addRecord(b, stream, off, r)
+		if err != nil {
+			return 0, 0, err
+		}
+		added += n
+		off++
+	}
+	return off, added, nil
 }
 
 // kvOffsets returns the local and origin offsets of the current KV entry for
