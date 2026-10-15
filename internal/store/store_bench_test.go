@@ -3,6 +3,8 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -40,6 +42,48 @@ func BenchmarkAppendBatch(b *testing.B) {
 				}
 			}
 			b.ReportMetric(float64(size*b.N)/b.Elapsed().Seconds(), "rec/s")
+		})
+	}
+}
+
+// BenchmarkAppendConcurrent has several writers append one record at a time
+// each, as MQTT clients publishing to one node do: every Append returns only
+// once its record is durable. The rate shows whether concurrent appends share a
+// sync or queue for one each.
+func BenchmarkAppendConcurrent(b *testing.B) {
+	for _, writers := range []int{1, 8, 64} {
+		b.Run(fmt.Sprintf("writers=%d", writers), func(b *testing.B) {
+			s, err := Open(b.TempDir())
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer s.Close()
+			var n atomic.Int64
+			var wg sync.WaitGroup
+			b.ResetTimer()
+			for range writers {
+				wg.Go(func() {
+					for {
+						i := int(n.Add(1))
+						if i > b.N {
+							return
+						}
+						rec := Record{
+							Topic:   fmt.Sprintf("colca/v1/_Metric/m1/m1/sig%d", i%16),
+							Payload: benchPayload(i),
+							TS:      int64(i),
+							KVPath:  fmt.Sprintf("m1/sig%d", i%16),
+							KVNode:  "m1",
+						}
+						if _, _, err := s.Append("metrics", []Record{rec}); err != nil {
+							b.Error(err)
+							return
+						}
+					}
+				})
+			}
+			wg.Wait()
+			b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "rec/s")
 		})
 	}
 }
