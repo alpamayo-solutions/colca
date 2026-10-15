@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.37.1](https://github.com/alpamayo-solutions/colca/compare/v0.37.0...v0.37.1) (2026-10-15)
+
+
+### Performance
+
+* **store:** let concurrent appends share one synced commit ([#226](https://github.com/alpamayo-solutions/colca/issues/226)) ([1e9d9d3](https://github.com/alpamayo-solutions/colca/commit/1e9d9d367597d25ead90f0c5e07ecba14af5eb0e))
+
 ## [0.37.0](https://github.com/alpamayo-solutions/colca/compare/v0.36.4...v0.37.0) (2026-10-14)
 
 
