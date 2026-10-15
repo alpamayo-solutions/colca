@@ -158,7 +158,7 @@ type Store struct {
 	appendApply func(*pebble.Batch, *pebble.WriteOptions) error
 	// replQueue gathers concurrent ApplyReplicated calls into one synced commit;
 	// see replgroup.go.
-	replQueue replQueue
+	replQueue groupQueue[*replRequest]
 	// adopted caches, per child, the store incarnation AdoptChildStore last
 	// confirmed, so the common case (unchanged) takes neither s.mu nor a read.
 	adopted sync.Map
