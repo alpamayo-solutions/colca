@@ -550,6 +550,39 @@ func (e *Entry) MayImplicitlyConfigure(contract string) bool {
 	return e != nil && e.Kind == KindLocal && e.Element == "" && contract == "_CmdConfigure"
 }
 
+// AppNotificationSender is the local service that hands its node's
+// notifications service an app's notification under its own identity: the
+// platform api, which admits the app by the app's own capability role before
+// it publishes. Local doors carry no credential (reachability inside the
+// deployment is the credential), so the name is what the api registers under
+// -- the same trust every unplaced local service already holds for
+// _CmdConfigure.
+const AppNotificationSender = "api"
+
+// appNotificationAction is the last segment of an app notification's path,
+// `{notification-id}/notify`, the act the node's notifications service accepts.
+const appNotificationAction = "notify"
+
+// IsAppNotificationPath reports whether a node-local command path hands the
+// notifications service one app notification: exactly `{notification-id}/notify`.
+func IsAppNotificationPath(path string) bool {
+	id, action, ok := strings.Cut(path, "/")
+	return ok && action == appNotificationAction && id != "" && ValidElementID(id) == nil &&
+		!strings.Contains(id, "_")
+}
+
+// MayImplicitlyDeliverAppNotification reports the second command right implied
+// by placement, narrower than the first: the node's own unplaced api may
+// publish a _CmdOperate app notification to its node without an operate
+// grant. Nothing else rides on it -- not another _CmdOperate path (an alarm's
+// acknowledge, a channel's test stay a person's acts, authorized at their
+// place), not another local service, not a placed one, not a person. The
+// caller pins the node: the right covers the publisher's own node only.
+func (e *Entry) MayImplicitlyDeliverAppNotification(contract, path string) bool {
+	return e != nil && e.Kind == KindLocal && e.Element == "" && e.Name == AppNotificationSender &&
+		contract == "_CmdOperate" && IsAppNotificationPath(path)
+}
+
 // AuthorizeCmdAt reports whether a cmd grant of the class covers the path. The
 // door applies it to a command's topic path and the Edit executor to every
 // position of its plan, so both checks use the same comparison.

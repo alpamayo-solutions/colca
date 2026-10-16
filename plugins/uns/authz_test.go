@@ -856,3 +856,41 @@ func TestAuthorizeSubRefusesTheReservedDollarSpace(t *testing.T) {
 		}
 	}
 }
+
+func TestOnlyTheUnplacedLocalAPIDeliversAnAppNotificationWithoutAGrant(t *testing.T) {
+	const notification = "01KR0APPNOTE00000000000001"
+	api := &Entry{ULID: "svc-api", Kind: KindLocal, Name: AppNotificationSender}
+	if !api.MayImplicitlyDeliverAppNotification("_CmdOperate", notification+"/notify") {
+		t.Fatal("the node's own api must deliver an app notification under its own identity")
+	}
+	refused := map[string]*Entry{
+		"another local service": {ULID: "svc-dataops", Kind: KindLocal, Name: "dataops"},
+		"a placed api":          {ULID: "svc-api-2", Kind: KindLocal, Name: AppNotificationSender, Element: "01HLINE1"},
+		"an external service":   {ULID: "m1", Kind: KindExternal, Name: AppNotificationSender},
+		"a person":              {ULID: "sub-anna", Kind: KindHuman, Name: AppNotificationSender},
+		"nobody":                nil,
+	}
+	for name, entry := range refused {
+		if entry.MayImplicitlyDeliverAppNotification("_CmdOperate", notification+"/notify") {
+			t.Errorf("%s gained the implicit app notification", name)
+		}
+	}
+	for _, path := range []string{
+		"press/" + notification + "/acknowledge", // an alarm act stays a person's
+		notification + "/message",                // a channel test stays an administrator's
+		"site1/" + notification + "/notify",      // a child's: not this node's
+		"/notify",
+		notification + "/notify/x",
+		"_colca/notify",
+		"#/notify",
+	} {
+		if api.MayImplicitlyDeliverAppNotification("_CmdOperate", path) {
+			t.Errorf("path %q gained the implicit app notification", path)
+		}
+	}
+	for _, contract := range []string{"_CmdEdit", "_CmdParam", "_CmdMaintain", "_CmdAdmin"} {
+		if api.MayImplicitlyDeliverAppNotification(contract, notification+"/notify") {
+			t.Errorf("%s gained the implicit app notification", contract)
+		}
+	}
+}

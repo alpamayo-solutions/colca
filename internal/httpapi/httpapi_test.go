@@ -3464,3 +3464,61 @@ func TestALocalServiceNamingNoPersonLeavesTheLabelEmpty(t *testing.T) {
 		t.Fatalf("service's label = %q, want its id", label)
 	}
 }
+
+// The node's own api sends a message through one of its channels under its own
+// identity (`uns.MayImplicitlyDeliverAppNotification`): no person, no operate
+// grant. The same act from any other local service, and any other
+// _CmdOperate from the api, is still refused at the door.
+func TestTheLocalAPIDeliversAnAppNotificationAndNothingElseRidesOnIt(t *testing.T) {
+	h := newLocalHandler(t)
+	const notification = "01KR0APPNOTE00000000000001"
+	publish := func(service, topic string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"topic": topic, "payload": map[string]any{
+			"correlation_id": "msg-" + service + "-" + topic, "expires_at": 9999999999999,
+			"command": map[string]any{"email": map[string]any{"recipients": []string{"a@example.test"}, "subject": "s", "body": "b"}},
+		}})
+		req := httptest.NewRequest(http.MethodPost, "/publish", bytes.NewReader(body))
+		req.Header.Set("X-Colca-Service", service)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	message := "colca/v1/_CmdOperate/n-test/" + notification + "/notify"
+
+	if rec := publish(uns.AppNotificationSender, message); rec.Code != http.StatusOK {
+		t.Fatalf("the api's app notification = %d: %s", rec.Code, rec.Body.String())
+	}
+	// The node's notifications service reads it as the api's act: it answers
+	// only a message that carries the identity the node witnessed.
+	api, _ := h.reg.ByName(uns.AppNotificationSender)
+	fetch := httptest.NewRequest(http.MethodGet, "/fetch?stream=commands&cursor=c/notifications/app-notifications", nil)
+	fetch.Header.Set("X-Colca-Service", "notifications")
+	fetched := httptest.NewRecorder()
+	h.ServeHTTP(fetched, fetch)
+	var page struct {
+		Records []struct {
+			Topic     string `json:"topic"`
+			ActorID   string `json:"actor_id"`
+			ActorKind string `json:"actor_kind"`
+		} `json:"records"`
+	}
+	if err := json.NewDecoder(fetched.Body).Decode(&page); err != nil || len(page.Records) != 1 {
+		t.Fatalf("commands stream = %v (%v), want the one message", page.Records, err)
+	}
+	if got := page.Records[0]; got.Topic != message || got.ActorID != api.ULID || got.ActorKind != "service" {
+		t.Fatalf("message record = %+v, want the api %s as its actor", got, api.ULID)
+	}
+	if rec := publish("dataops", message); rec.Code != http.StatusForbidden {
+		t.Fatalf("another local service's app notification = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if rec := publish(uns.AppNotificationSender, "colca/v1/_CmdOperate/n-test/press/"+notification+"/acknowledge"); rec.Code != http.StatusForbidden {
+		t.Fatalf("the api's alarm act under its own identity = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if rec := publish(uns.AppNotificationSender, "colca/v1/_CmdOperate/n-test/"+notification+"/message"); rec.Code != http.StatusForbidden {
+		t.Fatalf("the api's channel test under its own identity = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if rec := publish(uns.AppNotificationSender, "colca/v1/_CmdOperate/n-other/"+notification+"/notify"); rec.Code == http.StatusOK {
+		t.Fatalf("the api sent a message addressed to another node under its own identity: %s", rec.Body.String())
+	}
+}

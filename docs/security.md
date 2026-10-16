@@ -50,6 +50,23 @@ live session at once.
 | local | creates its own entry on first use of a local door, by name | read and write its element's subtree, or the whole node when unplaced |
 | human | OIDC token; grants come from the groups the token names | nothing without grants; never writes data, only commands |
 
+Commands need a `cmd` grant, with two rights implied by placement for an
+**unplaced** local service, both on its own node only:
+
+| Command | Who, without a grant |
+|---|---|
+| `_CmdConfigure` | any unplaced local service |
+| `_CmdOperate` to `{notification-id}/notify` (an app's notification for the node's notifications service) | the unplaced local service named `api` (`uns.AppNotificationSender`) |
+
+The second lets the platform api hand over an app's notification once it has
+checked the app's own capability role; the node's notifications service
+accepts and delivers it. Every other `_CmdOperate` -- an alarm's acknowledge,
+silence, unsilence, a channel's test message -- stays a person's act,
+authorized against their `operate` grant at its place.
+Another local service, a placed one, an external service or a person gets
+nothing from it. The local door authenticates by reaching it, so the name is
+the same trust every unplaced local service already holds for configure.
+
 An identity is bound to a **system element**, not to a path. Renaming or
 moving the element moves everything bound to it.
 

@@ -612,7 +612,8 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		if attested := e.actorForAttested(attribution, true); attested != nil {
 			actor = attested
 		}
-		implicitLocalConfigure := actor == entry && p.NodeID == e.cfg.ULID && entry.MayImplicitlyConfigure(p.Contract)
+		implicitLocalConfigure := actor == entry && p.NodeID == e.cfg.ULID &&
+			(entry.MayImplicitlyConfigure(p.Contract) || entry.MayImplicitlyDeliverAppNotification(p.Contract, p.Path))
 		if !implicitLocalConfigure && !uns.Authorize(e.Scope(), actor, uns.ActCmd, topic) {
 			e.refuseDeniedCommand(p, payload, attribution.ActorID)
 			return e.rejectDenied(metrics.ReasonCmdDenied, attribution, "execute", &p, "client %s: no cmd grant covers %s", identity, topic)
