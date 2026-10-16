@@ -64,7 +64,8 @@ def test_the_tolerance_survives_the_data_model_record(tmp_path):
 
 def test_an_inherited_slot_keeps_its_tolerance_and_an_override_replaces_it(tmp_path):
     (tmp_path / "base.yaml").write_text(
-        yaml.safe_dump({"name": "Base", "version": "1.0", "signals": [SETPOINT, ACTUAL]}), encoding="utf-8",
+        yaml.safe_dump({"name": "Base", "version": "1.0", "signals": [SETPOINT, ACTUAL]}),
+        encoding="utf-8",
     )
     _write(tmp_path, {**_filler([{**SETPOINT, "process_tolerance": 50}]), "extends": ["Base"]})
 
