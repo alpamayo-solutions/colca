@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.38.0](https://github.com/alpamayo-solutions/colca/compare/v0.37.1...v0.38.0) (2026-10-16)
+
+
+### Features
+
+* **contracts:** process tolerance on _Signal ([004123c](https://github.com/alpamayo-solutions/colca/commit/004123c7aa1c5b549ebf42a4300794669f1fb73a))
+* **contracts:** process tolerance on data-model signal slots ([3b2909e](https://github.com/alpamayo-solutions/colca/commit/3b2909e89a5f41e243aa78b1e553854be862f21b))
+
 ## [0.37.1](https://github.com/alpamayo-solutions/colca/compare/v0.37.0...v0.37.1) (2026-10-15)
 
 
