@@ -188,6 +188,15 @@ def test_signal_roundtrip_full():
     assert decoded.metadata == original.metadata
 
 
+def test_signal_process_tolerance_round_trips():
+    setpoint = SignalPayload(id="01HSIG", name="speed_setpoint", unit="rpm", process_tolerance=2.5)
+
+    decoded = SignalPayload.decode(setpoint.encode(), timestamp=0)
+
+    assert decoded.process_tolerance == 2.5
+    assert SignalPayload.decode(SignalPayload(id="x", name="y").encode(), timestamp=0).process_tolerance is None
+
+
 def test_signal_enums_serialised_as_strings():
     """Enums must serialise to strings (otherwise broker payload is unreadable for non-Python consumers)."""
     sig = SignalPayload(

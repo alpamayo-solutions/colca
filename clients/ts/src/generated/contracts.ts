@@ -554,6 +554,7 @@ export type Signal = {
   min_value?: null | number;
   name: string;
   precision?: number | null;
+  process_tolerance?: null | number;
   relationships?: {
     relationship_type: "actual" | "upper_limit" | "lower_limit" | "feedback";
     target_signal_id: string;

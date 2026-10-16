@@ -1315,6 +1315,10 @@ class Signal(ToleratesUnknownFields, Payload):
     precision: Annotated[int | None, PRECISION] = None
     min_value: float | None = None
     max_value: float | None = None
+    #: How far the ``actual`` of this setpoint may differ from it in normal
+    #: operation, in the signal's unit; None for none. Not a tolerance a write
+    #: is confirmed within.
+    process_tolerance: Annotated[float | None, Bounds(minimum=0)] = None
     config: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     has_contract: bool = False

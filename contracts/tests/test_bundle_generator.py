@@ -719,6 +719,10 @@ def test_every_declared_field_limit_reaches_the_bundle():
         ("precision", 11, False),
         ("precision", 1.5, False),
         ("precision", None, True),
+        ("process_tolerance", 0, True),
+        ("process_tolerance", 0.5, True),
+        ("process_tolerance", -0.1, False),
+        ("process_tolerance", None, True),
     ],
 )
 def test_a_signal_field_outside_its_limit_is_refused(field, value, valid):
