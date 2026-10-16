@@ -1973,3 +1973,83 @@ func TestModelAssignRefusesAManifestWithBrokenLinks(t *testing.T) {
 		t.Fatalf("assign = %d %q writes=%+v", code, msg, writes)
 	}
 }
+
+// tolerantPressModel seeds a Press model whose speed_setpoint declares a
+// process tolerance of 25 and names speed as its actual.
+func tolerantPressModel(t *testing.T, f *fakeStore) {
+	t.Helper()
+	seedEditEntity(t, f, "_DataModel", "_colca/data-models/press", map[string]any{
+		"id": "dm-press", "name": "Press", "version": "1.3",
+		"slots": []map[string]any{
+			{"key": "speed", "kind": "measured", "data_type": "number", "required": true, "declared_by": "Press", "access": "read", "process_tolerance": nil},
+			{
+				"key": "speed_setpoint", "kind": "measured", "data_type": "number", "required": true, "declared_by": "Press",
+				"access": "read_write", "process_tolerance": 25.0,
+				"relationships": []map[string]string{{"type": "actual", "target": "speed"}},
+			},
+		},
+	})
+}
+
+// Assign gives a signal the slot's process tolerance when the signal has
+// none, and keeps one that already equals it; a slot without one adds none.
+func TestModelAssignGivesSignalsTheSlotsProcessTolerance(t *testing.T) {
+	for _, held := range []any{nil, 25.0} {
+		t.Run(fmt.Sprintf("signal holds %v", held), func(t *testing.T) {
+			f := newStore("n-edge1")
+			elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{"id": "el-press", "name": "Press"})
+			signal := map[string]any{"id": "sig-sp", "name": "speed_setpoint", "system_element_id": "el-press", "data_type": "float"}
+			if held != nil {
+				signal["process_tolerance"] = held
+			}
+			signalVersion := seedEditEntity(t, f, "_Signal", "press/speed_setpoint", signal)
+			tolerantPressModel(t, f)
+			exec := NewEditExec(f, nil)
+
+			code, msg, _, _ := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(t, "op-assign-tolerance",
+				map[string]uint64{"system-element:el-press": elementVersion, "signal:sig-sp": signalVersion},
+				map[string]any{
+					"type": "model", "action": "assign",
+					"entity":  map[string]any{"kind": "system-element", "id": "el-press"},
+					"models":  []string{"Press"},
+					"creates": map[string]string{"speed": "sig-speed"},
+				}))
+			if code != 200 {
+				t.Fatalf("assign = %d %q", code, msg)
+			}
+			if setpoint := signalPayloadAt(t, f, "colca/v1/_Signal/n-edge1/press/speed_setpoint"); setpoint["process_tolerance"] != 25.0 {
+				t.Fatalf("setpoint process_tolerance = %v, want 25", setpoint["process_tolerance"])
+			}
+			if speed := signalPayloadAt(t, f, "colca/v1/_Signal/n-edge1/press/speed"); speed["process_tolerance"] != nil {
+				t.Fatalf("a slot without a tolerance gave its signal one: %+v", speed)
+			}
+		})
+	}
+}
+
+// A signal whose process tolerance differs from its slot's does not
+// implement the slot. Nothing is written.
+func TestModelAssignRefusesAProcessToleranceConflict(t *testing.T) {
+	f := newStore("n-edge1")
+	elementVersion := seedEditEntity(t, f, "_SystemElement", "press", map[string]any{"id": "el-press", "name": "Press"})
+	signalVersion := seedEditEntity(t, f, "_Signal", "press/speed_setpoint", map[string]any{
+		"id": "sig-sp", "name": "speed_setpoint", "system_element_id": "el-press", "data_type": "float",
+		"process_tolerance": 40.0,
+	})
+	tolerantPressModel(t, f)
+	exec := NewEditExec(f, nil)
+	before := f.offset
+
+	code, msg, _, writes := exec.ExecuteWithWrites(asHuman, "_CmdEdit", "apply", editBody(t, "op-tolerance-conflict",
+		map[string]uint64{"system-element:el-press": elementVersion, "signal:sig-sp": signalVersion},
+		map[string]any{
+			"type": "model", "action": "assign",
+			"entity":  map[string]any{"kind": "system-element", "id": "el-press"},
+			"models":  []string{"Press"},
+			"creates": map[string]string{"speed": "sig-speed"},
+		}))
+	want := `slot "speed_setpoint" has process tolerance 25, but its signal sig-sp has 40`
+	if code != 409 || len(writes) != 0 || f.offset != before || !strings.Contains(msg, want) {
+		t.Fatalf("assign = %d %q writes=%+v, want 409 containing %q", code, msg, writes, want)
+	}
+}

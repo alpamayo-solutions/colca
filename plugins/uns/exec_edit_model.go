@@ -36,6 +36,10 @@ type modelSlot struct {
 	// Access is the signal slot's access, read or read_write; empty (read)
 	// for a child slot and for a manifest compiled before slots carried it.
 	Access string `json:"access"`
+	// ProcessTolerance is how far the actual of the signal slot may differ
+	// from it in normal operation; nil for none, for a child slot and for a
+	// manifest compiled before slots carried it.
+	ProcessTolerance *float64 `json:"process_tolerance"`
 	// Relationships link this signal slot to other signal slots of the model,
 	// by key. Assign gives the signals that fill the slots the same links.
 	Relationships []slotRelationship `json:"relationships"`
@@ -515,6 +519,7 @@ func (w *EditExec) resolveModelSlots(
 	// the access it needs and the links it holds, by target slot key.
 	slotAccess := map[string]requirement{}
 	slotLinks := map[string]map[string]requirement{} // key -> type -> the declaring slot
+	slotTolerance := map[string]requirement{}
 
 	// Child slots with the same key merge: every child_model at that key is
 	// applied to the same child. Two different keys with the same
@@ -582,6 +587,14 @@ func (w *EditExec) resolveModelSlots(
 			}
 			if slot.Access == "read_write" {
 				slotAccess[slot.Key] = requirement{slot: slot, model: name}
+			}
+			if slot.ProcessTolerance != nil {
+				if prev, seen := slotTolerance[slot.Key]; seen && *prev.slot.ProcessTolerance != *slot.ProcessTolerance {
+					return 409, fmt.Sprintf(
+						"model: %s and %s give slot %q different process tolerances", prev.model, name, slot.Key,
+					)
+				}
+				slotTolerance[slot.Key] = requirement{slot: slot, model: name}
 			}
 			for _, link := range slot.Relationships {
 				if slotLinks[slot.Key] == nil {
@@ -733,10 +746,12 @@ func (w *EditExec) resolveModelSlots(
 		resolved[key] = &filled{id: signalID, topic: topic, payload: payload}
 	}
 
-	// Access and links the slots declare land on the signals that fill them.
-	// A read_write slot makes its signal read_write; a signal that is
-	// read_write where the slot is read does not implement it. A link whose
-	// target slot no signal fills here (an optional slot) is left out.
+	// Access, tolerance and links the slots declare land on the signals that
+	// fill them. A read_write slot makes its signal read_write; a signal that
+	// is read_write where the slot is read does not implement it. A slot's
+	// process tolerance is given to a signal that has none; a signal with a
+	// different one does not implement it. A link whose target slot no signal
+	// fills here (an optional slot) is left out.
 	for _, key := range signalOrder {
 		fill := resolved[key]
 		combinedKey := modelSlotPath(path, key)
@@ -754,6 +769,25 @@ func (w *EditExec) resolveModelSlots(
 				"model: slot %q is read, but its signal %s is read_write; a read slot is implemented by a read signal",
 				combinedKey, fill.id,
 			)
+		}
+		if want, declared := slotTolerance[key]; declared {
+			var held *float64
+			if raw, ok := payload["process_tolerance"]; ok && len(raw) > 0 && string(raw) != "null" {
+				var value float64
+				if err := json.Unmarshal(raw, &value); err != nil {
+					return 422, fmt.Sprintf("model: signal %s has an unreadable process_tolerance", fill.id)
+				}
+				held = &value
+			}
+			switch {
+			case held == nil:
+				payload["process_tolerance"] = rawJSON(*want.slot.ProcessTolerance)
+			case *held != *want.slot.ProcessTolerance:
+				return 409, fmt.Sprintf(
+					"model: slot %q has process tolerance %v, but its signal %s has %v",
+					combinedKey, *want.slot.ProcessTolerance, fill.id, *held,
+				)
+			}
 		}
 		var links []relationshipLink
 		if raw, ok := payload["relationships"]; ok && len(raw) > 0 && string(raw) != "null" {

@@ -340,6 +340,14 @@ slot carries the same field, and a signal implementing a slot has its access:
 assigning a model makes the signal of a `read_write` slot `read_write`, and
 refuses a `read_write` signal for a `read` slot.
 
+**Process tolerance.** A setpoint signal's `process_tolerance` is how far its
+`actual` may differ from it in normal operation, in the signal's unit: a
+number `>= 0`, or absent/`null` for none. It is not a tolerance a write is
+confirmed within. A data-model signal slot carries the same field
+(`process_tolerance: 100` in the model YAML; the compiler refuses a negative
+one). Assigning a model gives a signal without a tolerance its slot's, and
+refuses a signal whose tolerance differs from the slot's.
+
 **Relationships.** A signal links to other signals of its node with
 `relationships: [{"relationship_type": …, "target_signal_id": …}]`, at most one
 link per type:

@@ -34,6 +34,8 @@ YAML schema (one file per model)::
       - name: speed_setpoint
         data_type: number
         access: read_write
+        process_tolerance: 25        # optional; how far the actual may
+                                     # differ in normal operation (unit's)
         relationships:               # optional; directed links to other
           - type: actual             # signal slots of this model, see
             target: speed            # colca_data_contracts.signal_relationships
@@ -73,12 +75,17 @@ Resolution rules:
 - A signal's ``access`` is ``read`` (the default) or ``read_write``. It only
   declares that the signal may be written. A signal implementing the slot has
   the same access.
+- A signal's ``process_tolerance`` is how far the ``actual`` of the setpoint
+  may differ from it in normal operation, in the slot's unit: a number
+  ``>= 0``, or omitted (``None``) for none. A signal implementing the slot has
+  the same tolerance.
 - A signal's ``relationships`` link it to other signal slots of the same
   (flattened) model by key, each with a ``type`` from
   ``SignalRelationshipType``. They are checked after flattening against
   ``signal_relationships.RULES``, so a link may name an inherited slot, and an
   override that turns its target into a child slot is caught. A child slot
-  declares neither field; its manifest carries ``access: None`` and no
+  declares none of ``access``, ``process_tolerance`` and ``relationships``; its
+  manifest carries ``access: None``, ``process_tolerance: None`` and no
   relationships.
 - Every problem found during a single ``compile_models()`` call is
   accumulated and raised together as one ``CompileError``.
@@ -128,6 +135,15 @@ def _slot_relationships(where: str, raw: Any) -> tuple[list[dict[str, str]], lis
     return entries, problems
 
 
+def _slot_process_tolerance(where: str, raw: Any) -> tuple[float | None, list[str]]:
+    """A signal's ``process_tolerance:``: a number >= 0, or None when omitted."""
+    if raw is None:
+        return None, []
+    if isinstance(raw, bool) or not isinstance(raw, int | float) or not raw >= 0:
+        return None, [f"{where}: process_tolerance must be a number >= 0, not {raw!r}"]
+    return float(raw), []
+
+
 def _default_source_dir() -> Path:
     return Path(__file__).resolve().parent
 
@@ -172,6 +188,8 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             problems.append(f"{name}.{key}: unknown access {access!r}; use one of {sorted(ACCESS_VALUES)}")
         relationships, relationship_problems_ = _slot_relationships(f"{name}.{key}", item.get("relationships"))
         problems.extend(relationship_problems_)
+        process_tolerance, tolerance_problems = _slot_process_tolerance(f"{name}.{key}", item.get("process_tolerance"))
+        problems.extend(tolerance_problems)
         slots[key] = {
             "key": key,
             "kind": "computed" if item.get("computed", False) else "measured",
@@ -185,11 +203,12 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "child_model": None,
             "entity_name": None,
             "access": access,
+            "process_tolerance": process_tolerance,
             "relationships": relationships,
         }
     for item in raw.get("children") or []:
         key = item["name"]
-        for field_name in ("access", "relationships"):
+        for field_name in ("access", "process_tolerance", "relationships"):
             if field_name in item:
                 problems.append(f"{name}.{key}: a child slot cannot declare {field_name}; only signal slots do")
         entity_name = item.get("entity_name")
@@ -213,6 +232,7 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "child_model": item.get("child_model"),
             "entity_name": entity_name,
             "access": None,
+            "process_tolerance": None,
             "relationships": [],
         }
     return slots, problems
