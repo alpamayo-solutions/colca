@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.0](https://github.com/alpamayo-solutions/colca/compare/v0.38.0...v0.39.0) (2026-10-17)
+
+
+### Features
+
+* **authz:** let the node's unplaced api hand over an app notification without an operate grant ([0f5cd99](https://github.com/alpamayo-solutions/colca/commit/0f5cd99a69143b93d25382c1b9cf0b25522bda55))
+
 ## [0.38.0](https://github.com/alpamayo-solutions/colca/compare/v0.37.1...v0.38.0) (2026-10-16)
 
 
