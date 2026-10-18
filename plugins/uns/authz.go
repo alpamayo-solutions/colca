@@ -550,14 +550,27 @@ func (e *Entry) MayImplicitlyConfigure(contract string) bool {
 	return e != nil && e.Kind == KindLocal && e.Element == "" && contract == "_CmdConfigure"
 }
 
-// AppNotificationSender is the local service that hands its node's
-// notifications service an app's notification under its own identity: the
-// platform api, which admits the app by the app's own capability role before
-// it publishes. Local doors carry no credential (reachability inside the
-// deployment is the credential), so the name is what the api registers under
-// -- the same trust every unplaced local service already holds for
-// _CmdConfigure.
-const AppNotificationSender = "api"
+// AppNotificationSenders are the names of the local service that hands its
+// node's notifications service an app's notification under its own identity:
+// the platform api, which admits the app by the app's own capability role
+// before it publishes. It registers as `api` on a node and as `hub-api` on a
+// node that aggregates others (a name the platform keeps, because renaming a
+// registered identity is a migration on every deployed node). Local doors
+// carry no credential (reachability inside the deployment is the credential),
+// so the name is the same trust every unplaced local service already holds
+// for _CmdConfigure.
+var AppNotificationSenders = []string{"api", "hub-api"}
+
+// IsAppNotificationSender reports whether name is one the platform api
+// registers under (AppNotificationSenders).
+func IsAppNotificationSender(name string) bool {
+	for _, sender := range AppNotificationSenders {
+		if name == sender {
+			return true
+		}
+	}
+	return false
+}
 
 // appNotificationAction is the last segment of an app notification's path,
 // `{notification-id}/notify`, the act the node's notifications service accepts.
@@ -572,14 +585,15 @@ func IsAppNotificationPath(path string) bool {
 }
 
 // MayImplicitlyDeliverAppNotification reports the second command right implied
-// by placement, narrower than the first: the node's own unplaced api may
+// by placement, narrower than the first: the node's own unplaced api (under
+// either name it registers as) may
 // publish a _CmdOperate app notification to its node without an operate
 // grant. Nothing else rides on it -- not another _CmdOperate path (an alarm's
 // acknowledge, a channel's test stay a person's acts, authorized at their
 // place), not another local service, not a placed one, not a person. The
 // caller pins the node: the right covers the publisher's own node only.
 func (e *Entry) MayImplicitlyDeliverAppNotification(contract, path string) bool {
-	return e != nil && e.Kind == KindLocal && e.Element == "" && e.Name == AppNotificationSender &&
+	return e != nil && e.Kind == KindLocal && e.Element == "" && IsAppNotificationSender(e.Name) &&
 		contract == "_CmdOperate" && IsAppNotificationPath(path)
 }
 

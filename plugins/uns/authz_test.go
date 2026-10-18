@@ -859,15 +859,22 @@ func TestAuthorizeSubRefusesTheReservedDollarSpace(t *testing.T) {
 
 func TestOnlyTheUnplacedLocalAPIDeliversAnAppNotificationWithoutAGrant(t *testing.T) {
 	const notification = "01KR0APPNOTE00000000000001"
-	api := &Entry{ULID: "svc-api", Kind: KindLocal, Name: AppNotificationSender}
+	api := &Entry{ULID: "svc-api", Kind: KindLocal, Name: "api"}
 	if !api.MayImplicitlyDeliverAppNotification("_CmdOperate", notification+"/notify") {
 		t.Fatal("the node's own api must deliver an app notification under its own identity")
 	}
+	// An aggregating node's api registers as `hub-api`: the same right.
+	hubAPI := &Entry{ULID: "svc-hub-api", Kind: KindLocal, Name: "hub-api"}
+	if !hubAPI.MayImplicitlyDeliverAppNotification("_CmdOperate", notification+"/notify") {
+		t.Fatal("an aggregating node's api must deliver an app notification under its own identity")
+	}
 	refused := map[string]*Entry{
 		"another local service": {ULID: "svc-dataops", Kind: KindLocal, Name: "dataops"},
-		"a placed api":          {ULID: "svc-api-2", Kind: KindLocal, Name: AppNotificationSender, Element: "01HLINE1"},
-		"an external service":   {ULID: "m1", Kind: KindExternal, Name: AppNotificationSender},
-		"a person":              {ULID: "sub-anna", Kind: KindHuman, Name: AppNotificationSender},
+		"a name close to it":    {ULID: "svc-api-x", Kind: KindLocal, Name: "hub-api-x"},
+		"a placed api":          {ULID: "svc-api-2", Kind: KindLocal, Name: "api", Element: "01HLINE1"},
+		"a placed hub api":      {ULID: "svc-api-3", Kind: KindLocal, Name: "hub-api", Element: "01HLINE1"},
+		"an external service":   {ULID: "m1", Kind: KindExternal, Name: "hub-api"},
+		"a person":              {ULID: "sub-anna", Kind: KindHuman, Name: "api"},
 		"nobody":                nil,
 	}
 	for name, entry := range refused {

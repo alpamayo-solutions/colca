@@ -3470,6 +3470,13 @@ func TestALocalServiceNamingNoPersonLeavesTheLabelEmpty(t *testing.T) {
 // grant. The same act from any other local service, and any other
 // _CmdOperate from the api, is still refused at the door.
 func TestTheLocalAPIDeliversAnAppNotificationAndNothingElseRidesOnIt(t *testing.T) {
+	// `api` on a node, `hub-api` on a node that aggregates others.
+	for _, sender := range uns.AppNotificationSenders {
+		t.Run(sender, func(t *testing.T) { testLocalAPIDeliversAnAppNotification(t, sender) })
+	}
+}
+
+func testLocalAPIDeliversAnAppNotification(t *testing.T, sender string) {
 	h := newLocalHandler(t)
 	const notification = "01KR0APPNOTE00000000000001"
 	publish := func(service, topic string) *httptest.ResponseRecorder {
@@ -3486,12 +3493,12 @@ func TestTheLocalAPIDeliversAnAppNotificationAndNothingElseRidesOnIt(t *testing.
 	}
 	message := "colca/v1/_CmdOperate/n-test/" + notification + "/notify"
 
-	if rec := publish(uns.AppNotificationSender, message); rec.Code != http.StatusOK {
+	if rec := publish(sender, message); rec.Code != http.StatusOK {
 		t.Fatalf("the api's app notification = %d: %s", rec.Code, rec.Body.String())
 	}
 	// The node's notifications service reads it as the api's act: it answers
 	// only a message that carries the identity the node witnessed.
-	api, _ := h.reg.ByName(uns.AppNotificationSender)
+	api, _ := h.reg.ByName(sender)
 	fetch := httptest.NewRequest(http.MethodGet, "/fetch?stream=commands&cursor=c/notifications/app-notifications", nil)
 	fetch.Header.Set("X-Colca-Service", "notifications")
 	fetched := httptest.NewRecorder()
@@ -3512,13 +3519,13 @@ func TestTheLocalAPIDeliversAnAppNotificationAndNothingElseRidesOnIt(t *testing.
 	if rec := publish("dataops", message); rec.Code != http.StatusForbidden {
 		t.Fatalf("another local service's app notification = %d, want 403: %s", rec.Code, rec.Body.String())
 	}
-	if rec := publish(uns.AppNotificationSender, "colca/v1/_CmdOperate/n-test/press/"+notification+"/acknowledge"); rec.Code != http.StatusForbidden {
+	if rec := publish(sender, "colca/v1/_CmdOperate/n-test/press/"+notification+"/acknowledge"); rec.Code != http.StatusForbidden {
 		t.Fatalf("the api's alarm act under its own identity = %d, want 403: %s", rec.Code, rec.Body.String())
 	}
-	if rec := publish(uns.AppNotificationSender, "colca/v1/_CmdOperate/n-test/"+notification+"/message"); rec.Code != http.StatusForbidden {
+	if rec := publish(sender, "colca/v1/_CmdOperate/n-test/"+notification+"/message"); rec.Code != http.StatusForbidden {
 		t.Fatalf("the api's channel test under its own identity = %d, want 403: %s", rec.Code, rec.Body.String())
 	}
-	if rec := publish(uns.AppNotificationSender, "colca/v1/_CmdOperate/n-other/"+notification+"/notify"); rec.Code == http.StatusOK {
+	if rec := publish(sender, "colca/v1/_CmdOperate/n-other/"+notification+"/notify"); rec.Code == http.StatusOK {
 		t.Fatalf("the api sent a message addressed to another node under its own identity: %s", rec.Body.String())
 	}
 }

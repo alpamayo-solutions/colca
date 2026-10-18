@@ -56,7 +56,7 @@ Commands need a `cmd` grant, with two rights implied by placement for an
 | Command | Who, without a grant |
 |---|---|
 | `_CmdConfigure` | any unplaced local service |
-| `_CmdOperate` to `{notification-id}/notify` (an app's notification for the node's notifications service) | the unplaced local service named `api` (`uns.AppNotificationSender`) |
+| `_CmdOperate` to `{notification-id}/notify` (an app's notification for the node's notifications service) | the unplaced local service named `api`, or `hub-api` on a node that aggregates others (`uns.AppNotificationSenders`) |
 
 The second lets the platform api hand over an app's notification once it has
 checked the app's own capability role; the node's notifications service
