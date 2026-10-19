@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.1](https://github.com/alpamayo-solutions/colca/compare/v0.39.0...v0.39.1) (2026-10-19)
+
+
+### Fixes
+
+* **authz:** let an aggregating node api hand over an app notification ([3fe2304](https://github.com/alpamayo-solutions/colca/commit/3fe2304a28efeea3f246427ba7ce62a38e538113))
+
 ## [0.39.0](https://github.com/alpamayo-solutions/colca/compare/v0.38.0...v0.39.0) (2026-10-17)
 
 
