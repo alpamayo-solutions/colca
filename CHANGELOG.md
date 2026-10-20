@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.0](https://github.com/alpamayo-solutions/colca/compare/v0.39.1...v0.40.0) (2026-10-20)
+
+
+### Features
+
+* value definitions on signals ([#235](https://github.com/alpamayo-solutions/colca/issues/235)) ([41bea77](https://github.com/alpamayo-solutions/colca/commit/41bea771596bd2b1c3b9ef248bd85b1c08737fd2))
+
 ## [0.39.1](https://github.com/alpamayo-solutions/colca/compare/v0.39.0...v0.39.1) (2026-10-19)
 
 
