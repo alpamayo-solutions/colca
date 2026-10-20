@@ -564,6 +564,7 @@ export type Signal = {
   system_element_id?: null | string;
   unit?: null | string;
   updated_at?: null | string;
+  value_definitions?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
