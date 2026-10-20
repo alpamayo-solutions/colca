@@ -689,6 +689,9 @@ func Validate(contract string, payload []byte) error {
 				return fmt.Errorf("_Signal: access must be read or read_write")
 			}
 		}
+		if err := validateSignalValueDefinitionsField(m); err != nil {
+			return err
+		}
 		return validateSignalRelationshipsField(m)
 	case contract == "_Node" || contract == "_ServiceDetails" ||
 		contract == "_SystemElement" ||

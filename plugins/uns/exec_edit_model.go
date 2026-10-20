@@ -43,6 +43,10 @@ type modelSlot struct {
 	// Relationships link this signal slot to other signal slots of the model,
 	// by key. Assign gives the signals that fill the slots the same links.
 	Relationships []slotRelationship `json:"relationships"`
+	// ValueDefinitions say what the slot's values mean, by canonical key.
+	// When set, the slot owns them: every signal filling it carries exactly
+	// these (see model_value_definitions.go).
+	ValueDefinitions map[string]string `json:"value_definitions"`
 }
 
 // slotRelationship is one link a data-model slot declares: its type and the
@@ -72,10 +76,21 @@ func validateSlotDeclarations(model string, slots []modelSlot) []string {
 	for _, slot := range slots {
 		if slot.Kind == "child" {
 			children[slot.Key] = true
-			if slot.Access != "" || len(slot.Relationships) > 0 {
-				problems = append(problems, fmt.Sprintf("%s slot %q: a child slot declares no access or relationships", model, slot.Key))
+			if slot.Access != "" || len(slot.Relationships) > 0 || len(slot.ValueDefinitions) > 0 {
+				problems = append(problems, fmt.Sprintf(
+					"%s slot %q: a child slot declares no access, relationships or value definitions", model, slot.Key,
+				))
 			}
 			continue
+		}
+		if len(slot.ValueDefinitions) > 0 {
+			definitions := make(map[string]any, len(slot.ValueDefinitions))
+			for key, meaning := range slot.ValueDefinitions {
+				definitions[key] = meaning
+			}
+			if problem := valueDefinitionsProblem(slot.DataType, definitions); problem != nil {
+				problems = append(problems, fmt.Sprintf("%s slot %q: %v", model, slot.Key, problem.Err))
+			}
 		}
 		if slot.Access != "" && !signalAccessValues[slot.Access] {
 			problems = append(problems, fmt.Sprintf("%s slot %q: unknown access %q", model, slot.Key, slot.Access))
@@ -520,6 +535,9 @@ func (w *EditExec) resolveModelSlots(
 	slotAccess := map[string]requirement{}
 	slotLinks := map[string]map[string]requirement{} // key -> type -> the declaring slot
 	slotTolerance := map[string]requirement{}
+	// The value definitions signal slots own, required or optional.
+	slotDefinitions := map[string]requirement{}
+	definitionOrder := []string{}
 
 	// Child slots with the same key merge: every child_model at that key is
 	// applied to the same child. Two different keys with the same
@@ -582,6 +600,18 @@ func (w *EditExec) resolveModelSlots(
 				}
 				computedBy[slot.Key] = computer{model: name, declaredBy: slot.DeclaredBy}
 			}
+			if len(slot.ValueDefinitions) > 0 {
+				if prev, seen := slotDefinitions[slot.Key]; seen {
+					if !sameValueDefinitions(prev.slot.ValueDefinitions, slot.ValueDefinitions) {
+						return 409, fmt.Sprintf(
+							"model: %s and %s give slot %q different value definitions", prev.model, name, slot.Key,
+						)
+					}
+				} else {
+					slotDefinitions[slot.Key] = requirement{slot: slot, model: name}
+					definitionOrder = append(definitionOrder, slot.Key)
+				}
+			}
 			if !slot.Required {
 				continue
 			}
@@ -617,7 +647,7 @@ func (w *EditExec) resolveModelSlots(
 			signalOrder = append(signalOrder, slot.Key)
 		}
 	}
-	if len(signalOrder) == 0 && len(childOrder) == 0 {
+	if len(signalOrder) == 0 && len(childOrder) == 0 && len(definitionOrder) == 0 {
 		return 0, ""
 	}
 
@@ -789,6 +819,10 @@ func (w *EditExec) resolveModelSlots(
 				)
 			}
 		}
+		if want, declared := slotDefinitions[key]; declared &&
+			!sameValueDefinitions(heldValueDefinitions(payload["value_definitions"]), want.slot.ValueDefinitions) {
+			payload["value_definitions"] = rawJSON(want.slot.ValueDefinitions)
+		}
 		var links []relationshipLink
 		if raw, ok := payload["relationships"]; ok && len(raw) > 0 && string(raw) != "null" {
 			if err := json.Unmarshal(raw, &links); err != nil {
@@ -833,6 +867,37 @@ func (w *EditExec) resolveModelSlots(
 			return 422, "model: payload is not encodable"
 		}
 		fill.payload = payload
+	}
+
+	// An optional slot is filled only by a signal that already exists. When
+	// the slot owns value definitions, that signal is given them like a
+	// required slot's; one whose data type cannot hold them is left alone,
+	// and the read side's coverage reports it as a conflict.
+	for _, key := range definitionOrder {
+		if _, required := requiredSignals[key]; required {
+			continue
+		}
+		existing, found := byName[key]
+		if !found {
+			continue
+		}
+		want := slotDefinitions[key].slot
+		existingType, _ := rawString(existing.Payload["data_type"])
+		if existingType == "" || !compatibleDataTypes(existingType, slotDataTypes[want.DataType]) {
+			continue
+		}
+		if sameValueDefinitions(heldValueDefinitions(existing.Payload["value_definitions"]), want.ValueDefinitions) {
+			continue
+		}
+		existingID, _ := rawString(existing.Payload["id"])
+		if message := requireExpected(state.expected, entityVersionKey("signal", existingID)); message != "" {
+			return 422, "model: " + message
+		}
+		payload := cloneRawMap(existing.Payload)
+		payload["value_definitions"] = rawJSON(want.ValueDefinitions)
+		if err := state.queue(existing.Record.Topic, payload); err != nil {
+			return 422, "model: payload is not encodable"
+		}
 	}
 
 	childrenByName := directChildrenByName(state.entities, elementID)

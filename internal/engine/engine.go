@@ -1029,13 +1029,17 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 	return results, nil
 }
 
-// checkSignals refuses a batch that would bind a tag another of this node's
-// signals holds, or leave a signal with relationships that break a rule. The
+// checkSignals refuses a batch that would write a signal whose value
+// definitions break a rule, bind a tag another of this node's signals holds,
+// or leave a signal with relationships that break a rule. The
 // caller holds bindMu until the batch is appended.
 func (e *Engine) checkSignals(records []uns.StateRecord) error {
 	current, err := e.scanContract("_Signal", func(kv store.KVEntry) bool { return kv.NodeID == e.cfg.ULID })
 	if err != nil {
 		return fmt.Errorf("signal check: %w", err)
+	}
+	if err := uns.CheckSignalValueDefinitions(records); err != nil {
+		return err
 	}
 	if err := uns.CheckTagBindings(current, records); err != nil {
 		return err
