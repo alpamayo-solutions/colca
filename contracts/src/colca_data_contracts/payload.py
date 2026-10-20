@@ -1330,6 +1330,11 @@ class Signal(ToleratesUnknownFields, Payload):
     #: Links from this signal to other signals of the node; see
     #: `SignalRelationship`.
     relationships: list[SignalRelationship] = field(default_factory=list)
+    #: What the signal's values mean: a value, as its canonical key, to a text
+    #: (``{"202": "Sieve blocked"}``). Only int, boolean and string signals
+    #: take one; the rules are ``value_definitions``. A signal filling a
+    #: data-model slot that declares one carries exactly the slot's.
+    value_definitions: dict[str, str] = field(default_factory=dict)
     created_at: str | None = None
     updated_at: str | None = None
 
