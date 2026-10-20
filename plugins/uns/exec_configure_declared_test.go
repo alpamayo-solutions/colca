@@ -614,6 +614,148 @@ func TestAFirstPublishAfterARestartFillsButDoesNotOverwrite(t *testing.T) {
 	}
 }
 
+// storeAndObserveCatalogue stores a catalogue and hands it to the trigger,
+// as the engine does for a connector's publish.
+func storeAndObserveCatalogue(t *testing.T, c *ConfigExec, topic string, tags []map[string]any) {
+	t.Helper()
+	publishCatalogue(t, c, topic, tags)
+	c.Observe("_DataTags", topic, mustJSON(map[string]any{"data_tags": tags}))
+}
+
+// semanticTagTopic is where seedSemanticTag stores a _SemanticTag.
+func semanticTagTopic(name string) string {
+	return "colca/v1/_SemanticTag/n1/_colca/semantic-tags/" + name
+}
+
+// A tag can name a semantic type the node does not know yet: the definition
+// comes down from the parent, possibly after the connector's tags were bound.
+// When it arrives, every bound signal whose tag names it gets it; a signal
+// that already has a semantic type keeps it, and a second arrival writes
+// nothing.
+func TestASemanticTagArrivingAfterTheBindingFillsTheBoundSignals(t *testing.T) {
+	c := newTriggerConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JDATAOPS", "dataops", "01HLINE1")
+	storeAndObserveCatalogue(t, c, "colca/v1/_DataTags/n1/line1/dataops", []map[string]any{
+		{"id": "t1", "name": "bearing_health", "data_type": "float", "meta": map[string]any{"unit": "%", "semantic_type": "health_indicator"}},
+		{"id": "t2", "name": "bearing_rul_h", "data_type": "float", "meta": map[string]any{"unit": "h"}},
+		{"id": "t3", "name": "kept", "data_type": "float", "meta": map[string]any{"semantic_type": "health_indicator"}},
+	})
+	// An operator classified this one differently meanwhile.
+	kept := signalRecordAt(t, c, "line1/kept")
+	kept["semantic_type_id"] = "01STAGOTHER"
+	if _, err := c.store.(*fakeStore).seed(c.signalTopic("line1/kept"), mustJSON(kept)); err != nil {
+		t.Fatal(err)
+	}
+	if got, present := signalRecordAt(t, c, "line1/bearing_health")["semantic_type_id"]; present {
+		t.Fatalf("a semantic type the node does not know was applied: %v", got)
+	}
+
+	seedSemanticTag(t, c, "01STAGHEALTH", "health_indicator")
+	payload := mustJSON(map[string]any{"id": "01STAGHEALTH", "name": "health_indicator"})
+	c.Observe("_SemanticTag", semanticTagTopic("health_indicator"), payload)
+
+	if got := signalRecordAt(t, c, "line1/bearing_health")["semantic_type_id"]; got != "01STAGHEALTH" {
+		t.Fatalf("semantic_type_id = %v, want the semantic tag that arrived after the binding", got)
+	}
+	if got, present := signalRecordAt(t, c, "line1/bearing_rul_h")["semantic_type_id"]; present {
+		t.Fatalf("a signal whose tag names no semantic type got one: %v", got)
+	}
+	if got := signalRecordAt(t, c, "line1/kept")["semantic_type_id"]; got != "01STAGOTHER" {
+		t.Fatalf("semantic_type_id = %v, want the one the signal already had", got)
+	}
+
+	f := c.store.(*fakeStore)
+	before := f.batchCalls
+	c.Observe("_SemanticTag", semanticTagTopic("health_indicator"), payload)
+	if f.batchCalls != before {
+		t.Fatalf("a repeated arrival wrote again (%d batches)", f.batchCalls-before)
+	}
+}
+
+// Filling a signal from a late semantic tag is not autobind: it happens
+// whether or not the lifecycle trigger is on, for a signal bound by the verb.
+func TestALateSemanticTagFillsSignalsWithTheTriggerOff(t *testing.T) {
+	c := newConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JDATAOPS", "dataops", "01HLINE1")
+	publishCatalogue(t, c, "colca/v1/_DataTags/n1/line1/dataops", []map[string]any{
+		{"id": "t1", "name": "bearing_health", "data_type": "float", "meta": map[string]any{"semantic_type": "health_indicator"}},
+	})
+	if code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "signal/autobind", body(t, map[string]any{"connector": "01JDATAOPS"})); code != 200 {
+		t.Fatalf("autobind = %d %q", code, msg)
+	}
+
+	seedSemanticTag(t, c, "01STAGHEALTH", "health_indicator")
+	c.Observe("_SemanticTag", semanticTagTopic("health_indicator"),
+		mustJSON(map[string]any{"id": "01STAGHEALTH", "name": "health_indicator"}))
+
+	if got := signalRecordAt(t, c, "line1/bearing_health")["semantic_type_id"]; got != "01STAGHEALTH" {
+		t.Fatalf("semantic_type_id = %v, want the late semantic tag", got)
+	}
+}
+
+// A tag may name its semantic type by id as well as by name.
+func TestALateSemanticTagNamedByIDFillsTheBoundSignal(t *testing.T) {
+	c := newTriggerConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JDATAOPS", "dataops", "01HLINE1")
+	storeAndObserveCatalogue(t, c, "colca/v1/_DataTags/n1/line1/dataops", []map[string]any{
+		{"id": "t1", "name": "bearing_health", "data_type": "float", "meta": map[string]any{"semantic_type": "01STAGHEALTH"}},
+	})
+
+	seedSemanticTag(t, c, "01STAGHEALTH", "health_indicator")
+	c.Observe("_SemanticTag", semanticTagTopic("health_indicator"),
+		mustJSON(map[string]any{"id": "01STAGHEALTH", "name": "health_indicator"}))
+
+	if got := signalRecordAt(t, c, "line1/bearing_health")["semantic_type_id"]; got != "01STAGHEALTH" {
+		t.Fatalf("semantic_type_id = %v, want the semantic tag named by id", got)
+	}
+}
+
+// A semantic tag this node authors itself (definition/upsert) fills the
+// signals bound before it in the same command.
+func TestASemanticTagUpsertedOnTheNodeFillsTheBoundSignals(t *testing.T) {
+	c := newTriggerConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JDATAOPS", "dataops", "01HLINE1")
+	storeAndObserveCatalogue(t, c, "colca/v1/_DataTags/n1/line1/dataops", []map[string]any{
+		{"id": "t1", "name": "bearing_health", "data_type": "float", "meta": map[string]any{"semantic_type": "health_indicator"}},
+	})
+
+	code, msg, _ := c.Execute(asHuman, "_CmdConfigure", "definition/upsert", body(t, map[string]any{
+		"definitions": []map[string]any{{"contract": "_SemanticTag", "definition": map[string]any{
+			"id": "01STAGHEALTH", "name": "health_indicator", "applies_to": []string{"signal"},
+		}}},
+	}))
+	if code != 200 {
+		t.Fatalf("definition/upsert = %d %q", code, msg)
+	}
+	if got := signalRecordAt(t, c, "line1/bearing_health")["semantic_type_id"]; got != "01STAGHEALTH" {
+		t.Fatalf("semantic_type_id = %v, want the semantic tag upserted after the binding", got)
+	}
+}
+
+// A semantic tag tombstone, or one no tag names, writes nothing.
+func TestARetiredOrUnnamedSemanticTagWritesNothing(t *testing.T) {
+	c := newTriggerConfigExec(t)
+	place(t, c, "01HLINE1", "line1")
+	bindEntry(t, c, "01JDATAOPS", "dataops", "01HLINE1")
+	storeAndObserveCatalogue(t, c, "colca/v1/_DataTags/n1/line1/dataops", []map[string]any{
+		{"id": "t1", "name": "bearing_health", "data_type": "float", "meta": map[string]any{"semantic_type": "health_indicator"}},
+	})
+	f := c.store.(*fakeStore)
+	before := f.batchCalls
+
+	c.Observe("_SemanticTag", semanticTagTopic("health_indicator"), nil)
+	seedSemanticTag(t, c, "01STAGTEMP", "temperature")
+	c.Observe("_SemanticTag", semanticTagTopic("temperature"), mustJSON(map[string]any{"id": "01STAGTEMP", "name": "temperature"}))
+
+	if f.batchCalls != before {
+		t.Fatalf("wrote %d batches, want none", f.batchCalls-before)
+	}
+}
+
 // The autobind verb reports the bound signals it brought in line.
 func TestAutobindReportsTheSignalsItUpdated(t *testing.T) {
 	c := newConfigExec(t)

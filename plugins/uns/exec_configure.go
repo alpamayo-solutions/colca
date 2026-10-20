@@ -65,7 +65,19 @@ func (c *ConfigExec) Handles(contract string) bool { return contract == "_CmdCon
 // signal/autobind would. A record only counts as a catalogue if its topic is
 // the one an enrolled entry computes to, since anyone with read scope can copy
 // tag ids. Autobind is idempotent, so the trigger needs no coordination.
+//
+// A _SemanticTag that reaches the node (from the parent, the admin door, or
+// the replay at startup) is given to the signals already bound to tags that
+// name it (fillSemanticType). That is not binding, so it runs whether or not
+// the trigger is on.
 func (c *ConfigExec) Observe(contract, topic string, payload []byte) {
+	if contract == "_SemanticTag" && len(payload) > 0 {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		// A refused write is left for the next arrival or restart.
+		_, _ = c.fillSemanticType(CommandContext{}, payload)
+		return
+	}
 	if !c.autobindNew || contract != "_DataTags" || len(payload) == 0 {
 		return // not the trigger's contract, or the catalogue was retired
 	}
@@ -1712,6 +1724,54 @@ func (c *ConfigExec) semanticTags() map[string]string {
 	return index
 }
 
+// fillSemanticType gives a semantic tag that just reached this node to the
+// signals bound before it: a catalogue tag names its semantic type by name or
+// id, and a name the node did not know yet left the bound signal without one
+// (applyTagMeta). Every signal bound to a tag of this node's catalogues that
+// names the semantic tag gets it, unless it already has a semantic type. Other
+// fields the tag states are filled the same way, into empty fields only. A
+// repeated arrival writes nothing. The caller holds the lock.
+func (c *ConfigExec) fillSemanticType(ctx CommandContext, definition []byte) ([]StateWrite, error) {
+	var semantic struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(definition, &semantic); err != nil {
+		return nil, fmt.Errorf("unreadable semantic tag: %w", err)
+	}
+	if semantic.ID == "" {
+		return nil, nil
+	}
+	names := func(ref string) bool {
+		return ref != "" && (ref == semantic.ID || ref == semantic.Name)
+	}
+	var naming catalogue
+	for _, e := range c.bound.Entries() {
+		mount, ok := c.mountFor(e.Element)
+		if !ok {
+			continue
+		}
+		raw, ok := c.store.KVGet(CatalogueTopic(c.store.NodeID(), mount, e.Name))
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		var cat catalogue
+		if json.Unmarshal(raw, &cat) != nil {
+			continue
+		}
+		for _, tag := range cat.DataTags {
+			if names(tag.Meta.SemanticType) {
+				naming.DataTags = append(naming.DataTags, tag)
+			}
+		}
+	}
+	if len(naming.DataTags) == 0 {
+		return nil, nil
+	}
+	_, writes, err := c.syncCatalogueMeta(ctx, naming, nil)
+	return writes, err
+}
+
 // syncCatalogueMeta brings the signals bound to a catalogue's tags in line with
 // what the tags state: empty fields are filled, and the fields of the tags in
 // overwrite are replaced. Only records that change are written. It returns how
@@ -2171,6 +2231,18 @@ func (c *ConfigExec) definitionUpsert(ctx CommandContext, payload []byte) (int, 
 	writes, err := c.commit(ctx, records)
 	if err != nil {
 		return 422, "definition/upsert: rejected: " + err.Error(), "invalid", nil
+	}
+	// A semantic tag authored here reaches the signals already bound to tags
+	// that name it, as one arriving from the parent does (Observe). The
+	// definition stands even if that write is refused; the next arrival or
+	// restart fills them.
+	for i, ref := range body.Definitions {
+		if ref.Contract != "_SemanticTag" {
+			continue
+		}
+		if filled, err := c.fillSemanticType(ctx, records[i].Payload); err == nil {
+			writes = append(writes, filled...)
+		}
 	}
 	return 200, fmt.Sprintf("upserted %d", len(records)), "ok", writes
 }

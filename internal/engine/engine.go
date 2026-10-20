@@ -1530,8 +1530,14 @@ func (e *Engine) afterPersist(class uns.Class, p uns.Parsed, topic string, paylo
 	}
 	// The element index tracks every persisted record, not just machine publishes:
 	// an element authored through IngestAdmin must be visible too. The plugin
-	// observer, by contrast, only sees what machines published.
+	// observer, by contrast, sees what machines published, plus the definitions
+	// that reach this node (from the parent, or authored through the admin
+	// door): state bound before a definition arrived may resolve against it.
+	// Machines cannot author definitions, so no record is observed twice.
 	e.observeIndexes(p.Contract, topic, payload)
+	if uns.IsDefinition(class) {
+		e.observe(p, topic, payload)
+	}
 	// Routability is a question about the tree, not the local bus, so it is asked
 	// even on a node without a broker.
 	if uns.IsCommand(class) {
