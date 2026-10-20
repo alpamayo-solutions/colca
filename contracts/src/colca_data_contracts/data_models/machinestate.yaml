@@ -3,7 +3,7 @@ version: '1.0'
 description: |-
   Platform-default machine-state contract. Required spine = the OPC-UA
   Machinery roll-up + a Colca UNKNOWN, as an ordinal int. Orthogonal optional
-  operating_mode + state_reason (fixed enums) + a pluggable optional native
+  operating_mode + state_reason (fixed value definitions) + a pluggable optional native
   detailed_state. machine_state is the sole OEE input. No transition guards —
   it is an observation roll-up, not a behavioural state machine.
 extends:
@@ -19,12 +19,12 @@ signals:
   - name: machine_state
     data_type: integer
     semantic_type: machine-state
-    enum:
-      - UNKNOWN
-      - OFFLINE
-      - DOWN
-      - IDLE
-      - EXECUTING
+    value_definitions:
+      0: UNKNOWN
+      1: OFFLINE
+      2: DOWN
+      3: IDLE
+      4: EXECUTING
     computed: true
     description: 0 UNKNOWN | 1 OFFLINE | 2 DOWN | 3 IDLE | 4 EXECUTING. Mutually exclusive (NOT
       a bitfield). OPC-UA Machinery semantics + Colca UNKNOWN. EXECUTING is part-counter-free
@@ -33,34 +33,34 @@ signals:
       requires a positively observed power/disconnect signal, never a stale heartbeat.
   - name: operating_mode
     data_type: integer
-    enum:
-      - UNKNOWN
-      - PRODUCTION
-      - SETUP
-      - MAINTENANCE
-      - MANUAL
-      - ENGINEERING
+    value_definitions:
+      0: UNKNOWN
+      1: PRODUCTION
+      2: SETUP
+      3: MAINTENANCE
+      4: MANUAL
+      5: ENGINEERING
     required: false
     description: Orthogonal planned-vs-unplanned driver. Consumed by the OEE layer (which owns
       the shift calendar); NEVER folded into machine_state. UNKNOWN when unobservable -> OEE
       falls back to the shift calendar.
   - name: state_reason
     data_type: integer
-    enum:
-      - UNCLASSIFIED
-      - LOCAL_FAULT
-      - EMERGENCY_STOP
-      - STARVED
-      - BLOCKED
-      - UTILITY_LOSS
-      - CHANGEOVER
-      - CLEANING
-      - PLANNED_MAINTENANCE
-      - NO_DEMAND
-      - NO_SHIFT
-      - WARMUP
-      - QUALITY_HOLD
-      - GRADE_CHANGE
+    value_definitions:
+      0: UNCLASSIFIED
+      1: LOCAL_FAULT
+      2: EMERGENCY_STOP
+      3: STARVED
+      4: BLOCKED
+      5: UTILITY_LOSS
+      6: CHANGEOVER
+      7: CLEANING
+      8: PLANNED_MAINTENANCE
+      9: NO_DEMAND
+      10: NO_SHIFT
+      11: WARMUP
+      12: QUALITY_HOLD
+      13: GRADE_CHANGE
     required: false
     description: Cause axis; routes each interval to an OEE loss family deterministically. Carries
       local-vs-upstream (LOCAL_FAULT vs STARVED/BLOCKED) and starved-vs-blocked splits. UNCLASSIFIED

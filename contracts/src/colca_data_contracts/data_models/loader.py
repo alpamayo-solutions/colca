@@ -24,7 +24,9 @@ YAML schema (one file per model)::
         semantic_type: machine-state # optional tag name; the loader emits a
                                       # seedable stub for any tag referenced
                                       # here that has no existing definition
-        enum: [UNKNOWN, OFFLINE, DOWN, IDLE, EXECUTING]
+        value_definitions:           # optional; what the values mean, see
+          0: UNKNOWN                 # colca_data_contracts.value_definitions
+          1: OFFLINE
         computed: true               # -> kind "computed"; default false -> "measured"
         required: true               # default true
         unit: null                   # optional
@@ -79,14 +81,19 @@ Resolution rules:
   may differ from it in normal operation, in the slot's unit: a number
   ``>= 0``, or omitted (``None``) for none. A signal implementing the slot has
   the same tolerance.
+- A signal's ``value_definitions`` map a value of the slot's data type to
+  what it means. Keys are written as YAML values (``0:``, ``true:``, ``E17:``)
+  and compiled to their canonical text (``"0"``); the rules are
+  ``value_definitions.value_definition_problems``. A signal implementing the
+  slot carries exactly this definition. Omitted, the manifest carries ``{}``.
 - A signal's ``relationships`` link it to other signal slots of the same
   (flattened) model by key, each with a ``type`` from
   ``SignalRelationshipType``. They are checked after flattening against
   ``signal_relationships.RULES``, so a link may name an inherited slot, and an
   override that turns its target into a child slot is caught. A child slot
-  declares none of ``access``, ``process_tolerance`` and ``relationships``; its
-  manifest carries ``access: None``, ``process_tolerance: None`` and no
-  relationships.
+  declares none of ``access``, ``process_tolerance``, ``relationships`` and
+  ``value_definitions``; its manifest carries ``access: None``,
+  ``process_tolerance: None``, no relationships and no value definitions.
 - Every problem found during a single ``compile_models()`` call is
   accumulated and raised together as one ``CompileError``.
 """
@@ -99,6 +106,7 @@ from typing import Any
 
 from colca_data_contracts.payload import SignalAccess
 from colca_data_contracts.signal_relationships import RelationshipEnd, relationship_problems
+from colca_data_contracts.value_definitions import canonical_key, value_definition_problems
 
 # The canonical slot data_type vocabulary. colca's plugins/uns.slotDataTypes
 # is checked against it through vectors/data_model_vocabulary.json.
@@ -142,6 +150,31 @@ def _slot_process_tolerance(where: str, raw: Any) -> tuple[float | None, list[st
     if isinstance(raw, bool) or not isinstance(raw, int | float) or not raw >= 0:
         return None, [f"{where}: process_tolerance must be a number >= 0, not {raw!r}"]
     return float(raw), []
+
+
+def _slot_value_definitions(where: str, data_type: Any, raw: Any) -> tuple[dict[str, str], list[str]]:
+    """A signal's ``value_definitions:`` with canonical keys; ``{}`` when omitted."""
+    if raw is None:
+        return {}, []
+    if not isinstance(raw, dict):
+        return {}, [f"{where}: value_definitions must be a mapping of value to meaning"]
+    definitions: dict[str, str] = {}
+    problems: list[str] = []
+    for value, meaning in raw.items():
+        try:
+            key = canonical_key(str(data_type), value)
+        except ValueError as exc:
+            problems.append(f"{where}: value_definitions: {exc}")
+            continue
+        if key in definitions:
+            problems.append(f"{where}: value_definitions names {key} twice")
+            continue
+        definitions[key] = meaning
+    problems.extend(
+        f"{where}: value_definitions: {problem.message}"
+        for problem in value_definition_problems(str(data_type), definitions)
+    )
+    return definitions, problems
 
 
 def _default_source_dir() -> Path:
@@ -190,13 +223,18 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
         problems.extend(relationship_problems_)
         process_tolerance, tolerance_problems = _slot_process_tolerance(f"{name}.{key}", item.get("process_tolerance"))
         problems.extend(tolerance_problems)
+        if "enum" in item:
+            problems.append(f"{name}.{key}: enum is not a slot field; name the values with value_definitions")
+        value_definitions, definition_problems = _slot_value_definitions(
+            f"{name}.{key}", data_type, item.get("value_definitions")
+        )
+        problems.extend(definition_problems)
         slots[key] = {
             "key": key,
             "kind": "computed" if item.get("computed", False) else "measured",
             "data_type": data_type,
             "semantic_type": item.get("semantic_type"),
             "unit": item.get("unit"),
-            "enum": list(item["enum"]) if item.get("enum") else None,
             "required": item.get("required", True),
             "description": _clean(item.get("description")),
             "declared_by": name,
@@ -205,10 +243,11 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "access": access,
             "process_tolerance": process_tolerance,
             "relationships": relationships,
+            "value_definitions": value_definitions,
         }
     for item in raw.get("children") or []:
         key = item["name"]
-        for field_name in ("access", "process_tolerance", "relationships"):
+        for field_name in ("access", "process_tolerance", "relationships", "value_definitions"):
             if field_name in item:
                 problems.append(f"{name}.{key}: a child slot cannot declare {field_name}; only signal slots do")
         entity_name = item.get("entity_name")
@@ -225,7 +264,6 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "data_type": "",
             "semantic_type": None,
             "unit": None,
-            "enum": None,
             "required": item.get("required", True),
             "description": _clean(item.get("description")),
             "declared_by": name,
@@ -234,6 +272,7 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "access": None,
             "process_tolerance": None,
             "relationships": [],
+            "value_definitions": {},
         }
     return slots, problems
 
