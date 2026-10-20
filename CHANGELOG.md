@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.1](https://github.com/alpamayo-solutions/colca/compare/v0.40.0...v0.40.1) (2026-10-20)
+
+
+### Fixes
+
+* **contracts:** word a value definition refusal that names no key ([#237](https://github.com/alpamayo-solutions/colca/issues/237)) ([ccbad66](https://github.com/alpamayo-solutions/colca/commit/ccbad661b8327b040b05411d1a0f31c830ddc376))
+
 ## [0.40.0](https://github.com/alpamayo-solutions/colca/compare/v0.39.1...v0.40.0) (2026-10-20)
 
 
