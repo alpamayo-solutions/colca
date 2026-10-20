@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.2](https://github.com/alpamayo-solutions/colca/compare/v0.40.1...v0.40.2) (2026-10-20)
+
+
+### Fixes
+
+* **uns:** give a late semantic tag to signals bound before it ([#239](https://github.com/alpamayo-solutions/colca/issues/239)) ([728d3f8](https://github.com/alpamayo-solutions/colca/commit/728d3f8822d0b91a8ee3d95c610d2346b9b2e44a))
+
 ## [0.40.1](https://github.com/alpamayo-solutions/colca/compare/v0.40.0...v0.40.1) (2026-10-20)
 
 
