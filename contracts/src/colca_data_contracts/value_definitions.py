@@ -74,7 +74,10 @@ class ValueDefinitionProblem:
 
     @property
     def message(self) -> str:
-        """A sentence for a person."""
+        """A sentence for a person. Without a key (the node's refusal names
+        none) it speaks of "a value" and "a meaning"."""
+        value = repr(self.key) if self.key is not None else "a value"
+        meaning = f"the meaning of {self.key!r}" if self.key is not None else "a meaning"
         if self.keyword == "data_type":
             return f"only signals of data type {', '.join(sorted(set(KEY_KINDS.values())))} take value definitions"
         if self.keyword == "type":
@@ -82,12 +85,12 @@ class ValueDefinitionProblem:
         if self.keyword == "maxProperties":
             return f"at most {MAX_ENTRIES} values may be defined"
         if self.keyword == "propertyNames":
-            return f"{self.key!r} is not a {self.limit} value written the canonical way"
+            return f"{value} is not written as a canonical {self.limit} value"
         if self.keyword == "minLength":
-            return f"the meaning of {self.key!r} is empty"
+            return f"{meaning} is empty"
         if self.keyword == "maxLength":
-            return f"the meaning of {self.key!r} is longer than {MAX_TEXT} characters"
-        return f"the meaning of {self.key!r} has surrounding whitespace"
+            return f"{meaning} is longer than {MAX_TEXT} characters"
+        return f"{meaning} has surrounding whitespace"
 
 
 def key_is_canonical(kind: KeyKind, key: str) -> bool:
