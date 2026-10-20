@@ -59,9 +59,7 @@ def test_every_problem_reads_as_a_sentence():
 
 
 def test_a_refusal_without_a_key_still_reads_as_a_sentence():
-    assert ValueDefinitionProblem("propertyNames", "int").message == (
-        "a value is not written as a canonical int value"
-    )
+    assert ValueDefinitionProblem("propertyNames", "int").message == ("a value is not written as a canonical int value")
     assert ValueDefinitionProblem("maxLength", "120").message == "a meaning is longer than 120 characters"
 
 
