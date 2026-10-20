@@ -322,6 +322,15 @@ node can already answer binds at once. Two signals waiting for the same tag
 leave it unbound (autobind reports them as `ambiguous`). Unbinding a signal
 drops its intent, so a later publish does not bind it again.
 
+**What a tag states.** A catalogue tag's `meta` may state a `unit`, a
+`description` and a `semantic_type` (a `_SemanticTag` name or id). Binding
+fills the signal's empty fields from them; `semantic_type` becomes
+`semantic_type_id` once the node holds that `_SemanticTag`. A semantic tag that
+reaches the node after the binding (from the parent, through
+`definition/upsert`, or at startup) is given to every bound signal whose tag
+names it and that has no semantic type yet. A signal that already has one keeps
+it.
+
 **Taking a tag over.** A signal that autobind minted carries `is_autobound:
 true`. A `signal/upsert` entry with `"take_over": true` and a `data_tag` held
 by such a signal moves the tag to the upserted signal and retires the minted
