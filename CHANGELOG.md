@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.40.3](https://github.com/alpamayo-solutions/colca/compare/v0.40.2...v0.40.3) (2026-10-20)
+
+
+### Fixes
+
+* **repl:** drop a downlink page whose parent no longer enrolls the child ([#241](https://github.com/alpamayo-solutions/colca/issues/241)) ([e2f8480](https://github.com/alpamayo-solutions/colca/commit/e2f8480746960219d330683ffb82d8fef9be0ecf))
+
 ## [0.40.2](https://github.com/alpamayo-solutions/colca/compare/v0.40.1...v0.40.2) (2026-10-20)
 
 
