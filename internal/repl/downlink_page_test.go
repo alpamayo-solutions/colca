@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/alpamayo-solutions/colca/internal/config"
 	"github.com/alpamayo-solutions/colca/internal/engine"
+	"github.com/alpamayo-solutions/colca/internal/registry"
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
@@ -26,6 +28,10 @@ type linkTap struct {
 	onPage   func()
 	paged    atomic.Bool
 	confirms atomic.Int32
+	// sinceConfirm counts downlink requests sent after the first confirm
+	// request: once one is seen, the child has finished with that confirm's
+	// answer, whatever it did with the page.
+	sinceConfirm atomic.Int32
 	// failConfirm makes every confirm request fail as a dead link would.
 	failConfirm bool
 	// oldParent removes "confirms" from the responses: a parent that predates it.
@@ -39,6 +45,9 @@ func (linkDown) Error() string { return "link down" }
 func (l *linkTap) RoundTrip(req *http.Request) (*http.Response, error) {
 	q := req.URL.Query()
 	poll := strings.HasSuffix(req.URL.Path, "/downlink") && q.Get("hello") == ""
+	if strings.HasSuffix(req.URL.Path, "/downlink") && l.confirms.Load() > 0 {
+		l.sinceConfirm.Add(1)
+	}
 	if poll && q.Get("confirm") == "1" {
 		l.confirms.Add(1)
 		if l.failConfirm {
@@ -83,6 +92,8 @@ func withoutConfirms(body io.ReadCloser) io.ReadCloser {
 // stream held at that moment: what a consumer reading ahead would find.
 type pageWorld struct {
 	peng *engine.Engine
+	preg *registry.Manager
+	srv  *Server
 	cs   *store.Store
 	tap  *linkTap
 
@@ -115,9 +126,10 @@ func newPageWorld(t *testing.T, tap *linkTap) *pageWorld {
 	ps := mustStore(t, filepath.Join(dir, "pdata"))
 	pcfg := &config.Config{ULID: "n-parent", Repl: config.Endpoint{Addr: "127.0.0.1:0"}}
 	preg, peng := nodeParts(t, ps, pcfg, nil, nil, nil, childSpec{"n-child", childID.PublicHex(), "child1"})
-	w.peng = peng
+	w.peng, w.preg = peng, preg
 	srv, addr := startServer(t, pcfg, w.peng, parentID, preg)
 	t.Cleanup(srv.Stop)
+	w.srv = srv
 
 	w.cs = mustStore(t, filepath.Join(dir, "cdata"))
 	deliver := func(topic string, _ []byte, _ bool) {
@@ -218,6 +230,50 @@ func TestAFailedConfirmStoresThePageInHand(t *testing.T) {
 	}
 	if tap.confirms.Load() == 0 {
 		t.Fatal("the child never tried to confirm the page: the test proves nothing about a failed confirm")
+	}
+}
+
+// Deliver OR expire, never both. The parent answers the child's open poll with
+// a command, and the response sits on a link that stalled. Meanwhile the
+// parent drains the child: the command expires undelivered, the drain
+// completes as expired and retires the child. When the link returns, the page
+// reaches the child, whose confirm request the parent refuses, since it no
+// longer enrolls the child. The parent has recorded that command as never
+// delivered, so the child must not store or deliver it.
+func TestAPageFromAParentThatRetiredTheChildIsNotStored(t *testing.T) {
+	tap := &linkTap{}
+	w := newPageWorld(t, tap)
+	expires := time.Now().Add(300 * time.Millisecond).UnixMilli()
+	tap.onPage = func() {
+		// The page is on the link. The drain resolves while it is there.
+		if _, err := w.preg.Drain("n-child"); err != nil {
+			t.Errorf("Drain: %v", err)
+			return
+		}
+		time.Sleep(time.Until(time.UnixMilli(expires + 50)))
+		w.srv.evaluateDrain("n-child")
+	}
+	mustIngestAdmin(t, w.peng, strings.Replace(proposeTopic, "/m1/m1/", "/m1/child1/m1/", 1),
+		`{"correlation_id":"propose-1","expires_at":`+strconv.FormatInt(expires, 10)+`}`)
+
+	waitFor(t, "the child to finish with the answer to its confirm request", 10*time.Second, func() bool {
+		return tap.sinceConfirm.Load() > 0
+	})
+	if _, ok := w.preg.Get("n-child"); ok {
+		t.Fatal("the drain did not complete while the page was on the link: the test proves nothing about a retired child")
+	}
+	if got := w.deliveries(); len(got) != 0 {
+		t.Fatalf("the child delivered %q, a command its parent resolved as expired after retiring it: "+
+			"deliver OR expire, never both", got[0].topic)
+	}
+	recs, _, err := w.cs.Read("commands", 1, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range recs {
+		if r.Topic == proposeTopic {
+			t.Fatalf("the child stored %q, a command its parent resolved as expired after retiring it", r.Topic)
+		}
 	}
 }
 

@@ -185,7 +185,11 @@ for it, in order.
     from the command's offset to the head once; it does not wait and read
     again. If the second request fails, the commands in hand are stored as
     they are rather than kept back on a failing link, and under a parent older
-    than this behaviour the child stores each fetch as it arrives.
+    than this behaviour the child stores each fetch as it arrives. The
+    exception is a parent that refuses the second request because it no
+    longer enrolls the node: it revoked the node, or a drain retired it and
+    recorded those commands as expired, so the child drops the page instead
+    of delivering what the parent resolved without it.
 - **Progress, if asked.** With `"progress": true` in the command, the sender
   also gets `_Ack` records with `result_code` `202` and a `stage`: `queued`
   from the node that accepted it for a child, and `forwarded` from every node

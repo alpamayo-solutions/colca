@@ -1087,6 +1087,22 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 		sent := eng.Now()
 		res, err := c.pollInterruptibly(ctx, after, defAfter, false)
 		received := eng.Now()
+		if err == nil {
+			c.setStatus(UplinkConnected)
+			m.DownlinkFetched(time.Now())
+			// The response carries the parent's clock: a skew measurement, nothing more,
+			// and none at all when the exchange took too long on the link to bound one.
+			// Expiry is judged on this node's own clock.
+			eng.ObserveParentClock(res.Clock.sample(sent, received))
+			if len(res.Records) > 0 && res.Confirms {
+				// The parent wrote this page when its first command arrived there, and
+				// the page may have been on the link for a long time since: a link that
+				// stalls keeps a written response back for seconds. Ask once more,
+				// without waiting, for everything that waits now, so what queued up
+				// behind the page is stored with it rather than a moment after it.
+				res, err = c.confirmPage(ctx, eng, res, after, defAfter)
+			}
+		}
 		if err != nil {
 			if stopped() {
 				return // the request was aborted by our own shutdown
@@ -1110,20 +1126,6 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 			}
 			rehello = true
 			continue
-		}
-		c.setStatus(UplinkConnected)
-		m.DownlinkFetched(time.Now())
-		// The response carries the parent's clock: a skew measurement, nothing more,
-		// and none at all when the exchange took too long on the link to bound one.
-		// Expiry is judged on this node's own clock.
-		eng.ObserveParentClock(res.Clock.sample(sent, received))
-		if len(res.Records) > 0 && res.Confirms {
-			// The parent wrote this page when its first command arrived there, and
-			// the page may have been on the link for a long time since: a link that
-			// stalls keeps a written response back for seconds. Ask once more,
-			// without waiting, for everything that waits now, so what queued up
-			// behind the page is stored with it rather than a moment after it.
-			res = c.confirmPage(ctx, eng, res, after, defAfter)
 		}
 		recs, next, gap, ancestry := res.Records, res.Next, res.Gap, res.Ancestry
 		if ancestry != nil {
@@ -1160,18 +1162,32 @@ func RunDownlink(c *Client, eng *engine.Engine, m *metrics.Metrics, stop <-chan 
 // the commands of page come again, with any issued since. When the request
 // fails the page in hand is returned as it is: a command this node holds is not
 // kept back on a link that is failing, and the next poll reports the failure.
-func (c *Client) confirmPage(ctx context.Context, eng *engine.Engine, page downResult, after, defAfter uint64) downResult {
+//
+// The one exception is a parent that refuses this node's key: it has revoked
+// or retired this node while the page was on the link. A drain that retires a
+// child resolved every command it had not seen acknowledged as expired, and a
+// revoke ended the parent's obligation to deliver, so storing the page would
+// deliver what the parent recorded as never delivered ("deliver OR expire",
+// never both). The page is dropped unacknowledged and the refusal is returned
+// for the loop to handle like any other refused poll.
+func (c *Client) confirmPage(ctx context.Context, eng *engine.Engine, page downResult, after, defAfter uint64) (downResult, error) {
 	sent := eng.Now()
 	confirmed, err := c.pollInterruptibly(ctx, after, defAfter, true)
 	received := eng.Now()
+	if isUnauthorized(err) {
+		c.log.Warn("downlink page dropped: the parent no longer enrolls this node, so it has resolved the "+
+			"commands in hand without this node (revoked, or retired by a drain that let them expire)",
+			"parent", c.base, "commands", len(page.Records), "err", err)
+		return downResult{}, err
+	}
 	if err != nil {
 		c.log.Warn("downlink page not confirmed with the parent — storing the commands in hand; "+
 			"any that queued behind them follow with the next poll",
 			"parent", c.base, "commands", len(page.Records), "err", err)
-		return page
+		return page, nil
 	}
 	eng.ObserveParentClock(confirmed.Clock.sample(sent, received))
-	return confirmed
+	return confirmed, nil
 }
 
 // storePage stores the commands of one downlink page and returns the position
