@@ -348,6 +348,25 @@ confirmed within. A data-model signal slot carries the same field
 one). Assigning a model gives a signal without a tolerance its slot's, and
 refuses a signal whose tolerance differs from the slot's.
 
+**Value definitions.** A signal's `value_definitions` say what its values
+mean: `{"202": "Sieve blocked"}` for a fault code, `{"0": "UNKNOWN", …}` for a
+machine state. Keys are the value written its one canonical way (`int`: base
+ten without leading zeros or `+`; `boolean`: `true`/`false`; `string`: the value
+itself), and only `int`, `boolean` and `string` signals take a definition. A
+definition names at most 500 values; a meaning is 1–120 characters without
+surrounding whitespace. The node refuses a write that breaks a rule, including
+a `data_type` change the definition no longer fits, with a `422`
+`invalid_field: value_definitions: <keyword>[ <limit>]`. A data-model signal slot
+may declare one (`value_definitions: {0: UNKNOWN, 1: OFFLINE}` in the model
+YAML) and then owns it: assigning the model gives every signal filling the slot,
+required or optional, exactly the slot's definition; creating a signal that
+fills the slot without one gives it the slot's; and a create or edit that would
+give it another is refused with `409 value_definitions_owned_by_model: <model>`.
+Slots that declare none leave the signal's own definition free to edit. The
+rules are `colca_data_contracts.value_definitions`; the builtin `MachineState`
+model declares its states this way, and `FaultCodes` leaves the meanings of
+`fault_code` to each signal.
+
 **Relationships.** A signal links to other signals of its node with
 `relationships: [{"relationship_type": …, "target_signal_id": …}]`, at most one
 link per type:

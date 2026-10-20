@@ -118,6 +118,11 @@ func (w *EditExec) composeCreate(
 	if _, occupied := w.store.KVGet(topic); occupied {
 		return 409, "duplicate_name: position is already occupied", "conflict", nil
 	}
+	if intent.Entity.Kind == "signal" {
+		if refusal := w.ownValueDefinitions(entities, intent.ParentID, attributes, true); refusal != "" {
+			return 409, refusal, "conflict", nil
+		}
+	}
 	payload, err := json.Marshal(attributes)
 	if err != nil {
 		return 422, "create: attributes are not encodable", "invalid", nil
@@ -158,6 +163,12 @@ func (w *EditExec) composeUpdate(
 		delete(merged, "system_element_id")
 		if parent, ok := current.Payload["system_element_id"]; ok {
 			merged["system_element_id"] = append(json.RawMessage(nil), parent...)
+		}
+	}
+	if _, touched := intent.Attributes["value_definitions"]; touched && current.Kind == "signal" {
+		elementID, _ := rawString(merged["system_element_id"])
+		if refusal := w.ownValueDefinitions(entities, elementID, merged, false); refusal != "" {
+			return 409, refusal, "conflict", nil
 		}
 	}
 	if len(intent.Attributes) > 0 && !rawMapsEqual(merged, current.Payload) {
