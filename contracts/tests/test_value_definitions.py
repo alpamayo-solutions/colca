@@ -15,6 +15,7 @@ from colca_data_contracts.value_definitions import (
     KEY_KINDS,
     MAX_ENTRIES,
     MAX_TEXT,
+    ValueDefinitionProblem,
     canonical_key,
     key_value,
     sorted_keys,
@@ -55,6 +56,13 @@ def test_every_problem_reads_as_a_sentence():
         "type",
     ]
     assert all(problem.message for problem in problems)
+
+
+def test_a_refusal_without_a_key_still_reads_as_a_sentence():
+    assert ValueDefinitionProblem("propertyNames", "int").message == (
+        "a value is not written as a canonical int value"
+    )
+    assert ValueDefinitionProblem("maxLength", "120").message == "a meaning is longer than 120 characters"
 
 
 @pytest.mark.parametrize(
