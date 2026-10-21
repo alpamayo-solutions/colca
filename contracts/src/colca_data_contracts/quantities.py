@@ -7,6 +7,12 @@ how two tags end up disagreeing about a unit.
 Values are never converted anywhere in Colca. The factor and offset are
 published so a consumer that needs a common basis -- an alarm threshold, an
 export -- can do the arithmetic itself.
+
+Money has no fixed factor between currencies, so a unit of a price kind
+names its `currency`, and its factor converts only to the kind's unit of that
+same currency with factor 1 (`ct/kWh` to `EUR/kWh`, `Rp./kWh` to `CHF/kWh`).
+`convertible` says whether two units of a kind share a basis; between
+currencies they never do.
 """
 
 from dataclasses import dataclass, field
@@ -14,10 +20,14 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class Unit:
-    """`base = value * factor + offset`. Offset carries affine scales (°C→K)."""
+    """`base = value * factor + offset`. Offset carries affine scales (°C→K).
+
+    With a `currency`, the base is the kind's unit of that currency with
+    factor 1, not the kind's `base_unit`."""
 
     factor: float
     offset: float = 0.0
+    currency: str | None = None
 
 
 @dataclass(frozen=True)
@@ -186,24 +196,34 @@ QUANTITY_KINDS: dict[str, QuantityKind] = {
             "ppm": Unit(1e-6),
         },
     ),
-    # Money per quantity. Currencies have no fixed factor between them, so a
-    # kind admits one currency only; a deployment billed in another currency
-    # needs its own kind.
+    # Money per quantity: one kind per quantity, each unit naming its
+    # currency. Factors convert within one currency only (see `convertible`).
     "energy-price": QuantityKind(
         "EUR/kWh",
         {
-            "EUR/kWh": Unit(1.0),
-            "EUR/MWh": Unit(1e-3),
-            "ct/kWh": Unit(1e-2),
+            "EUR/kWh": Unit(1.0, currency="EUR"),
+            "EUR/MWh": Unit(1e-3, currency="EUR"),
+            "ct/kWh": Unit(1e-2, currency="EUR"),
+            "CHF/kWh": Unit(1.0, currency="CHF"),
+            "CHF/MWh": Unit(1e-3, currency="CHF"),
+            "Rp./kWh": Unit(1e-2, currency="CHF"),
+            "USD/kWh": Unit(1.0, currency="USD"),
+            "USD/MWh": Unit(1e-3, currency="USD"),
         },
     ),
     # Charge per kW of the billed peak demand, per year.
     "demand-charge": QuantityKind(
         "EUR/kW/a",
         {
-            "EUR/kW/a": Unit(1.0),
-            "EUR/kW/month": Unit(12.0),
-            "EUR/MW/a": Unit(1e-3),
+            "EUR/kW/a": Unit(1.0, currency="EUR"),
+            "EUR/kW/month": Unit(12.0, currency="EUR"),
+            "EUR/MW/a": Unit(1e-3, currency="EUR"),
+            "CHF/kW/a": Unit(1.0, currency="CHF"),
+            "CHF/kW/month": Unit(12.0, currency="CHF"),
+            "CHF/MW/a": Unit(1e-3, currency="CHF"),
+            "USD/kW/a": Unit(1.0, currency="USD"),
+            "USD/kW/month": Unit(12.0, currency="USD"),
+            "USD/MW/a": Unit(1e-3, currency="USD"),
         },
     ),
     # Greenhouse-gas mass per unit of energy, in CO2 equivalents.
@@ -227,3 +247,12 @@ def accepts_unit(quantity_kind: str, unit: str) -> bool:
     if kind is None:
         return False
     return unit in kind.units
+
+
+def convertible(quantity_kind: str, unit: str, other: str) -> bool:
+    """Whether a value in `unit` can be converted to `other` with the published
+    factors: both belong to the kind and name the same currency (or none)."""
+    kind = QUANTITY_KINDS.get(quantity_kind)
+    if kind is None or unit not in kind.units or other not in kind.units:
+        return False
+    return kind.units[unit].currency == kind.units[other].currency

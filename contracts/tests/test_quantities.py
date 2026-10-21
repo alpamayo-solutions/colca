@@ -5,7 +5,7 @@ import yaml
 
 import colca_data_contracts
 from colca_data_contracts.icons import ICON_SET
-from colca_data_contracts.quantities import QUANTITY_KINDS, accepts_unit
+from colca_data_contracts.quantities import QUANTITY_KINDS, accepts_unit, convertible
 
 
 def test_every_kind_accepts_its_own_base_unit():
@@ -59,3 +59,54 @@ def test_shipped_model_units_are_accepted_by_their_tag_quantity():
             checked += 1
             assert accepts_unit(kind, slot["unit"]), f"{manifest['name']}.{slot['key']}: {slot['unit']} is not {kind}"
     assert checked >= 7
+
+
+CURRENCY_KINDS = ("energy-price", "demand-charge")
+
+
+@pytest.mark.parametrize("kind", CURRENCY_KINDS)
+@pytest.mark.parametrize("currency", ["EUR", "CHF", "USD"])
+def test_a_price_kind_admits_each_currency_with_a_factor_one_unit(kind, currency):
+    units = QUANTITY_KINDS[kind].units
+    own = {symbol: unit for symbol, unit in units.items() if unit.currency == currency}
+    assert any(unit.factor == 1.0 for unit in own.values()), f"{kind} has no {currency} basis"
+    assert all(accepts_unit(kind, symbol) for symbol in own)
+
+
+@pytest.mark.parametrize("kind", CURRENCY_KINDS)
+def test_every_price_unit_names_a_currency_and_offsets_nothing(kind):
+    for symbol, unit in QUANTITY_KINDS[kind].units.items():
+        assert unit.currency in {"EUR", "CHF", "USD"}, symbol
+        assert unit.offset == 0.0, symbol
+        prefix = {"ct": "EUR", "Rp.": "CHF"}.get(symbol.split("/")[0], symbol.split("/")[0])
+        assert prefix == unit.currency, symbol
+
+
+def test_swiss_units_convert_within_chf():
+    units = QUANTITY_KINDS["energy-price"].units
+    # 18 Rp./kWh is 0.18 CHF/kWh.
+    assert 18 * units["Rp./kWh"].factor == pytest.approx(0.18)
+    assert convertible("energy-price", "Rp./kWh", "CHF/kWh")
+    assert convertible("demand-charge", "CHF/kW/month", "CHF/kW/a")
+    assert QUANTITY_KINDS["demand-charge"].units["CHF/kW/month"].factor == 12.0
+
+
+@pytest.mark.parametrize(
+    ("kind", "unit", "other"),
+    [
+        ("energy-price", "CHF/kWh", "EUR/kWh"),
+        ("energy-price", "Rp./kWh", "ct/kWh"),
+        ("energy-price", "USD/MWh", "EUR/MWh"),
+        ("demand-charge", "USD/kW/a", "CHF/kW/a"),
+    ],
+)
+def test_units_never_convert_between_currencies(kind, unit, other):
+    assert not convertible(kind, unit, other)
+    assert not convertible(kind, other, unit)
+
+
+def test_convertible_outside_money_and_for_unknown_units():
+    assert convertible("power", "kW", "W")
+    assert not convertible("power", "kW", "bananas")
+    assert not convertible("no-such-kind", "kW", "W")
+    assert not convertible("power", "kW", "kWh")
