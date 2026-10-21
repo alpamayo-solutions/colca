@@ -399,6 +399,21 @@ declare links by slot key (`relationships: [{type, target}]`), and assigning
 the model gives the signals filling the slots the same links. The rules are
 `colca_data_contracts.signal_relationships.RULES`.
 
+**Constant slots.** A data model may require constants next to signals: a
+`constants:` section in the model YAML (`name`, `data_type`, `semantic_type`,
+`unit`, `required`, `description`) compiles to slots of kind `constant`, which
+inherit through `extends` like any slot. A constant slot is filled by the
+element's `_Constant` of that name, with a compatible data type (`number` is
+`float64`, `integer` is `int64`) and the slot's semantic type. Assigning the
+model gives a matching constant without a semantic type the slot's, and refuses
+a constant of another data type or semantic type, or a signal holding the
+slot's name (`409`). It never creates a constant, because a constant's value is
+authored: a missing required constant leaves the element's coverage incomplete
+until someone writes it. A constant slot declares no `access`,
+`process_tolerance`, `relationships` or `value_definitions`, and no signal may
+link to it. The builtin `EnergyConsumer` requires `rated_power` this way, and
+`EnergySupply` consists of constants only.
+
 ### Fetching a node's logs
 
 A node keeps its whole `logs` stream locally. An ancestor reads it on demand

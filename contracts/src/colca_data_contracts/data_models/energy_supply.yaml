@@ -1,0 +1,30 @@
+name: EnergySupply
+version: '1.0'
+description: |-
+  The commercial and environmental terms of an electricity supply, held as
+  constants on a site or area element. A consumer uses the terms of its
+  nearest ancestor that implements this model. Constants have no history:
+  a result computed from them states the values it used.
+constants:
+  - name: energy_price
+    data_type: number
+    semantic_type: energy-price
+    unit: EUR/kWh
+    description: Price per kWh drawn from the grid.
+  - name: demand_charge
+    data_type: number
+    semantic_type: demand-charge
+    unit: EUR/kW/a
+    description: Yearly charge per kW of the highest 15-minute mean power drawn.
+  - name: emission_factor
+    data_type: number
+    semantic_type: emission-factor
+    unit: g CO2e/kWh
+    description: Greenhouse-gas emissions per kWh drawn, in CO2 equivalents (location-based
+      grid mix unless stated otherwise).
+  - name: grid_capacity
+    data_type: number
+    semantic_type: grid-capacity
+    unit: kW
+    required: false
+    description: Contracted or physical capacity of the grid connection.

@@ -47,6 +47,13 @@ YAML schema (one file per model)::
         entity_name: "M-101 DE Bearing"  # optional; defaults to the slot key
         required: true
         description: ""
+    constants:
+      - name: rated_power            # slot key AND constant name
+        data_type: number            # canonical, as for signals
+        semantic_type: rated-power   # optional, as for signals
+        unit: kW                     # optional
+        required: true               # default true
+        description: Nameplate power.
 
 Resolution rules:
 
@@ -94,6 +101,17 @@ Resolution rules:
   declares none of ``access``, ``process_tolerance``, ``relationships`` and
   ``value_definitions``; its manifest carries ``access: None``,
   ``process_tolerance: None``, no relationships and no value definitions.
+- A ``constants:`` entry compiles to a slot of kind ``constant``: a typed
+  value the element must carry as a ``_Constant`` (its current value is the
+  record itself, there is no acquisition and no history). It declares only
+  ``name``, ``data_type``, ``semantic_type``, ``unit``, ``required`` and
+  ``description``; ``computed``, ``access``, ``process_tolerance``,
+  ``relationships`` and ``value_definitions`` are signal-only and a load
+  error on a constant. A signal's relationship cannot target a constant slot.
+  Constant slots inherit and override through ``extends`` like any slot, and
+  their ``semantic_type`` shares the one-data-type-per-tag rule with signals.
+- One slot key declared twice in one model's YAML, in the same or in
+  different sections, is a load error.
 - Every problem found during a single ``compile_models()`` call is
   accumulated and raised together as one ``CompileError``.
 """
@@ -118,6 +136,12 @@ class CompileError(ValueError):
 
 
 ACCESS_VALUES = frozenset(str(member) for member in SignalAccess)
+
+#: Slot kinds that are not filled by a signal.
+NON_SIGNAL_KINDS = frozenset({"child", "constant"})
+
+#: Fields only a signal slot may declare; a child or constant slot refuses them.
+SIGNAL_ONLY_FIELDS = ("computed", "access", "process_tolerance", "relationships", "value_definitions")
 
 
 def _slot_relationships(where: str, raw: Any) -> tuple[list[dict[str, str]], list[str]]:
@@ -213,6 +237,8 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
     problems: list[str] = []
     for item in raw.get("signals") or []:
         key = item["name"]
+        if key in slots:
+            problems.append(f"{name}.{key}: slot key declared twice")
         data_type = item.get("data_type")
         if data_type not in CANONICAL_DATA_TYPES:
             problems.append(f"{name}.{key}: unknown data_type {data_type!r}; use one of {sorted(CANONICAL_DATA_TYPES)}")
@@ -245,9 +271,37 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "relationships": relationships,
             "value_definitions": value_definitions,
         }
+    for item in raw.get("constants") or []:
+        key = item["name"]
+        if key in slots:
+            problems.append(f"{name}.{key}: slot key declared twice")
+        data_type = item.get("data_type")
+        if data_type not in CANONICAL_DATA_TYPES:
+            problems.append(f"{name}.{key}: unknown data_type {data_type!r}; use one of {sorted(CANONICAL_DATA_TYPES)}")
+        for field_name in SIGNAL_ONLY_FIELDS:
+            if field_name in item:
+                problems.append(f"{name}.{key}: a constant slot cannot declare {field_name}; only signal slots do")
+        slots[key] = {
+            "key": key,
+            "kind": "constant",
+            "data_type": data_type,
+            "semantic_type": item.get("semantic_type"),
+            "unit": item.get("unit"),
+            "required": item.get("required", True),
+            "description": _clean(item.get("description")),
+            "declared_by": name,
+            "child_model": None,
+            "entity_name": None,
+            "access": None,
+            "process_tolerance": None,
+            "relationships": [],
+            "value_definitions": {},
+        }
     for item in raw.get("children") or []:
         key = item["name"]
-        for field_name in ("access", "process_tolerance", "relationships", "value_definitions"):
+        if key in slots:
+            problems.append(f"{name}.{key}: slot key declared twice")
+        for field_name in SIGNAL_ONLY_FIELDS:
             if field_name in item:
                 problems.append(f"{name}.{key}: a child slot cannot declare {field_name}; only signal slots do")
         entity_name = item.get("entity_name")
@@ -338,7 +392,7 @@ def _semantic_tag_stub(tag_name: str, slot: dict[str, Any]) -> dict[str, Any]:
         "name": tag_name,
         "i18n_name": tag_name.replace("-", " ").capitalize(),
         "description": "",
-        "applies_to": ["signal"],
+        "applies_to": ["constant" if slot["kind"] == "constant" else "signal"],
         "icon": "category",
         "data_type": slot["data_type"],
     }
@@ -401,10 +455,10 @@ def _slot_relationship_problems(model_name: str, slots: list[dict[str, Any]]) ->
             relationships=[(entry["type"], entry["target"]) for entry in slot["relationships"]],
         )
         for slot in slots
-        if slot["kind"] != "child"
+        if slot["kind"] not in NON_SIGNAL_KINDS
     }
-    child_keys = {slot["key"] for slot in slots if slot["kind"] == "child"}
-    return relationship_problems(ends, label=lambda key: f"{model_name}.{key}", not_signals=child_keys)
+    other_keys = {slot["key"] for slot in slots if slot["kind"] in NON_SIGNAL_KINDS}
+    return relationship_problems(ends, label=lambda key: f"{model_name}.{key}", not_signals=other_keys)
 
 
 def compile_models(source_dir: Path | None = None) -> list[dict[str, Any]]:

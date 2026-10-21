@@ -40,3 +40,22 @@ def test_every_seeded_icon_is_in_the_set():
     assert tags, "the platform seed is empty, so this proves nothing"
     for tag in tags:
         assert tag["icon"] in ICON_SET, f"{tag['name']} names an unlisted icon {tag['icon']!r}"
+
+
+def test_shipped_model_units_are_accepted_by_their_tag_quantity():
+    """A shipped slot whose unit its tag's quantity refuses could never be implemented."""
+    from colca_data_contracts.data_models import compile_models
+
+    seed = yaml.safe_load(
+        (Path(colca_data_contracts.__file__).parent / "semantic_tags" / "platform.yaml").read_text(encoding="utf-8")
+    )
+    kinds = {tag["name"]: tag.get("quantity_kind") for tag in seed["tags"]}
+    checked = 0
+    for manifest in compile_models():
+        for slot in manifest["slots"]:
+            kind = kinds.get(slot["semantic_type"])
+            if not slot["unit"] or not kind:
+                continue
+            checked += 1
+            assert accepts_unit(kind, slot["unit"]), f"{manifest['name']}.{slot['key']}: {slot['unit']} is not {kind}"
+    assert checked >= 7

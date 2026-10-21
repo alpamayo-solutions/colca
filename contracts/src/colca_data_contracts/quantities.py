@@ -186,6 +186,36 @@ QUANTITY_KINDS: dict[str, QuantityKind] = {
             "ppm": Unit(1e-6),
         },
     ),
+    # Money per quantity. Currencies have no fixed factor between them, so a
+    # kind admits one currency only; a deployment billed in another currency
+    # needs its own kind.
+    "energy-price": QuantityKind(
+        "EUR/kWh",
+        {
+            "EUR/kWh": Unit(1.0),
+            "EUR/MWh": Unit(1e-3),
+            "ct/kWh": Unit(1e-2),
+        },
+    ),
+    # Charge per kW of the billed peak demand, per year.
+    "demand-charge": QuantityKind(
+        "EUR/kW/a",
+        {
+            "EUR/kW/a": Unit(1.0),
+            "EUR/kW/month": Unit(12.0),
+            "EUR/MW/a": Unit(1e-3),
+        },
+    ),
+    # Greenhouse-gas mass per unit of energy, in CO2 equivalents.
+    "emission-factor": QuantityKind(
+        "g CO2e/kWh",
+        {
+            "g CO2e/kWh": Unit(1.0),
+            "kg CO2e/kWh": Unit(1e3),
+            "kg CO2e/MWh": Unit(1.0),
+            "t CO2e/MWh": Unit(1e3),
+        },
+    ),
     # Dimensionless counter: a part count has no unit at all.
     "count": QuantityKind(None, {}),
 }

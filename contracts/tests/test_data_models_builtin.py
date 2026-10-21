@@ -73,3 +73,36 @@ def test_no_slot_carries_inputs_or_trigger():
         for slot in manifest["slots"]:
             assert "inputs" not in slot
             assert "trigger" not in slot
+
+
+def test_energy_consumer_requires_power_energy_and_rated_power():
+    manifest = _manifests()["EnergyConsumer"]
+    assert manifest["extends"] == []
+    slots = _slots(manifest)
+    assert set(slots) == {"active_power", "energy_total", "peak_power", "rated_power"}
+    expected = {
+        "active_power": ("measured", "kW", "active-power", True),
+        "energy_total": ("measured", "kWh", "energy-consumption", True),
+        "peak_power": ("measured", "kW", "active-power", False),
+        "rated_power": ("constant", "kW", "rated-power", True),
+    }
+    for key, (kind, unit, tag, required) in expected.items():
+        slot = slots[key]
+        assert (slot["kind"], slot["unit"], slot["semantic_type"], slot["required"]) == (kind, unit, tag, required), key
+        assert slot["data_type"] == "number"
+
+
+def test_energy_supply_is_constants_only():
+    slots = _slots(_manifests()["EnergySupply"])
+    expected = {
+        "energy_price": ("EUR/kWh", "energy-price", True),
+        "demand_charge": ("EUR/kW/a", "demand-charge", True),
+        "emission_factor": ("g CO2e/kWh", "emission-factor", True),
+        "grid_capacity": ("kW", "grid-capacity", False),
+    }
+    assert set(slots) == set(expected)
+    for key, (unit, tag, required) in expected.items():
+        slot = slots[key]
+        assert slot["kind"] == "constant", key
+        assert slot["data_type"] == "number"
+        assert (slot["unit"], slot["semantic_type"], slot["required"]) == (unit, tag, required), key

@@ -44,6 +44,16 @@ SEMANTIC_TOPIC_GROUPS: dict[str, frozenset[str]] = {
     "throughput": frozenset({"throughput", "parts-per-minute", "cycle-time", "batch"}),
     "state": frozenset({"machine-state", "state-reason", "connectivity", "heartbeat"}),
     "process": frozenset({"temperature", "pressure", "speed", "level", "setpoint", "recipe"}),
-    "energy": frozenset({"power", "energy", "rated-power"}),
+    "energy": frozenset(
+        {
+            "power",
+            "energy",
+            "rated-power",
+            "energy-price",
+            "demand-charge",
+            "emission-factor",
+            "grid-capacity",
+        }
+    ),
     "downtime": frozenset({"downtime", "machine-state", "state-reason"}),
 }
