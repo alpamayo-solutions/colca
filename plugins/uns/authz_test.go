@@ -279,6 +279,30 @@ func TestAcknowledgeAndOperateDoNotImplyEachOther(t *testing.T) {
 	}
 }
 
+// annotate is its own class. It admits a person to the Edit contract, where
+// the executor decides per position; it carries no other class and no other
+// class carries it.
+func TestAnnotateIsAGrantableClassThatImpliesNoOther(t *testing.T) {
+	const (
+		operateCmd   = "colca/v1/_CmdOperate/n1/werk1/cnc5/start"
+		configureCmd = "colca/v1/_CmdConfigure/n1/werk1/cnc5/upsert"
+	)
+	if _, err := ParseGrant(cmdAt("werk1", "annotate")); err != nil {
+		t.Fatalf("cmd:...:annotate rejected: %v", err)
+	}
+	ann := entry("", cmdAt("werk1", "annotate"))
+	if !ann.HoldsCmdClass("annotate") || ann.HoldsCmdClass("operate") || ann.HoldsCmdClass("configure") {
+		t.Error("an annotate grant must hold annotate and nothing else")
+	}
+	if Authorize(ns, ann, ActCmd, operateCmd) || Authorize(ns, ann, ActCmd, configureCmd) {
+		t.Error("an annotate grant must not admit operate or configure commands")
+	}
+	op := entry("", cmdAt("werk1", "operate"))
+	if op.HoldsCmdClass("annotate") {
+		t.Error("an operate grant must not carry annotate")
+	}
+}
+
 func TestConfigureIsAGrantableClass(t *testing.T) {
 	g, err := ParseGrant(cmdAt("werk1", "configure,param"))
 	if err != nil {
