@@ -15,7 +15,9 @@ import (
 )
 
 // modelSlot is the part of a _DataModel slot compose needs: name, kind,
-// canonical type and required semantic tag name. DeclaredBy is the model whose
+// canonical type and required semantic tag name. Kind is measured or computed
+// (filled by a signal), constant (filled by a _Constant) or child (filled by a
+// system element). DeclaredBy is the model whose
 // YAML declared the slot; a model that inherits it via extends keeps the
 // parent's value, so the two share one computed slot.
 type modelSlot struct {
@@ -72,13 +74,14 @@ func slotLinkTarget(slot modelSlot, kind string) string {
 func validateSlotDeclarations(model string, slots []modelSlot) []string {
 	problems := []string{}
 	ends := map[string]relationshipEnd{}
+	// Child and constant slots are no signals, so a link to one is refused.
 	children := map[string]bool{}
 	for _, slot := range slots {
-		if slot.Kind == "child" {
+		if slot.Kind == "child" || slot.Kind == "constant" {
 			children[slot.Key] = true
 			if slot.Access != "" || len(slot.Relationships) > 0 || len(slot.ValueDefinitions) > 0 {
 				problems = append(problems, fmt.Sprintf(
-					"%s slot %q: a child slot declares no access, relationships or value definitions", model, slot.Key,
+					"%s slot %q: a %s slot declares no access, relationships or value definitions", model, slot.Key, slot.Kind,
 				))
 			}
 			continue
@@ -253,11 +256,7 @@ func modelsRemoved(original, desired []string) []string {
 // directChildrenByName indexes parentID's direct element children by name;
 // the lowest id wins a duplicate name.
 func directChildrenByName(entities map[string]editSnapshot, parentID string) map[string]editSnapshot {
-	type candidate struct {
-		id     string
-		entity editSnapshot
-	}
-	owned := make([]candidate, 0)
+	owned := make([]namedEntity, 0)
 	for _, entity := range entities {
 		if entity.Kind != "system-element" {
 			continue
@@ -267,11 +266,23 @@ func directChildrenByName(entities map[string]editSnapshot, parentID string) map
 			continue
 		}
 		id, _ := rawString(entity.Payload["id"])
-		owned = append(owned, candidate{id: id, entity: entity})
+		owned = append(owned, namedEntity{id: id, entity: entity})
 	}
-	sort.Slice(owned, func(i, j int) bool { return owned[i].id < owned[j].id })
+	return lowestIDByName(owned)
+}
+
+// namedEntity is an entity with its id, for indexing by name.
+type namedEntity struct {
+	id     string
+	entity editSnapshot
+}
+
+// lowestIDByName indexes entities by name, the lowest id winning a duplicate
+// name, so a match never depends on map order.
+func lowestIDByName(items []namedEntity) map[string]editSnapshot {
+	sort.Slice(items, func(i, j int) bool { return items[i].id < items[j].id })
 	byName := map[string]editSnapshot{}
-	for _, item := range owned {
+	for _, item := range items {
 		name, _ := rawString(item.entity.Payload["name"])
 		if name == "" {
 			continue
@@ -352,7 +363,10 @@ func (w *EditExec) mandatedChildModels(
 // system element. "models" is always the full desired list, so the element
 // update is the same for both. Assign resolves every slot of every model,
 // signals and child elements, in one batch; unassign strips the removed models
-// from the mandated children. Neither deletes an element or a signal.
+// from the mandated children. Neither deletes an element or a signal. A
+// constant slot is only matched: assign gives an existing constant the slot's
+// semantic type but never creates one, because a constant's value is authored,
+// not acquired. A missing required constant leaves the coverage incomplete.
 func (w *EditExec) composeModel(
 	intent editIntent,
 	expected map[string]uint64,
@@ -538,6 +552,12 @@ func (w *EditExec) resolveModelSlots(
 	// The value definitions signal slots own, required or optional.
 	slotDefinitions := map[string]requirement{}
 	definitionOrder := []string{}
+	// Required constant slots, and the kind every signal or constant key was
+	// first declared with, so one key cannot be a signal in one model and a
+	// constant in another.
+	requiredConstants := map[string]requirement{}
+	constantOrder := []string{}
+	slotKinds := map[string]requirement{}
 
 	// Child slots with the same key merge: every child_model at that key is
 	// applied to the same child. Two different keys with the same
@@ -594,6 +614,26 @@ func (w *EditExec) resolveModelSlots(
 				}
 				continue
 			}
+			if prev, seen := slotKinds[slot.Key]; seen && (prev.slot.Kind == "constant") != (slot.Kind == "constant") {
+				return 409, fmt.Sprintf(
+					"model: %s and %s disagree on whether %q is a signal or a constant", prev.model, name, slot.Key,
+				)
+			}
+			slotKinds[slot.Key] = requirement{slot: slot, model: name}
+			if slot.Kind == "constant" {
+				if !slot.Required {
+					continue
+				}
+				if prev, seen := requiredConstants[slot.Key]; seen {
+					if prev.slot.DataType != slot.DataType || prev.slot.SemanticType != slot.SemanticType {
+						return 409, fmt.Sprintf("model: %s and %s require incompatible %q", prev.model, name, slot.Key)
+					}
+					continue
+				}
+				requiredConstants[slot.Key] = requirement{slot: slot, model: name}
+				constantOrder = append(constantOrder, slot.Key)
+				continue
+			}
 			if slot.Kind == "computed" {
 				if holder, taken := computedBy[slot.Key]; taken && holder.declaredBy != slot.DeclaredBy {
 					return 409, fmt.Sprintf("model: %s and %s both compute %q", holder.model, name, slot.Key)
@@ -647,17 +687,14 @@ func (w *EditExec) resolveModelSlots(
 			signalOrder = append(signalOrder, slot.Key)
 		}
 	}
-	if len(signalOrder) == 0 && len(childOrder) == 0 && len(definitionOrder) == 0 {
+	if len(signalOrder) == 0 && len(childOrder) == 0 && len(definitionOrder) == 0 && len(constantOrder) == 0 {
 		return 0, ""
 	}
 
-	// Index the element's signals by name in ascending id order, so a
-	// duplicate name always resolves to its lowest-id signal.
-	type ownedSignal struct {
-		id     string
-		entity editSnapshot
-	}
-	owned := make([]ownedSignal, 0)
+	// Index the element's signals and constants by name in ascending id
+	// order, so a duplicate name always resolves to its lowest-id entity.
+	owned := make([]namedEntity, 0)
+	ownedConstants := make([]namedEntity, 0)
 	otherByName := map[string]editSnapshot{}
 	for _, entity := range state.entities {
 		if entity.Kind != "signal" && entity.Kind != "constant" {
@@ -668,9 +705,11 @@ func (w *EditExec) resolveModelSlots(
 			continue
 		}
 		name, _ := rawString(entity.Payload["name"])
+		id, _ := rawString(entity.Payload["id"])
 		if entity.Kind == "signal" {
-			id, _ := rawString(entity.Payload["id"])
-			owned = append(owned, ownedSignal{id: id, entity: entity})
+			owned = append(owned, namedEntity{id: id, entity: entity})
+		} else {
+			ownedConstants = append(ownedConstants, namedEntity{id: id, entity: entity})
 		}
 		if name != "" {
 			if _, exists := otherByName[name]; !exists {
@@ -678,17 +717,8 @@ func (w *EditExec) resolveModelSlots(
 			}
 		}
 	}
-	sort.Slice(owned, func(i, j int) bool { return owned[i].id < owned[j].id })
-	byName := map[string]editSnapshot{}
-	for _, item := range owned {
-		name, _ := rawString(item.entity.Payload["name"])
-		if name == "" {
-			continue
-		}
-		if _, exists := byName[name]; !exists {
-			byName[name] = item.entity
-		}
-	}
+	byName := lowestIDByName(owned)
+	constantsByName := lowestIDByName(ownedConstants)
 
 	// The signal filling each required slot after this plan: its id, topic
 	// and payload (the queued one where the plan changes it).
@@ -774,6 +804,53 @@ func (w *EditExec) resolveModelSlots(
 		}
 		state.signalPaths[signalPath] = true
 		resolved[key] = &filled{id: signalID, topic: topic, payload: payload}
+	}
+
+	// A required constant slot is filled by the element's constant of that
+	// name. Assign gives it the slot's semantic type when it has none; a
+	// missing one is left to whoever authors its value.
+	for _, key := range constantOrder {
+		slot := requiredConstants[key].slot
+		combinedKey := modelSlotPath(path, key)
+		if occupant, found := byName[key]; found {
+			occupantID, _ := rawString(occupant.Payload["id"])
+			return 409, fmt.Sprintf(
+				"model: constant slot %q is occupied by signal %s, not a constant", combinedKey, occupantID,
+			)
+		}
+		existing, found := constantsByName[key]
+		if !found {
+			continue
+		}
+		existingID, _ := rawString(existing.Payload["id"])
+		if message := requireExpected(state.expected, entityVersionKey("constant", existingID)); message != "" {
+			return 422, "model: " + message
+		}
+		existingType, _ := rawString(existing.Payload["data_type"])
+		if !compatibleDataTypes(existingType, slotDataTypes[slot.DataType]) {
+			return 409, fmt.Sprintf(
+				"model: slot %q has incompatible data_type: constant has %q, model requires %q",
+				combinedKey, existingType, slot.DataType,
+			)
+		}
+		if slot.SemanticType == "" {
+			continue
+		}
+		tagID, ok := w.resolveSemanticTag(state, slot.SemanticType)
+		if !ok {
+			return 409, fmt.Sprintf("model: slot %q names unknown semantic type %q", combinedKey, slot.SemanticType)
+		}
+		existingTag, _ := rawString(existing.Payload["semantic_type_id"])
+		switch {
+		case existingTag == "":
+			payload := cloneRawMap(existing.Payload)
+			payload["semantic_type_id"] = rawJSON(tagID)
+			if err := state.queue(existing.Record.Topic, payload); err != nil {
+				return 422, "model: payload is not encodable"
+			}
+		case existingTag != tagID:
+			return 409, fmt.Sprintf("model: slot %q has an incompatible semantic type already assigned", combinedKey)
+		}
 	}
 
 	// Access, tolerance and links the slots declare land on the signals that
