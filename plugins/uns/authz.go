@@ -322,9 +322,12 @@ type Grant struct {
 // model, so an editor can bind signals without being able to send maintenance
 // commands to a PLC. acknowledge is not on it either: quitting an alarm moves
 // nothing, so everyone who watches a line may be granted it without being able
-// to start or stop the line.
+// to start or stop the line. annotate is not on it either: it writes
+// annotations -- events about the plant -- and nothing else, so a shift lead
+// may correct or remove a colleague's entry without configuring the model or
+// moving equipment.
 var cmdClasses = map[string]bool{
-	"acknowledge": true, "param": true, "operate": true, "maintain": true, "configure": true, "admin": true,
+	"acknowledge": true, "annotate": true, "param": true, "operate": true, "maintain": true, "configure": true, "admin": true,
 }
 
 // CmdClasses lists the hazard classes a cmd grant may name, sorted.
@@ -431,7 +434,7 @@ func ParseGrant(s string) (Grant, error) {
 		}
 		for _, c := range classes {
 			if !cmdClasses[c] {
-				return Grant{}, fmt.Errorf("grant %q: unknown cmd class %q (acknowledge|param|operate|maintain|configure|admin)", s, c)
+				return Grant{}, fmt.Errorf("grant %q: unknown cmd class %q (acknowledge|annotate|param|operate|maintain|configure|admin)", s, c)
 			}
 		}
 		return Grant{Verb: "cmd", Element: z, Classes: classes}, nil
@@ -893,10 +896,11 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 			// The topic path routes the command to the owning node and names
 			// no element, so a prefix check would refuse anyone with a
 			// narrower grant. The door only checks that the person holds a
-			// class the editor honours (configure, operate for annotations, or
-			// param for an operator-input constant's value); the executor
-			// authorizes each position with AuthorizeCmdAt.
-			return e.HoldsCmdClass(class) || e.HoldsCmdClass("operate") || e.HoldsCmdClass("param")
+			// class the editor honours (configure; annotate or operate for
+			// annotations; param for an operator-input constant's value); the
+			// executor authorizes each position with AuthorizeCmdAt.
+			return e.HoldsCmdClass(class) || e.HoldsCmdClass("annotate") ||
+				e.HoldsCmdClass("operate") || e.HoldsCmdClass("param")
 		}
 		return AuthorizeCmdAt(sc, e, class, p.Path)
 

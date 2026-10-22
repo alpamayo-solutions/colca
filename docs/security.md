@@ -116,23 +116,29 @@ Grants use one grammar for machines and people:
 | `cmd:<element>/#:<classes>` | send commands of the listed classes below the element |
 | `admin:#` | use the administrative routes; does not widen reads or commands |
 
-Command classes are `acknowledge`, `param`, `operate`, `maintain`, `configure`
-and `admin`. `configure` is separate on purpose: someone who may rename a signal
+Command classes are `acknowledge`, `annotate`, `param`, `operate`, `maintain`,
+`configure` and `admin`. `configure` is separate on purpose: someone who may rename a signal
 must not thereby be able to send maintenance commands to a PLC. `acknowledge`
 is separate for the opposite reason: quitting an alarm moves nothing, so
 everyone who watches a line may hold it, and holding it must not let them start
 or stop the line. It covers `_CmdAcknowledge` and nothing else; silencing an
-alarm keeps notifications from other people and stays `operate`. No class
-implies another: someone who may both operate and acknowledge holds both.
+alarm keeps notifications from other people and stays `operate`. `annotate` is
+separate for the same reason: an annotation is an event about the plant, so a
+shift lead may correct or remove a colleague's entry without being able to
+configure the model or move equipment. No class implies another: someone who
+may both operate and acknowledge holds both.
 
 `_CmdEdit` is a person's tool for the node's data model, and the door admits
-anyone holding `configure` on it. Two narrower classes are also admitted, each
-covering only the part of `_CmdEdit` that matches the hazard: `operate` covers
-creating an annotation, or editing one's own; `param` covers setting the value
+anyone holding `configure` on it. Three narrower classes are also admitted, each
+covering only the part of `_CmdEdit` that matches the hazard: `annotate` covers
+every annotation write -- creating one, and changing or removing anyone's,
+including its start and its signals; `operate` covers creating an annotation,
+or changing or removing one's own as long as its type, start and signals stay
+what the node derives its id from; `param` covers setting the value
 and metadata of an existing constant, through an `update` or a single-key
 `metadata` edit (see [concepts.md](concepts.md#writing-one-metadata-key)) — an
 operator input such as a station's sandoff or grit — never creating or deleting
-a constant, never its other attributes, and never a signal's binding. Both are
+a constant, never its other attributes, and never a signal's binding. All three are
 scoped by the grant's element exactly as `configure` is:
 `cmd:<element>/#:param` reaches only the constants under that element. The write itself is still made by the node —
 `_CmdEdit` never lets a person publish state directly — but it carries the
