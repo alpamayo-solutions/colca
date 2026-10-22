@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.41.0](https://github.com/alpamayo-solutions/colca/compare/v0.40.3...v0.41.0) (2026-10-22)
+
+
+### Features
+
+* **contracts:** constant slots in data models, energy models ([#246](https://github.com/alpamayo-solutions/colca/issues/246)) ([dd0544b](https://github.com/alpamayo-solutions/colca/commit/dd0544bd3ab755a0d73021425422da081091a80b))
+
+
+### Fixes
+
+* **deps:** Go 1.26.10 for CVE-2026-111943 ([#244](https://github.com/alpamayo-solutions/colca/issues/244)) ([2909180](https://github.com/alpamayo-solutions/colca/commit/29091804da3715397ecfd7d85be84a65bb456b70))
+
 ## [0.40.3](https://github.com/alpamayo-solutions/colca/compare/v0.40.2...v0.40.3) (2026-10-20)
 
 
