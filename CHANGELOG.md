@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.1](https://github.com/alpamayo-solutions/colca/compare/v0.41.0...v0.41.1) (2026-10-22)
+
+
+### Fixes
+
+* **auth:** annotate grant class for annotation writes on any author's entry ([#247](https://github.com/alpamayo-solutions/colca/issues/247)) ([5df46ab](https://github.com/alpamayo-solutions/colca/commit/5df46abeda89fafc6bcec8f8c4d2959ca04ddd65))
+
 ## [0.41.0](https://github.com/alpamayo-solutions/colca/compare/v0.40.3...v0.41.0) (2026-10-22)
 
 
