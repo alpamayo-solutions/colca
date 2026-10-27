@@ -258,6 +258,7 @@ func (p *Pruner) pruneStream(stream string) (again bool) {
 		return false
 	}
 	newLWM := scan.UpTo()
+	p.m.RetentionBlockedByCursor(stream, p.blockedByCursor(stream, lwm, next, now, maxAge, maxBytes, liveBytes, window, clamped))
 	if clamped {
 		p.log.Warn("retention policy cursor-clamped: policy wants to prune further but a live cursor forbids it",
 			"stream", stream, "cursor", blocking, "clamp", clamp, "lwm", lwm)
@@ -388,6 +389,31 @@ func (p *Pruner) pruneStream(stream string) (again bool) {
 		p.completePendingRefresh()
 	}
 	return capped
+}
+
+// blockedByCursor counts the protected cursors below the offset the age and
+// size policy alone would prune to, for colca_retention_blocked_by_cursor. It
+// runs once per pass, not per scrape, and only when a cursor clamped the pass:
+// otherwise the policy stopped below every protecting cursor and none blocks.
+// The policy scan is capped like the pass's own, so past the cap the target is
+// a floor and the count can undercount, never overcount.
+func (p *Pruner) blockedByCursor(stream string, lwm, next uint64, now time.Time, maxAge time.Duration, maxBytes, liveBytes uint64, window time.Duration, clamped bool) int {
+	if !clamped {
+		return 0
+	}
+	target, _, _, err := p.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, next, p.scanCap)
+	if err != nil {
+		p.log.Warn("retention policy scan for the blocked-cursor gauge failed", "stream", stream, "err", err)
+		return 0
+	}
+	protecting, _ := p.st.ProtectedCursors(stream, now, window)
+	blocked := 0
+	for _, c := range protecting {
+		if c.Position < target {
+			blocked++
+		}
+	}
+	return blocked
 }
 
 // cursorFloor is the protected-cursor floor: every cursor on this stream
