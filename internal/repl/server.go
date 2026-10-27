@@ -324,7 +324,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	if s.eng.Store().ReplicatedBacklog() >= maxReplicatedBacklog {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "the parent is busy: its store is behind", http.StatusTooManyRequests)
-		s.metrics.HTTPRequestLimited(metrics.DoorRepl, limitClassReplBacklog)
+		s.metrics.HTTPRequestLimited(metrics.DoorRepl, limitClassReplBacklog, metrics.LimitedBusy)
 		return
 	}
 	// A body without a declared length is counted at the largest a body may be.
@@ -335,7 +335,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	if !s.pushBytes.reserve(size, s.eng.QueuedBytes()) {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "the parent is busy: too many pushes in progress", http.StatusTooManyRequests)
-		s.metrics.HTTPRequestLimited(metrics.DoorRepl, limitClassReplBytes)
+		s.metrics.HTTPRequestLimited(metrics.DoorRepl, limitClassReplBytes, metrics.LimitedBusy)
 		return
 	}
 	defer s.pushBytes.release(size)

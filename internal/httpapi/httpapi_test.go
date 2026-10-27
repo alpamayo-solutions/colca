@@ -1353,7 +1353,7 @@ func TestRequestLimitReturns429RetryAfterAndMetric(t *testing.T) {
 	if result.Code != http.StatusTooManyRequests || result.Header().Get("Retry-After") != "1" {
 		t.Fatalf("limited response = %d Retry-After=%q, want 429/1", result.Code, result.Header().Get("Retry-After"))
 	}
-	line := `colca_http_request_limited_total{class="scan",door="http"}`
+	line := `colca_http_request_limited_total{class="scan",door="http",reason="rate_limit"}`
 	if got := metricstest.Value(t, m, line); got != 1 {
 		t.Fatalf("%s = %v, want 1", line, got)
 	}
@@ -1400,6 +1400,11 @@ func TestAConcurrencyRefusalNamesTheCapAndCarriesNoRetryAfter(t *testing.T) {
 	}
 	if body.Code != "concurrency_limit" || body.Class != "watch" || body.Limit != watchPolicy.PerCallerConcurrent || body.Error == "" {
 		t.Fatalf("body = %+v, want code concurrency_limit, class watch, limit %d", body, watchPolicy.PerCallerConcurrent)
+	}
+	// The metric tells a caller at its cap from one over its rate.
+	line := `colca_http_request_limited_total{class="watch",door="http",reason="concurrency_limit"}`
+	if got := metricstest.Value(t, m, line); got != 1 {
+		t.Fatalf("%s = %v, want 1", line, got)
 	}
 }
 
