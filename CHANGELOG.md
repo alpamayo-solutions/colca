@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.41.2](https://github.com/alpamayo-solutions/colca/compare/v0.41.1...v0.41.2) (2026-10-27)
+
+
+### Performance
+
+* faster filtered reads, crash-safe indexes, batched acks and push-driven grantsync ([#251](https://github.com/alpamayo-solutions/colca/issues/251)) ([d08f99e](https://github.com/alpamayo-solutions/colca/commit/d08f99e562973e27c328bcd0ceb4d64ae562ad4d))
+
 ## [0.41.1](https://github.com/alpamayo-solutions/colca/compare/v0.41.0...v0.41.1) (2026-10-22)
 
 
