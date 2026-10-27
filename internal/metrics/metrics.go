@@ -259,7 +259,7 @@ type Metrics struct {
 	// retentionBlocked is colca_retention_blocked_by_cursor{stream}, as of the
 	// pruner's last pass over the stream.
 	retentionBlocked *prometheus.GaugeVec
-	gapRecords    *prometheus.CounterVec // colca_retention_gap_records_total{stream}
+	gapRecords       *prometheus.CounterVec // colca_retention_gap_records_total{stream}
 	// The state refresh only runs on the entities stream, so these are unlabeled.
 	// A failed refresh append is internal repair, not a rejected publish.
 	refreshRecords  prometheus.Counter // colca_retention_state_refresh_records_total
