@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -449,13 +450,32 @@ func TestUplinkJumpsEvenWithNothingToPush(t *testing.T) {
 
 // captureLogs routes slog.Default through a buffer for the duration of the
 // test; clients constructed AFTER the call log into it.
-func captureLogs(t *testing.T) *bytes.Buffer {
+func captureLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &lockedBuffer{}
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
+	return buf
+}
+
+// lockedBuffer is a bytes.Buffer a test can read while the goroutines it
+// started still log into it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // unreachableAddr returns a loopback address nothing listens on.
