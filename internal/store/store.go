@@ -325,17 +325,9 @@ func OpenWithOptions(dir string, o Options) (*Store, error) {
 			return nil, err
 		}
 	}
-	added, removed, err := s.openKVIndex()
-	if err != nil {
+	if err := s.openIndexes(); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("reconcile the KV contract index: %w", err)
-	}
-	if added > 0 || removed > 0 {
-		slog.Info("store: KV contract index reconciled", "added", added, "removed", removed)
-	}
-	if err := s.openSigIndex(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("open the signal index: %w", err)
+		return nil, fmt.Errorf("open the record indexes: %w", err)
 	}
 	id, minted, err := loadOrMintStoreID(db)
 	if err != nil {
@@ -434,25 +426,12 @@ func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (u
 	return binary.BigEndian.Uint64(v), nil
 }
 
-// Close marks the contract index and the signal index complete (see
-// kvIndexCleanKey and sigIndexCleanKey) and closes the database.
+// Close closes the database. It holds the write lock while it does, so no
+// write is half way through a batch when the database goes. The indexes need
+// no mark at Close: every batch keeps them complete (see openIndexes).
 func (s *Store) Close() error {
 	s.mu.Lock()
-	kvClean, sigClean := s.kvIndexCleanValue(), s.sigIndexCleanValue()
-	s.mu.Unlock()
-	b := s.db.NewBatch()
-	err := b.Set(kvIndexCleanKey, kvClean, nil)
-	if err == nil {
-		err = b.Set(sigIndexCleanKey, sigClean, nil)
-	}
-	if err == nil {
-		err = b.Commit(pebble.Sync)
-	}
-	_ = b.Close()
-	if err != nil {
-		_ = s.db.Close()
-		return err
-	}
+	defer s.mu.Unlock()
 	return s.db.Close()
 }
 
@@ -615,7 +594,7 @@ func (s *Store) appendAdvancingLocked(stream string, recs []Record, adv *CursorA
 	}
 	liveBytes := s.bytes[stream] + added
 	last = off - 1
-	if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
+	if err := setHead(b, stream, off); err != nil {
 		return 0, 0, err
 	}
 	if err := b.Set(bytesKey(stream), be64(liveBytes), nil); err != nil {
@@ -762,25 +741,33 @@ func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(S
 // forward. head, when set, skips the records it rejects without decoding them
 // (see HeadFilter); filter decides on the rest.
 func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, head HeadFilter, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
-	iter, err := s.db.NewIter(&pebble.IterOptions{
+	page := pageBytes{max: maxBytes}
+	out, next, _, _, err = readRange(ctx, s.db, stream, from, ^uint64(0), limit, maxScan, &page, head, filter, nil)
+	return out, next, err
+}
+
+// readRange is ReadRecordsBounded over [from, upTo) of r that appends to out and
+// counts the records it scans. stopped is true when the limit, the scan budget
+// or the page's bytes ended the read before upTo; then next is where the next
+// page starts. Otherwise next is the offset after the last record scanned.
+func readRange(ctx context.Context, r pebble.Reader, stream string, from, upTo uint64, limit, maxScan int, page *pageBytes, head HeadFilter, filter func(StoredRecord) bool, out []StoredRecord) (_ []StoredRecord, next uint64, scanned int, stopped bool, err error) {
+	iter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: streamKey(stream, from),
-		UpperBound: streamKey(stream, ^uint64(0)),
+		UpperBound: streamKey(stream, upTo),
 	})
 	if err != nil {
-		return nil, from, err
+		return out, from, 0, false, err
 	}
 	defer iter.Close()
 	next = from
-	scanned := 0
-	page := pageBytes{max: maxBytes}
-	for iter.First(); iter.Valid() && len(out) < limit; iter.Next() {
-		if maxScan > 0 && scanned >= maxScan {
-			break
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if len(out) >= limit || (maxScan > 0 && scanned >= maxScan) {
+			return out, next, scanned, true, nil
 		}
 		scanned++
 		if scanned%1024 == 0 {
 			if err := ctx.Err(); err != nil {
-				return nil, next, err
+				return nil, next, scanned, false, err
 			}
 		}
 		key := iter.Key()
@@ -793,7 +780,7 @@ func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint
 		}
 		var e recEnc
 		if err := json.Unmarshal(iter.Value(), &e); err != nil {
-			return nil, next, err
+			return nil, next, scanned, false, err
 		}
 		record := storedRecord(off, e)
 		if filter != nil && !filter(record) {
@@ -801,15 +788,15 @@ func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint
 			continue
 		}
 		if !page.take(len(iter.Value()), len(out)) {
-			break // next stays at this record
+			return out, next, scanned, true, nil // next stays at this record
 		}
 		next = off + 1
 		out = append(out, record)
 	}
 	if err := iter.Error(); err != nil {
-		return nil, next, err
+		return nil, next, scanned, false, err
 	}
-	return out, next, nil
+	return out, next, scanned, len(out) >= limit, nil
 }
 
 // FirstMatch returns the first record in [from, upTo) that filter keeps (every
@@ -1505,7 +1492,7 @@ func (s *Store) PruneScanned(scan *PruneScan, overridden []string, plan func(spa
 		off++
 	}
 	if off != s.next[stream] {
-		if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
+		if err := setHead(b, stream, off); err != nil {
 			return 0, err
 		}
 	}

@@ -80,15 +80,9 @@ func splitKVKey(key string) (path, nodeID, topic string, ok bool) {
 	return key[:pathSep], rest[:nodeSep], rest[nodeSep+1:], true
 }
 
-// kvIndexCleanKey records, at a clean Close, every stream's next offset. KV
-// entries are only ever set together with an append, so if the offsets still
-// match at the next Open, nothing wrote KV in between without the index (an older
-// version, or a crash mid-write), and the reconcile can be skipped. Open deletes
-// it, so a crash leaves it absent.
-var kvIndexCleanKey = []byte("xc\x00")
-
-// kvIndexCleanValue is every stream's next offset in stream order.
-func (s *Store) kvIndexCleanValue() []byte {
+// kvIndexHeads is every stream's next offset in stream order: what a recovery
+// checkpoint is valid for.
+func (s *Store) kvIndexHeads() []byte {
 	var v []byte
 	for _, stream := range streams {
 		v = append(v, be64(s.next[stream])...)
@@ -96,30 +90,14 @@ func (s *Store) kvIndexCleanValue() []byte {
 	return v
 }
 
-// openKVIndex runs at Open: it reconciles the contract index unless the last
-// Close left it known to be complete, then clears that mark for this run.
-func (s *Store) openKVIndex() (added, removed int, err error) {
-	clean, closer, err := s.db.Get(kvIndexCleanKey)
-	switch {
-	case err == nil:
-		matches := bytes.Equal(clean, s.kvIndexCleanValue())
-		closer.Close()
-		if matches {
-			return 0, 0, s.db.Delete(kvIndexCleanKey, pebble.Sync)
-		}
-	case !errors.Is(err, pebble.ErrNotFound):
-		return 0, 0, err
-	}
-	added, removed, err = s.reconcileKVIndex()
-	if err != nil {
-		return added, removed, err
-	}
-	return added, removed, s.db.Delete(kvIndexCleanKey, pebble.Sync)
-}
+// The index is written in the same batch as every KV entry, and every batch
+// that writes KV with an append marks the stream indexed through its new head
+// (setHead). Open reconciles it only when a stream was written without that
+// mark: by a version before the index, or before the mark. See openIndexes.
 
 // Recovery checkpoints are versioned and tied to the stream heads. A version
 // without this index may have written between opens; changed heads invalidate
-// its checkpoint just as they invalidate the clean marker.
+// its checkpoint.
 var kvIndexRecoveryKey = []byte("xr\x00")
 
 const (
@@ -145,7 +123,7 @@ func (s *Store) reconcileKVIndex() (added, removed int, err error) {
 }
 
 func (s *Store) reconcileKVIndexBounded(rows, batchBytes int, committed func(kvIndexRecovery, int) error) (added, removed int, err error) {
-	progress := kvIndexRecovery{Version: kvIndexRecoveryVersion, Heads: s.kvIndexCleanValue()}
+	progress := kvIndexRecovery{Version: kvIndexRecoveryVersion, Heads: s.kvIndexHeads()}
 	raw, closer, err := s.db.Get(kvIndexRecoveryKey)
 	if err == nil {
 		var saved kvIndexRecovery

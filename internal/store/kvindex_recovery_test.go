@@ -121,7 +121,7 @@ func TestKVIndexRecoveryInvalidatesIncompatibleCheckpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			breakIndex(t, s)
-			p := kvIndexRecovery{Version: kvIndexRecoveryVersion, Heads: s.kvIndexCleanValue(), Phase: 1, After: []byte("x\x00zzzz")}
+			p := kvIndexRecovery{Version: kvIndexRecoveryVersion, Heads: s.kvIndexHeads(), Phase: 1, After: []byte("x\x00zzzz")}
 			switch kind {
 			case "heads":
 				p.Heads = []byte("old")

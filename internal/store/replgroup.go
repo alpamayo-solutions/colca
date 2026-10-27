@@ -109,7 +109,7 @@ func (s *Store) commitReplicated(group []*replRequest) {
 			if off == s.next[stream] {
 				continue
 			}
-			if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
+			if err := setHead(b, stream, off); err != nil {
 				return err
 			}
 			if err := b.Set(bytesKey(stream), be64(liveBytes[stream]), nil); err != nil {

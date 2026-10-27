@@ -122,7 +122,7 @@ func (s *Store) commitAppendBatch(group []*appendRequest) {
 	defer s.state.Unlock()
 	err := func() error {
 		for _, stream := range grown {
-			if err := b.Set(metaKey(stream), be64(next[stream]), nil); err != nil {
+			if err := setHead(b, stream, next[stream]); err != nil {
 				return err
 			}
 			if err := b.Set(bytesKey(stream), be64(liveBytes[stream]), nil); err != nil {

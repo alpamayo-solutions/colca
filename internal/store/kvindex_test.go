@@ -158,38 +158,81 @@ func assertReconciled(t *testing.T, dir string) {
 	}
 }
 
-// A store that did not close cleanly (a crash, or a version without the index)
-// is reconciled when it opens: missing index keys are added, stale ones dropped.
-func TestOpenReconcilesAfterAnUncleanClose(t *testing.T) {
-	dir := t.TempDir()
-	s := openWithSignal(t, dir)
-	breakIndex(t, s)
-	if err := s.db.Close(); err != nil { // no clean mark
-		t.Fatal(err)
-	}
-	assertReconciled(t, dir)
-}
-
-// A clean mark whose offsets no longer match (another version appended since)
-// does not skip the reconcile.
-func TestOpenReconcilesWhenTheOffsetsMoved(t *testing.T) {
-	dir := t.TempDir()
-	s := openWithSignal(t, dir)
-	breakIndex(t, s)
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+// asLegacyStore rewrites a closed store as a version before the indexed-head
+// mark leaves it: no ix/ keys, and the clean-close marks it wrote, or none.
+func asLegacyStore(t *testing.T, dir string, kvClean, sigClean []byte) {
+	t.Helper()
 	db, err := pebble.Open(dir, &pebble.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Set(kvIndexCleanKey, []byte("older offsets"), pebble.Sync); err != nil {
+	b := db.NewBatch()
+	for _, stream := range streams {
+		if err := b.Delete(indexedKey(stream), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if kvClean != nil {
+		if err := b.Set(legacyKVCleanKey, kvClean, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sigClean != nil {
+		if err := b.Set(legacySigCleanKey, sigClean, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.Commit(pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	assertReconciled(t, dir)
+}
+
+// A store a version before the indexed-head mark wrote last is reconciled when
+// its clean-close mark is missing (it crashed) or no longer matches.
+func TestOpenReconcilesALegacyStoreWithoutAMatchingCleanMark(t *testing.T) {
+	for name, mark := range map[string][]byte{"no mark": nil, "offsets moved": []byte("older offsets")} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			s := openWithSignal(t, dir)
+			breakIndex(t, s)
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			asLegacyStore(t, dir, mark, nil)
+			assertReconciled(t, dir)
+		})
+	}
+}
+
+// A legacy store that closed cleanly keeps its indexes across the upgrade.
+func TestOpenTrustsALegacyStoreThatClosedCleanly(t *testing.T) {
+	dir := t.TempDir()
+	s := openWithSignal(t, dir)
+	appendSparse(t, s, 10, map[int]string{5: "a"})
+	breakIndex(t, s)
+	heads, sigClean := s.kvIndexHeads(), []byte(nil)
+	for _, stream := range streams {
+		sigClean = append(sigClean, be64(s.next[stream])...)
+		sigClean = append(sigClean, be64(s.lwm[stream])...)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	asLegacyStore(t, dir, heads, sigClean)
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if signals, _, _ := s.KVScanPage("", "", 10, []string{"_Signal"}); len(signals) != 0 {
+		t.Fatalf("a cleanly closed legacy store was reconciled: %v", topicsOf(signals))
+	}
+	if covered := s.sigFrom["metrics"]; covered != 1 {
+		t.Fatalf("signal coverage starts at %d, want 1", covered)
+	}
 }
 
 func countIndexKeys(t *testing.T, s *Store) int {

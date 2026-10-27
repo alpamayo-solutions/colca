@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -48,8 +49,15 @@ import (
 //
 // The index covers a stream from sf/{stream} on. Records below it were written
 // by a version without the index (or before a downgrade and upgrade), and a
-// read that starts there scans them as before. That range only shrinks:
-// retention prunes it away.
+// read that starts there scans them, within its budget, before it switches to
+// the index. That range only shrinks: retention prunes it away.
+//
+// Coverage survives every restart, a crash included: each batch that appends
+// records writes their index entries, the new head (m/) and ix/{stream}, the
+// head the index is complete through, together. At Open ix/ equal to m/ says
+// that every record was indexed when it was written. A version that appends
+// without the index moves m/ and not ix/; then the coverage of that stream
+// restarts at its head. See openIndexes.
 
 // sigKey identifies one record of one signal. The signal id is a ULID, so it
 // never contains the separator.
@@ -60,54 +68,129 @@ func sigKey(stream, signalID string, off uint64) []byte {
 // sigFromKey holds the first offset of a stream the signal index covers.
 func sigFromKey(stream string) []byte { return []byte("sf\x00" + stream) }
 
-// sigIndexCleanKey records, at a clean Close, every stream's next offset and
-// LWM. If both still match at the next Open, nothing appended or pruned in
-// between without maintaining the index, and the coverage in sf/ stands. An
-// older version does not know this key, so a run of it leaves either no key
-// (Open deletes it) or one that no longer matches; then the coverage restarts
-// at the head. A crash also leaves no key, and is treated the same way:
-// conservative, since only the read path's speed depends on it.
-var sigIndexCleanKey = []byte("sfc\x00")
+// indexedKey holds the head through which every record of the stream was
+// written with its index entries: the signal index and the KV contract index.
+// It is written with m/{stream} in the same batch (see setHead).
+func indexedKey(stream string) []byte { return []byte("ix\x00" + stream) }
 
-// sigIndexCleanValue is every stream's next offset and LWM in stream order.
-func (s *Store) sigIndexCleanValue() []byte {
-	var v []byte
-	for _, stream := range streams {
-		v = append(v, be64(s.next[stream])...)
-		v = append(v, be64(s.lwm[stream])...)
+// setHead adds a stream's new head to b, together with the mark that the
+// records below it were written with their index entries. Every batch that
+// appends records sets the head through it.
+func setHead(b *pebble.Batch, stream string, next uint64) error {
+	if err := b.Set(metaKey(stream), be64(next), nil); err != nil {
+		return err
 	}
-	return v
+	return b.Set(indexedKey(stream), be64(next), nil)
 }
 
-// openSigIndex runs at Open, after the counters are read: it keeps the index's
-// coverage if the last Close left it known to be complete, and otherwise
-// restarts it at each stream's head. Either way it clears the clean mark for
-// this run.
-func (s *Store) openSigIndex() error {
-	trusted := false
-	clean, closer, err := s.db.Get(sigIndexCleanKey)
-	switch {
-	case err == nil:
-		trusted = bytes.Equal(clean, s.sigIndexCleanValue())
-		closer.Close()
-	case !errors.Is(err, pebble.ErrNotFound):
+// legacySigCleanKey and legacyKVCleanKey are the marks versions before
+// indexedKey wrote at a clean Close: every stream's next offset and LWM, and
+// every stream's next offset. Open still honours them for a store such a
+// version wrote last, so the upgrade does not cost the coverage, and deletes
+// them.
+var (
+	legacySigCleanKey = []byte("sfc\x00")
+	legacyKVCleanKey  = []byte("xc\x00")
+)
+
+// legacyClean reports whether key holds the value a clean Close of a version
+// before indexedKey would have written for the current counters.
+func (s *Store) legacyClean(key []byte, withLWM bool) (bool, error) {
+	v, closer, err := s.db.Get(key)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer closer.Close()
+	var want []byte
+	for _, stream := range streams {
+		want = append(want, be64(s.next[stream])...)
+		if withLWM {
+			want = append(want, be64(s.lwm[stream])...)
+		}
+	}
+	return bytes.Equal(v, want), nil
+}
+
+// indexTrust says, per stream, whether every record below the head was written
+// with its index entries. ix/{stream} decides when present. A stream without it
+// was either never written (nothing to index) or last written by a version
+// before indexedKey, whose clean-close mark (legacy) then decides.
+func (s *Store) indexTrust(legacy []byte, withLWM bool) (map[string]bool, error) {
+	legacyOK, err := s.legacyClean(legacy, withLWM)
+	if err != nil {
+		return nil, err
+	}
+	trust := make(map[string]bool, len(streams))
+	for _, stream := range streams {
+		through, err := readCounter(s.db, indexedKey(stream), 0, "indexed head", stream)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case through != 0:
+			trust[stream] = through == s.next[stream]
+		case s.next[stream] == 1:
+			trust[stream] = true // never written
+		default:
+			trust[stream] = legacyOK
+		}
+	}
+	return trust, nil
+}
+
+// openIndexes runs at Open, after the counters are read. It reconciles the KV
+// contract index unless every stream was indexed through its head, keeps each
+// stream's signal index coverage where that holds and restarts it at the head
+// where it does not, and then marks every stream indexed through its head. A
+// crash during the reconcile leaves the marks as they were, so the next Open
+// resumes it.
+func (s *Store) openIndexes() error {
+	kvTrust, err := s.indexTrust(legacyKVCleanKey, false)
+	if err != nil {
 		return err
+	}
+	sigTrust, err := s.indexTrust(legacySigCleanKey, true)
+	if err != nil {
+		return err
+	}
+	kvTrusted := true
+	for _, ok := range kvTrust {
+		kvTrusted = kvTrusted && ok
+	}
+	if !kvTrusted {
+		added, removed, err := s.reconcileKVIndex()
+		if err != nil {
+			return fmt.Errorf("reconcile the KV contract index: %w", err)
+		}
+		slog.Info("store: KV contract index reconciled", "added", added, "removed", removed)
 	}
 	b := s.db.NewBatch()
 	defer b.Close()
 	for _, stream := range streams {
 		from := s.next[stream]
-		if trusted {
+		if sigTrust[stream] {
 			if from, err = readCounter(s.db, sigFromKey(stream), s.next[stream], "signal index start", stream); err != nil {
 				return err
 			}
+		} else {
+			slog.Info("store: signal index coverage restarts at the head: records were written without it",
+				"stream", stream, "head", from)
 		}
 		if err := b.Set(sigFromKey(stream), be64(from), nil); err != nil {
 			return err
 		}
+		if err := b.Set(indexedKey(stream), be64(s.next[stream]), nil); err != nil {
+			return err
+		}
 		s.sigFrom[stream] = from
 	}
-	if err := b.Delete(sigIndexCleanKey, nil); err != nil {
+	if err := b.Delete(legacySigCleanKey, nil); err != nil {
+		return err
+	}
+	if err := b.Delete(legacyKVCleanKey, nil); err != nil {
 		return err
 	}
 	return b.Commit(pebble.Sync)
@@ -123,7 +206,8 @@ func (s *Store) openSigIndex() error {
 // next is the offset after the last record visited, or the stream head when
 // none of the signals has a record before it, so a reader of rare signals
 // reaches the head in one call. A read that starts below the index's coverage
-// is ReadRecordsBounded.
+// scans the records below it like ReadRecordsBounded, within the same limit and
+// budgets, and goes on through the index from the coverage on.
 //
 // The read walks the signals one after the other with a single iterator and
 // keeps only the smallest offsets it may still visit. It used to hold one open
@@ -141,11 +225,20 @@ func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, lim
 	snap := s.db.NewSnapshot()
 	s.state.RUnlock()
 	defer func() { _ = snap.Close() }()
+	page := pageBytes{max: maxBytes}
+	scanned := 0
 	if from < covered {
-		return s.ReadRecordsBounded(ctx, stream, from, limit, maxScan, maxBytes, keepHead, filter)
+		// Below the coverage the records carry no index entry: scan them, then go on
+		// through the index.
+		var stopped bool
+		out, next, scanned, stopped, err = readRange(ctx, snap, stream, from, min(covered, head), limit, maxScan, &page, keepHead, filter, nil)
+		if err != nil || stopped || covered >= head {
+			return out, next, err
+		}
+		from = covered
 	}
 	if from >= head {
-		return nil, from, nil
+		return out, from, nil
 	}
 
 	// In key order, so the iterator only ever moves forward within a round.
@@ -157,13 +250,11 @@ func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, lim
 	defer func() { _ = iter.Close() }()
 
 	next = from
-	scanned := 0
-	page := pageBytes{max: maxBytes}
 	// A round collects the `want` smallest index entries from next on and visits
 	// them in offset order. One round serves a read whose filter accepts what the
 	// index yields; each further one looks at more entries at once, so a filter
 	// that rejects most of them does not cost a pass over the signals per page.
-	want := limit
+	want := limit - len(out)
 	for len(out) < limit {
 		budget := maxSigRound
 		if maxScan > 0 {

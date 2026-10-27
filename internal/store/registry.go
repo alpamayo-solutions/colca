@@ -203,7 +203,7 @@ func (s *Store) registryBatchLocked(batches []streamRecords, mut func(*pebble.Ba
 			liveBytes += n
 			off++
 		}
-		if err := b.Set(metaKey(sr.stream), be64(off), nil); err != nil {
+		if err := setHead(b, sr.stream, off); err != nil {
 			return 0, err
 		}
 		if err := b.Set(bytesKey(sr.stream), be64(liveBytes), nil); err != nil {
