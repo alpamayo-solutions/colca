@@ -163,9 +163,11 @@ func (c *Client) loadState(st *store.Store) error {
 		return err
 	}
 	if raw != nil {
-		if err := json.Unmarshal(raw, &c.state); err != nil {
+		var loaded parentState
+		if err := json.Unmarshal(raw, &loaded); err != nil {
 			return fmt.Errorf("state kept for parent %s: %w", short(c.parentPub), err)
 		}
+		c.setState(loaded)
 	}
 	c.stateLoaded = true
 	c.replaying.Store(c.state.Resync != nil && c.state.Resync.State == resyncReplaying)
@@ -249,7 +251,7 @@ func (c *Client) recordParent(st *store.Store, id string) {
 			"parent_store", id, "err", err)
 		return
 	}
-	c.state = next
+	c.setState(next)
 }
 
 // resync places this node against the parent's store as the handshake
@@ -318,7 +320,7 @@ func (c *Client) resync(eng *engine.Engine, m *metrics.Metrics, res downResult, 
 		c.log.Error("re-sync with the parent not persisted — nothing was moved, the handshake is repeated", "err", err)
 		return false
 	}
-	c.state = next
+	c.setState(next)
 	c.epoch++
 	c.replaying.Store(r.State == resyncReplaying)
 	m.UplinkResynced()
@@ -393,25 +395,34 @@ func (c *Client) noteReplayProgress(st *store.Store, m *metrics.Metrics) {
 		c.log.Warn("re-sync completion not recorded — it is recorded after the next push", "err", err)
 		return
 	}
-	c.state = next
+	c.setState(next)
 	c.replaying.Store(false)
 	m.SetUplinkResyncActive(false)
 	c.log.Info("re-sync with the parent complete: everything it lacked and this node still held was sent again",
 		"parent", c.base, "took", now.Sub(r.Started).Round(time.Second), "gaps", len(r.Gaps))
 }
 
+// setState replaces what this node keeps about the parent and publishes its
+// re-sync for ResyncStatus. The caller holds syncMu.
+func (c *Client) setState(next parentState) {
+	c.state = next
+	c.resyncView.Store(next.Resync)
+}
+
 // ResyncStatus is the last re-sync with the parent, nil when there never was
 // one. While it is replaying, each stream's Position says how far it got.
+//
+// It takes no lock: /healthz calls it, and syncMu is held across synced
+// writes, so a slow disk would otherwise stall the liveness probe.
 func (c *Client) ResyncStatus(st *store.Store) *Resync {
-	c.syncMu.Lock()
-	defer c.syncMu.Unlock()
-	if c.state.Resync == nil {
+	r := c.resyncView.Load()
+	if r == nil {
 		return nil
 	}
-	out := *c.state.Resync
-	out.Streams = map[string]ResyncRange{}
+	out := *r
+	out.Streams = make(map[string]ResyncRange, len(r.Streams))
 	up := uns.UplinkCursor(c.parentPub)
-	for stream, span := range c.state.Resync.Streams {
+	for stream, span := range r.Streams {
 		span.Position = min(max(st.CursorGet(up, stream), span.From), span.To)
 		out.Streams[stream] = span
 	}

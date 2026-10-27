@@ -98,6 +98,10 @@ type Client struct {
 	// flight. It is never held across a request.
 	syncMu      sync.Mutex
 	state       parentState
+	// resyncView is state.Resync as last set under syncMu, for ResyncStatus to
+	// read without it: syncMu is held across synced writes, and /healthz must
+	// not wait on the disk. A published Resync is never changed in place.
+	resyncView atomic.Pointer[Resync]
 	stateLoaded bool
 	epoch       uint64
 	pollCancel  context.CancelFunc
