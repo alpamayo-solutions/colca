@@ -116,6 +116,14 @@ type Client struct {
 	logs logForwarding
 	// setAsideGrace overrides defaultSetAsideGrace in tests; see setaside.go.
 	setAsideGrace time.Duration
+	// findingMu serializes publishSetAsideFinding: the uplink and DELETE
+	// /uplink/set-aside both read the copies and write the finding from them,
+	// and without it the older read could be written last.
+	findingMu sync.Mutex
+	// findingRead and findingWait are test hooks, nil in production: called
+	// between reading the copies and writing the finding, and when a publish
+	// has to wait for another.
+	findingRead, findingWait func()
 }
 
 // SetStoreID names the store incarnation replication batches carry, for a
