@@ -792,7 +792,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	}
 	body = withoutStore(body)
 	want := `{"from":2,"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
-		`"next":6,"records":[` + surviving + `]}` + "\n"
+		`"head":6,"more":false,"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fetch gap wire shape:\n got %s\nwant %s", body, want)
 	}
@@ -809,7 +809,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	// added after retention ran missed nothing it was promised.
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh", "tok", "")
 	body = withoutStore(body)
-	want = `{"from":4,"next":6,"records":[` + surviving + `]}` + "\n"
+	want = `{"from":4,"head":6,"more":false,"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fresh cursor must start at the LWM without a gap:\n got %s\nwant %s", body, want)
 	}
@@ -819,7 +819,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh&from=2", "tok", "")
 	body = withoutStore(body)
 	want = `{"from":2,"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
-		`"next":6,"records":[` + surviving + `]}` + "\n"
+		`"head":6,"more":false,"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fresh cursor read-ahead below the LWM must see the gap:\n got %s\nwant %s", body, want)
 	}
@@ -832,7 +832,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	}
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
 	body = withoutStore(body)
-	want = `{"from":5,"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
+	want = `{"from":5,"head":6,"more":false,"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
 	if body != want {
 		t.Fatalf("after ack past LWM the gap object must disappear:\n got %s\nwant %s", body, want)
 	}
