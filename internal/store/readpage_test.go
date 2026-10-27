@@ -22,10 +22,10 @@ func TestRecordPagesStopAtTheirByteBoundWithoutSkippingARecord(t *testing.T) {
 	even := func(r StoredRecord) bool { return r.Offset%2 == 0 }
 	reads := map[string]func(from uint64, maxBytes uint64) ([]StoredRecord, uint64, error){
 		"stream": func(from, maxBytes uint64) ([]StoredRecord, uint64, error) {
-			return s.ReadRecordsBounded(context.Background(), "metrics", from, 100, 0, maxBytes, even)
+			return s.ReadRecordsBounded(context.Background(), "metrics", from, 100, 0, maxBytes, nil, even)
 		},
 		"signal index": func(from, maxBytes uint64) ([]StoredRecord, uint64, error) {
-			return s.ReadSignals(context.Background(), "metrics", from, 100, 0, maxBytes, []string{"s"}, even)
+			return s.ReadSignals(context.Background(), "metrics", from, 100, 0, maxBytes, []string{"s"}, nil, even)
 		},
 	}
 	for name, read := range reads {

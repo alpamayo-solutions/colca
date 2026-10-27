@@ -114,10 +114,11 @@ func (s *Store) openSigIndex() error {
 }
 
 // ReadSignals is ReadRecordsBounded for a reader that wants only the records of
-// the given signals: every record it returns carries one of them, and filter
-// decides on the rest of its view (grants, topics). It reads through the signal
-// index, so the records of other signals cost nothing; maxScan bounds the index
-// entries visited and maxBytes the stored bytes returned (see pageBytes).
+// the given signals: every record it returns carries one of them, and keepHead
+// and filter decide on the rest of its view (grants, topics; see HeadFilter).
+// It reads through the signal index, so the records of other signals cost
+// nothing; maxScan bounds the index entries visited and maxBytes the stored
+// bytes returned (see pageBytes).
 //
 // next is the offset after the last record visited, or the stream head when
 // none of the signals has a record before it, so a reader of rare signals
@@ -132,7 +133,7 @@ func (s *Store) openSigIndex() error {
 // whose index tables carried megabytes of range tombstones held gigabytes for
 // as long as it ran. Now one read pins the blocks of one position, whatever the
 // number of signals.
-func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, signals []string, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
+func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, signals []string, keepHead HeadFilter, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	s.state.RLock()
 	covered, head, lwm := s.sigFrom[stream], s.next[stream], s.lwm[stream]
 	// Appends publish head after they commit, so this snapshot holds every
@@ -141,7 +142,7 @@ func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, lim
 	s.state.RUnlock()
 	defer func() { _ = snap.Close() }()
 	if from < covered {
-		return s.ReadRecordsBounded(ctx, stream, from, limit, maxScan, maxBytes, filter)
+		return s.ReadRecordsBounded(ctx, stream, from, limit, maxScan, maxBytes, keepHead, filter)
 	}
 	if from >= head {
 		return nil, from, nil
@@ -196,6 +197,12 @@ func (s *Store) ReadSignals(ctx context.Context, stream string, from uint64, lim
 			}
 			if err != nil {
 				return nil, next, err
+			}
+			if keepHead != nil {
+				if topic, signalID, ok := peekHead(val); ok && !keepHead(topic, signalID) {
+					closer.Close()
+					continue
+				}
 			}
 			var e recEnc
 			size := len(val)

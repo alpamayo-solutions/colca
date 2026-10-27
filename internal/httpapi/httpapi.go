@@ -749,37 +749,36 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				return
 			}
 		}
-		filter := func(record store.StoredRecord) bool {
+		// head decides from a record's topic and stored signal id, which a scan
+		// reads without decoding the record: the records it rejects, most of
+		// what a narrow filter crosses, cost no decode. filter applies it too,
+		// so it decides alone on records whose head could not be read cheaply.
+		head := func(topic, signalID string) bool {
 			// A record stored with its signal answers the signal filter without a
 			// parse or a payload decode, so the records it skips cost little.
-			if hasSignalFilter && record.SignalID != "" {
-				if _, wanted := signalSet[record.SignalID]; !wanted {
+			if hasSignalFilter && signalID != "" {
+				if _, wanted := signalSet[signalID]; !wanted {
 					return false
 				}
 			}
-			if stream == uns.StreamFor(uns.ClassCmd) && e.CommandRetired(record) {
-				return false
-			}
-			topic := record.Topic
 			if len(topicFilters) > 0 && !slices.ContainsFunc(topicFilters, func(f string) bool { return uns.MatchFilter(f, topic) }) {
 				return false
 			}
-			var parsed uns.Parsed
-			var parseErr error
-			if contractSet != nil {
-				parsed, parseErr = uns.Parse(topic)
-				if parseErr != nil || !contractSet[parsed.Contract] {
+			if contractSet != nil || prefix != "" {
+				// prefix filters on the uns hierarchy path, not on the raw topic.
+				parsed, err := uns.Parse(topic)
+				if err != nil || (contractSet != nil && !contractSet[parsed.Contract]) || !strings.HasPrefix(parsed.Path, prefix) {
 					return false
 				}
 			}
-			if prefix != "" && parsed.Contract == "" {
-				// prefix filters on the uns hierarchy path, not on the raw topic.
-				parsed, parseErr = uns.Parse(topic)
-			}
-			if prefix != "" && (parseErr != nil || !strings.HasPrefix(parsed.Path, prefix)) {
+			return c.admin || uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic)
+		}
+		filter := func(record store.StoredRecord) bool {
+			if !head(record.Topic, record.SignalID) {
 				return false
 			}
-			if !c.admin && !uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic) {
+			topic := record.Topic
+			if stream == uns.StreamFor(uns.ClassCmd) && e.CommandRetired(record) {
 				return false
 			}
 			if !c.admin && !uns.MayReadFetchLogsAck(e.Scope(), c.entry, topic, record.ActorID) {
@@ -788,10 +787,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			if !hasSignalFilter || record.SignalID != "" {
 				return true
 			}
-			if parseErr != nil || parsed.Contract == "" {
-				parsed, parseErr = uns.Parse(topic)
-			}
-			if parseErr != nil || parsed.Contract != "_Metric" {
+			parsed, err := uns.Parse(topic)
+			if err != nil || parsed.Contract != "_Metric" {
 				return false
 			}
 			var metric struct {
@@ -853,9 +850,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if hasSignalFilter {
 			// The signal index reads only the wanted signals' records, so a
 			// consumer of a few signals does not pay for the whole stream.
-			recs, next, err = e.Store().ReadSignals(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, slices.Collect(maps.Keys(signalSet)), filter)
+			recs, next, err = e.Store().ReadSignals(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, slices.Collect(maps.Keys(signalSet)), head, filter)
 		} else {
-			recs, next, err = e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, filter)
+			recs, next, err = e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, head, filter)
 		}
 		if r.Context().Err() != nil {
 			return // the caller is gone; nobody reads the page

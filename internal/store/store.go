@@ -738,18 +738,20 @@ func (s *Store) NextOffset(stream string) uint64 {
 // Read returns up to limit records with Offset >= from, optionally filtered by
 // topic. Views that need the payload use ReadRecords.
 func (s *Store) Read(stream string, from uint64, limit int, filter func(string) bool) (out []StoredRecord, next uint64, err error) {
+	var head HeadFilter
 	var recordFilter func(StoredRecord) bool
 	if filter != nil {
+		head = func(topic, _ string) bool { return filter(topic) }
 		recordFilter = func(record StoredRecord) bool { return filter(record.Topic) }
 	}
-	return s.ReadRecords(stream, from, limit, recordFilter)
+	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, 0, head, recordFilter)
 }
 
 // ReadRecords returns up to limit matching records with Offset >= from. next is
 // the last scanned position + 1, filtered records included, so a consumer of a
 // sparse view keeps moving forward.
 func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
-	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, 0, filter)
+	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, 0, nil, filter)
 }
 
 // ReadRecordsBounded is ReadRecords that also stops after maxScan scanned
@@ -757,8 +759,9 @@ func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(S
 // maxBytes stored bytes (0: no bound; see pageBytes), and when ctx ends. A
 // filter that matches little would otherwise scan to the head in one call,
 // however long the stream; a bounded page may be empty while next still moves
-// forward.
-func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
+// forward. head, when set, skips the records it rejects without decoding them
+// (see HeadFilter); filter decides on the rest.
+func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, head HeadFilter, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	iter, err := s.db.NewIter(&pebble.IterOptions{
 		LowerBound: streamKey(stream, from),
 		UpperBound: streamKey(stream, ^uint64(0)),
@@ -782,6 +785,12 @@ func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint
 		}
 		key := iter.Key()
 		off := binary.BigEndian.Uint64(key[len(key)-8:])
+		if head != nil {
+			if topic, signalID, ok := peekHead(iter.Value()); ok && !head(topic, signalID) {
+				next = off + 1
+				continue
+			}
+		}
 		var e recEnc
 		if err := json.Unmarshal(iter.Value(), &e); err != nil {
 			return nil, next, err
