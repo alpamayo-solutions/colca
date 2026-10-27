@@ -71,6 +71,9 @@ type Server struct {
 	// downlinkWakes counts waiting downlink polls woken by a change to their
 	// streams. Tests read it: a commit to any other stream must not wake them.
 	downlinkWakes atomic.Int64
+	// downlinkCrossed counts the commands offsets downlink polls read across,
+	// for tests: a waiting poll reads every record once, however often it wakes.
+	downlinkCrossed atomic.Int64
 
 	// pushBytes bounds the bytes of pushes held at once; see byteBudget.
 	pushBytes byteBudget
@@ -592,6 +595,9 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			if s.refuseForResync(w, child.ULID, claimed, position) {
 				return
 			}
+			// Offsets read past under the old incarnation say nothing about
+			// the new one: read again from the child's own position.
+			after = position.commands
 			reincarnated = nil
 		default:
 		}
@@ -608,6 +614,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.downlinkCrossed.Add(int64(next - after))
 		// The downlink gap object has the same shape and journal as /fetch, in parent
 		// coordinates. after is the first offset the child has not consumed, so there
 		// is a gap when after < LWM. A gap answers at once instead of making the child
@@ -669,6 +676,11 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, resp)
 			return
 		}
+		// Nothing to answer yet: what this read crossed holds nothing for the
+		// child, so the next wake reads on from where it ended instead of
+		// crossing the same records again. The answer's next and the gap are
+		// both measured from there, as they would be had it been read in one go.
+		after = next
 		select {
 		case <-ctx.Done():
 			// Client gone (or the server was stopped): never outlive the request.
@@ -703,13 +715,18 @@ func (s *Server) noteForwarded(child, mount string, after uint64) {
 	if lwm := st.LWM("commands"); lwm > from {
 		from = lwm
 	}
+	// The topic decides on a record's head, so siblings' commands and records
+	// that are not commands are stepped over without being decoded; only the
+	// child's own commands are decoded, for the payload's progress flag.
+	forChild := func(topic, _ string) bool {
+		p, err := uns.Parse(topic)
+		return err == nil && uns.IsCommand(s.eng.ClassOf(p.Contract)) && uns.UnderMount(p.Path, mount)
+	}
 	wants := func(r store.StoredRecord) bool {
-		p, err := uns.Parse(r.Topic)
-		return err == nil && uns.IsCommand(s.eng.ClassOf(p.Contract)) && uns.UnderMount(p.Path, mount) &&
-			uns.CommandWantsProgress(r.Payload)
+		return forChild(r.Topic, "") && uns.CommandWantsProgress(r.Payload)
 	}
 	for from < after {
-		recs, next, err := st.ReadRecordsBounded(context.Background(), "commands", from, maxDownlinkMax, int(min(after-from, uint64(maxDownlinkScan))), 0, nil, wants)
+		recs, next, err := st.ReadRecordsBounded(context.Background(), "commands", from, maxDownlinkMax, int(min(after-from, uint64(maxDownlinkScan))), 0, forChild, wants)
 		if err != nil {
 			s.log.Warn("downlink: progress acks for forwarded commands not written", "child", child, "err", err)
 			return
