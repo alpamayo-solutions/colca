@@ -177,6 +177,14 @@ class AlarmSeverity(BaseStrEnum):
     CRITICAL = "critical"
 
 
+class SubscriptionChannelKind(BaseStrEnum):
+    """How an alarm subscription reaches its person: an email to their own
+    verified address, or their Workbench."""
+
+    EMAIL = "email"
+    WORKBENCH = "workbench"
+
+
 class CustomEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(
@@ -912,6 +920,46 @@ class AlarmSilence(ToleratesUnknownFields, Payload):
     silenced_at: float
     silenced_by_name: str | None = None
     note: str | None = None
+
+
+@dataclass
+class AlarmSubscription(ToleratesUnknownFields, Payload):
+    """A person asked to be told about one alarm for a time window (on call).
+
+    The alarm's evaluator writes it when it applies the person's
+    ``_CmdOperate`` ``subscribe`` (and ends or retires it on ``unsubscribe``):
+    read on the alarm is the whole authority, since asking to be told is
+    seeing, not acting. One record per subscription and alarm, at the alarm's
+    own place, so read grants reach it like the alarm:
+    ``{root}/v1/_AlarmSubscription/{node}/{element-path}/{alarm-id}/{subscription-id}``.
+    Retained: a node that takes over evaluating the alarm adopts it from here,
+    and a tombstone retires it once ended and kept long enough.
+
+    ``subscriber_email`` is the address the person's token vouched for
+    (``email_verified``) when they subscribed, the command's ``actor_email``;
+    empty when it vouched for none.
+    """
+
+    subscription_id: str
+    alarm_id: ULID
+    #: ``sub`` of the person, as the node witnessed it on the command.
+    subscriber_id: str
+    channel_id: str
+    channel_kind: SubscriptionChannelKind
+    #: Unix seconds: notified within [active_from, active_until).
+    active_from: float
+    active_until: float
+    #: Unix seconds.
+    created_at: float
+    updated_at: float
+    #: What the person's token called them when they subscribed.
+    subscriber_label: str = ""
+    subscriber_email: str = ""
+    #: Why nothing can be delivered, empty while it can: ``channel_not_offered``
+    #: (the evaluator has no such channel), ``no_verified_email``,
+    #: ``evaluator_changed`` (another node evaluates the alarm now). Kept,
+    #: not dropped, so the person sees it.
+    undeliverable: str = ""
 
 
 def derive_annotation_id(

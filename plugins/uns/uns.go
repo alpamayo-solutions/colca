@@ -109,7 +109,10 @@ func ClassOf(contract string) Class {
 		contract == "_AlarmState" ||
 		// A silence per element and alarm type: retained until it runs out, then
 		// retired by tombstone. It outlives the alarms it covers.
-		contract == "_AlarmSilence":
+		contract == "_AlarmSilence" ||
+		// A person's subscription to one alarm: retained at the alarm's place,
+		// adopted by the node that evaluates it next, retired by tombstone.
+		contract == "_AlarmSubscription":
 		return ClassEntity
 	case contract == "_Group" || contract == "_MetadataType" ||
 		contract == "_AnnotationType" || contract == "_DataModel" ||
@@ -126,6 +129,15 @@ func ClassOf(contract string) Class {
 		return ClassCmd
 	}
 	return ClassNone
+}
+
+// KeepsActorEmail reports whether a record at topic keeps the person's verified
+// address its attribution carries: a command only, where the service applying
+// it needs it (an alarm subscription that mails them). State, events and acks
+// a person's command leads to are read by others and never repeat it.
+func KeepsActorEmail(topic string) bool {
+	p, err := Parse(topic)
+	return err == nil && IsCommand(ClassOf(p.Contract))
 }
 
 // IsState reports whether a class is state rather than an event: latest value

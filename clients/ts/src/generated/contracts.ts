@@ -108,6 +108,23 @@ export type AlarmStateChange = {
   [key: string]: unknown;
 };
 
+/** `_AlarmSubscription` — stream class `entity`. */
+export type AlarmSubscription = {
+  active_from: number;
+  active_until: number;
+  alarm_id: string;
+  channel_id: string;
+  channel_kind: "email" | "workbench";
+  created_at: number;
+  subscriber_email?: string;
+  subscriber_id: string;
+  subscriber_label?: string;
+  subscription_id: string;
+  undeliverable?: string;
+  updated_at: number;
+  [key: string]: unknown;
+};
+
 /** `_Annotation` — stream class `annotation`. */
 export type Annotation = {
   annotation_id: string;
@@ -589,6 +606,7 @@ export const CONTRACTS = {
   "_AlarmSilence": { class: "entity", tombstone: true },
   "_AlarmState": { class: "entity", tombstone: true },
   "_AlarmStateChange": { class: "alarm", tombstone: false },
+  "_AlarmSubscription": { class: "entity", tombstone: true },
   "_Annotation": { class: "annotation", tombstone: false },
   "_AnnotationType": { class: "definition", tombstone: true },
   "_AuditEvent": { class: "audit", tombstone: false },
@@ -632,6 +650,7 @@ export interface PayloadByContract {
   "_AlarmSilence": AlarmSilence;
   "_AlarmState": AlarmState;
   "_AlarmStateChange": AlarmStateChange;
+  "_AlarmSubscription": AlarmSubscription;
   "_Annotation": Annotation;
   "_AnnotationType": AnnotationType;
   "_AuditEvent": AuditEvent;
