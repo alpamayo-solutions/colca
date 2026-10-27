@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.0](https://github.com/alpamayo-solutions/colca/compare/v0.41.2...v0.42.0) (2026-10-27)
+
+
+### Features
+
+* alarm subscriptions, verified actor witness on commands, faster uplink/downlink reads ([#253](https://github.com/alpamayo-solutions/colca/issues/253)) ([766faad](https://github.com/alpamayo-solutions/colca/commit/766faad2b07651d914d05c1dbed477c21a5efb2f))
+
 ## [0.41.2](https://github.com/alpamayo-solutions/colca/compare/v0.41.1...v0.41.2) (2026-10-27)
 
 
