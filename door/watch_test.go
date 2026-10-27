@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,5 +52,23 @@ func TestWaitChangeBatchesWithoutTrailingEdgeStarvation(t *testing.T) {
 	cancel()
 	if WaitChange(ctx, signal.Changes(), time.Hour, time.Time{}) {
 		t.Fatal("cancellation ignored")
+	}
+}
+
+func TestWatchForAsksForItsContractsOnly(t *testing.T) {
+	var query atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query.Store(r.URL.Query())
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Write([]byte("{\"streams\":[\"entities\"]}\n"))
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req := WatchRequest{Streams: []string{"entities", "definitions"}, Contracts: []string{"_SystemElement", "_Group"}, Interval: 250 * time.Millisecond}
+	_ = (&Client{BaseURL: server.URL}).WatchFor(ctx, req, func(Hint) { cancel() })
+	q, _ := query.Load().(url.Values)
+	if !slices.Equal(q["stream"], req.Streams) || !slices.Equal(q["contract"], req.Contracts) || q.Get("interval_ms") != "250" {
+		t.Fatalf("query = %v, want the streams, the contracts and the interval", q)
 	}
 }

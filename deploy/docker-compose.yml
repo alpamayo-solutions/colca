@@ -263,7 +263,10 @@ services:
       KC_REALM: colca
       KC_CLIENT_SECRET: colca-authz-dev-secret
       OWNER: colca-demo
-      SYNC_INTERVAL_MS: "${GRANTSYNC_INTERVAL_MS:-5000}"
+      # Tree changes wake it through /watch. Keycloak pushes nothing, so after
+      # editing the realm, `curl -X POST 127.0.0.1:19090/sync` applies the edit
+      # at once; this interval only catches edits nobody announced.
+      SYNC_INTERVAL_MS: "${GRANTSYNC_INTERVAL_MS:-300000}"
     ports:
       - "127.0.0.1:${COLCA_PORT_GRANTSYNC:-19090}:9090"
     depends_on: [global, keycloak]
