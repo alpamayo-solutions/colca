@@ -182,6 +182,19 @@ func (s *Store) openIndexes() error {
 		if err := b.Set(sigFromKey(stream), be64(from), nil); err != nil {
 			return err
 		}
+		// The target index has a coverage of its own: it is younger than the
+		// signal index, so a store that comes from a version before it starts
+		// covering at its head (no tf/ yet).
+		targetFrom := s.next[stream]
+		if sigTrust[stream] {
+			if targetFrom, err = readCounter(s.db, targetFromKey(stream), s.next[stream], "target index start", stream); err != nil {
+				return err
+			}
+		}
+		if err := b.Set(targetFromKey(stream), be64(targetFrom), nil); err != nil {
+			return err
+		}
+		s.targetFrom[stream] = targetFrom
 		if err := b.Set(indexedKey(stream), be64(s.next[stream]), nil); err != nil {
 			return err
 		}

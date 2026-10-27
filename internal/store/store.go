@@ -154,6 +154,9 @@ type Store struct {
 	lwm      map[string]uint64        // low-water mark per stream: lowest retained offset
 	bytes    map[string]uint64        // live logical bytes per stream (stream key + encoded value)
 	sigFrom  map[string]uint64        // first offset per stream the signal index covers (see sigindex.go)
+	// targetFrom is the first offset per stream the target index covers (see
+	// targetindex.go).
+	targetFrom map[string]uint64
 	// appendApply is Pebble's atomic apply boundary for appends and replicated
 	// commits. Keeping the bound method injectable lets tests prove an apply
 	// failure changes neither stream nor KV, and hold a commit open.
@@ -301,6 +304,7 @@ func OpenWithOptions(dir string, o Options) (*Store, error) {
 	s := &Store{
 		db: db, health: health, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{},
 		sigFrom:     map[string]uint64{},
+		targetFrom:  map[string]uint64{},
 		holes:       map[string]uint64{},
 		appendApply: db.Apply,
 	}

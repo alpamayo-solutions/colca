@@ -23,15 +23,19 @@ import (
 //
 // Like the signal index the entry is written with its record and goes with it,
 // in the same batch: Prune deletes the entries of the prefix it removes.
-// Compaction, eviction and per-signal retention never remove commands. It
-// shares the signal index's coverage (sf/{stream}, see sigindex.go): both are
-// written by the same appends, and a read below the coverage scans.
+// Compaction, eviction and per-signal retention never remove commands. Its
+// coverage, tf/{stream}, is kept on the same terms as the signal index's
+// (ix/, see openIndexes) but starts where a version with this index first
+// opened the store, since the index is younger. A read below it scans.
 
 // targetKey identifies one command of one target. A target is a ULID, so it
 // never contains the separator.
 func targetKey(stream, target string, off uint64) []byte {
 	return append([]byte("ti\x00"+stream+"\x00"+target+"\x00"), be64(off)...)
 }
+
+// targetFromKey holds the first offset of a stream the target index covers.
+func targetFromKey(stream string) []byte { return []byte("tf\x00" + stream) }
 
 // recordTarget is the target of a record by its topic, "" for a record that is
 // not a command.
@@ -50,7 +54,7 @@ func recordTarget(topic string) string {
 // before it, so a reader moves over every other record of the stream at once.
 func (s *Store) ReadTarget(ctx context.Context, stream, target string, from, upTo uint64, limit, maxScan int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	s.state.RLock()
-	covered, head, lwm := s.sigFrom[stream], s.next[stream], s.lwm[stream]
+	covered, head, lwm := s.targetFrom[stream], s.next[stream], s.lwm[stream]
 	snap := s.db.NewSnapshot()
 	s.state.RUnlock()
 	defer func() { _ = snap.Close() }()

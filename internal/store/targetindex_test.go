@@ -56,7 +56,7 @@ func TestReadTargetBelowTheCoverageAndAfterAPrune(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.state.Lock()
-	s.sigFrom["commands"] = 3 // records 1 and 2 as a version without the index wrote them
+	s.targetFrom["commands"] = 3 // records 1 and 2 as a version without the index wrote them
 	s.state.Unlock()
 	if _, _, err := s.Append("commands", []Record{cmdRecord("m2", 3), cmdRecord("m1", 4)}); err != nil {
 		t.Fatal(err)
@@ -96,4 +96,48 @@ func countKeys(t *testing.T, s *Store, prefix string) int {
 		n++
 	}
 	return n
+}
+
+// A store a version without the target index wrote holds commands without
+// entries: the coverage starts at the head the first time this version opens
+// it, and a read from below finds the old commands by scanning.
+func TestTheTargetIndexCoverageStartsWhereThisVersionFirstOpened(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Append("commands", []Record{cmdRecord("m1", 0), cmdRecord("m2", 1)}); err != nil {
+		t.Fatal(err)
+	}
+	// What a version without the index leaves: no entries, no tf/.
+	b := s.db.NewBatch()
+	for _, key := range [][]byte{targetKey("commands", "m1", 1), targetKey("commands", "m2", 2), targetFromKey("commands")} {
+		if err := b.Delete(key, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.Commit(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if s, err = Open(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if covered := s.targetFrom["commands"]; covered != 3 {
+		t.Fatalf("target coverage starts at %d, want the head 3", covered)
+	}
+	if covered := s.sigFrom["commands"]; covered != 1 {
+		t.Fatalf("signal coverage starts at %d, want 1: it is not the target index's", covered)
+	}
+	if _, _, err := s.Append("commands", []Record{cmdRecord("m1", 2)}); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.ReadTarget(context.Background(), "commands", "m1", 1, 10, 10, 0, nil)
+	if err != nil || len(got) != 2 || got[0].Offset != 1 || got[1].Offset != 3 {
+		t.Fatalf("got %+v err=%v, want the old command 1 and the new 3", got, err)
+	}
 }
