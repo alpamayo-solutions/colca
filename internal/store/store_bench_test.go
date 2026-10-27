@@ -196,7 +196,7 @@ func BenchmarkKVScanContract(b *testing.B) {
 	}{{"indexed", 0}, {"walk", 100}} {
 		b.Run(mode.name, func(b *testing.B) {
 			for n := 0; n < b.N; n++ {
-				entries, _, err := s.KVScanPageDepth("", "", 10000, 0, []string{"_Signal"}, mode.depth)
+				entries, _, err := s.KVScanPageDepth("", "", 10000, 0, []string{"_Signal"}, mode.depth, nil)
 				if err != nil || len(entries) != 200 {
 					b.Fatalf("%d entries, %v", len(entries), err)
 				}

@@ -1032,13 +1032,27 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				return
 			}
 		}
+		// The caller's grants decide on each entry from the topic in its key,
+		// before the store reads the entry: what the caller may not read is never
+		// decoded. Such entries still count towards the page size.
+		denied := 0
+		var keep func(string) bool
+		if !c.admin {
+			keep = func(topic string) bool {
+				if uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic) {
+					return true
+				}
+				denied++
+				return false
+			}
+		}
 		var entries []store.KVEntry
 		var folders []string
 		var next string
 		if withFolders {
-			entries, folders, next, err = e.Store().KVScanLevel(prefix, after, pageSize, pageMaxBytes, contracts, depth)
+			entries, folders, next, err = e.Store().KVScanLevel(prefix, after, pageSize, pageMaxBytes, contracts, depth, keep)
 		} else {
-			entries, next, err = e.Store().KVScanPageDepth(prefix, after, pageSize, pageMaxBytes, contracts, depth)
+			entries, next, err = e.Store().KVScanPageDepth(prefix, after, pageSize, pageMaxBytes, contracts, depth, keep)
 		}
 		if err != nil {
 			if errors.Is(err, store.ErrInvalidPageToken) {
@@ -1052,12 +1066,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		out := make([]map[string]any, 0, len(entries))
-		denied := 0
 		for _, en := range entries {
-			if !c.admin && !uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, en.Topic) {
-				denied++
-				continue
-			}
 			out = append(out, kvEntryJSON(en))
 		}
 		if denied > 0 {

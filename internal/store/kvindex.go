@@ -273,7 +273,7 @@ func kvPageToken(after string, lb, ub []byte) ([]byte, error) {
 // index instead of every entry under the prefix, so the work is proportional to
 // the entries returned. Entries come in KV key order and tokens are KV keys, as
 // from the unindexed walk.
-func (s *Store) kvScanPageIndexed(prefix, after string, limit int, maxBytes uint64, contracts []string) ([]KVEntry, string, error) {
+func (s *Store) kvScanPageIndexed(prefix, after string, limit int, maxBytes uint64, contracts []string, keep func(topic string) bool) ([]KVEntry, string, error) {
 	lb := kvPrefix(prefix)
 	ub := append(append([]byte{}, lb...), 0xFF)
 	var resume []byte // the token's KV key without "k\x00"
@@ -327,7 +327,8 @@ func (s *Store) kvScanPageIndexed(prefix, after string, limit int, maxBytes uint
 	out := make([]KVEntry, 0, 64)
 	page := pageBytes{max: maxBytes}
 	var lastKey []byte
-	for len(out) < limit {
+	taken := 0 // entries returned or rejected by keep: both count towards limit
+	for taken < limit {
 		var next *cursor
 		for _, c := range cursors {
 			if !c.iter.Valid() {
@@ -341,6 +342,14 @@ func (s *Store) kvScanPageIndexed(prefix, after string, limit int, maxBytes uint
 			break
 		}
 		kvk := append([]byte("k\x00"), next.iter.Key()[next.skip:]...)
+		if keep != nil {
+			if _, _, topic, split := splitKVKey(string(kvk[2:])); split && !keep(topic) {
+				next.iter.Next()
+				lastKey = kvk
+				taken++
+				continue
+			}
+		}
 		entry, size, ok, err := getKVEntry(snap, kvk)
 		if err != nil {
 			return nil, "", fmt.Errorf("store: kv page %q: %w", prefix, err)
@@ -352,6 +361,7 @@ func (s *Store) kvScanPageIndexed(prefix, after string, limit int, maxBytes uint
 		lastKey = kvk
 		if ok {
 			out = append(out, entry)
+			taken++
 		}
 	}
 	for _, c := range cursors {

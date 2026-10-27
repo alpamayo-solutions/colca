@@ -307,3 +307,58 @@ func TestHeadFilterSkipsWithoutDecoding(t *testing.T) {
 		t.Fatalf("the full filter saw %d records, want the 100 kept by the head and the escaped one", decoded)
 	}
 }
+
+// TestPeekRecordAgreesWithDecode: whenever peekRecord reads a stored record's
+// head, it is the one a full decode gives, payload emptiness and a negative or
+// huge timestamp included; and it reads every record of the plain shape.
+func TestPeekRecordAgreesWithDecode(t *testing.T) {
+	rng := rand.New(rand.NewPCG(3, 5)) //nolint:gosec // a reproducible sample
+	plain := 0
+	for i := range 20000 {
+		e := recEnc{
+			SourceLocalOnly: rng.IntN(2) == 0,
+			Topic:           randText(rng),
+			TS:              []int64{rng.Int64(), -rng.Int64(), 0, 1}[rng.IntN(4)],
+			WrittenBy:       randText(rng), OriginOffset: rng.Uint64N(3),
+			ActorID: randText(rng), ActorLabel: randText(rng), ActorKind: randText(rng),
+			ActorClient: randText(rng), Door: randText(rng),
+			SignalID: randText(rng),
+		}
+		switch rng.IntN(3) {
+		case 0: // nil: encoded as null
+		case 1:
+			e.Payload = []byte{}
+		default:
+			e.Payload = []byte(randText(rng) + "x")
+		}
+		if i%2 == 0 {
+			e.Topic = fmt.Sprintf("colca/v1/_Metric/n/line-%d/s%d", i%7, i)
+			e.SignalID = []string{"", fmt.Sprintf("01HZZ%05d", i)}[i%4/2]
+		}
+		val, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var d recEnc
+		if err := json.Unmarshal(val, &d); err != nil {
+			t.Fatal(err)
+		}
+		want := recHead{topic: d.Topic, signalID: d.SignalID, ts: d.TS, emptyPayload: len(d.Payload) == 0}
+		h, ok := peekRecord(val)
+		if ok && h != want {
+			t.Fatalf("peekRecord(%s) = %+v; decoded %+v", val, h, want)
+		}
+		if got, err := headOf(val); err != nil || got != want {
+			t.Fatalf("headOf(%s) = %+v, %v; decoded %+v", val, got, err, want)
+		}
+		if i%2 == 0 {
+			if !ok {
+				t.Fatalf("peekRecord(%s) did not read a plain record", val)
+			}
+			plain++
+		}
+	}
+	if plain == 0 {
+		t.Fatal("no plain record was peeked")
+	}
+}

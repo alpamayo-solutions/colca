@@ -69,13 +69,13 @@ func TestKVPagesStopAtTheirByteBoundWithoutSkippingAnEntry(t *testing.T) {
 	}
 	pages := map[string]func(after string, maxBytes uint64) ([]KVEntry, string, error){
 		"walk": func(after string, maxBytes uint64) ([]KVEntry, string, error) {
-			return s.KVScanPageDepth("line/", after, 100, maxBytes, nil, 0)
+			return s.KVScanPageDepth("line/", after, 100, maxBytes, nil, 0, nil)
 		},
 		"contract index": func(after string, maxBytes uint64) ([]KVEntry, string, error) {
-			return s.KVScanPageDepth("line/", after, 100, maxBytes, []string{"_Resource"}, 0)
+			return s.KVScanPageDepth("line/", after, 100, maxBytes, []string{"_Resource"}, 0, nil)
 		},
 		"level": func(after string, maxBytes uint64) ([]KVEntry, string, error) {
-			entries, _, next, err := s.KVScanLevel("line/", after, 100, maxBytes, nil, 1)
+			entries, _, next, err := s.KVScanLevel("line/", after, 100, maxBytes, nil, 1, nil)
 			return entries, next, err
 		},
 	}

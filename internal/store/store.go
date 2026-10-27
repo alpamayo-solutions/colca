@@ -170,6 +170,9 @@ type Store struct {
 	// ackApplyHook, when set, commits ack batches instead of the database: tests
 	// hold a commit open with it.
 	ackApplyHook func(*pebble.Batch, *pebble.WriteOptions) error
+	// compactScanned, when set, runs between Compact's scan and its batch:
+	// tests write there.
+	compactScanned func()
 	// adopted caches, per child, the store incarnation AdoptChildStore last
 	// confirmed, so the common case (unchanged) takes neither s.mu nor a read.
 	adopted sync.Map
@@ -1312,24 +1315,24 @@ type sigEntry struct {
 }
 
 // add accounts for one record of the prefix.
-func (st *pruneStats) add(off uint64, e *recEnc, size uint64) {
-	if st.pruned == 0 || e.TS < st.firstTS {
-		st.firstTS = e.TS
+func (st *pruneStats) add(off uint64, h *recHead, size uint64) {
+	if st.pruned == 0 || h.ts < st.firstTS {
+		st.firstTS = h.ts
 	}
-	if st.pruned == 0 || e.TS > st.lastTS {
-		st.lastTS = e.TS
+	if st.pruned == 0 || h.ts > st.lastTS {
+		st.lastTS = h.ts
 	}
 	st.shed += size
 	st.pruned++
-	if e.SignalID == "" {
+	if h.signalID == "" {
 		return
 	}
-	id, ok := st.ids[e.SignalID]
+	id, ok := st.ids[h.signalID]
 	if !ok {
 		if st.ids == nil {
 			st.ids = map[string]string{}
 		}
-		id = e.SignalID
+		id = h.signalID
 		st.ids[id] = id
 	}
 	st.index = append(st.index, sigEntry{signalID: id, off: off})
@@ -1338,8 +1341,8 @@ func (st *pruneStats) add(off uint64, e *recEnc, size uint64) {
 // scanDoomed accumulates the accounting stats of the prefix [from, upTo).
 func (s *Store) scanDoomed(stream string, from, upTo uint64) (pruneStats, error) {
 	var st pruneStats
-	err := s.scanStream(stream, from, upTo, "prune", func(off uint64, e *recEnc, size uint64) bool {
-		st.add(off, e, size)
+	err := s.scanStream(stream, from, upTo, "prune", func(off uint64, h *recHead, size uint64) bool {
+		st.add(off, h, size)
 		return true
 	})
 	return st, err
@@ -1568,14 +1571,15 @@ func (s *Store) ClearRefreshPending(stream string) error {
 // until fn returns false. It takes no mutex; Pebble iterators are consistent
 // snapshots. A record that does not decode is an error.
 func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64, ts int64, size uint64) bool) error {
-	return s.scanStream(stream, from, upTo, "scan", func(off uint64, e *recEnc, size uint64) bool {
-		return fn(off, e.TS, size)
+	return s.scanStream(stream, from, upTo, "scan", func(off uint64, h *recHead, size uint64) bool {
+		return fn(off, h.ts, size)
 	})
 }
 
-// scanStream is ScanRecords with the whole decoded record, which is only valid
-// during the call. what names the scan in its error.
-func (s *Store) scanStream(stream string, from, upTo uint64, what string, fn func(off uint64, e *recEnc, size uint64) bool) error {
+// scanStream is ScanRecords with each record's head (see peekRecord), valid
+// only during the call. A record is decoded only when its head cannot be read
+// without. what names the scan in its error.
+func (s *Store) scanStream(stream string, from, upTo uint64, what string, fn func(off uint64, h *recHead, size uint64) bool) error {
 	if upTo <= from {
 		return nil
 	}
@@ -1590,11 +1594,11 @@ func (s *Store) scanStream(stream string, from, upTo uint64, what string, fn fun
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := iter.Key()
 		off := binary.BigEndian.Uint64(key[len(key)-8:])
-		var e recEnc
-		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+		h, err := headOf(iter.Value())
+		if err != nil {
 			return fmt.Errorf("decode record %q during %s: %w", key, what, err)
 		}
-		if !fn(off, &e, uint64(len(key)+len(iter.Value()))) {
+		if !fn(off, &h, uint64(len(key)+len(iter.Value()))) {
 			break
 		}
 	}
@@ -1638,7 +1642,7 @@ func (s *Store) policyScan(stream string, lwm, next uint64, now time.Time, maxAg
 	cutoff := now.UnixMilli() - maxAge.Milliseconds()
 	target = lwm
 	var shed, scanned uint64
-	err = s.scanStream(stream, lwm, next, "scan", func(off uint64, e *recEnc, size uint64) bool {
+	err = s.scanStream(stream, lwm, next, "scan", func(off uint64, h *recHead, size uint64) bool {
 		if maxScan > 0 && scanned >= maxScan {
 			hitScanCap = true // policy wants more, the scan budget forbids it
 			return false
@@ -1646,7 +1650,7 @@ func (s *Store) policyScan(stream string, lwm, next uint64, now time.Time, maxAg
 		scanned++
 		// A record without a timestamp has no age: maxAge never takes it, and so
 		// it stops the age policy there. Only maxBytes can prune past it.
-		ageWants := maxAge > 0 && e.TS > 0 && e.TS < cutoff
+		ageWants := maxAge > 0 && h.ts > 0 && h.ts < cutoff
 		sizeWants := maxBytes > 0 && liveBytes > shed+maxBytes // liveBytes−shed > maxBytes, underflow-safe
 		if !ageWants && !sizeWants {
 			return false // first record the policy keeps
@@ -1658,7 +1662,7 @@ func (s *Store) policyScan(stream string, lwm, next uint64, now time.Time, maxAg
 		shed += size
 		target = off + 1
 		if stats != nil {
-			stats.add(off, e, size)
+			stats.add(off, h, size)
 		}
 		return true
 	})
@@ -1736,15 +1740,20 @@ func (s *Store) KVVisit(prefix string, visit func(KVEntry)) error {
 // It sets no byte bound: it is for the node's own walks, which take a page and
 // let it go before the next. A page for a client is KVScanPageDepth's.
 func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) ([]KVEntry, string, error) {
-	return s.KVScanPageDepth(prefix, after, limit, 0, contracts, 0)
+	return s.KVScanPageDepth(prefix, after, limit, 0, contracts, 0, nil)
 }
 
 // KVScanPageDepth is KVScanPage limited to entries at most depth path segments
 // below prefix (0: no limit) and to maxBytes stored bytes (0: no bound; see
 // pageBytes). Deeper subtrees are skipped with a seek, not walked, so a tree
 // view reading one level pays for that level only.
-func (s *Store) KVScanPageDepth(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int) ([]KVEntry, string, error) {
-	entries, _, next, err := s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, false)
+//
+// keep, when set, decides on each entry from the topic in its key before the
+// entry is read: a reader's authorization. An entry it rejects is never
+// decoded and costs no page bytes, but counts towards limit like a returned
+// one, so a sparse grant cannot turn one page into a walk of the whole tree.
+func (s *Store) KVScanPageDepth(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int, keep func(topic string) bool) ([]KVEntry, string, error) {
+	entries, _, next, err := s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, false, keep)
 	return entries, next, err
 }
 
@@ -1754,14 +1763,14 @@ func (s *Store) KVScanPageDepth(prefix, after string, limit int, maxBytes uint64
 // call and learns which rows expand. Each folder is reported once, on the page
 // where the scan skips its subtree, and counts towards limit like an entry.
 // Folders ignore the contract filter: they describe the tree, not a contract.
-func (s *Store) KVScanLevel(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int) ([]KVEntry, []string, string, error) {
+func (s *Store) KVScanLevel(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int, keep func(topic string) bool) ([]KVEntry, []string, string, error) {
 	if depth < 1 {
 		return nil, nil, "", fmt.Errorf("store: KV level scan needs a positive depth")
 	}
-	return s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, true)
+	return s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, true, keep)
 }
 
-func (s *Store) kvScanPage(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int, withFolders bool) ([]KVEntry, []string, string, error) {
+func (s *Store) kvScanPage(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int, withFolders bool, keep func(topic string) bool) ([]KVEntry, []string, string, error) {
 	if limit <= 0 {
 		return nil, nil, "", fmt.Errorf("store: KV page size must be positive")
 	}
@@ -1769,7 +1778,7 @@ func (s *Store) kvScanPage(prefix, after string, limit int, maxBytes uint64, con
 		return nil, nil, "", fmt.Errorf("store: KV depth must not be negative")
 	}
 	if len(contracts) > 0 && depth == 0 {
-		entries, next, err := s.kvScanPageIndexed(prefix, after, limit, maxBytes, contracts)
+		entries, next, err := s.kvScanPageIndexed(prefix, after, limit, maxBytes, contracts, keep)
 		return entries, nil, next, err
 	}
 	var want map[string]bool
@@ -1828,12 +1837,16 @@ func (s *Store) kvScanPage(prefix, after string, limit int, maxBytes uint64, con
 			}
 		}
 		if ok && kvContractMatches(topic, want) {
-			if !page.take(len(iter.Value()), len(out)) {
-				break // the token resumes at this entry
-			}
-			if entry, decoded := decodeKVEntry(path, node, iter.Value()); decoded {
-				out = append(out, entry)
-				matched++
+			if keep != nil && !keep(topic) {
+				matched++ // counts towards the limit, unread
+			} else {
+				if !page.take(len(iter.Value()), len(out)) {
+					break // the token resumes at this entry
+				}
+				if entry, decoded := decodeKVEntry(path, node, iter.Value()); decoded {
+					out = append(out, entry)
+					matched++
+				}
 			}
 		}
 		lastKey = append(lastKey[:0], iter.Key()...)

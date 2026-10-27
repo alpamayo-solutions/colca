@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -269,7 +270,7 @@ func TestDepthLimitedScan(t *testing.T) {
 		var out []string
 		after := ""
 		for {
-			entries, next, err := s.KVScanPageDepth(prefix, after, 1, 0, contracts, depth)
+			entries, next, err := s.KVScanPageDepth(prefix, after, 1, 0, contracts, depth, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -347,7 +348,7 @@ func TestLevelScanNamesFolders(t *testing.T) {
 		var entries, folders []string
 		after := ""
 		for {
-			page, fs, next, err := s.KVScanLevel(prefix, after, limit, 0, contracts, depth)
+			page, fs, next, err := s.KVScanLevel(prefix, after, limit, 0, contracts, depth, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -376,7 +377,40 @@ func TestLevelScanNamesFolders(t *testing.T) {
 	if entries, folders := level("plant/", 1, 1, "_Signal"); entries != "[plant/l3]" || folders != "[plant/l1 plant/l2 plant/l30]" {
 		t.Errorf("contract: entries %s folders %s", entries, folders)
 	}
-	if _, _, _, err := s.KVScanLevel("plant/", "", 10, 0, nil, 0); err == nil {
+	if _, _, _, err := s.KVScanLevel("plant/", "", 10, 0, nil, 0, nil); err == nil {
 		t.Error("depth 0 must be refused")
+	}
+}
+
+// A reader's keep decides from the key before the entry is read: an entry it
+// may not see costs the page none of its bytes, so the entries it may see
+// still fit. Rejected entries still count towards the page size. Both the
+// plain walk and the contract index walk.
+func TestKVPageDecidesTheReadersGrantsBeforeReadingAnEntry(t *testing.T) {
+	s := mustOpen(t)
+	big := `{"v":"` + strings.Repeat("x", 10<<10) + `"}`
+	if _, _, err := s.Append("entities", []Record{
+		kvRec("_Signal", "a/hidden", big),
+		kvRec("_Signal", "a/shown", `{"v":1}`),
+		kvRec("_Signal", "b/hidden", `{"v":2}`),
+		kvRec("_Signal", "b/shown", `{"v":3}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	keep := func(topic string) bool { return strings.HasSuffix(topic, "/shown") }
+	for name, contracts := range map[string][]string{"walk": nil, "index": {"_Signal"}} {
+		t.Run(name, func(t *testing.T) {
+			got, next, err := s.KVScanPageDepth("", "", 2, 1<<10, contracts, 0, keep)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].Path != "a/shown" || next == "" {
+				t.Fatalf("page = %v next=%q, want a/shown and a token: the hidden entry took no bytes but one place", topicsOf(got), next)
+			}
+			got, next, err = s.KVScanPageDepth("", next, 2, 1<<10, contracts, 0, keep)
+			if err != nil || len(got) != 1 || got[0].Path != "b/shown" || next != "" {
+				t.Fatalf("second page = %v next=%q err=%v, want b/shown and the end", topicsOf(got), next, err)
+			}
+		})
 	}
 }
