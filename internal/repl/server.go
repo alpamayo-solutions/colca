@@ -190,7 +190,7 @@ func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter 
 	for _, rec := range recs {
 		out = append(out, wireRec{
 			O: rec.Offset, T: rec.Topic, P: rec.Payload, TS: rec.TS,
-			WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups, AC: rec.ActorClient,
+			WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups, AC: rec.ActorClient, AE: rec.ActorEmail,
 		})
 	}
 	resp["definitions"], resp["def_next"] = out, next
@@ -302,6 +302,7 @@ type wireRec struct {
 	AK       string   `json:"ak,omitempty"`
 	AG       []string `json:"ag,omitempty"`
 	AC       string   `json:"ac,omitempty"`
+	AE       string   `json:"ae,omitempty"`
 }
 
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
@@ -387,7 +388,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rec.SkipFrom != 0 {
-			if in.Stream != "metrics" || rec.SkipFrom > rec.O || rec.SkipFrom <= previous || rec.T != "" || len(rec.P) != 0 || rec.OO != 0 || rec.TS != 0 || rec.WB != "" || rec.AID != "" || rec.AL != "" || rec.AK != "" || len(rec.AG) != 0 || rec.AC != "" {
+			if in.Stream != "metrics" || rec.SkipFrom > rec.O || rec.SkipFrom <= previous || rec.T != "" || len(rec.P) != 0 || rec.OO != 0 || rec.TS != 0 || rec.WB != "" || rec.AID != "" || rec.AL != "" || rec.AK != "" || len(rec.AG) != 0 || rec.AC != "" || rec.AE != "" {
 				http.Error(w, "invalid metric skip range", http.StatusBadRequest)
 				return
 			}
@@ -425,7 +426,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 			ChildOffset: rec.O, OriginOffset: rec.OO,
 			Topic: topic, Payload: rec.P, TS: rec.TS,
 			WrittenBy: rec.WB, ActorID: rec.AID,
-			ActorLabel: rec.AL, ActorKind: rec.AK, ActorGroups: rec.AG, ActorClient: rec.AC,
+			ActorLabel: rec.AL, ActorKind: rec.AK, ActorGroups: rec.AG, ActorClient: rec.AC, ActorEmail: rec.AE,
 		}
 		// Route by the engine's bundle-aware classes: a declared data or entity
 		// contract projects into KV here as at any door.
@@ -631,7 +632,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 				}
 				out = append(out, wireRec{
 					O: rec.Offset, T: stripped, P: rec.Payload, TS: rec.TS,
-					WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups, AC: rec.ActorClient,
+					WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups, AC: rec.ActorClient, AE: rec.ActorEmail,
 				})
 			}
 			// now_ms is this node's wall clock, stamped here, after the long-poll

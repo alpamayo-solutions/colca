@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/internal/authtest"
 	"github.com/alpamayo-solutions/colca/internal/blobstore"
 	"github.com/alpamayo-solutions/colca/internal/config"
@@ -3614,5 +3615,107 @@ func testLocalAPIDeliversAnAppNotification(t *testing.T, sender string) {
 	}
 	if rec := publish(sender, "colca/v1/_CmdOperate/n-other/"+notification+"/notify"); rec.Code == http.StatusOK {
 		t.Fatalf("the api sent a message addressed to another node under its own identity: %s", rec.Body.String())
+	}
+}
+
+// Asking to be told about an alarm is seeing it: read on the alarm's place is
+// the whole authority for subscribe and unsubscribe, and no cmd grant stands in
+// for it. Every other act on the alarm still needs its class.
+func TestASubscriptionToAnAlarmNeedsReadNotAGrantToAct(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	publish := func(grants []string, action, correlation string) int {
+		t.Helper()
+		token := iss.MintOpt(tokentest.MintOpts{Sub: "kc-sub-" + correlation, Grants: grants, Name: "Anna Meier"})
+		rec := localPublish(t, h,
+			map[string]string{"Authorization": "Bearer " + token, "X-Colca-Service": "api"},
+			map[string]any{"topic": "colca/v1/_CmdOperate/n-test/line1/press3/01HALARM0000000000000000AA/" + action,
+				"payload": map[string]any{"correlation_id": correlation, "expires_at": 9999999999999}})
+		return rec.Code
+	}
+	reader := []string{"read:#"}
+	operator := []string{"cmd:#:operate"}
+	for _, action := range []string{"subscribe", "unsubscribe"} {
+		if code := publish(reader, action, "reader-"+action); code != http.StatusOK {
+			t.Fatalf("a reader's %s = %d, want 200: read on the alarm is the authority", action, code)
+		}
+		if code := publish(operator, action, "operator-"+action); code != http.StatusForbidden {
+			t.Fatalf("%s by a person with operate but no read = %d, want 403", action, code)
+		}
+		if code := publish(nil, action, "nobody-"+action); code != http.StatusForbidden {
+			t.Fatalf("%s by a person with no grant = %d, want 403", action, code)
+		}
+	}
+	for _, action := range []string{"silence", "acknowledge"} {
+		if code := publish(reader, action, "reader-"+action); code != http.StatusForbidden {
+			t.Fatalf("a reader's %s = %d, want 403: it still needs operate", action, code)
+		}
+		if code := publish(operator, action, "operator-"+action); code != http.StatusOK {
+			t.Fatalf("an operator's %s = %d, want 200", action, code)
+		}
+	}
+}
+
+// The person's address travels with their command only when the token vouches
+// for it: email_verified is the boolean true. The service that applies the
+// command reads it as actor_email on /fetch; nothing else can put one there.
+func TestACommandCarriesTheVerifiedEmailOnly(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	send := func(correlation string, opts tokentest.MintOpts, extra map[string]any) {
+		t.Helper()
+		headers := map[string]string{"X-Colca-Service": "api"}
+		if opts.Sub != "" {
+			opts.Grants = []string{"read:#"}
+			headers["Authorization"] = "Bearer " + iss.MintOpt(opts)
+		}
+		body := map[string]any{"topic": "colca/v1/_CmdOperate/n-test/line1/01HALARM0000000000000000AA/subscribe",
+			"payload": map[string]any{"correlation_id": correlation, "expires_at": 9999999999999}}
+		for k, v := range extra {
+			body[k] = v
+		}
+		if rec := localPublish(t, h, headers, body); rec.Code != http.StatusOK {
+			t.Fatalf("%s: publish = %d: %s", correlation, rec.Code, rec.Body.String())
+		}
+	}
+	send("verified", tokentest.MintOpts{Sub: "kc-anna", Email: "anna@plant.test", EmailVerified: true}, nil)
+	send("unverified", tokentest.MintOpts{Sub: "kc-bert", Email: "bert@plant.test", EmailVerified: false}, nil)
+	send("string-true", tokentest.MintOpts{Sub: "kc-cara", Email: "cara@plant.test", EmailVerified: "true"}, nil)
+	send("no-claim", tokentest.MintOpts{Sub: "kc-dora", Email: "dora@plant.test"}, nil)
+	// A service account is no person to mail, whatever its token says.
+	send("service-account", tokentest.MintOpts{Sub: "kc-erp", Username: "service-account-erp-bridge",
+		Email: "erp@plant.test", EmailVerified: true}, nil)
+	// A local service naming the person it acts for, without their token:
+	// the body has no way to claim an address for them.
+	send("attested", tokentest.MintOpts{}, map[string]any{
+		"actor_id": "kc-emil", "actor_kind": "human", "actor_email": "emil@plant.test"})
+
+	fetchReq := httptest.NewRequest(http.MethodGet, "/fetch?stream=commands&cursor="+uns.LocalCursorPrefix+"api/emails&max=50", nil)
+	fetchReq.Header.Set("X-Colca-Service", "api")
+	fetchRec := httptest.NewRecorder()
+	h.ServeHTTP(fetchRec, fetchReq)
+	if fetchRec.Code != http.StatusOK {
+		t.Fatalf("GET /fetch = %d: %s", fetchRec.Code, fetchRec.Body.String())
+	}
+	var page door.Page
+	if err := json.Unmarshal(fetchRec.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	emails := map[string]string{}
+	for _, rec := range page.Records {
+		var payload struct {
+			CorrelationID string `json:"correlation_id"`
+		}
+		if json.Unmarshal(rec.Payload, &payload) == nil && payload.CorrelationID != "" {
+			emails[payload.CorrelationID] = rec.ActorEmail
+		}
+	}
+	want := map[string]string{"verified": "anna@plant.test", "unverified": "", "string-true": "", "no-claim": "", "service-account": "", "attested": ""}
+	for correlation, email := range want {
+		got, found := emails[correlation]
+		if !found {
+			t.Fatalf("command %s not on the commands stream; fetched %v", correlation, emails)
+		}
+		if got != email {
+			t.Fatalf("command %s: actor_email = %q, want %q", correlation, got, email)
+		}
 	}
 }

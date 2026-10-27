@@ -56,6 +56,10 @@ type Record struct {
 	ActorID      string          `json:"actor_id"`
 	ActorLabel   string          `json:"actor_label"`
 	ActorKind    string          `json:"actor_kind"`
+	// ActorEmail is the person's address as their token vouched for it
+	// (`email_verified: true`) when they sent this command through a token
+	// door; "" for every other record. It authorizes nothing.
+	ActorEmail string `json:"actor_email,omitempty"`
 }
 
 // Gap is the contiguous pruned stream prefix a cursor can no longer read.

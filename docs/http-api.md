@@ -159,6 +159,15 @@ id, so there it counts as a person's: a service account then needs
 `configure` to change an annotation it authored, until the parent is
 upgraded.
 
+`actor_email` is on a `/fetch` record of a command only, and only when the
+person sent it with a token whose `email_verified` claim is the boolean `true`
+(what Keycloak emits): it is the token's `email`, kept with the command and
+replicated with it to the node that executes it, for the service that has to
+reach the person -- an alarm subscription that mails them
+([alarms.md](alarms.md#subscribing-to-an-alarm)). A personal access token, a
+service account, the admin door and a local service naming a person never set
+it; `/kv` and every state or event record omit it. It authorizes nothing.
+
 When a cursor stands below what retention has already removed, the response
 carries a `gap` object that names the missing offsets and times, and `records`
 continue after the gap:

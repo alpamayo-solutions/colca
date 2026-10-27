@@ -60,6 +60,7 @@ func rawPayload(payload []byte) json.RawMessage {
 type fetchRecord struct {
 	// Fields in the order the map encoding gave them (by name), so the wire
 	// bytes stay what they were.
+	ActorEmail   string          `json:"actor_email,omitempty"`
 	ActorID      string          `json:"actor_id"`
 	ActorKind    string          `json:"actor_kind"`
 	ActorLabel   string          `json:"actor_label"`
@@ -871,6 +872,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				Offset: rec.Offset, OriginOffset: rec.OriginOffset, Topic: rec.Topic,
 				Payload: rawPayload(rec.Payload), TS: rec.TS, WrittenBy: rec.WrittenBy,
 				ActorID: rec.ActorID, ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind,
+				ActorEmail: rec.ActorEmail,
 			})
 		}
 		m.HTTPFetch(callerLabel(c), stream)
