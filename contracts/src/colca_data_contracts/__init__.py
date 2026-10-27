@@ -84,7 +84,6 @@ from colca_data_contracts.payload import (
     AuditOutcome,
     AuditSource,
     BindIntent,
-    SubscriptionChannelKind,
     Bounds,
     CmdEdit,
     CommandRoute,
@@ -114,6 +113,7 @@ from colca_data_contracts.payload import (
     SignalDataType,
     SignalRelationship,
     SignalRelationshipType,
+    SubscriptionChannelKind,
     derive_annotation_id,
     field_limits,
 )
