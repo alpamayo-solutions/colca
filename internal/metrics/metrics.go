@@ -175,7 +175,8 @@ type Metrics struct {
 	uplinkFail *prometheus.CounterVec
 	// colca_uplink_refused_total: the parent answered and refused the batch (4xx).
 	// That is a misconfiguration or a bug, not a network problem.
-	uplinkRefused *prometheus.CounterVec
+	uplinkRefused  *prometheus.CounterVec
+	uplinkSetAside *prometheus.CounterVec
 	// colca_uplink_logs_withheld_total: _Log records parent.logs kept home, by
 	// level. Bounded: the label is one of the five log levels.
 	uplinkLogsWithheld *prometheus.CounterVec
@@ -370,7 +371,11 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}, []string{"level"}),
 		uplinkRefused: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_uplink_refused_total",
-			Help: "Uplink pushes the parent ANSWERED and refused (4xx), by stream — a misconfiguration or a bug between the two nodes, not an outage. Nothing is dropped: the batch is held and retried, so this counter rising is a lane that is not moving. Resets on restart.",
+			Help: "Uplink pushes the parent ANSWERED and refused (4xx), by stream — a misconfiguration or a bug between the two nodes, not an outage. The batch is held and retried, so this counter rising is a lane that is not moving; a single record refused for longer than the grace is set aside (colca_uplink_set_aside_total). Resets on restart.",
+		}, []string{"stream"}),
+		uplinkSetAside: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_uplink_set_aside_total",
+			Help: "Records the parent refused alone for longer than the grace, set aside so the rest of the lane rises, by stream. Each one is NOT replicated: data loss at the parent. The copies are listed at GET /uplink/set-aside and in the node's uplink_set_aside finding. Resets on restart.",
 		}, []string{"stream"}),
 		downlinkOK: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_downlink_last_success_timestamp_seconds",
@@ -724,7 +729,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	for _, reason := range []string{"expired", "identity_removed", "retired"} {
 		m.offlineEnded.WithLabelValues(reason)
 	}
-	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused, m.uplinkLogsWithheld,
+	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused, m.uplinkSetAside, m.uplinkLogsWithheld,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.storeReincarnated, m.childAheadOfStore, m.uplinkResyncs, m.uplinkResyncActive, m.uplinkResyncGap,
 		m.downlinkCommandKnown,
@@ -1033,6 +1038,15 @@ func (m *Metrics) UplinkPushFailed(stream string) {
 		return
 	}
 	m.uplinkFail.WithLabelValues(stream).Inc()
+}
+
+// UplinkSetAside counts one record the uplink set aside after the parent kept
+// refusing it alone: a record that does not reach the parent.
+func (m *Metrics) UplinkSetAside(stream string) {
+	if m == nil {
+		return
+	}
+	m.uplinkSetAside.WithLabelValues(stream).Inc()
 }
 
 // UplinkRefused counts one uplink push the parent answered and refused. It is

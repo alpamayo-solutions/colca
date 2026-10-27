@@ -1340,6 +1340,39 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			writeJSON(w, http.StatusOK, map[string]any{"store": id, "previous": previous})
 		}))
 
+		if uplink != nil {
+			// Records the parent refused alone past the uplink grace, set aside so their lane
+			// moves on (repl/setaside.go). They did not reach the parent; listing and clearing
+			// them is the operator's part.
+			mux.HandleFunc("GET /uplink/set-aside", adminFor(limitClassScan, scanPolicy, func(w http.ResponseWriter, r *http.Request) {
+				records, err := uplink.SetAsideRecords(e.Store())
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+					return
+				}
+				if records == nil {
+					records = []store.SetAsideRecord{}
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"records": records})
+			}))
+			mux.HandleFunc("DELETE /uplink/set-aside/{stream}/{offset}", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
+				offset, err := strconv.ParseUint(r.PathValue("offset"), 10, 64)
+				if err != nil || offset == 0 {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": "offset must be a positive integer"})
+					return
+				}
+				found, err := uplink.ClearSetAside(e, r.PathValue("stream"), offset)
+				switch {
+				case err != nil:
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				case !found:
+					writeJSON(w, http.StatusNotFound, map[string]any{"error": "no record set aside at that stream and offset"})
+				default:
+					writeJSON(w, http.StatusOK, map[string]any{"cleared": true})
+				}
+			}))
+		}
+
 		mux.HandleFunc("GET /debug/state", adminFor(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request) {
 			streams := map[string]any{}
 			// Derived from the store: test harnesses read a node's stream set here, so a copy

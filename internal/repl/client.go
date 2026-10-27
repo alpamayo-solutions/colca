@@ -110,6 +110,8 @@ type Client struct {
 	// logs decides which logs-stream records rise (parent.logs). The default
 	// forwards WARNING and above.
 	logs logForwarding
+	// setAsideGrace overrides defaultSetAsideGrace in tests; see setaside.go.
+	setAsideGrace time.Duration
 }
 
 // SetStoreID names the store incarnation replication batches carry, for a
@@ -723,6 +725,11 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 	// busyUntil is, per lane, until when a parent that answered 429 asked to be
 	// left alone. A lane waits it out even while other lanes make progress.
 	busyUntil := map[string]time.Time{}
+	// holds isolates, per lane, a record the parent refuses (see setaside.go).
+	holds := map[string]*laneHold{}
+	if err := c.publishSetAsideFinding(eng); err != nil {
+		c.log.Warn("uplink_set_aside finding not brought up to date at start", "err", err)
+	}
 	pushOnce := func(stream string, filter func(string) bool) (scanned, aborted bool) {
 		if c.resyncWanted.Load() {
 			// The parent's store is not the one this node's positions belong
@@ -820,6 +827,15 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				m.UplinkPushFailed(stream)
 				return false, false
 			}
+			hold := holds[stream]
+			if hold == nil {
+				hold = &laneHold{}
+				holds[stream] = hold
+			}
+			if hold.limit > 0 && len(batch) > hold.limit {
+				// Isolating a refused record: the records before it go first.
+				batch = batch[:hold.limit]
+			}
 			if len(batch) < fullBatchLen {
 				next = batch[len(batch)-1].ChildOffset + 1
 			}
@@ -837,10 +853,12 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				// A parent that answered and refused (4xx) is not a parent that is down, and the
 				// log must say which.
 				//
-				// A refused batch is held and retried, never skipped. Only retention decides to
-				// drop data, and it leaves a _StreamGap marker; skipping here would lose records
-				// without a trace over what is usually a config mismatch (max_record_bytes).
-				// colca_uplink_refused_total and this error make the stalled lane visible.
+				// A refused batch is held and retried, not skipped: a refusal is usually a config
+				// mismatch (max_record_bytes) that the parent's operator fixes. The retry sends
+				// half the batch, down to the one record the parent refuses, so the records
+				// before it rise; that record alone is set aside only after the grace, with a
+				// copy, a finding and an error that say it did not reach the parent (setaside.go).
+				// colca_uplink_refused_total and this error make the held lane visible.
 				var refusal *replError
 				if errors.As(err, &refusal) && refusal.StoreChanged() {
 					// Not a refusal of the batch: the parent's store changed.
@@ -870,7 +888,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 							"stream", stream, "parent", c.base, "retry_after", refusal.RetryAfter,
 							"attempts", attempts, "busy_for", down.Round(time.Second))
 					case refused:
-						c.log.Error("uplink refused by the parent — the batch is held and retried, nothing is dropped",
+						c.log.Error("uplink refused by the parent — the batch is held and retried; a record refused alone past the grace is set aside",
 							"stream", stream, "parent", c.base, "status", refusal.Status,
 							"meaning", replicationStatusMeaning(refusal.Status),
 							"parent_said", refusal.Body,
@@ -886,11 +904,23 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				if refused {
 					m.UplinkRefused(stream)
 				}
+				if refused && !refusal.Unauthorized() && hold.refused(batch, time.Now(), c.grace()) {
+					for _, r := range recs {
+						if r.Offset == batch[0].ChildOffset {
+							if c.setAside(eng, m, epoch, stream, r, refusal, hold.since) {
+								*hold = laneHold{}
+								return true, false
+							}
+							break
+						}
+					}
+				}
 				// The cursor stays put. Report "not scanned" so a batch the parent cannot take
 				// ends the drain loop instead of spinning.
 				return false, false
 			}
 			c.unenrolled.accepted()
+			hold.accepted()
 			if wasFailing, attempts, down := c.links.Recovered("uplink:"+stream, time.Now()); wasFailing {
 				c.log.Info("uplink recovered",
 					"stream", stream, "parent", c.base,
