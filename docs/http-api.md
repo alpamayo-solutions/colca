@@ -20,7 +20,7 @@ A caller is one of:
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}`, or `202` `{"stream":"logs","topic":"…","withheld":"…"}` without `offset` |
 | `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"stream":"logs","withheld":"…"} or {"error":"…","reason":"…"},…]}` |
-| `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N,"store":"ID"}` |
+| `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N,"head":N,"more":false,"store":"ID"}` |
 | `GET /watch` | machine, service, person, admin | `?stream=S&stream=S2&interval_ms=100` | NDJSON, one line per change: `{"streams":["S"],"next":{"S":N}}` |
 | `POST /ack` | owner of the cursor, admin; to retire a stale cursor also `cmd:<node>/#:admin` | `{"cursor":"NAME","stream":"S","offset":N}` (optionally `"store":"ID"`), or `{"cursor":"NAME","stream":"S","delete":true}` to retire it | `{"moved":true}` or `{"deleted":true}`; `409` store changed, `422` past the head |
 | `GET /backlog` | local service (`?prefix=` required), admin | `?prefix=c/projector/` | `{"queues":[{"cursor":"…","stream":"S","position":N,"head":N,"lag_records":N,"last_ack_ms":T,"stale":false,"read_since_start":true}]}` |
@@ -84,6 +84,11 @@ A caller is one of:
   of stored data, and `next` resumes at that record or entry. A page always
   holds at least one. A short page is therefore no sign of the end: for
   `/fetch` that is `next` reaching the head, for `/kv` an empty `next`.
+- `/fetch` reports `head`, the stream's next offset when the page was read,
+  and `more`, true when the page stopped before it. A filtered page also
+  stops after the node examined 20,000 records, so it can be empty with
+  `more: true`: nothing matched yet, read on from `next` at once. `more:
+  false` means caught up; wait for the next `/watch` hint.
 - `contract` on `/kv` and `/fetch` may be repeated. An unknown name is a `400`.
   On `/kv` the node keeps an index by contract, so a filtered read costs what
   it returns, not what lies under the prefix. On `/fetch` the other records

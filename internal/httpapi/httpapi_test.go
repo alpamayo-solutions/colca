@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -337,6 +338,48 @@ func TestFetchWithASignalFilterReachesASparseMatchInOnePage(t *testing.T) {
 	records := out["records"].([]any)
 	if len(records) != 1 || records[0].(map[string]any)["offset"] != float64(skipped+1) || out["next"] != float64(skipped+2) {
 		t.Fatalf("first page = %v, want the match at offset %d and next %d", out, skipped+1, skipped+2)
+	}
+}
+
+// An empty page the scan budget cut short says so: more is true and head lies
+// past next, so the consumer reads on at once. A caught-up page says more=false
+// with next at the head, on the plain path and the signal index path alike.
+func TestFetchTellsABudgetCutPageFromACaughtUpOne(t *testing.T) {
+	a := newAPI(t)
+	skipped := fetchScanBudget + 100
+	recs := make([]store.Record, 0, skipped)
+	for i := 0; i < skipped; i++ {
+		recs = append(recs, store.Record{Topic: "colca/v1/_Metric/n-test/line1/other", Payload: []byte(`{"signal_id":"other","value":1}`), TS: int64(i)})
+	}
+	if _, _, err := a.st.Append("metrics", recs); err != nil {
+		t.Fatal(err)
+	}
+	head := float64(skipped + 1)
+
+	resp, out := req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=cut&max=10&topic="+
+		url.QueryEscape("colca/v1/_Metric/n-test/line1/wanted"), "tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fetch = %d: %v", resp.StatusCode, out)
+	}
+	if len(out["records"].([]any)) != 0 || out["next"] != float64(fetchScanBudget+1) || out["head"] != head || out["more"] != true {
+		t.Fatalf("budget-cut page = next %v head %v more %v, want empty, next %d, head %v, more true",
+			out["next"], out["head"], out["more"], fetchScanBudget+1, head)
+	}
+
+	resp, out = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=cut&max=10&from="+
+		fmt.Sprint(fetchScanBudget+1)+"&topic="+url.QueryEscape("colca/v1/_Metric/n-test/line1/wanted"), "tok", nil)
+	if resp.StatusCode != http.StatusOK || out["next"] != head || out["head"] != head || out["more"] != false {
+		t.Fatalf("caught-up page = %d next %v head %v more %v, want next = head = %v, more false",
+			resp.StatusCode, out["next"], out["head"], out["more"], head)
+	}
+
+	resp, out = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=sig&max=10&signal_id=absent", "tok", nil)
+	if resp.StatusCode != http.StatusOK || out["next"] != head || out["head"] != head || out["more"] != false {
+		t.Fatalf("signal page = %d next %v head %v more %v, want caught up", resp.StatusCode, out["next"], out["head"], out["more"])
+	}
+	resp, out = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=sig2&max=5&signal_id=other", "tok", nil)
+	if resp.StatusCode != http.StatusOK || len(out["records"].([]any)) != 5 || out["more"] != true {
+		t.Fatalf("limited signal page = %d records %d more %v, want 5 and more true", resp.StatusCode, len(out["records"].([]any)), out["more"])
 	}
 }
 

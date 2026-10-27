@@ -875,7 +875,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		// store names the store incarnation the page was read from; a consumer
 		// passes it back on /ack so an ack can never land on a store that was
 		// recreated in between.
+		// head is the stream's next offset, read after the page. more says the page
+		// stopped before it: on a limit, the byte bound or the scan budget. An empty
+		// page with more=true was cut by the budget, not caught up, and the consumer
+		// fetches again from next at once instead of waiting for a wake-up.
+		streamHead := e.Store().NextOffset(stream)
 		resp := map[string]any{"records": out, "next": next, "from": from,
+			"head": streamHead, "more": next < streamHead,
 			"store": e.Store().StoreID()}
 		// Without a position of its own the consumer started at the LWM; a prune
 		// between that read and this check moved nothing it was owed.
