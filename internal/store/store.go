@@ -162,6 +162,12 @@ type Store struct {
 	// appendQueue gathers concurrent Append calls into one synced commit; see
 	// appendgroup.go.
 	appendQueue groupQueue[*appendRequest]
+	// ackQueue gathers concurrent cursor acks into one synced commit; see
+	// cursorgroup.go.
+	ackQueue groupQueue[*ackRequest]
+	// ackApplyHook, when set, commits ack batches instead of the database: tests
+	// hold a commit open with it.
+	ackApplyHook func(*pebble.Batch, *pebble.WriteOptions) error
 	// adopted caches, per child, the store incarnation AdoptChildStore last
 	// confirmed, so the common case (unchanged) takes neither s.mu nor a read.
 	adopted sync.Map
@@ -876,26 +882,12 @@ func (s *Store) CursorStart(name, stream string) (pos uint64, saved bool) {
 }
 
 // CursorAck moves the cursor forward only and reports whether it moved. The
-// cursor and its last-advance timestamp (ct/) are written in one synced batch.
+// cursor and its last-advance timestamp (ct/) are written in one synced batch,
+// which concurrent acks share (see cursorgroup.go).
 func (s *Store) CursorAck(name, stream string, off uint64) bool {
-	s.cursorMu.Lock()
-	defer s.cursorMu.Unlock()
-	if off <= s.readU64(cursorKey(name, stream), 1) {
-		return false
-	}
-	b := s.db.NewBatch()
-	defer b.Close()
-	if err := b.Set(cursorKey(name, stream), be64(off), nil); err != nil {
-		return false
-	}
-	if err := b.Set(ctKey(name, stream), be64(uint64(time.Now().UnixMilli())), nil); err != nil {
-		return false
-	}
-	if err := s.db.Apply(b, pebble.Sync); err != nil {
-		return false
-	}
-	s.signalBacklogChange()
-	return true
+	req := &ackRequest{name: name, stream: stream, off: off}
+	s.ack(req)
+	return req.moved
 }
 
 // CursorSetIfAbsent creates a cursor at off unless one exists and reports
@@ -948,14 +940,16 @@ func (s *Store) CursorDelete(name, stream string) error {
 
 // CursorMarkSeen sets ts (unix ms) as the last-advance time of a cursor that has
 // none yet, so a cursor from before ct/ timestamps gets a full staleness window
-// from its first sighting. Synced, so a restart does not reset that clock.
+// from its first sighting. It is not synced on its own: the next synced commit
+// takes it to disk, and a crash before that only costs the cursor a later
+// first sighting.
 func (s *Store) CursorMarkSeen(name, stream string, ts int64) {
 	s.cursorMu.Lock()
 	defer s.cursorMu.Unlock()
 	if s.readU64(ctKey(name, stream), 0) != 0 {
 		return
 	}
-	if err := s.db.Set(ctKey(name, stream), be64(uint64(ts)), pebble.Sync); err != nil { //nolint:gosec // an int64 timestamp stored bit for bit
+	if err := s.db.Set(ctKey(name, stream), be64(uint64(ts)), pebble.NoSync); err != nil { //nolint:gosec // an int64 timestamp stored bit for bit
 		// Not fatal, since the caller treats the cursor as fresh either way, but
 		// logged: an unpersisted sighting resets the staleness clock on restart.
 		slog.Warn("store: persisting cursor first-sighting timestamp failed",

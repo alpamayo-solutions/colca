@@ -201,34 +201,9 @@ func (s *Store) AckedMark(parent, stream string) uint64 {
 // the highest offset the parent confirmed. The cursor moves forward only; the
 // mark is set to what the parent said. It reports whether the cursor moved.
 func (s *Store) CursorAckMarked(name, stream string, off uint64, parent string, mark uint64) (moved bool, err error) {
-	s.cursorMu.Lock()
-	defer s.cursorMu.Unlock()
-	b := s.db.NewBatch()
-	defer b.Close()
-	if off > s.readU64(cursorKey(name, stream), 1) {
-		if err := b.Set(cursorKey(name, stream), be64(off), nil); err != nil {
-			return false, err
-		}
-		if err := b.Set(ctKey(name, stream), be64(uint64(time.Now().UnixMilli())), nil); err != nil { //nolint:gosec // a positive timestamp
-			return false, err
-		}
-		moved = true
-	}
-	if mark != s.readU64(ackedKey(parent, stream), 0) {
-		if err := b.Set(ackedKey(parent, stream), be64(mark), nil); err != nil {
-			return false, err
-		}
-	}
-	if b.Empty() {
-		return false, nil
-	}
-	if err := s.db.Apply(b, pebble.Sync); err != nil {
-		return false, err
-	}
-	if moved {
-		s.signalBacklogChange()
-	}
-	return moved, nil
+	req := &ackRequest{name: name, stream: stream, off: off, marked: true, parent: parent, mark: mark}
+	s.ack(req)
+	return req.moved, req.err
 }
 
 // CursorPlacement puts a cursor at an exact position, which may be behind
