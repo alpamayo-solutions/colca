@@ -229,124 +229,14 @@ func TestRetentionGaugesDerivedFromStoreAndPolicy(t *testing.T) {
 		t.Fatalf("colca_retention_pressure = %v, want ~2 (oldest record ~2h old, max_age 1h)", pressure)
 	}
 
-	// All 5 records are older than max_age, so the unclamped policy wants the
-	// whole stream gone — the "slow" cursor at 3 is the one thing in the way.
+	// colca_retention_blocked_by_cursor is the pruner's: a scrape reads it,
+	// it scans nothing. No pass ran, so it reads 0 although "slow" blocks.
+	if blocked := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "metrics"}); blocked != 0 {
+		t.Fatalf("colca_retention_blocked_by_cursor = %v before any pruner pass, want 0", blocked)
+	}
+	m.RetentionBlockedByCursor("metrics", 1)
 	if blocked := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "metrics"}); blocked != 1 {
-		t.Fatalf("colca_retention_blocked_by_cursor = %v, want 1", blocked)
-	}
-
-	// Advancing the cursor past the policy target drops the count to 0 on the next
-	// scrape.
-	if !s.CursorAck("slow", "metrics", 6) {
-		t.Fatal("cursor advance must move")
-	}
-	if got := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "metrics"}); got != 0 {
-		t.Fatalf("colca_retention_blocked_by_cursor after the cursor catches up = %v, want 0", got)
-	}
-}
-
-// colca_retention_blocked_by_cursor counts every protecting cursor below the
-// policy target, so two blocking cursors read 2.
-func TestBlockedByCursorCountsEveryProtectingCursorBelowTarget(t *testing.T) {
-	s := mustStore(t)
-	base := time.Now().Add(-2 * time.Hour).UnixMilli()
-	seedRecordsAt(t, s, "metrics", 5, base, 10*60*1000) // offsets 1..5, all older than max_age below
-
-	// Two independent cursors, both below where the unclamped policy wants
-	// to go (offset 6): "slower" at 2, "slow" at 3.
-	if !s.CursorAck("slower", "metrics", 2) {
-		t.Fatal("seed cursor")
-	}
-	if !s.CursorAck("slow", "metrics", 3) {
-		t.Fatal("seed cursor")
-	}
-
-	cfg := config.Retention{Streams: map[string]config.StreamRetention{
-		"metrics": {MaxAge: config.Duration(time.Hour)},
-	}}
-	m := New(s, cfg, nil)
-
-	if blocked := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "metrics"}); blocked != 2 {
-		t.Fatalf("colca_retention_blocked_by_cursor = %v, want 2 (both cursors independently block)", blocked)
-	}
-
-	// Advancing only the further-behind cursor lowers the count by exactly one.
-	if !s.CursorAck("slower", "metrics", 6) {
-		t.Fatal("cursor advance must move")
-	}
-	if blocked := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "metrics"}); blocked != 1 {
-		t.Fatalf("colca_retention_blocked_by_cursor after one cursor catches up = %v, want 1 (the other still blocks)", blocked)
-	}
-}
-
-// A cursor is not blocking when the policy does not want to prune that far.
-func TestBlockedByCursorZeroWhenPolicyWantsNothingPruned(t *testing.T) {
-	s := mustStore(t)
-	seedRecordsAt(t, s, "commands", 3, time.Now().Add(-100*24*time.Hour).UnixMilli(), 1000)
-	if !s.CursorAck("slow", "commands", 2) { // consumed offset 1, unread from offset 2
-		t.Fatal("seed cursor")
-	}
-	cfg := config.Retention{Streams: map[string]config.StreamRetention{
-		"commands": {MaxAge: config.Duration(1000 * 24 * time.Hour)}, // far older than any record
-	}}
-	m := New(s, cfg, nil)
-	if got := gaugeValue(t, m, "colca_retention_blocked_by_cursor", map[string]string{"stream": "commands"}); got != 0 {
-		t.Fatalf("colca_retention_blocked_by_cursor = %v, want 0 (policy wants nothing pruned)", got)
-	}
-}
-
-// The blocked-by-cursor scan must stop at its cap, or a dead consumer's backlog
-// would be decoded on every scrape. With the cap the target is a floor (lwm +
-// cap) and only the cursor below it counts; without the cap both cursors count,
-// which shows the capped case really exercises the cap.
-func TestBlockedByCursorScanIsBoundedByCap(t *testing.T) {
-	s := mustStore(t)
-	const backlog = 1000
-	const testCap = 50
-	base := time.Now().Add(-2 * time.Hour).UnixMilli()
-	seedRecordsAt(t, s, "metrics", backlog, base, 1000) // all well older than the 1h cutoff below
-
-	// One cursor below the capped floor (must count), one well above it but
-	// still below the true uncapped target (must NOT count while capped).
-	if !s.CursorAck("below-floor", "metrics", 30) {
-		t.Fatal("seed cursor")
-	}
-	if !s.CursorAck("above-floor", "metrics", 200) {
-		t.Fatal("seed cursor")
-	}
-
-	cfg := config.Retention{Streams: map[string]config.StreamRetention{
-		"metrics": {MaxAge: config.Duration(time.Hour)},
-	}}
-
-	// With the cap, the scan examines exactly testCap records and reports it.
-	lwm := s.LWM("metrics")
-	next := s.NextOffset("metrics")
-	liveBytes := s.StreamBytes("metrics")
-	target, clampedAtCap, hitScanCap, err := s.PolicyPruneTarget("metrics", lwm, next, time.Now(), time.Hour, 0, liveBytes, next, testCap)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if clampedAtCap {
-		t.Fatal("no cursor clamp in play here (blockedByCursor always calls with clamp=next); clampedAtCap must stay false")
-	}
-	if !hitScanCap {
-		t.Fatal("scan must report hitting the record cap — backlog (1000) far exceeds the cap (50)")
-	}
-	if want := lwm + testCap; target != want {
-		t.Fatalf("target = %d, want %d (lwm + cap: the scan must examine EXACTLY the cap's worth of records, not the full backlog)", target, want)
-	}
-
-	// Collector-level check: capped, only the below-floor cursor blocks.
-	c := newStoreCollector(s, cfg, testCap)
-	if blocked := c.blockedByCursor("metrics", time.Now()); blocked != 1 {
-		t.Fatalf("colca_retention_blocked_by_cursor (capped) = %d, want 1 (only the below-floor cursor; the above-floor cursor sits beyond the scan cap and must not be reported as blocking)", blocked)
-	}
-
-	// Without a cap the whole backlog is scanned and both cursors block.
-	uncapped := newStoreCollector(s, cfg, 0)
-	if blocked := uncapped.blockedByCursor("metrics", time.Now()); blocked != 2 {
-		t.Fatalf("colca_retention_blocked_by_cursor (uncapped, scanCap=0) = %d, want 2 (sanity check that the capped case above is actually exercising the cap, not returning 1 for some unrelated reason)", blocked)
+		t.Fatalf("colca_retention_blocked_by_cursor = %v after the pruner set 1", blocked)
 	}
 }
 

@@ -749,37 +749,36 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				return
 			}
 		}
-		filter := func(record store.StoredRecord) bool {
+		// head decides from a record's topic and stored signal id, which a scan
+		// reads without decoding the record: the records it rejects, most of
+		// what a narrow filter crosses, cost no decode. filter applies it too,
+		// so it decides alone on records whose head could not be read cheaply.
+		head := func(topic, signalID string) bool {
 			// A record stored with its signal answers the signal filter without a
 			// parse or a payload decode, so the records it skips cost little.
-			if hasSignalFilter && record.SignalID != "" {
-				if _, wanted := signalSet[record.SignalID]; !wanted {
+			if hasSignalFilter && signalID != "" {
+				if _, wanted := signalSet[signalID]; !wanted {
 					return false
 				}
 			}
-			if stream == uns.StreamFor(uns.ClassCmd) && e.CommandRetired(record) {
-				return false
-			}
-			topic := record.Topic
 			if len(topicFilters) > 0 && !slices.ContainsFunc(topicFilters, func(f string) bool { return uns.MatchFilter(f, topic) }) {
 				return false
 			}
-			var parsed uns.Parsed
-			var parseErr error
-			if contractSet != nil {
-				parsed, parseErr = uns.Parse(topic)
-				if parseErr != nil || !contractSet[parsed.Contract] {
+			if contractSet != nil || prefix != "" {
+				// prefix filters on the uns hierarchy path, not on the raw topic.
+				parsed, err := uns.Parse(topic)
+				if err != nil || (contractSet != nil && !contractSet[parsed.Contract]) || !strings.HasPrefix(parsed.Path, prefix) {
 					return false
 				}
 			}
-			if prefix != "" && parsed.Contract == "" {
-				// prefix filters on the uns hierarchy path, not on the raw topic.
-				parsed, parseErr = uns.Parse(topic)
-			}
-			if prefix != "" && (parseErr != nil || !strings.HasPrefix(parsed.Path, prefix)) {
+			return c.admin || uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic)
+		}
+		filter := func(record store.StoredRecord) bool {
+			if !head(record.Topic, record.SignalID) {
 				return false
 			}
-			if !c.admin && !uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic) {
+			topic := record.Topic
+			if stream == uns.StreamFor(uns.ClassCmd) && e.CommandRetired(record) {
 				return false
 			}
 			if !c.admin && !uns.MayReadFetchLogsAck(e.Scope(), c.entry, topic, record.ActorID) {
@@ -788,10 +787,8 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			if !hasSignalFilter || record.SignalID != "" {
 				return true
 			}
-			if parseErr != nil || parsed.Contract == "" {
-				parsed, parseErr = uns.Parse(topic)
-			}
-			if parseErr != nil || parsed.Contract != "_Metric" {
+			parsed, err := uns.Parse(topic)
+			if err != nil || parsed.Contract != "_Metric" {
 				return false
 			}
 			var metric struct {
@@ -845,7 +842,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 		}
 		if q.Get("tail") == "" {
-			e.CursorFilters().Remember(cursor, stream, filter)
+			// The key names what decides the filter, so the watchdog rescans the
+			// cursor only when one of them changes, not on every page.
+			key, _ := json.Marshal([]any{callerLimitKey(c), slices.Sorted(maps.Keys(contractSet)), prefix,
+				topicFilters, slices.Sorted(maps.Keys(signalSet))})
+			e.CursorFilters().Remember(cursor, stream, cursorwatch.Filter{Key: string(key), Head: head, Keep: filter})
 		}
 		var recs []store.StoredRecord
 		var next uint64
@@ -853,9 +854,9 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		if hasSignalFilter {
 			// The signal index reads only the wanted signals' records, so a
 			// consumer of a few signals does not pay for the whole stream.
-			recs, next, err = e.Store().ReadSignals(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, slices.Collect(maps.Keys(signalSet)), filter)
+			recs, next, err = e.Store().ReadSignals(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, slices.Collect(maps.Keys(signalSet)), head, filter)
 		} else {
-			recs, next, err = e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, filter)
+			recs, next, err = e.Store().ReadRecordsBounded(r.Context(), stream, from, limit, fetchScanBudget, pageMaxBytes, head, filter)
 		}
 		if r.Context().Err() != nil {
 			return // the caller is gone; nobody reads the page
@@ -878,7 +879,13 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 		// store names the store incarnation the page was read from; a consumer
 		// passes it back on /ack so an ack can never land on a store that was
 		// recreated in between.
+		// head is the stream's next offset, read after the page. more says the page
+		// stopped before it: on a limit, the byte bound or the scan budget. An empty
+		// page with more=true was cut by the budget, not caught up, and the consumer
+		// fetches again from next at once instead of waiting for a wake-up.
+		streamHead := e.Store().NextOffset(stream)
 		resp := map[string]any{"records": out, "next": next, "from": from,
+			"head": streamHead, "more": next < streamHead,
 			"store": e.Store().StoreID()}
 		// Without a position of its own the consumer started at the LWM; a prune
 		// between that read and this check moved nothing it was owed.
@@ -1029,13 +1036,27 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				return
 			}
 		}
+		// The caller's grants decide on each entry from the topic in its key,
+		// before the store reads the entry: what the caller may not read is never
+		// decoded. Such entries still count towards the page size.
+		denied := 0
+		var keep func(string) bool
+		if !c.admin {
+			keep = func(topic string) bool {
+				if uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, topic) {
+					return true
+				}
+				denied++
+				return false
+			}
+		}
 		var entries []store.KVEntry
 		var folders []string
 		var next string
 		if withFolders {
-			entries, folders, next, err = e.Store().KVScanLevel(prefix, after, pageSize, pageMaxBytes, contracts, depth)
+			entries, folders, next, err = e.Store().KVScanLevel(prefix, after, pageSize, pageMaxBytes, contracts, depth, keep)
 		} else {
-			entries, next, err = e.Store().KVScanPageDepth(prefix, after, pageSize, pageMaxBytes, contracts, depth)
+			entries, next, err = e.Store().KVScanPageDepth(prefix, after, pageSize, pageMaxBytes, contracts, depth, keep)
 		}
 		if err != nil {
 			if errors.Is(err, store.ErrInvalidPageToken) {
@@ -1049,12 +1070,7 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		out := make([]map[string]any, 0, len(entries))
-		denied := 0
 		for _, en := range entries {
-			if !c.admin && !uns.Authorize(e.Scope(), c.entry, uns.ActReadRecord, en.Topic) {
-				denied++
-				continue
-			}
 			out = append(out, kvEntryJSON(en))
 		}
 		if denied > 0 {
@@ -1342,6 +1358,39 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 				"previous_store", previous, "store", id)
 			writeJSON(w, http.StatusOK, map[string]any{"store": id, "previous": previous})
 		}))
+
+		if uplink != nil {
+			// Records the parent refused alone past the uplink grace, set aside so their lane
+			// moves on (repl/setaside.go). They did not reach the parent; listing and clearing
+			// them is the operator's part.
+			mux.HandleFunc("GET /uplink/set-aside", adminFor(limitClassScan, scanPolicy, func(w http.ResponseWriter, r *http.Request) {
+				records, err := uplink.SetAsideRecords(e.Store())
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+					return
+				}
+				if records == nil {
+					records = []store.SetAsideRecord{}
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"records": records})
+			}))
+			mux.HandleFunc("DELETE /uplink/set-aside/{stream}/{offset}", adminFor(limitClassAdmin, adminPolicy, func(w http.ResponseWriter, r *http.Request) {
+				offset, err := strconv.ParseUint(r.PathValue("offset"), 10, 64)
+				if err != nil || offset == 0 {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": "offset must be a positive integer"})
+					return
+				}
+				found, err := uplink.ClearSetAside(e, r.PathValue("stream"), offset)
+				switch {
+				case err != nil:
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				case !found:
+					writeJSON(w, http.StatusNotFound, map[string]any{"error": "no record set aside at that stream and offset"})
+				default:
+					writeJSON(w, http.StatusOK, map[string]any{"cleared": true})
+				}
+			}))
+		}
 
 		mux.HandleFunc("GET /debug/state", adminFor(limitClassCheap, cheapPolicy, func(w http.ResponseWriter, r *http.Request) {
 			streams := map[string]any{}

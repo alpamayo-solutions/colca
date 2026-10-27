@@ -20,7 +20,7 @@ A caller is one of:
 | `GET /metrics` | anyone | | Prometheus text |
 | `POST /publish` | machine, service, person (commands), admin | `{"topic":"…","payload":{…}}` | `{"stream":"…","offset":N,"topic":"…"}`, or `202` `{"stream":"logs","topic":"…","withheld":"…"}` without `offset` |
 | `POST /publish/batch` | machine, service | `{"records":[{"topic":"…","payload":{…}},…]}` (1–5000 records, 16 MiB) | `{"accepted":N,"results":[{"stream":"…","offset":N} or {"stream":"logs","withheld":"…"} or {"error":"…","reason":"…"},…]}` |
-| `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N,"store":"ID"}` |
+| `GET /fetch` | machine, service, person, admin | `?stream=S&cursor=NAME&max=100&prefix=P&contract=_Annotation&from=N` | `{"records":[{"offset":N,"topic":"…","payload":{…},"ts":T}],"next":N,"from":N,"head":N,"more":false,"store":"ID"}` |
 | `GET /watch` | machine, service, person, admin | `?stream=S&stream=S2&interval_ms=100` | NDJSON, one line per change: `{"streams":["S"],"next":{"S":N}}` |
 | `POST /ack` | owner of the cursor, admin; to retire a stale cursor also `cmd:<node>/#:admin` | `{"cursor":"NAME","stream":"S","offset":N}` (optionally `"store":"ID"`), or `{"cursor":"NAME","stream":"S","delete":true}` to retire it | `{"moved":true}` or `{"deleted":true}`; `409` store changed, `422` past the head |
 | `GET /backlog` | local service (`?prefix=` required), admin | `?prefix=c/projector/` | `{"queues":[{"cursor":"…","stream":"S","position":N,"head":N,"lag_records":N,"last_ack_ms":T,"stale":false,"read_since_start":true}]}` |
@@ -84,6 +84,11 @@ A caller is one of:
   of stored data, and `next` resumes at that record or entry. A page always
   holds at least one. A short page is therefore no sign of the end: for
   `/fetch` that is `next` reaching the head, for `/kv` an empty `next`.
+- `/fetch` reports `head`, the stream's next offset when the page was read,
+  and `more`, true when the page stopped before it. A filtered page also
+  stops after the node examined 20,000 records, so it can be empty with
+  `more: true`: nothing matched yet, read on from `next` at once. `more:
+  false` means caught up; wait for the next `/watch` hint.
 - `contract` on `/kv` and `/fetch` may be repeated. An unknown name is a `400`.
   On `/kv` the node keeps an index by contract, so a filtered read costs what
   it returns, not what lies under the prefix. On `/fetch` the other records
@@ -260,6 +265,8 @@ its stream from the pruner. Nothing removes them on its own.
 | `DELETE /enroll/{ulid}` | `?retire=true` | `{"revoked":true,"offset":N}`; the same batch retires the records the identity authored about itself — its `_ServiceDetails`, at every mount it published one at. Only that identity may write them, so one left behind could never be retired by anyone. A plain revoke keeps what a child node replicated up: the child may be enrolled again and resumes from its own cursor. With `retire=true` (kind `node` only, `409` otherwise; `400` on a value that is not a boolean) the same batch also tombstones every current-state record the child and the nodes below it replicated, clears its replication marks, and deletes its definitions cursor (`downlink-def:<ulid>`) and every cursor in its own namespace (`<ulid>/...`), so nothing it left stands as live or holds retention and the same identity enrolled later starts clean (a plain revoke keeps the definitions cursor as the child's catch-up position); the response adds `"retired":true,"records_retired":N`. The tombstones replicate up, so ancestors retire their copies too |
 | `POST /enroll/{ulid}/drain` | | `{"ulid","offset","status":"draining"}`; decommissions a child node: new commands under its mount are refused, and once its queue is delivered or expired it is retired as with `DELETE ?retire=true`. `409` for an entry that is not a node or is already draining |
 | `POST /store/incarnation` | | `{"store":"NEW","previous":"OLD"}`; gives the node's store a new incarnation id, so every child re-syncs with it, its parent clears the marks kept for it and local consumers get `store_changed` on `/ack`. For a store restored or replaced without a neighbour noticing; see [Restoring a parent from a backup](operations.md#restoring-a-parent-from-a-backup) |
+| `GET /uplink/set-aside` | | `{"records":[{"parent","stream","offset","record","status","reason","held_since_ms","at_ms"}]}`; the records this node's uplink set aside because the parent refused each alone past the grace. They are not at the parent; see [Records the parent refuses](operations.md#records-the-parent-refuses). Only on a node with a parent |
+| `DELETE /uplink/set-aside/{stream}/{offset}` | | `{"cleared":true}`, `404` when nothing is set aside there; clears the copy, and the `uplink_set_aside` finding once none is left |
 | `GET /debug/state` | | the next offset of every stream |
 
 A node that is reachable only through the tree is administered with
@@ -292,13 +299,32 @@ compare-and-swap.
 | `403` | the caller may not do this |
 | `413` | body too large; a record over the record cap has `reason` `too_large` |
 | `422` | bad topic, unknown contract or invalid payload, with `reason` when the node names one |
-| `429` | rate limit; see `Retry-After` |
+| `429` | a request limit; `code` in the body says which (below) |
 | `503` | `/publish`: the record was admitted but not written (`reason` `not_written`); send it again |
 
 Every route belongs to a rate class. Authenticated callers get their own
 quota; the local door and unauthenticated traffic are limited per source
 address. Per caller: `/kv` 5 requests a second (burst 10), `/fetch` 25 (burst
-50), `/watch` 2 new connections a second (burst 8) and 8 open at a time.
+50) and 16 open at a time, `/watch` 2 new connections a second (burst 8) and 8
+open at a time.
+
+A `429` body names the bound that refused the request:
+
+```json
+{"error": "too many concurrent requests: …", "code": "concurrency_limit", "class": "watch", "limit": 8}
+```
+
+| `code` | Meaning | What helps |
+|---|---|---|
+| `rate_limit` | the caller's request rate for the class is used up | wait `Retry-After` seconds (only this code sets it) |
+| `concurrency_limit` | the caller already holds `limit` open requests of the class | close one, e.g. a `/watch` it no longer reads; retrying sooner does not help |
+| `global_concurrency_limit` | all callers together hold `limit` open requests of the class | back off with your own delay |
+| `caller_limit` | the node tracks as many callers as it may | back off with your own delay |
+
+Only `rate_limit` carries `Retry-After`: for the others no wait is known, so a
+client backs off on its own schedule instead of retrying every second against
+a bound that waiting does not clear. The Go door client (`door.RetryDelay`)
+falls back to its jittered backoff when the header is absent.
 
 ## MQTT reason codes
 

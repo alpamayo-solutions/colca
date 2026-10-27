@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -337,6 +338,48 @@ func TestFetchWithASignalFilterReachesASparseMatchInOnePage(t *testing.T) {
 	records := out["records"].([]any)
 	if len(records) != 1 || records[0].(map[string]any)["offset"] != float64(skipped+1) || out["next"] != float64(skipped+2) {
 		t.Fatalf("first page = %v, want the match at offset %d and next %d", out, skipped+1, skipped+2)
+	}
+}
+
+// An empty page the scan budget cut short says so: more is true and head lies
+// past next, so the consumer reads on at once. A caught-up page says more=false
+// with next at the head, on the plain path and the signal index path alike.
+func TestFetchTellsABudgetCutPageFromACaughtUpOne(t *testing.T) {
+	a := newAPI(t)
+	skipped := fetchScanBudget + 100
+	recs := make([]store.Record, 0, skipped)
+	for i := 0; i < skipped; i++ {
+		recs = append(recs, store.Record{Topic: "colca/v1/_Metric/n-test/line1/other", Payload: []byte(`{"signal_id":"other","value":1}`), TS: int64(i)})
+	}
+	if _, _, err := a.st.Append("metrics", recs); err != nil {
+		t.Fatal(err)
+	}
+	head := float64(skipped + 1)
+
+	resp, out := req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=cut&max=10&topic="+
+		url.QueryEscape("colca/v1/_Metric/n-test/line1/wanted"), "tok", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fetch = %d: %v", resp.StatusCode, out)
+	}
+	if len(out["records"].([]any)) != 0 || out["next"] != float64(fetchScanBudget+1) || out["head"] != head || out["more"] != true {
+		t.Fatalf("budget-cut page = next %v head %v more %v, want empty, next %d, head %v, more true",
+			out["next"], out["head"], out["more"], fetchScanBudget+1, head)
+	}
+
+	resp, out = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=cut&max=10&from="+
+		fmt.Sprint(fetchScanBudget+1)+"&topic="+url.QueryEscape("colca/v1/_Metric/n-test/line1/wanted"), "tok", nil)
+	if resp.StatusCode != http.StatusOK || out["next"] != head || out["head"] != head || out["more"] != false {
+		t.Fatalf("caught-up page = %d next %v head %v more %v, want next = head = %v, more false",
+			resp.StatusCode, out["next"], out["head"], out["more"], head)
+	}
+
+	resp, out = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=sig&max=10&signal_id=absent", "tok", nil)
+	if resp.StatusCode != http.StatusOK || out["next"] != head || out["head"] != head || out["more"] != false {
+		t.Fatalf("signal page = %d next %v head %v more %v, want caught up", resp.StatusCode, out["next"], out["head"], out["more"])
+	}
+	resp, out = req(t, client(nil), "GET", a.url+"/fetch?stream=metrics&cursor=sig2&max=5&signal_id=other", "tok", nil)
+	if resp.StatusCode != http.StatusOK || len(out["records"].([]any)) != 5 || out["more"] != true {
+		t.Fatalf("limited signal page = %d records %d more %v, want 5 and more true", resp.StatusCode, len(out["records"].([]any)), out["more"])
 	}
 }
 
@@ -749,7 +792,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	}
 	body = withoutStore(body)
 	want := `{"from":2,"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
-		`"next":6,"records":[` + surviving + `]}` + "\n"
+		`"head":6,"more":false,"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fetch gap wire shape:\n got %s\nwant %s", body, want)
 	}
@@ -766,7 +809,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	// added after retention ran missed nothing it was promised.
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh", "tok", "")
 	body = withoutStore(body)
-	want = `{"from":4,"next":6,"records":[` + surviving + `]}` + "\n"
+	want = `{"from":4,"head":6,"more":false,"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fresh cursor must start at the LWM without a gap:\n got %s\nwant %s", body, want)
 	}
@@ -776,7 +819,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=fresh&from=2", "tok", "")
 	body = withoutStore(body)
 	want = `{"from":2,"gap":{"stream":"metrics","from_offset":2,"to_offset":3,"first_ts":1000,"last_ts":3000,"approx":false},` +
-		`"next":6,"records":[` + surviving + `]}` + "\n"
+		`"head":6,"more":false,"next":6,"records":[` + surviving + `]}` + "\n"
 	if body != want {
 		t.Fatalf("fresh cursor read-ahead below the LWM must see the gap:\n got %s\nwant %s", body, want)
 	}
@@ -789,7 +832,7 @@ func TestFetchGapExactWireShape(t *testing.T) {
 	}
 	_, body = raw(t, admin, "GET", a.url+"/fetch?stream=metrics&cursor=lag", "tok", "")
 	body = withoutStore(body)
-	want = `{"from":5,"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
+	want = `{"from":5,"head":6,"more":false,"next":6,"records":[{"actor_id":"","actor_kind":"","actor_label":"","offset":5,"origin_offset":5,"payload":{"v":5},"topic":"` + topic + `","ts":5000,"written_by":""}]}` + "\n"
 	if body != want {
 		t.Fatalf("after ack past LWM the gap object must disappear:\n got %s\nwant %s", body, want)
 	}
@@ -1313,6 +1356,50 @@ func TestRequestLimitReturns429RetryAfterAndMetric(t *testing.T) {
 	line := `colca_http_request_limited_total{class="scan",door="http"}`
 	if got := metricstest.Value(t, m, line); got != 1 {
 		t.Fatalf("%s = %v, want 1", line, got)
+	}
+}
+
+// A caller at its /watch concurrency cap is not told to retry in a second: no
+// slot frees by waiting, only by closing one of its watches. The body names the
+// bound, so a client can tell it from a rate refusal.
+func TestAConcurrencyRefusalNamesTheCapAndCarriesNoRetryAfter(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	m := metrics.New(st, config.Retention{}, nil)
+	limiter := httplimit.New()
+	for i := 0; i < watchPolicy.PerCallerConcurrent; i++ {
+		release, ok := acquireRequest(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/watch", nil),
+			limiter, m, metrics.DoorHTTP, limitClassWatch, "caller-1", watchPolicy)
+		if !ok {
+			t.Fatalf("watch %d rejected below the cap", i)
+		}
+		t.Cleanup(release)
+	}
+	result := httptest.NewRecorder()
+	if _, ok := acquireRequest(result, httptest.NewRequest(http.MethodGet, "/watch", nil),
+		limiter, m, metrics.DoorHTTP, limitClassWatch, "caller-1", watchPolicy); ok {
+		t.Fatal("a watch beyond the per-caller cap was admitted")
+	}
+	if result.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", result.Code)
+	}
+	if v := result.Header().Get("Retry-After"); v != "" {
+		t.Fatalf("Retry-After = %q on a concurrency refusal, want none", v)
+	}
+	var body struct {
+		Code  string `json:"code"`
+		Class string `json:"class"`
+		Limit int    `json:"limit"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(result.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body %q: %v", result.Body.String(), err)
+	}
+	if body.Code != "concurrency_limit" || body.Class != "watch" || body.Limit != watchPolicy.PerCallerConcurrent || body.Error == "" {
+		t.Fatalf("body = %+v, want code concurrency_limit, class watch, limit %d", body, watchPolicy.PerCallerConcurrent)
 	}
 }
 
@@ -2888,7 +2975,7 @@ func TestACursorLagFindingIsAcceptedAndRetiredThroughTheAdminDoor(t *testing.T) 
 			return err
 		}}
 	cursor := a.m1.ULID + "/ingest"
-	a.eng.CursorFilters().Remember(cursor, "metrics", nil) // its consumer fetched since start
+	a.eng.CursorFilters().Remember(cursor, "metrics", cursorwatch.Filter{}) // its consumer fetched since start
 	var last uint64
 	_, last, err = a.st.Append("metrics", []store.Record{{Topic: "colca/v1/_Metric/n-test/m1/s1", Payload: []byte(`{"signal_id":"s1","value":1}`), TS: 1000}})
 	if err != nil {

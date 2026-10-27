@@ -277,6 +277,17 @@ identity provider, grants live in the tree, and an edge cut off from its parent
 still knows what its people may do. `colca-grantsync` keeps a Keycloak realm and
 the tree's groups in step, if you use Keycloak.
 
+`colca-grantsync` runs a cycle when the tree tells it something changed: it
+holds a `/watch` scoped to `_SystemElement` and `_Group`, so a new or retired
+element and a group definition written elsewhere are handled within a second.
+Keycloak has no push, so a tool that edits permissions, groups or role
+membership there posts `POST /sync` to the service's `HTTP_ADDR` (default
+`:9090`) to apply the edit at once. `SYNC_INTERVAL_MS` (default 5 minutes) is
+only a safety interval for Keycloak edits nobody announced; a failed cycle is
+retried sooner, backing off from 5 s up to that interval. `POST /sync` only
+schedules an idempotent cycle and bursts are merged into one cycle a second,
+so keep the address on a network only trusted tools reach.
+
 A grant change applies to open sessions as soon as the `_Group` definition
 reaches the node, not at the next token renewal. REST reads resolve the groups on
 every request. A live MQTT or WebSocket session resolves its token's groups again

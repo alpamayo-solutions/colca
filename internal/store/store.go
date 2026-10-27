@@ -139,11 +139,13 @@ type Store struct {
 	// with the count its scan started from. Guarded by mu.
 	holes map[string]uint64
 	// state guards the in-memory stream state readers need (next, lwm, bytes,
-	// the change channels and contract heads). A writer holds mu while it
-	// builds its batch and takes state only from its apply until it published
-	// the new head, so readers see records, KV and head change together, and
-	// wait for at most one apply, never for a writer's batch building or
-	// another writer queued behind it. Lock order: mu, cursorMu, state.
+	// the change channels and contract heads). An append holds mu while it
+	// builds and applies its batch and takes state only after the synced apply,
+	// to publish the new head, so a reader never waits for the disk. Readers
+	// read records only below the published head. A prune holds state across
+	// its apply: a reader must never see records gone below an LWM that was not
+	// yet raised, or it would miss them without a gap. Lock order: mu,
+	// cursorMu, state.
 	state sync.RWMutex
 	// cursorMu serialises cursor moves; they never wait for a stream write.
 	cursorMu sync.Mutex
@@ -152,6 +154,9 @@ type Store struct {
 	lwm      map[string]uint64        // low-water mark per stream: lowest retained offset
 	bytes    map[string]uint64        // live logical bytes per stream (stream key + encoded value)
 	sigFrom  map[string]uint64        // first offset per stream the signal index covers (see sigindex.go)
+	// targetFrom is the first offset per stream the target index covers (see
+	// targetindex.go).
+	targetFrom map[string]uint64
 	// appendApply is Pebble's atomic apply boundary for appends and replicated
 	// commits. Keeping the bound method injectable lets tests prove an apply
 	// failure changes neither stream nor KV, and hold a commit open.
@@ -162,6 +167,15 @@ type Store struct {
 	// appendQueue gathers concurrent Append calls into one synced commit; see
 	// appendgroup.go.
 	appendQueue groupQueue[*appendRequest]
+	// ackQueue gathers concurrent cursor acks into one synced commit; see
+	// cursorgroup.go.
+	ackQueue groupQueue[*ackRequest]
+	// ackApplyHook, when set, commits ack batches instead of the database: tests
+	// hold a commit open with it.
+	ackApplyHook func(*pebble.Batch, *pebble.WriteOptions) error
+	// compactScanned, when set, runs between Compact's scan and its batch:
+	// tests write there.
+	compactScanned func()
 	// adopted caches, per child, the store incarnation AdoptChildStore last
 	// confirmed, so the common case (unchanged) takes neither s.mu nor a read.
 	adopted sync.Map
@@ -171,6 +185,9 @@ type Store struct {
 	// cannot overwrite a newer mark; see HWMGet.
 	hwmMu sync.Mutex
 	hwms  map[replHWMKey]uint64
+	// policies caches each signal's replication decision with the KV value it
+	// was read from (see metricSourceLocalOnly). Guarded by mu.
+	policies map[string]cachedPolicy
 	// maxRecordBytes is 0 (no cap) until SetMaxRecordBytes. It is set once before
 	// the first append, so s.mu does not guard it.
 	maxRecordBytes uint64
@@ -290,6 +307,7 @@ func OpenWithOptions(dir string, o Options) (*Store, error) {
 	s := &Store{
 		db: db, health: health, next: map[string]uint64{}, lwm: map[string]uint64{}, bytes: map[string]uint64{},
 		sigFrom:     map[string]uint64{},
+		targetFrom:  map[string]uint64{},
 		holes:       map[string]uint64{},
 		appendApply: db.Apply,
 	}
@@ -325,17 +343,9 @@ func OpenWithOptions(dir string, o Options) (*Store, error) {
 			return nil, err
 		}
 	}
-	added, removed, err := s.openKVIndex()
-	if err != nil {
+	if err := s.openIndexes(); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("reconcile the KV contract index: %w", err)
-	}
-	if added > 0 || removed > 0 {
-		slog.Info("store: KV contract index reconciled", "added", added, "removed", removed)
-	}
-	if err := s.openSigIndex(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("open the signal index: %w", err)
+		return nil, fmt.Errorf("open the record indexes: %w", err)
 	}
 	id, minted, err := loadOrMintStoreID(db)
 	if err != nil {
@@ -434,25 +444,12 @@ func readCounter(db *pebble.DB, key []byte, dflt uint64, what, stream string) (u
 	return binary.BigEndian.Uint64(v), nil
 }
 
-// Close marks the contract index and the signal index complete (see
-// kvIndexCleanKey and sigIndexCleanKey) and closes the database.
+// Close closes the database. It holds the write lock while it does, so no
+// write is half way through a batch when the database goes. The indexes need
+// no mark at Close: every batch keeps them complete (see openIndexes).
 func (s *Store) Close() error {
 	s.mu.Lock()
-	kvClean, sigClean := s.kvIndexCleanValue(), s.sigIndexCleanValue()
-	s.mu.Unlock()
-	b := s.db.NewBatch()
-	err := b.Set(kvIndexCleanKey, kvClean, nil)
-	if err == nil {
-		err = b.Set(sigIndexCleanKey, sigClean, nil)
-	}
-	if err == nil {
-		err = b.Commit(pebble.Sync)
-	}
-	_ = b.Close()
-	if err != nil {
-		_ = s.db.Close()
-		return err
-	}
+	defer s.mu.Unlock()
 	return s.db.Close()
 }
 
@@ -522,6 +519,12 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 		// sigindex.go). b/{stream} does not count it: that counter is the
 		// stream's own bytes, which retention budgets against.
 		if err := b.Set(sigKey(stream, signalID, off), nil, nil); err != nil {
+			return 0, err
+		}
+	}
+	if target := recordTarget(rec.Topic); target != "" {
+		// So is the target index entry of a command (see targetindex.go).
+		if err := b.Set(targetKey(stream, target, off), nil, nil); err != nil {
 			return 0, err
 		}
 	}
@@ -615,7 +618,7 @@ func (s *Store) appendAdvancingLocked(stream string, recs []Record, adv *CursorA
 	}
 	liveBytes := s.bytes[stream] + added
 	last = off - 1
-	if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
+	if err := setHead(b, stream, off); err != nil {
 		return 0, 0, err
 	}
 	if err := b.Set(bytesKey(stream), be64(liveBytes), nil); err != nil {
@@ -629,12 +632,12 @@ func (s *Store) appendAdvancingLocked(stream string, recs []Record, adv *CursorA
 			return 0, 0, err
 		}
 	}
-	// The head is published with the records: see commitReplicated.
-	s.state.Lock()
-	defer s.state.Unlock()
+	// The head is published after the records: see commitReplicated.
 	if err := s.appendApply(b, pebble.Sync); err != nil {
 		return 0, 0, err
 	}
+	s.state.Lock()
+	defer s.state.Unlock()
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
 	s.noteContractsLocked(stream, recs)
@@ -738,18 +741,20 @@ func (s *Store) NextOffset(stream string) uint64 {
 // Read returns up to limit records with Offset >= from, optionally filtered by
 // topic. Views that need the payload use ReadRecords.
 func (s *Store) Read(stream string, from uint64, limit int, filter func(string) bool) (out []StoredRecord, next uint64, err error) {
+	var head HeadFilter
 	var recordFilter func(StoredRecord) bool
 	if filter != nil {
+		head = func(topic, _ string) bool { return filter(topic) }
 		recordFilter = func(record StoredRecord) bool { return filter(record.Topic) }
 	}
-	return s.ReadRecords(stream, from, limit, recordFilter)
+	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, 0, head, recordFilter)
 }
 
 // ReadRecords returns up to limit matching records with Offset >= from. next is
 // the last scanned position + 1, filtered records included, so a consumer of a
 // sparse view keeps moving forward.
 func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
-	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, 0, filter)
+	return s.ReadRecordsBounded(context.Background(), stream, from, limit, 0, 0, nil, filter)
 }
 
 // ReadRecordsBounded is ReadRecords that also stops after maxScan scanned
@@ -757,34 +762,51 @@ func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(S
 // maxBytes stored bytes (0: no bound; see pageBytes), and when ctx ends. A
 // filter that matches little would otherwise scan to the head in one call,
 // however long the stream; a bounded page may be empty while next still moves
-// forward.
-func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
-	iter, err := s.db.NewIter(&pebble.IterOptions{
+// forward. head, when set, skips the records it rejects without decoding them
+// (see HeadFilter); filter decides on the rest.
+func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, head HeadFilter, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
+	page := pageBytes{max: maxBytes}
+	// Bounded by the published head: a commit applies its records before it
+	// publishes their head (see commitReplicated).
+	out, next, _, _, err = readRange(ctx, s.db, stream, from, s.NextOffset(stream), limit, maxScan, &page, head, filter, nil)
+	return out, next, err
+}
+
+// readRange is ReadRecordsBounded over [from, upTo) of r that appends to out and
+// counts the records it scans. stopped is true when the limit, the scan budget
+// or the page's bytes ended the read before upTo; then next is where the next
+// page starts. Otherwise next is the offset after the last record scanned.
+func readRange(ctx context.Context, r pebble.Reader, stream string, from, upTo uint64, limit, maxScan int, page *pageBytes, head HeadFilter, filter func(StoredRecord) bool, out []StoredRecord) (_ []StoredRecord, next uint64, scanned int, stopped bool, err error) {
+	iter, err := r.NewIter(&pebble.IterOptions{
 		LowerBound: streamKey(stream, from),
-		UpperBound: streamKey(stream, ^uint64(0)),
+		UpperBound: streamKey(stream, upTo),
 	})
 	if err != nil {
-		return nil, from, err
+		return out, from, 0, false, err
 	}
 	defer iter.Close()
 	next = from
-	scanned := 0
-	page := pageBytes{max: maxBytes}
-	for iter.First(); iter.Valid() && len(out) < limit; iter.Next() {
-		if maxScan > 0 && scanned >= maxScan {
-			break
+	for valid := iter.First(); valid; valid = iter.Next() {
+		if len(out) >= limit || (maxScan > 0 && scanned >= maxScan) {
+			return out, next, scanned, true, nil
 		}
 		scanned++
 		if scanned%1024 == 0 {
 			if err := ctx.Err(); err != nil {
-				return nil, next, err
+				return nil, next, scanned, false, err
 			}
 		}
 		key := iter.Key()
 		off := binary.BigEndian.Uint64(key[len(key)-8:])
+		if head != nil {
+			if topic, signalID, ok := peekHead(iter.Value()); ok && !head(topic, signalID) {
+				next = off + 1
+				continue
+			}
+		}
 		var e recEnc
 		if err := json.Unmarshal(iter.Value(), &e); err != nil {
-			return nil, next, err
+			return nil, next, scanned, false, err
 		}
 		record := storedRecord(off, e)
 		if filter != nil && !filter(record) {
@@ -792,45 +814,32 @@ func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint
 			continue
 		}
 		if !page.take(len(iter.Value()), len(out)) {
-			break // next stays at this record
+			return out, next, scanned, true, nil // next stays at this record
 		}
 		next = off + 1
 		out = append(out, record)
 	}
 	if err := iter.Error(); err != nil {
-		return nil, next, err
+		return nil, next, scanned, false, err
 	}
-	return out, next, nil
+	return out, next, scanned, len(out) >= limit, nil
 }
 
-// FirstMatch returns the first record in [from, upTo) that filter keeps (every
-// record when filter is nil). The scan stops at upTo, so a caller bounds the
-// work per call; found is false when nothing in the range matched.
-func (s *Store) FirstMatch(stream string, from, upTo uint64, filter func(StoredRecord) bool) (rec StoredRecord, found bool, err error) {
+// FirstMatch returns the first record in [from, upTo) that head and filter
+// keep (every record when both are nil). head decides on a record before it is
+// decoded (see HeadFilter), so the records it rejects cost no decode. The scan
+// stops at upTo, so a caller bounds the work per call; found is false when
+// nothing in the range matched.
+func (s *Store) FirstMatch(stream string, from, upTo uint64, head HeadFilter, filter func(StoredRecord) bool) (rec StoredRecord, found bool, err error) {
 	if upTo <= from {
 		return StoredRecord{}, false, nil
 	}
-	iter, err := s.db.NewIter(&pebble.IterOptions{
-		LowerBound: streamKey(stream, from),
-		UpperBound: streamKey(stream, upTo),
-	})
-	if err != nil {
+	page := pageBytes{}
+	out, _, _, _, err := readRange(context.Background(), s.db, stream, from, upTo, 1, 0, &page, head, filter, nil)
+	if err != nil || len(out) == 0 {
 		return StoredRecord{}, false, err
 	}
-	defer iter.Close()
-	for iter.First(); iter.Valid(); iter.Next() {
-		key := iter.Key()
-		off := binary.BigEndian.Uint64(key[len(key)-8:])
-		var e recEnc
-		if err := json.Unmarshal(iter.Value(), &e); err != nil {
-			return StoredRecord{}, false, err
-		}
-		record := storedRecord(off, e)
-		if filter == nil || filter(record) {
-			return record, true, nil
-		}
-	}
-	return StoredRecord{}, false, iter.Error()
+	return out[0], true, nil
 }
 
 // readU64 returns the big-endian counter stored at key, or dflt when the key is
@@ -880,26 +889,12 @@ func (s *Store) CursorStart(name, stream string) (pos uint64, saved bool) {
 }
 
 // CursorAck moves the cursor forward only and reports whether it moved. The
-// cursor and its last-advance timestamp (ct/) are written in one synced batch.
+// cursor and its last-advance timestamp (ct/) are written in one synced batch,
+// which concurrent acks share (see cursorgroup.go).
 func (s *Store) CursorAck(name, stream string, off uint64) bool {
-	s.cursorMu.Lock()
-	defer s.cursorMu.Unlock()
-	if off <= s.readU64(cursorKey(name, stream), 1) {
-		return false
-	}
-	b := s.db.NewBatch()
-	defer b.Close()
-	if err := b.Set(cursorKey(name, stream), be64(off), nil); err != nil {
-		return false
-	}
-	if err := b.Set(ctKey(name, stream), be64(uint64(time.Now().UnixMilli())), nil); err != nil {
-		return false
-	}
-	if err := s.db.Apply(b, pebble.Sync); err != nil {
-		return false
-	}
-	s.signalBacklogChange()
-	return true
+	req := &ackRequest{name: name, stream: stream, off: off}
+	s.ack(req)
+	return req.moved
 }
 
 // CursorSetIfAbsent creates a cursor at off unless one exists and reports
@@ -952,14 +947,16 @@ func (s *Store) CursorDelete(name, stream string) error {
 
 // CursorMarkSeen sets ts (unix ms) as the last-advance time of a cursor that has
 // none yet, so a cursor from before ct/ timestamps gets a full staleness window
-// from its first sighting. Synced, so a restart does not reset that clock.
+// from its first sighting. It is not synced on its own: the next synced commit
+// takes it to disk, and a crash before that only costs the cursor a later
+// first sighting.
 func (s *Store) CursorMarkSeen(name, stream string, ts int64) {
 	s.cursorMu.Lock()
 	defer s.cursorMu.Unlock()
 	if s.readU64(ctKey(name, stream), 0) != 0 {
 		return
 	}
-	if err := s.db.Set(ctKey(name, stream), be64(uint64(ts)), pebble.Sync); err != nil { //nolint:gosec // an int64 timestamp stored bit for bit
+	if err := s.db.Set(ctKey(name, stream), be64(uint64(ts)), pebble.NoSync); err != nil { //nolint:gosec // an int64 timestamp stored bit for bit
 		// Not fatal, since the caller treats the cursor as fresh either way, but
 		// logged: an unpersisted sighting resets the staleness clock on restart.
 		slog.Warn("store: persisting cursor first-sighting timestamp failed",
@@ -1309,6 +1306,9 @@ type pruneStats struct {
 	// records carry it, so a prefix of 100k records costs a few megabytes.
 	index []sigEntry
 	ids   map[string]string
+	// targets names the target index entry of every command of the prefix,
+	// held like index.
+	targets []sigEntry
 }
 
 // sigEntry is one entry of the signal index.
@@ -1318,34 +1318,42 @@ type sigEntry struct {
 }
 
 // add accounts for one record of the prefix.
-func (st *pruneStats) add(off uint64, e *recEnc, size uint64) {
-	if st.pruned == 0 || e.TS < st.firstTS {
-		st.firstTS = e.TS
+func (st *pruneStats) add(off uint64, h *recHead, size uint64) {
+	if st.pruned == 0 || h.ts < st.firstTS {
+		st.firstTS = h.ts
 	}
-	if st.pruned == 0 || e.TS > st.lastTS {
-		st.lastTS = e.TS
+	if st.pruned == 0 || h.ts > st.lastTS {
+		st.lastTS = h.ts
 	}
 	st.shed += size
 	st.pruned++
-	if e.SignalID == "" {
+	if target := recordTarget(h.topic); target != "" {
+		st.targets = append(st.targets, sigEntry{signalID: st.intern(target), off: off})
+	}
+	if h.signalID == "" {
 		return
 	}
-	id, ok := st.ids[e.SignalID]
-	if !ok {
-		if st.ids == nil {
-			st.ids = map[string]string{}
-		}
-		id = e.SignalID
-		st.ids[id] = id
-	}
+	id := st.intern(h.signalID)
 	st.index = append(st.index, sigEntry{signalID: id, off: off})
+}
+
+// intern holds each id once, however many records carry it.
+func (st *pruneStats) intern(id string) string {
+	if held, ok := st.ids[id]; ok {
+		return held
+	}
+	if st.ids == nil {
+		st.ids = map[string]string{}
+	}
+	st.ids[id] = id
+	return id
 }
 
 // scanDoomed accumulates the accounting stats of the prefix [from, upTo).
 func (s *Store) scanDoomed(stream string, from, upTo uint64) (pruneStats, error) {
 	var st pruneStats
-	err := s.scanStream(stream, from, upTo, "prune", func(off uint64, e *recEnc, size uint64) bool {
-		st.add(off, e, size)
+	err := s.scanStream(stream, from, upTo, "prune", func(off uint64, h *recHead, size uint64) bool {
+		st.add(off, h, size)
 		return true
 	})
 	return st, err
@@ -1475,6 +1483,11 @@ func (s *Store) PruneScanned(scan *PruneScan, overridden []string, plan func(spa
 			return 0, err
 		}
 	}
+	for _, e := range stats.targets {
+		if err := b.Delete(targetKey(stream, e.signalID, e.off), nil); err != nil {
+			return 0, err
+		}
+	}
 	if err := b.Set(lwmKey(stream), be64(upTo), nil); err != nil {
 		return 0, err
 	}
@@ -1496,7 +1509,7 @@ func (s *Store) PruneScanned(scan *PruneScan, overridden []string, plan func(spa
 		off++
 	}
 	if off != s.next[stream] {
-		if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
+		if err := setHead(b, stream, off); err != nil {
 			return 0, err
 		}
 	}
@@ -1574,14 +1587,15 @@ func (s *Store) ClearRefreshPending(stream string) error {
 // until fn returns false. It takes no mutex; Pebble iterators are consistent
 // snapshots. A record that does not decode is an error.
 func (s *Store) ScanRecords(stream string, from, upTo uint64, fn func(off uint64, ts int64, size uint64) bool) error {
-	return s.scanStream(stream, from, upTo, "scan", func(off uint64, e *recEnc, size uint64) bool {
-		return fn(off, e.TS, size)
+	return s.scanStream(stream, from, upTo, "scan", func(off uint64, h *recHead, size uint64) bool {
+		return fn(off, h.ts, size)
 	})
 }
 
-// scanStream is ScanRecords with the whole decoded record, which is only valid
-// during the call. what names the scan in its error.
-func (s *Store) scanStream(stream string, from, upTo uint64, what string, fn func(off uint64, e *recEnc, size uint64) bool) error {
+// scanStream is ScanRecords with each record's head (see peekRecord), valid
+// only during the call. A record is decoded only when its head cannot be read
+// without. what names the scan in its error.
+func (s *Store) scanStream(stream string, from, upTo uint64, what string, fn func(off uint64, h *recHead, size uint64) bool) error {
 	if upTo <= from {
 		return nil
 	}
@@ -1596,11 +1610,11 @@ func (s *Store) scanStream(stream string, from, upTo uint64, what string, fn fun
 	for iter.First(); iter.Valid(); iter.Next() {
 		key := iter.Key()
 		off := binary.BigEndian.Uint64(key[len(key)-8:])
-		var e recEnc
-		if err := json.Unmarshal(iter.Value(), &e); err != nil {
+		h, err := headOf(iter.Value())
+		if err != nil {
 			return fmt.Errorf("decode record %q during %s: %w", key, what, err)
 		}
-		if !fn(off, &e, uint64(len(key)+len(iter.Value()))) {
+		if !fn(off, &h, uint64(len(key)+len(iter.Value()))) {
 			break
 		}
 	}
@@ -1644,7 +1658,7 @@ func (s *Store) policyScan(stream string, lwm, next uint64, now time.Time, maxAg
 	cutoff := now.UnixMilli() - maxAge.Milliseconds()
 	target = lwm
 	var shed, scanned uint64
-	err = s.scanStream(stream, lwm, next, "scan", func(off uint64, e *recEnc, size uint64) bool {
+	err = s.scanStream(stream, lwm, next, "scan", func(off uint64, h *recHead, size uint64) bool {
 		if maxScan > 0 && scanned >= maxScan {
 			hitScanCap = true // policy wants more, the scan budget forbids it
 			return false
@@ -1652,7 +1666,7 @@ func (s *Store) policyScan(stream string, lwm, next uint64, now time.Time, maxAg
 		scanned++
 		// A record without a timestamp has no age: maxAge never takes it, and so
 		// it stops the age policy there. Only maxBytes can prune past it.
-		ageWants := maxAge > 0 && e.TS > 0 && e.TS < cutoff
+		ageWants := maxAge > 0 && h.ts > 0 && h.ts < cutoff
 		sizeWants := maxBytes > 0 && liveBytes > shed+maxBytes // liveBytes−shed > maxBytes, underflow-safe
 		if !ageWants && !sizeWants {
 			return false // first record the policy keeps
@@ -1664,7 +1678,7 @@ func (s *Store) policyScan(stream string, lwm, next uint64, now time.Time, maxAg
 		shed += size
 		target = off + 1
 		if stats != nil {
-			stats.add(off, e, size)
+			stats.add(off, h, size)
 		}
 		return true
 	})
@@ -1742,15 +1756,20 @@ func (s *Store) KVVisit(prefix string, visit func(KVEntry)) error {
 // It sets no byte bound: it is for the node's own walks, which take a page and
 // let it go before the next. A page for a client is KVScanPageDepth's.
 func (s *Store) KVScanPage(prefix, after string, limit int, contracts []string) ([]KVEntry, string, error) {
-	return s.KVScanPageDepth(prefix, after, limit, 0, contracts, 0)
+	return s.KVScanPageDepth(prefix, after, limit, 0, contracts, 0, nil)
 }
 
 // KVScanPageDepth is KVScanPage limited to entries at most depth path segments
 // below prefix (0: no limit) and to maxBytes stored bytes (0: no bound; see
 // pageBytes). Deeper subtrees are skipped with a seek, not walked, so a tree
 // view reading one level pays for that level only.
-func (s *Store) KVScanPageDepth(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int) ([]KVEntry, string, error) {
-	entries, _, next, err := s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, false)
+//
+// keep, when set, decides on each entry from the topic in its key before the
+// entry is read: a reader's authorization. An entry it rejects is never
+// decoded and costs no page bytes, but counts towards limit like a returned
+// one, so a sparse grant cannot turn one page into a walk of the whole tree.
+func (s *Store) KVScanPageDepth(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int, keep func(topic string) bool) ([]KVEntry, string, error) {
+	entries, _, next, err := s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, false, keep)
 	return entries, next, err
 }
 
@@ -1760,14 +1779,14 @@ func (s *Store) KVScanPageDepth(prefix, after string, limit int, maxBytes uint64
 // call and learns which rows expand. Each folder is reported once, on the page
 // where the scan skips its subtree, and counts towards limit like an entry.
 // Folders ignore the contract filter: they describe the tree, not a contract.
-func (s *Store) KVScanLevel(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int) ([]KVEntry, []string, string, error) {
+func (s *Store) KVScanLevel(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int, keep func(topic string) bool) ([]KVEntry, []string, string, error) {
 	if depth < 1 {
 		return nil, nil, "", fmt.Errorf("store: KV level scan needs a positive depth")
 	}
-	return s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, true)
+	return s.kvScanPage(prefix, after, limit, maxBytes, contracts, depth, true, keep)
 }
 
-func (s *Store) kvScanPage(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int, withFolders bool) ([]KVEntry, []string, string, error) {
+func (s *Store) kvScanPage(prefix, after string, limit int, maxBytes uint64, contracts []string, depth int, withFolders bool, keep func(topic string) bool) ([]KVEntry, []string, string, error) {
 	if limit <= 0 {
 		return nil, nil, "", fmt.Errorf("store: KV page size must be positive")
 	}
@@ -1775,7 +1794,7 @@ func (s *Store) kvScanPage(prefix, after string, limit int, maxBytes uint64, con
 		return nil, nil, "", fmt.Errorf("store: KV depth must not be negative")
 	}
 	if len(contracts) > 0 && depth == 0 {
-		entries, next, err := s.kvScanPageIndexed(prefix, after, limit, maxBytes, contracts)
+		entries, next, err := s.kvScanPageIndexed(prefix, after, limit, maxBytes, contracts, keep)
 		return entries, nil, next, err
 	}
 	var want map[string]bool
@@ -1834,12 +1853,16 @@ func (s *Store) kvScanPage(prefix, after string, limit int, maxBytes uint64, con
 			}
 		}
 		if ok && kvContractMatches(topic, want) {
-			if !page.take(len(iter.Value()), len(out)) {
-				break // the token resumes at this entry
-			}
-			if entry, decoded := decodeKVEntry(path, node, iter.Value()); decoded {
-				out = append(out, entry)
-				matched++
+			if keep != nil && !keep(topic) {
+				matched++ // counts towards the limit, unread
+			} else {
+				if !page.take(len(iter.Value()), len(out)) {
+					break // the token resumes at this entry
+				}
+				if entry, decoded := decodeKVEntry(path, node, iter.Value()); decoded {
+					out = append(out, entry)
+					matched++
+				}
 			}
 		}
 		lastKey = append(lastKey[:0], iter.Key()...)

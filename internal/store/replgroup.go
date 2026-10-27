@@ -99,17 +99,18 @@ func (s *Store) commitReplicated(group []*replRequest) {
 	if len(committed) == 0 {
 		return
 	}
-	// Readers see a commit's records, KV and new head together: the state lock
-	// is held from the apply until the head is published. It is not held while
-	// the group is built, and cursor moves never take it.
-	s.state.Lock()
-	defer s.state.Unlock()
+	// The state lock is taken only to publish the new head, after the synced
+	// apply: readers never wait for the disk. They read records only below the
+	// published head (a reader that iterates the stream bounds itself by it), so
+	// they see a commit's records once its head is published. The KV entries a
+	// commit writes are current state and show as soon as they are applied.
+	// Cursor moves never take the state lock.
 	err := func() error {
 		for stream, off := range next {
 			if off == s.next[stream] {
 				continue
 			}
-			if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
+			if err := setHead(b, stream, off); err != nil {
 				return err
 			}
 			if err := b.Set(bytesKey(stream), be64(liveBytes[stream]), nil); err != nil {
@@ -131,6 +132,8 @@ func (s *Store) commitReplicated(group []*replRequest) {
 		return
 	}
 	s.hwmsCommitted(hwms)
+	s.state.Lock()
+	defer s.state.Unlock()
 	for stream, off := range next {
 		s.next[stream] = off
 		s.bytes[stream] = liveBytes[stream]

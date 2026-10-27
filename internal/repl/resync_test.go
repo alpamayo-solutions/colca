@@ -716,3 +716,34 @@ func asReplError(err error, target **replError) bool {
 	}
 	return ok
 }
+
+// /healthz reads the re-sync status. syncMu is held across synced writes of
+// the parent state and the uplink cursors, so the status must not wait for
+// it: a stalled disk would otherwise stall the liveness probe too.
+func TestResyncStatusDoesNotWaitForTheSyncLock(t *testing.T) {
+	r := newRestoreRig(t)
+	state := parentState{Store: r.ps.StoreID(), Resync: &Resync{
+		State: resyncReplaying, Reason: "test", ParentStore: r.ps.StoreID(), Started: time.Now().UTC(),
+		Streams: map[string]ResyncRange{"metrics": {From: 1, To: 6}},
+	}}
+	raw, _ := json.Marshal(state)
+	if err := r.cs.SetParentState(r.cl.ParentPub(), raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareUplink(r.cl, r.cs); err != nil {
+		t.Fatal(err)
+	}
+
+	r.cl.syncMu.Lock() // a writer in the middle of a synced write
+	defer r.cl.syncMu.Unlock()
+	got := make(chan *Resync, 1)
+	go func() { got <- r.cl.ResyncStatus(r.cs) }()
+	select {
+	case status := <-got:
+		if status == nil || status.State != resyncReplaying || status.Streams["metrics"].Position != 1 {
+			t.Fatalf("status = %+v, want the replaying re-sync at position 1", status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ResyncStatus waited for syncMu")
+	}
+}

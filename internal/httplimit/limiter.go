@@ -57,10 +57,39 @@ func newWithClock(maxCallers int, idleTTL time.Duration, now func() time.Time) *
 	}
 }
 
-// Acquire admits one request or returns a retry delay. release must be called
+// Reason says which bound refused a request. Only a rate refusal clears by
+// itself after a known delay; a concurrency refusal clears when the caller (or,
+// for the global bound, anyone) finishes a request it holds open, which for a
+// long-lived /watch can be never.
+type Reason string
+
+const (
+	// ReasonRate: the caller's token bucket is empty. Refusal.RetryAfter says
+	// when the next token is there.
+	ReasonRate Reason = "rate_limit"
+	// ReasonCallerConcurrency: the caller already holds Policy.PerCallerConcurrent
+	// requests of the class open.
+	ReasonCallerConcurrency Reason = "concurrency_limit"
+	// ReasonGlobalConcurrency: all callers together hold Policy.GlobalConcurrent
+	// requests of the class open.
+	ReasonGlobalConcurrency Reason = "global_concurrency_limit"
+	// ReasonCallers: the limiter tracks as many callers as it may and none of
+	// them is idle.
+	ReasonCallers Reason = "caller_limit"
+)
+
+// Refusal describes a refused request. RetryAfter is set only for ReasonRate:
+// for the other reasons no delay is known. Limit is the bound that was reached.
+type Refusal struct {
+	Reason     Reason
+	RetryAfter time.Duration
+	Limit      int
+}
+
+// Acquire admits one request or says why it did not. release must be called
 // exactly once for an admitted request; it is idempotent so a defensive double
 // defer cannot corrupt the concurrency count.
-func (l *Limiter) Acquire(class, caller string, policy Policy) (release func(), retryAfter time.Duration, ok bool) {
+func (l *Limiter) Acquire(class, caller string, policy Policy) (release func(), refusal Refusal, ok bool) {
 	now := l.now()
 	key := class + "\x00" + caller
 
@@ -74,7 +103,7 @@ func (l *Limiter) Acquire(class, caller string, policy Policy) (release func(), 
 			l.evictOldestIdle()
 		}
 		if len(l.buckets) >= l.maxCallers {
-			return nil, time.Second, false
+			return nil, Refusal{Reason: ReasonCallers, Limit: l.maxCallers}, false
 		}
 		b = &bucket{tokens: float64(policy.Burst), last: now, lastSeen: now}
 		l.buckets[key] = b
@@ -83,10 +112,10 @@ func (l *Limiter) Acquire(class, caller string, policy Policy) (release func(), 
 	l.refill(b, now, policy)
 
 	if policy.PerCallerConcurrent > 0 && b.active >= policy.PerCallerConcurrent {
-		return nil, time.Second, false
+		return nil, Refusal{Reason: ReasonCallerConcurrency, Limit: policy.PerCallerConcurrent}, false
 	}
 	if policy.GlobalConcurrent > 0 && l.global[class] >= policy.GlobalConcurrent {
-		return nil, time.Second, false
+		return nil, Refusal{Reason: ReasonGlobalConcurrency, Limit: policy.GlobalConcurrent}, false
 	}
 	if policy.RatePerSecond > 0 && policy.Burst > 0 && b.tokens < 1 {
 		missing := 1 - b.tokens
@@ -94,7 +123,7 @@ func (l *Limiter) Acquire(class, caller string, policy Policy) (release func(), 
 		if delay < time.Millisecond {
 			delay = time.Millisecond
 		}
-		return nil, delay, false
+		return nil, Refusal{Reason: ReasonRate, RetryAfter: delay, Limit: policy.Burst}, false
 	}
 
 	if policy.RatePerSecond > 0 && policy.Burst > 0 {
@@ -116,7 +145,7 @@ func (l *Limiter) Acquire(class, caller string, policy Policy) (release func(), 
 				l.global[class]--
 			}
 		})
-	}, 0, true
+	}, Refusal{}, true
 }
 
 func (l *Limiter) refill(b *bucket, now time.Time, policy Policy) {

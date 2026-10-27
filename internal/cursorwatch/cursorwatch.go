@@ -29,8 +29,16 @@ import (
 	"github.com/alpamayo-solutions/colca/internal/store"
 )
 
-// Filter keeps the records a consumer reads.
-type Filter func(store.StoredRecord) bool
+// Filter is what a consumer's fetch keeps: Head decides on a record's topic
+// and stored signal id before it is decoded (store.HeadFilter), Keep on the
+// decoded record; either may be nil. Key names the fetch's filter parameters
+// and identity: the watchdog starts a cursor's scan over only when it changes,
+// not on every fetch.
+type Filter struct {
+	Key  string
+	Head store.HeadFilter
+	Keep func(store.StoredRecord) bool
+}
 
 type key struct{ cursor, stream string }
 
@@ -51,12 +59,22 @@ type Filters struct {
 // NewFilters returns an empty set.
 func NewFilters() *Filters { return &Filters{m: map[key]remembered{}} }
 
-// Remember records the filter of a fetch on cursor. nil means every record.
+// Remember records the filter of a fetch on cursor. A consumer fetches after
+// every page with the same parameters: the generation, which makes the
+// watchdog rescan the cursor, moves only when the filter's Key changes or the
+// cursor fetches for the first time. The functions are replaced either way, so
+// the watchdog asks the latest ones (with the caller's current grants).
 func (f *Filters) Remember(cursor, stream string, filter Filter) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	k := key{cursor, stream}
+	prev, seen := f.m[k]
+	if seen && prev.filter.Key == filter.Key {
+		f.m[k] = remembered{filter: filter, gen: prev.gen}
+		return
+	}
 	f.gen++
-	f.m[key{cursor, stream}] = remembered{filter: filter, gen: f.gen}
+	f.m[k] = remembered{filter: filter, gen: f.gen}
 	f.changed.Notify()
 }
 

@@ -14,6 +14,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 
@@ -90,26 +91,58 @@ func (e *Engine) deliverCommand(class uns.Class, p uns.Parsed, topic string, pay
 		"topic", topic, "correlation_id", correlationIDOf(payload))
 }
 
+// owedScanBudget bounds the commands of one machine an owed check visits. The
+// check reads that machine's commands only (the store's target index), so the
+// budget is reached only by thousands of its own commands between the floor
+// and the record, and then the record is held: a held command is only
+// delayed, the replay delivers it in order.
+const owedScanBudget = 4096
+
 // owedBelow reports whether a command still owed to ulid sits below offset. The
 // floor only advances over this machine's records while the stream also carries
 // acks and other machines' commands, so a floor far below the head is normal, and
-// comparing floor with offset would hold every command. The scan ends at offset at
-// the latest. A read error answers yes: a held command is only delayed, while a
-// duplicate is a second physical action.
+// comparing floor with offset would hold every command. The read visits only
+// this machine's commands (Store.ReadTarget) from the floor, or from the first
+// command a standalone period left in force, and ends at offset at the latest.
+// A read error or an exhausted budget answers yes: a held command is only
+// delayed, while a duplicate is a second physical action.
 func (e *Engine) owedBelow(stream string, floor, offset uint64, ulid string) bool {
 	if floor >= offset {
 		return false
 	}
+	before, ok := e.commandsInForceFrom()
+	if !ok {
+		return false // no command is authorized for replay: none is owed
+	}
 	now := e.Now().UnixMilli()
-	recs, _, err := e.store.ReadRecords(stream, floor, 1, func(r store.StoredRecord) bool {
-		return !e.CommandRetired(r) && uns.OwedCommand(r.Topic, r.Payload, ulid, now)
-	})
+	recs, next, err := e.store.ReadTarget(context.Background(), stream, ulid, max(floor, before), offset, 1, owedScanBudget,
+		func(r store.StoredRecord) bool { return uns.OwedCommand(r.Topic, r.Payload, ulid, now) })
 	if err != nil {
 		e.log.Warn("command held: could not read the commands stream to check for older owed commands",
 			"ulid", ulid, "floor", floor, "offset", offset, "err", err)
 		return true
 	}
-	return len(recs) > 0 && recs[0].Offset < offset
+	if len(recs) == 0 && next < offset {
+		e.log.Warn("command held: more older commands for this machine than one check reads; the replay delivers them in order",
+			"ulid", ulid, "floor", floor, "offset", offset, "checked_up_to", next)
+		return true
+	}
+	return len(recs) > 0
+}
+
+// commandsInForceFrom is the first offset of the commands stream whose
+// commands may still be delivered: CommandRetired, read once per pass rather
+// than once per record. ok is false when the trust journal cannot be read,
+// which authorizes no replay.
+func (e *Engine) commandsInForceFrom() (uint64, bool) {
+	state, err := e.store.StandaloneGet()
+	if err != nil {
+		return 0, false
+	}
+	if state == nil {
+		return 0, true
+	}
+	return state.CommandsBefore, true
 }
 
 // ReplayOwedCommands republishes every command addressed to entry above its
@@ -139,12 +172,21 @@ func (e *Engine) ReplayOwedCommands(entry *uns.Entry) int {
 	from := e.store.CursorGet(cursor, stream)
 	head := e.store.NextOffset(stream)
 	now := e.Now().UnixMilli()
+	before, ok := e.commandsInForceFrom()
+	if !ok {
+		e.log.Warn("command replay skipped: the standalone trust journal cannot be read", "ulid", entry.ULID)
+		return 0
+	}
+	// Commands below before are retired by a standalone period (CommandRetired):
+	// the cursor moves over them like over any record not owed.
+	from = max(from, before)
 
 	published := 0
 	for from < head && published < replayCap {
-		recs, next, err := e.store.ReadRecords(stream, from, replayBatch, func(r store.StoredRecord) bool {
-			return !e.CommandRetired(r) && uns.OwedCommand(r.Topic, r.Payload, entry.ULID, now)
-		})
+		// Only this machine's commands are read (the store's target index); next
+		// moves over every other record at once.
+		recs, next, err := e.store.ReadTarget(context.Background(), stream, entry.ULID, from, head, replayBatch, 0,
+			func(r store.StoredRecord) bool { return uns.OwedCommand(r.Topic, r.Payload, entry.ULID, now) })
 		if err != nil {
 			e.log.Warn("command replay stopped: stream read failed",
 				"ulid", entry.ULID, "from", from, "err", err)

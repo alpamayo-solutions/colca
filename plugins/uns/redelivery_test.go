@@ -2,6 +2,7 @@ package uns
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -133,5 +134,26 @@ func TestCommandDeadline(t *testing.T) {
 	}
 	if !CommandWantsProgress([]byte(`{"progress":true}`)) || CommandWantsProgress([]byte(`{}`)) {
 		t.Fatal("CommandWantsProgress reads the progress flag")
+	}
+}
+
+// CommandTarget answers as Parse and ClassOf do, for well-formed and broken
+// topics alike.
+func TestCommandTargetAgreesWithParse(t *testing.T) {
+	topics := []string{
+		"colca/v1/_CmdParam/n1/m1/go", "colca/v1/_CmdAdmin/n1/x", "colca/v1/_Metric/n1/a/b",
+		"colca/v1/_Ack/n1/m1/go", "colca/v1/_CmdParam//m1", "colca/v1/_CmdParam/n1/",
+		"colca/v1/_CmdParam/n1", "colca/v1/CmdParam/n1/m1", "", "a/b/c/d/e/f/g",
+		"colca/v1/_CmdConfigure/n1/definition/upsert", "colca/v1/_Signal/n1/a",
+		"colca/v1/_CmdParam/n1/" + strings.Repeat("x", MaxTopicBytes),
+	}
+	for _, topic := range topics {
+		want, wantOK := "", false
+		if p, err := Parse(topic); err == nil && IsCommand(ClassOf(p.Contract)) && p.NodeID != "" {
+			want, wantOK = p.NodeID, true
+		}
+		if got, ok := CommandTarget(topic); got != want || ok != wantOK {
+			t.Errorf("CommandTarget(%.60q) = %q, %v; want %q, %v", topic, got, ok, want, wantOK)
+		}
 	}
 }

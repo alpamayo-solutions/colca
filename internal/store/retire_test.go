@@ -3,7 +3,9 @@ package store
 import (
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // seedReplicated applies one record a child replicated, projected into KV the way
@@ -171,4 +173,51 @@ func (s *Store) registryPutForTest(ulid string) error {
 		KVPath: "_colca/identities/" + ulid, KVNode: "01PARENT",
 	})
 	return err
+}
+
+// The selection walk runs without the store lock: the node's appends go on
+// while it walks. An entry deleted before the batch gets no tombstone.
+func TestRegistryRetireWalksWithoutTheStoreLock(t *testing.T) {
+	s := mustOpen(t)
+	if err := s.registryPutForTest("01CHILD"); err != nil {
+		t.Fatal(err)
+	}
+	seedReplicated(t, s, "01CHILD", "entities", 5, "01CHILD", "site/edge1/a", "_SystemElement", `{"id":"a"}`)
+	seedReplicated(t, s, "01CHILD", "entities", 6, "01CHILD", "site/edge1/b", "_SystemElement", `{"id":"b"}`)
+	walking, appended := make(chan struct{}), make(chan error)
+	var once sync.Once
+	streamOf := func(e KVEntry) string {
+		if e.NodeID != "01CHILD" {
+			return ""
+		}
+		once.Do(func() {
+			close(walking)
+			select {
+			case err := <-appended:
+				if err != nil {
+					t.Error(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("an append waited for the retirement's walk")
+			}
+		})
+		return "entities"
+	}
+	go func() {
+		<-walking
+		// Another writer while the walk runs: an append, and the deletion of
+		// one selected entry.
+		_, _, err := s.Append("entities", []Record{{
+			Topic: "colca/v1/_SystemElement/01CHILD/site/edge1/b", TS: 3, KVPath: "site/edge1/b", KVNode: "01CHILD", Delete: true,
+		}})
+		appended <- err
+	}()
+	_, retired, err := s.RegistryRetire("01CHILD", "entities", identityTombstone("01CHILD"), nil,
+		ChildRetirement{Child: "01CHILD", StreamOf: streamOf, TS: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retired) != 1 || !strings.HasSuffix(retired[0].Topic, "/site/edge1/a") {
+		t.Fatalf("retired %+v, want only a: b was deleted before the batch", retired)
+	}
 }

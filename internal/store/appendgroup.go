@@ -3,9 +3,10 @@ package store
 import (
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // Group commit for local appends.
@@ -53,19 +54,11 @@ func (s *Store) commitAppends(group []*appendRequest) {
 
 func writesSignal(recs []Record) bool {
 	for _, rec := range recs {
-		if rec.KVPath != "" && topicContract(rec.Topic) == "_Signal" {
+		if rec.KVPath != "" && uns.DecidesReplication(rec.Topic) {
 			return true
 		}
 	}
 	return false
-}
-
-func topicContract(topic string) string {
-	parts := strings.SplitN(topic, "/", 4)
-	if len(parts) < 4 {
-		return ""
-	}
-	return parts[2]
 }
 
 // commitAppendBatch writes group in order as one synced batch and fills in
@@ -116,13 +109,10 @@ func (s *Store) commitAppendBatch(group []*appendRequest) {
 	if len(committed) == 0 {
 		return
 	}
-	// Readers see a commit's records, KV and new head together: see
-	// commitReplicated.
-	s.state.Lock()
-	defer s.state.Unlock()
+	// Readers see the records once the head is published: see commitReplicated.
 	err := func() error {
 		for _, stream := range grown {
-			if err := b.Set(metaKey(stream), be64(next[stream]), nil); err != nil {
+			if err := setHead(b, stream, next[stream]); err != nil {
 				return err
 			}
 			if err := b.Set(bytesKey(stream), be64(liveBytes[stream]), nil); err != nil {
@@ -137,6 +127,8 @@ func (s *Store) commitAppendBatch(group []*appendRequest) {
 		}
 		return
 	}
+	s.state.Lock()
+	defer s.state.Unlock()
 	for _, stream := range grown {
 		s.next[stream] = next[stream]
 		s.bytes[stream] = liveBytes[stream]

@@ -20,20 +20,20 @@ func (s *entityStore) KVGet(topic string) ([]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	kvs, err := s.e.store.KVScan(p.Path)
+	// Every KV entry is keyed by its topic's own path and node (see
+	// engine.go's KVPath/KVNode), so the entry of a topic is one point lookup.
+	kv, ok, err := s.e.store.KVGet(p.Path, p.NodeID, topic)
 	if err != nil {
-		// The port's KVGet cannot return an error, so a failed scan reads as not found.
+		// The port's KVGet cannot return an error, so a failed read reads as not found.
 		// Logged at error level so it is never silent.
-		s.e.log.Error("kv scan failed — entity read answered not-found rather than the true state",
-			"path", p.Path, "err", err)
+		s.e.log.Error("kv read failed — entity read answered not-found rather than the true state",
+			"topic", topic, "err", err)
 		return nil, false
 	}
-	for _, kv := range kvs {
-		if kv.Topic == topic {
-			return kv.Payload, true
-		}
+	if !ok {
+		return nil, false
 	}
-	return nil, false
+	return kv.Payload, true
 }
 
 // KVScan filters the projection by contract and publishing identity, both taken

@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -158,38 +159,81 @@ func assertReconciled(t *testing.T, dir string) {
 	}
 }
 
-// A store that did not close cleanly (a crash, or a version without the index)
-// is reconciled when it opens: missing index keys are added, stale ones dropped.
-func TestOpenReconcilesAfterAnUncleanClose(t *testing.T) {
-	dir := t.TempDir()
-	s := openWithSignal(t, dir)
-	breakIndex(t, s)
-	if err := s.db.Close(); err != nil { // no clean mark
-		t.Fatal(err)
-	}
-	assertReconciled(t, dir)
-}
-
-// A clean mark whose offsets no longer match (another version appended since)
-// does not skip the reconcile.
-func TestOpenReconcilesWhenTheOffsetsMoved(t *testing.T) {
-	dir := t.TempDir()
-	s := openWithSignal(t, dir)
-	breakIndex(t, s)
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+// asLegacyStore rewrites a closed store as a version before the indexed-head
+// mark leaves it: no ix/ keys, and the clean-close marks it wrote, or none.
+func asLegacyStore(t *testing.T, dir string, kvClean, sigClean []byte) {
+	t.Helper()
 	db, err := pebble.Open(dir, &pebble.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Set(kvIndexCleanKey, []byte("older offsets"), pebble.Sync); err != nil {
+	b := db.NewBatch()
+	for _, stream := range streams {
+		if err := b.Delete(indexedKey(stream), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if kvClean != nil {
+		if err := b.Set(legacyKVCleanKey, kvClean, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sigClean != nil {
+		if err := b.Set(legacySigCleanKey, sigClean, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.Commit(pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	assertReconciled(t, dir)
+}
+
+// A store a version before the indexed-head mark wrote last is reconciled when
+// its clean-close mark is missing (it crashed) or no longer matches.
+func TestOpenReconcilesALegacyStoreWithoutAMatchingCleanMark(t *testing.T) {
+	for name, mark := range map[string][]byte{"no mark": nil, "offsets moved": []byte("older offsets")} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			s := openWithSignal(t, dir)
+			breakIndex(t, s)
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			asLegacyStore(t, dir, mark, nil)
+			assertReconciled(t, dir)
+		})
+	}
+}
+
+// A legacy store that closed cleanly keeps its indexes across the upgrade.
+func TestOpenTrustsALegacyStoreThatClosedCleanly(t *testing.T) {
+	dir := t.TempDir()
+	s := openWithSignal(t, dir)
+	appendSparse(t, s, 10, map[int]string{5: "a"})
+	breakIndex(t, s)
+	heads, sigClean := s.kvIndexHeads(), []byte(nil)
+	for _, stream := range streams {
+		sigClean = append(sigClean, be64(s.next[stream])...)
+		sigClean = append(sigClean, be64(s.lwm[stream])...)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	asLegacyStore(t, dir, heads, sigClean)
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if signals, _, _ := s.KVScanPage("", "", 10, []string{"_Signal"}); len(signals) != 0 {
+		t.Fatalf("a cleanly closed legacy store was reconciled: %v", topicsOf(signals))
+	}
+	if covered := s.sigFrom["metrics"]; covered != 1 {
+		t.Fatalf("signal coverage starts at %d, want 1", covered)
+	}
 }
 
 func countIndexKeys(t *testing.T, s *Store) int {
@@ -226,7 +270,7 @@ func TestDepthLimitedScan(t *testing.T) {
 		var out []string
 		after := ""
 		for {
-			entries, next, err := s.KVScanPageDepth(prefix, after, 1, 0, contracts, depth)
+			entries, next, err := s.KVScanPageDepth(prefix, after, 1, 0, contracts, depth, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -304,7 +348,7 @@ func TestLevelScanNamesFolders(t *testing.T) {
 		var entries, folders []string
 		after := ""
 		for {
-			page, fs, next, err := s.KVScanLevel(prefix, after, limit, 0, contracts, depth)
+			page, fs, next, err := s.KVScanLevel(prefix, after, limit, 0, contracts, depth, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -333,7 +377,40 @@ func TestLevelScanNamesFolders(t *testing.T) {
 	if entries, folders := level("plant/", 1, 1, "_Signal"); entries != "[plant/l3]" || folders != "[plant/l1 plant/l2 plant/l30]" {
 		t.Errorf("contract: entries %s folders %s", entries, folders)
 	}
-	if _, _, _, err := s.KVScanLevel("plant/", "", 10, 0, nil, 0); err == nil {
+	if _, _, _, err := s.KVScanLevel("plant/", "", 10, 0, nil, 0, nil); err == nil {
 		t.Error("depth 0 must be refused")
+	}
+}
+
+// A reader's keep decides from the key before the entry is read: an entry it
+// may not see costs the page none of its bytes, so the entries it may see
+// still fit. Rejected entries still count towards the page size. Both the
+// plain walk and the contract index walk.
+func TestKVPageDecidesTheReadersGrantsBeforeReadingAnEntry(t *testing.T) {
+	s := mustOpen(t)
+	big := `{"v":"` + strings.Repeat("x", 10<<10) + `"}`
+	if _, _, err := s.Append("entities", []Record{
+		kvRec("_Signal", "a/hidden", big),
+		kvRec("_Signal", "a/shown", `{"v":1}`),
+		kvRec("_Signal", "b/hidden", `{"v":2}`),
+		kvRec("_Signal", "b/shown", `{"v":3}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	keep := func(topic string) bool { return strings.HasSuffix(topic, "/shown") }
+	for name, contracts := range map[string][]string{"walk": nil, "index": {"_Signal"}} {
+		t.Run(name, func(t *testing.T) {
+			got, next, err := s.KVScanPageDepth("", "", 2, 1<<10, contracts, 0, keep)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].Path != "a/shown" || next == "" {
+				t.Fatalf("page = %v next=%q, want a/shown and a token: the hidden entry took no bytes but one place", topicsOf(got), next)
+			}
+			got, next, err = s.KVScanPageDepth("", next, 2, 1<<10, contracts, 0, keep)
+			if err != nil || len(got) != 1 || got[0].Path != "b/shown" || next != "" {
+				t.Fatalf("second page = %v next=%q err=%v, want b/shown and the end", topicsOf(got), next, err)
+			}
+		})
 	}
 }

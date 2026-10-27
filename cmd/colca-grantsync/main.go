@@ -10,6 +10,13 @@
 // keeps no state: two instances write the same thing, and losing it only costs
 // freshness.
 //
+// A cycle runs at start and whenever something changed: the node's /watch
+// announces a _SystemElement or _Group append, or someone posts to
+// POST /sync on HTTP_ADDR after editing Keycloak. Keycloak itself pushes
+// nothing, so SYNC_INTERVAL_MS is a safety interval for Keycloak edits nobody
+// announced; it is not how tree changes are noticed. Bursts are merged into one
+// cycle a second at most.
+//
 // Configuration is environment only:
 //
 //	COLCA_URL           root node's local API base URL     (default http://colca)
@@ -21,10 +28,10 @@
 //	KC_CLIENT_SECRET    its secret                         (required)
 //	KC_AUTHZ_CLIENT     clientId owning the resource server (default colca-authz)
 //	OWNER               deployment key for the managed marker (required)
-//	SYNC_INTERVAL_MS    poll interval                      (default 30000)
+//	SYNC_INTERVAL_MS    Keycloak safety interval           (default 300000)
 //	SYNC_ONCE           run one cycle and exit             (default false)
 //	SYNC_DRY_RUN        report, write nothing              (default false)
-//	HTTP_ADDR           /healthz + /metrics                (default :9090)
+//	HTTP_ADDR           /healthz, /metrics, POST /sync     (default :9090)
 package main
 
 import (
@@ -98,7 +105,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf("missing required environment: %s", strings.Join(missing, ", "))
 	}
 
-	ms := 30000
+	ms := 300000
 	if raw := getenv("SYNC_INTERVAL_MS"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed <= 0 {
@@ -206,8 +213,12 @@ func run() int {
 		return 0
 	}
 
-	go serve(ctx, cfg.httpAddr, registry, log)
-	log.Info("syncing grants", "interval", cfg.interval, "root", rootULID,
+	go serve(ctx, cfg.httpAddr, registry, syncer.Wake, log)
+	go node.WatchTree(ctx, syncer.Wake, func(err error) {
+		log.Warn("watching the tree failed, reconnecting — tree changes wait for the reconnect or the safety interval",
+			"error", err)
+	})
+	log.Info("syncing grants", "keycloak_safety_interval", cfg.interval, "root", rootULID,
 		"realm", cfg.kcRealm, "dry_run", cfg.dryRun)
 	syncer.Run(ctx, cfg.interval)
 	log.Info("stopped")
@@ -215,17 +226,8 @@ func run() int {
 	return 0
 }
 
-func serve(ctx context.Context, addr string, reg *prometheus.Registry, log *slog.Logger) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		// Liveness only: this service must survive Keycloak and node outages, so it does
-		// not report unhealthy because of one.
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	})
-	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-
-	srv := httpserver.NewAt(addr, mux)
+func serve(ctx context.Context, addr string, reg *prometheus.Registry, wake func(), log *slog.Logger) {
+	srv := httpserver.NewAt(addr, mux(reg, wake))
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -235,4 +237,25 @@ func serve(ctx context.Context, addr string, reg *prometheus.Registry, log *slog
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("metrics server stopped", "error", err)
 	}
+}
+
+// mux serves liveness, metrics and the sync trigger.
+func mux(reg *prometheus.Registry, wake func()) *http.ServeMux {
+	m := http.NewServeMux()
+	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		// Liveness only: this service must survive Keycloak and node outages, so it does
+		// not report unhealthy because of one.
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	m.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	// Keycloak cannot tell this service that a grant changed, so whoever edits
+	// it posts here. It only schedules a cycle, which reads both sides whole and
+	// is idempotent, and triggers are merged, so it needs no authentication
+	// beyond the address it listens on.
+	m.HandleFunc("POST /sync", func(w http.ResponseWriter, _ *http.Request) {
+		wake()
+		w.WriteHeader(http.StatusAccepted)
+	})
+	return m
 }

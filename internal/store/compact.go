@@ -1,7 +1,6 @@
 package store
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/cockroachdb/pebble/v2"
@@ -30,37 +29,53 @@ type CompactStats struct {
 //
 // The floor is the lowest cursor on the stream; for a parent, that is every
 // child's downlink-definitions cursor.
+//
+// One scan without the mutex reads each record's head (topic, payload
+// emptiness, signal id; see peekRecord), not the record. Records appended
+// meanwhile lie past the scan and can only supersede more, so the pass goes on
+// with what it read; only a prune or another removal of records since the scan
+// makes it stop, as the records it read may be gone.
 func (s *Store) Compact(stream string) (CompactStats, error) {
 	var st CompactStats
 	s.mu.Lock()
-	next, lwm := s.next[stream], s.lwm[stream]
+	next, lwm, holes := s.next[stream], s.lwm[stream], s.holes[stream]
 	s.mu.Unlock()
 	if next == 0 {
 		return st, fmt.Errorf("unknown stream %q", stream)
 	}
 
-	// Pass 1, without the mutex (same discipline as scanDoomed): the latest
-	// offset per topic, and whether that latest record is a retraction.
+	type candidate struct {
+		off, size uint64
+		topic     string
+		signalID  string
+		tombstone bool
+	}
+	// The latest offset per topic, and every record that is not, or is a
+	// retraction (which may go once every cursor passed it).
 	latest := map[string]uint64{}
-	tombstone := map[string]bool{}
-	if err := s.scanRecords(stream, lwm, next, func(off uint64, e recEnc) {
-		latest[e.Topic] = off
-		tombstone[e.Topic] = len(e.Payload) == 0
+	var records []candidate
+	if err := s.scanStream(stream, lwm, next, "compaction", func(off uint64, h *recHead, size uint64) bool {
+		latest[h.topic] = off
+		records = append(records, candidate{off: off, size: size, topic: h.topic, signalID: h.signalID, tombstone: h.emptyPayload})
+		return true
 	}); err != nil {
 		return st, err
 	}
-	if len(latest) == 0 {
+	if len(records) == 0 {
 		return st, nil
 	}
 
+	if s.compactScanned != nil {
+		s.compactScanned()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.lwm[stream] != lwm || s.next[stream] != next {
-		// The stream moved under the scan. Nothing was deleted; the next cycle
+	if s.lwm[stream] != lwm || s.holes[stream] != holes {
+		// Records the scan read may be gone. Nothing was deleted; the next cycle
 		// sees the newer state.
-		return st, fmt.Errorf("concurrent write on stream %q during compaction", stream)
+		return st, fmt.Errorf("concurrent removal on stream %q during compaction", stream)
 	}
-	floor, err := s.cursorFloorLocked(stream, next)
+	floor, err := s.cursorFloorLocked(stream, s.next[stream])
 	if err != nil {
 		return st, err
 	}
@@ -68,28 +83,25 @@ func (s *Store) Compact(stream string) (CompactStats, error) {
 	b := s.db.NewBatch()
 	defer b.Close()
 	var shed uint64
-	if err := s.scanRecords(stream, lwm, next, func(off uint64, e recEnc) {
-		last := latest[e.Topic]
+	for _, r := range records {
+		last := latest[r.topic]
 		switch {
-		case off < last:
-			// Superseded: safe whatever any cursor is doing.
-		case tombstone[e.Topic] && off < floor:
-			// A retraction every consumer has already seen.
-			st.Tombstones++
+		case r.off < last:
+			st.Superseded++ // safe whatever any cursor is doing
+		case r.tombstone && r.off < floor:
+			st.Tombstones++ // a retraction every consumer has already seen
 		default:
-			return // the live value, or a retraction somebody has not read yet
+			continue // the live value, or a retraction somebody has not read yet
 		}
-		if off < last {
-			st.Superseded++
+		shed += r.size
+		if err := b.Delete(streamKey(stream, r.off), nil); err != nil {
+			return st, err
 		}
-		key := streamKey(stream, off)
-		shed += uint64(len(key)) + e.size
-		_ = b.Delete(key, nil)
-		if e.SignalID != "" {
-			_ = b.Delete(sigKey(stream, e.SignalID, off), nil)
+		if r.signalID != "" {
+			if err := b.Delete(sigKey(stream, r.signalID, r.off), nil); err != nil {
+				return st, err
+			}
 		}
-	}); err != nil {
-		return st, err
 	}
 	if st.Superseded == 0 && st.Tombstones == 0 {
 		return st, nil
@@ -123,30 +135,4 @@ func (s *Store) cursorFloorLocked(stream string, next uint64) (uint64, error) {
 		}
 	})
 	return floor, err
-}
-
-// scanRecords walks [from, upTo) of a stream, decoding each record. fn is called
-// with the offset and the decoded record plus its encoded size.
-func (s *Store) scanRecords(stream string, from, upTo uint64, fn func(uint64, recEnc)) error {
-	iter, err := s.db.NewIter(&pebble.IterOptions{
-		LowerBound: streamKey(stream, from),
-		UpperBound: streamKey(stream, upTo),
-	})
-	if err != nil {
-		return err
-	}
-	defer iter.Close()
-	for iter.First(); iter.Valid(); iter.Next() {
-		off, ok := offsetOf(iter.Key())
-		if !ok {
-			return fmt.Errorf("corrupt stream key %q during compaction of %q", iter.Key(), stream)
-		}
-		var e recEnc
-		if err := json.Unmarshal(iter.Value(), &e); err != nil {
-			return fmt.Errorf("decode record %q during compaction: %w", iter.Key(), err)
-		}
-		e.size = uint64(len(iter.Value()))
-		fn(off, e)
-	}
-	return iter.Error()
 }

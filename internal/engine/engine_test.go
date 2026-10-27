@@ -59,12 +59,12 @@ func testIDsWithDraining() fakeIDs {
 	return f
 }
 
-func newEngine(t *testing.T) *Engine {
+func newEngine(t testing.TB) *Engine {
 	t.Helper()
 	return newEngineWithIDs(t, testIDs())
 }
 
-func newEngineWithIDs(t *testing.T, ids fakeIDs) *Engine {
+func newEngineWithIDs(t testing.TB, ids fakeIDs) *Engine {
 	t.Helper()
 	s, err := store.Open(t.TempDir())
 	if err != nil {
@@ -80,7 +80,7 @@ func newEngineWithIDs(t *testing.T, ids fakeIDs) *Engine {
 // placeTestElements authors the elements the fixture's identities bind to and
 // their grants name; without them every grant would be denied and the tests
 // would prove nothing.
-func placeTestElements(t *testing.T, e *Engine) {
+func placeTestElements(t testing.TB, e *Engine) {
 	t.Helper()
 	for _, el := range []struct{ id, path string }{{"el-m1", "m1"}, {"el-hmi", "hmi"}} {
 		topic := "colca/v1/_SystemElement/" + e.NodeID() + "/" + el.path

@@ -310,7 +310,7 @@ func (s *Store) deleteSignalRecords(stream string, doomed []doomedRec, overridde
 		}
 	}
 	if off != s.next[stream] {
-		if err := b.Set(metaKey(stream), be64(off), nil); err != nil {
+		if err := setHead(b, stream, off); err != nil {
 			return 0, 0, nil, err
 		}
 	}

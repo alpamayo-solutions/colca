@@ -175,7 +175,8 @@ type Metrics struct {
 	uplinkFail *prometheus.CounterVec
 	// colca_uplink_refused_total: the parent answered and refused the batch (4xx).
 	// That is a misconfiguration or a bug, not a network problem.
-	uplinkRefused *prometheus.CounterVec
+	uplinkRefused  *prometheus.CounterVec
+	uplinkSetAside *prometheus.CounterVec
 	// colca_uplink_logs_withheld_total: _Log records parent.logs kept home, by
 	// level. Bounded: the label is one of the five log levels.
 	uplinkLogsWithheld *prometheus.CounterVec
@@ -255,7 +256,10 @@ type Metrics struct {
 	prunedRecords *prometheus.CounterVec // colca_retention_pruned_records_total{stream}
 	prunedBytes   *prometheus.CounterVec // colca_retention_pruned_bytes_total{stream}
 	pruneRuns     *prometheus.CounterVec // colca_retention_prune_runs_total{stream}
-	gapRecords    *prometheus.CounterVec // colca_retention_gap_records_total{stream}
+	// retentionBlocked is colca_retention_blocked_by_cursor{stream}, as of the
+	// pruner's last pass over the stream.
+	retentionBlocked *prometheus.GaugeVec
+	gapRecords       *prometheus.CounterVec // colca_retention_gap_records_total{stream}
 	// The state refresh only runs on the entities stream, so these are unlabeled.
 	// A failed refresh append is internal repair, not a rejected publish.
 	refreshRecords  prometheus.Counter // colca_retention_state_refresh_records_total
@@ -370,7 +374,11 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}, []string{"level"}),
 		uplinkRefused: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_uplink_refused_total",
-			Help: "Uplink pushes the parent ANSWERED and refused (4xx), by stream — a misconfiguration or a bug between the two nodes, not an outage. Nothing is dropped: the batch is held and retried, so this counter rising is a lane that is not moving. Resets on restart.",
+			Help: "Uplink pushes the parent ANSWERED and refused (4xx), by stream — a misconfiguration or a bug between the two nodes, not an outage. The batch is held and retried, so this counter rising is a lane that is not moving; a single record refused for longer than the grace is set aside (colca_uplink_set_aside_total). Resets on restart.",
+		}, []string{"stream"}),
+		uplinkSetAside: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "colca_uplink_set_aside_total",
+			Help: "Records the parent refused alone for longer than the grace, set aside so the rest of the lane rises, by stream. Each one is NOT replicated: data loss at the parent. The copies are listed at GET /uplink/set-aside and in the node's uplink_set_aside finding. Resets on restart.",
 		}, []string{"stream"}),
 		downlinkOK: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "colca_downlink_last_success_timestamp_seconds",
@@ -532,6 +540,14 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 			Name: "colca_retention_prune_runs_total",
 			Help: "Prune cycles that actually removed at least one record, by stream. Resets on restart.",
 		}, []string{"stream"}),
+		retentionBlocked: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "colca_retention_blocked_by_cursor",
+			Help: "Cursors that clamped the stream below where the age/size policy would have pruned to, as of the " +
+				"retention pruner's last pass over the stream (it is not recomputed per scrape). The policy target is " +
+				"scanned under the pruner's record cap (store.DefaultPolicyScanCap): in an extreme backlog the scan may " +
+				"stop before the policy's true target and count only the cursors below that floor, so the value can " +
+				"undercount, never overcount. colca_stream_live_bytes is the never-capped signal for backlog pressure.",
+		}, []string{"stream"}),
 		gapRecords: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_retention_gap_records_total",
 			Help: "Durable _StreamGap records emitted by the pruner, by stream. Resets on restart.",
@@ -673,6 +689,9 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	m.prunedRecordsBy = counterChildren(m.prunedRecords, retentionStreams)
 	m.prunedBytesBy = counterChildren(m.prunedBytes, retentionStreams)
 	m.pruneRunsBy = counterChildren(m.pruneRuns, retentionStreams)
+	for _, stream := range retentionStreams {
+		m.retentionBlocked.WithLabelValues(stream) // present from the first scrape
+	}
 	m.gapRecordsBy = counterChildren(m.gapRecords, retentionStreams)
 	m.gapReceivedBy = counterChildren(m.gapReceived, streams)
 	m.gapServedBy = make(map[string]map[string]prometheus.Counter, len(streams))
@@ -724,7 +743,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 	for _, reason := range []string{"expired", "identity_removed", "retired"} {
 		m.offlineEnded.WithLabelValues(reason)
 	}
-	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused, m.uplinkLogsWithheld,
+	m.reg.MustRegister(m.ingest, m.rejected, m.uplinkOK, m.uplinkFail, m.uplinkRefused, m.uplinkSetAside, m.uplinkLogsWithheld,
 		m.downlinkOK, m.downlinkFail, m.downlinkBeyondHead, m.downlinkHeadAbsent, m.reseed,
 		m.storeReincarnated, m.childAheadOfStore, m.uplinkResyncs, m.uplinkResyncActive, m.uplinkResyncGap,
 		m.downlinkCommandKnown,
@@ -736,7 +755,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.nodeCmds, m.securityChanges, m.nodePrefix,
 		m.commandUndelivered, m.commandUnroutable, m.commandDropped, m.commandRedelivered,
 		m.bundleInfo, m.bundleContracts,
-		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.gapRecords,
+		m.prunedRecords, m.prunedBytes, m.pruneRuns, m.retentionBlocked, m.gapRecords,
 		m.refreshRecords, m.refreshSkipped, m.refreshFailures,
 		m.gapServed, m.gapReceived, m.replGapApplied, m.replIntegrityFailures,
 		m.drainsActive, m.drainPendingCommands, m.drainsCompleted,
@@ -746,7 +765,7 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		m.cursorUnreadAge,
 		m.metricsUnbound,
 		&clockCollector{clk: clk},
-		newStoreCollector(st, cfg, store.DefaultPolicyScanCap), &pebbleCollector{st: st})
+		newStoreCollector(st, cfg), &pebbleCollector{st: st})
 	return m
 }
 
@@ -1035,6 +1054,15 @@ func (m *Metrics) UplinkPushFailed(stream string) {
 	m.uplinkFail.WithLabelValues(stream).Inc()
 }
 
+// UplinkSetAside counts one record the uplink set aside after the parent kept
+// refusing it alone: a record that does not reach the parent.
+func (m *Metrics) UplinkSetAside(stream string) {
+	if m == nil {
+		return
+	}
+	m.uplinkSetAside.WithLabelValues(stream).Inc()
+}
+
 // UplinkRefused counts one uplink push the parent answered and refused. It is
 // counted in addition to UplinkPushFailed and tells a refusal from an outage.
 func (m *Metrics) UplinkRefused(stream string) {
@@ -1168,6 +1196,15 @@ func (m *Metrics) SetReseedCount(n int) {
 		return
 	}
 	m.reseed.Set(float64(n))
+}
+
+// RetentionBlockedByCursor sets how many cursors clamped the stream below the
+// policy's target in the pruner's last pass over it.
+func (m *Metrics) RetentionBlockedByCursor(stream string, cursors int) {
+	if m == nil {
+		return
+	}
+	m.retentionBlocked.WithLabelValues(stream).Set(float64(cursors))
 }
 
 // RetentionPruneRun counts one prune cycle that removed at least one record.
@@ -1477,18 +1514,15 @@ func (m *Metrics) MetricUnbound() {
 }
 
 // storeCollector derives the gauge families from the store (and, for the
-// retention families, the node's retention policy) at scrape time.
+// retention pressure, the node's retention policy) at scrape time. Each costs
+// a counter read or a point lookup: a scrape scans no stream.
 type storeCollector struct {
 	st  *store.Store
 	cfg config.Retention
-	// scanCap bounds the policy target scan in blockedByCursor. Tests pass a small
-	// value.
-	scanCap uint64
 }
 
-// newStoreCollector builds the collector; tests use it to pass a small scan cap.
-func newStoreCollector(st *store.Store, cfg config.Retention, scanCap uint64) *storeCollector {
-	return &storeCollector{st: st, cfg: cfg, scanCap: scanCap}
+func newStoreCollector(st *store.Store, cfg config.Retention) *storeCollector {
+	return &storeCollector{st: st, cfg: cfg}
 }
 
 var (
@@ -1516,14 +1550,6 @@ var (
 	descRetentionPressure = prometheus.NewDesc("colca_retention_pressure",
 		"max(age_used/max_age, live_bytes/max_bytes) for the stream's currently retained window; >1 means policy wants to prune further but is cursor-clamped.",
 		[]string{"stream"}, nil)
-	descBlockedByCursor = prometheus.NewDesc("colca_retention_blocked_by_cursor",
-		"Count of cursors currently clamping the stream below where the age/size policy would otherwise prune to. "+
-			"The policy target itself is scanned under a bounded record cap (store.DefaultPolicyScanCap): in an "+
-			"extreme backlog (e.g. a long-dead consumer) the scan may stop before reaching the policy's true target, "+
-			"in which case this gauge counts cursors below that capped FLOOR instead — every counted cursor is still "+
-			"exactly blocked, so the value can only undercount, never overcount. colca_stream_live_bytes is the "+
-			"O(1), never-capped signal for unbounded backlog pressure.",
-		[]string{"stream"}, nil)
 	descChildHWM = prometheus.NewDesc("colca_child_hwm",
 		"Highest child offset already applied, per (child, stream).",
 		[]string{"child", "stream"}, nil)
@@ -1538,7 +1564,6 @@ func (c *storeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descCursorAdvanceAge
 	ch <- descCursorNextRecordAge
 	ch <- descRetentionPressure
-	ch <- descBlockedByCursor
 	ch <- descChildHWM
 }
 
@@ -1587,8 +1612,6 @@ func (c *storeCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, s := range retentionStreams {
 		ch <- prometheus.MustNewConstMetric(descRetentionPressure, prometheus.GaugeValue,
 			c.pressure(s, now), s)
-		ch <- prometheus.MustNewConstMetric(descBlockedByCursor, prometheus.GaugeValue,
-			float64(c.blockedByCursor(s, now)), s)
 	}
 	for _, h := range c.st.HWMs() {
 		ch <- prometheus.MustNewConstMetric(descChildHWM, prometheus.GaugeValue,
@@ -1628,38 +1651,6 @@ func (c *storeCollector) oldestTS(stream string) (ts int64, ok bool) {
 		return false
 	})
 	return ts, ok
-}
-
-// blockedByCursor counts the protected cursors below the offset the age and
-// size policy would prune to, using the pruner's own store functions,
-// read-only. The scan is capped because this gauge matters most when a dead
-// consumer lets the backlog grow; past the cap the target is a floor, so the
-// count can undercount but never overcount.
-func (c *storeCollector) blockedByCursor(stream string, now time.Time) int {
-	pol := c.cfg.EffectiveStream(stream)
-	maxAge := time.Duration(pol.MaxAge)
-	maxBytes := uint64(pol.MaxBytes)
-	window := time.Duration(pol.IgnoreCursorsAfter)
-	if maxAge <= 0 && maxBytes == 0 {
-		return 0 // no policy configured: nothing can ever be "blocked"
-	}
-	lwm := c.st.LWM(stream)
-	next := c.st.NextOffset(stream)
-	liveBytes := c.st.StreamBytes(stream)
-
-	target, _, _, _ := c.st.PolicyPruneTarget(stream, lwm, next, now, maxAge, maxBytes, liveBytes, next, c.scanCap)
-	if target <= lwm {
-		return 0 // policy wants nothing further: no cursor can be "blocking"
-	}
-
-	protecting, _ := c.st.ProtectedCursors(stream, now, window)
-	blocked := 0
-	for _, cur := range protecting {
-		if cur.Position < target {
-			blocked++
-		}
-	}
-	return blocked
 }
 
 // CursorUnreadAge sets the unread age of one cursor (see the cursor watchdog).

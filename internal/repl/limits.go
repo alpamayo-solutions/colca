@@ -102,16 +102,20 @@ func replicateBodyLimit(cfg *config.Config) int64 {
 }
 
 func (s *Server) acquireRequest(w http.ResponseWriter, class, child string, policy httplimit.Policy) (func(), bool) {
-	release, retry, ok := s.limiter.Acquire(class, child, policy)
+	release, refusal, ok := s.limiter.Acquire(class, child, policy)
 	if ok {
 		return release, true
 	}
-	seconds := int(math.Ceil(retry.Seconds()))
-	if seconds < 1 {
-		seconds = 1
+	// Retry-After only where a delay is known (the rate bucket); a child refused
+	// for concurrency waits its own retry interval.
+	if refusal.Reason == httplimit.ReasonRate {
+		seconds := int(math.Ceil(refusal.RetryAfter.Seconds()))
+		if seconds < 1 {
+			seconds = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
 	}
-	w.Header().Set("Retry-After", strconv.Itoa(seconds))
-	http.Error(w, "request limit exceeded", http.StatusTooManyRequests)
+	http.Error(w, "request limit exceeded: "+string(refusal.Reason), http.StatusTooManyRequests)
 	s.metrics.HTTPRequestLimited(metrics.DoorRepl, class)
 	return nil, false
 }

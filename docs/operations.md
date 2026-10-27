@@ -28,6 +28,8 @@ alert first:
 | `colca_store_incarnation_changes_total` | rises: this node's store was restored from a backup, replaced, or given a new incarnation by an operator; its children re-sync |
 | `colca_uplink_resync_active` | stays `1`: this node is still sending again what its restored parent lacks |
 | `colca_uplink_resync_unreplayable_records_total` | above `0`: a restored parent lacks records this node had already pruned |
+| `colca_uplink_refused_total` | rises: the parent answered a push and refused it (`4xx`); the lane is held while it does |
+| `colca_uplink_set_aside_total` | above `0`: a record the parent kept refusing was set aside and is **not** at the parent (see [Records the parent refuses](#records-the-parent-refuses)) |
 | `colca_repl_child_ahead_of_store_total` | rises: a child too old to re-sync is ahead of this node's store |
 | `colca_host_clock_synchronized` | stays `0`: no NTP daemon vouches for the host's clock (see [Clocks](#clocks)) |
 | `abs(colca_clock_parent_skew_seconds)` | above `0.5` for minutes, and at once above `5`: this node and its parent disagree about the time |
@@ -79,6 +81,36 @@ of its memory limit in request bytes, a new push is answered `429` with
 child keeps the batch, waits as long as the parent asked (with jitter, so its
 siblings do not return in step) and sends it again; nothing is dropped, and
 the uplink logs a busy parent as a warning, not as a refusal.
+
+### Records the parent refuses
+
+A parent that answers a push and refuses it (a `4xx` other than `429`, `401`
+or the `409` of a changed store) has read the batch and said no: usually a
+record larger than its `limits.max_record_bytes`, or one on a stream it may not
+rise on. Order within a stream never changes, so the uplink cannot send what
+follows past a refused record. It isolates it instead: the refused batch is
+sent again at half its size, down to the one record the parent refuses, so the
+records before it rise at once. The batch grows back once the parent takes
+one.
+
+That record is held and sent again for 15 minutes, since the cause is often
+fixed on the parent (a rolling upgrade, a raised limit). After that it is set
+aside: the node copies it into its store outside the stream, moves the uplink
+cursor past it, counts `colca_uplink_set_aside_total{stream}`, logs an error,
+and writes the retained `_Finding` `<root>/v1/_Finding/<node>/uplink_set_aside`
+naming each record (stream, offset, topic, size and what the parent said). The
+lane continues behind it. **A set-aside record never reaches the parent**: it
+is lost there, and that is what the finding and the error say.
+
+The node does not send a set-aside record again by itself. The parent drops
+every child offset at or below its high-water mark, so the record cannot be
+pushed later at its own offset, and appending it again under a new offset
+could put an old state value over a newer one at the parent. What to do with
+it is the operator's decision: `GET /uplink/set-aside` on the child's admin
+door lists the copies with their payloads, and `DELETE
+/uplink/set-aside/{stream}/{offset}` clears one once it is dealt with. The
+copies survive the stream's retention; the finding retires when the last one
+is cleared.
 
 colcad and colca-historian set Go's memory limit to 75 % of their cgroup's
 memory ceiling (cgroup v1 or v2, the process's own cgroup and the smallest

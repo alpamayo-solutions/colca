@@ -80,6 +80,8 @@ type ChildRetirement struct {
 	Child string
 	// StreamOf selects the KV entries to retire. It returns the stream an entry's
 	// tombstone is appended to, the one its contract rises on, or "" to keep it.
+	// It decides from the entry's key: Path, NodeID and Topic are set, nothing
+	// else is read.
 	StreamOf func(KVEntry) string
 	// TS stamps the tombstones.
 	TS int64
@@ -88,8 +90,14 @@ type ChildRetirement struct {
 // RegistryRetire is RegistryDelete for a child node taken out of service for
 // good. In the same synced batch it appends a tombstone for every KV entry
 // ret.StreamOf selects, on the stream it names, and clears the child's
-// high-water marks and recorded store incarnation. The selection runs under the
-// store lock, so no write lands between the scan and the batch.
+// high-water marks and recorded store incarnation.
+//
+// The selection walks every KV key, without the store lock: it used to hold the
+// lock, and every append of the node, for the whole walk. Under the lock each
+// selected entry is checked to still exist, so an entry deleted meanwhile gets
+// no tombstone. The child cannot write new state meanwhile: the registry holds
+// its own lock across the call, so no push of the child is authenticated, and
+// a push already in flight may land after the batch as it always could.
 //
 // The tombstones are ordinary retained deletes: this node's uplink carries them
 // up like any record, so every ancestor retires its copies too. Clearing the
@@ -101,26 +109,37 @@ type ChildRetirement struct {
 func (s *Store) RegistryRetire(ulid, stream string, rec Record, also []Record, ret ChildRetirement) (uint64, []Record, error) {
 	kvPath, kvNode, kvTopic := rec.KVPath, rec.KVNode, rec.Topic
 	rec.KVPath, rec.KVNode = "", ""
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entries, err := s.KVScan("")
-	if err != nil {
+	type selected struct {
+		entry  KVEntry
+		stream string
+	}
+	var candidates []selected
+	if err := s.kvVisitKeys(func(path, node, topic string) {
+		if kvPath != "" && path == kvPath && node == kvNode && topic == kvTopic {
+			return // the identity's own record, retired below
+		}
+		e := KVEntry{Path: path, NodeID: node, Topic: topic}
+		if target := ret.StreamOf(e); target != "" {
+			candidates = append(candidates, selected{e, target})
+		}
+	}); err != nil {
 		return 0, nil, fmt.Errorf("scan the state %s replicated: %w", ret.Child, err)
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	batches := []streamRecords{{stream: stream, recs: append([]Record{rec}, also...)}}
 	var retired []Record
-	for _, e := range entries {
-		target := ret.StreamOf(e)
-		if target == "" {
-			continue
-		}
-		if kvPath != "" && e.Path == kvPath && e.NodeID == kvNode && e.Topic == kvTopic {
-			continue // the identity's own record, retired below
+	for _, c := range candidates {
+		e, target := c.entry, c.stream
+		if _, _, still := s.kvOffsets(e.Path, e.NodeID, e.Topic); !still {
+			continue // deleted since the walk
 		}
 		tomb := Record{Topic: e.Topic, TS: ret.TS, KVPath: e.Path, KVNode: e.NodeID, Delete: true}
 		if target == "metrics" {
 			// Decided like any metrics append, so a tombstone never rises past
 			// where its samples stopped.
+			var err error
 			if tomb.SourceLocalOnly, err = s.metricSourceLocalOnly(tomb); err != nil {
 				return 0, nil, err
 			}
@@ -203,7 +222,7 @@ func (s *Store) registryBatchLocked(batches []streamRecords, mut func(*pebble.Ba
 			liveBytes += n
 			off++
 		}
-		if err := b.Set(metaKey(sr.stream), be64(off), nil); err != nil {
+		if err := setHead(b, sr.stream, off); err != nil {
 			return 0, err
 		}
 		if err := b.Set(bytesKey(sr.stream), be64(liveBytes), nil); err != nil {
@@ -214,12 +233,12 @@ func (s *Store) registryBatchLocked(batches []streamRecords, mut func(*pebble.Ba
 	if err := mut(b); err != nil {
 		return 0, err
 	}
-	// The head is published with the records: see commitReplicated.
-	s.state.Lock()
-	defer s.state.Unlock()
+	// The head is published after the records: see commitReplicated.
 	if err := s.db.Apply(b, pebble.Sync); err != nil {
 		return 0, err
 	}
+	s.state.Lock()
+	defer s.state.Unlock()
 	for _, sr := range batches {
 		s.next[sr.stream] = next[sr.stream]
 		s.bytes[sr.stream] = live[sr.stream]
@@ -244,4 +263,22 @@ func (s *Store) RegistryScan() (map[string][]byte, error) {
 		out[ulid] = append([]byte(nil), iter.Value()...)
 	}
 	return out, iter.Error()
+}
+
+// kvVisitKeys calls fn with the path, node and topic of every KV entry, read
+// from the keys alone: no entry is decoded.
+func (s *Store) kvVisitKeys(fn func(path, node, topic string)) error {
+	lb := kvPrefix("")
+	ub := append(append([]byte{}, lb...), 0xFF)
+	iter, err := s.db.NewIter(&pebble.IterOptions{LowerBound: lb, UpperBound: ub})
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+	for iter.First(); iter.Valid(); iter.Next() {
+		if path, node, topic, ok := splitKVKey(string(iter.Key()[2:])); ok {
+			fn(path, node, topic)
+		}
+	}
+	return iter.Error()
 }

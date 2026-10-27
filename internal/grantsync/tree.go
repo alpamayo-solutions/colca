@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
+	"time"
 
 	"github.com/alpamayo-solutions/colca/door"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -114,6 +116,27 @@ func (c *NodeClient) Tree(ctx context.Context) (TreeView, error) {
 		return TreeView{}, fmt.Errorf("reading %s/kv: %w", c.BaseURL, err)
 	}
 	return ParseKV(entries), nil
+}
+
+// treeStreams are the streams the tree contracts are stored on, each once.
+func treeStreams() []string {
+	var out []string
+	for _, contract := range treeContracts {
+		if stream := uns.StreamFor(uns.ClassOf(contract)); stream != "" && !slices.Contains(out, stream) {
+			out = append(out, stream)
+		}
+	}
+	return out
+}
+
+// WatchTree calls changed whenever the node announces an append of a tree
+// contract, and once per (re)connection, since the first hint of every watch
+// names each stream: a change missed while disconnected is read then. It
+// returns when ctx ends; a dropped watch is reconnected with a backoff, and
+// failed hears why.
+func (c *NodeClient) WatchTree(ctx context.Context, changed func(), failed func(error)) {
+	req := door.WatchRequest{Streams: treeStreams(), Contracts: treeContracts, Interval: time.Second}
+	c.door().WatchForeverFor(ctx, req, time.Second, func(door.Hint) { changed() }, failed)
 }
 
 // ULID asks the node who it is, so the service does not have to be told.

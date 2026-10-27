@@ -64,7 +64,7 @@ type LogReader interface {
 	SeekTS(stream string, ts int64) (uint64, error)
 	LWM(stream string) uint64
 	NextOffset(stream string) uint64
-	EachRecord(stream string, from, upTo uint64, fn func(store.StoredRecord) bool) error
+	EachRecord(stream string, from, upTo uint64, head func(off uint64, topic string, ts int64) (decode, more bool), fn func(store.StoredRecord) bool) error
 	MaxRecordBytes() uint64
 }
 
@@ -220,20 +220,26 @@ func fetchLogs(r LogReader, q fetchLogsQuery, now time.Time, budget fetchLogsBud
 	last := start - 1
 	used, scanned := 0, 0
 	stopped := false // a budget ended the page before the window did
-	err = r.EachRecord(stream, start, head, func(rec store.StoredRecord) bool {
+	// The window and the filters decide on a record's topic and timestamp,
+	// which the store reads without decoding the record: only the records the
+	// page returns are decoded.
+	decide := func(off uint64, topic string, ts int64) (decode, more bool) {
 		if scanned >= budget.scan {
 			stopped = true
-			return false
+			return false, false
 		}
 		scanned++
-		if rec.TS >= doneAt {
+		if ts >= doneAt {
 			res.Complete = true
-			return false
+			return false, false
 		}
-		if rec.TS < q.from || rec.TS >= q.to || !q.matches(rec.Topic) {
-			last = rec.Offset
-			return true
+		if ts < q.from || ts >= q.to || !q.matches(topic) {
+			last = off
+			return false, true
 		}
+		return true, true
+	}
+	err = r.EachRecord(stream, start, head, decide, func(rec store.StoredRecord) bool {
 		entry := FetchLogsRecord{Offset: rec.Offset, TS: rec.TS, Topic: rec.Topic, Payload: rec.Payload}
 		if !json.Valid(rec.Payload) || nestedDeeperThan(rec.Payload, MaxPayloadDepth-fetchLogsEntryDepth) {
 			entry.Payload, entry.Truncated = nil, true
