@@ -987,3 +987,34 @@ func TestReadAuthorizedAct(t *testing.T) {
 		}
 	}
 }
+
+// What a door witnesses about a person at a command's place: read where their
+// read zones cover it, and each cmd class a grant covers there -- not one held
+// on another element.
+func TestClassesAtTheCommandsPlace(t *testing.T) {
+	const alarm = "01HALARM0000000000000000AA"
+	sub := "werk1/cnc5/" + alarm + "/unsubscribe"
+	cases := []struct {
+		name   string
+		grants []string
+		want   string
+	}{
+		{"reader", []string{readAt("werk1/cnc5")}, "read"},
+		{"reader who configures here", []string{readAt("werk1/cnc5"), cmdAt("werk1", "configure,operate")}, "configure,operate,read"},
+		{"configure on another element", []string{readAt("werk1/cnc5"), cmdAt("werk1/cnc6", "configure")}, "read"},
+		{"read elsewhere", []string{readAt("werk1/cnc6")}, ""},
+	}
+	for _, c := range cases {
+		got := strings.Join(ClassesAt(ns, entry("", c.grants...), "_CmdOperate", sub), ",")
+		if got != c.want {
+			t.Errorf("%s: ClassesAt = %q, want %q", c.name, got, c.want)
+		}
+	}
+	// Any other command is witnessed at its own path.
+	if got := strings.Join(ClassesAt(ns, entry("", cmdAt("werk1/cnc5", "param")), "_CmdParam", "werk1/cnc5/speed/set"), ","); got != "param" {
+		t.Errorf("ClassesAt for a param command = %q, want param", got)
+	}
+	if got := ClassesAt(ns, nil, "_CmdOperate", sub); got != nil {
+		t.Errorf("ClassesAt for no actor = %v", got)
+	}
+}

@@ -60,6 +60,11 @@ type Record struct {
 	// (`email_verified: true`) when they sent this command through a token
 	// door; "" for every other record. It authorizes nothing.
 	ActorEmail string `json:"actor_email,omitempty"`
+	// ActorClasses are the classes the node that admitted this command
+	// witnessed the person holding at its place (read, acknowledge, annotate,
+	// param, operate, maintain, configure, admin), sorted; empty for every
+	// other record.
+	ActorClasses []string `json:"actor_classes,omitempty"`
 }
 
 // Gap is the contiguous pruned stream prefix a cursor can no longer read.

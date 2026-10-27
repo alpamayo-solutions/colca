@@ -65,6 +65,9 @@ type Record struct {
 	// ActorEmail is the person's verified address from their token, kept with
 	// the command for the service that applies it where it executes.
 	ActorEmail string `json:"ae,omitempty"`
+	// ActorClasses are the classes the admitting node witnessed the person
+	// holding at the command's place, kept with the command like ActorEmail.
+	ActorClasses []string `json:"acs,omitempty"`
 	// Door names the door that admitted a command on this node ("client" or
 	// "human"), where its sender's grants were checked. It is empty for a command
 	// that came down from the parent or through the admin door, and never leaves
@@ -94,6 +97,7 @@ type StoredRecord struct {
 	ActorGroups     []string
 	ActorClient     string
 	ActorEmail      string
+	ActorClasses    []string
 	// Door is Record.Door as stored.
 	Door string
 	// SignalID is the signal of a _Metric record, "" for other records and for
@@ -473,6 +477,7 @@ type recEnc struct {
 	ActorGroups     []string `json:"ag,omitempty"`
 	ActorClient     string   `json:"ac,omitempty"`
 	ActorEmail      string   `json:"ae,omitempty"`
+	ActorClasses    []string `json:"acs,omitempty"`
 	Door            string   `json:"door,omitempty"`
 	SignalID        string   `json:"sid,omitempty"`
 	// size is the encoded length of this record as stored, set by scanRecords for
@@ -491,13 +496,14 @@ type kvEnc struct {
 	ActorKind    string `json:"ak,omitempty"`
 }
 
-// actorEmail is the person's verified address as this record keeps it: on a
-// command only (uns.KeepsActorEmail), whatever its attribution carried.
-func actorEmail(rec Record) string {
-	if rec.ActorEmail == "" || !uns.KeepsActorEmail(rec.Topic) {
-		return ""
+// actorWitness is the person's verified address and witnessed classes as this
+// record keeps them: on a command only (uns.KeepsActorWitness), whatever its
+// attribution carried.
+func actorWitness(rec Record) (string, []string) {
+	if (rec.ActorEmail == "" && len(rec.ActorClasses) == 0) || !uns.KeepsActorWitness(rec.Topic) {
+		return "", nil
 	}
-	return rec.ActorEmail
+	return rec.ActorEmail, rec.ActorClasses
 }
 
 // addRecord writes one stream record and its optional KV projection into the
@@ -513,11 +519,12 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 	if _, ok := uns.FetchLogsAck(rec.Topic); ok && signalID == "" {
 		signalID = uns.FetchLogsAckKey // indexed for its short retention (see sigindex.go)
 	}
+	email, classes := actorWitness(rec)
 	val, err := json.Marshal(recEnc{
 		SourceLocalOnly: rec.SourceLocalOnly,
 		Topic:           rec.Topic, Payload: rec.Payload, TS: rec.TS,
 		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
-		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, ActorClient: rec.ActorClient, ActorEmail: actorEmail(rec), OriginOffset: originOffset,
+		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, ActorClient: rec.ActorClient, ActorEmail: email, ActorClasses: classes, OriginOffset: originOffset,
 		Door:     rec.Door,
 		SignalID: signalID,
 	})
@@ -1137,6 +1144,7 @@ type ReplRecord struct {
 	ActorGroups  []string `json:"ag,omitempty"`
 	ActorClient  string   `json:"ac,omitempty"`
 	ActorEmail   string   `json:"ae,omitempty"`
+	ActorClasses []string `json:"acs,omitempty"`
 	KVPath       string   `json:"kp,omitempty"`
 	KVNode       string   `json:"kn,omitempty"`
 	// Delete mirrors Record.Delete. The parent derives it after decoding, as the
@@ -1942,7 +1950,7 @@ func storedRecord(off uint64, e recEnc) StoredRecord {
 		Offset:          off, OriginOffset: originOffset(e.OriginOffset, off),
 		Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 		WrittenBy: e.WrittenBy, ActorID: e.ActorID,
-		ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups, ActorClient: e.ActorClient, ActorEmail: e.ActorEmail,
+		ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups, ActorClient: e.ActorClient, ActorEmail: e.ActorEmail, ActorClasses: e.ActorClasses,
 		Door: e.Door, SignalID: e.SignalID,
 	}
 }

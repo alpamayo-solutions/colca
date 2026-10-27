@@ -168,6 +168,21 @@ reach the person -- an alarm subscription that mails them
 service account, the admin door and a local service naming a person never set
 it; `/kv` and every state or event record omit it. It authorizes nothing.
 
+`actor_classes` is on a `/fetch` record of a command only: the classes the
+node that admitted it witnessed the person holding at the command's place,
+sorted (`read` when their read zones cover it, and each command class a grant
+covers there). The place is the alarm's for a subscription, else the command's
+path. It is set where the person's own grants authorized the command (a token
+door, or a local service attesting their groups), never from a request body
+or at the admin door, and a node the command came down to keeps the value it
+was sent. The service applying the command may rely on it instead of
+authorizing again.
+
+Both are handed only to the node's own unplaced services and the admin token
+(`uns.Entry.SeesActorWitness`). A person or a machine whose read grants cover
+a command reads the command on `/fetch` without them. MQTT delivery carries no
+attribution at all, only topic and payload.
+
 When a cursor stands below what retention has already removed, the response
 carries a `gap` object that names the missing offsets and times, and `records`
 continue after the gap:

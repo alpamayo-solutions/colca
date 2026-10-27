@@ -147,7 +147,7 @@ func TestADownlinkedCommandKeepsThePersonsVerifiedEmail(t *testing.T) {
 	e, _ := pageEngine(t, testIDs())
 	topic := "colca/v1/_CmdOperate/m1/m1/01HALARM0000000000000000AA/subscribe"
 	anna := Attribution{WrittenBy: "n-hub", ActorID: "kc-anna", ActorLabel: "Anna", ActorKind: "human",
-		ActorGroups: []string{"operators"}, ActorEmail: "anna@plant.test"}
+		ActorGroups: []string{"operators"}, ActorEmail: "anna@plant.test", ActorClasses: []string{"admin", "read"}}
 	results, err := e.IngestDownlinkPage([]DownlinkCommand{{Topic: topic, Payload: cmdPayload("sub"), TS: 1, Attribution: anna}},
 		store.CursorAdvance{Name: "downlink:parent", Stream: "commands-parent", To: 7})
 	if err != nil || len(results) != 1 || results[0].Err != nil {
@@ -160,6 +160,11 @@ func TestADownlinkedCommandKeepsThePersonsVerifiedEmail(t *testing.T) {
 	if recs[0].ActorEmail != "anna@plant.test" {
 		t.Fatalf("downlinked command's actor email = %q, want the person's verified address", recs[0].ActorEmail)
 	}
+	// The classes the hub witnessed, not recomputed here: this node's fixture
+	// grants Anna nothing.
+	if got := recs[0].ActorClasses; len(got) != 2 || got[0] != "admin" || got[1] != "read" {
+		t.Fatalf("downlinked command's actor classes = %v, want the hub's [admin read]", got)
+	}
 
 	state := "colca/v1/_SystemElement/n-edge1/line9"
 	if _, err := e.IngestAdminAttributed(state, []byte(`{"id":"el-line9","name":"line9"}`), anna); err != nil {
@@ -169,7 +174,7 @@ func TestADownlinkedCommandKeepsThePersonsVerifiedEmail(t *testing.T) {
 	if err != nil || len(stateRecs) != 1 {
 		t.Fatalf("stored state: %v %+v", err, stateRecs)
 	}
-	if stateRecs[0].ActorID != "kc-anna" || stateRecs[0].ActorEmail != "" {
+	if stateRecs[0].ActorID != "kc-anna" || stateRecs[0].ActorEmail != "" || len(stateRecs[0].ActorClasses) != 0 {
 		t.Fatalf("state record attribution = %+v, want the person without their address", stateRecs[0])
 	}
 }

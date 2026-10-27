@@ -763,6 +763,48 @@ func ReadAuthorizedAct(contract, path string) (string, bool) {
 	return place, true
 }
 
+// ClassesAt is what a door witnesses about an actor admitting their command:
+// the classes they hold at the command's place, sorted. The place is the one
+// ReadAuthorizedAct names for a read-authorized act, else the command's path.
+// "read" when their read zones cover it, and each cmd class a grant of theirs
+// covers there (AuthorizeCmdAt). The service applying the command may rely on
+// it instead of authorizing again -- an administrator ending someone else's
+// alarm subscription.
+func ClassesAt(sc Scope, e *Entry, contract, path string) []string {
+	if e == nil {
+		return nil
+	}
+	place := path
+	if readPlace, ok := ReadAuthorizedAct(contract, path); ok {
+		place = readPlace
+	}
+	var classes []string
+	for _, z := range readZones(sc, e) {
+		if coverPath(z, place) {
+			classes = append(classes, "read")
+			break
+		}
+	}
+	for class := range cmdClasses {
+		if AuthorizeCmdAt(sc, e, class, place) {
+			classes = append(classes, class)
+		}
+	}
+	sort.Strings(classes)
+	return classes
+}
+
+// SeesActorWitness reports whether a reader of command records is handed what
+// the admitting door witnessed about their sender beyond who they are -- the
+// verified address and the classes held (actor_email, actor_classes): the
+// node's own unplaced services only, which apply commands (an alarm's
+// evaluator). A person or a machine whose read grants cover a command's place
+// reads the command, never a colleague's address. The admin token is not an
+// entry; the door decides for it.
+func (e *Entry) SeesActorWitness() bool {
+	return e != nil && e.Kind == KindLocal && e.Element == ""
+}
+
 // cutLast splits path at its last "/": everything before, and the last segment.
 func cutLast(path string) (string, string, bool) {
 	i := strings.LastIndexByte(path, '/')

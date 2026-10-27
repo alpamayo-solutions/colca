@@ -131,11 +131,13 @@ func ClassOf(contract string) Class {
 	return ClassNone
 }
 
-// KeepsActorEmail reports whether a record at topic keeps the person's verified
-// address its attribution carries: a command only, where the service applying
-// it needs it (an alarm subscription that mails them). State, events and acks
-// a person's command leads to are read by others and never repeat it.
-func KeepsActorEmail(topic string) bool {
+// KeepsActorWitness reports whether a record at topic keeps what the admitting
+// door witnessed about the person beyond who they are -- their verified
+// address and the classes they held at the command's place: a command only,
+// where the service applying it needs them (an alarm subscription that mails
+// them, an administrator ending someone else's). State, events and acks a
+// person's command leads to are read by others and never repeat them.
+func KeepsActorWitness(topic string) bool {
 	p, err := Parse(topic)
 	return err == nil && IsCommand(ClassOf(p.Contract))
 }

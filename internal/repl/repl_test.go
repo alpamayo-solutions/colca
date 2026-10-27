@@ -98,7 +98,8 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 		"colca/v1/_CmdParam/m1/child1/m1/go",
 		[]byte(`{"correlation_id":"c1","expires_at":99999999999}`),
 		engine.Attribution{WrittenBy: "api", ActorID: "user-anna", ActorLabel: "anna@example.com", ActorKind: "human",
-			ActorGroups: []string{"operators"}, ActorClient: "erp-bridge", ActorEmail: "anna@plant.test"},
+			ActorGroups: []string{"operators"}, ActorClient: "erp-bridge", ActorEmail: "anna@plant.test",
+			ActorClasses: []string{"operate", "read"}},
 	)
 	dl, next, gap, err := cl.Downlink(1, 10, 5*time.Second)
 	if err != nil {
@@ -113,7 +114,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	if dl[0].WrittenBy != "api" || dl[0].ActorID != "user-anna" ||
 		dl[0].ActorLabel != "anna@example.com" || dl[0].ActorKind != "human" ||
 		len(dl[0].ActorGroups) != 1 || dl[0].ActorGroups[0] != "operators" || dl[0].ActorClient != "erp-bridge" ||
-		dl[0].ActorEmail != "anna@plant.test" {
+		dl[0].ActorEmail != "anna@plant.test" || len(dl[0].ActorClasses) != 2 || dl[0].ActorClasses[1] != "read" {
 		t.Fatalf("downlink lost attribution — the executing node cannot reconstitute the person: %+v", dl[0])
 	}
 	if next != 2 {

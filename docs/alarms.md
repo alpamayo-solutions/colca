@@ -165,8 +165,12 @@ subscription needs no command class at all.
    (`actor_email`), replicates it down with the command's groups to the node
    that evaluates the alarm, and `GET /fetch` hands it to the consumer there.
    A personal access token, a service account, the admin door and a local
-   service naming a person it acts for never set it. Only commands keep it;
-   the state and events they lead to never repeat it.
+   service naming a person it acts for never set it. Beside it the door keeps
+   the classes it witnessed the person holding at the alarm's place
+   (`actor_classes`), so the evaluator can let an administrator end someone
+   else's subscription without authorizing again. Only commands keep either,
+   only the node's own services read them, and the state and events they lead
+   to never repeat them.
 3. The evaluator records the subscription as `_AlarmSubscription`, retained,
    one record per subscription and alarm at the alarm's place:
    `{root}/v1/_AlarmSubscription/{node}/{element-path}/{alarm-id}/{subscription-id}`.

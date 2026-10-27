@@ -144,7 +144,7 @@ func ackAttribution(node string, of Attribution) Attribution {
 func attributionOf(rec store.StoredRecord) Attribution {
 	return Attribution{
 		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID, ActorLabel: rec.ActorLabel,
-		ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, ActorClient: rec.ActorClient, ActorEmail: rec.ActorEmail,
+		ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, ActorClient: rec.ActorClient, ActorEmail: rec.ActorEmail, ActorClasses: rec.ActorClasses,
 	}
 }
 

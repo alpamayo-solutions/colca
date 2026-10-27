@@ -3719,3 +3719,109 @@ func TestACommandCarriesTheVerifiedEmailOnly(t *testing.T) {
 		}
 	}
 }
+
+// The classes a person held at the command's place travel with it as the door
+// witnessed them; a local service's request cannot claim any for a person.
+func TestACommandCarriesTheClassesWitnessedAtItsPlace(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	topic := "colca/v1/_CmdOperate/n-test/line1/01HALARM0000000000000000AA/unsubscribe"
+	send := func(correlation string, headers map[string]string, extra map[string]any) {
+		t.Helper()
+		headers["X-Colca-Service"] = "api"
+		body := map[string]any{"topic": topic,
+			"payload": map[string]any{"correlation_id": correlation, "expires_at": 9999999999999}}
+		for k, v := range extra {
+			body[k] = v
+		}
+		if rec := localPublish(t, h, headers, body); rec.Code != http.StatusOK {
+			t.Fatalf("%s: publish = %d: %s", correlation, rec.Code, rec.Body.String())
+		}
+	}
+	bearer := func(sub string, grants ...string) map[string]string {
+		return map[string]string{"Authorization": "Bearer " + iss.MintOpt(tokentest.MintOpts{Sub: sub, Grants: grants})}
+	}
+	send("reader", bearer("kc-anna", "read:#"), nil)
+	send("admin", bearer("kc-bert", "read:#", "cmd:#:configure,admin"), nil)
+	send("claimed", map[string]string{}, map[string]any{
+		"actor_id": "kc-cara", "actor_kind": "human", "actor_classes": []string{"admin"}})
+
+	fetchReq := httptest.NewRequest(http.MethodGet, "/fetch?stream=commands&cursor="+uns.LocalCursorPrefix+"api/classes&max=50", nil)
+	fetchReq.Header.Set("X-Colca-Service", "api")
+	fetchRec := httptest.NewRecorder()
+	h.ServeHTTP(fetchRec, fetchReq)
+	if fetchRec.Code != http.StatusOK {
+		t.Fatalf("GET /fetch = %d: %s", fetchRec.Code, fetchRec.Body.String())
+	}
+	var page door.Page
+	if err := json.Unmarshal(fetchRec.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	classes := map[string]string{}
+	for _, rec := range page.Records {
+		var payload struct {
+			CorrelationID string `json:"correlation_id"`
+		}
+		if json.Unmarshal(rec.Payload, &payload) == nil && payload.CorrelationID != "" {
+			classes[payload.CorrelationID] = strings.Join(rec.ActorClasses, ",")
+		}
+	}
+	for correlation, want := range map[string]string{"reader": "read", "admin": "admin,configure,read", "claimed": ""} {
+		got, found := classes[correlation]
+		if !found {
+			t.Fatalf("command %s not on the commands stream; fetched %v", correlation, classes)
+		}
+		if got != want {
+			t.Fatalf("command %s: actor_classes = %q, want %q", correlation, got, want)
+		}
+	}
+}
+
+// A person whose read covers a command's place reads the command on /fetch,
+// but never what the door witnessed about its sender: a colleague's address
+// and classes reach only the node's own services, which apply commands.
+func TestFetchHandsTheWitnessToTheNodesServicesOnly(t *testing.T) {
+	h, iss := newLocalHandlerWithVerifier(t)
+	anna := iss.MintOpt(tokentest.MintOpts{Sub: "kc-anna", Grants: []string{"read:#"},
+		Email: "anna@plant.test", EmailVerified: true})
+	rec := localPublish(t, h, map[string]string{"Authorization": "Bearer " + anna, "X-Colca-Service": "api"},
+		map[string]any{"topic": "colca/v1/_CmdOperate/n-test/line1/01HALARM0000000000000000AA/subscribe",
+			"payload": map[string]any{"correlation_id": "c-witness", "expires_at": 9999999999999}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("publish = %d: %s", rec.Code, rec.Body.String())
+	}
+	fetch := func(cursor string, headers map[string]string) door.Record {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/fetch?stream=commands&cursor="+cursor+"&max=50", nil)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		out := httptest.NewRecorder()
+		h.ServeHTTP(out, req)
+		if out.Code != http.StatusOK {
+			t.Fatalf("GET /fetch (%s) = %d: %s", cursor, out.Code, out.Body.String())
+		}
+		var page door.Page
+		if err := json.Unmarshal(out.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range page.Records {
+			if strings.Contains(string(r.Payload), "c-witness") {
+				return r
+			}
+		}
+		t.Fatalf("the subscription is not on the page fetched with %s: %+v", cursor, page.Records)
+		return door.Record{}
+	}
+	service := fetch(uns.LocalCursorPrefix+"api/witness", map[string]string{"X-Colca-Service": "api"})
+	if service.ActorEmail != "anna@plant.test" || strings.Join(service.ActorClasses, ",") != "read" {
+		t.Fatalf("the node's service read %q %v, want the witnessed address and classes", service.ActorEmail, service.ActorClasses)
+	}
+	bert := iss.MintOpt(tokentest.MintOpts{Sub: "kc-bert", Grants: []string{"read:#"}})
+	person := fetch("kc-bert/witness", map[string]string{"Authorization": "Bearer " + bert, "X-Colca-Service": "api"})
+	if person.ActorID != "kc-anna" {
+		t.Fatalf("a reader read the command as sent by %q, want kc-anna", person.ActorID)
+	}
+	if person.ActorEmail != "" || len(person.ActorClasses) != 0 {
+		t.Fatalf("a reader of the command read the sender's witness: %q %v", person.ActorEmail, person.ActorClasses)
+	}
+}

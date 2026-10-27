@@ -60,6 +60,7 @@ func rawPayload(payload []byte) json.RawMessage {
 type fetchRecord struct {
 	// Fields in the order the map encoding gave them (by name), so the wire
 	// bytes stay what they were.
+	ActorClasses []string        `json:"actor_classes,omitempty"`
 	ActorEmail   string          `json:"actor_email,omitempty"`
 	ActorID      string          `json:"actor_id"`
 	ActorKind    string          `json:"actor_kind"`
@@ -867,12 +868,16 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			return
 		}
 		out := make([]fetchRecord, 0, len(recs))
+		witness := c.admin || c.entry.SeesActorWitness()
 		for _, rec := range recs {
+			if !witness {
+				rec.ActorEmail, rec.ActorClasses = "", nil
+			}
 			out = append(out, fetchRecord{
 				Offset: rec.Offset, OriginOffset: rec.OriginOffset, Topic: rec.Topic,
 				Payload: rawPayload(rec.Payload), TS: rec.TS, WrittenBy: rec.WrittenBy,
 				ActorID: rec.ActorID, ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind,
-				ActorEmail: rec.ActorEmail,
+				ActorEmail: rec.ActorEmail, ActorClasses: rec.ActorClasses,
 			})
 		}
 		m.HTTPFetch(callerLabel(c), stream)
