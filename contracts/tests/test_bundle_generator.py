@@ -383,6 +383,34 @@ def test_a_silence_is_retained_state_of_its_own():
     assert set(silence["schema"]["required"]) == {"reason", "until", "silenced_by", "silenced_at"}
 
 
+def test_an_alarm_subscription_is_retained_state_at_the_alarms_place():
+    """A person's on-call subscription to one alarm: retained so the node that
+    evaluates the alarm next can adopt it, retired by tombstone, naming who
+    subscribed, through which channel, and for which window."""
+    body, _ = gb.build_bundle()
+    subscription = body["contracts"]["_AlarmSubscription"]
+    schema = subscription["schema"]
+
+    assert subscription["class"] == "entity"
+    assert subscription["tombstone"] is True
+    assert set(schema["required"]) == {
+        "subscription_id",
+        "alarm_id",
+        "subscriber_id",
+        "channel_id",
+        "channel_kind",
+        "active_from",
+        "active_until",
+        "created_at",
+        "updated_at",
+    }
+    for optional in ("subscriber_label", "undeliverable"):
+        assert optional in schema["properties"], optional
+    # Everyone who reads the alarm reads this record: no address in it.
+    assert not any("email" in field for field in schema["properties"])
+    assert set(schema["properties"]["channel_kind"]["enum"]) == {"email", "workbench"}
+
+
 def test_standing_alarm_is_retained_state_with_a_closed_status_vocabulary():
     body, _ = gb.build_bundle()
     standing = body["contracts"]["_AlarmState"]
@@ -592,6 +620,7 @@ ULID_CONSTRAINED_FIELDS = {
     "_ExternalReference": ["id", "external_system_id"],
     "_Finding": ["signal_id"],
     "_AlarmState": ["alarm_id", "signal_id"],
+    "_AlarmSubscription": ["alarm_id"],
     # annotation_type_id stays unconstrained until the golden annotation-id
     # vectors derive from ULID type ids — see payload.Annotation.
     "_Annotation": [

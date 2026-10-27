@@ -50,6 +50,7 @@ func TestParseAndClass(t *testing.T) {
 		"_Finding":                  {ClassEntity, "entities"},
 		"_AlarmState":               {ClassEntity, "entities"},
 		"_AlarmSilence":             {ClassEntity, "entities"},
+		"_AlarmSubscription":        {ClassEntity, "entities"},
 		"_Node":                     {ClassEntity, "entities"}, "_ServiceDetails": {ClassEntity, "entities"},
 		"_ExternalReference": {ClassEntity, "entities"},
 		"_SystemElement":     {ClassEntity, "entities"}, "_CmdParam": {ClassCmd, "commands"},

@@ -193,7 +193,7 @@ func (h *colcaHook) authenticateHuman(cl *mqtt.Client, pk packets.Packet) bool {
 func sessionFor(cl *mqtt.Client, v *tokenauth.Verified, gen uint64) humanSession {
 	s := humanSession{
 		client: cl, entry: v.Entry, sub: v.Sub, exp: v.Exp,
-		holder:     tokenauth.Holder{DisplayName: v.Entry.DisplayName, ServiceClient: v.Entry.ServiceClient},
+		holder:     tokenauth.Holder{DisplayName: v.Entry.DisplayName, ServiceClient: v.Entry.ServiceClient, Email: v.Entry.Email},
 		credential: v.Credential, credentialID: v.CredentialID,
 		credentialDigest: v.CredentialDigest,
 		sid:              v.SessionID, issuedAt: v.IssuedAt,

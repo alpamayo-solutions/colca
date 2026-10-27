@@ -128,6 +128,11 @@ shift lead may correct or remove a colleague's entry without being able to
 configure the model or move equipment. No class implies another: someone who
 may both operate and acknowledge holds both.
 
+One command needs no class: subscribing to an alarm (`_CmdOperate`
+`{alarm-path}/subscribe` and `/unsubscribe`) is authorized by `read` on the
+alarm's place, since asking to be told about an alarm is seeing it. A cmd
+grant does not replace that read. See [alarms.md](alarms.md#subscribing-to-an-alarm).
+
 `_CmdEdit` is a person's tool for the node's data model, and the door admits
 anyone holding `configure` on it. Three narrower classes are also admitted, each
 covering only the part of `_CmdEdit` that matches the hazard: `annotate` covers
