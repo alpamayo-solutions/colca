@@ -1316,6 +1316,50 @@ func TestRequestLimitReturns429RetryAfterAndMetric(t *testing.T) {
 	}
 }
 
+// A caller at its /watch concurrency cap is not told to retry in a second: no
+// slot frees by waiting, only by closing one of its watches. The body names the
+// bound, so a client can tell it from a rate refusal.
+func TestAConcurrencyRefusalNamesTheCapAndCarriesNoRetryAfter(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	m := metrics.New(st, config.Retention{}, nil)
+	limiter := httplimit.New()
+	for i := 0; i < watchPolicy.PerCallerConcurrent; i++ {
+		release, ok := acquireRequest(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/watch", nil),
+			limiter, m, metrics.DoorHTTP, limitClassWatch, "caller-1", watchPolicy)
+		if !ok {
+			t.Fatalf("watch %d rejected below the cap", i)
+		}
+		t.Cleanup(release)
+	}
+	result := httptest.NewRecorder()
+	if _, ok := acquireRequest(result, httptest.NewRequest(http.MethodGet, "/watch", nil),
+		limiter, m, metrics.DoorHTTP, limitClassWatch, "caller-1", watchPolicy); ok {
+		t.Fatal("a watch beyond the per-caller cap was admitted")
+	}
+	if result.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", result.Code)
+	}
+	if v := result.Header().Get("Retry-After"); v != "" {
+		t.Fatalf("Retry-After = %q on a concurrency refusal, want none", v)
+	}
+	var body struct {
+		Code  string `json:"code"`
+		Class string `json:"class"`
+		Limit int    `json:"limit"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(result.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body %q: %v", result.Body.String(), err)
+	}
+	if body.Code != "concurrency_limit" || body.Class != "watch" || body.Limit != watchPolicy.PerCallerConcurrent || body.Error == "" {
+		t.Fatalf("body = %+v, want code concurrency_limit, class watch, limit %d", body, watchPolicy.PerCallerConcurrent)
+	}
+}
+
 // The raw-body limit and Store.Append's record cap never both fire for one
 // request, so a record rejection is counted once. This body fits the wire cap but
 // decodes above MaxRecordBytes.

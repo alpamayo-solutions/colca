@@ -294,13 +294,32 @@ compare-and-swap.
 | `403` | the caller may not do this |
 | `413` | body too large; a record over the record cap has `reason` `too_large` |
 | `422` | bad topic, unknown contract or invalid payload, with `reason` when the node names one |
-| `429` | rate limit; see `Retry-After` |
+| `429` | a request limit; `code` in the body says which (below) |
 | `503` | `/publish`: the record was admitted but not written (`reason` `not_written`); send it again |
 
 Every route belongs to a rate class. Authenticated callers get their own
 quota; the local door and unauthenticated traffic are limited per source
 address. Per caller: `/kv` 5 requests a second (burst 10), `/fetch` 25 (burst
-50), `/watch` 2 new connections a second (burst 8) and 8 open at a time.
+50) and 16 open at a time, `/watch` 2 new connections a second (burst 8) and 8
+open at a time.
+
+A `429` body names the bound that refused the request:
+
+```json
+{"error": "too many concurrent requests: …", "code": "concurrency_limit", "class": "watch", "limit": 8}
+```
+
+| `code` | Meaning | What helps |
+|---|---|---|
+| `rate_limit` | the caller's request rate for the class is used up | wait `Retry-After` seconds (only this code sets it) |
+| `concurrency_limit` | the caller already holds `limit` open requests of the class | close one, e.g. a `/watch` it no longer reads; retrying sooner does not help |
+| `global_concurrency_limit` | all callers together hold `limit` open requests of the class | back off with your own delay |
+| `caller_limit` | the node tracks as many callers as it may | back off with your own delay |
+
+Only `rate_limit` carries `Retry-After`: for the others no wait is known, so a
+client backs off on its own schedule instead of retrying every second against
+a bound that waiting does not clear. The Go door client (`door.RetryDelay`)
+falls back to its jittered backoff when the header is absent.
 
 ## MQTT reason codes
 

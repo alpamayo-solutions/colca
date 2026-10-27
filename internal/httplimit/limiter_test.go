@@ -17,8 +17,8 @@ func TestTokenBucketRefills(t *testing.T) {
 		}
 		release()
 	}
-	if _, retry, ok := l.Acquire("write", "m1", policy); ok || retry != 500*time.Millisecond {
-		t.Fatalf("empty bucket = ok %v retry %s, want false and 500ms", ok, retry)
+	if _, refusal, ok := l.Acquire("write", "m1", policy); ok || refusal.Reason != ReasonRate || refusal.RetryAfter != 500*time.Millisecond {
+		t.Fatalf("empty bucket = ok %v refusal %+v, want a rate refusal after 500ms", ok, refusal)
 	}
 	now = now.Add(500 * time.Millisecond)
 	if release, _, ok := l.Acquire("write", "m1", policy); !ok {
@@ -37,15 +37,20 @@ func TestConcurrencyIsBoundPerCallerAndGlobally(t *testing.T) {
 	if !ok {
 		t.Fatal("first transfer rejected")
 	}
-	if _, _, ok := l.Acquire("transfer", "m1", policy); ok {
+	if _, refusal, ok := l.Acquire("transfer", "m1", policy); ok {
 		t.Fatal("second transfer for one caller exceeded its concurrency limit")
+	} else if refusal != (Refusal{Reason: ReasonCallerConcurrency, Limit: 1}) {
+		// No retry delay: waiting does not free a slot, only finishing a request does.
+		t.Fatalf("per-caller refusal = %+v, want concurrency_limit, limit 1, no delay", refusal)
 	}
 	release2, _, ok := l.Acquire("transfer", "m2", policy)
 	if !ok {
 		t.Fatal("second caller should fit the global limit")
 	}
-	if _, _, ok := l.Acquire("transfer", "m3", policy); ok {
+	if _, refusal, ok := l.Acquire("transfer", "m3", policy); ok {
 		t.Fatal("third caller exceeded the global concurrency limit")
+	} else if refusal != (Refusal{Reason: ReasonGlobalConcurrency, Limit: 2}) {
+		t.Fatalf("global refusal = %+v, want global_concurrency_limit, limit 2, no delay", refusal)
 	}
 	release1()
 	if release3, _, ok := l.Acquire("transfer", "m3", policy); !ok {

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"math"
 	"net"
 	"net/http"
@@ -121,20 +122,43 @@ func acquireRequest(
 	door, class, key string,
 	policy httplimit.Policy,
 ) (func(), bool) {
-	release, retry, ok := limiter.Acquire(class, key, policy)
+	release, refusal, ok := limiter.Acquire(class, key, policy)
 	if ok {
 		return release, true
 	}
-	retrySeconds := int(math.Ceil(retry.Seconds()))
-	if retrySeconds < 1 {
-		retrySeconds = 1
-	}
-	w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusTooManyRequests)
-	_, _ = w.Write([]byte(`{"error":"request limit exceeded"}` + "\n"))
+	writeRefusal(w, class, refusal)
 	m.HTTPRequestLimited(door, class)
 	return nil, false
+}
+
+// writeRefusal answers a request the limiter refused: 429 in every case, with a
+// body whose code says which bound was reached. Only a rate refusal carries
+// Retry-After. A concurrency refusal clears when the caller closes one of the
+// requests it holds open (for /watch, a long-lived stream), not after a delay,
+// so a Retry-After of one second would only invite a retry loop that never
+// succeeds.
+func writeRefusal(w http.ResponseWriter, class string, refusal httplimit.Refusal) {
+	body := map[string]any{"code": string(refusal.Reason), "class": class, "limit": refusal.Limit}
+	switch refusal.Reason {
+	case httplimit.ReasonRate:
+		retrySeconds := int(math.Ceil(refusal.RetryAfter.Seconds()))
+		if retrySeconds < 1 {
+			retrySeconds = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+		body["error"] = "request rate limit exceeded"
+	case httplimit.ReasonCallerConcurrency:
+		body["error"] = "too many concurrent requests: this caller already holds the most open " + class +
+			" requests it may; close one before opening another"
+	case httplimit.ReasonGlobalConcurrency:
+		body["error"] = "too many concurrent requests: the node holds the most open " + class + " requests it serves"
+	default:
+		body["error"] = "too many callers: the node tracks the most callers it may"
+	}
+	raw, _ := json.Marshal(body) // strings and an int: cannot fail
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = w.Write(append(raw, '\n'))
 }
 
 func pageRequest(r *http.Request) (size int, after string, err error) {
