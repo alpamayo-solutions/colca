@@ -98,6 +98,17 @@ func TestStreamPassesDecideOnTheHeadWithoutDecoding(t *testing.T) {
 			t.Fatalf("walk = %v, %v; want only record 2, the other never decoded", got, err)
 		}
 	})
+	t.Run("first match", func(t *testing.T) {
+		s := mustOpen(t)
+		putHeadOnly(t, s, "logs", "colca/v1/_Log/n/other/INFO", 1)
+		if _, _, err := s.Append("logs", []Record{{Topic: "colca/v1/_Log/n/svc/INFO", Payload: []byte(`{}`), TS: 2}}); err != nil {
+			t.Fatal(err)
+		}
+		rec, found, err := s.FirstMatch("logs", 1, 3, func(topic, _ string) bool { return topic == "colca/v1/_Log/n/svc/INFO" }, nil)
+		if err != nil || !found || rec.Offset != 2 {
+			t.Fatalf("FirstMatch = %d %v %v; want record 2, the other never decoded", rec.Offset, found, err)
+		}
+	})
 }
 
 // A record appended while compaction scans lies past the scan: the pass goes

@@ -842,7 +842,11 @@ func Handler(e *engine.Engine, cfg *config.Config, reg *registry.Manager, ver *t
 			}
 		}
 		if q.Get("tail") == "" {
-			e.CursorFilters().Remember(cursor, stream, filter)
+			// The key names what decides the filter, so the watchdog rescans the
+			// cursor only when one of them changes, not on every page.
+			key, _ := json.Marshal([]any{callerLimitKey(c), slices.Sorted(maps.Keys(contractSet)), prefix,
+				topicFilters, slices.Sorted(maps.Keys(signalSet))})
+			e.CursorFilters().Remember(cursor, stream, cursorwatch.Filter{Key: string(key), Head: head, Keep: filter})
 		}
 		var recs []store.StoredRecord
 		var next uint64

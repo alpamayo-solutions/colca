@@ -26,8 +26,8 @@ const StaleReason = "stale_cursors"
 
 // scanCap bounds how many records one check reads past a cursor looking for
 // the first one its consumer reads. A cursor far behind is scanned a slice per
-// check, from where the previous check stopped.
-const scanCap = 50_000
+// check, from where the previous check stopped. A variable for tests.
+var scanCap uint64 = 50_000
 
 // Owners finds the identity a cursor belongs to (the registry).
 type Owners interface {
@@ -123,11 +123,12 @@ func (w *Watchdog) Run(stop <-chan struct{}) {
 	var notBefore time.Time
 	retryDelay := time.Second
 	for {
-		select {
-		case <-stop:
+		// One check a second at most, whatever woke it: hints, a deadline, or
+		// a bounded scan that has more records to go.
+		if !sleepUntil(stop, notBefore) {
 			return
-		default:
 		}
+		notBefore = time.Now().Add(time.Second)
 		changed := w.Store.BacklogChanges()
 		filters := w.Filters.changed.Changes()
 		w.Check(time.Now())
@@ -145,9 +146,8 @@ func (w *Watchdog) Run(stop <-chan struct{}) {
 		retryDelay = time.Second
 		delay := w.nextDelay(time.Now())
 		if delay == 0 {
-			continue
-		} // bounded scan has more records
-		notBefore = time.Now().Add(time.Second)
+			continue // a bounded scan has more records
+		}
 		var timer *time.Timer
 		var due <-chan time.Time
 		if delay >= 0 {
@@ -167,16 +167,22 @@ func (w *Watchdog) Run(stop <-chan struct{}) {
 		if timer != nil {
 			timer.Stop()
 		}
-		// New hints cannot postpone the batch indefinitely.
-		if wait := time.Until(notBefore); wait > 0 {
-			timer = time.NewTimer(wait)
-			select {
-			case <-stop:
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
-		}
+	}
+}
+
+// sleepUntil waits until t, false when stop closed first.
+func sleepUntil(stop <-chan struct{}, t time.Time) bool {
+	wait := time.Until(t)
+	if wait <= 0 {
+		return true
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-stop:
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -327,13 +333,13 @@ func (w *Watchdog) unreadAge(k key, position uint64, now time.Time) (float64, ui
 	if state.found {
 		// The record may have left the consumer's view since (a command the node
 		// retired), and then the one after it is the oldest.
-		if _, still, err := w.Store.FirstMatch(k.stream, state.offset, state.offset+1, filter); err == nil && !still {
+		if _, still, err := w.Store.FirstMatch(k.stream, state.offset, state.offset+1, filter.Head, filter.Keep); err == nil && !still {
 			state.found, state.scannedTo = false, state.offset+1
 		}
 	}
 	if !state.found && state.scannedTo < head {
 		upTo := min(head, state.scannedTo+scanCap)
-		rec, found, err := w.Store.FirstMatch(k.stream, state.scannedTo, upTo, filter)
+		rec, found, err := w.Store.FirstMatch(k.stream, state.scannedTo, upTo, filter.Head, filter.Keep)
 		if err != nil {
 			w.retry = true
 			w.logger().Warn("cursor check could not read the stream", "cursor", k.cursor, "stream", k.stream, "err", err)
