@@ -139,11 +139,13 @@ type Store struct {
 	// with the count its scan started from. Guarded by mu.
 	holes map[string]uint64
 	// state guards the in-memory stream state readers need (next, lwm, bytes,
-	// the change channels and contract heads). A writer holds mu while it
-	// builds its batch and takes state only from its apply until it published
-	// the new head, so readers see records, KV and head change together, and
-	// wait for at most one apply, never for a writer's batch building or
-	// another writer queued behind it. Lock order: mu, cursorMu, state.
+	// the change channels and contract heads). An append holds mu while it
+	// builds and applies its batch and takes state only after the synced apply,
+	// to publish the new head, so a reader never waits for the disk. Readers
+	// read records only below the published head. A prune holds state across
+	// its apply: a reader must never see records gone below an LWM that was not
+	// yet raised, or it would miss them without a gap. Lock order: mu,
+	// cursorMu, state.
 	state sync.RWMutex
 	// cursorMu serialises cursor moves; they never wait for a stream write.
 	cursorMu sync.Mutex
@@ -614,12 +616,12 @@ func (s *Store) appendAdvancingLocked(stream string, recs []Record, adv *CursorA
 			return 0, 0, err
 		}
 	}
-	// The head is published with the records: see commitReplicated.
-	s.state.Lock()
-	defer s.state.Unlock()
+	// The head is published after the records: see commitReplicated.
 	if err := s.appendApply(b, pebble.Sync); err != nil {
 		return 0, 0, err
 	}
+	s.state.Lock()
+	defer s.state.Unlock()
 	s.next[stream] = off
 	s.bytes[stream] = liveBytes
 	s.noteContractsLocked(stream, recs)
@@ -748,7 +750,9 @@ func (s *Store) ReadRecords(stream string, from uint64, limit int, filter func(S
 // (see HeadFilter); filter decides on the rest.
 func (s *Store) ReadRecordsBounded(ctx context.Context, stream string, from uint64, limit, maxScan int, maxBytes uint64, head HeadFilter, filter func(StoredRecord) bool) (out []StoredRecord, next uint64, err error) {
 	page := pageBytes{max: maxBytes}
-	out, next, _, _, err = readRange(ctx, s.db, stream, from, ^uint64(0), limit, maxScan, &page, head, filter, nil)
+	// Bounded by the published head: a commit applies its records before it
+	// publishes their head (see commitReplicated).
+	out, next, _, _, err = readRange(ctx, s.db, stream, from, s.NextOffset(stream), limit, maxScan, &page, head, filter, nil)
 	return out, next, err
 }
 

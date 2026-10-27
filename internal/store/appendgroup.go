@@ -116,10 +116,7 @@ func (s *Store) commitAppendBatch(group []*appendRequest) {
 	if len(committed) == 0 {
 		return
 	}
-	// Readers see a commit's records, KV and new head together: see
-	// commitReplicated.
-	s.state.Lock()
-	defer s.state.Unlock()
+	// Readers see the records once the head is published: see commitReplicated.
 	err := func() error {
 		for _, stream := range grown {
 			if err := setHead(b, stream, next[stream]); err != nil {
@@ -137,6 +134,8 @@ func (s *Store) commitAppendBatch(group []*appendRequest) {
 		}
 		return
 	}
+	s.state.Lock()
+	defer s.state.Unlock()
 	for _, stream := range grown {
 		s.next[stream] = next[stream]
 		s.bytes[stream] = liveBytes[stream]

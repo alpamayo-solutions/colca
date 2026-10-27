@@ -163,6 +163,9 @@ func TestMetricRecordsKeepTheirSignalAndOlderRecordsReadWithout(t *testing.T) {
 	if err := s.db.Set(streamKey("metrics", 3), old, pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
+	s.state.Lock()
+	s.next["metrics"] = 4 // readers read below the published head
+	s.state.Unlock()
 	got, _, err := s.ReadRecords("metrics", 1, 10, nil)
 	if err != nil {
 		t.Fatal(err)
