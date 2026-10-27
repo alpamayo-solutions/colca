@@ -71,6 +71,9 @@ type Server struct {
 	// downlinkWakes counts waiting downlink polls woken by a change to their
 	// streams. Tests read it: a commit to any other stream must not wake them.
 	downlinkWakes atomic.Int64
+	// downlinkCrossed counts the commands offsets downlink polls read across,
+	// for tests: a waiting poll reads every record once, however often it wakes.
+	downlinkCrossed atomic.Uint64
 
 	// pushBytes bounds the bytes of pushes held at once; see byteBudget.
 	pushBytes byteBudget
@@ -190,7 +193,7 @@ func (s *Server) addDefinitions(resp map[string]any, childULID string, defAfter 
 	for _, rec := range recs {
 		out = append(out, wireRec{
 			O: rec.Offset, T: rec.Topic, P: rec.Payload, TS: rec.TS,
-			WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups, AC: rec.ActorClient,
+			WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups, AC: rec.ActorClient, AE: rec.ActorEmail, ACS: rec.ActorClasses,
 		})
 	}
 	resp["definitions"], resp["def_next"] = out, next
@@ -302,6 +305,8 @@ type wireRec struct {
 	AK       string   `json:"ak,omitempty"`
 	AG       []string `json:"ag,omitempty"`
 	AC       string   `json:"ac,omitempty"`
+	AE       string   `json:"ae,omitempty"`
+	ACS      []string `json:"acs,omitempty"`
 }
 
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
@@ -321,7 +326,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	if s.eng.Store().ReplicatedBacklog() >= maxReplicatedBacklog {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "the parent is busy: its store is behind", http.StatusTooManyRequests)
-		s.metrics.HTTPRequestLimited(metrics.DoorRepl, limitClassReplBacklog)
+		s.metrics.HTTPRequestLimited(metrics.DoorRepl, limitClassReplBacklog, metrics.LimitedBusy)
 		return
 	}
 	// A body without a declared length is counted at the largest a body may be.
@@ -332,7 +337,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	if !s.pushBytes.reserve(size, s.eng.QueuedBytes()) {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "the parent is busy: too many pushes in progress", http.StatusTooManyRequests)
-		s.metrics.HTTPRequestLimited(metrics.DoorRepl, limitClassReplBytes)
+		s.metrics.HTTPRequestLimited(metrics.DoorRepl, limitClassReplBytes, metrics.LimitedBusy)
 		return
 	}
 	defer s.pushBytes.release(size)
@@ -387,7 +392,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rec.SkipFrom != 0 {
-			if in.Stream != "metrics" || rec.SkipFrom > rec.O || rec.SkipFrom <= previous || rec.T != "" || len(rec.P) != 0 || rec.OO != 0 || rec.TS != 0 || rec.WB != "" || rec.AID != "" || rec.AL != "" || rec.AK != "" || len(rec.AG) != 0 || rec.AC != "" {
+			if in.Stream != "metrics" || rec.SkipFrom > rec.O || rec.SkipFrom <= previous || rec.T != "" || len(rec.P) != 0 || rec.OO != 0 || rec.TS != 0 || rec.WB != "" || rec.AID != "" || rec.AL != "" || rec.AK != "" || len(rec.AG) != 0 || rec.AC != "" || rec.AE != "" || len(rec.ACS) != 0 {
 				http.Error(w, "invalid metric skip range", http.StatusBadRequest)
 				return
 			}
@@ -425,7 +430,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request) {
 			ChildOffset: rec.O, OriginOffset: rec.OO,
 			Topic: topic, Payload: rec.P, TS: rec.TS,
 			WrittenBy: rec.WB, ActorID: rec.AID,
-			ActorLabel: rec.AL, ActorKind: rec.AK, ActorGroups: rec.AG, ActorClient: rec.AC,
+			ActorLabel: rec.AL, ActorKind: rec.AK, ActorGroups: rec.AG, ActorClient: rec.AC, ActorEmail: rec.AE, ActorClasses: rec.ACS,
 		}
 		// Route by the engine's bundle-aware classes: a declared data or entity
 		// contract projects into KV here as at any door.
@@ -592,6 +597,9 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			if s.refuseForResync(w, child.ULID, claimed, position) {
 				return
 			}
+			// Offsets read past under the old incarnation say nothing about
+			// the new one: read again from the child's own position.
+			after = position.commands
 			reincarnated = nil
 		default:
 		}
@@ -608,6 +616,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.downlinkCrossed.Add(next - after)
 		// The downlink gap object has the same shape and journal as /fetch, in parent
 		// coordinates. after is the first offset the child has not consumed, so there
 		// is a gap when after < LWM. A gap answers at once instead of making the child
@@ -631,7 +640,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 				}
 				out = append(out, wireRec{
 					O: rec.Offset, T: stripped, P: rec.Payload, TS: rec.TS,
-					WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups, AC: rec.ActorClient,
+					WB: rec.WrittenBy, AID: rec.ActorID, AL: rec.ActorLabel, AK: rec.ActorKind, AG: rec.ActorGroups, AC: rec.ActorClient, AE: rec.ActorEmail, ACS: rec.ActorClasses,
 				})
 			}
 			// now_ms is this node's wall clock, stamped here, after the long-poll
@@ -669,6 +678,11 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, resp)
 			return
 		}
+		// Nothing to answer yet: what this read crossed holds nothing for the
+		// child, so the next wake reads on from where it ended instead of
+		// crossing the same records again. The answer's next and the gap are
+		// both measured from there, as they would be had it been read in one go.
+		after = next
 		select {
 		case <-ctx.Done():
 			// Client gone (or the server was stopped): never outlive the request.
@@ -703,13 +717,18 @@ func (s *Server) noteForwarded(child, mount string, after uint64) {
 	if lwm := st.LWM("commands"); lwm > from {
 		from = lwm
 	}
+	// The topic decides on a record's head, so siblings' commands and records
+	// that are not commands are stepped over without being decoded; only the
+	// child's own commands are decoded, for the payload's progress flag.
+	forChild := func(topic, _ string) bool {
+		p, err := uns.Parse(topic)
+		return err == nil && uns.IsCommand(s.eng.ClassOf(p.Contract)) && uns.UnderMount(p.Path, mount)
+	}
 	wants := func(r store.StoredRecord) bool {
-		p, err := uns.Parse(r.Topic)
-		return err == nil && uns.IsCommand(s.eng.ClassOf(p.Contract)) && uns.UnderMount(p.Path, mount) &&
-			uns.CommandWantsProgress(r.Payload)
+		return forChild(r.Topic, "") && uns.CommandWantsProgress(r.Payload)
 	}
 	for from < after {
-		recs, next, err := st.ReadRecordsBounded(context.Background(), "commands", from, maxDownlinkMax, int(min(after-from, uint64(maxDownlinkScan))), 0, nil, wants)
+		recs, next, err := st.ReadRecordsBounded(context.Background(), "commands", from, maxDownlinkMax, int(min(after-from, uint64(maxDownlinkScan))), 0, forChild, wants)
 		if err != nil {
 			s.log.Warn("downlink: progress acks for forwarded commands not written", "child", child, "err", err)
 			return

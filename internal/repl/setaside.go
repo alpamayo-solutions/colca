@@ -161,12 +161,25 @@ type setAsideEntry struct {
 }
 
 // publishSetAsideFinding writes the finding from the stored copies, or retires
-// it when there are none and it stands.
+// it when there are none and it stands. The uplink (a new copy) and DELETE
+// /uplink/set-aside (a cleared one) both call it, so one publish at a time reads
+// and writes: the last finding written is then always from the last read, which
+// follows every change to the copies made before it.
 func (c *Client) publishSetAsideFinding(eng *engine.Engine) error {
+	if !c.findingMu.TryLock() {
+		if c.findingWait != nil {
+			c.findingWait()
+		}
+		c.findingMu.Lock()
+	}
+	defer c.findingMu.Unlock()
 	st := eng.Store()
 	records, err := c.SetAsideRecords(st)
 	if err != nil {
 		return err
+	}
+	if c.findingRead != nil {
+		c.findingRead()
 	}
 	topic := SetAsideFindingTopic(eng.NodeID())
 	attribution := engine.Attribution{

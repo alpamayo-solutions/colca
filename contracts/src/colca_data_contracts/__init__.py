@@ -78,6 +78,7 @@ from colca_data_contracts.payload import (
     AlarmState,
     AlarmStateChange,
     AlarmStatus,
+    AlarmSubscription,
     AuditAction,
     AuditEvent,
     AuditOutcome,
@@ -112,6 +113,7 @@ from colca_data_contracts.payload import (
     SignalDataType,
     SignalRelationship,
     SignalRelationshipType,
+    SubscriptionChannelKind,
     derive_annotation_id,
     field_limits,
 )
@@ -235,6 +237,9 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "AlarmState",
     "AlarmStatus",
     "AlarmSeverity",
+    # A person's on-call subscription to one alarm, retained at the alarm's place
+    "AlarmSubscription",
+    "SubscriptionChannelKind",
     # Annotation instances, on their own stream like alarms
     "AnnotationPayload",
     "derive_annotation_id",

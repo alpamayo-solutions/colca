@@ -925,3 +925,96 @@ func TestOnlyTheUnplacedLocalAPIDeliversAnAppNotificationWithoutAGrant(t *testin
 		}
 	}
 }
+
+// An alarm subscription is the one command read authorizes: the reader of an
+// alarm's element may ask to be told about it, someone who may act there but
+// not read there may not, and every other act keeps its class.
+func TestASubscriptionIsAuthorizedByReadOnTheAlarmsPlace(t *testing.T) {
+	const alarm = "01HALARM0000000000000000AA"
+	at := func(path, action string) string { return "colca/v1/_CmdOperate/n1/" + path + "/" + action }
+	reader := entry("", readAt("werk1/cnc5"))
+	operator := entry("", cmdAt("werk1/cnc5", "operate"))
+	neighbour := entry("", readAt("werk1/cnc6"))
+	for _, action := range []string{"subscribe", "unsubscribe"} {
+		topic := at("werk1/cnc5/"+alarm, action)
+		if !Authorize(ns, reader, ActCmd, topic) {
+			t.Fatalf("a reader of the alarm's element was refused %s", action)
+		}
+		if Authorize(ns, operator, ActCmd, topic) {
+			t.Fatalf("operate without read admitted %s: read is the authority", action)
+		}
+		if Authorize(ns, neighbour, ActCmd, topic) {
+			t.Fatalf("a reader of another element was admitted to %s here", action)
+		}
+	}
+	for _, action := range []string{"silence", "unsilence", "acknowledge"} {
+		topic := at("werk1/cnc5/"+alarm, action)
+		if Authorize(ns, reader, ActCmd, topic) {
+			t.Fatalf("read admitted %s: an act on the alarm needs operate", action)
+		}
+		if !Authorize(ns, operator, ActCmd, topic) {
+			t.Fatalf("operate was refused %s", action)
+		}
+	}
+	// A platform alarm stands on the node: its place is the alarm id alone,
+	// covered by a read of the whole node.
+	if !Authorize(ns, entry("", "read:#"), ActCmd, at(alarm, "subscribe")) {
+		t.Fatal("a reader of the node was refused a platform alarm's subscription")
+	}
+	if Authorize(ns, reader, ActCmd, at(alarm, "subscribe")) {
+		t.Fatal("a reader of one element was admitted to a platform alarm's subscription")
+	}
+}
+
+func TestReadAuthorizedAct(t *testing.T) {
+	cases := []struct {
+		contract, path, place string
+		ok                    bool
+	}{
+		{"_CmdOperate", "werk1/cnc5/A1/subscribe", "werk1/cnc5/A1", true},
+		{"_CmdOperate", "A1/unsubscribe", "A1", true},
+		{"_CmdOperate", "subscribe", "", false}, // no alarm before the action
+		{"_CmdOperate", "/subscribe", "", false},
+		{"_CmdOperate", "werk1/cnc5/A1/silence", "", false},
+		{"_CmdOperate", "werk1/subscribe/A1", "", false}, // the action is the last segment
+		{"_CmdAcknowledge", "werk1/cnc5/A1/subscribe", "", false},
+		{"_CmdParam", "werk1/cnc5/A1/subscribe", "", false},
+	}
+	for _, c := range cases {
+		place, ok := ReadAuthorizedAct(c.contract, c.path)
+		if ok != c.ok || place != c.place {
+			t.Errorf("ReadAuthorizedAct(%s, %s) = %q, %v; want %q, %v", c.contract, c.path, place, ok, c.place, c.ok)
+		}
+	}
+}
+
+// What a door witnesses about a person at a command's place: read where their
+// read zones cover it, and each cmd class a grant covers there -- not one held
+// on another element.
+func TestClassesAtTheCommandsPlace(t *testing.T) {
+	const alarm = "01HALARM0000000000000000AA"
+	sub := "werk1/cnc5/" + alarm + "/unsubscribe"
+	cases := []struct {
+		name   string
+		grants []string
+		want   string
+	}{
+		{"reader", []string{readAt("werk1/cnc5")}, "read"},
+		{"reader who configures here", []string{readAt("werk1/cnc5"), cmdAt("werk1", "configure,operate")}, "configure,operate,read"},
+		{"configure on another element", []string{readAt("werk1/cnc5"), cmdAt("werk1/cnc6", "configure")}, "read"},
+		{"read elsewhere", []string{readAt("werk1/cnc6")}, ""},
+	}
+	for _, c := range cases {
+		got := strings.Join(ClassesAt(ns, entry("", c.grants...), "_CmdOperate", sub), ",")
+		if got != c.want {
+			t.Errorf("%s: ClassesAt = %q, want %q", c.name, got, c.want)
+		}
+	}
+	// Any other command is witnessed at its own path.
+	if got := strings.Join(ClassesAt(ns, entry("", cmdAt("werk1/cnc5", "param")), "_CmdParam", "werk1/cnc5/speed/set"), ","); got != "param" {
+		t.Errorf("ClassesAt for a param command = %q, want param", got)
+	}
+	if got := ClassesAt(ns, nil, "_CmdOperate", sub); got != nil {
+		t.Errorf("ClassesAt for no actor = %v", got)
+	}
+}

@@ -109,7 +109,10 @@ func ClassOf(contract string) Class {
 		contract == "_AlarmState" ||
 		// A silence per element and alarm type: retained until it runs out, then
 		// retired by tombstone. It outlives the alarms it covers.
-		contract == "_AlarmSilence":
+		contract == "_AlarmSilence" ||
+		// A person's subscription to one alarm: retained at the alarm's place,
+		// adopted by the node that evaluates it next, retired by tombstone.
+		contract == "_AlarmSubscription":
 		return ClassEntity
 	case contract == "_Group" || contract == "_MetadataType" ||
 		contract == "_AnnotationType" || contract == "_DataModel" ||
@@ -126,6 +129,17 @@ func ClassOf(contract string) Class {
 		return ClassCmd
 	}
 	return ClassNone
+}
+
+// KeepsActorWitness reports whether a record at topic keeps what the admitting
+// door witnessed about the person beyond who they are -- their verified
+// address and the classes they held at the command's place: a command only,
+// where the service applying it needs them (an alarm subscription that mails
+// them, an administrator ending someone else's). State, events and acks a
+// person's command leads to are read by others and never repeat them.
+func KeepsActorWitness(topic string) bool {
+	p, err := Parse(topic)
+	return err == nil && IsCommand(ClassOf(p.Contract))
 }
 
 // IsState reports whether a class is state rather than an event: latest value

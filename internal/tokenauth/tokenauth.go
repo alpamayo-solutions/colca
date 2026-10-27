@@ -439,7 +439,7 @@ func (v *Verifier) ResolveEntry(sub string, who Holder, grants, groupIDs []strin
 		}
 		v.log.Warn("token: a group contributed no grants", "sub", sub, "err", problem)
 	}
-	entry.DisplayName, entry.ServiceClient = who.DisplayName, who.ServiceClient
+	entry.DisplayName, entry.ServiceClient, entry.Email = who.DisplayName, who.ServiceClient, who.Email
 	return entry, nil
 }
 
@@ -452,6 +452,10 @@ type Holder struct {
 	// ServiceClient is the client id of a Keycloak service account, "" for a
 	// person.
 	ServiceClient string
+	// Email is the `email` claim of a person whose token says
+	// `email_verified: true` (a JSON boolean, which is what Keycloak emits),
+	// else "". A service account has none.
+	Email string
 }
 
 func holderOf(claims jwt.MapClaims) Holder {
@@ -461,7 +465,22 @@ func holderOf(claims jwt.MapClaims) Holder {
 	if display == "" {
 		display = strings.TrimSpace(username)
 	}
-	return Holder{DisplayName: display, ServiceClient: uns.ServiceAccountClient(username)}
+	client := uns.ServiceAccountClient(username)
+	return Holder{DisplayName: display, ServiceClient: client, Email: verifiedEmail(claims, client)}
+}
+
+// verifiedEmail is the token's `email` when the identity provider vouches for
+// it (`email_verified` is the boolean true) and the holder is a person. An
+// unverified address is one anybody could have typed into their profile.
+func verifiedEmail(claims jwt.MapClaims, serviceClient string) string {
+	if serviceClient != "" {
+		return ""
+	}
+	if verified, _ := claims["email_verified"].(bool); !verified {
+		return ""
+	}
+	email, _ := claims["email"].(string)
+	return strings.TrimSpace(email)
 }
 
 // signingKey is the jwt.Keyfunc for every token this verifier accepts. The issuer

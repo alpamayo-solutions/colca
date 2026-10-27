@@ -144,3 +144,39 @@ called them when they acted (see
 and a reader that shows a name resolves it from the subject. A silence works the same way, but as a `_CmdOperate`
 (`silenceAlarm`, `unsilenceAlarm`): keeping an alarm from notifying anyone is
 more than confirming one has seen it, so it needs `operate`.
+
+## Subscribing to an alarm
+
+A person who may see an alarm may ask to be told when it fires: being on call
+for a machine over a weekend is watching it, not acting on it. So a
+subscription needs no command class at all.
+
+1. The person sends a `_CmdOperate` to the alarm's own place with `subscribe`
+   (or `unsubscribe`) last: `{element-path}/{alarm-id}/subscribe`, and
+   `{alarm-id}/subscribe` for an alarm that stands on the node. The door
+   authorizes it by **read** on the alarm's place -- the path without the
+   action -- exactly as it would a read of a record there
+   (`uns.ReadAuthorizedAct`). A cmd grant does not stand in for read: someone
+   who may operate a line but not see it may not subscribe to its alarms.
+   Every other `_CmdOperate` on an alarm keeps its class. The same rule is
+   applied again where a queued command is forwarded to a child.
+2. When the person sent it with a token whose `email_verified` claim is the
+   boolean `true`, the door keeps the token's `email` with the command
+   (`actor_email`), replicates it down with the command's groups to the node
+   that evaluates the alarm, and `GET /fetch` hands it to the consumer there.
+   A personal access token, a service account, the admin door and a local
+   service naming a person it acts for never set it. Beside it the door keeps
+   the classes it witnessed the person holding at the alarm's place
+   (`actor_classes`), so the evaluator can let an administrator end someone
+   else's subscription without authorizing again. Only commands keep either,
+   only the node's own services read them, and the state and events they lead
+   to never repeat them.
+3. The evaluator records the subscription as `_AlarmSubscription`, retained,
+   one record per subscription and alarm at the alarm's place:
+   `{root}/v1/_AlarmSubscription/{node}/{element-path}/{alarm-id}/{subscription-id}`.
+   It names the subscriber (`subscriber_id`, the witnessed subject, and its
+   label) but never their address: everyone who reads the alarm reads this
+   record, so the evaluator keeps the address in its own store. It names the channel, the window (`active_from`,
+   `active_until`) and, when nothing can be delivered, why (`undeliverable`).
+   Being retained, it is what a node that takes over evaluating the alarm
+   adopts; a tombstone retires it.

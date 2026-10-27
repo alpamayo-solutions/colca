@@ -53,7 +53,7 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	recs := []store.ReplRecord{
 		{ChildOffset: 1, OriginOffset: 41, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":1}`), TS: 1,
 			WrittenBy: "svc-connector", ActorID: "user-anna", ActorLabel: "anna@example.com", ActorKind: "human",
-			ActorGroups: []string{"operators"}, ActorClient: "erp-bridge"},
+			ActorGroups: []string{"operators"}, ActorClient: "erp-bridge", ActorEmail: "anna@plant.test"},
 		{ChildOffset: 2, OriginOffset: 42, Topic: "colca/v1/_Metric/m1/m1/temp", Payload: []byte(`{"v":2}`), TS: 2},
 	}
 	hwm, err := cl.Replicate("metrics", recs)
@@ -71,7 +71,9 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	if stored[0].WrittenBy != "svc-connector" || stored[0].ActorID != "user-anna" ||
 		stored[0].ActorLabel != "anna@example.com" || stored[0].ActorKind != "human" ||
 		len(stored[0].ActorGroups) != 1 || stored[0].ActorGroups[0] != "operators" ||
-		stored[0].ActorClient != "erp-bridge" || stored[1].ActorClient != "" {
+		stored[0].ActorClient != "erp-bridge" || stored[1].ActorClient != "" ||
+		// A person's address stays on commands; a metric never keeps one.
+		stored[0].ActorEmail != "" || stored[1].ActorEmail != "" {
 		t.Fatalf("uplink lost attribution: %+v", stored[0])
 	}
 	if stored[0].OriginOffset != 41 || stored[1].OriginOffset != 42 {
@@ -96,7 +98,8 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 		"colca/v1/_CmdParam/m1/child1/m1/go",
 		[]byte(`{"correlation_id":"c1","expires_at":99999999999}`),
 		engine.Attribution{WrittenBy: "api", ActorID: "user-anna", ActorLabel: "anna@example.com", ActorKind: "human",
-			ActorGroups: []string{"operators"}, ActorClient: "erp-bridge"},
+			ActorGroups: []string{"operators"}, ActorClient: "erp-bridge", ActorEmail: "anna@plant.test",
+			ActorClasses: []string{"operate", "read"}},
 	)
 	dl, next, gap, err := cl.Downlink(1, 10, 5*time.Second)
 	if err != nil {
@@ -110,7 +113,8 @@ func TestReplicateAndDownlinkOverMTLS(t *testing.T) {
 	}
 	if dl[0].WrittenBy != "api" || dl[0].ActorID != "user-anna" ||
 		dl[0].ActorLabel != "anna@example.com" || dl[0].ActorKind != "human" ||
-		len(dl[0].ActorGroups) != 1 || dl[0].ActorGroups[0] != "operators" || dl[0].ActorClient != "erp-bridge" {
+		len(dl[0].ActorGroups) != 1 || dl[0].ActorGroups[0] != "operators" || dl[0].ActorClient != "erp-bridge" ||
+		dl[0].ActorEmail != "anna@plant.test" || len(dl[0].ActorClasses) != 2 || dl[0].ActorClasses[1] != "read" {
 		t.Fatalf("downlink lost attribution — the executing node cannot reconstitute the person: %+v", dl[0])
 	}
 	if next != 2 {

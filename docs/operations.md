@@ -49,7 +49,7 @@ say who uses them:
 | `colca_http_kv_requests_total` | `caller`, `contract` (one contract, `multiple` or `all`), `prefix_depth` (`0` is the whole node, up to `5+`) | whole-node reads (`contract="all",prefix_depth="0"`) are the ones to remove first |
 | `colca_http_kv_entries` | `caller` | histogram of entries per `/kv` page |
 | `colca_http_fetch_requests_total` | `caller`, `stream` | a follower polling an idle stream shows a steady rate; `/watch` removes it |
-| `colca_http_request_limited_by_caller_total` | `route` (the route pattern, such as `GET /kv`), `caller` | 429s per caller; `colca_http_request_limited_total` has them by door and class |
+| `colca_http_request_limited_by_caller_total` | `route` (the route pattern, such as `GET /kv`), `caller` | 429s per caller; `colca_http_request_limited_total` has them by door, class and `reason` |
 
 A caller's `colca_http_request_limited_by_caller_total` series exists at `0`
 from its first request on a route, so "never limited" reads as `0`, not as a
@@ -69,6 +69,15 @@ requests a second and 64 at a time. A parent holds at most 1024 pushes and 8192
 downlink polls at once. `colca_http_request_limited_total{door="repl"}` counts
 refusals by class: `node`, `auth` (by address), `replication` (pushes),
 `downlink` and `transfer` (files).
+
+Every refusal also carries `reason`, the bound that refused it:
+`rate_limit` (the caller's request rate; the answer carries `Retry-After`),
+`concurrency_limit` (the caller already holds the most open requests of the
+class, such as `/watch` streams; it clears when the caller closes one),
+`global_concurrency_limit` (the node holds the most of the class it serves),
+`caller_limit` (the node tracks the most callers it may) and `busy` (a parent
+shedding pushes its store or memory cannot take yet). Queries that sum over
+door and class keep working.
 
 A parent commits the pushes that arrive while a commit is being synced
 together in the next one, up to 4096 records a commit, so its children are

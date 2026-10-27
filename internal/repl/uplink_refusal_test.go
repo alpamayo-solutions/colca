@@ -124,20 +124,17 @@ func TestARecordRefusedAlonePastTheGraceIsSetAsideAndTheLaneMovesOn(t *testing.T
 
 	// Isolation: the two records before the refused one reach the parent while
 	// it is still held.
-	waitFor(t, "the records before the refused one to reach the parent", 10*time.Second, func() bool {
-		return f.ps.NextOffset("metrics") == 3
+	// The parent stores a batch before the child hears back and moves its
+	// cursor, so both are waited for. The cursor standing at 3 is the hold: a
+	// set-aside would have moved it past the refused record.
+	waitFor(t, "the records before the refused one to reach the parent and the cursor held at the refused one", 10*time.Second, func() bool {
+		return f.ps.NextOffset("metrics") == 3 && cs.CursorGet(up, "metrics") == 3
 	})
-	if pos := cs.CursorGet(up, "metrics"); pos != 3 {
-		t.Fatalf("uplink cursor = %d during the grace, want 3: the refused record is held", pos)
-	}
 
 	// Past the grace it is set aside and the record after it rises.
-	waitFor(t, "the record after the refused one to reach the parent", 15*time.Second, func() bool {
-		return f.ps.NextOffset("metrics") == 4
+	waitFor(t, "the record after the refused one to reach the parent and the cursor past it", 15*time.Second, func() bool {
+		return f.ps.NextOffset("metrics") == 4 && cs.CursorGet(up, "metrics") == 5
 	})
-	if pos := cs.CursorGet(up, "metrics"); pos != 5 {
-		t.Fatalf("uplink cursor = %d, want 5: past the set-aside record and the one after it", pos)
-	}
 	if got := metricstest.Value(t, cm, `colca_uplink_set_aside_total{stream="metrics"}`); got != 1 {
 		t.Fatalf("colca_uplink_set_aside_total = %v, want 1", got)
 	}

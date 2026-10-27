@@ -77,6 +77,18 @@ type Attribution struct {
 	// record, so the node that executes a downlinked command knows the account
 	// from a person without reading its label.
 	ActorClient string
+	// ActorEmail is the person's address as their token vouched for it
+	// (email_verified), set only at a token door. Like ActorGroups it travels
+	// with the record, so the service applying a downlinked command -- an
+	// alarm subscription that mails the person -- has it where it executes.
+	ActorEmail string
+	// ActorClasses are the classes the admitting door witnessed a person
+	// holding at the command's place (uns.ClassesAt): what the service that
+	// applies the command may rely on without authorizing again, such as an
+	// administrator ending someone else's alarm subscription. Set only where
+	// the person's entry authorized the command, never from a request body;
+	// a node a command came down to keeps the value it was sent.
+	ActorClasses []string
 	// ActorGroups are the group ids a human's grants were resolved from at the
 	// verifying door. They travel with the record, so the node that executes a
 	// downlinked command can resolve the same person against its own _Group
@@ -106,6 +118,7 @@ func attributionForEntry(entry *uns.Entry) Attribution {
 		WrittenBy: entry.ULID, ActorID: entry.ULID,
 		ActorLabel: label, ActorKind: entry.ActorKind(),
 		ActorClient: entry.ServiceClient,
+		ActorEmail:  entry.Email,
 		ActorGroups: append([]string(nil), entry.Groups...),
 	}
 }
@@ -611,6 +624,9 @@ func (e *Engine) ingestClientAttributed(identity, topic string, payload []byte, 
 		actor := entry
 		if attested := e.actorForAttested(attribution, true); attested != nil {
 			actor = attested
+			// What the node witnessed the attested person holding here, never
+			// what the service's request said.
+			attribution.ActorClasses = uns.ClassesAt(e.Scope(), attested, p.Contract, p.Path)
 		}
 		implicitLocalConfigure := actor == entry && p.NodeID == e.cfg.ULID &&
 			(entry.MayImplicitlyConfigure(p.Contract) || entry.MayImplicitlyDeliverAppNotification(p.Contract, p.Path))
@@ -779,6 +795,7 @@ func (e *Engine) IngestHuman(entry *uns.Entry, topic string, payload []byte) (Re
 	}
 	attribution := attributionForEntry(entry)
 	attribution.Door = doorHuman
+	attribution.ActorClasses = uns.ClassesAt(e.Scope(), entry, p.Contract, p.Path)
 	// Forwarding checks the person again from the groups alone, so the door is
 	// recorded only when the groups alone authorize the command. Grants carried
 	// in the token itself cannot change during its life and are not checked again.
@@ -978,7 +995,7 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 				Topic: input.Topic, Payload: input.Payload, TS: ts,
 				WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 				ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-				ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient,
+				ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses,
 				KVPath: parsed.Path, KVNode: parsed.NodeID, Delete: len(input.Payload) == 0,
 			},
 		})
@@ -1101,7 +1118,7 @@ func (e *Engine) ingestAdminEvent(record uns.StateRecord, attribution Attributio
 		Topic: record.Topic, Payload: record.Payload, TS: ts,
 		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient,
+		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses,
 		// Deliberately no KVPath/KVNode: this class is never state (IsState is
 		// false), so there is nothing to project and nothing to retract.
 	}
@@ -1264,7 +1281,7 @@ func (e *Engine) IngestDownlinkPage(cmds []DownlinkCommand, at store.CursorAdvan
 		recs = append(recs, store.Record{
 			Topic: c.Topic, Payload: c.Payload, TS: c.TS,
 			WrittenBy: a.WrittenBy, ActorID: a.ActorID, ActorLabel: a.ActorLabel, ActorKind: a.ActorKind,
-			ActorGroups: a.ActorGroups, ActorClient: a.ActorClient, Door: a.Door,
+			ActorGroups: a.ActorGroups, ActorClient: a.ActorClient, ActorEmail: a.ActorEmail, ActorClasses: a.ActorClasses, Door: a.Door,
 		})
 	}
 	if len(recs) == 0 {
@@ -1483,7 +1500,7 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 		Topic: topic, Payload: payload, TS: ts,
 		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, Door: attribution.Door,
+		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses, Door: attribution.Door,
 	}
 	if uns.IsState(class) {
 		rec.KVPath, rec.KVNode = p.Path, p.NodeID

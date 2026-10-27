@@ -116,6 +116,14 @@ type Client struct {
 	logs logForwarding
 	// setAsideGrace overrides defaultSetAsideGrace in tests; see setaside.go.
 	setAsideGrace time.Duration
+	// findingMu serializes publishSetAsideFinding: the uplink and DELETE
+	// /uplink/set-aside both read the copies and write the finding from them,
+	// and without it the older read could be written last.
+	findingMu sync.Mutex
+	// findingRead and findingWait are test hooks, nil in production: called
+	// between reading the copies and writing the finding, and when a publish
+	// has to wait for another.
+	findingRead, findingWait func()
 }
 
 // SetStoreID names the store incarnation replication batches carry, for a
@@ -272,7 +280,7 @@ func marshalReplication(env envelope, recs []store.ReplRecord) ([]byte, error) {
 		wire[i] = wireRec{
 			SkipFrom: r.SkipFrom,
 			O:        r.ChildOffset, OO: r.OriginOffset, T: r.Topic, P: r.Payload, TS: r.TS,
-			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups, AC: r.ActorClient,
+			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups, AC: r.ActorClient, AE: r.ActorEmail, ACS: r.ActorClasses,
 		}
 	}
 	msg := map[string]any{"stream": env.stream, "records": wire}
@@ -330,6 +338,8 @@ type DownRec struct {
 	ActorKind    string
 	ActorGroups  []string
 	ActorClient  string
+	ActorEmail   string
+	ActorClasses []string
 }
 
 // downResult is one decoded downlink response. Definitions share the response
@@ -535,7 +545,7 @@ func toDownRecs(in []wireRec) []DownRec {
 		out[i] = DownRec{
 			ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS,
 			WrittenBy: r.WB, ActorID: r.AID,
-			ActorLabel: r.AL, ActorKind: r.AK, ActorGroups: r.AG, ActorClient: r.AC,
+			ActorLabel: r.AL, ActorKind: r.AK, ActorGroups: r.AG, ActorClient: r.AC, ActorEmail: r.AE, ActorClasses: r.ACS,
 		}
 	}
 	return out
@@ -565,6 +575,52 @@ func pushable(laneFilter func(string) bool) func(string) bool {
 		return leavesTheNode
 	}
 	return func(topic string) bool { return leavesTheNode(topic) && laneFilter(topic) }
+}
+
+// withheldLog is a logs-stream record the log policy keeps home. Like every
+// filtered record, the uplink cursor moves past it, so it neither holds the lane
+// nor pins retention. It is counted only once the cursor has moved, so a retried
+// page counts once.
+type withheldLog struct {
+	offset uint64
+	level  string
+}
+
+// readUplinkPage reads the physical page of stream that starts at from: at most
+// replBatch records, the ones that stay home included, so a lane that keeps
+// most of its records home still moves forward a page at a time. Each record is
+// judged on its head (see store.EachRecord): only the records allowed keeps and
+// the log policy forwards are decoded and returned, and the logs the policy keeps
+// home come back in withheld. next is the offset after the last record of the
+// page; it equals from when the lane is empty.
+func (c *Client) readUplinkPage(st *store.Store, stream string, from uint64, allowed func(string) bool) (recs []store.StoredRecord, withheld []withheldLog, next uint64, err error) {
+	next = from
+	scanned := 0
+	head := func(off uint64, topic string, _ int64) (decode, more bool) {
+		if scanned >= replBatch {
+			return false, false
+		}
+		scanned++
+		next = off + 1
+		if !allowed(topic) {
+			return false, true
+		}
+		if stream == logsStream {
+			if ok, level := c.logs.forward(topic); !ok {
+				withheld = append(withheld, withheldLog{off, level})
+				return false, true
+			}
+		}
+		return true, true
+	}
+	err = st.EachRecord(stream, from, st.NextOffset(stream), head, func(r store.StoredRecord) bool {
+		recs = append(recs, r)
+		return true
+	})
+	if err != nil {
+		return nil, nil, from, err
+	}
+	return recs, withheld, next, nil
 }
 
 // priorityLanes are drained to empty, in this order, before metrics. Acks come
@@ -773,8 +829,11 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 			eng.Store().CursorAck(uns.UplinkCursor(c.parentPub), stream, lwm)
 			from = lwm
 		}
-		// Read a bounded physical page before filtering, including local-only records.
-		recs, next, err := eng.Store().Read(stream, from, replBatch, nil)
+		// Read a bounded physical page, including local-only records. The lane's
+		// filter and the log policy decide on a record's head: what stays home is
+		// stepped over without being decoded.
+		allowed := pushable(filter)
+		recs, withheld, next, err := c.readUplinkPage(eng.Store(), stream, from, allowed)
 		if err != nil {
 			c.log.Error("uplink read", "stream", stream, "err", err)
 			retryPending = true
@@ -786,25 +845,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 		pushed := false
 		var hwm uint64
 		batch := make([]store.ReplRecord, 0, len(recs))
-		allowed := pushable(filter)
-		// Records the log policy keeps home. Like every filtered record, the cursor
-		// moves past them, so they neither hold the lane nor pin retention. They are
-		// counted only once the cursor has moved, so a retried page counts once.
-		type withheldLog struct {
-			offset uint64
-			level  string
-		}
-		var withheld []withheldLog
 		for _, r := range recs {
-			if !allowed(r.Topic) {
-				continue
-			}
-			if stream == logsStream {
-				if ok, level := c.logs.forward(r.Topic); !ok {
-					withheld = append(withheld, withheldLog{r.Offset, level})
-					continue
-				}
-			}
 			if stream == "metrics" && r.SourceLocalOnly {
 				if n := len(batch); n > 0 && batch[n-1].SkipFrom != 0 && batch[n-1].ChildOffset+1 == r.Offset {
 					batch[n-1].ChildOffset = r.Offset
@@ -817,7 +858,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				ChildOffset: r.Offset, OriginOffset: r.OriginOffset,
 				Topic: r.Topic, Payload: r.Payload, TS: r.TS,
 				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
+				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses,
 			})
 		}
 		if len(batch) > 0 {
@@ -1257,7 +1298,7 @@ func (c *Client) storePage(eng *engine.Engine, m *metrics.Metrics, memory *comma
 	attribution := func(r DownRec) engine.Attribution {
 		return engine.Attribution{
 			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses,
 		}
 	}
 	cursor := uns.DownlinkCursor(c.parentPub)
@@ -1445,7 +1486,7 @@ func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res dow
 		}
 		if _, err := eng.IngestDownlinkDefinitionAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses,
 		}); err != nil {
 			m.DefinitionRejected()
 			var refused *engine.RejectError
