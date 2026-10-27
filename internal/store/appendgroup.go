@@ -3,9 +3,10 @@ package store
 import (
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/cockroachdb/pebble/v2"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // Group commit for local appends.
@@ -53,19 +54,11 @@ func (s *Store) commitAppends(group []*appendRequest) {
 
 func writesSignal(recs []Record) bool {
 	for _, rec := range recs {
-		if rec.KVPath != "" && topicContract(rec.Topic) == "_Signal" {
+		if rec.KVPath != "" && uns.DecidesReplication(rec.Topic) {
 			return true
 		}
 	}
 	return false
-}
-
-func topicContract(topic string) string {
-	parts := strings.SplitN(topic, "/", 4)
-	if len(parts) < 4 {
-		return ""
-	}
-	return parts[2]
 }
 
 // commitAppendBatch writes group in order as one synced batch and fills in

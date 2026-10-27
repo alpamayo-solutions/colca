@@ -28,3 +28,29 @@ func TestSignalReplicationPolicyVocabulary(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSignalSourceLocalOnlyReadsThePolicy(t *testing.T) {
+	for payload, want := range map[string]bool{
+		`{"id":"s1"}`: false,
+		`{"id":"s1","replication_policy":"replicate_to_parents"}`: false,
+		`{"id":"s1","replication_policy":"source_local_only"}`:    true,
+	} {
+		if got, err := SignalSourceLocalOnly([]byte(payload)); err != nil || got != want {
+			t.Errorf("%s: %v %v, want %v", payload, got, err, want)
+		}
+	}
+	for _, payload := range []string{`{"replication_policy":"elsewhere"}`, `{"replication_policy":1}`, `[]`, `not json`} {
+		if _, err := SignalSourceLocalOnly([]byte(payload)); err == nil {
+			t.Errorf("%s: no error", payload)
+		}
+	}
+	if path, node, signal, ok := MetricSignalKey("colca/v1/_Metric/n1/line/temp"); !ok || path != "line/temp" || node != "n1" || signal != Prefix()+"_Signal/n1/line/temp" {
+		t.Errorf("MetricSignalKey = %q %q %q %v", path, node, signal, ok)
+	}
+	if _, _, _, ok := MetricSignalKey("colca/v1/_Signal/n1/line/temp"); ok {
+		t.Error("a signal has no signal key")
+	}
+	if !DecidesReplication("colca/v1/_Signal/n1/a") || DecidesReplication("colca/v1/_Metric/n1/a") {
+		t.Error("DecidesReplication")
+	}
+}

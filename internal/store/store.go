@@ -185,6 +185,9 @@ type Store struct {
 	// cannot overwrite a newer mark; see HWMGet.
 	hwmMu sync.Mutex
 	hwms  map[replHWMKey]uint64
+	// policies caches each signal's replication decision with the KV value it
+	// was read from (see metricSourceLocalOnly). Guarded by mu.
+	policies map[string]cachedPolicy
 	// maxRecordBytes is 0 (no cap) until SetMaxRecordBytes. It is set once before
 	// the first append, so s.mu does not guard it.
 	maxRecordBytes uint64
