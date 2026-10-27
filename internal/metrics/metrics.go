@@ -306,7 +306,7 @@ type Metrics struct {
 
 	// Rate and concurrency limits. Both labels are fixed door and route classes,
 	// never paths or identities.
-	httpRequestLimited *prometheus.CounterVec // colca_http_request_limited_total{door,class}
+	httpRequestLimited *prometheus.CounterVec // colca_http_request_limited_total{door,class,reason}
 
 	// Per-caller read load, to see who spends the scan and fetch budgets. The
 	// caller label is a registered identity (kind:name), "human" for every
@@ -638,8 +638,8 @@ func New(st *store.Store, cfg config.Retention, clk *clock.Clock) *Metrics {
 		}, []string{"result"}),
 		httpRequestLimited: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_http_request_limited_total",
-			Help: "HTTP requests refused by Colca's rate or concurrency controls, by bounded door and route class. Resets on restart.",
-		}, []string{"door", "class"}),
+			Help: "HTTP requests refused by Colca's rate or concurrency controls, by bounded door, route class and the bound that refused them: rate_limit (the caller's rate; the only one with Retry-After from the bucket), concurrency_limit (the caller holds the most open requests it may), global_concurrency_limit (the node holds the most it serves), caller_limit (the node tracks the most callers it may) or busy (a parent shedding pushes its store or memory cannot take yet). Resets on restart.",
+		}, []string{"door", "class", "reason"}),
 		httpKVRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "colca_http_kv_requests_total",
 			Help: "GET /kv pages served, by caller, contract filter (one contract, \"multiple\" or \"all\") and the number of segments in the prefix (0 is the whole node, capped at \"5+\"). Resets on restart.",
@@ -1436,12 +1436,16 @@ func (m *Metrics) LogGateWriteFailed(notice bool) {
 	m.logGateWriteFailBy[kind].Inc()
 }
 
-// HTTPRequestLimited counts one 429 response. Callers supply only fixed door
-// and route-class constants, so the metric cannot acquire attacker-controlled
-// label cardinality.
-func (m *Metrics) HTTPRequestLimited(door, class string) {
+// LimitedBusy is the reason of a 429 a parent answers when it sheds pushes its
+// store or memory cannot take yet; the limiter's own reasons are its Reason values.
+const LimitedBusy = "busy"
+
+// HTTPRequestLimited counts one 429 response. Callers supply only fixed door,
+// route-class and reason constants, so the metric cannot acquire
+// attacker-controlled label cardinality.
+func (m *Metrics) HTTPRequestLimited(door, class, reason string) {
 	if m != nil {
-		m.httpRequestLimited.WithLabelValues(door, class).Inc()
+		m.httpRequestLimited.WithLabelValues(door, class, reason).Inc()
 	}
 }
 

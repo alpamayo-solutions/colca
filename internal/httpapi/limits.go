@@ -127,7 +127,7 @@ func acquireRequest(
 		return release, true
 	}
 	writeRefusal(w, class, refusal)
-	m.HTTPRequestLimited(door, class)
+	m.HTTPRequestLimited(door, class, string(refusal.Reason))
 	return nil, false
 }
 

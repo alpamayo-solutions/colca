@@ -116,7 +116,7 @@ func (s *Server) acquireRequest(w http.ResponseWriter, class, child string, poli
 		w.Header().Set("Retry-After", strconv.Itoa(seconds))
 	}
 	http.Error(w, "request limit exceeded: "+string(refusal.Reason), http.StatusTooManyRequests)
-	s.metrics.HTTPRequestLimited(metrics.DoorRepl, class)
+	s.metrics.HTTPRequestLimited(metrics.DoorRepl, class, string(refusal.Reason))
 	return nil, false
 }
 
