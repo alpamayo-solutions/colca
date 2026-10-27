@@ -17,7 +17,9 @@ dependencies = [
     # franzmq 0.5 moved the publishing node to topic level 4 and 0.6 aligned
     # authentication and acknowledgement with the broker. The package supports
     # the whole range, so a service can move its own pin when it is ready.
-    "franzmq>=0.4.1,<0.7",
+    # 0.7 keeps publish order across a reconnect and drops PATHLESS_CONTRACTS,
+    # which this package never used.
+    "franzmq>=0.4.1,<0.8",
     "python-decouple>=3.8",
     # derive_annotation_id ULID-encodes a content hash.
     "ulid-py>=1.1",
