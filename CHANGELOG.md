@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.42.1](https://github.com/alpamayo-solutions/colca/compare/v0.42.0...v0.42.1) (2026-10-27)
+
+
+### Fixes
+
+* **contracts:** accept franzmq 0.7 ([#255](https://github.com/alpamayo-solutions/colca/issues/255)) ([b98e14e](https://github.com/alpamayo-solutions/colca/commit/b98e14e5191ada9687a8db0cb006613e9473e1d2))
+
 ## [0.42.0](https://github.com/alpamayo-solutions/colca/compare/v0.41.2...v0.42.0) (2026-10-27)
 
 
