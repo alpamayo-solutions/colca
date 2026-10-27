@@ -116,7 +116,6 @@ export type AlarmSubscription = {
   channel_id: string;
   channel_kind: "email" | "workbench";
   created_at: number;
-  subscriber_email?: string;
   subscriber_id: string;
   subscriber_label?: string;
   subscription_id: string;

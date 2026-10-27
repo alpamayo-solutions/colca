@@ -935,9 +935,9 @@ class AlarmSubscription(ToleratesUnknownFields, Payload):
     Retained: a node that takes over evaluating the alarm adopts it from here,
     and a tombstone retires it once ended and kept long enough.
 
-    ``subscriber_email`` is the address the person's token vouched for
-    (``email_verified``) when they subscribed, the command's ``actor_email``;
-    empty when it vouched for none.
+    The person's address is deliberately absent: everyone who reads the alarm
+    reads this record. The evaluator keeps the address the command carried
+    (``actor_email``) in its own store.
     """
 
     subscription_id: str
@@ -954,7 +954,6 @@ class AlarmSubscription(ToleratesUnknownFields, Payload):
     updated_at: float
     #: What the person's token called them when they subscribed.
     subscriber_label: str = ""
-    subscriber_email: str = ""
     #: Why nothing can be delivered, empty while it can: ``channel_not_offered``
     #: (the evaluator has no such channel), ``no_verified_email``,
     #: ``evaluator_changed`` (another node evaluates the alarm now). Kept,

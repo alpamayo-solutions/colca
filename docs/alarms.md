@@ -170,8 +170,9 @@ subscription needs no command class at all.
 3. The evaluator records the subscription as `_AlarmSubscription`, retained,
    one record per subscription and alarm at the alarm's place:
    `{root}/v1/_AlarmSubscription/{node}/{element-path}/{alarm-id}/{subscription-id}`.
-   It names the subscriber (`subscriber_id`, the witnessed subject; its label;
-   the verified address), the channel, the window (`active_from`,
+   It names the subscriber (`subscriber_id`, the witnessed subject, and its
+   label) but never their address: everyone who reads the alarm reads this
+   record, so the evaluator keeps the address in its own store. It names the channel, the window (`active_from`,
    `active_until`) and, when nothing can be delivered, why (`undeliverable`).
    Being retained, it is what a node that takes over evaluating the alarm
    adopts; a tombstone retires it.

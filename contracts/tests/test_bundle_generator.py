@@ -404,8 +404,10 @@ def test_an_alarm_subscription_is_retained_state_at_the_alarms_place():
         "created_at",
         "updated_at",
     }
-    for optional in ("subscriber_label", "subscriber_email", "undeliverable"):
+    for optional in ("subscriber_label", "undeliverable"):
         assert optional in schema["properties"], optional
+    # Everyone who reads the alarm reads this record: no address in it.
+    assert not any("email" in field for field in schema["properties"])
     assert set(schema["properties"]["channel_kind"]["enum"]) == {"email", "workbench"}
 
 
