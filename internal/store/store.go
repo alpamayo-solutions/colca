@@ -515,6 +515,12 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 			return 0, err
 		}
 	}
+	if target := recordTarget(rec.Topic); target != "" {
+		// So is the target index entry of a command (see targetindex.go).
+		if err := b.Set(targetKey(stream, target, off), nil, nil); err != nil {
+			return 0, err
+		}
+	}
 	if rec.KVPath != "" {
 		if rec.Delete {
 			if err := deleteKV(b, rec.KVPath, rec.KVNode, rec.Topic); err != nil {
@@ -1306,6 +1312,9 @@ type pruneStats struct {
 	// records carry it, so a prefix of 100k records costs a few megabytes.
 	index []sigEntry
 	ids   map[string]string
+	// targets names the target index entry of every command of the prefix,
+	// held like index.
+	targets []sigEntry
 }
 
 // sigEntry is one entry of the signal index.
@@ -1324,18 +1333,26 @@ func (st *pruneStats) add(off uint64, h *recHead, size uint64) {
 	}
 	st.shed += size
 	st.pruned++
+	if target := recordTarget(h.topic); target != "" {
+		st.targets = append(st.targets, sigEntry{signalID: st.intern(target), off: off})
+	}
 	if h.signalID == "" {
 		return
 	}
-	id, ok := st.ids[h.signalID]
-	if !ok {
-		if st.ids == nil {
-			st.ids = map[string]string{}
-		}
-		id = h.signalID
-		st.ids[id] = id
-	}
+	id := st.intern(h.signalID)
 	st.index = append(st.index, sigEntry{signalID: id, off: off})
+}
+
+// intern holds each id once, however many records carry it.
+func (st *pruneStats) intern(id string) string {
+	if held, ok := st.ids[id]; ok {
+		return held
+	}
+	if st.ids == nil {
+		st.ids = map[string]string{}
+	}
+	st.ids[id] = id
+	return id
 }
 
 // scanDoomed accumulates the accounting stats of the prefix [from, upTo).
@@ -1469,6 +1486,11 @@ func (s *Store) PruneScanned(scan *PruneScan, overridden []string, plan func(spa
 	// The index entries go one by one, not as a range per signal: see sigindex.go.
 	for _, e := range stats.index {
 		if err := b.Delete(sigKey(stream, e.signalID, e.off), nil); err != nil {
+			return 0, err
+		}
+	}
+	for _, e := range stats.targets {
+		if err := b.Delete(targetKey(stream, e.signalID, e.off), nil); err != nil {
 			return 0, err
 		}
 	}

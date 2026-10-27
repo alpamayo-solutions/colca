@@ -92,3 +92,29 @@ func identityCursor(cursor string) bool {
 	prefix, rest, ok := strings.Cut(strings.TrimPrefix(cursor, LocalCursorPrefix), "/")
 	return ok && prefix != "" && rest != "" && rest != commandCursorSuffix && !strings.Contains(prefix, ":")
 }
+
+// CommandTarget returns the identity a stored record is a command for, ok
+// false for any record that is not a command. The store files commands under
+// it, so the commands owed to one machine are found without reading those of
+// every other one. The store asks it for every record it writes and prunes, so
+// it reads the topic's first levels in place instead of parsing all of it; it
+// answers as Parse and ClassOf do.
+func CommandTarget(topic string) (string, bool) {
+	if len(topic) > MaxTopicBytes {
+		return "", false
+	}
+	var seg [4]string
+	rest := topic
+	for i := range seg {
+		j := strings.IndexByte(rest, '/')
+		if j < 0 {
+			return "", false // fewer than 5 segments
+		}
+		seg[i], rest = rest[:j], rest[j+1:]
+	}
+	contract, node := seg[2], seg[3]
+	if !strings.HasPrefix(contract, "_") || node == "" || !IsCommand(ClassOf(contract)) {
+		return "", false
+	}
+	return node, true
+}
