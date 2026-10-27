@@ -218,10 +218,10 @@ func TestAWaitingDownlinkPollReadsEachCommandOnce(t *testing.T) {
 		return goroutinesIn("(*Server).handleDownlink") == 1
 	})
 	const siblings = 5
-	for i := int64(1); i <= siblings; i++ {
+	for i := uint64(1); i <= siblings; i++ {
 		seedCommandFor(t, ps, "child2")
 		waitFor(t, "the poll read the sibling's command", 5*time.Second, func() bool {
-			return srv.downlinkWakes.Load() == i && srv.downlinkCrossed.Load() >= i
+			return srv.downlinkWakes.Load() == int64(i) && srv.downlinkCrossed.Load() >= i //nolint:gosec // at most 5
 		})
 	}
 	seedCommandFor(t, ps, "child1")

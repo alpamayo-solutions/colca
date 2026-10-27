@@ -73,7 +73,7 @@ type Server struct {
 	downlinkWakes atomic.Int64
 	// downlinkCrossed counts the commands offsets downlink polls read across,
 	// for tests: a waiting poll reads every record once, however often it wakes.
-	downlinkCrossed atomic.Int64
+	downlinkCrossed atomic.Uint64
 
 	// pushBytes bounds the bytes of pushes held at once; see byteBudget.
 	pushBytes byteBudget
@@ -614,7 +614,7 @@ func (s *Server) handleDownlink(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.downlinkCrossed.Add(int64(next - after))
+		s.downlinkCrossed.Add(next - after)
 		// The downlink gap object has the same shape and journal as /fetch, in parent
 		// coordinates. after is the first offset the child has not consumed, so there
 		// is a gap when after < LWM. A gap answers at once instead of making the child
