@@ -570,6 +570,9 @@ func (w *EditExec) resolveModelSlots(
 		entityName  string
 		required    bool
 		childModels []string
+		// semanticType is the category the child must carry, when a slot
+		// names one; every model naming the slot must agree on it.
+		semanticType string
 	}
 	requiredChildren := map[string]*childRequirement{}
 	childOrder := []string{}
@@ -601,6 +604,14 @@ func (w *EditExec) resolveModelSlots(
 				}
 				if slot.Required {
 					cr.required = true
+				}
+				if slot.SemanticType != "" {
+					if cr.semanticType != "" && cr.semanticType != slot.SemanticType {
+						return 409, fmt.Sprintf(
+							"model: %s and %s require different categories for child slot %q", cr.model, name, slot.Key,
+						)
+					}
+					cr.semanticType = slot.SemanticType
 				}
 				if slot.ChildModel != "" {
 					if _, ok := state.manifests[slot.ChildModel]; !ok {
@@ -757,10 +768,21 @@ func (w *EditExec) resolveModelSlots(
 			if tagID != "" && existingTag != "" && existingTag != tagID {
 				return 409, fmt.Sprintf("model: slot %q has an incompatible semantic type already assigned", combinedKey)
 			}
+			// What the signal does not carry yet, it takes from the slot: the
+			// semantic type and the unit. A unit it already carries is not
+			// judged here: whether it fits the slot (the same unit, or one
+			// convertible within the category's quantity kind) is the
+			// command boundary's, which knows the quantity kinds.
+			existingUnit, _ := rawString(existing.Payload["unit"])
 			payload := existing.Payload
-			if tagID != "" && existingTag == "" {
+			if (tagID != "" && existingTag == "") || (slot.Unit != "" && existingUnit == "") {
 				payload = cloneRawMap(existing.Payload)
-				payload["semantic_type_id"] = rawJSON(tagID)
+				if tagID != "" && existingTag == "" {
+					payload["semantic_type_id"] = rawJSON(tagID)
+				}
+				if slot.Unit != "" && existingUnit == "" {
+					payload["unit"] = rawJSON(slot.Unit)
+				}
 				if err := state.queue(existing.Record.Topic, payload); err != nil {
 					return 422, "model: payload is not encodable"
 				}
@@ -833,23 +855,31 @@ func (w *EditExec) resolveModelSlots(
 				combinedKey, existingType, slot.DataType,
 			)
 		}
-		if slot.SemanticType == "" {
-			continue
+		payload := cloneRawMap(existing.Payload)
+		adopted := false
+		if slot.SemanticType != "" {
+			tagID, ok := w.resolveSemanticTag(state, slot.SemanticType)
+			if !ok {
+				return 409, fmt.Sprintf("model: slot %q names unknown semantic type %q", combinedKey, slot.SemanticType)
+			}
+			existingTag, _ := rawString(existing.Payload["semantic_type_id"])
+			switch {
+			case existingTag == "":
+				payload["semantic_type_id"] = rawJSON(tagID)
+				adopted = true
+			case existingTag != tagID:
+				return 409, fmt.Sprintf("model: slot %q has an incompatible semantic type already assigned", combinedKey)
+			}
 		}
-		tagID, ok := w.resolveSemanticTag(state, slot.SemanticType)
-		if !ok {
-			return 409, fmt.Sprintf("model: slot %q names unknown semantic type %q", combinedKey, slot.SemanticType)
+		// A constant without a unit takes the slot's, as a signal does.
+		if existingUnit, _ := rawString(existing.Payload["unit"]); slot.Unit != "" && existingUnit == "" {
+			payload["unit"] = rawJSON(slot.Unit)
+			adopted = true
 		}
-		existingTag, _ := rawString(existing.Payload["semantic_type_id"])
-		switch {
-		case existingTag == "":
-			payload := cloneRawMap(existing.Payload)
-			payload["semantic_type_id"] = rawJSON(tagID)
+		if adopted {
 			if err := state.queue(existing.Record.Topic, payload); err != nil {
 				return 422, "model: payload is not encodable"
 			}
-		case existingTag != tagID:
-			return 409, fmt.Sprintf("model: slot %q has an incompatible semantic type already assigned", combinedKey)
 		}
 	}
 
@@ -989,14 +1019,28 @@ func (w *EditExec) resolveModelSlots(
 				combinedKey, occupant.Kind, entityName,
 			)
 		}
+		var childTagID string
+		if cr.semanticType != "" {
+			id, ok := w.resolveSemanticTag(state, cr.semanticType)
+			if !ok {
+				return 409, fmt.Sprintf("model: child slot %q names unknown semantic type %q", combinedKey, cr.semanticType)
+			}
+			childTagID = id
+		}
 
 		if child, found := childrenByName[entityName]; found {
 			childID, _ := rawString(child.Payload["id"])
 			if message := requireExpected(state.expected, entityVersionKey("system-element", childID)); message != "" {
 				return 422, "model: " + message
 			}
+			// A child of another category does not fill the slot; one without
+			// a category takes the slot's, as a signal takes its semantic type.
+			existingTag, _ := rawString(child.Payload["semantic_type_id"])
+			if childTagID != "" && existingTag != "" && existingTag != childTagID {
+				return 409, fmt.Sprintf("model: child slot %q has an incompatible category already assigned", combinedKey)
+			}
 			implements := stringListFromRaw(child.Payload["implements"])
-			changed := false
+			changed := childTagID != "" && existingTag == ""
 			for _, name := range cr.childModels {
 				if !containsString(implements, name) {
 					implements = append(implements, name)
@@ -1006,6 +1050,9 @@ func (w *EditExec) resolveModelSlots(
 			if changed {
 				payload := cloneRawMap(child.Payload)
 				payload["implements"] = rawJSON(implements)
+				if childTagID != "" && existingTag == "" {
+					payload["semantic_type_id"] = rawJSON(childTagID)
+				}
 				if err := state.queue(child.Record.Topic, payload); err != nil {
 					return 422, "model: attributes are not encodable"
 				}
@@ -1038,6 +1085,9 @@ func (w *EditExec) resolveModelSlots(
 		}
 		if len(cr.childModels) > 0 {
 			payload["implements"] = rawJSON(cr.childModels)
+		}
+		if childTagID != "" {
+			payload["semantic_type_id"] = rawJSON(childTagID)
 		}
 		topic := editTopic("_SystemElement", w.store.NodeID(), childPath)
 		if err := state.queue(topic, payload); err != nil {

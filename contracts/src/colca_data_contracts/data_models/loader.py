@@ -45,6 +45,7 @@ YAML schema (one file per model)::
       - name: drive_end_bearing      # slot key
         child_model: BearingModel    # optional; omitted -> plain structural child
         entity_name: "M-101 DE Bearing"  # optional; defaults to the slot key
+        semantic_type: subsystem     # optional; the category the child must have
         required: true
         description: ""
     constants:
@@ -101,6 +102,10 @@ Resolution rules:
   declares none of ``access``, ``process_tolerance``, ``relationships`` and
   ``value_definitions``; its manifest carries ``access: None``,
   ``process_tolerance: None``, no relationships and no value definitions.
+- A ``children:`` entry may name a ``semantic_type``: the category the child
+  element must carry (``machine``, ``subsystem``, ...). It is the child's
+  category, not a signal's, so it seeds a stub that applies to system
+  elements and takes no part in the one-data-type-per-tag rule.
 - A ``constants:`` entry compiles to a slot of kind ``constant``: a typed
   value the element must carry as a ``_Constant`` (its current value is the
   record itself, there is no acquisition and no history). It declares only
@@ -316,7 +321,7 @@ def _own_slots(name: str, raw: dict[str, Any]) -> tuple[dict[str, dict[str, Any]
             "key": key,
             "kind": "child",
             "data_type": "",
-            "semantic_type": None,
+            "semantic_type": item.get("semantic_type"),
             "unit": None,
             "required": item.get("required", True),
             "description": _clean(item.get("description")),
@@ -388,6 +393,14 @@ def _flatten(
 def _semantic_tag_stub(tag_name: str, slot: dict[str, Any]) -> dict[str, Any]:
     """Minimal seedable tag spec for a referenced tag. The seeder only uses
     this when no live tag of that name exists (existing wins)."""
+    if slot["kind"] == "child":
+        return {
+            "name": tag_name,
+            "i18n_name": tag_name.replace("-", " ").capitalize(),
+            "description": "",
+            "applies_to": ["system_element"],
+            "icon": "category",
+        }
     return {
         "name": tag_name,
         "i18n_name": tag_name.replace("-", " ").capitalize(),
@@ -409,7 +422,7 @@ def _tag_stub_conflicts(own_slots: dict[str, dict[str, dict[str, Any]]]) -> list
         for key in sorted(own_slots[model_name]):
             slot = own_slots[model_name][key]
             tag_name = slot["semantic_type"]
-            if not tag_name:
+            if not tag_name or slot["kind"] == "child":
                 continue
             data_type = slot["data_type"]
             seen = first_seen.setdefault(tag_name, (data_type, model_name))
