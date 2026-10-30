@@ -414,6 +414,17 @@ until someone writes it. A constant slot declares no `access`,
 link to it. The builtin `EnergyConsumer` requires `rated_power` this way, and
 `EnergySupply` consists of constants only.
 
+**Units and child categories on assign.** Assigning a model gives a signal or
+constant without a unit the slot's `unit`, as it gives one without a semantic
+type the slot's. A unit the entity already carries is kept and not judged here:
+whether it fits the slot (the same unit, or one convertible within the quantity
+kind of the slot's semantic type) is decided where the quantity kinds are
+known, at the command boundary of the API that sends the assign. A `children:`
+entry may name a `semantic_type`, the category the child element must carry
+(`machine`, `subsystem`, ...): assigning creates a missing child with it, gives
+an unclassified child it, and refuses (`409`) a child of another category, or
+two models asking one child slot for two categories.
+
 ### Fetching a node's logs
 
 A node keeps its whole `logs` stream locally. An ancestor reads it on demand
