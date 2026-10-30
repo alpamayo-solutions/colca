@@ -480,3 +480,36 @@ def test_canonical_data_types_matches_golden_vector():
     # test_data_models_vocabulary.py owns the golden-vector comparison; this
     # just confirms the loader package still exports the same set.
     assert frozenset({"boolean", "integer", "number", "string", "json"}) == CANONICAL_DATA_TYPES
+
+
+def test_child_slot_records_the_category_the_child_must_have(tmp_path):
+    """A child slot may name the child's category; it compiles onto the slot,
+    survives `extends`, and seeds a stub that classifies system elements,
+    outside the one-data-type-per-tag rule signals follow."""
+    _write(tmp_path, "bearing.yaml", BEARING)
+    _write(
+        tmp_path,
+        "motor.yaml",
+        _motor([{"name": "drive_end_bearing", "child_model": "Bearing", "semantic_type": "subsystem"}]),
+    )
+    _write(
+        tmp_path,
+        "servo.yaml",
+        {"name": "ServoMotor", "version": "1.0", "description": "", "extends": ["Motor"]},
+    )
+    manifests = {m["name"]: m for m in compile_models(tmp_path)}
+
+    for name in ("Motor", "ServoMotor"):
+        slot = {s["key"]: s for s in manifests[name]["slots"]}["drive_end_bearing"]
+        assert slot["semantic_type"] == "subsystem", name
+    (stub,) = [tag for tag in manifests["Motor"]["semantic_tags"] if tag["name"] == "subsystem"]
+    assert stub["applies_to"] == ["system_element"]
+    assert "data_type" not in stub
+
+
+def test_child_slot_without_a_category_carries_none(tmp_path):
+    _write(tmp_path, "bearing.yaml", BEARING)
+    _write(tmp_path, "motor.yaml", _motor([{"name": "drive_end_bearing", "child_model": "Bearing"}]))
+    manifests = {m["name"]: m for m in compile_models(tmp_path)}
+    slot = {s["key"]: s for s in manifests["Motor"]["slots"]}["drive_end_bearing"]
+    assert slot["semantic_type"] is None
