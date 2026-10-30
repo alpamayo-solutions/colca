@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.43.0](https://github.com/alpamayo-solutions/colca/compare/v0.42.1...v0.43.0) (2026-10-30)
+
+
+### Features
+
+* a data-model child slot may name the child's category ([#258](https://github.com/alpamayo-solutions/colca/issues/258)) ([32d2941](https://github.com/alpamayo-solutions/colca/commit/32d29419023cbb5a5d4833d2ddc0ae153b7bbf24))
+
 ## [0.42.1](https://github.com/alpamayo-solutions/colca/compare/v0.42.0...v0.42.1) (2026-10-27)
 
 
