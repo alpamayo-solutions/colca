@@ -94,6 +94,11 @@ type Attribution struct {
 	// downlinked command can resolve the same person against its own _Group
 	// definitions.
 	ActorGroups []string
+	// ActorCredential is the personal access token a person signed in with at
+	// the admitting door, "<token id>:<hash-only digest>" (store.Record). The
+	// node a command comes down to resolves the person from its own definition
+	// of that token, as ActorGroups resolve against its own _Group definitions.
+	ActorCredential string
 	// Door is the door that admitted a command here and checked its sender's
 	// grants: doorClient or doorHuman. It is stored with the command so the grants
 	// can be checked again when the command is forwarded (ForwardRefusal).
@@ -117,9 +122,10 @@ func attributionForEntry(entry *uns.Entry) Attribution {
 	return Attribution{
 		WrittenBy: entry.ULID, ActorID: entry.ULID,
 		ActorLabel: label, ActorKind: entry.ActorKind(),
-		ActorClient: entry.ServiceClient,
-		ActorEmail:  entry.Email,
-		ActorGroups: append([]string(nil), entry.Groups...),
+		ActorClient:     entry.ServiceClient,
+		ActorEmail:      entry.Email,
+		ActorGroups:     append([]string(nil), entry.Groups...),
+		ActorCredential: entry.Credential,
 	}
 }
 
@@ -134,7 +140,13 @@ func attributionForEntry(entry *uns.Entry) Attribution {
 // command that came down from the parent. Only then do their node-relative
 // ($node) grants resolve here; see uns.Entry.SignedInHere.
 func (e *Engine) actorForAttested(attribution Attribution, signedInHere bool) *uns.Entry {
-	if attribution.ActorKind != "human" || attribution.ActorID == "" || len(attribution.ActorGroups) == 0 {
+	if attribution.ActorKind != "human" || attribution.ActorID == "" {
+		return nil
+	}
+	if attribution.ActorCredential != "" {
+		return e.actorForCredential(attribution, signedInHere)
+	}
+	if len(attribution.ActorGroups) == 0 {
 		return nil
 	}
 	entry, problems, err := uns.TokenEntryWithGroups(attribution.ActorID, nil, attribution.ActorGroups, e.Groups())
@@ -157,6 +169,32 @@ func (e *Engine) actorForAttested(attribution Attribution, signedInHere bool) *u
 	entry.SignedInHere = signedInHere
 	return entry
 }
+
+// actorForCredential reconstitutes a person who signed in with a personal
+// access token from this node's own definition of that token
+// (uns.PersonalAccessTokenIndex.Attested): a token revoked, expired or changed
+// here, or one this node holds no definition of, gives no actor, and the
+// executor refuses the command. The person is never wider than the token.
+func (e *Engine) actorForCredential(attribution Attribution, signedInHere bool) *uns.Entry {
+	pats := e.pats.Load()
+	if pats == nil {
+		e.log.Warn("attested actor: no personal access token index on this node", "actor", attribution.ActorID)
+		return nil
+	}
+	entry, err := pats.Attested(attribution.ActorCredential, attribution.ActorID, e.clk.Now())
+	if err != nil {
+		e.log.Warn("attested actor: personal access token does not hold here", "actor", attribution.ActorID, "err", err)
+		return nil
+	}
+	entry.DisplayName, entry.ServiceClient, entry.Email = attribution.ActorLabel, attribution.ActorClient, attribution.ActorEmail
+	entry.SignedInHere = signedInHere
+	return entry
+}
+
+// SetPersonalAccessTokens gives the engine the index of this node's personal
+// access token definitions, from which it rebuilds a person whose command was
+// admitted with one (actorForCredential).
+func (e *Engine) SetPersonalAccessTokens(idx *uns.PersonalAccessTokenIndex) { e.pats.Store(idx) }
 
 // Mounts resolves identities to registry entries (*registry.Manager). The engine
 // keeps no identity state of its own.
@@ -185,6 +223,9 @@ type Engine struct {
 	ids     Mounts
 	log     *slog.Logger
 	metrics *metrics.Metrics // nil-safe: every method on a nil receiver is a no-op
+	// pats resolves a person whose command was admitted with a personal access
+	// token; nil until SetPersonalAccessTokens.
+	pats atomic.Pointer[uns.PersonalAccessTokenIndex]
 	// unknownGroups keeps an attested group this node does not define to one log line.
 	unknownGroups uns.GroupNotices
 	clk           *clock.Clock
@@ -995,7 +1036,7 @@ func (e *Engine) ingestAdminStateBatch(records []uns.StateRecord, attribution At
 				Topic: input.Topic, Payload: input.Payload, TS: ts,
 				WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 				ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-				ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses,
+				ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses, ActorCredential: attribution.ActorCredential,
 				KVPath: parsed.Path, KVNode: parsed.NodeID, Delete: len(input.Payload) == 0,
 			},
 		})
@@ -1118,7 +1159,7 @@ func (e *Engine) ingestAdminEvent(record uns.StateRecord, attribution Attributio
 		Topic: record.Topic, Payload: record.Payload, TS: ts,
 		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses,
+		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses, ActorCredential: attribution.ActorCredential,
 		// Deliberately no KVPath/KVNode: this class is never state (IsState is
 		// false), so there is nothing to project and nothing to retract.
 	}
@@ -1281,7 +1322,7 @@ func (e *Engine) IngestDownlinkPage(cmds []DownlinkCommand, at store.CursorAdvan
 		recs = append(recs, store.Record{
 			Topic: c.Topic, Payload: c.Payload, TS: c.TS,
 			WrittenBy: a.WrittenBy, ActorID: a.ActorID, ActorLabel: a.ActorLabel, ActorKind: a.ActorKind,
-			ActorGroups: a.ActorGroups, ActorClient: a.ActorClient, ActorEmail: a.ActorEmail, ActorClasses: a.ActorClasses, Door: a.Door,
+			ActorGroups: a.ActorGroups, ActorClient: a.ActorClient, ActorEmail: a.ActorEmail, ActorClasses: a.ActorClasses, ActorCredential: a.ActorCredential, Door: a.Door,
 		})
 	}
 	if len(recs) == 0 {
@@ -1500,7 +1541,7 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 		Topic: topic, Payload: payload, TS: ts,
 		WrittenBy: attribution.WrittenBy, ActorID: attribution.ActorID,
 		ActorLabel: attribution.ActorLabel, ActorKind: attribution.ActorKind,
-		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses, Door: attribution.Door,
+		ActorGroups: attribution.ActorGroups, ActorClient: attribution.ActorClient, ActorEmail: attribution.ActorEmail, ActorClasses: attribution.ActorClasses, ActorCredential: attribution.ActorCredential, Door: attribution.Door,
 	}
 	if uns.IsState(class) {
 		rec.KVPath, rec.KVNode = p.Path, p.NodeID
