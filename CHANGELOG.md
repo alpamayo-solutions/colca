@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.44.0](https://github.com/alpamayo-solutions/colca/compare/v0.43.0...v0.44.0) (2026-11-04)
+
+
+### Features
+
+* **auth:** a PAT person's command is authorized again where it comes down ([#260](https://github.com/alpamayo-solutions/colca/issues/260)) ([59ccbfc](https://github.com/alpamayo-solutions/colca/commit/59ccbfcc4514dac4bfe93475c5990b76b019d1a9))
+
 ## [0.43.0](https://github.com/alpamayo-solutions/colca/compare/v0.42.1...v0.43.0) (2026-10-30)
 
 
