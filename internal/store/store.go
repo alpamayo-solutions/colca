@@ -68,6 +68,13 @@ type Record struct {
 	// ActorClasses are the classes the admitting node witnessed the person
 	// holding at the command's place, kept with the command like ActorEmail.
 	ActorClasses []string `json:"acs,omitempty"`
+	// ActorCredential names the personal access token a person's command was
+	// admitted with, as "<token id>:<hash-only digest>", kept with the command
+	// like ActorEmail. A PAT carries its grants itself, not in groups, so the
+	// node a command comes down to authorizes the person again against its own
+	// replicated definition of that token (engine.actorForAttested). Empty for
+	// a person signed in with an OIDC token.
+	ActorCredential string `json:"acr,omitempty"`
 	// Door names the door that admitted a command on this node ("client" or
 	// "human"), where its sender's grants were checked. It is empty for a command
 	// that came down from the parent or through the admin door, and never leaves
@@ -98,6 +105,7 @@ type StoredRecord struct {
 	ActorClient     string
 	ActorEmail      string
 	ActorClasses    []string
+	ActorCredential string
 	// Door is Record.Door as stored.
 	Door string
 	// SignalID is the signal of a _Metric record, "" for other records and for
@@ -478,6 +486,7 @@ type recEnc struct {
 	ActorClient     string   `json:"ac,omitempty"`
 	ActorEmail      string   `json:"ae,omitempty"`
 	ActorClasses    []string `json:"acs,omitempty"`
+	ActorCredential string   `json:"acr,omitempty"`
 	Door            string   `json:"door,omitempty"`
 	SignalID        string   `json:"sid,omitempty"`
 	// size is the encoded length of this record as stored, set by scanRecords for
@@ -520,11 +529,15 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 		signalID = uns.FetchLogsAckKey // indexed for its short retention (see sigindex.go)
 	}
 	email, classes := actorWitness(rec)
+	credential := ""
+	if uns.KeepsActorWitness(rec.Topic) {
+		credential = rec.ActorCredential // on a command only, like the witness
+	}
 	val, err := json.Marshal(recEnc{
 		SourceLocalOnly: rec.SourceLocalOnly,
 		Topic:           rec.Topic, Payload: rec.Payload, TS: rec.TS,
 		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
-		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, ActorClient: rec.ActorClient, ActorEmail: email, ActorClasses: classes, OriginOffset: originOffset,
+		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, ActorClient: rec.ActorClient, ActorEmail: email, ActorClasses: classes, ActorCredential: credential, OriginOffset: originOffset,
 		Door:     rec.Door,
 		SignalID: signalID,
 	})
@@ -1131,22 +1144,23 @@ func (s *Store) HWMs() []HWMInfo {
 type ReplRecord struct {
 	// SkipFrom marks an inclusive intentionally omitted metric range ending at ChildOffset.
 	// Such entries advance the child HWM but never create a local stream record.
-	SkipFrom     uint64   `json:"skip_from,omitempty"`
-	ChildOffset  uint64   `json:"o"`
-	OriginOffset uint64   `json:"oo,omitempty"`
-	Topic        string   `json:"t"`
-	Payload      []byte   `json:"p"`
-	TS           int64    `json:"ts"`
-	WrittenBy    string   `json:"wb,omitempty"`
-	ActorID      string   `json:"aid,omitempty"`
-	ActorLabel   string   `json:"al,omitempty"`
-	ActorKind    string   `json:"ak,omitempty"`
-	ActorGroups  []string `json:"ag,omitempty"`
-	ActorClient  string   `json:"ac,omitempty"`
-	ActorEmail   string   `json:"ae,omitempty"`
-	ActorClasses []string `json:"acs,omitempty"`
-	KVPath       string   `json:"kp,omitempty"`
-	KVNode       string   `json:"kn,omitempty"`
+	SkipFrom        uint64   `json:"skip_from,omitempty"`
+	ChildOffset     uint64   `json:"o"`
+	OriginOffset    uint64   `json:"oo,omitempty"`
+	Topic           string   `json:"t"`
+	Payload         []byte   `json:"p"`
+	TS              int64    `json:"ts"`
+	WrittenBy       string   `json:"wb,omitempty"`
+	ActorID         string   `json:"aid,omitempty"`
+	ActorLabel      string   `json:"al,omitempty"`
+	ActorKind       string   `json:"ak,omitempty"`
+	ActorGroups     []string `json:"ag,omitempty"`
+	ActorClient     string   `json:"ac,omitempty"`
+	ActorEmail      string   `json:"ae,omitempty"`
+	ActorClasses    []string `json:"acs,omitempty"`
+	ActorCredential string   `json:"acr,omitempty"`
+	KVPath          string   `json:"kp,omitempty"`
+	KVNode          string   `json:"kn,omitempty"`
 	// Delete mirrors Record.Delete. The parent derives it after decoding, as the
 	// engine does, from an empty payload on a KV-projecting class; it is not a wire
 	// field.
@@ -1950,7 +1964,7 @@ func storedRecord(off uint64, e recEnc) StoredRecord {
 		Offset:          off, OriginOffset: originOffset(e.OriginOffset, off),
 		Topic: e.Topic, Payload: e.Payload, TS: e.TS,
 		WrittenBy: e.WrittenBy, ActorID: e.ActorID,
-		ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups, ActorClient: e.ActorClient, ActorEmail: e.ActorEmail, ActorClasses: e.ActorClasses,
+		ActorLabel: e.ActorLabel, ActorKind: e.ActorKind, ActorGroups: e.ActorGroups, ActorClient: e.ActorClient, ActorEmail: e.ActorEmail, ActorClasses: e.ActorClasses, ActorCredential: e.ActorCredential,
 		Door: e.Door, SignalID: e.SignalID,
 	}
 }

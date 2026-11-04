@@ -78,6 +78,13 @@ type Entry struct {
 	// down from the parent signed in at another node, and $node names that
 	// node, not this one. Never persisted.
 	SignedInHere bool `json:"-"`
+	// Credential names the personal access token a KindHuman entry signed in
+	// with, "<token id>:<hash-only digest>", set by the door that verified it;
+	// "" for an OIDC token. A PAT's grants are on the token, not in groups, so
+	// it travels with the person's commands (ActorCredential) for the node that
+	// authorizes them again against its own definition of the token
+	// (PersonalAccessTokenIndex.Attested). Never persisted.
+	Credential string `json:"-"`
 	// Status is StatusActive (or empty) or StatusDraining. Only a node entry
 	// can drain; an external service's delivery lives in broker session state,
 	// so there is nothing to drain.

@@ -304,6 +304,15 @@ group at the identity provider applies when the token is renewed or ends. A
 personal access token carries its own grants rather than groups; its sessions
 keep the grants they authenticated with, so re-issue the token to change them.
 
+A command a person sends with a personal access token names the token (its id
+and hash-only digest, never the secret) instead of groups. The node the command
+comes down to authorizes the person again against its own replicated
+definition of that token: the same token, still defined there, not expired, and
+owned by the acting person. A token revoked or changed there makes the person
+nobody, and the command is refused. A token made for `mcp` is also accepted
+where a door asks for `api`; a token made for `api` alone is not accepted for
+`mcp`.
+
 ## Administration
 
 The administrative routes (`/enroll`, `/debug/state`) require either the node's

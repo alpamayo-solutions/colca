@@ -122,3 +122,62 @@ func TestStandalonePATsRequireLocalAuthorAndFreshIdentity(t *testing.T) {
 		t.Fatal("retired PAT survived under local author")
 	}
 }
+
+func TestAnMCPTokenIsAnAPITokenAndNotTheReverse(t *testing.T) {
+	f := newStore("n-edge")
+	mcp := "pk_pat_01M0ZPAT000000000000000010_secret"
+	api := "pk_pat_01M0ZPAT000000000000000011_secret"
+	putPersonalAccessToken(f, mcp, []string{"mcp"}, "")
+	putPersonalAccessToken(f, api, []string{"api"}, "")
+	idx := NewPersonalAccessTokenIndex(f)
+
+	if _, _, err := idx.Authenticate(mcp, ScopeAPI, time.Now()); err != nil {
+		t.Fatalf("mcp token at an api door: %v", err)
+	}
+	if _, _, err := idx.Authenticate(api, ScopeMCP, time.Now()); err == nil || !strings.Contains(err.Error(), "scope") {
+		t.Fatalf("api token at an mcp door: err = %v", err)
+	}
+	if _, _, err := idx.Authenticate(mcp, ScopeI3X, time.Now()); err == nil {
+		t.Fatal("mcp token at an i3x door")
+	}
+}
+
+func TestAnAttestedTokenResolvesFromThisNodesDefinitionOnly(t *testing.T) {
+	f := newStore("n-edge")
+	token := "pk_pat_01M0ZPAT000000000000000012_secret"
+	topic := putPersonalAccessToken(f, token, []string{"api"}, "")
+	idx := NewPersonalAccessTokenIndex(f)
+	_, signedIn, err := idx.Authenticate(token, ScopeAPI, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(signedIn.Credential, "01M0ZPAT000000000000000012:") {
+		t.Fatalf("credential = %q", signedIn.Credential)
+	}
+
+	entry, err := idx.Attested(signedIn.Credential, "person-1", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.ULID != "person-1" || len(entry.Grants) != 1 || entry.Grants[0] != "read:01HLINE/#" {
+		t.Fatalf("entry = %#v", entry)
+	}
+	// Another person's command naming this token gets nobody.
+	if _, err := idx.Attested(signedIn.Credential, "person-2", time.Now()); err == nil {
+		t.Fatal("token attested for another person")
+	}
+	// A credential that names the token with another digest gets nobody.
+	if _, err := idx.Attested("01M0ZPAT000000000000000012:"+strings.Repeat("0", 64), "person-1", time.Now()); err == nil {
+		t.Fatal("wrong digest attested")
+	}
+	for _, malformed := range []string{"", "01M0ZPAT000000000000000012", ":abc", "id:"} {
+		if _, err := idx.Attested(malformed, "person-1", time.Now()); err == nil {
+			t.Fatalf("malformed credential %q attested", malformed)
+		}
+	}
+	// Revoked here: the definition is gone, so is the person.
+	f.records[topic] = nil
+	if _, err := idx.Attested(signedIn.Credential, "person-1", time.Now()); err == nil {
+		t.Fatal("revoked token attested")
+	}
+}

@@ -280,7 +280,7 @@ func marshalReplication(env envelope, recs []store.ReplRecord) ([]byte, error) {
 		wire[i] = wireRec{
 			SkipFrom: r.SkipFrom,
 			O:        r.ChildOffset, OO: r.OriginOffset, T: r.Topic, P: r.Payload, TS: r.TS,
-			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups, AC: r.ActorClient, AE: r.ActorEmail, ACS: r.ActorClasses,
+			WB: r.WrittenBy, AID: r.ActorID, AL: r.ActorLabel, AK: r.ActorKind, AG: r.ActorGroups, AC: r.ActorClient, AE: r.ActorEmail, ACS: r.ActorClasses, ACR: r.ActorCredential,
 		}
 	}
 	msg := map[string]any{"stream": env.stream, "records": wire}
@@ -340,6 +340,8 @@ type DownRec struct {
 	ActorClient  string
 	ActorEmail   string
 	ActorClasses []string
+	// ActorCredential is store.Record.ActorCredential.
+	ActorCredential string
 }
 
 // downResult is one decoded downlink response. Definitions share the response
@@ -545,7 +547,7 @@ func toDownRecs(in []wireRec) []DownRec {
 		out[i] = DownRec{
 			ParentOffset: r.O, Topic: r.T, Payload: r.P, TS: r.TS,
 			WrittenBy: r.WB, ActorID: r.AID,
-			ActorLabel: r.AL, ActorKind: r.AK, ActorGroups: r.AG, ActorClient: r.AC, ActorEmail: r.AE, ActorClasses: r.ACS,
+			ActorLabel: r.AL, ActorKind: r.AK, ActorGroups: r.AG, ActorClient: r.AC, ActorEmail: r.AE, ActorClasses: r.ACS, ActorCredential: r.ACR,
 		}
 	}
 	return out
@@ -858,7 +860,7 @@ func RunUplink(c *Client, eng *engine.Engine, blobs *blobstore.Store, m *metrics
 				ChildOffset: r.Offset, OriginOffset: r.OriginOffset,
 				Topic: r.Topic, Payload: r.Payload, TS: r.TS,
 				WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses,
+				ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses, ActorCredential: r.ActorCredential,
 			})
 		}
 		if len(batch) > 0 {
@@ -1298,7 +1300,7 @@ func (c *Client) storePage(eng *engine.Engine, m *metrics.Metrics, memory *comma
 	attribution := func(r DownRec) engine.Attribution {
 		return engine.Attribution{
 			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses, ActorCredential: r.ActorCredential,
 		}
 	}
 	cursor := uns.DownlinkCursor(c.parentPub)
@@ -1486,7 +1488,7 @@ func applyDefinitions(c *Client, eng *engine.Engine, m *metrics.Metrics, res dow
 		}
 		if _, err := eng.IngestDownlinkDefinitionAttributed(r.Topic, r.Payload, r.TS, engine.Attribution{
 			WrittenBy: r.WrittenBy, ActorID: r.ActorID,
-			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses,
+			ActorLabel: r.ActorLabel, ActorKind: r.ActorKind, ActorGroups: r.ActorGroups, ActorClient: r.ActorClient, ActorEmail: r.ActorEmail, ActorClasses: r.ActorClasses, ActorCredential: r.ActorCredential,
 		}); err != nil {
 			m.DefinitionRejected()
 			var refused *engine.RejectError
