@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.44.1](https://github.com/alpamayo-solutions/colca/compare/v0.44.0...v0.44.1) (2026-11-05)
+
+
+### Fixes
+
+* **historian:** reject a value with a NUL character instead of retrying its page forever ([#262](https://github.com/alpamayo-solutions/colca/issues/262)) ([7f7cc40](https://github.com/alpamayo-solutions/colca/commit/7f7cc408f83c41938b539e20043fb553965ad97e))
+
 ## [0.44.0](https://github.com/alpamayo-solutions/colca/compare/v0.43.0...v0.44.0) (2026-11-04)
 
 
