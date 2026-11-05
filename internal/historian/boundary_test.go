@@ -348,6 +348,37 @@ func TestEachValueKindSurvivesTheRoundTrip(t *testing.T) {
 	}
 }
 
+// A NUL in a JSON or text value is a row Postgres never stores: it is rejected
+// and the rest of the page lands, instead of the page failing on every retry.
+func TestANulCharacterIsRejectedAndThePageLands(t *testing.T) {
+	ctx := context.Background()
+	sink := testPool(t)
+
+	jsonNul, textNul, fine := sigID("sig-json-nul"), sigID("sig-text-nul"), sigID("sig-fine")
+	at := time.Now().UTC().Truncate(time.Millisecond)
+	nul, value := "a\x00b", 1.5
+	rows := []Row{
+		{Timestamp: at, SignalID: jsonNul, JSON: []byte(`{"text":"a\u0000b"}`), Offset: 1},
+		{Timestamp: at, SignalID: textNul, Text: &nul, Offset: 2},
+		{Timestamp: at, SignalID: fine, Number: &value, Offset: 3},
+	}
+	rejections, err := sink.Apply(ctx, rows, "test:nul", 3, "")
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	reasons := map[string]string{}
+	for _, r := range rejections {
+		reasons[r.Row.SignalID] = r.Reason
+	}
+	if reasons[jsonNul] != "untranslatable_character" || reasons[textNul] != "character_not_in_repertoire" ||
+		len(reasons) != 2 {
+		t.Fatalf("rejections = %v", reasons)
+	}
+	if got := storedValues(t, sink, fine); describe(got) != "1.5" {
+		t.Fatalf("the valid row = %s, want 1.5", describe(got))
+	}
+}
+
 // storedValues returns the signal's rows in time order, nil for a retraction.
 func storedValues(t *testing.T, sink *Sink, signalID string) []*float64 {
 	t.Helper()

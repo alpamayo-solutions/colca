@@ -221,6 +221,11 @@ var poisonStates = []struct {
 	{"23502", "not_null_violation"},
 	// A number outside the column's range.
 	{"22003", "numeric_out_of_range"},
+	// A NUL character, which Postgres stores in neither jsonb (\u0000 in a
+	// JSON value) nor text: one note with a NUL stopped a plant's historian
+	// (2026-11-04).
+	{"22P05", "untranslatable_character"},
+	{"22021", "character_not_in_repertoire"},
 }
 
 var poisonReasonByCode = func() map[string]string {
