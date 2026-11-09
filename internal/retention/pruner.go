@@ -23,7 +23,7 @@ import (
 // streams mirrors the store's stream set. definitions is left out on purpose: a
 // pruned definition cannot be fetched again, so that stream is compacted
 // instead.
-var streams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations", "logs"}
+var streams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations", "logs", "service_state"}
 
 // definitionsStream is reclaimed by compaction instead (compactDefinitions).
 const definitionsStream = "definitions"

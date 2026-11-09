@@ -129,7 +129,7 @@ var uplinkStreams = uns.UplinkStreams()
 
 // retentionStreams are the streams the retention policy applies to.
 // definitions is never pruned by age or size.
-var retentionStreams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations", "logs"}
+var retentionStreams = []string{"metrics", "entities", "commands", "audit", "alarms", "annotations", "logs", "service_state"}
 
 // Blob transfer and ingress rejection label values.
 var blobDirections = []string{"push", "pull", "receive"}

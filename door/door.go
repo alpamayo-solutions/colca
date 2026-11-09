@@ -581,6 +581,64 @@ func (c *Client) publish(ctx context.Context, topic string, record map[string]an
 	return nil
 }
 
+// BatchRecord is one record of PublishBatch. A nil Payload is a tombstone:
+// the record carries no payload at all and retires its state path.
+type BatchRecord struct {
+	Topic   string          `json:"topic"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+// BatchResult is the node's answer for one BatchRecord: where it was stored,
+// or why not. Reason "not_written" means the record was admitted but not
+// written and may be sent again; every other reason is a verdict on the
+// record itself.
+type BatchResult struct {
+	Stream   string `json:"stream,omitempty"`
+	Offset   uint64 `json:"offset,omitempty"`
+	Withheld string `json:"withheld,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// Stored reports whether the record was accepted.
+func (r BatchResult) Stored() bool { return r.Error == "" }
+
+// PublishBatch posts records through POST /publish/batch: each is judged as
+// Publish judges it, and the admitted ones are written with one append per
+// stream, in order. The results are in the order of records. A refused record
+// does not stop the others; the caller checks each result. Commands and audit
+// records cannot be batched.
+func (c *Client) PublishBatch(ctx context.Context, records []BatchRecord) ([]BatchResult, error) {
+	body, err := json.Marshal(map[string]any{"records": records})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/publish/batch", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("publishing a batch of %d: %w", len(records), err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		reason, _ := io.ReadAll(resp.Body)
+		return nil, httpResponseError(resp, fmt.Errorf("publishing a batch of %d: HTTP %d: %s", len(records), resp.StatusCode, truncate(reason, 300)))
+	}
+	var out struct {
+		Results []BatchResult `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("publishing a batch of %d: %w", len(records), err)
+	}
+	if len(out.Results) != len(records) {
+		return nil, fmt.Errorf("publishing a batch of %d: %d results", len(records), len(out.Results))
+	}
+	return out.Results, nil
+}
+
 // ULID asks the node who it is, so a service never has to be told.
 func (c *Client) ULID(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/healthz", nil)

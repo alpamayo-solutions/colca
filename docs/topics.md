@@ -91,6 +91,7 @@ The contract decides which stream a record lands in and which way it flows.
 | log | `_Log` | `logs` | up, from a minimum level ([`parent.logs`](configuration.md#log-forwarding)) |
 | annotation | `_Annotation` | `annotations` | up |
 | audit | `_AuditEvent` | `audit` | up |
+| service state | `_ServiceState` | `service_state` | stays on the node |
 
 Data and entity records have a current value. They are retained on the MQTT
 bus and appear in the key-value view. Commands, acknowledgements and the event
@@ -119,6 +120,40 @@ authorized at the element and at each signal; a producer publishing directly is
 checked against the schema only. The id derives from the type, the source, the
 start and the signal set, so placing an annotation or relating it does not
 change its id.
+
+### Service state
+
+`_ServiceState` is one service's private state: what a stateless service needs
+back after a restart, such as an evaluator's checkpoint or the work it has
+accepted and not finished. It is not for app or plant data, which belong in
+contracts other readers are granted.
+
+```
+{root}/v1/_ServiceState/{node}/{service-position}/{key…}
+```
+
+The service position is where the service's `_ServiceDetails` sits: its mount,
+then its name. The key is the service's own, at least one segment.
+
+- **One writer, one reader.** Only the service at that position writes and
+  reads it, besides the admin door. A write or read grant over the path does
+  not reach it, however wide; other services' `/kv`, `/kv/lookup` and
+  `/fetch` leave it out.
+- **Never on the bus.** It is neither retained nor fanned out over MQTT, and a
+  subscription that names the contract is refused. The service reads it back
+  over `GET /kv` (current value) or `GET /fetch` on `service_state`.
+- **Stays on the node.** It does not replicate up.
+- **Its own stream.** `service_state` is short-lived (24 h by default) and
+  wakes no consumer of `entities`. The current value is the key-value entry,
+  which outlives the stream's records.
+- **Goes with the service.** Revoking the service's identity
+  (`DELETE /enroll/{ulid}`) retires its `_ServiceState` with its
+  `_ServiceDetails`.
+
+colcad defines the contract itself; a contracts bundle may not declare it.
+The payload is the service's JSON object with a positive integer `version`
+(the service's own format number) and is bounded by `limits.max_record_bytes`.
+An empty payload retires the key.
 
 ### Log records
 

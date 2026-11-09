@@ -69,6 +69,10 @@ A caller is one of:
   processes and acks the previous one. It never reads behind the cursor. The
   response's `from` is where the page started; nodes before 0.18.2 ignore the
   parameter and do not send it.
+- A service's own state (`_ServiceState`, see
+  [Topics](topics.md#service-state)) is read and written only by that service
+  and the admin door. Every other caller's `/kv`, `/kv/lookup` and `/fetch`
+  leave it out, whatever its grants.
 - `prefix` filters on the path part of the topic, not the raw topic.
 - `topic` on `/fetch` (repeatable, colca 0.19+) keeps records whose raw topic
   matches one of the MQTT filters (`+`, `#`). A consumer woken by a set of

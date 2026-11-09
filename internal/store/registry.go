@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/pebble/v2"
+
+	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
 
 // Registry keys: r/{ulid} holds the entry of a locally enrolled identity and is
@@ -58,7 +60,9 @@ func (s *Store) RegistryPut(ulid string, entry []byte, stream string, rec Record
 func (s *Store) RegistryDelete(ulid string, stream string, rec Record, also ...Record) (uint64, error) {
 	kvPath, kvNode, kvTopic := rec.KVPath, rec.KVNode, rec.Topic
 	rec.KVPath, rec.KVNode = "", ""
-	return s.registryBatch(stream, append([]Record{rec}, also...), func(b *pebble.Batch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.registryBatchLocked(authoredBatches(stream, rec, also), func(b *pebble.Batch) error {
 		if kvPath != "" {
 			if err := deleteKV(b, kvPath, kvNode, kvTopic); err != nil {
 				return err
@@ -128,7 +132,7 @@ func (s *Store) RegistryRetire(ulid, stream string, rec Record, also []Record, r
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	batches := []streamRecords{{stream: stream, recs: append([]Record{rec}, also...)}}
+	batches := authoredBatches(stream, rec, also)
 	var retired []Record
 	for _, c := range candidates {
 		e, target := c.entry, c.stream
@@ -180,6 +184,33 @@ func (s *Store) RegistryRetire(ulid, stream string, rec Record, also []Record, r
 	s.hwmsDropped(ret.Child)
 	s.adopted.Delete(ret.Child)
 	return off, retired, nil
+}
+
+// authoredBatches puts the identity's own record first, on stream, and each
+// record it authored on the stream its contract lands on: a service's
+// _ServiceDetails on entities, its _ServiceState on service_state.
+func authoredBatches(stream string, rec Record, also []Record) []streamRecords {
+	batches := []streamRecords{{stream: stream, recs: []Record{rec}}}
+	for _, r := range also {
+		target := stream
+		if p, err := uns.Parse(r.Topic); err == nil {
+			if s := uns.StreamFor(uns.ClassOf(p.Contract)); s != "" {
+				target = s
+			}
+		}
+		placed := false
+		for i := range batches {
+			if batches[i].stream == target {
+				batches[i].recs = append(batches[i].recs, r)
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			batches = append(batches, streamRecords{stream: target, recs: []Record{r}})
+		}
+	}
+	return batches
 }
 
 // streamRecords is one stream's share of a registry batch.

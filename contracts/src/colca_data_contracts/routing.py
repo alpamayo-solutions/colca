@@ -75,6 +75,10 @@ CLASS_TABLE: dict[str, str] = {
     "_SemanticTag": "definition",
     "_PersonalAccessToken": "definition",
     "_AuditEvent": "audit",
+    # One service's private state (checkpoints, open work): read back only by
+    # that service, never on the bus, never replicated. colcad defines it;
+    # no bundle carries it. See ``service_state_topic``.
+    "_ServiceState": "service_state",
 }
 
 

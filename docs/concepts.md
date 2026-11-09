@@ -35,7 +35,7 @@ stored copy.
 
 Each node keeps a set of append-only streams with gapless offsets:
 `metrics`, `entities`, `commands`, `definitions`, `alarms`, `logs`,
-`annotations` and `audit`. Which stream a record lands in follows from its
+`annotations`, `audit` and `service_state`. Which stream a record lands in follows from its
 contract (see [Topics](topics.md#contract-classes)).
 
 Next to the streams, the node keeps the latest value of every data and entity

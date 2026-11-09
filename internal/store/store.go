@@ -25,7 +25,7 @@ import (
 )
 
 // streams is the fixed set of streams a store maintains offsets for.
-var streams = []string{"metrics", "entities", "commands", "definitions", "audit", "alarms", "annotations", "logs"}
+var streams = []string{"metrics", "entities", "commands", "definitions", "audit", "alarms", "annotations", "logs", "service_state"}
 
 // Streams returns the stream set. Other packages should ask for it instead of
 // keeping a copy that silently misses a new stream. The result is a copy.

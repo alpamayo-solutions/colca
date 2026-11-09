@@ -162,7 +162,9 @@ retention:
 | `…streams.metrics.signals` | none | Per-signal windows inside the stream's own, see below. |
 
 Default ages: `metrics` and `logs` 14 days (`336h`); `entities`, `alarms`,
-`annotations` and `audit` 365 days (`8760h`); `commands` 90 days (`2160h`).
+`annotations` and `audit` 365 days (`8760h`); `commands` 90 days (`2160h`);
+`service_state` one day (`24h`): a service reads its state back from the
+key-value entry, which pruning does not touch.
 `commands` cannot be set below 7 days. A delivery cursor (a child node's
 downlink cursor, a machine's delivery cursor) protects what is queued for it
 beyond `max_age`; set `ignore_cursors_after` on `commands` to bound how long an

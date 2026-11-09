@@ -29,17 +29,18 @@ type Class int
 
 // Routing classes; ClassNone is the zero value.
 const (
-	ClassNone       Class = iota
-	ClassData             // _Metric …    node-owned state, authorized by write scope
-	ClassEntity           // _Node, _EnrolledIdentity, _SystemElement, _Signal, _Constant, _Resource
-	ClassDefinition       // _Group, _MetadataType, ...: written by any node, flows down, applied as state
-	ClassCmd              // _Cmd*        write: ancestors/admin, flows down
-	ClassAck              // _Ack         write: owner, flows up
-	ClassGap              // _StreamGap: written by the pruner only; event, no KV, not retained
-	ClassAudit            // _AuditEvent  append-only security event, local/internal write, flows up
-	ClassAlarm            // _AlarmStateChange, _NotificationDispatched: events on their own stream, never behind metrics
-	ClassLog              // _Log: events on their own stream; logs are the loudest class and would crowd out samples
-	ClassAnnotation       // _Annotation: events on their own stream; too many per machine to keep as KV state
+	ClassNone         Class = iota
+	ClassData               // _Metric …    node-owned state, authorized by write scope
+	ClassEntity             // _Node, _EnrolledIdentity, _SystemElement, _Signal, _Constant, _Resource
+	ClassDefinition         // _Group, _MetadataType, ...: written by any node, flows down, applied as state
+	ClassCmd                // _Cmd*        write: ancestors/admin, flows down
+	ClassAck                // _Ack         write: owner, flows up
+	ClassGap                // _StreamGap: written by the pruner only; event, no KV, not retained
+	ClassAudit              // _AuditEvent  append-only security event, local/internal write, flows up
+	ClassAlarm              // _AlarmStateChange, _NotificationDispatched: events on their own stream, never behind metrics
+	ClassLog                // _Log: events on their own stream; logs are the loudest class and would crowd out samples
+	ClassAnnotation         // _Annotation: events on their own stream; too many per machine to keep as KV state
+	ClassServiceState       // _ServiceState: one service's private state, on its own stream, never replicated or on the bus
 )
 
 // Parsed is a decomposed UNS topic: colca/v1/_Contract/{node-id}/{path…}
@@ -119,6 +120,10 @@ func ClassOf(contract string) Class {
 		contract == "_ExternalSystem" || contract == "_SemanticTag" ||
 		contract == PersonalAccessTokenContract:
 		return ClassDefinition
+	// A service's own state (checkpoints, open work), read back only by that
+	// service: see ServiceStateContract.
+	case contract == ServiceStateContract:
+		return ClassServiceState
 	case contract == "_Ack":
 		return ClassAck
 	case contract == "_StreamGap":
@@ -148,7 +153,21 @@ func KeepsActorWitness(topic string) bool {
 // events, and retaining them would replay stale instructions. The KV
 // projection, the retained flag and the tombstone rule all ask this.
 func IsState(c Class) bool {
-	return c == ClassData || c == ClassEntity || c == ClassDefinition
+	return c == ClassData || c == ClassEntity || c == ClassDefinition || c == ClassServiceState
+}
+
+// OnBus reports whether a class's records appear on the node's MQTT bus at
+// all. A service's private state does not: it has one reader, the service
+// that wrote it, which reads it back over /kv and /fetch, where every record
+// is authorized on its own. On the bus a subscription filter is all that is
+// checked, and a filter cannot tell one service's state from another's.
+func OnBus(c Class) bool { return c != ClassServiceState }
+
+// OnBusTopic is OnBus for a record's topic. A topic that does not parse is
+// not colca's to keep off the bus.
+func OnBusTopic(topic string) bool {
+	p, err := Parse(topic)
+	return err != nil || OnBus(ClassOf(p.Contract))
 }
 
 // The predicates below let the core ask what a class does without knowing
@@ -407,6 +426,10 @@ var manifestClasses = map[string]Class{
 	"alarm":      ClassAlarm,
 	"annotation": ClassAnnotation,
 	"log":        ClassLog,
+	// Only _ServiceState has this class, and colcad defines it itself: a
+	// bundle that gives it to a contract is refused (internal/contracts). It
+	// is listed so the manifest vector names its stream.
+	"service_state": ClassServiceState,
 }
 
 // ClassFromManifest returns the class a bundle manifest names, and whether the name is known.
@@ -414,6 +437,11 @@ func ClassFromManifest(name string) (Class, bool) {
 	c, ok := manifestClasses[name]
 	return c, ok
 }
+
+// BundleMayDeclare reports whether a contracts bundle may give one of its
+// contracts this class. Service state may not: its owner rule goes by the
+// contract name, so another contract of the class would be unguarded.
+func BundleMayDeclare(c Class) bool { return c != ClassServiceState }
 
 // ManifestClassNames lists every class name a bundle may declare, sorted, so
 // anything that must stay in step can iterate it.
@@ -447,6 +475,8 @@ func StreamFor(c Class) string {
 		return "annotations"
 	case ClassLog:
 		return "logs"
+	case ClassServiceState:
+		return "service_state"
 	case ClassGap:
 		return ""
 	}
@@ -606,6 +636,8 @@ func Validate(contract string, payload []byte) error {
 	switch {
 	case contract == "_Metric":
 		return reqNum("v")
+	case contract == ServiceStateContract:
+		return validateServiceState(payload)
 	case contract == "_Ack":
 		if err := reqStr("correlation_id"); err != nil {
 			return err

@@ -1493,7 +1493,7 @@ func retainFor(c uns.Class) bool { return uns.IsState(c) }
 // which reached this node through replication, is not retained unless
 // bus.retain_child_metrics says so (see config.Bus).
 func (e *Engine) retainOnBus(p uns.Parsed) bool {
-	if !retainFor(e.ClassOf(p.Contract)) {
+	if class := e.ClassOf(p.Contract); !retainFor(class) || !uns.OnBus(class) {
 		return false
 	}
 	return !e.childMetric(p)
