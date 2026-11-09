@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.0](https://github.com/alpamayo-solutions/colca/compare/v0.44.1...v0.45.0) (2026-11-09)
+
+
+### Features
+
+* _ServiceState, a service's private state on its own stream ([#267](https://github.com/alpamayo-solutions/colca/issues/267)) ([b07fa8b](https://github.com/alpamayo-solutions/colca/commit/b07fa8b546ac9d81414a59b7b9a6e37c72aaf47c))
+
 ## [0.44.1](https://github.com/alpamayo-solutions/colca/compare/v0.44.0...v0.44.1) (2026-11-05)
 
 
