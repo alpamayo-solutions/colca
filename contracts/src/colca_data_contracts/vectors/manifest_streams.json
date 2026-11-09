@@ -19,6 +19,7 @@
     "data": "metrics",
     "definition": "definitions",
     "entity": "entities",
-    "log": "logs"
+    "log": "logs",
+    "service_state": "service_state"
   }
 }

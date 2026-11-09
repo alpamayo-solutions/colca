@@ -162,7 +162,7 @@ from colca_data_contracts.payload import (
 from colca_data_contracts.payload import (
     SystemElement as SystemElementPayload,
 )
-from colca_data_contracts.service_topics import service_context
+from colca_data_contracts.service_topics import service_context, service_state_topic
 from colca_data_contracts.topics import (
     TOPICS_CARRY_NODE_ID,
     node_id,
@@ -293,6 +293,7 @@ __all__ = [  # noqa: RUF022 - grouped by topic
     "connect_local_mqtt",
     "publish_local_service_details",
     "service_context",
+    "service_state_topic",
     "resolve_local_identity",
     "service_details_topic",
 ]

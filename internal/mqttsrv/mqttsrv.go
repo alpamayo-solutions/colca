@@ -794,6 +794,12 @@ func (s *Server) Close() error {
 // appended record reaches the bus this way under its stored topic; state is
 // retained so new subscribers get the current value.
 func (s *Server) DeliverLocal(topic string, payload []byte, retain bool) {
+	if !uns.OnBusTopic(topic) {
+		// A service's private state has one reader, who reads it over HTTP
+		// where each record is authorized; a subscription filter cannot
+		// tell whose it is (uns.ServiceStateContract).
+		return
+	}
 	if len(topic) > uns.MaxTopicBytes {
 		// A record stored before Parse refused such topics; delivered, it would
 		// misframe the stream of every subscriber.

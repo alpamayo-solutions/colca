@@ -98,7 +98,9 @@ func (e *Engine) rejectDenied(reason string, actor Attribution, operation string
 	return Result{}, &RejectError{Reason: reason, Denied: true, Err: fmt.Errorf(format, args...)}
 }
 
-var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true}
+// _ServiceState is colcad's too: who may read and write it is decided by the
+// contract name (uns.ServiceStateContract), so no bundle may redefine it.
+var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true, uns.ServiceStateContract: true}
 
 // SetContracts installs the loaded bundle table (node startup; nil = floor).
 func (e *Engine) SetContracts(t *contracts.Table) { e.contracts = t }

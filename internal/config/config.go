@@ -859,13 +859,17 @@ var defaultStreamMaxAge = map[string]time.Duration{
 	// Logs are high-volume and rarely needed after a fortnight; matching the
 	// metrics window keeps both answerable for the same period.
 	"logs": 336 * time.Hour, // 14 days
+	// A service's private state is read back from its KV entry, which
+	// outlives the records; the stream is only the write history, which
+	// nobody else reads.
+	"service_state": 24 * time.Hour,
 }
 
 // knownStreams are the stream names the system produces. A retention key
 // outside this set would never match, so it is a config error.
 var knownStreams = map[string]bool{
 	"metrics": true, "entities": true, "commands": true, "audit": true, "alarms": true,
-	"annotations": true, "logs": true,
+	"annotations": true, "logs": true, "service_state": true,
 }
 
 // EffectiveInterval returns the pruner interval: 5m when absent, otherwise the

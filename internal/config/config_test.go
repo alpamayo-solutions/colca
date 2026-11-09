@@ -288,6 +288,8 @@ func TestRetentionDefaultsWhenAbsent(t *testing.T) {
 		"annotations": 8760 * time.Hour,
 		// Logs match the metrics window.
 		"logs": 336 * time.Hour,
+		// A service's private state lives on in its KV entry.
+		"service_state": 24 * time.Hour,
 	}
 	// Fail when defaultStreamMaxAge gains a stream this table does not pin.
 	for stream := range defaultStreamMaxAge {

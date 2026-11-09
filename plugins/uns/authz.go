@@ -942,6 +942,11 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		if err != nil {
 			return false // only uns records exist in the store: fail closed
 		}
+		if p.Contract == ServiceStateContract {
+			// One reader: the service whose state it is. No read zone
+			// reaches it, however wide.
+			return ServiceStateOwnedBy(sc, e, p.Path)
+		}
 		if localServiceRead(e, topic) {
 			return true
 		}
@@ -954,6 +959,10 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 
 	case ActSub:
 		if isReservedFilter(topic) {
+			return false
+		}
+		if contract, named := FilterContract(topic); named && contract == ServiceStateContract {
+			// Never on the bus (OnBus): there is nothing to subscribe to.
 			return false
 		}
 		if localServiceRead(e, topic) {
@@ -1006,6 +1015,10 @@ func Authorize(sc Scope, e *Entry, a Action, topic string) bool {
 		p, err := Parse(topic)
 		if err != nil {
 			return false
+		}
+		if p.Contract == ServiceStateContract {
+			// Its own position, nobody else's, whatever its write zones.
+			return ServiceStateOwnedBy(sc, e, p.Path)
 		}
 		for _, z := range writeZones(sc, e) {
 			if coverPath(z, p.Path) {

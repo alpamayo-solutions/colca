@@ -169,6 +169,7 @@ colca_stream_next_offset{stream="definitions"} 1
 colca_stream_next_offset{stream="entities"} 3
 colca_stream_next_offset{stream="logs"} 1
 colca_stream_next_offset{stream="metrics"} 4
+colca_stream_next_offset{stream="service_state"} 1
 `
 	if err := testutil.GatherAndCompare(m.reg, strings.NewReader(expect),
 		"colca_child_hwm", "colca_cursor_position", "colca_cursor_lag_records",
@@ -192,6 +193,7 @@ colca_stream_next_offset{stream="definitions"} 1
 colca_stream_next_offset{stream="entities"} 3
 colca_stream_next_offset{stream="logs"} 1
 colca_stream_next_offset{stream="metrics"} 6
+colca_stream_next_offset{stream="service_state"} 1
 `
 	if err := testutil.GatherAndCompare(m.reg, strings.NewReader(expect2),
 		"colca_cursor_lag_records", "colca_stream_next_offset"); err != nil {

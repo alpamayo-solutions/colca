@@ -184,6 +184,14 @@ func TestFailStartConditions(t *testing.T) {
 		{"builtin redeclared", func(t *testing.T) string {
 			return fixture(t, map[string]any{"_Metric": metricEntry(), "_StreamGap": metricEntry()}, "")
 		}, "builtin-only"},
+		{"service state redeclared", func(t *testing.T) string {
+			return fixture(t, map[string]any{"_Metric": metricEntry(), "_ServiceState": metricEntry()}, "")
+		}, "builtin-only"},
+		{"another contract given the service-state class", func(t *testing.T) string {
+			e := metricEntry()
+			e["class"] = "service_state"
+			return fixture(t, map[string]any{"_Metric": e}, "")
+		}, "_ServiceState's alone"},
 		{"internal digest mismatch", func(t *testing.T) string {
 			return fixture(t, valid, strings.Repeat("ab", 32))
 		}, "does not match content"},

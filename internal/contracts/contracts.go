@@ -24,7 +24,7 @@ import (
 
 // builtinOnly are contracts colcad produces and validates itself; a bundle that
 // declares one fails to load.
-var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true}
+var builtinOnly = map[string]bool{"_StreamGap": true, "_EnrolledIdentity": true, uns.ServiceStateContract: true}
 
 // allowedKeywords is the supported schema subset, enforced at load so a bundle
 // cannot use features the broker does not support. pattern is compiled once at
@@ -164,6 +164,11 @@ func Load(path, wantSHA string) (*Table, error) {
 		class, ok := uns.ClassFromManifest(e.Class)
 		if !ok {
 			return nil, fmt.Errorf("contracts bundle %s: contract %s has unknown class %q (want data|entity|definition|cmd|ack|audit|alarm)", path, name, e.Class)
+		}
+		if !uns.BundleMayDeclare(class) {
+			// Only colcad's own _ServiceState has this class; another contract
+			// with it would be service state no owner rule guards.
+			return nil, fmt.Errorf("contracts bundle %s: contract %s may not have class %q: it is _ServiceState's alone", path, name, e.Class)
 		}
 		if err := lintSubset(e.Schema, name); err != nil {
 			return nil, fmt.Errorf("contracts bundle %s: %w", path, err)
