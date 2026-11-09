@@ -243,3 +243,34 @@ func TestServiceStateDoesNotReplicateUp(t *testing.T) {
 		t.Fatal("service state would be on the bus")
 	}
 }
+
+// A batch carries checkpoints in one append: the service's own keys are
+// written, another service's is refused alone, and a record without a payload
+// retires a key.
+func TestServiceStateInABatch(t *testing.T) {
+	h := newLocalHandler(t)
+	registerLocal(t, h, "notifications", "")
+	mine := stateTopic("notifications", "a")
+	gone := stateTopic("notifications", "b")
+	if rec := publishState(t, h, "notifications", gone, map[string]any{"version": 1}); rec.Code != http.StatusOK {
+		t.Fatalf("publish = %d: %s", rec.Code, rec.Body.String())
+	}
+	body, _ := json.Marshal(map[string]any{"records": []map[string]any{
+		{"topic": mine, "payload": map[string]any{"version": 1}},
+		{"topic": stateTopic("projector", "x"), "payload": map[string]any{"version": 1}},
+		{"topic": gone},
+	}})
+	rec := doLocalAs(t, h, "notifications", http.MethodPost, "/publish/batch", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Accepted int `json:"accepted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Accepted != 2 {
+		t.Fatalf("batch answer = %s", rec.Body.String())
+	}
+	if !holds(t, h, mine) || holds(t, h, gone) || holds(t, h, stateTopic("projector", "x")) {
+		t.Fatal("the batch did not write exactly the service's own keys")
+	}
+}
