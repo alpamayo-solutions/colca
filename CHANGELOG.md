@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.45.1](https://github.com/alpamayo-solutions/colca/compare/v0.45.0...v0.45.1) (2026-11-11)
+
+
+### Fixes
+
+* **store:** a _Metric's current value is its newest sample ([#269](https://github.com/alpamayo-solutions/colca/issues/269)) ([a85ed93](https://github.com/alpamayo-solutions/colca/commit/a85ed9370d6f6308ff70891cc3f5640f1b867d08))
+
 ## [0.45.0](https://github.com/alpamayo-solutions/colca/compare/v0.44.1...v0.45.0) (2026-11-09)
 
 
