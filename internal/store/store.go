@@ -538,8 +538,8 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record, order *sa
 		originOffset = off
 	}
 	signalID, sampleAt, isMetric := uns.MetricHead(rec.Topic, rec.Payload)
-	if isMetric && sampleAt == 0 {
-		sampleAt = rec.TS * int64(time.Millisecond)
+	if isMetric {
+		sampleAt = orderingTime(sampleAt, rec.TS)
 	}
 	if _, ok := uns.FetchLogsAck(rec.Topic); ok && signalID == "" {
 		signalID = uns.FetchLogsAckKey // indexed for its short retention (see sigindex.go)

@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/cockroachdb/pebble/v2"
 )
@@ -18,6 +19,11 @@ import (
 // A sample's time is its payload timestamp, or, without one, the time the node
 // that first stored it ingested it: the time the historian files it under. Other
 // state classes carry no sample time and keep last-arrival-wins.
+//
+// A sample time more than maxSampleLead ahead of the ingest time counts as
+// ingest time + maxSampleLead: a device whose clock runs far ahead would
+// otherwise hold the current value until real time reached its stamp. The
+// payload keeps the timestamp it was published with.
 //
 // The KV entry keeps the sample time it holds (kvEnc.SampleAt), so the check
 // reads one small value and never decodes the retained payload. An entry
@@ -105,4 +111,23 @@ func (o *sampleOrder) deleted(key []byte) {
 	if o != nil {
 		o.note(string(key), pendingSample{deleted: true})
 	}
+}
+
+// maxSampleLead is how far a sample's time may run ahead of the time it was
+// ingested before it is ordered by ingest time + maxSampleLead.
+const maxSampleLead = time.Minute
+
+// orderingTime is the time a _Metric is ordered by, in unix nanoseconds:
+// the payload's sample time at (0: none), capped at maxSampleLead past the
+// ingest time ingestMS (unix milliseconds); the ingest time without one. 0
+// when neither is known.
+func orderingTime(at, ingestMS int64) int64 {
+	if ingestMS == 0 {
+		return at
+	}
+	ingest := ingestMS * int64(time.Millisecond)
+	if at == 0 {
+		return ingest
+	}
+	return min(at, ingest+int64(maxSampleLead))
 }

@@ -46,7 +46,7 @@ func TestReplicatedOlderSampleIsNotRetainedAtTheParent(t *testing.T) {
 	e := New(s, cfg, testIDs(), rec.deliver, nil, nil)
 	const topic = "colca/v1/_Metric/n-edge1/edge1/m1/temp"
 	r := func(off uint64, p string) store.ReplRecord {
-		return store.ReplRecord{ChildOffset: off, Topic: topic, Payload: []byte(p), TS: 1, KVPath: "edge1/m1/temp", KVNode: "n-edge1"}
+		return store.ReplRecord{ChildOffset: off, Topic: topic, Payload: []byte(p), TS: 1_800_000_000_000, KVPath: "edge1/m1/temp", KVNode: "n-edge1"}
 	}
 	if _, _, err := e.IngestReplicated("n-edge1", "metrics", []store.ReplRecord{
 		r(1, `{"v":2,"timestamp":1700000200}`), r(2, `{"v":1,"timestamp":1700000100}`),

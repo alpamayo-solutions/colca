@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 const sampleTopic = "colca/v1/_Metric/n1/line1/temp"
@@ -10,9 +11,13 @@ const sampleTopic = "colca/v1/_Metric/n1/line1/temp"
 func sampleRec(v int, at string) Record {
 	return Record{
 		Topic: sampleTopic, Payload: []byte(fmt.Sprintf(`{"signal_id":"s1","value":%d,"timestamp":%s}`, v, at)),
-		TS: 1, KVPath: "line1/temp", KVNode: "n1",
+		TS: sampleIngestMS, KVPath: "line1/temp", KVNode: "n1",
 	}
 }
+
+// sampleIngestMS is when sampleRec's records were ingested, after every sample
+// time the tests use, so none is capped at ingest + 1 min.
+const sampleIngestMS = int64(1_800_000_000_000)
 
 // heldValue is the payload the topic's KV entry holds, failing when there is none.
 func heldValue(t *testing.T, s *Store) string {
@@ -175,5 +180,53 @@ func TestReplicatedOlderSampleKeepsTheParentsNewerValue(t *testing.T) {
 	}
 	if n := streamLen(t, s); n != 3 {
 		t.Fatalf("parent stream has %d records, want 3", n)
+	}
+}
+
+// A device clock far ahead must not hold the current value until real time
+// reaches its stamp: it is ordered as ingest time + one minute at most.
+func TestAFutureDatedSampleHoldsTheCurrentValueForAtMostAMinute(t *testing.T) {
+	s := mustOpen(t)
+	at := func(v int, stamp string, ingestMS int64) Record {
+		r := sampleRec(v, stamp)
+		r.TS = ingestMS
+		return r
+	}
+	const ingest = int64(1_700_000_000_000) // ms
+	future := at(1, "1800000000", ingest)   // three years ahead
+	appendOne(t, s, future)
+	if got := appendOne(t, s, at(2, "1700000030", ingest+30_000)); !got.Stale {
+		t.Fatal("a sample within the minute after a future-dated one replaced it")
+	}
+	normal := at(3, "1700000061", ingest+61_000)
+	if got := appendOne(t, s, normal); got.Stale {
+		t.Fatal("a sample past ingest + 1 min was held back by the future-dated one")
+	}
+	if got := heldValue(t, s); got != string(normal.Payload) {
+		t.Fatalf("KV holds %s, want %s", got, normal.Payload)
+	}
+	recs, _, err := s.Read("metrics", 1, 1, nil)
+	if err != nil || string(recs[0].Payload) != string(future.Payload) {
+		t.Fatalf("stream record %s err=%v, want the payload as published", recs[0].Payload, err)
+	}
+}
+
+func TestOrderingTime(t *testing.T) {
+	const ingestMS = int64(1_000_000)
+	ingest := ingestMS * int64(time.Millisecond)
+	lead := int64(time.Minute)
+	for _, c := range []struct {
+		at, ingestMS, want int64
+	}{
+		{ingest - 5, ingestMS, ingest - 5},       // past samples keep their time
+		{ingest + lead, ingestMS, ingest + lead}, // up to a minute ahead keeps its time
+		{ingest + lead + 1, ingestMS, ingest + lead},
+		{0, ingestMS, ingest},
+		{42, 0, 42},
+		{0, 0, 0},
+	} {
+		if got := orderingTime(c.at, c.ingestMS); got != c.want {
+			t.Errorf("orderingTime(%d, %d) = %d, want %d", c.at, c.ingestMS, got, c.want)
+		}
 	}
 }
