@@ -246,7 +246,7 @@ func (s *Store) registryBatchLocked(batches []streamRecords, mut func(*pebble.Ba
 		}
 		liveBytes := s.bytes[sr.stream]
 		for _, rec := range sr.recs {
-			n, err := addRecord(b, sr.stream, off, rec)
+			n, _, err := addRecord(b, sr.stream, off, rec, nil)
 			if err != nil {
 				return 0, err
 			}

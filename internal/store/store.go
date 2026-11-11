@@ -88,6 +88,11 @@ type Record struct {
 	// at that path alone. The stream record is still appended. The engine sets it
 	// for an empty payload on a KV-projecting class.
 	Delete bool `json:"-"`
+	// Stale is set by the store on the caller's record: a _Metric whose sample
+	// is older than the one its KV entry holds was appended to the stream but
+	// left the KV entry, the topic's current value, alone (see sampleorder.go).
+	// The engine then delivers it without the retained flag.
+	Stale bool `json:"-"`
 }
 
 type StoredRecord struct {
@@ -503,6 +508,10 @@ type kvEnc struct {
 	ActorID      string `json:"aid,omitempty"`
 	ActorLabel   string `json:"al,omitempty"`
 	ActorKind    string `json:"ak,omitempty"`
+	// SampleAt is the sample time of a _Metric entry in unix nanoseconds, which
+	// a later sample must not be older than to replace it (see sampleorder.go).
+	// 0 for other entries and for entries written before it was kept.
+	SampleAt int64 `json:"sa,omitempty"`
 }
 
 // actorWitness is the person's verified address and witnessed classes as this
@@ -519,12 +528,19 @@ func actorWitness(rec Record) (string, []string) {
 // batch and returns its byte cost, len(key) + len(value), the unit b/{stream}
 // counts. For a tombstone it deletes the KV key instead; deleting an absent key
 // is a no-op, so a replayed tombstone is harmless.
-func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, error) {
+//
+// order keeps a _Metric's KV entry at its newest sample (see sampleorder.go);
+// stale is true when the record is older and its KV projection was skipped.
+// Writers that never append a _Metric (registry, gap markers) pass nil.
+func addRecord(b *pebble.Batch, stream string, off uint64, rec Record, order *sampleOrder) (cost uint64, stale bool, err error) {
 	originOffset := rec.OriginOffset
 	if originOffset == 0 {
 		originOffset = off
 	}
-	signalID := uns.MetricSignalID(rec.Topic, rec.Payload)
+	signalID, sampleAt, isMetric := uns.MetricHead(rec.Topic, rec.Payload)
+	if isMetric {
+		sampleAt = orderingTime(sampleAt, rec.TS)
+	}
 	if _, ok := uns.FetchLogsAck(rec.Topic); ok && signalID == "" {
 		signalID = uns.FetchLogsAckKey // indexed for its short retention (see sigindex.go)
 	}
@@ -542,47 +558,50 @@ func addRecord(b *pebble.Batch, stream string, off uint64, rec Record) (uint64, 
 		SignalID: signalID,
 	})
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	key := streamKey(stream, off)
 	if err := b.Set(key, val, nil); err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if signalID != "" {
 		// The signal index entry is written and deleted with its record (see
 		// sigindex.go). b/{stream} does not count it: that counter is the
 		// stream's own bytes, which retention budgets against.
 		if err := b.Set(sigKey(stream, signalID, off), nil, nil); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 	}
 	if target := recordTarget(rec.Topic); target != "" {
 		// So is the target index entry of a command (see targetindex.go).
 		if err := b.Set(targetKey(stream, target, off), nil, nil); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 	}
-	if rec.KVPath != "" {
-		if rec.Delete {
-			if err := deleteKV(b, rec.KVPath, rec.KVNode, rec.Topic); err != nil {
-				return 0, err
-			}
-		} else {
-			kval, err := json.Marshal(kvEnc{
-				Topic: rec.Topic, Payload: rec.Payload, TS: rec.TS,
-				Offset: off, OriginOffset: originOffset,
-				WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
-				ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind,
-			})
-			if err != nil {
-				return 0, err
-			}
-			if err := setKV(b, rec.KVPath, rec.KVNode, rec.Topic, kval); err != nil {
-				return 0, err
-			}
-		}
+	cost = uint64(len(key) + len(val))
+	if rec.KVPath == "" {
+		return cost, false, nil
 	}
-	return uint64(len(key) + len(val)), nil
+	if rec.Delete {
+		order.deleted(kvKey(rec.KVPath, rec.KVNode, rec.Topic))
+		return cost, false, deleteKV(b, rec.KVPath, rec.KVNode, rec.Topic)
+	}
+	if !isMetric {
+		sampleAt = 0
+	} else if !order.admit(kvKey(rec.KVPath, rec.KVNode, rec.Topic), sampleAt) {
+		return cost, true, nil
+	}
+	kval, err := json.Marshal(kvEnc{
+		Topic: rec.Topic, Payload: rec.Payload, TS: rec.TS,
+		Offset: off, OriginOffset: originOffset,
+		WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
+		ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind,
+		SampleAt: sampleAt,
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	return cost, false, setKV(b, rec.KVPath, rec.KVNode, rec.Topic, kval)
 }
 
 // Append writes records, meta, the byte counter and KV projections in one
@@ -646,7 +665,7 @@ func (s *Store) appendAdvancingLocked(stream string, recs []Record, adv *CursorA
 	if err != nil {
 		return 0, 0, err
 	}
-	off, added, err := writeAppend(b, stream, recs, localOnly, first)
+	off, added, err := writeAppend(b, stream, recs, localOnly, first, newSampleOrder(s.db))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -704,16 +723,18 @@ func (s *Store) checkAppend(stream string, recs []Record) (localOnly []bool, err
 }
 
 // writeAppend adds recs to b from offset off and returns the next offset and
-// the bytes added. localOnly is checkAppend's answer.
-func writeAppend(b *pebble.Batch, stream string, recs []Record, localOnly []bool, off uint64) (next, added uint64, err error) {
+// the bytes added. localOnly is checkAppend's answer. It sets Stale on each
+// record of recs whose KV projection order skipped.
+func writeAppend(b *pebble.Batch, stream string, recs []Record, localOnly []bool, off uint64, order *sampleOrder) (next, added uint64, err error) {
 	for i, r := range recs {
 		if localOnly != nil {
 			r.SourceLocalOnly = localOnly[i]
 		}
-		n, err := addRecord(b, stream, off, r)
+		n, stale, err := addRecord(b, stream, off, r, order)
 		if err != nil {
 			return 0, 0, err
 		}
+		recs[i].Stale = stale
 		added += n
 		off++
 	}
@@ -1165,6 +1186,9 @@ type ReplRecord struct {
 	// engine does, from an empty payload on a KV-projecting class; it is not a wire
 	// field.
 	Delete bool `json:"-"`
+	// Stale is Record.Stale for an applied record: older than the sample this
+	// node's KV entry holds, so stored as history only. Not a wire field.
+	Stale bool `json:"-"`
 }
 
 // LWM returns the low-water mark of a stream, the lowest retained offset.
@@ -1538,7 +1562,7 @@ func (s *Store) PruneScanned(scan *PruneScan, overridden []string, plan func(spa
 	}
 	off := s.next[stream]
 	for _, r := range out.GapRecords {
-		n, err := addRecord(b, stream, off, r)
+		n, _, err := addRecord(b, stream, off, r, nil)
 		if err != nil {
 			return 0, err
 		}

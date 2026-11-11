@@ -301,7 +301,7 @@ func (s *Store) deleteSignalRecords(stream string, doomed []doomedRec, overridde
 	off := s.next[stream]
 	if len(passed) > 0 && marker != nil {
 		for _, r := range marker(span, passed) {
-			n, err := addRecord(b, stream, off, r)
+			n, _, err := addRecord(b, stream, off, r, nil)
 			if err != nil {
 				return 0, 0, nil, err
 			}

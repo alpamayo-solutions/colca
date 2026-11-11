@@ -98,6 +98,23 @@ bus and appear in the key-value view. Commands, acknowledgements and the event
 classes are history only: retaining a command would deliver it again to every
 new subscriber.
 
+A `_Metric`'s current value is its newest sample by the sample's own
+`timestamp` (unix seconds), or, without one, the time the first node stored
+it. A timestamp more than one minute ahead of that ingest time counts as
+ingest time + 1 minute; the record keeps the timestamp it was published with.
+An older sample (a backfill, a repair, a catch-up) is stored as history
+and delivered to subscribers, but not as the retained message, and the
+current value stays. A sample at the same timestamp replaces it, so a
+correction lands. Every node applies the same rule, so a parent holds the
+same current value as the child it came from. Entity and definition records
+carry no sample time: the last one to arrive is current.
+
+What a producer's clock does to it: a clock that jumps back holds the current
+value at the last sample before the jump until the clock passes that time
+again, so for at most the size of the jump. A clock running ahead holds it for
+at most about a minute, the cap above. Samples published meanwhile are stored
+and delivered as usual.
+
 A topic whose third level is not one of these contracts is refused: a publish
 with the reason `grammar`, a subscription with a failed SUBACK, whatever the
 caller may read. A subscription may put a wildcard at that level.

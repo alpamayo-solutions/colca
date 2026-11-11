@@ -131,7 +131,7 @@ func (e *Engine) IngestClientBatch(identity string, records []BatchRecord) []Bat
 			}
 			e.observeIndexes(item.parsed.Contract, topic, payload)
 			if e.deliver != nil {
-				e.deliver(topic, payload, retainFor(item.class))
+				e.deliver(topic, payload, retainFor(item.class) && !storeRecords[j].Stale)
 			}
 			e.observe(item.parsed, topic, payload)
 			e.checkMetricBinding(item.parsed)
