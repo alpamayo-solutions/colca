@@ -73,6 +73,7 @@ func (s *Store) commitAppendBatch(group []*appendRequest) {
 	b := s.db.NewBatch()
 	defer b.Close()
 	var committed []*appendRequest
+	order := newSampleOrder(s.db)
 	failAll := func(err error) {
 		for _, r := range group {
 			r.first, r.last, r.err = 0, 0, err
@@ -93,7 +94,7 @@ func (s *Store) commitAppendBatch(group []*appendRequest) {
 			continue
 		}
 		first := next[r.stream]
-		off, added, err := writeAppend(b, r.stream, r.recs, localOnly, first)
+		off, added, err := writeAppend(b, r.stream, r.recs, localOnly, first, order)
 		if err != nil {
 			// Part of r may be in b: nothing of the group is committed.
 			failAll(err)

@@ -9,18 +9,29 @@ import (
 	"unicode/utf8"
 )
 
-func TestMetricSignalIDIsReadFromMetricsOnly(t *testing.T) {
+func TestMetricHeadIsReadFromMetricsOnly(t *testing.T) {
 	cases := []struct {
-		topic, payload, want string
+		topic, payload, signal string
+		at                     int64
+		ok                     bool
 	}{
-		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","value":1}`, "01ABC"},
-		{"colca/v1/_Log/m1/svc/INFO", `{"signal_id":"01ABC"}`, ""},
-		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":`, ""},
-		{"not-a-topic", `{"signal_id":"01ABC"}`, ""},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","value":1}`, "01ABC", 0, true},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","value":1,"timestamp":1700000000.25}`, "01ABC", 1700000000250000000, true},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","timestamp":1700000000}`, "01ABC", 1700000000000000000, true},
+		// A timestamp that is not a number keeps the signal id and has no sample time.
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","timestamp":"2026-01-01T00:00:00Z"}`, "01ABC", 0, true},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","timestamp":null}`, "01ABC", 0, true},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","timestamp":-5}`, "01ABC", 0, true},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":"01ABC","timestamp":1e300}`, "01ABC", 0, true},
+		{"colca/v1/_Log/m1/svc/INFO", `{"signal_id":"01ABC","timestamp":1}`, "", 0, false},
+		{"colca/v1/_Metric/m1/line1/temp", `{"signal_id":`, "", 0, false},
+		{"not-a-topic", `{"signal_id":"01ABC"}`, "", 0, false},
 	}
 	for _, c := range cases {
-		if got := MetricSignalID(c.topic, []byte(c.payload)); got != c.want {
-			t.Errorf("MetricSignalID(%q, %s) = %q, want %q", c.topic, c.payload, got, c.want)
+		signal, at, ok := MetricHead(c.topic, []byte(c.payload))
+		if signal != c.signal || at != c.at || ok != c.ok {
+			t.Errorf("MetricHead(%q, %s) = %q, %d, %v; want %q, %d, %v",
+				c.topic, c.payload, signal, at, ok, c.signal, c.at, c.ok)
 		}
 	}
 }

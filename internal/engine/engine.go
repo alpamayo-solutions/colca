@@ -1348,7 +1348,7 @@ func (e *Engine) IngestDownlinkPage(cmds []DownlinkCommand, at store.CursorAdvan
 	}
 	for _, k := range keep {
 		c := cmds[k.i]
-		e.afterPersist(k.class, k.p, c.Topic, c.Payload, results[k.i].Offset)
+		e.afterPersist(k.class, k.p, c.Topic, c.Payload, results[k.i].Offset, false)
 		// The target executes downlinked commands, as in IngestDownlinkAttributed.
 		e.maybeExec(k.p, c.Payload, c.Attribution, e.actorForAttested(c.Attribution, false))
 	}
@@ -1430,7 +1430,7 @@ func (e *Engine) IngestReplicated(child, stream string, recs []store.ReplRecord)
 		// the mount-inserted path, so an ancestor can resolve grants naming it.
 		e.observeIndexes(p.Contract, r.Topic, r.Payload)
 		if e.deliver != nil {
-			bus = append(bus, busMsg{r.Topic, r.Payload, e.retainOnBus(p)})
+			bus = append(bus, busMsg{r.Topic, r.Payload, e.retainOnBus(p) && !r.Stale})
 		}
 	}
 	e.deliverReplicated(bus)
@@ -1550,18 +1550,19 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 		// empty delivery below makes mochi clear the retained message.
 		rec.Delete = len(payload) == 0
 	}
+	recs := []store.Record{rec}
 	var first uint64
 	var err error
 	if at != nil {
 		var applied bool
-		first, _, applied, err = e.store.AppendAdvancing(streamName, []store.Record{rec}, *at)
+		first, _, applied, err = e.store.AppendAdvancing(streamName, recs, *at)
 		if err == nil && !applied {
 			e.log.Info("record already stored: not stored, forwarded or executed again",
 				"topic", topic, "cursor", at.Name, "position", at.To-1)
 			return Result{Duplicate: true}, nil
 		}
 	} else {
-		first, _, err = e.store.Append(streamName, []store.Record{rec})
+		first, _, err = e.store.Append(streamName, recs)
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrRecordTooLarge) {
@@ -1570,13 +1571,15 @@ func (e *Engine) persistRecord(class uns.Class, p uns.Parsed, topic string, payl
 		}
 		return Result{}, &StorageError{Err: err}
 	}
-	e.afterPersist(class, p, topic, payload, first)
+	e.afterPersist(class, p, topic, payload, first, recs[0].Stale)
 	return Result{Persisted: true, Stream: streamName, Offset: first, Topic: topic}, nil
 }
 
 // afterPersist is what follows a record's durable write at offset: the
-// counters, the indexes and the local delivery.
-func (e *Engine) afterPersist(class uns.Class, p uns.Parsed, topic string, payload []byte, offset uint64) {
+// counters, the indexes and the local delivery. A stale record (store.Record.Stale)
+// reaches the bus without the retained flag, so the retained message stays the
+// current value.
+func (e *Engine) afterPersist(class uns.Class, p uns.Parsed, topic string, payload []byte, offset uint64, stale bool) {
 	streamName := uns.StreamFor(class)
 	e.metrics.IngestRecord(streamName)
 	e.log.Debug("ingest", "stream", streamName, "offset", offset, "topic", topic)
@@ -1608,7 +1611,7 @@ func (e *Engine) afterPersist(class uns.Class, p uns.Parsed, topic string, paylo
 		if uns.IsCommand(class) {
 			e.deliverCommand(class, p, topic, payload, offset)
 		} else {
-			e.deliver(topic, payload, retainFor(class))
+			e.deliver(topic, payload, retainFor(class) && !stale)
 		}
 	}
 }

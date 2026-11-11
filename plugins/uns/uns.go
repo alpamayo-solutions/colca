@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -512,21 +513,43 @@ func FetchLogsAck(topic string) (path string, ok bool) {
 	return p.Path, true
 }
 
-// MetricSignalID returns the signal_id of a _Metric record, or "" for any other
-// record. The store keeps it beside the record so a signal filter does not
-// decode every payload it skips.
-func MetricSignalID(topic string, payload []byte) string {
+// MetricHead reads what the store keeps beside a _Metric record, in the one
+// decode the record gets on the write path: its signal_id, which a signal
+// filter matches without decoding the payloads it skips, and its sample time,
+// which decides whether the record becomes the topic's current value.
+//
+// at is the payload's timestamp (unix seconds, the unit publishers use) in
+// unix nanoseconds, rounded as the historian rounds it, or 0 when the payload
+// has no numeric timestamp in range. ok is false for any record that is not a
+// _Metric or does not decode.
+func MetricHead(topic string, payload []byte) (signalID string, at int64, ok bool) {
 	p, err := Parse(topic)
 	if err != nil || !IsMetric(p.Contract) {
-		return ""
+		return "", 0, false
 	}
 	var metric struct {
-		SignalID string `json:"signal_id"`
+		SignalID  string          `json:"signal_id"`
+		Timestamp json.RawMessage `json:"timestamp"`
 	}
 	if json.Unmarshal(payload, &metric) != nil {
-		return ""
+		return "", 0, false
 	}
-	return metric.SignalID
+	return metric.SignalID, sampleNanos(metric.Timestamp), true
+}
+
+// sampleNanos converts a payload timestamp in unix seconds to unix
+// nanoseconds; 0 when it is not a number, or not after the epoch and before
+// the year 2262, where nanoseconds overflow int64.
+func sampleNanos(raw json.RawMessage) int64 {
+	if len(raw) == 0 || raw[0] == '"' || raw[0] == 'n' {
+		return 0
+	}
+	f, err := strconv.ParseFloat(string(raw), 64)
+	if err != nil || f <= 0 || f >= 9.2e9 {
+		return 0
+	}
+	sec := math.Floor(f)
+	return int64(sec)*int64(time.Second) + int64(math.Round((f-sec)*float64(time.Second)))
 }
 
 // SignalTopicForMetric returns the _Signal topic with p's node and path: the

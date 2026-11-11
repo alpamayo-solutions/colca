@@ -65,6 +65,7 @@ func (s *Store) commitReplicated(group []*replRequest) {
 	b := s.db.NewBatch()
 	defer b.Close()
 	var committed []*replRequest
+	order := newSampleOrder(s.db)
 	for _, r := range group {
 		if _, ok := next[r.stream]; !ok {
 			off := s.next[r.stream]
@@ -79,7 +80,7 @@ func (s *Store) commitReplicated(group []*replRequest) {
 		if !ok {
 			prev = s.HWMGet(r.child, r.stream)
 		}
-		applied, hwm, off, added, err := s.buildReplicated(b, r, prev, next[r.stream])
+		applied, hwm, off, added, err := s.buildReplicated(b, order, r, prev, next[r.stream])
 		if err != nil {
 			r.hwm, r.err = prev, err
 			continue
@@ -154,9 +155,10 @@ func (s *Store) commitReplicated(group []*replRequest) {
 // builds into a batch of its own first, so a request that fails leaves nothing
 // in b. It returns the applied records, the new HWM, the next offset and the
 // bytes added.
-func (s *Store) buildReplicated(b *pebble.Batch, r *replRequest, prev, off uint64) (applied []ReplRecord, hwm, next, added uint64, err error) {
+func (s *Store) buildReplicated(b *pebble.Batch, batchOrder *sampleOrder, r *replRequest, prev, off uint64) (applied []ReplRecord, hwm, next, added uint64, err error) {
 	own := s.db.NewBatch()
 	defer own.Close()
+	order := batchOrder.child()
 	hwm = prev
 	for _, rec := range r.recs {
 		if rec.SkipFrom != 0 && (r.stream != "metrics" || rec.SkipFrom > rec.ChildOffset || rec.Topic != "" || len(rec.Payload) != 0) {
@@ -175,16 +177,17 @@ func (s *Store) buildReplicated(b *pebble.Batch, r *replRequest, prev, off uint6
 			// child offset is the owner-authored coordinate.
 			rec.OriginOffset = rec.ChildOffset
 		}
-		n, err := addRecord(own, r.stream, off, Record{
+		n, stale, err := addRecord(own, r.stream, off, Record{
 			Topic: rec.Topic, Payload: rec.Payload, TS: rec.TS,
 			WrittenBy: rec.WrittenBy, ActorID: rec.ActorID,
 			ActorLabel: rec.ActorLabel, ActorKind: rec.ActorKind, ActorGroups: rec.ActorGroups, ActorClient: rec.ActorClient, ActorEmail: rec.ActorEmail, ActorClasses: rec.ActorClasses, ActorCredential: rec.ActorCredential,
 			OriginOffset: rec.OriginOffset,
 			KVPath:       rec.KVPath, KVNode: rec.KVNode, Delete: rec.Delete,
-		})
+		}, order)
 		if err != nil {
 			return nil, prev, off, 0, err
 		}
+		rec.Stale = stale
 		added += n
 		off++
 		applied = append(applied, rec)
@@ -196,5 +199,6 @@ func (s *Store) buildReplicated(b *pebble.Batch, r *replRequest, prev, off uint6
 	if err := b.Apply(own, nil); err != nil {
 		return nil, prev, off, 0, err
 	}
+	order.commit()
 	return applied, hwm, off, added, nil
 }

@@ -16,7 +16,7 @@ import (
 // The signal index lets a reader that follows a few signals on a long metrics
 // stream skip the records of every other signal without reading them.
 //
-// Every record that carries a signal id (a _Metric, see uns.MetricSignalID)
+// Every record that carries a signal id (a _Metric, see uns.MetricHead)
 // also writes si/{stream}/{signal}/{offset}, empty, in the same batch. A
 // filtered read merges the index ranges of the wanted signals in offset order
 // and reads exactly those records, so its cost follows the records it returns,
