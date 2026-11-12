@@ -670,7 +670,7 @@ func Validate(contract string, payload []byte) error {
 		if err := reqStr("event_id"); err != nil {
 			return err
 		}
-		if err := reqOneOf("source", "colca", "api", "keycloak", "projector", "node_manager"); err != nil {
+		if err := reqOneOf("source", "colca", "api", "keycloak", "projector", "node_manager", "orchestrator"); err != nil {
 			return err
 		}
 		if err := reqOneOf("action", "sign_in", "sign_out", "authorize", "identity_admin", "credential_admin", "execute", "rebuild", "restore", "security_config"); err != nil {

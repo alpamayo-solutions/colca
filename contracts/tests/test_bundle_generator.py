@@ -505,6 +505,7 @@ def test_audit_event_is_append_only_and_has_stable_required_fields():
         "keycloak",
         "projector",
         "node_manager",
+        "orchestrator",
     ]
 
 

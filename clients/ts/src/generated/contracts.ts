@@ -172,7 +172,7 @@ export type AuditEvent = {
   operation?: null | string;
   outcome: "success" | "failure" | "denied";
   reason_code?: null | string;
-  source: "colca" | "api" | "keycloak" | "projector" | "node_manager";
+  source: "colca" | "api" | "keycloak" | "projector" | "node_manager" | "orchestrator";
   [key: string]: unknown;
 };
 
