@@ -134,6 +134,7 @@ class AuditSource(BaseStrEnum):
     KEYCLOAK = "keycloak"
     PROJECTOR = "projector"
     NODE_MANAGER = "node_manager"
+    ORCHESTRATOR = "orchestrator"
 
 
 class AuditAction(BaseStrEnum):
