@@ -6,7 +6,7 @@
 cmd/            the binaries: colcad and the tools that run beside it
 internal/       the core: store, ingest engine, doors, replication, retention
 plugins/uns/    the domain: topic grammar, contract classes, grants, identities
-door/           Go client for services that talk to a node's local door
+door/           Go client and command executor for services on a node's local door
 secrets/        sealed-envelope helpers for services that store secrets on a node
 contracts/      the Python data contracts, the bundle generator, golden vectors
 bench/          benchmark scenarios and their thresholds
