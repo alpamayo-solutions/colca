@@ -68,6 +68,9 @@ type Manager struct {
 	// classOf is the engine's bundle-aware classifier, wired by SetClassifier.
 	// Until then the built-in classes answer.
 	classOf func(contract string) uns.Class
+	// observe tells the engine's indexes about a record this package retired,
+	// wired by SetObserver.
+	observe func(contract, topic string, payload []byte)
 }
 
 // New loads every locally enrolled entry from the store. A corrupt persisted
@@ -148,6 +151,14 @@ func (m *Manager) SetAuthoring(author func(path string) (string, error)) {
 func (m *Manager) SetClassifier(classOf func(contract string) uns.Class) {
 	m.mu.Lock()
 	m.classOf = classOf
+	m.mu.Unlock()
+}
+
+// SetObserver wires the engine's index update for records a revoke retires,
+// so a retired catalogue stops naming its tags' producer.
+func (m *Manager) SetObserver(fn func(contract, topic string, payload []byte)) {
+	m.mu.Lock()
+	m.observe = fn
 	m.mu.Unlock()
 }
 
@@ -287,6 +298,9 @@ func (m *Manager) Enroll(entryJSON []byte) (ulid string, offset uint64, err erro
 // It is the kill switch, not a decommission: a child node's replicated state,
 // replication marks and store incarnation stay, because a revoked child may be
 // enrolled again and resume from its own uplink cursor. Retire takes those too.
+// A local service is different: it registers again by name under a new
+// identity, so its revoke also retires its catalogues and findings and deletes
+// its command cursors (see authoredBy).
 //
 // wasDraining reports whether the entry was draining at removal, read under the
 // same lock, so the "forced" drain outcome is counted correctly.
@@ -333,7 +347,7 @@ func (m *Manager) revoke(ulid string, retire bool) (offset uint64, wasDraining b
 	// records for one service across two mount moves, two of them under elements
 	// deleted since, and the hub above it folded them by name and showed a
 	// running service as inactive.
-	authored, err := m.authoredBy(ulid)
+	authored, err := m.authoredBy(e)
 	if err != nil {
 		m.mu.Unlock()
 		// Reading nothing is not the same as there being nothing. Revoking on a
@@ -392,13 +406,27 @@ func (m *Manager) revoke(ulid string, retire bool) (offset uint64, wasDraining b
 	if e.MayUseDoor(uns.DoorMQTT) {
 		dead[cursorKey{e.CommandCursor(), "commands"}] = true
 	}
-	if retire {
-		dead[cursorKey{uns.DownlinkDefCursorPrefix + ulid, "definitions"}] = true
-		cursors, err := m.st.CursorSnapshot()
-		if err != nil {
-			m.log.Warn("retire: cursors under the identity's namespace not listed — they will hold a retention floor until the staleness window overrides them",
+	// A local service registers again by name and gets a new identity, so its
+	// command cursors (c/<name>/...) would hand the old one's position to a
+	// successor. Its other cursors stay: a successor of the same name resumes
+	// them as its own.
+	var cursors []store.CursorInfo
+	if retire || e.IsLocal() {
+		var err error
+		if cursors, err = m.st.CursorSnapshot(); err != nil {
+			m.log.Warn(verb+": cursors under the identity's namespace not listed — they will hold a retention floor until the staleness window overrides them",
 				"ulid", ulid, "err", err)
 		}
+	}
+	if e.IsLocal() {
+		for _, c := range cursors {
+			if c.Stream == "commands" && strings.HasPrefix(c.Name, e.CursorPrefix()) {
+				dead[cursorKey{c.Name, c.Stream}] = true
+			}
+		}
+	}
+	if retire {
+		dead[cursorKey{uns.DownlinkDefCursorPrefix + ulid, "definitions"}] = true
 		for _, c := range cursors {
 			if strings.HasPrefix(c.Name, e.CursorPrefix()) {
 				dead[cursorKey{c.Name, c.Stream}] = true
@@ -411,10 +439,17 @@ func (m *Manager) revoke(ulid string, retire bool) (offset uint64, wasDraining b
 				"ulid", ulid, "cursor", key.name, "stream", key.stream, "err", err)
 		}
 	}
-	kick, deliver, space := m.kick, m.deliver, m.ns
+	kick, deliver, space, observe := m.kick, m.deliver, m.ns, m.observe
 	m.mu.Unlock() // callbacks outside the lock, see Enroll
 	if kick != nil {
 		kick(ulid)
+	}
+	if observe != nil {
+		for _, rec := range authored {
+			if p, err := uns.Parse(rec.Topic); err == nil {
+				observe(p.Contract, rec.Topic, nil)
+			}
+		}
 	}
 	if deliver != nil {
 		deliver(topic, nil, true) // empty retained payload clears the retained copy
@@ -497,7 +532,12 @@ func (m *Manager) replicatedBy(e *uns.Entry) func(store.KVEntry) string {
 }
 
 // authoredBy builds a retirement tombstone for every record this node holds
-// that ulid authored about itself. The caller holds at least the read lock.
+// that e authored about itself. The caller holds at least the read lock.
+//
+// For a local service that includes its catalogues (_DataTags) and findings
+// (_Finding), told by the write that holds each entry: its name comes back
+// with a new identity, and records left behind would stand as live. Its
+// _Metric values stay.
 //
 // It asks each record who wrote it (uns.ServiceRecordAuthor) rather than
 // computing the topic the identity would publish to now: a service leaves a
@@ -505,7 +545,8 @@ func (m *Manager) replicatedBy(e *uns.Entry) func(store.KVEntry) string {
 // only the last one. Records this node holds for another node's author are a
 // child's own state replicated up and are not this node's to retire, so the
 // scan keeps only the ones written here.
-func (m *Manager) authoredBy(ulid string) ([]store.Record, error) {
+func (m *Manager) authoredBy(e *uns.Entry) ([]store.Record, error) {
+	ulid := e.ULID
 	entries, err := m.st.KVScan("")
 	if err != nil {
 		return nil, fmt.Errorf("scan for the records %s authored: %w", ulid, err)
@@ -521,8 +562,11 @@ func (m *Manager) authoredBy(ulid string) ([]store.Record, error) {
 			continue
 		}
 		author := uns.ServiceRecordAuthor(p.Contract, kv.Payload)
-		if p.Contract == uns.ServiceStateContract {
+		switch {
+		case p.Contract == uns.ServiceStateContract:
 			// Its payload names nobody: the write that holds the entry does.
+			author = kv.WrittenBy
+		case e.IsLocal() && (p.Contract == "_DataTags" || p.Contract == "_Finding"):
 			author = kv.WrittenBy
 		}
 		if author != ulid {
