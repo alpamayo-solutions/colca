@@ -102,6 +102,9 @@ func (e *GapError) Error() string {
 //
 // expires_at is judged by this host's clock, which is the node's: a local
 // service runs beside its node. An expired command is answered 498.
+//
+// A new cursor starts at the oldest retained command. Run or Drain one at a
+// time.
 type Executor struct {
 	Client  *Client
 	Handler Handler
