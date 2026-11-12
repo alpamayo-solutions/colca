@@ -73,7 +73,7 @@ func TestPublishCommandUnannouncedIsAnErrorWithItsOutcome(t *testing.T) {
 
 	offset, out, err := (&Client{BaseURL: srv.URL}).PublishCommand(context.Background(), "t", map[string]any{})
 	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) || httpErr.StatusCode != 404 {
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
 		t.Fatalf("err = %v, want HTTP 404", err)
 	}
 	if offset != 0 || out == nil || out.ResultCode != 404 || out.CorrelationID != "c2" {
