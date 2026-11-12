@@ -1,7 +1,7 @@
 // Package door is the client for a Colca node's HTTP API, shared by every
 // service so headers, status handling and paging live in one place. The
 // published API door takes an admin token; the local door takes a service name
-// and no credential.
+// and no credential. Executor runs a local service's commands and answers them.
 package door
 
 import (
