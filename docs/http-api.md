@@ -302,6 +302,12 @@ A node that is reachable only through the tree is administered with
 `fetchLogs`, which returns one page of its own logs in the ack's `result`. See
 [Fetching a node's logs](concepts.md#fetching-a-nodes-logs).
 
+A local service whose registry entry holds `cmd:#:admin` may send the same
+commands to its own node over the local door, at `_CmdAdmin/<node>/<verb>`. The node runs them at once: `/publish`
+returns the outcome in `command`, and the `_Ack` lands at `_Ack/<node>/<verb>`.
+Without the grant the answer is `403`. `POST /enroll` stays on the published
+door.
+
 ## Secrets
 
 Available when `secrets_dir` is set. The owner is the calling service; a local
