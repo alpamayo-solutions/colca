@@ -72,7 +72,8 @@ moving the element moves everything bound to it.
 
 Enrollment goes through `POST /enroll` with the admin token, or through a
 `_CmdAdmin` command sent down the tree to a node that is not directly
-reachable.
+reachable. A local service whose registry entry holds `cmd:#:admin` can send
+`_CmdAdmin` to its own node over the local door; `admin:#` it can never hold.
 
 ## Who writes a signal's values
 
