@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -102,7 +103,7 @@ func TestALocalServiceWithCmdAdminAdministersItsOwnNode(t *testing.T) {
 	_, payload = adminCommand("revoke", map[string]any{"ulid": "01Lconn-new"})
 	_, out, err = plain.PublishCommand(ctx, door.CommandTopic("_CmdAdmin", carryNode, "", "revoke"), payload)
 	var refused *door.HTTPError
-	if !errors.As(err, &refused) || refused.StatusCode != 403 {
+	if !errors.As(err, &refused) || refused.StatusCode != http.StatusForbidden {
 		t.Fatalf("revoke without cmd:#:admin: outcome=%+v err=%v, want 403", out, err)
 	}
 	if _, ok := n.Registry.ByName("conn-new"); !ok {
