@@ -42,7 +42,7 @@ func TestAdminListsAndClearsSetAsideUplinkRecords(t *testing.T) {
 	m := metrics.New(s, config.Retention{}, nil)
 	eng := engine.New(s, cfg, reg, nil, m, nil)
 	reg.SetNamespace(eng.Elements())
-	h := Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), "deadbeef", false, cl)
+	h := Handler(eng, cfg, reg, nil, m, testBlobs(t, cfg), NodeKey{Pubkey: "deadbeef"}, false, cl, nil)
 
 	if _, _, err := s.Append("metrics", []store.Record{{Topic: "colca/v1/_Metric/n-child/x", Payload: []byte(`{"v":1}`), TS: 1}}); err != nil {
 		t.Fatal(err)
