@@ -366,6 +366,28 @@ func TestACommandWithoutCorrelationIDRunsButIsNotAnswered(t *testing.T) {
 	}
 }
 
+func TestACommandWithoutCorrelationIDIsRefusedWhenOneIsRequired(t *testing.T) {
+	f := newExecNode(t)
+	h := newRecorder("svc/plan")
+	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{})
+	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{"correlation_id": "c1"})
+	x := newExecutor(f, h)
+	x.RequireCorrelationID = true
+	drain(t, x)
+	if h.count() != 1 || h.calls[0].CorrelationID != "c1" {
+		t.Fatalf("handler calls = %+v, want only c1", h.calls)
+	}
+	if n := len(f.answers()); n != 1 {
+		t.Fatalf("%d answers, want only c1's", n)
+	}
+	if got := x.Uncorrelated(); got != 1 {
+		t.Fatalf("Uncorrelated = %d, want 1", got)
+	}
+	if got := f.cursor(x.Cursor); got != 2 {
+		t.Fatalf("cursor = %d, want 2 (past both commands)", got)
+	}
+}
+
 // A command whose answer is already on the stream was answered before a
 // restart: it is neither run nor answered again, even when the answer is
 // pages further on.

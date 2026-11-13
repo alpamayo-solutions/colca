@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -142,6 +143,13 @@ type Executor struct {
 	Log      *slog.Logger
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// RequireCorrelationID refuses a command without a correlation_id: it is
+	// not run, only logged and counted (Uncorrelated). Without it such a
+	// command runs but is neither answered nor recorded in the ledger, as in
+	// chaski, so a restart may run it again.
+	RequireCorrelationID bool
+
+	uncorrelated atomic.Int64
 
 	answered map[string]bool // published by this executor, the latest ledgerLimit
 	order    []string
@@ -181,6 +189,10 @@ func (x *Executor) init(ctx context.Context) error {
 	}
 	return nil
 }
+
+// Uncorrelated is how many commands without a correlation_id RequireCorrelationID
+// refused since the executor was made.
+func (x *Executor) Uncorrelated() int64 { return x.uncorrelated.Load() }
 
 func (x *Executor) contracts() []string { return append(append([]string(nil), x.Contracts...), "_Ack") }
 
@@ -397,6 +409,11 @@ func (x *Executor) handle(ctx context.Context, rec Record, answered map[string]b
 	log := x.Log.With("contract", contract, "path", path, "correlation_id", cmd.CorrelationID,
 		"sender", firstNonEmpty(cmd.Sender.Label, cmd.Sender.ID))
 
+	if cmd.CorrelationID == "" && x.RequireCorrelationID {
+		x.uncorrelated.Add(1)
+		log.Warn("command has no correlation_id; not executed")
+		return nil
+	}
 	if cmd.CorrelationID != "" && (x.answered[cmd.CorrelationID] || answered[cmd.CorrelationID]) {
 		log.Info("command was answered already; not executed again")
 		return nil
