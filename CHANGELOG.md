@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.46.0](https://github.com/alpamayo-solutions/colca/compare/v0.45.1...v0.46.0) (2026-11-13)
+
+
+### Features
+
+* **auth:** a sender reads the _Ack of its own command without a read grant ([264bd1d](https://github.com/alpamayo-solutions/colca/commit/264bd1de1348b61de7676bff25b9136f9847bbc1))
+* **contracts:** accept orchestrator as an _AuditEvent source ([9e50f9f](https://github.com/alpamayo-solutions/colca/commit/9e50f9f80ee2b0a628e2d80efc5a3e5edc6d2390))
+* **door:** Bearer auth, PublishCommand outcomes and cursorless AwaitAck ([98717c6](https://github.com/alpamayo-solutions/colca/commit/98717c623fab29ddc9d3ddbbbcd01d09f9e02d20))
+* **door:** command ledgers in memory and in a file ([d034df8](https://github.com/alpamayo-solutions/colca/commit/d034df88807f65a10967909aaacc9d3b1bd73750))
+* **door:** Executor runs a local service's commands and answers them ([7bf78fe](https://github.com/alpamayo-solutions/colca/commit/7bf78fedd1141ec462b852b97008340c5ddbc940))
+* **door:** optionally refuse commands without a correlation_id ([b0d60b3](https://github.com/alpamayo-solutions/colca/commit/b0d60b3a8c4ac5510e00e18b978e2810ed99246e))
+* **door:** orchestrator support — executor, ledger, bearer commands and own-ack reads ([41554e9](https://github.com/alpamayo-solutions/colca/commit/41554e9884653176b9a266bc217267104096400e))
+* **door:** orchestrator support — executor, ledger, bearer commands and own-ack reads ([#273](https://github.com/alpamayo-solutions/colca/issues/273)) ([41554e9](https://github.com/alpamayo-solutions/colca/commit/41554e9884653176b9a266bc217267104096400e))
+* **registry:** revoking a local service retires its catalogues, findings and command cursors ([a8ed07f](https://github.com/alpamayo-solutions/colca/commit/a8ed07fd4542a341497c9ce9b2d4de1f2577546e))
+
+
+### Fixes
+
+* **door:** let expires_at gate only the start of a command ([a5fc9fd](https://github.com/alpamayo-solutions/colca/commit/a5fc9fd49f7d805eeaca2c39c9dd56bd8420c6ba))
+* **door:** look ahead only for the answers to the current page's commands ([642641e](https://github.com/alpamayo-solutions/colca/commit/642641eaac155d7be0736b27c26a716c35ba0fd8))
+
+
+### Documentation
+
+* **auth:** reading the answer to your own command ([003a7aa](https://github.com/alpamayo-solutions/colca/commit/003a7aa00eaa2cd79befdb31c4601374c04b090d))
+* **door:** run read-only verbs on a second executor beside long ones ([d0dd718](https://github.com/alpamayo-solutions/colca/commit/d0dd7189c7c87e79cfff44225f5c67d6a032e020))
+* **door:** where a new executor cursor starts ([af73622](https://github.com/alpamayo-solutions/colca/commit/af736229e859a7f9e00f0d6e6d76ec8d69d5b997))
+
 ## [0.45.1](https://github.com/alpamayo-solutions/colca/compare/v0.45.0...v0.45.1) (2026-11-11)
 
 
