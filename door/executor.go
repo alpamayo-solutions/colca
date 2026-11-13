@@ -75,9 +75,19 @@ type Answer struct {
 type Handler interface {
 	// Handles reports whether this handler answers contract at path.
 	Handles(contract, path string) bool
-	// Execute runs one command. Its context ends at the command's expires_at.
-	// An error is answered 500.
+	// Execute runs one command. Its context is not cut at the command's
+	// expires_at, which only gates the start (see Executor); it ends with the
+	// executor's context, or after the handler's Budget. An error is answered
+	// 500.
 	Execute(ctx context.Context, cmd Command) (Answer, error)
+}
+
+// Budgeter is an optional Handler method: how long the handler may run cmd.
+// Its context ends after that budget; zero or less sets none. A handler whose
+// verbs run for minutes (an apply with a health window) gives those a budget
+// of their own instead of inheriting the sender's expires_at.
+type Budgeter interface {
+	Budget(cmd Command) time.Duration
 }
 
 // GapError is returned by Drain and Run when commands were pruned before the
@@ -105,7 +115,14 @@ func (e *GapError) Error() string {
 // "replayed": true, or 409 when it asks for something else.
 //
 // expires_at is judged by this host's clock, which is the node's: a local
-// service runs beside its node. An expired command is answered 498.
+// service runs beside its node. It gates the start of execution only: a
+// command already expired when the executor picks it up is answered 498 and
+// not run; one that started runs to its end, past expires_at, so a long
+// change (an apply and its health window) is not cancelled half way. This
+// matches chaski, which does not cancel a handler at expires_at either. chaski
+// additionally refuses the handler's own node writes after expires_at
+// (writes_until); a door handler sees Command.ExpiresAt and decides for
+// itself. Bound a handler's run time with Budgeter.
 //
 // A new cursor starts at the oldest retained command. Run or Drain one at a
 // time.
@@ -536,12 +553,15 @@ func hasControl(s string) bool {
 	return false
 }
 
-// run calls the handler with a context that ends at the command's deadline.
+// run calls the handler, with a context that ends after its budget if it
+// has one. expires_at does not cut it: it gated the start.
 func (x *Executor) run(ctx context.Context, cmd Command) (answer Answer) {
-	if !cmd.ExpiresAt.IsZero() {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, cmd.ExpiresAt)
-		defer cancel()
+	if b, ok := x.Handler.(Budgeter); ok {
+		if budget := b.Budget(cmd); budget > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, budget)
+			defer cancel()
+		}
 	}
 	defer func() {
 		if r := recover(); r != nil {

@@ -251,19 +251,61 @@ func TestAnExpiredCommandIsAnswered498AndNotRun(t *testing.T) {
 	}
 }
 
-func TestTheHandlersContextEndsAtTheCommandsDeadline(t *testing.T) {
+// expires_at gates the start only: a handler that started runs on past it, so
+// a long change is not cancelled half way.
+func TestTheHandlersContextIsNotCutAtTheCommandsDeadline(t *testing.T) {
 	f := newExecNode(t)
 	h := newRecorder("svc/plan")
-	deadline := time.Now().Add(time.Hour).Truncate(time.Millisecond)
-	var got time.Time
+	now := time.Now()
+	clock := now
+	x := newExecutor(f, h)
+	x.Now = func() time.Time { return clock }
+	var hasDeadline bool
+	var ctxErr error
 	h.answer = func(ctx context.Context, _ Command) (Answer, error) {
-		got, _ = ctx.Deadline()
+		_, hasDeadline = ctx.Deadline()
+		clock = now.Add(time.Hour) // the command expires while it runs
+		ctxErr = ctx.Err()
+		return Answer{Message: "applied"}, nil
+	}
+	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{"correlation_id": "c1",
+		"expires_at": now.Add(time.Minute).UnixMilli()})
+	drain(t, x)
+	if hasDeadline || ctxErr != nil {
+		t.Fatalf("handler context: deadline %v err %v, want neither", hasDeadline, ctxErr)
+	}
+	if a := f.answers()[0]; a["result_code"] != 200.0 || a["message"] != "applied" {
+		t.Fatalf("answer = %v", a)
+	}
+}
+
+// budgeted is a recorder with a Budget per verb.
+type budgeted struct {
+	*recorder
+	budgets map[string]time.Duration
+}
+
+func (b budgeted) Budget(cmd Command) time.Duration { return b.budgets[cmd.Verb] }
+
+func TestAHandlersBudgetBoundsItsContext(t *testing.T) {
+	f := newExecNode(t)
+	h := budgeted{newRecorder("svc/apply", "svc/plan"), map[string]time.Duration{"apply": 2 * time.Minute}}
+	deadlines := map[string]time.Duration{}
+	h.answer = func(ctx context.Context, cmd Command) (Answer, error) {
+		if d, ok := ctx.Deadline(); ok {
+			deadlines[cmd.Verb] = time.Until(d)
+		}
 		return Answer{}, nil
 	}
-	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{"correlation_id": "c1", "expires_at": deadline.UnixMilli()})
+	f.command("_CmdMaintain", "svc/apply", operator, map[string]any{"correlation_id": "c1",
+		"expires_at": time.Now().Add(time.Second).UnixMilli()})
+	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{"correlation_id": "c2"})
 	drain(t, newExecutor(f, h))
-	if !got.Equal(deadline) {
-		t.Fatalf("handler deadline = %v, want %v", got, deadline)
+	if d, ok := deadlines["apply"]; !ok || d < time.Minute || d > 2*time.Minute {
+		t.Fatalf("apply deadline in %v, want its two-minute budget", d)
+	}
+	if _, ok := deadlines["plan"]; ok {
+		t.Fatalf("plan has a deadline without a budget")
 	}
 }
 
