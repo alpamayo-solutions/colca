@@ -346,6 +346,44 @@ func TestACommandAnsweredOnTheStreamIsNeitherRunNorAnswered(t *testing.T) {
 	}
 }
 
+// A fresh cursor starts at the oldest retained command. Its answer must count
+// however many answers to other commands lie ahead of it: more than the
+// executor would ever keep in memory.
+func TestAnAnswerIsFoundBehindMoreAnswersThanTheExecutorRemembers(t *testing.T) {
+	f := newExecNode(t)
+	h := newRecorder("svc/plan")
+	now := time.UnixMilli(1_800_000_000_000)
+	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{"correlation_id": "old", "expires_at": now.UnixMilli() - 1})
+	f.mu.Lock()
+	for i := range 150 {
+		f.append(Record{Topic: "colca/v1/_CmdMaintain/" + execNode + "/other/x", Payload: []byte(`{"correlation_id":"x` + strconv.Itoa(i) + `"}`)})
+	}
+	f.append(Record{Topic: "colca/v1/_Ack/" + execNode + "/svc/plan", Payload: []byte(`{"correlation_id":"old","result_code":498}`)})
+	for i := range ledgerLimit + 500 {
+		f.append(Record{Topic: "colca/v1/_Ack/" + execNode + "/other/x",
+			Payload: []byte(`{"correlation_id":"a` + strconv.Itoa(i) + `","result_code":200}`)})
+	}
+	f.mu.Unlock()
+	x := newExecutor(f, h)
+	x.Now = func() time.Time { return now }
+	drain(t, x)
+	if h.count() != 0 {
+		t.Fatalf("handler ran %d times, want 0", h.count())
+	}
+	var mine int
+	for _, a := range f.answers() {
+		if a["correlation_id"] == "old" {
+			mine++
+		}
+	}
+	if mine != 1 {
+		t.Fatalf("%d answers to the old command, want the one already there", mine)
+	}
+	if len(x.answered) != 0 {
+		t.Fatalf("executor remembers %d answers, want none: it published none", len(x.answered))
+	}
+}
+
 // A 202 says a node queued or forwarded the command, not that it was answered.
 func TestAProgressAckDoesNotCountAsTheAnswer(t *testing.T) {
 	f := newExecNode(t)
