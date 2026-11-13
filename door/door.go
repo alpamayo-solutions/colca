@@ -3,6 +3,14 @@
 // published API door takes an admin token or a person's Bearer token (JWT or
 // PAT); the local door takes a service name and no credential, or a Bearer.
 // Executor runs a local service's commands and answers them.
+//
+// An Executor runs its commands one after another, so a quick read-only verb
+// (status, plan) waits behind a long-running one (an apply with its health
+// window). A service that must answer reads meanwhile runs two Executors:
+// each with its own Cursor and Ledger, and a Handler that takes only its
+// share of the verbs, one for the long-running changes and one for the
+// read-only verbs. Each skips the other's commands and moves its cursor past
+// them, and each command is still run and answered once.
 package door
 
 import (

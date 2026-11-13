@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -75,9 +76,19 @@ type Answer struct {
 type Handler interface {
 	// Handles reports whether this handler answers contract at path.
 	Handles(contract, path string) bool
-	// Execute runs one command. Its context ends at the command's expires_at.
-	// An error is answered 500.
+	// Execute runs one command. Its context is not cut at the command's
+	// expires_at, which only gates the start (see Executor); it ends with the
+	// executor's context, or after the handler's Budget. An error is answered
+	// 500.
 	Execute(ctx context.Context, cmd Command) (Answer, error)
+}
+
+// Budgeter is an optional Handler method: how long the handler may run cmd.
+// Its context ends after that budget; zero or less sets none. A handler whose
+// verbs run for minutes (an apply with a health window) gives those a budget
+// of their own instead of inheriting the sender's expires_at.
+type Budgeter interface {
+	Budget(cmd Command) time.Duration
 }
 
 // GapError is returned by Drain and Run when commands were pruned before the
@@ -94,14 +105,25 @@ func (e *GapError) Error() string {
 // records a command before it runs and its answer before it is published,
 // and the cursor moves only once every answer on a page is published. A
 // command seen again is answered from the ledger, or 504 when it was started
-// and never answered; it is never run twice.
+// and never answered; it is never run twice. Before it runs a page, it looks
+// for answers to the page's commands up to the stream's head, so a fresh
+// cursor (one that starts at the oldest retained command) neither runs nor
+// answers again what was answered before. That look-ahead is read per page
+// and remembers only the page's ids; a long backlog costs reads, not memory.
 //
 // A command with an operation_id is also recorded under the attested sender
 // and that id. A repeat is answered with the recorded outcome and
 // "replayed": true, or 409 when it asks for something else.
 //
 // expires_at is judged by this host's clock, which is the node's: a local
-// service runs beside its node. An expired command is answered 498.
+// service runs beside its node. It gates the start of execution only: a
+// command already expired when the executor picks it up is answered 498 and
+// not run; one that started runs to its end, past expires_at, so a long
+// change (an apply and its health window) is not cancelled half way. This
+// matches chaski, which does not cancel a handler at expires_at either. chaski
+// additionally refuses the handler's own node writes after expires_at
+// (writes_until); a door handler sees Command.ExpiresAt and decides for
+// itself. Bound a handler's run time with Budgeter.
 //
 // A new cursor starts at the oldest retained command. Run or Drain one at a
 // time.
@@ -121,10 +143,16 @@ type Executor struct {
 	Log      *slog.Logger
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// RequireCorrelationID refuses a command without a correlation_id: it is
+	// not run, only logged and counted (Uncorrelated). Without it such a
+	// command runs but is neither answered nor recorded in the ledger, as in
+	// chaski, so a restart may run it again.
+	RequireCorrelationID bool
 
-	answered  map[string]bool
-	order     []string
-	scannedTo int64
+	uncorrelated atomic.Int64
+
+	answered map[string]bool // published by this executor, the latest ledgerLimit
+	order    []string
 }
 
 func (x *Executor) init(ctx context.Context) error {
@@ -161,6 +189,10 @@ func (x *Executor) init(ctx context.Context) error {
 	}
 	return nil
 }
+
+// Uncorrelated is how many commands without a correlation_id RequireCorrelationID
+// refused since the executor was made.
+func (x *Executor) Uncorrelated() int64 { return x.uncorrelated.Load() }
 
 func (x *Executor) contracts() []string { return append(append([]string(nil), x.Contracts...), "_Ack") }
 
@@ -242,15 +274,12 @@ func (x *Executor) drainPage(ctx context.Context, head int64) (int64, error) {
 	if page.Gap != nil {
 		return 0, &GapError{Gap: *page.Gap}
 	}
-	x.noteAnswers(page.Records)
-	if page.Next <= head {
-		// The answer to a command on this page may be further on.
-		if err := x.scanAhead(ctx, page.Next, head); err != nil {
-			return 0, err
-		}
+	answered, err := x.pageAnswers(ctx, page, head)
+	if err != nil {
+		return 0, err
 	}
 	for _, rec := range page.Records {
-		if err := x.handle(ctx, rec); err != nil {
+		if err := x.handle(ctx, rec, answered); err != nil {
 			return 0, err
 		}
 	}
@@ -264,9 +293,57 @@ func (x *Executor) drainPage(ctx context.Context, head int64) (int64, error) {
 	return last, nil
 }
 
-// noteAnswers remembers the correlation ids answered on this node, so a
-// command answered before a restart is neither run nor answered again.
-func (x *Executor) noteAnswers(records []Record) {
+// pageAnswers returns which commands on page were answered on this node
+// already, by an _Ack on the page or anywhere up to head, so a command
+// answered before a restart is neither run nor answered again. It looks only
+// for the page's own correlation ids: what it holds is bounded by the page
+// size however many answers lie ahead.
+func (x *Executor) pageAnswers(ctx context.Context, page Page, head int64) (map[string]bool, error) {
+	wanted := map[string]bool{}
+	for _, rec := range page.Records {
+		if id := x.commandCorrelationID(rec); id != "" && !x.answered[id] {
+			wanted[id] = true
+		}
+	}
+	answered := map[string]bool{}
+	if len(wanted) == 0 {
+		return answered, nil
+	}
+	x.noteAnswers(page.Records, wanted, answered)
+	// The answer to a command on this page may be further on.
+	offset := page.Next
+	for len(answered) < len(wanted) && offset <= head {
+		ahead, err := x.Client.FetchWithOptions(ctx, FetchOptions{Stream: commandsStream, Cursor: x.Cursor,
+			Max: 1000, Contracts: []string{"_Ack"}, From: uint64(offset)}) //nolint:gosec // offset is at least 1
+		if err != nil {
+			return nil, err
+		}
+		x.noteAnswers(ahead.Records, wanted, answered)
+		if ahead.Next <= offset {
+			break
+		}
+		offset = ahead.Next
+	}
+	return answered, nil
+}
+
+// commandCorrelationID is the correlation id of a command the handler takes,
+// or "" for any other record.
+func (x *Executor) commandCorrelationID(rec Record) string {
+	contract, node, path, ok := splitTopic(rec.Topic)
+	if !ok || node != x.Node || !strings.HasPrefix(contract, "_Cmd") || !x.Handler.Handles(contract, path) {
+		return ""
+	}
+	var env struct {
+		CorrelationID string `json:"correlation_id"`
+	}
+	_ = json.Unmarshal(rec.Payload, &env)
+	return env.CorrelationID
+}
+
+// noteAnswers adds to answered the ids in wanted that an _Ack among records
+// answers on this node.
+func (x *Executor) noteAnswers(records []Record, wanted, answered map[string]bool) {
 	for _, rec := range records {
 		contract, node, _, ok := splitTopic(rec.Topic)
 		if !ok || contract != "_Ack" || node != x.Node {
@@ -277,13 +354,15 @@ func (x *Executor) noteAnswers(records []Record) {
 			ResultCode    int    `json:"result_code"`
 		}
 		// A 202 says a node queued or forwarded it, not that it was answered.
-		if json.Unmarshal(rec.Payload, &ack) != nil || ack.CorrelationID == "" || ack.ResultCode == 202 {
+		if json.Unmarshal(rec.Payload, &ack) != nil || !wanted[ack.CorrelationID] || ack.ResultCode == 202 {
 			continue
 		}
-		x.remember(ack.CorrelationID)
+		answered[ack.CorrelationID] = true
 	}
 }
 
+// remember records an answer this executor published, so a page read again
+// (its cursor ack failed) does not answer it twice.
 func (x *Executor) remember(correlationID string) {
 	if x.answered[correlationID] {
 		return
@@ -294,26 +373,6 @@ func (x *Executor) remember(correlationID string) {
 		delete(x.answered, x.order[0])
 		x.order = x.order[1:]
 	}
-}
-
-// scanAhead notes the answers between from and head without moving the
-// cursor. What an earlier scan read is not read again.
-func (x *Executor) scanAhead(ctx context.Context, from, head int64) error {
-	offset := max(from, x.scannedTo)
-	for offset <= head {
-		page, err := x.Client.FetchWithOptions(ctx, FetchOptions{Stream: commandsStream, Cursor: x.Cursor,
-			Max: 1000, Contracts: []string{"_Ack"}, From: uint64(offset)}) //nolint:gosec // offset is at least 1
-		if err != nil {
-			return err
-		}
-		x.noteAnswers(page.Records)
-		if page.Next <= offset {
-			return nil
-		}
-		offset = page.Next
-		x.scannedTo = max(x.scannedTo, offset)
-	}
-	return nil
 }
 
 // envelope is the part of a command's payload the executor reads.
@@ -327,7 +386,7 @@ type envelope struct {
 
 // handle runs one record if it is a command for the handler, and answers it.
 // An error means an answer is not published yet; the cursor must not move.
-func (x *Executor) handle(ctx context.Context, rec Record) error {
+func (x *Executor) handle(ctx context.Context, rec Record, answered map[string]bool) error {
 	contract, node, path, ok := splitTopic(rec.Topic)
 	if !ok || node != x.Node || !strings.HasPrefix(contract, "_Cmd") || !x.Handler.Handles(contract, path) {
 		return nil
@@ -350,7 +409,12 @@ func (x *Executor) handle(ctx context.Context, rec Record) error {
 	log := x.Log.With("contract", contract, "path", path, "correlation_id", cmd.CorrelationID,
 		"sender", firstNonEmpty(cmd.Sender.Label, cmd.Sender.ID))
 
-	if x.answered[cmd.CorrelationID] {
+	if cmd.CorrelationID == "" && x.RequireCorrelationID {
+		x.uncorrelated.Add(1)
+		log.Warn("command has no correlation_id; not executed")
+		return nil
+	}
+	if cmd.CorrelationID != "" && (x.answered[cmd.CorrelationID] || answered[cmd.CorrelationID]) {
 		log.Info("command was answered already; not executed again")
 		return nil
 	}
@@ -506,12 +570,15 @@ func hasControl(s string) bool {
 	return false
 }
 
-// run calls the handler with a context that ends at the command's deadline.
+// run calls the handler, with a context that ends after its budget if it
+// has one. expires_at does not cut it: it gated the start.
 func (x *Executor) run(ctx context.Context, cmd Command) (answer Answer) {
-	if !cmd.ExpiresAt.IsZero() {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, cmd.ExpiresAt)
-		defer cancel()
+	if b, ok := x.Handler.(Budgeter); ok {
+		if budget := b.Budget(cmd); budget > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, budget)
+			defer cancel()
+		}
 	}
 	defer func() {
 		if r := recover(); r != nil {

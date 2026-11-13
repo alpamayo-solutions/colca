@@ -251,19 +251,61 @@ func TestAnExpiredCommandIsAnswered498AndNotRun(t *testing.T) {
 	}
 }
 
-func TestTheHandlersContextEndsAtTheCommandsDeadline(t *testing.T) {
+// expires_at gates the start only: a handler that started runs on past it, so
+// a long change is not cancelled half way.
+func TestTheHandlersContextIsNotCutAtTheCommandsDeadline(t *testing.T) {
 	f := newExecNode(t)
 	h := newRecorder("svc/plan")
-	deadline := time.Now().Add(time.Hour).Truncate(time.Millisecond)
-	var got time.Time
+	now := time.Now()
+	clock := now
+	x := newExecutor(f, h)
+	x.Now = func() time.Time { return clock }
+	var hasDeadline bool
+	var ctxErr error
 	h.answer = func(ctx context.Context, _ Command) (Answer, error) {
-		got, _ = ctx.Deadline()
+		_, hasDeadline = ctx.Deadline()
+		clock = now.Add(time.Hour) // the command expires while it runs
+		ctxErr = ctx.Err()
+		return Answer{Message: "applied"}, nil
+	}
+	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{"correlation_id": "c1",
+		"expires_at": now.Add(time.Minute).UnixMilli()})
+	drain(t, x)
+	if hasDeadline || ctxErr != nil {
+		t.Fatalf("handler context: deadline %v err %v, want neither", hasDeadline, ctxErr)
+	}
+	if a := f.answers()[0]; a["result_code"] != 200.0 || a["message"] != "applied" {
+		t.Fatalf("answer = %v", a)
+	}
+}
+
+// budgeted is a recorder with a Budget per verb.
+type budgeted struct {
+	*recorder
+	budgets map[string]time.Duration
+}
+
+func (b budgeted) Budget(cmd Command) time.Duration { return b.budgets[cmd.Verb] }
+
+func TestAHandlersBudgetBoundsItsContext(t *testing.T) {
+	f := newExecNode(t)
+	h := budgeted{newRecorder("svc/apply", "svc/plan"), map[string]time.Duration{"apply": 2 * time.Minute}}
+	deadlines := map[string]time.Duration{}
+	h.answer = func(ctx context.Context, cmd Command) (Answer, error) {
+		if d, ok := ctx.Deadline(); ok {
+			deadlines[cmd.Verb] = time.Until(d)
+		}
 		return Answer{}, nil
 	}
-	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{"correlation_id": "c1", "expires_at": deadline.UnixMilli()})
+	f.command("_CmdMaintain", "svc/apply", operator, map[string]any{"correlation_id": "c1",
+		"expires_at": time.Now().Add(time.Second).UnixMilli()})
+	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{"correlation_id": "c2"})
 	drain(t, newExecutor(f, h))
-	if !got.Equal(deadline) {
-		t.Fatalf("handler deadline = %v, want %v", got, deadline)
+	if d, ok := deadlines["apply"]; !ok || d < time.Minute || d > 2*time.Minute {
+		t.Fatalf("apply deadline in %v, want its two-minute budget", d)
+	}
+	if _, ok := deadlines["plan"]; ok {
+		t.Fatalf("plan has a deadline without a budget")
 	}
 }
 
@@ -324,6 +366,28 @@ func TestACommandWithoutCorrelationIDRunsButIsNotAnswered(t *testing.T) {
 	}
 }
 
+func TestACommandWithoutCorrelationIDIsRefusedWhenOneIsRequired(t *testing.T) {
+	f := newExecNode(t)
+	h := newRecorder("svc/plan")
+	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{})
+	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{"correlation_id": "c1"})
+	x := newExecutor(f, h)
+	x.RequireCorrelationID = true
+	drain(t, x)
+	if h.count() != 1 || h.calls[0].CorrelationID != "c1" {
+		t.Fatalf("handler calls = %+v, want only c1", h.calls)
+	}
+	if n := len(f.answers()); n != 1 {
+		t.Fatalf("%d answers, want only c1's", n)
+	}
+	if got := x.Uncorrelated(); got != 1 {
+		t.Fatalf("Uncorrelated = %d, want 1", got)
+	}
+	if got := f.cursor(x.Cursor); got != 2 {
+		t.Fatalf("cursor = %d, want 2 (past both commands)", got)
+	}
+}
+
 // A command whose answer is already on the stream was answered before a
 // restart: it is neither run nor answered again, even when the answer is
 // pages further on.
@@ -343,6 +407,44 @@ func TestACommandAnsweredOnTheStreamIsNeitherRunNorAnswered(t *testing.T) {
 	drain(t, x)
 	if h.count() != 0 || len(f.answers()) != 1 {
 		t.Fatalf("calls %d answers %v, want the one already there", h.count(), f.answers())
+	}
+}
+
+// A fresh cursor starts at the oldest retained command. Its answer must count
+// however many answers to other commands lie ahead of it: more than the
+// executor would ever keep in memory.
+func TestAnAnswerIsFoundBehindMoreAnswersThanTheExecutorRemembers(t *testing.T) {
+	f := newExecNode(t)
+	h := newRecorder("svc/plan")
+	now := time.UnixMilli(1_800_000_000_000)
+	f.command("_CmdMaintain", "svc/plan", operator, map[string]any{"correlation_id": "old", "expires_at": now.UnixMilli() - 1})
+	f.mu.Lock()
+	for i := range 150 {
+		f.append(Record{Topic: "colca/v1/_CmdMaintain/" + execNode + "/other/x", Payload: []byte(`{"correlation_id":"x` + strconv.Itoa(i) + `"}`)})
+	}
+	f.append(Record{Topic: "colca/v1/_Ack/" + execNode + "/svc/plan", Payload: []byte(`{"correlation_id":"old","result_code":498}`)})
+	for i := range ledgerLimit + 500 {
+		f.append(Record{Topic: "colca/v1/_Ack/" + execNode + "/other/x",
+			Payload: []byte(`{"correlation_id":"a` + strconv.Itoa(i) + `","result_code":200}`)})
+	}
+	f.mu.Unlock()
+	x := newExecutor(f, h)
+	x.Now = func() time.Time { return now }
+	drain(t, x)
+	if h.count() != 0 {
+		t.Fatalf("handler ran %d times, want 0", h.count())
+	}
+	var mine int
+	for _, a := range f.answers() {
+		if a["correlation_id"] == "old" {
+			mine++
+		}
+	}
+	if mine != 1 {
+		t.Fatalf("%d answers to the old command, want the one already there", mine)
+	}
+	if len(x.answered) != 0 {
+		t.Fatalf("executor remembers %d answers, want none: it published none", len(x.answered))
 	}
 }
 
