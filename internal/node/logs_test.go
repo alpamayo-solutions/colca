@@ -31,7 +31,7 @@ func TestTheNodeGatesItsServicesLogsAndFlushesOnStop(t *testing.T) {
 	genKey(t, keyFile)
 	dataDir := filepath.Join(base, "data")
 	n := mustStart(t, &config.Config{
-		ULID: "n1", DataDir: dataDir, KeyFile: keyFile,
+		ULID: "n1", DataDir: dataDir, Identity: config.Identity{KeyFile: keyFile},
 		API:       config.API{Addr: "127.0.0.1:0", Token: tok},
 		Contracts: config.Contracts{Bundle: contractstest.GeneratedBundlePath(t)},
 		Logs:      config.Logs{MaxPerService: new(50)},

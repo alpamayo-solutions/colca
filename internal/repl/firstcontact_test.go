@@ -295,7 +295,7 @@ func TestLegacyCursorsAreAdoptedOnceThenGone(t *testing.T) {
 			"temp0..temp2 had already been offered", recs)
 	}
 	waitFor(t, "the scoped cursor to carry the adopted position forward", 20*time.Second, func() bool {
-		return cs.CursorGet(uns.UplinkCursor(parentPub), "metrics") == 6
+		return cs.CursorGet(uns.UplinkCursor(CursorScope(parentPub)), "metrics") == 6
 	})
 
 	for _, c := range cs.Cursors() {

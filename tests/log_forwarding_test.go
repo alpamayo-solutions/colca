@@ -38,11 +38,11 @@ func startLogTree(t *testing.T) (hub, site, edge *node.Node) {
 		return &config.Config{
 			Contracts: config.Contracts{Bundle: bundle},
 			ULID:      ulid, DataDir: filepath.Join(base, ulid+"-data"),
-			KeyFile: filepath.Join(base, ulid+".key"),
-			API:     config.API{Addr: "127.0.0.1:0", Token: tok},
-			MQTT:    config.Endpoint{Addr: "127.0.0.1:0"},
-			Repl:    config.Endpoint{Addr: "127.0.0.1:0"},
-			Parent:  parent,
+			Identity: config.Identity{KeyFile: filepath.Join(base, ulid+".key")},
+			API:      config.API{Addr: "127.0.0.1:0", Token: tok},
+			MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
+			Repl:     config.Endpoint{Addr: "127.0.0.1:0"},
+			Parent:   parent,
 		}
 	}
 	start := func(cfg *config.Config) *node.Node {

@@ -25,7 +25,7 @@ func startCarryNode(t *testing.T) *node.Node {
 	base := t.TempDir()
 	n, err := node.Start(&config.Config{
 		ULID: carryNode, DataDir: filepath.Join(base, "data"), LogLevel: "debug",
-		KeyFile:   filepath.Join(base, "node.key"),
+		Identity:  config.Identity{KeyFile: filepath.Join(base, "node.key")},
 		API:       config.API{Addr: "127.0.0.1:0", LocalAddr: "127.0.0.1:0", Token: tok},
 		MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
 		MQTTLocal: config.Endpoint{Addr: "127.0.0.1:0"},

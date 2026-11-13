@@ -42,7 +42,7 @@ func TestStartupPurgesRetainedStateOfRetiredContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &config.Config{ULID: "n-old", DataDir: dataDir, KeyFile: filepath.Join(dir, "key.pem"),
+	cfg := &config.Config{ULID: "n-old", DataDir: dataDir, Identity: config.Identity{KeyFile: filepath.Join(dir, "key.pem")},
 		API: config.API{Addr: "127.0.0.1:0", LocalAddr: "127.0.0.1:0", Token: tok}}
 	n := mustStart(t, cfg)
 	entries, err := n.Store.KVScan("")

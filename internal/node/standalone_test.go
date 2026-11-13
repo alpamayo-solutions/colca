@@ -12,7 +12,7 @@ import (
 
 func TestStandaloneRetiresParentTrustBeforeServingAndSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
-	cfg := &config.Config{ULID: "n-machine", DataDir: filepath.Join(dir, "db"), KeyFile: filepath.Join(dir, "key.pem"), API: config.API{Addr: "127.0.0.1:0", LocalAddr: "127.0.0.1:0", Token: tok}}
+	cfg := &config.Config{ULID: "n-machine", DataDir: filepath.Join(dir, "db"), Identity: config.Identity{KeyFile: filepath.Join(dir, "key.pem")}, API: config.API{Addr: "127.0.0.1:0", LocalAddr: "127.0.0.1:0", Token: tok}}
 	n := mustStart(t, cfg)
 	// Pending upload plus an ordinary local consumer, not an artificial empty DB.
 	if _, _, err := n.Store.Append("metrics", []store.Record{{Topic: "colca/v1/_Metric/n-machine/temp", Payload: []byte(`{"value":21}`)}}); err != nil {
@@ -129,7 +129,7 @@ func TestStandaloneRetiresParentTrustBeforeServingAndSurvivesRestart(t *testing.
 func TestStandaloneUpgradesLegacyCommandBoundaryOnlyOnce(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{ULID: "n-machine", Standalone: true, DataDir: filepath.Join(dir, "db"),
-		KeyFile: filepath.Join(dir, "key.pem"), API: config.API{LocalAddr: "127.0.0.1:0"}}
+		Identity: config.Identity{KeyFile: filepath.Join(dir, "key.pem")}, API: config.API{LocalAddr: "127.0.0.1:0"}}
 	st, err := store.Open(cfg.DataDir)
 	if err != nil {
 		t.Fatal(err)

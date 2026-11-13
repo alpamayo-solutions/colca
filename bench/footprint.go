@@ -61,7 +61,7 @@ func RunFootprint(p Params) (*Report, error) {
 	const apiAddr, mqttAddr = "127.0.0.1:19301", "127.0.0.1:19302"
 	cfg := fmt.Sprintf(`ulid: n-fp
 data_dir: %s
-key_file: %s
+identity: { key_file: %s }
 api:
   addr: %s
   token: %s

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alpamayo-solutions/colca/internal/identity/pubkey"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
 )
@@ -44,7 +45,20 @@ func machine(ulid, mount, pub string) uns.Entry {
 	return uns.Entry{ULID: ulid, Pubkey: pub, Kind: uns.KindExternal, Element: elementAt(mount)}
 }
 
-func pub(seed string) string { return strings.Repeat(seed, 64/len(seed)) }
+// pub is a test key as stored: SPKI hex of an ed25519 key whose raw bytes
+// repeat seed.
+func pub(seed string) string { return spkiOf(rawPub(seed)) }
+
+// rawPub is the same key in the legacy raw 64-hex form.
+func rawPub(seed string) string { return strings.Repeat(seed, 64/len(seed)) }
+
+func spkiOf(raw string) string {
+	n, err := pubkey.NormalizeHex(raw)
+	if err != nil {
+		panic(err)
+	}
+	return n
+}
 
 // elementAt is the element id tests place at a path; the shape only keeps
 // failures readable.
@@ -999,5 +1013,119 @@ func TestRevokeLeavesRecordsAuthoredAtAnotherNodeAlone(t *testing.T) {
 	if got := serviceTopics(t, st); len(got) != 1 || got[0] != belowChild {
 		t.Fatalf("after revoking the child the node holds %v, want its replicated record %s "+
 			"untouched — this node does not author or retire it", got, belowChild)
+	}
+}
+
+// Entries enrolled before SPKI keys hold the raw 64-hex ed25519 form. The
+// adoption pass on load rewrites them to SPKI with their fingerprint, marks
+// child nodes cert_state none, and afterwards only the SPKI form is a key.
+func TestTheAdoptionPassRewritesLegacyEntries(t *testing.T) {
+	dir := t.TempDir()
+	st := openStore(t, dir)
+	raw := rawPub("ab")
+	legacy := []byte(`{"ulid":"01N1","pubkey":"` + raw + `","kind":"node","element":"` + elementAt("z/a") + `"}`)
+	if _, err := st.RegistryPut("01N1", legacy, "entities", store.Record{
+		Topic: uns.Prefix() + "_EnrolledIdentity/01NODE/_colca/identities/01N1", Payload: legacy,
+		TS: 1, KVPath: "_colca/identities/01N1", KVNode: "01NODE",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ext := []byte(`{"ulid":"01M1","pubkey":"` + rawPub("cd") + `","kind":"external","element":"` + elementAt("z/b") + `"}`)
+	if _, err := st.RegistryPut("01M1", ext, "entities", store.Record{
+		Topic: uns.Prefix() + "_EnrolledIdentity/01NODE/_colca/identities/01M1", Payload: ext,
+		TS: 1, KVPath: "_colca/identities/01M1", KVNode: "01NODE",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := newManager(t, st, "z/a", "z/b")
+	e, ok := m.ByPubkey(spkiOf(raw))
+	if !ok || e.ULID != "01N1" {
+		t.Fatalf("ByPubkey(SPKI) after adoption: %v %v", e, ok)
+	}
+	if e.Pubkey != spkiOf(raw) || e.CertState != uns.CertStateNone || e.KeyStore != uns.KeyStoreFile || e.Status != "" {
+		t.Fatalf("adopted node entry: %+v", e)
+	}
+	fp, _ := pubkey.FingerprintHex(raw)
+	if e.Fingerprint != fp {
+		t.Fatalf("fingerprint %q, want %q", e.Fingerprint, fp)
+	}
+	if _, ok := m.ByPubkey(raw); ok {
+		t.Fatal("the raw form is still a key after the adoption pass")
+	}
+	if x, _ := m.Get("01M1"); x.Pubkey != spkiOf(rawPub("cd")) || x.CertState != "" {
+		t.Fatalf("adopted external entry: %+v", x)
+	}
+	// Persisted, and the mirror carries it: a reload changes nothing more.
+	stored, err := st.RegistryScan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stored["01N1"]), spkiOf(raw)) || !strings.Contains(string(stored["01N1"]), `"cert_state":"none"`) {
+		t.Fatalf("stored entry not rewritten: %s", stored["01N1"])
+	}
+	if kv, ok, err := st.KVGet("_colca/identities/01N1", "01NODE", uns.Prefix()+"_EnrolledIdentity/01NODE/_colca/identities/01N1"); err != nil || !ok || !strings.Contains(string(kv.Payload), `"fingerprint"`) {
+		t.Fatalf("mirror not rewritten: %s %v %v", kv.Payload, ok, err)
+	}
+	m2, _ := newManager(t, st, "z/a", "z/b", "z/c")
+	if e, ok := m2.ByPubkey(spkiOf(raw)); !ok || e.CertState != uns.CertStateNone {
+		t.Fatalf("after reload: %v %v", e, ok)
+	}
+	// A node approved by this release has no certificate until it asks for
+	// one; a restart must not adopt it as cert_state none.
+	if _, _, err := m2.Enroll(entryJSON(t, node("01N2", "z/c", pub("ef")))); err != nil {
+		t.Fatal(err)
+	}
+	m3, _ := newManager(t, st, "z/a", "z/b", "z/c")
+	if e, _ := m3.Get("01N2"); e.CertState != "" {
+		t.Fatalf("a node enrolled since was adopted: %+v", e)
+	}
+}
+
+// The enrollment door may still be handed the raw form: it is stored as SPKI,
+// so both spellings of one key are one key.
+func TestEnrollStoresARawKeyAsSPKI(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "z/a", "z/b")
+	if _, _, err := m.Enroll(entryJSON(t, node("01N1", "z/a", rawPub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := m.ByPubkey(pub("ab")); !ok || e.ULID != "01N1" || e.Pubkey != pub("ab") {
+		t.Fatalf("ByPubkey: %v %v", e, ok)
+	}
+	if _, _, err := m.Enroll(entryJSON(t, node("01N2", "z/b", pub("ab")))); !errors.Is(err, ErrConflict) {
+		t.Fatalf("enrolling the SPKI form of a taken raw key: %v, want ErrConflict", err)
+	}
+}
+
+// Update swaps a key atomically: the old key stops resolving, the session is
+// kicked; other updates leave the session alone.
+func TestUpdateSwapsTheKeyAndKicksOnlyThen(t *testing.T) {
+	st := openStore(t, t.TempDir())
+	m, _ := newManager(t, st, "z/a")
+	var kicked []string
+	m.SetKick(func(u string) { kicked = append(kicked, u) })
+	if _, _, err := m.Enroll(entryJSON(t, node("01N1", "z/a", pub("ab")))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Update("01N1", func(e *uns.Entry) error { e.CertState = uns.CertStateIssued; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(kicked) != 0 {
+		t.Fatalf("a certificate update kicked %v", kicked)
+	}
+	if _, err := m.Update("01N1", func(e *uns.Entry) error { e.Pubkey = pub("cd"); e.KeyStore = uns.KeyStoreTPM; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.ByPubkey(pub("ab")); ok {
+		t.Fatal("the old key still resolves after the swap")
+	}
+	if e, ok := m.ByPubkey(pub("cd")); !ok || e.KeyStore != uns.KeyStoreTPM || e.CertState != uns.CertStateIssued {
+		t.Fatalf("new key: %v %v", e, ok)
+	}
+	if len(kicked) != 1 || kicked[0] != "01N1" {
+		t.Fatalf("kicked %v, want the swapped identity once", kicked)
+	}
+	if _, err := m.Update("01NX", func(*uns.Entry) error { return nil }); !errors.Is(err, ErrNotEnrolled) {
+		t.Fatalf("update of an unknown entry: %v", err)
 	}
 }

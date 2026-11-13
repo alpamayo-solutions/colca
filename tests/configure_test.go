@@ -99,7 +99,7 @@ func TestAutobindIssuedAtTheParentBindsAtTheChild(t *testing.T) {
 	mk := func(ulid string, parent *config.Parent) *config.Config {
 		return &config.Config{
 			ULID: ulid, DataDir: filepath.Join(base, ulid+"-data"), LogLevel: "debug",
-			KeyFile:   filepath.Join(base, ulid+".key"),
+			Identity:  config.Identity{KeyFile: filepath.Join(base, ulid+".key")},
 			API:       config.API{Addr: "127.0.0.1:0", Token: tok},
 			MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
 			Repl:      config.Endpoint{Addr: "127.0.0.1:0"},
@@ -122,6 +122,9 @@ func TestAutobindIssuedAtTheParentBindsAtTheChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer child.Stop()
+	// The child attaches once its parent issued its certificate; a command
+	// issued before that attachment is not meant for it.
+	waitForPrefix(t, "n-child", child)
 
 	// A connector enrolls at the child and publishes its catalogue at the topic its
 	// entry computes: node, mount, name.
@@ -189,7 +192,7 @@ func TestAutobindWithoutACatalogueAcksConflict(t *testing.T) {
 	}
 	n, err := node.Start(&config.Config{
 		ULID: "n-solo", DataDir: filepath.Join(base, "data"), LogLevel: "debug",
-		KeyFile:   filepath.Join(base, "n-solo.key"),
+		Identity:  config.Identity{KeyFile: filepath.Join(base, "n-solo.key")},
 		API:       config.API{Addr: "127.0.0.1:0", Token: tok},
 		Repl:      config.Endpoint{Addr: "127.0.0.1:0"},
 		Contracts: config.Contracts{Bundle: bindingBundle(t)},
@@ -221,7 +224,7 @@ func TestConfigureConstantUpsertAndDeleteAreRetainedState(t *testing.T) {
 	}
 	n, err := node.Start(&config.Config{
 		ULID: "n-constant", DataDir: filepath.Join(base, "data"), LogLevel: "debug",
-		KeyFile:   filepath.Join(base, "n-constant.key"),
+		Identity:  config.Identity{KeyFile: filepath.Join(base, "n-constant.key")},
 		API:       config.API{Addr: "127.0.0.1:0", Token: tok},
 		Repl:      config.Endpoint{Addr: "127.0.0.1:0"},
 		Contracts: config.Contracts{Bundle: bindingBundle(t)},

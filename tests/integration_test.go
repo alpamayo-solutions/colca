@@ -75,8 +75,8 @@ func startTopo(t *testing.T) *topo {
 	mk := func(ulid string, parent *config.Parent) *config.Config {
 		return &config.Config{
 			ULID: ulid, DataDir: tp.dirs[ulid], LogLevel: "debug",
-			KeyFile: filepath.Join(base, ulid+".key"),
-			API:     config.API{Addr: "127.0.0.1:0", Token: tok},
+			Identity: config.Identity{KeyFile: filepath.Join(base, ulid+".key")},
+			API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 			// The broker binds in node.Start and reports the resolved port as
 			// Node.MQTTAddr — never read cfg.MQTT.Addr, it stays "127.0.0.1:0".
 			MQTT:   config.Endpoint{Addr: "127.0.0.1:0"},

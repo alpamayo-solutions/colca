@@ -23,6 +23,7 @@ import (
 	pahomqtt "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/alpamayo-solutions/colca/internal/identity"
+	"github.com/alpamayo-solutions/colca/internal/identity/pubkey"
 	"github.com/alpamayo-solutions/colca/internal/repl"
 	"github.com/alpamayo-solutions/colca/internal/store"
 	"github.com/alpamayo-solutions/colca/plugins/uns"
@@ -112,7 +113,7 @@ func (n *fanoutNode) kill() {
 func nodeConfig(ulid, dir, keyPath, addrFile, parent string) string {
 	cfg := fmt.Sprintf(`ulid: %s
 data_dir: %s
-key_file: %s
+identity: { key_file: %s }
 log_level: warn
 addr_file: %s
 api:
@@ -370,6 +371,9 @@ func RunFanout(p FanoutParams) (*Report, error) {
 			if err == nil && p.Protocol {
 				var client *repl.Client
 				if client, err = repl.NewClient("https://"+hubRepl, hubID.PublicHex(), id); err == nil {
+					err = enrollProtocolChild(context.Background(), client, ulid)
+				}
+				if err == nil {
 					client.SetStoreID(ulid)
 					pc := &protoChild{ulid: ulid, client: client, wake: make(chan struct{}, 1)}
 					loadWG.Add(2)
@@ -613,11 +617,47 @@ func enrollKey(hub *fanoutNode, path, ulid, kind, pubHex string, grants ...strin
 	if err := postAdmin(hub.hc, hub.addrs["api"], "/publish", placed); err != nil {
 		return fmt.Errorf("place %s: %w", path, err)
 	}
+	if kind == string(uns.KindNode) {
+		// A node is not enrolled by entry: it asks, and a pre-approval of its key
+		// admits it on arrival.
+		fp, err := pubkey.FingerprintHex(pubHex)
+		if err != nil {
+			return err
+		}
+		cmd, _ := json.Marshal(map[string]any{
+			"topic": uns.Prefix() + "_CmdAdmin/n-hub/preapprove",
+			"payload": map[string]any{
+				"correlation_id": "bench-preapprove-" + ulid, "id": "bench-" + ulid,
+				"match": map[string]string{"key": fp}, "element": element,
+			},
+		})
+		if err := postAdmin(hub.hc, hub.addrs["api"], "/publish", cmd); err != nil {
+			return fmt.Errorf("pre-approve %s: %w", ulid, err)
+		}
+		return nil
+	}
 	entry, _ := json.Marshal(map[string]any{"ulid": ulid, "pubkey": pubHex, "kind": kind, "element": element, "grants": grants})
 	if err := postAdmin(hub.hc, hub.addrs["api"], "/enroll", entry); err != nil {
 		return fmt.Errorf("enroll %s: %w", ulid, err)
 	}
 	return nil
+}
+
+// enrollProtocolChild has a protocol child (a bare repl.Client) fetch its
+// certificate, which the hub requires before it replicates.
+func enrollProtocolChild(ctx context.Context, client *repl.Client, ulid string) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		err := client.Enroll(ctx, repl.EnrollOptions{ULID: ulid, Name: ulid})
+		if err == nil || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 func publishOnce(hc *http.Client, apiAddr string, body []byte) error {

@@ -21,6 +21,8 @@ func (s *Server) handleBlobHead(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	r, done := s.track(r, child.ULID)
+	defer done()
 	release, ok := s.acquireRequest(w, limitClassReplTransfer, child.ULID, replTransferPolicy)
 	if !ok {
 		return
@@ -45,6 +47,8 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	r, done := s.track(r, child.ULID)
+	defer done()
 	release, ok := s.acquireRequest(w, limitClassReplTransfer, child.ULID, replTransferPolicy)
 	if !ok {
 		return
@@ -104,6 +108,8 @@ func (s *Server) handleBlobGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	r, done := s.track(r, child.ULID)
+	defer done()
 	release, ok := s.acquireRequest(w, limitClassReplTransfer, child.ULID, replTransferPolicy)
 	if !ok {
 		return

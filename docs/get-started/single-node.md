@@ -9,7 +9,7 @@ bin/colca-keygen ./node.key        # writes the key and prints its public half
 cat > node.yaml <<'EOF'
 ulid: n-edge1
 data_dir: ./data
-key_file: ./node.key
+identity: { key_file: ./node.key }
 api: { local_addr: "127.0.0.1:8080" }
 EOF
 

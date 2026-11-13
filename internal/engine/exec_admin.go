@@ -22,11 +22,19 @@ type AdminExec interface {
 	Revoke(ulid string) (offset uint64, wasDraining bool, err error)
 }
 
+// EnrollmentDecider answers the enrollment verbs of _CmdAdmin (approve,
+// reject, block, unblock, preapprove, unpreapprove, request-key-change).
+// handled is false for any other verb. Satisfied by *enroll.Manager.
+type EnrollmentDecider interface {
+	Decide(ctx uns.CommandContext, verb string, payload []byte) (code int, message, result string, handled bool)
+}
+
 // AdminExecutor answers _CmdAdmin against a node's registry and logs stream.
 type AdminExecutor struct {
-	registry AdminExec
-	logs     LogReader
-	now      func() time.Time
+	registry   AdminExec
+	enrollment EnrollmentDecider
+	logs       LogReader
+	now        func() time.Time
 	// scans holds a slot per running fetchLogs scan (FetchLogsMaxConcurrent).
 	scans chan struct{}
 	pages pageBucket
@@ -39,6 +47,10 @@ func NewAdminExecutor(r AdminExec, logs LogReader) *AdminExecutor {
 }
 
 func (a *AdminExecutor) Handles(contract string) bool { return contract == "_CmdAdmin" }
+
+// SetEnrollment wires the node's enrollment decisions. Call it before the
+// engine executes commands.
+func (a *AdminExecutor) SetEnrollment(d EnrollmentDecider) { a.enrollment = d }
 
 // adminCmdBody carries the per-verb fields; the envelope (correlation_id,
 // expires_at) is the engine's business and already handled by the time this runs.
@@ -61,6 +73,11 @@ func (a *AdminExecutor) ExecuteWithResult(
 ) (int, string, string, json.RawMessage) {
 	if verb == "fetchLogs" {
 		return a.fetchLogs(payload)
+	}
+	if a.enrollment != nil {
+		if code, message, result, handled := a.enrollment.Decide(ctx, verb, payload); handled {
+			return code, message, result, nil
+		}
 	}
 	code, message, result := a.executeRegistry(verb, payload)
 	return code, message, result, nil
@@ -104,6 +121,11 @@ func (a *AdminExecutor) executeRegistry(verb string, payload []byte) (int, strin
 	case "enroll":
 		if len(body.Entry) == 0 {
 			return 422, "enroll: missing entry", "invalid"
+		}
+		var kind uns.Entry
+		if json.Unmarshal(body.Entry, &kind) == nil && kind.ReplicatesUp() {
+			// A node files its own request; a person approves it (approve verb).
+			return 422, "enroll: a node is not enrolled by entry — it files its own request, which the approve verb decides", "invalid"
 		}
 		ulid, _, err := a.registry.Enroll(body.Entry)
 		if err != nil {

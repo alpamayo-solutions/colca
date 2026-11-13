@@ -21,8 +21,9 @@ func TestGenerateLoadAndCert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(id.PublicHex()) != 64 {
-		t.Fatalf("want 64 hex chars, got %d", len(id.PublicHex()))
+	// SPKI DER of an ed25519 key is 44 bytes.
+	if len(id.PublicHex()) != 88 {
+		t.Fatalf("want 88 hex chars (SPKI), got %d", len(id.PublicHex()))
 	}
 
 	id2, err := Load(keyPath)
@@ -168,7 +169,7 @@ func TestServerCertPrefersTheSuppliedPair(t *testing.T) {
 
 func TestServerCertFallsBackToTheKeyContainerWhenNoneIsConfigured(t *testing.T) {
 	// Absent configuration must keep today's behaviour exactly: the self-signed
-	// cert that carries this node's ed25519 key, which is what peers pin.
+	// cert that carries this node's key, which is what peers pin.
 	id, _, err := LoadOrGenerate(filepath.Join(t.TempDir(), "n.key"))
 	if err != nil {
 		t.Fatal(err)

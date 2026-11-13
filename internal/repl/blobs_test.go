@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -480,10 +479,7 @@ func TestBlobTransfersAreBoundedBySizeNotByAFixedCap(t *testing.T) {
 	// Getting a CONNECTION stays bounded by time: that cost does not depend
 	// on how many bytes follow it, and a parent that accepts a connection and
 	// then says nothing must not hold a transfer open forever.
-	tr, ok := child.http.Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("transport is %T, so the connection bounds below cannot be checked", child.http.Transport)
-	}
+	tr := child.transport.cur.Load()
 	if tr.TLSHandshakeTimeout == 0 || tr.DialContext == nil {
 		t.Fatal("dial and TLS handshake are unbounded: with no whole-exchange timeout either, " +
 			"a parent that never answers holds every transfer to it open forever")

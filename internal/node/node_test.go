@@ -135,7 +135,7 @@ func TestStartStopResolvesAddressesAndReleasesPorts(t *testing.T) {
 		ULID:     "n1",
 		DataDir:  filepath.Join(base, "data"),
 		LogLevel: "debug",
-		KeyFile:  keyFile,
+		Identity: config.Identity{KeyFile: keyFile},
 		API:      config.API{Addr: "127.0.0.1:0", LocalAddr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 		// Children are enrolled at runtime, so a repl address always opens a listener.
@@ -215,7 +215,7 @@ func TestRestartSameDataDirKeepsOffsets(t *testing.T) {
 		ULID:     "n1",
 		DataDir:  filepath.Join(base, "data"),
 		LogLevel: "debug",
-		KeyFile:  keyFile,
+		Identity: config.Identity{KeyFile: keyFile},
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 	}
 
@@ -254,7 +254,7 @@ func TestNodeLocalSecretStoreSurvivesRestartAndDecryptsOnlyInService(t *testing.
 		ULID:       "n1",
 		DataDir:    filepath.Join(base, "data"),
 		SecretsDir: filepath.Join(base, "secrets"),
-		KeyFile:    keyFile,
+		Identity:   config.Identity{KeyFile: keyFile},
 		API:        config.API{LocalAddr: "127.0.0.1:0"},
 	}
 	keyring, err := secrets.OpenKeyring(filepath.Join(base, "assistant-keys"))
@@ -304,7 +304,7 @@ func TestSecretStoreNeverReplicatesToParent(t *testing.T) {
 		ULID:       "n-parent",
 		DataDir:    filepath.Join(base, "parent-data"),
 		SecretsDir: filepath.Join(base, "parent-secrets"),
-		KeyFile:    parentKey,
+		Identity:   config.Identity{KeyFile: parentKey},
 		API:        config.API{Addr: "127.0.0.1:0", Token: tok},
 		Repl:       config.Endpoint{Addr: "127.0.0.1:0"},
 	})
@@ -314,7 +314,7 @@ func TestSecretStoreNeverReplicatesToParent(t *testing.T) {
 		ULID:       "n-child",
 		DataDir:    filepath.Join(base, "child-data"),
 		SecretsDir: filepath.Join(base, "child-secrets"),
-		KeyFile:    childKey,
+		Identity:   config.Identity{KeyFile: childKey},
 		API:        config.API{Addr: "127.0.0.1:0", LocalAddr: "127.0.0.1:0", Token: tok},
 		Parent:     &config.Parent{URL: "https://" + parent.ReplAddr, Pubkey: parentID.PublicHex()},
 	})
@@ -406,7 +406,7 @@ func TestRestartRepopulatesRetainedFromKV(t *testing.T) {
 		ULID:     "n1",
 		DataDir:  filepath.Join(base, "data"),
 		LogLevel: "debug",
-		KeyFile:  keyFile,
+		Identity: config.Identity{KeyFile: keyFile},
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 	}
@@ -548,11 +548,11 @@ func TestRetainedSeedStartupCostTenThousandPaths(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		ULID:    "n1",
-		DataDir: dataDir,
-		KeyFile: keyFile,
-		API:     config.API{Addr: "127.0.0.1:0", Token: tok},
-		MQTT:    config.Endpoint{Addr: "127.0.0.1:0"},
+		ULID:     "n1",
+		DataDir:  dataDir,
+		Identity: config.Identity{KeyFile: keyFile},
+		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
+		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 		// The seeded metrics are m1's, which n1 retains only on request.
 		Bus: config.Bus{RetainChildMetrics: true},
 	}
@@ -621,7 +621,7 @@ func TestParentChildUplinkThroughNodes(t *testing.T) {
 		ULID:     "n-parent",
 		DataDir:  filepath.Join(base, "parent-data"),
 		LogLevel: "debug",
-		KeyFile:  parentKey,
+		Identity: config.Identity{KeyFile: parentKey},
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		Repl:     config.Endpoint{Addr: "127.0.0.1:0"},
 	}
@@ -638,7 +638,7 @@ func TestParentChildUplinkThroughNodes(t *testing.T) {
 		ULID:     "n-child",
 		DataDir:  filepath.Join(base, "child-data"),
 		LogLevel: "debug",
-		KeyFile:  childKey,
+		Identity: config.Identity{KeyFile: childKey},
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 		Parent:   &config.Parent{URL: "https://" + parent.ReplAddr, Pubkey: parentID.PublicHex()},
@@ -730,10 +730,10 @@ func TestRetentionPrunerRunsInNodeLifecycleAndRestartsSafely(t *testing.T) {
 
 	interval := config.Duration(5 * time.Millisecond)
 	cfg := &config.Config{
-		ULID:    "n-ret",
-		DataDir: dataDir,
-		KeyFile: keyFile,
-		API:     config.API{Addr: "127.0.0.1:0", Token: tok},
+		ULID:     "n-ret",
+		DataDir:  dataDir,
+		Identity: config.Identity{KeyFile: keyFile},
+		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		Retention: config.Retention{
 			Interval: &interval,
 			Streams:  map[string]config.StreamRetention{"metrics": {MaxAge: config.Duration(time.Hour)}},
@@ -769,7 +769,7 @@ func TestTombstonedPathStaysGoneAcrossRestart(t *testing.T) {
 		ULID:     "n1",
 		DataDir:  filepath.Join(base, "data"),
 		LogLevel: "debug",
-		KeyFile:  keyFile,
+		Identity: config.Identity{KeyFile: keyFile},
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 	}
@@ -868,7 +868,7 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 		ULID:     "n-parent",
 		DataDir:  filepath.Join(base, "parent-data"),
 		LogLevel: "debug",
-		KeyFile:  parentKey,
+		Identity: config.Identity{KeyFile: parentKey},
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 		Repl:     config.Endpoint{Addr: "127.0.0.1:0"},
@@ -884,7 +884,7 @@ func TestTombstoneReplicatesUpwardAndRetiresParent(t *testing.T) {
 		ULID:     "n-child",
 		DataDir:  filepath.Join(base, "child-data"),
 		LogLevel: "debug",
-		KeyFile:  childKey,
+		Identity: config.Identity{KeyFile: childKey},
 		API:      config.API{Addr: "127.0.0.1:0", Token: tok},
 		MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 		Parent:   &config.Parent{URL: "https://" + parent.ReplAddr, Pubkey: parentID.PublicHex()},
@@ -1015,7 +1015,7 @@ func TestAddrFileNamesEveryResolvedDoor(t *testing.T) {
 		ULID:      "n-addr",
 		DataDir:   filepath.Join(base, "data"),
 		LogLevel:  "info",
-		KeyFile:   keyFile,
+		Identity:  config.Identity{KeyFile: keyFile},
 		AddrFile:  addrFile,
 		API:       config.API{Addr: "127.0.0.1:0", LocalAddr: "127.0.0.1:0", Token: tok},
 		MQTT:      config.Endpoint{Addr: "127.0.0.1:0"},
@@ -1063,11 +1063,11 @@ func TestStopWhileRequestsArrive(t *testing.T) {
 		keyFile := filepath.Join(base, "n1.key")
 		genKey(t, keyFile)
 		n := mustStart(t, &config.Config{
-			ULID:    "n1",
-			DataDir: filepath.Join(base, "data"),
-			KeyFile: keyFile,
-			API:     config.API{Addr: "127.0.0.1:0", Token: tok},
-			MQTT:    config.Endpoint{Addr: "127.0.0.1:0"},
+			ULID:     "n1",
+			DataDir:  filepath.Join(base, "data"),
+			Identity: config.Identity{KeyFile: keyFile},
+			API:      config.API{Addr: "127.0.0.1:0", Token: tok},
+			MQTT:     config.Endpoint{Addr: "127.0.0.1:0"},
 		})
 
 		done := make(chan struct{})
@@ -1116,7 +1116,7 @@ func TestNodeRecordFollowsConfiguredAccess(t *testing.T) {
 	base := t.TempDir()
 	keyFile := filepath.Join(base, "n1.key")
 	genKey(t, keyFile)
-	cfg := &config.Config{ULID: "n1", DataDir: filepath.Join(base, "data"), KeyFile: keyFile,
+	cfg := &config.Config{ULID: "n1", DataDir: filepath.Join(base, "data"), Identity: config.Identity{KeyFile: keyFile},
 		API:    config.API{Addr: "127.0.0.1:0", Token: tok},
 		Access: &config.Access{Hostname: "edge-07.example", UIURL: "https://edge-07.example"}}
 	first := mustStart(t, cfg)
@@ -1145,7 +1145,7 @@ func TestNodeRecordGainsAHealthMetricAddedSinceItWasWritten(t *testing.T) {
 	base := t.TempDir()
 	keyFile := filepath.Join(base, "n1.key")
 	genKey(t, keyFile)
-	cfg := &config.Config{ULID: "n1", DataDir: filepath.Join(base, "data"), KeyFile: keyFile,
+	cfg := &config.Config{ULID: "n1", DataDir: filepath.Join(base, "data"), Identity: config.Identity{KeyFile: keyFile},
 		API: config.API{Addr: "127.0.0.1:0", Token: tok}}
 	keys := func(entity map[string]any) (out []string, names map[string]any) {
 		names = map[string]any{}

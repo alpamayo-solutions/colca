@@ -22,8 +22,13 @@ func childWithReplicatedState(t *testing.T) (*localAPI, http.Handler, []string) 
 	entry, _ := json.Marshal(map[string]any{
 		"ulid": "01NCHILD", "pubkey": strings.Repeat("ab", 32), "kind": "node", "element": "edge1",
 	})
-	if rec := doAdmin(t, admin, http.MethodPost, "/enroll", entry); rec.Code != http.StatusOK {
-		t.Fatalf("POST /enroll = %d: %s", rec.Code, rec.Body.String())
+	// A node is not enrolled through POST /enroll; its approval writes the
+	// registry entry, as here.
+	if rec := doAdmin(t, admin, http.MethodPost, "/enroll", entry); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("POST /enroll of a node = %d: %s, want 422", rec.Code, rec.Body.String())
+	}
+	if _, _, err := h.reg.Enroll(entry); err != nil {
+		t.Fatal(err)
 	}
 	element := "colca/v1/_SystemElement/01NCHILD/site/edge1/press3"
 	signal := "colca/v1/_Signal/01NCHILD/site/edge1/press3/machine_state"

@@ -16,7 +16,7 @@ import (
 // around it rise and the cursor reaches the head. The parent would skip the
 // marker too; counting what was sent shows the child kept it.
 func TestTheUplinkLeavesRetiredRecordsHome(t *testing.T) {
-	cs, ps, parentPub, cl, start := uplinkPairWithClient(t)
+	cs, ps, _, cl, start := uplinkPairWithClient(t)
 	pushes := watchPushes(cl)
 	if _, _, err := cs.Append("metrics", []store.Record{
 		{Topic: "colca/v1/_Metric/n-child/press/temp", Payload: []byte(`{"signal_id":"temp","value":1}`), TS: 1},
@@ -28,7 +28,7 @@ func TestTheUplinkLeavesRetiredRecordsHome(t *testing.T) {
 	head := cs.NextOffset("metrics")
 	start()
 	waitFor(t, "the child's metrics uplink cursor to reach its head", 20*time.Second, func() bool {
-		return cs.CursorGet(uns.UplinkCursor(parentPub), "metrics") == head
+		return cs.CursorGet(uns.UplinkCursor(cl.ParentPub()), "metrics") == head
 	})
 	recs, _, err := ps.Read("metrics", 1, 100, nil)
 	if err != nil {
