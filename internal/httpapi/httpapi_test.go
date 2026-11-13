@@ -3236,6 +3236,68 @@ func TestFetchLogsAckReadableOnlyByRequesterAndAdmins(t *testing.T) {
 	}
 }
 
+// The sender of a command reads the _Ack answering it without a read grant on
+// the target: a probe that pauses the orchestrator learns the outcome with only
+// its cmd grant. It reads its own ack and nothing else there: not another
+// sender's ack at the same place, not the commands. A read grant on the target
+// still reads everything under it, as before.
+func TestASenderFetchesTheAckOfItsOwnCommandWithoutAReadGrant(t *testing.T) {
+	a := newAPI(t)
+	orch := authtest.Place(t, a.eng, "orch")
+	probe, other, obs := authtest.NewMachine(t, "probe"), authtest.NewMachine(t, "other"), authtest.NewMachine(t, "obs")
+	authtest.EnrollAt(t, a.reg, a.eng, probe, "probe", "cmd:"+orch+"/#:operate")
+	authtest.EnrollAt(t, a.reg, a.eng, other, "other", "cmd:"+orch+"/#:operate")
+	authtest.EnrollAt(t, a.reg, a.eng, obs, "obs", "read:"+orch+"/#")
+	const cmd, at = "colca/v1/_CmdOperate/n-test/orch/pause", "colca/v1/_Ack/n-test/orch/pause"
+	send := func(m *authtest.Machine, corr string) {
+		t.Helper()
+		resp, out := req(t, client(m), "POST", a.url+"/publish", "", map[string]any{"topic": cmd,
+			"payload": map[string]any{"correlation_id": corr, "expires_at": float64(99999999999999)}})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s sends %s: %d %v", m.ULID, corr, resp.StatusCode, out)
+		}
+	}
+	send(probe, "p-1")
+	send(other, "o-1")
+	// The orchestrator answers both; its acks are attributed to itself.
+	for _, corr := range []string{"p-1", "o-1"} {
+		resp, out := req(t, client(nil), "POST", a.url+"/publish", "tok", map[string]any{"topic": at,
+			"written_by": "orchestrator", "payload": map[string]any{"correlation_id": corr, "result_code": 200}})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("ack %s: %d %v", corr, resp.StatusCode, out)
+		}
+	}
+	seen := func(m *authtest.Machine, query string) string {
+		t.Helper()
+		resp, out := req(t, client(m), "GET", a.url+"/fetch?stream=commands&cursor="+m.ULID+"/c"+query, "", nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("fetch as %s: %d %v", m.ULID, resp.StatusCode, out)
+		}
+		var got []string
+		for _, r := range out["records"].([]any) {
+			rec := r.(map[string]any)
+			p, err := uns.Parse(rec["topic"].(string))
+			if err != nil || p.Path != "orch/pause" {
+				continue
+			}
+			got = append(got, p.Contract+":"+rec["payload"].(map[string]any)["correlation_id"].(string))
+		}
+		return strings.Join(got, ",")
+	}
+	if got := seen(probe, ""); got != "_Ack:p-1" {
+		t.Errorf("the probe sees %q, want only its own ack", got)
+	}
+	if got := seen(probe, "&contract=_Ack&topic=colca/v1/_Ack/n-test/%23"); got != "_Ack:p-1" {
+		t.Errorf("the probe awaiting acks sees %q, want only its own ack", got)
+	}
+	if got := seen(other, ""); got != "_Ack:o-1" {
+		t.Errorf("the other sender sees %q, want only its own ack", got)
+	}
+	if got := seen(obs, ""); got != "_CmdOperate:p-1,_CmdOperate:o-1,_Ack:p-1,_Ack:o-1" {
+		t.Errorf("a read grant on the target sees %q, want every command and ack", got)
+	}
+}
+
 // A person holding the admin command class over the whole node retires another
 // identity's stale cursor without the node's admin token, and the retirement is
 // audited with the actor and the cursor's owner. Moving it, retiring a cursor

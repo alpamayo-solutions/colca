@@ -223,6 +223,50 @@ command with that id is refused, and that sender gets an `_Ack` with `422`.
 The ten minutes are the node's memory of accepted ids, not a command's
 lifetime.
 
+#### Reading the answer to your own command
+
+A `cmd` grant is enough to learn how a command ended: its sender reads the
+`_Ack` that answers it from `/fetch` without a `read` grant on the target. A
+placed service that pauses the orchestrator holds `cmd:<orchestrator>/#:maintain`
+and nothing more; reading the orchestrator's records stays someone else's
+grant.
+
+The node decides whose an ack is from what it recorded itself, never from
+fields the ack's writer chose. An ack is its reader's own when:
+
+- **the node wrote it** (an outcome the node executed, the `202`/`403`/`410`
+  answers to a queued command) and its attribution names the reader. The node
+  stamps these with the door-verified attribution of the command they answer;
+- **anyone else wrote it** (the executing service, a child node) and the node
+  accepted the reader's command under the ack's `correlation_id` within the
+  last ten minutes, and the ack sits exactly at that command's position,
+  `_Ack/<owner>/<path>`. The node keeps this in the same in-memory record of
+  accepted ids that turns away a repeat. A command the node refused (`403`,
+  `400`, `404`, `422`) leaves nothing there.
+
+The rule is narrow on purpose:
+
+- only `_Ack` records, only the one answering the reader's command; another
+  sender's ack at the same place and the commands themselves stay behind the
+  read grants;
+- the read grants still decide first: a `read` grant on the target reads
+  every ack there as before, and a `fetchLogs` ack keeps its own, narrower
+  rule ([fetching logs](#fetching-a-nodes-logs));
+- a `topic` filter, a cursor, `from` or `tail` return nothing beyond it: the
+  same rule decides on every record a page reads;
+- it is node-local: each node answers from its own record of accepted ids, so
+  a parent sees an ack replicated from a child as its sender's own only when
+  that sender's command was accepted at the parent. An ancestor's view of a
+  command sent at the child does not widen;
+- the ten minutes outlast how long a sender waits for its answer, not a node
+  restart: after a restart, or later than that, an ack the node did not write
+  itself is readable by its sender only with a `read` grant. The node's own
+  acks stay readable by their sender.
+
+MQTT is unchanged: subscribing to `_Ack` needs a `read` grant on the target, as
+any subscription does. A sender without one reads its answer from `/fetch`,
+which is what the Go door client's `AwaitAck` does.
+
 The node answers a command itself, instead of leaving the sender waiting for
 the whole lifetime, in two cases:
 

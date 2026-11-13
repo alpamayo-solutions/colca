@@ -20,6 +20,12 @@ func (e *Engine) observeIndexes(contract, topic string, payload []byte) {
 	}
 }
 
+// ObserveIndexes is observeIndexes for a record stored outside the engine, such
+// as the tombstones a registry revoke appends.
+func (e *Engine) ObserveIndexes(contract, topic string, payload []byte) {
+	e.observeIndexes(contract, topic, payload)
+}
+
 // groupContract holds the group definitions human tokens resolve against.
 const groupContract = "_Group"
 

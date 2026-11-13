@@ -361,6 +361,9 @@ func Start(cfg *config.Config) (*Node, error) {
 	// Retiring a child node tombstones what it replicated on the stream each
 	// record's class rises on, which bundle contracts decide too.
 	reg.SetClassifier(n.Engine.ClassOf)
+	// A revoke retires a local service's catalogues; the engine's catalogue
+	// index must see them go.
+	reg.SetObserver(n.Engine.ObserveIndexes)
 	// A local service registering with a mount that does not exist yet gets its
 	// elements authored through the same path as everything else. Without this,
 	// such registrations are refused.

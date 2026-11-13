@@ -49,6 +49,10 @@ different bundle does not start.
   is published. The node's own audit writer passes no door; it cuts what a
   refused caller sent (a contract, a topic path) to the same limits, and a
   test compares its table with the bundle.
+- **Local services write their own audit records.** `source` names the
+  writer (`projector`, `node_manager`, `orchestrator`); an edge orchestrator
+  records a rollout, a stop or a rollback as action `execute`, with the
+  service it changed in `entity_id`.
 - **Validation happens once**, at the door where a record enters. Replication
   does not validate again, so nodes on different bundle versions keep
   replicating while a rollout moves through the tree.

@@ -207,6 +207,10 @@ func TestAuditEventIsAnUpwardAppendOnlyEvent(t *testing.T) {
 	if err := Validate("_AuditEvent", payload); err != nil {
 		t.Fatalf("valid audit event rejected: %v", err)
 	}
+	rollout := []byte(`{"event_id":"evt-2","source":"orchestrator","action":"execute","outcome":"success","actor_kind":"service","occurred_at":1}`)
+	if err := Validate("_AuditEvent", rollout); err != nil {
+		t.Fatalf("an orchestrator's rollout record was rejected: %v", err)
+	}
 }
 
 // Retaining and KV projection both apply only to ClassData and ClassEntity,

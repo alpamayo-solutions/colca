@@ -1,7 +1,16 @@
 // Package door is the client for a Colca node's HTTP API, shared by every
 // service so headers, status handling and paging live in one place. The
-// published API door takes an admin token; the local door takes a service name
-// and no credential.
+// published API door takes an admin token or a person's Bearer token (JWT or
+// PAT); the local door takes a service name and no credential, or a Bearer.
+// Executor runs a local service's commands and answers them.
+//
+// An Executor runs its commands one after another, so a quick read-only verb
+// (status, plan) waits behind a long-running one (an apply with its health
+// window). A service that must answer reads meanwhile runs two Executors:
+// each with its own Cursor and Ledger, and a Handler that takes only its
+// share of the verbs, one for the long-running changes and one for the
+// read-only verbs. Each skips the other's commands and moves its cursor past
+// them, and each command is still run and answered once.
 package door
 
 import (
@@ -24,8 +33,15 @@ import (
 type Client struct {
 	BaseURL string
 	Token   string // admin token, for the published API door
+	// Bearer is a person's token (OIDC JWT or PAT), sent as Authorization:
+	// Bearer. A node judges a Bearer before Token or Service, so set one.
+	Bearer  string
 	Service string // service name, for the local door (no credential)
 	HTTP    *http.Client
+
+	// ackCursor is the cursor name AwaitAck reads under, learned from the
+	// node when the caller's cursor prefix is not known up front.
+	ackCursor string
 }
 
 func (c *Client) http() *http.Client {
@@ -36,6 +52,9 @@ func (c *Client) http() *http.Client {
 }
 
 func (c *Client) do(req *http.Request) (*http.Response, error) {
+	if c.Bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Bearer)
+	}
 	if c.Token != "" {
 		req.Header.Set("X-Colca-Token", c.Token)
 	}
@@ -101,6 +120,8 @@ type FetchOptions struct {
 	// Contracts keeps only records of these contracts; next still moves past the
 	// others.
 	Contracts []string
+	// Topics keeps only records whose topic matches one of these MQTT filters.
+	Topics []string
 	// From reads ahead of the cursor, from this offset (colca 0.18.2+), so the
 	// next page can be fetched before the previous one is acked. 0 reads from
 	// the cursor.
@@ -190,6 +211,9 @@ func (c *Client) FetchWithOptions(ctx context.Context, options FetchOptions) (Pa
 	}
 	for _, contract := range options.Contracts {
 		q.Add("contract", contract)
+	}
+	for _, topic := range options.Topics {
+		q.Add("topic", topic)
 	}
 	if options.From > 0 {
 		q.Set("from", strconv.FormatUint(options.From, 10))

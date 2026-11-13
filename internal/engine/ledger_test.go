@@ -103,3 +103,54 @@ func TestTheLedgerIsBounded(t *testing.T) {
 		t.Fatalf("ledger holds %d entries, limit %d", len(l.entries), ledgerLimit)
 	}
 }
+
+// The sender of a command reads the _Ack answering it whoever wrote that ack,
+// and only that ack: not another sender's at the same place, not one under its
+// own correlation id elsewhere, not the answer to a command the node refused,
+// and never on the strength of an attribution a writer other than the node chose.
+func TestAckSentByNamesOnlyTheSenderOfTheAnsweredCommand(t *testing.T) {
+	e, _ := ledgerEngine(t)
+	const cmd = "colca/v1/_CmdParam/n-edge1/line1/operator/setDensity"
+	const at = "colca/v1/_Ack/n-edge1/line1/operator/setDensity"
+	anna := humanEntry(t, "cmd:#:param")
+	bert := humanEntry(t, "cmd:#:param")
+	bert.ULID = "bert"
+	if _, err := e.IngestHuman(anna, cmd, cmdPayload("anna-1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.IngestHuman(bert, cmd, cmdPayload("bert-1")); err != nil {
+		t.Fatal(err)
+	}
+	// carl holds no grant: his command is refused, and its id names no command.
+	carl := humanEntry(t)
+	carl.ULID = "carl"
+	if _, err := e.IngestHuman(carl, cmd, cmdPayload("carl-1")); err == nil {
+		t.Fatal("a command without a grant was accepted")
+	}
+
+	ack := func(topic, id, writtenBy, actor string) store.StoredRecord {
+		return store.StoredRecord{Topic: topic, WrittenBy: writtenBy, ActorID: actor,
+			Payload: []byte(`{"correlation_id":"` + id + `","result_code":200}`)}
+	}
+	for _, tc := range []struct {
+		name   string
+		rec    store.StoredRecord
+		reader string
+		want   bool
+	}{
+		{"own ack, written by the executing service", ack(at, "anna-1", "orchestrator", "orchestrator"), anna.ULID, true},
+		{"another sender's ack at the same place", ack(at, "bert-1", "orchestrator", "orchestrator"), anna.ULID, false},
+		{"the other sender's own ack", ack(at, "bert-1", "orchestrator", "orchestrator"), "bert", true},
+		{"own correlation id at another place", ack("colca/v1/_Ack/n-edge1/line2/operator/setDensity", "anna-1", "orchestrator", "orchestrator"), anna.ULID, false},
+		{"the answer to a refused command", ack(at, "carl-1", "orchestrator", "orchestrator"), "carl", false},
+		{"an id the node never saw, attributed by its writer", ack(at, "x-1", "orchestrator", anna.ULID), anna.ULID, false},
+		{"an ack the node wrote, attributed to the sender", ack(at, "x-2", "n-edge1", anna.ULID), anna.ULID, true},
+		{"an ack the node wrote for someone else", ack(at, "x-3", "n-edge1", "bert"), anna.ULID, false},
+		{"not an ack", store.StoredRecord{Topic: cmd, WrittenBy: "n-edge1", ActorID: anna.ULID, Payload: cmdPayload("anna-1")}, anna.ULID, false},
+		{"no reader", ack(at, "anna-1", "orchestrator", "orchestrator"), "", false},
+	} {
+		if got := e.AckSentBy(tc.rec, tc.reader); got != tc.want {
+			t.Errorf("%s: AckSentBy = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

@@ -72,7 +72,8 @@ moving the element moves everything bound to it.
 
 Enrollment goes through `POST /enroll` with the admin token, or through a
 `_CmdAdmin` command sent down the tree to a node that is not directly
-reachable.
+reachable. A local service whose registry entry holds `cmd:#:admin` can send
+`_CmdAdmin` to its own node over the local door; `admin:#` it can never hold.
 
 ## Who writes a signal's values
 
@@ -132,6 +133,10 @@ One command needs no class: subscribing to an alarm (`_CmdOperate`
 `{alarm-path}/subscribe` and `/unsubscribe`) is authorized by `read` on the
 alarm's place, since asking to be told about an alarm is seeing it. A cmd
 grant does not replace that read. See [alarms.md](alarms.md#subscribing-to-an-alarm).
+
+The opposite holds for the answer to a command: a sender reads the `_Ack` of
+its own command without a `read` grant on the target, and nothing else there.
+See [reading the answer to your own command](concepts.md#reading-the-answer-to-your-own-command).
 
 `_CmdEdit` is a person's tool for the node's data model, and the door admits
 anyone holding `configure` on it. Three narrower classes are also admitted, each
